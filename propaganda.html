@@ -1,0 +1,1471 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SCUFFED CREW — They Can't Track What They Can't See</title>
+<link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Libre+Barcode+128+Text&family=Oswald:wght@300;400;700&family=Source+Code+Pro:wght@300;400;600&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #050505;
+    --bg-card: #0a0a0a;
+    --bg-card-alt: #080808;
+    --green: #00ff41;
+    --green-dim: #00cc33;
+    --green-dark: rgba(0,255,65,0.04);
+    --green-glow: rgba(0,255,65,0.15);
+    --red: #ff0040;
+    --red-soft: rgba(255,0,64,0.08);
+    --red-glow: rgba(255,0,64,0.15);
+    --amber: #ffaa00;
+    --amber-soft: rgba(255,170,0,0.08);
+    --text: #a0a0a0;
+    --text-bright: #e0e0e0;
+    --text-dim: #444;
+    --border: #161616;
+    --border-light: #222;
+    --scanline: rgba(0,255,65,0.02);
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'Source Code Pro', monospace;
+    font-weight: 300;
+    overflow-x: hidden;
+    cursor: crosshair;
+  }
+
+  /* Scanlines */
+  body::before {
+    content: '';
+    position: fixed;
+    top: 0; left: 0; right: 0; bottom: 0;
+    background: repeating-linear-gradient(
+      0deg, transparent, transparent 2px,
+      var(--scanline) 2px, var(--scanline) 4px
+    );
+    pointer-events: none;
+    z-index: 9999;
+  }
+  /* CRT vignette */
+  body::after {
+    content: '';
+    position: fixed;
+    top: 0; left: 0; right: 0; bottom: 0;
+    background: radial-gradient(ellipse at center, transparent 40%, rgba(0,0,0,0.6) 100%);
+    pointer-events: none;
+    z-index: 9998;
+  }
+
+  @keyframes glitchText {
+    0%, 100% { text-shadow: 2px 0 var(--red), -2px 0 cyan; }
+    25% { text-shadow: -3px 0 var(--red), 3px 0 cyan; }
+    50% { text-shadow: 2px 2px var(--red), -2px -2px cyan; }
+    75% { text-shadow: -2px -1px var(--red), 2px 1px cyan; }
+  }
+  @keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: 0; } }
+  @keyframes pulse { 0%, 100% { opacity: 0.4; } 50% { opacity: 1; } }
+  @keyframes fadeUp {
+    from { opacity: 0; transform: translateY(20px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+  @keyframes tickerScroll {
+    0% { transform: translateX(0); }
+    100% { transform: translateX(-50%); }
+  }
+  @keyframes eyePulse {
+    0%, 100% { transform: scale(1); opacity: 0.6; }
+    50% { transform: scale(1.05); opacity: 1; }
+  }
+  @keyframes staticNoise {
+    0% { background-position: 0 0; }
+    100% { background-position: 100% 100%; }
+  }
+  @keyframes redPulse {
+    0%, 100% { box-shadow: 0 0 20px rgba(255,0,64,0.1); }
+    50% { box-shadow: 0 0 40px rgba(255,0,64,0.25); }
+  }
+  @keyframes countUp {
+    from { opacity: 0; }
+    to { opacity: 1; }
+  }
+
+  .container { max-width: 1000px; margin: 0 auto; padding: 0 2rem; }
+
+  /* ─── THE EYE ─── */
+  .the-eye {
+    position: fixed;
+    top: 30px;
+    right: 30px;
+    z-index: 9000;
+    text-align: center;
+    animation: eyePulse 3s ease-in-out infinite;
+    opacity: 0.5;
+    transition: opacity 0.3s;
+  }
+  .the-eye:hover { opacity: 1; }
+  .eye-icon { font-size: 2rem; }
+  .eye-label {
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 0.45rem;
+    letter-spacing: 2px;
+    color: var(--red);
+    text-transform: uppercase;
+    margin-top: 4px;
+    display: block;
+  }
+
+  /* ─── TOP BAR ─── */
+  .top-bar {
+    border-bottom: 1px solid var(--border);
+    padding: 0.6rem 2rem;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 0.6rem;
+    color: var(--text-dim);
+    letter-spacing: 1px;
+    position: relative;
+    overflow: hidden;
+  }
+  .top-bar::before {
+    content: '';
+    position: absolute;
+    top: 0; left: 0; right: 0; bottom: 0;
+    background: linear-gradient(90deg, transparent, var(--green-dark), transparent);
+    animation: pulse 4s ease-in-out infinite;
+  }
+  .status-dot {
+    display: inline-block;
+    width: 6px; height: 6px;
+    background: var(--green);
+    border-radius: 50%;
+    margin-right: 6px;
+    box-shadow: 0 0 6px var(--green);
+    animation: blink 2s infinite;
+  }
+  .threat-level { color: var(--red); text-transform: uppercase; }
+
+  /* ─── HERO ─── */
+  .hero { padding: 8rem 0 5rem; text-align: center; position: relative; }
+  .hero-warning {
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 0.55rem;
+    letter-spacing: 4px;
+    text-transform: uppercase;
+    color: var(--red);
+    margin-bottom: 2rem;
+    animation: blink 3s infinite;
+  }
+  .hero h1 {
+    font-family: 'Oswald', sans-serif;
+    font-size: 5.5rem;
+    font-weight: 700;
+    color: var(--green);
+    text-transform: uppercase;
+    letter-spacing: 10px;
+    line-height: 1;
+    margin-bottom: 1rem;
+    animation: glitchText 0.15s ease-in-out infinite;
+    text-shadow: 0 0 60px rgba(0,255,65,0.25);
+  }
+  .hero-sub {
+    font-family: 'Oswald', sans-serif;
+    font-size: 1.3rem;
+    font-weight: 300;
+    color: var(--text-bright);
+    letter-spacing: 6px;
+    text-transform: uppercase;
+    margin-bottom: 3rem;
+  }
+  .hero-tagline {
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 0.72rem;
+    color: var(--text-dim);
+    max-width: 620px;
+    margin: 0 auto;
+    line-height: 1.9;
+  }
+  .hl { color: var(--green); text-shadow: 0 0 8px rgba(0,255,65,0.3); }
+  .hl-red { color: var(--red); text-shadow: 0 0 8px rgba(255,0,64,0.3); }
+  .hl-amber { color: var(--amber); }
+  .cursor-blink { animation: blink 1s step-end infinite; color: var(--green); }
+
+  /* ─── LIVE COUNTER ─── */
+  .live-counter-bar {
+    background: var(--bg-card);
+    border-top: 1px solid var(--border);
+    border-bottom: 1px solid var(--border);
+    padding: 1.5rem 2rem;
+    display: flex;
+    justify-content: center;
+    gap: 4rem;
+    align-items: center;
+  }
+  .counter-item { text-align: center; }
+  .counter-value {
+    font-family: 'Oswald', sans-serif;
+    font-size: 1.8rem;
+    font-weight: 700;
+    color: var(--red);
+    display: block;
+    text-shadow: 0 0 20px rgba(255,0,64,0.3);
+  }
+  .counter-label {
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 0.5rem;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    color: var(--text-dim);
+    margin-top: 4px;
+    display: block;
+  }
+
+  /* ─── TICKER ─── */
+  .ticker-wrap {
+    overflow: hidden;
+    background: var(--red-soft);
+    border-top: 1px solid rgba(255,0,64,0.15);
+    border-bottom: 1px solid rgba(255,0,64,0.15);
+    padding: 0.5rem 0;
+  }
+  .ticker {
+    display: flex;
+    white-space: nowrap;
+    animation: tickerScroll 45s linear infinite;
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 0.55rem;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    color: var(--red);
+  }
+  .ticker span { padding-right: 4rem; }
+
+  /* ─── SECTIONS ─── */
+  section { padding: 4rem 0; }
+  .section-label {
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 0.5rem;
+    letter-spacing: 4px;
+    text-transform: uppercase;
+    color: var(--red);
+    margin-bottom: 0.5rem;
+  }
+  .section-title {
+    font-family: 'Oswald', sans-serif;
+    font-size: 2.2rem;
+    font-weight: 700;
+    color: var(--text-bright);
+    text-transform: uppercase;
+    letter-spacing: 3px;
+    margin-bottom: 1.5rem;
+  }
+  .section-body {
+    font-size: 0.8rem;
+    line-height: 1.9;
+    color: var(--text);
+    max-width: 700px;
+  }
+
+  /* ─── HARVEST GRID ─── */
+  .harvest-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 1rem;
+    margin-top: 2rem;
+  }
+  .harvest-card {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 2px;
+    padding: 1.5rem;
+    position: relative;
+    overflow: hidden;
+    transition: all 0.3s;
+  }
+  .harvest-card:hover {
+    border-color: var(--red);
+    animation: redPulse 2s infinite;
+  }
+  .harvest-card::before {
+    content: 'COMPROMISED';
+    position: absolute;
+    top: 8px; right: -28px;
+    background: var(--red);
+    color: white;
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 0.4rem;
+    letter-spacing: 2px;
+    padding: 2px 30px;
+    transform: rotate(45deg);
+  }
+  .harvest-icon { font-size: 1.5rem; margin-bottom: 0.75rem; }
+  .harvest-card h3 {
+    font-family: 'Oswald', sans-serif;
+    font-size: 0.85rem;
+    color: var(--text-bright);
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    margin-bottom: 0.5rem;
+  }
+  .harvest-card p {
+    font-size: 0.7rem;
+    color: var(--text-dim);
+    line-height: 1.7;
+  }
+  .harvest-stat {
+    margin-top: 0.75rem;
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 1.1rem;
+    color: var(--red);
+    font-weight: 600;
+  }
+  .harvest-stat-label {
+    font-size: 0.5rem;
+    color: var(--text-dim);
+    letter-spacing: 1px;
+    text-transform: uppercase;
+  }
+
+  /* ─── ASCII DIVIDER ─── */
+  .ascii-divider {
+    text-align: center;
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 0.5rem;
+    color: var(--text-dim);
+    padding: 3rem 0;
+    letter-spacing: 1px;
+    opacity: 0.35;
+    user-select: none;
+  }
+
+  /* ─── DAVE DISSECTION ─── */
+  .dave-section {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 2px;
+    margin-top: 2rem;
+    overflow: hidden;
+  }
+  .dave-header {
+    padding: 1.5rem 2rem;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  .dave-header h3 {
+    font-family: 'Oswald', sans-serif;
+    font-size: 1.1rem;
+    color: var(--amber);
+    text-transform: uppercase;
+    letter-spacing: 2px;
+  }
+  .dave-header .dave-verdict {
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 0.55rem;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    color: var(--amber);
+    padding: 0.2rem 0.8rem;
+    border: 1px solid rgba(255,170,0,0.2);
+    border-radius: 2px;
+    background: var(--amber-soft);
+  }
+  .dave-body { padding: 2rem; }
+  .dave-row {
+    display: grid;
+    grid-template-columns: 200px 80px 1fr;
+    gap: 1rem;
+    padding: 0.75rem 0;
+    border-bottom: 1px solid var(--border);
+    font-size: 0.72rem;
+    align-items: start;
+  }
+  .dave-row:last-child { border-bottom: none; }
+  .dave-feature {
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 0.6rem;
+    color: var(--text-bright);
+    letter-spacing: 1px;
+    text-transform: uppercase;
+  }
+  .dave-status { font-weight: 600; }
+  .dave-concern { color: var(--text-dim); line-height: 1.7; font-size: 0.7rem; }
+
+  /* ─── METADATA SECTION ─── */
+  .metadata-visual {
+    margin-top: 2rem;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 2rem;
+  }
+  .metadata-box {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 2px;
+    padding: 2rem;
+  }
+  .metadata-box h4 {
+    font-family: 'Oswald', sans-serif;
+    font-size: 0.85rem;
+    text-transform: uppercase;
+    letter-spacing: 2px;
+    margin-bottom: 1rem;
+    color: var(--text-bright);
+  }
+  .meta-line {
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 0.6rem;
+    color: var(--text-dim);
+    line-height: 2.2;
+    padding-left: 1rem;
+    border-left: 2px solid var(--border);
+  }
+  .meta-line .meta-key { color: var(--text); }
+  .meta-line .meta-val-bad { color: var(--red); }
+  .meta-line .meta-val-good { color: var(--green); }
+
+  /* ─── BREACH TIMELINE ─── */
+  .timeline {
+    margin-top: 2rem;
+    position: relative;
+    padding-left: 2rem;
+  }
+  .timeline::before {
+    content: '';
+    position: absolute;
+    left: 6px;
+    top: 0;
+    bottom: 0;
+    width: 1px;
+    background: var(--red);
+    opacity: 0.3;
+  }
+  .timeline-event {
+    position: relative;
+    padding: 1rem 0 1.5rem 1.5rem;
+  }
+  .timeline-event::before {
+    content: '';
+    position: absolute;
+    left: -2rem;
+    top: 1.15rem;
+    width: 11px;
+    height: 11px;
+    background: var(--red);
+    border-radius: 50%;
+    box-shadow: 0 0 8px rgba(255,0,64,0.4);
+  }
+  .timeline-date {
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 0.55rem;
+    color: var(--red);
+    letter-spacing: 2px;
+    text-transform: uppercase;
+  }
+  .timeline-text {
+    font-size: 0.75rem;
+    color: var(--text);
+    line-height: 1.7;
+    margin-top: 0.3rem;
+  }
+
+  /* ─── COMPARE TABLE ─── */
+  .compare-table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-top: 2rem;
+    font-size: 0.72rem;
+  }
+  .compare-table th {
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 0.55rem;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    color: var(--text-dim);
+    padding: 0.75rem;
+    border-bottom: 1px solid var(--border);
+    text-align: left;
+  }
+  .compare-table td {
+    padding: 0.6rem 0.75rem;
+    border-bottom: 1px solid var(--border);
+  }
+  .compare-table tr:hover td { background: rgba(0,255,65,0.02); }
+  .status-bad { color: var(--red); font-weight: 600; }
+  .status-good { color: var(--green); font-weight: 600; }
+  .status-warn { color: var(--amber); font-weight: 600; }
+  .platform-name {
+    font-family: 'Oswald', sans-serif;
+    font-weight: 400;
+    letter-spacing: 1px;
+    color: var(--text-bright);
+  }
+
+  /* ─── FORTRESS ─── */
+  .fortress-stack {
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+    margin-top: 2rem;
+    border: 1px solid var(--border);
+    border-radius: 2px;
+    overflow: hidden;
+  }
+  .fortress-layer {
+    padding: 2rem;
+    position: relative;
+    border-bottom: 1px solid var(--border);
+    transition: all 0.3s;
+  }
+  .fortress-layer:last-child { border-bottom: none; }
+  .fortress-layer:hover { background: rgba(0,255,65,0.015); }
+  .fortress-layer-badge {
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 0.45rem;
+    letter-spacing: 3px;
+    text-transform: uppercase;
+    padding: 0.2rem 0.6rem;
+    border-radius: 2px;
+    display: inline-block;
+    margin-bottom: 0.75rem;
+  }
+  .badge-honeypot {
+    background: var(--red-soft);
+    color: var(--red);
+    border: 1px solid rgba(255,0,64,0.2);
+  }
+  .badge-suspect {
+    background: var(--amber-soft);
+    color: var(--amber);
+    border: 1px solid rgba(255,170,0,0.2);
+  }
+  .badge-secure {
+    background: var(--green-dark);
+    color: var(--green);
+    border: 1px solid rgba(0,255,65,0.12);
+  }
+  .fortress-layer h3 {
+    font-family: 'Oswald', sans-serif;
+    font-size: 1.05rem;
+    font-weight: 700;
+    color: var(--text-bright);
+    text-transform: uppercase;
+    letter-spacing: 2px;
+    margin-bottom: 0.4rem;
+  }
+  .fortress-layer p {
+    font-size: 0.75rem;
+    line-height: 1.8;
+    color: var(--text);
+    max-width: 640px;
+  }
+  .encryption-tag {
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 0.5rem;
+    color: var(--green-dim);
+    letter-spacing: 1px;
+    margin-top: 0.75rem;
+    display: block;
+  }
+  .encryption-tag-warn {
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 0.5rem;
+    color: var(--amber);
+    letter-spacing: 1px;
+    margin-top: 0.75rem;
+    display: block;
+  }
+  .encryption-tag-bad {
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 0.5rem;
+    color: var(--red);
+    letter-spacing: 1px;
+    margin-top: 0.75rem;
+    display: block;
+  }
+
+  /* ─── LOG FEED ─── */
+  .log-feed {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 2px;
+    padding: 1.25rem;
+    margin-top: 2rem;
+    max-height: 320px;
+    overflow: hidden;
+    position: relative;
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 0.58rem;
+    line-height: 2;
+  }
+  .log-feed::after {
+    content: '';
+    position: absolute;
+    bottom: 0; left: 0; right: 0;
+    height: 60px;
+    background: linear-gradient(transparent, var(--bg-card));
+  }
+  .log-line .timestamp { color: var(--text-dim); }
+  .log-line .action { color: var(--green-dim); }
+  .log-line .blocked { color: var(--red); }
+  .log-line .suspect { color: var(--amber); }
+  .log-line .entity { color: var(--amber); }
+
+  /* ─── MANIFESTO ─── */
+  .manifesto {
+    border-left: 2px solid var(--green);
+    padding-left: 2rem;
+    margin: 3rem 0;
+  }
+  .manifesto p {
+    font-family: 'Oswald', sans-serif;
+    font-size: 1.05rem;
+    font-weight: 300;
+    color: var(--text-bright);
+    line-height: 2;
+    letter-spacing: 1px;
+  }
+  .manifesto .attribution {
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 0.55rem;
+    color: var(--text-dim);
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    margin-top: 1rem;
+  }
+
+  /* ─── REQUIREMENTS ─── */
+  .req-list { list-style: none; margin-top: 1.5rem; }
+  .req-list li {
+    padding: 0.7rem 0;
+    border-bottom: 1px solid var(--border);
+    font-size: 0.75rem;
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+  }
+  .req-icon {
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 0.7rem;
+    width: 20px;
+    text-align: center;
+  }
+  .req-mandatory { color: var(--red); }
+
+  /* ─── REDACTED ─── */
+  .redacted {
+    background: var(--text-bright);
+    color: var(--text-bright);
+    padding: 0 4px;
+    border-radius: 1px;
+    cursor: not-allowed;
+    user-select: none;
+    transition: all 0.3s;
+  }
+  .redacted:hover { background: var(--red); color: white; }
+
+  /* ─── PARANOIA SCORE ─── */
+  .paranoia-meter {
+    margin-top: 3rem;
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 2px;
+    padding: 2rem;
+    text-align: center;
+  }
+  .paranoia-meter h4 {
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 0.55rem;
+    letter-spacing: 3px;
+    text-transform: uppercase;
+    color: var(--text-dim);
+    margin-bottom: 1rem;
+  }
+  .paranoia-bar {
+    width: 100%;
+    height: 4px;
+    background: var(--border);
+    border-radius: 2px;
+    overflow: hidden;
+    margin-bottom: 0.5rem;
+  }
+  .paranoia-fill {
+    height: 100%;
+    width: 94%;
+    background: linear-gradient(90deg, var(--green), var(--amber), var(--red));
+    border-radius: 2px;
+  }
+  .paranoia-labels {
+    display: flex;
+    justify-content: space-between;
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 0.45rem;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    color: var(--text-dim);
+  }
+  .paranoia-current {
+    font-family: 'Oswald', sans-serif;
+    font-size: 1.8rem;
+    font-weight: 700;
+    color: var(--red);
+    margin-top: 1rem;
+    letter-spacing: 4px;
+    text-transform: uppercase;
+  }
+  .paranoia-sub {
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 0.55rem;
+    color: var(--text-dim);
+    letter-spacing: 1px;
+    margin-top: 0.5rem;
+  }
+
+  /* ─── BARCODE ─── */
+  .barcode-section { text-align: center; padding: 4rem 0 2rem; }
+  .barcode {
+    font-family: 'Libre Barcode 128 Text', cursive;
+    font-size: 4rem;
+    color: var(--text-dim);
+    letter-spacing: 2px;
+    opacity: 0.25;
+  }
+  .barcode-label {
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 0.45rem;
+    color: var(--text-dim);
+    letter-spacing: 3px;
+    text-transform: uppercase;
+    margin-top: 0.5rem;
+    opacity: 0.25;
+  }
+
+  /* ─── JOIN CTA ─── */
+  .join-section { text-align: center; padding: 5rem 0; }
+  .join-btn {
+    display: inline-block;
+    font-family: 'Oswald', sans-serif;
+    font-size: 1rem;
+    font-weight: 700;
+    color: var(--bg);
+    background: var(--green);
+    text-transform: uppercase;
+    letter-spacing: 4px;
+    padding: 1rem 3rem;
+    border: none;
+    border-radius: 0;
+    cursor: pointer;
+    text-decoration: none;
+    position: relative;
+    transition: all 0.3s;
+    box-shadow: 0 0 30px rgba(0,255,65,0.2);
+  }
+  .join-btn:hover {
+    box-shadow: 0 0 60px rgba(0,255,65,0.4);
+    transform: translateY(-2px);
+  }
+  .join-disclaimer {
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 0.5rem;
+    color: var(--text-dim);
+    margin-top: 1.5rem;
+    letter-spacing: 1px;
+    max-width: 520px;
+    margin-left: auto;
+    margin-right: auto;
+    line-height: 2;
+  }
+
+  /* ─── FOOTER ─── */
+  footer {
+    border-top: 1px solid var(--border);
+    padding: 3rem 2rem;
+    text-align: center;
+  }
+  .footer-logo {
+    font-family: 'Oswald', sans-serif;
+    font-size: 1rem;
+    font-weight: 700;
+    color: var(--green);
+    letter-spacing: 4px;
+    text-transform: uppercase;
+    margin-bottom: 1rem;
+  }
+  .footer-text {
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 0.5rem;
+    color: var(--text-dim);
+    letter-spacing: 1px;
+    line-height: 2;
+  }
+  .footer-warning {
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 0.45rem;
+    color: var(--red);
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    margin-top: 1.5rem;
+    animation: pulse 3s infinite;
+  }
+  /* ─── FOOTNOTE LINKS ─── */
+  .src {
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 0.5rem;
+    color: var(--amber);
+    text-decoration: none;
+    letter-spacing: 1px;
+    opacity: 0.6;
+    transition: all 0.2s;
+    vertical-align: super;
+    margin-left: 2px;
+  }
+  .src:hover { opacity: 1; color: var(--green); text-decoration: underline; }
+
+  .sources-section {
+    margin-top: 3rem;
+    padding: 2rem;
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 2px;
+  }
+  .sources-section h4 {
+    font-family: 'Oswald', sans-serif;
+    font-size: 0.85rem;
+    text-transform: uppercase;
+    letter-spacing: 2px;
+    color: var(--text-bright);
+    margin-bottom: 1rem;
+  }
+  .source-item {
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 0.55rem;
+    color: var(--text-dim);
+    line-height: 2.2;
+    letter-spacing: 0.5px;
+  }
+  .source-item a {
+    color: var(--amber);
+    text-decoration: none;
+    transition: color 0.2s;
+  }
+  .source-item a:hover { color: var(--green); text-decoration: underline; }
+  .source-num {
+    color: var(--text);
+    margin-right: 0.5rem;
+  }
+
+  .footer-tinfoil {
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 0.4rem;
+    color: var(--text-dim);
+    letter-spacing: 1px;
+    margin-top: 2rem;
+    opacity: 0.2;
+    line-height: 2;
+  }
+
+  /* ─── SOURCE LINKS ─── */
+  a.src-link {
+    color: var(--amber);
+    text-decoration: none;
+    border-bottom: 1px dotted rgba(255,170,0,0.3);
+    transition: all 0.2s;
+    font-size: inherit;
+  }
+  a.src-link:hover {
+    color: var(--red);
+    border-bottom-color: var(--red);
+  }
+  .sources-section {
+    margin-top: 3rem;
+    padding: 2rem;
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 2px;
+  }
+  .sources-section h4 {
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 0.55rem;
+    letter-spacing: 3px;
+    text-transform: uppercase;
+    color: var(--text-dim);
+    margin-bottom: 1rem;
+  }
+  .source-item {
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 0.55rem;
+    color: var(--text-dim);
+    line-height: 2.2;
+    letter-spacing: 0.5px;
+  }
+  .source-item a {
+    color: var(--amber);
+    text-decoration: none;
+    border-bottom: 1px dotted rgba(255,170,0,0.2);
+  }
+  .source-item a:hover { color: var(--red); }
+  .source-id {
+    color: var(--text);
+    font-weight: 600;
+  }
+</style>
+</head>
+<body>
+
+<!-- THE EYE -->
+<div class="the-eye">
+  <div class="eye-icon">👁</div>
+  <span class="eye-label">They're watching</span>
+</div>
+
+<!-- TOP BAR -->
+<div class="top-bar">
+  <div><span class="status-dot"></span> CONNECTION ENCRYPTED — TLS 1.3 — NO COOKIES — NO JS TRACKING — NO FINGERPRINTING</div>
+  <div class="threat-level">⚠ DISCORD THREAT LEVEL: CRITICAL — TEXT SURVEILLANCE ACTIVE</div>
+</div>
+
+<!-- HERO -->
+<section class="hero">
+  <div class="container">
+    <div class="hero-warning">⚠ THIS PAGE DOES NOT TRACK YOU — YOUR BROWSER IS CURRENTLY BEING FINGERPRINTED BY 14 OTHER TABS ⚠</div>
+    <h1>SCUFFED CREW</h1>
+    <div class="hero-sub">They can't track what they can't see</div>
+    <div class="hero-tagline">
+      A competitive gaming organization built on a radical premise:<br>
+      <span class="hl">your comms should belong to you, not a data broker.</span><br><br>
+      We play on FACEIT. We coordinate on Matrix. We talk on TeamSpeak.<br>
+      Discord is a <span class="hl-red">surveillance platform with a chat feature</span><br>
+      and we use it anyway because that's where the people are.<br>
+      We just don't keep anything important there.<span class="cursor-blink">█</span>
+    </div>
+  </div>
+</section>
+
+<!-- LIVE COUNTERS -->
+<div class="live-counter-bar">
+  <div class="counter-item">
+    <span class="counter-value" id="msgCounter">~5,438,291</span>
+    <span class="counter-label">Discord messages logged since you opened this page</span>
+  </div>
+  <div class="counter-item">
+    <span class="counter-value">600,000,000</span>
+    <span class="counter-label">Users exposed in Discord's 2024 data scrape</span>
+  </div>
+  <div class="counter-item">
+    <span class="counter-value">∞</span>
+    <span class="counter-label">Days Discord retains your text messages</span>
+  </div>
+</div>
+
+<!-- TICKER -->
+<div class="ticker-wrap">
+  <div class="ticker">
+    <span>⚠ DISCORD TEXT MESSAGES ARE NOT ENCRYPTED — DISCORD READS ALL OF THEM</span>
+    <span>⚠ DISCORD SHARES DEVICE IDS WITH ADVERTISING PARTNERS</span>
+    <span>⚠ 100 THIEVES ADMITTED TO SELLING USER IP ADDRESSES UNDER CA LAW</span>
+    <span>⚠ FAZE CLAN PRIVACY POLICY: "YOU SHOULD HAVE NO EXPECTATION OF PRIVACY"</span>
+    <span>⚠ DISCORD AUG 2025: EXPANDED THIRD-PARTY DATA ACQUISITION FOR AD TARGETING</span>
+    <span>⚠ DISCORD OCT 2025: DATA BREACH — OFFERED VICTIMS 1 YEAR OF EXPERIAN AS COMPENSATION</span>
+    <span>⚠ 600 MILLION DISCORD USERS HAD DATA SCRAPED FROM GROUP CHATS IN 2024</span>
+    <span>⚠ DISCORD'S "SCIENCE" ENDPOINT TRANSMITS BEHAVIORAL TELEMETRY ON EVERY ACTION YOU TAKE</span>
+    <span>⚠ DISCORD REQUIRES MANDATORY AGE VERIFICATION — YOUR FACE SCAN ON THEIR SERVERS</span>
+    <span>⚠ DISCORD VOICE IS NOW "ENCRYPTED" BY A PROTOCOL DISCORD WROTE, CONTROLS, AND DELIVERS THE KEYS FOR</span>
+    <span>⚠ DISCORD TEXT MESSAGES ARE NOT ENCRYPTED — DISCORD READS ALL OF THEM</span>
+    <span>⚠ DISCORD SHARES DEVICE IDS WITH ADVERTISING PARTNERS</span>
+    <span>⚠ 100 THIEVES ADMITTED TO SELLING USER IP ADDRESSES UNDER CA LAW</span>
+    <span>⚠ FAZE CLAN PRIVACY POLICY: "YOU SHOULD HAVE NO EXPECTATION OF PRIVACY"</span>
+    <span>⚠ DISCORD AUG 2025: EXPANDED THIRD-PARTY DATA ACQUISITION FOR AD TARGETING</span>
+    <span>⚠ DISCORD OCT 2025: DATA BREACH — OFFERED VICTIMS 1 YEAR OF EXPERIAN AS COMPENSATION</span>
+    <span>⚠ 600 MILLION DISCORD USERS HAD DATA SCRAPED FROM GROUP CHATS IN 2024</span>
+    <span>⚠ DISCORD'S "SCIENCE" ENDPOINT TRANSMITS BEHAVIORAL TELEMETRY ON EVERY ACTION YOU TAKE</span>
+    <span>⚠ DISCORD REQUIRES MANDATORY AGE VERIFICATION — YOUR FACE SCAN ON THEIR SERVERS</span>
+    <span>⚠ DISCORD VOICE IS NOW "ENCRYPTED" BY A PROTOCOL DISCORD WROTE, CONTROLS, AND DELIVERS THE KEYS FOR</span>
+  </div>
+</div>
+
+<!-- WHAT THEY HARVEST -->
+<section>
+  <div class="container">
+    <div class="section-label">// Intelligence Briefing</div>
+    <div class="section-title">What Your "Free" Platform Costs You</div>
+    <div class="section-body">
+      Every major esports org runs on Discord. Every one of them has a privacy policy that reads like a warrant. Here's what the platforms powering competitive gaming actually harvest from you — not in theory, in their own published policies:
+    </div>
+
+    <div class="harvest-grid">
+      <div class="harvest-card">
+        <div class="harvest-icon">📝</div>
+        <h3>Every Message</h3>
+        <p>Discord text is not encrypted. Not DMs. Not private channels. Not "members only" servers. Every word you type is stored on Discord's servers in plaintext, scanned by automated systems, and retained indefinitely.<a href="https://discord.com/privacy" target="_blank" class="src">[1]</a> They told you this. You clicked "I agree."</p>
+        <div class="harvest-stat">0%</div>
+        <div class="harvest-stat-label">of text messages are encrypted</div>
+      </div>
+      <div class="harvest-card">
+        <div class="harvest-icon">📍</div>
+        <h3>Your Behavior</h3>
+        <p>What you play. When. How long. Who with. What channels you read. How long you hover. What you click. Discord's /api/v9/science endpoint fires on virtually every user action.<a href="https://discord.com/safety/privacy-preserving-products" target="_blank" class="src">[2]</a> They call it "usage statistics." Intelligence agencies call it "behavioral profiling."</p>
+        <div class="harvest-stat">24/7</div>
+        <div class="harvest-stat-label">telemetry while client is running</div>
+      </div>
+      <div class="harvest-card">
+        <div class="harvest-icon">🎯</div>
+        <h3>Your Identity</h3>
+        <p>Aug 2025: Discord now acquires third-party data about you from external sources to build ad profiles.<a href="https://discord.com/safety/important-policy-updates" target="_blank" class="src">[3]</a> 2026: Global age verification rollout — submit your face or your ID.<a href="https://discord.com/safety/important-policy-updates" target="_blank" class="src">[3]</a> They're not just logging what you do on Discord. They're buying data about what you do everywhere else.</p>
+        <div class="harvest-stat">$22B</div>
+        <div class="harvest-stat-label">projected comms app advertising market</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- DAVE DISSECTION -->
+<section>
+  <div class="container">
+    <div class="section-label">// Threat Analysis</div>
+    <div class="section-title">"But Discord Has E2E Encryption Now"</div>
+    <div class="section-body">
+      Yes. Discord's DAVE protocol encrypts voice and video as of March 2026. Credit where it's due — the EFF praised it<a href="https://www.eff.org/deeplinks/2024/09/discords-end-end-encryption-voice-and-video-step-forward-privacy-all" target="_blank" class="src">[4]</a>, Trail of Bits audited it, it uses MLS, and the whitepaper is public<a href="https://daveprotocol.com/" target="_blank" class="src">[5]</a>. We're not going to lie to you and say it doesn't exist.<br><br>
+      We're going to explain why it doesn't matter as much as you think.
+    </div>
+
+    <div class="dave-section">
+      <div class="dave-header">
+        <h3>DAVE Protocol — Autopsy Report</h3>
+        <div class="dave-verdict">Verdict: Necessary but insufficient</div>
+      </div>
+      <div class="dave-body">
+        <div class="dave-row">
+          <div class="dave-feature">Voice / Video E2E</div>
+          <div class="dave-status status-good">YES</div>
+          <div class="dave-concern">Real E2E encryption. MLS-based. Audited by Trail of Bits.<a href="https://daveprotocol.com/" target="_blank" class="src">[5]</a> We acknowledge this is legitimate cryptography. Your voice content is protected from eavesdroppers, including Discord employees. This is good.</div>
+        </div>
+        <div class="dave-row">
+          <div class="dave-feature">Text Messages E2E</div>
+          <div class="dave-status status-bad">NO</div>
+          <div class="dave-concern">Every text message — DMs, private channels, "members only" servers — is stored unencrypted on Discord's servers. Discord explicitly chose not to encrypt text, citing "safety tooling."<a href="https://support.discord.com/hc/en-us/articles/25968222946071-End-to-End-Encryption-for-Audio-and-Video" target="_blank" class="src">[6]</a> Your strat discussions, scheduling, and coordination are readable by Discord, by law enforcement with a subpoena, and by anyone who breaches their infrastructure. Which has already happened.</div>
+        </div>
+        <div class="dave-row">
+          <div class="dave-feature">MLS Delivery Service</div>
+          <div class="dave-status status-warn">DISCORD</div>
+          <div class="dave-concern">Discord controls the MLS delivery and authentication service. They facilitate the key exchange. The voice gateway — their server — selects the DAVE protocol version and manages group epoch transitions.<a href="https://daveprotocol.com/" target="_blank" class="src">[5]</a> The cryptography is real, but the infrastructure running it belongs to a company that also runs an advertising pipeline. You're trusting the locksmith not to keep a copy of the key.</div>
+        </div>
+        <div class="dave-row">
+          <div class="dave-feature">Voice Metadata</div>
+          <div class="dave-status status-bad">EXPOSED</div>
+          <div class="dave-concern">DAVE encrypts the content of your voice. It does not encrypt who is talking, when, for how long, in which channel, with whom, or at what times. Discord's SFU (Selective Forwarding Unit) relays every packet — it knows the shape of every conversation even if it can't hear the words. The NSA's former general counsel said it best: "We kill people based on metadata."</div>
+        </div>
+        <div class="dave-row">
+          <div class="dave-feature">Stage Channels</div>
+          <div class="dave-status status-bad">NO E2E</div>
+          <div class="dave-concern">Stage channels are explicitly excluded from DAVE encryption.<a href="https://discord.com/blog/bringing-dave-to-all-discord-platforms" target="_blank" class="src">[7]</a> If your org uses stages for announcements, town halls, or community events — that's unencrypted. Stream previews are also unencrypted.</div>
+        </div>
+        <div class="dave-row">
+          <div class="dave-feature">Client Control</div>
+          <div class="dave-status status-bad">CLOSED SOURCE</div>
+          <div class="dave-concern">You cannot verify what Discord's client actually does with your data before encryption or after decryption. The DAVE protocol is open. The whitepaper is public. The client that implements it is proprietary. You are trusting closed-source software with your microphone input. Third-party clients are banned by Discord's ToS.<a href="https://discord.com/terms" target="_blank" class="src">[8]</a></div>
+        </div>
+        <div class="dave-row">
+          <div class="dave-feature">Process Scanning</div>
+          <div class="dave-status status-bad">ACTIVE</div>
+          <div class="dave-concern">While your voice is encrypted, Discord's client continues to scan your running processes for "activity status,"<a href="https://discord.com/privacy" target="_blank" class="src">[1]</a> collect system telemetry via the science endpoint, fingerprint your device, and phone home to sentry.io. The mic is encrypted. Everything else about your system is not.</div>
+        </div>
+      </div>
+    </div>
+
+    <div style="margin-top: 1.5rem; padding: 1.5rem; border: 1px solid rgba(255,170,0,0.15); border-radius: 2px; background: var(--amber-soft);">
+      <div style="font-family: 'Share Tech Mono', monospace; font-size: 0.55rem; letter-spacing: 2px; text-transform: uppercase; color: var(--amber); margin-bottom: 0.75rem;">// Summary</div>
+      <div style="font-size: 0.75rem; color: var(--text); line-height: 1.9;">
+        DAVE is a lock on one window of a house where the front door is wide open, the walls are made of glass, and the landlord has cameras in every room. They encrypted the one thing they couldn't monetize (voice) and left everything they can monetize (text, metadata, behavior, identity) completely exposed. Congratulations on your encrypted callouts. They still know who you called, when, for how long, what game you were playing, what you typed before and after, and what you had for breakfast based on the DoorDash link you pasted in #general.
+      </div>
+    </div>
+  </div>
+</section>
+
+<div class="ascii-divider">
+  ╔══════════════════════════════════════════════════════════════════════════╗<br>
+  ║&nbsp;&nbsp;THEY ENCRYPTED YOUR VOICE BECAUSE VOICE DATA WAS A LIABILITY.&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;║<br>
+  ║&nbsp;&nbsp;THEY LEFT TEXT OPEN BECAUSE TEXT DATA IS AN ASSET.&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;║<br>
+  ║&nbsp;&nbsp;THIS IS NOT A PRIVACY FEATURE. THIS IS RISK MANAGEMENT.&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;║<br>
+  ╚══════════════════════════════════════════════════════════════════════════╝
+</div>
+
+<!-- METADATA KILLS -->
+<section>
+  <div class="container">
+    <div class="section-label">// The Thing Nobody Talks About</div>
+    <div class="section-title">Content Is a Distraction. Metadata Is the Weapon.</div>
+    <div class="section-body">
+      Everyone argues about whether messages are encrypted. Almost nobody talks about metadata — the data about the data. Here's what metadata reveals about your gaming life on Discord vs. on our stack:
+    </div>
+
+    <div class="metadata-visual">
+      <div class="metadata-box" style="border-color: rgba(255,0,64,0.15);">
+        <h4 style="color: var(--red);">Discord Knows</h4>
+        <div class="meta-line">
+          <span class="meta-key">who_spoke_to:</span> <span class="meta-val-bad">[Nightfall#4821, xRaven#1337, ...]</span><br>
+          <span class="meta-key">channel:</span> <span class="meta-val-bad">#blackwatch-strats</span><br>
+          <span class="meta-key">server:</span> <span class="meta-val-bad">Scuffed Crew (id: 1098234871234)</span><br>
+          <span class="meta-key">duration:</span> <span class="meta-val-bad">2h 41m 13s</span><br>
+          <span class="meta-key">participants:</span> <span class="meta-val-bad">6</span><br>
+          <span class="meta-key">time:</span> <span class="meta-val-bad">2026-02-25 19:00-21:41 CET</span><br>
+          <span class="meta-key">game_detected:</span> <span class="meta-val-bad">Overwatch 2 (pid: 28441)</span><br>
+          <span class="meta-key">device:</span> <span class="meta-val-bad">Linux x86_64, Intel Arc A770</span><br>
+          <span class="meta-key">ip_address:</span> <span class="meta-val-bad">85.xxx.xxx.xxx (Oslo, NO)</span><br>
+          <span class="meta-key">client:</span> <span class="meta-val-bad">Discord 0.0.71 (electron)</span><br>
+          <span class="meta-key">mic_active:</span> <span class="meta-val-bad">true (intervals logged)</span><br>
+          <span class="meta-key">text_before_call:</span> <span class="meta-val-bad">"ok lets run dive comp tonight"</span><br>
+          <span class="meta-key">text_after_call:</span> <span class="meta-val-bad">"gg, same time thursday?"</span><br>
+          <span class="meta-key">voice_content:</span> <span class="meta-val-good">[DAVE ENCRYPTED — CANNOT READ]</span><br>
+        </div>
+      </div>
+      <div class="metadata-box" style="border-color: rgba(0,255,65,0.12);">
+        <h4 style="color: var(--green);">Our TeamSpeak Server Knows</h4>
+        <div class="meta-line">
+          <span class="meta-key">who_connected:</span> <span class="meta-val-good">[username only, no external ID]</span><br>
+          <span class="meta-key">channel:</span> <span class="meta-val-good">Blackwatch</span><br>
+          <span class="meta-key">duration:</span> <span class="meta-val-good">[logged if we choose, we don't]</span><br>
+          <span class="meta-key">participants:</span> <span class="meta-val-good">[visible only to other users]</span><br>
+          <span class="meta-key">game_detected:</span> <span class="meta-val-good">[no process scanning]</span><br>
+          <span class="meta-key">device:</span> <span class="meta-val-good">[not collected]</span><br>
+          <span class="meta-key">ip_address:</span> <span class="meta-val-good">[server sees IP, we don't log it]</span><br>
+          <span class="meta-key">telemetry:</span> <span class="meta-val-good">[none — open source, verified]</span><br>
+          <span class="meta-key">text_context:</span> <span class="meta-val-good">[lives on Matrix, E2E encrypted]</span><br>
+          <span class="meta-key">voice_content:</span> <span class="meta-val-good">[AES-256 encrypted to our server]</span><br>
+          <span class="meta-key">third_party_access:</span> <span class="meta-val-good">[zero — we own the hardware]</span><br>
+          <span class="meta-key">data_sold_to:</span> <span class="meta-val-good">[nobody — we don't have a shop]</span><br>
+        </div>
+      </div>
+    </div>
+    
+    <div style="margin-top: 1.5rem; font-family: 'Share Tech Mono', monospace; font-size: 0.6rem; color: var(--text-dim); letter-spacing: 1px; text-align: center;">
+      Discord encrypted one field. Everything else is wide open.<br>
+      We encrypted everything. And we don't even log most of it.
+    </div>
+  </div>
+</section>
+
+<!-- BREACH TIMELINE -->
+<section>
+  <div class="container">
+    <div class="section-label">// Incident History</div>
+    <div class="section-title">Discord's Track Record</div>
+    <div class="section-body">
+      Trust is earned, not declared. Here's what the platform you're trusting with your comms has done recently:
+    </div>
+
+    <div class="timeline">
+      <div class="timeline-event">
+        <div class="timeline-date">2024 — Mass Data Scrape</div>
+        <div class="timeline-text">600 million Discord users had data scraped from group chats across thousands of servers.<a href="https://www.pcworld.com/article/2461674/discord-starts-with-full-range-encryption-for-voice-and-video-calls.html" target="_blank" class="src">[10]</a> Usernames, message content, server memberships — harvested at scale. Discord's response: silence, then downplaying.</div>
+      </div>
+      <div class="timeline-event">
+        <div class="timeline-date">October 2025 — Data Breach</div>
+        <div class="timeline-text">Discord suffered a confirmed data breach. Their compensation to affected users: one year of Experian Identity Plus membership.<a href="https://piunikaweb.com/2026/02/10/discord-voice-cutoff-old-clients-march-2026/" target="_blank" class="src">[11]</a> Your data is now in a breach database forever. They gave you twelve months of credit monitoring. Seems fair.</div>
+      </div>
+      <div class="timeline-event">
+        <div class="timeline-date">August 2025 — Policy Expansion</div>
+        <div class="timeline-text">Discord updated Terms of Service and Privacy Policy to expand third-party data acquisition.<a href="https://discord.com/safety/important-policy-updates" target="_blank" class="src">[3]</a> They now buy data about you from external sources to "personalize sponsored content." They're not just watching what you do on Discord — they're buying your profile from data brokers to follow you everywhere.</div>
+      </div>
+      <div class="timeline-event">
+        <div class="timeline-date">2025-2026 — Mandatory Age Verification</div>
+        <div class="timeline-text">Global rollout of age verification.<a href="https://discord.com/safety/important-policy-updates" target="_blank" class="src">[3]</a> Submit government ID or a face scan to prove you're human. This biometric data is now on Discord's servers — servers that have already been breached once. Your face. On the servers of a company whose previous breach mitigation was an Experian subscription.</div>
+      </div>
+      <div class="timeline-event">
+        <div class="timeline-date">March 2026 — DAVE Mandate</div>
+        <div class="timeline-text">All voice must use DAVE encryption. Older clients blocked.<a href="https://discord.com/blog/bringing-dave-to-all-discord-platforms" target="_blank" class="src">[7]</a> Third-party clients must implement DAVE or die.<a href="https://support.discord.com/hc/en-us/articles/38025123604631-Minimum-Client-Version-Requirements-for-Voice-Chat" target="_blank" class="src">[12]</a> Discord frames this as privacy. It also means they control the only clients allowed to connect to their voice infrastructure. The walls of the garden just got higher.</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- COMPARE TABLE -->
+<section>
+  <div class="container">
+    <div class="section-label">// Comparative Analysis</div>
+    <div class="section-title">How Gaming Orgs Treat Your Data</div>
+
+    <table class="compare-table">
+      <thead>
+        <tr>
+          <th>Organization</th>
+          <th>Sells Data</th>
+          <th>Tracking</th>
+          <th>Text E2E</th>
+          <th>Voice E2E</th>
+          <th>Self-Hosted</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td class="platform-name">FaZe Clan <a href="https://shop.fazeclan.com/pages/privacy-policy" target="_blank" class="src">[9]</a></td>
+          <td class="status-bad">YES</td>
+          <td class="status-bad">Beacons, pixels</td>
+          <td class="status-bad">NO</td>
+          <td class="status-warn">DAVE*</td>
+          <td class="status-bad">NO</td>
+        </tr>
+        <tr>
+          <td class="platform-name">100 Thieves <a href="https://100thieves.com/pages/privacy-policy" target="_blank" class="src">[13]</a></td>
+          <td class="status-bad">YES (CA def.)</td>
+          <td class="status-bad">IP + device IDs</td>
+          <td class="status-bad">NO</td>
+          <td class="status-warn">DAVE*</td>
+          <td class="status-bad">NO</td>
+        </tr>
+        <tr>
+          <td class="platform-name">Team Liquid</td>
+          <td class="status-warn">UNCLEAR</td>
+          <td class="status-bad">Cookies + 3rd party</td>
+          <td class="status-bad">NO</td>
+          <td class="status-warn">DAVE*</td>
+          <td class="status-bad">NO</td>
+        </tr>
+        <tr>
+          <td class="platform-name">Any Discord Clan</td>
+          <td class="status-warn">N/A</td>
+          <td class="status-bad">Full Discord stack</td>
+          <td class="status-bad">NO</td>
+          <td class="status-warn">DAVE*</td>
+          <td class="status-bad">NO</td>
+        </tr>
+        <tr style="background: var(--green-dark);">
+          <td class="platform-name" style="color: var(--green);">SCUFFED CREW</td>
+          <td class="status-good">NO</td>
+          <td class="status-good">NONE</td>
+          <td class="status-good">MEGOLM E2E</td>
+          <td class="status-good">SELF-HOSTED</td>
+          <td class="status-good">YES</td>
+        </tr>
+      </tbody>
+    </table>
+    <div style="margin-top: 0.75rem; font-family: 'Share Tech Mono', monospace; font-size: 0.5rem; color: var(--text-dim); letter-spacing: 1px;">
+      * DAVE encrypts voice content only. Text, metadata, behavioral telemetry, device fingerprints, and process lists remain fully exposed. Discord controls MLS key delivery infrastructure.
+    </div>
+  </div>
+</section>
+
+<!-- MANIFESTO -->
+<section>
+  <div class="container">
+    <div class="manifesto">
+      <p>
+        We don't read your messages. We can't — they're encrypted.<br>
+        We don't log your voice. We can't — we don't store it.<br>
+        We don't scan your processes. We don't have a client on your machine.<br>
+        We don't sell your IP. We don't have a merch store with tracking pixels.<br>
+        We don't require your phone number. Or your face. Or your government ID.<br>
+        We don't buy data about you from third-party brokers.<br>
+        We don't compensate breaches with twelve months of Experian.<br>
+        We don't have breaches. We don't store anything worth breaching.<br><br>
+        We just play the game.<br>
+      </p>
+      <div class="attribution">— Scuffed Crew Founding Principles, 2026</div>
+    </div>
+  </div>
+</section>
+
+<!-- COMMS ARCHITECTURE -->
+<section>
+  <div class="container">
+    <div class="section-label">// Communications Architecture</div>
+    <div class="section-title">The Fortress</div>
+    <div class="section-body">
+      Three layers. One is a necessary evil. One is a partial concession. Two are hardened by design. The important stuff never touches infrastructure we don't own.
+    </div>
+
+    <div class="fortress-stack">
+      <div class="fortress-layer">
+        <div class="fortress-layer-badge badge-honeypot">⚠ HOSTILE TERRITORY — TEXT FULLY MONITORED — VOICE ENCRYPTED BY LANDLORD</div>
+        <h3>Discord — The Honeypot</h3>
+        <p>Yes, we have a Discord. It's the recruitment layer. Announcements, casual chat, LFG for pickups. Treat it like a public square — fine for meeting people, terrible for discussing anything operational. Every text message is stored in plaintext on Discord's servers.<a href="https://discord.com/privacy" target="_blank" class="src">[1]</a> Voice is DAVE-encrypted, which means Discord can't hear you, but they still know who you're talking to, when, and for how long.<a href="https://daveprotocol.com/" target="_blank" class="src">[5]</a> It's the difference between wiretapping and traffic analysis. Intelligence agencies have killed people with less than what Discord's metadata provides for free.</p>
+        <span class="encryption-tag-bad">TEXT: UNENCRYPTED — DISCORD READS EVERYTHING</span>
+        <span class="encryption-tag-warn">VOICE: DAVE E2E — CONTENT ENCRYPTED, METADATA EXPOSED — KEY DELIVERY BY DISCORD</span>
+        <span class="encryption-tag-bad">TELEMETRY: ACTIVE — SCIENCE ENDPOINT, PROCESS SCAN, DEVICE FINGERPRINT</span>
+      </div>
+      <div class="fortress-layer">
+        <div class="fortress-layer-badge badge-secure">🔐 VERIFIED SECURE — SELF-HOSTED — E2E ENCRYPTED — FEDERATED</div>
+        <h3>Matrix / Element — The War Room</h3>
+        <p>When you make a roster, you get access. Per-team rooms for strats, scheduling, org coordination. Self-hosted on hardware we control. End-to-end encrypted by default — not "encrypted by a protocol the platform wrote and manages the key exchange for," actually encrypted, with keys that never leave your devices. Even if someone seized our server tomorrow, they'd get ciphertext. The protocol is federated — if Element disappears, the network lives on. If we disappear, you export your keys and keep your history. Try that with Discord.</p>
+        <span class="encryption-tag">ENCRYPTION: OLMA/MEGOLM E2E — KEYS NEVER LEAVE YOUR DEVICE — SELF-HOSTED — ZERO THIRD-PARTY ACCESS</span>
+      </div>
+      <div class="fortress-layer">
+        <div class="fortress-layer-badge badge-secure">🔐 VERIFIED SECURE — SELF-HOSTED — OPEN SOURCE — AUDITABLE</div>
+        <h3>TeamSpeak — The Bunker</h3>
+        <p>Voice comms. Self-hosted. The same platform competitive CS and esports teams have trusted for two decades — except we run the server, not a hosting company. Your voice goes from your mic to our hardware to your teammates' ears. No SFU controlled by an ad company. No MLS key exchange managed by a corporation that just expanded its data brokerage relationships. No process scanning. No behavioral telemetry. No closed-source client you're forbidden from modifying. Just voice. Encrypted. On our metal.</p>
+        <span class="encryption-tag">ENCRYPTION: AES-256 — SELF-HOSTED — ZERO TELEMETRY — 20 YEARS OF COMPETITIVE TRUST</span>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- INTERCEPTED COMMS -->
+<section>
+  <div class="container">
+    <div class="section-label">// Live Feed</div>
+    <div class="section-title">What Our Firewall Looks Like</div>
+    <div class="log-feed">
+      <div class="log-line"><span class="timestamp">[2026-02-25 19:41:02]</span> <span class="blocked">BLOCKED</span> Discord telemetry → sentry.io/api/discord</div>
+      <div class="log-line"><span class="timestamp">[2026-02-25 19:41:03]</span> <span class="blocked">BLOCKED</span> Discord science → /api/v9/science (behavioral payload: 4.2KB)</div>
+      <div class="log-line"><span class="timestamp">[2026-02-25 19:41:03]</span> <span class="action">ALLOWED</span> Matrix sync → matrix.scuffedcrew.gg (E2E verified, 0 plaintext)</div>
+      <div class="log-line"><span class="timestamp">[2026-02-25 19:41:04]</span> <span class="blocked">BLOCKED</span> Discord fingerprint → /api/v9/auth/fingerprint</div>
+      <div class="log-line"><span class="timestamp">[2026-02-25 19:41:04]</span> <span class="blocked">BLOCKED</span> Google Analytics → google-analytics.com/collect</div>
+      <div class="log-line"><span class="timestamp">[2026-02-25 19:41:05]</span> <span class="action">ALLOWED</span> TeamSpeak voice → ts.scuffedcrew.gg:9987 (AES-256)</div>
+      <div class="log-line"><span class="timestamp">[2026-02-25 19:41:06]</span> <span class="blocked">BLOCKED</span> Discord process scan → /api/v9/users/@me/activities</div>
+      <div class="log-line"><span class="timestamp">[2026-02-25 19:41:06]</span> <span class="suspect">SUSPECT</span> Discord DAVE key exchange → voice-gateway (MLS epoch transition)</div>
+      <div class="log-line"><span class="timestamp">[2026-02-25 19:41:07]</span> <span class="blocked">BLOCKED</span> Discord ad targeting → cdn.discordapp.com/sponsored</div>
+      <div class="log-line"><span class="timestamp">[2026-02-25 19:41:07]</span> <span class="blocked">BLOCKED</span> Meta pixel → connect.facebook.net/signals</div>
+      <div class="log-line"><span class="timestamp">[2026-02-25 19:41:08]</span> <span class="action">ALLOWED</span> FACEIT match lobby → faceit.com/en/ow2 (no client required)</div>
+      <div class="log-line"><span class="timestamp">[2026-02-25 19:41:09]</span> <span class="blocked">BLOCKED</span> Discord metrics → /api/v9/metrics (payload: system info, GPU, RAM)</div>
+      <div class="log-line"><span class="timestamp">[2026-02-25 19:41:09]</span> <span class="action">ALLOWED</span> Matrix room event → #blackwatch:scuffedcrew.gg (E2E, Megolm)</div>
+      <div class="log-line"><span class="timestamp">[2026-02-25 19:41:10]</span> <span class="blocked">BLOCKED</span> Discord Krisp telemetry → krisp.ai/api/v1/telemetry</div>
+      <div class="log-line"><span class="timestamp">[2026-02-25 19:41:11]</span> <span class="blocked">BLOCKED</span> Discord age verification → discord.com/api/v9/verification</div>
+      <div class="log-line"><span class="timestamp">[2026-02-25 19:41:11]</span> <span class="action">ALLOWED</span> TeamSpeak keepalive → ping OK (11ms, 0 metadata leaked)</div>
+      <div class="log-line"><span class="timestamp">[2026-02-25 19:41:12]</span> <span class="blocked">BLOCKED</span> Discord third-party data ingest → /api/v9/users/@me/affinities</div>
+      <div class="log-line"><span class="timestamp">[2026-02-25 19:41:13]</span> <span class="action">ALLOWED</span> Matrix key verification → cross-sign OK (ed25519)</div>
+      <div class="log-line"><span class="timestamp">[2026-02-25 19:41:14]</span> <span class="blocked">BLOCKED</span> Discord quest targeting → /api/v9/users/@me/billing/quests</div>
+      <div class="log-line"><span class="timestamp">[2026-02-25 19:41:14]</span> <span class="action">ALLOWED</span> FACEIT API → open.faceit.com/data/v4/ (public stats only)</div>
+    </div>
+  </div>
+</section>
+
+<!-- RECRUITMENT -->
+<section>
+  <div class="container">
+    <div class="section-label">// Recruitment Protocol</div>
+    <div class="section-title">What We Actually Need From You</div>
+    <div class="section-body">
+      Most orgs want your email, phone, social handles, real name, and now apparently your face. We need five things:
+    </div>
+
+    <ul class="req-list">
+      <li>
+        <span class="req-icon req-mandatory">!</span>
+        <span><strong style="color: var(--text-bright);">A username.</strong> Not your real name. We don't want it. If you tell us, we'll forget it on purpose.</span>
+      </li>
+      <li>
+        <span class="req-icon req-mandatory">!</span>
+        <span><strong style="color: var(--text-bright);">Your game + role.</strong> So we know where to slot you. That's it.</span>
+      </li>
+      <li>
+        <span class="req-icon req-mandatory">!</span>
+        <span><strong style="color: var(--text-bright);">Your timezone + availability.</strong> One rule: communicate. We need to know when you can play.</span>
+      </li>
+      <li>
+        <span class="req-icon req-mandatory">!</span>
+        <span><strong style="color: var(--text-bright);">A mic.</strong> We need callouts. We don't need them routed through an ad company's infrastructure.</span>
+      </li>
+      <li>
+        <span class="req-icon req-mandatory">!</span>
+        <span><strong style="color: var(--text-bright);">Willingness to install Element and TeamSpeak.</strong> Two apps. Both free. Both lighter than the Electron panopticon Discord calls a "client." If this is a dealbreaker, we respect that — but this isn't the org for you.</span>
+      </li>
+    </ul>
+
+    <div style="margin-top: 2.5rem; padding: 1.5rem; background: var(--bg-card); border: 1px solid var(--border); border-radius: 2px;">
+      <div style="font-family: 'Share Tech Mono', monospace; font-size: 0.5rem; letter-spacing: 2px; text-transform: uppercase; color: var(--green); margin-bottom: 0.75rem;">What we will never ask for</div>
+      <div style="font-size: 0.72rem; color: var(--text); line-height: 2;">
+        Your real name · Your email address · Your phone number · Your social media · Your location · Your age (18+ honor system) · Your <span class="redacted">government identification</span> · Your <span class="redacted">biometric face scan</span> · Your <span class="redacted">mother's maiden name</span> · Your <span class="redacted">running process list</span> · Access to your contacts · Permission to scan your system · A mandatory closed-source client that phones home to an ad network every 30 seconds · Twelve months of Experian when we inevitably lose all of the above
+      </div>
+    </div>
+
+    <!-- PARANOIA METER -->
+    <div class="paranoia-meter">
+      <h4>Current Organizational Paranoia Level</h4>
+      <div class="paranoia-bar"><div class="paranoia-fill"></div></div>
+      <div class="paranoia-labels">
+        <span>Naïve</span>
+        <span>Cautious</span>
+        <span>Informed</span>
+        <span>Paranoid</span>
+        <span>Correct</span>
+      </div>
+      <div class="paranoia-current">Correct</div>
+      <div class="paranoia-sub">It's not paranoia if they published it in their own privacy policy.</div>
+    </div>
+  </div>
+</section>
+
+<!-- JOIN -->
+<section class="join-section">
+  <div class="container">
+    <div class="section-label" style="margin-bottom: 2rem;">// Enlist</div>
+    <a href="#" class="join-btn">JOIN SCUFFED CREW</a>
+    <div class="join-disclaimer">
+      Clicking this button takes you to our Discord. Yes, the irony is noted.<br>
+      Think of it as going behind enemy lines to recruit assets.<br>
+      The real comms happen on infrastructure we own.<br>
+      Discord gets to know you joined. They don't get to know what happens next.<br><br>
+      (Use a VPN. Obviously.)
+    </div>
+  </div>
+</section>
+
+<!-- BARCODE -->
+<div class="barcode-section">
+  <div class="barcode">SCUFFED-CREW-2026-PRIVACY-IS-NOT-PARANOIA-ITS-READING-COMPREHENSION</div>
+  <div class="barcode-label">You are not a product. You are not a data point. You are a player. Act like it.</div>
+</div>
+
+<!-- SOURCES -->
+<section>
+  <div class="container">
+    <div class="sources-section">
+      <h4>// Sources — We Don't Make This Up, They Published It Themselves</h4>
+      <div class="source-item"><span class="source-id">[1]</span> Discord Privacy Policy — <a href="https://discord.com/privacy" target="_blank">discord.com/privacy</a></div>
+      <div class="source-item"><span class="source-id">[2]</span> Discord Privacy Preserving Products — <a href="https://discord.com/safety/privacy-preserving-products" target="_blank">discord.com/safety/privacy-preserving-products</a></div>
+      <div class="source-item"><span class="source-id">[3]</span> Discord Policy Updates August 2025 — <a href="https://discord.com/safety/important-policy-updates" target="_blank">discord.com/safety/important-policy-updates</a></div>
+      <div class="source-item"><span class="source-id">[4]</span> EFF: Discord's E2E Encryption — A Step Forward — <a href="https://www.eff.org/deeplinks/2024/09/discords-end-end-encryption-voice-and-video-step-forward-privacy-all" target="_blank">eff.org/deeplinks/2024/09/...</a></div>
+      <div class="source-item"><span class="source-id">[5]</span> DAVE Protocol Whitepaper — <a href="https://daveprotocol.com/" target="_blank">daveprotocol.com</a></div>
+      <div class="source-item"><span class="source-id">[6]</span> Discord: E2E Encryption for Audio and Video — <a href="https://support.discord.com/hc/en-us/articles/25968222946071-End-to-End-Encryption-for-Audio-and-Video" target="_blank">support.discord.com/hc/en-us/articles/25968222946071</a></div>
+      <div class="source-item"><span class="source-id">[7]</span> Discord: Bringing DAVE to All Platforms — <a href="https://discord.com/blog/bringing-dave-to-all-discord-platforms" target="_blank">discord.com/blog/bringing-dave-to-all-discord-platforms</a></div>
+      <div class="source-item"><span class="source-id">[8]</span> Discord Terms of Service — <a href="https://discord.com/terms" target="_blank">discord.com/terms</a></div>
+      <div class="source-item"><span class="source-id">[9]</span> FaZe Clan Privacy Policy — <a href="https://shop.fazeclan.com/pages/privacy-policy" target="_blank">shop.fazeclan.com/pages/privacy-policy</a></div>
+      <div class="source-item"><span class="source-id">[10]</span> PCWorld: Discord Encryption & 600M Data Scrape — <a href="https://www.pcworld.com/article/2461674/discord-starts-with-full-range-encryption-for-voice-and-video-calls.html" target="_blank">pcworld.com/article/2461674</a></div>
+      <div class="source-item"><span class="source-id">[11]</span> PiunikaWeb: Discord Voice Cutoff & Breach — <a href="https://piunikaweb.com/2026/02/10/discord-voice-cutoff-old-clients-march-2026/" target="_blank">piunikaweb.com/2026/02/10/...</a></div>
+      <div class="source-item"><span class="source-id">[12]</span> Discord: Minimum Client Version Requirements — <a href="https://support.discord.com/hc/en-us/articles/38025123604631-Minimum-Client-Version-Requirements-for-Voice-Chat" target="_blank">support.discord.com/hc/en-us/articles/38025123604631</a></div>
+      <div class="source-item"><span class="source-id">[13]</span> 100 Thieves Privacy Policy — <a href="https://100thieves.com/pages/privacy-policy" target="_blank">100thieves.com/pages/privacy-policy</a></div>
+    </div>
+    <div style="margin-top: 1rem; font-family: 'Share Tech Mono', monospace; font-size: 0.5rem; color: var(--text-dim); letter-spacing: 1px; text-align: center;">
+      Every claim on this page links to its primary source. We didn't editorialize the policies. We read them. You should too.
+    </div>
+  </div>
+</section>
+
+<!-- FOOTER -->
+<footer>
+  <div class="footer-logo">SCUFFED CREW</div>
+  <div class="footer-text">
+    This website stores zero cookies. Runs zero analytics. Contains zero tracking pixels.<br>
+    No JavaScript telemetry. No fingerprinting. No third-party resources.<br>
+    Hosted on static infrastructure. Source available on request.<br>
+    Built with Zola. Served over HTTPS. Nothing else.<br><br>
+    We don't know you visited this page. That's the point.
+  </div>
+  <div class="footer-warning">
+    ⚠ THIS SITE RESPECTS YOUR PRIVACY — YOUR ISP DOESN'T — DISCORD DOESN'T — YOUR BROWSER DOESN'T — USE A VPN AND HARDEN YOUR SETUP ⚠
+  </div>
+  <div class="footer-tinfoil">
+    If you've read this far, you're either one of us or you're compiling a dossier.<br>
+    Either way, we didn't log your visit. Good luck proving you were here.<br><br>
+    P.S. — Check your Discord client's network traffic sometime. Bring a drink. You'll need it.
+  </div>
+</footer>
+
+<!-- Counter animation -->
+<script>
+  // Fake live counter that increments
+  const counter = document.getElementById('msgCounter');
+  let count = 5438291;
+  setInterval(() => {
+    count += Math.floor(Math.random() * 847) + 312;
+    counter.textContent = '~' + count.toLocaleString();
+  }, 1000);
+</script>
+
+</body>
+</html>
