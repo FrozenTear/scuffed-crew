@@ -506,6 +506,69 @@
   .comm-public { background: var(--green-soft); color: var(--green); }
   .comm-members { background: var(--accent-soft); color: var(--accent-bright); }
 
+  /* ─── WHY MATRIX ─── */
+  .why-matrix {
+    margin-top: 1.5rem;
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+  }
+  .why-matrix-header {
+    font-family: 'DM Mono', monospace;
+    font-size: 0.7rem;
+    font-weight: 500;
+    letter-spacing: 1px;
+    color: var(--text-bright);
+    padding: 1.25rem 2rem;
+    border-bottom: 1px solid var(--border);
+  }
+  .why-matrix-body {
+    padding: 1.5rem 2rem;
+  }
+  .why-matrix-body p {
+    font-size: 0.85rem;
+    color: var(--text-secondary);
+    font-weight: 300;
+    line-height: 1.8;
+    margin-bottom: 1.25rem;
+  }
+  .why-matrix-body p:last-child { margin-bottom: 0; }
+  .why-tradeoffs {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 1.25rem;
+    margin-top: 1.25rem;
+  }
+  .why-tradeoff h4 {
+    font-family: 'DM Mono', monospace;
+    font-size: 0.6rem;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    margin-bottom: 0.75rem;
+    padding-bottom: 0.6rem;
+    border-bottom: 1px solid var(--border);
+    color: var(--text-secondary);
+  }
+  .why-tradeoff-item {
+    display: flex;
+    align-items: baseline;
+    gap: 0.5rem;
+    padding: 0.3rem 0;
+    font-size: 0.78rem;
+    font-weight: 300;
+    color: var(--text-secondary);
+  }
+  .why-tradeoff-item .marker {
+    font-family: 'DM Mono', monospace;
+    font-size: 0.7rem;
+    flex-shrink: 0;
+    color: var(--text-muted);
+  }
+  @media (max-width: 600px) {
+    .why-tradeoffs { grid-template-columns: 1fr; }
+  }
+
   /* ─── NEVER ASK ─── */
   .never-ask {
     margin-top: 1.5rem;
@@ -736,7 +799,7 @@
 <section id="about">
   <div class="sec-label sec-label-purple" data-reveal>// The Ethos</div>
   <h2 class="sec-title" data-reveal>Not a server. A clan.</h2>
-  <p class="sec-desc" data-reveal>A structured gaming org with game-specific squads and scheduled play nights. Adults only. No drama. Life comes first — the games come second, but we still show up.</p>
+  <p class="sec-desc" data-reveal>A structured gaming org with game-specific squads and scheduled play nights. No drama. Life comes first — the games come second, but we still show up.</p>
 
   <div class="pillars">
     <div class="pillar pillar-purple" data-reveal data-reveal-delay="1">
@@ -879,7 +942,7 @@
 <section id="comms" class="section-comms-bg">
   <div class="sec-label sec-label-blue" data-reveal>// Communication</div>
   <h2 class="sec-title" data-reveal>How we talk</h2>
-  <p class="sec-desc" data-reveal>Matrix for text, TeamSpeak for voice. Self-hosted, no middleman, no face scans to log in.</p>
+  <p class="sec-desc" data-reveal>Matrix for text, TeamSpeak for voice. Self-hosted, no middleman.</p>
 
   <div class="comms-grid">
     <div class="comm-card comm-card-discord" data-reveal data-reveal-delay="1">
@@ -911,6 +974,34 @@
       <p>Voice comms for play nights and scrims. Self-hosted, low latency, no distractions mid-match. Been the competitive standard for two decades.</p>
       <div class="comm-tags">
         <span class="comm-tag comm-members">Rostered members</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- WHY MATRIX -->
+  <div class="why-matrix" data-reveal>
+    <div class="why-matrix-header">Why Matrix instead of Discord?</div>
+    <div class="why-matrix-body">
+      <p>We use Matrix because we'd rather own our infrastructure than rent it. Our server, our data, our rules. We control the uptime, the backups, and what happens to the community long-term.</p>
+      <p>Commet gives you the same UI you're used to from Discord — channels, voice, roles, emoji — plus built-in calendar rooms and shared photo albums that Discord doesn't have.</p>
+
+      <div class="why-tradeoffs">
+        <div class="why-tradeoff">
+          <h4>What you gain</h4>
+          <div class="why-tradeoff-item"><span class="marker">+</span> Self-hosted — we own the server and data</div>
+          <div class="why-tradeoff-item"><span class="marker">+</span> E2E encrypted messages, files, and calls</div>
+          <div class="why-tradeoff-item"><span class="marker">+</span> Built-in calendar rooms with .ics sync</div>
+          <div class="why-tradeoff-item"><span class="marker">+</span> No account on a third-party platform required</div>
+          <div class="why-tradeoff-item"><span class="marker">+</span> Community lives on our hardware — not rented space</div>
+        </div>
+        <div class="why-tradeoff">
+          <h4>What you give up</h4>
+          <div class="why-tradeoff-item"><span class="marker">−</span> Smaller bot and integration ecosystem</div>
+          <div class="why-tradeoff-item"><span class="marker">−</span> Fewer people already have an account</div>
+          <div class="why-tradeoff-item"><span class="marker">−</span> Screen sharing is less polished</div>
+          <div class="why-tradeoff-item"><span class="marker">−</span> Search isn't as refined yet</div>
+          <div class="why-tradeoff-item"><span class="marker">−</span> Newer platform — still growing</div>
+        </div>
       </div>
     </div>
   </div>
@@ -962,7 +1053,7 @@
     </div>
     <div class="recruit-right">
       <h3>What we expect</h3>
-      <div class="req"><span class="req-marker">›</span><span>18+ — adults with lives who get that this isn't a job</span></div>
+      <div class="req"><span class="req-marker">›</span><span>16+ — old enough to communicate and commit to a schedule</span></div>
       <div class="req"><span class="req-marker">›</span><span>PC only — our teams play on PC</span></div>
       <div class="req"><span class="req-marker">›</span><span>Communicate — let your squad know if you can't make it</span></div>
       <div class="req"><span class="req-marker">›</span><span>No toxicity — competitive is fine, being a jerk isn't</span></div>
