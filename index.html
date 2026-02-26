@@ -3,8 +3,8 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Scuffed Crew — Gaming Org</title>
-<link href="https://fonts.googleapis.com/css2?family=Archivo+Black&family=DM+Mono:wght@400;500&family=Source+Sans+3:wght@300;400;600;700&display=swap" rel="stylesheet">
+<title>The Scuffed Crew — Gaming Org</title>
+<link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Rajdhani:wght@600;700&family=DM+Mono:wght@400;500&family=Source+Sans+3:wght@300;400;600;700&display=swap" rel="stylesheet">
 <style>
   :root {
     --bg-void: #08080c;
@@ -12,22 +12,31 @@
     --bg-card: #14141e;
     --bg-card-alt: #1a1a28;
     --bg-elevated: #20202e;
-    --accent: #d63031;
-    --accent-soft: rgba(214, 48, 49, 0.15);
-    --accent-glow: rgba(214, 48, 49, 0.25);
-    --accent-bright: #ff4444;
+    --accent: #7c3aed;
+    --accent-soft: rgba(124, 58, 237, 0.15);
+    --accent-glow: rgba(124, 58, 237, 0.25);
+    --accent-bright: #a78bfa;
+    --red: #d63031;
+    --red-soft: rgba(214, 48, 49, 0.15);
+    --red-glow: rgba(214, 48, 49, 0.25);
+    --red-bright: #ff4444;
     --gold: #f0b232;
     --gold-soft: rgba(240, 178, 50, 0.15);
+    --gold-glow: rgba(240, 178, 50, 0.25);
     --blue: #4a9eff;
     --blue-soft: rgba(74, 158, 255, 0.15);
+    --blue-glow: rgba(74, 158, 255, 0.25);
     --green: #00c853;
     --green-soft: rgba(0, 200, 83, 0.12);
+    --green-glow: rgba(0, 200, 83, 0.2);
     --text-bright: #f0eee8;
     --text-primary: #ccc8c0;
     --text-secondary: #807a70;
     --text-muted: #504c44;
     --border: #2a2832;
     --border-light: #363440;
+    --card-glow-x: 50%;
+    --card-glow-y: 50%;
   }
 
   * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -41,18 +50,34 @@
     overflow-x: hidden;
   }
 
-  /* Grain */
+  /* Grain overlay */
   body::after {
     content: '';
     position: fixed;
     inset: 0;
-    background: url("data:image/svg+xml,%3Csvg viewBox='0 0 512 512' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.75' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.025'/%3E%3C/svg%3E");
+    background: url("data:image/svg+xml,%3Csvg viewBox='0 0 512 512' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.75' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.04'/%3E%3C/svg%3E");
     pointer-events: none;
     z-index: 9999;
   }
 
   .mono { font-family: 'DM Mono', monospace; }
-  .display { font-family: 'Archivo Black', sans-serif; }
+  .display-hero { font-family: 'Bebas Neue', sans-serif; }
+  .display { font-family: 'Rajdhani', sans-serif; font-weight: 700; }
+
+  /* ─── SCROLL REVEAL ─── */
+  [data-reveal] {
+    opacity: 0;
+    transform: translateY(24px);
+    transition: opacity 0.7s cubic-bezier(0.16, 1, 0.3, 1), transform 0.7s cubic-bezier(0.16, 1, 0.3, 1);
+  }
+  [data-reveal="left"] { transform: translateX(-24px); }
+  [data-reveal="right"] { transform: translateX(24px); }
+  [data-reveal="scale"] { transform: scale(0.95); }
+  [data-reveal].revealed { opacity: 1; transform: none; }
+  [data-reveal-delay="1"] { transition-delay: 0.08s; }
+  [data-reveal-delay="2"] { transition-delay: 0.16s; }
+  [data-reveal-delay="3"] { transition-delay: 0.24s; }
+  [data-reveal-delay="4"] { transition-delay: 0.32s; }
 
   /* ─── NAV ─── */
   nav {
@@ -73,20 +98,28 @@
     background: var(--accent);
     border-radius: 5px;
     display: grid; place-items: center;
-    font-family: 'Archivo Black', sans-serif;
+    font-family: 'Bebas Neue', sans-serif;
     font-size: 1.1rem; color: #fff;
     transform: rotate(-2deg);
     box-shadow: 0 0 16px var(--accent-glow);
   }
   .nav-mark span { font-family: 'DM Mono', monospace; font-size: 0.8rem; letter-spacing: 2px; text-transform: uppercase; }
-  .nav-links { display: flex; gap: 1.8rem; list-style: none; }
+  .nav-links { display: flex; gap: 1.8rem; list-style: none; align-items: center; }
   .nav-links a {
     color: var(--text-secondary); text-decoration: none;
     font-family: 'DM Mono', monospace; font-size: 0.72rem;
     letter-spacing: 1.5px; text-transform: uppercase;
     transition: color 0.2s;
+    position: relative;
   }
   .nav-links a:hover { color: var(--accent); }
+  .nav-links a.nav-active { color: var(--text-bright); }
+  .nav-links a.nav-active::after {
+    content: '';
+    position: absolute; bottom: -4px; left: 0; right: 0;
+    height: 2px; background: var(--accent);
+    border-radius: 1px;
+  }
   .nav-cta {
     padding: 0.5rem 1.2rem;
     background: var(--accent);
@@ -96,7 +129,43 @@
     box-shadow: 0 0 20px var(--accent-glow);
     transition: all 0.25s !important;
   }
-  .nav-cta:hover { box-shadow: 0 0 30px rgba(214,48,49,0.5); transform: translateY(-1px); }
+  .nav-cta:hover { box-shadow: 0 0 30px rgba(124,58,237,0.5); transform: translateY(-1px); }
+  .nav-cta::after { display: none !important; }
+
+  /* Hamburger */
+  .nav-hamburger {
+    display: none;
+    background: none; border: none; cursor: pointer;
+    width: 32px; height: 32px;
+    flex-direction: column; justify-content: center; align-items: center; gap: 5px;
+  }
+  .nav-hamburger span {
+    display: block; width: 20px; height: 2px;
+    background: var(--text-secondary);
+    transition: all 0.3s;
+  }
+  .nav-hamburger.open span:nth-child(1) { transform: rotate(45deg) translate(2.5px, 2.5px); }
+  .nav-hamburger.open span:nth-child(2) { opacity: 0; }
+  .nav-hamburger.open span:nth-child(3) { transform: rotate(-45deg) translate(2.5px, -2.5px); }
+
+  .nav-overlay {
+    display: none;
+    position: fixed; top: 60px; left: 0; right: 0; bottom: 0;
+    background: rgba(8, 8, 12, 0.97);
+    backdrop-filter: blur(24px);
+    z-index: 99;
+    flex-direction: column;
+    align-items: center; justify-content: center;
+    gap: 2rem;
+  }
+  .nav-overlay.open { display: flex; }
+  .nav-overlay a {
+    color: var(--text-secondary); text-decoration: none;
+    font-family: 'DM Mono', monospace; font-size: 0.9rem;
+    letter-spacing: 2px; text-transform: uppercase;
+    transition: color 0.2s;
+  }
+  .nav-overlay a:hover { color: var(--accent); }
 
   /* ─── HERO ─── */
   .hero {
@@ -111,23 +180,74 @@
   .hero-bg {
     position: absolute; inset: 0;
     background:
-      radial-gradient(ellipse 50% 40% at 50% 45%, rgba(214,48,49,0.06) 0%, transparent 70%),
+      radial-gradient(ellipse 50% 40% at 50% 45%, rgba(124,58,237,0.06) 0%, transparent 70%),
       linear-gradient(180deg, transparent 60%, var(--bg-void) 100%);
   }
   .hero-grid {
     position: absolute; inset: 0;
     background-image:
-      linear-gradient(rgba(214,48,49,0.03) 1px, transparent 1px),
-      linear-gradient(90deg, rgba(214,48,49,0.03) 1px, transparent 1px);
+      linear-gradient(rgba(124,58,237,0.04) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(124,58,237,0.04) 1px, transparent 1px);
     background-size: 80px 80px;
-    mask-image: radial-gradient(ellipse 60% 50% at 50% 50%, black 10%, transparent 65%);
+    transform: perspective(500px) rotateX(35deg);
+    transform-origin: center 70%;
+    mask-image: radial-gradient(ellipse 80% 60% at 50% 60%, black 10%, transparent 55%);
   }
+  .hero-emblem {
+    position: absolute;
+    top: 50%; left: 50%;
+    transform: translate(-50%, -55%);
+    width: 420px; height: 420px;
+    opacity: 0.04;
+    color: var(--text-bright);
+    pointer-events: none;
+  }
+  .hero-scanline {
+    position: absolute;
+    left: 0; right: 0;
+    height: 1px;
+    background: linear-gradient(90deg, transparent 0%, var(--accent) 20%, var(--accent) 80%, transparent 100%);
+    opacity: 0.08;
+    pointer-events: none;
+  }
+  .hero-scanline:nth-child(1) {
+    top: 35%;
+    animation: scanline-sweep1 18s linear infinite;
+  }
+  .hero-scanline:nth-child(2) {
+    top: 65%;
+    animation: scanline-sweep2 25s linear infinite;
+  }
+  @keyframes scanline-sweep1 {
+    0% { transform: translateY(-200px); opacity: 0; }
+    10% { opacity: 0.08; }
+    90% { opacity: 0.08; }
+    100% { transform: translateY(200px); opacity: 0; }
+  }
+  @keyframes scanline-sweep2 {
+    0% { transform: translateY(150px); opacity: 0; }
+    10% { opacity: 0.06; }
+    90% { opacity: 0.06; }
+    100% { transform: translateY(-150px); opacity: 0; }
+  }
+  .hero-spotlight {
+    position: absolute;
+    width: 300px; height: 300px;
+    border-radius: 50%;
+    background: radial-gradient(circle, rgba(124,58,237,0.06) 0%, transparent 70%);
+    pointer-events: none;
+    transform: translate(-50%, -50%);
+    opacity: 0;
+    transition: opacity 0.3s;
+  }
+  .hero:hover .hero-spotlight { opacity: 1; }
+
   .hero-content { position: relative; max-width: 800px; }
   .hero-badge {
     display: inline-flex; align-items: center; gap: 0.5rem;
     padding: 0.4rem 1rem;
     background: var(--accent-soft);
-    border: 1px solid rgba(214,48,49,0.2);
+    border: 1px solid rgba(124,58,237,0.2);
     border-radius: 20px;
     font-family: 'DM Mono', monospace;
     font-size: 0.7rem; letter-spacing: 1.5px;
@@ -140,15 +260,24 @@
   @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
 
   .hero-title {
-    font-family: 'Archivo Black', sans-serif;
-    font-size: clamp(3.5rem, 10vw, 7.5rem);
-    line-height: 0.95;
-    text-transform: uppercase;
-    letter-spacing: 2px;
+    font-family: 'Bebas Neue', sans-serif;
+    font-size: clamp(4rem, 12vw, 9rem);
+    line-height: 0.9;
+    letter-spacing: 4px;
     color: var(--text-bright);
+    text-shadow:
+      2px 0 0 rgba(124,58,237,0.3),
+      -2px 0 0 rgba(74,158,255,0.2);
     opacity: 0; animation: fadeUp 0.7s ease forwards 0.25s;
   }
-  .hero-title .red { color: var(--accent); }
+  .hero-title .purple {
+    color: var(--accent);
+    text-shadow:
+      0 0 40px rgba(124,58,237,0.4),
+      0 0 80px rgba(124,58,237,0.15),
+      2px 0 0 rgba(124,58,237,0.3),
+      -2px 0 0 rgba(74,158,255,0.2);
+  }
   .hero-sub {
     margin-top: 1.5rem;
     font-size: 1.15rem; font-weight: 300;
@@ -163,12 +292,27 @@
   }
   .hero-stats {
     margin-top: 4rem;
-    display: flex; gap: 3rem; justify-content: center;
+    display: inline-flex; align-items: center;
+    background: rgba(14,14,20,0.6);
+    backdrop-filter: blur(16px);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 0.8rem 0;
     opacity: 0; animation: fadeUp 0.7s ease forwards 0.7s;
   }
-  .hero-stat { text-align: center; }
-  .hero-stat-val { font-family: 'Archivo Black', sans-serif; font-size: 1.8rem; color: var(--text-bright); }
-  .hero-stat-label { font-family: 'DM Mono', monospace; font-size: 0.65rem; color: var(--text-muted); letter-spacing: 2px; text-transform: uppercase; margin-top: 0.2rem; }
+  .hero-stat {
+    text-align: center;
+    padding: 0 2rem;
+    position: relative;
+  }
+  .hero-stat + .hero-stat::before {
+    content: '';
+    position: absolute; left: 0; top: 15%; bottom: 15%;
+    width: 1px;
+    background: var(--border-light);
+  }
+  .hero-stat-val { font-family: 'Rajdhani', sans-serif; font-weight: 700; font-size: 1.8rem; color: var(--text-bright); line-height: 1; }
+  .hero-stat-label { font-family: 'DM Mono', monospace; font-size: 0.6rem; color: var(--text-muted); letter-spacing: 2px; text-transform: uppercase; margin-top: 0.25rem; }
 
   @keyframes fadeUp {
     from { opacity: 0; transform: translateY(16px); }
@@ -183,16 +327,50 @@
     text-decoration: none; cursor: pointer; transition: all 0.25s;
   }
   .btn-primary { background: var(--accent); color: #fff; box-shadow: 0 0 24px var(--accent-glow); }
-  .btn-primary:hover { box-shadow: 0 0 36px rgba(214,48,49,0.5); transform: translateY(-2px); }
+  .btn-primary:hover { box-shadow: 0 0 36px rgba(124,58,237,0.5); transform: translateY(-2px); }
   .btn-outline { background: transparent; color: var(--text-secondary); border: 1px solid var(--border); }
   .btn-outline:hover { border-color: var(--text-secondary); color: var(--text-bright); transform: translateY(-2px); }
 
   /* ─── SECTIONS ─── */
   section { padding: 5rem 2rem; max-width: 1140px; margin: 0 auto; }
-  .sec-label { font-family: 'DM Mono', monospace; font-size: 0.68rem; color: var(--accent); letter-spacing: 4px; text-transform: uppercase; margin-bottom: 0.6rem; }
-  .sec-title { font-family: 'Archivo Black', sans-serif; font-size: 2.4rem; color: var(--text-bright); letter-spacing: 1px; text-transform: uppercase; margin-bottom: 0.75rem; }
+  .sec-label { font-family: 'DM Mono', monospace; font-size: 0.68rem; letter-spacing: 4px; text-transform: uppercase; margin-bottom: 0.6rem; }
+  .sec-label-purple { color: var(--accent); }
+  .sec-label-red { color: var(--red); }
+  .sec-label-gold { color: var(--gold); }
+  .sec-label-blue { color: var(--blue); }
+  .sec-label-green { color: var(--green); }
+  .sec-title {
+    font-family: 'Rajdhani', sans-serif; font-weight: 700;
+    font-size: 2.6rem; color: var(--text-bright);
+    letter-spacing: 1px;
+    margin-bottom: 0.75rem;
+    line-height: 1.1;
+  }
   .sec-desc { color: var(--text-secondary); max-width: 580px; font-weight: 300; margin-bottom: 3rem; font-size: 1.05rem; }
-  .divider { max-width: 1140px; margin: 0 auto; height: 1px; background: linear-gradient(to right, transparent, var(--border), transparent); }
+  .divider {
+    max-width: 1140px; margin: 0 auto; height: 1px;
+    background: linear-gradient(to right, transparent, var(--border), transparent);
+    position: relative; overflow: hidden;
+  }
+  .divider::after {
+    content: '';
+    position: absolute; top: 0; left: -100%; width: 60px; height: 100%;
+    background: linear-gradient(90deg, transparent, var(--accent), transparent);
+    animation: divider-shimmer 8s linear infinite;
+  }
+  @keyframes divider-shimmer {
+    0% { left: -10%; }
+    100% { left: 110%; }
+  }
+
+  .section-comms-bg { position: relative; }
+  .section-comms-bg::before {
+    content: '';
+    position: absolute; top: -100px; left: -200px;
+    width: 600px; height: 600px;
+    background: radial-gradient(circle, rgba(74,158,255,0.03) 0%, transparent 60%);
+    pointer-events: none; z-index: 0;
+  }
 
   /* ─── PILLARS ─── */
   .pillars { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1.25rem; }
@@ -204,13 +382,31 @@
     transition: all 0.3s;
     position: relative; overflow: hidden;
   }
-  .pillar::after {
-    content: ''; position: absolute; top: 0; left: 0; right: 0; height: 2px;
-    background: var(--accent); transform: scaleX(0); transform-origin: left; transition: transform 0.4s;
+  .pillar::before {
+    content: '';
+    position: absolute; inset: 0;
+    background: radial-gradient(circle 200px at var(--card-glow-x) var(--card-glow-y), rgba(255,255,255,0.03), transparent);
+    opacity: 0;
+    transition: opacity 0.3s;
+    pointer-events: none;
   }
-  .pillar:hover::after { transform: scaleX(1); }
-  .pillar:hover { border-color: rgba(214,48,49,0.15); }
-  .pillar-icon { font-size: 1.3rem; margin-bottom: 1rem; width: 40px; height: 40px; display: grid; place-items: center; background: var(--accent-soft); border-radius: 6px; }
+  .pillar:hover::before { opacity: 1; }
+  .pillar-purple { border-left: 3px solid var(--accent); }
+  .pillar-gold { border-left: 3px solid var(--gold); }
+  .pillar-blue { border-left: 3px solid var(--blue); }
+  .pillar-green { border-left: 3px solid var(--green); }
+  .pillar:hover { border-color: var(--border-light); }
+  .pillar-icon {
+    margin-bottom: 1rem;
+    width: 40px; height: 40px;
+    display: grid; place-items: center;
+    border-radius: 6px;
+  }
+  .pillar-purple .pillar-icon { background: var(--accent-soft); color: var(--accent-bright); }
+  .pillar-gold .pillar-icon { background: var(--gold-soft); color: var(--gold); }
+  .pillar-blue .pillar-icon { background: var(--blue-soft); color: var(--blue); }
+  .pillar-green .pillar-icon { background: var(--green-soft); color: var(--green); }
+  .pillar-icon svg { width: 20px; height: 20px; }
   .pillar h3 { font-size: 0.95rem; font-weight: 700; color: var(--text-bright); margin-bottom: 0.4rem; }
   .pillar p { font-size: 0.85rem; color: var(--text-secondary); font-weight: 300; line-height: 1.7; }
 
@@ -222,19 +418,34 @@
     border-radius: 8px;
     padding: 2rem;
     transition: all 0.3s;
-    position: relative;
+    position: relative; overflow: hidden;
   }
-  .team-card:hover { border-color: var(--border-light); background: var(--bg-card-alt); }
+  .team-card::before {
+    content: '';
+    position: absolute; inset: 0;
+    background: radial-gradient(circle 200px at var(--card-glow-x) var(--card-glow-y), rgba(255,255,255,0.03), transparent);
+    opacity: 0;
+    transition: opacity 0.3s;
+    pointer-events: none;
+  }
+  .team-card:hover::before { opacity: 1; }
+  .team-card[data-game="ow"] { border-top: 3px solid var(--red); }
+  .team-card[data-game="destiny"] { border-top: 3px solid var(--gold); }
+  .team-card:hover {
+    border-color: var(--border-light);
+    background: var(--bg-card-alt);
+    transform: translateY(-4px);
+    box-shadow: 0 8px 30px rgba(0,0,0,0.3);
+  }
   .team-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 1.25rem; }
-  .team-name { font-family: 'Archivo Black', sans-serif; font-size: 1.15rem; color: var(--text-bright); text-transform: uppercase; letter-spacing: 1px; }
+  .team-name { font-family: 'Rajdhani', sans-serif; font-weight: 700; font-size: 1.25rem; color: var(--text-bright); letter-spacing: 1px; }
   .team-game { font-family: 'DM Mono', monospace; font-size: 0.6rem; letter-spacing: 1.5px; text-transform: uppercase; padding: 0.2rem 0.6rem; border-radius: 3px; }
-  .game-ow { background: var(--accent-soft); color: var(--accent-bright); }
-  .game-val { background: var(--blue-soft); color: var(--blue); }
+  .game-ow { background: var(--red-soft); color: var(--red-bright); }
   .game-dest { background: var(--gold-soft); color: var(--gold); }
   .team-lore { font-size: 0.82rem; color: var(--text-muted); font-style: italic; margin-bottom: 1rem; line-height: 1.5; }
   .team-meta { display: flex; gap: 1.5rem; }
   .team-meta-item { display: flex; flex-direction: column; }
-  .team-meta-val { font-family: 'DM Mono', monospace; font-size: 0.9rem; color: var(--text-bright); }
+  .team-meta-val { font-family: 'Rajdhani', sans-serif; font-weight: 700; font-size: 1rem; color: var(--text-bright); }
   .team-meta-label { font-family: 'DM Mono', monospace; font-size: 0.58rem; color: var(--text-muted); letter-spacing: 1.5px; text-transform: uppercase; }
   .team-division {
     display: inline-flex; align-items: center; gap: 0.4rem;
@@ -243,139 +454,57 @@
     letter-spacing: 1px; text-transform: uppercase;
     color: var(--text-muted);
   }
-  .team-division .faceit-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); }
+  .team-division .faceit-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--red); }
 
-  /* ─── FACEIT SECTION ─── */
-  .faceit-banner {
-    background: var(--bg-card);
-    border: 1px solid var(--border);
-    border-radius: 10px;
-    padding: 3rem;
-    display: grid; grid-template-columns: 1fr 1fr; gap: 3rem;
-    position: relative; overflow: hidden;
+  /* ─── COMMS ─── */
+  .comms-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 1.25rem;
   }
-  .faceit-banner::before {
-    content: ''; position: absolute; top: -40%; right: -10%;
-    width: 350px; height: 350px; border-radius: 50%;
-    background: radial-gradient(circle, var(--accent-glow), transparent 70%);
-    opacity: 0.2; filter: blur(60px);
-  }
-  .faceit-content { position: relative; }
-  .faceit-content h2 { font-family: 'Archivo Black', sans-serif; font-size: 2rem; color: var(--text-bright); text-transform: uppercase; margin-bottom: 1rem; }
-  .faceit-content p { color: var(--text-secondary); font-weight: 300; line-height: 1.8; margin-bottom: 1.5rem; }
-  .faceit-path { position: relative; display: flex; flex-direction: column; gap: 0.75rem; }
-  .faceit-path-label { font-family: 'DM Mono', monospace; font-size: 0.65rem; letter-spacing: 3px; text-transform: uppercase; color: var(--text-muted); margin-bottom: 0.5rem; }
-  .path-step {
-    display: flex; align-items: center; gap: 1rem;
-    padding: 0.85rem 1rem;
-    background: rgba(8,8,12,0.5);
-    border-radius: 6px;
-    border: 1px solid rgba(42,40,50,0.6);
-  }
-  .path-step-num {
-    width: 28px; height: 28px; border-radius: 50%;
-    display: grid; place-items: center;
-    font-family: 'DM Mono', monospace; font-size: 0.7rem; font-weight: 500;
-    flex-shrink: 0;
-  }
-  .path-step-num.active { background: var(--accent-soft); color: var(--accent-bright); }
-  .path-step-num.dim { background: var(--bg-elevated); color: var(--text-muted); }
-  .path-step span { font-size: 0.85rem; color: var(--text-secondary); }
-
-  /* ─── COMMS FLOW ─── */
-  .comms-flow { display: flex; flex-direction: column; gap: 2rem; }
-  .flow-stage-header {
-    display: flex; align-items: center; gap: 1rem;
-    margin-bottom: 1rem;
-  }
-  .flow-stage-badge {
-    font-family: 'DM Mono', monospace; font-size: 0.65rem;
-    letter-spacing: 2px; text-transform: uppercase;
-    padding: 0.35rem 0.9rem; border-radius: 20px;
-  }
-  .public-badge { background: var(--green-soft); color: var(--green); border: 1px solid rgba(0,200,83,0.15); }
-  .member-badge { background: var(--accent-soft); color: var(--accent-bright); border: 1px solid rgba(214,48,49,0.15); }
-  .flow-arrow { color: var(--text-muted); font-family: 'DM Mono', monospace; font-size: 1rem; }
-  .flow-card {
+  .comm-card {
     background: var(--bg-card);
     border: 1px solid var(--border);
     border-radius: 8px;
     padding: 2rem;
     transition: all 0.3s;
+    position: relative; overflow: hidden;
   }
-  .flow-card:hover { border-color: var(--border-light); }
-  .flow-card-group { display: grid; grid-template-columns: 1fr 1fr; gap: 1.25rem; }
-  .comm-icon { font-size: 1.5rem; margin-bottom: 0.75rem; }
-  .flow-card h3 { font-size: 1rem; font-weight: 700; color: var(--text-bright); margin-bottom: 0.5rem; }
-  .flow-card p { font-size: 0.85rem; color: var(--text-secondary); font-weight: 300; line-height: 1.7; }
+  .comm-card::before {
+    content: '';
+    position: absolute; inset: 0;
+    background: radial-gradient(circle 200px at var(--card-glow-x) var(--card-glow-y), rgba(255,255,255,0.03), transparent);
+    opacity: 0;
+    transition: opacity 0.3s;
+    pointer-events: none;
+  }
+  .comm-card:hover::before { opacity: 1; }
+  .comm-card:hover { border-color: var(--border-light); }
+  .comm-card-discord { border-top: 3px solid var(--blue); }
+  .comm-card-ts { border-top: 3px solid var(--accent); }
+  .comm-card-header {
+    display: flex; align-items: center; gap: 0.75rem;
+    margin-bottom: 1rem;
+  }
+  .comm-icon-svg {
+    width: 36px; height: 36px;
+    display: grid; place-items: center;
+    border-radius: 6px;
+  }
+  .comm-card-discord .comm-icon-svg { background: var(--blue-soft); color: var(--blue); }
+  .comm-card-ts .comm-icon-svg { background: var(--accent-soft); color: var(--accent-bright); }
+  .comm-icon-svg svg { width: 18px; height: 18px; }
+  .comm-card h3 { font-size: 1rem; font-weight: 700; color: var(--text-bright); }
+  .comm-card p { font-size: 0.85rem; color: var(--text-secondary); font-weight: 300; line-height: 1.7; }
+  .comm-tags { display: flex; gap: 0.5rem; margin-top: 1rem; flex-wrap: wrap; }
   .comm-tag {
-    display: inline-block; margin-top: 1rem;
+    display: inline-block;
     font-family: 'DM Mono', monospace; font-size: 0.6rem;
     letter-spacing: 1px; text-transform: uppercase;
     padding: 0.25rem 0.6rem; border-radius: 3px;
   }
   .comm-public { background: var(--green-soft); color: var(--green); }
   .comm-members { background: var(--accent-soft); color: var(--accent-bright); }
-
-  /* ─── COMMS WHY ─── */
-  .comms-why {
-    margin-top: 2.5rem;
-    background: var(--bg-card);
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    overflow: hidden;
-  }
-  .comms-why-header {
-    font-family: 'DM Mono', monospace;
-    font-size: 0.7rem;
-    font-weight: 500;
-    letter-spacing: 1px;
-    color: var(--text-bright);
-    padding: 1.25rem 2rem;
-    border-bottom: 1px solid var(--border);
-  }
-  .comms-why-body {
-    padding: 1.5rem 2rem;
-    font-size: 0.85rem;
-    color: var(--text-secondary);
-    font-weight: 300;
-    line-height: 1.8;
-  }
-  .comms-compare {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    border-top: 1px solid var(--border);
-  }
-  .compare-col { padding: 1.5rem 2rem; }
-  .compare-col:first-child { border-right: 1px solid var(--border); }
-  .compare-col-header {
-    font-family: 'DM Mono', monospace;
-    font-size: 0.6rem;
-    letter-spacing: 2px;
-    text-transform: uppercase;
-    margin-bottom: 1rem;
-    padding-bottom: 0.75rem;
-    border-bottom: 1px solid var(--border);
-  }
-  .compare-discord { color: var(--text-muted); }
-  .compare-ours { color: var(--green); }
-  .compare-item {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    padding: 0.4rem 0;
-    font-size: 0.78rem;
-  }
-  .compare-label { color: var(--text-muted); font-weight: 300; }
-  .compare-val {
-    font-family: 'DM Mono', monospace;
-    font-size: 0.65rem;
-    letter-spacing: 0.5px;
-    font-weight: 500;
-  }
-  .compare-bad { color: #e05555; }
-  .compare-ok { color: var(--gold); }
-  .compare-good { color: var(--green); }
 
   /* ─── NEVER ASK ─── */
   .never-ask {
@@ -390,7 +519,7 @@
     font-size: 0.6rem;
     letter-spacing: 2px;
     text-transform: uppercase;
-    color: var(--green);
+    color: var(--text-muted);
     margin-bottom: 0.75rem;
   }
   .never-ask-body {
@@ -401,18 +530,55 @@
   }
 
   /* ─── SCHEDULE ─── */
-  .sched-row { display: grid; grid-template-columns: repeat(7, 1fr); gap: 0.75rem; }
-  .sched-day {
-    background: var(--bg-card); border: 1px solid var(--border); border-radius: 8px;
-    padding: 1.2rem 0.8rem; text-align: center; transition: all 0.3s;
+  .sched-strip {
+    display: flex;
+    align-items: center;
+    gap: 0;
   }
-  .sched-day.on { border-color: rgba(214,48,49,0.25); background: rgba(214,48,49,0.03); }
-  .sched-day.on:hover { border-color: var(--accent); box-shadow: 0 0 20px var(--accent-glow); }
-  .day-label { font-family: 'DM Mono', monospace; font-size: 0.6rem; letter-spacing: 2px; text-transform: uppercase; color: var(--text-muted); margin-bottom: 0.6rem; }
-  .sched-day.on .day-label { color: var(--accent); }
-  .day-event { font-size: 0.78rem; font-weight: 600; color: var(--text-bright); margin-bottom: 0.2rem; }
-  .day-time { font-family: 'DM Mono', monospace; font-size: 0.65rem; color: var(--text-muted); }
-  .day-off { font-size: 0.72rem; color: var(--text-muted); }
+  .sched-off {
+    flex: 0 0 auto;
+    font-family: 'DM Mono', monospace;
+    font-size: 0.6rem;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    opacity: 0.4;
+    padding: 0 0.75rem;
+    text-align: center;
+  }
+  .sched-active {
+    flex: 1;
+    background: rgba(124,58,237,0.03);
+    border: 1px solid rgba(124,58,237,0.25);
+    border-radius: 8px;
+    padding: 1.5rem 1.25rem;
+    text-align: center;
+    transition: all 0.3s;
+  }
+  .sched-active:hover {
+    border-color: var(--accent);
+    box-shadow: 0 0 20px var(--accent-glow);
+  }
+  .sched-active .day-label {
+    font-family: 'DM Mono', monospace;
+    font-size: 0.65rem;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    color: var(--accent-bright);
+    margin-bottom: 0.5rem;
+  }
+  .sched-active .day-event {
+    font-family: 'Rajdhani', sans-serif;
+    font-weight: 700;
+    font-size: 1.1rem;
+    color: var(--text-bright);
+    margin-bottom: 0.2rem;
+  }
+  .sched-active .day-time {
+    font-family: 'DM Mono', monospace;
+    font-size: 0.65rem;
+    color: var(--text-muted);
+  }
 
   /* ─── RECRUIT ─── */
   .recruit-wrap {
@@ -430,7 +596,7 @@
     opacity: 0.15; filter: blur(50px);
   }
   .recruit-left > * { position: relative; }
-  .recruit-left h2 { font-family: 'Archivo Black', sans-serif; font-size: 2.2rem; color: var(--text-bright); text-transform: uppercase; margin-bottom: 1rem; }
+  .recruit-left h2 { font-family: 'Bebas Neue', sans-serif; font-size: 3rem; color: var(--text-bright); letter-spacing: 2px; margin-bottom: 1rem; }
   .recruit-left p { color: var(--text-secondary); font-weight: 300; line-height: 1.8; margin-bottom: 2rem; }
   .recruit-right {
     padding: 3.5rem;
@@ -455,7 +621,7 @@
     border-top: 1px solid var(--border);
     text-align: center;
   }
-  .footer-mark { font-family: 'Archivo Black', sans-serif; font-size: 1rem; color: var(--text-muted); letter-spacing: 3px; text-transform: uppercase; margin-bottom: 0.75rem; }
+  .footer-mark { font-family: 'Bebas Neue', sans-serif; font-size: 1.2rem; color: var(--text-muted); letter-spacing: 4px; margin-bottom: 0.75rem; }
   .footer-links { display: flex; justify-content: center; gap: 2rem; margin-bottom: 1rem; }
   .footer-links a { color: var(--text-muted); text-decoration: none; font-family: 'DM Mono', monospace; font-size: 0.65rem; letter-spacing: 1.5px; text-transform: uppercase; transition: color 0.2s; }
   .footer-links a:hover { color: var(--accent); }
@@ -466,21 +632,30 @@
   @media (max-width: 960px) {
     .pillars { grid-template-columns: repeat(2, 1fr); }
     .teams-grid { grid-template-columns: 1fr; }
-    .faceit-banner { grid-template-columns: 1fr; }
     .comms-grid { grid-template-columns: 1fr; }
-    .comms-compare { grid-template-columns: 1fr; }
-    .compare-col:first-child { border-right: none; border-bottom: 1px solid var(--border); }
-    .sched-row { grid-template-columns: repeat(2, 1fr); }
     .recruit-wrap { grid-template-columns: 1fr; }
     .recruit-right { border-left: none; border-top: 1px solid var(--border); }
   }
   @media (max-width: 600px) {
     nav { padding: 0 1rem; }
     .nav-links { display: none; }
+    .nav-hamburger { display: flex; }
     section { padding: 3.5rem 1.25rem; }
     .pillars { grid-template-columns: 1fr; }
-    .sched-row { grid-template-columns: 1fr; }
-    .hero-stats { flex-direction: column; gap: 1.5rem; }
+    .hero-stats { flex-direction: column; padding: 1rem; gap: 0; }
+    .hero-stat { padding: 0.6rem 2rem; }
+    .hero-stat + .hero-stat::before {
+      top: 0; bottom: auto;
+      left: 15%; right: 15%;
+      width: auto; height: 1px;
+    }
+    .sched-strip { flex-direction: column; gap: 0.75rem; }
+    .sched-off { display: none; }
+    .sched-active { width: 100%; }
+    .comms-grid { grid-template-columns: 1fr; }
+    .recruit-left { padding: 2rem; }
+    .recruit-right { padding: 2rem; }
+    .recruit-left h2 { font-size: 2.2rem; }
   }
 </style>
 </head>
@@ -489,29 +664,51 @@
 <nav>
   <a href="#" class="nav-mark">
     <div class="nav-icon">SC</div>
-    <span>Scuffed Crew</span>
+    <span>The Scuffed Crew</span>
   </a>
   <ul class="nav-links">
-    <li><a href="#about">About</a></li>
-    <li><a href="#teams">Teams</a></li>
-    <li><a href="#compete">Compete</a></li>
-    <li><a href="#comms">Comms</a></li>
-    <li><a href="#schedule">Schedule</a></li>
+    <li><a href="#about" data-nav>About</a></li>
+    <li><a href="#teams" data-nav>Teams</a></li>
+    <li><a href="#comms" data-nav>Comms</a></li>
+    <li><a href="#schedule" data-nav>Schedule</a></li>
     <li><a href="#join" class="nav-cta">Join Us</a></li>
   </ul>
+  <button class="nav-hamburger" aria-label="Toggle menu">
+    <span></span><span></span><span></span>
+  </button>
 </nav>
 
-<!-- ═══ HERO ═══ -->
+<div class="nav-overlay">
+  <a href="#about">About</a>
+  <a href="#teams">Teams</a>
+  <a href="#comms">Comms</a>
+  <a href="#schedule">Schedule</a>
+  <a href="#join" class="btn btn-primary" style="margin-top:1rem;">Join Us</a>
+</div>
+
+<!-- HERO -->
 <section class="hero">
   <div class="hero-bg"></div>
   <div class="hero-grid"></div>
+  <div class="hero-scanline"></div>
+  <div class="hero-scanline"></div>
+  <div class="hero-spotlight"></div>
+  <svg class="hero-emblem" viewBox="0 0 400 400" fill="none" stroke="currentColor" stroke-width="1.5">
+    <path d="M200 20 L360 120 L340 320 L200 380 L60 320 L40 120 Z" />
+    <path d="M200 60 L320 140 L305 290 L200 340 L95 290 L80 140 Z" />
+    <path d="M200 100 L280 160 L270 260 L200 300 L130 260 L120 160 Z" />
+    <line x1="200" y1="20" x2="200" y2="380" />
+    <line x1="40" y1="120" x2="340" y2="320" />
+    <line x1="360" y1="120" x2="60" y2="320" />
+    <path d="M200 170 L230 200 L200 230 L170 200 Z" />
+  </svg>
   <div class="hero-content">
     <div class="hero-badge">
       <span class="badge-dot"></span>
-      FACEIT Club &mdash; EMEA &mdash; Est. 2026
+      Multi-Game Crew &mdash; EMEA &mdash; Est. 2026
     </div>
-    <h1 class="hero-title">Scuffed<br><span class="red">Crew</span></h1>
-    <p class="hero-sub">A multi-game org built on old-school clan principles. Small teams, real structure, scheduled play nights. No ghost members. No dead servers.</p>
+    <h1 class="hero-title">The Scuffed<br><span class="purple">Crew</span></h1>
+    <p class="hero-sub">A multi-game crew built on old-school clan principles. Small teams, real structure, scheduled play nights. No ghost members. No dead servers.</p>
     <div class="hero-actions">
       <a href="#join" class="btn btn-primary">Apply to Join</a>
       <a href="#teams" class="btn btn-outline">Our Teams</a>
@@ -526,8 +723,8 @@
         <div class="hero-stat-label">Members</div>
       </div>
       <div class="hero-stat">
-        <div class="hero-stat-val">S8</div>
-        <div class="hero-stat-label">FACEIT League</div>
+        <div class="hero-stat-val">2</div>
+        <div class="hero-stat-label">Games</div>
       </div>
     </div>
   </div>
@@ -535,46 +732,68 @@
 
 <div class="divider"></div>
 
-<!-- ═══ ABOUT ═══ -->
+<!-- ABOUT -->
 <section id="about">
-  <div class="sec-label">// The Ethos</div>
-  <h2 class="sec-title">Not a server. A clan.</h2>
-  <p class="sec-desc">We're a structured gaming org with game-specific squads, scheduled play nights, and a competitive pipeline through FACEIT. Adults only. Drama-free. Life comes first.</p>
+  <div class="sec-label sec-label-purple" data-reveal>// The Ethos</div>
+  <h2 class="sec-title" data-reveal>Not a server. A clan.</h2>
+  <p class="sec-desc" data-reveal>A structured gaming org with game-specific squads and scheduled play nights. Adults only. No drama. Life comes first — the games come second, but we still show up.</p>
 
   <div class="pillars">
-    <div class="pillar">
-      <div class="pillar-icon">⚔</div>
+    <div class="pillar pillar-purple" data-reveal data-reveal-delay="1">
+      <div class="pillar-icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="6" r="2"/><circle cx="6" cy="18" r="2"/><circle cx="18" cy="18" r="2"/><circle cx="6" cy="12" r="2"/><circle cx="18" cy="12" r="2"/>
+          <line x1="12" y1="8" x2="6" y2="12"/><line x1="12" y1="8" x2="18" y2="12"/><line x1="6" y1="14" x2="6" y2="16"/><line x1="18" y1="14" x2="18" y2="16"/>
+        </svg>
+      </div>
       <h3>Squad structure</h3>
       <p>Small teams of 5+5 named after in-game lore. Your squad is your crew — the org is the scaffold that holds it together.</p>
     </div>
-    <div class="pillar">
-      <div class="pillar-icon">🏆</div>
-      <h3>Compete on FACEIT</h3>
-      <p>Our teams compete in FACEIT League from Open division up. Real matches, real standings, real path to OWCS qualification.</p>
+    <div class="pillar pillar-gold" data-reveal data-reveal-delay="2">
+      <div class="pillar-icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="2" y="4" width="8" height="8" rx="1"/><rect x="14" y="12" width="8" height="8" rx="1"/>
+          <line x1="10" y1="8" x2="14" y2="16"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/>
+        </svg>
+      </div>
+      <h3>Multi-game</h3>
+      <p>Overwatch, Destiny 2, and whatever comes next. The crew spans games — your squad plays one, the org plays them all.</p>
     </div>
-    <div class="pillar">
-      <div class="pillar-icon">🎧</div>
+    <div class="pillar pillar-blue" data-reveal data-reveal-delay="3">
+      <div class="pillar-icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="9" y="2" width="6" height="10" rx="3"/>
+          <path d="M5 10a7 7 0 0 0 14 0"/>
+          <line x1="12" y1="17" x2="12" y2="22"/>
+          <path d="M19 10c1.5-1 2.5-1 3 0"/>
+        </svg>
+      </div>
       <h3>Dedicated voice</h3>
-      <p>Play nights run on TeamSpeak — self-hosted, low latency, built for competitive gaming. Discord handles the rest. No process scanning, no telemetry on our voice server.</p>
+      <p>Play nights run on TeamSpeak — self-hosted, low latency, built for competitive gaming. Discord handles everything else.</p>
     </div>
-    <div class="pillar">
-      <div class="pillar-icon">🛡</div>
+    <div class="pillar pillar-green" data-reveal data-reveal-delay="4">
+      <div class="pillar-icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+          <line x1="12" y1="8" x2="12" y2="12"/><circle cx="12" cy="15" r="0.5" fill="currentColor"/>
+        </svg>
+      </div>
       <h3>One rule</h3>
-      <p>Communicate. Show up when you can, let your team know when you can't. Ghost for weeks and your slot goes to someone who gives a damn.</p>
+      <p>We're here to play games. No politics, no drama, no soapboxes. Show up, communicate, have fun. Ghost for weeks and your slot goes to someone who gives a damn.</p>
     </div>
   </div>
 </section>
 
 <div class="divider"></div>
 
-<!-- ═══ TEAMS ═══ -->
+<!-- TEAMS -->
 <section id="teams">
-  <div class="sec-label">// Active Squads</div>
-  <h2 class="sec-title">The Teams</h2>
-  <p class="sec-desc">Each team carries a name from the lore of the game they play. Your team is your identity within the org.</p>
+  <div class="sec-label sec-label-red" data-reveal>// Active Squads</div>
+  <h2 class="sec-title" data-reveal>The Teams</h2>
+  <p class="sec-desc" data-reveal>Each team carries a name from the lore of the game they play. Your team is your identity within the org.</p>
 
   <div class="teams-grid">
-    <div class="team-card">
+    <div class="team-card" data-game="ow" data-reveal data-reveal-delay="1">
       <div class="team-header">
         <div class="team-name">Blackwatch</div>
         <span class="team-game game-ow">Overwatch</span>
@@ -596,11 +815,11 @@
       </div>
       <div class="team-division">
         <span class="faceit-dot"></span>
-        FACEIT League &mdash; Open Division &mdash; EMEA
+        Open Division &mdash; EMEA
       </div>
     </div>
 
-    <div class="team-card">
+    <div class="team-card" data-game="ow" data-reveal data-reveal-delay="2">
       <div class="team-header">
         <div class="team-name">Null Sector</div>
         <span class="team-game game-ow">Overwatch</span>
@@ -622,11 +841,11 @@
       </div>
       <div class="team-division">
         <span class="faceit-dot"></span>
-        FACEIT League &mdash; Open Division &mdash; EMEA
+        Open Division &mdash; EMEA
       </div>
     </div>
 
-    <div class="team-card">
+    <div class="team-card" data-game="destiny" data-reveal data-reveal-delay="3">
       <div class="team-header">
         <div class="team-name">Dredgen</div>
         <span class="team-game game-dest">Destiny 2</span>
@@ -656,119 +875,95 @@
 
 <div class="divider"></div>
 
-<!-- ═══ FACEIT / COMPETE ═══ -->
-<section id="compete">
-  <div class="faceit-banner">
-    <div class="faceit-content">
-      <div class="sec-label">// Competitive Pipeline</div>
-      <h2>From clan to OWCS</h2>
-      <p>We compete through FACEIT — the official Tier 2 platform for Overwatch esports. No client install, no anti-cheat, no Windows requirement. Just browser + game. Works on Linux.</p>
-      <p>Our Overwatch teams enter FACEIT League each season starting in Open division. Win enough and you promote to Advanced, Expert, and eventually Master — where OWCS qualification spots are on the line.</p>
-      <a href="https://www.faceit.com" class="btn btn-outline" target="_blank">FACEIT Club &rarr;</a>
-    </div>
-    <div class="faceit-path">
-      <div class="faceit-path-label">The ladder</div>
-      <div class="path-step">
-        <div class="path-step-num dim">M</div>
-        <span>Master &mdash; OWCS qualification, $50K prize pool</span>
-      </div>
-      <div class="path-step">
-        <div class="path-step-num dim">E</div>
-        <span>Expert &mdash; Invitation based on Elo + results</span>
-      </div>
-      <div class="path-step">
-        <div class="path-step-num dim">A</div>
-        <span>Advanced &mdash; 1,650+ Elo fast-track</span>
-      </div>
-      <div class="path-step">
-        <div class="path-step-num active">O</div>
-        <span>Open &mdash; Where every team starts. We are here.</span>
-      </div>
-    </div>
-  </div>
-</section>
+<!-- COMMS -->
+<section id="comms" class="section-comms-bg">
+  <div class="sec-label sec-label-blue" data-reveal>// Communication</div>
+  <h2 class="sec-title" data-reveal>How we talk</h2>
+  <p class="sec-desc" data-reveal>Discord for text, TeamSpeak for voice. Two platforms, clear separation, no bloat.</p>
 
-<div class="divider"></div>
-
-<!-- ═══ COMMS ═══ -->
-<section id="comms">
-  <div class="sec-label">// Communication</div>
-  <h2 class="sec-title">How we talk</h2>
-  <p class="sec-desc">Discord for text, TeamSpeak for voice. Two platforms, clear separation, no bloat.</p>
-
-  <div class="comms-flow">
-    <div class="flow-stage">
-      <div class="flow-stage-header">
-        <div class="flow-stage-badge public-badge">Everyone</div>
-        <div class="flow-arrow">→</div>
-      </div>
-      <div class="flow-card">
-        <div class="comm-icon">💬</div>
+  <div class="comms-grid">
+    <div class="comm-card comm-card-discord" data-reveal data-reveal-delay="1">
+      <div class="comm-card-header">
+        <div class="comm-icon-svg">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+          </svg>
+        </div>
         <h3>Discord</h3>
-        <p>All text lives here. Public channels for announcements, casual chat, LFG, and recruitment. Private team channels for scheduling, strat discussion, and coordination — unlocked when you join a roster.</p>
+      </div>
+      <p>All text lives here. Public channels for announcements, casual chat, LFG, and recruitment. Private team channels unlock when you join a roster.</p>
+      <div class="comm-tags">
         <span class="comm-tag comm-public">Open to all</span>
       </div>
     </div>
 
-    <div class="flow-stage">
-      <div class="flow-stage-header">
-        <div class="flow-stage-badge member-badge">Rostered Members</div>
-      </div>
-      <div class="flow-card">
-        <div class="comm-icon">🎧</div>
+    <div class="comm-card comm-card-ts" data-reveal data-reveal-delay="2">
+      <div class="comm-card-header">
+        <div class="comm-icon-svg">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M3 18v-6a9 9 0 0 1 18 0v6"/>
+            <path d="M21 19a2 2 0 0 1-2 2h-1a2 2 0 0 1-2-2v-3a2 2 0 0 1 2-2h3z"/>
+            <path d="M3 19a2 2 0 0 0 2 2h1a2 2 0 0 0 2-2v-3a2 2 0 0 0-2-2H3z"/>
+          </svg>
+        </div>
         <h3>TeamSpeak</h3>
-        <p>Voice comms for play nights and scrims. Self-hosted, low latency, trusted by competitive teams for two decades. No process scanning, no behavioral telemetry — just voice on hardware we control.</p>
-        <span class="comm-tag comm-members">Added on roster</span>
+      </div>
+      <p>Voice comms for play nights and scrims. Self-hosted, low latency, no distractions mid-match. Been the competitive standard for two decades.</p>
+      <div class="comm-tags">
+        <span class="comm-tag comm-members">Rostered members</span>
       </div>
     </div>
   </div>
-
-  <!-- WHY TEAMSPEAK -->
-  <div class="comms-why">
-    <div class="comms-why-header">Why TeamSpeak instead of Discord voice?</div>
-    <div class="comms-why-body">
-      Discord voice works fine for casual play — DAVE encryption is legit, audited by Trail of Bits. But for competitive play nights we want dedicated voice: self-hosted, lower latency, no process scanning, no accidental screen-share popups mid-match. TeamSpeak has been the standard for competitive teams for over two decades. It does one thing and does it well.
-    </div>
-  </div>
 </section>
 
 <div class="divider"></div>
 
-<!-- ═══ SCHEDULE ═══ -->
+<!-- SCHEDULE -->
 <section id="schedule">
-  <div class="sec-label">// Weekly Rhythm</div>
-  <h2 class="sec-title">Play Nights</h2>
-  <p class="sec-desc">No obligation to hit every session. Show up when life allows. These are the nights people are online and playing.</p>
+  <div class="sec-label sec-label-purple" data-reveal>// Weekly Rhythm</div>
+  <h2 class="sec-title" data-reveal>Play Nights</h2>
+  <p class="sec-desc" data-reveal>No obligation to hit every session. Show up when life allows. These are the nights people are online and playing.</p>
 
-  <div class="sched-row">
-    <div class="sched-day"><div class="day-label">Mon</div><div class="day-off">&mdash;</div></div>
-    <div class="sched-day on"><div class="day-label">Tue</div><div class="day-event">Comp Night</div><div class="day-time">21:00 CET</div></div>
-    <div class="sched-day"><div class="day-label">Wed</div><div class="day-off">&mdash;</div></div>
-    <div class="sched-day on"><div class="day-label">Thu</div><div class="day-event">Scrims</div><div class="day-time">21:00 CET</div></div>
-    <div class="sched-day"><div class="day-label">Fri</div><div class="day-off">&mdash;</div></div>
-    <div class="sched-day on"><div class="day-label">Sat</div><div class="day-event">Game Night</div><div class="day-time">20:00 CET</div></div>
-    <div class="sched-day"><div class="day-label">Sun</div><div class="day-off">&mdash;</div></div>
+  <div class="sched-strip" data-reveal>
+    <div class="sched-off">Mon</div>
+    <div class="sched-active">
+      <div class="day-label">Tue</div>
+      <div class="day-event">Comp Night</div>
+      <div class="day-time">21:00 CET</div>
+    </div>
+    <div class="sched-off">Wed</div>
+    <div class="sched-active">
+      <div class="day-label">Thu</div>
+      <div class="day-event">Scrims</div>
+      <div class="day-time">21:00 CET</div>
+    </div>
+    <div class="sched-off">Fri</div>
+    <div class="sched-active">
+      <div class="day-label">Sat</div>
+      <div class="day-event">Game Night</div>
+      <div class="day-time">20:00 CET</div>
+    </div>
+    <div class="sched-off">Sun</div>
   </div>
 </section>
 
 <div class="divider"></div>
 
-<!-- ═══ JOIN ═══ -->
+<!-- JOIN -->
 <section id="join">
-  <div class="recruit-wrap">
+  <div class="recruit-wrap" data-reveal="scale">
     <div class="recruit-left">
-      <div class="sec-label">// Recruitment Open</div>
+      <div class="sec-label sec-label-purple">// Recruitment Open</div>
       <h2>Want in?</h2>
-      <p>We keep rosters intentional. Join the Discord, fill out a short app on FACEIT, and we'll match you with a team that fits your schedule and skill level. Play 3–5 sessions with us. If we're having fun together, you're in.</p>
+      <p>We keep rosters intentional. Join the Discord, hop in a few play nights, and we'll match you with a team that fits your schedule and skill level. Play 3–5 sessions with us. If we're having fun together, you're in.</p>
       <div style="display:flex;gap:1rem;flex-wrap:wrap;">
         <a href="#" class="btn btn-primary">Join Discord</a>
-        <a href="#" class="btn btn-outline">FACEIT Club</a>
       </div>
     </div>
     <div class="recruit-right">
       <h3>What we expect</h3>
       <div class="req"><span class="req-marker">›</span><span>18+ — adults with lives who get that this isn't a job</span></div>
-      <div class="req"><span class="req-marker">›</span><span>PC only — our teams compete through FACEIT on PC</span></div>
+      <div class="req"><span class="req-marker">›</span><span>PC only — our teams play on PC</span></div>
       <div class="req"><span class="req-marker">›</span><span>Communicate — let your squad know if you can't make it</span></div>
       <div class="req"><span class="req-marker">›</span><span>No toxicity — competitive is fine, being a jerk isn't</span></div>
       <div class="req"><span class="req-marker">›</span><span>Mic required for play nights</span></div>
@@ -784,19 +979,87 @@
   </div>
 </section>
 
-<!-- ═══ FOOTER ═══ -->
+<!-- FOOTER -->
 <footer>
-  <div class="footer-mark">Scuffed Crew</div>
+  <div class="footer-mark">The Scuffed Crew</div>
   <div class="footer-links">
     <a href="#about">About</a>
     <a href="#teams">Teams</a>
-    <a href="#compete">Compete</a>
     <a href="#schedule">Schedule</a>
     <a href="#join">Join</a>
   </div>
-  <div class="footer-copy">&copy; 2026 Scuffed Crew</div>
-  <div class="footer-privacy">No tracking · No cookies · No ads · Your data stays yours</div>
+  <div class="footer-copy">&copy; 2026 The Scuffed Crew</div>
+  <div class="footer-privacy">No tracking · No cookies · No ads</div>
 </footer>
+
+<script>
+(function() {
+  // Scroll Reveal
+  const revealEls = document.querySelectorAll('[data-reveal]');
+  const revealObs = new IntersectionObserver((entries) => {
+    entries.forEach(e => {
+      if (e.isIntersecting) {
+        e.target.classList.add('revealed');
+        revealObs.unobserve(e.target);
+      }
+    });
+  }, { threshold: 0.15, rootMargin: '-60px 0px' });
+  revealEls.forEach(el => revealObs.observe(el));
+
+  // Active Nav Indicator
+  const navLinks = document.querySelectorAll('a[data-nav]');
+  const sections = document.querySelectorAll('section[id]');
+  const navObs = new IntersectionObserver((entries) => {
+    entries.forEach(e => {
+      if (e.isIntersecting) {
+        navLinks.forEach(l => l.classList.remove('nav-active'));
+        const active = document.querySelector(`a[data-nav][href="#${e.target.id}"]`);
+        if (active) active.classList.add('nav-active');
+      }
+    });
+  }, { threshold: 0.3, rootMargin: '-80px 0px' });
+  sections.forEach(s => navObs.observe(s));
+
+  // Hero Spotlight
+  const hero = document.querySelector('.hero');
+  const spotlight = document.querySelector('.hero-spotlight');
+  if (hero && spotlight) {
+    hero.addEventListener('mousemove', (e) => {
+      const rect = hero.getBoundingClientRect();
+      spotlight.style.left = (e.clientX - rect.left) + 'px';
+      spotlight.style.top = (e.clientY - rect.top) + 'px';
+    });
+  }
+
+  // Card Hover Glow
+  const glowCards = document.querySelectorAll('.pillar, .team-card, .comm-card');
+  glowCards.forEach(card => {
+    card.addEventListener('mousemove', (e) => {
+      const rect = card.getBoundingClientRect();
+      card.style.setProperty('--card-glow-x', (e.clientX - rect.left) + 'px');
+      card.style.setProperty('--card-glow-y', (e.clientY - rect.top) + 'px');
+    });
+  });
+
+  // Hamburger Menu
+  const hamburger = document.querySelector('.nav-hamburger');
+  const overlay = document.querySelector('.nav-overlay');
+  if (hamburger && overlay) {
+    hamburger.addEventListener('click', () => {
+      hamburger.classList.toggle('open');
+      overlay.classList.toggle('open');
+      document.body.style.overflow = overlay.classList.contains('open') ? 'hidden' : '';
+    });
+    overlay.querySelectorAll('a').forEach(a => {
+      a.addEventListener('click', () => {
+        hamburger.classList.remove('open');
+        overlay.classList.remove('open');
+        document.body.style.overflow = '';
+      });
+    });
+  }
+})();
+</script>
 
 </body>
 </html>
