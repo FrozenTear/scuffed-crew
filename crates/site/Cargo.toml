@@ -1,0 +1,21 @@
+[package]
+name = "scuffed-site"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+leptos = { version = "0.8", features = ["csr"] }
+leptos_router = "0.8"
+leptos_meta = "0.8"
+scuffed-auth = { path = "../auth", features = ["client"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+scuffed-ui = { path = "../ui" }
+wasm-bindgen = "0.2"
+js-sys = "0.3"
+console_error_panic_hook = "0.1"
+tracing-wasm = "0.2"
+tracing = "0.1"
+
+[lib]
+crate-type = ["cdylib", "rlib"]

@@ -1,0 +1,17 @@
+# Replace scuffed.example.com with your domain.
+# Caddy auto-provisions TLS via Let's Encrypt.
+
+scuffed.example.com {
+	encode zstd gzip
+
+	# Hashed static assets — cache aggressively
+	@hashed path *.wasm *.js *.css
+	header @hashed Cache-Control "public, max-age=31536000, immutable"
+
+	# Security headers
+	header X-Content-Type-Options "nosniff"
+	header X-Frame-Options "DENY"
+	header Referrer-Policy "strict-origin-when-cross-origin"
+
+	reverse_proxy localhost:3000
+}
