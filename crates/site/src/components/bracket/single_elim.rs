@@ -165,6 +165,7 @@ pub fn BracketSingleElim(
                                         score_b=m.score_b
                                         winner=winner
                                         state=match_state(&m.status)
+                                        replay_codes=m.replay_codes
                                     />
                                 }
                             }).collect_view()}

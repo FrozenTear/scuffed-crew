@@ -1,4 +1,14 @@
 use leptos::prelude::*;
+use leptos::task::spawn_local;
+use wasm_bindgen_futures::JsFuture;
+
+fn copy_to_clipboard(text: String) {
+    spawn_local(async move {
+        let window = web_sys::window().unwrap();
+        let clipboard = window.navigator().clipboard();
+        let _ = JsFuture::from(clipboard.write_text(&text)).await;
+    });
+}
 
 /// A participant slot within a match card.
 #[component]
@@ -105,8 +115,16 @@ pub fn MatchCard(
             })}
             {(!replay_codes.is_empty() && state == MatchCardState::Completed).then(|| view! {
                 <div class="match-replay-codes">
-                    {replay_codes.iter().map(|c| view! {
-                        <span class="replay-code">{c.clone()}</span>
+                    {replay_codes.iter().map(|c| {
+                        let code = c.clone();
+                        let code2 = c.clone();
+                        view! {
+                            <span
+                                class="replay-code"
+                                title="Click to copy"
+                                on:click=move |_| copy_to_clipboard(code.clone())
+                            >{code2}</span>
+                        }
                     }).collect_view()}
                 </div>
             })}

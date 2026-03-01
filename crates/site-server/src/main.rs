@@ -245,6 +245,172 @@ async fn main() {
             tracing::info!("Bracket generated with semi-final results — final pending");
         }
 
+        // ── Round Robin tournament seed ──
+        db.client
+            .query(r#"
+                CREATE team:echo SET
+                    name = 'Echo Company',
+                    game_id = 'overwatch2',
+                    description = NONE,
+                    avatar_url = NONE,
+                    is_active = true,
+                    created_at = time::now();
+
+                CREATE tournament:rr_demo SET
+                    name = 'Scuffed Round Robin',
+                    game_id = 'overwatch2',
+                    format = 'round_robin',
+                    status = 'registration',
+                    max_teams = 8,
+                    best_of = 3,
+                    swiss_rounds = NONE,
+                    is_external = false,
+                    is_open = false,
+                    external_url = NONE,
+                    rules = 'Round robin format — everyone plays everyone.',
+                    description = 'Round robin showcase with partial results.',
+                    starts_at = time::now() + 14d,
+                    ends_at = NONE,
+                    created_by = 'devadmin',
+                    created_at = time::now();
+
+                CREATE tournament_participant:rr1 SET
+                    tournament_id = 'rr_demo', team_id = 'alpha', external_name = NONE,
+                    seed = 1, group_label = NONE, status = 'registered', created_at = time::now();
+                CREATE tournament_participant:rr2 SET
+                    tournament_id = 'rr_demo', team_id = 'bravo', external_name = NONE,
+                    seed = 2, group_label = NONE, status = 'registered', created_at = time::now();
+                CREATE tournament_participant:rr3 SET
+                    tournament_id = 'rr_demo', team_id = 'charlie', external_name = NONE,
+                    seed = 3, group_label = NONE, status = 'registered', created_at = time::now();
+                CREATE tournament_participant:rr4 SET
+                    tournament_id = 'rr_demo', team_id = 'echo', external_name = NONE,
+                    seed = 4, group_label = NONE, status = 'registered', created_at = time::now();
+            "#)
+            .await
+            .expect("Failed to seed RR tournament");
+
+        db.generate_round_robin_pairings("rr_demo")
+            .await
+            .expect("Failed to generate RR pairings");
+
+        db.client
+            .query("UPDATE tournament:rr_demo SET status = 'in_progress'")
+            .await
+            .expect("Failed to start RR tournament");
+
+        // Report some RR matches with replay codes
+        let rr_matches = db
+            .list_tournament_matches("rr_demo")
+            .await
+            .expect("Failed to list RR matches");
+
+        let rr_pending: Vec<_> = rr_matches
+            .iter()
+            .filter(|m| {
+                m.participant_a_id.is_some()
+                    && m.participant_b_id.is_some()
+                    && m.status == scuffed_db::types::TournamentMatchStatus::Pending
+            })
+            .collect();
+
+        // Report first 3 matches of the round robin
+        for (i, m) in rr_pending.iter().take(3).enumerate() {
+            let winner = if i % 2 == 0 {
+                m.participant_a_id.as_ref().unwrap()
+            } else {
+                m.participant_b_id.as_ref().unwrap()
+            };
+            let codes = vec![
+                format!("RR{}{}", (b'A' + i as u8) as char, "001"),
+                format!("RR{}{}", (b'A' + i as u8) as char, "002"),
+            ];
+            db.report_tournament_match(&m.id, 2, 1, winner, None, codes)
+                .await
+                .unwrap_or_else(|_| panic!("Failed to report RR match {i}"));
+        }
+
+        tracing::info!("Round robin seeded: 4 teams, 3 matches reported");
+
+        // ── Swiss tournament seed ──
+        db.client
+            .query(r#"
+                CREATE tournament:swiss_demo SET
+                    name = 'Scuffed Swiss Open',
+                    game_id = 'overwatch2',
+                    format = 'swiss',
+                    status = 'registration',
+                    max_teams = 8,
+                    best_of = 3,
+                    swiss_rounds = 3,
+                    is_external = false,
+                    is_open = false,
+                    external_url = NONE,
+                    rules = 'Swiss format — 3 rounds, paired by record.',
+                    description = 'Swiss format showcase with one completed round.',
+                    starts_at = time::now() + 21d,
+                    ends_at = NONE,
+                    created_by = 'devadmin',
+                    created_at = time::now();
+
+                CREATE tournament_participant:sw1 SET
+                    tournament_id = 'swiss_demo', team_id = 'alpha', external_name = NONE,
+                    seed = 1, group_label = NONE, status = 'registered', created_at = time::now();
+                CREATE tournament_participant:sw2 SET
+                    tournament_id = 'swiss_demo', team_id = 'bravo', external_name = NONE,
+                    seed = 2, group_label = NONE, status = 'registered', created_at = time::now();
+                CREATE tournament_participant:sw3 SET
+                    tournament_id = 'swiss_demo', team_id = 'charlie', external_name = NONE,
+                    seed = 3, group_label = NONE, status = 'registered', created_at = time::now();
+                CREATE tournament_participant:sw4 SET
+                    tournament_id = 'swiss_demo', team_id = 'delta', external_name = NONE,
+                    seed = 4, group_label = NONE, status = 'registered', created_at = time::now();
+            "#)
+            .await
+            .expect("Failed to seed Swiss tournament");
+
+        // Generate and report round 1
+        db.client
+            .query("UPDATE tournament:swiss_demo SET status = 'in_progress'")
+            .await
+            .expect("Failed to start Swiss tournament");
+
+        db.generate_swiss_round("swiss_demo")
+            .await
+            .expect("Failed to generate Swiss round 1");
+
+        let sw_matches = db
+            .list_tournament_matches("swiss_demo")
+            .await
+            .expect("Failed to list Swiss matches");
+
+        let sw_pending: Vec<_> = sw_matches
+            .iter()
+            .filter(|m| {
+                m.participant_a_id.is_some()
+                    && m.participant_b_id.is_some()
+                    && m.status == scuffed_db::types::TournamentMatchStatus::Pending
+            })
+            .collect();
+
+        for (i, m) in sw_pending.iter().enumerate() {
+            let winner = m.participant_a_id.as_ref().unwrap();
+            let codes = vec![
+                format!("SW1{}{}", (b'A' + i as u8) as char, "01"),
+                format!("SW1{}{}", (b'A' + i as u8) as char, "02"),
+            ];
+            db.report_tournament_match(&m.id, 2, 0, winner, None, codes)
+                .await
+                .unwrap_or_else(|_| panic!("Failed to report Swiss match {i}"));
+        }
+
+        // Generate round 2 (pairs by standings now)
+        db.generate_swiss_round("swiss_demo")
+            .await
+            .expect("Failed to generate Swiss round 2");
+
+        tracing::info!("Swiss seeded: 4 teams, round 1 complete, round 2 pending");
+
         tracing::info!("Visit /api/dev/login to set session cookie");
     }
 

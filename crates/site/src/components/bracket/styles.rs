@@ -185,6 +185,12 @@ pub const BRACKET_STYLES: &str = r#"
     padding: 0.1rem 0.35rem;
     border-radius: 3px;
     letter-spacing: 0.04em;
+    cursor: pointer;
+    transition: background 0.15s, color 0.15s;
+}
+.replay-code:hover {
+    background: var(--accent-soft, rgba(124, 58, 237, 0.15));
+    color: var(--text-primary);
 }
 
 /* ─── Double Elim Layout ─── */
