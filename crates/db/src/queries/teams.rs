@@ -1,6 +1,7 @@
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use surrealdb::sql::Thing;
+use surrealdb::sql::Datetime as SurrealDatetime;
 
 use crate::types::Team;
 use crate::{with_timeout, Database, DbResult};
@@ -11,12 +12,13 @@ struct DbTeam {
     #[allow(dead_code)]
     id: Option<Thing>,
     name: String,
-    game: String,
+    game_id: String,
     color: Option<String>,
     division: Option<String>,
     lore_quote: Option<String>,
+    logo_url: Option<String>,
     is_active: bool,
-    created_at: DateTime<Utc>,
+    created_at: SurrealDatetime,
 }
 
 fn db_to_team(db: DbTeam) -> Team {
@@ -27,12 +29,13 @@ fn db_to_team(db: DbTeam) -> Team {
     Team {
         id,
         name: db.name,
-        game: db.game,
+        game_id: db.game_id,
         color: db.color,
         division: db.division,
         lore_quote: db.lore_quote,
+        logo_url: db.logo_url,
         is_active: db.is_active,
-        created_at: db.created_at,
+        created_at: db.created_at.into(),
     }
 }
 
@@ -41,7 +44,7 @@ impl Database {
     pub async fn create_team(
         &self,
         name: &str,
-        game: &str,
+        game_id: &str,
         color: Option<&str>,
         division: Option<&str>,
         lore_quote: Option<&str>,
@@ -50,12 +53,13 @@ impl Database {
             let db_team = DbTeam {
                 id: None,
                 name: name.to_string(),
-                game: game.to_string(),
+                game_id: game_id.to_string(),
                 color: color.map(|s| s.to_string()),
                 division: division.map(|s| s.to_string()),
                 lore_quote: lore_quote.map(|s| s.to_string()),
+                logo_url: None,
                 is_active: true,
-                created_at: Utc::now(),
+                created_at: SurrealDatetime::from(Utc::now()),
             };
             let created: Option<DbTeam> = self.client.create("team").content(db_team).await?;
             Ok(db_to_team(
@@ -93,7 +97,7 @@ impl Database {
         &self,
         id: &str,
         name: Option<&str>,
-        game: Option<&str>,
+        game_id: Option<&str>,
         color: Option<Option<&str>>,
         division: Option<Option<&str>>,
         lore_quote: Option<Option<&str>>,
@@ -106,8 +110,8 @@ impl Database {
             if let Some(n) = name {
                 db.name = n.to_string();
             }
-            if let Some(g) = game {
-                db.game = g.to_string();
+            if let Some(g) = game_id {
+                db.game_id = g.to_string();
             }
             if let Some(c) = color {
                 db.color = c.map(|s| s.to_string());

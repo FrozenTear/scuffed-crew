@@ -8,7 +8,10 @@ use serde::Deserialize;
 use scuffed_auth::server::session::ErrorResponse;
 use scuffed_db::Team;
 
+use scuffed_db::{AuditAction, AuditTargetType};
+
 use crate::extractors::{AdminUser, OfficerUser};
+use crate::routes::audit_log::audit;
 use crate::state::AppState;
 
 /// GET /api/teams — list all teams (public)
@@ -56,7 +59,7 @@ pub async fn get_team(
 #[derive(Deserialize)]
 pub struct CreateTeamRequest {
     pub name: String,
-    pub game: String,
+    pub game_id: String,
     pub color: Option<String>,
     pub division: Option<String>,
     pub lore_quote: Option<String>,
@@ -72,7 +75,7 @@ pub async fn create_team(
         .db
         .create_team(
             &body.name,
-            &body.game,
+            &body.game_id,
             body.color.as_deref(),
             body.division.as_deref(),
             body.lore_quote.as_deref(),
@@ -86,13 +89,23 @@ pub async fn create_team(
                 }),
             )
         })?;
+    audit(
+        &state.db,
+        &_admin.member.id,
+        AuditAction::CreatedTeam,
+        AuditTargetType::Team,
+        &team.id,
+        Some(&format!("Created team: {}", team.name)),
+    )
+    .await;
+
     Ok((StatusCode::CREATED, Json(team)))
 }
 
 #[derive(Deserialize)]
 pub struct UpdateTeamRequest {
     pub name: Option<String>,
-    pub game: Option<String>,
+    pub game_id: Option<String>,
     pub color: Option<Option<String>>,
     pub division: Option<Option<String>>,
     pub lore_quote: Option<Option<String>>,
@@ -105,18 +118,17 @@ pub async fn update_team(
     Path(id): Path<String>,
     Json(body): Json<UpdateTeamRequest>,
 ) -> Result<Json<Team>, (StatusCode, Json<ErrorResponse>)> {
-    state
+    let team = state
         .db
         .update_team(
             &id,
             body.name.as_deref(),
-            body.game.as_deref(),
+            body.game_id.as_deref(),
             body.color.as_ref().map(|c| c.as_deref()),
             body.division.as_ref().map(|d| d.as_deref()),
             body.lore_quote.as_ref().map(|q| q.as_deref()),
         )
         .await
-        .map(Json)
         .map_err(|e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -124,5 +136,17 @@ pub async fn update_team(
                     error: e.to_string(),
                 }),
             )
-        })
+        })?;
+
+    audit(
+        &state.db,
+        &_officer.member.id,
+        AuditAction::UpdatedTeam,
+        AuditTargetType::Team,
+        &id,
+        None,
+    )
+    .await;
+
+    Ok(Json(team))
 }

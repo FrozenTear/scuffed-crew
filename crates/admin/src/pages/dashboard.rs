@@ -26,12 +26,19 @@ struct Team {
     name: String,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+struct Announcement {
+    #[allow(dead_code)]
+    id: String,
+}
+
 #[component]
 pub fn DashboardPage() -> impl IntoView {
     let members = LocalResource::new(|| async { api::get::<Vec<Member>>("/api/members").await.ok() });
     let apps = LocalResource::new(|| async { api::get::<Vec<Application>>("/api/applications").await.ok() });
     let events = LocalResource::new(|| async { api::get::<Vec<Event>>("/api/events").await.ok() });
     let teams = LocalResource::new(|| async { api::get::<Vec<Team>>("/api/teams").await.ok() });
+    let announcements = LocalResource::new(|| async { api::get::<Vec<Announcement>>("/api/announcements").await.ok() });
 
     view! {
         <h1>"Dashboard"</h1>
@@ -58,6 +65,12 @@ pub fn DashboardPage() -> impl IntoView {
                 <div class="label">"Events"</div>
                 <div class="value">
                     {move || events.get().flatten().map(|e| e.len().to_string()).unwrap_or_else(|| "...".into())}
+                </div>
+            </div>
+            <div class="summary-card">
+                <div class="label">"Announcements"</div>
+                <div class="value">
+                    {move || announcements.get().flatten().map(|a| a.len().to_string()).unwrap_or_else(|| "...".into())}
                 </div>
             </div>
         </div>

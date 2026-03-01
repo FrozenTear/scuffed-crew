@@ -13,6 +13,7 @@ struct DbEvent {
     day_of_week: u8,
     time: String,
     timezone: String,
+    duration_minutes: u32,
     is_recurring: bool,
     team_id: Option<String>,
     created_by: String,
@@ -30,6 +31,7 @@ fn db_to_event(db: DbEvent) -> Event {
         day_of_week: db.day_of_week,
         time: db.time,
         timezone: db.timezone,
+        duration_minutes: db.duration_minutes,
         is_recurring: db.is_recurring,
         team_id: db.team_id,
         created_by: db.created_by,
@@ -44,6 +46,7 @@ impl Database {
         day_of_week: u8,
         time: &str,
         timezone: &str,
+        duration_minutes: u32,
         is_recurring: bool,
         team_id: Option<&str>,
         created_by: &str,
@@ -55,6 +58,7 @@ impl Database {
                 day_of_week,
                 time: time.to_string(),
                 timezone: timezone.to_string(),
+                duration_minutes,
                 is_recurring,
                 team_id: team_id.map(|s| s.to_string()),
                 created_by: created_by.to_string(),
@@ -89,6 +93,7 @@ impl Database {
         day_of_week: Option<u8>,
         time: Option<&str>,
         timezone: Option<&str>,
+        duration_minutes: Option<u32>,
         is_recurring: Option<bool>,
         team_id: Option<Option<&str>>,
     ) -> DbResult<Event> {
@@ -109,6 +114,9 @@ impl Database {
             if let Some(tz) = timezone {
                 db.timezone = tz.to_string();
             }
+            if let Some(dur) = duration_minutes {
+                db.duration_minutes = dur;
+            }
             if let Some(r) = is_recurring {
                 db.is_recurring = r;
             }
@@ -128,8 +136,8 @@ impl Database {
     pub async fn deactivate_event(&self, id: &str) -> DbResult<()> {
         with_timeout(async {
             self.client
-                .query("UPDATE type::thing('event', $id) SET is_active = false")
-                .bind(("id", id.to_string()))
+                .query("UPDATE $rid SET is_active = false")
+                .bind(("rid", surrealdb::RecordId::from(("event", id))))
                 .await?;
             Ok(())
         })

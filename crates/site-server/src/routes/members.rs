@@ -6,9 +6,10 @@ use axum::{
 use serde::Deserialize;
 
 use scuffed_auth::server::session::ErrorResponse;
-use scuffed_db::{Member, OrgRole};
+use scuffed_db::{AuditAction, AuditTargetType, GameAccount, Member, OrgRole};
 
 use crate::extractors::{AdminUser, OrgMember};
+use crate::routes::audit_log::audit;
 use crate::state::AppState;
 
 /// GET /api/members — list all active members
@@ -59,6 +60,11 @@ pub async fn get_member(
 pub struct UpdateMemberRequest {
     pub display_name: Option<String>,
     pub bio: Option<Option<String>>,
+    pub avatar_url: Option<Option<String>>,
+    pub timezone: Option<Option<String>>,
+    pub pronouns: Option<Option<String>>,
+    pub availability_status: Option<Option<String>>,
+    pub is_active: Option<bool>,
 }
 
 /// PUT /api/members/:id — update member profile (self or officer+)
@@ -107,9 +113,12 @@ pub async fn update_member(
         .update_member(
             &id,
             body.display_name.as_deref(),
-            body.bio
-                .as_ref()
-                .map(|b| b.as_deref()),
+            body.bio.as_ref().map(|b| b.as_deref()),
+            body.avatar_url.as_ref().map(|a| a.as_deref()),
+            body.timezone.as_ref().map(|t| t.as_deref()),
+            body.pronouns.as_ref().map(|p| p.as_deref()),
+            body.availability_status.as_ref().map(|a| a.as_deref()),
+            body.is_active,
         )
         .await
         .map_err(|e| {
@@ -120,6 +129,16 @@ pub async fn update_member(
                 }),
             )
         })?;
+
+    audit(
+        &state.db,
+        &caller.member.id,
+        AuditAction::UpdatedMember,
+        AuditTargetType::Member,
+        &id,
+        None,
+    )
+    .await;
 
     Ok(Json(updated))
 }
@@ -132,13 +151,45 @@ pub struct ChangeRoleRequest {
 /// PATCH /api/members/:id/role — change org role (admin only)
 pub async fn change_role(
     State(state): State<AppState>,
-    _admin: AdminUser,
+    admin: AdminUser,
     Path(id): Path<String>,
     Json(body): Json<ChangeRoleRequest>,
 ) -> Result<Json<Member>, (StatusCode, Json<ErrorResponse>)> {
-    state
+    let member = state
         .db
         .change_member_role(&id, body.role)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: e.to_string(),
+                }),
+            )
+        })?;
+
+    audit(
+        &state.db,
+        &admin.member.id,
+        AuditAction::ChangedRole,
+        AuditTargetType::Member,
+        &id,
+        Some(&format!("Changed role to {}", body.role)),
+    )
+    .await;
+
+    Ok(Json(member))
+}
+
+/// GET /api/members/:id/game-accounts — list game accounts for a member
+pub async fn list_game_accounts(
+    State(state): State<AppState>,
+    _member: OrgMember,
+    Path(member_id): Path<String>,
+) -> Result<Json<Vec<GameAccount>>, (StatusCode, Json<ErrorResponse>)> {
+    state
+        .db
+        .list_member_game_accounts(&member_id)
         .await
         .map(Json)
         .map_err(|e| {
@@ -149,4 +200,84 @@ pub async fn change_role(
                 }),
             )
         })
+}
+
+#[derive(Deserialize)]
+pub struct UpsertGameAccountRequest {
+    pub game_id: String,
+    pub account_name: String,
+    pub account_id: Option<String>,
+}
+
+/// PUT /api/members/:id/game-accounts — upsert game account (self or officer+)
+pub async fn upsert_game_account(
+    State(state): State<AppState>,
+    caller: OrgMember,
+    Path(member_id): Path<String>,
+    Json(body): Json<UpsertGameAccountRequest>,
+) -> Result<Json<GameAccount>, (StatusCode, Json<ErrorResponse>)> {
+    let is_self = caller.member.id == member_id;
+    let is_officer = caller.member.org_role.is_at_least(OrgRole::Officer);
+
+    if !is_self && !is_officer {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(ErrorResponse {
+                error: "Can only edit your own game accounts".into(),
+            }),
+        ));
+    }
+
+    state
+        .db
+        .upsert_game_account(
+            &member_id,
+            &body.game_id,
+            &body.account_name,
+            body.account_id.as_deref(),
+        )
+        .await
+        .map(Json)
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: e.to_string(),
+                }),
+            )
+        })
+}
+
+/// DELETE /api/members/:member_id/game-accounts/:id — delete game account (self or officer+)
+pub async fn delete_game_account(
+    State(state): State<AppState>,
+    caller: OrgMember,
+    Path((member_id, account_id)): Path<(String, String)>,
+) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
+    let is_self = caller.member.id == member_id;
+    let is_officer = caller.member.org_role.is_at_least(OrgRole::Officer);
+
+    if !is_self && !is_officer {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(ErrorResponse {
+                error: "Can only delete your own game accounts".into(),
+            }),
+        ));
+    }
+
+    state
+        .db
+        .delete_game_account(&account_id)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: e.to_string(),
+                }),
+            )
+        })?;
+
+    Ok(StatusCode::OK)
 }

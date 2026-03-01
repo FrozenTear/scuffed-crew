@@ -1,8 +1,17 @@
+pub mod announcements;
 pub mod applications;
+pub mod attendance;
+pub mod audit_log;
 pub mod events;
+pub mod game_accounts;
+pub mod games;
 pub mod matches;
 pub mod members;
+pub mod moderation;
 pub mod roster;
+pub mod rsvps;
 pub mod sessions;
+pub mod settings;
 pub mod teams;
+pub mod tournaments;
 pub mod users;

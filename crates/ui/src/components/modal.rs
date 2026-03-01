@@ -9,7 +9,8 @@ use leptos::prelude::*;
 #[component]
 pub fn Modal(
     /// Whether the modal is currently visible
-    open: ReadSignal<bool>,
+    #[prop(into)]
+    open: Signal<bool>,
     /// Called when the user clicks the backdrop or close button
     on_close: Callback<()>,
     children: Children,

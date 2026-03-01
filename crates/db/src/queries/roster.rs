@@ -1,5 +1,6 @@
-use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use surrealdb::RecordId;
+use surrealdb::sql::Datetime as SurrealDatetime;
 
 use crate::types::{RosterEntry, TeamRole};
 use crate::{with_timeout, Database, DbResult};
@@ -12,7 +13,7 @@ struct DbRosterEntry {
     in_id: Option<String>,
     out: Option<String>,
     team_role: String,
-    joined_at: DateTime<Utc>,
+    joined_at: SurrealDatetime,
     is_active: bool,
 }
 
@@ -56,9 +57,17 @@ fn db_to_roster_entry(db: DbRosterEntry) -> RosterEntry {
         member_id,
         team_id,
         team_role: parse_team_role(&db.team_role),
-        joined_at: db.joined_at,
+        joined_at: db.joined_at.into(),
         is_active: db.is_active,
     }
+}
+
+fn member_rid(id: &str) -> RecordId {
+    RecordId::from(("member", id))
+}
+
+fn team_rid(id: &str) -> RecordId {
+    RecordId::from(("team", id))
 }
 
 impl Database {
@@ -70,17 +79,20 @@ impl Database {
         role: TeamRole,
     ) -> DbResult<RosterEntry> {
         with_timeout(async {
+            // RELATE then SELECT back with string casts for proper deserialization
             let mut result = self
                 .client
                 .query(
-                    r#"RELATE type::thing('member', $member) -> plays_on -> type::thing('team', $team)
-                       SET team_role = $role, joined_at = time::now(), is_active = true"#,
+                    r#"LET $entry = (RELATE $member_rid -> plays_on -> $team_rid
+                       SET team_role = $role, joined_at = time::now(), is_active = true);
+                       SELECT *, meta::id(id) as id, <string>in as in, <string>out as out
+                       FROM $entry"#,
                 )
-                .bind(("member", member_id.to_string()))
-                .bind(("team", team_id.to_string()))
+                .bind(("member_rid", member_rid(member_id)))
+                .bind(("team_rid", team_rid(team_id)))
                 .bind(("role", role.to_string()))
                 .await?;
-            let entries: Vec<DbRosterEntry> = result.take(0)?;
+            let entries: Vec<DbRosterEntry> = result.take(1)?;
             entries.into_iter().next().map(db_to_roster_entry).ok_or_else(|| {
                 crate::DbError::NotFound("Failed to create roster entry".into())
             })
@@ -96,9 +108,9 @@ impl Database {
                 .query(
                     r#"SELECT *, meta::id(id) as id, <string>in as in, <string>out as out
                        FROM plays_on
-                       WHERE out = type::thing('team', $team) AND is_active = true"#,
+                       WHERE out = $team_rid AND is_active = true"#,
                 )
-                .bind(("team", team_id.to_string()))
+                .bind(("team_rid", team_rid(team_id)))
                 .await?;
             let entries: Vec<DbRosterEntry> = result.take(0)?;
             Ok(entries.into_iter().map(db_to_roster_entry).collect())
@@ -114,9 +126,9 @@ impl Database {
                 .query(
                     r#"SELECT *, meta::id(id) as id, <string>in as in, <string>out as out
                        FROM plays_on
-                       WHERE in = type::thing('member', $member) AND is_active = true"#,
+                       WHERE in = $member_rid AND is_active = true"#,
                 )
-                .bind(("member", member_id.to_string()))
+                .bind(("member_rid", member_rid(member_id)))
                 .await?;
             let entries: Vec<DbRosterEntry> = result.take(0)?;
             Ok(entries.into_iter().map(db_to_roster_entry).collect())
@@ -135,13 +147,13 @@ impl Database {
             self.client
                 .query(
                     r#"UPDATE plays_on SET team_role = $role
-                       WHERE in = type::thing('member', $member)
-                       AND out = type::thing('team', $team)
+                       WHERE in = $member_rid
+                       AND out = $team_rid
                        AND is_active = true"#,
                 )
                 .bind(("role", new_role.to_string()))
-                .bind(("member", member_id.to_string()))
-                .bind(("team", team_id.to_string()))
+                .bind(("member_rid", member_rid(member_id)))
+                .bind(("team_rid", team_rid(team_id)))
                 .await?;
             Ok(())
         })
@@ -154,11 +166,11 @@ impl Database {
             self.client
                 .query(
                     r#"UPDATE plays_on SET is_active = false
-                       WHERE in = type::thing('member', $member)
-                       AND out = type::thing('team', $team)"#,
+                       WHERE in = $member_rid
+                       AND out = $team_rid"#,
                 )
-                .bind(("member", member_id.to_string()))
-                .bind(("team", team_id.to_string()))
+                .bind(("member_rid", member_rid(member_id)))
+                .bind(("team_rid", team_rid(team_id)))
                 .await?;
             Ok(())
         })

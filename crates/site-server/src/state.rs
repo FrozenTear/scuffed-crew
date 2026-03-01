@@ -1,8 +1,11 @@
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use scuffed_auth::server::HasAuth;
 use scuffed_auth::{AuthError, SessionConfig, User};
 use scuffed_db::Database;
+
+use crate::notifications::MatrixNotifier;
 
 /// Application state shared across handlers.
 #[derive(Clone)]
@@ -10,6 +13,8 @@ pub struct AppState {
     pub db: Arc<Database>,
     pub session_config: SessionConfig,
     pub oauth_config: OAuthConfig,
+    pub upload_dir: PathBuf,
+    pub notifier: Option<MatrixNotifier>,
 }
 
 /// OAuth configuration loaded from environment.
@@ -17,6 +22,8 @@ pub struct AppState {
 pub struct OAuthConfig {
     pub discord_client_id: String,
     pub discord_client_secret: String,
+    pub google_client_id: String,
+    pub google_client_secret: String,
     pub redirect_base_url: String,
     pub allowed_origins: Vec<String>,
 }
@@ -32,14 +39,21 @@ impl OAuthConfig {
 
         let discord_client_id = std::env::var("DISCORD_CLIENT_ID").unwrap_or_default();
         let discord_client_secret = std::env::var("DISCORD_CLIENT_SECRET").unwrap_or_default();
+        let google_client_id = std::env::var("GOOGLE_CLIENT_ID").unwrap_or_default();
+        let google_client_secret = std::env::var("GOOGLE_CLIENT_SECRET").unwrap_or_default();
 
         if discord_client_id.is_empty() || discord_client_secret.is_empty() {
             tracing::warn!("Discord OAuth not configured — login disabled");
+        }
+        if google_client_id.is_empty() || google_client_secret.is_empty() {
+            tracing::warn!("Google OAuth not configured — login disabled");
         }
 
         Self {
             discord_client_id,
             discord_client_secret,
+            google_client_id,
+            google_client_secret,
             redirect_base_url,
             allowed_origins,
         }
@@ -56,14 +70,22 @@ impl HasAuth for AppState {
             .db
             .get_session(token)
             .await
-            .map_err(|e| AuthError::Database(e.to_string()))?;
+            .map_err(|e| {
+                tracing::error!("Session lookup failed: {e}");
+                AuthError::Database(e.to_string())
+            })?;
 
         match user_id {
-            Some(uid) => self
-                .db
-                .get_user(&uid)
-                .await
-                .map_err(|e| AuthError::Database(e.to_string())),
+            Some(uid) => {
+                tracing::debug!("Session resolved to user_id={uid}");
+                self.db
+                    .get_user(&uid)
+                    .await
+                    .map_err(|e| {
+                        tracing::error!("User lookup failed for uid={uid}: {e}");
+                        AuthError::Database(e.to_string())
+                    })
+            }
             None => Ok(None),
         }
     }

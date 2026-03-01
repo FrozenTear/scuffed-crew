@@ -1,6 +1,6 @@
-use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use surrealdb::sql::Thing;
+use surrealdb::sql::Datetime as SurrealDatetime;
 
 use scuffed_auth::crypto::{hash_provider_id, EncryptedBlob};
 use scuffed_auth::{AuthProvider, User};
@@ -18,7 +18,7 @@ struct DbUser {
     provider_id: Option<String>,
     provider_id_hash: Option<String>,
     provider_id_encrypted: Option<EncryptedBlob>,
-    created_at: DateTime<Utc>,
+    created_at: SurrealDatetime,
 }
 
 impl Database {
@@ -116,7 +116,7 @@ impl Database {
                 provider_id: None,
                 provider_id_hash: Some(id_hash),
                 provider_id_encrypted: Some(id_encrypted),
-                created_at: user.created_at,
+                created_at: SurrealDatetime::from(user.created_at),
             }
         } else {
             DbUser {
@@ -127,7 +127,7 @@ impl Database {
                 provider_id: Some(user.provider_id.clone()),
                 provider_id_hash: None,
                 provider_id_encrypted: None,
-                created_at: user.created_at,
+                created_at: SurrealDatetime::from(user.created_at),
             }
         };
 
@@ -154,7 +154,7 @@ impl Database {
                 provider_id: None,
                 provider_id_hash: Some(id_hash),
                 provider_id_encrypted: Some(id_encrypted),
-                created_at: user.created_at,
+                created_at: SurrealDatetime::from(user.created_at),
             }
         } else {
             DbUser {
@@ -165,7 +165,7 @@ impl Database {
                 provider_id: Some(user.provider_id.clone()),
                 provider_id_hash: None,
                 provider_id_encrypted: None,
-                created_at: user.created_at,
+                created_at: SurrealDatetime::from(user.created_at),
             }
         };
 
@@ -212,7 +212,7 @@ impl Database {
             provider_id,
             username: db.username,
             avatar_url: db.avatar_url,
-            created_at: db.created_at,
+            created_at: db.created_at.into(),
         })
     }
 }

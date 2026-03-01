@@ -1,6 +1,7 @@
-use chrono::{DateTime, Utc};
+use chrono::{Duration, Utc};
 use serde::{Deserialize, Serialize};
 use surrealdb::sql::Thing;
+use surrealdb::sql::Datetime as SurrealDatetime;
 
 use crate::types::{Application, ApplicationStatus};
 use crate::{with_timeout, Database, DbResult};
@@ -17,8 +18,11 @@ struct DbApplication {
     message: Option<String>,
     reviewed_by: Option<String>,
     review_notes: Option<String>,
-    created_at: DateTime<Utc>,
-    updated_at: DateTime<Utc>,
+    trial_started_at: Option<SurrealDatetime>,
+    trial_ends_at: Option<SurrealDatetime>,
+    mentor_id: Option<String>,
+    created_at: SurrealDatetime,
+    updated_at: SurrealDatetime,
 }
 
 fn parse_status(s: &str) -> ApplicationStatus {
@@ -46,8 +50,11 @@ fn db_to_application(db: DbApplication) -> Application {
         message: db.message,
         reviewed_by: db.reviewed_by,
         review_notes: db.review_notes,
-        created_at: db.created_at,
-        updated_at: db.updated_at,
+        trial_started_at: db.trial_started_at.map(|d| d.into()),
+        trial_ends_at: db.trial_ends_at.map(|d| d.into()),
+        mentor_id: db.mentor_id,
+        created_at: db.created_at.into(),
+        updated_at: db.updated_at.into(),
     }
 }
 
@@ -60,7 +67,7 @@ impl Database {
         message: Option<&str>,
     ) -> DbResult<Application> {
         with_timeout(async {
-            let now = Utc::now();
+            let now = SurrealDatetime::from(Utc::now());
             let db_app = DbApplication {
                 id: None,
                 user_id: user_id.to_string(),
@@ -70,7 +77,10 @@ impl Database {
                 message: message.map(|s| s.to_string()),
                 reviewed_by: None,
                 review_notes: None,
-                created_at: now,
+                trial_started_at: None,
+                trial_ends_at: None,
+                mentor_id: None,
+                created_at: now.clone(),
                 updated_at: now,
             };
             let created: Option<DbApplication> =
@@ -127,7 +137,14 @@ impl Database {
             db.status = status.to_string();
             db.reviewed_by = Some(reviewed_by.to_string());
             db.review_notes = review_notes.map(|s| s.to_string());
-            db.updated_at = Utc::now();
+            db.updated_at = SurrealDatetime::from(Utc::now());
+
+            // Auto-set trial dates when transitioning to trial status
+            if status == ApplicationStatus::Trial {
+                let now = Utc::now();
+                db.trial_started_at = Some(SurrealDatetime::from(now));
+                db.trial_ends_at = Some(SurrealDatetime::from(now + Duration::days(14)));
+            }
 
             let updated: Option<DbApplication> = self
                 .client
@@ -137,6 +154,23 @@ impl Database {
             Ok(db_to_application(updated.ok_or_else(|| {
                 crate::DbError::NotFound(format!("Application {id} not found after update"))
             })?))
+        })
+        .await
+    }
+
+    /// List applications with trials expiring within the given number of days.
+    pub async fn list_expiring_trials(&self, days: i64) -> DbResult<Vec<Application>> {
+        with_timeout(async {
+            let deadline = SurrealDatetime::from(Utc::now() + Duration::days(days));
+            let mut result = self
+                .client
+                .query(
+                    "SELECT * FROM application WHERE status = 'trial' AND trial_ends_at != NONE AND trial_ends_at <= $deadline ORDER BY trial_ends_at ASC"
+                )
+                .bind(("deadline", deadline))
+                .await?;
+            let apps: Vec<DbApplication> = result.take(0)?;
+            Ok(apps.into_iter().map(db_to_application).collect())
         })
         .await
     }

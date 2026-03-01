@@ -12,9 +12,15 @@ struct TeamRecord {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+struct GameData {
+    id: String,
+    name: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
 struct TeamData {
     name: String,
-    game: String,
+    game_id: String,
     division: Option<String>,
     lore_quote: Option<String>,
     roster_count: usize,
@@ -24,6 +30,7 @@ struct TeamData {
 #[derive(Debug, Clone, Deserialize)]
 struct PublicOverview {
     teams: Vec<TeamData>,
+    games: Vec<GameData>,
 }
 
 fn game_css_class(game: &str) -> &'static str {
@@ -75,9 +82,14 @@ pub fn Teams() -> impl IntoView {
 
             <div class="teams-grid">
                 {move || match overview.get().flatten() {
-                    Some(data) => data.teams.into_iter().enumerate().map(|(i, team)| {
-                        let game_class = game_css_class(&team.game);
-                        let badge_class = game_badge_class(&team.game);
+                    Some(data) => {
+                        let game_map: std::collections::HashMap<String, String> = data.games.iter()
+                            .map(|g| (g.id.clone(), g.name.clone()))
+                            .collect();
+                        data.teams.into_iter().enumerate().map(|(i, team)| {
+                        let game_name = game_map.get(&team.game_id).cloned().unwrap_or_else(|| team.game_id.clone());
+                        let game_class = game_css_class(&game_name);
+                        let badge_class = game_badge_class(&game_name);
                         let wl = format_record(&team.record);
                         let division = team.division.unwrap_or_else(|| "Scrims & Internal".into());
                         let lore = team.lore_quote.unwrap_or_default();
@@ -92,7 +104,7 @@ pub fn Teams() -> impl IntoView {
                             >
                                 <div class="team-header">
                                     <div class="team-name">{team.name}</div>
-                                    <span class=format!("team-game {badge_class}")>{team.game}</span>
+                                    <span class=format!("team-game {badge_class}")>{game_name}</span>
                                 </div>
                                 <div class="team-lore">{format!("\u{201C}{lore}\u{201D}")}</div>
                                 <div class="team-meta">
@@ -111,7 +123,8 @@ pub fn Teams() -> impl IntoView {
                                 </div>
                             </div>
                         }
-                    }).collect_view().into_any(),
+                    }).collect_view().into_any()
+                    },
                     None => view! {
                         <p style="color: var(--text-muted); text-align: center;">"Loading teams..."</p>
                     }.into_any(),

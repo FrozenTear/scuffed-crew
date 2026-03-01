@@ -1,7 +1,43 @@
 use leptos::prelude::*;
+use serde::Deserialize;
+
+use scuffed_auth::client::api::fetch_json;
+
+#[derive(Debug, Clone, Deserialize)]
+struct OverviewGame {
+    #[allow(dead_code)]
+    id: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct OverviewTeam {
+    #[allow(dead_code)]
+    id: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct Overview {
+    teams: Vec<OverviewTeam>,
+    games: Vec<OverviewGame>,
+    member_count: usize,
+}
 
 #[component]
 pub fn Hero() -> impl IntoView {
+    let overview = LocalResource::new(|| async {
+        fetch_json::<Overview>("/api/public/overview").await.ok()
+    });
+
+    let team_count = move || {
+        overview.get().flatten().map(|o| o.teams.len()).unwrap_or(0)
+    };
+    let member_count = move || {
+        overview.get().flatten().map(|o| o.member_count).unwrap_or(0)
+    };
+    let game_count = move || {
+        overview.get().flatten().map(|o| o.games.len()).unwrap_or(0)
+    };
+
     view! {
         <section class="hero">
             <div class="hero-bg"></div>
@@ -31,15 +67,15 @@ pub fn Hero() -> impl IntoView {
                 </div>
                 <div class="hero-stats">
                     <div class="hero-stat">
-                        <div class="hero-stat-val">"3"</div>
+                        <div class="hero-stat-val">{team_count}</div>
                         <div class="hero-stat-label">"Active Teams"</div>
                     </div>
                     <div class="hero-stat">
-                        <div class="hero-stat-val">"28"</div>
+                        <div class="hero-stat-val">{member_count}</div>
                         <div class="hero-stat-label">"Members"</div>
                     </div>
                     <div class="hero-stat">
-                        <div class="hero-stat-val">"2"</div>
+                        <div class="hero-stat-val">{game_count}</div>
                         <div class="hero-stat-label">"Games"</div>
                     </div>
                 </div>

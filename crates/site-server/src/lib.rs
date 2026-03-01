@@ -1,10 +1,13 @@
+pub mod calendar;
 pub mod extractors;
+pub mod notifications;
 pub mod routes;
 pub mod state;
+pub mod uploads;
 
 use axum::{
     http::{header, HeaderValue, Method},
-    routing::{get, patch, post, put},
+    routing::{delete, get, patch, post, put},
     Router,
 };
 use tower_http::cors::CorsLayer;
@@ -38,6 +41,8 @@ pub fn create_router(state: AppState) -> Router {
     Router::new()
         // Health check
         .route("/api/health", get(routes::health::health))
+        // Dev login (sets session cookie for in-memory dev mode)
+        .route("/api/dev/login", get(routes::dev::dev_login))
         // Auth routes
         .route("/api/auth/{provider}/login", get(routes::auth::login))
         .route(
@@ -55,6 +60,34 @@ pub fn create_router(state: AppState) -> Router {
         .route(
             "/api/members/{id}/role",
             patch(routes::members::change_role),
+        )
+        // Member game accounts
+        .route(
+            "/api/members/{id}/game-accounts",
+            get(routes::members::list_game_accounts)
+                .put(routes::members::upsert_game_account),
+        )
+        .route(
+            "/api/members/{member_id}/game-accounts/{id}",
+            delete(routes::members::delete_game_account),
+        )
+        // Member attendance
+        .route(
+            "/api/members/{id}/attendance",
+            get(routes::attendance::member_attendance),
+        )
+        .route(
+            "/api/members/{id}/attendance/stats",
+            get(routes::attendance::member_attendance_stats),
+        )
+        // Game routes
+        .route(
+            "/api/games",
+            get(routes::games::list_games).post(routes::games::create_game),
+        )
+        .route(
+            "/api/games/{id}",
+            get(routes::games::get_game).put(routes::games::update_game),
         )
         // Team routes
         .route(
@@ -84,6 +117,25 @@ pub fn create_router(state: AppState) -> Router {
             "/api/events/{id}",
             put(routes::events::update_event).delete(routes::events::delete_event),
         )
+        // Event RSVPs
+        .route(
+            "/api/events/{id}/rsvp",
+            post(routes::rsvps::rsvp_event),
+        )
+        .route(
+            "/api/events/{id}/rsvps",
+            get(routes::rsvps::get_event_rsvps),
+        )
+        .route(
+            "/api/events/{id}/rsvp-summary",
+            get(routes::rsvps::get_rsvp_summary),
+        )
+        // Event attendance
+        .route(
+            "/api/events/{id}/attendance",
+            get(routes::attendance::get_event_attendance)
+                .post(routes::attendance::batch_mark_attendance),
+        )
         // Application routes
         .route(
             "/api/applications",
@@ -93,6 +145,10 @@ pub fn create_router(state: AppState) -> Router {
         .route(
             "/api/applications/mine",
             get(routes::applications::my_application),
+        )
+        .route(
+            "/api/applications/expiring",
+            get(routes::applications::expiring_trials),
         )
         .route(
             "/api/applications/{id}",
@@ -111,8 +167,124 @@ pub fn create_router(state: AppState) -> Router {
             "/api/matches/{id}",
             put(routes::matches::update_match),
         )
+        // Calendar routes
+        .route(
+            "/api/calendar/all.ics",
+            get(routes::calendar::all_events_ics),
+        )
+        .route(
+            "/api/calendar/team/{id}",
+            get(routes::calendar::team_events_ics),
+        )
+        // Audit log
+        .route(
+            "/api/audit-log",
+            get(routes::audit_log::list_audit_log),
+        )
+        // Moderation routes
+        .route(
+            "/api/moderation",
+            get(routes::moderation::list_moderation)
+                .post(routes::moderation::create_moderation_action),
+        )
+        .route(
+            "/api/moderation/{id}/lift",
+            patch(routes::moderation::lift_moderation_action),
+        )
+        .route(
+            "/api/members/{id}/moderation",
+            get(routes::moderation::member_moderation),
+        )
+        // Announcement routes
+        .route(
+            "/api/announcements",
+            get(routes::announcements::list_announcements)
+                .post(routes::announcements::create_announcement),
+        )
+        .route(
+            "/api/announcements/{id}",
+            put(routes::announcements::update_announcement)
+                .delete(routes::announcements::delete_announcement),
+        )
+        // Tournament routes
+        .route(
+            "/api/tournaments",
+            get(routes::tournaments::list_tournaments)
+                .post(routes::tournaments::create_tournament),
+        )
+        .route(
+            "/api/tournaments/{id}",
+            get(routes::tournaments::get_tournament)
+                .put(routes::tournaments::update_tournament),
+        )
+        .route(
+            "/api/tournaments/{id}/status",
+            patch(routes::tournaments::transition_status),
+        )
+        .route(
+            "/api/tournaments/{id}/bracket",
+            get(routes::tournaments::get_bracket),
+        )
+        .route(
+            "/api/tournaments/{id}/generate-bracket",
+            post(routes::tournaments::generate_bracket),
+        )
+        .route(
+            "/api/tournaments/{id}/participants",
+            get(routes::tournaments::list_participants)
+                .post(routes::tournaments::add_participant),
+        )
+        .route(
+            "/api/tournaments/{id}/participants/{pid}",
+            put(routes::tournaments::update_participant)
+                .delete(routes::tournaments::remove_participant),
+        )
+        .route(
+            "/api/tournaments/{id}/matches",
+            get(routes::tournaments::list_matches),
+        )
+        .route(
+            "/api/tournaments/{id}/matches/{mid}/report",
+            patch(routes::tournaments::report_match),
+        )
+        .route(
+            "/api/tournaments/{id}/standings",
+            get(routes::tournaments::get_standings),
+        )
+        .route(
+            "/api/tournaments/{id}/next-round",
+            post(routes::tournaments::generate_next_round),
+        )
+        // Upload routes
+        .route(
+            "/api/upload/avatar",
+            post(routes::uploads::upload_avatar),
+        )
+        .route(
+            "/api/upload/image",
+            post(routes::uploads::upload_image),
+        )
+        // Settings routes
+        .route(
+            "/api/settings",
+            get(routes::settings::get_settings).put(routes::settings::update_settings),
+        )
         // Public aggregate
         .route("/api/public/overview", get(routes::public::overview))
+        .route(
+            "/api/public/members",
+            get(routes::public::public_members),
+        )
+        .route(
+            "/api/public/members/{id}",
+            get(routes::public::public_member_profile),
+        )
+        .route(
+            "/api/public/teams/{id}",
+            get(routes::public::public_team_detail),
+        )
+        // Serve uploaded files
+        .nest_service("/uploads", ServeDir::new(state.upload_dir.clone()))
         // Admin SPA (must be before public site fallback)
         .nest_service(
             "/admin",

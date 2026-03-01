@@ -1,8 +1,9 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use surrealdb::sql::Thing;
+use surrealdb::sql::Datetime as SurrealDatetime;
 
-use crate::types::{MatchResult, TeamRecord};
+use crate::types::{MatchResult, MatchType, TeamRecord};
 use crate::{with_timeout, Database, DbResult};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -16,9 +17,18 @@ struct DbMatchResult {
     score_them: u32,
     map_name: Option<String>,
     game_mode: Option<String>,
-    played_at: DateTime<Utc>,
+    match_type: String,
+    played_at: SurrealDatetime,
     recorded_by: String,
     notes: Option<String>,
+}
+
+fn parse_match_type(s: &str) -> MatchType {
+    match s {
+        "official" => MatchType::Official,
+        "tournament" => MatchType::Tournament,
+        _ => MatchType::Scrim,
+    }
 }
 
 fn db_to_match(db: DbMatchResult) -> MatchResult {
@@ -34,7 +44,8 @@ fn db_to_match(db: DbMatchResult) -> MatchResult {
         score_them: db.score_them,
         map_name: db.map_name,
         game_mode: db.game_mode,
-        played_at: db.played_at,
+        match_type: parse_match_type(&db.match_type),
+        played_at: db.played_at.into(),
         recorded_by: db.recorded_by,
         notes: db.notes,
     }
@@ -49,6 +60,7 @@ impl Database {
         score_them: u32,
         map_name: Option<&str>,
         game_mode: Option<&str>,
+        match_type: MatchType,
         played_at: DateTime<Utc>,
         recorded_by: &str,
         notes: Option<&str>,
@@ -62,7 +74,8 @@ impl Database {
                 score_them,
                 map_name: map_name.map(|s| s.to_string()),
                 game_mode: game_mode.map(|s| s.to_string()),
-                played_at,
+                match_type: match_type.to_string(),
+                played_at: SurrealDatetime::from(played_at),
                 recorded_by: recorded_by.to_string(),
                 notes: notes.map(|s| s.to_string()),
             };
@@ -101,6 +114,7 @@ impl Database {
         score_them: Option<u32>,
         map_name: Option<Option<&str>>,
         game_mode: Option<Option<&str>>,
+        match_type: Option<MatchType>,
         notes: Option<Option<&str>>,
     ) -> DbResult<MatchResult> {
         with_timeout(async {
@@ -123,6 +137,9 @@ impl Database {
             }
             if let Some(g) = game_mode {
                 db.game_mode = g.map(|s| s.to_string());
+            }
+            if let Some(mt) = match_type {
+                db.match_type = mt.to_string();
             }
             if let Some(n) = notes {
                 db.notes = n.map(|s| s.to_string());
@@ -171,6 +188,58 @@ impl Database {
                     "SELECT count() FROM match_result WHERE team_id = $tid AND score_us = score_them GROUP ALL",
                 )
                 .bind(("tid", team_id.to_string()))
+                .await?;
+            let draws: Vec<CountResult> = draws_result.take(0)?;
+
+            Ok(TeamRecord {
+                wins: wins.first().map(|c| c.count).unwrap_or(0),
+                losses: losses.first().map(|c| c.count).unwrap_or(0),
+                draws: draws.first().map(|c| c.count).unwrap_or(0),
+            })
+        })
+        .await
+    }
+
+    pub async fn get_team_record_by_type(
+        &self,
+        team_id: &str,
+        match_type: MatchType,
+    ) -> DbResult<TeamRecord> {
+        with_timeout(async {
+            #[derive(Deserialize)]
+            struct CountResult {
+                count: u32,
+            }
+
+            let mt = match_type.to_string();
+
+            let mut wins_result = self
+                .client
+                .query(
+                    "SELECT count() FROM match_result WHERE team_id = $tid AND match_type = $mt AND score_us > score_them GROUP ALL",
+                )
+                .bind(("tid", team_id.to_string()))
+                .bind(("mt", mt.clone()))
+                .await?;
+            let wins: Vec<CountResult> = wins_result.take(0)?;
+
+            let mut losses_result = self
+                .client
+                .query(
+                    "SELECT count() FROM match_result WHERE team_id = $tid AND match_type = $mt AND score_us < score_them GROUP ALL",
+                )
+                .bind(("tid", team_id.to_string()))
+                .bind(("mt", mt.clone()))
+                .await?;
+            let losses: Vec<CountResult> = losses_result.take(0)?;
+
+            let mut draws_result = self
+                .client
+                .query(
+                    "SELECT count() FROM match_result WHERE team_id = $tid AND match_type = $mt AND score_us = score_them GROUP ALL",
+                )
+                .bind(("tid", team_id.to_string()))
+                .bind(("mt", mt))
                 .await?;
             let draws: Vec<CountResult> = draws_result.take(0)?;
 

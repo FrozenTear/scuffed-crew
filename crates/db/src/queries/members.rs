@@ -1,6 +1,7 @@
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use surrealdb::sql::Thing;
+use surrealdb::sql::Datetime as SurrealDatetime;
 
 use crate::types::{Member, OrgRole};
 use crate::{with_timeout, Database, DbResult};
@@ -14,7 +15,11 @@ struct DbMember {
     org_role: String,
     display_name: String,
     bio: Option<String>,
-    joined_at: DateTime<Utc>,
+    avatar_url: Option<String>,
+    timezone: Option<String>,
+    pronouns: Option<String>,
+    availability_status: Option<String>,
+    joined_at: SurrealDatetime,
     is_active: bool,
 }
 
@@ -38,7 +43,11 @@ fn db_to_member(db: DbMember) -> Member {
         org_role: parse_role(&db.org_role),
         display_name: db.display_name,
         bio: db.bio,
-        joined_at: db.joined_at,
+        avatar_url: db.avatar_url,
+        timezone: db.timezone,
+        pronouns: db.pronouns,
+        availability_status: db.availability_status,
+        joined_at: db.joined_at.into(),
         is_active: db.is_active,
     }
 }
@@ -58,7 +67,11 @@ impl Database {
                 org_role: role.to_string(),
                 display_name: display_name.to_string(),
                 bio: None,
-                joined_at: Utc::now(),
+                avatar_url: None,
+                timezone: None,
+                pronouns: None,
+                availability_status: None,
+                joined_at: SurrealDatetime::from(Utc::now()),
                 is_active: true,
             };
             let created: Option<DbMember> =
@@ -112,6 +125,11 @@ impl Database {
         id: &str,
         display_name: Option<&str>,
         bio: Option<Option<&str>>,
+        avatar_url: Option<Option<&str>>,
+        timezone: Option<Option<&str>>,
+        pronouns: Option<Option<&str>>,
+        availability_status: Option<Option<&str>>,
+        is_active: Option<bool>,
     ) -> DbResult<Member> {
         with_timeout(async {
             let existing: Option<DbMember> = self.client.select(("member", id)).await?;
@@ -123,6 +141,21 @@ impl Database {
             }
             if let Some(new_bio) = bio {
                 db.bio = new_bio.map(|s| s.to_string());
+            }
+            if let Some(new_avatar) = avatar_url {
+                db.avatar_url = new_avatar.map(|s| s.to_string());
+            }
+            if let Some(new_tz) = timezone {
+                db.timezone = new_tz.map(|s| s.to_string());
+            }
+            if let Some(new_pronouns) = pronouns {
+                db.pronouns = new_pronouns.map(|s| s.to_string());
+            }
+            if let Some(new_status) = availability_status {
+                db.availability_status = new_status.map(|s| s.to_string());
+            }
+            if let Some(active) = is_active {
+                db.is_active = active;
             }
 
             let updated: Option<DbMember> =

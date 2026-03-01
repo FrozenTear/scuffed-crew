@@ -6,9 +6,10 @@ use axum::{
 use serde::Deserialize;
 
 use scuffed_auth::server::session::ErrorResponse;
-use scuffed_db::{RosterEntry, TeamRole};
+use scuffed_db::{AuditAction, AuditTargetType, RosterEntry, TeamRole};
 
 use crate::extractors::OfficerUser;
+use crate::routes::audit_log::audit;
 use crate::state::AppState;
 
 /// GET /api/teams/:id/roster — get team roster (public)
@@ -56,6 +57,16 @@ pub async fn add_to_roster(
                 }),
             )
         })?;
+    audit(
+        &state.db,
+        &_officer.member.id,
+        AuditAction::AddedToRoster,
+        AuditTargetType::Roster,
+        &team_id,
+        Some(&format!("Added member {} as {}", body.member_id, body.team_role)),
+    )
+    .await;
+
     Ok((StatusCode::CREATED, Json(entry)))
 }
 
@@ -83,6 +94,17 @@ pub async fn update_roster_role(
                 }),
             )
         })?;
+
+    audit(
+        &state.db,
+        &_officer.member.id,
+        AuditAction::UpdatedRosterRole,
+        AuditTargetType::Roster,
+        &team_id,
+        Some(&format!("Changed {} role to {}", member_id, body.team_role)),
+    )
+    .await;
+
     Ok(StatusCode::OK)
 }
 
@@ -104,5 +126,16 @@ pub async fn remove_from_roster(
                 }),
             )
         })?;
+
+    audit(
+        &state.db,
+        &_officer.member.id,
+        AuditAction::RemovedFromRoster,
+        AuditTargetType::Roster,
+        &team_id,
+        Some(&format!("Removed member {member_id}")),
+    )
+    .await;
+
     Ok(StatusCode::OK)
 }

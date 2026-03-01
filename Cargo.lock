@@ -460,6 +460,7 @@ dependencies = [
  "matchit",
  "memchr",
  "mime",
+ "multer",
  "percent-encoding",
  "pin-project-lite",
  "serde_core",
@@ -4564,6 +4565,7 @@ dependencies = [
  "tracing",
  "tracing-wasm",
  "wasm-bindgen",
+ "web-sys",
 ]
 
 [[package]]
@@ -4574,6 +4576,7 @@ dependencies = [
  "axum-extra",
  "chrono",
  "dotenvy",
+ "reqwest 0.12.28",
  "scuffed-auth",
  "scuffed-db",
  "serde",
@@ -4584,6 +4587,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "urlencoding",
+ "uuid",
 ]
 
 [[package]]

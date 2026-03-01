@@ -5,6 +5,8 @@ mod comms;
 mod schedule;
 mod recruit;
 mod footer;
+mod announcements;
+mod tournaments;
 
 pub use hero::Hero;
 pub use about::About;
@@ -13,3 +15,5 @@ pub use comms::Comms;
 pub use schedule::Schedule;
 pub use recruit::Recruit;
 pub use footer::Footer;
+pub use announcements::Announcements;
+pub use tournaments::Tournaments;

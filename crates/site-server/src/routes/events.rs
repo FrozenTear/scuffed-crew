@@ -6,9 +6,10 @@ use axum::{
 use serde::Deserialize;
 
 use scuffed_auth::server::session::ErrorResponse;
-use scuffed_db::Event;
+use scuffed_db::{AuditAction, AuditTargetType, Event};
 
 use crate::extractors::OfficerUser;
+use crate::routes::audit_log::audit;
 use crate::state::AppState;
 
 /// GET /api/events — list all active events (public)
@@ -32,13 +33,18 @@ pub struct CreateEventRequest {
     pub time: String,
     #[serde(default = "default_timezone")]
     pub timezone: String,
+    #[serde(default = "default_duration")]
+    pub duration_minutes: u32,
     #[serde(default = "default_true")]
     pub is_recurring: bool,
     pub team_id: Option<String>,
 }
 
 fn default_timezone() -> String {
-    "CET".to_string()
+    "Europe/Berlin".to_string()
+}
+fn default_duration() -> u32 {
+    120
 }
 fn default_true() -> bool {
     true
@@ -57,6 +63,7 @@ pub async fn create_event(
             body.day_of_week,
             &body.time,
             &body.timezone,
+            body.duration_minutes,
             body.is_recurring,
             body.team_id.as_deref(),
             &officer.member.id,
@@ -70,6 +77,16 @@ pub async fn create_event(
                 }),
             )
         })?;
+    audit(
+        &state.db,
+        &officer.member.id,
+        AuditAction::CreatedEvent,
+        AuditTargetType::Event,
+        &event.id,
+        Some(&format!("Created event: {}", event.title)),
+    )
+    .await;
+
     Ok((StatusCode::CREATED, Json(event)))
 }
 
@@ -79,6 +96,7 @@ pub struct UpdateEventRequest {
     pub day_of_week: Option<u8>,
     pub time: Option<String>,
     pub timezone: Option<String>,
+    pub duration_minutes: Option<u32>,
     pub is_recurring: Option<bool>,
     pub team_id: Option<Option<String>>,
 }
@@ -86,11 +104,11 @@ pub struct UpdateEventRequest {
 /// PUT /api/events/:id — update event (officer+)
 pub async fn update_event(
     State(state): State<AppState>,
-    _officer: OfficerUser,
+    officer: OfficerUser,
     Path(id): Path<String>,
     Json(body): Json<UpdateEventRequest>,
 ) -> Result<Json<Event>, (StatusCode, Json<ErrorResponse>)> {
-    state
+    let event = state
         .db
         .update_event(
             &id,
@@ -98,11 +116,11 @@ pub async fn update_event(
             body.day_of_week,
             body.time.as_deref(),
             body.timezone.as_deref(),
+            body.duration_minutes,
             body.is_recurring,
             body.team_id.as_ref().map(|t| t.as_deref()),
         )
         .await
-        .map(Json)
         .map_err(|e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -110,13 +128,25 @@ pub async fn update_event(
                     error: e.to_string(),
                 }),
             )
-        })
+        })?;
+
+    audit(
+        &state.db,
+        &officer.member.id,
+        AuditAction::UpdatedEvent,
+        AuditTargetType::Event,
+        &id,
+        None,
+    )
+    .await;
+
+    Ok(Json(event))
 }
 
 /// DELETE /api/events/:id — deactivate event (officer+)
 pub async fn delete_event(
     State(state): State<AppState>,
-    _officer: OfficerUser,
+    officer: OfficerUser,
     Path(id): Path<String>,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
     state.db.deactivate_event(&id).await.map_err(|e| {
@@ -127,5 +157,16 @@ pub async fn delete_event(
             }),
         )
     })?;
+
+    audit(
+        &state.db,
+        &officer.member.id,
+        AuditAction::DeletedEvent,
+        AuditTargetType::Event,
+        &id,
+        None,
+    )
+    .await;
+
     Ok(StatusCode::OK)
 }

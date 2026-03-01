@@ -95,10 +95,17 @@ pub fn Sidebar() -> impl IntoView {
             <nav>
                 <a href="/admin/">"Dashboard"</a>
                 <a href="/admin/members">"Members"</a>
+                <a href="/admin/games">"Games"</a>
                 <a href="/admin/teams">"Teams"</a>
                 <a href="/admin/schedule">"Schedule"</a>
                 <a href="/admin/applications">"Applications"</a>
                 <a href="/admin/matches">"Matches"</a>
+                <a href="/admin/tournaments">"Tournaments"</a>
+                <a href="/admin/announcements">"Announcements"</a>
+                {move || state.is_admin().then(|| view! {
+                    <a href="/admin/audit-log">"Audit Log"</a>
+                    <a href="/admin/settings">"Settings"</a>
+                })}
             </nav>
             <div class="user-info">
                 {move || user_display().map(|(name, role)| view! {

@@ -1,0 +1,123 @@
+use chrono::Utc;
+use serde::{Deserialize, Serialize};
+use surrealdb::sql::Thing;
+use surrealdb::sql::Datetime as SurrealDatetime;
+
+use crate::types::SiteSettings;
+use crate::{with_timeout, Database, DbResult};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DbSiteSettings {
+    #[serde(skip_serializing)]
+    #[allow(dead_code)]
+    id: Option<Thing>,
+    org_name: String,
+    site_description: String,
+    recruitment_open: bool,
+    recruitment_message: String,
+    min_age: u32,
+    updated_at: SurrealDatetime,
+}
+
+fn db_to_settings(db: DbSiteSettings) -> SiteSettings {
+    let id = db
+        .id
+        .map(|t| t.id.to_raw())
+        .unwrap_or_else(|| "unknown".to_string());
+    SiteSettings {
+        id,
+        org_name: db.org_name,
+        site_description: db.site_description,
+        recruitment_open: db.recruitment_open,
+        recruitment_message: db.recruitment_message,
+        min_age: db.min_age,
+        updated_at: db.updated_at.into(),
+    }
+}
+
+impl Database {
+    /// Get site settings, creating defaults if none exist.
+    pub async fn get_settings(&self) -> DbResult<SiteSettings> {
+        with_timeout(async {
+            let mut result = self
+                .client
+                .query("SELECT * FROM site_settings LIMIT 1")
+                .await?;
+            let entries: Vec<DbSiteSettings> = result.take(0)?;
+
+            if let Some(settings) = entries.into_iter().next() {
+                return Ok(db_to_settings(settings));
+            }
+
+            // Create defaults
+            let defaults = DbSiteSettings {
+                id: None,
+                org_name: "The Scuffed Crew".to_string(),
+                site_description: "EMEA Gaming Organization".to_string(),
+                recruitment_open: true,
+                recruitment_message:
+                    "We are currently recruiting! Apply now to join the crew.".to_string(),
+                min_age: 16,
+                updated_at: SurrealDatetime::from(Utc::now()),
+            };
+            let created: Option<DbSiteSettings> = self
+                .client
+                .create("site_settings")
+                .content(defaults)
+                .await?;
+            Ok(db_to_settings(created.ok_or_else(|| {
+                crate::DbError::NotFound("Failed to create default settings".into())
+            })?))
+        })
+        .await
+    }
+
+    /// Update site settings.
+    pub async fn update_settings(
+        &self,
+        org_name: Option<&str>,
+        site_description: Option<&str>,
+        recruitment_open: Option<bool>,
+        recruitment_message: Option<&str>,
+        min_age: Option<u32>,
+    ) -> DbResult<SiteSettings> {
+        with_timeout(async {
+            // Ensure settings exist first
+            let current = self.get_settings().await?;
+            let id = &current.id;
+
+            let existing: Option<DbSiteSettings> =
+                self.client.select(("site_settings", id.as_str())).await?;
+            let mut db = existing.ok_or_else(|| {
+                crate::DbError::NotFound("Settings not found".into())
+            })?;
+
+            if let Some(name) = org_name {
+                db.org_name = name.to_string();
+            }
+            if let Some(desc) = site_description {
+                db.site_description = desc.to_string();
+            }
+            if let Some(open) = recruitment_open {
+                db.recruitment_open = open;
+            }
+            if let Some(msg) = recruitment_message {
+                db.recruitment_message = msg.to_string();
+            }
+            if let Some(age) = min_age {
+                db.min_age = age;
+            }
+            db.updated_at = SurrealDatetime::from(Utc::now());
+
+            let updated: Option<DbSiteSettings> = self
+                .client
+                .update(("site_settings", id.as_str()))
+                .content(db)
+                .await?;
+            Ok(db_to_settings(updated.ok_or_else(|| {
+                crate::DbError::NotFound("Settings not found after update".into())
+            })?))
+        })
+        .await
+    }
+}

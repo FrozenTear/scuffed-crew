@@ -101,3 +101,45 @@ pub async fn delete(url: &str) -> ApiResult<()> {
     do_fetch("DELETE", url, None).await?;
     Ok(())
 }
+
+/// Upload a file via multipart form data.
+pub async fn upload_file<T: DeserializeOwned>(url: &str, file: web_sys::File) -> ApiResult<T> {
+    let form_data =
+        web_sys::FormData::new().map_err(|e| ApiError::Network(format!("{e:?}")))?;
+    form_data
+        .append_with_blob("file", &file)
+        .map_err(|e| ApiError::Network(format!("{e:?}")))?;
+
+    let opts = RequestInit::new();
+    opts.set_method("POST");
+    opts.set_mode(RequestMode::SameOrigin);
+    opts.set_credentials(RequestCredentials::SameOrigin);
+    opts.set_body(&form_data);
+
+    let request = Request::new_with_str_and_init(url, &opts)
+        .map_err(|e| ApiError::Network(format!("{e:?}")))?;
+
+    let window = web_sys::window().ok_or_else(|| ApiError::Network("No window".into()))?;
+    let resp_value = JsFuture::from(window.fetch_with_request(&request))
+        .await
+        .map_err(|e| ApiError::Network(format!("{e:?}")))?;
+
+    let resp: Response = resp_value
+        .dyn_into()
+        .map_err(|_| ApiError::Network("Response cast failed".into()))?;
+
+    if !resp.ok() {
+        let status = resp.status();
+        let text = JsFuture::from(resp.text().map_err(|e| ApiError::Network(format!("{e:?}")))?)
+            .await
+            .map_err(|e| ApiError::Network(format!("{e:?}")))?
+            .as_string()
+            .unwrap_or_default();
+        return Err(ApiError::Status {
+            status,
+            message: text,
+        });
+    }
+
+    parse_json(resp).await
+}

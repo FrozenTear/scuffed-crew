@@ -69,6 +69,21 @@ impl FromRequestParts<AppState> for OrgMember {
             ));
         }
 
+        // Check for active suspension or ban
+        let suspended = state
+            .db
+            .is_member_suspended_or_banned(&member.id)
+            .await
+            .unwrap_or(false);
+        if suspended {
+            return Err((
+                StatusCode::FORBIDDEN,
+                Json(ErrorResponse {
+                    error: "Account suspended".into(),
+                }),
+            ));
+        }
+
         Ok(OrgMember { user, member })
     }
 }

@@ -1,6 +1,7 @@
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use surrealdb::sql::Thing;
+use surrealdb::sql::Datetime as SurrealDatetime;
 
 use scuffed_auth::crypto::hash_session_token;
 
@@ -14,8 +15,8 @@ struct DbSession {
     id: Option<Thing>,
     user_id: String,
     token: String,
-    expires_at: DateTime<Utc>,
-    created_at: DateTime<Utc>,
+    expires_at: SurrealDatetime,
+    created_at: SurrealDatetime,
 }
 
 impl Database {
@@ -32,8 +33,8 @@ impl Database {
                 id: None,
                 user_id: user_id.to_string(),
                 token: token_hash,
-                expires_at: Utc::now() + chrono::Duration::hours(duration_hours),
-                created_at: Utc::now(),
+                expires_at: SurrealDatetime::from(Utc::now() + chrono::Duration::hours(duration_hours)),
+                created_at: SurrealDatetime::from(Utc::now()),
             };
             let _: Option<DbSession> = self.client.create("session").content(session).await?;
             Ok(())
@@ -48,9 +49,9 @@ impl Database {
             let mut result = self
                 .client
                 .query(
-                    "SELECT * FROM session WHERE token = $token AND expires_at > time::now()",
+                    "SELECT * FROM session WHERE token = $tok AND expires_at > time::now()",
                 )
-                .bind(("token", token_hash))
+                .bind(("tok", token_hash))
                 .await?;
             let sessions: Vec<DbSession> = result.take(0)?;
             Ok(sessions.into_iter().next().map(|s| s.user_id))
@@ -63,8 +64,8 @@ impl Database {
         with_timeout(async {
             let token_hash = hash_session_token(raw_token);
             self.client
-                .query("DELETE FROM session WHERE token = $token")
-                .bind(("token", token_hash))
+                .query("DELETE FROM session WHERE token = $tok")
+                .bind(("tok", token_hash))
                 .await?;
             Ok(())
         })
