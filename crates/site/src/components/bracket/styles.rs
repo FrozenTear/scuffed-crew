@@ -170,6 +170,23 @@ pub const BRACKET_STYLES: &str = r#"
     50% { opacity: 0.3; }
 }
 
+/* ─── Replay Codes ─── */
+.match-replay-codes {
+    display: flex;
+    gap: 0.25rem;
+    padding: 0.2rem 0.6rem 0.3rem;
+    flex-wrap: wrap;
+}
+.replay-code {
+    font-family: 'DM Mono', monospace;
+    font-size: 0.6rem;
+    color: var(--text-muted);
+    background: var(--bg-elevated);
+    padding: 0.1rem 0.35rem;
+    border-radius: 3px;
+    letter-spacing: 0.04em;
+}
+
 /* ─── Double Elim Layout ─── */
 .double-elim-container {
     display: flex;
@@ -228,6 +245,10 @@ pub const BRACKET_STYLES: &str = r#"
 }
 .rr-table .rr-pending {
     color: var(--text-muted);
+}
+.rr-score-with-codes {
+    border-bottom: 1px dotted var(--text-muted);
+    cursor: help;
 }
 
 /* ─── Swiss Standings ─── */

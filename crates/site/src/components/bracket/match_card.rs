@@ -54,6 +54,7 @@ pub fn MatchCard(
     score_b: Option<u32>,
     winner: Option<String>,
     #[prop(default = MatchCardState::Pending)] state: MatchCardState,
+    #[prop(default = vec![])] replay_codes: Vec<String>,
 ) -> impl IntoView {
     let card_class = match state {
         MatchCardState::InProgress => "match-card live",
@@ -101,6 +102,13 @@ pub fn MatchCard(
             />
             {status_text.map(|text| view! {
                 <div class=status_class>{text}</div>
+            })}
+            {(!replay_codes.is_empty() && state == MatchCardState::Completed).then(|| view! {
+                <div class="match-replay-codes">
+                    {replay_codes.iter().map(|c| view! {
+                        <span class="replay-code">{c.clone()}</span>
+                    }).collect_view()}
+                </div>
             })}
         </div>
     }

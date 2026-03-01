@@ -317,6 +317,8 @@ pub async fn run_migrations(client: &Surreal<Any>) -> DbResult<()> {
         DEFINE FIELD loser_next_match_id ON tournament_match TYPE option<string>;
         DEFINE FIELD loser_next_match_slot ON tournament_match TYPE option<string>;
         DEFINE FIELD notes ON tournament_match TYPE option<string>;
+        DEFINE FIELD replay_codes ON tournament_match TYPE array DEFAULT [];
+        DEFINE FIELD replay_codes.* ON tournament_match TYPE string;
 
         DEFINE INDEX tm_tournament_idx ON tournament_match COLUMNS tournament_id;
         DEFINE INDEX tm_round_idx ON tournament_match COLUMNS round_id;

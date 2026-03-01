@@ -14,6 +14,8 @@ pub struct BracketMatch {
     pub score_b: Option<u32>,
     pub winner_id: Option<String>,
     pub status: String,
+    #[serde(default)]
+    pub replay_codes: Vec<String>,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -112,6 +114,7 @@ pub fn BracketSingleElim(
                                             score_b=m.score_b
                                             winner=winner
                                             state=match_state(&m.status)
+                                            replay_codes=m.replay_codes
                                         />
                                     }
                                 }).collect_view()}

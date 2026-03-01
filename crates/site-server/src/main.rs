@@ -187,6 +187,64 @@ async fn main() {
             .expect("Failed to seed tournament data");
 
         tracing::info!("Tournament seed data created: Scuffed Cup #1 (4 teams, registration)");
+
+        // Generate bracket and simulate some results
+        db.generate_single_elim_bracket("demo")
+            .await
+            .expect("Failed to generate bracket");
+
+        // Transition to in_progress
+        db.client
+            .query("UPDATE tournament:demo SET status = 'in_progress'")
+            .await
+            .expect("Failed to update tournament status");
+
+        // Get matches to report results on the first round (semi-finals)
+        let matches = db
+            .list_tournament_matches("demo")
+            .await
+            .expect("Failed to list matches");
+
+        // Find first-round matches (they have participants assigned)
+        let semis: Vec<_> = matches
+            .iter()
+            .filter(|m| {
+                m.participant_a_id.is_some()
+                    && m.participant_b_id.is_some()
+                    && m.status == scuffed_db::types::TournamentMatchStatus::Pending
+            })
+            .collect();
+
+        if semis.len() >= 2 {
+            // Semi 1: participant A wins (seed 1 beats seed 4)
+            let s1 = &semis[0];
+            let winner1 = s1.participant_a_id.as_ref().unwrap();
+            db.report_tournament_match(&s1.id, 2, 0, winner1, Some("Dominant performance"), vec!["ABC123".to_string(), "DEF456".to_string()])
+                .await
+                .expect("Failed to report semi 1");
+            // Advance winner to final
+            if let (Some(next_id), Some(next_slot)) = (&s1.next_match_id, &s1.next_match_slot) {
+                db.set_match_participant(next_id, next_slot, winner1)
+                    .await
+                    .expect("Failed to advance semi 1 winner");
+            }
+
+            // Semi 2: participant A wins (seed 2 beats seed 3)
+            let s2 = &semis[1];
+            let winner2 = s2.participant_a_id.as_ref().unwrap();
+            db.report_tournament_match(&s2.id, 2, 1, winner2, Some("Close series"), vec!["GHI789".to_string(), "JKL012".to_string(), "MNO345".to_string()])
+                .await
+                .expect("Failed to report semi 2");
+            // Advance winner to final
+            if let (Some(next_id), Some(next_slot)) = (&s2.next_match_id, &s2.next_match_slot) {
+                db.set_match_participant(next_id, next_slot, winner2)
+                    .await
+                    .expect("Failed to advance semi 2 winner");
+            }
+
+            tracing::info!("Bracket generated with semi-final results — final pending");
+        }
+
         tracing::info!("Visit /api/dev/login to set session cookie");
     }
 

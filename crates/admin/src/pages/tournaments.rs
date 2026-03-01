@@ -54,6 +54,9 @@ struct TournamentMatch {
     score_b: Option<u32>,
     winner_id: Option<String>,
     status: String,
+    #[serde(default)]
+    #[allow(dead_code)]
+    replay_codes: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -129,6 +132,7 @@ struct ReportMatchBody {
     score_b: u32,
     winner_id: String,
     notes: Option<String>,
+    replay_codes: Option<Vec<String>>,
 }
 
 fn format_label(f: &str) -> &str {
@@ -230,6 +234,7 @@ pub fn TournamentsPage() -> impl IntoView {
     let report_score_a = RwSignal::new("0".to_string());
     let report_score_b = RwSignal::new("0".to_string());
     let report_winner = RwSignal::new(String::new());
+    let report_replay_codes = RwSignal::new(String::new());
     let report_submitting = RwSignal::new(false);
 
     // ── Handlers ──
@@ -444,6 +449,12 @@ pub fn TournamentsPage() -> impl IntoView {
             return;
         }
 
+        let codes: Vec<String> = report_replay_codes.get()
+            .split([',', '\n'])
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+
         report_submitting.set(true);
         spawn_local(async move {
             let body = ReportMatchBody {
@@ -451,6 +462,7 @@ pub fn TournamentsPage() -> impl IntoView {
                 score_b,
                 winner_id,
                 notes: None,
+                replay_codes: if codes.is_empty() { None } else { Some(codes) },
             };
             match api::patch::<_, TournamentMatch>(
                 &format!("/api/tournaments/{tid}/matches/{mid}/report"),
@@ -792,6 +804,7 @@ pub fn TournamentsPage() -> impl IntoView {
                                                         report_match_b_id.set(b_id.clone());
                                                         report_score_a.set("0".to_string());
                                                         report_score_b.set("0".to_string());
+                                                        report_replay_codes.set(String::new());
                                                         report_winner.set(String::new());
                                                         report_open.set(true);
                                                     })
@@ -870,6 +883,8 @@ pub fn TournamentsPage() -> impl IntoView {
             </div>
             <FormField label="Score A" value=report_score_a input_type="number"/>
             <FormField label="Score B" value=report_score_b input_type="number"/>
+            <TextAreaField label="Replay Codes" value=report_replay_codes rows=3/>
+            <p style="margin-top: -0.5rem; margin-bottom: 0.75rem; font-size: 0.75rem; color: var(--text-muted);">"One code per line, or comma-separated"</p>
             <div class="form-group">
                 <label class="form-label">"Winner"</label>
                 <select

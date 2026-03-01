@@ -551,6 +551,7 @@ pub struct ReportMatchRequest {
     pub score_b: u32,
     pub winner_id: String,
     pub notes: Option<String>,
+    pub replay_codes: Option<Vec<String>>,
 }
 
 /// PATCH /api/tournaments/:id/matches/:mid/report
@@ -569,6 +570,7 @@ pub async fn report_match(
             body.score_b,
             &body.winner_id,
             body.notes.as_deref(),
+            body.replay_codes.unwrap_or_default(),
         )
         .await
         .map_err(internal_err)?;

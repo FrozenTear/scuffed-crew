@@ -84,6 +84,8 @@ struct DbTournamentMatch {
     loser_next_match_id: Option<String>,
     loser_next_match_slot: Option<String>,
     notes: Option<String>,
+    #[serde(default)]
+    replay_codes: Vec<String>,
 }
 
 // ─── Conversion Helpers ───
@@ -218,6 +220,7 @@ fn db_to_match(db: DbTournamentMatch) -> TournamentMatch {
         loser_next_match_id: db.loser_next_match_id,
         loser_next_match_slot: db.loser_next_match_slot,
         notes: db.notes,
+        replay_codes: db.replay_codes,
     }
 }
 
@@ -638,6 +641,7 @@ impl Database {
                 loser_next_match_id: loser_next_match_id.map(|s| s.to_string()),
                 loser_next_match_slot: loser_next_match_slot.map(|s| s.to_string()),
                 notes: None,
+                replay_codes: vec![],
             };
             let created: Option<DbTournamentMatch> = self
                 .client
@@ -683,6 +687,7 @@ impl Database {
         score_b: u32,
         winner_id: &str,
         notes: Option<&str>,
+        replay_codes: Vec<String>,
     ) -> DbResult<TournamentMatch> {
         with_timeout(async {
             let existing: Option<DbTournamentMatch> =
@@ -696,6 +701,7 @@ impl Database {
             db.winner_id = Some(winner_id.to_string());
             db.status = "completed".to_string();
             db.completed_at = Some(SurrealDatetime::from(Utc::now()));
+            db.replay_codes = replay_codes;
             if let Some(n) = notes {
                 db.notes = Some(n.to_string());
             }

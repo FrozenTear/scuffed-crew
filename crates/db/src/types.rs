@@ -426,6 +426,7 @@ pub struct TournamentMatch {
     pub loser_next_match_id: Option<String>,
     pub loser_next_match_slot: Option<String>,
     pub notes: Option<String>,
+    pub replay_codes: Vec<String>,
 }
 
 /// Swiss standings for a participant (computed, not stored).
