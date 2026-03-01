@@ -368,6 +368,12 @@ pub const BRACKET_STYLES: &str = r#"
     align-items: center;
     gap: 0.25rem;
 }
+.tournament-card-desc {
+    color: var(--text-secondary);
+    font-size: 0.82rem;
+    margin-top: 0.4rem;
+    line-height: 1.5;
+}
 .tournament-card-status {
     display: inline-block;
     padding: 0.15rem 0.5rem;
@@ -436,9 +442,11 @@ pub const BRACKET_STYLES: &str = r#"
     text-align: center;
 }
 
-/* Center empty-state / loading text on tournament pages */
+/* Empty-state / loading text on tournament pages */
 .tournament-detail-page > p,
 .tournaments-page > p {
     text-align: center;
+    color: var(--text-muted);
+    padding: 1rem 0;
 }
 "#;

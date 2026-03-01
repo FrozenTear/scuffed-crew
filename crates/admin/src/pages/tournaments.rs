@@ -232,11 +232,6 @@ pub fn TournamentsPage() -> impl IntoView {
     let report_winner = RwSignal::new(String::new());
     let report_submitting = RwSignal::new(false);
 
-    // ── Confirm dialog ──
-    let _confirm_open = RwSignal::new(false);
-    let _confirm_action = RwSignal::new(String::new());
-    let _confirm_message = RwSignal::new(String::new());
-
     // ── Handlers ──
 
     let open_create = move || {

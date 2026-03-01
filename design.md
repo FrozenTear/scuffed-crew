@@ -205,8 +205,8 @@ Primary (CTA):
 ```css
 background: var(--accent);
 color: #fff;
-border-radius: 3px;
-box-shadow: 0 0 20px var(--accent-glow);
+border-radius: 4px;
+box-shadow: 0 0 24px var(--accent-glow);
 font-family: 'DM Mono', monospace;
 text-transform: uppercase;
 letter-spacing: 1.5px;

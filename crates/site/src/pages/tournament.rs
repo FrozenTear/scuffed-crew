@@ -135,7 +135,7 @@ pub fn TournamentPage() -> impl IntoView {
                     .collect();
 
                 match bracket_data.get().flatten() {
-                    None => view! { <p style="color: var(--text-muted);">"Loading..."</p> }.into_any(),
+                    None => view! { <p >"Loading..."</p> }.into_any(),
                     Some(data) => {
                         let t = &data.tournament;
                         let format_text = format_label(&t.format).to_string();
@@ -208,7 +208,7 @@ pub fn TournamentPage() -> impl IntoView {
                                 }.into_any()
                             } else {
                                 view! {
-                                    <p style="color: var(--text-muted);">"Bracket not yet generated."</p>
+                                    <p >"Bracket not yet generated."</p>
                                 }.into_any()
                             }}
 

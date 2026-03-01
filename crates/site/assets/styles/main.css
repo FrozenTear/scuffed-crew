@@ -842,6 +842,15 @@
     line-height: 1.7;
     white-space: pre-wrap;
   }
+  .news-grid {
+    display: flex;
+    flex-direction: column;
+    gap: 1.5rem;
+  }
+  .news-more {
+    text-align: center;
+    margin-top: 1.5rem;
+  }
 
   /* ─── MEMBERS PAGE ─── */
   .members-page {
@@ -928,6 +937,24 @@
     font-size: 0.85rem;
     margin-top: 0.5rem;
     line-height: 1.5;
+  }
+  .members-loading, .members-empty {
+    color: var(--text-secondary);
+    font-size: 1rem;
+    padding: 3rem 0;
+    text-align: center;
+  }
+  .member-initials {
+    font-family: 'Rajdhani', sans-serif;
+    font-weight: 700;
+    color: var(--accent-bright);
+  }
+  .member-role-pill {
+    font-family: 'DM Mono', monospace;
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: var(--accent-bright);
   }
 
   /* ─── MEMBER PROFILE PAGE ─── */
@@ -1026,6 +1053,72 @@
     font-size: 0.7rem;
     text-transform: uppercase;
     letter-spacing: 1px;
+    color: var(--text-secondary);
+  }
+  .profile-loading {
+    color: var(--text-secondary);
+    font-size: 1rem;
+    padding: 3rem 0;
+    text-align: center;
+  }
+  .profile-avatar-large {
+    width: 96px;
+    height: 96px;
+    border-radius: 50%;
+    margin: 0 auto 1rem;
+    background: var(--accent-soft);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-family: 'Rajdhani', sans-serif;
+    font-size: 2.2rem;
+    font-weight: 700;
+    color: var(--accent-bright);
+    overflow: hidden;
+  }
+  .profile-avatar-large img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+  }
+  .profile-info {
+    text-align: center;
+  }
+  .profile-joined {
+    font-family: 'DM Mono', monospace;
+    font-size: 0.75rem;
+    color: var(--text-muted);
+    margin-top: 0.5rem;
+  }
+  .profile-section {
+    margin-bottom: 2rem;
+  }
+  .profile-section h2 {
+    font-family: 'Rajdhani', sans-serif;
+    font-size: 1.1rem;
+    font-weight: 700;
+    color: var(--text-bright);
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    margin-bottom: 1rem;
+  }
+  .profile-account-card {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 1rem 1.25rem;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  .profile-account-name {
+    font-family: 'Rajdhani', sans-serif;
+    font-weight: 700;
+    color: var(--text-bright);
+  }
+  .profile-account-id {
+    font-family: 'DM Mono', monospace;
+    font-size: 0.75rem;
     color: var(--text-secondary);
   }
 

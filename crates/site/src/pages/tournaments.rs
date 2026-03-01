@@ -60,9 +60,9 @@ pub fn TournamentsPage() -> impl IntoView {
             <h1>"Tournaments"</h1>
 
             {move || match tournaments.get().flatten() {
-                None => view! { <p style="color: var(--text-muted);">"Loading..."</p> }.into_any(),
+                None => view! { <p >"Loading..."</p> }.into_any(),
                 Some(list) if list.is_empty() => view! {
-                    <p style="color: var(--text-muted);">"No tournaments yet."</p>
+                    <p >"No tournaments yet."</p>
                 }.into_any(),
                 Some(list) => {
                     // Filter out drafts from public view
@@ -71,7 +71,7 @@ pub fn TournamentsPage() -> impl IntoView {
                         .collect();
                     if visible.is_empty() {
                         return view! {
-                            <p style="color: var(--text-muted);">"No tournaments yet."</p>
+                            <p >"No tournaments yet."</p>
                         }.into_any();
                     }
                     view! {
@@ -94,7 +94,7 @@ pub fn TournamentsPage() -> impl IntoView {
                                             {t.is_external.then(|| view! { <span>"External"</span> })}
                                         </div>
                                         {t.description.map(|d| view! {
-                                            <p style="color: var(--text-secondary); font-size: 0.82rem; margin-top: 0.4rem; line-height: 1.5;">
+                                            <p class="tournament-card-desc">
                                                 {d.chars().take(120).collect::<String>()}
                                             </p>
                                         })}

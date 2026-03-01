@@ -468,8 +468,8 @@ pub struct UpdateParticipantRequest {
 /// PUT /api/tournaments/:id/participants/:pid
 pub async fn update_participant(
     State(state): State<AppState>,
-    _officer: OfficerUser,
-    Path((_id, pid)): Path<(String, String)>,
+    officer: OfficerUser,
+    Path((id, pid)): Path<(String, String)>,
     Json(body): Json<UpdateParticipantRequest>,
 ) -> ApiResult<Json<TournamentParticipant>> {
     let status = body.status.as_deref().map(|s| match s {
@@ -481,7 +481,7 @@ pub async fn update_participant(
         _ => ParticipantStatus::Registered,
     });
 
-    state
+    let result = state
         .db
         .update_tournament_participant(
             &pid,
@@ -490,8 +490,19 @@ pub async fn update_participant(
             body.group_label.as_ref().map(|g| g.as_deref()),
         )
         .await
-        .map(Json)
-        .map_err(internal_err)
+        .map_err(internal_err)?;
+
+    audit(
+        &state.db,
+        &officer.member.id,
+        AuditAction::UpdatedTournament,
+        AuditTargetType::TournamentParticipant,
+        &pid,
+        Some(&format!("Updated participant in tournament {id}")),
+    )
+    .await;
+
+    Ok(Json(result))
 }
 
 /// DELETE /api/tournaments/:id/participants/:pid
