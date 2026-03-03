@@ -1,16 +1,17 @@
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
-use surrealdb::sql::Thing;
-use surrealdb::sql::Datetime as SurrealDatetime;
+use surrealdb_types::RecordId;
+use surrealdb::types::Datetime as SurrealDatetime;
+use surrealdb_types::SurrealValue;
 
 use crate::types::Team;
 use crate::{with_timeout, Database, DbResult};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, SurrealValue)]
 struct DbTeam {
-    #[serde(skip_serializing)]
+    #[surreal(default)]
     #[allow(dead_code)]
-    id: Option<Thing>,
+    id: Option<RecordId>,
     name: String,
     game_id: String,
     color: Option<String>,
@@ -24,7 +25,7 @@ struct DbTeam {
 fn db_to_team(db: DbTeam) -> Team {
     let id = db
         .id
-        .map(|t| t.id.to_raw())
+        .map(|r| crate::record_id_key_to_string(r.key))
         .unwrap_or_else(|| "unknown".to_string());
     Team {
         id,

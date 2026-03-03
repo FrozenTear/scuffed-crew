@@ -3,7 +3,7 @@ pub mod migrations;
 pub mod queries;
 pub mod types;
 
-pub use client::Database;
+pub use client::{Database, DbConfig};
 pub use types::*;
 
 use std::time::Duration;
@@ -26,6 +26,15 @@ pub enum DbError {
 pub type DbResult<T> = Result<T, DbError>;
 
 const DEFAULT_QUERY_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Extract a string from a `RecordIdKey` enum (SurrealDB v3).
+pub(crate) fn record_id_key_to_string(key: surrealdb_types::RecordIdKey) -> String {
+    match key {
+        surrealdb_types::RecordIdKey::String(s) => s,
+        surrealdb_types::RecordIdKey::Number(n) => n.to_string(),
+        other => format!("{:?}", other),
+    }
+}
 
 pub(crate) async fn with_timeout<T, F>(future: F) -> DbResult<T>
 where

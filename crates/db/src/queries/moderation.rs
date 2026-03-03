@@ -1,16 +1,17 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use surrealdb::sql::Thing;
-use surrealdb::sql::Datetime as SurrealDatetime;
+use surrealdb_types::RecordId;
+use surrealdb::types::Datetime as SurrealDatetime;
+use surrealdb_types::SurrealValue;
 
 use crate::types::{ModerationAction, ModerationActionType};
 use crate::{with_timeout, Database, DbResult};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, SurrealValue)]
 struct DbModerationAction {
-    #[serde(skip_serializing)]
+    #[surreal(default)]
     #[allow(dead_code)]
-    id: Option<Thing>,
+    id: Option<RecordId>,
     member_id: String,
     action_type: String,
     reason: String,
@@ -33,7 +34,7 @@ fn parse_action_type(s: &str) -> ModerationActionType {
 fn db_to_action(db: DbModerationAction) -> ModerationAction {
     let id = db
         .id
-        .map(|t| t.id.to_raw())
+        .map(|r| crate::record_id_key_to_string(r.key))
         .unwrap_or_else(|| "unknown".to_string());
     ModerationAction {
         id,
@@ -121,7 +122,7 @@ impl Database {
     /// Count total moderation actions.
     pub async fn count_moderation(&self) -> DbResult<u64> {
         with_timeout(async {
-            #[derive(Deserialize)]
+            #[derive(Deserialize, SurrealValue)]
             struct CountResult {
                 count: u64,
             }
@@ -171,7 +172,7 @@ impl Database {
                 .bind(("mid", member_id.to_string()))
                 .await?;
 
-            #[derive(Deserialize)]
+            #[derive(Deserialize, SurrealValue)]
             struct CountResult {
                 count: u64,
             }

@@ -1,9 +1,11 @@
 services:
   surrealdb:
-    image: surrealdb/surrealdb:v2.3
-    command: start file:///data/scuffed.db --bind 0.0.0.0:8000 --user ${SURREALDB_USER:-root} --pass ${SURREALDB_PASSWORD:?Set SURREALDB_PASSWORD in .env}
+    image: surrealdb/surrealdb:v3.0
+    command: start rocksdb:///data/scuffed.db --bind 0.0.0.0:8000 --user ${SURREALDB_USER:-root} --pass ${SURREALDB_PASSWORD:?Set SURREALDB_PASSWORD in .env}
     volumes:
       - surrealdb-data:/data
+    networks:
+      - internal
     healthcheck:
       test: ["CMD", "surreal", "is-ready", "--conn", "http://localhost:8000"]
       interval: 10s
@@ -22,6 +24,8 @@ services:
       SURREALDB_URL: ws://surrealdb:8000
       SURREALDB_USER: ${SURREALDB_USER:-root}
       SURREALDB_PASSWORD: ${SURREALDB_PASSWORD:?Set SURREALDB_PASSWORD in .env}
+      SURREALDB_NS: ${SURREALDB_NS:-scuffed_crew}
+      SURREALDB_DB: ${SURREALDB_DB:-main}
       DISCORD_CLIENT_ID: ${DISCORD_CLIENT_ID:-}
       DISCORD_CLIENT_SECRET: ${DISCORD_CLIENT_SECRET:-}
       REDIRECT_BASE_URL: ${REDIRECT_BASE_URL:-http://localhost:3000}
@@ -29,9 +33,17 @@ services:
       ENCRYPTION_KEY: ${ENCRYPTION_KEY:-}
       ENCRYPTION_KEY_VERSION: ${ENCRYPTION_KEY_VERSION:-1}
       RUST_LOG: ${RUST_LOG:-info}
+    networks:
+      - internal
+      - external
     ports:
       - "127.0.0.1:3000:3000"
     restart: unless-stopped
+
+networks:
+  internal:
+    internal: true
+  external:
 
 volumes:
   surrealdb-data:

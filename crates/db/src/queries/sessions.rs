@@ -1,18 +1,19 @@
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
-use surrealdb::sql::Thing;
-use surrealdb::sql::Datetime as SurrealDatetime;
+use surrealdb_types::RecordId;
+use surrealdb::types::Datetime as SurrealDatetime;
+use surrealdb_types::SurrealValue;
 
 use scuffed_auth::crypto::hash_session_token;
 
 use crate::{with_timeout, Database, DbResult};
 
 /// Internal DB representation of a session.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, SurrealValue)]
 struct DbSession {
-    #[serde(skip_serializing)]
+    #[surreal(default)]
     #[allow(dead_code)]
-    id: Option<Thing>,
+    id: Option<RecordId>,
     user_id: String,
     token: String,
     expires_at: SurrealDatetime,
@@ -75,7 +76,7 @@ impl Database {
     /// Delete all expired sessions. Returns count removed.
     pub async fn cleanup_expired_sessions(&self) -> DbResult<u64> {
         with_timeout(async {
-            #[derive(Deserialize)]
+            #[derive(Deserialize, SurrealValue)]
             struct CountResult {
                 count: u64,
             }

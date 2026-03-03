@@ -1,16 +1,17 @@
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
-use surrealdb::sql::Thing;
-use surrealdb::sql::Datetime as SurrealDatetime;
+use surrealdb_types::RecordId;
+use surrealdb::types::Datetime as SurrealDatetime;
+use surrealdb_types::SurrealValue;
 
 use crate::types::{Member, OrgRole};
 use crate::{with_timeout, Database, DbResult};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, SurrealValue)]
 struct DbMember {
-    #[serde(skip_serializing)]
+    #[surreal(default)]
     #[allow(dead_code)]
-    id: Option<Thing>,
+    id: Option<RecordId>,
     user_id: String,
     org_role: String,
     display_name: String,
@@ -35,7 +36,7 @@ fn parse_role(s: &str) -> OrgRole {
 fn db_to_member(db: DbMember) -> Member {
     let id = db
         .id
-        .map(|t| t.id.to_raw())
+        .map(|r| crate::record_id_key_to_string(r.key))
         .unwrap_or_else(|| "unknown".to_string());
     Member {
         id,

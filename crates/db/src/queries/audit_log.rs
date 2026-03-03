@@ -1,16 +1,17 @@
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
-use surrealdb::sql::Thing;
-use surrealdb::sql::Datetime as SurrealDatetime;
+use surrealdb_types::RecordId;
+use surrealdb::types::Datetime as SurrealDatetime;
+use surrealdb_types::SurrealValue;
 
 use crate::types::{AuditAction, AuditLogEntry, AuditTargetType};
 use crate::{with_timeout, Database, DbResult};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, SurrealValue)]
 struct DbAuditLogEntry {
-    #[serde(skip_serializing)]
+    #[surreal(default)]
     #[allow(dead_code)]
-    id: Option<Thing>,
+    id: Option<RecordId>,
     actor_id: String,
     action: String,
     target_type: String,
@@ -22,7 +23,7 @@ struct DbAuditLogEntry {
 fn db_to_entry(db: DbAuditLogEntry) -> AuditLogEntry {
     let id = db
         .id
-        .map(|t| t.id.to_raw())
+        .map(|r| crate::record_id_key_to_string(r.key))
         .unwrap_or_else(|| "unknown".to_string());
     AuditLogEntry {
         id,
@@ -84,7 +85,7 @@ impl Database {
     /// Count total audit log entries.
     pub async fn count_audit_log(&self) -> DbResult<u64> {
         with_timeout(async {
-            #[derive(Deserialize)]
+            #[derive(Deserialize, SurrealValue)]
             struct CountResult {
                 count: u64,
             }

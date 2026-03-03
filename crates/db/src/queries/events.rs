@@ -1,14 +1,15 @@
 use serde::{Deserialize, Serialize};
-use surrealdb::sql::Thing;
+use surrealdb_types::RecordId;
+use surrealdb_types::SurrealValue;
 
 use crate::types::Event;
 use crate::{with_timeout, Database, DbResult};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, SurrealValue)]
 struct DbEvent {
-    #[serde(skip_serializing)]
+    #[surreal(default)]
     #[allow(dead_code)]
-    id: Option<Thing>,
+    id: Option<RecordId>,
     title: String,
     day_of_week: u8,
     time: String,
@@ -23,7 +24,7 @@ struct DbEvent {
 fn db_to_event(db: DbEvent) -> Event {
     let id = db
         .id
-        .map(|t| t.id.to_raw())
+        .map(|r| crate::record_id_key_to_string(r.key))
         .unwrap_or_else(|| "unknown".to_string());
     Event {
         id,
@@ -137,7 +138,7 @@ impl Database {
         with_timeout(async {
             self.client
                 .query("UPDATE $rid SET is_active = false")
-                .bind(("rid", surrealdb::RecordId::from(("event", id))))
+                .bind(("rid", RecordId::new("event", id)))
                 .await?;
             Ok(())
         })

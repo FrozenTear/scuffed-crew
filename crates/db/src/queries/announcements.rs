@@ -1,16 +1,17 @@
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
-use surrealdb::sql::Thing;
-use surrealdb::sql::Datetime as SurrealDatetime;
+use surrealdb_types::RecordId;
+use surrealdb::types::Datetime as SurrealDatetime;
+use surrealdb_types::SurrealValue;
 
 use crate::types::Announcement;
 use crate::{with_timeout, Database, DbResult};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, SurrealValue)]
 struct DbAnnouncement {
-    #[serde(skip_serializing)]
+    #[surreal(default)]
     #[allow(dead_code)]
-    id: Option<Thing>,
+    id: Option<RecordId>,
     title: String,
     content: String,
     author_id: String,
@@ -23,7 +24,7 @@ struct DbAnnouncement {
 fn db_to_announcement(db: DbAnnouncement) -> Announcement {
     let id = db
         .id
-        .map(|t| t.id.to_raw())
+        .map(|r| crate::record_id_key_to_string(r.key))
         .unwrap_or_else(|| "unknown".to_string());
     Announcement {
         id,
@@ -125,7 +126,7 @@ impl Database {
         with_timeout(async {
             self.client
                 .query("UPDATE $rid SET is_active = false")
-                .bind(("rid", surrealdb::RecordId::from(("announcement", id))))
+                .bind(("rid", RecordId::new("announcement", id)))
                 .await?;
             Ok(())
         })

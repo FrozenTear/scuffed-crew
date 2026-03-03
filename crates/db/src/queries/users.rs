@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
-use surrealdb::sql::Thing;
-use surrealdb::sql::Datetime as SurrealDatetime;
+use surrealdb_types::RecordId;
+use surrealdb::types::Datetime as SurrealDatetime;
+use surrealdb_types::SurrealValue;
 
 use scuffed_auth::crypto::{hash_provider_id, EncryptedBlob};
 use scuffed_auth::{AuthProvider, User};
@@ -8,16 +9,16 @@ use scuffed_auth::{AuthProvider, User};
 use crate::{with_timeout, Database, DbError, DbResult};
 
 /// Internal DB representation of a user (handles encryption fields).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, SurrealValue)]
 struct DbUser {
-    #[serde(skip_serializing)]
-    id: Option<Thing>,
+    #[surreal(default)]
+    id: Option<RecordId>,
     provider: String,
     username: String,
     avatar_url: Option<String>,
     provider_id: Option<String>,
     provider_id_hash: Option<String>,
-    provider_id_encrypted: Option<EncryptedBlob>,
+    provider_id_encrypted: Option<serde_json::Value>,
     created_at: SurrealDatetime,
 }
 
@@ -115,7 +116,7 @@ impl Database {
                 avatar_url: user.avatar_url.clone(),
                 provider_id: None,
                 provider_id_hash: Some(id_hash),
-                provider_id_encrypted: Some(id_encrypted),
+                provider_id_encrypted: Some(serde_json::to_value(id_encrypted).map_err(|e| DbError::Config(format!("Failed to serialize encrypted blob: {e}")))?),
                 created_at: SurrealDatetime::from(user.created_at),
             }
         } else {
@@ -153,7 +154,7 @@ impl Database {
                 avatar_url: user.avatar_url.clone(),
                 provider_id: None,
                 provider_id_hash: Some(id_hash),
-                provider_id_encrypted: Some(id_encrypted),
+                provider_id_encrypted: Some(serde_json::to_value(id_encrypted).map_err(|e| DbError::Config(format!("Failed to serialize encrypted blob: {e}")))?),
                 created_at: SurrealDatetime::from(user.created_at),
             }
         } else {
@@ -187,9 +188,11 @@ impl Database {
             other => return Err(DbError::Config(format!("Unknown provider: {other}"))),
         };
 
-        let provider_id = if let Some(ref encrypted) = db.provider_id_encrypted {
+        let provider_id = if let Some(ref encrypted_json) = db.provider_id_encrypted {
+            let encrypted: EncryptedBlob = serde_json::from_value(encrypted_json.clone())
+                .map_err(|e| DbError::Config(format!("Failed to deserialize encrypted blob: {e}")))?;
             if let Some(ref crypto) = self.crypto {
-                crypto.decrypt(encrypted)?
+                crypto.decrypt(&encrypted)?
             } else {
                 return Err(DbError::Config(
                     "Encrypted data present but no crypto service configured".into(),
@@ -203,7 +206,7 @@ impl Database {
 
         let id = db
             .id
-            .map(|t| t.id.to_raw())
+            .map(|r| crate::record_id_key_to_string(r.key))
             .unwrap_or_else(|| "unknown".to_string());
 
         Ok(User {

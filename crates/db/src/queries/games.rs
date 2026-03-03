@@ -1,16 +1,17 @@
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
-use surrealdb::sql::Datetime as SurrealDatetime;
-use surrealdb::sql::Thing;
+use surrealdb::types::Datetime as SurrealDatetime;
+use surrealdb_types::RecordId;
+use surrealdb_types::SurrealValue;
 
 use crate::types::Game;
 use crate::{with_timeout, Database, DbResult};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, SurrealValue)]
 struct DbGame {
-    #[serde(skip_serializing)]
+    #[surreal(default)]
     #[allow(dead_code)]
-    id: Option<Thing>,
+    id: Option<RecordId>,
     name: String,
     abbreviation: Option<String>,
     is_active: bool,
@@ -20,7 +21,7 @@ struct DbGame {
 fn db_to_game(db: DbGame) -> Game {
     let id = db
         .id
-        .map(|t| t.id.to_raw())
+        .map(|r| crate::record_id_key_to_string(r.key))
         .unwrap_or_else(|| "unknown".to_string());
     Game {
         id,

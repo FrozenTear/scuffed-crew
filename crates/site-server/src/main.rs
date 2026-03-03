@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use scuffed_auth::SessionConfig;
-use scuffed_db::Database;
+use scuffed_db::{Database, DbConfig};
 use scuffed_db::migrations::run_migrations;
 use scuffed_site_server::{create_router, notifications::MatrixNotifier, state::{AppState, OAuthConfig}, uploads};
 use tracing_subscriber::EnvFilter;
@@ -28,7 +28,13 @@ async fn main() {
                 std::env::var("SURREALDB_USER").unwrap_or_else(|_| "root".to_string());
             let pass =
                 std::env::var("SURREALDB_PASSWORD").unwrap_or_else(|_| "root".to_string());
-            Database::connect(&url, &user, &pass)
+            let config = DbConfig {
+                namespace: std::env::var("SURREALDB_NS")
+                    .unwrap_or_else(|_| "scuffed_crew".to_string()),
+                database: std::env::var("SURREALDB_DB")
+                    .unwrap_or_else(|_| "main".to_string()),
+            };
+            Database::connect(&url, &user, &pass, config)
                 .await
                 .expect("Failed to connect to SurrealDB")
         }
@@ -91,40 +97,48 @@ async fn main() {
                 -- Games
                 CREATE game:overwatch2 SET
                     name = 'Overwatch 2',
-                    slug = 'overwatch-2',
-                    icon_url = NONE,
+                    abbreviation = 'OW2',
+                    is_active = true,
                     created_at = time::now();
 
                 -- Teams
                 CREATE team:alpha SET
                     name = 'Alpha Squad',
                     game_id = 'overwatch2',
-                    description = 'Main competitive roster',
-                    avatar_url = NONE,
+                    color = '#e74c3c',
+                    division = 'Main',
+                    lore_quote = NONE,
+                    logo_url = NONE,
                     is_active = true,
                     created_at = time::now();
 
                 CREATE team:bravo SET
                     name = 'Bravo Team',
                     game_id = 'overwatch2',
-                    description = 'Secondary roster',
-                    avatar_url = NONE,
+                    color = '#3498db',
+                    division = 'Academy',
+                    lore_quote = NONE,
+                    logo_url = NONE,
                     is_active = true,
                     created_at = time::now();
 
                 CREATE team:charlie SET
                     name = 'Charlie Company',
                     game_id = 'overwatch2',
-                    description = NONE,
-                    avatar_url = NONE,
+                    color = NONE,
+                    division = NONE,
+                    lore_quote = NONE,
+                    logo_url = NONE,
                     is_active = true,
                     created_at = time::now();
 
                 CREATE team:delta SET
                     name = 'Delta Force',
                     game_id = 'overwatch2',
-                    description = NONE,
-                    avatar_url = NONE,
+                    color = NONE,
+                    division = NONE,
+                    lore_quote = NONE,
+                    logo_url = NONE,
                     is_active = true,
                     created_at = time::now();
 
@@ -251,8 +265,10 @@ async fn main() {
                 CREATE team:echo SET
                     name = 'Echo Company',
                     game_id = 'overwatch2',
-                    description = NONE,
-                    avatar_url = NONE,
+                    color = NONE,
+                    division = NONE,
+                    lore_quote = NONE,
+                    logo_url = NONE,
                     is_active = true,
                     created_at = time::now();
 

@@ -1,16 +1,17 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use surrealdb::sql::Datetime as SurrealDatetime;
-use surrealdb::sql::Thing;
+use surrealdb::types::Datetime as SurrealDatetime;
+use surrealdb_types::RecordId;
+use surrealdb_types::SurrealValue;
 
 use crate::types::{AttendanceStats, AttendanceStatus, EventAttendance};
 use crate::{with_timeout, Database, DbResult};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, SurrealValue)]
 struct DbEventAttendance {
-    #[serde(skip_serializing)]
+    #[surreal(default)]
     #[allow(dead_code)]
-    id: Option<Thing>,
+    id: Option<RecordId>,
     member_id: String,
     event_id: String,
     occurrence_date: SurrealDatetime,
@@ -30,7 +31,7 @@ fn parse_attendance_status(s: &str) -> AttendanceStatus {
 fn db_to_attendance(db: DbEventAttendance) -> EventAttendance {
     let id = db
         .id
-        .map(|t| t.id.to_raw())
+        .map(|r| crate::record_id_key_to_string(r.key))
         .unwrap_or_else(|| "unknown".to_string());
     EventAttendance {
         id,
@@ -123,7 +124,7 @@ impl Database {
         member_id: &str,
     ) -> DbResult<AttendanceStats> {
         with_timeout(async {
-            #[derive(Deserialize)]
+            #[derive(Deserialize, SurrealValue)]
             struct CountResult {
                 count: u32,
             }

@@ -1,0 +1,10 @@
+[Unit]
+Description=Scuffed Crew database backup
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/opt/scuffed-crew/scripts/backup.sh
+EnvironmentFile=/opt/scuffed-crew/.env
+TimeoutStartSec=600

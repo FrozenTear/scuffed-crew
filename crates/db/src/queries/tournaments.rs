@@ -1,7 +1,8 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use surrealdb::sql::Datetime as SurrealDatetime;
-use surrealdb::sql::Thing;
+use surrealdb::types::Datetime as SurrealDatetime;
+use surrealdb_types::RecordId;
+use surrealdb_types::SurrealValue;
 
 use crate::types::{
     BracketStage, ParticipantStatus, RoundStatus, SwissStanding, Tournament, TournamentBracket,
@@ -12,11 +13,11 @@ use crate::{with_timeout, Database, DbResult};
 
 // ─── Internal DB Structs ───
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, SurrealValue)]
 struct DbTournament {
-    #[serde(skip_serializing)]
+    #[surreal(default)]
     #[allow(dead_code)]
-    id: Option<Thing>,
+    id: Option<RecordId>,
     name: String,
     game_id: Option<String>,
     format: String,
@@ -36,11 +37,11 @@ struct DbTournament {
     updated_at: SurrealDatetime,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, SurrealValue)]
 struct DbTournamentParticipant {
-    #[serde(skip_serializing)]
+    #[surreal(default)]
     #[allow(dead_code)]
-    id: Option<Thing>,
+    id: Option<RecordId>,
     tournament_id: String,
     team_id: Option<String>,
     external_name: Option<String>,
@@ -50,11 +51,11 @@ struct DbTournamentParticipant {
     created_at: SurrealDatetime,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, SurrealValue)]
 struct DbTournamentRound {
-    #[serde(skip_serializing)]
+    #[surreal(default)]
     #[allow(dead_code)]
-    id: Option<Thing>,
+    id: Option<RecordId>,
     tournament_id: String,
     round_number: u32,
     stage: String,
@@ -62,11 +63,11 @@ struct DbTournamentRound {
     created_at: SurrealDatetime,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, SurrealValue)]
 struct DbTournamentMatch {
-    #[serde(skip_serializing)]
+    #[surreal(default)]
     #[allow(dead_code)]
-    id: Option<Thing>,
+    id: Option<RecordId>,
     tournament_id: String,
     round_id: String,
     bracket_position: u32,
@@ -148,8 +149,8 @@ fn parse_match_status(s: &str) -> TournamentMatchStatus {
     }
 }
 
-fn thing_to_id(t: Option<Thing>) -> String {
-    t.map(|t| t.id.to_raw())
+fn thing_to_id(t: Option<RecordId>) -> String {
+    t.map(|r| crate::record_id_key_to_string(r.key))
         .unwrap_or_else(|| "unknown".to_string())
 }
 
@@ -1426,7 +1427,7 @@ impl Database {
         tournament_id: &str,
     ) -> DbResult<u64> {
         with_timeout(async {
-            #[derive(Deserialize)]
+            #[derive(Deserialize, SurrealValue)]
             struct CountResult {
                 count: u64,
             }

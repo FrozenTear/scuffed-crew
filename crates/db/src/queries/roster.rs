@@ -1,15 +1,17 @@
 use serde::{Deserialize, Serialize};
-use surrealdb::RecordId;
-use surrealdb::sql::Datetime as SurrealDatetime;
+use surrealdb_types::RecordId;
+use surrealdb::types::Datetime as SurrealDatetime;
+use surrealdb_types::SurrealValue;
 
 use crate::types::{RosterEntry, TeamRole};
 use crate::{with_timeout, Database, DbResult};
 
 /// Raw DB result from a RELATE / graph query on plays_on.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, SurrealValue)]
 struct DbRosterEntry {
     id: Option<String>,
     #[serde(rename = "in")]
+    #[surreal(rename = "in")]
     in_id: Option<String>,
     out: Option<String>,
     team_role: String,
@@ -63,11 +65,11 @@ fn db_to_roster_entry(db: DbRosterEntry) -> RosterEntry {
 }
 
 fn member_rid(id: &str) -> RecordId {
-    RecordId::from(("member", id))
+    RecordId::new("member", id)
 }
 
 fn team_rid(id: &str) -> RecordId {
-    RecordId::from(("team", id))
+    RecordId::new("team", id)
 }
 
 impl Database {

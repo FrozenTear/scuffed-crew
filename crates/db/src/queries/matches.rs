@@ -1,16 +1,17 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use surrealdb::sql::Thing;
-use surrealdb::sql::Datetime as SurrealDatetime;
+use surrealdb_types::RecordId;
+use surrealdb::types::Datetime as SurrealDatetime;
+use surrealdb_types::SurrealValue;
 
 use crate::types::{MatchResult, MatchType, TeamRecord};
 use crate::{with_timeout, Database, DbResult};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, SurrealValue)]
 struct DbMatchResult {
-    #[serde(skip_serializing)]
+    #[surreal(default)]
     #[allow(dead_code)]
-    id: Option<Thing>,
+    id: Option<RecordId>,
     team_id: String,
     opponent: String,
     score_us: u32,
@@ -34,7 +35,7 @@ fn parse_match_type(s: &str) -> MatchType {
 fn db_to_match(db: DbMatchResult) -> MatchResult {
     let id = db
         .id
-        .map(|t| t.id.to_raw())
+        .map(|r| crate::record_id_key_to_string(r.key))
         .unwrap_or_else(|| "unknown".to_string());
     MatchResult {
         id,
@@ -159,7 +160,7 @@ impl Database {
 
     pub async fn get_team_record(&self, team_id: &str) -> DbResult<TeamRecord> {
         with_timeout(async {
-            #[derive(Deserialize)]
+            #[derive(Deserialize, SurrealValue)]
             struct CountResult {
                 count: u32,
             }
@@ -206,7 +207,7 @@ impl Database {
         match_type: MatchType,
     ) -> DbResult<TeamRecord> {
         with_timeout(async {
-            #[derive(Deserialize)]
+            #[derive(Deserialize, SurrealValue)]
             struct CountResult {
                 count: u32,
             }
