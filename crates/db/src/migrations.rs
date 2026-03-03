@@ -20,7 +20,7 @@ pub async fn run_migrations(client: &Surreal<Any>) -> DbResult<()> {
         DEFINE FIELD avatar_url ON user TYPE option<string>;
         DEFINE FIELD provider_id ON user TYPE option<string>;
         DEFINE FIELD provider_id_hash ON user TYPE option<string>;
-        DEFINE FIELD provider_id_encrypted ON user FLEXIBLE TYPE option<object>;
+        DEFINE FIELD provider_id_encrypted ON user TYPE option<object> FLEXIBLE;
         DEFINE FIELD created_at ON user TYPE datetime DEFAULT time::now();
 
         DEFINE INDEX user_provider_idx ON user
