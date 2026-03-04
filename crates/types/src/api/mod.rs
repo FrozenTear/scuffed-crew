@@ -1,3 +1,25 @@
+pub mod members;
+pub mod tournaments;
+pub mod teams;
+pub mod games;
+pub mod announcements;
+pub mod events;
+pub mod moderation;
+pub mod applications;
+pub mod matches;
+pub mod settings;
+
+pub use members::*;
+pub use tournaments::*;
+pub use teams::*;
+pub use games::*;
+pub use announcements::*;
+pub use events::*;
+pub use moderation::*;
+pub use applications::*;
+pub use matches::*;
+pub use settings::*;
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
