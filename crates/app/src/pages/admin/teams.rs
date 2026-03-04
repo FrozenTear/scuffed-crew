@@ -4,6 +4,7 @@ use serde::Deserialize;
 use scuffed_api_client::ApiClient;
 use scuffed_types::api::{CreateTeamRequest, AddRosterMemberRequest, UpdateRosterRoleRequest};
 use crate::components::{DataTable, FormModal, ConfirmDialog, Toast, use_toast, ADMIN_SHARED_CSS};
+use crate::hooks::use_api;
 
 // --- Types ---
 // Local response types with API-enriched fields (joined names).
@@ -41,7 +42,9 @@ const TEAM_ROLES: [&str; 4] = ["player", "captain", "coach", "sub"];
 
 #[component]
 pub fn AdminTeams() -> Element {
-    let mut refresh = use_signal(|| 0u64);
+    let mut teams = use_api::<Vec<Team>>("/api/teams");
+    let mut games = use_api::<Vec<Game>>("/api/games");
+    let mut members = use_api::<Vec<Member>>("/api/members");
     let mut toast = use_toast();
 
     // Team form state
@@ -71,22 +74,6 @@ pub fn AdminTeams() -> Element {
     // Remove member confirm
     let mut remove_open = use_signal(|| false);
     let mut remove_target: Signal<Option<RosterEntry>> = use_signal(|| None);
-
-    // Data
-    let teams = use_resource(move || async move {
-        let _ = refresh();
-        ApiClient::web().fetch::<Vec<Team>>("/api/teams").await.ok()
-    });
-
-    let games = use_resource(move || async move {
-        let _ = refresh();
-        ApiClient::web().fetch::<Vec<Game>>("/api/games").await.ok()
-    });
-
-    let members = use_resource(move || async move {
-        let _ = refresh();
-        ApiClient::web().fetch::<Vec<Member>>("/api/members").await.ok()
-    });
 
     // Fetch roster when team selected
     let _roster_loader = use_resource(move || async move {
@@ -152,7 +139,9 @@ pub fn AdminTeams() -> Element {
                 Ok(_) => {
                     toast.show(Toast::success("Team saved."));
                     modal_open.set(false);
-                    refresh += 1;
+                    teams.refresh += 1;
+                    games.refresh += 1;
+                    members.refresh += 1;
                 }
                 Err(e) => toast.show(Toast::error(format!("Failed to save team: {e}"))),
             }
@@ -175,7 +164,9 @@ pub fn AdminTeams() -> Element {
                         toast.show(Toast::success("Team deleted."));
                         delete_open.set(false);
                         delete_target.set(None);
-                        refresh += 1;
+                        teams.refresh += 1;
+                        games.refresh += 1;
+                        members.refresh += 1;
                     }
                     Err(e) => toast.show(Toast::error(format!("Delete failed: {e}"))),
                 }
@@ -301,7 +292,7 @@ pub fn AdminTeams() -> Element {
 
         // Teams table
         {
-            let data = teams.read();
+            let data = teams.data.read();
             let data = data.as_ref().and_then(|d| d.as_ref());
             match data {
                 None => rsx! { p { class: "admin-loading", "Loading..." } },
@@ -384,7 +375,7 @@ pub fn AdminTeams() -> Element {
                     onchange: move |e| form_game_id.set(e.value()),
                     option { value: "", "-- Select Game --" }
                     {
-                        let games_data = games.read();
+                        let games_data = games.data.read();
                         let games_data = games_data.as_ref().and_then(|d| d.as_ref());
                         match games_data {
                             Some(list) => rsx! {
@@ -506,7 +497,7 @@ pub fn AdminTeams() -> Element {
                                     onchange: move |e| add_member_id.set(e.value()),
                                     option { value: "", "-- Select --" }
                                     {
-                                        let mems = members.read();
+                                        let mems = members.data.read();
                                         let mems = mems.as_ref().and_then(|d| d.as_ref());
                                         match mems {
                                             Some(list) => rsx! {

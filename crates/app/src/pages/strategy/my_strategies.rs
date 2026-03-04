@@ -3,6 +3,7 @@ use serde::Deserialize;
 
 use scuffed_api_client::ApiClient;
 use crate::components::{ConfirmDialog, Toast, use_toast, ADMIN_SHARED_CSS};
+use crate::hooks::use_api;
 use crate::routes::Route;
 use crate::state::auth::use_auth;
 
@@ -219,7 +220,7 @@ const PAGE_CSS: &str = r#"
 pub fn StrategyMy() -> Element {
     let auth = use_auth();
     let mut toast = use_toast();
-    let mut refresh = use_signal(|| 0u64);
+    let mut strategies = use_api::<Vec<StrategySummary>>("/api/strategy/strategies/mine");
 
     // Delete confirmation state
     let mut delete_open = use_signal(|| false);
@@ -249,15 +250,6 @@ pub fn StrategyMy() -> Element {
         };
     }
 
-    // Fetch user's strategies
-    let strategies = use_resource(move || async move {
-        let _ = refresh();
-        ApiClient::web()
-            .fetch::<Vec<StrategySummary>>("/api/strategy/strategies/mine")
-            .await
-            .ok()
-    });
-
     // --- Delete handlers ---
 
     let mut open_delete = move |strat: StrategySummary| {
@@ -277,7 +269,7 @@ pub fn StrategyMy() -> Element {
                         toast.show(Toast::success("Strategy deleted."));
                         delete_open.set(false);
                         delete_target.set(None);
-                        refresh += 1;
+                        strategies.refresh += 1;
                     }
                     Err(e) => toast.show(Toast::error(format!("Delete failed: {e}"))),
                 }
@@ -307,7 +299,7 @@ pub fn StrategyMy() -> Element {
 
             // List
             {
-                let data = strategies.read();
+                let data = strategies.data.read();
                 let data = data.as_ref().and_then(|d| d.as_ref());
                 match data {
                     None => rsx! {

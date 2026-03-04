@@ -7,6 +7,7 @@ use scuffed_types::api::{
     AttendanceEntry,
 };
 use crate::components::{DataTable, FormModal, ConfirmDialog, Toast, use_toast, ADMIN_SHARED_CSS};
+use crate::hooks::use_api;
 
 // --- Types ---
 // Local response types with API-enriched fields (joined names).
@@ -40,7 +41,9 @@ const TIMEZONES: [&str; 5] = ["UTC", "Europe/London", "Europe/Berlin", "US/Easte
 
 #[component]
 pub fn AdminSchedule() -> Element {
-    let mut refresh = use_signal(|| 0u64);
+    let mut events = use_api::<Vec<Event>>("/api/events");
+    let mut teams = use_api::<Vec<Team>>("/api/teams");
+    let mut members = use_api::<Vec<Member>>("/api/members");
     let mut toast = use_toast();
 
     // Form modal state
@@ -65,21 +68,6 @@ pub fn AdminSchedule() -> Element {
     let mut att_entries: Signal<Vec<AttendanceEntry>> = use_signal(Vec::new);
     let mut att_submitting = use_signal(|| false);
 
-    // Data
-    let events = use_resource(move || async move {
-        let _ = refresh();
-        ApiClient::web().fetch::<Vec<Event>>("/api/events").await.ok()
-    });
-
-    let teams = use_resource(move || async move {
-        let _ = refresh();
-        ApiClient::web().fetch::<Vec<Team>>("/api/teams").await.ok()
-    });
-
-    let members = use_resource(move || async move {
-        let _ = refresh();
-        ApiClient::web().fetch::<Vec<Member>>("/api/members").await.ok()
-    });
 
     // --- Event form handlers ---
 
@@ -134,7 +122,9 @@ pub fn AdminSchedule() -> Element {
                 Ok(_) => {
                     toast.show(Toast::success("Event saved."));
                     modal_open.set(false);
-                    refresh += 1;
+                    events.refresh += 1;
+                    teams.refresh += 1;
+                    members.refresh += 1;
                 }
                 Err(e) => toast.show(Toast::error(format!("Failed to save event: {e}"))),
             }
@@ -157,7 +147,9 @@ pub fn AdminSchedule() -> Element {
                         toast.show(Toast::success("Event deleted."));
                         delete_open.set(false);
                         delete_target.set(None);
-                        refresh += 1;
+                        events.refresh += 1;
+                        teams.refresh += 1;
+                        members.refresh += 1;
                     }
                     Err(e) => toast.show(Toast::error(format!("Delete failed: {e}"))),
                 }
@@ -177,7 +169,7 @@ pub fn AdminSchedule() -> Element {
         att_date.set(today);
         att_event.set(Some(evt));
         // Initialize entries from members
-        let mems = members.read();
+        let mems = members.data.read();
         let mems = mems.as_ref().and_then(|d| d.as_ref());
         if let Some(list) = mems {
             att_entries.set(
@@ -236,7 +228,7 @@ pub fn AdminSchedule() -> Element {
 
         // Events table
         {
-            let data = events.read();
+            let data = events.data.read();
             let data = data.as_ref().and_then(|d| d.as_ref());
             match data {
                 None => rsx! { p { class: "admin-loading", "Loading..." } },
@@ -362,7 +354,7 @@ pub fn AdminSchedule() -> Element {
                     },
                     option { value: "", "\u{2014} None \u{2014}" }
                     {
-                        let teams_data = teams.read();
+                        let teams_data = teams.data.read();
                         let teams_data = teams_data.as_ref().and_then(|d| d.as_ref());
                         match teams_data {
                             Some(list) => rsx! {
@@ -412,7 +404,7 @@ pub fn AdminSchedule() -> Element {
             }
 
             {
-                let mems = members.read();
+                let mems = members.data.read();
                 let mems = mems.as_ref().and_then(|d| d.as_ref());
                 let entries = att_entries.read();
                 match mems {

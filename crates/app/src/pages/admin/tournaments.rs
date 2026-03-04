@@ -9,6 +9,7 @@ use scuffed_types::api::{
 use crate::components::{
     DataTable, FormModal, ConfirmDialog, StatusPill, Toast, use_toast, ADMIN_SHARED_CSS,
 };
+use crate::hooks::use_api;
 
 // --- Types ---
 // Local response types with simplified/string-typed fields for display.
@@ -75,7 +76,9 @@ const STATUS_FILTERS: [&str; 6] = ["all", "draft", "registration", "active", "co
 
 #[component]
 pub fn AdminTournaments() -> Element {
-    let mut refresh = use_signal(|| 0u64);
+    let mut tournaments = use_api::<Vec<Tournament>>("/api/tournaments");
+    let mut games = use_api::<Vec<Game>>("/api/games");
+    let mut members = use_api::<Vec<Member>>("/api/members");
     let mut toast = use_toast();
 
     // View toggle: None = list, Some(id) = detail
@@ -123,21 +126,6 @@ pub fn AdminTournaments() -> Element {
     let mut match_replays = use_signal(String::new);
     let mut match_submitting = use_signal(|| false);
 
-    // Data
-    let tournaments = use_resource(move || async move {
-        let _ = refresh();
-        ApiClient::web().fetch::<Vec<Tournament>>("/api/tournaments").await.ok()
-    });
-
-    let games = use_resource(move || async move {
-        let _ = refresh();
-        ApiClient::web().fetch::<Vec<Game>>("/api/games").await.ok()
-    });
-
-    let members = use_resource(move || async move {
-        let _ = refresh();
-        ApiClient::web().fetch::<Vec<Member>>("/api/members").await.ok()
-    });
 
     // Detail data loader
     let _detail_loader = use_resource(move || async move {
@@ -231,7 +219,9 @@ pub fn AdminTournaments() -> Element {
                 Ok(_) => {
                     toast.show(Toast::success("Tournament saved."));
                     modal_open.set(false);
-                    refresh += 1;
+                    tournaments.refresh += 1;
+                    games.refresh += 1;
+                    members.refresh += 1;
                 }
                 Err(e) => toast.show(Toast::error(format!("Failed to save: {e}"))),
             }
@@ -252,7 +242,9 @@ pub fn AdminTournaments() -> Element {
                         toast.show(Toast::success("Tournament deleted."));
                         delete_open.set(false);
                         delete_target.set(None);
-                        refresh += 1;
+                        tournaments.refresh += 1;
+                        games.refresh += 1;
+                        members.refresh += 1;
                     }
                     Err(e) => toast.show(Toast::error(format!("Delete failed: {e}"))),
                 }
@@ -274,7 +266,9 @@ pub fn AdminTournaments() -> Element {
             match result {
                 Ok(_) => {
                     toast.show(Toast::success(format!("Status changed to {new_status}.")));
-                    refresh += 1;
+                    tournaments.refresh += 1;
+                    games.refresh += 1;
+                    members.refresh += 1;
                     detail_refresh += 1;
                 }
                 Err(e) => toast.show(Toast::error(format!("Status change failed: {e}"))),
@@ -680,7 +674,7 @@ pub fn AdminTournaments() -> Element {
             }
 
             {
-                let data = tournaments.read();
+                let data = tournaments.data.read();
                 let data = data.as_ref().and_then(|d| d.as_ref());
                 let filter = status_filter();
                 match data {
@@ -810,7 +804,7 @@ pub fn AdminTournaments() -> Element {
                         },
                         option { value: "", "\u{2014} None \u{2014}" }
                         {
-                            let g = games.read();
+                            let g = games.data.read();
                             let g = g.as_ref().and_then(|d| d.as_ref());
                             match g {
                                 Some(list) => rsx! {
@@ -881,7 +875,7 @@ pub fn AdminTournaments() -> Element {
                     onchange: move |e| add_part_member_id.set(e.value()),
                     option { value: "", "-- Select Member --" }
                     {
-                        let m = members.read();
+                        let m = members.data.read();
                         let m = m.as_ref().and_then(|d| d.as_ref());
                         match m {
                             Some(list) => rsx! {

@@ -7,6 +7,7 @@ use crate::components::{
     DataTable, FormModal, ConfirmDialog, StatusPill, RolePill, SummaryCard, Toast, use_toast,
     ADMIN_SHARED_CSS,
 };
+use crate::hooks::use_api;
 
 // --- Types ---
 // These local types have API-enriched fields (joined names, computed stats)
@@ -57,19 +58,9 @@ const ROLES: [&str; 4] = ["recruit", "member", "officer", "admin"];
 
 #[component]
 pub fn AdminMembers() -> Element {
-    let mut refresh = use_signal(|| 0u64);
+    let mut members = use_api::<Vec<Member>>("/api/members");
+    let mut games = use_api::<Vec<Game>>("/api/games");
     let mut toast = use_toast();
-
-    // Data
-    let members = use_resource(move || async move {
-        let _ = refresh();
-        ApiClient::web().fetch::<Vec<Member>>("/api/members").await.ok()
-    });
-
-    let games = use_resource(move || async move {
-        let _ = refresh();
-        ApiClient::web().fetch::<Vec<Game>>("/api/games").await.ok()
-    });
 
     // Role change modal
     let mut role_open = use_signal(|| false);
@@ -154,7 +145,8 @@ pub fn AdminMembers() -> Element {
                         toast.show(Toast::success("Role updated."));
                         role_open.set(false);
                         role_target.set(None);
-                        refresh += 1;
+                        members.refresh += 1;
+                        games.refresh += 1;
                     }
                     Err(e) => toast.show(Toast::error(format!("Failed to change role: {e}"))),
                 }
@@ -184,7 +176,8 @@ pub fn AdminMembers() -> Element {
                         toast.show(Toast::success(format!("Member {action}.")));
                         toggle_open.set(false);
                         toggle_target.set(None);
-                        refresh += 1;
+                        members.refresh += 1;
+                        games.refresh += 1;
                     }
                     Err(e) => toast.show(Toast::error(format!("Failed: {e}"))),
                 }
@@ -341,7 +334,7 @@ pub fn AdminMembers() -> Element {
 
         // Members table
         {
-            let data = members.read();
+            let data = members.data.read();
             let data = data.as_ref().and_then(|d| d.as_ref());
             match data {
                 None => rsx! { p { class: "admin-loading", "Loading..." } },
@@ -617,7 +610,7 @@ pub fn AdminMembers() -> Element {
                                         onchange: move |e| add_acct_game_id.set(e.value()),
                                         option { value: "", "-- Select --" }
                                         {
-                                            let g = games.read();
+                                            let g = games.data.read();
                                             let g = g.as_ref().and_then(|d| d.as_ref());
                                             match g {
                                                 Some(list) => rsx! {

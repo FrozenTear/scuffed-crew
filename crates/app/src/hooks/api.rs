@@ -11,7 +11,9 @@ pub struct ApiResource<T: 'static> {
 
 impl<T: 'static> ApiResource<T> {
     /// Trigger a reload of the resource.
-    pub fn reload(&mut self) {
+    /// Note: In closures, prefer `resource.refresh += 1` to avoid FnOnce issues.
+    #[allow(dead_code)]
+    pub fn reload(mut self) {
         self.refresh += 1;
     }
 }

@@ -1,8 +1,8 @@
 use dioxus::prelude::*;
 use serde::Deserialize;
 
-use scuffed_api_client::ApiClient;
 use crate::components::{SummaryCard, ADMIN_SHARED_CSS};
+use crate::hooks::use_api;
 
 #[derive(Debug, Clone, Deserialize)]
 struct Member {
@@ -37,33 +37,23 @@ struct Announcement {
 
 #[component]
 pub fn AdminDashboard() -> Element {
-    let members = use_resource(|| async {
-        ApiClient::web().fetch::<Vec<Member>>("/api/members").await.ok()
-    });
-    let applications = use_resource(|| async {
-        ApiClient::web().fetch::<Vec<Application>>("/api/applications").await.ok()
-    });
-    let teams = use_resource(|| async {
-        ApiClient::web().fetch::<Vec<Team>>("/api/teams").await.ok()
-    });
-    let events = use_resource(|| async {
-        ApiClient::web().fetch::<Vec<Event>>("/api/events").await.ok()
-    });
-    let announcements = use_resource(|| async {
-        ApiClient::web().fetch::<Vec<Announcement>>("/api/announcements").await.ok()
-    });
+    let members = use_api::<Vec<Member>>("/api/members");
+    let applications = use_api::<Vec<Application>>("/api/applications");
+    let teams = use_api::<Vec<Team>>("/api/teams");
+    let events = use_api::<Vec<Event>>("/api/events");
+    let announcements = use_api::<Vec<Announcement>>("/api/announcements");
 
-    let member_count = members.read().as_ref()
+    let member_count = members.data.read().as_ref()
         .and_then(|d| d.as_ref()).map(|v| v.len()).unwrap_or(0);
-    let pending_count = applications.read().as_ref()
+    let pending_count = applications.data.read().as_ref()
         .and_then(|d| d.as_ref())
         .map(|v| v.iter().filter(|a| a.status == "pending").count())
         .unwrap_or(0);
-    let team_count = teams.read().as_ref()
+    let team_count = teams.data.read().as_ref()
         .and_then(|d| d.as_ref()).map(|v| v.len()).unwrap_or(0);
-    let event_count = events.read().as_ref()
+    let event_count = events.data.read().as_ref()
         .and_then(|d| d.as_ref()).map(|v| v.len()).unwrap_or(0);
-    let announcement_count = announcements.read().as_ref()
+    let announcement_count = announcements.data.read().as_ref()
         .and_then(|d| d.as_ref()).map(|v| v.len()).unwrap_or(0);
 
     rsx! {

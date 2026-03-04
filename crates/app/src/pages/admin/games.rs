@@ -3,10 +3,11 @@ use dioxus::prelude::*;
 use scuffed_api_client::ApiClient;
 use scuffed_types::{Game, api::{CreateGameRequest, UpdateGameRequest}};
 use crate::components::{DataTable, FormModal, Toast, use_toast, ADMIN_SHARED_CSS};
+use crate::hooks::use_api;
 
 #[component]
 pub fn AdminGames() -> Element {
-    let mut refresh = use_signal(|| 0u64);
+    let mut games = use_api::<Vec<Game>>("/api/games");
     let mut toast = use_toast();
 
     // Modal state
@@ -15,11 +16,6 @@ pub fn AdminGames() -> Element {
     let mut editing_id: Signal<Option<String>> = use_signal(|| None);
     let mut form_name = use_signal(String::new);
     let mut form_abbr = use_signal(String::new);
-
-    let games = use_resource(move || async move {
-        let _ = refresh();
-        ApiClient::web().fetch::<Vec<Game>>("/api/games").await.ok()
-    });
 
     let open_create = move |_| {
         editing_id.set(None);
@@ -67,7 +63,7 @@ pub fn AdminGames() -> Element {
                 Ok(_) => {
                     toast.show(Toast::success("Game saved."));
                     modal_open.set(false);
-                    refresh += 1;
+                    games.refresh += 1;
                 }
                 Err(e) => {
                     toast.show(Toast::error(format!("Failed to save game: {e}")));
@@ -85,7 +81,7 @@ pub fn AdminGames() -> Element {
         }
 
         {
-            let data = games.read();
+            let data = games.data.read();
             let data = data.as_ref().and_then(|d| d.as_ref());
             match data {
                 None => rsx! { p { class: "admin-loading", "Loading..." } },

@@ -4,6 +4,7 @@ use serde::Deserialize;
 use scuffed_api_client::ApiClient;
 use scuffed_types::api::CreateModerationRequest;
 use crate::components::{DataTable, FormModal, ConfirmDialog, StatusPill, Toast, use_toast, ADMIN_SHARED_CSS};
+use crate::hooks::use_api;
 
 // Local response types with API-enriched fields (joined names, computed fields).
 #[derive(Debug, Clone, Deserialize)]
@@ -38,17 +39,9 @@ struct Member {
 
 #[component]
 pub fn AdminModeration() -> Element {
-    let mut refresh = use_signal(|| 0u64);
+    let mut actions = use_api::<ModerationResponse>("/api/moderation?limit=50&offset=0");
+    let members = use_api::<Vec<Member>>("/api/members");
     let mut toast = use_toast();
-
-    let actions = use_resource(move || async move {
-        let _ = refresh();
-        ApiClient::web().fetch::<ModerationResponse>("/api/moderation?limit=50&offset=0").await.ok()
-    });
-
-    let members = use_resource(|| async {
-        ApiClient::web().fetch::<Vec<Member>>("/api/members").await.ok()
-    });
 
     // Create modal state
     let mut modal_open = use_signal(|| false);
@@ -94,7 +87,7 @@ pub fn AdminModeration() -> Element {
                 Ok(_) => {
                     toast.show(Toast::success("Moderation action created"));
                     modal_open.set(false);
-                    refresh += 1;
+                    actions.refresh += 1;
                 }
                 Err(e) => toast.show(Toast::error(format!("Failed to create: {e}"))),
             }
@@ -110,7 +103,7 @@ pub fn AdminModeration() -> Element {
             match ApiClient::web().patch_json_empty(&path, &serde_json::json!({})).await {
                 Ok(_) => {
                     toast.show(Toast::success("Action lifted"));
-                    refresh += 1;
+                    actions.refresh += 1;
                 }
                 Err(e) => toast.show(Toast::error(format!("Failed to lift: {e}"))),
             }
@@ -128,7 +121,7 @@ pub fn AdminModeration() -> Element {
         }
 
         {
-            let data = actions.read();
+            let data = actions.data.read();
             let data = data.as_ref().and_then(|d| d.as_ref());
             match data {
                 None => rsx! { p { class: "admin-loading", "Loading..." } },
@@ -186,7 +179,7 @@ pub fn AdminModeration() -> Element {
                     onchange: move |e| f_member_id.set(e.value()),
                     option { value: "", "-- Select Member --" }
                     {
-                        let data = members.read();
+                        let data = members.data.read();
                         let data = data.as_ref().and_then(|d| d.as_ref());
                         match data {
                             Some(list) => rsx! {

@@ -4,6 +4,7 @@ use serde::Deserialize;
 use scuffed_api_client::ApiClient;
 use scuffed_types::api::{CreateAnnouncementRequest, UpdateAnnouncementRequest};
 use crate::components::{DataTable, FormModal, ConfirmDialog, Toast, use_toast, ADMIN_SHARED_CSS};
+use crate::hooks::use_api;
 
 // Local response type (field name `is_pinned` differs from shared `pinned`).
 #[derive(Debug, Clone, Deserialize)]
@@ -17,7 +18,7 @@ struct Announcement {
 
 #[component]
 pub fn AdminAnnouncements() -> Element {
-    let mut refresh = use_signal(|| 0u64);
+    let mut announcements = use_api::<Vec<Announcement>>("/api/announcements");
     let mut toast = use_toast();
 
     // Form modal state
@@ -32,11 +33,6 @@ pub fn AdminAnnouncements() -> Element {
     let mut confirm_open = use_signal(|| false);
     let mut delete_id: Signal<Option<String>> = use_signal(|| None);
     let mut delete_title = use_signal(String::new);
-
-    let announcements = use_resource(move || async move {
-        let _ = refresh();
-        ApiClient::web().fetch::<Vec<Announcement>>("/api/announcements").await.ok()
-    });
 
     let open_create = move |_| {
         editing_id.set(None);
@@ -89,7 +85,7 @@ pub fn AdminAnnouncements() -> Element {
                 Ok(_) => {
                     toast.show(Toast::success("Announcement saved."));
                     modal_open.set(false);
-                    refresh += 1;
+                    announcements.refresh += 1;
                 }
                 Err(e) => {
                     toast.show(Toast::error(format!("Failed to save: {e}")));
@@ -106,7 +102,7 @@ pub fn AdminAnnouncements() -> Element {
             match client.delete(&format!("/api/announcements/{id}")).await {
                 Ok(_) => {
                     toast.show(Toast::success("Announcement deleted."));
-                    refresh += 1;
+                    announcements.refresh += 1;
                 }
                 Err(e) => {
                     toast.show(Toast::error(format!("Failed to delete: {e}")));
@@ -128,7 +124,7 @@ pub fn AdminAnnouncements() -> Element {
         }
 
         {
-            let data = announcements.read();
+            let data = announcements.data.read();
             let data = data.as_ref().and_then(|d| d.as_ref());
             match data {
                 None => rsx! { p { class: "admin-loading", "Loading..." } },

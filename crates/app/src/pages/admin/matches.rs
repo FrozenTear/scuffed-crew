@@ -4,6 +4,7 @@ use serde::Deserialize;
 use scuffed_api_client::ApiClient;
 use scuffed_types::api::MatchPayload;
 use crate::components::{DataTable, FormModal, Toast, use_toast, ADMIN_SHARED_CSS};
+use crate::hooks::{use_api, use_api_with};
 
 // Local response types with String-typed fields for display.
 #[derive(Debug, Clone, Deserialize)]
@@ -26,27 +27,16 @@ struct MatchResult {
 
 #[component]
 pub fn AdminMatches() -> Element {
-    let mut refresh = use_signal(|| 0u64);
+    let teams = use_api::<Vec<Team>>("/api/teams");
     let mut toast = use_toast();
 
     // Team selector
     let mut selected_team = use_signal(|| None::<String>);
 
-    let teams = use_resource(|| async {
-        ApiClient::web().fetch::<Vec<Team>>("/api/teams").await.ok()
-    });
-
-    let matches = use_resource(move || {
-        let team_id = selected_team().clone();
-        async move {
-            let _ = refresh();
-            match team_id {
-                Some(id) => {
-                    let path = format!("/api/teams/{id}/matches");
-                    ApiClient::web().fetch::<Vec<MatchResult>>(&path).await.ok()
-                }
-                None => None,
-            }
+    let mut matches = use_api_with::<Vec<MatchResult>>(move || {
+        match selected_team() {
+            Some(id) => format!("/api/teams/{id}/matches"),
+            None => String::new(),
         }
     });
 
@@ -130,7 +120,7 @@ pub fn AdminMatches() -> Element {
                 Ok(_) => {
                     toast.show(Toast::success("Match saved"));
                     modal_open.set(false);
-                    refresh += 1;
+                    matches.refresh += 1;
                 }
                 Err(e) => toast.show(Toast::error(format!("Failed to save: {e}"))),
             }
@@ -153,7 +143,7 @@ pub fn AdminMatches() -> Element {
                 },
                 option { value: "", "-- Select Team --" }
                 {
-                    let data = teams.read();
+                    let data = teams.data.read();
                     let data = data.as_ref().and_then(|d| d.as_ref());
                     match data {
                         Some(list) => rsx! {
@@ -174,7 +164,7 @@ pub fn AdminMatches() -> Element {
             p { class: "empty-state", "Select a team to view matches." }
         } else {
             {
-                let data = matches.read();
+                let data = matches.data.read();
                 let data = data.as_ref().and_then(|d| d.as_ref());
                 match data {
                     None => rsx! { p { class: "admin-loading", "Loading..." } },

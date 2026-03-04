@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use scuffed_api_client::ApiClient;
 use scuffed_types::{SiteSettings, Game};
 use crate::components::{Toast, use_toast};
+use crate::hooks::use_api;
 use crate::state::auth::use_auth;
 
 // Local minimal type for checking existing application status.
@@ -55,19 +56,9 @@ const APPLY_CSS: &str = r#"
 pub fn Apply() -> Element {
     let auth = use_auth();
 
-    let settings = use_resource(|| async {
-        ApiClient::web().fetch::<SiteSettings>("/api/settings").await.ok()
-    });
-
-    let games = use_resource(|| async {
-        ApiClient::web().fetch::<Vec<Game>>("/api/games").await.ok()
-    });
-
-    let mut app_refresh = use_signal(|| 0u64);
-    let my_app = use_resource(move || async move {
-        let _ = app_refresh();
-        ApiClient::web().fetch::<Option<Application>>("/api/applications/mine").await.ok().flatten()
-    });
+    let settings = use_api::<SiteSettings>("/api/settings");
+    let games = use_api::<Vec<Game>>("/api/games");
+    let mut my_app = use_api::<Option<Application>>("/api/applications/mine");
 
     let mut selected_games = use_signal(Vec::<String>::new);
     let mut message = use_signal(String::new);
@@ -80,7 +71,7 @@ pub fn Apply() -> Element {
 
             {
                 let loading = auth().loading;
-                let s = settings.read().as_ref().and_then(|s| s.as_ref()).cloned();
+                let s = settings.data.read().as_ref().and_then(|s| s.as_ref()).cloned();
 
                 if loading || s.is_none() {
                     rsx! { p { class: "apply-loading", "Loading..." } }
@@ -104,7 +95,7 @@ pub fn Apply() -> Element {
                                 }
                             }
                         }
-                    } else if let Some(app) = my_app.read().as_ref().and_then(|a| a.as_ref()) {
+                    } else if let Some(app) = my_app.data.read().as_ref().and_then(|a| a.as_ref()).and_then(|a| a.as_ref()) {
                         let status_class = format!("apply-status-pill {}", app.status);
                         let status_label = match app.status.as_str() {
                             "pending" => "Pending Review",
@@ -132,7 +123,7 @@ pub fn Apply() -> Element {
                             }
                         }
                     } else {
-                        let game_list = games.read().as_ref().and_then(|g| g.as_ref()).cloned().unwrap_or_default();
+                        let game_list = games.data.read().as_ref().and_then(|g| g.as_ref()).cloned().unwrap_or_default();
 
                         rsx! {
                             div { class: "apply-card",
@@ -200,7 +191,7 @@ pub fn Apply() -> Element {
                                                     Ok(_) => {
                                                         let mut toast = use_toast();
                                                         toast.show(Toast::success("Application submitted!"));
-                                                        app_refresh += 1;
+                                                        my_app.refresh += 1;
                                                     }
                                                     Err(e) => {
                                                         let mut toast = use_toast();

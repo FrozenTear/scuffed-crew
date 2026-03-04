@@ -4,6 +4,7 @@ use serde::Deserialize;
 use scuffed_api_client::ApiClient;
 use scuffed_types::api::PatchApplicationRequest;
 use crate::components::{DataTable, ConfirmDialog, StatusPill, Toast, use_toast, ADMIN_SHARED_CSS};
+use crate::hooks::use_api;
 
 // Local response type with API-enriched fields (user_display_name).
 #[derive(Debug, Clone, Deserialize)]
@@ -18,13 +19,8 @@ struct Application {
 
 #[component]
 pub fn AdminApplications() -> Element {
-    let mut refresh = use_signal(|| 0u64);
+    let mut applications = use_api::<Vec<Application>>("/api/applications");
     let mut toast = use_toast();
-
-    let applications = use_resource(move || async move {
-        let _ = refresh();
-        ApiClient::web().fetch::<Vec<Application>>("/api/applications").await.ok()
-    });
 
     // Reject dialog state
     let mut reject_id = use_signal(|| None::<String>);
@@ -40,7 +36,7 @@ pub fn AdminApplications() -> Element {
             match ApiClient::web().patch_json::<_, Application>(&path, &body).await {
                 Ok(_) => {
                     toast.show(Toast::success("Application accepted"));
-                    refresh += 1;
+                    applications.refresh += 1;
                 }
                 Err(e) => toast.show(Toast::error(format!("Failed to accept: {e}"))),
             }
@@ -61,7 +57,7 @@ pub fn AdminApplications() -> Element {
             match ApiClient::web().patch_json::<_, Application>(&path, &body).await {
                 Ok(_) => {
                     toast.show(Toast::success("Application rejected"));
-                    refresh += 1;
+                    applications.refresh += 1;
                 }
                 Err(e) => toast.show(Toast::error(format!("Failed to reject: {e}"))),
             }
@@ -74,7 +70,7 @@ pub fn AdminApplications() -> Element {
         h1 { "Applications" }
 
         {
-            let data = applications.read();
+            let data = applications.data.read();
             let data = data.as_ref().and_then(|d| d.as_ref());
             match data {
                 None => rsx! { p { class: "admin-loading", "Loading..." } },

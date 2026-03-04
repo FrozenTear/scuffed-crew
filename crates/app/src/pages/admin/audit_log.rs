@@ -1,8 +1,8 @@
 use dioxus::prelude::*;
 use serde::Deserialize;
 
-use scuffed_api_client::ApiClient;
 use crate::components::{DataTable, ADMIN_SHARED_CSS};
+use crate::hooks::use_api_with;
 
 #[derive(Debug, Clone, Deserialize)]
 struct AuditLogEntry {
@@ -30,11 +30,9 @@ const PAGE_SIZE: u64 = 50;
 pub fn AdminAuditLog() -> Element {
     let mut page = use_signal(|| 0u64);
 
-    let log_data = use_resource(move || async move {
-        let current_page = page();
-        let offset = current_page * PAGE_SIZE;
-        let url = format!("/api/audit-log?limit={PAGE_SIZE}&offset={offset}");
-        ApiClient::web().fetch::<AuditLogResponse>(&url).await.ok()
+    let log_data = use_api_with::<AuditLogResponse>(move || {
+        let offset = page() * PAGE_SIZE;
+        format!("/api/audit-log?limit={PAGE_SIZE}&offset={offset}")
     });
 
     let on_prev = move |_| {
@@ -44,7 +42,7 @@ pub fn AdminAuditLog() -> Element {
     };
 
     let on_next = {
-        let log_data = log_data.clone();
+        let log_data = log_data.data;
         move |_| {
             let data = log_data.read();
             if let Some(Some(resp)) = data.as_ref() {
@@ -64,7 +62,7 @@ pub fn AdminAuditLog() -> Element {
         }
 
         {
-            let data = log_data.read();
+            let data = log_data.data.read();
             let data = data.as_ref().and_then(|d| d.as_ref());
             match data {
                 None => rsx! { p { class: "admin-loading", "Loading..." } },
