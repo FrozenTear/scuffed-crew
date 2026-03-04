@@ -1,0 +1,41 @@
+[application]
+name = "scuffed-crew"
+default_platform = "web"
+asset_dir = "assets"
+
+[application.tools.dx]
+app = "crates/app"
+
+[web.app]
+title = "The Scuffed Crew"
+
+[web.watcher]
+reload_html = true
+watch_path = ["crates/app/src", "crates/types/src", "assets"]
+
+[web.resource]
+style = []
+script = []
+
+[web.resource.dev]
+style = []
+script = []
+
+[desktop]
+enable_default_menu_bar = false
+
+[desktop.window]
+title = "The Scuffed Crew"
+width = 1400
+height = 900
+resizable = true
+decorations = true
+
+[bundle]
+identifier = "gg.scuffedcrew.app"
+publisher = "The Scuffed Crew"
+icon = ["assets/icons/32x32.png", "assets/icons/128x128.png", "assets/icons/icon.ico"]
+resources = ["assets"]
+copyright = "The Scuffed Crew 2026"
+short_description = "The Scuffed Crew gaming community"
+long_description = "Community management and strategy planning for The Scuffed Crew gaming organization."

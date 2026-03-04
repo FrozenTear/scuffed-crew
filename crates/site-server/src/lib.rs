@@ -2,6 +2,7 @@ pub mod calendar;
 pub mod extractors;
 pub mod notifications;
 pub mod routes;
+pub mod seed;
 pub mod state;
 pub mod uploads;
 
@@ -285,12 +286,7 @@ pub fn create_router(state: AppState) -> Router {
         )
         // Serve uploaded files
         .nest_service("/uploads", ServeDir::new(state.upload_dir.clone()))
-        // Admin SPA (must be before public site fallback)
-        .nest_service(
-            "/admin",
-            ServeDir::new("dist/admin").fallback(ServeFile::new("dist/admin/index.html")),
-        )
-        // Static files from dist/, falling back to index.html for SPA routing
+        // Static files from dist/, falling back to index.html for SPA routing (Dioxus handles all routes)
         .fallback_service(ServeDir::new("dist").fallback(ServeFile::new("dist/index.html")))
         .layer(TraceLayer::new_for_http())
         .layer(cors)

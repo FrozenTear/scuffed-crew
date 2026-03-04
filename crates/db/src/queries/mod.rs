@@ -12,6 +12,7 @@ pub mod roster;
 pub mod rsvps;
 pub mod sessions;
 pub mod settings;
+pub mod strategies;
 pub mod teams;
 pub mod tournaments;
 pub mod users;

@@ -322,6 +322,31 @@ pub async fn run_migrations(client: &Surreal<Any>) -> DbResult<()> {
 
         DEFINE INDEX tm_tournament_idx ON tournament_match COLUMNS tournament_id;
         DEFINE INDEX tm_round_idx ON tournament_match COLUMNS round_id;
+
+        -- ================================================
+        -- Strategies (strategy planner documents)
+        -- ================================================
+        DEFINE TABLE strategy SCHEMAFULL;
+        DEFINE FIELD name ON strategy TYPE string;
+        DEFINE FIELD description ON strategy TYPE option<string>;
+        DEFINE FIELD map_id ON strategy TYPE string;
+        DEFINE FIELD sub_map_id ON strategy TYPE option<string>;
+        DEFINE FIELD game_mode ON strategy TYPE string;
+        DEFINE FIELD owner_id ON strategy TYPE string;
+        DEFINE FIELD team_id ON strategy TYPE option<string>;
+        DEFINE FIELD visibility ON strategy TYPE string DEFAULT 'private'
+            ASSERT $value IN ['private', 'unlisted', 'public'];
+        DEFINE FIELD elements ON strategy TYPE array DEFAULT [];
+        DEFINE FIELD elements.* ON strategy TYPE object FLEXIBLE;
+        DEFINE FIELD phases ON strategy TYPE array DEFAULT [];
+        DEFINE FIELD phases.* ON strategy TYPE object FLEXIBLE;
+        DEFINE FIELD coordinate_version ON strategy TYPE string DEFAULT 'v2';
+        DEFINE FIELD created_at ON strategy TYPE datetime DEFAULT time::now();
+        DEFINE FIELD updated_at ON strategy TYPE datetime DEFAULT time::now();
+
+        DEFINE INDEX strategy_owner_idx ON strategy COLUMNS owner_id;
+        DEFINE INDEX strategy_visibility_idx ON strategy COLUMNS visibility;
+        DEFINE INDEX strategy_map_idx ON strategy COLUMNS map_id;
     "#,
         )
         .await?

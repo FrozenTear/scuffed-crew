@@ -3,3 +3,6 @@
 target/
 .env
 dist/
+.dioxus/
+dist.old/
+.playwright-mcp/

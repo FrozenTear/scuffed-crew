@@ -1,0 +1,27 @@
+[package]
+name = "scuffed-api-client"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+scuffed-types = { path = "../types" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+# Web (WASM) client
+web-sys = { version = "0.3", features = [
+    "Headers", "Request", "RequestCredentials", "RequestInit",
+    "RequestMode", "Response", "Window",
+], optional = true }
+wasm-bindgen = { version = "0.2", optional = true }
+wasm-bindgen-futures = { version = "0.4", optional = true }
+js-sys = { version = "0.3", optional = true }
+
+# Native client
+reqwest = { workspace = true, optional = true }
+
+[features]
+default = ["web"]
+web = ["dep:web-sys", "dep:wasm-bindgen", "dep:wasm-bindgen-futures", "dep:js-sys"]
+native = ["dep:reqwest"]

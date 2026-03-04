@@ -1,3 +1,30 @@
 [workspace]
 resolver = "2"
-members = ["crates/auth", "crates/ui", "crates/site", "crates/site-server", "crates/db", "crates/admin"]
+members = [
+    # Existing Leptos crates (kept until Dioxus frontend is verified)
+    "crates/auth",
+    "crates/ui",
+    "crates/site",
+    "crates/site-server",
+    "crates/db",
+    "crates/admin",
+    # New Dioxus crates
+    "crates/types",
+    "crates/app",
+    "crates/server",
+    "crates/api-client",
+]
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4", "serde", "js"] }
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+thiserror = "2"
+dioxus = "0.7"
+axum = "0.8"
+axum-extra = { version = "0.10", features = ["cookie"] }
+tower-http = { version = "0.6", features = ["fs", "cors", "trace", "compression-br", "compression-gzip"] }
+reqwest = { version = "0.12", features = ["json"] }

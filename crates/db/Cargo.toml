@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 scuffed-auth = { path = "../auth", features = ["crypto"] }
+scuffed-types = { path = "../types" }
 surrealdb = { version = "3", features = ["kv-mem", "protocol-ws"] }
 surrealdb-types = "3"
 serde = { version = "1", features = ["derive"] }

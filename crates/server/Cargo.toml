@@ -1,0 +1,29 @@
+[package]
+name = "scuffed-server"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+# Reuse the existing server's router and state
+scuffed-site-server = { path = "../site-server" }
+scuffed-types = { path = "../types" }
+scuffed-auth = { path = "../auth", features = ["server"] }
+scuffed-db = { path = "../db" }
+
+axum = { workspace = true, features = ["ws"] }
+axum-extra = { workspace = true }
+tower-http = { workspace = true }
+tokio = { workspace = true }
+reqwest = { workspace = true }
+
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+thiserror = { workspace = true }
+
+dotenvy = "0.15"
+dashmap = "6"
+futures = "0.3"

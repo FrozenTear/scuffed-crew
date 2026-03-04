@@ -1,0 +1,23 @@
+mod home;
+mod members;
+mod member_profile;
+mod news;
+mod apply;
+mod tournaments;
+mod tournament;
+mod not_found;
+
+pub mod admin;
+pub mod strategy;
+
+pub use home::Home;
+pub use members::Members;
+pub use member_profile::MemberProfile;
+pub use news::News;
+pub use apply::Apply;
+pub use tournaments::Tournaments;
+pub use tournament::Tournament;
+pub use not_found::NotFound;
+
+pub use admin::*;
+pub use strategy::*;

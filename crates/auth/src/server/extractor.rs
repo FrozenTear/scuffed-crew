@@ -41,6 +41,15 @@ impl<S: HasAuth> std::ops::Deref for AuthUser<S> {
     }
 }
 
+fn unauthorized() -> (StatusCode, Json<ErrorResponse>) {
+    (
+        StatusCode::UNAUTHORIZED,
+        Json(ErrorResponse {
+            error: "Authentication required".into(),
+        }),
+    )
+}
+
 impl<S: HasAuth> FromRequestParts<S> for AuthUser<S> {
     type Rejection = (StatusCode, Json<ErrorResponse>);
 
@@ -48,23 +57,25 @@ impl<S: HasAuth> FromRequestParts<S> for AuthUser<S> {
         parts: &mut Parts,
         state: &S,
     ) -> Result<Self, Self::Rejection> {
-        let jar = CookieJar::from_request_parts(parts, state)
-            .await
-            .unwrap_or_default();
-
-        let config = state.session_config();
-        let token = jar
-            .get(&config.cookie_name)
-            .ok_or_else(|| {
-                (
-                    StatusCode::UNAUTHORIZED,
-                    Json(ErrorResponse {
-                        error: "Authentication required".into(),
-                    }),
-                )
-            })?
-            .value()
-            .to_string();
+        // Try bearer token first (for desktop/API clients)
+        let token = if let Some(auth_header) = parts.headers.get(axum::http::header::AUTHORIZATION) {
+            let header_str = auth_header.to_str().map_err(|_| unauthorized())?;
+            if let Some(bearer_token) = header_str.strip_prefix("Bearer ") {
+                bearer_token.to_string()
+            } else {
+                return Err(unauthorized());
+            }
+        } else {
+            // Fall back to session cookie
+            let jar = CookieJar::from_request_parts(parts, state)
+                .await
+                .unwrap_or_default();
+            let config = state.session_config();
+            jar.get(&config.cookie_name)
+                .ok_or_else(unauthorized)?
+                .value()
+                .to_string()
+        };
 
         let user = state
             .get_session_user(&token)
