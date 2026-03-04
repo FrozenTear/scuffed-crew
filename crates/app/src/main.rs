@@ -6,6 +6,7 @@ mod pages;
 mod routes;
 mod state;
 mod theme;
+mod hooks;
 
 use dioxus::prelude::*;
 
