@@ -7,6 +7,7 @@ pub struct ChangeRoleRequest {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ToggleActiveRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub is_active: Option<bool>,
 }
 
