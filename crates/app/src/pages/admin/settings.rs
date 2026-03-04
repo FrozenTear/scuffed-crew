@@ -2,7 +2,7 @@ use dioxus::prelude::*;
 
 use scuffed_api_client::ApiClient;
 use scuffed_types::{SiteSettings, api::UpdateSettingsRequest};
-use crate::components::{Toast, use_toast, ADMIN_SHARED_CSS};
+use crate::components::{Toast, use_toast};
 
 #[component]
 pub fn AdminSettings() -> Element {
@@ -55,7 +55,6 @@ pub fn AdminSettings() -> Element {
     };
 
     rsx! {
-        style { {ADMIN_SHARED_CSS} }
 
         div { class: "admin-toolbar",
             h1 { "Settings" }

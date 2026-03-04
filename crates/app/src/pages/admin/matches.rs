@@ -3,7 +3,7 @@ use serde::Deserialize;
 
 use scuffed_api_client::ApiClient;
 use scuffed_types::api::MatchPayload;
-use crate::components::{DataTable, FormModal, Toast, use_toast, ADMIN_SHARED_CSS};
+use crate::components::{DataTable, FormModal, Toast, use_toast};
 use crate::hooks::{use_api, use_api_with, ModalController};
 
 // Local response types with String-typed fields for display.
@@ -126,7 +126,6 @@ pub fn AdminMatches() -> Element {
     let modal_title = if modal.get_target().is_some() { "Edit Match" } else { "New Match" };
 
     rsx! {
-        style { {ADMIN_SHARED_CSS} }
 
         h1 { "Matches" }
 

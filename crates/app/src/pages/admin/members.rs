@@ -5,7 +5,6 @@ use scuffed_api_client::ApiClient;
 use scuffed_types::api::{ChangeRoleRequest, ToggleActiveRequest, CreateGameAccountRequest};
 use crate::components::{
     DataTable, FormModal, ConfirmDialog, StatusPill, RolePill, SummaryCard, Toast, use_toast,
-    ADMIN_SHARED_CSS,
 };
 use crate::hooks::{use_api, ModalController};
 
@@ -304,7 +303,6 @@ pub fn AdminMembers() -> Element {
     // --- Render ---
 
     rsx! {
-        style { {ADMIN_SHARED_CSS} }
 
         div { class: "admin-toolbar",
             h1 { "Members" }

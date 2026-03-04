@@ -119,6 +119,7 @@ pub fn AdminLayout() -> Element {
 
     rsx! {
         style { {ADMIN_CSS} }
+        style { {crate::styles::admin::CSS} }
         div { class: "admin-layout",
             aside { class: "admin-sidebar",
                 div { class: "brand",

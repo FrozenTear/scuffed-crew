@@ -3,7 +3,7 @@ use serde::Deserialize;
 
 use scuffed_api_client::ApiClient;
 use scuffed_types::api::CreateModerationRequest;
-use crate::components::{DataTable, FormModal, ConfirmDialog, StatusPill, Toast, use_toast, ADMIN_SHARED_CSS};
+use crate::components::{DataTable, FormModal, ConfirmDialog, StatusPill, Toast, use_toast};
 use crate::hooks::{use_api, ModalController};
 
 // Local response types with API-enriched fields (joined names, computed fields).
@@ -110,7 +110,6 @@ pub fn AdminModeration() -> Element {
     };
 
     rsx! {
-        style { {ADMIN_SHARED_CSS} }
 
         h1 { "Moderation" }
 

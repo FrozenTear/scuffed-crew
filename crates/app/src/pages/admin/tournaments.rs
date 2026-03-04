@@ -7,7 +7,7 @@ use scuffed_types::api::{
     CreateTournamentRequest, StatusChangeRequest, AddParticipantRequest, MatchReportRequest,
 };
 use crate::components::{
-    DataTable, FormModal, ConfirmDialog, StatusPill, Toast, use_toast, ADMIN_SHARED_CSS,
+    DataTable, FormModal, ConfirmDialog, StatusPill, Toast, use_toast,
 };
 use crate::hooks::{use_api, ModalController};
 
@@ -425,7 +425,6 @@ pub fn AdminTournaments() -> Element {
     // --- Render ---
 
     rsx! {
-        style { {ADMIN_SHARED_CSS} }
 
         if detail_id().is_some() {
             // ==================== DETAIL VIEW ====================

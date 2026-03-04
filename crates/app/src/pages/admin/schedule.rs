@@ -6,7 +6,7 @@ use scuffed_types::api::{
     CreateEventRequest, BatchAttendanceRequest,
     AttendanceEntry,
 };
-use crate::components::{DataTable, FormModal, ConfirmDialog, Toast, use_toast, ADMIN_SHARED_CSS};
+use crate::components::{DataTable, FormModal, ConfirmDialog, Toast, use_toast};
 use crate::hooks::{use_api, ModalController};
 
 // --- Types ---
@@ -206,7 +206,6 @@ pub fn AdminSchedule() -> Element {
     // --- Render ---
 
     rsx! {
-        style { {ADMIN_SHARED_CSS} }
 
         div { class: "admin-toolbar",
             h1 { "Schedule" }

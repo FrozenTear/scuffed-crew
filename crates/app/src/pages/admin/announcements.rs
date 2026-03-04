@@ -3,7 +3,7 @@ use serde::Deserialize;
 
 use scuffed_api_client::ApiClient;
 use scuffed_types::api::{CreateAnnouncementRequest, UpdateAnnouncementRequest};
-use crate::components::{DataTable, FormModal, ConfirmDialog, Toast, use_toast, ADMIN_SHARED_CSS};
+use crate::components::{DataTable, FormModal, ConfirmDialog, Toast, use_toast};
 use crate::hooks::{use_api, ModalController};
 
 // Local response type (field name `is_pinned` differs from shared `pinned`).
@@ -109,7 +109,6 @@ pub fn AdminAnnouncements() -> Element {
     };
 
     rsx! {
-        style { {ADMIN_SHARED_CSS} }
 
         div { class: "admin-toolbar",
             h1 { "Announcements" }

@@ -1,7 +1,7 @@
 use dioxus::prelude::*;
 use serde::Deserialize;
 
-use crate::components::{DataTable, ADMIN_SHARED_CSS};
+use crate::components::DataTable;
 use crate::hooks::use_api_with;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -55,7 +55,6 @@ pub fn AdminAuditLog() -> Element {
     };
 
     rsx! {
-        style { {ADMIN_SHARED_CSS} }
 
         div { class: "admin-toolbar",
             h1 { "Audit Log" }

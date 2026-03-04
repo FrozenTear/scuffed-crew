@@ -1,7 +1,7 @@
 use dioxus::prelude::*;
 use serde::Deserialize;
 
-use crate::components::{SummaryCard, ADMIN_SHARED_CSS};
+use crate::components::SummaryCard;
 use crate::hooks::use_api;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -57,7 +57,6 @@ pub fn AdminDashboard() -> Element {
         .and_then(|d| d.as_ref()).map(|v| v.len()).unwrap_or(0);
 
     rsx! {
-        style { {ADMIN_SHARED_CSS} }
 
         h1 { "Dashboard" }
         div { class: "summary-cards",

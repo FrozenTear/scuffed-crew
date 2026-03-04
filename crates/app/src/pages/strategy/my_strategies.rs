@@ -2,7 +2,7 @@ use dioxus::prelude::*;
 use serde::Deserialize;
 
 use scuffed_api_client::ApiClient;
-use crate::components::{ConfirmDialog, Toast, use_toast, ADMIN_SHARED_CSS};
+use crate::components::{ConfirmDialog, Toast, use_toast};
 use crate::hooks::use_api;
 use crate::routes::Route;
 use crate::state::auth::use_auth;
@@ -286,7 +286,7 @@ pub fn StrategyMy() -> Element {
 
     rsx! {
         style { {PAGE_CSS} }
-        style { {ADMIN_SHARED_CSS} }
+        style { {crate::styles::admin::CSS} }
 
         div { class: "my-strategies",
             // Header

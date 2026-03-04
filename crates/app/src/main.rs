@@ -5,6 +5,7 @@ mod layouts;
 mod pages;
 mod routes;
 mod state;
+mod styles;
 mod theme;
 mod hooks;
 
@@ -43,6 +44,7 @@ fn App() -> Element {
             href: "https://fonts.googleapis.com/css2?family=Bebas+Neue&family=DM+Mono:wght@400;500&family=Rajdhani:wght@400;500;600;700&family=Source+Sans+3:wght@300;400;500;600;700&display=swap",
         }
         style { {theme::THEME_CSS} }
+        style { {styles::common::CSS} }
         ToastProvider {
             Router::<Route> {}
         }

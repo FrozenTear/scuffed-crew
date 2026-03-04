@@ -3,7 +3,7 @@ use serde::Deserialize;
 
 use scuffed_api_client::ApiClient;
 use scuffed_types::api::PatchApplicationRequest;
-use crate::components::{DataTable, ConfirmDialog, StatusPill, Toast, use_toast, ADMIN_SHARED_CSS};
+use crate::components::{DataTable, ConfirmDialog, StatusPill, Toast, use_toast};
 use crate::hooks::{use_api, ModalController};
 
 // Local response type with API-enriched fields (user_display_name).
@@ -65,7 +65,6 @@ pub fn AdminApplications() -> Element {
     };
 
     rsx! {
-        style { {ADMIN_SHARED_CSS} }
 
         h1 { "Applications" }
 

@@ -2,7 +2,7 @@ use dioxus::prelude::*;
 
 use scuffed_api_client::ApiClient;
 use scuffed_types::{Game, api::{CreateGameRequest, UpdateGameRequest}};
-use crate::components::{DataTable, FormModal, Toast, use_toast, ADMIN_SHARED_CSS};
+use crate::components::{DataTable, FormModal, Toast, use_toast};
 use crate::hooks::{use_api, ModalController};
 
 #[component]
@@ -69,7 +69,6 @@ pub fn AdminGames() -> Element {
     };
 
     rsx! {
-        style { {ADMIN_SHARED_CSS} }
 
         div { class: "admin-toolbar",
             h1 { "Games" }
