@@ -8,8 +8,8 @@ pub fn tiles_at_zoom(full_width: u32, full_height: u32, tile_size: u32, zoom: u3
     let scale = 1u32 << (max_zoom - zoom.min(max_zoom));
     let scaled_w = full_width / scale;
     let scaled_h = full_height / scale;
-    let cols = (scaled_w + tile_size - 1) / tile_size;
-    let rows = (scaled_h + tile_size - 1) / tile_size;
+    let cols = scaled_w.div_ceil(tile_size);
+    let rows = scaled_h.div_ceil(tile_size);
     (cols.max(1), rows.max(1))
 }
 

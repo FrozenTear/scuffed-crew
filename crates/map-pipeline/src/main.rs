@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tracing_subscriber::EnvFilter;
 
 use scuffed_map_pipeline::config::MapConfig;
@@ -101,7 +101,7 @@ fn main() -> Result<()> {
     }
 }
 
-fn cmd_detect_floors(glb: &PathBuf, output: &PathBuf, name: &str, id: &str) -> Result<()> {
+fn cmd_detect_floors(glb: &Path, output: &Path, name: &str, id: &str) -> Result<()> {
     tracing::info!("Loading mesh from {:?}", glb);
     let triangles = mesh::load_glb(glb)?;
 
@@ -139,7 +139,7 @@ fn cmd_detect_floors(glb: &PathBuf, output: &PathBuf, name: &str, id: &str) -> R
     Ok(())
 }
 
-fn cmd_generate_tiles(config_path: &PathBuf, images_dir: &PathBuf, output_dir: &PathBuf) -> Result<()> {
+fn cmd_generate_tiles(config_path: &Path, images_dir: &Path, output_dir: &Path) -> Result<()> {
     let content = std::fs::read_to_string(config_path)
         .with_context(|| format!("Failed to read config: {:?}", config_path))?;
     let config = MapConfig::from_toml(&content)?;
@@ -205,10 +205,10 @@ fn cmd_generate_tiles(config_path: &PathBuf, images_dir: &PathBuf, output_dir: &
 }
 
 fn cmd_process_map(
-    glb: &PathBuf,
-    images_dir: &PathBuf,
-    output_dir: &PathBuf,
-    config_path: Option<&std::path::Path>,
+    glb: &Path,
+    images_dir: &Path,
+    output_dir: &Path,
+    config_path: Option<&Path>,
     name: &str,
     id: &str,
 ) -> Result<()> {
@@ -228,13 +228,13 @@ fn cmd_process_map(
     } {
         tracing::info!("No existing floor config — running detection");
         std::fs::create_dir_all(output_dir)?;
-        cmd_detect_floors(&glb.clone(), &config_path.to_path_buf(), name, id)?;
+        cmd_detect_floors(glb, config_path, name, id)?;
         println!("\nFloor detection complete. Review the config at {:?} then re-run to generate tiles.", config_path);
         return Ok(());
     }
 
     // Step 2: Generate tiles
-    cmd_generate_tiles(&config_path.to_path_buf(), images_dir, output_dir)?;
+    cmd_generate_tiles(config_path, images_dir, output_dir)?;
 
     Ok(())
 }

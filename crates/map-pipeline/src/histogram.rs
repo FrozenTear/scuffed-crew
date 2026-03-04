@@ -60,14 +60,14 @@ pub fn gaussian_smooth(signal: &[f64], sigma: f64, bin_width: f64) -> Vec<f64> {
     // Convolve
     let n = signal.len();
     let mut result = vec![0.0; n];
-    for i in 0..n {
+    for (i, out) in result.iter_mut().enumerate() {
         let mut sum = 0.0;
         for (j, &k) in kernel.iter().enumerate() {
             let idx = i as isize + j as isize - radius as isize;
             let idx = idx.clamp(0, n as isize - 1) as usize;
             sum += signal[idx] * k;
         }
-        result[i] = sum;
+        *out = sum;
     }
 
     result
@@ -84,14 +84,12 @@ pub fn find_valleys(signal: &[f64], peak_indices: &[usize]) -> Vec<(usize, f64)>
     let mut valleys = Vec::with_capacity(peak_indices.len() - 1);
     for window in peak_indices.windows(2) {
         let (start, end) = (window[0], window[1]);
-        let mut min_idx = start;
-        let mut min_val = f64::INFINITY;
-        for i in start..=end {
-            if signal[i] < min_val {
-                min_val = signal[i];
-                min_idx = i;
-            }
-        }
+        let (min_idx, min_val) = signal[start..=end]
+            .iter()
+            .enumerate()
+            .min_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+            .map(|(i, &v)| (start + i, v))
+            .unwrap();
         valleys.push((min_idx, min_val));
     }
 
