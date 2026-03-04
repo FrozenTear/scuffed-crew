@@ -5,4 +5,4 @@ target/
 dist/
 .dioxus/
 dist.old/
-.playwright-mcp/
+.worktrees/
