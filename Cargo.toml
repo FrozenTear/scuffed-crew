@@ -13,6 +13,8 @@ members = [
     "crates/app",
     "crates/server",
     "crates/api-client",
+    # Map pipeline tooling
+    "crates/map-pipeline",
 ]
 
 [workspace.dependencies]
