@@ -1,10 +1,12 @@
 use dioxus::prelude::*;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
 use scuffed_api_client::ApiClient;
+use scuffed_types::api::{CreateTeamRequest, AddRosterMemberRequest, UpdateRosterRoleRequest};
 use crate::components::{DataTable, FormModal, ConfirmDialog, Toast, use_toast, ADMIN_SHARED_CSS};
 
 // --- Types ---
+// Local response types with API-enriched fields (joined names).
 
 #[derive(Debug, Clone, Deserialize)]
 struct Team {
@@ -33,25 +35,6 @@ struct RosterEntry {
 struct Member {
     id: String,
     display_name: String,
-}
-
-#[derive(Serialize)]
-struct CreateTeam {
-    name: String,
-    game_id: String,
-    color: Option<String>,
-    division: Option<String>,
-}
-
-#[derive(Serialize)]
-struct AddRosterMember {
-    member_id: String,
-    team_role: String,
-}
-
-#[derive(Serialize)]
-struct UpdateRosterRole {
-    team_role: String,
 }
 
 const TEAM_ROLES: [&str; 4] = ["player", "captain", "coach", "sub"];
@@ -149,7 +132,7 @@ pub fn AdminTeams() -> Element {
         }
         let color_raw = form_color().trim().to_string();
         let div_raw = form_division().trim().to_string();
-        let body = CreateTeam {
+        let body = CreateTeamRequest {
             name,
             game_id,
             color: if color_raw.is_empty() { None } else { Some(color_raw) },
@@ -228,7 +211,7 @@ pub fn AdminTeams() -> Element {
         }
         if let Some(team) = roster_team() {
             let team_id = team.id.clone();
-            let body = AddRosterMember {
+            let body = AddRosterMemberRequest {
                 member_id,
                 team_role: add_member_role(),
             };
@@ -254,7 +237,7 @@ pub fn AdminTeams() -> Element {
     let on_role_change = move |(member_id, new_role): (String, String)| {
         if let Some(team) = roster_team() {
             let team_id = team.id.clone();
-            let body = UpdateRosterRole { team_role: new_role };
+            let body = UpdateRosterRoleRequest { team_role: new_role };
             spawn(async move {
                 let result = ApiClient::web()
                     .put_json::<_, RosterEntry>(

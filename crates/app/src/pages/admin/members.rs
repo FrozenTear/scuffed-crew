@@ -1,13 +1,16 @@
 use dioxus::prelude::*;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
 use scuffed_api_client::ApiClient;
+use scuffed_types::api::{ChangeRoleRequest, ToggleActiveRequest, CreateGameAccountRequest};
 use crate::components::{
     DataTable, FormModal, ConfirmDialog, StatusPill, RolePill, SummaryCard, Toast, use_toast,
     ADMIN_SHARED_CSS,
 };
 
 // --- Types ---
+// These local types have API-enriched fields (joined names, computed stats)
+// that differ from the base org types in scuffed_types.
 
 #[derive(Debug, Clone, Deserialize)]
 struct Member {
@@ -48,23 +51,6 @@ struct AttendanceStats {
     absent: u32,
     excused: u32,
     attendance_rate: f64,
-}
-
-#[derive(Serialize)]
-struct ChangeRole {
-    role: String,
-}
-
-#[derive(Serialize)]
-struct ToggleActive {
-    is_active: Option<bool>,
-}
-
-#[derive(Serialize)]
-struct CreateGameAccount {
-    game_id: String,
-    account_name: String,
-    account_id: Option<String>,
 }
 
 const ROLES: [&str; 4] = ["recruit", "member", "officer", "admin"];
@@ -156,7 +142,7 @@ pub fn AdminMembers() -> Element {
     let on_role_submit = move |_| {
         if let Some(member) = role_target() {
             let id = member.id.clone();
-            let body = ChangeRole { role: role_value() };
+            let body = ChangeRoleRequest { role: role_value() };
             role_submitting.set(true);
             spawn(async move {
                 let result = ApiClient::web()
@@ -187,7 +173,7 @@ pub fn AdminMembers() -> Element {
         if let Some(member) = toggle_target() {
             let id = member.id.clone();
             let new_active = !member.is_active;
-            let body = ToggleActive { is_active: Some(new_active) };
+            let body = ToggleActiveRequest { is_active: Some(new_active) };
             spawn(async move {
                 let result = ApiClient::web()
                     .put_json_empty(&format!("/api/members/{id}"), &body)
@@ -284,7 +270,7 @@ pub fn AdminMembers() -> Element {
             return;
         }
         let acct_id_raw = add_acct_id().trim().to_string();
-        let body = CreateGameAccount {
+        let body = CreateGameAccountRequest {
             game_id,
             account_name: acct_name,
             account_id: if acct_id_raw.is_empty() { None } else { Some(acct_id_raw) },

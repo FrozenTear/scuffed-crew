@@ -1,27 +1,8 @@
 use dioxus::prelude::*;
-use serde::{Deserialize, Serialize};
 
 use scuffed_api_client::ApiClient;
+use scuffed_types::{Game, api::{CreateGameRequest, UpdateGameRequest}};
 use crate::components::{DataTable, FormModal, Toast, use_toast, ADMIN_SHARED_CSS};
-
-#[derive(Debug, Clone, Deserialize)]
-struct Game {
-    id: String,
-    name: String,
-    abbreviation: Option<String>,
-}
-
-#[derive(Serialize)]
-struct CreateGame {
-    name: String,
-    abbreviation: Option<String>,
-}
-
-#[derive(Serialize)]
-struct UpdateGame {
-    name: Option<String>,
-    abbreviation: Option<Option<String>>,
-}
 
 #[component]
 pub fn AdminGames() -> Element {
@@ -71,13 +52,13 @@ pub fn AdminGames() -> Element {
         spawn(async move {
             let client = ApiClient::web();
             let result = if let Some(id) = edit_id {
-                let body = UpdateGame {
+                let body = UpdateGameRequest {
                     name: Some(name),
                     abbreviation: Some(abbr),
                 };
                 client.put_json::<_, Game>(&format!("/api/games/{id}"), &body).await
             } else {
-                let body = CreateGame { name, abbreviation: abbr };
+                let body = CreateGameRequest { name, abbreviation: abbr };
                 client.post_json::<_, Game>("/api/games", &body).await
             };
 

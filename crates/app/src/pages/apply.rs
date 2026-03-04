@@ -2,27 +2,18 @@ use dioxus::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use scuffed_api_client::ApiClient;
+use scuffed_types::{SiteSettings, Game};
 use crate::components::{Toast, use_toast};
 use crate::state::auth::use_auth;
 
-#[derive(Debug, Clone, Deserialize)]
-struct SiteSettings {
-    recruitment_open: bool,
-    recruitment_message: String,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct Game {
-    id: String,
-    name: String,
-}
-
+// Local minimal type for checking existing application status.
 #[derive(Debug, Clone, Deserialize)]
 struct Application {
     #[allow(dead_code)] id: String,
     status: String,
 }
 
+// Local request type (no shared equivalent for application submission).
 #[derive(Serialize)]
 struct ApplyBody {
     preferred_games: Vec<String>,

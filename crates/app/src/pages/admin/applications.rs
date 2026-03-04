@@ -1,9 +1,11 @@
 use dioxus::prelude::*;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
 use scuffed_api_client::ApiClient;
+use scuffed_types::api::PatchApplicationRequest;
 use crate::components::{DataTable, ConfirmDialog, StatusPill, Toast, use_toast, ADMIN_SHARED_CSS};
 
+// Local response type with API-enriched fields (user_display_name).
 #[derive(Debug, Clone, Deserialize)]
 struct Application {
     id: String,
@@ -12,12 +14,6 @@ struct Application {
     message: Option<String>,
     status: String,
     created_at: String,
-}
-
-#[derive(Serialize)]
-struct PatchApplication {
-    status: String,
-    review_notes: Option<String>,
 }
 
 #[component]
@@ -36,7 +32,7 @@ pub fn AdminApplications() -> Element {
 
     let accept = move |id: String| {
         spawn(async move {
-            let body = PatchApplication {
+            let body = PatchApplicationRequest {
                 status: "accepted".to_string(),
                 review_notes: None,
             };
@@ -57,7 +53,7 @@ pub fn AdminApplications() -> Element {
         reject_id.set(None);
         reject_notes.set(String::new());
         spawn(async move {
-            let body = PatchApplication {
+            let body = PatchApplicationRequest {
                 status: "rejected".to_string(),
                 review_notes: if notes.is_empty() { None } else { Some(notes) },
             };

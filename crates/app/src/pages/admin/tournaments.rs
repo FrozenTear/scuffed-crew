@@ -1,13 +1,17 @@
 use std::collections::HashMap;
 use dioxus::prelude::*;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
 use scuffed_api_client::ApiClient;
+use scuffed_types::api::{
+    CreateTournamentRequest, StatusChangeRequest, AddParticipantRequest, MatchReportRequest,
+};
 use crate::components::{
     DataTable, FormModal, ConfirmDialog, StatusPill, Toast, use_toast, ADMIN_SHARED_CSS,
 };
 
 // --- Types ---
+// Local response types with simplified/string-typed fields for display.
 
 #[derive(Debug, Clone, Deserialize)]
 struct Tournament {
@@ -64,33 +68,6 @@ struct BracketMatch {
 struct Member {
     id: String,
     display_name: String,
-}
-
-#[derive(Serialize)]
-struct CreateTournament {
-    name: String,
-    format: String,
-    game_id: Option<String>,
-    max_participants: Option<u32>,
-    starts_at: Option<String>,
-}
-
-#[derive(Serialize)]
-struct StatusChange {
-    status: String,
-}
-
-#[derive(Serialize)]
-struct AddParticipant {
-    member_id: String,
-}
-
-#[derive(Serialize)]
-struct MatchReport {
-    score_a: Option<u32>,
-    score_b: Option<u32>,
-    winner_id: Option<String>,
-    replay_codes: Option<String>,
 }
 
 const FORMATS: [&str; 4] = ["single_elim", "double_elim", "round_robin", "swiss"];
@@ -233,7 +210,7 @@ pub fn AdminTournaments() -> Element {
         } else {
             Some(format!("{date}T{time}"))
         };
-        let body = CreateTournament {
+        let body = CreateTournamentRequest {
             name,
             format: form_format(),
             game_id: form_game_id(),
@@ -289,7 +266,7 @@ pub fn AdminTournaments() -> Element {
     };
 
     let change_status = move |(id, new_status): (String, String)| {
-        let body = StatusChange { status: new_status.clone() };
+        let body = StatusChangeRequest { status: new_status.clone() };
         spawn(async move {
             let result = ApiClient::web()
                 .patch_json_empty(&format!("/api/tournaments/{id}"), &body)
@@ -333,7 +310,7 @@ pub fn AdminTournaments() -> Element {
             return;
         }
         if let Some(id) = detail_id() {
-            let body = AddParticipant { member_id: mid };
+            let body = AddParticipantRequest { member_id: mid };
             add_part_submitting.set(true);
             spawn(async move {
                 let result = ApiClient::web()
@@ -440,7 +417,7 @@ pub fn AdminTournaments() -> Element {
                 let sb = match_score_b().trim().to_string();
                 let winner_raw = match_winner().trim().to_string();
                 let replays_raw = match_replays().trim().to_string();
-                let body = MatchReport {
+                let body = MatchReportRequest {
                     score_a: if sa.is_empty() { None } else { sa.parse::<u32>().ok() },
                     score_b: if sb.is_empty() { None } else { sb.parse::<u32>().ok() },
                     winner_id: if winner_raw.is_empty() { None } else { Some(winner_raw) },

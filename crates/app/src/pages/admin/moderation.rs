@@ -1,9 +1,11 @@
 use dioxus::prelude::*;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
 use scuffed_api_client::ApiClient;
+use scuffed_types::api::CreateModerationRequest;
 use crate::components::{DataTable, FormModal, ConfirmDialog, StatusPill, Toast, use_toast, ADMIN_SHARED_CSS};
 
+// Local response types with API-enriched fields (joined names, computed fields).
 #[derive(Debug, Clone, Deserialize)]
 struct ModerationAction {
     id: String,
@@ -32,14 +34,6 @@ struct ModerationResponse {
 struct Member {
     id: String,
     display_name: String,
-}
-
-#[derive(Serialize)]
-struct CreateModeration {
-    member_id: String,
-    action_type: String,
-    reason: String,
-    expires_at: Option<String>,
 }
 
 #[component]
@@ -89,7 +83,7 @@ pub fn AdminModeration() -> Element {
         submitting.set(true);
         spawn(async move {
             let expires_at = if duration.is_empty() { None } else { Some(duration) };
-            let payload = CreateModeration {
+            let payload = CreateModerationRequest {
                 member_id,
                 action_type,
                 reason,

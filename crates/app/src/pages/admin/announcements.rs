@@ -1,9 +1,11 @@
 use dioxus::prelude::*;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
 use scuffed_api_client::ApiClient;
+use scuffed_types::api::{CreateAnnouncementRequest, UpdateAnnouncementRequest};
 use crate::components::{DataTable, FormModal, ConfirmDialog, Toast, use_toast, ADMIN_SHARED_CSS};
 
+// Local response type (field name `is_pinned` differs from shared `pinned`).
 #[derive(Debug, Clone, Deserialize)]
 struct Announcement {
     id: String,
@@ -11,20 +13,6 @@ struct Announcement {
     content: String,
     is_pinned: bool,
     created_at: String,
-}
-
-#[derive(Serialize)]
-struct CreateAnnouncement {
-    title: String,
-    content: String,
-    is_pinned: bool,
-}
-
-#[derive(Serialize)]
-struct UpdateAnnouncement {
-    title: String,
-    content: String,
-    is_pinned: bool,
 }
 
 #[component]
@@ -89,10 +77,10 @@ pub fn AdminAnnouncements() -> Element {
         spawn(async move {
             let client = ApiClient::web();
             let result = if let Some(id) = edit_id {
-                let body = UpdateAnnouncement { title, content, is_pinned };
+                let body = UpdateAnnouncementRequest { title, content, is_pinned };
                 client.put_json::<_, Announcement>(&format!("/api/announcements/{id}"), &body).await
             } else {
-                let body = CreateAnnouncement { title, content, is_pinned };
+                let body = CreateAnnouncementRequest { title, content, is_pinned };
                 client.post_json::<_, Announcement>("/api/announcements", &body).await
             };
 

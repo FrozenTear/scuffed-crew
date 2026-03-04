@@ -1,10 +1,15 @@
 use dioxus::prelude::*;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
 use scuffed_api_client::ApiClient;
+use scuffed_types::api::{
+    CreateEventRequest, BatchAttendanceRequest,
+    AttendanceEntry,
+};
 use crate::components::{DataTable, FormModal, ConfirmDialog, Toast, use_toast, ADMIN_SHARED_CSS};
 
 // --- Types ---
+// Local response types with API-enriched fields (joined names).
 
 #[derive(Debug, Clone, Deserialize)]
 struct Event {
@@ -28,28 +33,6 @@ struct Team {
 struct Member {
     id: String,
     display_name: String,
-}
-
-#[derive(Serialize)]
-struct CreateEvent {
-    title: String,
-    day_of_week: u8,
-    time: String,
-    timezone: String,
-    is_recurring: bool,
-    team_id: Option<String>,
-}
-
-#[derive(Serialize)]
-struct AttendancePayload {
-    occurrence_date: String,
-    entries: Vec<AttendanceEntry>,
-}
-
-#[derive(Clone, Serialize)]
-struct AttendanceEntry {
-    member_id: String,
-    status: String,
 }
 
 const DAYS: [&str; 7] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
@@ -129,7 +112,7 @@ pub fn AdminSchedule() -> Element {
         if title.is_empty() {
             return;
         }
-        let body = CreateEvent {
+        let body = CreateEventRequest {
             title,
             day_of_week: form_day(),
             time: form_time().trim().to_string(),
@@ -218,7 +201,7 @@ pub fn AdminSchedule() -> Element {
 
     let on_att_submit = move |_| {
         if let Some(evt) = att_event() {
-            let payload = AttendancePayload {
+            let payload = BatchAttendanceRequest {
                 occurrence_date: att_date(),
                 entries: att_entries(),
             };

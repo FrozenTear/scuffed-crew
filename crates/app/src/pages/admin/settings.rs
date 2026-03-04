@@ -1,26 +1,8 @@
 use dioxus::prelude::*;
-use serde::{Deserialize, Serialize};
 
 use scuffed_api_client::ApiClient;
+use scuffed_types::{SiteSettings, api::UpdateSettingsRequest};
 use crate::components::{Toast, use_toast, ADMIN_SHARED_CSS};
-
-#[derive(Debug, Clone, Deserialize)]
-struct SiteSettings {
-    org_name: String,
-    site_description: String,
-    recruitment_open: bool,
-    recruitment_message: String,
-    min_age: u32,
-}
-
-#[derive(Serialize)]
-struct UpdateSettings {
-    org_name: Option<String>,
-    site_description: Option<String>,
-    recruitment_open: Option<bool>,
-    recruitment_message: Option<String>,
-    min_age: Option<u32>,
-}
 
 #[component]
 pub fn AdminSettings() -> Element {
@@ -49,7 +31,7 @@ pub fn AdminSettings() -> Element {
 
     let on_save = move |_| {
         let age: u32 = min_age().trim().parse().unwrap_or(16);
-        let body = UpdateSettings {
+        let body = UpdateSettingsRequest {
             org_name: Some(org_name().trim().to_string()),
             site_description: Some(site_description().trim().to_string()),
             recruitment_open: Some(recruitment_open()),

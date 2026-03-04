@@ -1,9 +1,11 @@
 use dioxus::prelude::*;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
 use scuffed_api_client::ApiClient;
+use scuffed_types::api::MatchPayload;
 use crate::components::{DataTable, FormModal, Toast, use_toast, ADMIN_SHARED_CSS};
 
+// Local response types with String-typed fields for display.
 #[derive(Debug, Clone, Deserialize)]
 struct Team {
     id: String,
@@ -13,18 +15,6 @@ struct Team {
 #[derive(Debug, Clone, Deserialize)]
 struct MatchResult {
     id: String,
-    opponent: String,
-    score_us: u32,
-    score_them: u32,
-    map_name: Option<String>,
-    match_type: String,
-    played_at: String,
-    notes: Option<String>,
-}
-
-#[derive(Serialize)]
-struct MatchPayload {
-    team_id: String,
     opponent: String,
     score_us: u32,
     score_them: u32,
