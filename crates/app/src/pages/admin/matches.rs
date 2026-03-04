@@ -4,7 +4,7 @@ use serde::Deserialize;
 use scuffed_api_client::ApiClient;
 use scuffed_types::api::MatchPayload;
 use crate::components::{DataTable, FormModal, Toast, use_toast, ADMIN_SHARED_CSS};
-use crate::hooks::{use_api, use_api_with};
+use crate::hooks::{use_api, use_api_with, ModalController};
 
 // Local response types with String-typed fields for display.
 #[derive(Debug, Clone, Deserialize)]
@@ -41,9 +41,7 @@ pub fn AdminMatches() -> Element {
     });
 
     // Form modal state
-    let mut modal_open = use_signal(|| false);
-    let mut editing_id = use_signal(|| None::<String>);
-    let mut submitting = use_signal(|| false);
+    let mut modal = ModalController::<String>::new();
 
     // Form fields
     let mut f_opponent = use_signal(String::new);
@@ -55,7 +53,6 @@ pub fn AdminMatches() -> Element {
     let mut f_notes = use_signal(String::new);
 
     let open_create = move |_| {
-        editing_id.set(None);
         f_opponent.set(String::new());
         f_score_us.set("0".to_string());
         f_score_them.set("0".to_string());
@@ -63,11 +60,10 @@ pub fn AdminMatches() -> Element {
         f_match_type.set("scrim".to_string());
         f_played_at.set(String::new());
         f_notes.set(String::new());
-        modal_open.set(true);
+        modal.show_empty();
     };
 
     let mut open_edit = move |m: MatchResult| {
-        editing_id.set(Some(m.id));
         f_opponent.set(m.opponent);
         f_score_us.set(m.score_us.to_string());
         f_score_them.set(m.score_them.to_string());
@@ -75,7 +71,7 @@ pub fn AdminMatches() -> Element {
         f_match_type.set(m.match_type);
         f_played_at.set(m.played_at.chars().take(10).collect::<String>());
         f_notes.set(m.notes.unwrap_or_default());
-        modal_open.set(true);
+        modal.show(m.id);
     };
 
     let on_submit = move |_| {
@@ -83,7 +79,7 @@ pub fn AdminMatches() -> Element {
             Some(id) => id,
             None => return,
         };
-        let edit_id = editing_id();
+        let edit_id = modal.get_target();
         let opponent = f_opponent().clone();
         let score_us: u32 = f_score_us().parse().unwrap_or(0);
         let score_them: u32 = f_score_them().parse().unwrap_or(0);
@@ -92,7 +88,7 @@ pub fn AdminMatches() -> Element {
         let played_at_val = f_played_at().clone();
         let notes_val = f_notes().clone();
 
-        submitting.set(true);
+        modal.start_submit();
         spawn(async move {
             let payload = MatchPayload {
                 team_id,
@@ -115,11 +111,11 @@ pub fn AdminMatches() -> Element {
                 }
             };
 
-            submitting.set(false);
+            modal.end_submit();
             match result {
                 Ok(_) => {
                     toast.show(Toast::success("Match saved"));
-                    modal_open.set(false);
+                    modal.close();
                     matches.refresh += 1;
                 }
                 Err(e) => toast.show(Toast::error(format!("Failed to save: {e}"))),
@@ -127,7 +123,7 @@ pub fn AdminMatches() -> Element {
         });
     };
 
-    let modal_title = if editing_id().is_some() { "Edit Match" } else { "New Match" };
+    let modal_title = if modal.get_target().is_some() { "Edit Match" } else { "New Match" };
 
     rsx! {
         style { {ADMIN_SHARED_CSS} }
@@ -207,9 +203,9 @@ pub fn AdminMatches() -> Element {
 
         FormModal {
             title: modal_title.to_string(),
-            open: modal_open(),
-            submitting: submitting(),
-            on_close: move |_| modal_open.set(false),
+            open: modal.is_open(),
+            submitting: modal.is_submitting(),
+            on_close: move |_| modal.close(),
             on_submit: on_submit,
 
             div { class: "form-field",

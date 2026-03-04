@@ -4,7 +4,7 @@ use serde::Deserialize;
 use scuffed_api_client::ApiClient;
 use scuffed_types::api::{CreateTeamRequest, AddRosterMemberRequest, UpdateRosterRoleRequest};
 use crate::components::{DataTable, FormModal, ConfirmDialog, Toast, use_toast, ADMIN_SHARED_CSS};
-use crate::hooks::use_api;
+use crate::hooks::{use_api, ModalController};
 
 // --- Types ---
 // Local response types with API-enriched fields (joined names).
@@ -48,21 +48,17 @@ pub fn AdminTeams() -> Element {
     let mut toast = use_toast();
 
     // Team form state
-    let mut modal_open = use_signal(|| false);
-    let mut submitting = use_signal(|| false);
-    let mut editing_id: Signal<Option<String>> = use_signal(|| None);
+    let mut modal = ModalController::<String>::new();
     let mut form_name = use_signal(String::new);
     let mut form_game_id = use_signal(String::new);
     let mut form_color = use_signal(String::new);
     let mut form_division = use_signal(String::new);
 
     // Delete confirm state
-    let mut delete_open = use_signal(|| false);
-    let mut delete_target: Signal<Option<Team>> = use_signal(|| None);
+    let mut delete_modal = ModalController::<Team>::new();
 
     // Roster modal state
-    let mut roster_open = use_signal(|| false);
-    let mut roster_team: Signal<Option<Team>> = use_signal(|| None);
+    let mut roster_modal = ModalController::<Team>::new();
     let mut roster_data: Signal<Vec<RosterEntry>> = use_signal(Vec::new);
     let mut roster_refresh = use_signal(|| 0u64);
 
@@ -72,13 +68,12 @@ pub fn AdminTeams() -> Element {
     let mut add_submitting = use_signal(|| false);
 
     // Remove member confirm
-    let mut remove_open = use_signal(|| false);
-    let mut remove_target: Signal<Option<RosterEntry>> = use_signal(|| None);
+    let mut remove_modal = ModalController::<RosterEntry>::new();
 
     // Fetch roster when team selected
     let _roster_loader = use_resource(move || async move {
         let _ = roster_refresh();
-        if let Some(team) = roster_team() {
+        if let Some(team) = roster_modal.get_target() {
             if let Ok(entries) = ApiClient::web()
                 .fetch::<Vec<RosterEntry>>(&format!("/api/teams/{}/roster", team.id))
                 .await
@@ -91,24 +86,22 @@ pub fn AdminTeams() -> Element {
     // --- Team CRUD handlers ---
 
     let open_create = move |_| {
-        editing_id.set(None);
         form_name.set(String::new());
         form_game_id.set(String::new());
         form_color.set(String::new());
         form_division.set(String::new());
-        modal_open.set(true);
+        modal.show_empty();
     };
 
     let mut open_edit = move |team: Team| {
-        editing_id.set(Some(team.id));
         form_name.set(team.name);
         form_game_id.set(team.game_id);
         form_color.set(team.color.unwrap_or_default());
         form_division.set(team.division.unwrap_or_default());
-        modal_open.set(true);
+        modal.show(team.id);
     };
 
-    let on_close = move |_| modal_open.set(false);
+    let on_close = move |_| modal.close();
 
     let on_submit = move |_| {
         let name = form_name().trim().to_string();
@@ -125,8 +118,8 @@ pub fn AdminTeams() -> Element {
             color: if color_raw.is_empty() { None } else { Some(color_raw) },
             division: if div_raw.is_empty() { None } else { Some(div_raw) },
         };
-        let edit_id = editing_id();
-        submitting.set(true);
+        let edit_id = modal.get_target();
+        modal.start_submit();
         spawn(async move {
             let client = ApiClient::web();
             let result = if let Some(id) = edit_id {
@@ -134,11 +127,11 @@ pub fn AdminTeams() -> Element {
             } else {
                 client.post_json::<_, Team>("/api/teams", &body).await
             };
-            submitting.set(false);
+            modal.end_submit();
             match result {
                 Ok(_) => {
                     toast.show(Toast::success("Team saved."));
-                    modal_open.set(false);
+                    modal.close();
                     teams.refresh += 1;
                     games.refresh += 1;
                     members.refresh += 1;
@@ -151,19 +144,17 @@ pub fn AdminTeams() -> Element {
     // --- Delete handlers ---
 
     let mut open_delete = move |team: Team| {
-        delete_target.set(Some(team));
-        delete_open.set(true);
+        delete_modal.show(team);
     };
 
     let on_delete_confirm = move |_| {
-        if let Some(team) = delete_target() {
+        if let Some(team) = delete_modal.get_target() {
             let id = team.id.clone();
+            delete_modal.close();
             spawn(async move {
                 match ApiClient::web().delete(&format!("/api/teams/{id}")).await {
                     Ok(_) => {
                         toast.show(Toast::success("Team deleted."));
-                        delete_open.set(false);
-                        delete_target.set(None);
                         teams.refresh += 1;
                         games.refresh += 1;
                         members.refresh += 1;
@@ -175,24 +166,21 @@ pub fn AdminTeams() -> Element {
     };
 
     let on_delete_cancel = move |_| {
-        delete_open.set(false);
-        delete_target.set(None);
+        delete_modal.close();
     };
 
     // --- Roster handlers ---
 
     let mut open_roster = move |team: Team| {
-        roster_team.set(Some(team));
         roster_data.set(Vec::new());
         add_member_id.set(String::new());
         add_member_role.set("player".to_string());
         roster_refresh += 1;
-        roster_open.set(true);
+        roster_modal.show(team);
     };
 
     let mut on_roster_close = move |_| {
-        roster_open.set(false);
-        roster_team.set(None);
+        roster_modal.close();
     };
 
     let on_add_member = move |_| {
@@ -200,7 +188,7 @@ pub fn AdminTeams() -> Element {
         if member_id.is_empty() {
             return;
         }
-        if let Some(team) = roster_team() {
+        if let Some(team) = roster_modal.get_target() {
             let team_id = team.id.clone();
             let body = AddRosterMemberRequest {
                 member_id,
@@ -226,7 +214,7 @@ pub fn AdminTeams() -> Element {
     };
 
     let on_role_change = move |(member_id, new_role): (String, String)| {
-        if let Some(team) = roster_team() {
+        if let Some(team) = roster_modal.get_target() {
             let team_id = team.id.clone();
             let body = UpdateRosterRoleRequest { team_role: new_role };
             spawn(async move {
@@ -248,15 +236,15 @@ pub fn AdminTeams() -> Element {
     };
 
     let mut open_remove = move |entry: RosterEntry| {
-        remove_target.set(Some(entry));
-        remove_open.set(true);
+        remove_modal.show(entry);
     };
 
     let on_remove_confirm = move |_| {
-        if let Some(entry) = remove_target() {
-            if let Some(team) = roster_team() {
+        if let Some(entry) = remove_modal.get_target() {
+            if let Some(team) = roster_modal.get_target() {
                 let team_id = team.id.clone();
                 let member_id = entry.member_id.clone();
+                remove_modal.close();
                 spawn(async move {
                     match ApiClient::web()
                         .delete(&format!("/api/teams/{team_id}/roster/{member_id}"))
@@ -264,8 +252,6 @@ pub fn AdminTeams() -> Element {
                     {
                         Ok(_) => {
                             toast.show(Toast::success("Member removed from roster."));
-                            remove_open.set(false);
-                            remove_target.set(None);
                             roster_refresh += 1;
                         }
                         Err(e) => toast.show(Toast::error(format!("Remove failed: {e}"))),
@@ -276,8 +262,7 @@ pub fn AdminTeams() -> Element {
     };
 
     let on_remove_cancel = move |_| {
-        remove_open.set(false);
-        remove_target.set(None);
+        remove_modal.close();
     };
 
     // --- Render ---
@@ -352,9 +337,9 @@ pub fn AdminTeams() -> Element {
 
         // Create/Edit Team modal
         FormModal {
-            title: if editing_id().is_some() { "Edit Team".to_string() } else { "Add Team".to_string() },
-            open: modal_open(),
-            submitting: submitting(),
+            title: if modal.get_target().is_some() { "Edit Team".to_string() } else { "Add Team".to_string() },
+            open: modal.is_open(),
+            submitting: modal.is_submitting(),
             on_close: on_close,
             on_submit: on_submit,
 
@@ -415,16 +400,16 @@ pub fn AdminTeams() -> Element {
             title: "Delete Team".to_string(),
             message: format!(
                 "Are you sure you want to delete \"{}\"? All roster data will be lost.",
-                delete_target().map(|t| t.name).unwrap_or_default()
+                delete_modal.get_target().map(|t| t.name).unwrap_or_default()
             ),
-            open: delete_open(),
+            open: delete_modal.is_open(),
             danger: true,
             on_confirm: on_delete_confirm,
             on_cancel: on_delete_cancel,
         }
 
         // Roster modal (wide)
-        if roster_open() {
+        if roster_modal.is_open() {
             div {
                 class: "form-modal-overlay",
                 onclick: move |_| on_roster_close(()),
@@ -434,7 +419,7 @@ pub fn AdminTeams() -> Element {
                     onclick: move |e| e.stop_propagation(),
 
                     div { class: "form-modal-header",
-                        "Roster: {roster_team().map(|t| t.name).unwrap_or_default()}"
+                        "Roster: {roster_modal.get_target().map(|t| t.name).unwrap_or_default()}"
                     }
 
                     div { class: "form-modal-body",
@@ -546,9 +531,9 @@ pub fn AdminTeams() -> Element {
             title: "Remove from Roster".to_string(),
             message: format!(
                 "Remove \"{}\" from this team's roster?",
-                remove_target().map(|e| e.member_name).unwrap_or_default()
+                remove_modal.get_target().map(|e| e.member_name).unwrap_or_default()
             ),
-            open: remove_open(),
+            open: remove_modal.is_open(),
             danger: true,
             on_confirm: on_remove_confirm,
             on_cancel: on_remove_cancel,

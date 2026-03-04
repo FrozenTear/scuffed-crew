@@ -7,7 +7,7 @@ use crate::components::{
     DataTable, FormModal, ConfirmDialog, StatusPill, RolePill, SummaryCard, Toast, use_toast,
     ADMIN_SHARED_CSS,
 };
-use crate::hooks::use_api;
+use crate::hooks::{use_api, ModalController};
 
 // --- Types ---
 // These local types have API-enriched fields (joined names, computed stats)
@@ -63,30 +63,24 @@ pub fn AdminMembers() -> Element {
     let mut toast = use_toast();
 
     // Role change modal
-    let mut role_open = use_signal(|| false);
-    let mut role_target: Signal<Option<Member>> = use_signal(|| None);
+    let mut role_modal = ModalController::<Member>::new();
     let mut role_value = use_signal(String::new);
-    let mut role_submitting = use_signal(|| false);
 
     // Toggle active confirm
-    let mut toggle_open = use_signal(|| false);
-    let mut toggle_target: Signal<Option<Member>> = use_signal(|| None);
+    let mut toggle_modal = ModalController::<Member>::new();
 
     // Mod history modal
-    let mut mod_open = use_signal(|| false);
-    let mut mod_target: Signal<Option<Member>> = use_signal(|| None);
+    let mut mod_modal = ModalController::<Member>::new();
     let mut mod_data: Signal<Vec<ModerationAction>> = use_signal(Vec::new);
     let mut mod_loading = use_signal(|| false);
 
     // Attendance stats modal
-    let mut stats_open = use_signal(|| false);
-    let mut stats_target: Signal<Option<Member>> = use_signal(|| None);
+    let mut stats_modal = ModalController::<Member>::new();
     let mut stats_data: Signal<Option<AttendanceStats>> = use_signal(|| None);
     let mut stats_loading = use_signal(|| false);
 
     // Game accounts modal
-    let mut accts_open = use_signal(|| false);
-    let mut accts_target: Signal<Option<Member>> = use_signal(|| None);
+    let mut accts_modal = ModalController::<Member>::new();
     let mut accts_data: Signal<Vec<GameAccount>> = use_signal(Vec::new);
     let mut accts_refresh = use_signal(|| 0u64);
     let mut accts_loading = use_signal(|| false);
@@ -98,14 +92,13 @@ pub fn AdminMembers() -> Element {
     let mut add_acct_submitting = use_signal(|| false);
 
     // Delete game account confirm
-    let mut del_acct_open = use_signal(|| false);
-    let mut del_acct_target: Signal<Option<GameAccount>> = use_signal(|| None);
+    let mut del_acct_modal = ModalController::<GameAccount>::new();
 
     // --- Fetch helpers for sub-modals ---
 
     let _accts_loader = use_resource(move || async move {
         let _ = accts_refresh();
-        if let Some(member) = accts_target() {
+        if let Some(member) = accts_modal.get_target() {
             accts_loading.set(true);
             if let Ok(list) = ApiClient::web()
                 .fetch::<Vec<GameAccount>>(&format!("/api/members/{}/game-accounts", member.id))
@@ -121,30 +114,27 @@ pub fn AdminMembers() -> Element {
 
     let mut open_role = move |member: Member| {
         role_value.set(member.org_role.clone());
-        role_target.set(Some(member));
-        role_open.set(true);
+        role_modal.show(member);
     };
 
     let on_role_close = move |_| {
-        role_open.set(false);
-        role_target.set(None);
+        role_modal.close();
     };
 
     let on_role_submit = move |_| {
-        if let Some(member) = role_target() {
+        if let Some(member) = role_modal.get_target() {
             let id = member.id.clone();
             let body = ChangeRoleRequest { role: role_value() };
-            role_submitting.set(true);
+            role_modal.start_submit();
             spawn(async move {
                 let result = ApiClient::web()
                     .patch_json_empty(&format!("/api/members/{id}/role"), &body)
                     .await;
-                role_submitting.set(false);
+                role_modal.end_submit();
                 match result {
                     Ok(_) => {
                         toast.show(Toast::success("Role updated."));
-                        role_open.set(false);
-                        role_target.set(None);
+                        role_modal.close();
                         members.refresh += 1;
                         games.refresh += 1;
                     }
@@ -157,15 +147,15 @@ pub fn AdminMembers() -> Element {
     // --- Toggle active handlers ---
 
     let mut open_toggle = move |member: Member| {
-        toggle_target.set(Some(member));
-        toggle_open.set(true);
+        toggle_modal.show(member);
     };
 
     let on_toggle_confirm = move |_| {
-        if let Some(member) = toggle_target() {
+        if let Some(member) = toggle_modal.get_target() {
             let id = member.id.clone();
             let new_active = !member.is_active;
             let body = ToggleActiveRequest { is_active: Some(new_active) };
+            toggle_modal.close();
             spawn(async move {
                 let result = ApiClient::web()
                     .put_json_empty(&format!("/api/members/{id}"), &body)
@@ -174,8 +164,6 @@ pub fn AdminMembers() -> Element {
                     Ok(_) => {
                         let action = if new_active { "activated" } else { "deactivated" };
                         toast.show(Toast::success(format!("Member {action}.")));
-                        toggle_open.set(false);
-                        toggle_target.set(None);
                         members.refresh += 1;
                         games.refresh += 1;
                     }
@@ -186,18 +174,16 @@ pub fn AdminMembers() -> Element {
     };
 
     let on_toggle_cancel = move |_| {
-        toggle_open.set(false);
-        toggle_target.set(None);
+        toggle_modal.close();
     };
 
     // --- Mod history handlers ---
 
     let mut open_mod_history = move |member: Member| {
-        mod_target.set(Some(member.clone()));
         mod_data.set(Vec::new());
         mod_loading.set(true);
-        mod_open.set(true);
         let mid = member.id.clone();
+        mod_modal.show(member);
         spawn(async move {
             if let Ok(list) = ApiClient::web()
                 .fetch::<Vec<ModerationAction>>(&format!("/api/members/{mid}/moderation"))
@@ -210,18 +196,16 @@ pub fn AdminMembers() -> Element {
     };
 
     let mut on_mod_close = move |_| {
-        mod_open.set(false);
-        mod_target.set(None);
+        mod_modal.close();
     };
 
     // --- Stats handlers ---
 
     let mut open_stats = move |member: Member| {
-        stats_target.set(Some(member.clone()));
         stats_data.set(None);
         stats_loading.set(true);
-        stats_open.set(true);
         let mid = member.id.clone();
+        stats_modal.show(member);
         spawn(async move {
             if let Ok(data) = ApiClient::web()
                 .fetch::<AttendanceStats>(&format!("/api/members/{mid}/attendance/stats"))
@@ -234,25 +218,22 @@ pub fn AdminMembers() -> Element {
     };
 
     let mut on_stats_close = move |_| {
-        stats_open.set(false);
-        stats_target.set(None);
+        stats_modal.close();
     };
 
     // --- Game accounts handlers ---
 
     let mut open_accounts = move |member: Member| {
-        accts_target.set(Some(member));
         accts_data.set(Vec::new());
         add_acct_game_id.set(String::new());
         add_acct_name.set(String::new());
         add_acct_id.set(String::new());
         accts_refresh += 1;
-        accts_open.set(true);
+        accts_modal.show(member);
     };
 
     let mut on_accts_close = move |_| {
-        accts_open.set(false);
-        accts_target.set(None);
+        accts_modal.close();
     };
 
     let on_add_acct = move |_| {
@@ -268,7 +249,7 @@ pub fn AdminMembers() -> Element {
             account_name: acct_name,
             account_id: if acct_id_raw.is_empty() { None } else { Some(acct_id_raw) },
         };
-        if let Some(member) = accts_target() {
+        if let Some(member) = accts_modal.get_target() {
             let mid = member.id.clone();
             add_acct_submitting.set(true);
             spawn(async move {
@@ -291,15 +272,15 @@ pub fn AdminMembers() -> Element {
     };
 
     let mut open_del_acct = move |acct: GameAccount| {
-        del_acct_target.set(Some(acct));
-        del_acct_open.set(true);
+        del_acct_modal.show(acct);
     };
 
     let on_del_acct_confirm = move |_| {
-        if let Some(acct) = del_acct_target() {
-            if let Some(member) = accts_target() {
+        if let Some(acct) = del_acct_modal.get_target() {
+            if let Some(member) = accts_modal.get_target() {
                 let mid = member.id.clone();
                 let aid = acct.id.clone();
+                del_acct_modal.close();
                 spawn(async move {
                     match ApiClient::web()
                         .delete(&format!("/api/members/{mid}/game-accounts/{aid}"))
@@ -307,8 +288,6 @@ pub fn AdminMembers() -> Element {
                     {
                         Ok(_) => {
                             toast.show(Toast::success("Game account removed."));
-                            del_acct_open.set(false);
-                            del_acct_target.set(None);
                             accts_refresh += 1;
                         }
                         Err(e) => toast.show(Toast::error(format!("Delete failed: {e}"))),
@@ -319,8 +298,7 @@ pub fn AdminMembers() -> Element {
     };
 
     let on_del_acct_cancel = move |_| {
-        del_acct_open.set(false);
-        del_acct_target.set(None);
+        del_acct_modal.close();
     };
 
     // --- Render ---
@@ -400,10 +378,10 @@ pub fn AdminMembers() -> Element {
         FormModal {
             title: format!(
                 "Change Role: {}",
-                role_target().map(|m| m.display_name).unwrap_or_default()
+                role_modal.get_target().map(|m| m.display_name).unwrap_or_default()
             ),
-            open: role_open(),
-            submitting: role_submitting(),
+            open: role_modal.is_open(),
+            submitting: role_modal.is_submitting(),
             on_close: on_role_close,
             on_submit: on_role_submit,
 
@@ -422,24 +400,24 @@ pub fn AdminMembers() -> Element {
 
         // Toggle active confirm
         ConfirmDialog {
-            title: if toggle_target().map(|m| m.is_active).unwrap_or(false) {
+            title: if toggle_modal.get_target().map(|m| m.is_active).unwrap_or(false) {
                 "Deactivate Member".to_string()
             } else {
                 "Activate Member".to_string()
             },
             message: format!(
                 "{} \"{}\"?",
-                if toggle_target().map(|m| m.is_active).unwrap_or(false) { "Deactivate" } else { "Activate" },
-                toggle_target().map(|m| m.display_name).unwrap_or_default()
+                if toggle_modal.get_target().map(|m| m.is_active).unwrap_or(false) { "Deactivate" } else { "Activate" },
+                toggle_modal.get_target().map(|m| m.display_name).unwrap_or_default()
             ),
-            open: toggle_open(),
-            danger: toggle_target().map(|m| m.is_active).unwrap_or(false),
+            open: toggle_modal.is_open(),
+            danger: toggle_modal.get_target().map(|m| m.is_active).unwrap_or(false),
             on_confirm: on_toggle_confirm,
             on_cancel: on_toggle_cancel,
         }
 
         // Mod history modal
-        if mod_open() {
+        if mod_modal.is_open() {
             div {
                 class: "form-modal-overlay",
                 onclick: move |_| on_mod_close(()),
@@ -448,7 +426,7 @@ pub fn AdminMembers() -> Element {
                     style: "max-width:700px;",
                     onclick: move |e| e.stop_propagation(),
                     div { class: "form-modal-header",
-                        "Moderation: {mod_target().map(|m| m.display_name).unwrap_or_default()}"
+                        "Moderation: {mod_modal.get_target().map(|m| m.display_name).unwrap_or_default()}"
                     }
                     div { class: "form-modal-body",
                         if mod_loading() {
@@ -495,7 +473,7 @@ pub fn AdminMembers() -> Element {
         }
 
         // Attendance stats modal
-        if stats_open() {
+        if stats_modal.is_open() {
             div {
                 class: "form-modal-overlay",
                 onclick: move |_| on_stats_close(()),
@@ -504,7 +482,7 @@ pub fn AdminMembers() -> Element {
                     style: "max-width:550px;",
                     onclick: move |e| e.stop_propagation(),
                     div { class: "form-modal-header",
-                        "Attendance: {stats_target().map(|m| m.display_name).unwrap_or_default()}"
+                        "Attendance: {stats_modal.get_target().map(|m| m.display_name).unwrap_or_default()}"
                     }
                     div { class: "form-modal-body",
                         if stats_loading() {
@@ -543,7 +521,7 @@ pub fn AdminMembers() -> Element {
         }
 
         // Game accounts modal
-        if accts_open() {
+        if accts_modal.is_open() {
             div {
                 class: "form-modal-overlay",
                 onclick: move |_| on_accts_close(()),
@@ -552,7 +530,7 @@ pub fn AdminMembers() -> Element {
                     style: "max-width:700px;",
                     onclick: move |e| e.stop_propagation(),
                     div { class: "form-modal-header",
-                        "Game Accounts: {accts_target().map(|m| m.display_name).unwrap_or_default()}"
+                        "Game Accounts: {accts_modal.get_target().map(|m| m.display_name).unwrap_or_default()}"
                     }
                     div { class: "form-modal-body",
                         if accts_loading() {
@@ -667,9 +645,9 @@ pub fn AdminMembers() -> Element {
             title: "Remove Game Account".to_string(),
             message: format!(
                 "Remove account \"{}\"?",
-                del_acct_target().map(|a| a.account_name).unwrap_or_default()
+                del_acct_modal.get_target().map(|a| a.account_name).unwrap_or_default()
             ),
-            open: del_acct_open(),
+            open: del_acct_modal.is_open(),
             danger: true,
             on_confirm: on_del_acct_confirm,
             on_cancel: on_del_acct_cancel,

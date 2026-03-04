@@ -4,7 +4,7 @@ use serde::Deserialize;
 use scuffed_api_client::ApiClient;
 use scuffed_types::api::PatchApplicationRequest;
 use crate::components::{DataTable, ConfirmDialog, StatusPill, Toast, use_toast, ADMIN_SHARED_CSS};
-use crate::hooks::use_api;
+use crate::hooks::{use_api, ModalController};
 
 // Local response type with API-enriched fields (user_display_name).
 #[derive(Debug, Clone, Deserialize)]
@@ -23,7 +23,7 @@ pub fn AdminApplications() -> Element {
     let mut toast = use_toast();
 
     // Reject dialog state
-    let mut reject_id = use_signal(|| None::<String>);
+    let mut reject_modal = ModalController::<String>::new();
     let mut reject_notes = use_signal(String::new);
 
     let accept = move |id: String| {
@@ -44,9 +44,9 @@ pub fn AdminApplications() -> Element {
     };
 
     let confirm_reject = move |_| {
-        let id = reject_id().clone().unwrap_or_default();
+        let id = reject_modal.get_target().unwrap_or_default();
         let notes = reject_notes().clone();
-        reject_id.set(None);
+        reject_modal.close();
         reject_notes.set(String::new());
         spawn(async move {
             let body = PatchApplicationRequest {
@@ -104,7 +104,7 @@ pub fn AdminApplications() -> Element {
                                                     }
                                                     button {
                                                         class: "row-btn danger",
-                                                        onclick: move |_| reject_id.set(Some(id2.clone())),
+                                                        onclick: move |_| reject_modal.show(id2.clone()),
                                                         "Reject"
                                                     }
                                                 }
@@ -122,11 +122,11 @@ pub fn AdminApplications() -> Element {
         ConfirmDialog {
             title: "Reject Application".to_string(),
             message: "Are you sure you want to reject this application?".to_string(),
-            open: reject_id().is_some(),
+            open: reject_modal.is_open(),
             danger: true,
             on_confirm: confirm_reject,
             on_cancel: move |_| {
-                reject_id.set(None);
+                reject_modal.close();
                 reject_notes.set(String::new());
             },
             extra: rsx! {

@@ -4,7 +4,7 @@ use serde::Deserialize;
 use scuffed_api_client::ApiClient;
 use scuffed_types::api::CreateModerationRequest;
 use crate::components::{DataTable, FormModal, ConfirmDialog, StatusPill, Toast, use_toast, ADMIN_SHARED_CSS};
-use crate::hooks::use_api;
+use crate::hooks::{use_api, ModalController};
 
 // Local response types with API-enriched fields (joined names, computed fields).
 #[derive(Debug, Clone, Deserialize)]
@@ -44,22 +44,21 @@ pub fn AdminModeration() -> Element {
     let mut toast = use_toast();
 
     // Create modal state
-    let mut modal_open = use_signal(|| false);
-    let mut submitting = use_signal(|| false);
+    let mut modal = ModalController::<()>::new();
     let mut f_member_id = use_signal(String::new);
     let mut f_action_type = use_signal(|| "warning".to_string());
     let mut f_reason = use_signal(String::new);
     let mut f_duration = use_signal(String::new);
 
     // Lift dialog state
-    let mut lift_id = use_signal(|| None::<String>);
+    let mut lift_modal = ModalController::<String>::new();
 
     let open_create = move |_| {
         f_member_id.set(String::new());
         f_action_type.set("warning".to_string());
         f_reason.set(String::new());
         f_duration.set(String::new());
-        modal_open.set(true);
+        modal.show_empty();
     };
 
     let on_submit = move |_| {
@@ -73,7 +72,7 @@ pub fn AdminModeration() -> Element {
             return;
         }
 
-        submitting.set(true);
+        modal.start_submit();
         spawn(async move {
             let expires_at = if duration.is_empty() { None } else { Some(duration) };
             let payload = CreateModerationRequest {
@@ -86,18 +85,18 @@ pub fn AdminModeration() -> Element {
             match ApiClient::web().post_json::<_, ModerationAction>("/api/moderation", &payload).await {
                 Ok(_) => {
                     toast.show(Toast::success("Moderation action created"));
-                    modal_open.set(false);
+                    modal.close();
                     actions.refresh += 1;
                 }
                 Err(e) => toast.show(Toast::error(format!("Failed to create: {e}"))),
             }
-            submitting.set(false);
+            modal.end_submit();
         });
     };
 
     let confirm_lift = move |_| {
-        let id = lift_id().clone().unwrap_or_default();
-        lift_id.set(None);
+        let id = lift_modal.get_target().unwrap_or_default();
+        lift_modal.close();
         spawn(async move {
             let path = format!("/api/moderation/{id}/lift");
             match ApiClient::web().patch_json_empty(&path, &serde_json::json!({})).await {
@@ -149,7 +148,7 @@ pub fn AdminModeration() -> Element {
                                                 div { class: "row-actions",
                                                     button {
                                                         class: "row-btn danger",
-                                                        onclick: move |_| lift_id.set(Some(id.clone())),
+                                                        onclick: move |_| lift_modal.show(id.clone()),
                                                         "Lift"
                                                     }
                                                 }
@@ -166,9 +165,9 @@ pub fn AdminModeration() -> Element {
 
         FormModal {
             title: "New Moderation Action".to_string(),
-            open: modal_open(),
-            submitting: submitting(),
-            on_close: move |_| modal_open.set(false),
+            open: modal.is_open(),
+            submitting: modal.is_submitting(),
+            on_close: move |_| modal.close(),
             on_submit: on_submit,
 
             div { class: "form-field",
@@ -228,10 +227,10 @@ pub fn AdminModeration() -> Element {
         ConfirmDialog {
             title: "Lift Action".to_string(),
             message: "Are you sure you want to lift this moderation action?".to_string(),
-            open: lift_id().is_some(),
+            open: lift_modal.is_open(),
             danger: false,
             on_confirm: confirm_lift,
-            on_cancel: move |_| lift_id.set(None),
+            on_cancel: move |_| lift_modal.close(),
         }
     }
 }

@@ -7,7 +7,7 @@ use scuffed_types::api::{
     AttendanceEntry,
 };
 use crate::components::{DataTable, FormModal, ConfirmDialog, Toast, use_toast, ADMIN_SHARED_CSS};
-use crate::hooks::use_api;
+use crate::hooks::{use_api, ModalController};
 
 // --- Types ---
 // Local response types with API-enriched fields (joined names).
@@ -47,9 +47,7 @@ pub fn AdminSchedule() -> Element {
     let mut toast = use_toast();
 
     // Form modal state
-    let mut modal_open = use_signal(|| false);
-    let mut submitting = use_signal(|| false);
-    let mut editing_id: Signal<Option<String>> = use_signal(|| None);
+    let mut modal = ModalController::<String>::new();
     let mut form_title = use_signal(String::new);
     let mut form_day = use_signal(|| 0u8);
     let mut form_time = use_signal(|| "19:00".to_string());
@@ -58,42 +56,37 @@ pub fn AdminSchedule() -> Element {
     let mut form_team_id: Signal<Option<String>> = use_signal(|| None);
 
     // Delete confirm state
-    let mut delete_open = use_signal(|| false);
-    let mut delete_target: Signal<Option<Event>> = use_signal(|| None);
+    let mut delete_modal = ModalController::<Event>::new();
 
     // Attendance modal state
-    let mut att_open = use_signal(|| false);
-    let mut att_event: Signal<Option<Event>> = use_signal(|| None);
+    let mut att_modal = ModalController::<Event>::new();
     let mut att_date = use_signal(String::new);
     let mut att_entries: Signal<Vec<AttendanceEntry>> = use_signal(Vec::new);
-    let mut att_submitting = use_signal(|| false);
 
 
     // --- Event form handlers ---
 
     let open_create = move |_| {
-        editing_id.set(None);
         form_title.set(String::new());
         form_day.set(0);
         form_time.set("19:00".to_string());
         form_tz.set("UTC".to_string());
         form_recurring.set(true);
         form_team_id.set(None);
-        modal_open.set(true);
+        modal.show_empty();
     };
 
     let mut open_edit = move |evt: Event| {
-        editing_id.set(Some(evt.id));
         form_title.set(evt.title);
         form_day.set(evt.day_of_week);
         form_time.set(evt.time);
         form_tz.set(evt.timezone);
         form_recurring.set(evt.is_recurring);
         form_team_id.set(evt.team_id);
-        modal_open.set(true);
+        modal.show(evt.id);
     };
 
-    let on_close = move |_| modal_open.set(false);
+    let on_close = move |_| modal.close();
 
     let on_submit = move |_| {
         let title = form_title().trim().to_string();
@@ -108,8 +101,8 @@ pub fn AdminSchedule() -> Element {
             is_recurring: form_recurring(),
             team_id: form_team_id(),
         };
-        let edit_id = editing_id();
-        submitting.set(true);
+        let edit_id = modal.get_target();
+        modal.start_submit();
         spawn(async move {
             let client = ApiClient::web();
             let result = if let Some(id) = edit_id {
@@ -117,11 +110,11 @@ pub fn AdminSchedule() -> Element {
             } else {
                 client.post_json::<_, Event>("/api/events", &body).await
             };
-            submitting.set(false);
+            modal.end_submit();
             match result {
                 Ok(_) => {
                     toast.show(Toast::success("Event saved."));
-                    modal_open.set(false);
+                    modal.close();
                     events.refresh += 1;
                     teams.refresh += 1;
                     members.refresh += 1;
@@ -134,19 +127,17 @@ pub fn AdminSchedule() -> Element {
     // --- Delete handlers ---
 
     let mut open_delete = move |evt: Event| {
-        delete_target.set(Some(evt));
-        delete_open.set(true);
+        delete_modal.show(evt);
     };
 
     let on_delete_confirm = move |_| {
-        if let Some(evt) = delete_target() {
+        if let Some(evt) = delete_modal.get_target() {
             let id = evt.id.clone();
+            delete_modal.close();
             spawn(async move {
                 match ApiClient::web().delete(&format!("/api/events/{id}")).await {
                     Ok(_) => {
                         toast.show(Toast::success("Event deleted."));
-                        delete_open.set(false);
-                        delete_target.set(None);
                         events.refresh += 1;
                         teams.refresh += 1;
                         members.refresh += 1;
@@ -158,8 +149,7 @@ pub fn AdminSchedule() -> Element {
     };
 
     let on_delete_cancel = move |_| {
-        delete_open.set(false);
-        delete_target.set(None);
+        delete_modal.close();
     };
 
     // --- Attendance handlers ---
@@ -167,7 +157,6 @@ pub fn AdminSchedule() -> Element {
     let mut open_attendance = move |evt: Event| {
         let today = "2026-03-03".to_string();
         att_date.set(today);
-        att_event.set(Some(evt));
         // Initialize entries from members
         let mems = members.data.read();
         let mems = mems.as_ref().and_then(|d| d.as_ref());
@@ -183,32 +172,30 @@ pub fn AdminSchedule() -> Element {
         } else {
             att_entries.set(Vec::new());
         }
-        att_open.set(true);
+        att_modal.show(evt);
     };
 
     let on_att_close = move |_| {
-        att_open.set(false);
-        att_event.set(None);
+        att_modal.close();
     };
 
     let on_att_submit = move |_| {
-        if let Some(evt) = att_event() {
+        if let Some(evt) = att_modal.get_target() {
             let payload = BatchAttendanceRequest {
                 occurrence_date: att_date(),
                 entries: att_entries(),
             };
             let event_id = evt.id.clone();
-            att_submitting.set(true);
+            att_modal.start_submit();
             spawn(async move {
                 let result = ApiClient::web()
                     .post_json_empty(&format!("/api/events/{event_id}/attendance"), &payload)
                     .await;
-                att_submitting.set(false);
+                att_modal.end_submit();
                 match result {
                     Ok(_) => {
                         toast.show(Toast::success("Attendance saved."));
-                        att_open.set(false);
-                        att_event.set(None);
+                        att_modal.close();
                     }
                     Err(e) => toast.show(Toast::error(format!("Failed to save attendance: {e}"))),
                 }
@@ -283,9 +270,9 @@ pub fn AdminSchedule() -> Element {
 
         // Create/Edit modal
         FormModal {
-            title: if editing_id().is_some() { "Edit Event".to_string() } else { "Add Event".to_string() },
-            open: modal_open(),
-            submitting: submitting(),
+            title: if modal.get_target().is_some() { "Edit Event".to_string() } else { "Add Event".to_string() },
+            open: modal.is_open(),
+            submitting: modal.is_submitting(),
             on_close: on_close,
             on_submit: on_submit,
 
@@ -374,9 +361,9 @@ pub fn AdminSchedule() -> Element {
             title: "Delete Event".to_string(),
             message: format!(
                 "Are you sure you want to delete \"{}\"?",
-                delete_target().map(|e| e.title).unwrap_or_default()
+                delete_modal.get_target().map(|e| e.title).unwrap_or_default()
             ),
-            open: delete_open(),
+            open: delete_modal.is_open(),
             danger: true,
             on_confirm: on_delete_confirm,
             on_cancel: on_delete_cancel,
@@ -386,10 +373,10 @@ pub fn AdminSchedule() -> Element {
         FormModal {
             title: format!(
                 "Attendance: {}",
-                att_event().map(|e| e.title).unwrap_or_default()
+                att_modal.get_target().map(|e| e.title).unwrap_or_default()
             ),
-            open: att_open(),
-            submitting: att_submitting(),
+            open: att_modal.is_open(),
+            submitting: att_modal.is_submitting(),
             on_close: on_att_close,
             on_submit: on_att_submit,
 

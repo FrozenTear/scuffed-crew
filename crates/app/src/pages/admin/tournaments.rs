@@ -9,7 +9,7 @@ use scuffed_types::api::{
 use crate::components::{
     DataTable, FormModal, ConfirmDialog, StatusPill, Toast, use_toast, ADMIN_SHARED_CSS,
 };
-use crate::hooks::use_api;
+use crate::hooks::{use_api, ModalController};
 
 // --- Types ---
 // Local response types with simplified/string-typed fields for display.
@@ -88,9 +88,7 @@ pub fn AdminTournaments() -> Element {
     let mut status_filter = use_signal(|| "all".to_string());
 
     // Form modal state
-    let mut modal_open = use_signal(|| false);
-    let mut submitting = use_signal(|| false);
-    let mut editing_id: Signal<Option<String>> = use_signal(|| None);
+    let mut modal = ModalController::<String>::new();
     let mut form_name = use_signal(String::new);
     let mut form_format = use_signal(|| "single_elim".to_string());
     let mut form_game_id: Signal<Option<String>> = use_signal(|| None);
@@ -99,8 +97,7 @@ pub fn AdminTournaments() -> Element {
     let mut form_time = use_signal(String::new);
 
     // Delete confirm
-    let mut delete_open = use_signal(|| false);
-    let mut delete_target: Signal<Option<Tournament>> = use_signal(|| None);
+    let mut delete_modal = ModalController::<Tournament>::new();
 
     // Detail view state
     let mut detail_refresh = use_signal(|| 0u64);
@@ -109,22 +106,18 @@ pub fn AdminTournaments() -> Element {
     let mut detail_loading = use_signal(|| false);
 
     // Add participant
-    let mut add_part_open = use_signal(|| false);
+    let mut add_part_modal = ModalController::<()>::new();
     let mut add_part_member_id = use_signal(String::new);
-    let mut add_part_submitting = use_signal(|| false);
 
     // Remove participant confirm
-    let mut remove_part_open = use_signal(|| false);
-    let mut remove_part_target: Signal<Option<Participant>> = use_signal(|| None);
+    let mut remove_part_modal = ModalController::<Participant>::new();
 
     // Match report modal
-    let mut match_open = use_signal(|| false);
-    let mut match_target: Signal<Option<BracketMatch>> = use_signal(|| None);
+    let mut match_modal = ModalController::<BracketMatch>::new();
     let mut match_score_a = use_signal(String::new);
     let mut match_score_b = use_signal(String::new);
     let mut match_winner = use_signal(String::new);
     let mut match_replays = use_signal(String::new);
-    let mut match_submitting = use_signal(|| false);
 
 
     // Detail data loader
@@ -151,18 +144,16 @@ pub fn AdminTournaments() -> Element {
     // --- List view handlers ---
 
     let open_create = move |_| {
-        editing_id.set(None);
         form_name.set(String::new());
         form_format.set("single_elim".to_string());
         form_game_id.set(None);
         form_max.set(String::new());
         form_date.set(String::new());
         form_time.set(String::new());
-        modal_open.set(true);
+        modal.show_empty();
     };
 
     let mut open_edit = move |t: Tournament| {
-        editing_id.set(Some(t.id));
         form_name.set(t.name);
         form_format.set(t.format);
         form_game_id.set(t.game_name.map(|_| String::new()));
@@ -176,10 +167,10 @@ pub fn AdminTournaments() -> Element {
             form_date.set(String::new());
             form_time.set(String::new());
         }
-        modal_open.set(true);
+        modal.show(t.id);
     };
 
-    let on_close = move |_| modal_open.set(false);
+    let on_close = move |_| modal.close();
 
     let on_submit = move |_| {
         let name = form_name().trim().to_string();
@@ -205,8 +196,8 @@ pub fn AdminTournaments() -> Element {
             max_participants: max_val,
             starts_at,
         };
-        let edit_id = editing_id();
-        submitting.set(true);
+        let edit_id = modal.get_target();
+        modal.start_submit();
         spawn(async move {
             let client = ApiClient::web();
             let result = if let Some(id) = edit_id {
@@ -214,11 +205,11 @@ pub fn AdminTournaments() -> Element {
             } else {
                 client.post_json::<_, Tournament>("/api/tournaments", &body).await
             };
-            submitting.set(false);
+            modal.end_submit();
             match result {
                 Ok(_) => {
                     toast.show(Toast::success("Tournament saved."));
-                    modal_open.set(false);
+                    modal.close();
                     tournaments.refresh += 1;
                     games.refresh += 1;
                     members.refresh += 1;
@@ -229,19 +220,17 @@ pub fn AdminTournaments() -> Element {
     };
 
     let mut open_delete = move |t: Tournament| {
-        delete_target.set(Some(t));
-        delete_open.set(true);
+        delete_modal.show(t);
     };
 
     let on_delete_confirm = move |_| {
-        if let Some(t) = delete_target() {
+        if let Some(t) = delete_modal.get_target() {
             let id = t.id.clone();
+            delete_modal.close();
             spawn(async move {
                 match ApiClient::web().delete(&format!("/api/tournaments/{id}")).await {
                     Ok(_) => {
                         toast.show(Toast::success("Tournament deleted."));
-                        delete_open.set(false);
-                        delete_target.set(None);
                         tournaments.refresh += 1;
                         games.refresh += 1;
                         members.refresh += 1;
@@ -253,8 +242,7 @@ pub fn AdminTournaments() -> Element {
     };
 
     let on_delete_cancel = move |_| {
-        delete_open.set(false);
-        delete_target.set(None);
+        delete_modal.close();
     };
 
     let change_status = move |(id, new_status): (String, String)| {
@@ -293,10 +281,10 @@ pub fn AdminTournaments() -> Element {
 
     let on_add_part_open = move |_| {
         add_part_member_id.set(String::new());
-        add_part_open.set(true);
+        add_part_modal.show_empty();
     };
 
-    let on_add_part_close = move |_| add_part_open.set(false);
+    let on_add_part_close = move |_| add_part_modal.close();
 
     let on_add_part_submit = move |_| {
         let mid = add_part_member_id().trim().to_string();
@@ -305,16 +293,16 @@ pub fn AdminTournaments() -> Element {
         }
         if let Some(id) = detail_id() {
             let body = AddParticipantRequest { member_id: mid };
-            add_part_submitting.set(true);
+            add_part_modal.start_submit();
             spawn(async move {
                 let result = ApiClient::web()
                     .post_json_empty(&format!("/api/tournaments/{id}/participants"), &body)
                     .await;
-                add_part_submitting.set(false);
+                add_part_modal.end_submit();
                 match result {
                     Ok(_) => {
                         toast.show(Toast::success("Participant added."));
-                        add_part_open.set(false);
+                        add_part_modal.close();
                         detail_refresh += 1;
                     }
                     Err(e) => toast.show(Toast::error(format!("Failed: {e}"))),
@@ -324,14 +312,14 @@ pub fn AdminTournaments() -> Element {
     };
 
     let mut open_remove_part = move |p: Participant| {
-        remove_part_target.set(Some(p));
-        remove_part_open.set(true);
+        remove_part_modal.show(p);
     };
 
     let on_remove_part_confirm = move |_| {
-        if let Some(p) = remove_part_target() {
+        if let Some(p) = remove_part_modal.get_target() {
             if let Some(tid) = detail_id() {
                 let pid = p.id.clone();
+                remove_part_modal.close();
                 spawn(async move {
                     match ApiClient::web()
                         .delete(&format!("/api/tournaments/{tid}/participants/{pid}"))
@@ -339,8 +327,6 @@ pub fn AdminTournaments() -> Element {
                     {
                         Ok(_) => {
                             toast.show(Toast::success("Participant removed."));
-                            remove_part_open.set(false);
-                            remove_part_target.set(None);
                             detail_refresh += 1;
                         }
                         Err(e) => toast.show(Toast::error(format!("Remove failed: {e}"))),
@@ -351,8 +337,7 @@ pub fn AdminTournaments() -> Element {
     };
 
     let on_remove_part_cancel = move |_| {
-        remove_part_open.set(false);
-        remove_part_target.set(None);
+        remove_part_modal.close();
     };
 
     let generate_bracket = move |_| {
@@ -394,17 +379,15 @@ pub fn AdminTournaments() -> Element {
         match_score_b.set(m.score_b.map(|n| n.to_string()).unwrap_or_default());
         match_winner.set(m.winner_id.clone().unwrap_or_default());
         match_replays.set(String::new());
-        match_target.set(Some(m));
-        match_open.set(true);
+        match_modal.show(m);
     };
 
     let on_match_close = move |_| {
-        match_open.set(false);
-        match_target.set(None);
+        match_modal.close();
     };
 
     let on_match_submit = move |_| {
-        if let Some(m) = match_target() {
+        if let Some(m) = match_modal.get_target() {
             if let Some(tid) = detail_id() {
                 let mid = m.id.clone();
                 let sa = match_score_a().trim().to_string();
@@ -417,7 +400,7 @@ pub fn AdminTournaments() -> Element {
                     winner_id: if winner_raw.is_empty() { None } else { Some(winner_raw) },
                     replay_codes: if replays_raw.is_empty() { None } else { Some(replays_raw) },
                 };
-                match_submitting.set(true);
+                match_modal.start_submit();
                 spawn(async move {
                     let result = ApiClient::web()
                         .put_json_empty(
@@ -425,12 +408,11 @@ pub fn AdminTournaments() -> Element {
                             &body,
                         )
                         .await;
-                    match_submitting.set(false);
+                    match_modal.end_submit();
                     match result {
                         Ok(_) => {
                             toast.show(Toast::success("Match result saved."));
-                            match_open.set(false);
-                            match_target.set(None);
+                            match_modal.close();
                             detail_refresh += 1;
                         }
                         Err(e) => toast.show(Toast::error(format!("Failed: {e}"))),
@@ -765,9 +747,9 @@ pub fn AdminTournaments() -> Element {
 
         // Create/Edit tournament modal
         FormModal {
-            title: if editing_id().is_some() { "Edit Tournament".to_string() } else { "Add Tournament".to_string() },
-            open: modal_open(),
-            submitting: submitting(),
+            title: if modal.get_target().is_some() { "Edit Tournament".to_string() } else { "Add Tournament".to_string() },
+            open: modal.is_open(),
+            submitting: modal.is_submitting(),
             on_close: on_close,
             on_submit: on_submit,
             wide: true,
@@ -851,9 +833,9 @@ pub fn AdminTournaments() -> Element {
             title: "Delete Tournament".to_string(),
             message: format!(
                 "Are you sure you want to delete \"{}\"? All bracket data will be lost.",
-                delete_target().map(|t| t.name).unwrap_or_default()
+                delete_modal.get_target().map(|t| t.name).unwrap_or_default()
             ),
-            open: delete_open(),
+            open: delete_modal.is_open(),
             danger: true,
             on_confirm: on_delete_confirm,
             on_cancel: on_delete_cancel,
@@ -862,8 +844,8 @@ pub fn AdminTournaments() -> Element {
         // Add participant modal
         FormModal {
             title: "Add Participant".to_string(),
-            open: add_part_open(),
-            submitting: add_part_submitting(),
+            open: add_part_modal.is_open(),
+            submitting: add_part_modal.is_submitting(),
             on_close: on_add_part_close,
             on_submit: on_add_part_submit,
 
@@ -895,9 +877,9 @@ pub fn AdminTournaments() -> Element {
             title: "Remove Participant".to_string(),
             message: format!(
                 "Remove \"{}\" from this tournament?",
-                remove_part_target().map(|p| p.name).unwrap_or_default()
+                remove_part_modal.get_target().map(|p| p.name).unwrap_or_default()
             ),
-            open: remove_part_open(),
+            open: remove_part_modal.is_open(),
             danger: true,
             on_confirm: on_remove_part_confirm,
             on_cancel: on_remove_part_cancel,
@@ -906,8 +888,8 @@ pub fn AdminTournaments() -> Element {
         // Match report modal
         FormModal {
             title: "Report Match Result".to_string(),
-            open: match_open(),
-            submitting: match_submitting(),
+            open: match_modal.is_open(),
+            submitting: match_modal.is_submitting(),
             on_close: on_match_close,
             on_submit: on_match_submit,
 
@@ -937,7 +919,7 @@ pub fn AdminTournaments() -> Element {
                     onchange: move |e| match_winner.set(e.value()),
                     option { value: "", "-- Select Winner --" }
                     {
-                        if let Some(m) = match_target() {
+                        if let Some(m) = match_modal.get_target() {
                             let bd = bracket_data();
                             let pmap: HashMap<String, String> = bd
                                 .as_ref()

@@ -3,7 +3,7 @@ use dioxus::prelude::*;
 use scuffed_api_client::ApiClient;
 use scuffed_types::{Game, api::{CreateGameRequest, UpdateGameRequest}};
 use crate::components::{DataTable, FormModal, Toast, use_toast, ADMIN_SHARED_CSS};
-use crate::hooks::use_api;
+use crate::hooks::{use_api, ModalController};
 
 #[component]
 pub fn AdminGames() -> Element {
@@ -11,28 +11,24 @@ pub fn AdminGames() -> Element {
     let mut toast = use_toast();
 
     // Modal state
-    let mut modal_open = use_signal(|| false);
-    let mut submitting = use_signal(|| false);
-    let mut editing_id: Signal<Option<String>> = use_signal(|| None);
+    let mut modal = ModalController::<String>::new();
     let mut form_name = use_signal(String::new);
     let mut form_abbr = use_signal(String::new);
 
     let open_create = move |_| {
-        editing_id.set(None);
         form_name.set(String::new());
         form_abbr.set(String::new());
-        modal_open.set(true);
+        modal.show_empty();
     };
 
     let mut open_edit = move |game: Game| {
-        editing_id.set(Some(game.id));
         form_name.set(game.name);
         form_abbr.set(game.abbreviation.unwrap_or_default());
-        modal_open.set(true);
+        modal.show(game.id);
     };
 
     let on_close = move |_| {
-        modal_open.set(false);
+        modal.close();
     };
 
     let on_submit = move |_| {
@@ -42,9 +38,9 @@ pub fn AdminGames() -> Element {
         }
         let abbr_raw = form_abbr().trim().to_string();
         let abbr = if abbr_raw.is_empty() { None } else { Some(abbr_raw) };
-        let edit_id = editing_id();
+        let edit_id = modal.get_target();
 
-        submitting.set(true);
+        modal.start_submit();
         spawn(async move {
             let client = ApiClient::web();
             let result = if let Some(id) = edit_id {
@@ -58,11 +54,11 @@ pub fn AdminGames() -> Element {
                 client.post_json::<_, Game>("/api/games", &body).await
             };
 
-            submitting.set(false);
+            modal.end_submit();
             match result {
                 Ok(_) => {
                     toast.show(Toast::success("Game saved."));
-                    modal_open.set(false);
+                    modal.close();
                     games.refresh += 1;
                 }
                 Err(e) => {
@@ -117,9 +113,9 @@ pub fn AdminGames() -> Element {
         }
 
         FormModal {
-            title: if editing_id().is_some() { "Edit Game".to_string() } else { "Add Game".to_string() },
-            open: modal_open(),
-            submitting: submitting(),
+            title: if modal.get_target().is_some() { "Edit Game".to_string() } else { "Add Game".to_string() },
+            open: modal.is_open(),
+            submitting: modal.is_submitting(),
             on_close: on_close,
             on_submit: on_submit,
 

@@ -4,7 +4,7 @@ use serde::Deserialize;
 use scuffed_api_client::ApiClient;
 use scuffed_types::api::{CreateAnnouncementRequest, UpdateAnnouncementRequest};
 use crate::components::{DataTable, FormModal, ConfirmDialog, Toast, use_toast, ADMIN_SHARED_CSS};
-use crate::hooks::use_api;
+use crate::hooks::{use_api, ModalController};
 
 // Local response type (field name `is_pinned` differs from shared `pinned`).
 #[derive(Debug, Clone, Deserialize)]
@@ -22,42 +22,34 @@ pub fn AdminAnnouncements() -> Element {
     let mut toast = use_toast();
 
     // Form modal state
-    let mut modal_open = use_signal(|| false);
-    let mut submitting = use_signal(|| false);
-    let mut editing_id: Signal<Option<String>> = use_signal(|| None);
+    let mut modal = ModalController::<String>::new();
     let mut form_title = use_signal(String::new);
     let mut form_content = use_signal(String::new);
     let mut form_pinned = use_signal(|| false);
 
     // Delete confirm state
-    let mut confirm_open = use_signal(|| false);
-    let mut delete_id: Signal<Option<String>> = use_signal(|| None);
-    let mut delete_title = use_signal(String::new);
+    let mut delete_modal = ModalController::<Announcement>::new();
 
     let open_create = move |_| {
-        editing_id.set(None);
         form_title.set(String::new());
         form_content.set(String::new());
         form_pinned.set(false);
-        modal_open.set(true);
+        modal.show_empty();
     };
 
     let mut open_edit = move |a: Announcement| {
-        editing_id.set(Some(a.id));
         form_title.set(a.title);
         form_content.set(a.content);
         form_pinned.set(a.is_pinned);
-        modal_open.set(true);
+        modal.show(a.id);
     };
 
     let mut open_delete = move |a: Announcement| {
-        delete_id.set(Some(a.id));
-        delete_title.set(a.title);
-        confirm_open.set(true);
+        delete_modal.show(a);
     };
 
     let on_close = move |_| {
-        modal_open.set(false);
+        modal.close();
     };
 
     let on_submit = move |_| {
@@ -67,9 +59,9 @@ pub fn AdminAnnouncements() -> Element {
             return;
         }
         let is_pinned = form_pinned();
-        let edit_id = editing_id();
+        let edit_id = modal.get_target();
 
-        submitting.set(true);
+        modal.start_submit();
         spawn(async move {
             let client = ApiClient::web();
             let result = if let Some(id) = edit_id {
@@ -80,11 +72,11 @@ pub fn AdminAnnouncements() -> Element {
                 client.post_json::<_, Announcement>("/api/announcements", &body).await
             };
 
-            submitting.set(false);
+            modal.end_submit();
             match result {
                 Ok(_) => {
                     toast.show(Toast::success("Announcement saved."));
-                    modal_open.set(false);
+                    modal.close();
                     announcements.refresh += 1;
                 }
                 Err(e) => {
@@ -95,8 +87,9 @@ pub fn AdminAnnouncements() -> Element {
     };
 
     let on_confirm_delete = move |_| {
-        let Some(id) = delete_id() else { return };
-        confirm_open.set(false);
+        let Some(target) = delete_modal.get_target() else { return };
+        let id = target.id.clone();
+        delete_modal.close();
         spawn(async move {
             let client = ApiClient::web();
             match client.delete(&format!("/api/announcements/{id}")).await {
@@ -112,7 +105,7 @@ pub fn AdminAnnouncements() -> Element {
     };
 
     let on_cancel_delete = move |_| {
-        confirm_open.set(false);
+        delete_modal.close();
     };
 
     rsx! {
@@ -169,9 +162,9 @@ pub fn AdminAnnouncements() -> Element {
         }
 
         FormModal {
-            title: if editing_id().is_some() { "Edit Announcement".to_string() } else { "New Announcement".to_string() },
-            open: modal_open(),
-            submitting: submitting(),
+            title: if modal.get_target().is_some() { "Edit Announcement".to_string() } else { "New Announcement".to_string() },
+            open: modal.is_open(),
+            submitting: modal.is_submitting(),
             on_close: on_close,
             on_submit: on_submit,
 
@@ -206,8 +199,8 @@ pub fn AdminAnnouncements() -> Element {
 
         ConfirmDialog {
             title: "Delete Announcement".to_string(),
-            message: format!("Are you sure you want to delete \"{}\"? This cannot be undone.", delete_title()),
-            open: confirm_open(),
+            message: format!("Are you sure you want to delete \"{}\"? This cannot be undone.", delete_modal.get_target().map(|a| a.title).unwrap_or_default()),
+            open: delete_modal.is_open(),
             danger: true,
             on_confirm: on_confirm_delete,
             on_cancel: on_cancel_delete,

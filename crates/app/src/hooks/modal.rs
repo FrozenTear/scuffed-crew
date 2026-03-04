@@ -6,12 +6,21 @@ use dioxus::prelude::*;
 ///   let mut open = use_signal(|| false);
 ///   let mut target: Signal<Option<T>> = use_signal(|| None);
 ///   let mut submitting = use_signal(|| false);
-#[derive(Clone, Copy)]
 pub struct ModalController<T: Clone + 'static> {
     pub open: Signal<bool>,
     pub target: Signal<Option<T>>,
     pub submitting: Signal<bool>,
 }
+
+// Manual Clone/Copy impls because derive requires T: Copy,
+// but Signal<Option<T>> is Copy for all T: 'static.
+impl<T: Clone + 'static> Clone for ModalController<T> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<T: Clone + 'static> Copy for ModalController<T> {}
 
 impl<T: Clone + 'static> ModalController<T> {
     /// Create a new modal controller. Call this in your component body (it uses hooks).
