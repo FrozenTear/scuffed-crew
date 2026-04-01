@@ -15,6 +15,7 @@ members = [
     "crates/api-client",
     # Map pipeline tooling
     "crates/map-pipeline",
+    "crates/map-renderer",
 ]
 
 [workspace.dependencies]
