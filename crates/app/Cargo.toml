@@ -26,6 +26,7 @@ web-sys = { version = "0.3", features = [
     "Request", "RequestInit", "RequestMode", "RequestCredentials",
     "Response", "Headers", "DataTransfer", "DragEvent",
     "WebSocket", "BinaryType", "MessageEvent", "CloseEvent", "Location",
+    "FormData", "File", "Blob", "HtmlInputElement", "FileList",
 ] }
 
 # Desktop-only deps

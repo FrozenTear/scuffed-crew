@@ -1,5 +1,6 @@
 use dioxus::prelude::*;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use wasm_bindgen::JsCast;
 
 use scuffed_api_client::ApiClient;
 use scuffed_types::api::{ChangeRoleRequest, ToggleActiveRequest, CreateGameAccountRequest};
@@ -53,6 +54,16 @@ struct AttendanceStats {
     attendance_rate: f64,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+struct UploadResponse {
+    url: String,
+}
+
+#[derive(Serialize)]
+struct UpdateAvatarBody {
+    avatar_url: Option<String>,
+}
+
 const ROLES: [&str; 4] = ["recruit", "member", "officer", "admin"];
 
 #[component]
@@ -92,6 +103,11 @@ pub fn AdminMembers() -> Element {
 
     // Delete game account confirm
     let mut del_acct_modal = ModalController::<GameAccount>::new();
+
+    // Avatar upload modal
+    let mut avatar_modal = ModalController::<Member>::new();
+    let mut avatar_file: Signal<Option<web_sys::File>> = use_signal(|| None);
+    let mut avatar_uploading = use_signal(|| false);
 
     // --- Fetch helpers for sub-modals ---
 
@@ -300,6 +316,92 @@ pub fn AdminMembers() -> Element {
         del_acct_modal.close();
     };
 
+    // --- Avatar handlers ---
+
+    let mut open_avatar = move |member: Member| {
+        avatar_file.set(None);
+        avatar_modal.show(member);
+    };
+
+    let mut on_avatar_close = move |_| {
+        avatar_modal.close();
+    };
+
+    let on_avatar_file_change = move |_e: Event<FormData>| {
+        // Access the file input via DOM query to get the web_sys::File
+        let window = web_sys::window().unwrap();
+        let document = window.document().unwrap();
+        if let Some(el) = document.get_element_by_id("avatar-file-input") {
+            if let Ok(input) = el.dyn_into::<web_sys::HtmlInputElement>() {
+                if let Some(file_list) = input.files() {
+                    if let Some(file) = file_list.get(0) {
+                        avatar_file.set(Some(file));
+                    }
+                }
+            }
+        }
+    };
+
+    let on_avatar_submit = move |_| {
+        let Some(file) = avatar_file() else {
+            toast.show(Toast::error("Select a file first."));
+            return;
+        };
+        if file.size() > 2_000_000.0 {
+            toast.show(Toast::error("File must be under 2MB."));
+            return;
+        }
+        let Some(member) = avatar_modal.get_target() else { return };
+        let mid = member.id.clone();
+        avatar_uploading.set(true);
+        spawn(async move {
+            // Upload via FormData
+            let form_data = web_sys::FormData::new().unwrap();
+            let _ = form_data.append_with_blob("file", &file);
+
+            let opts = web_sys::RequestInit::new();
+            opts.set_method("POST");
+            opts.set_body(&form_data.into());
+            opts.set_credentials(web_sys::RequestCredentials::SameOrigin);
+
+            let request = web_sys::Request::new_with_str_and_init("/api/upload/avatar", &opts).unwrap();
+
+            let window = web_sys::window().unwrap();
+            let resp_val = wasm_bindgen_futures::JsFuture::from(window.fetch_with_request(&request)).await;
+
+            match resp_val {
+                Ok(resp_val) => {
+                    let resp: web_sys::Response = resp_val.unchecked_into();
+                    if resp.ok() {
+                        let text = wasm_bindgen_futures::JsFuture::from(resp.text().unwrap()).await;
+                        if let Ok(text) = text {
+                            let text_str = text.as_string().unwrap_or_default();
+                            if let Ok(upload) = serde_json::from_str::<UploadResponse>(&text_str) {
+                                let body = UpdateAvatarBody { avatar_url: Some(upload.url) };
+                                match ApiClient::web().put_json_empty(&format!("/api/members/{mid}"), &body).await {
+                                    Ok(_) => {
+                                        toast.show(Toast::success("Avatar updated."));
+                                        avatar_modal.close();
+                                        members.refresh += 1;
+                                    }
+                                    Err(e) => toast.show(Toast::error(format!("Failed to update profile: {e}"))),
+                                }
+                            } else {
+                                toast.show(Toast::error("Failed to parse upload response."));
+                            }
+                        } else {
+                            toast.show(Toast::error("Failed to read upload response."));
+                        }
+                    } else {
+                        toast.show(Toast::error(format!("Upload failed: HTTP {}", resp.status())));
+                    }
+                }
+                Err(_) => toast.show(Toast::error("Upload request failed.")),
+            }
+            avatar_uploading.set(false);
+        });
+    };
+
     // --- Render ---
 
     rsx! {
@@ -326,6 +428,7 @@ pub fn AdminMembers() -> Element {
                                 let m_mod = member.clone();
                                 let m_stats = member.clone();
                                 let m_accts = member.clone();
+                                let m_avatar = member.clone();
                                 let status_str = if member.is_active { "active" } else { "inactive" };
                                 let toggle_label = if member.is_active { "Deactivate" } else { "Activate" };
                                 rsx! {
@@ -360,6 +463,11 @@ pub fn AdminMembers() -> Element {
                                                     class: "row-btn",
                                                     onclick: move |_| open_accounts(m_accts.clone()),
                                                     "Accounts"
+                                                }
+                                                button {
+                                                    class: "row-btn",
+                                                    onclick: move |_| open_avatar(m_avatar.clone()),
+                                                    "Avatar"
                                                 }
                                             }
                                         }
@@ -649,6 +757,46 @@ pub fn AdminMembers() -> Element {
             danger: true,
             on_confirm: on_del_acct_confirm,
             on_cancel: on_del_acct_cancel,
+        }
+
+        // Avatar upload modal
+        if avatar_modal.is_open() {
+            div {
+                class: "form-modal-overlay",
+                onclick: move |_| on_avatar_close(()),
+                div {
+                    class: "form-modal",
+                    style: "max-width:450px;",
+                    onclick: move |e| e.stop_propagation(),
+                    div { class: "form-modal-header",
+                        "Avatar: {avatar_modal.get_target().map(|m| m.display_name).unwrap_or_default()}"
+                    }
+                    div { class: "form-modal-body",
+                        div { class: "form-field",
+                            label { class: "form-label", "Select Image (max 2MB)" }
+                            input {
+                                id: "avatar-file-input",
+                                r#type: "file",
+                                accept: "image/*",
+                                onchange: on_avatar_file_change,
+                            }
+                        }
+                    }
+                    div { class: "form-modal-footer",
+                        button {
+                            class: "btn-cancel",
+                            onclick: move |_| on_avatar_close(()),
+                            "Cancel"
+                        }
+                        button {
+                            class: "btn-save",
+                            disabled: avatar_uploading() || avatar_file().is_none(),
+                            onclick: on_avatar_submit,
+                            if avatar_uploading() { "Uploading..." } else { "Upload" }
+                        }
+                    }
+                }
+            }
         }
     }
 }

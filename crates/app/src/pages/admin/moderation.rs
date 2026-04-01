@@ -196,6 +196,7 @@ pub fn AdminModeration() -> Element {
                     class: "form-select",
                     value: "{f_action_type}",
                     onchange: move |e| f_action_type.set(e.value()),
+                    option { value: "note", "Note" }
                     option { value: "warning", "Warning" }
                     option { value: "suspension", "Suspension" }
                     option { value: "ban", "Ban" }

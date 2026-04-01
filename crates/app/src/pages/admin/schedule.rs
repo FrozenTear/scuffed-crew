@@ -7,7 +7,7 @@ use scuffed_types::api::{
     AttendanceEntry,
 };
 use crate::components::{DataTable, FormModal, ConfirmDialog, Toast, use_toast};
-use crate::hooks::{use_api, ModalController};
+use crate::hooks::{use_api, use_api_with, ModalController};
 
 // --- Types ---
 // Local response types with API-enriched fields (joined names).
@@ -34,6 +34,38 @@ struct Team {
 struct Member {
     id: String,
     display_name: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct RsvpSummary {
+    #[allow(dead_code)]
+    event_id: String,
+    yes_count: u32,
+    maybe_count: u32,
+    no_count: u32,
+}
+
+/// Inline RSVP summary cell for the schedule table.
+#[component]
+fn RsvpCell(event_id: String) -> Element {
+    let summary = use_api_with::<RsvpSummary>(move || {
+        format!("/api/events/{}/rsvp-summary", event_id)
+    });
+
+    let data = summary.data.read();
+    let data = data.as_ref().and_then(|d| d.as_ref());
+    match data {
+        None => rsx! { span { style: "color: var(--text-muted);", "\u{2014}" } },
+        Some(s) => rsx! {
+            span { style: "font-size: 0.85rem; white-space: nowrap;",
+                span { style: "color: #4ade80;", "{s.yes_count}" }
+                " / "
+                span { style: "color: #fbbf24;", "{s.maybe_count}" }
+                " / "
+                span { style: "color: #9ca3af;", "{s.no_count}" }
+            }
+        },
+    }
 }
 
 const DAYS: [&str; 7] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
@@ -222,12 +254,13 @@ pub fn AdminSchedule() -> Element {
                     p { class: "empty-state", "No events scheduled yet." }
                 },
                 Some(list) => rsx! {
-                    DataTable { headers: vec!["Title", "Day", "Time", "Timezone", "Recurring", "Team", "Actions"],
+                    DataTable { headers: vec!["Title", "Day", "Time", "Timezone", "Recurring", "Team", "RSVP", "Actions"],
                         for evt in list.iter() {
                             {
                                 let e_edit = evt.clone();
                                 let e_del = evt.clone();
                                 let e_att = evt.clone();
+                                let rsvp_id = evt.id.clone();
                                 let day_label = DAYS.get(evt.day_of_week as usize).unwrap_or(&"?");
                                 let recurring_label = if evt.is_recurring { "Yes" } else { "No" };
                                 let team_label = evt.team_name.clone().unwrap_or_else(|| "\u{2014}".into());
@@ -239,6 +272,7 @@ pub fn AdminSchedule() -> Element {
                                         td { "{evt.timezone}" }
                                         td { "{recurring_label}" }
                                         td { "{team_label}" }
+                                        td { RsvpCell { event_id: rsvp_id } }
                                         td {
                                             div { class: "row-actions",
                                                 button {
