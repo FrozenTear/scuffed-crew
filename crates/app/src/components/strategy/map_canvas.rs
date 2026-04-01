@@ -210,6 +210,7 @@ pub fn MapCanvas(
     on_arrow_create: EventHandler<(Position, Position)>,
     on_text_create: EventHandler<(Position, String)>,
     on_erase_at: EventHandler<Position>,
+    on_element_drag_end: EventHandler<(Uuid, Position, Position)>,
 ) -> Element {
     // =========================================================================
     // Canvas element refs — stored as signals so effects can read them
@@ -224,6 +225,7 @@ pub fn MapCanvas(
     let mut is_panning = use_signal(|| false);
     let mut is_dragging = use_signal(|| false);
     let mut drag_offset = use_signal(|| Position::new(0.0, 0.0));
+    let mut drag_start_pos = use_signal(|| Option::<(Uuid, Position)>::None);
     let mut last_mouse_pos = use_signal(|| Position::new(0.0, 0.0));
     let mut arrow_start = use_signal(|| Option::<Position>::None);
     let mut arrow_end = use_signal(|| Option::<Position>::None);
@@ -650,7 +652,7 @@ pub fn MapCanvas(
                 }
                 Tool::PlayerMarker | Tool::Route | Tool::Area | Tool::Arrow => "crosshair",
                 Tool::Text => "text",
-                Tool::Eraser => "not-allowed",
+                Tool::Eraser => "crosshair",
             }
         }
     };
@@ -729,11 +731,9 @@ pub fn MapCanvas(
                             // Check if clicking on already-selected element to start dragging
                             if let Some(sel_id) = selected_element {
                                 if let Some(element) = elements_4.iter().find(|e| e.id == sel_id) {
-                                    let dist = ((element.position.x - pos.x).powi(2)
-                                        + (element.position.y - pos.y).powi(2))
-                                    .sqrt();
-                                    if dist < 30.0 {
+                                    if crate::state::editor::is_position_near_element(pos, element, 30.0) {
                                         is_dragging.set(true);
+                                        drag_start_pos.set(Some((sel_id, element.position)));
                                         drag_offset.set(Position::new(
                                             element.position.x - pos.x,
                                             element.position.y - pos.y,
@@ -746,12 +746,7 @@ pub fn MapCanvas(
                             let found = elements_3
                                 .iter()
                                 .rev()
-                                .find(|e| {
-                                    let dist = ((e.position.x - pos.x).powi(2)
-                                        + (e.position.y - pos.y).powi(2))
-                                    .sqrt();
-                                    dist < 30.0
-                                })
+                                .find(|e| crate::state::editor::is_position_near_element(pos, e, 30.0))
                                 .map(|e| e.id);
                             on_element_select.call(found);
                         }
@@ -820,6 +815,10 @@ pub fn MapCanvas(
 
                     if *is_dragging.read() {
                         is_dragging.set(false);
+                        // Fire drag-end with start and final positions for undo
+                        if let Some((id, start_pos)) = drag_start_pos.take() {
+                            on_element_drag_end.call((id, start_pos, pos));
+                        }
                     }
 
                     match active_tool {

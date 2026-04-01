@@ -3,7 +3,11 @@
 //! Plain Rust struct — no Dioxus signals. The component layer wraps
 //! `UndoManager` in a `Signal` and calls `undo()`/`redo()` from event handlers.
 
-use scuffed_types::strategy::{HeroId, HeroSelection, StrategyElement, TeamSlot, TimelinePhase};
+use std::collections::VecDeque;
+
+use scuffed_types::strategy::{
+    HeroId, HeroSelection, Position, StrategyElement, TeamSlot, TimelinePhase,
+};
 use uuid::Uuid;
 
 /// Maximum number of undo actions to keep.
@@ -31,6 +35,12 @@ pub enum UndoableAction {
         id: Uuid,
         before: StrategyElement,
         after: StrategyElement,
+    },
+    /// An element was moved on the canvas.
+    MoveElement {
+        id: Uuid,
+        before: Position,
+        after: Position,
     },
     /// A timeline phase was added.
     AddPhase {
@@ -65,7 +75,7 @@ pub enum UndoableAction {
 /// Manages undo and redo stacks.
 #[derive(Debug, Clone)]
 pub struct UndoManager {
-    undo_stack: Vec<UndoableAction>,
+    undo_stack: VecDeque<UndoableAction>,
     redo_stack: Vec<UndoableAction>,
 }
 
@@ -79,7 +89,7 @@ impl UndoManager {
     /// Create a new, empty undo manager.
     pub fn new() -> Self {
         Self {
-            undo_stack: Vec::new(),
+            undo_stack: VecDeque::new(),
             redo_stack: Vec::new(),
         }
     }
@@ -88,18 +98,18 @@ impl UndoManager {
     /// redo stack (because the timeline has diverged).
     pub fn push(&mut self, action: UndoableAction) {
         self.redo_stack.clear();
-        self.undo_stack.push(action);
+        self.undo_stack.push_back(action);
 
-        // Trim oldest entries if we exceed the limit.
+        // Trim oldest entries if we exceed the limit (O(1) with VecDeque).
         while self.undo_stack.len() > MAX_HISTORY {
-            self.undo_stack.remove(0);
+            self.undo_stack.pop_front();
         }
     }
 
     /// Pop the most recent action from the undo stack and push it onto the redo
     /// stack. Returns the action so the caller can reverse it.
     pub fn undo(&mut self) -> Option<UndoableAction> {
-        let action = self.undo_stack.pop()?;
+        let action = self.undo_stack.pop_back()?;
         self.redo_stack.push(action.clone());
         Some(action)
     }
@@ -108,7 +118,7 @@ impl UndoManager {
     /// undo stack. Returns the action so the caller can reapply it.
     pub fn redo(&mut self) -> Option<UndoableAction> {
         let action = self.redo_stack.pop()?;
-        self.undo_stack.push(action.clone());
+        self.undo_stack.push_back(action.clone());
         Some(action)
     }
 
@@ -237,5 +247,91 @@ mod tests {
     fn redo_on_empty_returns_none() {
         let mut mgr = UndoManager::new();
         assert!(mgr.redo().is_none());
+    }
+
+    #[test]
+    fn move_element_roundtrip() {
+        let mut mgr = UndoManager::new();
+        let id = uuid::Uuid::new_v4();
+        mgr.push(UndoableAction::MoveElement {
+            id,
+            before: Position::new(10.0, 20.0),
+            after: Position::new(50.0, 60.0),
+        });
+        assert!(mgr.can_undo());
+
+        let action = mgr.undo().unwrap();
+        match action {
+            UndoableAction::MoveElement {
+                before, after, ..
+            } => {
+                assert_eq!(before.x, 10.0);
+                assert_eq!(after.x, 50.0);
+            }
+            _ => panic!("expected MoveElement"),
+        }
+
+        let action = mgr.redo().unwrap();
+        match action {
+            UndoableAction::MoveElement {
+                before, after, ..
+            } => {
+                assert_eq!(before.x, 10.0);
+                assert_eq!(after.x, 50.0);
+            }
+            _ => panic!("expected MoveElement"),
+        }
+    }
+
+    #[test]
+    fn multiple_undo_redo_cycles() {
+        let mut mgr = UndoManager::new();
+
+        mgr.push(UndoableAction::AddElement {
+            element: sample_element(),
+        });
+        mgr.push(UndoableAction::AddElement {
+            element: sample_element(),
+        });
+        mgr.push(UndoableAction::AddElement {
+            element: sample_element(),
+        });
+
+        // Undo all three
+        assert!(mgr.undo().is_some());
+        assert!(mgr.undo().is_some());
+        assert!(mgr.undo().is_some());
+        assert!(mgr.undo().is_none());
+
+        // Redo all three
+        assert!(mgr.redo().is_some());
+        assert!(mgr.redo().is_some());
+        assert!(mgr.redo().is_some());
+        assert!(mgr.redo().is_none());
+    }
+
+    #[test]
+    fn redo_cleared_by_push_after_undo() {
+        let mut mgr = UndoManager::new();
+
+        mgr.push(UndoableAction::AddElement {
+            element: sample_element(),
+        });
+        mgr.push(UndoableAction::AddElement {
+            element: sample_element(),
+        });
+
+        // Undo one, then push a new action — redo should be empty.
+        mgr.undo();
+        assert!(mgr.can_redo());
+
+        mgr.push(UndoableAction::AddElement {
+            element: sample_element(),
+        });
+        assert!(!mgr.can_redo());
+        // But we should still be able to undo two actions (the original + new).
+        assert!(mgr.undo().is_some());
+        assert!(mgr.undo().is_some());
+        assert!(mgr.undo().is_none());
     }
 }
