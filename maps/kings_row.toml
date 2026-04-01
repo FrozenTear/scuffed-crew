@@ -1,0 +1,49 @@
+[map]
+name = "King's Row"
+id = "kings_row"
+game_mode = "hybrid"
+blend_file = ""
+
+[cleanup]
+max_distance_from_center = 200.0
+min_object_size = 0.01
+remove_lights = true
+remove_cameras = true
+remove_particles = true
+skybox_size_threshold = 500.0
+
+[detection]
+walkable_slope_max_degrees = 50.0
+histogram_bin_width = 0.25
+gaussian_sigma = 0.4
+min_floor_gap = 2.0
+peak_min_prominence = 10.0
+
+[render]
+pixels_per_meter = 16.0
+camera_padding = 5.0
+
+[tiles]
+tile_size = 256
+max_zoom = 4
+
+[[floors]]
+id = "ground"
+name = "Ground"
+y_min = -6.0
+y_max = 3.0
+is_default = true
+
+[[floors]]
+id = "high_ground"
+name = "High Ground"
+y_min = 3.0
+y_max = 10.0
+is_default = false
+
+[[floors]]
+id = "rooftops"
+name = "Rooftops"
+y_min = 10.0
+y_max = 15.0
+is_default = false

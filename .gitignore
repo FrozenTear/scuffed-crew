@@ -6,3 +6,5 @@ dist/
 .dioxus/
 dist.old/
 .worktrees/
+*.jpeg
+maps/render/
