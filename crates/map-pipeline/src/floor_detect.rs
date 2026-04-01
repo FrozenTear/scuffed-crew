@@ -39,8 +39,17 @@ pub fn detect_floors(
     let smoothed = gaussian_smooth(&counts, config.gaussian_sigma, config.histogram_bin_width);
 
     // 4. Peak detection
+    // Scale prominence relative to the histogram's max value so it works
+    // with both small test data and real maps with hundreds of thousands of faces.
+    let max_signal = smoothed.iter().cloned().fold(0.0f64, f64::max);
+    let prominence = if max_signal > 100.0 {
+        max_signal * (config.peak_min_prominence / 100.0)
+    } else {
+        config.peak_min_prominence
+    };
     let min_distance = (config.min_floor_gap / config.histogram_bin_width).ceil() as usize;
-    let peaks = find_peaks_in_signal(&smoothed, config.peak_min_prominence, min_distance);
+    let peaks = find_peaks_in_signal(&smoothed, prominence, min_distance);
+    tracing::info!("Peak detection: max_signal={:.1}, prominence_threshold={:.1}", max_signal, prominence);
 
     if peaks.is_empty() {
         anyhow::bail!("No floor peaks detected. Try lowering peak_min_prominence (currently {}).",
@@ -117,7 +126,9 @@ fn find_peaks_in_signal(signal: &[f64], min_prominence: f64, min_distance: usize
     finder.with_min_distance(min_distance);
 
     let peaks = finder.find_peaks();
-    peaks.into_iter().map(|p| p.middle_position()).collect()
+    let mut indices: Vec<usize> = peaks.into_iter().map(|p| p.middle_position()).collect();
+    indices.sort_unstable();
+    indices
 }
 
 /// Print a simple ASCII histogram to the terminal for diagnostics.

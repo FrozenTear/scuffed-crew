@@ -29,10 +29,11 @@ def parse_args():
         argv = []
 
     parser = argparse.ArgumentParser(description="Export OW map for tactical pipeline")
-    parser.add_argument("--config", required=True, help="Path to map TOML config")
+    parser.add_argument("--config", required=False, help="Path to map TOML config (required for rendering, optional for --export-glb --skip-render)")
     parser.add_argument("--output", required=True, help="Output directory")
     parser.add_argument("--export-glb", action="store_true", help="Also export .glb geometry")
     parser.add_argument("--skip-render", action="store_true", help="Skip rendering floor PNGs")
+    parser.add_argument("--floor", help="Render only this floor ID (renders one floor per Blender invocation to save GPU memory)")
     return parser.parse_args(argv)
 
 
@@ -191,6 +192,7 @@ def setup_workbench_render(render_config):
     scene = bpy.context.scene
     scene.render.engine = "BLENDER_WORKBENCH"
 
+
     # Solid mode settings
     scene.display.shading.light = "FLAT"
     scene.display.shading.color_type = "TEXTURE"
@@ -270,12 +272,35 @@ def hide_objects_outside_floor(floor_config):
     print(f"  Floor [{y_min:.1f}, {y_max:.1f}]: showing {shown}, hiding {hidden} objects")
 
 
+def delete_objects_outside_floor(floor_config):
+    """Delete mesh objects outside this floor's Y range to reduce GPU memory.
+
+    Note: In Blender Z is up, but our config uses Y (glTF convention).
+    """
+    y_min = floor_config.get("y_min", float("-inf"))
+    y_max = floor_config.get("y_max", float("inf"))
+    margin = 3.0  # Keep objects slightly outside range for visual context
+
+    deleted = 0
+    kept = 0
+    for obj in list(bpy.data.objects):
+        if obj.type != "MESH":
+            continue
+        z_center = obj.matrix_world.translation.z
+        if z_center < (y_min - margin) or z_center > (y_max + margin):
+            bpy.data.objects.remove(obj, do_unlink=True)
+            deleted += 1
+        else:
+            kept += 1
+
+    print(f"  Floor [{y_min:.1f}, {y_max:.1f}]: kept {kept}, deleted {deleted} objects")
+    return kept
+
+
 def render_floor(floor_config, output_dir, render_bounds):
     """Render a single floor to PNG."""
     floor_id = floor_config["id"]
     output_path = os.path.join(output_dir, f"{floor_id}.png")
-
-    hide_objects_outside_floor(floor_config)
 
     bpy.context.scene.render.filepath = output_path
     bpy.ops.render.render(write_still=True)
@@ -300,8 +325,8 @@ def export_glb(output_dir, map_id):
         export_format="GLB",
         use_selection=False,
         export_apply=True,
-        export_materials="PLACEHOLDER",
-        export_draco_mesh_compression_enable=True,
+        export_materials="EXPORT",
+        export_draco_mesh_compression_enable=False,
     )
 
     print(f"  Exported GLB -> {output_path}")
@@ -352,8 +377,15 @@ def main():
     print(f"  Scuffed Map Pipeline — Blender Export")
     print(f"{'='*60}\n")
 
-    # Parse config
-    config = parse_toml_simple(args.config)
+    # Parse config (optional for GLB-only export)
+    if args.config:
+        config = parse_toml_simple(args.config)
+    else:
+        if not args.skip_render:
+            print("ERROR: --config is required when rendering floors. Use --skip-render for GLB-only export.")
+            sys.exit(1)
+        config = {}
+
     map_info = config.get("map", {})
     cleanup_config = config.get("cleanup", {})
     render_config = config.get("render", {})
@@ -380,11 +412,24 @@ def main():
             print("\nERROR: No floors defined in config. Run 'detect-floors' first.")
             sys.exit(1)
 
-        print(f"\nStep 3: Rendering {len(floors)} floors (Workbench engine)")
-        bounds = setup_workbench_render(render_config)
-        setup_camera(*bounds)
+        # Filter to requested floor(s)
+        if args.floor:
+            render_floors = [f for f in floors if f.get("id") == args.floor]
+            if not render_floors:
+                print(f"\nERROR: Floor '{args.floor}' not found in config. Available: {[f['id'] for f in floors]}")
+                sys.exit(1)
+        else:
+            render_floors = floors
 
-        for floor in floors:
+        print(f"\nStep 2.5: Rendering {len(render_floors)} floor(s)")
+
+        for floor in render_floors:
+            # Delete objects outside this floor to free GPU memory
+            kept = delete_objects_outside_floor(floor)
+            print(f"  {kept} mesh objects for rendering")
+
+            bounds = setup_workbench_render(render_config)
+            setup_camera(*bounds)
             render_floor(floor, args.output, bounds)
 
     # Export entities
