@@ -9,6 +9,7 @@ use scuffed_auth::server::session::ErrorResponse;
 use scuffed_db::{
     Announcement, Event, Game, GameAccount, MatchResult, Member, SiteSettings, Team, TeamRecord,
 };
+use scuffed_types::api::{CursorResponse, PaginationParams};
 
 use crate::state::AppState;
 
@@ -151,20 +152,27 @@ fn member_to_public(m: Member) -> PublicMember {
     }
 }
 
-/// GET /api/public/members — public member list
+/// GET /api/public/members — public member list (cursor-paginated)
 pub async fn public_members(
     State(state): State<AppState>,
-) -> Result<Json<Vec<PublicMember>>, (StatusCode, Json<ErrorResponse>)> {
-    let members = state.db.list_members().await.map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: e.to_string(),
-            }),
-        )
-    })?;
+    axum::extract::Query(pagination): axum::extract::Query<PaginationParams>,
+) -> Result<Json<CursorResponse<PublicMember>>, (StatusCode, Json<ErrorResponse>)> {
+    let (limit, offset) = pagination.resolve();
+    let members = state
+        .db
+        .list_members_paginated(limit, offset)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: e.to_string(),
+                }),
+            )
+        })?;
 
-    Ok(Json(members.into_iter().map(member_to_public).collect()))
+    let public: Vec<PublicMember> = members.into_iter().map(member_to_public).collect();
+    Ok(Json(CursorResponse::from_oversized(public, limit, offset)))
 }
 
 /// Public member profile with team memberships and game accounts.

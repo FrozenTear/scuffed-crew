@@ -1,4 +1,4 @@
-use serde::{de::DeserializeOwned, Serialize};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::JsFuture;
 use web_sys::{Request, RequestCredentials, RequestInit, RequestMode, Response};
@@ -77,6 +77,19 @@ async fn parse_json<T: DeserializeOwned>(resp: Response) -> ApiResult<T> {
 pub async fn get<T: DeserializeOwned>(url: &str) -> ApiResult<T> {
     let resp = do_fetch("GET", url, None).await?;
     parse_json(resp).await
+}
+
+/// Response shape for cursor-paginated list endpoints.
+#[derive(Debug, Clone, Deserialize)]
+pub struct CursorResponse<T> {
+    pub data: Vec<T>,
+    pub next_cursor: Option<String>,
+}
+
+/// Fetch all items from a cursor-paginated list endpoint (first page, no cursor).
+pub async fn get_list<T: DeserializeOwned>(url: &str) -> ApiResult<Vec<T>> {
+    let resp: CursorResponse<T> = get(url).await?;
+    Ok(resp.data)
 }
 
 pub async fn post<B: Serialize, T: DeserializeOwned>(url: &str, body: &B) -> ApiResult<T> {

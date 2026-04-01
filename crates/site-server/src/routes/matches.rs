@@ -8,21 +8,23 @@ use serde::Deserialize;
 
 use scuffed_auth::server::session::ErrorResponse;
 use scuffed_db::{AuditAction, AuditTargetType, MatchResult, MatchType};
+use scuffed_types::api::{CursorResponse, PaginationParams};
 
 use crate::extractors::OfficerUser;
 use crate::routes::audit_log::audit;
 use crate::state::AppState;
 
-/// GET /api/teams/:id/matches — team match history (public)
+/// GET /api/teams/:id/matches — team match history (cursor-paginated, public)
 pub async fn list_team_matches(
     State(state): State<AppState>,
     Path(team_id): Path<String>,
-) -> Result<Json<Vec<MatchResult>>, (StatusCode, Json<ErrorResponse>)> {
-    state
+    axum::extract::Query(pagination): axum::extract::Query<PaginationParams>,
+) -> Result<Json<CursorResponse<MatchResult>>, (StatusCode, Json<ErrorResponse>)> {
+    let (limit, offset) = pagination.resolve();
+    let items = state
         .db
-        .list_team_matches(&team_id)
+        .list_team_matches_paginated(&team_id, limit, offset)
         .await
-        .map(Json)
         .map_err(|e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -30,7 +32,8 @@ pub async fn list_team_matches(
                     error: e.to_string(),
                 }),
             )
-        })
+        })?;
+    Ok(Json(CursorResponse::from_oversized(items, limit, offset)))
 }
 
 #[derive(Deserialize)]

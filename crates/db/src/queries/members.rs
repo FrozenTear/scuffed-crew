@@ -97,6 +97,27 @@ impl Database {
         .await
     }
 
+    /// List active members with cursor-based pagination.
+    /// Fetches `limit + 1` rows so the caller can detect a next page.
+    pub async fn list_members_paginated(
+        &self,
+        limit: u32,
+        offset: u32,
+    ) -> DbResult<Vec<Member>> {
+        with_timeout(async {
+            let fetch = limit + 1;
+            let mut result = self
+                .client
+                .query("SELECT * FROM member WHERE is_active = true ORDER BY display_name ASC LIMIT $lim START $off")
+                .bind(("lim", fetch))
+                .bind(("off", offset))
+                .await?;
+            let members: Vec<DbMember> = result.take(0)?;
+            Ok(members.into_iter().map(db_to_member).collect())
+        })
+        .await
+    }
+
     /// Get a member by their user_id.
     pub async fn get_member_by_user(&self, user_id: &str) -> DbResult<Option<Member>> {
         with_timeout(async {

@@ -83,6 +83,28 @@ impl Database {
         .await
     }
 
+    /// List active announcements with cursor-based pagination.
+    pub async fn list_announcements_paginated(
+        &self,
+        limit: u32,
+        offset: u32,
+    ) -> DbResult<Vec<Announcement>> {
+        with_timeout(async {
+            let fetch = limit + 1;
+            let mut result = self
+                .client
+                .query(
+                    "SELECT * FROM announcement WHERE is_active = true ORDER BY pinned DESC, created_at DESC LIMIT $lim START $off",
+                )
+                .bind(("lim", fetch))
+                .bind(("off", offset))
+                .await?;
+            let anns: Vec<DbAnnouncement> = result.take(0)?;
+            Ok(anns.into_iter().map(db_to_announcement).collect())
+        })
+        .await
+    }
+
     /// Update an announcement.
     pub async fn update_announcement(
         &self,

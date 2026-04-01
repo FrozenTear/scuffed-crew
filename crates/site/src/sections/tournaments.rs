@@ -1,7 +1,7 @@
 use leptos::prelude::*;
 use serde::Deserialize;
 
-use scuffed_auth::client::api::fetch_json;
+use scuffed_auth::client::api::fetch_json_list;
 
 use crate::components::SectionHeader;
 use crate::components::bracket::BRACKET_STYLES;
@@ -38,7 +38,7 @@ fn status_label(s: &str) -> &str {
 #[component]
 pub fn Tournaments() -> impl IntoView {
     let tournaments = LocalResource::new(|| async {
-        fetch_json::<Vec<Tournament>>("/api/tournaments").await.ok()
+        fetch_json_list::<Tournament>("/api/tournaments").await.ok()
     });
 
     view! {

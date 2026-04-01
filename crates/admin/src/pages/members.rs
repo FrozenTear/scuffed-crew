@@ -108,7 +108,7 @@ pub fn MembersPage() -> impl IntoView {
 
     let members = LocalResource::new(move || {
         refresh.get();
-        async { api::get::<Vec<Member>>("/api/members").await.ok() }
+        async { api::get_list::<Member>("/api/members").await.ok() }
     });
 
     // Role edit modal state

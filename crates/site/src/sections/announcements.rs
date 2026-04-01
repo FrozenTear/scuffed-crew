@@ -1,7 +1,7 @@
 use leptos::prelude::*;
 use serde::Deserialize;
 
-use scuffed_auth::client::api::fetch_json;
+use scuffed_auth::client::api::fetch_json_list;
 
 use crate::components::SectionHeader;
 
@@ -18,7 +18,7 @@ struct Announcement {
 #[component]
 pub fn Announcements() -> impl IntoView {
     let announcements = LocalResource::new(|| async {
-        fetch_json::<Vec<Announcement>>("/api/announcements").await.ok()
+        fetch_json_list::<Announcement>("/api/announcements").await.ok()
     });
 
     view! {

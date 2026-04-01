@@ -7,24 +7,32 @@ use serde::Deserialize;
 
 use scuffed_auth::server::session::ErrorResponse;
 use scuffed_db::{AuditAction, AuditTargetType, GameAccount, Member, OrgRole};
+use scuffed_types::api::{CursorResponse, PaginationParams};
 
 use crate::extractors::{AdminUser, OrgMember};
 use crate::routes::audit_log::audit;
 use crate::state::AppState;
 
-/// GET /api/members — list all active members
+/// GET /api/members — list active members (cursor-paginated)
 pub async fn list_members(
     State(state): State<AppState>,
     _member: OrgMember,
-) -> Result<Json<Vec<Member>>, (StatusCode, Json<ErrorResponse>)> {
-    state.db.list_members().await.map(Json).map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: e.to_string(),
-            }),
-        )
-    })
+    axum::extract::Query(pagination): axum::extract::Query<PaginationParams>,
+) -> Result<Json<CursorResponse<Member>>, (StatusCode, Json<ErrorResponse>)> {
+    let (limit, offset) = pagination.resolve();
+    let items = state
+        .db
+        .list_members_paginated(limit, offset)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: e.to_string(),
+                }),
+            )
+        })?;
+    Ok(Json(CursorResponse::from_oversized(items, limit, offset)))
 }
 
 /// GET /api/members/:id — get member profile

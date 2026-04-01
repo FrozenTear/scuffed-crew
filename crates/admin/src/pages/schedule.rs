@@ -106,11 +106,11 @@ pub fn SchedulePage() -> impl IntoView {
 
     let events = LocalResource::new(move || {
         refresh.get();
-        async { api::get::<Vec<Event>>("/api/events").await.ok() }
+        async { api::get_list::<Event>("/api/events").await.ok() }
     });
 
     let teams_list =
-        LocalResource::new(|| async { api::get::<Vec<Team>>("/api/teams").await.ok() });
+        LocalResource::new(|| async { api::get_list::<Team>("/api/teams").await.ok() });
 
     // Form modal state
     let form_open = RwSignal::new(false);
@@ -238,7 +238,7 @@ pub fn SchedulePage() -> impl IntoView {
         att_open.set(true);
         // Fetch member list
         spawn_local(async move {
-            match api::get::<Vec<Member>>("/api/members").await {
+            match api::get_list::<Member>("/api/members").await {
                 Ok(members) => {
                     let statuses: Vec<(String, RwSignal<String>)> = members
                         .iter()

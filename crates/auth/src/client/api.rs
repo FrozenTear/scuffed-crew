@@ -45,6 +45,16 @@ pub async fn fetch_json<T: DeserializeOwned>(url: &str) -> ApiResult<T> {
     send_request(request).await
 }
 
+/// Fetch a cursor-paginated list endpoint, returning just the data vec.
+pub async fn fetch_json_list<T: DeserializeOwned>(url: &str) -> ApiResult<Vec<T>> {
+    #[derive(serde::Deserialize)]
+    struct CursorResponse<T> {
+        data: Vec<T>,
+    }
+    let resp: CursorResponse<T> = fetch_json(url).await?;
+    Ok(resp.data)
+}
+
 /// POST JSON to a URL
 pub async fn post_json<T: Serialize, R: DeserializeOwned>(url: &str, body: &T) -> ApiResult<R> {
     send_json_body("POST", url, body).await

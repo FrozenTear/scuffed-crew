@@ -46,7 +46,7 @@ pub fn AnnouncementsPage() -> impl IntoView {
 
     let announcements = LocalResource::new(move || {
         refresh.get();
-        async { api::get::<Vec<Announcement>>("/api/announcements").await.ok() }
+        async { api::get_list::<Announcement>("/api/announcements").await.ok() }
     });
 
     // Form modal state

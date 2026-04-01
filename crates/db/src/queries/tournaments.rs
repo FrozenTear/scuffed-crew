@@ -335,6 +335,67 @@ impl Database {
         .await
     }
 
+    /// List tournaments with filters and cursor-based pagination.
+    pub async fn list_tournaments_paginated(
+        &self,
+        status: Option<TournamentStatus>,
+        game_id: Option<&str>,
+        limit: u32,
+        offset: u32,
+    ) -> DbResult<Vec<Tournament>> {
+        with_timeout(async {
+            let fetch = limit + 1;
+            let query = match (status, game_id) {
+                (Some(s), Some(g)) => {
+                    let mut r = self
+                        .client
+                        .query("SELECT * FROM tournament WHERE status = $st AND game_id = $gid ORDER BY created_at DESC LIMIT $lim START $off")
+                        .bind(("st", s.to_string()))
+                        .bind(("gid", g.to_string()))
+                        .bind(("lim", fetch))
+                        .bind(("off", offset))
+                        .await?;
+                    let items: Vec<DbTournament> = r.take(0)?;
+                    items
+                }
+                (Some(s), None) => {
+                    let mut r = self
+                        .client
+                        .query("SELECT * FROM tournament WHERE status = $st ORDER BY created_at DESC LIMIT $lim START $off")
+                        .bind(("st", s.to_string()))
+                        .bind(("lim", fetch))
+                        .bind(("off", offset))
+                        .await?;
+                    let items: Vec<DbTournament> = r.take(0)?;
+                    items
+                }
+                (None, Some(g)) => {
+                    let mut r = self
+                        .client
+                        .query("SELECT * FROM tournament WHERE game_id = $gid ORDER BY created_at DESC LIMIT $lim START $off")
+                        .bind(("gid", g.to_string()))
+                        .bind(("lim", fetch))
+                        .bind(("off", offset))
+                        .await?;
+                    let items: Vec<DbTournament> = r.take(0)?;
+                    items
+                }
+                (None, None) => {
+                    let mut r = self
+                        .client
+                        .query("SELECT * FROM tournament ORDER BY created_at DESC LIMIT $lim START $off")
+                        .bind(("lim", fetch))
+                        .bind(("off", offset))
+                        .await?;
+                    let items: Vec<DbTournament> = r.take(0)?;
+                    items
+                }
+            };
+            Ok(query.into_iter().map(db_to_tournament).collect())
+        })
+        .await
+    }
+
     pub async fn update_tournament(
         &self,
         id: &str,

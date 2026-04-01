@@ -54,7 +54,7 @@ struct UpdateMatchBody {
 #[component]
 pub fn MatchesPage() -> impl IntoView {
     let toast = use_toast();
-    let teams = LocalResource::new(|| async { api::get::<Vec<Team>>("/api/teams").await.ok() });
+    let teams = LocalResource::new(|| async { api::get_list::<Team>("/api/teams").await.ok() });
 
     let selected_team = RwSignal::new(String::new());
     let refresh = RwSignal::new(0u32);
@@ -66,7 +66,7 @@ pub fn MatchesPage() -> impl IntoView {
             if tid.is_empty() {
                 return None;
             }
-            api::get::<Vec<MatchResult>>(&format!("/api/teams/{tid}/matches"))
+            api::get_list::<MatchResult>(&format!("/api/teams/{tid}/matches"))
                 .await
                 .ok()
         }

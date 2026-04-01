@@ -3,7 +3,7 @@ use leptos_router::hooks::use_params_map;
 use serde::Deserialize;
 use std::collections::HashMap;
 
-use scuffed_auth::client::api::fetch_json;
+use scuffed_auth::client::api::{fetch_json, fetch_json_list};
 
 use crate::components::bracket::{BracketMatch, BracketRound, BracketView, SwissStanding, BRACKET_STYLES};
 use crate::components::Nav;
@@ -94,7 +94,7 @@ pub fn TournamentPage() -> impl IntoView {
 
     // Fetch teams for name resolution
     let teams = LocalResource::new(|| async {
-        fetch_json::<Vec<Team>>("/api/teams").await.ok()
+        fetch_json_list::<Team>("/api/teams").await.ok()
     });
 
     // Fetch swiss standings if applicable
