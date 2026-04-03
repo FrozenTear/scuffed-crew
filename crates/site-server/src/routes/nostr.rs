@@ -265,7 +265,17 @@ pub async fn nostr_verify(
         ));
     }
 
-    // 3. Verify event content matches the challenge
+    // 3. Reject non-ephemeral event kinds (must be 22242 / NIP-42 AUTH)
+    if body.signed_event.kind != nostr::Kind::Custom(22242) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "Event must use ephemeral kind 22242".into(),
+            }),
+        ));
+    }
+
+    // 4. Verify event content matches the challenge
     if body.signed_event.content != challenge {
         return Err((
             StatusCode::BAD_REQUEST,
@@ -275,7 +285,7 @@ pub async fn nostr_verify(
         ));
     }
 
-    // 4. Verify event ID and signature
+    // 5. Verify event ID and signature
     body.signed_event.verify().map_err(|e| {
         (
             StatusCode::BAD_REQUEST,
@@ -287,7 +297,7 @@ pub async fn nostr_verify(
 
     let pubkey_hex = body.signed_event.pubkey.to_hex();
 
-    // 5. Update member's nostr_pubkey
+    // 6. Update member's nostr_pubkey
     let updated = state
         .db
         .update_member(
