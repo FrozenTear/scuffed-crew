@@ -261,6 +261,19 @@ pub fn create_router(state: AppState) -> Router {
             "/api/tournaments/{id}/next-round",
             post(routes::tournaments::generate_next_round),
         )
+        // Nostr identity verification (Phase 1.5)
+        .route(
+            "/api/nostr/challenge",
+            post(routes::nostr::nostr_challenge),
+        )
+        .route(
+            "/api/nostr/verify",
+            post(routes::nostr::nostr_verify),
+        )
+        .route(
+            "/api/nostr/identity",
+            delete(routes::nostr::nostr_unlink),
+        )
         // Upload routes
         .route(
             "/api/upload/avatar",

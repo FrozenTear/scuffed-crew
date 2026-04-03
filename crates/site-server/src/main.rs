@@ -444,12 +444,28 @@ async fn main() {
         tracing::info!("Matrix notifications not configured — running without");
     }
 
+    // Nostr challenge signing key: from env or deterministic dev fallback
+    let nostr_challenge_key: [u8; 32] = match std::env::var("NOSTR_CHALLENGE_SECRET") {
+        Ok(secret) if !secret.is_empty() => {
+            let hash = blake3::hash(secret.as_bytes());
+            *hash.as_bytes()
+        }
+        _ => {
+            if is_dev {
+                tracing::warn!("Using deterministic dev key for Nostr challenges — NOT for production");
+            }
+            let hash = blake3::hash(b"scuffed-crew-dev-nostr-challenge-key");
+            *hash.as_bytes()
+        }
+    };
+
     let state = AppState {
         db: db.clone(),
         session_config: SessionConfig::default(),
         oauth_config,
         upload_dir,
         notifier,
+        nostr_challenge_key,
     };
 
     // Spawn hourly session cleanup task

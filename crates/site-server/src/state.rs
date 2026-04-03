@@ -15,6 +15,8 @@ pub struct AppState {
     pub oauth_config: OAuthConfig,
     pub upload_dir: PathBuf,
     pub notifier: Option<MatrixNotifier>,
+    /// 32-byte key for HMAC-signing Nostr challenge tokens.
+    pub nostr_challenge_key: [u8; 32],
 }
 
 /// OAuth configuration loaded from environment.

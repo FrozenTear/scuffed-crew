@@ -44,6 +44,7 @@ async fn test_state() -> AppState {
         },
         upload_dir: PathBuf::from("/tmp/scuffed-test-uploads"),
         notifier: None,
+        nostr_challenge_key: *blake3::hash(b"test-nostr-challenge-key").as_bytes(),
     }
 }
 

@@ -18,7 +18,7 @@ use scuffed_ui::components::avatar::AVATAR_STYLES;
 use scuffed_ui::components::auth_buttons::AUTH_BUTTONS_STYLES;
 use scuffed_auth::client::api;
 
-use crate::pages::{ApplyPage, HomePage, MemberProfilePage, MembersPage, NewsPage, PropagandaPage, TournamentPage, TournamentsPage};
+use crate::pages::{ApplyPage, HomePage, MemberProfilePage, MembersPage, NewsPage, PropagandaPage, SettingsPage, TournamentPage, TournamentsPage};
 
 /// Response from /api/auth/me
 #[derive(Debug, Clone, Deserialize)]
@@ -130,6 +130,7 @@ pub fn App() -> impl IntoView {
                     <Route path=path!("/apply") view=ApplyPage/>
                     <Route path=path!("/tournaments") view=TournamentsPage/>
                     <Route path=path!("/tournaments/:id") view=TournamentPage/>
+                    <Route path=path!("/settings") view=SettingsPage/>
                     <Route path=path!("/propaganda") view=PropagandaPage/>
                 </Routes>
                 <ToastContainer/>
