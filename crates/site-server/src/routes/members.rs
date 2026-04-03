@@ -72,7 +72,13 @@ pub struct UpdateMemberRequest {
     pub timezone: Option<Option<String>>,
     pub pronouns: Option<Option<String>>,
     pub availability_status: Option<Option<String>>,
+    pub nostr_pubkey: Option<Option<String>>,
     pub is_active: Option<bool>,
+}
+
+/// Validate a Nostr pubkey: must be a 64-character lowercase hex string.
+fn validate_nostr_pubkey(pubkey: &str) -> bool {
+    pubkey.len() == 64 && pubkey.chars().all(|c| c.is_ascii_hexdigit())
 }
 
 /// PUT /api/members/:id — update member profile (self or officer+)
@@ -116,6 +122,18 @@ pub async fn update_member(
         ));
     }
 
+    // Validate nostr_pubkey if provided
+    if let Some(Some(ref pubkey)) = body.nostr_pubkey {
+        if !validate_nostr_pubkey(pubkey) {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: "Invalid Nostr pubkey: must be a 64-character hex string".into(),
+                }),
+            ));
+        }
+    }
+
     let updated = state
         .db
         .update_member(
@@ -126,6 +144,7 @@ pub async fn update_member(
             body.timezone.as_ref().map(|t| t.as_deref()),
             body.pronouns.as_ref().map(|p| p.as_deref()),
             body.availability_status.as_ref().map(|a| a.as_deref()),
+            body.nostr_pubkey.as_ref().map(|n| n.as_deref()),
             body.is_active,
         )
         .await

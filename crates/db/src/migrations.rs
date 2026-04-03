@@ -53,9 +53,11 @@ pub async fn run_migrations(client: &Surreal<Any>) -> DbResult<()> {
         DEFINE FIELD timezone ON member TYPE option<string>;
         DEFINE FIELD pronouns ON member TYPE option<string>;
         DEFINE FIELD availability_status ON member TYPE option<string>;
+        DEFINE FIELD nostr_pubkey ON member TYPE option<string>;
         DEFINE FIELD is_active ON member TYPE bool DEFAULT true;
 
         DEFINE INDEX member_user_idx ON member COLUMNS user_id UNIQUE;
+        DEFINE INDEX member_nostr_pubkey_idx ON member COLUMNS nostr_pubkey UNIQUE;
 
         -- ================================================
         -- Games (titles that teams can play)

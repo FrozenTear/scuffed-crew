@@ -40,6 +40,11 @@ pub fn create_router(state: AppState) -> Router {
         .allow_credentials(true);
 
     Router::new()
+        // NIP-05 Nostr identity verification (must be before fallback)
+        .route(
+            "/.well-known/nostr.json",
+            get(routes::nostr::nostr_json),
+        )
         // Health check
         .route("/api/health", get(routes::health::health))
         // Dev login (sets session cookie for in-memory dev mode)

@@ -135,6 +135,7 @@ pub struct PublicMember {
     pub timezone: Option<String>,
     pub pronouns: Option<String>,
     pub availability_status: Option<String>,
+    pub nostr_pubkey: Option<String>,
     pub joined_at: String,
 }
 
@@ -148,6 +149,7 @@ fn member_to_public(m: Member) -> PublicMember {
         timezone: m.timezone,
         pronouns: m.pronouns,
         availability_status: m.availability_status,
+        nostr_pubkey: m.nostr_pubkey,
         joined_at: m.joined_at.to_rfc3339(),
     }
 }

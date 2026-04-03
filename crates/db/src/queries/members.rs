@@ -20,6 +20,7 @@ struct DbMember {
     timezone: Option<String>,
     pronouns: Option<String>,
     availability_status: Option<String>,
+    nostr_pubkey: Option<String>,
     joined_at: SurrealDatetime,
     is_active: bool,
 }
@@ -48,6 +49,7 @@ fn db_to_member(db: DbMember) -> Member {
         timezone: db.timezone,
         pronouns: db.pronouns,
         availability_status: db.availability_status,
+        nostr_pubkey: db.nostr_pubkey,
         joined_at: db.joined_at.into(),
         is_active: db.is_active,
     }
@@ -72,6 +74,7 @@ impl Database {
                 timezone: None,
                 pronouns: None,
                 availability_status: None,
+                nostr_pubkey: None,
                 joined_at: SurrealDatetime::from(Utc::now()),
                 is_active: true,
             };
@@ -151,6 +154,7 @@ impl Database {
         timezone: Option<Option<&str>>,
         pronouns: Option<Option<&str>>,
         availability_status: Option<Option<&str>>,
+        nostr_pubkey: Option<Option<&str>>,
         is_active: Option<bool>,
     ) -> DbResult<Member> {
         with_timeout(async {
@@ -176,6 +180,9 @@ impl Database {
             if let Some(new_status) = availability_status {
                 db.availability_status = new_status.map(|s| s.to_string());
             }
+            if let Some(new_nostr) = nostr_pubkey {
+                db.nostr_pubkey = new_nostr.map(|s| s.to_string());
+            }
             if let Some(active) = is_active {
                 db.is_active = active;
             }
@@ -185,6 +192,19 @@ impl Database {
             Ok(db_to_member(updated.ok_or_else(|| {
                 crate::DbError::NotFound(format!("Member {id} not found after update"))
             })?))
+        })
+        .await
+    }
+
+    /// List all members who have a Nostr pubkey set (for NIP-05 well-known endpoint).
+    pub async fn list_nostr_identities(&self) -> DbResult<Vec<Member>> {
+        with_timeout(async {
+            let mut result = self
+                .client
+                .query("SELECT * FROM member WHERE is_active = true AND nostr_pubkey != NONE")
+                .await?;
+            let members: Vec<DbMember> = result.take(0)?;
+            Ok(members.into_iter().map(db_to_member).collect())
         })
         .await
     }

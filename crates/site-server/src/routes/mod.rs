@@ -11,6 +11,7 @@ pub mod health;
 pub mod matches;
 pub mod members;
 pub mod moderation;
+pub mod nostr;
 pub mod public;
 pub mod roster;
 pub mod rsvps;

@@ -49,6 +49,7 @@ pub struct Member {
     pub timezone: Option<String>,
     pub pronouns: Option<String>,
     pub availability_status: Option<String>,
+    pub nostr_pubkey: Option<String>,
     pub joined_at: DateTime<Utc>,
     pub is_active: bool,
 }
