@@ -8,3 +8,4 @@ dist.old/
 .worktrees/
 *.jpeg
 maps/render/
+node_modules/

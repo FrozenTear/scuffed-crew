@@ -8878,6 +8878,7 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "axum-extra",
+ "blake3",
  "chrono",
  "dashmap",
  "dotenvy",

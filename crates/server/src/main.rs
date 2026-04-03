@@ -126,12 +126,26 @@ async fn main() {
         tracing::info!("Matrix notifications not configured — running without");
     }
 
+    // Nostr challenge signing key: from env or deterministic dev fallback
+    let nostr_challenge_key: [u8; 32] = match std::env::var("NOSTR_CHALLENGE_SECRET") {
+        Ok(secret) if !secret.is_empty() => {
+            *blake3::hash(secret.as_bytes()).as_bytes()
+        }
+        _ => {
+            if is_dev {
+                tracing::warn!("Using deterministic dev key for Nostr challenges — NOT for production");
+            }
+            *blake3::hash(b"scuffed-crew-dev-nostr-challenge-key").as_bytes()
+        }
+    };
+
     let state = AppState {
         db: db.clone(),
         session_config: SessionConfig::default(),
         oauth_config,
         upload_dir,
         notifier,
+        nostr_challenge_key,
     };
 
     // Create the collaboration room manager
