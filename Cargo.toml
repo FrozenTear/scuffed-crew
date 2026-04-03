@@ -16,6 +16,8 @@ members = [
     # Map pipeline tooling
     "crates/map-pipeline",
     "crates/map-renderer",
+    # Nostr relay
+    "crates/relay-policy",
 ]
 
 [workspace.dependencies]

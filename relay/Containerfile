@@ -1,0 +1,22 @@
+# ── Stage 1: Build strfry29 (Go) ──────────────────────────
+FROM golang:1.23-alpine AS strfry29-builder
+
+RUN apk add --no-cache git
+
+WORKDIR /build
+RUN git clone --depth 1 https://github.com/fiatjaf/relay29.git \
+    && cd relay29/strfry29 \
+    && CGO_ENABLED=0 go build -o /usr/local/bin/strfry29 .
+
+# ── Stage 2: Runtime (strfry + strfry29 plugin) ──────────
+FROM dockurr/strfry:latest
+
+# Install strfry29 plugin for NIP-29 group support.
+COPY --from=strfry29-builder /usr/local/bin/strfry29 /usr/local/bin/strfry29
+
+# Copy relay configuration.
+COPY relay/strfry.conf /etc/strfry.conf
+
+EXPOSE 7777
+
+ENTRYPOINT ["strfry", "relay"]

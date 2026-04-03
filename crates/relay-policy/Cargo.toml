@@ -1,0 +1,20 @@
+[package]
+name = "relay-policy"
+version = "0.1.0"
+edition = "2021"
+description = "strfry write-policy plugin for Scuffed Crew relay"
+
+[[bin]]
+name = "relay-policy"
+path = "src/main.rs"
+
+[dependencies]
+scuffed-db = { path = "../db" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+serde_json = { workspace = true }

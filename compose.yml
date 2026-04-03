@@ -13,6 +13,19 @@ services:
       retries: 5
     restart: unless-stopped
 
+  strfry:
+    build:
+      context: .
+      dockerfile: relay/Containerfile
+    volumes:
+      - strfry-data:/app/strfry-db
+    networks:
+      - internal
+      - external
+    ports:
+      - "127.0.0.1:7777:7777"
+    restart: unless-stopped
+
   site-server:
     build:
       context: .
@@ -32,6 +45,7 @@ services:
       ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-}
       ENCRYPTION_KEY: ${ENCRYPTION_KEY:-}
       ENCRYPTION_KEY_VERSION: ${ENCRYPTION_KEY_VERSION:-1}
+      NOSTR_RELAY_URL: ${NOSTR_RELAY_URL:-ws://strfry:7777}
       RUST_LOG: ${RUST_LOG:-info}
     networks:
       - internal
@@ -47,3 +61,4 @@ networks:
 
 volumes:
   surrealdb-data:
+  strfry-data:
