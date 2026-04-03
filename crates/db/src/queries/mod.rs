@@ -2,6 +2,7 @@ pub mod announcements;
 pub mod applications;
 pub mod attendance;
 pub mod audit_log;
+pub mod channels;
 pub mod events;
 pub mod game_accounts;
 pub mod games;

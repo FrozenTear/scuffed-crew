@@ -527,6 +527,69 @@ impl std::fmt::Display for AuditTargetType {
     }
 }
 
+/// Type of NIP-29 group channel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum GroupType {
+    Public,
+    Officer,
+}
+
+impl std::fmt::Display for GroupType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            GroupType::Public => write!(f, "public"),
+            GroupType::Officer => write!(f, "officer"),
+        }
+    }
+}
+
+/// A team's auto-provisioned NIP-29 group on the relay.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TeamChannel {
+    pub id: String,
+    pub team_id: String,
+    pub group_id: String,
+    pub group_type: GroupType,
+    pub relay_url: String,
+    pub is_active: bool,
+    pub created_at: DateTime<Utc>,
+    pub synced_at: Option<DateTime<Utc>>,
+}
+
+/// Per-member read cursor for unread badge tracking.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GroupLastSeen {
+    pub id: String,
+    pub member_id: String,
+    pub group_id: String,
+    pub last_seen_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// NIP-29 group role derived from org role.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Nip29GroupRole {
+    GroupAdmin,
+    GroupMember,
+}
+
+impl OrgRole {
+    /// Map org role to NIP-29 group role.
+    pub fn to_nip29_role(&self) -> Nip29GroupRole {
+        match self {
+            OrgRole::Admin | OrgRole::Officer => Nip29GroupRole::GroupAdmin,
+            OrgRole::Member | OrgRole::Recruit => Nip29GroupRole::GroupMember,
+        }
+    }
+
+    /// Whether this role can access officer-only (encrypted) channels.
+    pub fn can_access_officer_channel(&self) -> bool {
+        matches!(self, OrgRole::Admin | OrgRole::Officer)
+    }
+}
+
 /// An audit log entry.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuditLogEntry {

@@ -349,6 +349,37 @@ pub async fn run_migrations(client: &Surreal<Any>) -> DbResult<()> {
         DEFINE INDEX strategy_owner_idx ON strategy COLUMNS owner_id;
         DEFINE INDEX strategy_visibility_idx ON strategy COLUMNS visibility;
         DEFINE INDEX strategy_map_idx ON strategy COLUMNS map_id;
+
+        -- ================================================
+        -- Team Channels (NIP-29 group mapping per team)
+        -- ================================================
+        DEFINE TABLE team_channel SCHEMAFULL;
+        DEFINE FIELD team_id ON team_channel TYPE string;
+        DEFINE FIELD group_id ON team_channel TYPE string;
+        DEFINE FIELD group_type ON team_channel TYPE string DEFAULT 'public'
+            ASSERT $value IN ['public', 'officer'];
+        DEFINE FIELD relay_url ON team_channel TYPE string;
+        DEFINE FIELD is_active ON team_channel TYPE bool DEFAULT true;
+        DEFINE FIELD created_at ON team_channel TYPE datetime DEFAULT time::now();
+        DEFINE FIELD synced_at ON team_channel TYPE option<datetime>;
+
+        DEFINE INDEX team_channel_team_idx ON team_channel COLUMNS team_id;
+        DEFINE INDEX team_channel_group_idx ON team_channel COLUMNS group_id UNIQUE;
+        DEFINE INDEX team_channel_team_type_idx ON team_channel
+            COLUMNS team_id, group_type UNIQUE;
+
+        -- ================================================
+        -- Group Last Seen (per-member read cursor for unread badges)
+        -- ================================================
+        DEFINE TABLE group_last_seen SCHEMAFULL;
+        DEFINE FIELD member_id ON group_last_seen TYPE string;
+        DEFINE FIELD group_id ON group_last_seen TYPE string;
+        DEFINE FIELD last_seen_at ON group_last_seen TYPE datetime;
+        DEFINE FIELD updated_at ON group_last_seen TYPE datetime DEFAULT time::now();
+
+        DEFINE INDEX gls_member_group_idx ON group_last_seen
+            COLUMNS member_id, group_id UNIQUE;
+        DEFINE INDEX gls_member_idx ON group_last_seen COLUMNS member_id;
     "#,
         )
         .await?
