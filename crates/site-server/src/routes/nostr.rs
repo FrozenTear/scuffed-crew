@@ -123,17 +123,20 @@ fn resolve_pubkey_hex(input: &str) -> Result<String, &'static str> {
     Err("Pubkey must be a 64-character hex string or npub1... bech32 address")
 }
 
-/// Create an HMAC token: `blake3_keyed_hash(key, challenge:member_id:expires_ts)`
+/// Create an HMAC token.
+///
+/// Token format: `{challenge}|{member_id}|{expires_ts}|{hmac_hex}` (pipe-delimited,
+/// because the challenge contains colons). HMAC covers all three fields.
 fn sign_challenge_token(
     key: &[u8; 32],
     challenge: &str,
     member_id: &str,
     expires_ts: u64,
 ) -> String {
-    let data = format!("{challenge}:{member_id}:{expires_ts}");
-    let hash = blake3::keyed_hash(key, data.as_bytes());
+    let hmac_data = format!("{challenge}:{member_id}:{expires_ts}");
+    let hash = blake3::keyed_hash(key, hmac_data.as_bytes());
     let hmac_hex = hash.to_hex();
-    let token_raw = format!("{challenge}:{member_id}:{expires_ts}:{hmac_hex}");
+    let token_raw = format!("{challenge}|{member_id}|{expires_ts}|{hmac_hex}");
     use base64::Engine;
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(token_raw.as_bytes())
 }
@@ -149,8 +152,8 @@ fn verify_challenge_token(
         .map_err(|_| "Invalid token encoding")?;
     let token_str = String::from_utf8(decoded).map_err(|_| "Invalid token encoding")?;
 
-    // Split: challenge:member_id:expires_ts:hmac_hex
-    let parts: Vec<&str> = token_str.splitn(4, ':').collect();
+    // Split on pipe: challenge|member_id|expires_ts|hmac_hex
+    let parts: Vec<&str> = token_str.splitn(4, '|').collect();
     if parts.len() != 4 {
         return Err("Malformed token");
     }
@@ -169,9 +172,9 @@ fn verify_challenge_token(
         return Err("Challenge expired");
     }
 
-    // Verify HMAC
-    let data = format!("{challenge}:{member_id}:{expires_ts}");
-    let expected = blake3::keyed_hash(key, data.as_bytes());
+    // Verify HMAC (data uses colon separator — only the token wire format uses pipes)
+    let hmac_data = format!("{challenge}:{member_id}:{expires_ts}");
+    let expected = blake3::keyed_hash(key, hmac_data.as_bytes());
     let expected_hex = expected.to_hex();
 
     if expected_hex.as_str() != provided_hmac {

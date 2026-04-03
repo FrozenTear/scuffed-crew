@@ -58,10 +58,12 @@ async fn link_nostr_identity(pubkey: &str) -> Result<(), String> {
         );
     }
 
-    // 3. Create unsigned event for the extension to sign
+    // 3. Create unsigned event for the extension to sign.
+    // Kind 22242 is ephemeral (NIP-42 AUTH range) — prevents the challenge from
+    // being broadcast as a regular post if the extension relays it.
     let now = (js_sys::Date::now() / 1000.0) as u64;
     let unsigned = serde_json::json!({
-        "kind": 1,
+        "kind": 22242,
         "created_at": now,
         "tags": [],
         "content": challenge_resp.challenge,
