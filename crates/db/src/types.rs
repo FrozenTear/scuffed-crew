@@ -1,4 +1,5 @@
 use chrono::{DateTime, Utc};
+use scuffed_auth::crypto::EncryptedBlob;
 use serde::{Deserialize, Serialize};
 
 /// Organization role levels, ordered by privilege.
@@ -37,6 +38,25 @@ impl std::fmt::Display for OrgRole {
     }
 }
 
+/// How a member's Nostr keypair is managed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NostrKeyMode {
+    /// Server generated and stored the key — server signs on behalf of the member.
+    ServerManaged,
+    /// Member linked their own external key — signs client-side (NIP-07).
+    External,
+}
+
+impl std::fmt::Display for NostrKeyMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            NostrKeyMode::ServerManaged => write!(f, "server_managed"),
+            NostrKeyMode::External => write!(f, "external"),
+        }
+    }
+}
+
 /// An org member (extends a user with org-specific data).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Member {
@@ -50,6 +70,11 @@ pub struct Member {
     pub pronouns: Option<String>,
     pub availability_status: Option<String>,
     pub nostr_pubkey: Option<String>,
+    pub nostr_key_mode: Option<NostrKeyMode>,
+    /// Encrypted secret key — only populated for `ServerManaged` mode.
+    /// Never exposed via API responses; only used server-side.
+    #[serde(skip_serializing)]
+    pub nostr_secret_key_encrypted: Option<EncryptedBlob>,
     pub joined_at: DateTime<Utc>,
     pub is_active: bool,
 }

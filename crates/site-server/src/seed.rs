@@ -26,6 +26,8 @@ pub async fn seed_dev_data(db: &Database, dev_session_token: &str) -> Result<(),
                 pronouns = NONE,
                 availability_status = NONE,
                 nostr_pubkey = NONE,
+                nostr_key_mode = NONE,
+                nostr_secret_key_encrypted = NONE,
                 joined_at = time::now(),
                 is_active = true;
 

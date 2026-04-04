@@ -4,7 +4,9 @@ use surrealdb_types::RecordId;
 use surrealdb::types::Datetime as SurrealDatetime;
 use surrealdb_types::SurrealValue;
 
-use crate::types::{Member, OrgRole};
+use scuffed_auth::crypto::EncryptedBlob;
+
+use crate::types::{Member, NostrKeyMode, OrgRole};
 use crate::{with_timeout, Database, DbResult};
 
 #[derive(Debug, Clone, Serialize, Deserialize, SurrealValue)]
@@ -21,6 +23,8 @@ struct DbMember {
     pronouns: Option<String>,
     availability_status: Option<String>,
     nostr_pubkey: Option<String>,
+    nostr_key_mode: Option<String>,
+    nostr_secret_key_encrypted: Option<serde_json::Value>,
     joined_at: SurrealDatetime,
     is_active: bool,
 }
@@ -31,6 +35,13 @@ fn parse_role(s: &str) -> OrgRole {
         "officer" => OrgRole::Officer,
         "member" => OrgRole::Member,
         _ => OrgRole::Recruit,
+    }
+}
+
+fn parse_key_mode(s: &str) -> NostrKeyMode {
+    match s {
+        "external" => NostrKeyMode::External,
+        _ => NostrKeyMode::ServerManaged,
     }
 }
 
@@ -50,6 +61,10 @@ fn db_to_member(db: DbMember) -> Member {
         pronouns: db.pronouns,
         availability_status: db.availability_status,
         nostr_pubkey: db.nostr_pubkey,
+        nostr_key_mode: db.nostr_key_mode.as_deref().map(parse_key_mode),
+        nostr_secret_key_encrypted: db.nostr_secret_key_encrypted.and_then(|v| {
+            serde_json::from_value(v).ok()
+        }),
         joined_at: db.joined_at.into(),
         is_active: db.is_active,
     }
@@ -57,13 +72,29 @@ fn db_to_member(db: DbMember) -> Member {
 
 impl Database {
     /// Create a new org member linked to a user.
+    ///
+    /// Automatically provisions a server-managed Nostr keypair if CryptoService
+    /// is configured (ENCRYPTION_KEY set). If not, the member is created without
+    /// a keypair — one can be provisioned later.
     pub async fn create_member(
         &self,
         user_id: &str,
         display_name: &str,
         role: OrgRole,
     ) -> DbResult<Member> {
+        // Generate keypair if crypto is available
+        let keypair = crate::queries::nostr_keys::generate_encrypted_keypair(self).ok();
+
         with_timeout(async {
+            let (nostr_pubkey, nostr_key_mode, nostr_secret_key_encrypted) = match keypair {
+                Some(kp) => (
+                    Some(kp.pubkey),
+                    Some(NostrKeyMode::ServerManaged.to_string()),
+                    serde_json::to_value(kp.secret_key_encrypted).ok(),
+                ),
+                None => (None, None, None),
+            };
+
             let db_member = DbMember {
                 id: None,
                 user_id: user_id.to_string(),
@@ -74,7 +105,9 @@ impl Database {
                 timezone: None,
                 pronouns: None,
                 availability_status: None,
-                nostr_pubkey: None,
+                nostr_pubkey,
+                nostr_key_mode,
+                nostr_secret_key_encrypted,
                 joined_at: SurrealDatetime::from(Utc::now()),
                 is_active: true,
             };
@@ -181,7 +214,21 @@ impl Database {
                 db.availability_status = new_status.map(|s| s.to_string());
             }
             if let Some(new_nostr) = nostr_pubkey {
-                db.nostr_pubkey = new_nostr.map(|s| s.to_string());
+                match new_nostr {
+                    Some(pubkey) => {
+                        // Member is linking an external pubkey → set external mode,
+                        // clear any server-managed encrypted secret key.
+                        db.nostr_pubkey = Some(pubkey.to_string());
+                        db.nostr_key_mode = Some(NostrKeyMode::External.to_string());
+                        db.nostr_secret_key_encrypted = None;
+                    }
+                    None => {
+                        // Member is removing their pubkey — clear everything.
+                        db.nostr_pubkey = None;
+                        db.nostr_key_mode = None;
+                        db.nostr_secret_key_encrypted = None;
+                    }
+                }
             }
             if let Some(active) = is_active {
                 db.is_active = active;
@@ -205,6 +252,52 @@ impl Database {
                 .await?;
             let members: Vec<DbMember> = result.take(0)?;
             Ok(members.into_iter().map(db_to_member).collect())
+        })
+        .await
+    }
+
+    /// Update a member's Nostr keypair fields (key mode + encrypted secret key).
+    ///
+    /// Used when provisioning server-managed keys or when a member links an external key.
+    pub async fn update_member_nostr_keys(
+        &self,
+        id: &str,
+        pubkey: Option<&str>,
+        key_mode: Option<&str>,
+        encrypted_secret: Option<&EncryptedBlob>,
+    ) -> DbResult<Member> {
+        with_timeout(async {
+            let existing: Option<DbMember> = self.client.select(("member", id)).await?;
+            let mut db = existing
+                .ok_or_else(|| crate::DbError::NotFound(format!("Member {id} not found")))?;
+
+            db.nostr_pubkey = pubkey.map(|s| s.to_string());
+            db.nostr_key_mode = key_mode.map(|s| s.to_string());
+            db.nostr_secret_key_encrypted = encrypted_secret
+                .and_then(|blob| serde_json::to_value(blob).ok());
+
+            let updated: Option<DbMember> =
+                self.client.update(("member", id)).content(db).await?;
+            Ok(db_to_member(updated.ok_or_else(|| {
+                crate::DbError::NotFound(format!("Member {id} not found after update"))
+            })?))
+        })
+        .await
+    }
+
+    /// Get a member by their Nostr public key.
+    pub async fn get_member_by_nostr_pubkey(
+        &self,
+        pubkey: &str,
+    ) -> DbResult<Option<Member>> {
+        with_timeout(async {
+            let mut result = self
+                .client
+                .query("SELECT * FROM member WHERE nostr_pubkey = $pk AND is_active = true LIMIT 1")
+                .bind(("pk", pubkey.to_string()))
+                .await?;
+            let members: Vec<DbMember> = result.take(0)?;
+            Ok(members.into_iter().next().map(db_to_member))
         })
         .await
     }

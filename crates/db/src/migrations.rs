@@ -54,6 +54,9 @@ pub async fn run_migrations(client: &Surreal<Any>) -> DbResult<()> {
         DEFINE FIELD pronouns ON member TYPE option<string>;
         DEFINE FIELD availability_status ON member TYPE option<string>;
         DEFINE FIELD nostr_pubkey ON member TYPE option<string>;
+        DEFINE FIELD nostr_key_mode ON member TYPE option<string>
+            ASSERT $value IN [NONE, 'server_managed', 'external'];
+        DEFINE FIELD nostr_secret_key_encrypted ON member TYPE option<object> FLEXIBLE;
         DEFINE FIELD is_active ON member TYPE bool DEFAULT true;
 
         DEFINE INDEX member_user_idx ON member COLUMNS user_id UNIQUE;
