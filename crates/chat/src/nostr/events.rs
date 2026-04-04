@@ -184,7 +184,7 @@ impl EventBuilder {
             id: event.id.to_hex(),
             pubkey: event.pubkey.to_hex(),
             created_at: event.created_at.as_secs(),
-            kind: event.kind.as_u16(),
+            kind: event.kind.as_u16() as u32,
             tags: event
                 .tags
                 .iter()
@@ -352,7 +352,7 @@ mod tests {
 
         assert_eq!(relay_event.id, event.id.to_hex());
         assert_eq!(relay_event.pubkey, event.pubkey.to_hex());
-        assert_eq!(relay_event.kind, event.kind.as_u16());
+        assert_eq!(relay_event.kind, event.kind.as_u16() as u32);
         assert!(relay_event.is_group_chat());
     }
 

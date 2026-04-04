@@ -8790,6 +8790,7 @@ dependencies = [
  "scuffed-api-client",
  "scuffed-types",
  "serde",
+ "serde-wasm-bindgen",
  "serde_json",
  "tokio",
  "tracing",

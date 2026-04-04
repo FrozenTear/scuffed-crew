@@ -139,6 +139,20 @@ async fn main() {
         }
     };
 
+    // Initialize CryptoService once from env
+    let crypto = match scuffed_auth::crypto::CryptoService::from_env() {
+        Ok(c) => {
+            if c.is_none() {
+                tracing::info!("ENCRYPTION_KEY not set — Nostr key encryption disabled");
+            }
+            c
+        }
+        Err(e) => {
+            tracing::error!("CryptoService init failed: {e} — running without encryption");
+            None
+        }
+    };
+
     let state = AppState {
         db: db.clone(),
         session_config: SessionConfig::default(),
@@ -146,6 +160,7 @@ async fn main() {
         upload_dir,
         notifier,
         nostr_challenge_key,
+        crypto,
     };
 
     // Create the collaboration room manager

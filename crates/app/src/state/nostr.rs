@@ -5,17 +5,19 @@
 //!
 //! Connection flow:
 //! 1. Member authenticates via Axum session
-//! 2. Frontend fetches NIP-42 auth token from Axum
-//! 3. `NostrRelayManager` opens WebSocket to strfry relay
-//! 4. On AUTH challenge, presents the pre-signed auth event
-//! 5. Subscribes to NIP-29 group events
+//! 2. `NostrRelayManager` opens WebSocket to strfry relay
+//! 3. On AUTH challenge, POSTs challenge to Axum auth endpoint
+//! 4. Server signs a fresh AUTH event bound to the challenge (NIP-42)
+//! 5. Frontend sends the signed event to the relay
+//! 6. Subscribes to NIP-29 group events
 
 use std::cell::RefCell;
 use std::rc::Rc;
 
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
-use web_sys::{MessageEvent, WebSocket};
+use wasm_bindgen_futures::JsFuture;
+use web_sys::{MessageEvent, Request, RequestInit, RequestCredentials, Response, WebSocket};
 
 use scuffed_types::nostr::{
     ChatMessage, ClientRelayMessage, NostrEvent, NostrFilter, RelayMessage,
@@ -139,7 +141,8 @@ struct SharedRelayState {
     reconnect_timer_id: RefCell<Option<i32>>,
     intentional_disconnect: RefCell<bool>,
     relay_url: RefCell<Option<String>>,
-    auth_event: RefCell<Option<NostrEvent>>,
+    /// Endpoint for async NIP-42 challenge-response auth (e.g., "/api/chat/auth-token").
+    auth_endpoint: RefCell<Option<String>>,
     subscriptions: RefCell<Vec<(String, Vec<NostrFilter>)>>,
     current_group: RefCell<Option<String>>,
     on_state_change: RefCell<Box<dyn FnMut(RelayConnectionState)>>,
@@ -323,22 +326,34 @@ fn handle_relay_message(shared: &Rc<SharedRelayState>, msg: RelayMessage) {
         RelayMessage::Eose { subscription_id } => {
             shared.emit_event(NostrRelayEvent::Eose { subscription_id });
         }
-        RelayMessage::Auth { challenge: _ } => {
+        RelayMessage::Auth { challenge } => {
             shared.emit_event(NostrRelayEvent::AuthChallenge);
             shared.emit_state(RelayConnectionState::Authenticating);
 
-            // Auto-present auth event if we have one
-            let auth_event = shared.auth_event.borrow().clone();
-            if let Some(event) = auth_event {
-                if let Some(socket) = shared.socket.borrow().as_ref() {
-                    let msg = ClientRelayMessage::Auth(event);
-                    if let Ok(json) = msg.to_json() {
-                        let _ = socket.send_with_str(&json);
-                        tracing::info!("Presented NIP-42 AUTH event to relay");
+            // Async NIP-42: POST challenge to server, get freshly-signed auth event
+            let auth_endpoint = shared.auth_endpoint.borrow().clone();
+            let relay_url = shared.relay_url.borrow().clone().unwrap_or_default();
+            if let Some(endpoint) = auth_endpoint {
+                let shared_auth = shared.clone();
+                wasm_bindgen_futures::spawn_local(async move {
+                    match fetch_auth_event(&endpoint, &relay_url, &challenge).await {
+                        Ok(event) => {
+                            if let Some(socket) = shared_auth.socket.borrow().as_ref() {
+                                let msg = ClientRelayMessage::Auth(event);
+                                if let Ok(json) = msg.to_json() {
+                                    let _ = socket.send_with_str(&json);
+                                    tracing::info!("Presented challenge-bound NIP-42 AUTH event");
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            tracing::error!("NIP-42 auth failed: {e}");
+                            shared_auth.emit_state(RelayConnectionState::Error);
+                        }
                     }
-                }
+                });
             } else {
-                tracing::warn!("Relay sent AUTH challenge but no auth event configured");
+                tracing::warn!("Relay sent AUTH challenge but no auth endpoint configured");
             }
         }
         RelayMessage::Notice(msg) => {
@@ -346,6 +361,64 @@ fn handle_relay_message(shared: &Rc<SharedRelayState>, msg: RelayMessage) {
             shared.emit_event(NostrRelayEvent::Notice(msg));
         }
     }
+}
+
+// =============================================================================
+// NIP-42 Auth Fetch
+// =============================================================================
+
+/// Fetch a freshly-signed NIP-42 AUTH event from the server.
+///
+/// POSTs the relay challenge to the auth endpoint so the server signs an event
+/// bound to this specific challenge, as required by NIP-42.
+async fn fetch_auth_event(
+    endpoint: &str,
+    relay_url: &str,
+    challenge: &str,
+) -> Result<NostrEvent, String> {
+    let body = serde_json::json!({
+        "relay_url": relay_url,
+        "challenge": challenge,
+    });
+    let body_str = serde_json::to_string(&body).map_err(|e| e.to_string())?;
+
+    let mut opts = RequestInit::new();
+    opts.method("POST");
+    opts.body(Some(&JsValue::from_str(&body_str)));
+    opts.credentials(RequestCredentials::SameOrigin);
+
+    let request = Request::new_with_str_and_init(endpoint, &opts).map_err(|e| format!("{e:?}"))?;
+    request
+        .headers()
+        .set("Content-Type", "application/json")
+        .map_err(|e| format!("{e:?}"))?;
+
+    let window = web_sys::window().ok_or("no window")?;
+    let resp_value = JsFuture::from(window.fetch_with_request(&request))
+        .await
+        .map_err(|e| format!("{e:?}"))?;
+    let resp: Response = resp_value.dyn_into().map_err(|_| "response cast failed")?;
+
+    if !resp.ok() {
+        return Err(format!("auth endpoint returned {}", resp.status()));
+    }
+
+    let json = JsFuture::from(resp.json().map_err(|e| format!("{e:?}"))?)
+        .await
+        .map_err(|e| format!("{e:?}"))?;
+
+    let parsed: serde_json::Value =
+        serde_wasm_bindgen::from_value(json).map_err(|e| e.to_string())?;
+
+    let event: NostrEvent = serde_json::from_value(
+        parsed
+            .get("auth_event")
+            .cloned()
+            .ok_or("missing auth_event in response")?,
+    )
+    .map_err(|e| e.to_string())?;
+
+    Ok(event)
 }
 
 // =============================================================================
@@ -379,7 +452,7 @@ impl NostrRelayManager {
             reconnect_timer_id: RefCell::new(None),
             intentional_disconnect: RefCell::new(false),
             relay_url: RefCell::new(None),
-            auth_event: RefCell::new(None),
+            auth_endpoint: RefCell::new(None),
             subscriptions: RefCell::new(Vec::new()),
             current_group: RefCell::new(None),
             on_state_change: RefCell::new(Box::new(on_state_change)),
@@ -392,9 +465,12 @@ impl NostrRelayManager {
         }
     }
 
-    /// Set the NIP-42 auth event to present on AUTH challenge.
-    pub fn set_auth_event(&self, event: NostrEvent) {
-        *self.shared.auth_event.borrow_mut() = Some(event);
+    /// Set the auth endpoint URL for NIP-42 challenge-response authentication.
+    ///
+    /// When the relay sends an AUTH challenge, the manager will POST the challenge
+    /// to this endpoint and send the freshly-signed auth event back to the relay.
+    pub fn set_auth_endpoint(&self, url: &str) {
+        *self.shared.auth_endpoint.borrow_mut() = Some(url.to_string());
     }
 
     /// Connect to a Nostr relay.

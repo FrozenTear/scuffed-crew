@@ -111,7 +111,7 @@ pub fn ComposeBox(
                 disabled: disabled,
                 value: "{draft}",
                 oninput: move |evt| draft.set(evt.value()),
-                onkeypress: move |evt| {
+                onkeydown: move |evt| {
                     if evt.key() == Key::Enter {
                         submit();
                     }

@@ -56,7 +56,7 @@ pub struct UnwrappedMessage {
     /// The decrypted plaintext content.
     pub content: String,
     /// The original event kind from the rumor.
-    pub kind: u16,
+    pub kind: u32,
     /// Tags from the rumor (e.g., group ID, reply references).
     pub tags: Vec<Vec<String>>,
     /// The rumor's created_at timestamp.
@@ -245,7 +245,7 @@ impl EncryptionService {
         Ok(UnwrappedMessage {
             sender_pubkey: unwrapped.sender.to_hex(),
             content: unwrapped.rumor.content.to_string(),
-            kind: unwrapped.rumor.kind.as_u16(),
+            kind: unwrapped.rumor.kind.as_u16() as u32,
             tags: unwrapped
                 .rumor
                 .tags

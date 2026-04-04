@@ -131,7 +131,7 @@ impl NostrAuthService {
     pub fn sign_event_for_member(
         &self,
         encrypted_secret_key: &EncryptedBlob,
-        kind: u16,
+        kind: u32,
         content: &str,
         tags: Vec<Vec<String>>,
     ) -> Result<NostrEvent, AuthError> {
@@ -143,7 +143,7 @@ impl NostrAuthService {
         let keys =
             EventBuilder::keys_from_hex(&secret_hex).map_err(|_| AuthError::InvalidKeyData)?;
 
-        let mut builder = nostr::EventBuilder::new(nostr::Kind::Custom(kind), content);
+        let mut builder = nostr::EventBuilder::new(nostr::Kind::Custom(kind as u16), content);
 
         for tag_parts in &tags {
             if tag_parts.is_empty() {

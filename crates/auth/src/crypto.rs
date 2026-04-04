@@ -73,6 +73,7 @@ pub enum CryptoError {
 ///
 /// Provides authenticated encryption — data cannot be read OR tampered
 /// with without the correct key.
+#[derive(Clone)]
 pub struct CryptoService {
     cipher: Aes256Gcm,
     key_version: u32,

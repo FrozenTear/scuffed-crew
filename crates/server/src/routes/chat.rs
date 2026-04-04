@@ -8,7 +8,6 @@ use axum::{
     http::StatusCode,
     Json,
 };
-use scuffed_auth::crypto::CryptoService;
 use scuffed_auth::server::session::ErrorResponse;
 use scuffed_chat::{AuthTokenRequest, AuthTokenResponse, EncryptionService, NostrAuthService};
 use scuffed_db::NostrKeyMode;
@@ -28,17 +27,7 @@ pub async fn provision_auth_token(
     caller: OrgMember,
     Json(body): Json<AuthTokenRequest>,
 ) -> Result<Json<AuthTokenResponse>, (StatusCode, Json<ErrorResponse>)> {
-    let crypto = CryptoService::from_env().map_err(|e| {
-        tracing::error!("CryptoService init failed: {e}");
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: "Encryption service not available".into(),
-            }),
-        )
-    })?;
-
-    let crypto = crypto.ok_or_else(|| {
+    let crypto = state.crypto.clone().ok_or_else(|| {
         (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(ErrorResponse {
@@ -177,26 +166,16 @@ pub struct DecryptMessageResponse {
     /// The decrypted plaintext content.
     pub content: String,
     /// Event kind from the inner rumor.
-    pub kind: u16,
+    pub kind: u32,
     /// Tags from the inner rumor.
     pub tags: Vec<Vec<String>>,
     /// Timestamp from the inner rumor.
     pub created_at: u64,
 }
 
-/// Helper to initialize CryptoService from env.
-fn init_crypto() -> Result<CryptoService, (StatusCode, Json<ErrorResponse>)> {
-    let crypto = CryptoService::from_env().map_err(|e| {
-        tracing::error!("CryptoService init failed: {e}");
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: "Encryption service not available".into(),
-            }),
-        )
-    })?;
-
-    crypto.ok_or_else(|| {
+/// Extract CryptoService from AppState.
+fn require_crypto(state: &AppState) -> Result<scuffed_auth::crypto::CryptoService, (StatusCode, Json<ErrorResponse>)> {
+    state.crypto.clone().ok_or_else(|| {
         (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(ErrorResponse {
@@ -221,7 +200,7 @@ pub async fn send_encrypted(
     caller: OfficerUser,
     Json(body): Json<SendEncryptedRequest>,
 ) -> Result<Json<SendEncryptedResponse>, (StatusCode, Json<ErrorResponse>)> {
-    let crypto = init_crypto()?;
+    let crypto = require_crypto(&state)?;
     let member = &caller.member;
 
     // Verify sender has server-managed keys
@@ -401,10 +380,11 @@ pub async fn send_encrypted(
 /// The caller's server-managed key is used to unwrap the gift wrap.
 /// Returns the decrypted message content and sender info.
 pub async fn decrypt_message(
+    State(state): State<AppState>,
     caller: OrgMember,
     Json(body): Json<DecryptMessageRequest>,
 ) -> Result<Json<DecryptMessageResponse>, (StatusCode, Json<ErrorResponse>)> {
-    let crypto = init_crypto()?;
+    let crypto = require_crypto(&state)?;
     let member = &caller.member;
 
     let encrypted_key = match member.nostr_key_mode {

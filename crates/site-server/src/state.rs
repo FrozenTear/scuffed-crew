@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use scuffed_auth::crypto::CryptoService;
 use scuffed_auth::server::HasAuth;
 use scuffed_auth::{AuthError, SessionConfig, User};
 use scuffed_db::Database;
@@ -17,6 +18,9 @@ pub struct AppState {
     pub notifier: Option<MatrixNotifier>,
     /// 32-byte key for HMAC-signing Nostr challenge tokens.
     pub nostr_challenge_key: [u8; 32],
+    /// Pre-initialized encryption service for Nostr key management.
+    /// `None` when `ENCRYPTION_KEY` is not configured.
+    pub crypto: Option<CryptoService>,
 }
 
 /// OAuth configuration loaded from environment.

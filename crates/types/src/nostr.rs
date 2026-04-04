@@ -17,7 +17,7 @@ pub struct NostrEvent {
     pub id: String,
     pub pubkey: String,
     pub created_at: u64,
-    pub kind: u16,
+    pub kind: u32,
     pub tags: Vec<Vec<String>>,
     pub content: String,
     pub sig: String,
@@ -77,7 +77,7 @@ pub struct NostrFilter {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub authors: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub kinds: Option<Vec<u16>>,
+    pub kinds: Option<Vec<u32>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub since: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -115,7 +115,7 @@ impl NostrFilter {
     }
 
     /// Create a filter for multiple event kinds (e.g., presence, voice status).
-    pub fn by_kinds(kinds: Vec<u16>) -> Self {
+    pub fn by_kinds(kinds: Vec<u32>) -> Self {
         Self {
             kinds: Some(kinds),
             ..Default::default()
@@ -350,23 +350,23 @@ impl ChatMessage {
 /// Well-known Nostr event kinds used in the chat system.
 pub mod event_kinds {
     /// NIP-29 group chat message.
-    pub const GROUP_CHAT_MESSAGE: u16 = 9;
+    pub const GROUP_CHAT_MESSAGE: u32 = 9;
     /// NIP-29 group chat reply (threaded).
-    pub const GROUP_CHAT_REPLY: u16 = 10;
+    pub const GROUP_CHAT_REPLY: u32 = 10;
     /// NIP-29 join request.
-    pub const GROUP_JOIN_REQUEST: u16 = 9021;
+    pub const GROUP_JOIN_REQUEST: u32 = 9021;
     /// NIP-29 group metadata.
-    pub const GROUP_METADATA: u16 = 39000;
+    pub const GROUP_METADATA: u32 = 39000;
     /// NIP-29 group admins.
-    pub const GROUP_ADMINS: u16 = 39001;
+    pub const GROUP_ADMINS: u32 = 39001;
     /// NIP-29 group members.
-    pub const GROUP_MEMBERS: u16 = 39002;
+    pub const GROUP_MEMBERS: u32 = 39002;
     /// NIP-42 AUTH event.
-    pub const AUTH: u16 = 22242;
+    pub const AUTH: u32 = 22242;
     /// NIP-44 encrypted direct message (NIP-17 private).
-    pub const PRIVATE_DIRECT_MESSAGE: u16 = 14;
+    pub const PRIVATE_DIRECT_MESSAGE: u32 = 14;
     /// NIP-59 gift wrap.
-    pub const GIFT_WRAP: u16 = 1059;
+    pub const GIFT_WRAP: u32 = 1059;
     /// NIP-59 seal.
-    pub const SEAL: u16 = 13;
+    pub const SEAL: u32 = 13;
 }

@@ -200,6 +200,7 @@ pub fn ChatWidget(
     let mut connection_state = use_signal(|| RelayConnectionState::Disconnected);
     let mut messages = use_signal(Vec::<ChatMessage>::new);
     let mut active_group = use_signal(|| groups.first().map(|g| g.id.clone()));
+    let mut current_sub_id = use_signal(|| Option::<String>::None);
     let mut loading = use_signal(|| false);
 
     // Initialize relay manager with FnMut callbacks that update signals
@@ -226,6 +227,15 @@ pub fn ChatWidget(
         )
     });
 
+    // Configure NIP-42 auth endpoint for challenge-response authentication
+    relay.set_auth_endpoint("/api/chat/auth-token");
+
+    // Disconnect WebSocket when component unmounts
+    let relay_cleanup = relay.clone();
+    use_drop(move || {
+        relay_cleanup.disconnect();
+    });
+
     // Connect on mount
     let relay_connect = relay.clone();
     let relay_path_owned = relay_path.clone();
@@ -233,7 +243,8 @@ pub fn ChatWidget(
         relay_connect.connect_same_origin(&relay_path_owned);
         if let Some(group_id) = active_group.peek().as_ref() {
             loading.set(true);
-            relay_connect.subscribe_group(group_id, Some(50));
+            let sub_id = relay_connect.subscribe_group(group_id, Some(50));
+            current_sub_id.set(Some(sub_id));
         }
     });
 
@@ -292,7 +303,12 @@ pub fn ChatWidget(
                                             active_group.set(Some(gid.clone()));
                                             messages.write().clear();
                                             loading.set(true);
-                                            relay_ch.subscribe_group(&gid, Some(50));
+                                            // Unsubscribe old group before subscribing new
+                                            if let Some(old_sub) = current_sub_id.peek().as_ref() {
+                                                relay_ch.unsubscribe(old_sub);
+                                            }
+                                            let sub_id = relay_ch.subscribe_group(&gid, Some(50));
+                                            current_sub_id.set(Some(sub_id));
                                         },
                                         "{group_name}"
                                     }
