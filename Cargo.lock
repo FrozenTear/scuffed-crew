@@ -8844,6 +8844,7 @@ dependencies = [
  "tokio-tungstenite 0.26.2",
  "tracing",
  "url",
+ "zeroize",
 ]
 
 [[package]]

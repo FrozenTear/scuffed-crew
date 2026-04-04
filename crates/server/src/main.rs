@@ -167,10 +167,22 @@ async fn main() {
         }
     });
 
-    // Build the unified router: existing org routes + strategy routes + WebSocket,
+    // Build the unified router: existing org routes + strategy routes + chat + WebSocket,
     // then apply production middleware to the combined router.
     let app = create_router(state.clone())
-        .merge(routes::strategy_routes(state))
+        .merge(routes::strategy_routes(state.clone()))
+        .route(
+            "/api/chat/auth-token",
+            axum::routing::post(routes::chat::provision_auth_token).with_state(state.clone()),
+        )
+        .route(
+            "/api/chat/send-encrypted",
+            axum::routing::post(routes::chat::send_encrypted).with_state(state.clone()),
+        )
+        .route(
+            "/api/chat/decrypt",
+            axum::routing::post(routes::chat::decrypt_message).with_state(state),
+        )
         .route("/api/strategy/ws", get(routes::ws::websocket_handler).with_state(ws_state))
         .layer(DefaultBodyLimit::max(10 * 1024 * 1024))
         .layer(CompressionLayer::new())

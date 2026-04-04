@@ -18,6 +18,8 @@ members = [
     "crates/map-renderer",
     # Nostr relay
     "crates/relay-policy",
+    # Nostr chat backend
+    "crates/chat",
 ]
 
 [workspace.dependencies]
