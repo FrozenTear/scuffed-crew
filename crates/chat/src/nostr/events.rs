@@ -17,6 +17,8 @@ pub enum EventError {
     InvalidKey(String),
     #[error("signing failed: {0}")]
     SigningFailed(String),
+    #[error("serialization failed: {0}")]
+    SerializationFailed(String),
 }
 
 /// Event construction helper for building signed Nostr events.
@@ -193,6 +195,31 @@ impl EventBuilder {
             content: event.content.to_string(),
             sig: event.sig.to_string(),
         }
+    }
+
+    /// Build a custom event with arbitrary kind, content, and tags.
+    ///
+    /// Used for community features (LFG, match results, announcements).
+    pub fn build_custom_event(
+        keys: &Keys,
+        kind: u16,
+        content: &str,
+        tags: Vec<Vec<String>>,
+    ) -> Result<Event, EventError> {
+        let mut builder = NostrEventBuilder::new(Kind::Custom(kind), content);
+
+        for tag_parts in &tags {
+            if tag_parts.is_empty() {
+                continue;
+            }
+            let kind = TagKind::custom(&tag_parts[0]);
+            let values: Vec<String> = tag_parts[1..].to_vec();
+            builder = builder.tag(Tag::custom(kind, values));
+        }
+
+        builder
+            .sign_with_keys(keys)
+            .map_err(|e| EventError::SigningFailed(e.to_string()))
     }
 
     /// Parse a hex secret key into `nostr::Keys`.

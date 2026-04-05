@@ -10,6 +10,7 @@ scuffed-auth = { path = "../auth", features = ["crypto"] }
 scuffed-types = { path = "../types" }
 
 nostr = { version = "0.44", default-features = false, features = ["std", "nip44", "nip59"] }
+chrono = { version = "0.4", features = ["serde"] }
 zeroize = "1"
 tokio = { version = "1", features = ["sync", "time", "macros"] }
 tokio-tungstenite = { version = "0.26", features = ["native-tls"] }
