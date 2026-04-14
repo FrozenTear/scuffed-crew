@@ -11,7 +11,10 @@ use serde::{Deserialize, Serialize};
 
 use scuffed_auth::server::session::ErrorResponse;
 
-use nostr::FromBech32;
+use nostr::key::Keys;
+use nostr::{FromBech32, SecretKey};
+
+use scuffed_db::NostrKeyMode;
 
 use crate::extractors::OrgMember;
 use crate::state::AppState;
@@ -374,6 +377,168 @@ pub async fn nostr_unlink(
         scuffed_db::AuditTargetType::Member,
         &caller.member.id,
         Some("Unlinked Nostr identity"),
+    )
+    .await;
+
+    Ok(Json(updated))
+}
+
+// ─── NIP-49 encrypted key backup ───
+
+#[derive(Deserialize)]
+pub struct ExportBackupRequest {
+    pub password: String,
+}
+
+#[derive(Serialize)]
+pub struct ExportBackupResponse {
+    pub ncryptsec: String,
+}
+
+/// POST /api/nostr/export-backup — export server-managed key as ncryptsec.
+pub async fn nostr_export_backup(
+    State(state): State<AppState>,
+    caller: OrgMember,
+    Json(body): Json<ExportBackupRequest>,
+) -> Result<Json<ExportBackupResponse>, (StatusCode, Json<ErrorResponse>)> {
+    if body.password.len() < 8 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "Password must be at least 8 characters".into(),
+            }),
+        ));
+    }
+
+    if caller.member.nostr_key_mode != Some(NostrKeyMode::ServerManaged) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "Key backup is only available for server-managed keys".into(),
+            }),
+        ));
+    }
+
+    let secret_hex = state
+        .db
+        .get_nostr_secret_key(&caller.member.id)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: e.to_string(),
+                }),
+            )
+        })?
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse {
+                    error: "No server-managed key found".into(),
+                }),
+            )
+        })?;
+
+    let ncryptsec = scuffed_auth::nip49::encrypt(&secret_hex, &body.password).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: format!("Encryption failed: {e}"),
+            }),
+        )
+    })?;
+
+    crate::routes::audit_log::audit(
+        &state.db,
+        &caller.member.id,
+        scuffed_db::AuditAction::UpdatedMember,
+        scuffed_db::AuditTargetType::Member,
+        &caller.member.id,
+        Some("Exported Nostr key backup (ncryptsec)"),
+    )
+    .await;
+
+    Ok(Json(ExportBackupResponse { ncryptsec }))
+}
+
+#[derive(Deserialize)]
+pub struct ImportKeyRequest {
+    pub ncryptsec: String,
+    pub password: String,
+}
+
+/// POST /api/nostr/import-key — import a key from ncryptsec backup.
+pub async fn nostr_import_key(
+    State(state): State<AppState>,
+    caller: OrgMember,
+    Json(body): Json<ImportKeyRequest>,
+) -> Result<Json<scuffed_db::Member>, (StatusCode, Json<ErrorResponse>)> {
+    let secret_hex =
+        scuffed_auth::nip49::decrypt(&body.ncryptsec, &body.password).map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: format!("Failed to decrypt: {e}"),
+                }),
+            )
+        })?;
+
+    // Derive pubkey from the decrypted secret
+    let keys = Keys::new(
+        SecretKey::from_hex(&secret_hex).map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: format!("Invalid key in backup: {e}"),
+                }),
+            )
+        })?,
+    );
+    let pubkey_hex = keys.public_key().to_hex();
+
+    // Update member to external mode with this key
+    state
+        .db
+        .set_external_nostr_key(&caller.member.id, &pubkey_hex)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: e.to_string(),
+                }),
+            )
+        })?;
+
+    let updated = state
+        .db
+        .get_member(&caller.member.id)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: e.to_string(),
+                }),
+            )
+        })?
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse {
+                    error: "Member not found".into(),
+                }),
+            )
+        })?;
+
+    crate::routes::audit_log::audit(
+        &state.db,
+        &caller.member.id,
+        scuffed_db::AuditAction::UpdatedMember,
+        scuffed_db::AuditTargetType::Member,
+        &caller.member.id,
+        Some("Imported Nostr key from ncryptsec backup"),
     )
     .await;
 

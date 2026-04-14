@@ -274,6 +274,14 @@ pub fn create_router(state: AppState) -> Router {
             "/api/nostr/identity",
             delete(routes::nostr::nostr_unlink),
         )
+        .route(
+            "/api/nostr/export-backup",
+            post(routes::nostr::nostr_export_backup),
+        )
+        .route(
+            "/api/nostr/import-key",
+            post(routes::nostr::nostr_import_key),
+        )
         // Upload routes
         .route(
             "/api/upload/avatar",
