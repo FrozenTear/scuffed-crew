@@ -22,6 +22,8 @@ pub enum Route {
         Tournaments {},
         #[route("/tournaments/:id")]
         Tournament { id: String },
+        #[route("/identity")]
+        Identity {},
     #[end_layout]
 
     // Admin panel (sidebar layout, auth guarded)
