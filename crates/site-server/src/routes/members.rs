@@ -6,7 +6,8 @@ use axum::{
 use serde::Deserialize;
 
 use scuffed_auth::server::session::ErrorResponse;
-use scuffed_db::{AuditAction, AuditTargetType, GameAccount, Member, OrgRole};
+use scuffed_chat::{EventBuilder, publish_event_oneshot};
+use scuffed_db::{AuditAction, AuditTargetType, GameAccount, Member, NostrKeyMode, OrgRole};
 use scuffed_types::api::{CursorResponse, PaginationParams};
 
 use crate::extractors::{AdminUser, OrgMember};
@@ -167,7 +168,86 @@ pub async fn update_member(
     )
     .await;
 
+    // Fire-and-forget: publish NIP-01 kind 0 profile metadata to relay
+    publish_profile_metadata(&state, &updated);
+
     Ok(Json(updated))
+}
+
+/// Spawn a fire-and-forget task to publish a NIP-01 kind 0 profile metadata event
+/// for a member with a server-managed Nostr key.
+fn publish_profile_metadata(state: &AppState, member: &Member) {
+    let relay_url = match state.relay_url {
+        Some(ref url) => url.clone(),
+        None => return,
+    };
+
+    // Only publish for members with server-managed keys
+    if member.nostr_key_mode != Some(NostrKeyMode::ServerManaged) || member.nostr_pubkey.is_none() {
+        return;
+    }
+
+    let db = state.db.clone();
+    let member_id = member.id.clone();
+    let display_name = member.display_name.clone();
+    let bio = member.bio.clone();
+    let avatar_url = member.avatar_url.clone();
+
+    tokio::spawn(async move {
+        let secret_hex = match db.get_nostr_secret_key(&member_id).await {
+            Ok(Some(s)) => s,
+            Ok(None) => {
+                tracing::debug!("No server-managed secret key for member {member_id}");
+                return;
+            }
+            Err(e) => {
+                tracing::error!("Failed to decrypt Nostr secret key for profile metadata: {e}");
+                return;
+            }
+        };
+
+        let keys = match EventBuilder::keys_from_hex(&secret_hex) {
+            Ok(k) => k,
+            Err(e) => {
+                tracing::error!("Invalid Nostr secret key for profile metadata: {e}");
+                return;
+            }
+        };
+
+        // Build NIP-05 identifier from display name
+        let nip05_name: String = display_name
+            .to_lowercase()
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric() || *c == '_')
+            .collect();
+        let nip05 = if nip05_name.is_empty() {
+            None
+        } else {
+            Some(format!("{nip05_name}@scuffed.gg"))
+        };
+
+        let event = match EventBuilder::build_profile_metadata(
+            &keys,
+            &display_name,
+            bio.as_deref(),
+            avatar_url.as_deref(),
+            nip05.as_deref(),
+            None,
+        ) {
+            Ok(e) => e,
+            Err(e) => {
+                tracing::error!("Failed to build kind 0 profile metadata event: {e}");
+                return;
+            }
+        };
+
+        let relay_event = EventBuilder::to_relay_event(&event);
+        if let Err(e) = publish_event_oneshot(&relay_url, relay_event).await {
+            tracing::error!("Failed to publish kind 0 profile metadata: {e}");
+        } else {
+            tracing::info!("Published kind 0 profile metadata for member {member_id}");
+        }
+    });
 }
 
 #[derive(Deserialize)]

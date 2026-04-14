@@ -349,6 +349,8 @@ impl ChatMessage {
 
 /// Well-known Nostr event kinds used in the chat system.
 pub mod event_kinds {
+    /// NIP-01 kind 0: user profile metadata.
+    pub const PROFILE_METADATA: u32 = 0;
     /// NIP-29 group chat message.
     pub const GROUP_CHAT_MESSAGE: u32 = 9;
     /// NIP-29 group chat reply (threaded).

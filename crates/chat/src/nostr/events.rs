@@ -197,6 +197,44 @@ impl EventBuilder {
         }
     }
 
+    /// Build a NIP-01 kind 0 profile metadata event.
+    ///
+    /// The content is a JSON string with profile fields:
+    /// `{name, about, picture, nip05, banner}`
+    ///
+    /// Only non-`None` fields are included in the JSON. Kind 0 is a
+    /// replaceable event — the relay keeps only the latest per pubkey.
+    pub fn build_profile_metadata(
+        keys: &Keys,
+        name: &str,
+        about: Option<&str>,
+        picture: Option<&str>,
+        nip05: Option<&str>,
+        banner: Option<&str>,
+    ) -> Result<Event, EventError> {
+        let mut profile = serde_json::Map::new();
+        profile.insert("name".into(), serde_json::Value::String(name.into()));
+        if let Some(about) = about {
+            profile.insert("about".into(), serde_json::Value::String(about.into()));
+        }
+        if let Some(picture) = picture {
+            profile.insert("picture".into(), serde_json::Value::String(picture.into()));
+        }
+        if let Some(nip05) = nip05 {
+            profile.insert("nip05".into(), serde_json::Value::String(nip05.into()));
+        }
+        if let Some(banner) = banner {
+            profile.insert("banner".into(), serde_json::Value::String(banner.into()));
+        }
+
+        let content = serde_json::to_string(&profile)
+            .map_err(|e| EventError::SerializationFailed(e.to_string()))?;
+
+        NostrEventBuilder::new(Kind::Custom(0), &content)
+            .sign_with_keys(keys)
+            .map_err(|e| EventError::SigningFailed(e.to_string()))
+    }
+
     /// Build a custom event with arbitrary kind, content, and tags.
     ///
     /// Used for community features (LFG, match results, announcements).
@@ -397,5 +435,67 @@ mod tests {
     #[test]
     fn keys_from_hex_invalid() {
         assert!(EventBuilder::keys_from_hex("not_a_valid_hex_key").is_err());
+    }
+
+    #[test]
+    fn build_profile_metadata_kind_0() {
+        let keys = test_keys();
+        let event = EventBuilder::build_profile_metadata(
+            &keys,
+            "TestUser",
+            Some("A test user"),
+            Some("https://example.com/avatar.png"),
+            Some("testuser@scuffed.gg"),
+            None,
+        )
+        .unwrap();
+        assert_eq!(event.kind, Kind::Custom(0));
+        assert!(event.verify().is_ok());
+
+        let content: serde_json::Value = serde_json::from_str(&event.content).unwrap();
+        assert_eq!(content["name"], "TestUser");
+        assert_eq!(content["about"], "A test user");
+        assert_eq!(content["picture"], "https://example.com/avatar.png");
+        assert_eq!(content["nip05"], "testuser@scuffed.gg");
+        assert!(content.get("banner").is_none());
+    }
+
+    #[test]
+    fn build_profile_metadata_minimal() {
+        let keys = test_keys();
+        let event = EventBuilder::build_profile_metadata(
+            &keys,
+            "MinimalUser",
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(event.kind, Kind::Custom(0));
+
+        let content: serde_json::Value = serde_json::from_str(&event.content).unwrap();
+        assert_eq!(content["name"], "MinimalUser");
+        // Only name should be present
+        assert!(content.get("about").is_none());
+        assert!(content.get("picture").is_none());
+        assert!(content.get("nip05").is_none());
+    }
+
+    #[test]
+    fn build_profile_metadata_with_banner() {
+        let keys = test_keys();
+        let event = EventBuilder::build_profile_metadata(
+            &keys,
+            "BannerUser",
+            None,
+            None,
+            None,
+            Some("https://example.com/banner.jpg"),
+        )
+        .unwrap();
+
+        let content: serde_json::Value = serde_json::from_str(&event.content).unwrap();
+        assert_eq!(content["banner"], "https://example.com/banner.jpg");
     }
 }

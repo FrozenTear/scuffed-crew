@@ -208,6 +208,55 @@ impl RelayClient {
     }
 }
 
+/// Publish a single event to a relay via a one-shot WebSocket connection.
+///
+/// Connects, sends the EVENT message, waits for the relay OK response
+/// (with a timeout), then disconnects. Suitable for fire-and-forget
+/// publishing where maintaining a persistent connection is unnecessary.
+pub async fn publish_event_oneshot(
+    relay_url: &str,
+    event: NostrEvent,
+) -> Result<(), RelayError> {
+    let (ws_stream, _) = tokio_tungstenite::connect_async(relay_url)
+        .await
+        .map_err(|e| RelayError::ConnectionFailed(e.to_string()))?;
+
+    let (mut sink, mut stream) = ws_stream.split();
+
+    let msg = ClientRelayMessage::Event(event)
+        .to_json()
+        .map_err(|e| RelayError::SendFailed(e.to_string()))?;
+
+    sink.send(Message::Text(msg.into()))
+        .await
+        .map_err(|e| RelayError::SendFailed(e.to_string()))?;
+
+    // Wait for OK response (up to 5 seconds)
+    let result = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while let Some(Ok(msg)) = stream.next().await {
+            if let Message::Text(text) = msg {
+                if let Ok(RelayMessage::Ok { accepted, message, .. }) =
+                    RelayMessage::from_json(&text)
+                {
+                    if !accepted {
+                        return Err(RelayError::EventRejected(message));
+                    }
+                    return Ok(());
+                }
+            }
+        }
+        Err(RelayError::NotConnected)
+    })
+    .await;
+
+    let _ = sink.close().await;
+
+    match result {
+        Ok(inner) => inner,
+        Err(_) => Err(RelayError::Timeout),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

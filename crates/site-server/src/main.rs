@@ -473,6 +473,13 @@ async fn main() {
         }
     };
 
+    let relay_url = std::env::var("NOSTR_RELAY_URL").ok();
+    if let Some(ref url) = relay_url {
+        tracing::info!("Nostr relay URL: {url}");
+    } else {
+        tracing::info!("NOSTR_RELAY_URL not set — kind 0 profile publishing disabled");
+    }
+
     let state = AppState {
         db: db.clone(),
         session_config: SessionConfig::default(),
@@ -481,6 +488,7 @@ async fn main() {
         notifier,
         nostr_challenge_key,
         crypto,
+        relay_url,
     };
 
     // Spawn hourly session cleanup task

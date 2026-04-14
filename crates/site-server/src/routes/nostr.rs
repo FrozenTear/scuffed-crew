@@ -59,6 +59,7 @@ pub async fn nostr_json(
     };
 
     let mut names = HashMap::new();
+    let mut relays: HashMap<String, Vec<String>> = HashMap::new();
     let requested_name = query.name.unwrap_or_default().to_lowercase();
 
     for member in &members {
@@ -69,6 +70,10 @@ pub async fn nostr_json(
             }
             if requested_name == "_" || requested_name == nip05_name {
                 names.insert(nip05_name, pubkey.clone());
+                // Add relay hints for this pubkey if relay URL is configured
+                if let Some(ref relay_url) = state.relay_url {
+                    relays.insert(pubkey.clone(), vec![relay_url.clone()]);
+                }
             }
         }
     }
@@ -78,7 +83,7 @@ pub async fn nostr_json(
         [(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")],
         Json(Nip05Response {
             names,
-            relays: HashMap::new(),
+            relays,
         }),
     )
 }

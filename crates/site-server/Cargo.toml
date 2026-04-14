@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 scuffed-auth = { path = "../auth", features = ["server"] }
+scuffed-chat = { path = "../chat" }
 scuffed-db = { path = "../db" }
 scuffed-types = { path = "../types" }
 axum = { version = "0.8", features = ["multipart"] }
