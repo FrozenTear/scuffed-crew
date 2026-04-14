@@ -16,7 +16,10 @@ use nostr::{FromBech32, SecretKey};
 
 use scuffed_db::NostrKeyMode;
 
-use crate::extractors::OrgMember;
+use scuffed_chat::nostr::events::EventBuilder;
+use scuffed_chat::nostr::relay::publish_event_oneshot;
+
+use crate::extractors::{OfficerUser, OrgMember};
 use crate::state::AppState;
 
 // ─── NIP-05 well-known endpoint (Phase 1) ───
@@ -543,4 +546,264 @@ pub async fn nostr_import_key(
     .await;
 
     Ok(Json(updated))
+}
+
+// ─── NIP-72 Community Definition (Phase 2) ───
+
+#[derive(Deserialize)]
+pub struct CommunityRequest {
+    pub community_id: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub rules: Option<String>,
+    pub image: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct CommunityResponse {
+    pub event_id: String,
+    pub community_id: String,
+}
+
+/// POST /api/nostr/community — publish or update a NIP-72 community definition.
+///
+/// Officer+ only. Moderator pubkeys are auto-resolved from all Officers and Admins.
+pub async fn nostr_community(
+    State(state): State<AppState>,
+    caller: OfficerUser,
+    Json(body): Json<CommunityRequest>,
+) -> Result<Json<CommunityResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let relay_url = state.relay_url.clone().ok_or_else(|| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(ErrorResponse {
+                error: "Relay not configured".into(),
+            }),
+        )
+    })?;
+
+    if caller.member.nostr_key_mode != Some(NostrKeyMode::ServerManaged) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "Server-managed Nostr key required to publish community events".into(),
+            }),
+        ));
+    }
+
+    let secret_hex = state
+        .db
+        .get_nostr_secret_key(&caller.member.id)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: e.to_string(),
+                }),
+            )
+        })?
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse {
+                    error: "No server-managed key found".into(),
+                }),
+            )
+        })?;
+
+    let keys = EventBuilder::keys_from_hex(&secret_hex).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: format!("Invalid key: {e}"),
+            }),
+        )
+    })?;
+
+    let members = state.db.list_nostr_identities().await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: e.to_string(),
+            }),
+        )
+    })?;
+
+    let moderator_pubkeys: Vec<String> = members
+        .iter()
+        .filter(|m| m.org_role.is_at_least(scuffed_db::OrgRole::Officer))
+        .filter_map(|m| m.nostr_pubkey.clone())
+        .collect();
+
+    let event = EventBuilder::build_community_definition(
+        &keys,
+        &body.community_id,
+        &body.name,
+        body.description.as_deref(),
+        body.rules.as_deref(),
+        body.image.as_deref(),
+        &moderator_pubkeys,
+    )
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: format!("Failed to build event: {e}"),
+            }),
+        )
+    })?;
+
+    let event_id = event.id.to_hex();
+    let community_id = body.community_id.clone();
+    let relay_event = EventBuilder::to_relay_event(&event);
+
+    let db = state.db.clone();
+    let member_id = caller.member.id.clone();
+    tokio::spawn(async move {
+        if let Err(e) = publish_event_oneshot(&relay_url, relay_event).await {
+            tracing::error!("Failed to publish community definition: {e}");
+        } else {
+            tracing::info!("Published NIP-72 community definition for {community_id}");
+        }
+
+        crate::routes::audit_log::audit(
+            &db,
+            &member_id,
+            scuffed_db::AuditAction::PublishedCommunity,
+            scuffed_db::AuditTargetType::Settings,
+            &community_id,
+            Some("Published NIP-72 community definition"),
+        )
+        .await;
+    });
+
+    Ok(Json(CommunityResponse {
+        event_id,
+        community_id: body.community_id,
+    }))
+}
+
+// ─── NIP-25 Reactions (Phase 2) ───
+
+#[derive(Deserialize)]
+pub struct ReactRequest {
+    pub event_id: String,
+    pub event_author_pubkey: String,
+    #[serde(default = "default_reaction")]
+    pub content: String,
+}
+
+fn default_reaction() -> String {
+    "+".to_string()
+}
+
+#[derive(Serialize)]
+pub struct ReactResponse {
+    pub reaction_event_id: String,
+}
+
+/// POST /api/nostr/react — publish a NIP-25 reaction to a Nostr event.
+pub async fn nostr_react(
+    State(state): State<AppState>,
+    caller: OrgMember,
+    Json(body): Json<ReactRequest>,
+) -> Result<Json<ReactResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let relay_url = state.relay_url.clone().ok_or_else(|| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(ErrorResponse {
+                error: "Relay not configured".into(),
+            }),
+        )
+    })?;
+
+    if caller.member.nostr_key_mode != Some(NostrKeyMode::ServerManaged) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "Server-managed Nostr key required to publish reactions".into(),
+            }),
+        ));
+    }
+
+    if body.content.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "Reaction content must not be empty".into(),
+            }),
+        ));
+    }
+
+    let secret_hex = state
+        .db
+        .get_nostr_secret_key(&caller.member.id)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: e.to_string(),
+                }),
+            )
+        })?
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse {
+                    error: "No server-managed key found".into(),
+                }),
+            )
+        })?;
+
+    let keys = EventBuilder::keys_from_hex(&secret_hex).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: format!("Invalid key: {e}"),
+            }),
+        )
+    })?;
+
+    let event = EventBuilder::build_reaction(
+        &keys,
+        &body.event_id,
+        &body.event_author_pubkey,
+        &body.content,
+    )
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: format!("Failed to build event: {e}"),
+            }),
+        )
+    })?;
+
+    let reaction_event_id = event.id.to_hex();
+    let relay_event = EventBuilder::to_relay_event(&event);
+    let target_event_id = body.event_id.clone();
+
+    let db = state.db.clone();
+    let member_id = caller.member.id.clone();
+    tokio::spawn(async move {
+        if let Err(e) = publish_event_oneshot(&relay_url, relay_event).await {
+            tracing::error!("Failed to publish reaction: {e}");
+        } else {
+            tracing::info!("Published NIP-25 reaction to event {target_event_id}");
+        }
+
+        crate::routes::audit_log::audit(
+            &db,
+            &member_id,
+            scuffed_db::AuditAction::PublishedReaction,
+            scuffed_db::AuditTargetType::Member,
+            &target_event_id,
+            Some("Published NIP-25 reaction"),
+        )
+        .await;
+    });
+
+    Ok(Json(ReactResponse { reaction_event_id }))
 }

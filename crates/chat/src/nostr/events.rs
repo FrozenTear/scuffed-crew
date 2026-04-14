@@ -235,6 +235,83 @@ impl EventBuilder {
             .map_err(|e| EventError::SigningFailed(e.to_string()))
     }
 
+    /// Build a NIP-72 community definition event (kind 34550).
+    ///
+    /// Replaceable event — the relay keeps only the latest per (pubkey, d-tag).
+    /// Moderator pubkeys are tagged with the `"moderator"` role marker.
+    pub fn build_community_definition(
+        keys: &Keys,
+        community_id: &str,
+        name: &str,
+        description: Option<&str>,
+        rules: Option<&str>,
+        image: Option<&str>,
+        moderator_pubkeys: &[String],
+    ) -> Result<Event, EventError> {
+        let mut builder = NostrEventBuilder::new(Kind::Custom(34550), "")
+            .tag(Tag::custom(
+                TagKind::custom("d"),
+                vec![community_id.to_string()],
+            ))
+            .tag(Tag::custom(
+                TagKind::custom("name"),
+                vec![name.to_string()],
+            ));
+
+        if let Some(desc) = description {
+            builder = builder.tag(Tag::custom(
+                TagKind::custom("description"),
+                vec![desc.to_string()],
+            ));
+        }
+        if let Some(rules_text) = rules {
+            builder = builder.tag(Tag::custom(
+                TagKind::custom("rules"),
+                vec![rules_text.to_string()],
+            ));
+        }
+        if let Some(img) = image {
+            builder = builder.tag(Tag::custom(
+                TagKind::custom("image"),
+                vec![img.to_string()],
+            ));
+        }
+
+        for pubkey in moderator_pubkeys {
+            builder = builder.tag(Tag::custom(
+                TagKind::custom("p"),
+                vec![pubkey.clone(), String::new(), "moderator".to_string()],
+            ));
+        }
+
+        builder
+            .sign_with_keys(keys)
+            .map_err(|e| EventError::SigningFailed(e.to_string()))
+    }
+
+    /// Build a NIP-25 reaction event (kind 7).
+    ///
+    /// Content is `"+"` for like, `"-"` for dislike, or an emoji/custom string.
+    /// Tags reference the reacted event (`e`) and its author (`p`).
+    pub fn build_reaction(
+        keys: &Keys,
+        event_id: &str,
+        event_author_pubkey: &str,
+        content: &str,
+    ) -> Result<Event, EventError> {
+        NostrEventBuilder::new(Kind::Custom(7), content)
+            .tag(Tag::custom(
+                TagKind::custom("e"),
+                vec![event_id.to_string()],
+            ))
+            .tag(Tag::custom(
+                TagKind::custom("p"),
+                vec![event_author_pubkey.to_string()],
+            ))
+            .sign_with_keys(keys)
+            .map_err(|e| EventError::SigningFailed(e.to_string()))
+    }
+
     /// Build a custom event with arbitrary kind, content, and tags.
     ///
     /// Used for community features (LFG, match results, announcements).
@@ -435,6 +512,100 @@ mod tests {
     #[test]
     fn keys_from_hex_invalid() {
         assert!(EventBuilder::keys_from_hex("not_a_valid_hex_key").is_err());
+    }
+
+    #[test]
+    fn build_community_definition_kind_34550() {
+        let keys = test_keys();
+        let mod1 = Keys::generate();
+        let mod2 = Keys::generate();
+        let mods = vec![
+            mod1.public_key().to_hex(),
+            mod2.public_key().to_hex(),
+        ];
+
+        let event = EventBuilder::build_community_definition(
+            &keys,
+            "scuffed-crew",
+            "Scuffed Crew",
+            Some("A gaming community"),
+            Some("Be respectful"),
+            Some("https://scuffed.gg/logo.png"),
+            &mods,
+        )
+        .unwrap();
+
+        assert_eq!(event.kind, Kind::Custom(34550));
+        assert!(event.verify().is_ok());
+
+        let relay_event = EventBuilder::to_relay_event(&event);
+        assert_eq!(relay_event.tag_value("d"), Some("scuffed-crew"));
+        assert_eq!(relay_event.tag_value("name"), Some("Scuffed Crew"));
+        assert_eq!(relay_event.tag_value("description"), Some("A gaming community"));
+        assert_eq!(relay_event.tag_value("rules"), Some("Be respectful"));
+        assert_eq!(relay_event.tag_value("image"), Some("https://scuffed.gg/logo.png"));
+
+        let p_tags = relay_event.tag_values("p");
+        assert_eq!(p_tags.len(), 2);
+    }
+
+    #[test]
+    fn build_community_definition_minimal() {
+        let keys = test_keys();
+        let event = EventBuilder::build_community_definition(
+            &keys,
+            "my-community",
+            "My Community",
+            None,
+            None,
+            None,
+            &[],
+        )
+        .unwrap();
+
+        assert_eq!(event.kind, Kind::Custom(34550));
+        let relay_event = EventBuilder::to_relay_event(&event);
+        assert_eq!(relay_event.tag_value("d"), Some("my-community"));
+        assert_eq!(relay_event.tag_value("name"), Some("My Community"));
+        assert!(relay_event.tag_value("description").is_none());
+        assert!(relay_event.tag_value("rules").is_none());
+        assert!(relay_event.tag_value("image").is_none());
+        assert!(relay_event.tag_values("p").is_empty());
+    }
+
+    #[test]
+    fn build_reaction_like() {
+        let keys = test_keys();
+        let event = EventBuilder::build_reaction(
+            &keys,
+            "abcdef1234567890",
+            "target_author_pubkey",
+            "+",
+        )
+        .unwrap();
+
+        assert_eq!(event.kind, Kind::Custom(7));
+        assert_eq!(event.content, "+");
+        assert!(event.verify().is_ok());
+
+        let relay_event = EventBuilder::to_relay_event(&event);
+        assert_eq!(relay_event.tag_value("e"), Some("abcdef1234567890"));
+        assert_eq!(relay_event.tag_value("p"), Some("target_author_pubkey"));
+    }
+
+    #[test]
+    fn build_reaction_emoji() {
+        let keys = test_keys();
+        let event = EventBuilder::build_reaction(
+            &keys,
+            "event123",
+            "author456",
+            "\u{1f525}",
+        )
+        .unwrap();
+
+        assert_eq!(event.kind, Kind::Custom(7));
+        assert_eq!(event.content, "\u{1f525}");
     }
 
     #[test]

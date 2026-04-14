@@ -153,6 +153,11 @@ async fn main() {
         }
     };
 
+    let relay_url = std::env::var("NOSTR_RELAY_URL").ok();
+    if let Some(ref url) = relay_url {
+        tracing::info!("Nostr relay configured: {url}");
+    }
+
     let state = AppState {
         db: db.clone(),
         session_config: SessionConfig::default(),
@@ -161,6 +166,7 @@ async fn main() {
         notifier,
         nostr_challenge_key,
         crypto,
+        relay_url,
     };
 
     // Create the collaboration room manager

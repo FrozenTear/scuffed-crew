@@ -282,6 +282,14 @@ pub fn create_router(state: AppState) -> Router {
             "/api/nostr/import-key",
             post(routes::nostr::nostr_import_key),
         )
+        .route(
+            "/api/nostr/community",
+            post(routes::nostr::nostr_community),
+        )
+        .route(
+            "/api/nostr/react",
+            post(routes::nostr::nostr_react),
+        )
         // Upload routes
         .route(
             "/api/upload/avatar",

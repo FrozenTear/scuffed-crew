@@ -33,6 +33,8 @@ pub enum AuditAction {
     AddedTournamentParticipant,
     RemovedTournamentParticipant,
     ReportedTournamentMatch,
+    PublishedCommunity,
+    PublishedReaction,
 }
 
 impl std::fmt::Display for AuditAction {

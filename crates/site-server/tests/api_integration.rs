@@ -976,3 +976,415 @@ async fn cookie_auth_works() {
     let resp = app.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
 }
+
+// ─── NIP-05 Well-Known ─────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn nip05_json_returns_empty_when_no_identities() {
+    let state = test_state().await;
+    let app = create_router(state);
+
+    let resp = app
+        .oneshot(unauthed_request(Method::GET, "/.well-known/nostr.json?name=_"))
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    assert!(json["names"].as_object().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn nip05_json_returns_identity_for_member_with_pubkey() {
+    let state = test_state().await;
+    seed_all_roles(&state.db).await;
+
+    // Set a nostr pubkey on the admin member
+    let fake_pubkey = "a".repeat(64);
+    state
+        .db
+        .client
+        .query(&format!(
+            "UPDATE member:adminmember SET nostr_pubkey = '{fake_pubkey}'"
+        ))
+        .await
+        .expect("set nostr pubkey");
+
+    let app = create_router(state);
+    let resp = app
+        .oneshot(unauthed_request(
+            Method::GET,
+            "/.well-known/nostr.json?name=_",
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    let names = json["names"].as_object().unwrap();
+    assert_eq!(names.len(), 1);
+    assert_eq!(names["testadmin"], fake_pubkey);
+}
+
+#[tokio::test]
+async fn nip05_json_filters_by_name() {
+    let state = test_state().await;
+    seed_all_roles(&state.db).await;
+
+    let pk_admin = "a".repeat(64);
+    let pk_officer = "b".repeat(64);
+    state
+        .db
+        .client
+        .query(&format!(
+            "UPDATE member:adminmember SET nostr_pubkey = '{pk_admin}'; \
+             UPDATE member:officermember SET nostr_pubkey = '{pk_officer}'"
+        ))
+        .await
+        .expect("set nostr pubkeys");
+
+    let app = create_router(state);
+    let resp = app
+        .oneshot(unauthed_request(
+            Method::GET,
+            "/.well-known/nostr.json?name=testadmin",
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    let names = json["names"].as_object().unwrap();
+    assert_eq!(names.len(), 1);
+    assert_eq!(names["testadmin"], pk_admin);
+}
+
+#[tokio::test]
+async fn nip05_json_has_cors_header() {
+    let state = test_state().await;
+    let app = create_router(state);
+
+    let resp = app
+        .oneshot(unauthed_request(Method::GET, "/.well-known/nostr.json?name=_"))
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let cors = resp.headers().get("access-control-allow-origin").unwrap();
+    assert_eq!(cors, "*");
+}
+
+#[tokio::test]
+async fn nip05_json_includes_relay_hints_when_configured() {
+    let mut state = test_state().await;
+    state.relay_url = Some("wss://relay.scuffed.gg".into());
+    seed_all_roles(&state.db).await;
+
+    let fake_pubkey = "c".repeat(64);
+    state
+        .db
+        .client
+        .query(&format!(
+            "UPDATE member:adminmember SET nostr_pubkey = '{fake_pubkey}'"
+        ))
+        .await
+        .expect("set nostr pubkey");
+
+    let app = create_router(state);
+    let resp = app
+        .oneshot(unauthed_request(
+            Method::GET,
+            "/.well-known/nostr.json?name=_",
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    let relays = json["relays"].as_object().unwrap();
+    assert_eq!(relays.len(), 1);
+    let hints = relays[&fake_pubkey].as_array().unwrap();
+    assert_eq!(hints[0], "wss://relay.scuffed.gg");
+}
+
+// ─── Nostr Challenge / Verify ──────────────────────────────────────────────
+
+#[tokio::test]
+async fn nostr_challenge_requires_auth() {
+    let state = test_state().await;
+    let app = create_router(state);
+
+    let req = Request::builder()
+        .method(Method::POST)
+        .uri("/api/nostr/challenge")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            serde_json::to_vec(&json!({"pubkey": "a".repeat(64)})).unwrap(),
+        ))
+        .unwrap();
+
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn nostr_challenge_rejects_invalid_pubkey() {
+    let state = test_state().await;
+    seed_all_roles(&state.db).await;
+    let app = create_router(state);
+
+    let resp = app
+        .oneshot(authed_json_request(
+            Method::POST,
+            "/api/nostr/challenge",
+            MEMBER_TOKEN,
+            json!({"pubkey": "not-a-valid-pubkey"}),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn nostr_challenge_accepts_valid_hex_pubkey() {
+    let state = test_state().await;
+    seed_all_roles(&state.db).await;
+    let app = create_router(state);
+
+    // Generate a valid secp256k1 pubkey
+    let keys = nostr::Keys::generate();
+    let pubkey_hex = keys.public_key().to_hex();
+
+    let resp = app
+        .oneshot(authed_json_request(
+            Method::POST,
+            "/api/nostr/challenge",
+            MEMBER_TOKEN,
+            json!({"pubkey": pubkey_hex}),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    assert!(json["challenge"].as_str().unwrap().starts_with("scuffedclan-verify:"));
+    assert!(!json["token"].as_str().unwrap().is_empty());
+    assert_eq!(json["pubkey_hex"].as_str().unwrap(), pubkey_hex);
+    assert_eq!(json["expires_in_secs"], 300);
+}
+
+#[tokio::test]
+async fn nostr_verify_rejects_malformed_event() {
+    let state = test_state().await;
+    seed_all_roles(&state.db).await;
+    let app = create_router(state);
+
+    // An empty object is not a valid nostr::Event, so Axum rejects at deserialization
+    let resp = app
+        .oneshot(authed_json_request(
+            Method::POST,
+            "/api/nostr/verify",
+            MEMBER_TOKEN,
+            json!({
+                "token": "invalid-token",
+                "signed_event": {}
+            }),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+// ─── Nostr Identity Unlink ─────────────────────────────────────────────────
+
+#[tokio::test]
+async fn nostr_unlink_removes_pubkey() {
+    let state = test_state().await;
+    seed_all_roles(&state.db).await;
+
+    // Set a pubkey first
+    let fake_pubkey = "d".repeat(64);
+    state
+        .db
+        .client
+        .query(&format!(
+            "UPDATE member:membermember SET nostr_pubkey = '{fake_pubkey}'"
+        ))
+        .await
+        .expect("set nostr pubkey");
+
+    let app = create_router(state);
+    let resp = app
+        .oneshot(authed_request(
+            Method::DELETE,
+            "/api/nostr/identity",
+            MEMBER_TOKEN,
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    assert!(json["nostr_pubkey"].is_null());
+}
+
+#[tokio::test]
+async fn nostr_unlink_requires_auth() {
+    let state = test_state().await;
+    let app = create_router(state);
+
+    let resp = app
+        .oneshot(unauthed_request(Method::DELETE, "/api/nostr/identity"))
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+// ─── NIP-49 Export Backup ──────────────────────────────────────────────────
+
+#[tokio::test]
+async fn nostr_export_backup_rejects_short_password() {
+    let state = test_state().await;
+    seed_all_roles(&state.db).await;
+    let app = create_router(state);
+
+    let resp = app
+        .oneshot(authed_json_request(
+            Method::POST,
+            "/api/nostr/export-backup",
+            MEMBER_TOKEN,
+            json!({"password": "short"}),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let json = body_json(resp).await;
+    assert!(json["error"].as_str().unwrap().contains("8 characters"));
+}
+
+#[tokio::test]
+async fn nostr_export_backup_rejects_non_server_managed() {
+    let state = test_state().await;
+    seed_all_roles(&state.db).await;
+    let app = create_router(state);
+
+    let resp = app
+        .oneshot(authed_json_request(
+            Method::POST,
+            "/api/nostr/export-backup",
+            MEMBER_TOKEN,
+            json!({"password": "a-strong-password-here"}),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let json = body_json(resp).await;
+    assert!(json["error"].as_str().unwrap().contains("server-managed"));
+}
+
+#[tokio::test]
+async fn nostr_export_backup_requires_auth() {
+    let state = test_state().await;
+    let app = create_router(state);
+
+    let req = Request::builder()
+        .method(Method::POST)
+        .uri("/api/nostr/export-backup")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            serde_json::to_vec(&json!({"password": "mypassword123"})).unwrap(),
+        ))
+        .unwrap();
+
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+// ─── NIP-49 Import Key ────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn nostr_import_key_rejects_invalid_ncryptsec() {
+    let state = test_state().await;
+    seed_all_roles(&state.db).await;
+    let app = create_router(state);
+
+    let resp = app
+        .oneshot(authed_json_request(
+            Method::POST,
+            "/api/nostr/import-key",
+            MEMBER_TOKEN,
+            json!({
+                "ncryptsec": "not-valid-ncryptsec",
+                "password": "anypassword"
+            }),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn nostr_import_key_rejects_wrong_password() {
+    let state = test_state().await;
+    seed_all_roles(&state.db).await;
+
+    // Create a valid ncryptsec with known password
+    let keys = nostr::Keys::generate();
+    let secret_hex = keys.secret_key().to_secret_hex();
+    let ncryptsec =
+        scuffed_auth::nip49::encrypt(&secret_hex, "correct-password").expect("encrypt");
+
+    let app = create_router(state);
+    let resp = app
+        .oneshot(authed_json_request(
+            Method::POST,
+            "/api/nostr/import-key",
+            MEMBER_TOKEN,
+            json!({
+                "ncryptsec": ncryptsec,
+                "password": "wrong-password"
+            }),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let json = body_json(resp).await;
+    assert!(json["error"].as_str().unwrap().contains("decrypt"));
+}
+
+#[tokio::test]
+async fn nostr_import_key_success() {
+    let state = test_state().await;
+    seed_all_roles(&state.db).await;
+
+    let keys = nostr::Keys::generate();
+    let secret_hex = keys.secret_key().to_secret_hex();
+    let expected_pubkey = keys.public_key().to_hex();
+    let password = "secure-backup-password";
+    let ncryptsec = scuffed_auth::nip49::encrypt(&secret_hex, password).expect("encrypt");
+
+    let app = create_router(state);
+    let resp = app
+        .oneshot(authed_json_request(
+            Method::POST,
+            "/api/nostr/import-key",
+            MEMBER_TOKEN,
+            json!({
+                "ncryptsec": ncryptsec,
+                "password": password
+            }),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    assert_eq!(json["nostr_pubkey"].as_str().unwrap(), expected_pubkey);
+}

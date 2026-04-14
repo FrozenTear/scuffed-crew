@@ -371,4 +371,8 @@ pub mod event_kinds {
     pub const GIFT_WRAP: u32 = 1059;
     /// NIP-59 seal.
     pub const SEAL: u32 = 13;
+    /// NIP-25 reaction (like, emoji).
+    pub const REACTION: u32 = 7;
+    /// NIP-72 community definition (replaceable).
+    pub const COMMUNITY_DEFINITION: u32 = 34550;
 }
