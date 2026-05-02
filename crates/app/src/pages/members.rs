@@ -15,6 +15,11 @@ struct PublicMember {
     joined_at: String,
 }
 
+#[derive(Deserialize)]
+struct MembersResponse {
+    data: Vec<PublicMember>,
+}
+
 const PAGE_CSS: &str = r#"
     .members-page {
         padding: 3rem 2rem;
@@ -115,7 +120,11 @@ const PAGE_CSS: &str = r#"
 #[component]
 pub fn Members() -> Element {
     let members = use_resource(|| async {
-        ApiClient::web().fetch::<Vec<PublicMember>>("/api/public/members").await.ok()
+        ApiClient::web()
+            .fetch::<MembersResponse>("/api/public/members")
+            .await
+            .ok()
+            .map(|r| r.data)
     });
 
     rsx! {

@@ -21,6 +21,9 @@ script = []
 style = []
 script = []
 
+[[web.proxy]]
+backend = "http://localhost:3030/api"
+
 [desktop]
 enable_default_menu_bar = false
 

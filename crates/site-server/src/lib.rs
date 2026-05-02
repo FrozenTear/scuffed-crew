@@ -294,6 +294,10 @@ pub fn create_router(state: AppState) -> Router {
             "/api/nostr/post",
             post(routes::nostr::nostr_post),
         )
+        .route(
+            "/api/nostr/feed",
+            get(routes::nostr::nostr_feed),
+        )
         // Upload routes
         .route(
             "/api/upload/avatar",

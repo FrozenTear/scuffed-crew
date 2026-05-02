@@ -8,6 +8,153 @@ use scuffed_types::MeResponse;
 
 use crate::components::{Toast, use_toast};
 
+const PAGE_CSS: &str = r#"
+    .identity-page {
+        padding: 3rem 2rem;
+        max-width: 640px;
+        margin: 0 auto;
+    }
+    .identity-page-title {
+        font-family: 'Bebas Neue', sans-serif;
+        font-size: 2.5rem;
+        color: var(--text-bright);
+        letter-spacing: 3px;
+        margin: 0 0 2rem;
+    }
+    .identity-section {
+        background: var(--bg-card);
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 1.5rem;
+        margin-bottom: 1.25rem;
+    }
+    .identity-section h2 {
+        font-family: 'Rajdhani', sans-serif;
+        font-size: 1.15rem;
+        font-weight: 700;
+        color: var(--text-bright);
+        margin: 0 0 0.75rem;
+    }
+    .identity-section p {
+        color: var(--text-secondary);
+        font-size: 0.85rem;
+        line-height: 1.5;
+        margin: 0 0 1rem;
+    }
+    .identity-field {
+        margin-bottom: 1rem;
+    }
+    .identity-label {
+        display: block;
+        font-size: 0.75rem;
+        font-weight: 600;
+        color: var(--text-muted);
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        margin-bottom: 0.35rem;
+    }
+    .identity-input {
+        width: 100%;
+        padding: 0.5rem 0.75rem;
+        background: var(--bg-surface, #1a1a2e);
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        color: var(--text-bright);
+        font-size: 0.875rem;
+        outline: none;
+        transition: border-color 0.15s;
+        box-sizing: border-box;
+    }
+    .identity-input:focus {
+        border-color: var(--accent);
+    }
+    .identity-mono {
+        font-family: monospace;
+        font-size: 0.8rem;
+        background: var(--bg-surface, #1a1a2e);
+        padding: 0.5rem 0.75rem;
+        border-radius: 6px;
+        word-break: break-all;
+        display: block;
+        color: var(--text-bright);
+        border: 1px solid var(--border);
+    }
+    .identity-pill {
+        display: inline-block;
+        font-size: 0.7rem;
+        padding: 0.15rem 0.6rem;
+        border-radius: 999px;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        background: #7c3aed33;
+        color: #a78bfa;
+    }
+    .identity-nip05 {
+        color: var(--text-secondary);
+        font-size: 0.85rem;
+    }
+    .identity-row {
+        display: flex;
+        gap: 0.5rem;
+        align-items: end;
+    }
+    .identity-row .identity-field { flex: 1; margin-bottom: 0; }
+    .identity-btn {
+        padding: 0.5rem 1rem;
+        border: none;
+        border-radius: 6px;
+        font-size: 0.85rem;
+        font-weight: 600;
+        cursor: pointer;
+        transition: filter 0.15s, opacity 0.15s;
+    }
+    .identity-btn:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+    }
+    .identity-btn-primary {
+        background: var(--accent);
+        color: white;
+    }
+    .identity-btn-primary:hover:not(:disabled) {
+        filter: brightness(1.15);
+    }
+    .identity-btn-danger {
+        background: #ef4444;
+        color: white;
+    }
+    .identity-btn-danger:hover:not(:disabled) {
+        filter: brightness(1.15);
+    }
+    .identity-btn-outline {
+        background: transparent;
+        color: var(--text-secondary);
+        border: 1px solid var(--border);
+    }
+    .identity-btn-outline:hover:not(:disabled) {
+        border-color: var(--text-bright);
+        color: var(--text-bright);
+    }
+    .identity-backup-box {
+        margin-top: 1rem;
+        padding: 1rem;
+        background: var(--bg-surface, #1a1a2e);
+        border-radius: 8px;
+        border: 1px solid var(--border);
+    }
+    .identity-warning {
+        color: #f97316;
+        font-size: 0.75rem;
+        margin-top: 0.5rem;
+    }
+    .identity-actions {
+        display: flex;
+        gap: 0.5rem;
+        margin-top: 0.5rem;
+    }
+"#;
+
 #[derive(Serialize)]
 struct ChallengeBody {
     pubkey: String,
@@ -199,179 +346,148 @@ pub fn IdentitySettings() -> Element {
         .unwrap_or(false);
 
     rsx! {
-        div { class: "admin-toolbar",
-            h1 { "Nostr Identity" }
-        }
+        style { {PAGE_CSS} }
 
-        // ─── Current Identity Status ───
-        div { class: "form-section",
-            h2 { "Identity Status" }
-            if let Some(m) = member {
-                if let Some(ref pubkey) = m.nostr_pubkey {
-                    div { class: "form-inline",
-                        div { class: "form-field",
-                            label { class: "form-label", "Public Key" }
-                            code { class: "form-input",
-                                style: "font-family: monospace; background: var(--surface-2); padding: 0.5rem; border-radius: 4px; display: block; word-break: break-all;",
-                                "{pubkey}"
-                            }
-                            small {
-                                style: "color: var(--text-muted);",
-                                "Truncated: {truncate_pubkey(pubkey)}"
-                            }
+        main { class: "identity-page",
+            h1 { class: "identity-page-title", "Nostr Identity" }
+
+            div { class: "identity-section",
+                h2 { "Identity Status" }
+                if let Some(m) = member {
+                    if let Some(ref pubkey) = m.nostr_pubkey {
+                        div { class: "identity-field",
+                            label { class: "identity-label", "Public Key" }
+                            code { class: "identity-mono", "{pubkey}" }
                         }
-                        div { class: "form-field",
-                            label { class: "form-label", "Key Mode" }
-                            span {
-                                style: "padding: 0.25rem 0.75rem; border-radius: 4px; background: var(--surface-2); font-size: 0.875rem;",
-                                {m.nostr_key_mode.as_deref().unwrap_or("unknown")}
+                        div { class: "identity-row",
+                            div { class: "identity-field",
+                                label { class: "identity-label", "Key Mode" }
+                                span { class: "identity-pill",
+                                    {m.nostr_key_mode.as_deref().unwrap_or("unknown")}
+                                }
                             }
-                        }
-                        div { class: "form-field",
-                            label { class: "form-label", "NIP-05" }
-                            span {
-                                style: "color: var(--text-secondary);",
-                                "{nip05_name(&m.display_name)}@scuffed.gg"
+                            div { class: "identity-field",
+                                label { class: "identity-label", "NIP-05" }
+                                span { class: "identity-nip05",
+                                    "{nip05_name(&m.display_name)}@scuffed.gg"
+                                }
                             }
                         }
-                    }
-                    div { class: "form-inline",
-                        button {
-                            class: "btn-danger",
-                            disabled: working(),
-                            onclick: on_unlink,
-                            "Unlink Identity"
+                        div { class: "identity-actions",
+                            button {
+                                class: "identity-btn identity-btn-danger",
+                                disabled: working(),
+                                onclick: on_unlink,
+                                "Unlink Identity"
+                            }
                         }
+                    } else {
+                        p { "No Nostr identity linked. Use one of the options below to get started." }
                     }
                 } else {
-                    p { style: "color: var(--text-muted);", "No Nostr identity linked." }
+                    p { "Loading..." }
                 }
-            } else {
-                p { style: "color: var(--text-muted);", "Loading..." }
             }
-        }
 
-        // ─── NIP-07: Link via Extension ───
-        if !has_pubkey {
-            div { class: "form-section",
-                h2 { "Link Nostr Identity" }
-                if has_extension {
-                    div { class: "form-inline",
-                        div { class: "form-field",
-                            label { class: "form-label", "Public Key (hex or npub)" }
-                            div { style: "display: flex; gap: 0.5rem;",
+            if !has_pubkey {
+                div { class: "identity-section",
+                    h2 { "Link Nostr Identity" }
+                    if has_extension {
+                        div { class: "identity-row",
+                            div { class: "identity-field",
+                                label { class: "identity-label", "Public Key (hex or npub)" }
                                 input {
-                                    class: "form-input",
+                                    class: "identity-input",
                                     r#type: "text",
                                     placeholder: "64-char hex or npub1...",
                                     value: "{pubkey_input}",
                                     oninput: move |e| pubkey_input.set(e.value()),
                                 }
-                                button {
-                                    class: "btn-add",
-                                    onclick: on_detect_pubkey,
-                                    "Detect (NIP-07)"
-                                }
+                            }
+                            button {
+                                class: "identity-btn identity-btn-outline",
+                                onclick: on_detect_pubkey,
+                                "Detect"
                             }
                         }
-                    }
-                    div { class: "form-inline",
-                        button {
-                            class: "btn-add",
-                            disabled: working() || pubkey_input().trim().is_empty(),
-                            onclick: on_link_identity,
-                            if working() { "Linking..." } else { "Link & Verify" }
+                        div { class: "identity-actions",
+                            button {
+                                class: "identity-btn identity-btn-primary",
+                                disabled: working() || pubkey_input().trim().is_empty(),
+                                onclick: on_link_identity,
+                                if working() { "Linking..." } else { "Link & Verify" }
+                            }
                         }
-                    }
-                } else {
-                    p {
-                        style: "color: var(--text-muted);",
-                        "Install a NIP-07 browser extension (nos2x, Alby, or similar) to link your Nostr identity."
+                    } else {
+                        p { "Install a NIP-07 browser extension (nos2x, Alby, or similar) to link your Nostr identity." }
                     }
                 }
             }
-        }
 
-        // ─── NIP-49: Key Backup ───
-        if is_server_managed {
-            div { class: "form-section",
-                h2 { "Key Backup (NIP-49)" }
-                p {
-                    style: "color: var(--text-muted); font-size: 0.875rem; margin-bottom: 1rem;",
-                    "Export your key as an encrypted ncryptsec backup. You will need the password to restore it."
-                }
-                div { class: "form-inline",
-                    div { class: "form-field",
-                        label { class: "form-label", "Backup Password (min 8 chars)" }
+            if is_server_managed {
+                div { class: "identity-section",
+                    h2 { "Key Backup (NIP-49)" }
+                    p { "Export your key as an encrypted ncryptsec backup. You will need the password to restore it." }
+                    div { class: "identity-field",
+                        label { class: "identity-label", "Backup Password (min 8 chars)" }
                         input {
-                            class: "form-input",
+                            class: "identity-input",
                             r#type: "password",
                             placeholder: "Enter a strong password",
                             value: "{backup_password}",
                             oninput: move |e| backup_password.set(e.value()),
                         }
                     }
-                }
-                div { class: "form-inline",
-                    button {
-                        class: "btn-add",
-                        disabled: working() || backup_password().trim().len() < 8,
-                        onclick: on_export_backup,
-                        if working() { "Exporting..." } else { "Export Backup" }
-                    }
-                }
-                if let Some(ref ncryptsec) = *backup_result.read() {
-                    div {
-                        style: "margin-top: 1rem; padding: 1rem; background: var(--surface-2); border-radius: 8px; border: 1px solid var(--border);",
-                        label { class: "form-label", "Your ncryptsec backup:" }
-                        code {
-                            style: "display: block; word-break: break-all; font-size: 0.75rem; padding: 0.5rem; background: var(--surface-1); border-radius: 4px; font-family: monospace;",
-                            "{ncryptsec}"
+                    div { class: "identity-actions",
+                        button {
+                            class: "identity-btn identity-btn-primary",
+                            disabled: working() || backup_password().trim().len() < 8,
+                            onclick: on_export_backup,
+                            if working() { "Exporting..." } else { "Export Backup" }
                         }
-                        p {
-                            style: "color: var(--warning); font-size: 0.75rem; margin-top: 0.5rem;",
-                            "Copy this now! It will not be shown again."
+                    }
+                    if let Some(ref ncryptsec) = *backup_result.read() {
+                        div { class: "identity-backup-box",
+                            label { class: "identity-label", "Your ncryptsec backup:" }
+                            code { class: "identity-mono", "{ncryptsec}" }
+                            p { class: "identity-warning",
+                                "Copy this now! It will not be shown again."
+                            }
                         }
                     }
                 }
             }
-        }
 
-        // ─── NIP-49: Import Key ───
-        div { class: "form-section",
-            h2 { "Import Key (NIP-49)" }
-            p {
-                style: "color: var(--text-muted); font-size: 0.875rem; margin-bottom: 1rem;",
-                "Restore a key from an ncryptsec backup."
-            }
-            div { class: "form-inline",
-                div { class: "form-field",
-                    label { class: "form-label", "ncryptsec" }
+            div { class: "identity-section",
+                h2 { "Import Key (NIP-49)" }
+                p { "Restore a key from an ncryptsec backup." }
+                div { class: "identity-field",
+                    label { class: "identity-label", "ncryptsec" }
                     input {
-                        class: "form-input",
+                        class: "identity-input",
                         r#type: "text",
                         placeholder: "ncryptsec1...",
                         value: "{import_ncryptsec}",
                         oninput: move |e| import_ncryptsec.set(e.value()),
                     }
                 }
-                div { class: "form-field",
-                    label { class: "form-label", "Password" }
+                div { class: "identity-field",
+                    label { class: "identity-label", "Password" }
                     input {
-                        class: "form-input",
+                        class: "identity-input",
                         r#type: "password",
                         placeholder: "Backup password",
                         value: "{import_password}",
                         oninput: move |e| import_password.set(e.value()),
                     }
                 }
-            }
-            div { class: "form-inline",
-                button {
-                    class: "btn-add",
-                    disabled: working() || import_ncryptsec().trim().is_empty() || import_password().trim().is_empty(),
-                    onclick: on_import_key,
-                    if working() { "Importing..." } else { "Import Key" }
+                div { class: "identity-actions",
+                    button {
+                        class: "identity-btn identity-btn-primary",
+                        disabled: working() || import_ncryptsec().trim().is_empty() || import_password().trim().is_empty(),
+                        onclick: on_import_key,
+                        if working() { "Importing..." } else { "Import Key" }
+                    }
                 }
             }
         }

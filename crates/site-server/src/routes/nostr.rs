@@ -808,6 +808,30 @@ pub async fn nostr_react(
     Ok(Json(ReactResponse { reaction_event_id }))
 }
 
+// ─── Feed endpoint (Phase 3) ───
+
+#[derive(Serialize)]
+pub struct FeedPostResponse {
+    pub id: String,
+    pub pubkey: String,
+    pub author_name: Option<String>,
+    pub content: String,
+    pub hashtags: Vec<String>,
+    pub created_at: i64,
+    pub reactions: Vec<serde_json::Value>,
+    pub reply_count: u32,
+}
+
+/// GET /api/nostr/feed — return community posts.
+///
+/// Currently returns posts stored locally. Relay subscription for live posts
+/// is planned for Phase 4.
+pub async fn nostr_feed(
+    State(_state): State<AppState>,
+) -> Json<Vec<FeedPostResponse>> {
+    Json(vec![])
+}
+
 #[derive(Deserialize)]
 pub struct CommunityPostRequest {
     pub content: String,
