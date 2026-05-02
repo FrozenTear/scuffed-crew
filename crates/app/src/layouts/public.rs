@@ -139,6 +139,7 @@ pub fn PublicLayout() -> Element {
             ul { class: "nav-links",
                 li { Link { to: Route::Members {}, "Members" } }
                 li { Link { to: Route::Community {}, "Community" } }
+                li { Link { to: Route::Feed {}, "Feed" } }
                 li { Link { to: Route::News {}, "News" } }
                 li { Link { to: Route::Tournaments {}, "Tournaments" } }
                 li { Link { to: Route::StrategyBrowse {}, "Strategy" } }
@@ -157,6 +158,7 @@ pub fn PublicLayout() -> Element {
         div { class: overlay_class,
             Link { to: Route::Members {}, onclick: move |_| menu_open.set(false), "Members" }
             Link { to: Route::Community {}, onclick: move |_| menu_open.set(false), "Community" }
+            Link { to: Route::Feed {}, onclick: move |_| menu_open.set(false), "Feed" }
             Link { to: Route::News {}, onclick: move |_| menu_open.set(false), "News" }
             Link { to: Route::Tournaments {}, onclick: move |_| menu_open.set(false), "Tournaments" }
             Link { to: Route::StrategyBrowse {}, onclick: move |_| menu_open.set(false), "Strategy" }

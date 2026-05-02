@@ -512,6 +512,7 @@ pub enum AuditAction {
     RemovedTournamentParticipant,
     ReportedTournamentMatch,
     PublishedCommunity,
+    PublishedPost,
     PublishedReaction,
 }
 

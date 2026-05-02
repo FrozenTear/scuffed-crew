@@ -114,6 +114,44 @@ impl NostrFilter {
         }
     }
 
+    /// Create a filter for community text posts (kind 1).
+    pub fn community_posts() -> Self {
+        Self {
+            kinds: Some(vec![event_kinds::TEXT_NOTE]),
+            ..Default::default()
+        }
+    }
+
+    /// Create a filter by hashtag (`#t`).
+    pub fn by_hashtag(tag: &str) -> Self {
+        let mut tags = HashMap::new();
+        tags.insert(format!("#{}", "t"), vec![tag.to_string()]);
+        Self {
+            tags,
+            ..Default::default()
+        }
+    }
+
+    /// Create a filter by event author pubkey.
+    pub fn by_author(pubkey: &str) -> Self {
+        Self {
+            authors: Some(vec![pubkey.to_string()]),
+            ..Default::default()
+        }
+    }
+
+    /// Add a lower-bound timestamp (`since`) to the filter.
+    pub fn with_since(mut self, since: u64) -> Self {
+        self.since = Some(since);
+        self
+    }
+
+    /// Add a result limit to the filter.
+    pub fn with_limit(mut self, limit: usize) -> Self {
+        self.limit = Some(limit);
+        self
+    }
+
     /// Create a filter for multiple event kinds (e.g., presence, voice status).
     pub fn by_kinds(kinds: Vec<u32>) -> Self {
         Self {
@@ -351,6 +389,8 @@ impl ChatMessage {
 pub mod event_kinds {
     /// NIP-01 kind 0: user profile metadata.
     pub const PROFILE_METADATA: u32 = 0;
+    /// NIP-01 kind 1: text note.
+    pub const TEXT_NOTE: u32 = 1;
     /// NIP-29 group chat message.
     pub const GROUP_CHAT_MESSAGE: u32 = 9;
     /// NIP-29 group chat reply (threaded).

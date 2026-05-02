@@ -312,6 +312,64 @@ impl EventBuilder {
             .map_err(|e| EventError::SigningFailed(e.to_string()))
     }
 
+    /// Build a kind 1 community post event.
+    ///
+    /// Optional tags:
+    /// - `["t", <hashtag>]` for each hashtag
+    /// - `["a", <community_id>]` for NIP-72 community context
+    /// - `["h", <group_id>]` for NIP-29 group context
+    /// - `["e", <root_id>, "", "root"]` and `["e", <reply_id>, "", "reply"]` for NIP-10 threading
+    pub fn build_community_post(
+        keys: &Keys,
+        content: &str,
+        hashtags: &[String],
+        community_id: Option<&str>,
+        group_id: Option<&str>,
+        reply_to: Option<&str>,
+        root: Option<&str>,
+    ) -> Result<Event, EventError> {
+        let mut builder = NostrEventBuilder::new(Kind::Custom(1), content);
+
+        for hashtag in hashtags {
+            builder = builder.tag(Tag::custom(
+                TagKind::custom("t"),
+                vec![hashtag.to_string()],
+            ));
+        }
+
+        if let Some(cid) = community_id {
+            builder = builder.tag(Tag::custom(
+                TagKind::custom("a"),
+                vec![cid.to_string()],
+            ));
+        }
+
+        if let Some(gid) = group_id {
+            builder = builder.tag(Tag::custom(
+                TagKind::custom("h"),
+                vec![gid.to_string()],
+            ));
+        }
+
+        if let Some(root_id) = root {
+            builder = builder.tag(Tag::custom(
+                TagKind::custom("e"),
+                vec![root_id.to_string(), String::new(), "root".to_string()],
+            ));
+        }
+
+        if let Some(reply_id) = reply_to {
+            builder = builder.tag(Tag::custom(
+                TagKind::custom("e"),
+                vec![reply_id.to_string(), String::new(), "reply".to_string()],
+            ));
+        }
+
+        builder
+            .sign_with_keys(keys)
+            .map_err(|e| EventError::SigningFailed(e.to_string()))
+    }
+
     /// Build a custom event with arbitrary kind, content, and tags.
     ///
     /// Used for community features (LFG, match results, announcements).
@@ -606,6 +664,88 @@ mod tests {
 
         assert_eq!(event.kind, Kind::Custom(7));
         assert_eq!(event.content, "\u{1f525}");
+    }
+
+    #[test]
+    fn build_community_post_basic() {
+        let keys = test_keys();
+        let event =
+            EventBuilder::build_community_post(&keys, "hello community", &[], None, None, None, None)
+                .unwrap();
+
+        assert_eq!(event.kind, Kind::Custom(1));
+        assert_eq!(event.content, "hello community");
+        assert!(event.verify().is_ok());
+
+        let relay_event = EventBuilder::to_relay_event(&event);
+        assert!(relay_event.tags.is_empty());
+    }
+
+    #[test]
+    fn build_community_post_with_hashtags() {
+        let keys = test_keys();
+        let hashtags = vec!["rust".to_string(), "nostr".to_string()];
+        let event = EventBuilder::build_community_post(
+            &keys,
+            "shipping backend work",
+            &hashtags,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+        let relay_event = EventBuilder::to_relay_event(&event);
+        assert_eq!(relay_event.tag_values("t"), vec!["rust", "nostr"]);
+    }
+
+    #[test]
+    fn build_community_post_with_reply_markers() {
+        let keys = test_keys();
+        let event = EventBuilder::build_community_post(
+            &keys,
+            "thread reply",
+            &[],
+            None,
+            None,
+            Some("reply-event-id"),
+            Some("root-event-id"),
+        )
+        .unwrap();
+
+        let relay_event = EventBuilder::to_relay_event(&event);
+        assert!(relay_event.tags.iter().any(|tag| {
+            tag.first().map(|s| s.as_str()) == Some("e")
+                && tag.get(1).map(|s| s.as_str()) == Some("root-event-id")
+                && tag.get(2).map(|s| s.as_str()) == Some("")
+                && tag.get(3).map(|s| s.as_str()) == Some("root")
+        }));
+        assert!(relay_event.tags.iter().any(|tag| {
+            tag.first().map(|s| s.as_str()) == Some("e")
+                && tag.get(1).map(|s| s.as_str()) == Some("reply-event-id")
+                && tag.get(2).map(|s| s.as_str()) == Some("")
+                && tag.get(3).map(|s| s.as_str()) == Some("reply")
+        }));
+    }
+
+    #[test]
+    fn build_community_post_with_community_context() {
+        let keys = test_keys();
+        let event = EventBuilder::build_community_post(
+            &keys,
+            "post in community feed",
+            &[],
+            Some("34550:scuffed:crew"),
+            Some("team-alpha"),
+            None,
+            None,
+        )
+        .unwrap();
+
+        let relay_event = EventBuilder::to_relay_event(&event);
+        assert_eq!(relay_event.tag_value("a"), Some("34550:scuffed:crew"));
+        assert_eq!(relay_event.tag_value("h"), Some("team-alpha"));
     }
 
     #[test]

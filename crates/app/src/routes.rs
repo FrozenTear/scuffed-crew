@@ -26,6 +26,8 @@ pub enum Route {
         IdentitySettings {},
         #[route("/community")]
         Community {},
+        #[route("/feed")]
+        Feed {},
     #[end_layout]
 
     // Admin panel (sidebar layout, auth guarded)

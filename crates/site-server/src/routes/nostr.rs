@@ -807,3 +807,132 @@ pub async fn nostr_react(
 
     Ok(Json(ReactResponse { reaction_event_id }))
 }
+
+#[derive(Deserialize)]
+pub struct CommunityPostRequest {
+    pub content: String,
+    #[serde(default)]
+    pub hashtags: Vec<String>,
+    pub community_id: Option<String>,
+    pub group_id: Option<String>,
+    pub reply_to: Option<String>,
+    pub root: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct CommunityPostResponse {
+    pub event_id: String,
+}
+
+/// POST /api/nostr/post — publish a kind 1 community post.
+pub async fn nostr_post(
+    State(state): State<AppState>,
+    caller: OrgMember,
+    Json(body): Json<CommunityPostRequest>,
+) -> Result<Json<CommunityPostResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let relay_url = state.relay_url.clone().ok_or_else(|| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(ErrorResponse {
+                error: "Relay not configured".into(),
+            }),
+        )
+    })?;
+
+    if caller.member.nostr_key_mode != Some(NostrKeyMode::ServerManaged) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "Server-managed Nostr key required to publish posts".into(),
+            }),
+        ));
+    }
+
+    if body.content.trim().is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "Post content must not be empty".into(),
+            }),
+        ));
+    }
+
+    let secret_hex = state
+        .db
+        .get_nostr_secret_key(&caller.member.id)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: e.to_string(),
+                }),
+            )
+        })?
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse {
+                    error: "No server-managed key found".into(),
+                }),
+            )
+        })?;
+
+    let keys = EventBuilder::keys_from_hex(&secret_hex).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: format!("Invalid key: {e}"),
+            }),
+        )
+    })?;
+
+    let event = EventBuilder::build_community_post(
+        &keys,
+        &body.content,
+        &body.hashtags,
+        body.community_id.as_deref(),
+        body.group_id.as_deref(),
+        body.reply_to.as_deref(),
+        body.root.as_deref(),
+    )
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: format!("Failed to build event: {e}"),
+            }),
+        )
+    })?;
+
+    let event_id = event.id.to_hex();
+    let relay_event = EventBuilder::to_relay_event(&event);
+    let post_context_id = body
+        .community_id
+        .clone()
+        .or_else(|| body.group_id.clone())
+        .unwrap_or_else(|| caller.member.id.clone());
+
+    let db = state.db.clone();
+    let member_id = caller.member.id.clone();
+    let log_event_id = event_id.clone();
+    tokio::spawn(async move {
+        if let Err(e) = publish_event_oneshot(&relay_url, relay_event).await {
+            tracing::error!("Failed to publish community post: {e}");
+        } else {
+            tracing::info!("Published kind 1 community post {log_event_id}");
+        }
+
+        crate::routes::audit_log::audit(
+            &db,
+            &member_id,
+            scuffed_db::AuditAction::PublishedPost,
+            scuffed_db::AuditTargetType::Member,
+            &post_context_id,
+            Some("Published kind 1 community post"),
+        )
+        .await;
+    });
+
+    Ok(Json(CommunityPostResponse { event_id }))
+}
