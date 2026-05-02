@@ -1,5 +1,6 @@
 mod home;
 mod identity;
+mod community;
 mod members;
 mod member_profile;
 mod news;
@@ -13,6 +14,7 @@ pub mod strategy;
 
 pub use home::Home;
 pub use identity::IdentitySettings;
+pub use community::Community;
 pub use members::Members;
 pub use member_profile::MemberProfile;
 pub use news::News;

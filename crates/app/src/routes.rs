@@ -24,6 +24,8 @@ pub enum Route {
         Tournament { id: String },
         #[route("/identity")]
         IdentitySettings {},
+        #[route("/community")]
+        Community {},
     #[end_layout]
 
     // Admin panel (sidebar layout, auth guarded)
