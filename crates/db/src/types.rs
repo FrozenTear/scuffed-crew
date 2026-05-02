@@ -778,3 +778,44 @@ pub struct AttendanceStats {
     pub excused: u32,
     pub total: u32,
 }
+
+/// A poll/survey.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Poll {
+    pub id: String,
+    pub title: String,
+    pub description: Option<String>,
+    pub options: Vec<String>,
+    pub close_at: Option<DateTime<Utc>>,
+    pub allow_multiple: bool,
+    pub created_by: String,
+    pub created_at: DateTime<Utc>,
+    pub is_active: bool,
+}
+
+/// A vote on a poll option.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PollVote {
+    pub id: String,
+    pub poll_id: String,
+    pub member_id: String,
+    pub option_index: u32,
+    pub voted_at: DateTime<Utc>,
+}
+
+/// Aggregated results for a poll.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PollResults {
+    pub poll: Poll,
+    pub votes: Vec<PollOptionResult>,
+    pub total_votes: u32,
+    pub my_votes: Vec<u32>,
+}
+
+/// Vote count for a single poll option.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PollOptionResult {
+    pub option_index: u32,
+    pub label: String,
+    pub count: u32,
+}
