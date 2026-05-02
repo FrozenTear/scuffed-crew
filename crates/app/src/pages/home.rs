@@ -60,6 +60,9 @@ struct Event {
     timezone: String,
 }
 
+#[derive(Deserialize)]
+struct CursorPage<T> { data: Vec<T> }
+
 // --- CSS ---
 
 const HOME_CSS: &str = r#"
@@ -174,13 +177,13 @@ pub fn Home() -> Element {
         ApiClient::web().fetch::<Overview>("/api/public/overview").await.ok()
     });
     let announcements = use_resource(|| async {
-        ApiClient::web().fetch::<Vec<Announcement>>("/api/announcements").await.ok()
+        ApiClient::web().fetch::<CursorPage<Announcement>>("/api/announcements").await.ok().map(|r| r.data)
     });
     let tournaments_res = use_resource(|| async {
-        ApiClient::web().fetch::<Vec<HomeTournament>>("/api/tournaments").await.ok()
+        ApiClient::web().fetch::<CursorPage<HomeTournament>>("/api/tournaments").await.ok().map(|r| r.data)
     });
     let events = use_resource(|| async {
-        ApiClient::web().fetch::<Vec<Event>>("/api/events").await.ok()
+        ApiClient::web().fetch::<CursorPage<Event>>("/api/events").await.ok().map(|r| r.data)
     });
 
     let (team_count, member_count, game_count) = {

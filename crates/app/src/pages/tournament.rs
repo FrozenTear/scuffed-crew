@@ -48,6 +48,9 @@ struct Team {
     name: String,
 }
 
+#[derive(Deserialize)]
+struct CursorPage<T> { data: Vec<T> }
+
 fn format_label(f: &str) -> &str {
     match f {
         "single_elim" => "Single Elimination",
@@ -176,7 +179,7 @@ pub fn Tournament(id: String) -> Element {
     });
 
     let teams = use_resource(|| async {
-        ApiClient::web().fetch::<Vec<Team>>("/api/teams").await.ok()
+        ApiClient::web().fetch::<CursorPage<Team>>("/api/teams").await.ok().map(|r| r.data)
     });
 
     let standings = use_resource(move || {
