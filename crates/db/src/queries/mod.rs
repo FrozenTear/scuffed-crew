@@ -11,6 +11,7 @@ pub mod members;
 pub mod moderation;
 pub mod nostr_keys;
 pub mod polls;
+pub mod scrims;
 pub mod roster;
 pub mod rsvps;
 pub mod sessions;

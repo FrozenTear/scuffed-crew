@@ -9,6 +9,8 @@ mod apply;
 mod tournaments;
 mod tournament;
 mod polls;
+mod scrims;
+mod events;
 mod not_found;
 
 pub mod admin;
@@ -25,6 +27,8 @@ pub use apply::Apply;
 pub use tournaments::Tournaments;
 pub use tournament::Tournament;
 pub use polls::Polls;
+pub use scrims::Scrims;
+pub use events::Events;
 pub use not_found::NotFound;
 
 pub use admin::*;

@@ -30,6 +30,10 @@ pub enum Route {
         Feed {},
         #[route("/polls")]
         Polls {},
+        #[route("/scrims")]
+        Scrims {},
+        #[route("/events")]
+        Events {},
     #[end_layout]
 
     // Admin panel (sidebar layout, auth guarded)

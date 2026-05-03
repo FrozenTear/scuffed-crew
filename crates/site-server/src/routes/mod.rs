@@ -14,6 +14,7 @@ pub mod moderation;
 pub mod nostr;
 pub mod polls;
 pub mod public;
+pub mod scrims;
 pub mod roster;
 pub mod rsvps;
 pub mod settings;

@@ -516,6 +516,8 @@ pub enum AuditAction {
     PublishedReaction,
     CreatedPoll,
     DeletedPoll,
+    CreatedScrim,
+    UpdatedScrimStatus,
 }
 
 impl std::fmt::Display for AuditAction {
@@ -546,6 +548,7 @@ pub enum AuditTargetType {
     TournamentParticipant,
     TournamentMatch,
     Poll,
+    Scrim,
 }
 
 impl std::fmt::Display for AuditTargetType {
@@ -821,4 +824,20 @@ pub struct PollOptionResult {
     pub option_index: u32,
     pub label: String,
     pub count: u32,
+}
+
+/// A scrim (practice match) request on the scrim board.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Scrim {
+    pub id: String,
+    pub team_id: String,
+    pub game_id: String,
+    pub requested_by: String,
+    pub opponent_name: Option<String>,
+    pub scheduled_at: DateTime<Utc>,
+    pub duration_minutes: u32,
+    pub status: String,
+    pub notes: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
 }

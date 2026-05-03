@@ -410,6 +410,23 @@ pub async fn run_migrations(client: &Surreal<Any>) -> DbResult<()> {
 
         DEFINE INDEX poll_vote_member_idx ON poll_vote
             COLUMNS poll_id, member_id, option_index UNIQUE;
+
+        -- ================================================
+        -- Scrims (scrim board / practice match requests)
+        -- ================================================
+        DEFINE TABLE scrim SCHEMAFULL;
+        DEFINE FIELD team_id ON scrim TYPE string;
+        DEFINE FIELD game_id ON scrim TYPE string;
+        DEFINE FIELD requested_by ON scrim TYPE string;
+        DEFINE FIELD opponent_name ON scrim TYPE option<string>;
+        DEFINE FIELD scheduled_at ON scrim TYPE datetime;
+        DEFINE FIELD duration_minutes ON scrim TYPE int DEFAULT 90;
+        DEFINE FIELD status ON scrim TYPE string DEFAULT 'open';
+        DEFINE FIELD notes ON scrim TYPE option<string>;
+        DEFINE FIELD created_at ON scrim TYPE datetime DEFAULT time::now();
+        DEFINE FIELD updated_at ON scrim TYPE datetime DEFAULT time::now();
+        DEFINE INDEX scrim_team_status_idx ON scrim COLUMNS team_id, status;
+        DEFINE INDEX scrim_scheduled_idx ON scrim COLUMNS scheduled_at;
     "#,
         )
         .await?

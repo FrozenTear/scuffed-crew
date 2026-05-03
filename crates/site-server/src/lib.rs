@@ -261,6 +261,15 @@ pub fn create_router(state: AppState) -> Router {
             "/api/tournaments/{id}/next-round",
             post(routes::tournaments::generate_next_round),
         )
+        // Scrim routes
+        .route(
+            "/api/scrims",
+            get(routes::scrims::list_scrims).post(routes::scrims::create_scrim),
+        )
+        .route(
+            "/api/scrims/{id}",
+            patch(routes::scrims::update_scrim_status),
+        )
         // Poll routes
         .route(
             "/api/polls",
