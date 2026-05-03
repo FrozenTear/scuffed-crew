@@ -6,7 +6,10 @@ use axum::{
 use serde::{Deserialize, Serialize};
 
 use scuffed_auth::server::session::ErrorResponse;
-use scuffed_db::{AuditAction, AuditTargetType, ForumReply, ForumThread};
+use scuffed_db::{AuditAction, AuditTargetType, ForumReply, ForumThread, NostrKeyMode};
+
+use scuffed_chat::nostr::events::EventBuilder;
+use scuffed_chat::nostr::relay::publish_event_oneshot;
 
 use crate::extractors::{OfficerUser, OrgMember};
 use crate::routes::audit_log::audit;
@@ -191,6 +194,8 @@ pub async fn create_thread(
             )
         })?;
 
+    maybe_publish_thread_to_relay(&state, &member.member, &thread, &body.category).await;
+
     Ok((StatusCode::CREATED, Json(thread)))
 }
 
@@ -250,6 +255,8 @@ pub async fn create_reply(
                 }),
             )
         })?;
+
+    maybe_publish_reply_to_relay(&state, &member.member, &reply).await;
 
     Ok((StatusCode::CREATED, Json(reply)))
 }
@@ -320,4 +327,108 @@ pub async fn lock_thread(
     .await;
 
     Ok(StatusCode::OK)
+}
+
+// ─── Nostr dual-publish helpers ────────────────────────────
+
+async fn is_nostr_forum(state: &AppState) -> bool {
+    state
+        .db
+        .get_settings()
+        .await
+        .map(|s| s.forum_backend == "nostr")
+        .unwrap_or(false)
+}
+
+async fn maybe_publish_thread_to_relay(
+    state: &AppState,
+    member: &scuffed_db::Member,
+    thread: &ForumThread,
+    category: &str,
+) {
+    if !is_nostr_forum(state).await {
+        return;
+    }
+    let relay_url = match state.relay_url.clone() {
+        Some(url) => url,
+        None => return,
+    };
+    if member.nostr_key_mode != Some(NostrKeyMode::ServerManaged) {
+        return;
+    }
+    let secret_hex = match state.db.get_nostr_secret_key(&member.id).await {
+        Ok(Some(key)) => key,
+        _ => return,
+    };
+    let keys = match EventBuilder::keys_from_hex(&secret_hex) {
+        Ok(k) => k,
+        Err(_) => return,
+    };
+
+    let content = format!("{}\n\n{}", thread.title, thread.content);
+    let hashtags = vec![format!("forum-{category}")];
+    let event = match EventBuilder::build_community_post(
+        &keys, &content, &hashtags, None, None, None, None,
+    ) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+
+    let relay_event = EventBuilder::to_relay_event(&event);
+    let thread_id = thread.id.clone();
+    tokio::spawn(async move {
+        if let Err(e) = publish_event_oneshot(&relay_url, relay_event).await {
+            tracing::error!("Failed to publish forum thread {thread_id} to relay: {e}");
+        } else {
+            tracing::info!("Dual-published forum thread {thread_id} to Nostr relay");
+        }
+    });
+}
+
+async fn maybe_publish_reply_to_relay(
+    state: &AppState,
+    member: &scuffed_db::Member,
+    reply: &ForumReply,
+) {
+    if !is_nostr_forum(state).await {
+        return;
+    }
+    let relay_url = match state.relay_url.clone() {
+        Some(url) => url,
+        None => return,
+    };
+    if member.nostr_key_mode != Some(NostrKeyMode::ServerManaged) {
+        return;
+    }
+    let secret_hex = match state.db.get_nostr_secret_key(&member.id).await {
+        Ok(Some(key)) => key,
+        _ => return,
+    };
+    let keys = match EventBuilder::keys_from_hex(&secret_hex) {
+        Ok(k) => k,
+        Err(_) => return,
+    };
+
+    let event = match EventBuilder::build_community_post(
+        &keys,
+        &reply.content,
+        &[],
+        None,
+        None,
+        None,
+        None,
+    ) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+
+    let relay_event = EventBuilder::to_relay_event(&event);
+    let reply_id = reply.id.clone();
+    tokio::spawn(async move {
+        if let Err(e) = publish_event_oneshot(&relay_url, relay_event).await {
+            tracing::error!("Failed to publish forum reply {reply_id} to relay: {e}");
+        } else {
+            tracing::info!("Dual-published forum reply {reply_id} to Nostr relay");
+        }
+    });
 }
