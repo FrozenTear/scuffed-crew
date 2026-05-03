@@ -46,6 +46,12 @@ pub enum Route {
         Forum {},
         #[route("/forum/:id")]
         ForumThread { id: String },
+        #[route("/stats")]
+        Stats {},
+        #[route("/stats/tokens")]
+        StatsTokens {},
+        #[route("/stats/member/:id")]
+        StatsMember { id: String },
     #[end_layout]
 
     // Admin panel (sidebar layout, auth guarded)

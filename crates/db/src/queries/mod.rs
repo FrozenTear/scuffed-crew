@@ -23,3 +23,5 @@ pub mod strategies;
 pub mod teams;
 pub mod tournaments;
 pub mod users;
+pub mod daemon_tokens;
+pub mod personal_stats;

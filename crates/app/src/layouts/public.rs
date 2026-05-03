@@ -148,6 +148,7 @@ pub fn PublicLayout() -> Element {
                 li { Link { to: Route::Wiki {}, "Wiki" } }
                 li { Link { to: Route::Forum {}, "Forum" } }
                 li { Link { to: Route::StrategyBrowse {}, "Strategy" } }
+                li { Link { to: Route::Stats {}, "Stats" } }
                 li { Link { to: Route::Apply {}, class: "nav-cta", "Apply" } }
             }
             button {
@@ -172,6 +173,7 @@ pub fn PublicLayout() -> Element {
             Link { to: Route::Wiki {}, onclick: move |_| menu_open.set(false), "Wiki" }
             Link { to: Route::Forum {}, onclick: move |_| menu_open.set(false), "Forum" }
             Link { to: Route::StrategyBrowse {}, onclick: move |_| menu_open.set(false), "Strategy" }
+            Link { to: Route::Stats {}, onclick: move |_| menu_open.set(false), "Stats" }
             Link { to: Route::Apply {}, onclick: move |_| menu_open.set(false),
                 class: "nav-cta",
                 style: "display: inline-block; padding: 0.5rem 1.5rem; border-radius: 6px; margin-top: 1rem;",

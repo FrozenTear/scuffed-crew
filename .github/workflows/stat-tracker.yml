@@ -1,0 +1,75 @@
+name: Stat Tracker CI
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "crates/stat-tracker/**"
+      - "crates/types/**"
+  pull_request:
+    branches: [main]
+    paths:
+      - "crates/stat-tracker/**"
+      - "crates/types/**"
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+
+defaults:
+  run:
+    working-directory: crates/stat-tracker
+
+jobs:
+  build-and-test:
+    name: Build & Test (stat-tracker)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwayland-dev libxkbcommon-dev \
+            tesseract-ocr libtesseract-dev libleptonica-dev \
+            libevdev-dev libudev-dev \
+            pkg-config
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: crates/stat-tracker
+
+      - name: Build
+        run: cargo build
+
+      - name: Test
+        run: cargo test
+
+  clippy:
+    name: Clippy (stat-tracker)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwayland-dev libxkbcommon-dev \
+            tesseract-ocr libtesseract-dev libleptonica-dev \
+            libevdev-dev libudev-dev \
+            pkg-config
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: crates/stat-tracker
+
+      - name: Clippy
+        run: cargo clippy -- -D warnings

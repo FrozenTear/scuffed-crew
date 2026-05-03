@@ -23,4 +23,5 @@ pub mod rsvps;
 pub mod settings;
 pub mod teams;
 pub mod tournaments;
+pub mod stats;
 pub mod uploads;

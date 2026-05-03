@@ -18,6 +18,9 @@ mod wiki_page;
 mod forum;
 mod forum_thread;
 mod not_found;
+mod stats;
+mod stats_tokens;
+mod stats_member;
 
 pub mod admin;
 pub mod strategy;
@@ -42,6 +45,9 @@ pub use wiki_page::WikiPage;
 pub use forum::Forum;
 pub use forum_thread::ForumThread;
 pub use not_found::NotFound;
+pub use stats::Stats;
+pub use stats_tokens::StatsTokens;
+pub use stats_member::StatsMember;
 
 pub use admin::*;
 pub use strategy::*;

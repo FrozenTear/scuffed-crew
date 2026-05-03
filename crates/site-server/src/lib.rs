@@ -173,6 +173,47 @@ pub fn create_router(state: AppState) -> Router {
             "/api/matches/{id}",
             put(routes::matches::update_match),
         )
+        // Personal stats routes
+        .route(
+            "/api/stats/upload",
+            post(routes::stats::upload_stats),
+        )
+        .route(
+            "/api/stats/me",
+            get(routes::stats::my_stats),
+        )
+        .route(
+            "/api/stats/me/matches",
+            get(routes::stats::my_matches),
+        )
+        .route(
+            "/api/stats/me/heroes",
+            get(routes::stats::my_hero_stats),
+        )
+        .route(
+            "/api/stats/me/maps",
+            get(routes::stats::my_map_stats),
+        )
+        .route(
+            "/api/stats/member/{id}",
+            get(routes::stats::member_stats),
+        )
+        .route(
+            "/api/stats/member/{id}/heroes",
+            get(routes::stats::member_hero_stats),
+        )
+        .route(
+            "/api/stats/member/{id}/maps",
+            get(routes::stats::member_map_stats),
+        )
+        .route(
+            "/api/stats/tokens",
+            get(routes::stats::list_daemon_tokens).post(routes::stats::create_daemon_token),
+        )
+        .route(
+            "/api/stats/tokens/{id}",
+            delete(routes::stats::revoke_daemon_token),
+        )
         // Calendar routes
         .route(
             "/api/calendar/all.ics",

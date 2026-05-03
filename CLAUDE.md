@@ -21,12 +21,12 @@ crates/
 ## SurrealDB Gotchas
 
 - **`$token` is a reserved variable.** Never use `$token` as a bind parameter name. Use `$tok` or similar.
-- **chrono DateTime<Utc> does NOT serialize correctly for SCHEMAFULL tables.** SurrealDB rejects chrono's string-serialized datetime (`"2026-02-27T..."`) because it expects a native datetime type. Use `surrealdb::sql::Datetime` (aliased as `SurrealDatetime`) in all `Db*` structs. Convert to/from chrono in the conversion layer:
+- **chrono DateTime<Utc> does NOT serialize correctly for SCHEMAFULL tables.** SurrealDB rejects chrono's string-serialized datetime (`"2026-02-27T..."`) because it expects a native datetime type. Use `surrealdb::types::Datetime` (aliased as `SurrealDatetime`) in all `Db*` structs. Convert to/from chrono in the conversion layer:
   - Rust → DB: `SurrealDatetime::from(Utc::now())`
   - DB → Rust: `db.field.into()` (implements `From<SurrealDatetime> for DateTime<Utc>`)
   - Optional: `db.field.map(|d| d.into())`
 - **Raw SurrealQL datetimes work fine:** `time::now()`, `time::now() + 365d`, etc.
-- **`type::thing()` does NOT work in SurrealDB 2.x.** Use `RecordId` bindings instead: `.bind(("rid", surrealdb::RecordId::from(("table", id))))` and `$rid` in the query. For `RELATE`: `RELATE $member_rid -> edge -> $team_rid`.
+- **We use SurrealDB v3 only (never v2).** `type::thing()` does NOT work. Use `RecordId` bindings instead: `.bind(("rid", surrealdb::RecordId::from(("table", id))))` and `$rid` in the query. For `RELATE`: `RELATE $member_rid -> edge -> $team_rid`.
 
 ## Dev Mode
 

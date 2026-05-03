@@ -478,6 +478,71 @@ pub struct TournamentBracket {
     pub matches: Vec<TournamentMatch>,
 }
 
+/// A personal match record (stat-tracker upload).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PersonalMatch {
+    pub id: String,
+    pub member_id: String,
+    pub hero: String,
+    pub map_name: String,
+    pub game_mode: String,
+    pub role: String,
+    pub outcome: String,
+    pub elims: u32,
+    pub deaths: u32,
+    pub assists: u32,
+    pub damage: u32,
+    pub healing: u32,
+    pub mitigation: u32,
+    pub played_at: DateTime<Utc>,
+    pub uploaded_at: DateTime<Utc>,
+}
+
+/// Aggregated personal stats for a member.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PersonalStats {
+    pub member_id: String,
+    pub total_matches: u32,
+    pub wins: u32,
+    pub losses: u32,
+    pub draws: u32,
+}
+
+/// Aggregated stats per hero.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HeroStats {
+    pub hero: String,
+    pub matches: u32,
+    pub wins: u32,
+    pub losses: u32,
+    pub draws: u32,
+    pub avg_elims: f64,
+    pub avg_deaths: f64,
+    pub avg_damage: f64,
+    pub avg_healing: f64,
+}
+
+/// Aggregated stats per map.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MapStats {
+    pub map_name: String,
+    pub matches: u32,
+    pub wins: u32,
+    pub losses: u32,
+    pub draws: u32,
+}
+
+/// A daemon authentication token.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DaemonToken {
+    pub id: String,
+    pub member_id: String,
+    pub label: String,
+    pub is_active: bool,
+    pub created_at: DateTime<Utc>,
+    pub last_used_at: Option<DateTime<Utc>>,
+}
+
 /// Audit log action types.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -530,6 +595,9 @@ pub enum AuditAction {
     LockedForumThread,
     DeletedForumThread,
     DeletedForumReply,
+    UploadedPersonalStats,
+    CreatedDaemonToken,
+    RevokedDaemonToken,
 }
 
 impl std::fmt::Display for AuditAction {
@@ -565,6 +633,8 @@ pub enum AuditTargetType {
     WikiPage,
     ForumThread,
     ForumReply,
+    PersonalStats,
+    DaemonToken,
 }
 
 impl std::fmt::Display for AuditTargetType {

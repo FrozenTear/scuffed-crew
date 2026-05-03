@@ -8,6 +8,7 @@ pub mod moderation;
 pub mod applications;
 pub mod matches;
 pub mod settings;
+pub mod stats;
 
 pub use members::*;
 pub use tournaments::*;
@@ -19,6 +20,7 @@ pub use moderation::*;
 pub use applications::*;
 pub use matches::*;
 pub use settings::*;
+pub use stats::*;
 
 use serde::{Deserialize, Serialize};
 

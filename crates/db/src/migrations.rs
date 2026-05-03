@@ -499,6 +499,44 @@ pub async fn run_migrations(client: &Surreal<Any>) -> DbResult<()> {
         DEFINE FIELD created_at ON forum_reply TYPE datetime DEFAULT time::now();
         DEFINE FIELD is_active ON forum_reply TYPE bool DEFAULT true;
         DEFINE INDEX forum_reply_thread_idx ON forum_reply COLUMNS thread_id, created_at;
+
+        -- ================================================
+        -- Personal Matches (individual stat-tracker uploads)
+        -- ================================================
+        DEFINE TABLE personal_match SCHEMAFULL;
+        DEFINE FIELD member_id ON personal_match TYPE string;
+        DEFINE FIELD hero ON personal_match TYPE string;
+        DEFINE FIELD map_name ON personal_match TYPE string;
+        DEFINE FIELD game_mode ON personal_match TYPE string;
+        DEFINE FIELD role ON personal_match TYPE string;
+        DEFINE FIELD outcome ON personal_match TYPE string
+            ASSERT $value IN ['victory', 'defeat', 'draw'];
+        DEFINE FIELD elims ON personal_match TYPE int DEFAULT 0;
+        DEFINE FIELD deaths ON personal_match TYPE int DEFAULT 0;
+        DEFINE FIELD assists ON personal_match TYPE int DEFAULT 0;
+        DEFINE FIELD damage ON personal_match TYPE int DEFAULT 0;
+        DEFINE FIELD healing ON personal_match TYPE int DEFAULT 0;
+        DEFINE FIELD mitigation ON personal_match TYPE int DEFAULT 0;
+        DEFINE FIELD played_at ON personal_match TYPE datetime;
+        DEFINE FIELD uploaded_at ON personal_match TYPE datetime DEFAULT time::now();
+
+        DEFINE INDEX pm_member_idx ON personal_match COLUMNS member_id, played_at;
+        DEFINE INDEX pm_dedup_idx ON personal_match
+            COLUMNS member_id, hero, map_name, played_at UNIQUE;
+
+        -- ================================================
+        -- Daemon Tokens (stat-tracker daemon auth)
+        -- ================================================
+        DEFINE TABLE daemon_token SCHEMAFULL;
+        DEFINE FIELD member_id ON daemon_token TYPE string;
+        DEFINE FIELD token_hash ON daemon_token TYPE string;
+        DEFINE FIELD label ON daemon_token TYPE string DEFAULT 'default';
+        DEFINE FIELD is_active ON daemon_token TYPE bool DEFAULT true;
+        DEFINE FIELD created_at ON daemon_token TYPE datetime DEFAULT time::now();
+        DEFINE FIELD last_used_at ON daemon_token TYPE option<datetime>;
+
+        DEFINE INDEX dt_token_hash_idx ON daemon_token COLUMNS token_hash UNIQUE;
+        DEFINE INDEX dt_member_idx ON daemon_token COLUMNS member_id;
     "#,
         )
         .await?
