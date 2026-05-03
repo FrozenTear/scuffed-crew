@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [features]
-gui = ["dep:dioxus"]
+gui = ["dep:dioxus", "dep:tray-icon", "dep:base64"]
 
 [dependencies]
 scuffed-types = { path = "../types" }
@@ -26,6 +26,8 @@ surrealdb = { version = "3", features = ["kv-surrealkv"] }
 surrealdb-types = "3"
 tempfile = "3"
 dioxus = { workspace = true, features = ["desktop", "router"], optional = true }
+tray-icon = { version = "0.23", optional = true }
+base64 = { version = "0.22", optional = true }
 
 [lib]
 name = "stat_tracker"

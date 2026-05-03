@@ -92,9 +92,29 @@ impl LocalStore {
         let row: Option<CountRow> = result.take(0)?;
         Ok(row.map(|r| r.total).unwrap_or(0))
     }
+
+    pub async fn last_capture_time(&self) -> Option<String> {
+        let mut result = self
+            .db
+            .query("SELECT played_at FROM personal_match ORDER BY played_at DESC LIMIT 1")
+            .await
+            .ok()?;
+        let row: Option<LastCaptureRow> = result.take(0).ok()?;
+        row.map(|r| {
+            let dt: chrono::DateTime<chrono::Utc> = r.played_at.into();
+            dt.with_timezone(&chrono::Local)
+                .format("%Y-%m-%d %H:%M:%S")
+                .to_string()
+        })
+    }
 }
 
 #[derive(Deserialize, SurrealValue)]
 struct CountRow {
     total: usize,
+}
+
+#[derive(Deserialize, SurrealValue)]
+struct LastCaptureRow {
+    played_at: SurrealDatetime,
 }

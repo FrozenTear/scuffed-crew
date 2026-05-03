@@ -3,17 +3,17 @@ use dioxus::prelude::*;
 use stat_tracker::config::Config;
 use stat_tracker::storage::LocalStore;
 
+use super::daemon::DaemonCard;
+
 #[component]
 pub fn StatusPanel() -> Element {
     let config = use_signal(|| Config::load().unwrap_or_default());
-    let match_count = use_resource(move || {
+    let mut refresh_tick = use_signal(|| 0u32);
+
+    let stats = use_resource(move || {
         let data_dir = config().data_dir.clone();
-        async move {
-            match LocalStore::open(&data_dir).await {
-                Ok(store) => store.match_count().await.unwrap_or(0),
-                Err(_) => 0,
-            }
-        }
+        let _tick = refresh_tick();
+        async move { load_stats(&data_dir).await }
     });
 
     let outputs = use_signal(|| {
@@ -30,14 +30,25 @@ pub fn StatusPanel() -> Element {
             .exists()
     });
 
-    let count = match &*match_count.read() {
-        Some(c) => *c,
-        None => 0,
+    use_future(move || async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            refresh_tick += 1;
+        }
+    });
+
+    let (count, unsynced, last_capture) = match &*stats.read() {
+        Some(s) => (s.total_matches, s.unsynced_count, s.last_capture_time.clone()),
+        None => (0, 0, None),
     };
+
+    let sync_configured = config().sync.is_some();
 
     rsx! {
         div { class: "panel",
             h2 { "Dashboard" }
+
+            DaemonCard {}
 
             div { class: "card",
                 h3 { "Capture" }
@@ -48,6 +59,16 @@ pub fn StatusPanel() -> Element {
                 div { class: "stat-row",
                     span { class: "label", "Available outputs" }
                     span { class: "value", "{outputs().len()}" }
+                }
+                div { class: "stat-row",
+                    span { class: "label", "Last capture" }
+                    span { class: "value",
+                        if let Some(ref t) = last_capture {
+                            "{t}"
+                        } else {
+                            "—"
+                        }
+                    }
                 }
                 div { class: "stat-row",
                     span { class: "label", "Backend" }
@@ -80,9 +101,9 @@ pub fn StatusPanel() -> Element {
                 }
             }
 
-            if config().sync.is_some() {
-                div { class: "card",
-                    h3 { "Sync" }
+            div { class: "card",
+                h3 { "Sync" }
+                if sync_configured {
                     div { class: "stat-row",
                         span { class: "label", "Server" }
                         span { class: "value",
@@ -90,14 +111,54 @@ pub fn StatusPanel() -> Element {
                         }
                     }
                     div { class: "stat-row",
-                        span { class: "label", "Status" }
+                        span { class: "label", "Unsynced matches" }
                         span { class: "value",
-                            span { class: "status-dot ok" }
-                            "configured"
+                            if unsynced > 0 {
+                                span { class: "status-dot warn" }
+                                "{unsynced} pending"
+                            } else {
+                                span { class: "status-dot ok" }
+                                "all synced"
+                            }
                         }
+                    }
+                } else {
+                    div { class: "stat-row",
+                        span { class: "label", "Status" }
+                        span { class: "value text-dim", "not configured" }
                     }
                 }
             }
         }
+    }
+}
+
+struct DashboardStats {
+    total_matches: usize,
+    unsynced_count: usize,
+    last_capture_time: Option<String>,
+}
+
+async fn load_stats(data_dir: &std::path::Path) -> DashboardStats {
+    match LocalStore::open(data_dir).await {
+        Ok(store) => {
+            let total = store.match_count().await.unwrap_or(0);
+            let unsynced = store
+                .get_unsynced()
+                .await
+                .map(|v| v.len())
+                .unwrap_or(0);
+            let last = store.last_capture_time().await;
+            DashboardStats {
+                total_matches: total,
+                unsynced_count: unsynced,
+                last_capture_time: last,
+            }
+        }
+        Err(_) => DashboardStats {
+            total_matches: 0,
+            unsynced_count: 0,
+            last_capture_time: None,
+        },
     }
 }

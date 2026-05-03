@@ -228,4 +228,19 @@ body {
     max-width: 100%;
     margin-top: 0.8rem;
 }
+
+.card-error {
+    border-color: var(--error);
+    color: var(--error);
+}
+
+.card-error p { font-size: 0.85rem; }
+
+.text-dim { color: var(--text-dim); }
+.text-sm { font-size: 0.8rem; margin-top: 0.6rem; }
+
+.btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
 "#;
