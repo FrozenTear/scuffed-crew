@@ -475,6 +475,8 @@ pub enum AuditAction {
     CreatedAnnouncement,
     UpdatedAnnouncement,
     DeletedAnnouncement,
+    CreatedPoll,
+    DeletedPoll,
     CreatedModerationAction,
     LiftedModerationAction,
     UpdatedSettings,
@@ -485,6 +487,11 @@ pub enum AuditAction {
     AddedTournamentParticipant,
     RemovedTournamentParticipant,
     ReportedTournamentMatch,
+    CreatedArticle,
+    UpdatedArticle,
+    PublishedArticle,
+    UnpublishedArticle,
+    DeletedArticle,
 }
 
 impl std::fmt::Display for AuditAction {
@@ -509,11 +516,13 @@ pub enum AuditTargetType {
     Roster,
     Match,
     Announcement,
+    Poll,
     Moderation,
     Settings,
     Tournament,
     TournamentParticipant,
     TournamentMatch,
+    Article,
 }
 
 impl std::fmt::Display for AuditTargetType {
@@ -584,6 +593,23 @@ pub struct SiteSettings {
     pub updated_at: DateTime<Utc>,
 }
 
+/// A long-form blog article (NIP-23 compatible).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Article {
+    pub id: String,
+    pub slug: String,
+    pub title: String,
+    pub content_markdown: String,
+    pub summary: Option<String>,
+    pub cover_image_url: Option<String>,
+    pub author_member_id: String,
+    pub published: bool,
+    pub nostr_event_id: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub published_at: Option<DateTime<Utc>>,
+}
+
 /// An announcement/news post.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Announcement {
@@ -595,6 +621,38 @@ pub struct Announcement {
     pub is_active: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+/// A poll that members can vote on.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Poll {
+    pub id: String,
+    pub title: String,
+    pub description: Option<String>,
+    pub options: Vec<String>,
+    pub close_at: Option<DateTime<Utc>>,
+    pub allow_multiple: bool,
+    pub created_by: String,
+    pub is_active: bool,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Aggregated vote count for a single option.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PollOptionResult {
+    pub option_index: u32,
+    pub option_text: String,
+    pub vote_count: u32,
+    pub percentage: f64,
+}
+
+/// Poll results for all options.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PollResults {
+    pub poll_id: String,
+    pub total_votes: u32,
+    pub options: Vec<PollOptionResult>,
 }
 
 /// A linked game account for a member.

@@ -1,5 +1,5 @@
-use surrealdb::engine::any::Any;
 use surrealdb::Surreal;
+use surrealdb::engine::any::Any;
 
 use crate::DbResult;
 
@@ -154,6 +154,37 @@ pub async fn run_migrations(client: &Surreal<Any>) -> DbResult<()> {
         DEFINE FIELD is_active ON announcement TYPE bool DEFAULT true;
         DEFINE FIELD created_at ON announcement TYPE datetime DEFAULT time::now();
         DEFINE FIELD updated_at ON announcement TYPE datetime DEFAULT time::now();
+
+        -- ================================================
+        -- Polls
+        -- ================================================
+        DEFINE TABLE poll SCHEMAFULL;
+        DEFINE FIELD title ON poll TYPE string;
+        DEFINE FIELD description ON poll TYPE option<string>;
+        DEFINE FIELD options ON poll TYPE array;
+        DEFINE FIELD options.* ON poll TYPE string;
+        DEFINE FIELD close_at ON poll TYPE option<datetime>;
+        DEFINE FIELD allow_multiple ON poll TYPE bool DEFAULT false;
+        DEFINE FIELD created_by ON poll TYPE string;
+        DEFINE FIELD is_active ON poll TYPE bool DEFAULT true;
+        DEFINE FIELD created_at ON poll TYPE datetime DEFAULT time::now();
+        DEFINE FIELD updated_at ON poll TYPE datetime DEFAULT time::now();
+
+        DEFINE INDEX poll_active_idx ON poll COLUMNS is_active, created_at;
+
+        -- ================================================
+        -- Poll Votes
+        -- ================================================
+        DEFINE TABLE poll_vote SCHEMAFULL;
+        DEFINE FIELD poll_id ON poll_vote TYPE string;
+        DEFINE FIELD member_id ON poll_vote TYPE string;
+        DEFINE FIELD option_index ON poll_vote TYPE int
+            ASSERT $value >= 0;
+        DEFINE FIELD created_at ON poll_vote TYPE datetime DEFAULT time::now();
+
+        DEFINE INDEX poll_vote_unique_idx ON poll_vote
+            COLUMNS poll_id, member_id, option_index UNIQUE;
+        DEFINE INDEX poll_vote_poll_idx ON poll_vote COLUMNS poll_id;
 
         -- ================================================
         -- Audit Log (immutable admin action history)
@@ -347,6 +378,25 @@ pub async fn run_migrations(client: &Surreal<Any>) -> DbResult<()> {
         DEFINE INDEX strategy_owner_idx ON strategy COLUMNS owner_id;
         DEFINE INDEX strategy_visibility_idx ON strategy COLUMNS visibility;
         DEFINE INDEX strategy_map_idx ON strategy COLUMNS map_id;
+
+        -- ================================================
+        -- Articles (long-form blog content, NIP-23)
+        -- ================================================
+        DEFINE TABLE article SCHEMAFULL;
+        DEFINE FIELD slug ON article TYPE string;
+        DEFINE FIELD title ON article TYPE string;
+        DEFINE FIELD content_markdown ON article TYPE string;
+        DEFINE FIELD summary ON article TYPE option<string>;
+        DEFINE FIELD cover_image_url ON article TYPE option<string>;
+        DEFINE FIELD author_member_id ON article TYPE string;
+        DEFINE FIELD published ON article TYPE bool DEFAULT false;
+        DEFINE FIELD nostr_event_id ON article TYPE option<string>;
+        DEFINE FIELD created_at ON article TYPE datetime DEFAULT time::now();
+        DEFINE FIELD updated_at ON article TYPE datetime DEFAULT time::now();
+        DEFINE FIELD published_at ON article TYPE option<datetime>;
+
+        DEFINE INDEX article_slug_idx ON article COLUMNS slug UNIQUE;
+        DEFINE INDEX article_published_idx ON article COLUMNS published, published_at;
     "#,
         )
         .await?

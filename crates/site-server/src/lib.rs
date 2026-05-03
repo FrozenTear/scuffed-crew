@@ -7,9 +7,9 @@ pub mod state;
 pub mod uploads;
 
 use axum::{
-    http::{header, HeaderValue, Method},
-    routing::{delete, get, patch, post, put},
     Router,
+    http::{HeaderValue, Method, header},
+    routing::{delete, get, patch, post, put},
 };
 use tower_http::cors::CorsLayer;
 use tower_http::services::{ServeDir, ServeFile};
@@ -46,10 +46,7 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/dev/login", get(routes::dev::dev_login))
         // Auth routes
         .route("/api/auth/{provider}/login", get(routes::auth::login))
-        .route(
-            "/api/auth/{provider}/callback",
-            get(routes::auth::callback),
-        )
+        .route("/api/auth/{provider}/callback", get(routes::auth::callback))
         .route("/api/auth/me", get(routes::auth::me))
         .route("/api/auth/logout", post(routes::auth::logout))
         // Member routes
@@ -65,8 +62,7 @@ pub fn create_router(state: AppState) -> Router {
         // Member game accounts
         .route(
             "/api/members/{id}/game-accounts",
-            get(routes::members::list_game_accounts)
-                .put(routes::members::upsert_game_account),
+            get(routes::members::list_game_accounts).put(routes::members::upsert_game_account),
         )
         .route(
             "/api/members/{member_id}/game-accounts/{id}",
@@ -106,8 +102,7 @@ pub fn create_router(state: AppState) -> Router {
         )
         .route(
             "/api/teams/{id}/roster/{member_id}",
-            put(routes::roster::update_roster_role)
-                .delete(routes::roster::remove_from_roster),
+            put(routes::roster::update_roster_role).delete(routes::roster::remove_from_roster),
         )
         // Event routes
         .route(
@@ -119,10 +114,7 @@ pub fn create_router(state: AppState) -> Router {
             put(routes::events::update_event).delete(routes::events::delete_event),
         )
         // Event RSVPs
-        .route(
-            "/api/events/{id}/rsvp",
-            post(routes::rsvps::rsvp_event),
-        )
+        .route("/api/events/{id}/rsvp", post(routes::rsvps::rsvp_event))
         .route(
             "/api/events/{id}/rsvps",
             get(routes::rsvps::get_event_rsvps),
@@ -160,14 +152,8 @@ pub fn create_router(state: AppState) -> Router {
             "/api/teams/{id}/matches",
             get(routes::matches::list_team_matches),
         )
-        .route(
-            "/api/matches",
-            post(routes::matches::record_match),
-        )
-        .route(
-            "/api/matches/{id}",
-            put(routes::matches::update_match),
-        )
+        .route("/api/matches", post(routes::matches::record_match))
+        .route("/api/matches/{id}", put(routes::matches::update_match))
         // Calendar routes
         .route(
             "/api/calendar/all.ics",
@@ -178,10 +164,7 @@ pub fn create_router(state: AppState) -> Router {
             get(routes::calendar::team_events_ics),
         )
         // Audit log
-        .route(
-            "/api/audit-log",
-            get(routes::audit_log::list_audit_log),
-        )
+        .route("/api/audit-log", get(routes::audit_log::list_audit_log))
         // Moderation routes
         .route(
             "/api/moderation",
@@ -207,16 +190,51 @@ pub fn create_router(state: AppState) -> Router {
             put(routes::announcements::update_announcement)
                 .delete(routes::announcements::delete_announcement),
         )
+        // Poll routes
+        .route(
+            "/api/polls",
+            get(routes::polls::list_polls).post(routes::polls::create_poll),
+        )
+        .route(
+            "/api/polls/{id}",
+            get(routes::polls::get_poll).delete(routes::polls::delete_poll),
+        )
+        .route("/api/polls/{id}/vote", post(routes::polls::vote_poll))
+        .route(
+            "/api/polls/{id}/vote/{option_index}",
+            delete(routes::polls::unvote_poll),
+        )
+        // Article (blog) routes
+        .route(
+            "/api/articles",
+            get(routes::articles::list_articles).post(routes::articles::create_article),
+        )
+        .route(
+            "/api/articles/admin/all",
+            get(routes::articles::list_all_articles),
+        )
+        .route(
+            "/api/articles/{slug}",
+            get(routes::articles::get_article)
+                .put(routes::articles::update_article)
+                .delete(routes::articles::delete_article),
+        )
+        .route(
+            "/api/articles/{slug}/publish",
+            post(routes::articles::publish_article),
+        )
+        .route(
+            "/api/articles/{slug}/unpublish",
+            post(routes::articles::unpublish_article),
+        )
         // Tournament routes
         .route(
             "/api/tournaments",
-            get(routes::tournaments::list_tournaments)
-                .post(routes::tournaments::create_tournament),
+            get(routes::tournaments::list_tournaments).post(routes::tournaments::create_tournament),
         )
         .route(
             "/api/tournaments/{id}",
-            get(routes::tournaments::get_tournament)
-                .put(routes::tournaments::update_tournament),
+            get(routes::tournaments::get_tournament).put(routes::tournaments::update_tournament),
         )
         .route(
             "/api/tournaments/{id}/status",
@@ -232,8 +250,7 @@ pub fn create_router(state: AppState) -> Router {
         )
         .route(
             "/api/tournaments/{id}/participants",
-            get(routes::tournaments::list_participants)
-                .post(routes::tournaments::add_participant),
+            get(routes::tournaments::list_participants).post(routes::tournaments::add_participant),
         )
         .route(
             "/api/tournaments/{id}/participants/{pid}",
@@ -257,14 +274,8 @@ pub fn create_router(state: AppState) -> Router {
             post(routes::tournaments::generate_next_round),
         )
         // Upload routes
-        .route(
-            "/api/upload/avatar",
-            post(routes::uploads::upload_avatar),
-        )
-        .route(
-            "/api/upload/image",
-            post(routes::uploads::upload_image),
-        )
+        .route("/api/upload/avatar", post(routes::uploads::upload_avatar))
+        .route("/api/upload/image", post(routes::uploads::upload_image))
         // Settings routes
         .route(
             "/api/settings",
@@ -272,10 +283,7 @@ pub fn create_router(state: AppState) -> Router {
         )
         // Public aggregate
         .route("/api/public/overview", get(routes::public::overview))
-        .route(
-            "/api/public/members",
-            get(routes::public::public_members),
-        )
+        .route("/api/public/members", get(routes::public::public_members))
         .route(
             "/api/public/members/{id}",
             get(routes::public::public_member_profile),

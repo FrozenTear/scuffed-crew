@@ -16,6 +16,8 @@ pub enum Route {
         MemberProfile { id: String },
         #[route("/news")]
         News {},
+        #[route("/polls")]
+        Polls {},
         #[route("/apply")]
         Apply {},
         #[route("/tournaments")]
@@ -24,6 +26,10 @@ pub enum Route {
         Tournament { id: String },
         #[route("/identity")]
         Identity {},
+        #[route("/blog")]
+        Blog {},
+        #[route("/blog/:slug")]
+        BlogArticle { slug: String },
     #[end_layout]
 
     // Admin panel (sidebar layout, auth guarded)
@@ -46,6 +52,8 @@ pub enum Route {
         AdminTournaments {},
         #[route("/admin/announcements")]
         AdminAnnouncements {},
+        #[route("/admin/articles")]
+        AdminArticles {},
         #[route("/admin/audit-log")]
         AdminAuditLog {},
         #[route("/admin/moderation")]

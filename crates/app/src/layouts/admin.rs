@@ -136,6 +136,7 @@ pub fn AdminLayout() -> Element {
                     Link { to: Route::AdminMatches {}, "Matches" }
                     Link { to: Route::AdminTournaments {}, "Tournaments" }
                     Link { to: Route::AdminAnnouncements {}, "Announcements" }
+                    Link { to: Route::AdminArticles {}, "Articles" }
                     if is_admin {
                         Link { to: Route::AdminModeration {}, "Moderation" }
                         Link { to: Route::AdminAuditLog {}, "Audit Log" }

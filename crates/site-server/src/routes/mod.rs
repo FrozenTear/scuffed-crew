@@ -1,5 +1,6 @@
 pub mod announcements;
 pub mod applications;
+pub mod articles;
 pub mod attendance;
 pub mod audit_log;
 pub mod auth;
@@ -11,6 +12,7 @@ pub mod health;
 pub mod matches;
 pub mod members;
 pub mod moderation;
+pub mod polls;
 pub mod public;
 pub mod roster;
 pub mod rsvps;

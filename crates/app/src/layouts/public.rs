@@ -139,9 +139,11 @@ pub fn PublicLayout() -> Element {
             ul { class: "nav-links",
                 li { Link { to: Route::Members {}, "Members" } }
                 li { Link { to: Route::News {}, "News" } }
+                li { Link { to: Route::Polls {}, "Polls" } }
                 li { Link { to: Route::Tournaments {}, "Tournaments" } }
                 li { Link { to: Route::StrategyBrowse {}, "Strategy" } }
                 li { Link { to: Route::Identity {}, "Identity" } }
+                li { Link { to: Route::Blog {}, "Blog" } }
                 li { Link { to: Route::Apply {}, class: "nav-cta", "Apply" } }
             }
             button {
@@ -157,9 +159,11 @@ pub fn PublicLayout() -> Element {
         div { class: overlay_class,
             Link { to: Route::Members {}, onclick: move |_| menu_open.set(false), "Members" }
             Link { to: Route::News {}, onclick: move |_| menu_open.set(false), "News" }
+            Link { to: Route::Polls {}, onclick: move |_| menu_open.set(false), "Polls" }
             Link { to: Route::Tournaments {}, onclick: move |_| menu_open.set(false), "Tournaments" }
             Link { to: Route::StrategyBrowse {}, onclick: move |_| menu_open.set(false), "Strategy" }
             Link { to: Route::Identity {}, onclick: move |_| menu_open.set(false), "Identity" }
+            Link { to: Route::Blog {}, onclick: move |_| menu_open.set(false), "Blog" }
             Link { to: Route::Apply {}, onclick: move |_| menu_open.set(false),
                 class: "nav-cta",
                 style: "display: inline-block; padding: 0.5rem 1.5rem; border-radius: 6px; margin-top: 1rem;",

@@ -1,24 +1,26 @@
-pub mod members;
-pub mod tournaments;
-pub mod teams;
-pub mod games;
 pub mod announcements;
-pub mod events;
-pub mod moderation;
 pub mod applications;
+pub mod articles;
+pub mod events;
+pub mod games;
 pub mod matches;
+pub mod members;
+pub mod moderation;
 pub mod settings;
+pub mod teams;
+pub mod tournaments;
 
-pub use members::*;
-pub use tournaments::*;
-pub use teams::*;
-pub use games::*;
 pub use announcements::*;
-pub use events::*;
-pub use moderation::*;
 pub use applications::*;
+pub use articles::*;
+pub use events::*;
+pub use games::*;
 pub use matches::*;
+pub use members::*;
+pub use moderation::*;
 pub use settings::*;
+pub use teams::*;
+pub use tournaments::*;
 
 use serde::{Deserialize, Serialize};
 
