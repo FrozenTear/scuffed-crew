@@ -13,8 +13,7 @@ struct Announcement {
     created_at: String,
 }
 
-#[derive(Deserialize)]
-struct CursorPage<T> { data: Vec<T> }
+use crate::hooks::CursorPage;
 
 const PAGE_CSS: &str = r#"
     .news-page {

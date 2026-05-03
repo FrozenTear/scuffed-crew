@@ -7,7 +7,7 @@ use scuffed_types::api::{
     AttendanceEntry,
 };
 use crate::components::{DataTable, FormModal, ConfirmDialog, Toast, use_toast};
-use crate::hooks::{use_api, use_api_with, ModalController};
+use crate::hooks::{use_api, use_api_list, use_api_with, ModalController};
 
 // --- Types ---
 // Local response types with API-enriched fields (joined names).
@@ -73,9 +73,9 @@ const TIMEZONES: [&str; 5] = ["UTC", "Europe/London", "Europe/Berlin", "US/Easte
 
 #[component]
 pub fn AdminSchedule() -> Element {
-    let mut events = use_api::<Vec<Event>>("/api/events");
-    let mut teams = use_api::<Vec<Team>>("/api/teams");
-    let mut members = use_api::<Vec<Member>>("/api/members");
+    let mut events = use_api_list::<Event>("/api/events");
+    let mut teams = use_api_list::<Team>("/api/teams");
+    let mut members = use_api_list::<Member>("/api/members");
     let mut toast = use_toast();
 
     // Form modal state

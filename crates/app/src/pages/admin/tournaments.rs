@@ -9,7 +9,7 @@ use scuffed_types::api::{
 use crate::components::{
     DataTable, FormModal, ConfirmDialog, StatusPill, Toast, use_toast,
 };
-use crate::hooks::{use_api, ModalController};
+use crate::hooks::{use_api, use_api_list, ModalController};
 
 // --- Types ---
 // Local response types with simplified/string-typed fields for display.
@@ -76,9 +76,9 @@ const STATUS_FILTERS: [&str; 6] = ["all", "draft", "registration", "active", "co
 
 #[component]
 pub fn AdminTournaments() -> Element {
-    let mut tournaments = use_api::<Vec<Tournament>>("/api/tournaments");
+    let mut tournaments = use_api_list::<Tournament>("/api/tournaments");
     let mut games = use_api::<Vec<Game>>("/api/games");
-    let mut members = use_api::<Vec<Member>>("/api/members");
+    let mut members = use_api_list::<Member>("/api/members");
     let mut toast = use_toast();
 
     // View toggle: None = list, Some(id) = detail

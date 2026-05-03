@@ -4,7 +4,7 @@ use serde::Deserialize;
 use scuffed_api_client::ApiClient;
 use scuffed_types::api::MatchPayload;
 use crate::components::{DataTable, FormModal, Toast, use_toast};
-use crate::hooks::{use_api, use_api_with, ModalController};
+use crate::hooks::{use_api_list, use_api_list_with, ModalController};
 
 // Local response types with String-typed fields for display.
 #[derive(Debug, Clone, Deserialize)]
@@ -27,13 +27,13 @@ struct MatchResult {
 
 #[component]
 pub fn AdminMatches() -> Element {
-    let teams = use_api::<Vec<Team>>("/api/teams");
+    let teams = use_api_list::<Team>("/api/teams");
     let mut toast = use_toast();
 
     // Team selector
     let mut selected_team = use_signal(|| None::<String>);
 
-    let mut matches = use_api_with::<Vec<MatchResult>>(move || {
+    let mut matches = use_api_list_with::<MatchResult>(move || {
         match selected_team() {
             Some(id) => format!("/api/teams/{id}/matches"),
             None => String::new(),

@@ -60,8 +60,7 @@ struct Event {
     timezone: String,
 }
 
-#[derive(Deserialize)]
-struct CursorPage<T> { data: Vec<T> }
+use crate::hooks::CursorPage;
 
 // --- CSS ---
 

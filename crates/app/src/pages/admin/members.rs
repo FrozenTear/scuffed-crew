@@ -7,7 +7,7 @@ use scuffed_types::api::{ChangeRoleRequest, ToggleActiveRequest, CreateGameAccou
 use crate::components::{
     DataTable, FormModal, ConfirmDialog, StatusPill, RolePill, SummaryCard, Toast, use_toast,
 };
-use crate::hooks::{use_api, ModalController};
+use crate::hooks::{use_api, use_api_list, ModalController};
 
 // --- Types ---
 // These local types have API-enriched fields (joined names, computed stats)
@@ -68,7 +68,7 @@ const ROLES: [&str; 4] = ["recruit", "member", "officer", "admin"];
 
 #[component]
 pub fn AdminMembers() -> Element {
-    let mut members = use_api::<Vec<Member>>("/api/members");
+    let mut members = use_api_list::<Member>("/api/members");
     let mut games = use_api::<Vec<Game>>("/api/games");
     let mut toast = use_toast();
 

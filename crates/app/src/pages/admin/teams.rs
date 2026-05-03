@@ -4,7 +4,7 @@ use serde::Deserialize;
 use scuffed_api_client::ApiClient;
 use scuffed_types::api::{CreateTeamRequest, AddRosterMemberRequest, UpdateRosterRoleRequest};
 use crate::components::{DataTable, FormModal, ConfirmDialog, Toast, use_toast};
-use crate::hooks::{use_api, ModalController};
+use crate::hooks::{use_api, use_api_list, ModalController};
 
 // --- Types ---
 // Local response types with API-enriched fields (joined names).
@@ -42,9 +42,9 @@ const TEAM_ROLES: [&str; 4] = ["player", "captain", "coach", "sub"];
 
 #[component]
 pub fn AdminTeams() -> Element {
-    let mut teams = use_api::<Vec<Team>>("/api/teams");
+    let mut teams = use_api_list::<Team>("/api/teams");
     let mut games = use_api::<Vec<Game>>("/api/games");
-    let mut members = use_api::<Vec<Member>>("/api/members");
+    let mut members = use_api_list::<Member>("/api/members");
     let mut toast = use_toast();
 
     // Team form state

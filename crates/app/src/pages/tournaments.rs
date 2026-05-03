@@ -24,8 +24,7 @@ struct Tournament {
     created_at: String,
 }
 
-#[derive(Deserialize)]
-struct CursorPage<T> { data: Vec<T> }
+use crate::hooks::CursorPage;
 
 fn format_label(f: &str) -> &str {
     match f {

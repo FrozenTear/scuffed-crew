@@ -4,7 +4,7 @@ use serde::Deserialize;
 use scuffed_api_client::ApiClient;
 use scuffed_types::api::CreateModerationRequest;
 use crate::components::{DataTable, FormModal, ConfirmDialog, StatusPill, Toast, use_toast};
-use crate::hooks::{use_api, ModalController};
+use crate::hooks::{use_api, use_api_list, ModalController};
 
 // Local response types with API-enriched fields (joined names, computed fields).
 #[derive(Debug, Clone, Deserialize)]
@@ -40,7 +40,7 @@ struct Member {
 #[component]
 pub fn AdminModeration() -> Element {
     let mut actions = use_api::<ModerationResponse>("/api/moderation?limit=50&offset=0");
-    let members = use_api::<Vec<Member>>("/api/members");
+    let members = use_api_list::<Member>("/api/members");
     let mut toast = use_toast();
 
     // Create modal state
