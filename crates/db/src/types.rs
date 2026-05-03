@@ -909,6 +909,7 @@ pub struct ForumThread {
     pub content: String,
     pub pinned: bool,
     pub locked: bool,
+    pub nostr_event_id: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub is_active: bool,

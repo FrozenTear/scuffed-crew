@@ -256,7 +256,8 @@ pub async fn create_reply(
             )
         })?;
 
-    maybe_publish_reply_to_relay(&state, &member.member, &reply).await;
+    maybe_publish_reply_to_relay(&state, &member.member, &reply, thread.nostr_event_id.as_deref())
+        .await;
 
     Ok((StatusCode::CREATED, Json(reply)))
 }
@@ -375,12 +376,17 @@ async fn maybe_publish_thread_to_relay(
     };
 
     let relay_event = EventBuilder::to_relay_event(&event);
+    let nostr_event_id = relay_event.id.clone();
     let thread_id = thread.id.clone();
+    let db = state.db.clone();
     tokio::spawn(async move {
         if let Err(e) = publish_event_oneshot(&relay_url, relay_event).await {
             tracing::error!("Failed to publish forum thread {thread_id} to relay: {e}");
         } else {
             tracing::info!("Dual-published forum thread {thread_id} to Nostr relay");
+            if let Err(e) = db.update_thread_nostr_event_id(&thread_id, &nostr_event_id).await {
+                tracing::error!("Failed to store nostr_event_id for thread {thread_id}: {e}");
+            }
         }
     });
 }
@@ -389,6 +395,7 @@ async fn maybe_publish_reply_to_relay(
     state: &AppState,
     member: &scuffed_db::Member,
     reply: &ForumReply,
+    thread_nostr_event_id: Option<&str>,
 ) {
     if !is_nostr_forum(state).await {
         return;
@@ -414,8 +421,8 @@ async fn maybe_publish_reply_to_relay(
         &reply.content,
         &[],
         None,
-        None,
-        None,
+        thread_nostr_event_id,
+        thread_nostr_event_id,
         None,
     ) {
         Ok(e) => e,

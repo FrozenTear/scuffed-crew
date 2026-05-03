@@ -484,6 +484,7 @@ pub async fn run_migrations(client: &Surreal<Any>) -> DbResult<()> {
         DEFINE FIELD locked ON forum_thread TYPE bool DEFAULT false;
         DEFINE FIELD created_at ON forum_thread TYPE datetime DEFAULT time::now();
         DEFINE FIELD updated_at ON forum_thread TYPE datetime DEFAULT time::now();
+        DEFINE FIELD nostr_event_id ON forum_thread TYPE option<string>;
         DEFINE FIELD is_active ON forum_thread TYPE bool DEFAULT true;
         DEFINE INDEX forum_thread_cat_idx ON forum_thread COLUMNS category, created_at;
 

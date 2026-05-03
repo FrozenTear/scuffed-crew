@@ -18,6 +18,7 @@ struct DbForumThread {
     content: String,
     pinned: bool,
     locked: bool,
+    nostr_event_id: Option<String>,
     created_at: SurrealDatetime,
     updated_at: SurrealDatetime,
     is_active: bool,
@@ -48,6 +49,7 @@ fn db_to_thread(db: DbForumThread) -> ForumThread {
         content: db.content,
         pinned: db.pinned,
         locked: db.locked,
+        nostr_event_id: db.nostr_event_id,
         created_at: db.created_at.into(),
         updated_at: db.updated_at.into(),
         is_active: db.is_active,
@@ -88,6 +90,7 @@ impl Database {
                 content: content.to_string(),
                 pinned: false,
                 locked: false,
+                nostr_event_id: None,
                 created_at: now.clone(),
                 updated_at: now,
                 is_active: true,
@@ -218,6 +221,23 @@ impl Database {
                 .query("UPDATE $rid SET locked = $locked, updated_at = time::now()")
                 .bind(("rid", RecordId::new("forum_thread", id)))
                 .bind(("locked", locked))
+                .await?;
+            Ok(())
+        })
+        .await
+    }
+
+    /// Store the Nostr event ID for a forum thread after relay publish.
+    pub async fn update_thread_nostr_event_id(
+        &self,
+        id: &str,
+        nostr_event_id: &str,
+    ) -> DbResult<()> {
+        with_timeout(async {
+            self.client
+                .query("UPDATE $rid SET nostr_event_id = $eid, updated_at = time::now()")
+                .bind(("rid", RecordId::new("forum_thread", id)))
+                .bind(("eid", nostr_event_id.to_string()))
                 .await?;
             Ok(())
         })
