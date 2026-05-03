@@ -34,6 +34,18 @@ pub enum Route {
         Scrims {},
         #[route("/events")]
         Events {},
+        #[route("/blog")]
+        Blog {},
+        #[route("/blog/:slug")]
+        BlogPost { slug: String },
+        #[route("/wiki")]
+        Wiki {},
+        #[route("/wiki/:topic")]
+        WikiPage { topic: String },
+        #[route("/forum")]
+        Forum {},
+        #[route("/forum/:id")]
+        ForumThread { id: String },
     #[end_layout]
 
     // Admin panel (sidebar layout, auth guarded)

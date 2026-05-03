@@ -427,6 +427,74 @@ pub async fn run_migrations(client: &Surreal<Any>) -> DbResult<()> {
         DEFINE FIELD updated_at ON scrim TYPE datetime DEFAULT time::now();
         DEFINE INDEX scrim_team_status_idx ON scrim COLUMNS team_id, status;
         DEFINE INDEX scrim_scheduled_idx ON scrim COLUMNS scheduled_at;
+
+        -- ================================================
+        -- Articles (blog posts)
+        -- ================================================
+        DEFINE TABLE article SCHEMAFULL;
+        DEFINE FIELD slug ON article TYPE string;
+        DEFINE FIELD title ON article TYPE string;
+        DEFINE FIELD content_markdown ON article TYPE string;
+        DEFINE FIELD summary ON article TYPE option<string>;
+        DEFINE FIELD cover_image_url ON article TYPE option<string>;
+        DEFINE FIELD author_member_id ON article TYPE string;
+        DEFINE FIELD published ON article TYPE bool DEFAULT false;
+        DEFINE FIELD published_at ON article TYPE option<datetime>;
+        DEFINE FIELD created_at ON article TYPE datetime DEFAULT time::now();
+        DEFINE FIELD updated_at ON article TYPE datetime DEFAULT time::now();
+        DEFINE INDEX article_slug_idx ON article COLUMNS slug UNIQUE;
+        DEFINE INDEX article_published_idx ON article COLUMNS published, published_at;
+
+        -- ================================================
+        -- Wiki Pages (knowledge base)
+        -- ================================================
+        DEFINE TABLE wiki_page SCHEMAFULL;
+        DEFINE FIELD topic ON wiki_page TYPE string;
+        DEFINE FIELD title ON wiki_page TYPE string;
+        DEFINE FIELD content_markdown ON wiki_page TYPE string;
+        DEFINE FIELD author_member_id ON wiki_page TYPE string;
+        DEFINE FIELD created_at ON wiki_page TYPE datetime DEFAULT time::now();
+        DEFINE FIELD updated_at ON wiki_page TYPE datetime DEFAULT time::now();
+        DEFINE FIELD is_active ON wiki_page TYPE bool DEFAULT true;
+        DEFINE INDEX wiki_page_topic_idx ON wiki_page COLUMNS topic UNIQUE;
+        DEFINE INDEX wiki_page_updated_idx ON wiki_page COLUMNS updated_at;
+
+        -- ================================================
+        -- Wiki Revisions (edit history)
+        -- ================================================
+        DEFINE TABLE wiki_revision SCHEMAFULL;
+        DEFINE FIELD page_id ON wiki_revision TYPE string;
+        DEFINE FIELD content_markdown ON wiki_revision TYPE string;
+        DEFINE FIELD edited_by ON wiki_revision TYPE string;
+        DEFINE FIELD edited_at ON wiki_revision TYPE datetime DEFAULT time::now();
+        DEFINE FIELD revision_note ON wiki_revision TYPE option<string>;
+        DEFINE INDEX wiki_revision_page_idx ON wiki_revision COLUMNS page_id, edited_at;
+
+        -- ================================================
+        -- Forum Threads (discussion board)
+        -- ================================================
+        DEFINE TABLE forum_thread SCHEMAFULL;
+        DEFINE FIELD title ON forum_thread TYPE string;
+        DEFINE FIELD category ON forum_thread TYPE string DEFAULT 'general';
+        DEFINE FIELD author_member_id ON forum_thread TYPE string;
+        DEFINE FIELD content ON forum_thread TYPE string;
+        DEFINE FIELD pinned ON forum_thread TYPE bool DEFAULT false;
+        DEFINE FIELD locked ON forum_thread TYPE bool DEFAULT false;
+        DEFINE FIELD created_at ON forum_thread TYPE datetime DEFAULT time::now();
+        DEFINE FIELD updated_at ON forum_thread TYPE datetime DEFAULT time::now();
+        DEFINE FIELD is_active ON forum_thread TYPE bool DEFAULT true;
+        DEFINE INDEX forum_thread_cat_idx ON forum_thread COLUMNS category, created_at;
+
+        -- ================================================
+        -- Forum Replies
+        -- ================================================
+        DEFINE TABLE forum_reply SCHEMAFULL;
+        DEFINE FIELD thread_id ON forum_reply TYPE string;
+        DEFINE FIELD author_member_id ON forum_reply TYPE string;
+        DEFINE FIELD content ON forum_reply TYPE string;
+        DEFINE FIELD created_at ON forum_reply TYPE datetime DEFAULT time::now();
+        DEFINE FIELD is_active ON forum_reply TYPE bool DEFAULT true;
+        DEFINE INDEX forum_reply_thread_idx ON forum_reply COLUMNS thread_id, created_at;
     "#,
         )
         .await?

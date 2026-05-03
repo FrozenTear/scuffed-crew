@@ -144,6 +144,9 @@ pub fn PublicLayout() -> Element {
                 li { Link { to: Route::Tournaments {}, "Tournaments" } }
                 li { Link { to: Route::Scrims {}, "Scrims" } }
                 li { Link { to: Route::Events {}, "Events" } }
+                li { Link { to: Route::Blog {}, "Blog" } }
+                li { Link { to: Route::Wiki {}, "Wiki" } }
+                li { Link { to: Route::Forum {}, "Forum" } }
                 li { Link { to: Route::StrategyBrowse {}, "Strategy" } }
                 li { Link { to: Route::Apply {}, class: "nav-cta", "Apply" } }
             }
@@ -165,6 +168,9 @@ pub fn PublicLayout() -> Element {
             Link { to: Route::Tournaments {}, onclick: move |_| menu_open.set(false), "Tournaments" }
             Link { to: Route::Scrims {}, onclick: move |_| menu_open.set(false), "Scrims" }
             Link { to: Route::Events {}, onclick: move |_| menu_open.set(false), "Events" }
+            Link { to: Route::Blog {}, onclick: move |_| menu_open.set(false), "Blog" }
+            Link { to: Route::Wiki {}, onclick: move |_| menu_open.set(false), "Wiki" }
+            Link { to: Route::Forum {}, onclick: move |_| menu_open.set(false), "Forum" }
             Link { to: Route::StrategyBrowse {}, onclick: move |_| menu_open.set(false), "Strategy" }
             Link { to: Route::Apply {}, onclick: move |_| menu_open.set(false),
                 class: "nav-cta",

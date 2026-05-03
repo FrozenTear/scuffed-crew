@@ -270,6 +270,63 @@ pub fn create_router(state: AppState) -> Router {
             "/api/scrims/{id}",
             patch(routes::scrims::update_scrim_status),
         )
+        // Article routes (blog)
+        .route(
+            "/api/articles",
+            get(routes::articles::list_articles)
+                .post(routes::articles::create_article),
+        )
+        .route(
+            "/api/articles/{slug}",
+            get(routes::articles::get_article)
+                .put(routes::articles::update_article),
+        )
+        .route(
+            "/api/articles/{slug}/publish",
+            post(routes::articles::publish_article),
+        )
+        .route(
+            "/api/articles/{slug}/delete",
+            delete(routes::articles::delete_article),
+        )
+        // Wiki routes
+        .route(
+            "/api/wiki",
+            get(routes::wiki::list_wiki_pages)
+                .post(routes::wiki::create_wiki_page),
+        )
+        .route(
+            "/api/wiki/{topic}",
+            get(routes::wiki::get_wiki_page)
+                .put(routes::wiki::update_wiki_page)
+                .delete(routes::wiki::delete_wiki_page),
+        )
+        .route(
+            "/api/wiki/{topic}/revisions",
+            get(routes::wiki::list_wiki_revisions),
+        )
+        // Forum routes
+        .route(
+            "/api/forum/threads",
+            get(routes::forum::list_threads)
+                .post(routes::forum::create_thread),
+        )
+        .route(
+            "/api/forum/threads/{id}",
+            get(routes::forum::get_thread),
+        )
+        .route(
+            "/api/forum/threads/{id}/replies",
+            post(routes::forum::create_reply),
+        )
+        .route(
+            "/api/forum/threads/{id}/pin",
+            patch(routes::forum::pin_thread),
+        )
+        .route(
+            "/api/forum/threads/{id}/lock",
+            patch(routes::forum::lock_thread),
+        )
         // Poll routes
         .route(
             "/api/polls",

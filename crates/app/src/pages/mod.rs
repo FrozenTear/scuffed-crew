@@ -11,6 +11,12 @@ mod tournament;
 mod polls;
 mod scrims;
 mod events;
+mod blog;
+mod blog_post;
+mod wiki;
+mod wiki_page;
+mod forum;
+mod forum_thread;
 mod not_found;
 
 pub mod admin;
@@ -29,6 +35,12 @@ pub use tournament::Tournament;
 pub use polls::Polls;
 pub use scrims::Scrims;
 pub use events::Events;
+pub use blog::Blog;
+pub use blog_post::BlogPost;
+pub use wiki::Wiki;
+pub use wiki_page::WikiPage;
+pub use forum::Forum;
+pub use forum_thread::ForumThread;
 pub use not_found::NotFound;
 
 pub use admin::*;

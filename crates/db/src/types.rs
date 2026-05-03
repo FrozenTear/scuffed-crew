@@ -518,6 +518,18 @@ pub enum AuditAction {
     DeletedPoll,
     CreatedScrim,
     UpdatedScrimStatus,
+    CreatedArticle,
+    UpdatedArticle,
+    PublishedArticle,
+    UnpublishedArticle,
+    DeletedArticle,
+    CreatedWikiPage,
+    UpdatedWikiPage,
+    DeletedWikiPage,
+    PinnedForumThread,
+    LockedForumThread,
+    DeletedForumThread,
+    DeletedForumReply,
 }
 
 impl std::fmt::Display for AuditAction {
@@ -549,6 +561,10 @@ pub enum AuditTargetType {
     TournamentMatch,
     Poll,
     Scrim,
+    Article,
+    WikiPage,
+    ForumThread,
+    ForumReply,
 }
 
 impl std::fmt::Display for AuditTargetType {
@@ -840,4 +856,70 @@ pub struct Scrim {
     pub notes: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+/// A blog article.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Article {
+    pub id: String,
+    pub slug: String,
+    pub title: String,
+    pub content_markdown: String,
+    pub summary: Option<String>,
+    pub cover_image_url: Option<String>,
+    pub author_member_id: String,
+    pub published: bool,
+    pub published_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// A wiki page.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WikiPage {
+    pub id: String,
+    pub topic: String,
+    pub title: String,
+    pub content_markdown: String,
+    pub author_member_id: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub is_active: bool,
+}
+
+/// A revision of a wiki page.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WikiRevision {
+    pub id: String,
+    pub page_id: String,
+    pub content_markdown: String,
+    pub edited_by: String,
+    pub edited_at: DateTime<Utc>,
+    pub revision_note: Option<String>,
+}
+
+/// A forum discussion thread.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ForumThread {
+    pub id: String,
+    pub title: String,
+    pub category: String,
+    pub author_member_id: String,
+    pub content: String,
+    pub pinned: bool,
+    pub locked: bool,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub is_active: bool,
+}
+
+/// A reply within a forum thread.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ForumReply {
+    pub id: String,
+    pub thread_id: String,
+    pub author_member_id: String,
+    pub content: String,
+    pub created_at: DateTime<Utc>,
+    pub is_active: bool,
 }
