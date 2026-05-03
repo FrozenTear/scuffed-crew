@@ -8,6 +8,7 @@ mod tray;
 use dioxus::prelude::*;
 
 fn main() {
+    let _ = gtk::init();
     let _tray = tray::try_create_tray();
     if let Some(ref handle) = _tray {
         let show_id = handle.show_id.clone();
