@@ -830,8 +830,12 @@ pub struct FeedPostResponse {
 }
 
 /// GET /api/nostr/feed — query community posts from the Nostr relay.
+///
+/// Applies per-group read ACLs: events tagged with officer-only groups
+/// are filtered out for unauthenticated or non-officer callers.
 pub async fn nostr_feed(
     State(state): State<AppState>,
+    jar: axum_extra::extract::cookie::CookieJar,
     Query(query): Query<FeedQuery>,
 ) -> Result<Json<Vec<FeedPostResponse>>, (StatusCode, Json<ErrorResponse>)> {
     let relay_url = match &state.relay_url {
@@ -866,6 +870,49 @@ pub async fn nostr_feed(
             }),
         )
     })?;
+
+    let is_officer = {
+        let cookie_name = &state.session_config.cookie_name;
+        match jar.get(cookie_name) {
+            Some(cookie) => {
+                let token = cookie.value();
+                match state.db.get_session(token).await {
+                    Ok(Some(uid)) => state
+                        .db
+                        .get_member_by_user(&uid)
+                        .await
+                        .ok()
+                        .flatten()
+                        .map(|m| m.org_role.can_access_officer_channel())
+                        .unwrap_or(false),
+                    _ => false,
+                }
+            }
+            None => false,
+        }
+    };
+
+    let officer_groups: std::collections::HashSet<String> = state
+        .db
+        .list_officer_group_ids()
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .collect();
+
+    let events: Vec<_> = if officer_groups.is_empty() || is_officer {
+        events
+    } else {
+        events
+            .into_iter()
+            .filter(|e| {
+                !e.tags.iter().any(|t| {
+                    t.first().map(|s| s.as_str()) == Some("h")
+                        && t.get(1).map(|g| officer_groups.contains(g)).unwrap_or(false)
+                })
+            })
+            .collect()
+    };
 
     let members = state.db.list_nostr_identities().await.unwrap_or_default();
     let pubkey_names: HashMap<String, String> = members
@@ -1040,6 +1087,7 @@ pub struct RelayHealthResponse {
     pub configured: bool,
     pub reachable: bool,
     pub relay_url: Option<String>,
+    pub extra_relay_urls: Vec<String>,
     pub relay_info: Option<RelayInfoResponse>,
     pub forum_backend: String,
 }
@@ -1054,12 +1102,21 @@ pub struct RelayInfoResponse {
 pub async fn nostr_health(
     State(state): State<AppState>,
 ) -> Json<RelayHealthResponse> {
-    let forum_backend = state
-        .db
-        .get_settings()
-        .await
-        .map(|s| s.forum_backend)
-        .unwrap_or_else(|_| "local".into());
+    let settings = state.db.get_settings().await.ok();
+    let forum_backend = settings
+        .as_ref()
+        .map(|s| s.forum_backend.clone())
+        .unwrap_or_else(|| "local".into());
+    let extra_relay_urls: Vec<String> = settings
+        .as_ref()
+        .map(|s| {
+            s.extra_relay_urls
+                .lines()
+                .map(|l| l.trim().to_string())
+                .filter(|l| !l.is_empty() && (l.starts_with("ws://") || l.starts_with("wss://")))
+                .collect()
+        })
+        .unwrap_or_default();
 
     let relay_url = match &state.relay_url {
         Some(url) => url.clone(),
@@ -1068,6 +1125,7 @@ pub async fn nostr_health(
                 configured: false,
                 reachable: false,
                 relay_url: None,
+                extra_relay_urls,
                 relay_info: None,
                 forum_backend,
             });
@@ -1093,6 +1151,7 @@ pub async fn nostr_health(
         configured: true,
         reachable,
         relay_url: Some(relay_url),
+        extra_relay_urls,
         relay_info: None,
         forum_backend,
     })

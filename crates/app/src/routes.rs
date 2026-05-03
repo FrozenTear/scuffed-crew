@@ -72,6 +72,8 @@ pub enum Route {
         AdminAuditLog {},
         #[route("/admin/moderation")]
         AdminModeration {},
+        #[route("/admin/relay")]
+        AdminRelay {},
         #[route("/admin/settings")]
         AdminSettings {},
     #[end_layout]

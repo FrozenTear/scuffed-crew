@@ -148,6 +148,21 @@ impl Database {
         .await
     }
 
+    /// List all group IDs that are officer-only (used for read ACL filtering).
+    pub async fn list_officer_group_ids(&self) -> DbResult<Vec<String>> {
+        with_timeout(async {
+            let mut result = self
+                .client
+                .query(
+                    "SELECT group_id FROM team_channel WHERE group_type = 'officer' AND is_active = true",
+                )
+                .await?;
+            let rows: Vec<DbTeamChannel> = result.take(0)?;
+            Ok(rows.into_iter().map(|r| r.group_id).collect())
+        })
+        .await
+    }
+
     /// Soft-delete a team channel.
     pub async fn deactivate_team_channel(&self, group_id: &str) -> DbResult<()> {
         let gid = group_id.to_string();

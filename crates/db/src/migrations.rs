@@ -202,6 +202,7 @@ pub async fn run_migrations(client: &Surreal<Any>) -> DbResult<()> {
         DEFINE FIELD min_age ON site_settings TYPE int DEFAULT 16;
         DEFINE FIELD forum_backend ON site_settings TYPE string DEFAULT 'local'
             ASSERT $value IN ['local', 'nostr'];
+        DEFINE FIELD extra_relay_urls ON site_settings TYPE string DEFAULT '';
         DEFINE FIELD updated_at ON site_settings TYPE datetime DEFAULT time::now();
 
         -- ================================================

@@ -9,6 +9,7 @@ mod tournaments;
 mod announcements;
 mod audit_log;
 mod moderation;
+mod relay;
 mod settings;
 
 pub use dashboard::AdminDashboard;
@@ -22,4 +23,5 @@ pub use tournaments::AdminTournaments;
 pub use announcements::AdminAnnouncements;
 pub use audit_log::AdminAuditLog;
 pub use moderation::AdminModeration;
+pub use relay::AdminRelay;
 pub use settings::AdminSettings;

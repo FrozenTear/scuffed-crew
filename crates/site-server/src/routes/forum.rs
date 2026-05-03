@@ -341,6 +341,22 @@ async fn is_nostr_forum(state: &AppState) -> bool {
         .unwrap_or(false)
 }
 
+fn parse_extra_relay_urls(raw: &str) -> Vec<String> {
+    raw.lines()
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty() && (l.starts_with("ws://") || l.starts_with("wss://")))
+        .collect()
+}
+
+async fn get_extra_relay_urls(state: &AppState) -> Vec<String> {
+    state
+        .db
+        .get_settings()
+        .await
+        .map(|s| parse_extra_relay_urls(&s.extra_relay_urls))
+        .unwrap_or_default()
+}
+
 async fn maybe_publish_thread_to_relay(
     state: &AppState,
     member: &scuffed_db::Member,
@@ -379,13 +395,19 @@ async fn maybe_publish_thread_to_relay(
     let nostr_event_id = relay_event.id.clone();
     let thread_id = thread.id.clone();
     let db = state.db.clone();
+    let extra_urls = get_extra_relay_urls(state).await;
     tokio::spawn(async move {
-        if let Err(e) = publish_event_oneshot(&relay_url, relay_event).await {
+        if let Err(e) = publish_event_oneshot(&relay_url, relay_event.clone()).await {
             tracing::error!("Failed to publish forum thread {thread_id} to relay: {e}");
         } else {
             tracing::info!("Dual-published forum thread {thread_id} to Nostr relay");
             if let Err(e) = db.update_thread_nostr_event_id(&thread_id, &nostr_event_id).await {
                 tracing::error!("Failed to store nostr_event_id for thread {thread_id}: {e}");
+            }
+        }
+        for url in extra_urls {
+            if let Err(e) = publish_event_oneshot(&url, relay_event.clone()).await {
+                tracing::warn!("Failed to publish thread {thread_id} to extra relay {url}: {e}");
             }
         }
     });
@@ -431,11 +453,17 @@ async fn maybe_publish_reply_to_relay(
 
     let relay_event = EventBuilder::to_relay_event(&event);
     let reply_id = reply.id.clone();
+    let extra_urls = get_extra_relay_urls(state).await;
     tokio::spawn(async move {
-        if let Err(e) = publish_event_oneshot(&relay_url, relay_event).await {
+        if let Err(e) = publish_event_oneshot(&relay_url, relay_event.clone()).await {
             tracing::error!("Failed to publish forum reply {reply_id} to relay: {e}");
         } else {
             tracing::info!("Dual-published forum reply {reply_id} to Nostr relay");
+        }
+        for url in extra_urls {
+            if let Err(e) = publish_event_oneshot(&url, relay_event.clone()).await {
+                tracing::warn!("Failed to publish reply {reply_id} to extra relay {url}: {e}");
+            }
         }
     });
 }
