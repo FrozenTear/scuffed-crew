@@ -44,12 +44,14 @@ fn me_to_user_info(me: &MeResponse) -> UserInfo {
         "admin" => Some(OrgRole::Admin),
         "officer" => Some(OrgRole::Officer),
         "member" => Some(OrgRole::Member),
+        "recruit" => Some(OrgRole::Recruit),
         _ => None,
     });
 
     UserInfo {
         id: me.user.id.clone(),
-        username: me.member
+        username: me
+            .member
             .as_ref()
             .map(|m| m.display_name.clone())
             .unwrap_or_else(|| me.user.username.clone()),
