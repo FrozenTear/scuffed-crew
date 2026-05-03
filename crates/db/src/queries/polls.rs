@@ -203,13 +203,17 @@ impl Database {
             let total_votes = votes.iter().map(|v| v.count).sum();
 
             let my_votes = if let Some(mid) = viewer_member_id {
+                #[derive(Debug, Clone, Deserialize, SurrealValue)]
+                struct VoteIdx {
+                    option_index: u32,
+                }
                 let mut r = self
                     .client
                     .query("SELECT option_index FROM poll_vote WHERE poll_id = $pid AND member_id = $mid")
                     .bind(("pid", poll_id.to_string()))
                     .bind(("mid", mid.to_string()))
                     .await?;
-                let v: Vec<DbPollVote> = r.take(0)?;
+                let v: Vec<VoteIdx> = r.take(0)?;
                 v.into_iter().map(|v| v.option_index).collect()
             } else {
                 vec![]
