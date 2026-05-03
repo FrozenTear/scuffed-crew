@@ -194,10 +194,12 @@
             let px = pack.x, py = pack.z;
             if (meta && meta.transform) {
                 const t = meta.transform;
-                px = (pack.x - t.world_origin_x) * t.scale_x + t.pixel_origin_x;
-                py = (pack.z - t.world_origin_z) * t.scale_z + t.pixel_origin_y;
+                px = (pack.x - t.origin_x) * t.pixels_per_meter;
+                py = t.z_flip
+                    ? (t.origin_z - pack.z) * t.pixels_per_meter
+                    : (pack.z - t.origin_z) * t.pixels_per_meter;
             }
-            const isSmall = pack.size === "Small";
+            const isSmall = pack.size === "small";
             const radius = isSmall ? 8 : 12;
             const fill = isSmall ? "#ffeb3b" : "#ff9800";
             const stroke = isSmall ? "#ffc107" : "#f57c00";
@@ -233,12 +235,17 @@
         return `rgba(${c.r}, ${c.g}, ${c.b}, ${alpha})`;
     }
 
+    const ICON_EMOJI = {
+        skull: "\u{1F480}", warning: "⚠️", star: "⭐", flag: "\u{1F6A9}",
+        eye: "\u{1F441}️", shield: "\u{1F6E1}️", target: "\u{1F3AF}", question: "❓"
+    };
+
     function drawElement(ctx, el, fillOpacity, heroCache) {
         const color = colorToCss(el.color);
         const pos = el.position;
         const et = el.element_type;
 
-        if (et.PlayerMarker !== undefined || et === "PlayerMarker") {
+        if (et.type === "player_marker") {
             const radius = 20;
             const x = pos.x, y = pos.y;
             let drewPortrait = false;
@@ -277,8 +284,8 @@
                 ctx.textAlign = "center";
                 ctx.fillText(el.label, x, y + 5);
             }
-        } else if (et.Route) {
-            const pts = et.Route.points;
+        } else if (et.type === "route") {
+            const pts = et.points;
             if (pts.length < 2) return;
             ctx.strokeStyle = color;
             ctx.lineWidth = 4;
@@ -291,8 +298,8 @@
             if (pts.length >= 2) {
                 drawArrowhead(ctx, pts[pts.length - 2], pts[pts.length - 1], color);
             }
-        } else if (et.Area) {
-            const pts = et.Area.points;
+        } else if (et.type === "area") {
+            const pts = et.points;
             if (pts.length < 3) return;
             ctx.fillStyle = colorToCssAlpha(el.color, fillOpacity);
             ctx.strokeStyle = color;
@@ -303,8 +310,8 @@
             ctx.closePath();
             ctx.fill();
             ctx.stroke();
-        } else if (et.Arrow) {
-            const end = et.Arrow.end;
+        } else if (et.type === "arrow") {
+            const end = et.end;
             ctx.strokeStyle = color;
             ctx.lineWidth = 4;
             ctx.lineCap = "round";
@@ -313,26 +320,25 @@
             ctx.lineTo(end.x, end.y);
             ctx.stroke();
             drawArrowhead(ctx, pos, end, color);
-        } else if (et.Text) {
+        } else if (et.type === "text") {
             ctx.fillStyle = color;
-            ctx.font = `${et.Text.font_size}px sans-serif`;
-            ctx.fillText(et.Text.content, pos.x, pos.y);
-        } else if (et.Icon) {
+            ctx.font = `${et.font_size}px sans-serif`;
+            ctx.fillText(et.content, pos.x, pos.y);
+        } else if (et.type === "icon") {
             ctx.font = "24px sans-serif";
-            const emoji = et.Icon.icon_type;
-            ctx.fillText(typeof emoji === "object" ? "📍" : emoji, pos.x, pos.y);
-        } else if (et.Drawing) {
-            const pts = et.Drawing.points;
+            ctx.fillText(ICON_EMOJI[et.icon_type] || "\u{1F4CD}", pos.x, pos.y);
+        } else if (et.type === "drawing") {
+            const pts = et.points;
             if (pts.length < 2) return;
             ctx.strokeStyle = color;
-            ctx.lineWidth = et.Drawing.stroke_width || 3;
+            ctx.lineWidth = et.stroke_width || 3;
             ctx.lineCap = "round";
             ctx.lineJoin = "round";
             ctx.beginPath();
             ctx.moveTo(pts[0].x, pts[0].y);
             for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
             ctx.stroke();
-        } else if (et.Ability) {
+        } else if (et.type === "ability") {
             ctx.strokeStyle = color;
             ctx.lineWidth = 2;
             ctx.beginPath();
@@ -341,7 +347,7 @@
             ctx.fillStyle = color;
             ctx.font = "12px sans-serif";
             ctx.textAlign = "center";
-            ctx.fillText(et.Ability.ability_id, pos.x, pos.y + 4);
+            ctx.fillText(et.ability_id, pos.x, pos.y + 4);
         }
     }
 
@@ -349,12 +355,12 @@
         const et = el.element_type;
         let bx = el.position.x - 10, by = el.position.y - 10;
 
-        if (et.PlayerMarker !== undefined || et === "PlayerMarker") {
+        if (et.type === "player_marker") {
             bx = el.position.x + 18; by = el.position.y - 18;
-        } else if (et.Route || et.Area || et.Drawing) {
-            const pts = (et.Route || et.Area || et.Drawing).points;
+        } else if (et.type === "route" || et.type === "area" || et.type === "drawing") {
+            const pts = et.points;
             if (pts && pts.length > 0) { bx = pts[0].x - 10; by = pts[0].y - 10; }
-        } else if (et.Text) {
+        } else if (et.type === "text") {
             by = el.position.y - 20;
         }
 

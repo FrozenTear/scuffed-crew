@@ -7,7 +7,7 @@
 use dioxus::prelude::*;
 use uuid::Uuid;
 
-use scuffed_types::strategy::{Color, ElementType, MapMetadata, Position, StrategyElement, Tool};
+use scuffed_types::strategy::{Color, MapMetadata, Position, StrategyElement, Tool};
 
 // =============================================================================
 // Serialization helpers for the JS bridge
@@ -21,74 +21,8 @@ fn position_to_json(p: &Position) -> String {
     format!(r#"{{"x":{},"y":{}}}"#, p.x, p.y)
 }
 
-fn element_type_to_json(et: &ElementType) -> String {
-    match et {
-        ElementType::PlayerMarker => r#""PlayerMarker""#.to_string(),
-        ElementType::Route { points } => {
-            let pts: Vec<String> = points.iter().map(|p| position_to_json(p)).collect();
-            format!(r#"{{"Route":{{"points":[{}]}}}}"#, pts.join(","))
-        }
-        ElementType::Area { points } => {
-            let pts: Vec<String> = points.iter().map(|p| position_to_json(p)).collect();
-            format!(r#"{{"Area":{{"points":[{}]}}}}"#, pts.join(","))
-        }
-        ElementType::Arrow { end } => {
-            format!(r#"{{"Arrow":{{"end":{}}}}}"#, position_to_json(end))
-        }
-        ElementType::Text { content, font_size } => {
-            let escaped = content.replace('\\', "\\\\").replace('"', "\\\"");
-            format!(
-                r#"{{"Text":{{"content":"{}","font_size":{}}}}}"#,
-                escaped, font_size
-            )
-        }
-        ElementType::Icon { icon_type } => {
-            format!(r#"{{"Icon":{{"icon_type":"{}"}}}}"#, icon_type.emoji())
-        }
-        ElementType::Drawing {
-            points,
-            stroke_width,
-        } => {
-            let pts: Vec<String> = points.iter().map(|p| position_to_json(p)).collect();
-            format!(
-                r#"{{"Drawing":{{"points":[{}],"stroke_width":{}}}}}"#,
-                pts.join(","),
-                stroke_width
-            )
-        }
-        ElementType::Ability { ability_id } => {
-            let escaped = ability_id.replace('\\', "\\\\").replace('"', "\\\"");
-            format!(r#"{{"Ability":{{"ability_id":"{}"}}}}"#, escaped)
-        }
-    }
-}
-
 fn element_to_json(el: &StrategyElement) -> String {
-    let hero = match &el.hero_id {
-        Some(h) => format!(r#""{}""#, h),
-        None => "null".to_string(),
-    };
-    let label = match &el.label {
-        Some(l) => {
-            let escaped = l.replace('\\', "\\\\").replace('"', "\\\"");
-            format!(r#""{}""#, escaped)
-        }
-        None => "null".to_string(),
-    };
-    let phase = match &el.phase_id {
-        Some(p) => format!(r#""{}""#, p),
-        None => "null".to_string(),
-    };
-    format!(
-        r#"{{"id":"{}","position":{},"color":{},"element_type":{},"hero_id":{},"label":{},"phase_id":{}}}"#,
-        el.id,
-        position_to_json(&el.position),
-        color_to_json(&el.color),
-        element_type_to_json(&el.element_type),
-        hero,
-        label,
-        phase
-    )
+    serde_json::to_string(el).unwrap_or_else(|_| "null".to_string())
 }
 
 fn metadata_to_json(meta: &MapMetadata) -> String {
