@@ -21,3 +21,4 @@ leptess = "0.14"
 evdev = { version = "0.13", features = ["tokio"] }
 surrealdb = { version = "3", features = ["kv-surrealkv"] }
 surrealdb-types = "3"
+tempfile = "3"

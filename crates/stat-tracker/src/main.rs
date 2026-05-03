@@ -3,6 +3,7 @@ mod config;
 mod detect;
 mod ocr;
 mod parse;
+mod setup;
 mod storage;
 mod sync;
 
@@ -21,6 +22,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = config::Config::load()?;
     tracing::info!("Scuffed Stat Tracker starting");
     tracing::info!(data_dir = %config.data_dir.display(), "using data directory");
+
+    if let Err(e) = setup::ensure_koverwatch_tessdata() {
+        tracing::warn!(error = %e, "koverwatch tessdata setup failed — falling back to eng");
+    }
 
     std::fs::create_dir_all(&config.data_dir)?;
 
