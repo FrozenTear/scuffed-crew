@@ -257,6 +257,74 @@ pub async fn publish_event_oneshot(
     }
 }
 
+/// Query events from a relay via a one-shot WebSocket connection.
+///
+/// Connects, sends a REQ with the given filters, collects all events
+/// until EOSE (end of stored events), then disconnects. Suitable for
+/// on-demand feed queries where a persistent subscription is unnecessary.
+pub async fn query_events_oneshot(
+    relay_url: &str,
+    filters: Vec<NostrFilter>,
+    timeout_secs: u64,
+) -> Result<Vec<NostrEvent>, RelayError> {
+    let (ws_stream, _) = tokio_tungstenite::connect_async(relay_url)
+        .await
+        .map_err(|e| RelayError::ConnectionFailed(e.to_string()))?;
+
+    let (mut sink, mut stream) = ws_stream.split();
+
+    let sub_id = "oneshot-query".to_string();
+    let req = ClientRelayMessage::Req {
+        subscription_id: sub_id.clone(),
+        filters,
+    };
+    let msg = req
+        .to_json()
+        .map_err(|e| RelayError::SendFailed(e.to_string()))?;
+
+    sink.send(Message::Text(msg.into()))
+        .await
+        .map_err(|e| RelayError::SendFailed(e.to_string()))?;
+
+    let mut events = Vec::new();
+
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(timeout_secs),
+        async {
+            while let Some(Ok(msg)) = stream.next().await {
+                if let Message::Text(text) = msg {
+                    match RelayMessage::from_json(&text) {
+                        Ok(RelayMessage::Event { event, .. }) => {
+                            events.push(event);
+                        }
+                        Ok(RelayMessage::Eose { .. }) => {
+                            break;
+                        }
+                        Ok(RelayMessage::Notice(notice)) => {
+                            tracing::warn!("Relay notice during query: {notice}");
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        },
+    )
+    .await;
+
+    // Close subscription and disconnect
+    let close = ClientRelayMessage::Close(sub_id);
+    if let Ok(json) = close.to_json() {
+        let _ = sink.send(Message::Text(json.into())).await;
+    }
+    let _ = sink.close().await;
+
+    if result.is_err() {
+        tracing::warn!("Relay query timed out after {timeout_secs}s, returning partial results");
+    }
+
+    Ok(events)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

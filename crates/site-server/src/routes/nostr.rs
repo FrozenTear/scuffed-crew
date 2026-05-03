@@ -808,7 +808,14 @@ pub async fn nostr_react(
     Ok(Json(ReactResponse { reaction_event_id }))
 }
 
-// ─── Feed endpoint (Phase 3) ───
+// ─── Feed endpoint (Phase 4: relay read path) ───
+
+#[derive(Deserialize)]
+pub struct FeedQuery {
+    pub limit: Option<usize>,
+    pub since: Option<u64>,
+    pub hashtag: Option<String>,
+}
 
 #[derive(Serialize)]
 pub struct FeedPostResponse {
@@ -822,14 +829,79 @@ pub struct FeedPostResponse {
     pub reply_count: u32,
 }
 
-/// GET /api/nostr/feed — return community posts.
-///
-/// Currently returns posts stored locally. Relay subscription for live posts
-/// is planned for Phase 4.
+/// GET /api/nostr/feed — query community posts from the Nostr relay.
 pub async fn nostr_feed(
-    State(_state): State<AppState>,
-) -> Json<Vec<FeedPostResponse>> {
-    Json(vec![])
+    State(state): State<AppState>,
+    Query(query): Query<FeedQuery>,
+) -> Result<Json<Vec<FeedPostResponse>>, (StatusCode, Json<ErrorResponse>)> {
+    let relay_url = match &state.relay_url {
+        Some(url) => url.clone(),
+        None => return Ok(Json(vec![])),
+    };
+
+    let limit = query.limit.unwrap_or(50).min(200);
+
+    let mut filter = if let Some(ref tag) = query.hashtag {
+        scuffed_types::nostr::NostrFilter::by_hashtag(tag)
+    } else {
+        scuffed_types::nostr::NostrFilter::community_posts()
+    };
+    filter.limit = Some(limit);
+    if let Some(since) = query.since {
+        filter.since = Some(since);
+    }
+
+    let events = scuffed_chat::nostr::relay::query_events_oneshot(
+        &relay_url,
+        vec![filter],
+        5,
+    )
+    .await
+    .map_err(|e| {
+        tracing::error!("Failed to query relay feed: {e}");
+        (
+            StatusCode::BAD_GATEWAY,
+            Json(ErrorResponse {
+                error: "Failed to query relay".into(),
+            }),
+        )
+    })?;
+
+    let members = state.db.list_nostr_identities().await.unwrap_or_default();
+    let pubkey_names: HashMap<String, String> = members
+        .into_iter()
+        .filter_map(|m| {
+            m.nostr_pubkey.map(|pk| (pk, m.display_name))
+        })
+        .collect();
+
+    let mut posts: Vec<FeedPostResponse> = events
+        .into_iter()
+        .filter(|e| e.kind == 1)
+        .map(|e| {
+            let hashtags: Vec<String> = e
+                .tags
+                .iter()
+                .filter(|t| t.first().map(|s| s.as_str()) == Some("t"))
+                .filter_map(|t| t.get(1).cloned())
+                .collect();
+
+            FeedPostResponse {
+                id: e.id.clone(),
+                pubkey: e.pubkey.clone(),
+                author_name: pubkey_names.get(&e.pubkey).cloned(),
+                content: e.content,
+                hashtags,
+                created_at: e.created_at as i64,
+                reactions: vec![],
+                reply_count: 0,
+            }
+        })
+        .collect();
+
+    posts.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+
+    Ok(Json(posts))
 }
 
 #[derive(Deserialize)]
@@ -959,4 +1031,69 @@ pub async fn nostr_post(
     });
 
     Ok(Json(CommunityPostResponse { event_id }))
+}
+
+// ─── Relay health endpoint (Phase 4) ───
+
+#[derive(Serialize)]
+pub struct RelayHealthResponse {
+    pub configured: bool,
+    pub reachable: bool,
+    pub relay_url: Option<String>,
+    pub relay_info: Option<RelayInfoResponse>,
+    pub forum_backend: String,
+}
+
+#[derive(Serialize)]
+pub struct RelayInfoResponse {
+    pub name: Option<String>,
+    pub description: Option<String>,
+}
+
+/// GET /api/nostr/health — relay connectivity and configuration status.
+pub async fn nostr_health(
+    State(state): State<AppState>,
+) -> Json<RelayHealthResponse> {
+    let forum_backend = state
+        .db
+        .get_settings()
+        .await
+        .map(|s| s.forum_backend)
+        .unwrap_or_else(|_| "local".into());
+
+    let relay_url = match &state.relay_url {
+        Some(url) => url.clone(),
+        None => {
+            return Json(RelayHealthResponse {
+                configured: false,
+                reachable: false,
+                relay_url: None,
+                relay_info: None,
+                forum_backend,
+            });
+        }
+    };
+
+    let http_url = relay_url
+        .replace("ws://", "http://")
+        .replace("wss://", "https://");
+
+    let reachable = match reqwest::Client::new()
+        .get(&http_url)
+        .header("Accept", "application/nostr+json")
+        .timeout(std::time::Duration::from_secs(3))
+        .send()
+        .await
+    {
+        Ok(resp) => resp.status().is_success(),
+        Err(_) => false,
+    };
+
+    Json(RelayHealthResponse {
+        configured: true,
+        reachable,
+        relay_url: Some(relay_url),
+        relay_info: None,
+        forum_backend,
+    })
 }

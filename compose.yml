@@ -17,6 +17,15 @@ services:
     build:
       context: .
       dockerfile: relay/Containerfile
+    depends_on:
+      surrealdb:
+        condition: service_healthy
+    environment:
+      SURREALDB_URL: ws://surrealdb:8000
+      SURREALDB_USER: ${SURREALDB_USER:-root}
+      SURREALDB_PASSWORD: ${SURREALDB_PASSWORD:?Set SURREALDB_PASSWORD in .env}
+      SURREALDB_NS: ${SURREALDB_NS:-scuffed_crew}
+      SURREALDB_DB: ${SURREALDB_DB:-main}
     volumes:
       - strfry-data:/app/strfry-db
     networks:

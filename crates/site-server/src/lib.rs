@@ -381,6 +381,10 @@ pub fn create_router(state: AppState) -> Router {
             "/api/nostr/feed",
             get(routes::nostr::nostr_feed),
         )
+        .route(
+            "/api/nostr/health",
+            get(routes::nostr::nostr_health),
+        )
         // Upload routes
         .route(
             "/api/upload/avatar",
