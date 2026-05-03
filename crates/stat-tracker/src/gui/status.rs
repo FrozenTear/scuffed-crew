@@ -24,9 +24,11 @@ pub fn StatusPanel() -> Element {
         outputs().first().cloned().unwrap_or_else(|| "unknown".into())
     });
 
-    let tessdata_installed = stat_tracker::setup::tessdata_dir()
-        .join("koverwatch.traineddata")
-        .exists();
+    let tessdata_installed = use_memo(|| {
+        stat_tracker::setup::tessdata_dir()
+            .join("koverwatch.traineddata")
+            .exists()
+    });
 
     let count = match &*match_count.read() {
         Some(c) => *c,
@@ -59,9 +61,9 @@ pub fn StatusPanel() -> Element {
                     span { class: "label", "Koverwatch tessdata" }
                     span { class: "value",
                         span {
-                            class: if tessdata_installed { "status-dot ok" } else { "status-dot err" },
+                            class: if tessdata_installed() { "status-dot ok" } else { "status-dot err" },
                         }
-                        if tessdata_installed { "installed" } else { "missing" }
+                        if tessdata_installed() { "installed" } else { "missing" }
                     }
                 }
             }

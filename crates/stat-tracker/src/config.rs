@@ -1,18 +1,21 @@
 use std::path::PathBuf;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Config {
     pub data_dir: PathBuf,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub capture_output: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub player_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub sync: Option<SyncConfig>,
     #[serde(default)]
     pub auto_detect: AutoDetectConfig,
 }
 
-#[derive(Debug, Clone, Copy, Deserialize)]
+#[derive(Debug, Clone, Copy, Deserialize, Serialize)]
 pub struct AutoDetectConfig {
     pub enabled: bool,
     pub poll_interval_secs: u64,
@@ -29,7 +32,7 @@ impl Default for AutoDetectConfig {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct SyncConfig {
     pub server_url: String,
     pub token: String,
