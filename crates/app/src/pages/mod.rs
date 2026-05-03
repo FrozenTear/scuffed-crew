@@ -1,6 +1,7 @@
 mod apply;
 mod blog;
 mod blog_article;
+mod events;
 mod home;
 mod identity;
 mod member_profile;
@@ -17,6 +18,7 @@ pub mod strategy;
 pub use apply::Apply;
 pub use blog::Blog;
 pub use blog_article::BlogArticle;
+pub use events::Events;
 pub use home::Home;
 pub use identity::Identity;
 pub use member_profile::MemberProfile;

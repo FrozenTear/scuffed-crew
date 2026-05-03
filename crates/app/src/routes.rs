@@ -24,6 +24,8 @@ pub enum Route {
         Tournaments {},
         #[route("/tournaments/:id")]
         Tournament { id: String },
+        #[route("/events")]
+        Events {},
         #[route("/identity")]
         Identity {},
         #[route("/blog")]

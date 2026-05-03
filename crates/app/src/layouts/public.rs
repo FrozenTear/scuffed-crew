@@ -141,6 +141,7 @@ pub fn PublicLayout() -> Element {
                 li { Link { to: Route::News {}, "News" } }
                 li { Link { to: Route::Polls {}, "Polls" } }
                 li { Link { to: Route::Tournaments {}, "Tournaments" } }
+                li { Link { to: Route::Events {}, "Events" } }
                 li { Link { to: Route::StrategyBrowse {}, "Strategy" } }
                 li { Link { to: Route::Identity {}, "Identity" } }
                 li { Link { to: Route::Blog {}, "Blog" } }
@@ -161,6 +162,7 @@ pub fn PublicLayout() -> Element {
             Link { to: Route::News {}, onclick: move |_| menu_open.set(false), "News" }
             Link { to: Route::Polls {}, onclick: move |_| menu_open.set(false), "Polls" }
             Link { to: Route::Tournaments {}, onclick: move |_| menu_open.set(false), "Tournaments" }
+            Link { to: Route::Events {}, onclick: move |_| menu_open.set(false), "Events" }
             Link { to: Route::StrategyBrowse {}, onclick: move |_| menu_open.set(false), "Strategy" }
             Link { to: Route::Identity {}, onclick: move |_| menu_open.set(false), "Identity" }
             Link { to: Route::Blog {}, onclick: move |_| menu_open.set(false), "Blog" }
