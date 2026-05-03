@@ -19,6 +19,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_env_filter(EnvFilter::from_default_env())
         .init();
 
+    if std::env::args().any(|a| a == "--list-outputs") {
+        match capture::wayshot::list_outputs() {
+            Ok(outputs) => {
+                println!("Available outputs:");
+                for (i, name) in outputs.iter().enumerate() {
+                    println!("  [{i}] {name}");
+                }
+                println!("\nSet capture_output in config.toml to select one.");
+            }
+            Err(e) => eprintln!("Failed to list outputs: {e}"),
+        }
+        return Ok(());
+    }
+
     let config = config::Config::load()?;
     tracing::info!("Scuffed Stat Tracker starting");
     tracing::info!(data_dir = %config.data_dir.display(), "using data directory");
@@ -31,6 +45,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let backend = capture::detect_backend().await;
     tracing::info!(?backend, "capture backend selected");
+
+    if let Ok(outputs) = capture::wayshot::list_outputs() {
+        let selected = config.capture_output.as_deref().unwrap_or(&outputs[0]);
+        tracing::info!(
+            available = ?outputs,
+            selected = %selected,
+            "wayland outputs"
+        );
+    }
 
     let store = storage::LocalStore::open(&config.data_dir).await?;
     let count = store.match_count().await?;
@@ -55,6 +78,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         &store,
         sync_client.as_ref(),
         config.player_name.as_deref(),
+        config.capture_output.as_deref(),
         &config.auto_detect,
     )
     .await
@@ -65,6 +89,7 @@ async fn run_loop(
     store: &storage::LocalStore,
     sync_client: Option<&sync::SyncClient>,
     player_name: Option<&str>,
+    capture_output: Option<&str>,
     auto_detect: &config::AutoDetectConfig,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut stream = match detect::open_keyboard_stream() {
@@ -97,7 +122,7 @@ async fn run_loop(
                         if outcome.is_some() {
                             tracing::info!("Tab pressed — using pending outcome from auto-detect");
                         }
-                        if let Err(e) = handle_capture(backend, store, player_name, outcome).await {
+                        if let Err(e) = handle_capture(backend, store, player_name, capture_output, outcome).await {
                             tracing::error!(error = %e, "capture cycle failed");
                         } else {
                             capture_count += 1;
@@ -133,7 +158,7 @@ async fn run_loop(
                     continue;
                 }
 
-                match capture::capture_screen(backend).await {
+                match capture::capture_screen_output(backend, capture_output).await {
                     Ok(img) => {
                         let outcome = tokio::task::spawn_blocking(move || {
                             detect::match_end::detect_outcome(&img)
@@ -167,10 +192,11 @@ async fn handle_capture(
     backend: &capture::CaptureBackend,
     store: &storage::LocalStore,
     player_name: Option<&str>,
+    capture_output: Option<&str>,
     polled_outcome: Option<detect::MatchOutcome>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     tracing::info!("Tab detected — capturing screen");
-    let img = capture::capture_screen(backend).await?;
+    let img = capture::capture_screen_output(backend, capture_output).await?;
 
     let (outcome, ocr_result) = tokio::task::spawn_blocking(move || {
         let outcome = polled_outcome

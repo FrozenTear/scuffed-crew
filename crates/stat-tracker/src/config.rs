@@ -5,7 +5,7 @@ use serde::Deserialize;
 #[derive(Debug, Deserialize)]
 pub struct Config {
     pub data_dir: PathBuf,
-    pub capture_backend: Option<String>,
+    pub capture_output: Option<String>,
     pub player_name: Option<String>,
     pub sync: Option<SyncConfig>,
     #[serde(default)]
@@ -61,7 +61,7 @@ impl Default for Config {
 
         Self {
             data_dir,
-            capture_backend: None,
+            capture_output: None,
             player_name: None,
             sync: None,
             auto_detect: AutoDetectConfig::default(),
