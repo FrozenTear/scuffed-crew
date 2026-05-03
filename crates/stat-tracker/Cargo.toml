@@ -1,0 +1,23 @@
+[package]
+name = "scuffed-stat-tracker"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+scuffed-types = { path = "../types" }
+image = "0.25"
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", features = ["serde"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+thiserror = "2"
+dirs = "6"
+toml = "0.8"
+reqwest = { version = "0.12", features = ["json"] }
+libwayshot = "0.7"
+leptess = "0.14"
+evdev = { version = "0.13", features = ["tokio"] }
+surrealdb = { version = "3", features = ["kv-surrealkv"] }
+surrealdb-types = "3"

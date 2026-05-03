@@ -22,6 +22,8 @@ members = [
     "crates/relay-policy",
     # Nostr chat backend
     "crates/chat",
+    # Overwatch stat tracker
+    "crates/stat-tracker",
 ]
 
 [workspace.dependencies]

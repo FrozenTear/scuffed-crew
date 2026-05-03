@@ -1,0 +1,64 @@
+use crate::config::SyncConfig;
+use crate::storage::PersonalMatch;
+
+use scuffed_types::api::{StatsUploadEntry, StatsUploadRequest, StatsUploadResponse};
+
+pub struct SyncClient {
+    config: SyncConfig,
+    http: reqwest::Client,
+}
+
+impl SyncClient {
+    pub fn new(config: SyncConfig) -> Self {
+        Self {
+            http: reqwest::Client::new(),
+            config,
+        }
+    }
+
+    pub async fn upload_matches(
+        &self,
+        matches: &[PersonalMatch],
+    ) -> Result<StatsUploadResponse, Box<dyn std::error::Error>> {
+        let entries: Vec<StatsUploadEntry> = matches
+            .iter()
+            .map(|m| StatsUploadEntry {
+                hero: m.hero.clone(),
+                map_name: m.map_name.clone(),
+                game_mode: m.game_mode.clone(),
+                role: m.role.clone(),
+                outcome: m.outcome.clone(),
+                elims: m.elims,
+                deaths: m.deaths,
+                assists: m.assists,
+                damage: m.damage,
+                healing: m.healing,
+                mitigation: m.mitigation,
+                played_at: chrono::DateTime::<chrono::Utc>::from(m.played_at.clone()),
+            })
+            .collect();
+
+        let url = format!("{}/api/stats/upload", self.config.server_url);
+        let resp = self
+            .http
+            .post(&url)
+            .bearer_auth(&self.config.token)
+            .json(&StatsUploadRequest { matches: entries })
+            .send()
+            .await?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(format!("Upload failed ({status}): {body}").into());
+        }
+
+        let result: StatsUploadResponse = resp.json().await?;
+        tracing::info!(
+            inserted = result.inserted,
+            skipped = result.skipped,
+            "stats upload complete"
+        );
+        Ok(result)
+    }
+}
