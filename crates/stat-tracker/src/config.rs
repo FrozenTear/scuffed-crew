@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use serde::Deserialize;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct Config {
     pub data_dir: PathBuf,
     pub capture_output: Option<String>,
@@ -12,7 +12,7 @@ pub struct Config {
     pub auto_detect: AutoDetectConfig,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Copy, Deserialize)]
 pub struct AutoDetectConfig {
     pub enabled: bool,
     pub poll_interval_secs: u64,

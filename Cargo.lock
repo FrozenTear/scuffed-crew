@@ -9698,6 +9698,7 @@ name = "scuffed-stat-tracker"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "dioxus",
  "dirs",
  "evdev",
  "image",

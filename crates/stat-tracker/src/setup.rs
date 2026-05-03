@@ -17,7 +17,7 @@ pub fn tessdata_dir() -> PathBuf {
         .join("tessdata")
 }
 
-pub fn ensure_koverwatch_tessdata() -> Result<(), Box<dyn std::error::Error>> {
+pub fn ensure_koverwatch_tessdata() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let tessdata = tessdata_dir();
     let traineddata = tessdata.join("koverwatch.traineddata");
 
@@ -46,7 +46,7 @@ pub fn ensure_koverwatch_tessdata() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn download_and_extract_font(dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
+fn download_and_extract_font(dir: &Path) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     tracing::info!("downloading Koverwatch font");
     let zip_path = dir.join("koverwatch.zip");
 
@@ -71,7 +71,7 @@ fn download_and_extract_font(dir: &Path) -> Result<(), Box<dyn std::error::Error
     Ok(())
 }
 
-fn install_font(dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
+fn install_font(dir: &Path) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let font_dir = dirs::data_dir()
         .ok_or("no data dir")?
         .join("fonts");
@@ -91,7 +91,7 @@ fn install_font(dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn generate_tessdata(dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
+fn generate_tessdata(dir: &Path) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let training_txt = dir.join("training_text.txt");
     std::fs::write(&training_txt, TRAINING_TEXT)?;
 

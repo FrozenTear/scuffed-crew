@@ -3,6 +3,9 @@ name = "scuffed-stat-tracker"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+gui = ["dep:dioxus"]
+
 [dependencies]
 scuffed-types = { path = "../types" }
 image = "0.25"
@@ -22,3 +25,17 @@ evdev = { version = "0.13", features = ["tokio"] }
 surrealdb = { version = "3", features = ["kv-surrealkv"] }
 surrealdb-types = "3"
 tempfile = "3"
+dioxus = { workspace = true, features = ["desktop", "router"], optional = true }
+
+[lib]
+name = "stat_tracker"
+path = "src/lib.rs"
+
+[[bin]]
+name = "scuffed-stat-tracker"
+path = "src/main.rs"
+
+[[bin]]
+name = "stat-tracker-gui"
+path = "src/gui/main.rs"
+required-features = ["gui"]

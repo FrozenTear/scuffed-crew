@@ -1,11 +1,4 @@
-mod capture;
-mod config;
-mod detect;
-mod ocr;
-mod parse;
-mod setup;
-mod storage;
-mod sync;
+use stat_tracker::{capture, config, detect, ocr, parse, setup, storage, sync};
 
 use std::time::Instant;
 
