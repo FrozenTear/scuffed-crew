@@ -215,6 +215,28 @@ impl FromRequestParts<AppState> for DaemonUser {
             ));
         }
 
+        let suspended_or_banned = state
+            .db
+            .is_member_suspended_or_banned(&member.id)
+            .await
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse {
+                        error: e.to_string(),
+                    }),
+                )
+            })?;
+
+        if suspended_or_banned {
+            return Err((
+                StatusCode::FORBIDDEN,
+                Json(ErrorResponse {
+                    error: "Member is suspended or banned".into(),
+                }),
+            ));
+        }
+
         Ok(DaemonUser { member })
     }
 }
