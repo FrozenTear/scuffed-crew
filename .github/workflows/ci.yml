@@ -57,6 +57,7 @@ jobs:
             --exclude scuffed-site \
             --exclude scuffed-admin \
             --exclude scuffed-app \
+            --exclude scuffed-stat-tracker \
             -- -D warnings
 
       - name: Clippy (WASM crates)
@@ -88,10 +89,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Build (native crates)
-        run: cargo build --workspace --exclude scuffed-site --exclude scuffed-admin --exclude scuffed-app
+        run: cargo build --workspace --exclude scuffed-site --exclude scuffed-admin --exclude scuffed-app --exclude scuffed-stat-tracker
 
       - name: Test (workspace)
-        run: cargo test --workspace --exclude scuffed-site --exclude scuffed-admin --exclude scuffed-app
+        run: cargo test --workspace --exclude scuffed-site --exclude scuffed-admin --exclude scuffed-app --exclude scuffed-stat-tracker
 
   wasm-build:
     name: WASM Build (Trunk)

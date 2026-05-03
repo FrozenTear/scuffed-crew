@@ -21,6 +21,19 @@ defaults:
     working-directory: crates/stat-tracker
 
 jobs:
+  fmt:
+    name: Rustfmt (stat-tracker)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Rustfmt
+        run: cargo fmt --check
+
   build-and-test:
     name: Build & Test (stat-tracker)
     runs-on: ubuntu-latest
