@@ -751,7 +751,7 @@ fn EditorLayout(initial_strategy: Option<Strategy>) -> Element {
 
     rsx! {
         style { {EDITOR_CSS} }
-        style { {crate::components::strategy::map_canvas::MAP_CANVAS_CSS} }
+        style { {crate::components::strategy::MAP_CANVAS_CSS} }
 
         div { class: "editor-page",
 
