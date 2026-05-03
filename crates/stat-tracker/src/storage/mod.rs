@@ -24,6 +24,7 @@ pub struct PersonalMatch {
     pub synced: bool,
 }
 
+#[derive(Clone)]
 pub struct LocalStore {
     db: Surreal<surrealdb::engine::local::Db>,
 }

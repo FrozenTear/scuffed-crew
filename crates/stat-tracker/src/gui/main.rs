@@ -20,7 +20,7 @@ fn main() {
                     tray::TrayAction::ShowWindow => {}
                 }
             }
-            std::thread::sleep(std::time::Duration::from_millis(200));
+            std::thread::sleep(std::time::Duration::from_secs(1));
         });
     }
 

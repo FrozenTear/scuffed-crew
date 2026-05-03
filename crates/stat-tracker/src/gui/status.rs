@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use dioxus::prelude::*;
 
 use stat_tracker::config::Config;
@@ -10,10 +12,22 @@ pub fn StatusPanel() -> Element {
     let config = use_signal(|| Config::load().unwrap_or_default());
     let mut refresh_tick = use_signal(|| 0u32);
 
-    let stats = use_resource(move || {
+    let store: Signal<Option<Arc<LocalStore>>> = use_signal(|| None);
+    let mut store_w = store;
+
+    use_future(move || {
         let data_dir = config().data_dir.clone();
+        async move {
+            if let Ok(s) = LocalStore::open(&data_dir).await {
+                store_w.set(Some(Arc::new(s)));
+            }
+        }
+    });
+
+    let stats = use_resource(move || {
+        let store = store();
         let _tick = refresh_tick();
-        async move { load_stats(&data_dir).await }
+        async move { load_stats(store.as_deref()).await }
     });
 
     let outputs = use_signal(|| {
@@ -32,7 +46,7 @@ pub fn StatusPanel() -> Element {
 
     use_future(move || async move {
         loop {
-            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            tokio::time::sleep(std::time::Duration::from_secs(15)).await;
             refresh_tick += 1;
         }
     });
@@ -139,26 +153,20 @@ struct DashboardStats {
     last_capture_time: Option<String>,
 }
 
-async fn load_stats(data_dir: &std::path::Path) -> DashboardStats {
-    match LocalStore::open(data_dir).await {
-        Ok(store) => {
-            let total = store.match_count().await.unwrap_or(0);
-            let unsynced = store
-                .get_unsynced()
-                .await
-                .map(|v| v.len())
-                .unwrap_or(0);
-            let last = store.last_capture_time().await;
-            DashboardStats {
-                total_matches: total,
-                unsynced_count: unsynced,
-                last_capture_time: last,
-            }
-        }
-        Err(_) => DashboardStats {
+async fn load_stats(store: Option<&LocalStore>) -> DashboardStats {
+    let Some(store) = store else {
+        return DashboardStats {
             total_matches: 0,
             unsynced_count: 0,
             last_capture_time: None,
-        },
+        };
+    };
+    let total = store.match_count().await.unwrap_or(0);
+    let unsynced = store.get_unsynced().await.map(|v| v.len()).unwrap_or(0);
+    let last = store.last_capture_time().await;
+    DashboardStats {
+        total_matches: total,
+        unsynced_count: unsynced,
+        last_capture_time: last,
     }
 }

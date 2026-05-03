@@ -89,7 +89,7 @@ pub fn DaemonCard() -> Element {
 
     use_future(move || async move {
         loop {
-            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
             daemon_pid.set(daemon_running(&config().data_dir));
         }
     });
