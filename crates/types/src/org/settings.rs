@@ -9,5 +9,6 @@ pub struct SiteSettings {
     pub recruitment_open: bool,
     pub recruitment_message: String,
     pub min_age: u32,
+    pub forum_backend: String,
     pub updated_at: DateTime<Utc>,
 }
