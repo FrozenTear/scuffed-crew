@@ -3,6 +3,7 @@ use serde::Deserialize;
 
 use scuffed_api_client::ApiClient;
 use crate::routes::Route;
+use crate::state::auth::use_auth;
 
 #[derive(Debug, Clone, Deserialize)]
 struct WikiPageData {
@@ -209,6 +210,7 @@ const PAGE_CSS: &str = r#"
 
 #[component]
 pub fn WikiPage(topic: String) -> Element {
+    let auth = use_auth();
     let topic_clone = topic.clone();
     let page_resource = use_resource(move || {
         let t = topic_clone.clone();
@@ -267,7 +269,7 @@ pub fn WikiPage(topic: String) -> Element {
                                     span { "Updated {updated}" }
                                 }
                                 div { class: "wiki-detail-actions",
-                                    if !editing() {
+                                    if auth().is_logged_in() && !editing() {
                                         button {
                                             class: "wiki-btn-edit",
                                             onclick: {

@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use scuffed_api_client::ApiClient;
 use crate::components::{Toast, use_toast};
 use crate::hooks::CursorPage;
+use crate::state::auth::use_auth;
 
 // --- Types ---
 
@@ -342,8 +343,15 @@ fn EventCard(event: Event, refresh: Signal<u64>) -> Element {
                 }
             }
 
-            // RSVP buttons
-            RsvpButtons { event_id: event.id.clone(), refresh: refresh }
+            // RSVP buttons (logged-in members only)
+            {
+                let auth = use_auth();
+                if auth().is_logged_in() {
+                    rsx! { RsvpButtons { event_id: event.id.clone(), refresh: refresh } }
+                } else {
+                    rsx! {}
+                }
+            }
         }
     }
 }
