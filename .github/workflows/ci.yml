@@ -12,6 +12,14 @@ env:
   TRUNK_VERSION: "0.21.14"
 
 jobs:
+  dep-guardrails:
+    name: Dependency Guardrails
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check for non-standard frontend deps
+        run: bash scripts/check-frontend-deps.sh
+
   fmt:
     name: Rustfmt
     runs-on: ubuntu-latest
@@ -57,6 +65,7 @@ jobs:
             --target wasm32-unknown-unknown \
             -p scuffed-site \
             -p scuffed-admin \
+            -p scuffed-app \
             -- -D warnings
 
   build-and-test:

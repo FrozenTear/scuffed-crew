@@ -1,17 +1,21 @@
 # The Scuffed Crew
 
-Gaming org community site. Rust monorepo: Leptos (CSR) frontends + Axum backend + SurrealDB.
+Gaming org community site. Rust monorepo: Dioxus 0.7 app + legacy Leptos frontends + Axum backends + SurrealDB.
 
 ## Architecture
 
 ```
 crates/
-  site/          # Public Leptos CSR site (trunk build → dist/)
-  admin/         # Admin Leptos CSR SPA (trunk build → dist/admin/)
-  site-server/   # Axum HTTP server (serves API + static files)
+  app/           # Primary Dioxus 0.7 WASM app (strategy editor, admin, chat)
+  server/        # Axum backend for Dioxus app (REST + WebSocket)
+  types/         # Shared types between app and server
+  api-client/    # HTTP client (web + native)
+  site/          # Legacy Leptos 0.8 CSR site (trunk build → dist/)
+  admin/         # Legacy Leptos 0.8 CSR admin SPA (trunk build → dist/admin/)
+  site-server/   # Legacy Axum server for site/admin (API + static files)
   db/            # SurrealDB client, migrations, queries
   auth/          # OAuth, sessions, crypto (shared crate)
-  ui/            # Shared Leptos UI components (scuffed-ui)
+  ui/            # Legacy Leptos 0.8 shared UI components (scuffed-ui)
 ```
 
 ## SurrealDB Gotchas
