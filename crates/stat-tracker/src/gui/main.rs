@@ -11,14 +11,10 @@ fn main() {
     let _ = gtk::init();
     let _tray = tray::try_create_tray();
     if let Some(ref handle) = _tray {
-        let show_id = handle.show_id.clone();
         let quit_id = handle.quit_id.clone();
         std::thread::spawn(move || loop {
-            if let Some(action) = tray::poll_tray_events(&show_id, &quit_id) {
-                match action {
-                    tray::TrayAction::Quit => std::process::exit(0),
-                    tray::TrayAction::ShowWindow => {}
-                }
+            if tray::poll_quit(&quit_id) {
+                std::process::exit(0);
             }
             std::thread::sleep(std::time::Duration::from_secs(1));
         });

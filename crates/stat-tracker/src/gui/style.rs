@@ -236,6 +236,13 @@ body {
 
 .card-error p { font-size: 0.85rem; }
 
+.card-warning {
+    border-color: var(--warning);
+}
+
+.card-warning h3 { color: var(--warning); }
+.card-warning p { font-size: 0.85rem; color: var(--text-dim); }
+
 .text-dim { color: var(--text-dim); }
 .text-sm { font-size: 0.8rem; margin-top: 0.6rem; }
 

@@ -7,27 +7,38 @@ use stat_tracker::storage::LocalStore;
 
 use super::daemon::DaemonCard;
 
+#[derive(Clone)]
+enum StoreState {
+    Loading,
+    Open(Arc<LocalStore>),
+    Locked,
+}
+
 #[component]
 pub fn StatusPanel() -> Element {
     let config = use_signal(|| Config::load().unwrap_or_default());
     let mut refresh_tick = use_signal(|| 0u32);
-
-    let store: Signal<Option<Arc<LocalStore>>> = use_signal(|| None);
-    let mut store_w = store;
+    let mut store_state: Signal<StoreState> = use_signal(|| StoreState::Loading);
 
     use_future(move || {
         let data_dir = config().data_dir.clone();
         async move {
-            if let Ok(s) = LocalStore::open(&data_dir).await {
-                store_w.set(Some(Arc::new(s)));
+            match LocalStore::open(&data_dir).await {
+                Ok(s) => store_state.set(StoreState::Open(Arc::new(s))),
+                Err(_) => store_state.set(StoreState::Locked),
             }
         }
     });
 
     let stats = use_resource(move || {
-        let store = store();
+        let state = store_state();
         let _tick = refresh_tick();
-        async move { load_stats(store.as_deref()).await }
+        async move {
+            match state {
+                StoreState::Open(ref store) => load_stats(store).await,
+                _ => None,
+            }
+        }
     });
 
     let outputs = use_signal(|| {
@@ -51,9 +62,11 @@ pub fn StatusPanel() -> Element {
         }
     });
 
+    let db_locked = matches!(store_state(), StoreState::Locked);
+
     let (count, unsynced, last_capture) = match &*stats.read() {
-        Some(s) => (s.total_matches, s.unsynced_count, s.last_capture_time.clone()),
-        None => (0, 0, None),
+        Some(Some(s)) => (s.total_matches, s.unsynced_count, s.last_capture_time.clone()),
+        _ => (0, 0, None),
     };
 
     let sync_configured = config().sync.is_some();
@@ -63,6 +76,13 @@ pub fn StatusPanel() -> Element {
             h2 { "Dashboard" }
 
             DaemonCard {}
+
+            if db_locked {
+                div { class: "card card-warning",
+                    h3 { "Database locked" }
+                    p { "Stats database is in use by the running daemon. Live stats will appear here when the daemon stops, or check the database directly." }
+                }
+            }
 
             div { class: "card",
                 h3 { "Capture" }
@@ -77,7 +97,9 @@ pub fn StatusPanel() -> Element {
                 div { class: "stat-row",
                     span { class: "label", "Last capture" }
                     span { class: "value",
-                        if let Some(ref t) = last_capture {
+                        if db_locked {
+                            span { class: "text-dim", "locked" }
+                        } else if let Some(ref t) = last_capture {
                             "{t}"
                         } else {
                             "—"
@@ -107,7 +129,13 @@ pub fn StatusPanel() -> Element {
                 h3 { "Storage" }
                 div { class: "stat-row",
                     span { class: "label", "Stored matches" }
-                    span { class: "value", "{count}" }
+                    span { class: "value",
+                        if db_locked {
+                            span { class: "text-dim", "locked" }
+                        } else {
+                            "{count}"
+                        }
+                    }
                 }
                 div { class: "stat-row",
                     span { class: "label", "Database" }
@@ -127,7 +155,9 @@ pub fn StatusPanel() -> Element {
                     div { class: "stat-row",
                         span { class: "label", "Unsynced matches" }
                         span { class: "value",
-                            if unsynced > 0 {
+                            if db_locked {
+                                span { class: "text-dim", "locked" }
+                            } else if unsynced > 0 {
                                 span { class: "status-dot warn" }
                                 "{unsynced} pending"
                             } else {
@@ -153,20 +183,13 @@ struct DashboardStats {
     last_capture_time: Option<String>,
 }
 
-async fn load_stats(store: Option<&LocalStore>) -> DashboardStats {
-    let Some(store) = store else {
-        return DashboardStats {
-            total_matches: 0,
-            unsynced_count: 0,
-            last_capture_time: None,
-        };
-    };
+async fn load_stats(store: &LocalStore) -> Option<DashboardStats> {
     let total = store.match_count().await.unwrap_or(0);
     let unsynced = store.get_unsynced().await.map(|v| v.len()).unwrap_or(0);
     let last = store.last_capture_time().await;
-    DashboardStats {
+    Some(DashboardStats {
         total_matches: total,
         unsynced_count: unsynced,
         last_capture_time: last,
-    }
+    })
 }

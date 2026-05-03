@@ -1,25 +1,16 @@
 use tray_icon::menu::{Menu, MenuEvent, MenuId, MenuItem};
 use tray_icon::{Icon, TrayIconBuilder};
 
-pub enum TrayAction {
-    ShowWindow,
-    Quit,
-}
-
 pub struct TrayHandle {
     pub _icon: tray_icon::TrayIcon,
-    pub show_id: MenuId,
     pub quit_id: MenuId,
 }
 
 pub fn try_create_tray() -> Option<TrayHandle> {
     let icon = create_icon();
     let menu = Menu::new();
-    let show_item = MenuItem::new("Show Window", true, None);
     let quit_item = MenuItem::new("Quit", true, None);
-    let show_id = show_item.id().clone();
     let quit_id = quit_item.id().clone();
-    menu.append(&show_item).ok()?;
     menu.append(&quit_item).ok()?;
 
     let tray = TrayIconBuilder::new()
@@ -31,21 +22,15 @@ pub fn try_create_tray() -> Option<TrayHandle> {
 
     Some(TrayHandle {
         _icon: tray,
-        show_id,
         quit_id,
     })
 }
 
-pub fn poll_tray_events(show_id: &MenuId, quit_id: &MenuId) -> Option<TrayAction> {
+pub fn poll_quit(quit_id: &MenuId) -> bool {
     if let Ok(event) = MenuEvent::receiver().try_recv() {
-        if event.id() == show_id {
-            return Some(TrayAction::ShowWindow);
-        }
-        if event.id() == quit_id {
-            return Some(TrayAction::Quit);
-        }
+        return event.id() == quit_id;
     }
-    None
+    false
 }
 
 fn create_icon() -> Icon {
