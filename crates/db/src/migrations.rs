@@ -200,6 +200,8 @@ pub async fn run_migrations(client: &Surreal<Any>) -> DbResult<()> {
         DEFINE FIELD recruitment_open ON site_settings TYPE bool DEFAULT true;
         DEFINE FIELD recruitment_message ON site_settings TYPE string DEFAULT 'We are currently recruiting! Apply now to join the crew.';
         DEFINE FIELD min_age ON site_settings TYPE int DEFAULT 16;
+        DEFINE FIELD forum_backend ON site_settings TYPE string DEFAULT 'local'
+            ASSERT $value IN ['local', 'nostr'];
         DEFINE FIELD updated_at ON site_settings TYPE datetime DEFAULT time::now();
 
         -- ================================================
