@@ -111,10 +111,8 @@ pub fn AdminModeration() -> Element {
 
     rsx! {
 
-        h1 { "Moderation" }
-
         div { class: "admin-toolbar",
-            span {}
+            h1 { "Moderation" }
             button { class: "btn-add", onclick: open_create, "+ New Action" }
         }
 
