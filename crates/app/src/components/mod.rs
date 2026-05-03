@@ -1,6 +1,7 @@
 pub mod section_header;
 pub mod bracket;
 pub mod chat;
+pub mod poll;
 pub mod post;
 pub mod toast;
 pub mod modal;

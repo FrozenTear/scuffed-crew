@@ -261,6 +261,23 @@ pub fn create_router(state: AppState) -> Router {
             "/api/tournaments/{id}/next-round",
             post(routes::tournaments::generate_next_round),
         )
+        // Poll routes
+        .route(
+            "/api/polls",
+            get(routes::polls::list_polls).post(routes::polls::create_poll),
+        )
+        .route(
+            "/api/polls/{id}",
+            get(routes::polls::get_poll).delete(routes::polls::deactivate_poll),
+        )
+        .route(
+            "/api/polls/{id}/vote",
+            post(routes::polls::vote_poll),
+        )
+        .route(
+            "/api/polls/{id}/vote/{option_index}",
+            delete(routes::polls::unvote_poll),
+        )
         // Nostr identity verification (Phase 1.5)
         .route(
             "/api/nostr/challenge",

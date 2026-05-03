@@ -28,6 +28,8 @@ pub enum Route {
         Community {},
         #[route("/feed")]
         Feed {},
+        #[route("/polls")]
+        Polls {},
     #[end_layout]
 
     // Admin panel (sidebar layout, auth guarded)

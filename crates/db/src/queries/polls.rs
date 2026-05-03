@@ -1,6 +1,6 @@
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
-use surrealdb::sql::Datetime as SurrealDatetime;
+use surrealdb::types::Datetime as SurrealDatetime;
 use surrealdb_types::RecordId;
 use surrealdb_types::SurrealValue;
 
@@ -151,8 +151,8 @@ impl Database {
         with_timeout(async {
             self.client
                 .query("DELETE FROM poll_vote WHERE poll_id = $pid AND member_id = $mid AND option_index = $oidx")
-                .bind(("pid", poll_id))
-                .bind(("mid", member_id))
+                .bind(("pid", poll_id.to_string()))
+                .bind(("mid", member_id.to_string()))
                 .bind(("oidx", option_index as i64))
                 .await?;
             Ok(())
@@ -171,10 +171,10 @@ impl Database {
             let mut result = self
                 .client
                 .query("SELECT option_index, count() AS count FROM poll_vote WHERE poll_id = $pid GROUP BY option_index")
-                .bind(("pid", poll_id))
+                .bind(("pid", poll_id.to_string()))
                 .await?;
 
-            #[derive(Deserialize)]
+            #[derive(Debug, Clone, Serialize, Deserialize, SurrealValue)]
             struct VoteCount {
                 option_index: u32,
                 count: u32,
@@ -206,8 +206,8 @@ impl Database {
                 let mut r = self
                     .client
                     .query("SELECT option_index FROM poll_vote WHERE poll_id = $pid AND member_id = $mid")
-                    .bind(("pid", poll_id))
-                    .bind(("mid", mid))
+                    .bind(("pid", poll_id.to_string()))
+                    .bind(("mid", mid.to_string()))
                     .await?;
                 let v: Vec<DbPollVote> = r.take(0)?;
                 v.into_iter().map(|v| v.option_index).collect()
@@ -229,7 +229,7 @@ impl Database {
         with_timeout(async {
             self.client
                 .query("UPDATE $rid SET is_active = false")
-                .bind(("rid", RecordId::from(("poll", id))))
+                .bind(("rid", RecordId::new("poll", id)))
                 .await?;
             Ok(())
         })

@@ -514,6 +514,8 @@ pub enum AuditAction {
     PublishedCommunity,
     PublishedPost,
     PublishedReaction,
+    CreatedPoll,
+    DeletedPoll,
 }
 
 impl std::fmt::Display for AuditAction {
@@ -543,6 +545,7 @@ pub enum AuditTargetType {
     Tournament,
     TournamentParticipant,
     TournamentMatch,
+    Poll,
 }
 
 impl std::fmt::Display for AuditTargetType {
