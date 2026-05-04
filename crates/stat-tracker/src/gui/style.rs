@@ -197,6 +197,13 @@ body {
     color: var(--text);
 }
 
+.btn-danger {
+    background: var(--error);
+    color: white;
+}
+
+.btn-danger:hover { background: #dc2626; }
+
 .actions {
     display: flex;
     gap: 0.8rem;

@@ -52,6 +52,7 @@ pub fn SettingsPanel() -> Element {
                 poll_interval_secs: poll_interval().parse().unwrap_or(4),
                 cooldown_secs: cooldown().parse().unwrap_or(120),
             },
+            session_window_secs: config().session_window_secs,
         };
 
         match save_config(&new_config) {
@@ -174,6 +175,47 @@ pub fn SettingsPanel() -> Element {
                     class: "btn btn-secondary",
                     onclick: install_tessdata,
                     "Install / Reinstall Koverwatch Tessdata"
+                }
+            }
+
+            div { class: "card card-warning",
+                h3 { "Data Management" }
+                p { class: "text-dim text-sm", "Clear all stored match data, sessions, and logs. This cannot be undone." }
+                div { class: "actions",
+                    button {
+                        class: "btn btn-danger",
+                        onclick: {
+                            let data_dir = config().data_dir.clone();
+                            move |_| {
+                                let data_dir = data_dir.clone();
+                                spawn(async move {
+                                    let result = async {
+                                        let store = stat_tracker::storage::LocalStore::open(&data_dir).await?;
+                                        store.clear_all_data().await?;
+                                        stat_tracker::storage::clear_match_log(&data_dir);
+                                        Ok::<(), Box<dyn std::error::Error>>(())
+                                    }.await;
+                                    match result {
+                                        Ok(()) => {
+                                            toast.set(Some(("All match data cleared!".into(), true)));
+                                            spawn(async move {
+                                                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                                                toast.set(None);
+                                            });
+                                        }
+                                        Err(e) => {
+                                            toast.set(Some((format!("Clear failed: {e}"), false)));
+                                            spawn(async move {
+                                                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                                                toast.set(None);
+                                            });
+                                        }
+                                    }
+                                });
+                            }
+                        },
+                        "Clear All Match Data"
+                    }
                 }
             }
 
