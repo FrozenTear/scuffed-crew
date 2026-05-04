@@ -45,6 +45,7 @@ pub fn parse_scoreboard(raw_text: &str, outcome: &str, player_name: Option<&str>
         mitigation: stats.mitigation,
         played_at: SurrealDatetime::from(Utc::now()),
         synced: false,
+        session_id: String::new(),
     })
 }
 
@@ -108,33 +109,89 @@ fn extract_numbers(s: &str) -> Vec<u32> {
 }
 
 const HEROES: &[&str] = &[
-    "Ana", "Ashe", "Baptiste", "Bastion", "Brigitte", "Cassidy",
-    "D.Va", "Doomfist", "Echo", "Genji", "Hanzo", "Hazard",
-    "Illari", "Junker Queen", "Junkrat", "Juno", "Kiriko",
-    "Lifeweaver", "Lucio", "Mauga", "Mei", "Mercy", "Moira",
+    "Ana", "Anran", "Ashe", "Baptiste", "Bastion", "Brigitte", "Cassidy",
+    "D.Va", "Domina", "Doomfist", "Echo", "Emre", "Freja",
+    "Genji", "Hanzo", "Hazard",
+    "Illari", "Jetpack Cat", "Junker Queen", "Junkrat", "Juno", "Kiriko",
+    "Lifeweaver", "Lucio", "Mauga", "Mei", "Mercy", "Mizuki", "Moira",
     "Orisa", "Pharah", "Ramattra", "Reaper", "Reinhardt",
-    "Roadhog", "Sigma", "Sojourn", "Soldier: 76", "Sombra",
-    "Symmetra", "Torbjorn", "Tracer", "Venture", "Widowmaker",
-    "Winston", "Wrecking Ball", "Zarya", "Zenyatta",
+    "Roadhog", "Sierra", "Sigma", "Sojourn", "Soldier: 76", "Sombra",
+    "Symmetra", "Torbjorn", "Tracer", "Vendetta", "Venture",
+    "Widowmaker", "Winston", "Wrecking Ball", "Wuyang", "Zarya", "Zenyatta",
 ];
 
 fn find_hero(lines: &[&str]) -> Option<String> {
+    // Count occurrences of each hero name and also check if it appears
+    // on a line by itself or in the right-side panel (capitalized hero name).
+    // OW2 scoreboard shows YOUR hero in large text on the right panel,
+    // while enemy heroes appear in player rows. Prefer the hero that
+    // appears with a role keyword nearby or in a standalone mention.
     let text = lines.join(" ").to_lowercase();
+
+    let mut found: Vec<(&str, usize)> = Vec::new();
     for &hero in HEROES {
-        if text.contains(&hero.to_lowercase()) {
-            return Some(hero.to_string());
+        let hero_lower = hero.to_lowercase();
+        let count = text.matches(&hero_lower).count();
+        if count > 0 {
+            found.push((hero, count));
         }
     }
-    None
+
+    if found.is_empty() {
+        return None;
+    }
+
+    // If only one hero found, use it
+    if found.len() == 1 {
+        return Some(found[0].0.to_string());
+    }
+
+    // When multiple heroes detected, prefer the one that appears with
+    // role-indicator keywords nearby (the right panel shows hero + accuracy stats).
+    // The right panel text has "WEAPON ACCURACY", "CRITICAL HIT" etc.
+    let panel_keywords = ["accuracy", "critical", "weapon", "kills"];
+    for &(hero, _) in &found {
+        let hero_lower = hero.to_lowercase();
+        for line in lines {
+            let line_lower = line.to_lowercase();
+            if line_lower.contains(&hero_lower) {
+                // Skip if this is on a stat row (has many numbers)
+                let num_count = line.split(|c: char| !c.is_ascii_digit())
+                    .filter(|w| !w.is_empty())
+                    .count();
+                if num_count <= 1 {
+                    return Some(hero.to_string());
+                }
+            }
+        }
+        // Check if hero name appears near panel keywords
+        for kw in &panel_keywords {
+            if text.contains(&format!("{} {}", hero_lower, kw))
+                || text.contains(&format!("{} {}", kw, hero_lower))
+            {
+                return Some(hero.to_string());
+            }
+        }
+    }
+
+    // Fallback: pick the hero with fewest occurrences (likely the player's hero
+    // appearing once in the panel, vs bots appearing many times in team rows)
+    found.sort_by_key(|&(_, count)| count);
+    Some(found[0].0.to_string())
+}
+
+pub fn guess_role_public(hero: &str) -> String {
+    guess_role(hero)
 }
 
 fn guess_role(hero: &str) -> String {
-    match hero {
-        "D.Va" | "Doomfist" | "Junker Queen" | "Mauga" | "Orisa" | "Ramattra"
-        | "Reinhardt" | "Roadhog" | "Sigma" | "Winston" | "Wrecking Ball" | "Zarya"
-        | "Hazard" => "Tank".to_string(),
-        "Ana" | "Baptiste" | "Brigitte" | "Illari" | "Juno" | "Kiriko"
-        | "Lifeweaver" | "Lucio" | "Mercy" | "Moira" | "Zenyatta" => "Support".to_string(),
+    match hero.to_lowercase().as_str() {
+        "d.va" | "dva" | "doomfist" | "junker queen" | "junker_queen" | "mauga"
+        | "orisa" | "ramattra" | "reinhardt" | "roadhog" | "sigma" | "winston"
+        | "wrecking ball" | "wrecking_ball" | "zarya" | "hazard" => "Tank".to_string(),
+        "ana" | "baptiste" | "brigitte" | "illari" | "juno" | "kiriko"
+        | "lifeweaver" | "lucio" | "mercy" | "moira" | "zenyatta"
+        | "anran" | "freja" | "mizuki" | "sierra" => "Support".to_string(),
         _ => "Damage".to_string(),
     }
 }

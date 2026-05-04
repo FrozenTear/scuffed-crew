@@ -284,24 +284,32 @@ async fn handle_capture(
     let img = capture::capture_screen_output(backend, capture_output).await?;
 
     let matcher = Arc::clone(portrait_matcher);
-    let (outcome, ocr_result, portrait_hero, scoreboard_img) = tokio::task::spawn_blocking(move || {
+    let (outcome, ocr_result, portrait_hero, scoreboard_img, player_row_idx) = tokio::task::spawn_blocking(move || {
         let outcome = polled_outcome
             .unwrap_or_else(|| detect::match_end::detect_outcome(&img));
         let ocr = ocr::recognize(&img);
 
-        // Try portrait matching on the scoreboard crop
+        // Try portrait matching — detect the player's highlighted row first
         let scoreboard = ocr::preprocess::crop_scoreboard(&img);
-        let portrait_match = matcher.match_all_portraits(&scoreboard).into_iter().next();
+        let player_match = matcher.match_player_hero(&scoreboard);
+        let portrait_match = player_match.as_ref().map(|(name, conf, _)| (name.clone(), *conf));
+        let row_idx = player_match.map(|(_, _, idx)| idx);
 
-        (outcome, ocr, portrait_match, scoreboard)
+        (outcome, ocr, portrait_match, scoreboard, row_idx)
     })
     .await?;
     let ocr_result = ocr_result?;
 
     tracing::info!(?outcome, "frame analysis");
+    let preview_end = ocr_result.raw_text
+        .char_indices()
+        .map(|(i, _)| i)
+        .take_while(|&i| i <= 120)
+        .last()
+        .unwrap_or(0);
     tracing::info!(
         confidence = ocr_result.confidence,
-        text_preview = &ocr_result.raw_text[..ocr_result.raw_text.len().min(120)],
+        text_preview = &ocr_result.raw_text[..preview_end],
         "OCR result"
     );
 
@@ -339,9 +347,11 @@ async fn handle_capture(
             let (sw, sh) = (scoreboard_img.width(), scoreboard_img.height());
             let portrait_w = sw * 6 / 100;
             let portrait_x = sw * 1 / 100;
-            let first_row_y = sh * 12 / 100;
-            if portrait_x + portrait_w <= sw && first_row_y + portrait_w <= sh {
-                let crop = scoreboard_img.crop_imm(portrait_x, first_row_y, portrait_w, portrait_w);
+            let row_height = sh * 7 / 100;
+            let start_y = sh * 12 / 100;
+            let row_y = start_y + player_row_idx.unwrap_or(0) as u32 * row_height;
+            if portrait_x + portrait_w <= sw && row_y + portrait_w <= sh {
+                let crop = scoreboard_img.crop_imm(portrait_x, row_y, portrait_w, portrait_w);
                 if let Err(e) = detect::hero_portrait::save_portrait_reference(
                     &portraits_path,
                     &parsed.hero,
