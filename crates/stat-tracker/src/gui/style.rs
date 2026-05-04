@@ -250,4 +250,346 @@ body {
     opacity: 0.5;
     cursor: not-allowed;
 }
+
+.panel-wide { max-width: 960px; }
+
+.match-count {
+    font-size: 0.8rem;
+    margin-bottom: 0.8rem;
+}
+
+/* Match history table */
+.match-table {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    overflow: hidden;
+}
+
+.match-header, .match-row {
+    display: grid;
+    grid-template-columns: 60px 100px 70px 1fr 40px 40px 40px 50px 50px 50px 90px;
+    align-items: center;
+    padding: 0.5rem 0.8rem;
+    font-size: 0.8rem;
+    gap: 0.3rem;
+}
+
+.match-header {
+    background: rgba(124, 58, 237, 0.08);
+    font-weight: 600;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    font-size: 0.7rem;
+    letter-spacing: 0.04em;
+}
+
+.match-row {
+    border-top: 1px solid var(--border);
+    font-family: var(--font-mono);
+}
+
+.match-row:hover { background: rgba(124, 58, 237, 0.04); }
+
+.col-outcome { font-weight: 700; text-transform: uppercase; font-size: 0.75rem; }
+.col-hero { font-weight: 500; }
+.col-role { font-size: 0.75rem; }
+.col-map { font-size: 0.75rem; color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.col-stat { text-align: right; font-size: 0.8rem; }
+.col-time { text-align: right; font-size: 0.75rem; }
+
+.outcome-win { color: var(--success); }
+.outcome-loss { color: var(--error); }
+.outcome-draw { color: var(--warning); }
+
+/* Stats page */
+.stats-grid {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 1rem;
+}
+
+.stat-block {
+    text-align: center;
+    padding: 0.8rem 0;
+}
+
+.stat-big {
+    font-size: 1.6rem;
+    font-weight: 700;
+    font-family: var(--font-mono);
+}
+
+.stat-win { color: var(--success); }
+.stat-loss { color: var(--error); }
+.stat-label { font-size: 0.75rem; color: var(--text-dim); text-transform: uppercase; margin-top: 0.2rem; }
+
+/* Role breakdown */
+.role-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 0.8rem;
+}
+
+.role-card {
+    background: var(--bg-input);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 0.8rem;
+}
+
+.role-name {
+    font-weight: 700;
+    font-size: 0.9rem;
+    margin-bottom: 0.3rem;
+}
+
+.role-tank { color: #f5b43c; }
+.role-damage { color: #e65050; }
+.role-support { color: #64c878; }
+
+.role-stats { font-size: 0.8rem; margin-bottom: 0.5rem; }
+
+.wr-bar {
+    height: 4px;
+    background: var(--border);
+    border-radius: 2px;
+    overflow: hidden;
+}
+
+.wr-fill {
+    height: 100%;
+    background: var(--accent);
+    border-radius: 2px;
+    transition: width 0.3s;
+}
+
+/* Hero table */
+.hero-table {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    overflow: hidden;
+}
+
+.hero-header, .hero-row {
+    display: grid;
+    grid-template-columns: 110px 70px 55px 55px 40px 40px 40px 50px 50px 50px;
+    align-items: center;
+    padding: 0.5rem 0.8rem;
+    font-size: 0.8rem;
+    gap: 0.3rem;
+}
+
+.hero-header {
+    background: rgba(124, 58, 237, 0.08);
+    font-weight: 600;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    font-size: 0.7rem;
+    letter-spacing: 0.04em;
+}
+
+.hero-row {
+    border-top: 1px solid var(--border);
+    font-family: var(--font-mono);
+}
+
+.hero-row:hover { background: rgba(124, 58, 237, 0.04); }
+
+.col-hero-name { font-weight: 500; }
+.col-hero-role { font-size: 0.75rem; }
+.col-hero-games { text-align: right; }
+.col-hero-wr { text-align: right; font-weight: 600; }
+
+/* Session list */
+.session-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+}
+
+.session-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0.6rem 0.8rem;
+    background: var(--bg-input);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    cursor: pointer;
+    transition: all 0.15s;
+}
+
+.session-item:hover {
+    border-color: var(--accent);
+}
+
+.session-item-active {
+    border-color: var(--accent);
+    background: rgba(124, 58, 237, 0.08);
+}
+
+.session-hero { font-weight: 600; font-size: 0.85rem; }
+.session-meta { font-size: 0.75rem; }
+
+/* Progression charts */
+.chart-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 0.8rem;
+}
+
+.stat-chart {
+    background: var(--bg-input);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 0.6rem;
+}
+
+.stat-chart-header {
+    display: flex;
+    align-items: baseline;
+    gap: 0.4rem;
+    margin-bottom: 0.3rem;
+}
+
+.stat-chart-label {
+    font-size: 0.7rem;
+    font-weight: 600;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+}
+
+.stat-chart-value {
+    font-size: 0.85rem;
+    font-weight: 700;
+    font-family: var(--font-mono);
+    margin-left: auto;
+}
+
+.stat-chart-delta {
+    font-size: 0.7rem;
+    font-family: var(--font-mono);
+    color: var(--text-dim);
+}
+
+.progression-svg {
+    width: 100%;
+    height: 50px;
+}
+
+/* Timeline table */
+.timeline-table {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    overflow: hidden;
+}
+
+.timeline-header, .timeline-row {
+    display: grid;
+    grid-template-columns: 40px 40px 40px 40px 55px 55px 55px 70px;
+    align-items: center;
+    padding: 0.5rem 0.8rem;
+    font-size: 0.8rem;
+    gap: 0.3rem;
+}
+
+.timeline-header {
+    background: rgba(124, 58, 237, 0.08);
+    font-weight: 600;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    font-size: 0.7rem;
+    letter-spacing: 0.04em;
+}
+
+.timeline-row {
+    border-top: 1px solid var(--border);
+    font-family: var(--font-mono);
+}
+
+.timeline-row:hover { background: rgba(124, 58, 237, 0.04); }
+
+.col-capture { font-weight: 600; color: var(--accent); }
+
+/* Map winrate table */
+.map-table {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    overflow: hidden;
+}
+
+.map-header, .map-row {
+    display: grid;
+    grid-template-columns: 1fr 55px 60px 55px 100px;
+    align-items: center;
+    padding: 0.5rem 0.8rem;
+    font-size: 0.8rem;
+    gap: 0.3rem;
+}
+
+.map-header {
+    background: rgba(124, 58, 237, 0.08);
+    font-weight: 600;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    font-size: 0.7rem;
+    letter-spacing: 0.04em;
+}
+
+.map-row {
+    border-top: 1px solid var(--border);
+    font-family: var(--font-mono);
+}
+
+.map-row:hover { background: rgba(124, 58, 237, 0.04); }
+
+.col-map-name { font-weight: 500; }
+.col-map-games { text-align: right; }
+.col-map-wl { text-align: right; font-size: 0.75rem; color: var(--text-dim); }
+.col-map-wr { text-align: right; font-weight: 600; }
+.col-map-bar { padding-left: 0.4rem; }
+
+/* Win trend chart */
+.trend-svg {
+    width: 100%;
+    height: 70px;
+}
+
+.trend-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    margin-bottom: 0.4rem;
+}
+
+.trend-current {
+    font-family: var(--font-mono);
+    font-size: 1rem;
+    font-weight: 700;
+}
+
+/* Map bar chart */
+.map-bar-svg {
+    width: 100%;
+    height: auto;
+}
+
+/* Hero-map expandable rows */
+.hero-row-expandable { cursor: pointer; }
+.hero-row-expandable:hover { background: rgba(124, 58, 237, 0.06); }
+
+.hero-row-sub {
+    background: rgba(124, 58, 237, 0.03);
+}
+
+.col-sub-indent {
+    padding-left: 1.2rem;
+    font-size: 0.75rem;
+    color: var(--text-dim);
+}
 "#;
