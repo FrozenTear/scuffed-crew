@@ -257,6 +257,16 @@ pub fn clear_match_log(data_dir: &Path) {
     }
 }
 
+pub fn force_clear_data_dir(data_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    let db_path = data_dir.join("stats.surrealkv");
+    if db_path.exists() {
+        std::fs::remove_dir_all(&db_path)?;
+    }
+    clear_match_log(data_dir);
+    tracing::info!("force-cleared data directory");
+    Ok(())
+}
+
 pub fn read_match_log(data_dir: &Path) -> Vec<PersonalMatch> {
     let path = match_log_path(data_dir);
     let Ok(content) = std::fs::read_to_string(&path) else {

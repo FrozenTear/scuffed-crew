@@ -180,7 +180,7 @@ pub fn SettingsPanel() -> Element {
 
             div { class: "card card-warning",
                 h3 { "Data Management" }
-                p { class: "text-dim text-sm", "Clear all stored match data, sessions, and logs. This cannot be undone." }
+                p { class: "text-dim text-sm", "Clear all stored match data, sessions, and logs. This cannot be undone. If the daemon is running, restart it after clearing." }
                 div { class: "actions",
                     button {
                         class: "btn btn-danger",
@@ -190,9 +190,15 @@ pub fn SettingsPanel() -> Element {
                                 let data_dir = data_dir.clone();
                                 spawn(async move {
                                     let result = async {
-                                        let store = stat_tracker::storage::LocalStore::open(&data_dir).await?;
-                                        store.clear_all_data().await?;
-                                        stat_tracker::storage::clear_match_log(&data_dir);
+                                        match stat_tracker::storage::LocalStore::open(&data_dir).await {
+                                            Ok(store) => {
+                                                store.clear_all_data().await?;
+                                                stat_tracker::storage::clear_match_log(&data_dir);
+                                            }
+                                            Err(_) => {
+                                                stat_tracker::storage::force_clear_data_dir(&data_dir)?;
+                                            }
+                                        }
                                         Ok::<(), Box<dyn std::error::Error>>(())
                                     }.await;
                                     match result {
