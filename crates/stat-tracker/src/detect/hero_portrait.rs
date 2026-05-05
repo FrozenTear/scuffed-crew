@@ -110,22 +110,21 @@ impl PortraitMatcher {
             }
         }
 
-        // Fallback: match all team 1 portraits and log them for debugging
-        tracing::debug!("highlighted row detection failed, matching all team 1 portraits");
+        // Log all team 1 portrait matches for debugging, but do NOT use them
+        // as the result. Picking the highest-confidence teammate portrait caused
+        // wrong-hero attribution when the highlighted row wasn't detected.
+        tracing::debug!("highlighted row detection failed, falling back to OCR text");
         let mut all_matches: Vec<(usize, String, f64)> = Vec::new();
         for (i, crop) in crops.iter().enumerate().take(team_size) {
             if let Some((name, conf)) = self.match_portrait(crop) {
                 all_matches.push((i, name, conf));
             }
         }
-
         if !all_matches.is_empty() {
-            tracing::info!(
+            tracing::debug!(
                 matches = ?all_matches.iter().map(|(i, n, c)| format!("row {i}: {n} ({c:.2})")).collect::<Vec<_>>(),
-                "team 1 portrait matches (using highest confidence as fallback)"
+                "team 1 portrait matches (debug only, not used without highlighted row)"
             );
-            let best = all_matches.into_iter().max_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal));
-            return best.map(|(idx, name, conf)| (name, conf, idx));
         }
 
         None

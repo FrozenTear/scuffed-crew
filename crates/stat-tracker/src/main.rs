@@ -329,7 +329,6 @@ async fn handle_capture(
     };
 
     if let Some(mut parsed) = parse::parse_scoreboard(&ocr_result.raw_text, outcome_str, player_name, player_row_idx) {
-        // Portrait matching is the primary hero detection method (more reliable than OCR text)
         if let Some((hero_name, confidence)) = &portrait_hero {
             tracing::info!(
                 hero = %hero_name,
@@ -339,6 +338,12 @@ async fn handle_capture(
             );
             parsed.hero = hero_name.clone();
             parsed.role = parse::guess_role_public(&parsed.hero);
+        } else {
+            tracing::info!(
+                hero = %parsed.hero,
+                source = "ocr_text",
+                "hero identified via OCR text (portrait row detection missed)"
+            );
         }
 
         // Auto-collect portrait reference when hero is identified and collection is enabled
