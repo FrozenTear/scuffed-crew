@@ -328,7 +328,7 @@ async fn handle_capture(
         detect::MatchOutcome::Unknown => "unknown",
     };
 
-    if let Some(mut parsed) = parse::parse_scoreboard(&ocr_result.raw_text, outcome_str, player_name) {
+    if let Some(mut parsed) = parse::parse_scoreboard(&ocr_result.raw_text, outcome_str, player_name, player_row_idx) {
         // Portrait matching is the primary hero detection method (more reliable than OCR text)
         if let Some((hero_name, confidence)) = &portrait_hero {
             tracing::info!(

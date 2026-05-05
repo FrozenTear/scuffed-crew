@@ -9,7 +9,7 @@ pub fn prepare_with_threshold(img: &DynamicImage, threshold: u8) -> GrayImage {
     let (w, h) = gray.dimensions();
 
     // Only upscale if the image is small (< 1280px wide) — high-res displays don't need it
-    let (work_img, scale) = if w < 1280 {
+    let work_img = if w < 1280 {
         let mut upscaled = GrayImage::new(w * 2, h * 2);
         for y in 0..h {
             for x in 0..w {
@@ -20,12 +20,10 @@ pub fn prepare_with_threshold(img: &DynamicImage, threshold: u8) -> GrayImage {
                 upscaled.put_pixel(x * 2 + 1, y * 2 + 1, px);
             }
         }
-        (upscaled, 2)
+        upscaled
     } else {
-        (gray, 1)
+        gray
     };
-
-    let _ = scale;
 
     // 3x3 median filter to remove noise while preserving text edges
     let filtered = median_filter_3x3(&work_img);

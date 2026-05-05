@@ -2,7 +2,12 @@ use crate::storage::PersonalMatch;
 use chrono::Utc;
 use surrealdb_types::Datetime as SurrealDatetime;
 
-pub fn parse_scoreboard(raw_text: &str, outcome: &str, player_name: Option<&str>) -> Option<PersonalMatch> {
+pub fn parse_scoreboard(
+    raw_text: &str,
+    outcome: &str,
+    player_name: Option<&str>,
+    player_row_index: Option<usize>,
+) -> Option<PersonalMatch> {
     let lines: Vec<&str> = raw_text
         .lines()
         .map(|l| l.trim())
@@ -16,14 +21,13 @@ pub fn parse_scoreboard(raw_text: &str, outcome: &str, player_name: Option<&str>
 
     tracing::debug!(line_count = lines.len(), "parsing scoreboard text");
 
-    let row = if let Some(name) = player_name {
-        find_player_row(&lines, name)
-    } else {
-        None
-    };
-
-    let stats = row
-        .and_then(|r| extract_row_stats(r))
+    let stats = player_row_index
+        .and_then(|idx| find_stat_row_by_index(&lines, idx))
+        .or_else(|| {
+            player_name
+                .and_then(|name| find_player_row(&lines, name))
+                .and_then(|r| extract_row_stats(r))
+        })
         .or_else(|| find_best_stat_row(&lines));
 
     let stats = stats?;
@@ -70,6 +74,22 @@ fn find_player_row<'a>(lines: &[&'a str], player_name: &str) -> Option<&'a str> 
 fn extract_row_stats(line: &str) -> Option<PlayerStats> {
     let numbers = extract_numbers(line);
     stats_from_numbers(&numbers)
+}
+
+fn find_stat_row_by_index(lines: &[&str], row_index: usize) -> Option<PlayerStats> {
+    let stat_rows: Vec<&str> = lines
+        .iter()
+        .copied()
+        .filter(|line| extract_numbers(line).len() >= 6)
+        .collect();
+
+    tracing::debug!(
+        stat_row_count = stat_rows.len(),
+        target_index = row_index,
+        "looking up stat row by portrait index"
+    );
+
+    stat_rows.get(row_index).and_then(|line| extract_row_stats(line))
 }
 
 fn find_best_stat_row(lines: &[&str]) -> Option<PlayerStats> {

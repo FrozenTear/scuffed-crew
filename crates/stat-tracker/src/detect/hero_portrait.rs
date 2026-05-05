@@ -99,9 +99,9 @@ impl PortraitMatcher {
     }
 
     pub fn match_player_hero(&self, scoreboard: &DynamicImage) -> Option<(String, f64, usize)> {
-        let player_row = detect_player_row(scoreboard);
-        let crops = extract_portrait_crops(scoreboard);
         let team_size = detect_team_size(scoreboard);
+        let player_row = detect_player_row_inner(scoreboard, team_size);
+        let crops = extract_portrait_crops_inner(scoreboard, team_size);
 
         if let Some(idx) = player_row {
             if let Some(result) = crops.get(idx).and_then(|crop| self.match_portrait(crop)) {
@@ -135,10 +135,9 @@ impl PortraitMatcher {
 /// Detect which row in team 1 is the player's own row.
 /// OW2 highlights the player's row with a brighter/glowing background.
 /// Returns the row index (0-based within team 1).
-fn detect_player_row(scoreboard: &DynamicImage) -> Option<usize> {
+fn detect_player_row_inner(scoreboard: &DynamicImage, team_size: usize) -> Option<usize> {
     let rgb = scoreboard.to_rgb8();
     let (w, h) = rgb.dimensions();
-    let team_size = detect_team_size(scoreboard);
 
     let row_height = match team_size {
         6 => h * 58 / 1000,
@@ -210,8 +209,11 @@ fn detect_player_row(scoreboard: &DynamicImage) -> Option<usize> {
 /// - Rows start ~12% from top
 /// - Portrait occupies roughly leftmost 5-6% of width, square
 fn extract_portrait_crops(scoreboard: &DynamicImage) -> Vec<DynamicImage> {
+    extract_portrait_crops_inner(scoreboard, detect_team_size(scoreboard))
+}
+
+fn extract_portrait_crops_inner(scoreboard: &DynamicImage, team_size: usize) -> Vec<DynamicImage> {
     let (w, h) = (scoreboard.width(), scoreboard.height());
-    let team_size = detect_team_size(scoreboard);
     let portrait_w = w * 6 / 100;
     let portrait_h = portrait_w; // square
     let portrait_x = w * 1 / 100;
