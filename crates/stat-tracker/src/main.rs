@@ -146,6 +146,8 @@ async fn run_loop(
     let poll_interval = tokio::time::Duration::from_secs(auto_detect.poll_interval_secs);
     let cooldown_duration = std::time::Duration::from_secs(auto_detect.cooldown_secs);
     let mut last_auto_detect: Option<Instant> = None;
+    let mut last_tab_capture: Option<Instant> = None;
+    let tab_debounce = std::time::Duration::from_secs(3);
 
     // Pending outcome detected by the poller, consumed by the next Tab capture
     let mut pending_outcome: Option<detect::MatchOutcome> = None;
@@ -162,9 +164,17 @@ async fn run_loop(
             result = kbd.wait_tab() => {
                 match result {
                     Ok(()) => {
+                        if let Some(last) = last_tab_capture {
+                            if last.elapsed() < tab_debounce {
+                                tracing::debug!("Tab debounced — ignoring rapid press");
+                                continue;
+                            }
+                        }
+
                         // Wait for the game to render the scoreboard overlay after Tab press
                         tokio::time::sleep(tokio::time::Duration::from_millis(750)).await;
 
+                        last_tab_capture = Some(Instant::now());
                         let outcome = pending_outcome.take();
                         if outcome.is_some() {
                             tracing::info!("Tab pressed — using pending outcome from auto-detect");
