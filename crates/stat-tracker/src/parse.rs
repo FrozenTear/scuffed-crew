@@ -187,12 +187,13 @@ pub fn guess_role_public(hero: &str) -> String {
 
 fn guess_role(hero: &str) -> String {
     match hero.to_lowercase().as_str() {
-        "d.va" | "dva" | "doomfist" | "junker queen" | "junker_queen" | "mauga"
-        | "orisa" | "ramattra" | "reinhardt" | "roadhog" | "sigma" | "winston"
-        | "wrecking ball" | "wrecking_ball" | "zarya" | "hazard" => "Tank".to_string(),
-        "ana" | "baptiste" | "brigitte" | "illari" | "juno" | "kiriko"
-        | "lifeweaver" | "lucio" | "mercy" | "moira" | "zenyatta"
-        | "anran" | "freja" | "mizuki" | "sierra" => "Support".to_string(),
+        "d.va" | "dva" | "doomfist" | "domina" | "junker queen" | "junker_queen"
+        | "mauga" | "orisa" | "ramattra" | "reinhardt" | "roadhog" | "sigma"
+        | "winston" | "wrecking ball" | "wrecking_ball" | "zarya"
+        | "hazard" => "Tank".to_string(),
+        "ana" | "baptiste" | "brigitte" | "illari" | "jetpack cat" | "juno"
+        | "kiriko" | "lifeweaver" | "lucio" | "mercy" | "mizuki" | "moira"
+        | "wuyang" | "zenyatta" => "Support".to_string(),
         _ => "Damage".to_string(),
     }
 }
