@@ -1,3 +1,4 @@
+#[cfg(feature = "web")]
 pub mod connection_status;
 pub mod map_canvas_css;
 #[cfg(feature = "web")]
@@ -10,6 +11,7 @@ pub mod hero_picker;
 pub mod team_panel;
 pub mod timeline;
 
+#[cfg(feature = "web")]
 pub use connection_status::ConnectionStatus;
 pub use map_canvas_css::MAP_CANVAS_CSS;
 #[cfg(feature = "web")]

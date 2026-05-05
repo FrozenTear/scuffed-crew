@@ -7,7 +7,7 @@
 use dioxus::prelude::*;
 use uuid::Uuid;
 
-use scuffed_types::strategy::{Color, MapMetadata, Position, StrategyElement, Tool};
+use scuffed_types::strategy::{Color, ElementType, MapMetadata, Position, StrategyElement, Tool};
 
 // =============================================================================
 // Serialization helpers for the JS bridge

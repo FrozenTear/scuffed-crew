@@ -163,7 +163,7 @@ async fn run_loop(
                 match result {
                     Ok(()) => {
                         // Wait for the game to render the scoreboard overlay after Tab press
-                        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+                        tokio::time::sleep(tokio::time::Duration::from_millis(750)).await;
 
                         let outcome = pending_outcome.take();
                         if outcome.is_some() {
@@ -364,18 +364,17 @@ async fn handle_capture(
 
         let now = SurrealDatetime::from(Utc::now());
 
+        // Populate map name: prefer auto-detected maps, then OCR-parsed map
+        if !detected_maps.is_empty() && parsed.map_name.is_empty() {
+            parsed.map_name = detected_maps[0].clone();
+        }
+
         let session_id = if force_new_session {
-            // Phase detection confirmed a new match — always start fresh
             let sid = format!("{:016x}", rand_id());
-            let map = if !detected_maps.is_empty() {
-                detected_maps[0].clone()
-            } else {
-                parsed.map_name.clone()
-            };
             let session = storage::MatchSession {
                 session_id: sid.clone(),
                 hero: parsed.hero.clone(),
-                map_name: map,
+                map_name: parsed.map_name.clone(),
                 role: parsed.role.clone(),
                 started_at: now.clone(),
                 last_capture_at: now.clone(),
@@ -390,6 +389,10 @@ async fn handle_capture(
         } else {
             match store.find_active_session(&parsed.hero, session_window_secs).await {
                 Ok(Some(session)) => {
+                    // Inherit map name from session if this capture doesn't have one
+                    if parsed.map_name.is_empty() && !session.map_name.is_empty() {
+                        parsed.map_name = session.map_name.clone();
+                    }
                     let new_count = session.capture_count + 1;
                     if let Err(e) = store.update_session(
                         &session.session_id,
@@ -431,6 +434,7 @@ async fn handle_capture(
 
         tracing::info!(
             hero = %parsed.hero,
+            map = %parsed.map_name,
             elims = parsed.elims,
             deaths = parsed.deaths,
             "parsed scoreboard"

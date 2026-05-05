@@ -1,5 +1,6 @@
 pub mod section_header;
 pub mod bracket;
+pub mod charts;
 pub mod chat;
 pub mod poll;
 pub mod post;
@@ -12,4 +13,5 @@ pub use section_header::SectionHeader;
 pub use toast::{Toast, ToastLevel, ToastProvider, ToastState, use_toast};
 pub use modal::Modal;
 pub use admin_shared::*;
+#[cfg(feature = "web")]
 pub use chat::ChatWidget;

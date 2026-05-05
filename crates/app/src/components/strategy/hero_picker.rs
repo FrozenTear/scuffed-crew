@@ -1,7 +1,7 @@
 use dioxus::prelude::*;
 use scuffed_types::HeroRole;
 
-const HERO_PICKER_CSS: &str = r#"
+const HERO_PICKER_CSS: &str = r##"
     .hero-picker {
         display: flex;
         flex-direction: column;
@@ -164,7 +164,17 @@ const HERO_PICKER_CSS: &str = r#"
         color: var(--text-muted);
         font-size: 0.65rem;
     }
-"#;
+    .hero-wr-badge {
+        font-size: 0.55rem;
+        font-weight: 700;
+        padding: 0.05rem 0.2rem;
+        border-radius: 3px;
+        line-height: 1;
+    }
+    .hero-wr-badge.high { color: #34d399; background: rgba(52, 211, 153, 0.12); }
+    .hero-wr-badge.mid { color: #fbbf24; background: rgba(251, 191, 36, 0.12); }
+    .hero-wr-badge.low { color: #f87171; background: rgba(248, 113, 113, 0.12); }
+"##;
 
 /// Hero definition for the picker UI.
 #[derive(Clone, PartialEq)]
@@ -188,25 +198,28 @@ struct AbilityDef {
 fn heroes_by_role(role: HeroRole) -> Vec<HeroDef> {
     let roster: &[(&str, &str)] = match role {
         HeroRole::Tank => &[
-            ("dva", "D.Va"), ("doomfist", "Doomfist"), ("junker-queen", "Junker Queen"),
+            ("dva", "D.Va"), ("domina", "Domina"), ("doomfist", "Doomfist"),
+            ("hazard", "Hazard"), ("junker-queen", "Junker Queen"),
             ("mauga", "Mauga"), ("orisa", "Orisa"), ("ramattra", "Ramattra"),
             ("reinhardt", "Reinhardt"), ("roadhog", "Roadhog"), ("sigma", "Sigma"),
             ("winston", "Winston"), ("wrecking-ball", "Wrecking Ball"), ("zarya", "Zarya"),
-            ("hazard", "Hazard"),
         ],
         HeroRole::Damage => &[
-            ("ashe", "Ashe"), ("bastion", "Bastion"), ("cassidy", "Cassidy"),
-            ("echo", "Echo"), ("genji", "Genji"), ("hanzo", "Hanzo"),
+            ("anran", "Anran"), ("ashe", "Ashe"), ("bastion", "Bastion"),
+            ("cassidy", "Cassidy"), ("echo", "Echo"), ("emre", "Emre"),
+            ("freja", "Freja"), ("genji", "Genji"), ("hanzo", "Hanzo"),
             ("junkrat", "Junkrat"), ("mei", "Mei"), ("pharah", "Pharah"),
-            ("reaper", "Reaper"), ("sojourn", "Sojourn"), ("soldier-76", "Soldier: 76"),
-            ("sombra", "Sombra"), ("symmetra", "Symmetra"), ("torbjorn", "Torbjorn"),
-            ("tracer", "Tracer"), ("venture", "Venture"), ("widowmaker", "Widowmaker"),
+            ("reaper", "Reaper"), ("sierra", "Sierra"), ("sojourn", "Sojourn"),
+            ("soldier-76", "Soldier: 76"), ("sombra", "Sombra"), ("symmetra", "Symmetra"),
+            ("torbjorn", "Torbjorn"), ("tracer", "Tracer"), ("vendetta", "Vendetta"),
+            ("venture", "Venture"), ("widowmaker", "Widowmaker"),
         ],
         HeroRole::Support => &[
             ("ana", "Ana"), ("baptiste", "Baptiste"), ("brigitte", "Brigitte"),
             ("illari", "Illari"), ("juno", "Juno"), ("kiriko", "Kiriko"),
             ("lifeweaver", "Lifeweaver"), ("lucio", "Lucio"), ("mercy", "Mercy"),
-            ("moira", "Moira"), ("zenyatta", "Zenyatta"),
+            ("mizuki", "Mizuki"), ("moira", "Moira"), ("wuyang", "Wuyang"),
+            ("zenyatta", "Zenyatta"),
         ],
     };
 
@@ -233,6 +246,28 @@ fn hero_by_id(id: &str) -> Option<HeroDef> {
     None
 }
 
+/// Hero winrate entry for display in the picker.
+#[derive(Clone, PartialEq)]
+pub struct HeroWinRate {
+    pub hero_name: String,
+    pub winrate: f64,
+}
+
+fn normalize_hero_id(name: &str) -> String {
+    name.to_lowercase()
+        .replace(".", "")
+        .replace(": ", "-")
+        .replace(" ", "-")
+        .replace("ö", "o")
+        .replace("ú", "u")
+}
+
+fn wr_badge_class(pct: f64) -> &'static str {
+    if pct >= 55.0 { "hero-wr-badge high" }
+    else if pct >= 45.0 { "hero-wr-badge mid" }
+    else { "hero-wr-badge low" }
+}
+
 #[component]
 pub fn HeroPicker(
     /// Currently selected hero ID.
@@ -241,6 +276,10 @@ pub fn HeroPicker(
 
     /// Fired when a hero is clicked.
     on_select: EventHandler<String>,
+
+    /// Optional personal winrate data per hero.
+    #[props(default)]
+    hero_winrates: Option<Vec<HeroWinRate>>,
 ) -> Element {
     let mut expanded_role = use_signal(|| Option::<HeroRole>::None);
 
@@ -286,6 +325,11 @@ pub fn HeroPicker(
                                     let is_selected = selected_hero.as_deref() == Some(hero.id);
                                     let btn_cls = if is_selected { "hero-btn selected" } else { "hero-btn" };
 
+                                    let wr = hero_winrates.as_ref().and_then(|rates| {
+                                        let norm_id = hero.id;
+                                        rates.iter().find(|r| normalize_hero_id(&r.hero_name) == norm_id)
+                                    });
+
                                     rsx! {
                                         button {
                                             class: "{btn_cls}",
@@ -297,6 +341,15 @@ pub fn HeroPicker(
                                                 alt: "{hero_name}",
                                             }
                                             span { class: "hero-name-short", "{hero_name}" }
+                                            if let Some(wr) = wr {
+                                                {
+                                                    let cls = wr_badge_class(wr.winrate);
+                                                    let val = wr.winrate;
+                                                    rsx! {
+                                                        span { class: "{cls}", "{val:.0}%" }
+                                                    }
+                                                }
+                                            }
                                         }
                                     }
                                 })}

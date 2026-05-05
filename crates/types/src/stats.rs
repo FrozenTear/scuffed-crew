@@ -1,12 +1,13 @@
 use serde::{Deserialize, Serialize};
 
-use crate::strategy::HeroRole;
+use crate::strategy::{GameMode, HeroRole};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Hero {
-    // Tank
+    // Tank (14)
     DVa,
+    Domina,
     Doomfist,
     Hazard,
     JunkerQueen,
@@ -20,27 +21,32 @@ pub enum Hero {
     WreckingBall,
     Zarya,
 
-    // Damage
+    // Damage (23)
+    Anran,
     Ashe,
     Bastion,
     Cassidy,
     Echo,
+    Emre,
+    Freja,
     Genji,
     Hanzo,
     Junkrat,
     Mei,
     Pharah,
     Reaper,
+    Sierra,
     Sojourn,
     Soldier76,
     Sombra,
     Symmetra,
     Torbjorn,
     Tracer,
+    Vendetta,
     Venture,
     Widowmaker,
 
-    // Support
+    // Support (13)
     Ana,
     Baptiste,
     Brigitte,
@@ -50,7 +56,9 @@ pub enum Hero {
     Lifeweaver,
     Lucio,
     Mercy,
+    Mizuki,
     Moira,
+    Wuyang,
     Zenyatta,
 }
 
@@ -58,6 +66,7 @@ impl Hero {
     pub fn role(&self) -> HeroRole {
         match self {
             Self::DVa
+            | Self::Domina
             | Self::Doomfist
             | Self::Hazard
             | Self::JunkerQueen
@@ -71,22 +80,27 @@ impl Hero {
             | Self::WreckingBall
             | Self::Zarya => HeroRole::Tank,
 
-            Self::Ashe
+            Self::Anran
+            | Self::Ashe
             | Self::Bastion
             | Self::Cassidy
             | Self::Echo
+            | Self::Emre
+            | Self::Freja
             | Self::Genji
             | Self::Hanzo
             | Self::Junkrat
             | Self::Mei
             | Self::Pharah
             | Self::Reaper
+            | Self::Sierra
             | Self::Sojourn
             | Self::Soldier76
             | Self::Sombra
             | Self::Symmetra
             | Self::Torbjorn
             | Self::Tracer
+            | Self::Vendetta
             | Self::Venture
             | Self::Widowmaker => HeroRole::Damage,
 
@@ -99,7 +113,9 @@ impl Hero {
             | Self::Lifeweaver
             | Self::Lucio
             | Self::Mercy
+            | Self::Mizuki
             | Self::Moira
+            | Self::Wuyang
             | Self::Zenyatta => HeroRole::Support,
         }
     }
@@ -107,6 +123,7 @@ impl Hero {
     pub fn display_name(&self) -> &'static str {
         match self {
             Self::DVa => "D.Va",
+            Self::Domina => "Domina",
             Self::Doomfist => "Doomfist",
             Self::Hazard => "Hazard",
             Self::JunkerQueen => "Junker Queen",
@@ -119,22 +136,27 @@ impl Hero {
             Self::Winston => "Winston",
             Self::WreckingBall => "Wrecking Ball",
             Self::Zarya => "Zarya",
+            Self::Anran => "Anran",
             Self::Ashe => "Ashe",
             Self::Bastion => "Bastion",
             Self::Cassidy => "Cassidy",
             Self::Echo => "Echo",
+            Self::Emre => "Emre",
+            Self::Freja => "Freja",
             Self::Genji => "Genji",
             Self::Hanzo => "Hanzo",
             Self::Junkrat => "Junkrat",
             Self::Mei => "Mei",
             Self::Pharah => "Pharah",
             Self::Reaper => "Reaper",
+            Self::Sierra => "Sierra",
             Self::Sojourn => "Sojourn",
             Self::Soldier76 => "Soldier: 76",
             Self::Sombra => "Sombra",
             Self::Symmetra => "Symmetra",
             Self::Torbjorn => "Torbjörn",
             Self::Tracer => "Tracer",
+            Self::Vendetta => "Vendetta",
             Self::Venture => "Venture",
             Self::Widowmaker => "Widowmaker",
             Self::Ana => "Ana",
@@ -146,7 +168,9 @@ impl Hero {
             Self::Lifeweaver => "Lifeweaver",
             Self::Lucio => "Lúcio",
             Self::Mercy => "Mercy",
+            Self::Mizuki => "Mizuki",
             Self::Moira => "Moira",
+            Self::Wuyang => "Wuyang",
             Self::Zenyatta => "Zenyatta",
         }
     }
@@ -196,6 +220,7 @@ pub enum MapName {
     Runasapi,
 
     // Flashpoint
+    Aatlis,
     NewJunkCity,
     Suravasa,
 
@@ -205,6 +230,47 @@ pub enum MapName {
 }
 
 impl MapName {
+    pub fn game_mode(&self) -> GameMode {
+        match self {
+            Self::CircuitRoyal
+            | Self::Dorado
+            | Self::Havana
+            | Self::Junkertown
+            | Self::Rialto
+            | Self::Route66
+            | Self::ShambaliMonastery
+            | Self::WatchpointGibraltar => GameMode::Escort,
+
+            Self::BlizzardWorld
+            | Self::Eichenwalde
+            | Self::Hollywood
+            | Self::KingsRow
+            | Self::Midtown
+            | Self::Numbani
+            | Self::Paraiso => GameMode::Hybrid,
+
+            Self::AntarcticPeninsula
+            | Self::Busan
+            | Self::Ilios
+            | Self::LijangTower
+            | Self::Nepal
+            | Self::Oasis
+            | Self::Samoa => GameMode::Control,
+
+            Self::Colosseo
+            | Self::Esperanca
+            | Self::NewQueenStreet
+            | Self::Runasapi => GameMode::Push,
+
+            Self::Aatlis
+            | Self::NewJunkCity
+            | Self::Suravasa => GameMode::Flashpoint,
+
+            Self::Hanaoka
+            | Self::ThroneOfAnubis => GameMode::Clash,
+        }
+    }
+
     pub fn display_name(&self) -> &'static str {
         match self {
             Self::CircuitRoyal => "Circuit Royal",
@@ -233,6 +299,7 @@ impl MapName {
             Self::Esperanca => "Esperança",
             Self::NewQueenStreet => "New Queen Street",
             Self::Runasapi => "Runasapi",
+            Self::Aatlis => "Aatlis",
             Self::NewJunkCity => "New Junk City",
             Self::Suravasa => "Suravasa",
             Self::Hanaoka => "Hanaoka",

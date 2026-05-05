@@ -1,6 +1,9 @@
 mod daemon;
+mod history;
 mod preview;
+mod progression;
 mod settings;
+mod stats;
 mod status;
 mod style;
 mod tray;
@@ -27,10 +30,16 @@ fn main() {
 enum Route {
     #[route("/")]
     Home {},
-    #[route("/settings")]
-    Settings {},
+    #[route("/history")]
+    History {},
+    #[route("/stats")]
+    Stats {},
+    #[route("/progression")]
+    Progression {},
     #[route("/preview")]
     Preview {},
+    #[route("/settings")]
+    Settings {},
 }
 
 #[component]
@@ -39,6 +48,36 @@ fn Home() -> Element {
         div { class: "app",
             Nav {}
             status::StatusPanel {}
+        }
+    }
+}
+
+#[component]
+fn History() -> Element {
+    rsx! {
+        div { class: "app",
+            Nav {}
+            history::HistoryPanel {}
+        }
+    }
+}
+
+#[component]
+fn Stats() -> Element {
+    rsx! {
+        div { class: "app",
+            Nav {}
+            stats::StatsPanel {}
+        }
+    }
+}
+
+#[component]
+fn Progression() -> Element {
+    rsx! {
+        div { class: "app",
+            Nav {}
+            progression::ProgressionPanel {}
         }
     }
 }
@@ -70,6 +109,9 @@ fn Nav() -> Element {
             h1 { class: "logo", "Scuffed Stat Tracker" }
             div { class: "nav-links",
                 Link { to: Route::Home {}, "Status" }
+                Link { to: Route::History {}, "Matches" }
+                Link { to: Route::Stats {}, "Stats" }
+                Link { to: Route::Progression {}, "Progression" }
                 Link { to: Route::Preview {}, "Preview" }
                 Link { to: Route::Settings {}, "Settings" }
             }

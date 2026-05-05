@@ -1,69 +1,66 @@
-use image::{DynamicImage, GrayImage};
+use image::{DynamicImage, GrayImage, Luma};
 
 pub fn prepare(img: &DynamicImage) -> GrayImage {
+    prepare_with_threshold(img, 140)
+}
+
+pub fn prepare_with_threshold(img: &DynamicImage, threshold: u8) -> GrayImage {
     let gray = img.to_luma8();
     let (w, h) = gray.dimensions();
 
-    // Upscale 2x with nearest-neighbor (preserves sharp text edges for OCR)
-    let mut upscaled = GrayImage::new(w * 2, h * 2);
-    for y in 0..h {
-        for x in 0..w {
-            let px = *gray.get_pixel(x, y);
-            upscaled.put_pixel(x * 2, y * 2, px);
-            upscaled.put_pixel(x * 2 + 1, y * 2, px);
-            upscaled.put_pixel(x * 2, y * 2 + 1, px);
-            upscaled.put_pixel(x * 2 + 1, y * 2 + 1, px);
+    // Only upscale if the image is small (< 1280px wide) — high-res displays don't need it
+    let (work_img, scale) = if w < 1280 {
+        let mut upscaled = GrayImage::new(w * 2, h * 2);
+        for y in 0..h {
+            for x in 0..w {
+                let px = *gray.get_pixel(x, y);
+                upscaled.put_pixel(x * 2, y * 2, px);
+                upscaled.put_pixel(x * 2 + 1, y * 2, px);
+                upscaled.put_pixel(x * 2, y * 2 + 1, px);
+                upscaled.put_pixel(x * 2 + 1, y * 2 + 1, px);
+            }
         }
+        (upscaled, 2)
+    } else {
+        (gray, 1)
+    };
+
+    let _ = scale;
+
+    // 3x3 median filter to remove noise while preserving text edges
+    let filtered = median_filter_3x3(&work_img);
+
+    // Invert so bright text becomes black (for Tesseract) and everything else becomes white.
+    let mut binary = filtered;
+    for px in binary.pixels_mut() {
+        px.0[0] = if px.0[0] > threshold { 0 } else { 255 };
     }
 
-    // Otsu threshold for binarization
-    let threshold = otsu_threshold(&upscaled);
-    for px in upscaled.pixels_mut() {
-        px.0[0] = if px.0[0] > threshold { 255 } else { 0 };
-    }
-
-    upscaled
+    binary
 }
 
-fn otsu_threshold(img: &GrayImage) -> u8 {
-    let mut histogram = [0u32; 256];
-    for px in img.pixels() {
-        histogram[px.0[0] as usize] += 1;
-    }
+fn median_filter_3x3(img: &GrayImage) -> GrayImage {
+    let (w, h) = img.dimensions();
+    let mut out = GrayImage::new(w, h);
 
-    let total = img.pixels().count() as f64;
-    let mut sum_total = 0.0;
-    for (i, &count) in histogram.iter().enumerate() {
-        sum_total += i as f64 * count as f64;
-    }
-
-    let mut sum_bg = 0.0;
-    let mut weight_bg = 0.0;
-    let mut max_variance = 0.0;
-    let mut best_threshold = 0u8;
-
-    for (i, &count) in histogram.iter().enumerate() {
-        weight_bg += count as f64;
-        if weight_bg == 0.0 {
-            continue;
-        }
-        let weight_fg = total - weight_bg;
-        if weight_fg == 0.0 {
-            break;
-        }
-
-        sum_bg += i as f64 * count as f64;
-        let mean_bg = sum_bg / weight_bg;
-        let mean_fg = (sum_total - sum_bg) / weight_fg;
-        let variance = weight_bg * weight_fg * (mean_bg - mean_fg).powi(2);
-
-        if variance > max_variance {
-            max_variance = variance;
-            best_threshold = i as u8;
+    for y in 0..h {
+        for x in 0..w {
+            let mut window = [0u8; 9];
+            let mut idx = 0;
+            for dy in -1i32..=1 {
+                for dx in -1i32..=1 {
+                    let sx = (x as i32 + dx).clamp(0, w as i32 - 1) as u32;
+                    let sy = (y as i32 + dy).clamp(0, h as i32 - 1) as u32;
+                    window[idx] = img.get_pixel(sx, sy).0[0];
+                    idx += 1;
+                }
+            }
+            window.sort_unstable();
+            out.put_pixel(x, y, Luma([window[4]]));
         }
     }
 
-    best_threshold
+    out
 }
 
 pub fn crop_scoreboard(img: &DynamicImage) -> DynamicImage {

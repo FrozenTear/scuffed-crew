@@ -1,5 +1,6 @@
 .playwright-mcp/
 *.png
+!crates/stat-tracker/portraits/*.png
 target/
 .env
 dist/

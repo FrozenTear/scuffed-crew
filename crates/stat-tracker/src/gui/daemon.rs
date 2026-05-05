@@ -48,14 +48,30 @@ fn find_daemon_binary() -> Option<PathBuf> {
     None
 }
 
+fn daemon_log_path(data_dir: &std::path::Path) -> PathBuf {
+    data_dir.join("daemon.log")
+}
+
 fn start_daemon(data_dir: &std::path::Path) -> Result<u32, String> {
     let exe = find_daemon_binary()
         .ok_or("Cannot find scuffed-stat-tracker binary in PATH or next to GUI binary")?;
 
+    let _ = std::fs::create_dir_all(data_dir);
+    let log_path = daemon_log_path(data_dir);
+    let log_file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .map_err(|e| format!("Failed to open daemon log {}: {e}", log_path.display()))?;
+    let stderr_file = log_file
+        .try_clone()
+        .map_err(|e| format!("Failed to clone log file handle: {e}"))?;
+
     let child = std::process::Command::new(&exe)
         .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
+        .stdout(std::process::Stdio::from(log_file))
+        .stderr(std::process::Stdio::from(stderr_file))
+        .env("RUST_LOG", std::env::var("RUST_LOG").unwrap_or_else(|_| "scuffed_stat_tracker=info,stat_tracker=info,surrealdb=warn".into()))
         .spawn()
         .map_err(|e| format!("Failed to spawn daemon: {e}"))?;
 
@@ -143,6 +159,10 @@ pub fn DaemonCard() -> Element {
                 div { class: "stat-row",
                     span { class: "label", "PID" }
                     span { class: "value", "{pid}" }
+                }
+                div { class: "stat-row",
+                    span { class: "label", "Log" }
+                    span { class: "value text-dim", "{daemon_log_path(&config().data_dir).display()}" }
                 }
             }
             div { class: "actions",

@@ -30,10 +30,11 @@ pub fn parse_scoreboard(raw_text: &str, outcome: &str, player_name: Option<&str>
 
     let hero = find_hero(&lines).unwrap_or_else(|| "Unknown".to_string());
     let role = guess_role(&hero);
+    let map_name = find_map(&lines).unwrap_or_default();
 
     Some(PersonalMatch {
         hero,
-        map_name: String::new(),
+        map_name,
         game_mode: String::new(),
         role,
         outcome: outcome.to_string(),
@@ -194,4 +195,47 @@ fn guess_role(hero: &str) -> String {
         | "anran" | "freja" | "mizuki" | "sierra" => "Support".to_string(),
         _ => "Damage".to_string(),
     }
+}
+
+const MAPS: &[(&str, &str)] = &[
+    ("King's Row", "king"),
+    ("Circuit Royal", "circuit royal"),
+    ("Dorado", "dorado"),
+    ("Havana", "havana"),
+    ("Junkertown", "junkertown"),
+    ("Rialto", "rialto"),
+    ("Route 66", "route 66"),
+    ("Shambali Monastery", "shambali"),
+    ("Watchpoint: Gibraltar", "watchpoint"),
+    ("Blizzard World", "blizzard world"),
+    ("Eichenwalde", "eichenwalde"),
+    ("Hollywood", "hollywood"),
+    ("Midtown", "midtown"),
+    ("Numbani", "numbani"),
+    ("Paraiso", "paraiso"),
+    ("Antarctic Peninsula", "antarctic"),
+    ("Busan", "busan"),
+    ("Ilios", "ilios"),
+    ("Lijiang Tower", "lijiang"),
+    ("Nepal", "nepal"),
+    ("Oasis", "oasis"),
+    ("Samoa", "samoa"),
+    ("Colosseo", "colosseo"),
+    ("Esperanca", "esperanca"),
+    ("New Queen Street", "new queen"),
+    ("Runasapi", "runasapi"),
+    ("New Junk City", "new junk"),
+    ("Suravasa", "suravasa"),
+    ("Hanaoka", "hanaoka"),
+    ("Throne of Anubis", "anubis"),
+];
+
+fn find_map(lines: &[&str]) -> Option<String> {
+    let text = lines.join(" ").to_lowercase();
+    for &(display_name, pattern) in MAPS {
+        if text.contains(pattern) {
+            return Some(display_name.to_string());
+        }
+    }
+    None
 }

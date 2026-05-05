@@ -20,6 +20,7 @@ dirs = "6"
 toml = "0.8"
 reqwest = { version = "0.12", features = ["json"] }
 libwayshot = "0.7"
+ashpd = { version = "0.13", features = ["screenshot"] }
 leptess = "0.14"
 evdev = { version = "0.13", features = ["tokio"] }
 surrealdb = { version = "3", features = ["kv-surrealkv"] }

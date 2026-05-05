@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use dioxus::prelude::*;
 
 use stat_tracker::config::Config;
@@ -7,36 +5,25 @@ use stat_tracker::storage::LocalStore;
 
 use super::daemon::DaemonCard;
 
-#[derive(Clone)]
-enum StoreState {
-    Loading,
-    Open(Arc<LocalStore>),
-    Locked,
-}
-
 #[component]
 pub fn StatusPanel() -> Element {
     let config = use_signal(|| Config::load().unwrap_or_default());
     let mut refresh_tick = use_signal(|| 0u32);
-    let mut store_state: Signal<StoreState> = use_signal(|| StoreState::Loading);
-
-    use_future(move || {
-        let data_dir = config().data_dir.clone();
-        async move {
-            match LocalStore::open(&data_dir).await {
-                Ok(s) => store_state.set(StoreState::Open(Arc::new(s))),
-                Err(_) => store_state.set(StoreState::Locked),
-            }
-        }
-    });
+    let mut db_locked = use_signal(|| false);
 
     let stats = use_resource(move || {
-        let state = store_state();
+        let data_dir = config().data_dir.clone();
         let _tick = refresh_tick();
         async move {
-            match state {
-                StoreState::Open(ref store) => load_stats(store).await,
-                _ => None,
+            match LocalStore::open(&data_dir).await {
+                Ok(store) => {
+                    db_locked.set(false);
+                    load_stats(&store).await
+                }
+                Err(_) => {
+                    db_locked.set(true);
+                    None
+                }
             }
         }
     });
@@ -62,7 +49,7 @@ pub fn StatusPanel() -> Element {
         }
     });
 
-    let db_locked = matches!(store_state(), StoreState::Locked);
+    let db_locked = db_locked();
 
     let (count, unsynced, last_capture) = match &*stats.read() {
         Some(Some(s)) => (s.total_matches, s.unsynced_count, s.last_capture_time.clone()),

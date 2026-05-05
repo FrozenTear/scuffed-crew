@@ -13,6 +13,12 @@ pub struct Config {
     pub sync: Option<SyncConfig>,
     #[serde(default)]
     pub auto_detect: AutoDetectConfig,
+    #[serde(default = "default_session_window_secs")]
+    pub session_window_secs: u64,
+}
+
+fn default_session_window_secs() -> u64 {
+    1800
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize)]
@@ -68,6 +74,7 @@ impl Default for Config {
             player_name: None,
             sync: None,
             auto_detect: AutoDetectConfig::default(),
+            session_window_secs: default_session_window_secs(),
         }
     }
 }
