@@ -9,23 +9,34 @@ pub fn detect_outcome(img: &DynamicImage) -> MatchOutcome {
     detect_commendation_screen(img)
 }
 
-// Detect the brief VICTORY/DEFEAT full-screen banner (gold or red backdrop)
+// Detect the brief VICTORY/DEFEAT full-screen banner (gold or red backdrop).
+// OW2 banners saturate >40% of the screen with a very specific color range.
+// Previous thresholds (15%, loose color ranges) caused false positives on
+// websites with warm/red colors during normal browsing.
 fn detect_banner(img: &DynamicImage) -> Option<MatchOutcome> {
     let rgb = img.to_rgb8();
     let (w, h) = rgb.dimensions();
-    let sample_height = h / 5;
+
+    // Sample the middle horizontal band (30%-70% height) where the banner
+    // text and color flood are most consistent, avoiding HUD/taskbar edges.
+    let y_start = h * 30 / 100;
+    let y_end = h * 70 / 100;
     let mut gold_count = 0u32;
     let mut red_count = 0u32;
     let mut total = 0u32;
 
-    for pixel in rgb.pixels().take((sample_height * w) as usize) {
-        let [r, g, b] = pixel.0;
-        total += 1;
-        if r > 180 && g > 120 && b < 80 {
-            gold_count += 1;
-        }
-        if r > 180 && g < 100 && b < 100 {
-            red_count += 1;
+    for y in y_start..y_end {
+        for x in 0..w {
+            let [r, g, b] = rgb.get_pixel(x, y).0;
+            total += 1;
+            // OW2 victory gold: saturated warm gold, green channel well above blue
+            if r > 200 && g > 140 && g < 220 && b < 60 && (r as i32 - b as i32) > 150 {
+                gold_count += 1;
+            }
+            // OW2 defeat red: deep red, very low green and blue
+            if r > 180 && g < 60 && b < 60 {
+                red_count += 1;
+            }
         }
     }
 
@@ -36,11 +47,15 @@ fn detect_banner(img: &DynamicImage) -> Option<MatchOutcome> {
     let gold_ratio = gold_count as f32 / total as f32;
     let red_ratio = red_count as f32 / total as f32;
 
-    const THRESHOLD: f32 = 0.15;
+    // OW2 banners flood >40% of the sampled region with the dominant color.
+    // 35% threshold with tighter color ranges eliminates web page false positives.
+    const THRESHOLD: f32 = 0.35;
 
     if gold_ratio > THRESHOLD {
+        tracing::debug!(gold_ratio, "victory banner detected");
         Some(MatchOutcome::Victory)
     } else if red_ratio > THRESHOLD {
+        tracing::debug!(red_ratio, "defeat banner detected");
         Some(MatchOutcome::Defeat)
     } else {
         None
@@ -48,8 +63,9 @@ fn detect_banner(img: &DynamicImage) -> Option<MatchOutcome> {
 }
 
 // Detect the post-match commendation/voting screen (after Play of the Game).
-// Both VICTORY and DEFEAT versions have a dominant blue gradient background
-// (57-66% blue-margin pixels vs <0.4% on all other screens).
+// OW2 commendation screens have 57-66% blue-dominant pixels — well above any
+// normal desktop content. Previous 20% threshold caused false positives on
+// websites with blue themes.
 fn detect_commendation_screen(img: &DynamicImage) -> MatchOutcome {
     let rgb = img.to_rgb8();
     let (w, h) = rgb.dimensions();
@@ -60,7 +76,8 @@ fn detect_commendation_screen(img: &DynamicImage) -> MatchOutcome {
     for pixel in rgb.pixels() {
         let [r, g, b] = pixel.0;
         total += 1;
-        if b > 130 && (b as i32 - r as i32) > 40 && (b as i32 - g as i32) > 20 {
+        // Tighter blue check: blue must strongly dominate both red and green
+        if b > 140 && (b as i32 - r as i32) > 60 && (b as i32 - g as i32) > 30 {
             blue_margin_count += 1;
         }
     }
@@ -70,7 +87,9 @@ fn detect_commendation_screen(img: &DynamicImage) -> MatchOutcome {
     }
 
     let blue_ratio = blue_margin_count as f32 / total as f32;
-    if blue_ratio < 0.20 {
+    // Require at least 45% — real OW2 commendation screens are 57-66%.
+    // This eliminates blue-themed websites while still catching all OW2 screens.
+    if blue_ratio < 0.45 {
         return MatchOutcome::Unknown;
     }
 
