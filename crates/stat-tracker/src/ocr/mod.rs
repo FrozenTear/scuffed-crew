@@ -54,6 +54,7 @@ pub fn recognize_region(img: &DynamicImage) -> Result<String, Box<dyn std::error
     let path_str = path.as_ref().and_then(|p| p.to_str());
 
     let mut lt = leptess::LepTess::new(path_str, lang)?;
+    lt.set_variable(leptess::Variable::TesseditPagesegMode, "7")?;
     lt.set_image_from_mem(&png_buf)?;
 
     Ok(lt.get_utf8_text()?)
@@ -145,6 +146,7 @@ fn run_ocr(
     let path_str = path.as_ref().and_then(|p| p.to_str());
 
     let mut lt = leptess::LepTess::new(path_str, lang)?;
+    lt.set_variable(leptess::Variable::TesseditPagesegMode, "6")?;
     lt.set_image_from_mem(png_buf)?;
 
     let text = lt.get_utf8_text()?;
