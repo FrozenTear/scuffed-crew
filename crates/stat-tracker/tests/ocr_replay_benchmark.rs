@@ -122,6 +122,24 @@ fn ground_truth_replays() -> Vec<ReplayGroundTruth> {
     ]
 }
 
+fn load_all_frames() -> Vec<(String, DynamicImage)> {
+    let fixture_dir = format!(
+        "{}/../../tests/fixtures/replays",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let mut frames: Vec<(String, DynamicImage)> = Vec::new();
+    for entry in std::fs::read_dir(&fixture_dir).expect("fixtures dir") {
+        let entry = entry.unwrap();
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name.starts_with("frame_") && name.ends_with(".jpg") {
+            let img = image::open(entry.path()).unwrap_or_else(|e| panic!("open {name}: {e}"));
+            frames.push((name, img));
+        }
+    }
+    frames.sort_by(|a, b| a.0.cmp(&b.0));
+    frames
+}
+
 fn parse_stat(s: &str) -> Option<u32> {
     let cleaned: String = s.chars().filter(|c| c.is_ascii_digit()).collect();
     if cleaned.is_empty() {
@@ -132,6 +150,47 @@ fn parse_stat(s: &str) -> Option<u32> {
 
 fn stat_match(ocr_val: &str, expected: u32) -> bool {
     parse_stat(ocr_val) == Some(expected)
+}
+
+#[test]
+fn debug_header_offset() {
+    for (file, label) in [
+        ("replay_01.png", "R01"),
+        ("replay_02.png", "R02"),
+        ("replay_03.png", "R03"),
+        ("replay_04.png", "R04"),
+        ("replay_05.png", "R05"),
+        ("frame_0001.jpg", "F01"),
+        ("frame_0096.jpg", "F96"),
+        ("frame_0275.jpg", "F275"),
+    ] {
+        let img = load_image(file);
+        let cropped = preprocess::crop_scoreboard(&img);
+        let header_off = preprocess::detect_column_offset(&cropped);
+
+        // Also run a quick OCR probe at the header offset vs 0.0
+        let ts = detect_team_size(&cropped);
+        let cols_header = preprocess::columns_with_offset(header_off);
+        let cols_zero = preprocess::columns_with_offset(0.0);
+        let probe = preprocess::crop_player_row(&cropped, 0, ts);
+        let (score_h, score_z) = if let Some(ref row) = probe {
+            let sh: i32 = (0..6).filter_map(|c| {
+                preprocess::crop_stat_cell(row, c, &cols_header)
+                    .and_then(|cell| ocr::recognize_cell(&cell).ok())
+                    .filter(|r| !r.value.is_empty() && r.value.chars().all(|ch| ch.is_ascii_digit() || ch == ','))
+            }).count() as i32;
+            let sz: i32 = (0..6).filter_map(|c| {
+                preprocess::crop_stat_cell(row, c, &cols_zero)
+                    .and_then(|cell| ocr::recognize_cell(&cell).ok())
+                    .filter(|r| !r.value.is_empty() && r.value.chars().all(|ch| ch.is_ascii_digit() || ch == ','))
+            }).count() as i32;
+            (sh, sz)
+        } else {
+            (0, 0)
+        };
+
+        println!("[{label}] header={header_off:+.4}, score@header={score_h}/6, score@zero={score_z}/6, ts={ts}");
+    }
 }
 
 #[test]
@@ -293,31 +352,37 @@ fn debug_measure_columns() {
 
 #[test]
 fn debug_save_cell_crops() {
-    let img = load_image("replay_05.png");
-    let cropped = preprocess::crop_scoreboard(&img);
-    let debug_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/debug_crops");
-    let _ = std::fs::create_dir_all(&debug_dir);
+    for (file, label, ts) in [("replay_05.png", "orig", 6usize), ("frame_0275.jpg", "new", 5)] {
+        let img = load_image(file);
+        let cropped = preprocess::crop_scoreboard(&img);
+        let debug_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join(format!("../../tests/fixtures/debug_crops_{label}"));
+        let _ = std::fs::create_dir_all(&debug_dir);
 
-    println!("Scoreboard crop: {}x{}", cropped.width(), cropped.height());
+        println!("[{label}] Scoreboard crop: {}x{}", cropped.width(), cropped.height());
 
-    let ts = 6;
-    let columns = preprocess::detect_stat_columns(&cropped);
-    println!("Detected columns: {:?}", columns);
-    for row_idx in 0..(ts * 2) {
-        if let Some(row) = preprocess::crop_player_row(&cropped, row_idx, ts) {
-            let _ = row.save(debug_dir.join(format!("row_{row_idx:02}.png")));
+        let columns = preprocess::columns_with_offset(0.0);
+        println!("[{label}] Columns: {:?}", columns);
+        for row_idx in 0..(ts * 2) {
+            if let Some(row) = preprocess::crop_player_row(&cropped, row_idx, ts) {
+                let _ = row.save(debug_dir.join(format!("row_{row_idx:02}.png")));
 
-            let name = preprocess::crop_name_cell(&row);
-            let _ = name.save(debug_dir.join(format!("row_{row_idx:02}_name.png")));
+                let name = preprocess::crop_name_cell(&row);
+                let _ = name.save(debug_dir.join(format!("row_{row_idx:02}_name.png")));
+                let name_pp = preprocess::prepare_name_cell(&name);
+                let _ = DynamicImage::ImageLuma8(name_pp).save(debug_dir.join(format!("row_{row_idx:02}_name_pp.png")));
 
-            for col in 0..6 {
-                if let Some(cell) = preprocess::crop_stat_cell(&row, col, &columns) {
-                    let _ = cell.save(debug_dir.join(format!("row_{row_idx:02}_col{col}.png")));
+                for col in 0..6 {
+                    if let Some(cell) = preprocess::crop_stat_cell(&row, col, &columns) {
+                        let _ = cell.save(debug_dir.join(format!("row_{row_idx:02}_col{col}.png")));
+                        let cell_pp = preprocess::prepare_cell(&cell);
+                        let _ = DynamicImage::ImageLuma8(cell_pp).save(debug_dir.join(format!("row_{row_idx:02}_col{col}_pp.png")));
+                    }
                 }
             }
         }
+        println!("[{label}] Saved to {}", debug_dir.display());
     }
-    println!("Saved debug crops to {}", debug_dir.display());
 }
 
 #[test]
@@ -420,4 +485,97 @@ fn benchmark_ocr_accuracy() {
     println!("Name accuracy:      {correct_names}/{total_names} ({name_accuracy:.1}%)");
     println!("Mean confidence:    {mean_conf:.1}");
     println!("=============================");
+}
+
+#[test]
+fn evaluate_new_frames() {
+    let frames = load_all_frames();
+    if frames.is_empty() {
+        println!("No frame_*.jpg files found, skipping.");
+        return;
+    }
+
+    let stat_labels = ["E", "A", "D", "DMG", "H", "MIT"];
+    let mut global_conf_sum = 0i64;
+    let mut global_conf_count = 0u32;
+    let mut global_rows = 0u32;
+    let mut global_clean_cells = 0u32;
+    let mut global_total_cells = 0u32;
+    let mut per_image_summary: Vec<(String, usize, f64, f64)> = Vec::new();
+
+    println!("=== Evaluating {} new frame images ===\n", frames.len());
+
+    for (name, img) in &frames {
+        let cropped = preprocess::crop_scoreboard(img);
+        let team_size = detect_team_size(&cropped);
+        let results = ocr::recognize_scoreboard_cells_with_team_size(img, Some(team_size));
+
+        let mut img_conf_sum = 0i64;
+        let mut img_conf_count = 0u32;
+        let mut img_clean = 0u32;
+        let mut img_total = 0u32;
+
+        println!("--- {name} (team_size={team_size}, rows={}) ---", results.len());
+
+        for (i, row) in results.iter().enumerate() {
+            let team = if i < team_size { "T1" } else { "T2" };
+            let row_in_team = if i < team_size { i } else { i - team_size };
+            let name_str = row.name.as_ref().map(|n| n.value.as_str()).unwrap_or("?");
+
+            let mut stat_strs = Vec::new();
+            for (col, cell) in row.stats.iter().enumerate() {
+                let label = stat_labels.get(col).unwrap_or(&"?");
+                let clean = !cell.value.is_empty()
+                    && cell.value.chars().all(|c| c.is_ascii_digit() || c == ',');
+                if clean { img_clean += 1; }
+                img_total += 1;
+                global_total_cells += 1;
+                if clean { global_clean_cells += 1; }
+
+                img_conf_sum += cell.confidence as i64;
+                img_conf_count += 1;
+                global_conf_sum += cell.confidence as i64;
+                global_conf_count += 1;
+
+                stat_strs.push(format!(
+                    "{}:{}({}%)",
+                    label, cell.value, cell.confidence
+                ));
+            }
+
+            println!(
+                "  [{team}R{row_in_team}] {name_str} | conf={} | {}",
+                row.mean_confidence,
+                stat_strs.join(" ")
+            );
+        }
+
+        global_rows += results.len() as u32;
+        let mean_conf = if img_conf_count > 0 {
+            img_conf_sum as f64 / img_conf_count as f64
+        } else { 0.0 };
+        let clean_pct = if img_total > 0 {
+            img_clean as f64 / img_total as f64 * 100.0
+        } else { 0.0 };
+        per_image_summary.push((name.clone(), results.len(), mean_conf, clean_pct));
+        println!("  => mean_conf={mean_conf:.1}, clean_cells={img_clean}/{img_total} ({clean_pct:.1}%)\n");
+    }
+
+    let global_mean_conf = if global_conf_count > 0 {
+        global_conf_sum as f64 / global_conf_count as f64
+    } else { 0.0 };
+    let global_clean_pct = if global_total_cells > 0 {
+        global_clean_cells as f64 / global_total_cells as f64 * 100.0
+    } else { 0.0 };
+
+    println!("\n========== NEW FRAMES SUMMARY ==========");
+    println!("Images processed:   {}", frames.len());
+    println!("Total rows:         {global_rows}");
+    println!("Mean confidence:    {global_mean_conf:.1}");
+    println!("Clean cells:        {global_clean_cells}/{global_total_cells} ({global_clean_pct:.1}%)");
+    println!("\nPer-image breakdown:");
+    for (name, rows, conf, clean) in &per_image_summary {
+        println!("  {name}: {rows} rows, conf={conf:.1}, clean={clean:.1}%");
+    }
+    println!("=========================================");
 }

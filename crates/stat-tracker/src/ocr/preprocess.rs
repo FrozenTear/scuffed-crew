@@ -162,6 +162,96 @@ pub fn columns_with_offset(offset: f64) -> StatColumns {
     columns
 }
 
+/// Detect the column offset by finding stat header labels (E, A, D, DMG, H, MIT)
+/// in the scoreboard header area. The header has dark text on a bright bar.
+///
+/// Groups adjacent dark-text clusters into logical labels, then identifies the
+/// 6 stat columns by their characteristic spacing pattern (3 narrow E/A/D, then
+/// 3 wider DMG/H/MIT). Returns the offset from the fallback E position.
+pub fn detect_column_offset(scoreboard: &DynamicImage) -> f64 {
+    let rgb = scoreboard.to_rgb8();
+    let (w, h) = rgb.dimensions();
+
+    let scan_start = (h as f64 * 0.005) as u32;
+    let scan_end = (h as f64 * 0.025).max(15.0) as u32;
+    let scan_rows = scan_end.saturating_sub(scan_start).max(1);
+
+    // Count dark pixels per column in the header area
+    let mut col_dark = vec![0u32; w as usize];
+    for y in scan_start..scan_end.min(h) {
+        for x in 0..w {
+            let px = rgb.get_pixel(x, y);
+            let brightness = (px.0[0] as u32 + px.0[1] as u32 + px.0[2] as u32) / 3;
+            if brightness < 150 {
+                col_dark[x as usize] += 1;
+            }
+        }
+    }
+
+    // Find dark-text clusters
+    let threshold = (scan_rows / 4).max(1);
+    let mut raw_clusters: Vec<(u32, u32)> = Vec::new();
+    let mut in_cluster = false;
+    let mut cluster_start = 0u32;
+
+    for (x, &count) in col_dark.iter().enumerate() {
+        if count >= threshold {
+            if !in_cluster {
+                cluster_start = x as u32;
+                in_cluster = true;
+            }
+        } else if in_cluster {
+            if (x as u32) - cluster_start >= 3 {
+                raw_clusters.push((cluster_start, x as u32));
+            }
+            in_cluster = false;
+        }
+    }
+
+    // Filter to stat area (ratio > 0.25) and merge clusters within 15px
+    let stat_area_start = (w as f64 * 0.25) as u32;
+    let filtered: Vec<(u32, u32)> = raw_clusters
+        .iter()
+        .filter(|&&(s, _)| s >= stat_area_start)
+        .copied()
+        .collect();
+
+    if filtered.is_empty() {
+        return 0.0;
+    }
+
+    // Merge nearby clusters into logical groups (individual letter clusters → labels)
+    let mut groups: Vec<(u32, u32)> = Vec::new();
+    let mut g_start = filtered[0].0;
+    let mut g_end = filtered[0].1;
+    for &(s, e) in &filtered[1..] {
+        if s <= g_end + 15 {
+            g_end = e;
+        } else {
+            groups.push((g_start, g_end));
+            g_start = s;
+            g_end = e;
+        }
+    }
+    groups.push((g_start, g_end));
+
+    // We expect 6 groups for E, A, D, DMG, H, MIT.
+    // The first group should be the "E" label.
+    let first_center = (groups[0].0 + groups[0].1) as f64 / 2.0 / w as f64;
+    let fallback_e_center =
+        STAT_COL_BOUNDARIES_FALLBACK[0].0 + STAT_COL_BOUNDARIES_FALLBACK[0].1 / 2.0;
+    let offset = first_center - fallback_e_center;
+
+    tracing::debug!(
+        groups = groups.len(),
+        first_center_ratio = first_center,
+        offset,
+        "header dark-text column offset"
+    );
+
+    offset
+}
+
 // --- Scoreboard geometry ---
 
 pub fn crop_scoreboard(img: &DynamicImage) -> DynamicImage {

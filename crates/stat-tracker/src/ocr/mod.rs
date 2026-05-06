@@ -212,38 +212,62 @@ pub fn recognize_scoreboard_cells_with_team_size(img: &DynamicImage, team_size_o
     results
 }
 
-/// Find the best horizontal column offset by running OCR on all stat cells
-/// in a probe row at a few candidate offsets. The offset where the most
-/// cells produce clean parseable numbers wins. Prefers offset=0 on ties.
+/// Two-phase calibration: coarse sweep centered on the header-detected offset,
+/// then fine-tune around the best coarse result.
 fn calibrate_columns(scoreboard: &DynamicImage, team_size: usize) -> preprocess::StatColumns {
+    let header_offset = preprocess::detect_column_offset(scoreboard);
+
     let probe_rows: Vec<_> = [0usize, 1, team_size]
         .iter()
         .filter_map(|&i| preprocess::crop_player_row(scoreboard, i, team_size))
         .collect();
 
     if probe_rows.is_empty() {
-        return preprocess::columns_with_offset(0.0);
+        return preprocess::columns_with_offset(header_offset);
     }
 
-    let offsets: &[f64] = &[-0.010, 0.0, 0.010, 0.020, 0.030, 0.035];
+    let score = |offset: f64| -> i32 {
+        let cols = preprocess::columns_with_offset(offset);
+        probe_rows.iter().map(|r| count_valid_cells(r, &cols)).sum()
+    };
+
+    // Phase 1: coarse sweep covering both the header-detected region and the
+    // standard near-zero region, in 0.02 steps
+    let coarse_min = header_offset.min(-0.02) - 0.04;
+    let coarse_max = header_offset.max(0.04) + 0.04;
+
     let mut best_offset = 0.0f64;
     let mut best_valid = -1i32;
 
-    for &offset in offsets {
-        let cols = preprocess::columns_with_offset(offset);
-        let valid: i32 = probe_rows.iter().map(|r| count_valid_cells(r, &cols)).sum();
-
+    let mut offset = coarse_min;
+    while offset <= coarse_max {
+        let valid = score(offset);
         if valid > best_valid {
             best_valid = valid;
             best_offset = offset;
         }
+        offset += 0.02;
+    }
+
+    // Phase 2: fine-tune ±0.02 around the best coarse result in 0.005 steps
+    let fine_start = best_offset - 0.02;
+    let fine_end = best_offset + 0.02;
+    let mut fine_offset = fine_start;
+    while fine_offset <= fine_end {
+        let valid = score(fine_offset);
+        if valid > best_valid {
+            best_valid = valid;
+            best_offset = fine_offset;
+        }
+        fine_offset += 0.005;
     }
 
     tracing::debug!(
-        offset_px = (best_offset * 1664.0) as i32,
+        header_offset_px = (header_offset * 1664.0) as i32,
+        final_offset_px = (best_offset * 1664.0) as i32,
         valid_cells = best_valid,
         probe_count = probe_rows.len(),
-        "calibrated column offset"
+        "two-phase column calibration"
     );
 
     preprocess::columns_with_offset(best_offset)
