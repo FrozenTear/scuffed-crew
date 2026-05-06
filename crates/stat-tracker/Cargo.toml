@@ -26,6 +26,7 @@ evdev = { version = "0.13", features = ["tokio"] }
 surrealdb = { version = "3", features = ["kv-surrealkv"] }
 surrealdb-types = "3"
 tempfile = "3"
+strsim = "0.11"
 dioxus = { workspace = true, features = ["desktop", "router"], optional = true }
 tray-icon = { version = "0.23", optional = true }
 base64 = { version = "0.22", optional = true }

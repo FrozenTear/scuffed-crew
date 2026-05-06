@@ -9794,6 +9794,7 @@ dependencies = [
  "scuffed-types",
  "serde",
  "serde_json",
+ "strsim",
  "surrealdb",
  "surrealdb-types",
  "tempfile",

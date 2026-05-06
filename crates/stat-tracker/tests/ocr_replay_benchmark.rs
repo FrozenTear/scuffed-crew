@@ -579,3 +579,81 @@ fn evaluate_new_frames() {
     }
     println!("=========================================");
 }
+
+#[test]
+fn evaluate_live_frames() {
+    let fixture_dir = format!(
+        "{}/../../tests/fixtures/replays",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let mut frames: Vec<(String, DynamicImage)> = Vec::new();
+    for entry in std::fs::read_dir(&fixture_dir).expect("fixtures dir") {
+        let entry = entry.unwrap();
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name.starts_with("live_") && name.ends_with(".png") {
+            let img = image::open(entry.path()).unwrap_or_else(|e| panic!("open {name}: {e}"));
+            frames.push((name, img));
+        }
+    }
+    frames.sort_by(|a, b| a.0.cmp(&b.0));
+
+    if frames.is_empty() {
+        println!("No live_*.png files found, skipping.");
+        return;
+    }
+
+    let stat_labels = ["E", "A", "D", "DMG", "H", "MIT"];
+    let mut global_conf_sum = 0i64;
+    let mut global_conf_count = 0u32;
+    let mut global_clean = 0u32;
+    let mut global_total = 0u32;
+
+    println!("=== Evaluating {} live gameplay screenshots ===\n", frames.len());
+
+    for (name, img) in &frames {
+        let cropped = preprocess::crop_scoreboard(img);
+        let team_size = detect_team_size(&cropped);
+        let results = ocr::recognize_scoreboard_cells_with_team_size(img, Some(team_size));
+
+        let mut img_clean = 0u32;
+        let mut img_total = 0u32;
+
+        println!("--- {name} (team_size={team_size}, rows={}) ---", results.len());
+
+        for (i, row) in results.iter().enumerate() {
+            let team = if i < team_size { "T1" } else { "T2" };
+            let row_in_team = if i < team_size { i } else { i - team_size };
+            let name_str = row.name.as_ref().map(|n| n.value.as_str()).unwrap_or("?");
+
+            let mut stat_strs = Vec::new();
+            for (col, cell) in row.stats.iter().enumerate() {
+                let label = stat_labels.get(col).unwrap_or(&"?");
+                let clean = !cell.value.is_empty()
+                    && cell.value.chars().all(|c| c.is_ascii_digit() || c == ',');
+                if clean { img_clean += 1; }
+                img_total += 1;
+                global_total += 1;
+                if clean { global_clean += 1; }
+                global_conf_sum += cell.confidence as i64;
+                global_conf_count += 1;
+                stat_strs.push(format!("{}:{}({}%)", label, cell.value, cell.confidence));
+            }
+
+            println!(
+                "  [{team}R{row_in_team}] {name_str} | conf={} | {}",
+                row.mean_confidence,
+                stat_strs.join(" ")
+            );
+        }
+
+        let clean_pct = if img_total > 0 { img_clean as f64 / img_total as f64 * 100.0 } else { 0.0 };
+        println!("  => clean={img_clean}/{img_total} ({clean_pct:.1}%)");
+    }
+
+    let mean_conf = if global_conf_count > 0 { global_conf_sum as f64 / global_conf_count as f64 } else { 0.0 };
+    let clean_pct = if global_total > 0 { global_clean as f64 / global_total as f64 * 100.0 } else { 0.0 };
+    println!("\n=== LIVE FRAMES SUMMARY ===");
+    let count = frames.len();
+    println!("Images: {count}, Clean cells: {global_clean}/{global_total} ({clean_pct:.1}%), Mean conf: {mean_conf:.1}");
+    println!("===========================");
+}

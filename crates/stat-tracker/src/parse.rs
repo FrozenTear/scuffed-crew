@@ -1,5 +1,6 @@
 use crate::storage::PersonalMatch;
 use chrono::Utc;
+use strsim::normalized_levenshtein;
 use surrealdb_types::Datetime as SurrealDatetime;
 
 pub fn parse_scoreboard(
@@ -142,13 +143,9 @@ const HEROES: &[&str] = &[
 ];
 
 fn find_hero(lines: &[&str]) -> Option<String> {
-    // Count occurrences of each hero name and also check if it appears
-    // on a line by itself or in the right-side panel (capitalized hero name).
-    // OW2 scoreboard shows YOUR hero in large text on the right panel,
-    // while enemy heroes appear in player rows. Prefer the hero that
-    // appears with a role keyword nearby or in a standalone mention.
     let text = lines.join(" ").to_lowercase();
 
+    // --- Pass 1: exact substring matching (original logic) ---
     let mut found: Vec<(&str, usize)> = Vec::new();
     for &hero in HEROES {
         let hero_lower = hero.to_lowercase();
@@ -158,47 +155,83 @@ fn find_hero(lines: &[&str]) -> Option<String> {
         }
     }
 
-    if found.is_empty() {
-        return None;
-    }
-
-    // If only one hero found, use it
     if found.len() == 1 {
         return Some(found[0].0.to_string());
     }
 
-    // When multiple heroes detected, prefer the one that appears with
-    // role-indicator keywords nearby (the right panel shows hero + accuracy stats).
-    // The right panel text has "WEAPON ACCURACY", "CRITICAL HIT" etc.
-    let panel_keywords = ["accuracy", "critical", "weapon", "kills"];
-    for &(hero, _) in &found {
-        let hero_lower = hero.to_lowercase();
-        for line in lines {
-            let line_lower = line.to_lowercase();
-            if line_lower.contains(&hero_lower) {
-                // Skip if this is on a stat row (has many numbers)
-                let num_count = line.split(|c: char| !c.is_ascii_digit())
-                    .filter(|w| !w.is_empty())
-                    .count();
-                if num_count <= 1 {
+    if found.len() > 1 {
+        let panel_keywords = ["accuracy", "critical", "weapon", "kills"];
+        for &(hero, _) in &found {
+            let hero_lower = hero.to_lowercase();
+            for line in lines {
+                let line_lower = line.to_lowercase();
+                if line_lower.contains(&hero_lower) {
+                    let num_count = line
+                        .split(|c: char| !c.is_ascii_digit())
+                        .filter(|w| !w.is_empty())
+                        .count();
+                    if num_count <= 1 {
+                        return Some(hero.to_string());
+                    }
+                }
+            }
+            for kw in &panel_keywords {
+                if text.contains(&format!("{} {}", hero_lower, kw))
+                    || text.contains(&format!("{} {}", kw, hero_lower))
+                {
                     return Some(hero.to_string());
                 }
             }
         }
-        // Check if hero name appears near panel keywords
-        for kw in &panel_keywords {
-            if text.contains(&format!("{} {}", hero_lower, kw))
-                || text.contains(&format!("{} {}", kw, hero_lower))
-            {
-                return Some(hero.to_string());
+        found.sort_by_key(|&(_, count)| count);
+        return Some(found[0].0.to_string());
+    }
+
+    // --- Pass 2: fuzzy matching against individual words ---
+    fuzzy_match_hero(&text)
+}
+
+const FUZZY_HERO_THRESHOLD: f64 = 0.75;
+
+fn fuzzy_match_hero(text: &str) -> Option<String> {
+    let words: Vec<&str> = text.split_whitespace().collect();
+
+    let mut best_hero: Option<&str> = None;
+    let mut best_score: f64 = 0.0;
+
+    for &hero in HEROES {
+        let hero_lower = hero.to_lowercase();
+        let hero_parts: Vec<&str> = hero_lower.split_whitespace().collect();
+
+        if hero_parts.len() == 1 {
+            for &word in &words {
+                let score = normalized_levenshtein(word, &hero_lower);
+                if score > best_score && score >= FUZZY_HERO_THRESHOLD {
+                    best_score = score;
+                    best_hero = Some(hero);
+                }
+            }
+        } else {
+            for window in words.windows(hero_parts.len()) {
+                let candidate = window.join(" ");
+                let score = normalized_levenshtein(&candidate, &hero_lower);
+                if score > best_score && score >= FUZZY_HERO_THRESHOLD {
+                    best_score = score;
+                    best_hero = Some(hero);
+                }
             }
         }
     }
 
-    // Fallback: pick the hero with fewest occurrences (likely the player's hero
-    // appearing once in the panel, vs bots appearing many times in team rows)
-    found.sort_by_key(|&(_, count)| count);
-    Some(found[0].0.to_string())
+    if let Some(hero) = best_hero {
+        tracing::debug!(
+            hero = hero,
+            score = best_score,
+            "fuzzy matched hero name"
+        );
+    }
+
+    best_hero.map(|h| h.to_string())
 }
 
 pub fn guess_role_public(hero: &str) -> String {
@@ -253,10 +286,56 @@ const MAPS: &[(&str, &str)] = &[
 
 fn find_map(lines: &[&str]) -> Option<String> {
     let text = lines.join(" ").to_lowercase();
+
+    // Pass 1: exact substring match
     for &(display_name, pattern) in MAPS {
         if text.contains(pattern) {
             return Some(display_name.to_string());
         }
     }
-    None
+
+    // Pass 2: fuzzy match each word/bigram against map patterns
+    fuzzy_match_map(&text)
+}
+
+const FUZZY_MAP_THRESHOLD: f64 = 0.75;
+
+fn fuzzy_match_map(text: &str) -> Option<String> {
+    let words: Vec<&str> = text.split_whitespace().collect();
+
+    let mut best_map: Option<&str> = None;
+    let mut best_score: f64 = 0.0;
+
+    for &(display_name, pattern) in MAPS {
+        let pattern_parts: Vec<&str> = pattern.split_whitespace().collect();
+
+        if pattern_parts.len() == 1 {
+            for &word in &words {
+                let score = normalized_levenshtein(word, pattern);
+                if score > best_score && score >= FUZZY_MAP_THRESHOLD {
+                    best_score = score;
+                    best_map = Some(display_name);
+                }
+            }
+        } else {
+            for window in words.windows(pattern_parts.len()) {
+                let candidate = window.join(" ");
+                let score = normalized_levenshtein(&candidate, pattern);
+                if score > best_score && score >= FUZZY_MAP_THRESHOLD {
+                    best_score = score;
+                    best_map = Some(display_name);
+                }
+            }
+        }
+    }
+
+    if let Some(map_name) = best_map {
+        tracing::debug!(
+            map = map_name,
+            score = best_score,
+            "fuzzy matched map name"
+        );
+    }
+
+    best_map.map(|m| m.to_string())
 }
