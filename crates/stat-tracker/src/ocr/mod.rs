@@ -77,21 +77,25 @@ pub fn recognize_region(img: &DynamicImage) -> Result<String, Box<dyn std::error
 
 /// Per-cell OCR: extract and recognize a single stat cell.
 /// Uses PSM 7 (single text line) for short numeric strings.
+/// `whitelist` controls which characters Tesseract will consider.
 pub fn recognize_cell(img: &DynamicImage) -> Result<CellOcrResult, Box<dyn std::error::Error + Send + Sync>> {
+    recognize_cell_with_whitelist(img, "0123456789,")
+}
+
+fn recognize_cell_with_whitelist(img: &DynamicImage, whitelist: &str) -> Result<CellOcrResult, Box<dyn std::error::Error + Send + Sync>> {
     let preprocessed = preprocess::prepare_cell(img);
 
     let mut png_buf = Vec::new();
     DynamicImage::ImageLuma8(preprocessed)
         .write_to(&mut Cursor::new(&mut png_buf), image::ImageFormat::Png)?;
 
-    let lang = tessdata_lang();
+    let lang = "eng";
     let path = tessdata_path_for_lang(lang);
     let path_str = path.as_ref().and_then(|p| p.to_str());
 
     let mut lt = leptess::LepTess::new(path_str, lang)?;
     lt.set_variable(leptess::Variable::TesseditPagesegMode, "7")?;
-    // Restrict to digits and comma for stat cells
-    lt.set_variable(leptess::Variable::TesseditCharWhitelist, "0123456789,")?;
+    lt.set_variable(leptess::Variable::TesseditCharWhitelist, whitelist)?;
     lt.set_image_from_mem(&png_buf)?;
 
     let text = lt.get_utf8_text()?.trim().to_string();
@@ -138,7 +142,11 @@ pub fn recognize_row(row_img: &DynamicImage, columns: &preprocess::StatColumns) 
     let cells = preprocess::extract_row_cells(row_img, columns);
     let stats: Vec<CellOcrResult> = cells
         .iter()
-        .filter_map(|cell| recognize_cell(cell).ok())
+        .enumerate()
+        .filter_map(|(i, cell)| {
+            let whitelist = if i < 3 { "0123456789" } else { "0123456789," };
+            recognize_cell_with_whitelist(cell, whitelist).ok()
+        })
         .collect();
 
     let confidences: Vec<i32> = stats.iter().map(|s| s.confidence).collect();
@@ -177,7 +185,7 @@ pub fn recognize_scoreboard_cells_with_team_size(img: &DynamicImage, team_size_o
         detected
     });
     let total_rows = team_size * 2;
-    let columns = preprocess::detect_stat_columns(&cropped);
+    let columns = calibrate_columns(&cropped, team_size);
 
     tracing::debug!(team_size, total_rows, ?columns, "scoreboard layout");
 
@@ -202,6 +210,67 @@ pub fn recognize_scoreboard_cells_with_team_size(img: &DynamicImage, team_size_o
     }
 
     results
+}
+
+/// Find the best horizontal column offset by running OCR on all stat cells
+/// in a probe row at a few candidate offsets. The offset where the most
+/// cells produce clean parseable numbers wins. Prefers offset=0 on ties.
+fn calibrate_columns(scoreboard: &DynamicImage, team_size: usize) -> preprocess::StatColumns {
+    let probe_rows: Vec<_> = [0usize, 1, team_size]
+        .iter()
+        .filter_map(|&i| preprocess::crop_player_row(scoreboard, i, team_size))
+        .collect();
+
+    if probe_rows.is_empty() {
+        return preprocess::columns_with_offset(0.0);
+    }
+
+    let offsets: &[f64] = &[-0.010, 0.0, 0.010, 0.020, 0.030, 0.035];
+    let mut best_offset = 0.0f64;
+    let mut best_valid = -1i32;
+
+    for &offset in offsets {
+        let cols = preprocess::columns_with_offset(offset);
+        let valid: i32 = probe_rows.iter().map(|r| count_valid_cells(r, &cols)).sum();
+
+        if valid > best_valid {
+            best_valid = valid;
+            best_offset = offset;
+        }
+    }
+
+    tracing::debug!(
+        offset_px = (best_offset * 1664.0) as i32,
+        valid_cells = best_valid,
+        probe_count = probe_rows.len(),
+        "calibrated column offset"
+    );
+
+    preprocess::columns_with_offset(best_offset)
+}
+
+fn count_valid_cells(row: &DynamicImage, cols: &preprocess::StatColumns) -> i32 {
+    let mut valid = 0i32;
+    for col_idx in 0..6 {
+        if let Some(cell) = preprocess::crop_stat_cell(row, col_idx, cols) {
+            if let Ok(result) = recognize_cell(&cell) {
+                let text = result.value.trim();
+                if is_clean_stat(text) {
+                    valid += 1;
+                }
+            }
+        }
+    }
+    valid
+}
+
+fn is_clean_stat(text: &str) -> bool {
+    if text.is_empty() {
+        return false;
+    }
+    let has_digit = text.chars().any(|c| c.is_ascii_digit());
+    let all_valid = text.chars().all(|c| c.is_ascii_digit() || c == ',');
+    has_digit && all_valid
 }
 
 /// Full-image OCR (original approach with adaptive preprocessing).

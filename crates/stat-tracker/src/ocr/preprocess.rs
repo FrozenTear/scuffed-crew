@@ -13,10 +13,10 @@ const STAT_COLUMNS: usize = 6;
 const STAT_COL_BOUNDARIES_FALLBACK: [(f64, f64); STAT_COLUMNS] = [
     (0.465, 0.033),  // Elims
     (0.503, 0.030),  // Assists (no overlap with E)
-    (0.538, 0.030),  // Deaths (no overlap with A)
+    (0.538, 0.029),  // Deaths
     (0.575, 0.070),  // Damage
     (0.650, 0.070),  // Healing
-    (0.725, 0.055),  // Mitigation (narrower to exclude UI warning icon)
+    (0.725, 0.050),  // Mitigation (narrow to exclude UI warning icon)
 ];
 
 /// Player name column within each row
@@ -103,7 +103,7 @@ pub fn prepare_cell(img: &DynamicImage) -> GrayImage {
     let gray = DynamicImage::ImageRgb8(masked).to_luma8();
     let (w, _) = gray.dimensions();
 
-    let work_img = if w < 100 {
+    let work_img = if w < 150 {
         nearest_2x_upscale(&gray)
     } else {
         gray
@@ -148,10 +148,18 @@ pub fn prepare_name_cell(img: &DynamicImage) -> GrayImage {
 /// Column boundaries as (left_edge_fraction, width_fraction) for each of the 6 stat columns.
 pub type StatColumns = [(f64, f64); STAT_COLUMNS];
 
-/// Return stat column boundaries. Uses fixed positions calibrated for the
-/// most common OW2 scoreboard layout at 2560x1440.
+/// Return fallback stat column boundaries.
 pub fn detect_stat_columns(_scoreboard: &DynamicImage) -> StatColumns {
     STAT_COL_BOUNDARIES_FALLBACK
+}
+
+/// Apply a horizontal offset to the fallback column boundaries.
+pub fn columns_with_offset(offset: f64) -> StatColumns {
+    let mut columns = STAT_COL_BOUNDARIES_FALLBACK;
+    for col in &mut columns {
+        col.0 += offset;
+    }
+    columns
 }
 
 // --- Scoreboard geometry ---
@@ -212,7 +220,7 @@ pub fn crop_stat_cell(row: &DynamicImage, col_index: usize, columns: &StatColumn
     let pad_y = (h as f64 * 0.15) as u32;
     let cell_h = h - (pad_y * 2);
 
-    if x + cell_w > w || pad_y + cell_h > h {
+    if x + cell_w > w || pad_y + cell_h > h || cell_w == 0 {
         return None;
     }
 
@@ -438,6 +446,7 @@ fn morphological_close(img: &GrayImage, radius: u32) -> GrayImage {
     let dilated = morphological_op(img, radius, true);
     morphological_op(&dilated, radius, false)
 }
+
 
 /// Generic morphological operation: dilate (max) or erode (min) with square kernel.
 fn morphological_op(img: &GrayImage, radius: u32, dilate: bool) -> GrayImage {
