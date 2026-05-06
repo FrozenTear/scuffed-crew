@@ -1,4 +1,4 @@
-use image::{DynamicImage, GrayImage, Luma};
+use image::{DynamicImage, GrayImage, Luma, Rgb, RgbImage};
 
 /// Scoreboard layout constants for 2560x1440 OW2 fullscreen.
 /// The Tab scoreboard is centered with ~65% width, ~70% height.
@@ -34,7 +34,27 @@ const HEADER_RATIO: f64 = 0.08;
 const TEAM_GAP_RATIO: f64 = 0.04;
 
 pub fn prepare(img: &DynamicImage) -> GrayImage {
-    prepare_adaptive(img)
+    prepare_hsv_adaptive(img)
+}
+
+/// HSV-masked adaptive pipeline (Phase 1 improvement):
+/// 1. HSV color mask — isolate white/near-white text pixels
+/// 2. Convert masked result to grayscale
+/// 3. Sauvola thresholding
+/// 4. Morphological cleanup
+pub fn prepare_hsv_adaptive(img: &DynamicImage) -> GrayImage {
+    let masked = hsv_white_mask(img);
+    let gray = DynamicImage::ImageRgb8(masked).to_luma8();
+    let (w, _) = gray.dimensions();
+
+    let work_img = if w < 1280 {
+        nearest_2x_upscale(&gray)
+    } else {
+        gray
+    };
+
+    let binary = sauvola_threshold(&work_img, 25, 0.2, 128.0);
+    morphological_close(&binary, 1)
 }
 
 /// Legacy global threshold method (kept for fallback/comparison)
@@ -79,9 +99,10 @@ pub fn prepare_adaptive(img: &DynamicImage) -> GrayImage {
 }
 
 /// Prepare a single cell crop with parameters tuned for numeric stat text.
-/// Uses tighter Sauvola window since cells contain isolated short strings.
+/// Uses HSV masking + tighter Sauvola window since cells contain isolated short strings.
 pub fn prepare_cell(img: &DynamicImage) -> GrayImage {
-    let gray = img.to_luma8();
+    let masked = hsv_white_mask(img);
+    let gray = DynamicImage::ImageRgb8(masked).to_luma8();
     let (w, _) = gray.dimensions();
 
     let work_img = if w < 80 {
@@ -90,14 +111,14 @@ pub fn prepare_cell(img: &DynamicImage) -> GrayImage {
         gray
     };
 
-    let enhanced = local_contrast_enhance(&work_img, 32);
-    let binary = sauvola_threshold(&enhanced, 15, 0.15, 128.0);
+    let binary = sauvola_threshold(&work_img, 15, 0.15, 128.0);
     morphological_close(&binary, 1)
 }
 
-/// Prepare a player name cell — slightly different params since names are wider text.
+/// Prepare a player name cell — HSV mask + wider Sauvola window for longer text strings.
 pub fn prepare_name_cell(img: &DynamicImage) -> GrayImage {
-    let gray = img.to_luma8();
+    let masked = hsv_white_mask(img);
+    let gray = DynamicImage::ImageRgb8(masked).to_luma8();
     let (w, _) = gray.dimensions();
 
     let work_img = if w < 200 {
@@ -106,8 +127,7 @@ pub fn prepare_name_cell(img: &DynamicImage) -> GrayImage {
         gray
     };
 
-    let enhanced = local_contrast_enhance(&work_img, 48);
-    let binary = sauvola_threshold(&enhanced, 21, 0.18, 128.0);
+    let binary = sauvola_threshold(&work_img, 21, 0.18, 128.0);
     morphological_close(&binary, 1)
 }
 
@@ -190,6 +210,93 @@ pub fn extract_row_cells(row: &DynamicImage) -> Vec<DynamicImage> {
     (0..STAT_COLUMNS)
         .filter_map(|col| crop_stat_cell(row, col))
         .collect()
+}
+
+// --- HSV color masking ---
+
+/// HSV white text isolation for OW2 scoreboard.
+/// White text has: any H, low S (< ~50/255), high V (> ~160/255).
+/// Non-text pixels (game background) are zeroed out.
+///
+/// Returns an RGB image where only white/near-white pixels are preserved;
+/// everything else is black. This dramatically reduces background noise
+/// before grayscale conversion and thresholding.
+fn hsv_white_mask(img: &DynamicImage) -> RgbImage {
+    let rgb = img.to_rgb8();
+    let (w, h) = rgb.dimensions();
+    let mut output = RgbImage::new(w, h);
+
+    // Tuned thresholds for OW2 scoreboard text at 1440p:
+    // - Saturation ceiling: text is white/gray so S is very low
+    // - Value floor: text is bright white
+    // - Allow slightly dimmer pixels at panel edges (gradient tolerance)
+    const SAT_CEIL: u8 = 60;
+    const VAL_FLOOR: u8 = 150;
+    // Softer threshold for partial alpha text at panel edges
+    const VAL_FLOOR_SOFT: u8 = 120;
+    const SAT_CEIL_SOFT: u8 = 80;
+
+    for y in 0..h {
+        for x in 0..w {
+            let px = rgb.get_pixel(x, y);
+            let [r, g, b] = px.0;
+
+            let (_, s, v) = rgb_to_hsv(r, g, b);
+
+            // Hard mask: definitely text
+            if s <= SAT_CEIL && v >= VAL_FLOOR {
+                output.put_pixel(x, y, *px);
+            }
+            // Soft mask: possible text at lower brightness (semi-transparent areas)
+            // Weight the pixel by how close it is to the hard threshold
+            else if s <= SAT_CEIL_SOFT && v >= VAL_FLOOR_SOFT {
+                let weight = (v - VAL_FLOOR_SOFT) as f32 / (VAL_FLOOR - VAL_FLOOR_SOFT) as f32;
+                let weight = weight.clamp(0.0, 1.0);
+                let wr = (r as f32 * weight) as u8;
+                let wg = (g as f32 * weight) as u8;
+                let wb = (b as f32 * weight) as u8;
+                output.put_pixel(x, y, Rgb([wr, wg, wb]));
+            }
+            // Everything else → black (background eliminated)
+        }
+    }
+
+    output
+}
+
+/// Convert RGB (0-255) to HSV. Returns (H: 0-360, S: 0-255, V: 0-255).
+fn rgb_to_hsv(r: u8, g: u8, b: u8) -> (u16, u8, u8) {
+    let rf = r as f32 / 255.0;
+    let gf = g as f32 / 255.0;
+    let bf = b as f32 / 255.0;
+
+    let max = rf.max(gf).max(bf);
+    let min = rf.min(gf).min(bf);
+    let delta = max - min;
+
+    let v = (max * 255.0) as u8;
+
+    if max == 0.0 {
+        return (0, 0, v);
+    }
+
+    let s = ((delta / max) * 255.0) as u8;
+
+    if delta == 0.0 {
+        return (0, s, v);
+    }
+
+    let h = if max == rf {
+        60.0 * (((gf - bf) / delta) % 6.0)
+    } else if max == gf {
+        60.0 * ((bf - rf) / delta + 2.0)
+    } else {
+        60.0 * ((rf - gf) / delta + 4.0)
+    };
+
+    let h = if h < 0.0 { h + 360.0 } else { h };
+
+    (h as u16, s, v)
 }
 
 // --- Adaptive thresholding core ---
@@ -377,14 +484,24 @@ fn nearest_2x_upscale(img: &GrayImage) -> GrayImage {
 
 /// Save intermediate preprocessing stages to debug directory.
 pub fn save_debug_stages(img: &DynamicImage, debug_dir: &std::path::Path) {
-    let gray = img.to_luma8();
-    let enhanced = local_contrast_enhance(&gray, 64);
-    let binary = sauvola_threshold(&enhanced, 25, 0.2, 128.0);
-    let final_img = morphological_close(&binary, 1);
-
     let _ = std::fs::create_dir_all(debug_dir);
-    let _ = DynamicImage::ImageLuma8(gray).save(debug_dir.join("01_grayscale.png"));
-    let _ = DynamicImage::ImageLuma8(enhanced).save(debug_dir.join("02_contrast_enhanced.png"));
-    let _ = DynamicImage::ImageLuma8(binary).save(debug_dir.join("03_sauvola_binary.png"));
-    let _ = DynamicImage::ImageLuma8(final_img).save(debug_dir.join("04_morphological_close.png"));
+
+    // Stage 0: Original input
+    let _ = img.save(debug_dir.join("00_original.png"));
+
+    // Stage 1: HSV white mask (new Phase 1 step)
+    let masked = hsv_white_mask(img);
+    let _ = DynamicImage::ImageRgb8(masked.clone()).save(debug_dir.join("01_hsv_masked.png"));
+
+    // Stage 2: Grayscale of masked image
+    let gray = DynamicImage::ImageRgb8(masked).to_luma8();
+    let _ = DynamicImage::ImageLuma8(gray.clone()).save(debug_dir.join("02_grayscale.png"));
+
+    // Stage 3: Sauvola binary
+    let binary = sauvola_threshold(&gray, 25, 0.2, 128.0);
+    let _ = DynamicImage::ImageLuma8(binary.clone()).save(debug_dir.join("03_sauvola_binary.png"));
+
+    // Stage 4: Morphological close (final)
+    let final_img = morphological_close(&binary, 1);
+    let _ = DynamicImage::ImageLuma8(final_img).save(debug_dir.join("04_final.png"));
 }
