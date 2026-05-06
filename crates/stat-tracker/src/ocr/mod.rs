@@ -5,6 +5,8 @@ use std::path::PathBuf;
 
 use image::DynamicImage;
 
+use crate::detect::hero_portrait::detect_team_size;
+
 #[derive(Debug)]
 pub struct OcrResult {
     pub raw_text: String,
@@ -127,13 +129,13 @@ pub fn recognize_name(img: &DynamicImage) -> Result<CellOcrResult, Box<dyn std::
 }
 
 /// Per-row OCR: extract name + all stat cells from a single player row.
-pub fn recognize_row(row_img: &DynamicImage) -> RowOcrResult {
+pub fn recognize_row(row_img: &DynamicImage, columns: &preprocess::StatColumns) -> RowOcrResult {
     let name = {
         let name_crop = preprocess::crop_name_cell(row_img);
         recognize_name(&name_crop).ok()
     };
 
-    let cells = preprocess::extract_row_cells(row_img);
+    let cells = preprocess::extract_row_cells(row_img, columns);
     let stats: Vec<CellOcrResult> = cells
         .iter()
         .filter_map(|cell| recognize_cell(cell).ok())
@@ -163,12 +165,27 @@ pub fn recognize_row(row_img: &DynamicImage) -> RowOcrResult {
 /// Full scoreboard OCR using per-cell extraction.
 /// Returns structured results per row with higher confidence than full-image OCR.
 pub fn recognize_scoreboard_cells(img: &DynamicImage) -> Vec<RowOcrResult> {
+    recognize_scoreboard_cells_with_team_size(img, None)
+}
+
+/// OCR with explicit team size override. Pass None to auto-detect.
+pub fn recognize_scoreboard_cells_with_team_size(img: &DynamicImage, team_size_override: Option<usize>) -> Vec<RowOcrResult> {
     let cropped = preprocess::crop_scoreboard(img);
+    let team_size = team_size_override.unwrap_or_else(|| {
+        let detected = detect_team_size(&cropped);
+        tracing::debug!(detected, "auto-detected team size");
+        detected
+    });
+    let total_rows = team_size * 2;
+    let columns = preprocess::detect_stat_columns(&cropped);
+
+    tracing::debug!(team_size, total_rows, ?columns, "scoreboard layout");
+
     let mut results = Vec::new();
 
-    for row_idx in 0..10 {
-        if let Some(row_img) = preprocess::crop_player_row(&cropped, row_idx) {
-            results.push(recognize_row(&row_img));
+    for row_idx in 0..total_rows {
+        if let Some(row_img) = preprocess::crop_player_row(&cropped, row_idx, team_size) {
+            results.push(recognize_row(&row_img, &columns));
         }
     }
 
@@ -177,9 +194,8 @@ pub fn recognize_scoreboard_cells(img: &DynamicImage) -> Vec<RowOcrResult> {
         let _ = std::fs::create_dir_all(&debug_dir);
         preprocess::save_debug_stages(&cropped, &debug_dir);
 
-        // Save individual row crops for debugging
-        for (idx, row_img) in (0..10)
-            .filter_map(|i| preprocess::crop_player_row(&cropped, i).map(|r| (i, r)))
+        for (idx, row_img) in (0..total_rows)
+            .filter_map(|i| preprocess::crop_player_row(&cropped, i, team_size).map(|r| (i, r)))
         {
             let _ = row_img.save(debug_dir.join(format!("row_{idx:02}.png")));
         }

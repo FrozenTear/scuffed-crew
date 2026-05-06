@@ -1,37 +1,33 @@
 use image::{DynamicImage, GrayImage, Luma, Rgb, RgbImage};
 
 /// Scoreboard layout constants for 2560x1440 OW2 fullscreen.
-/// The Tab scoreboard is centered with ~65% width, ~70% height.
 const SCOREBOARD_X_RATIO: f64 = 0.175;
 const SCOREBOARD_Y_RATIO: f64 = 0.15;
 const SCOREBOARD_W_RATIO: f64 = 0.65;
 const SCOREBOARD_H_RATIO: f64 = 0.70;
 
-/// Number of player rows visible on the scoreboard (5v5 = 10 rows)
-const PLAYER_ROWS: usize = 10;
-
 /// Stat columns: E, A, D, DMG, HLG, MIT
 const STAT_COLUMNS: usize = 6;
 
-/// Relative column boundaries within the scoreboard crop (left edge fraction, width fraction).
-/// Tuned from OW2 1440p captures. The stat columns occupy the right ~55% of each row.
-const STAT_COL_BOUNDARIES: [(f64, f64); STAT_COLUMNS] = [
-    (0.52, 0.07), // Elims
-    (0.59, 0.07), // Assists
-    (0.66, 0.07), // Deaths
-    (0.73, 0.09), // Damage
-    (0.82, 0.09), // Healing
-    (0.91, 0.09), // Mitigation
+/// Fallback column boundaries if dynamic detection fails.
+const STAT_COL_BOUNDARIES_FALLBACK: [(f64, f64); STAT_COLUMNS] = [
+    (0.465, 0.033),  // Elims
+    (0.503, 0.030),  // Assists (no overlap with E)
+    (0.538, 0.030),  // Deaths (no overlap with A)
+    (0.575, 0.070),  // Damage
+    (0.650, 0.070),  // Healing
+    (0.725, 0.055),  // Mitigation (narrower to exclude UI warning icon)
 ];
 
 /// Player name column within each row
-const NAME_COL_X: f64 = 0.08;
-const NAME_COL_W: f64 = 0.20;
+const NAME_COL_X: f64 = 0.09;
+const NAME_COL_W: f64 = 0.22;
 
-/// Row layout: header takes ~8% of scoreboard height, rows split remainder.
-/// Team 1 rows occupy top half, team 2 bottom half, with a small gap between.
-const HEADER_RATIO: f64 = 0.08;
-const TEAM_GAP_RATIO: f64 = 0.04;
+/// Row layout: header takes ~2.5% of scoreboard height.
+/// Team 1 starts immediately after header. Team 2 starts at ~56.5% (measured from
+/// real screenshots — the VS divider gap is larger than initially estimated).
+const HEADER_RATIO: f64 = 0.025;
+const TEAM2_START_RATIO: f64 = 0.565;
 
 pub fn prepare(img: &DynamicImage) -> GrayImage {
     prepare_hsv_adaptive(img)
@@ -99,23 +95,33 @@ pub fn prepare_adaptive(img: &DynamicImage) -> GrayImage {
 }
 
 /// Prepare a single cell crop with parameters tuned for numeric stat text.
-/// Uses HSV masking + tighter Sauvola window since cells contain isolated short strings.
+/// HSV mask isolates white text pixels; we then apply a simple fixed threshold
+/// since the mask already did the heavy lifting. Sauvola on these small, mostly-black
+/// post-mask images produces poor results (local mean ≈ 0 → garbage thresholds).
 pub fn prepare_cell(img: &DynamicImage) -> GrayImage {
     let masked = hsv_white_mask(img);
     let gray = DynamicImage::ImageRgb8(masked).to_luma8();
     let (w, _) = gray.dimensions();
 
-    let work_img = if w < 80 {
+    let work_img = if w < 100 {
         nearest_2x_upscale(&gray)
     } else {
         gray
     };
 
-    let binary = sauvola_threshold(&work_img, 15, 0.15, 128.0);
-    morphological_close(&binary, 1)
+    let (ww, hh) = work_img.dimensions();
+    let mut binary = GrayImage::new(ww, hh);
+    for y in 0..hh {
+        for x in 0..ww {
+            let v = work_img.get_pixel(x, y).0[0];
+            binary.put_pixel(x, y, Luma([if v > 30 { 0 } else { 255 }]));
+        }
+    }
+
+    add_white_border(&binary, 8)
 }
 
-/// Prepare a player name cell — HSV mask + wider Sauvola window for longer text strings.
+/// Prepare a player name cell — HSV mask + simple threshold (same rationale as prepare_cell).
 pub fn prepare_name_cell(img: &DynamicImage) -> GrayImage {
     let masked = hsv_white_mask(img);
     let gray = DynamicImage::ImageRgb8(masked).to_luma8();
@@ -127,8 +133,25 @@ pub fn prepare_name_cell(img: &DynamicImage) -> GrayImage {
         gray
     };
 
-    let binary = sauvola_threshold(&work_img, 21, 0.18, 128.0);
-    morphological_close(&binary, 1)
+    let (ww, hh) = work_img.dimensions();
+    let mut binary = GrayImage::new(ww, hh);
+    for y in 0..hh {
+        for x in 0..ww {
+            let v = work_img.get_pixel(x, y).0[0];
+            binary.put_pixel(x, y, Luma([if v > 30 { 0 } else { 255 }]));
+        }
+    }
+
+    add_white_border(&binary, 8)
+}
+
+/// Column boundaries as (left_edge_fraction, width_fraction) for each of the 6 stat columns.
+pub type StatColumns = [(f64, f64); STAT_COLUMNS];
+
+/// Return stat column boundaries. Uses fixed positions calibrated for the
+/// most common OW2 scoreboard layout at 2560x1440.
+pub fn detect_stat_columns(_scoreboard: &DynamicImage) -> StatColumns {
+    STAT_COL_BOUNDARIES_FALLBACK
 }
 
 // --- Scoreboard geometry ---
@@ -143,47 +166,49 @@ pub fn crop_scoreboard(img: &DynamicImage) -> DynamicImage {
 }
 
 /// Extract a single player row from the scoreboard crop.
-/// `row_index` is 0-9 (0-4 = team 1, 5-9 = team 2).
-pub fn crop_player_row(scoreboard: &DynamicImage, row_index: usize) -> Option<DynamicImage> {
-    if row_index >= PLAYER_ROWS {
+/// `row_index` is 0..(team_size*2-1). `team_size` is 5 or 6.
+pub fn crop_player_row(scoreboard: &DynamicImage, row_index: usize, team_size: usize) -> Option<DynamicImage> {
+    let total_rows = team_size * 2;
+    if row_index >= total_rows {
         return None;
     }
 
     let (w, h) = (scoreboard.width(), scoreboard.height());
-    let header_h = (h as f64 * HEADER_RATIO) as u32;
-    let gap_h = (h as f64 * TEAM_GAP_RATIO) as u32;
-    let usable_h = h - header_h - gap_h;
-    let row_h = usable_h / PLAYER_ROWS as u32;
+    let team1_start = (h as f64 * HEADER_RATIO) as u32;
+    let team2_start = (h as f64 * TEAM2_START_RATIO) as u32;
 
-    let (team, team_row) = if row_index < 5 {
+    let (team, team_row) = if row_index < team_size {
         (0, row_index)
     } else {
-        (1, row_index - 5)
+        (1, row_index - team_size)
     };
 
-    let y = header_h + (team as u32 * (usable_h / 2 + gap_h)) + (team_row as u32 * row_h);
+    let row_h = (team2_start - team1_start) / (team_size as u32 + 1);
 
-    if y + row_h > h {
+    let base_y = if team == 0 { team1_start } else { team2_start };
+    let y = base_y + (team_row as u32 * row_h);
+
+    let actual_h = row_h.min(h.saturating_sub(y));
+    if actual_h < row_h / 2 {
         return None;
     }
 
-    Some(scoreboard.crop_imm(0, y, w, row_h))
+    Some(scoreboard.crop_imm(0, y, w, actual_h))
 }
 
-/// Extract a stat cell from a player row.
+/// Extract a stat cell from a player row using dynamic column boundaries.
 /// `col_index` is 0-5 (E, A, D, DMG, HLG, MIT).
-pub fn crop_stat_cell(row: &DynamicImage, col_index: usize) -> Option<DynamicImage> {
+pub fn crop_stat_cell(row: &DynamicImage, col_index: usize, columns: &StatColumns) -> Option<DynamicImage> {
     if col_index >= STAT_COLUMNS {
         return None;
     }
 
     let (w, h) = (row.width(), row.height());
-    let (col_x_ratio, col_w_ratio) = STAT_COL_BOUNDARIES[col_index];
+    let (col_x_ratio, col_w_ratio) = columns[col_index];
 
-    let x = (w as f64 * col_x_ratio) as u32;
+    let x = (w as f64 * col_x_ratio).max(0.0) as u32;
     let cell_w = (w as f64 * col_w_ratio) as u32;
 
-    // Vertically trim to the middle ~70% of the row to avoid border artifacts
     let pad_y = (h as f64 * 0.15) as u32;
     let cell_h = h - (pad_y * 2);
 
@@ -206,9 +231,9 @@ pub fn crop_name_cell(row: &DynamicImage) -> DynamicImage {
 }
 
 /// Get all stat cells for a row as individual images.
-pub fn extract_row_cells(row: &DynamicImage) -> Vec<DynamicImage> {
+pub fn extract_row_cells(row: &DynamicImage, columns: &StatColumns) -> Vec<DynamicImage> {
     (0..STAT_COLUMNS)
-        .filter_map(|col| crop_stat_cell(row, col))
+        .filter_map(|col| crop_stat_cell(row, col, columns))
         .collect()
 }
 
@@ -462,6 +487,19 @@ fn median_filter_3x3(img: &GrayImage) -> GrayImage {
         }
     }
 
+    out
+}
+
+/// Add a white border around the image. Tesseract performs better when text
+/// doesn't touch the image edge.
+fn add_white_border(img: &GrayImage, pad: u32) -> GrayImage {
+    let (w, h) = img.dimensions();
+    let mut out = GrayImage::from_pixel(w + pad * 2, h + pad * 2, Luma([255]));
+    for y in 0..h {
+        for x in 0..w {
+            out.put_pixel(x + pad, y + pad, *img.get_pixel(x, y));
+        }
+    }
     out
 }
 

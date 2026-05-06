@@ -246,7 +246,7 @@ fn extract_portrait_crops_inner(scoreboard: &DynamicImage, team_size: usize) -> 
 
 /// Detect whether the scoreboard shows 5v5 or 6v6 by counting distinct
 /// portrait-sized bright regions in the left column.
-fn detect_team_size(scoreboard: &DynamicImage) -> usize {
+pub fn detect_team_size(scoreboard: &DynamicImage) -> usize {
     let rgb = scoreboard.to_rgb8();
     let (w, h) = rgb.dimensions();
     let scan_x = w * 3 / 100; // center of portrait column
