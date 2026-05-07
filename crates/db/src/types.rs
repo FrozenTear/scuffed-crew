@@ -600,6 +600,8 @@ pub enum AuditAction {
     UploadedPersonalStats,
     CreatedDaemonToken,
     RevokedDaemonToken,
+    SentDirectMessage,
+    SyncedDirectMessages,
 }
 
 impl std::fmt::Display for AuditAction {
@@ -638,6 +640,7 @@ pub enum AuditTargetType {
     ForumReply,
     PersonalStats,
     DaemonToken,
+    DirectMessage,
 }
 
 impl std::fmt::Display for AuditTargetType {
@@ -1047,4 +1050,55 @@ pub struct ForumReply {
     pub content: String,
     pub created_at: DateTime<Utc>,
     pub is_active: bool,
+}
+
+// =============================================================================
+// Direct Messages (NIP-44 + NIP-59 gift wrap, Phase 5)
+// =============================================================================
+
+/// One delivered direct message (gift-wrapped on the relay, decrypted server-side).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DmMessage {
+    pub id: String,
+    /// The kind 1059 gift-wrap event id from the relay (unique).
+    pub gift_wrap_id: String,
+    pub sender_pubkey: String,
+    pub recipient_pubkey: String,
+    /// Sorted "lo,hi" pubkey pair — used for fast peer lookups regardless of direction.
+    pub conversation_key: String,
+    pub content: String,
+    pub reply_to_event_id: Option<String>,
+    pub created_at: DateTime<Utc>,
+}
+
+/// One conversation summary: the peer + the latest message.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DmConversation {
+    pub peer_pubkey: String,
+    pub conversation_key: String,
+    pub last_message_preview: String,
+    pub last_message_at: DateTime<Utc>,
+    pub last_sender_pubkey: String,
+    pub unread_count: u32,
+}
+
+/// Per-member, per-conversation last-read marker.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DmReadMarker {
+    pub member_id: String,
+    pub peer_pubkey: String,
+    pub last_read_at: DateTime<Utc>,
+}
+
+/// Build the deterministic conversation key from a pubkey pair.
+///
+/// Sorts the two pubkeys lexicographically and joins with a comma, so
+/// `conversation_key(A, B) == conversation_key(B, A)`. Used as a single
+/// secondary index for retrieving any DM thread between two pubkeys.
+pub fn conversation_key(pubkey_a: &str, pubkey_b: &str) -> String {
+    if pubkey_a <= pubkey_b {
+        format!("{pubkey_a},{pubkey_b}")
+    } else {
+        format!("{pubkey_b},{pubkey_a}")
+    }
 }

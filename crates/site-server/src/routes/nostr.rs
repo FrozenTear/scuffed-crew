@@ -1156,3 +1156,578 @@ pub async fn nostr_health(
         forum_backend,
     })
 }
+
+// ─── Phase 5: Encrypted Direct Messages (NIP-44 + NIP-59) ───
+//
+// All DM routes require server-managed Nostr keys: the server holds the
+// member's encrypted secret key, decrypts on demand to encrypt/decrypt the
+// gift wrap, and stores the decrypted plaintext in `dm_message`. External-key
+// (NIP-07) members cannot send/receive DMs through this path — that requires
+// client-side encryption and is out of scope for Phase 5 v1.
+
+/// Pubkeys are 32-byte secp256k1 x-only keys serialized as 64 lowercase hex chars.
+fn validate_pubkey_hex(pk: &str) -> Result<(), &'static str> {
+    if pk.len() != 64 {
+        return Err("pubkey must be 64 hex characters");
+    }
+    if !pk.chars().all(|c| c.is_ascii_hexdigit() && (c.is_numeric() || c.is_ascii_lowercase())) {
+        return Err("pubkey must be lowercase hex");
+    }
+    Ok(())
+}
+
+#[derive(Deserialize)]
+pub struct DmSendRequest {
+    pub recipient_pubkey: String,
+    pub content: String,
+    #[serde(default)]
+    pub reply_to_event_id: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct DmSendResponse {
+    /// The kind 1059 gift-wrap event id published to the relay (and stored).
+    pub gift_wrap_id: String,
+}
+
+#[derive(Serialize, Clone)]
+pub struct DmMessageResponse {
+    pub id: String,
+    pub gift_wrap_id: String,
+    pub sender_pubkey: String,
+    pub recipient_pubkey: String,
+    pub content: String,
+    pub reply_to_event_id: Option<String>,
+    pub created_at: String,
+}
+
+impl From<scuffed_db::DmMessage> for DmMessageResponse {
+    fn from(m: scuffed_db::DmMessage) -> Self {
+        Self {
+            id: m.id,
+            gift_wrap_id: m.gift_wrap_id,
+            sender_pubkey: m.sender_pubkey,
+            recipient_pubkey: m.recipient_pubkey,
+            content: m.content,
+            reply_to_event_id: m.reply_to_event_id,
+            created_at: m.created_at.to_rfc3339(),
+        }
+    }
+}
+
+#[derive(Serialize)]
+pub struct DmConversationResponse {
+    pub peer_pubkey: String,
+    pub last_message_preview: String,
+    pub last_message_at: String,
+    pub last_sender_pubkey: String,
+    pub unread_count: u32,
+}
+
+impl From<scuffed_db::DmConversation> for DmConversationResponse {
+    fn from(c: scuffed_db::DmConversation) -> Self {
+        Self {
+            peer_pubkey: c.peer_pubkey,
+            last_message_preview: c.last_message_preview,
+            last_message_at: c.last_message_at.to_rfc3339(),
+            last_sender_pubkey: c.last_sender_pubkey,
+            unread_count: c.unread_count,
+        }
+    }
+}
+
+#[derive(Serialize)]
+pub struct DmSyncResponse {
+    /// Number of gift-wrap events fetched from the relay.
+    pub fetched: u32,
+    /// Number of new messages newly stored (excluding dedup hits).
+    pub stored: u32,
+}
+
+#[derive(Deserialize)]
+pub struct DmInboxQuery {
+    /// RFC3339 timestamp; only return messages strictly newer than this.
+    #[serde(default)]
+    pub since_ts: Option<String>,
+    #[serde(default)]
+    pub limit: Option<u32>,
+}
+
+#[derive(Deserialize)]
+pub struct DmThreadQuery {
+    #[serde(default)]
+    pub before_ts: Option<String>,
+    #[serde(default)]
+    pub limit: Option<u32>,
+}
+
+#[derive(Deserialize)]
+pub struct DmMarkReadRequest {
+    pub peer_pubkey: String,
+    /// RFC3339 timestamp; mark all messages from `peer_pubkey` up to and
+    /// including this timestamp as read.
+    pub until_ts: String,
+}
+
+/// Resolve the caller's server-managed Nostr identity, or return the right
+/// HTTP error for an external-key / unconfigured-relay caller.
+fn require_server_managed_dm_caller(
+    state: &AppState,
+    caller: &OrgMember,
+) -> Result<(String, String, scuffed_auth::crypto::EncryptedBlob), (StatusCode, Json<ErrorResponse>)>
+{
+    let relay_url = state.relay_url.clone().ok_or_else(|| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(ErrorResponse {
+                error: "Relay not configured".into(),
+            }),
+        )
+    })?;
+
+    if caller.member.nostr_key_mode != Some(NostrKeyMode::ServerManaged) {
+        return Err((
+            StatusCode::PRECONDITION_FAILED,
+            Json(ErrorResponse {
+                error: "Server-managed Nostr key required for DMs".into(),
+            }),
+        ));
+    }
+    let pubkey = caller.member.nostr_pubkey.clone().ok_or_else(|| {
+        (
+            StatusCode::PRECONDITION_FAILED,
+            Json(ErrorResponse {
+                error: "Member has no Nostr pubkey".into(),
+            }),
+        )
+    })?;
+    let blob = caller
+        .member
+        .nostr_secret_key_encrypted
+        .clone()
+        .ok_or_else(|| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: "Member has no encrypted secret key".into(),
+                }),
+            )
+        })?;
+    Ok((relay_url, pubkey, blob))
+}
+
+fn require_encryption_service(
+    state: &AppState,
+) -> Result<scuffed_chat::EncryptionService, (StatusCode, Json<ErrorResponse>)> {
+    let crypto = state.crypto.clone().ok_or_else(|| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(ErrorResponse {
+                error: "Encryption service not configured (set ENCRYPTION_KEY)".into(),
+            }),
+        )
+    })?;
+    Ok(scuffed_chat::EncryptionService::new(crypto))
+}
+
+fn parse_rfc3339(value: &str) -> Result<chrono::DateTime<chrono::Utc>, (StatusCode, Json<ErrorResponse>)> {
+    chrono::DateTime::parse_from_rfc3339(value)
+        .map(|dt| dt.with_timezone(&chrono::Utc))
+        .map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: format!("Invalid RFC3339 timestamp: {e}"),
+                }),
+            )
+        })
+}
+
+/// POST /api/nostr/dm/send — send an encrypted DM via NIP-59 gift wrap.
+pub async fn dm_send(
+    State(state): State<AppState>,
+    caller: OrgMember,
+    Json(body): Json<DmSendRequest>,
+) -> Result<Json<DmSendResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let recipient = body.recipient_pubkey.trim().to_lowercase();
+    validate_pubkey_hex(&recipient).map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: format!("Invalid recipient_pubkey: {e}"),
+            }),
+        )
+    })?;
+    let content = body.content.trim();
+    if content.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "Message content must not be empty".into(),
+            }),
+        ));
+    }
+
+    let (relay_url, sender_pubkey, sender_blob) = require_server_managed_dm_caller(&state, &caller)?;
+    let encryption = require_encryption_service(&state)?;
+
+    if recipient == sender_pubkey {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "Cannot DM yourself".into(),
+            }),
+        ));
+    }
+
+    // NIP-17 DMs use a single conversation context; we reuse the recipient
+    // pubkey as the `h` tag context so unrelated group chatter is not pulled
+    // in by relay-side filters keyed on it.
+    let context_id = format!("dm:{}:{}", sender_pubkey, recipient);
+
+    let wraps = encryption
+        .build_gift_wraps(
+            &sender_blob,
+            &[recipient.clone()],
+            content,
+            &context_id,
+            body.reply_to_event_id.as_deref(),
+        )
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("Failed to build gift wrap: {e}"),
+                }),
+            )
+        })?;
+
+    let wrap = wraps.into_iter().next().ok_or_else(|| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: "Encryption produced no gift wrap".into(),
+            }),
+        )
+    })?;
+    let gift_wrap_id = wrap.event.id.to_hex();
+    let relay_event = EventBuilder::to_relay_event(&wrap.event);
+
+    // Store the sender's own copy synchronously so the UI can render it
+    // immediately. Receiver-side dedup against the relay's later resync is
+    // handled by the unique index on `gift_wrap_id`.
+    let now = chrono::Utc::now();
+    let _ = state
+        .db
+        .insert_dm_message(
+            &gift_wrap_id,
+            &sender_pubkey,
+            &recipient,
+            content,
+            body.reply_to_event_id.as_deref(),
+            now,
+        )
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("Failed to store sent message: {e}"),
+                }),
+            )
+        })?;
+
+    let db = state.db.clone();
+    let log_event_id = gift_wrap_id.clone();
+    let member_id = caller.member.id.clone();
+    tokio::spawn(async move {
+        if let Err(e) = publish_event_oneshot(&relay_url, relay_event).await {
+            tracing::error!("Failed to publish DM gift wrap: {e}");
+        } else {
+            tracing::info!("Published DM gift wrap {log_event_id}");
+        }
+        crate::routes::audit_log::audit(
+            &db,
+            &member_id,
+            scuffed_db::AuditAction::SentDirectMessage,
+            scuffed_db::AuditTargetType::DirectMessage,
+            &log_event_id,
+            Some("Sent encrypted direct message"),
+        )
+        .await;
+    });
+
+    Ok(Json(DmSendResponse { gift_wrap_id }))
+}
+
+/// POST /api/nostr/dm/sync — pull new gift wraps from the relay, decrypt, store.
+///
+/// Used by the frontend on page mount (until real-time subscription wiring
+/// lands — see [THE-878]). Always idempotent: dedup is enforced via the
+/// unique index on `gift_wrap_id`.
+pub async fn dm_sync(
+    State(state): State<AppState>,
+    caller: OrgMember,
+) -> Result<Json<DmSyncResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let (relay_url, my_pubkey, my_blob) = require_server_managed_dm_caller(&state, &caller)?;
+    let encryption = require_encryption_service(&state)?;
+
+    // Use the inbox high-water mark as the relay `since` filter so we don't
+    // refetch every gift wrap on each sync. Subtract a small overlap window
+    // to forgive minor relay clock drift.
+    let high_water = state
+        .db
+        .dm_inbox_high_water(&my_pubkey)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("Failed to read inbox high-water: {e}"),
+                }),
+            )
+        })?;
+    let since_secs: Option<u64> = high_water.map(|dt| {
+        let secs = dt.timestamp();
+        // 60s overlap window
+        let lower = secs - 60;
+        if lower < 0 {
+            0
+        } else {
+            lower as u64
+        }
+    });
+
+    let mut tags = std::collections::HashMap::new();
+    tags.insert("#p".to_string(), vec![my_pubkey.clone()]);
+    let filter = scuffed_types::nostr::NostrFilter {
+        kinds: Some(vec![scuffed_types::nostr::event_kinds::GIFT_WRAP]),
+        since: since_secs,
+        limit: Some(500),
+        tags,
+        ..Default::default()
+    };
+
+    let events = scuffed_chat::nostr::relay::query_events_oneshot(&relay_url, vec![filter], 10)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(ErrorResponse {
+                    error: format!("Relay query failed: {e}"),
+                }),
+            )
+        })?;
+    let fetched = events.len() as u32;
+
+    let mut stored: u32 = 0;
+    for relay_event in events {
+        let event_json = match serde_json::to_string(&relay_event) {
+            Ok(j) => j,
+            Err(e) => {
+                tracing::warn!("Skipping unserializable relay event: {e}");
+                continue;
+            }
+        };
+        let unwrapped = match encryption.unwrap_gift_wrap_json(&my_blob, &event_json).await {
+            Ok(u) => u,
+            Err(e) => {
+                tracing::debug!("Skipping unwrap failure: {e}");
+                continue;
+            }
+        };
+        if unwrapped.kind != scuffed_types::nostr::event_kinds::PRIVATE_DIRECT_MESSAGE {
+            tracing::debug!(
+                "Skipping non-DM rumor inside gift wrap (kind={})",
+                unwrapped.kind
+            );
+            continue;
+        }
+        let reply_to = unwrapped.tags.iter().find_map(|tag| {
+            if tag.first().map(|s| s.as_str()) == Some("e") {
+                tag.get(1).cloned()
+            } else {
+                None
+            }
+        });
+        let created_at = chrono::DateTime::<chrono::Utc>::from_timestamp(
+            unwrapped.created_at as i64,
+            0,
+        )
+        .unwrap_or_else(chrono::Utc::now);
+
+        match state
+            .db
+            .insert_dm_message(
+                &relay_event.id,
+                &unwrapped.sender_pubkey,
+                &my_pubkey,
+                &unwrapped.content,
+                reply_to.as_deref(),
+                created_at,
+            )
+            .await
+        {
+            Ok((_, was_new)) => {
+                if was_new {
+                    stored += 1;
+                }
+            }
+            Err(e) => {
+                tracing::warn!("Failed to store DM {}: {e}", relay_event.id);
+            }
+        }
+    }
+
+    if stored > 0 {
+        let db = state.db.clone();
+        let member_id = caller.member.id.clone();
+        let stored_count = stored;
+        tokio::spawn(async move {
+            crate::routes::audit_log::audit(
+                &db,
+                &member_id,
+                scuffed_db::AuditAction::SyncedDirectMessages,
+                scuffed_db::AuditTargetType::DirectMessage,
+                &member_id,
+                Some(&format!("Synced {stored_count} new DM(s) from relay")),
+            )
+            .await;
+        });
+    }
+
+    Ok(Json(DmSyncResponse { fetched, stored }))
+}
+
+/// GET /api/nostr/dm/inbox?since_ts=&limit= — flat inbox for the caller.
+pub async fn dm_inbox(
+    State(state): State<AppState>,
+    caller: OrgMember,
+    Query(query): Query<DmInboxQuery>,
+) -> Result<Json<Vec<DmMessageResponse>>, (StatusCode, Json<ErrorResponse>)> {
+    let (_, my_pubkey, _) = require_server_managed_dm_caller(&state, &caller)?;
+    let limit = query.limit.unwrap_or(100).min(500);
+    let since = query
+        .since_ts
+        .as_deref()
+        .map(parse_rfc3339)
+        .transpose()?;
+
+    let messages = state
+        .db
+        .list_dm_inbox(&my_pubkey, limit, since)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("Failed to list inbox: {e}"),
+                }),
+            )
+        })?;
+    Ok(Json(messages.into_iter().map(Into::into).collect()))
+}
+
+/// GET /api/nostr/dm/conversations — distinct peer summaries with unread counts.
+pub async fn dm_conversations(
+    State(state): State<AppState>,
+    caller: OrgMember,
+) -> Result<Json<Vec<DmConversationResponse>>, (StatusCode, Json<ErrorResponse>)> {
+    let (_, my_pubkey, _) = require_server_managed_dm_caller(&state, &caller)?;
+    let convs = state
+        .db
+        .list_dm_conversations(&caller.member.id, &my_pubkey)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("Failed to list conversations: {e}"),
+                }),
+            )
+        })?;
+    Ok(Json(convs.into_iter().map(Into::into).collect()))
+}
+
+/// GET /api/nostr/dm/thread/:peer_pubkey?before_ts=&limit= — paginated thread.
+///
+/// Path param is taken via Query (`peer_pubkey=`) to match the codebase's
+/// existing query-extractor pattern; the route is registered as
+/// `GET /api/nostr/dm/thread`.
+#[derive(Deserialize)]
+pub struct DmThreadPeerQuery {
+    pub peer_pubkey: String,
+    #[serde(default)]
+    pub before_ts: Option<String>,
+    #[serde(default)]
+    pub limit: Option<u32>,
+}
+
+pub async fn dm_thread(
+    State(state): State<AppState>,
+    caller: OrgMember,
+    Query(query): Query<DmThreadPeerQuery>,
+) -> Result<Json<Vec<DmMessageResponse>>, (StatusCode, Json<ErrorResponse>)> {
+    let (_, my_pubkey, _) = require_server_managed_dm_caller(&state, &caller)?;
+    let peer = query.peer_pubkey.trim().to_lowercase();
+    validate_pubkey_hex(&peer).map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: format!("Invalid peer_pubkey: {e}"),
+            }),
+        )
+    })?;
+    let limit = query.limit.unwrap_or(50).min(200);
+    let before = query
+        .before_ts
+        .as_deref()
+        .map(parse_rfc3339)
+        .transpose()?;
+    let messages = state
+        .db
+        .list_dm_thread(&my_pubkey, &peer, limit, before)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("Failed to list thread: {e}"),
+                }),
+            )
+        })?;
+    Ok(Json(messages.into_iter().map(Into::into).collect()))
+}
+
+/// POST /api/nostr/dm/mark-read — advance the read marker for a peer.
+pub async fn dm_mark_read(
+    State(state): State<AppState>,
+    caller: OrgMember,
+    Json(body): Json<DmMarkReadRequest>,
+) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
+    let (_, _, _) = require_server_managed_dm_caller(&state, &caller)?;
+    let peer = body.peer_pubkey.trim().to_lowercase();
+    validate_pubkey_hex(&peer).map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: format!("Invalid peer_pubkey: {e}"),
+            }),
+        )
+    })?;
+    let until = parse_rfc3339(&body.until_ts)?;
+    state
+        .db
+        .upsert_dm_read_marker(&caller.member.id, &peer, until)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("Failed to mark read: {e}"),
+                }),
+            )
+        })?;
+    Ok(StatusCode::NO_CONTENT)
+}

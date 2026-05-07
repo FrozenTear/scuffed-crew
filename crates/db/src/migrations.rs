@@ -556,6 +556,39 @@ pub async fn run_migrations(client: &Surreal<Any>) -> DbResult<()> {
             COLUMNS member_id, hero, map_name, played_at UNIQUE;
 
         -- ================================================
+        -- Direct Messages (NIP-44 + NIP-59 gift wrap, Phase 5)
+        -- ================================================
+        -- One row per delivered gift wrap; dedup on `gift_wrap_id`.
+        -- Stored content is the decrypted plaintext (server-managed mode only).
+        -- `conversation_key` is the sorted "lo,hi" pubkey pair for fast peer
+        -- queries regardless of who sent which message.
+        DEFINE TABLE dm_message SCHEMAFULL;
+        DEFINE FIELD gift_wrap_id ON dm_message TYPE string;
+        DEFINE FIELD sender_pubkey ON dm_message TYPE string;
+        DEFINE FIELD recipient_pubkey ON dm_message TYPE string;
+        DEFINE FIELD conversation_key ON dm_message TYPE string;
+        DEFINE FIELD content ON dm_message TYPE string;
+        DEFINE FIELD reply_to_event_id ON dm_message TYPE option<string>;
+        DEFINE FIELD created_at ON dm_message TYPE datetime DEFAULT time::now();
+        DEFINE FIELD relay_received_at ON dm_message TYPE datetime DEFAULT time::now();
+
+        DEFINE INDEX dm_message_gift_wrap_idx ON dm_message COLUMNS gift_wrap_id UNIQUE;
+        DEFINE INDEX dm_message_conv_idx ON dm_message COLUMNS conversation_key, created_at;
+        DEFINE INDEX dm_message_recipient_idx ON dm_message COLUMNS recipient_pubkey, created_at;
+        DEFINE INDEX dm_message_sender_idx ON dm_message COLUMNS sender_pubkey, created_at;
+
+        -- ================================================
+        -- DM Read Markers (per-member, per-conversation)
+        -- ================================================
+        DEFINE TABLE dm_read_marker SCHEMAFULL;
+        DEFINE FIELD member_id ON dm_read_marker TYPE string;
+        DEFINE FIELD peer_pubkey ON dm_read_marker TYPE string;
+        DEFINE FIELD last_read_at ON dm_read_marker TYPE datetime;
+        DEFINE FIELD updated_at ON dm_read_marker TYPE datetime DEFAULT time::now();
+
+        DEFINE INDEX dm_read_marker_idx ON dm_read_marker COLUMNS member_id, peer_pubkey UNIQUE;
+
+        -- ================================================
         -- Daemon Tokens (stat-tracker daemon auth)
         -- ================================================
         DEFINE TABLE daemon_token SCHEMAFULL;

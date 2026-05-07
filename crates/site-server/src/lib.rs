@@ -449,6 +449,31 @@ pub fn create_router(state: AppState) -> Router {
             "/api/nostr/health",
             get(routes::nostr::nostr_health),
         )
+        // Phase 5: Encrypted Direct Messages (NIP-44 + NIP-59)
+        .route(
+            "/api/nostr/dm/send",
+            post(routes::nostr::dm_send),
+        )
+        .route(
+            "/api/nostr/dm/sync",
+            post(routes::nostr::dm_sync),
+        )
+        .route(
+            "/api/nostr/dm/inbox",
+            get(routes::nostr::dm_inbox),
+        )
+        .route(
+            "/api/nostr/dm/conversations",
+            get(routes::nostr::dm_conversations),
+        )
+        .route(
+            "/api/nostr/dm/thread",
+            get(routes::nostr::dm_thread),
+        )
+        .route(
+            "/api/nostr/dm/mark-read",
+            post(routes::nostr::dm_mark_read),
+        )
         // Upload routes
         .route("/api/upload/avatar", post(routes::uploads::upload_avatar))
         .route("/api/upload/image", post(routes::uploads::upload_image))
