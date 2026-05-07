@@ -105,14 +105,25 @@ struct SharedWsState {
 fn setup_ws_connection(shared: &Rc<SharedWsState>, strategy_id: &StrategyId) {
     (shared.on_state_change)(ConnectionState::Connecting);
 
-    let window = web_sys::window().unwrap();
+    let Some(window) = web_sys::window() else {
+        tracing::error!("No browser window available for WebSocket connection");
+        (shared.on_state_change)(ConnectionState::Disconnected);
+        return;
+    };
     let location = window.location();
-    let protocol = if location.protocol().unwrap() == "https:" {
+    let protocol = if location.protocol().unwrap_or_default() == "https:" {
         "wss:"
     } else {
         "ws:"
     };
-    let host = location.host().unwrap();
+    let host = match location.host() {
+        Ok(h) => h,
+        Err(_) => {
+            tracing::error!("Failed to read location.host for WebSocket URL");
+            (shared.on_state_change)(ConnectionState::Disconnected);
+            return;
+        }
+    };
     let url = format!("{}//{}/api/strategy/ws", protocol, host);
 
     match WebSocket::new(&url) {
@@ -203,8 +214,11 @@ fn setup_ws_connection(shared: &Rc<SharedWsState>, strategy_id: &StrategyId) {
                             setup_ws_connection(&shared_timer, &room_id);
                         }) as Box<dyn FnOnce()>);
 
-                        if let Ok(timer_id) = web_sys::window()
-                            .unwrap()
+                        let Some(window) = web_sys::window() else {
+                            tracing::error!("No window for reconnect timer");
+                            return;
+                        };
+                        if let Ok(timer_id) = window
                             .set_timeout_with_callback_and_timeout_and_arguments_0(
                                 callback.as_ref().unchecked_ref(),
                                 delay as i32,

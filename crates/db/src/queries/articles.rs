@@ -4,7 +4,7 @@ use surrealdb::types::Datetime as SurrealDatetime;
 use surrealdb_types::{RecordId, SurrealValue};
 
 use crate::types::Article;
-use crate::{Database, DbResult, with_timeout};
+use crate::{record_id_key_to_string, with_timeout, Database, DbResult};
 
 #[derive(Debug, Clone, Serialize, Deserialize, SurrealValue)]
 struct DbArticle {
@@ -18,16 +18,15 @@ struct DbArticle {
     cover_image_url: Option<String>,
     author_member_id: String,
     published: bool,
-    nostr_event_id: Option<String>,
+    published_at: Option<SurrealDatetime>,
     created_at: SurrealDatetime,
     updated_at: SurrealDatetime,
-    published_at: Option<SurrealDatetime>,
 }
 
 fn db_to_article(db: DbArticle) -> Article {
     let id = db
         .id
-        .map(|r| crate::record_id_key_to_string(r.key))
+        .map(|r| record_id_key_to_string(r.key))
         .unwrap_or_else(|| "unknown".to_string());
     Article {
         id,
@@ -38,14 +37,14 @@ fn db_to_article(db: DbArticle) -> Article {
         cover_image_url: db.cover_image_url,
         author_member_id: db.author_member_id,
         published: db.published,
-        nostr_event_id: db.nostr_event_id,
+        published_at: db.published_at.map(|d| d.into()),
         created_at: db.created_at.into(),
         updated_at: db.updated_at.into(),
-        published_at: db.published_at.map(|d| d.into()),
     }
 }
 
 impl Database {
+    /// Create a new article (draft by default).
     pub async fn create_article(
         &self,
         slug: &str,
@@ -66,10 +65,9 @@ impl Database {
                 cover_image_url: cover_image_url.map(|s| s.to_string()),
                 author_member_id: author_member_id.to_string(),
                 published: false,
-                nostr_event_id: None,
+                published_at: None,
                 created_at: now.clone(),
                 updated_at: now,
-                published_at: None,
             };
             let created: Option<DbArticle> =
                 self.client.create("article").content(db_article).await?;
@@ -80,13 +78,18 @@ impl Database {
         .await
     }
 
-    pub async fn list_published_articles(&self, limit: u32, offset: u32) -> DbResult<Vec<Article>> {
+    /// List published articles, ordered by published_at descending.
+    pub async fn list_published_articles(
+        &self,
+        limit: u32,
+        offset: u32,
+    ) -> DbResult<Vec<Article>> {
         with_timeout(async {
             let mut result = self
                 .client
-                .query("SELECT * FROM article WHERE published = true ORDER BY published_at DESC LIMIT $limit START $offset")
-                .bind(("limit", limit))
-                .bind(("offset", offset))
+                .query("SELECT * FROM article WHERE published = true ORDER BY published_at DESC LIMIT $lim START $off")
+                .bind(("lim", limit))
+                .bind(("off", offset))
                 .await?;
             let articles: Vec<DbArticle> = result.take(0)?;
             Ok(articles.into_iter().map(db_to_article).collect())
@@ -94,23 +97,18 @@ impl Database {
         .await
     }
 
-    pub async fn count_published_articles(&self) -> DbResult<u64> {
+    /// List all articles (admin/officer view), ordered by created_at descending.
+    pub async fn list_all_articles(
+        &self,
+        limit: u32,
+        offset: u32,
+    ) -> DbResult<Vec<Article>> {
         with_timeout(async {
             let mut result = self
                 .client
-                .query("SELECT count() FROM article WHERE published = true GROUP ALL")
-                .await?;
-            let count: Option<u64> = result.take("count")?;
-            Ok(count.unwrap_or(0))
-        })
-        .await
-    }
-
-    pub async fn list_all_articles(&self) -> DbResult<Vec<Article>> {
-        with_timeout(async {
-            let mut result = self
-                .client
-                .query("SELECT * FROM article ORDER BY created_at DESC")
+                .query("SELECT * FROM article ORDER BY created_at DESC LIMIT $lim START $off")
+                .bind(("lim", limit))
+                .bind(("off", offset))
                 .await?;
             let articles: Vec<DbArticle> = result.take(0)?;
             Ok(articles.into_iter().map(db_to_article).collect())
@@ -118,6 +116,7 @@ impl Database {
         .await
     }
 
+    /// Get an article by its slug.
     pub async fn get_article_by_slug(&self, slug: &str) -> DbResult<Article> {
         with_timeout(async {
             let mut result = self
@@ -130,36 +129,29 @@ impl Database {
                 .into_iter()
                 .next()
                 .map(db_to_article)
-                .ok_or_else(|| {
-                    crate::DbError::NotFound(format!("Article with slug '{slug}' not found"))
-                })
+                .ok_or_else(|| crate::DbError::NotFound(format!("Article with slug '{slug}' not found")))
         })
         .await
     }
 
+    /// Update an article's content fields.
     pub async fn update_article(
         &self,
-        slug: &str,
+        id: &str,
         title: Option<&str>,
-        new_slug: Option<&str>,
         content_markdown: Option<&str>,
         summary: Option<Option<&str>>,
         cover_image_url: Option<Option<&str>>,
     ) -> DbResult<Article> {
         with_timeout(async {
-            let existing = self.get_article_by_slug(slug).await?;
-
-            let mut db: DbArticle = self
-                .client
-                .select(("article", existing.id.as_str()))
-                .await?
-                .ok_or_else(|| crate::DbError::NotFound(format!("Article {slug} not found")))?;
+            let existing: Option<DbArticle> =
+                self.client.select(("article", id)).await?;
+            let mut db = existing.ok_or_else(|| {
+                crate::DbError::NotFound(format!("Article {id} not found"))
+            })?;
 
             if let Some(t) = title {
                 db.title = t.to_string();
-            }
-            if let Some(s) = new_slug {
-                db.slug = s.to_string();
             }
             if let Some(c) = content_markdown {
                 db.content_markdown = c.to_string();
@@ -174,51 +166,44 @@ impl Database {
 
             let updated: Option<DbArticle> = self
                 .client
-                .update(("article", existing.id.as_str()))
+                .update(("article", id))
                 .content(db)
                 .await?;
             Ok(db_to_article(updated.ok_or_else(|| {
-                crate::DbError::NotFound(format!("Article {slug} not found after update"))
+                crate::DbError::NotFound(format!("Article {id} not found after update"))
             })?))
         })
         .await
     }
 
-    pub async fn publish_article(&self, slug: &str) -> DbResult<Article> {
+    /// Publish an article (sets published=true and published_at to now).
+    pub async fn publish_article(&self, id: &str) -> DbResult<()> {
         with_timeout(async {
-            let existing = self.get_article_by_slug(slug).await?;
-            let now = SurrealDatetime::from(Utc::now());
             self.client
-                .query("UPDATE $rid SET published = true, published_at = $now, updated_at = $now")
-                .bind(("rid", RecordId::new("article", existing.id.as_str())))
-                .bind(("now", now))
+                .query("UPDATE $rid SET published = true, published_at = time::now(), updated_at = time::now()")
+                .bind(("rid", RecordId::new("article", id)))
                 .await?;
-            self.get_article_by_slug(slug).await
+            Ok(())
         })
         .await
     }
 
-    pub async fn unpublish_article(&self, slug: &str) -> DbResult<Article> {
+    /// Unpublish an article (sets published=false).
+    pub async fn unpublish_article(&self, id: &str) -> DbResult<()> {
         with_timeout(async {
-            let existing = self.get_article_by_slug(slug).await?;
-            let now = SurrealDatetime::from(Utc::now());
             self.client
-                .query("UPDATE $rid SET published = false, published_at = NONE, updated_at = $now")
-                .bind(("rid", RecordId::new("article", existing.id.as_str())))
-                .bind(("now", now))
+                .query("UPDATE $rid SET published = false, updated_at = time::now()")
+                .bind(("rid", RecordId::new("article", id)))
                 .await?;
-            self.get_article_by_slug(slug).await
+            Ok(())
         })
         .await
     }
 
-    pub async fn delete_article(&self, slug: &str) -> DbResult<()> {
+    /// Delete an article permanently.
+    pub async fn delete_article(&self, id: &str) -> DbResult<()> {
         with_timeout(async {
-            let existing = self.get_article_by_slug(slug).await?;
-            let _: Option<DbArticle> = self
-                .client
-                .delete(("article", existing.id.as_str()))
-                .await?;
+            let _: Option<DbArticle> = self.client.delete(("article", id)).await?;
             Ok(())
         })
         .await

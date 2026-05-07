@@ -87,7 +87,7 @@ pub fn TeamsPage() -> impl IntoView {
 
     let teams = LocalResource::new(move || {
         refresh.get();
-        async { api::get::<Vec<Team>>("/api/teams").await.ok() }
+        async { api::get_list::<Team>("/api/teams").await.ok() }
     });
 
     // Fetch roster counts whenever teams refresh
@@ -96,7 +96,7 @@ pub fn TeamsPage() -> impl IntoView {
         Effect::new(move || {
             refresh_val.get();
             spawn_local(async move {
-                if let Ok(team_list) = api::get::<Vec<Team>>("/api/teams").await {
+                if let Ok(team_list) = api::get_list::<Team>("/api/teams").await {
                     let mut counts = HashMap::new();
                     for t in &team_list {
                         if let Ok(roster) =
@@ -149,7 +149,7 @@ pub fn TeamsPage() -> impl IntoView {
 
     let all_members = LocalResource::new(move || {
         roster_refresh.get();
-        async { api::get::<Vec<Member>>("/api/members").await.ok() }
+        async { api::get_list::<Member>("/api/members").await.ok() }
     });
 
     // Add member to roster state

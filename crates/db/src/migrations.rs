@@ -53,9 +53,14 @@ pub async fn run_migrations(client: &Surreal<Any>) -> DbResult<()> {
         DEFINE FIELD timezone ON member TYPE option<string>;
         DEFINE FIELD pronouns ON member TYPE option<string>;
         DEFINE FIELD availability_status ON member TYPE option<string>;
+        DEFINE FIELD nostr_pubkey ON member TYPE option<string>;
+        DEFINE FIELD nostr_key_mode ON member TYPE option<string>
+            ASSERT $value IN [NONE, 'server_managed', 'external'];
+        DEFINE FIELD nostr_secret_key_encrypted ON member TYPE option<object> FLEXIBLE;
         DEFINE FIELD is_active ON member TYPE bool DEFAULT true;
 
         DEFINE INDEX member_user_idx ON member COLUMNS user_id UNIQUE;
+        DEFINE INDEX member_nostr_pubkey_idx ON member COLUMNS nostr_pubkey UNIQUE;
 
         -- ================================================
         -- Games (titles that teams can play)
@@ -226,6 +231,9 @@ pub async fn run_migrations(client: &Surreal<Any>) -> DbResult<()> {
         DEFINE FIELD recruitment_open ON site_settings TYPE bool DEFAULT true;
         DEFINE FIELD recruitment_message ON site_settings TYPE string DEFAULT 'We are currently recruiting! Apply now to join the crew.';
         DEFINE FIELD min_age ON site_settings TYPE int DEFAULT 16;
+        DEFINE FIELD forum_backend ON site_settings TYPE string DEFAULT 'local'
+            ASSERT $value IN ['local', 'nostr'];
+        DEFINE FIELD extra_relay_urls ON site_settings TYPE string DEFAULT '';
         DEFINE FIELD updated_at ON site_settings TYPE datetime DEFAULT time::now();
 
         -- ================================================
@@ -380,7 +388,82 @@ pub async fn run_migrations(client: &Surreal<Any>) -> DbResult<()> {
         DEFINE INDEX strategy_map_idx ON strategy COLUMNS map_id;
 
         -- ================================================
-        -- Articles (long-form blog content, NIP-23)
+        -- Team Channels (NIP-29 group mapping per team)
+        -- ================================================
+        DEFINE TABLE team_channel SCHEMAFULL;
+        DEFINE FIELD team_id ON team_channel TYPE string;
+        DEFINE FIELD group_id ON team_channel TYPE string;
+        DEFINE FIELD group_type ON team_channel TYPE string DEFAULT 'public'
+            ASSERT $value IN ['public', 'officer'];
+        DEFINE FIELD relay_url ON team_channel TYPE string;
+        DEFINE FIELD is_active ON team_channel TYPE bool DEFAULT true;
+        DEFINE FIELD created_at ON team_channel TYPE datetime DEFAULT time::now();
+        DEFINE FIELD synced_at ON team_channel TYPE option<datetime>;
+
+        DEFINE INDEX team_channel_team_idx ON team_channel COLUMNS team_id;
+        DEFINE INDEX team_channel_group_idx ON team_channel COLUMNS group_id UNIQUE;
+        DEFINE INDEX team_channel_team_type_idx ON team_channel
+            COLUMNS team_id, group_type UNIQUE;
+
+        -- ================================================
+        -- Group Last Seen (per-member read cursor for unread badges)
+        -- ================================================
+        DEFINE TABLE group_last_seen SCHEMAFULL;
+        DEFINE FIELD member_id ON group_last_seen TYPE string;
+        DEFINE FIELD group_id ON group_last_seen TYPE string;
+        DEFINE FIELD last_seen_at ON group_last_seen TYPE datetime;
+        DEFINE FIELD updated_at ON group_last_seen TYPE datetime DEFAULT time::now();
+
+        DEFINE INDEX gls_member_group_idx ON group_last_seen
+            COLUMNS member_id, group_id UNIQUE;
+        DEFINE INDEX gls_member_idx ON group_last_seen COLUMNS member_id;
+
+        -- ================================================
+        -- Polls
+        -- ================================================
+        DEFINE TABLE poll SCHEMAFULL;
+        DEFINE FIELD title ON poll TYPE string;
+        DEFINE FIELD description ON poll TYPE option<string>;
+        DEFINE FIELD options ON poll TYPE array<string>;
+        DEFINE FIELD close_at ON poll TYPE option<datetime>;
+        DEFINE FIELD allow_multiple ON poll TYPE bool DEFAULT false;
+        DEFINE FIELD created_by ON poll TYPE string;
+        DEFINE FIELD created_at ON poll TYPE datetime DEFAULT time::now();
+        DEFINE FIELD is_active ON poll TYPE bool DEFAULT true;
+
+        DEFINE INDEX poll_active_idx ON poll COLUMNS is_active, created_at;
+
+        -- ================================================
+        -- Poll Votes
+        -- ================================================
+        DEFINE TABLE poll_vote SCHEMAFULL;
+        DEFINE FIELD poll_id ON poll_vote TYPE string;
+        DEFINE FIELD member_id ON poll_vote TYPE string;
+        DEFINE FIELD option_index ON poll_vote TYPE int;
+        DEFINE FIELD voted_at ON poll_vote TYPE datetime DEFAULT time::now();
+
+        DEFINE INDEX poll_vote_member_idx ON poll_vote
+            COLUMNS poll_id, member_id, option_index UNIQUE;
+
+        -- ================================================
+        -- Scrims (scrim board / practice match requests)
+        -- ================================================
+        DEFINE TABLE scrim SCHEMAFULL;
+        DEFINE FIELD team_id ON scrim TYPE string;
+        DEFINE FIELD game_id ON scrim TYPE string;
+        DEFINE FIELD requested_by ON scrim TYPE string;
+        DEFINE FIELD opponent_name ON scrim TYPE option<string>;
+        DEFINE FIELD scheduled_at ON scrim TYPE datetime;
+        DEFINE FIELD duration_minutes ON scrim TYPE int DEFAULT 90;
+        DEFINE FIELD status ON scrim TYPE string DEFAULT 'open';
+        DEFINE FIELD notes ON scrim TYPE option<string>;
+        DEFINE FIELD created_at ON scrim TYPE datetime DEFAULT time::now();
+        DEFINE FIELD updated_at ON scrim TYPE datetime DEFAULT time::now();
+        DEFINE INDEX scrim_team_status_idx ON scrim COLUMNS team_id, status;
+        DEFINE INDEX scrim_scheduled_idx ON scrim COLUMNS scheduled_at;
+
+        -- ================================================
+        -- Articles (blog posts)
         -- ================================================
         DEFINE TABLE article SCHEMAFULL;
         DEFINE FIELD slug ON article TYPE string;
@@ -390,13 +473,101 @@ pub async fn run_migrations(client: &Surreal<Any>) -> DbResult<()> {
         DEFINE FIELD cover_image_url ON article TYPE option<string>;
         DEFINE FIELD author_member_id ON article TYPE string;
         DEFINE FIELD published ON article TYPE bool DEFAULT false;
-        DEFINE FIELD nostr_event_id ON article TYPE option<string>;
+        DEFINE FIELD published_at ON article TYPE option<datetime>;
         DEFINE FIELD created_at ON article TYPE datetime DEFAULT time::now();
         DEFINE FIELD updated_at ON article TYPE datetime DEFAULT time::now();
-        DEFINE FIELD published_at ON article TYPE option<datetime>;
-
         DEFINE INDEX article_slug_idx ON article COLUMNS slug UNIQUE;
         DEFINE INDEX article_published_idx ON article COLUMNS published, published_at;
+
+        -- ================================================
+        -- Wiki Pages (knowledge base)
+        -- ================================================
+        DEFINE TABLE wiki_page SCHEMAFULL;
+        DEFINE FIELD topic ON wiki_page TYPE string;
+        DEFINE FIELD title ON wiki_page TYPE string;
+        DEFINE FIELD content_markdown ON wiki_page TYPE string;
+        DEFINE FIELD author_member_id ON wiki_page TYPE string;
+        DEFINE FIELD created_at ON wiki_page TYPE datetime DEFAULT time::now();
+        DEFINE FIELD updated_at ON wiki_page TYPE datetime DEFAULT time::now();
+        DEFINE FIELD is_active ON wiki_page TYPE bool DEFAULT true;
+        DEFINE INDEX wiki_page_topic_idx ON wiki_page COLUMNS topic UNIQUE;
+        DEFINE INDEX wiki_page_updated_idx ON wiki_page COLUMNS updated_at;
+
+        -- ================================================
+        -- Wiki Revisions (edit history)
+        -- ================================================
+        DEFINE TABLE wiki_revision SCHEMAFULL;
+        DEFINE FIELD page_id ON wiki_revision TYPE string;
+        DEFINE FIELD content_markdown ON wiki_revision TYPE string;
+        DEFINE FIELD edited_by ON wiki_revision TYPE string;
+        DEFINE FIELD edited_at ON wiki_revision TYPE datetime DEFAULT time::now();
+        DEFINE FIELD revision_note ON wiki_revision TYPE option<string>;
+        DEFINE INDEX wiki_revision_page_idx ON wiki_revision COLUMNS page_id, edited_at;
+
+        -- ================================================
+        -- Forum Threads (discussion board)
+        -- ================================================
+        DEFINE TABLE forum_thread SCHEMAFULL;
+        DEFINE FIELD title ON forum_thread TYPE string;
+        DEFINE FIELD category ON forum_thread TYPE string DEFAULT 'general';
+        DEFINE FIELD author_member_id ON forum_thread TYPE string;
+        DEFINE FIELD content ON forum_thread TYPE string;
+        DEFINE FIELD pinned ON forum_thread TYPE bool DEFAULT false;
+        DEFINE FIELD locked ON forum_thread TYPE bool DEFAULT false;
+        DEFINE FIELD created_at ON forum_thread TYPE datetime DEFAULT time::now();
+        DEFINE FIELD updated_at ON forum_thread TYPE datetime DEFAULT time::now();
+        DEFINE FIELD nostr_event_id ON forum_thread TYPE option<string>;
+        DEFINE FIELD is_active ON forum_thread TYPE bool DEFAULT true;
+        DEFINE INDEX forum_thread_cat_idx ON forum_thread COLUMNS category, created_at;
+
+        -- ================================================
+        -- Forum Replies
+        -- ================================================
+        DEFINE TABLE forum_reply SCHEMAFULL;
+        DEFINE FIELD thread_id ON forum_reply TYPE string;
+        DEFINE FIELD author_member_id ON forum_reply TYPE string;
+        DEFINE FIELD content ON forum_reply TYPE string;
+        DEFINE FIELD created_at ON forum_reply TYPE datetime DEFAULT time::now();
+        DEFINE FIELD is_active ON forum_reply TYPE bool DEFAULT true;
+        DEFINE INDEX forum_reply_thread_idx ON forum_reply COLUMNS thread_id, created_at;
+
+        -- ================================================
+        -- Personal Matches (individual stat-tracker uploads)
+        -- ================================================
+        DEFINE TABLE personal_match SCHEMAFULL;
+        DEFINE FIELD member_id ON personal_match TYPE string;
+        DEFINE FIELD hero ON personal_match TYPE string;
+        DEFINE FIELD map_name ON personal_match TYPE string;
+        DEFINE FIELD game_mode ON personal_match TYPE string;
+        DEFINE FIELD role ON personal_match TYPE string;
+        DEFINE FIELD outcome ON personal_match TYPE string
+            ASSERT $value IN ['victory', 'defeat', 'draw'];
+        DEFINE FIELD elims ON personal_match TYPE int DEFAULT 0;
+        DEFINE FIELD deaths ON personal_match TYPE int DEFAULT 0;
+        DEFINE FIELD assists ON personal_match TYPE int DEFAULT 0;
+        DEFINE FIELD damage ON personal_match TYPE int DEFAULT 0;
+        DEFINE FIELD healing ON personal_match TYPE int DEFAULT 0;
+        DEFINE FIELD mitigation ON personal_match TYPE int DEFAULT 0;
+        DEFINE FIELD played_at ON personal_match TYPE datetime;
+        DEFINE FIELD uploaded_at ON personal_match TYPE datetime DEFAULT time::now();
+
+        DEFINE INDEX pm_member_idx ON personal_match COLUMNS member_id, played_at;
+        DEFINE INDEX pm_dedup_idx ON personal_match
+            COLUMNS member_id, hero, map_name, played_at UNIQUE;
+
+        -- ================================================
+        -- Daemon Tokens (stat-tracker daemon auth)
+        -- ================================================
+        DEFINE TABLE daemon_token SCHEMAFULL;
+        DEFINE FIELD member_id ON daemon_token TYPE string;
+        DEFINE FIELD token_hash ON daemon_token TYPE string;
+        DEFINE FIELD label ON daemon_token TYPE string DEFAULT 'default';
+        DEFINE FIELD is_active ON daemon_token TYPE bool DEFAULT true;
+        DEFINE FIELD created_at ON daemon_token TYPE datetime DEFAULT time::now();
+        DEFINE FIELD last_used_at ON daemon_token TYPE option<datetime>;
+
+        DEFINE INDEX dt_token_hash_idx ON daemon_token COLUMNS token_hash UNIQUE;
+        DEFINE INDEX dt_member_idx ON daemon_token COLUMNS member_id;
     "#,
         )
         .await?

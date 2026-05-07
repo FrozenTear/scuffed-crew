@@ -44,4 +44,8 @@ pub struct MeMember {
     pub id: String,
     pub org_role: String,
     pub display_name: String,
+    #[serde(default)]
+    pub nostr_pubkey: Option<String>,
+    #[serde(default)]
+    pub nostr_key_mode: Option<String>,
 }

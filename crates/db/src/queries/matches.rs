@@ -107,6 +107,30 @@ impl Database {
         .await
     }
 
+    /// List team matches with cursor-based pagination.
+    pub async fn list_team_matches_paginated(
+        &self,
+        team_id: &str,
+        limit: u32,
+        offset: u32,
+    ) -> DbResult<Vec<MatchResult>> {
+        with_timeout(async {
+            let fetch = limit + 1;
+            let mut result = self
+                .client
+                .query(
+                    "SELECT * FROM match_result WHERE team_id = $tid ORDER BY played_at DESC LIMIT $lim START $off",
+                )
+                .bind(("tid", team_id.to_string()))
+                .bind(("lim", fetch))
+                .bind(("off", offset))
+                .await?;
+            let matches: Vec<DbMatchResult> = result.take(0)?;
+            Ok(matches.into_iter().map(db_to_match).collect())
+        })
+        .await
+    }
+
     pub async fn update_match(
         &self,
         id: &str,

@@ -19,12 +19,22 @@ fn main() {
     dioxus::launch(App);
 }
 
+#[cfg(feature = "desktop")]
+const DESKTOP_CANVAS_JS: &str = include_str!("../assets/desktop_canvas.js");
+
 #[component]
 fn App() -> Element {
     // Provide auth state to entire app
     let auth = use_signal(AuthState::new);
     use_context_provider(|| auth);
     state::auth::use_auth_init();
+
+    #[cfg(feature = "desktop")]
+    {
+        use_hook(|| {
+            document::eval(DESKTOP_CANVAS_JS);
+        });
+    }
 
     rsx! {
         document::Stylesheet {

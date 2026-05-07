@@ -17,6 +17,8 @@ struct DbSiteSettings {
     recruitment_open: bool,
     recruitment_message: String,
     min_age: u32,
+    forum_backend: String,
+    extra_relay_urls: String,
     updated_at: SurrealDatetime,
 }
 
@@ -32,6 +34,8 @@ fn db_to_settings(db: DbSiteSettings) -> SiteSettings {
         recruitment_open: db.recruitment_open,
         recruitment_message: db.recruitment_message,
         min_age: db.min_age,
+        forum_backend: db.forum_backend,
+        extra_relay_urls: db.extra_relay_urls,
         updated_at: db.updated_at.into(),
     }
 }
@@ -59,6 +63,8 @@ impl Database {
                 recruitment_message:
                     "We are currently recruiting! Apply now to join the crew.".to_string(),
                 min_age: 16,
+                forum_backend: "local".to_string(),
+                extra_relay_urls: String::new(),
                 updated_at: SurrealDatetime::from(Utc::now()),
             };
             let created: Option<DbSiteSettings> = self
@@ -81,6 +87,8 @@ impl Database {
         recruitment_open: Option<bool>,
         recruitment_message: Option<&str>,
         min_age: Option<u32>,
+        forum_backend: Option<&str>,
+        extra_relay_urls: Option<&str>,
     ) -> DbResult<SiteSettings> {
         with_timeout(async {
             // Ensure settings exist first
@@ -107,6 +115,12 @@ impl Database {
             }
             if let Some(age) = min_age {
                 db.min_age = age;
+            }
+            if let Some(backend) = forum_backend {
+                db.forum_backend = backend.to_string();
+            }
+            if let Some(urls) = extra_relay_urls {
+                db.extra_relay_urls = urls.to_string();
             }
             db.updated_at = SurrealDatetime::from(Utc::now());
 

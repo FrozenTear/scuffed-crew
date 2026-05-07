@@ -40,6 +40,11 @@ pub fn create_router(state: AppState) -> Router {
         .allow_credentials(true);
 
     Router::new()
+        // NIP-05 Nostr identity verification (must be before fallback)
+        .route(
+            "/.well-known/nostr.json",
+            get(routes::nostr::nostr_json),
+        )
         // Health check
         .route("/api/health", get(routes::health::health))
         // Dev login (sets session cookie for in-memory dev mode)
@@ -152,8 +157,55 @@ pub fn create_router(state: AppState) -> Router {
             "/api/teams/{id}/matches",
             get(routes::matches::list_team_matches),
         )
-        .route("/api/matches", post(routes::matches::record_match))
-        .route("/api/matches/{id}", put(routes::matches::update_match))
+        .route(
+            "/api/matches",
+            post(routes::matches::record_match),
+        )
+        .route(
+            "/api/matches/{id}",
+            put(routes::matches::update_match),
+        )
+        // Personal stats routes
+        .route(
+            "/api/stats/upload",
+            post(routes::stats::upload_stats),
+        )
+        .route(
+            "/api/stats/me",
+            get(routes::stats::my_stats),
+        )
+        .route(
+            "/api/stats/me/matches",
+            get(routes::stats::my_matches),
+        )
+        .route(
+            "/api/stats/me/heroes",
+            get(routes::stats::my_hero_stats),
+        )
+        .route(
+            "/api/stats/me/maps",
+            get(routes::stats::my_map_stats),
+        )
+        .route(
+            "/api/stats/member/{id}",
+            get(routes::stats::member_stats),
+        )
+        .route(
+            "/api/stats/member/{id}/heroes",
+            get(routes::stats::member_hero_stats),
+        )
+        .route(
+            "/api/stats/member/{id}/maps",
+            get(routes::stats::member_map_stats),
+        )
+        .route(
+            "/api/stats/tokens",
+            get(routes::stats::list_daemon_tokens).post(routes::stats::create_daemon_token),
+        )
+        .route(
+            "/api/stats/tokens/{id}",
+            delete(routes::stats::revoke_daemon_token),
+        )
         // Calendar routes
         .route(
             "/api/calendar/all.ics",
@@ -272,6 +324,130 @@ pub fn create_router(state: AppState) -> Router {
         .route(
             "/api/tournaments/{id}/next-round",
             post(routes::tournaments::generate_next_round),
+        )
+        // Scrim routes
+        .route(
+            "/api/scrims",
+            get(routes::scrims::list_scrims).post(routes::scrims::create_scrim),
+        )
+        .route(
+            "/api/scrims/{id}",
+            patch(routes::scrims::update_scrim_status),
+        )
+        // Article routes (blog)
+        .route(
+            "/api/articles",
+            get(routes::articles::list_articles)
+                .post(routes::articles::create_article),
+        )
+        .route(
+            "/api/articles/{slug}",
+            get(routes::articles::get_article)
+                .put(routes::articles::update_article),
+        )
+        .route(
+            "/api/articles/{slug}/publish",
+            post(routes::articles::publish_article),
+        )
+        .route(
+            "/api/articles/{slug}/delete",
+            delete(routes::articles::delete_article),
+        )
+        // Wiki routes
+        .route(
+            "/api/wiki",
+            get(routes::wiki::list_wiki_pages)
+                .post(routes::wiki::create_wiki_page),
+        )
+        .route(
+            "/api/wiki/{topic}",
+            get(routes::wiki::get_wiki_page)
+                .put(routes::wiki::update_wiki_page)
+                .delete(routes::wiki::delete_wiki_page),
+        )
+        .route(
+            "/api/wiki/{topic}/revisions",
+            get(routes::wiki::list_wiki_revisions),
+        )
+        // Forum routes
+        .route(
+            "/api/forum/threads",
+            get(routes::forum::list_threads)
+                .post(routes::forum::create_thread),
+        )
+        .route(
+            "/api/forum/threads/{id}",
+            get(routes::forum::get_thread),
+        )
+        .route(
+            "/api/forum/threads/{id}/replies",
+            post(routes::forum::create_reply),
+        )
+        .route(
+            "/api/forum/threads/{id}/pin",
+            patch(routes::forum::pin_thread),
+        )
+        .route(
+            "/api/forum/threads/{id}/lock",
+            patch(routes::forum::lock_thread),
+        )
+        // Poll routes
+        .route(
+            "/api/polls",
+            get(routes::polls::list_polls).post(routes::polls::create_poll),
+        )
+        .route(
+            "/api/polls/{id}",
+            get(routes::polls::get_poll).delete(routes::polls::deactivate_poll),
+        )
+        .route(
+            "/api/polls/{id}/vote",
+            post(routes::polls::vote_poll),
+        )
+        .route(
+            "/api/polls/{id}/vote/{option_index}",
+            delete(routes::polls::unvote_poll),
+        )
+        // Nostr identity verification (Phase 1.5)
+        .route(
+            "/api/nostr/challenge",
+            post(routes::nostr::nostr_challenge),
+        )
+        .route(
+            "/api/nostr/verify",
+            post(routes::nostr::nostr_verify),
+        )
+        .route(
+            "/api/nostr/identity",
+            delete(routes::nostr::nostr_unlink),
+        )
+        .route(
+            "/api/nostr/export-backup",
+            post(routes::nostr::nostr_export_backup),
+        )
+        .route(
+            "/api/nostr/import-key",
+            post(routes::nostr::nostr_import_key),
+        )
+        .route(
+            "/api/nostr/community",
+            post(routes::nostr::nostr_community),
+        )
+        .route(
+            "/api/nostr/react",
+            post(routes::nostr::nostr_react),
+        )
+        .route(
+            "/api/nostr/post",
+            post(routes::nostr::nostr_post),
+        )
+        .route(
+            "/api/nostr/feed",
+            get(routes::nostr::nostr_feed),
+        )
+        .route(
+            "/api/nostr/health",
+            get(routes::nostr::nostr_health),
         )
         // Upload routes
         .route("/api/upload/avatar", post(routes::uploads::upload_avatar))

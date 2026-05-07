@@ -1,28 +1,32 @@
 # The Scuffed Crew
 
-Gaming org community site. Rust monorepo: Leptos (CSR) frontends + Axum backend + SurrealDB.
+Gaming org community site. Rust monorepo: Dioxus 0.7 app + legacy Leptos frontends + Axum backends + SurrealDB.
 
 ## Architecture
 
 ```
 crates/
-  site/          # Public Leptos CSR site (trunk build → dist/)
-  admin/         # Admin Leptos CSR SPA (trunk build → dist/admin/)
-  site-server/   # Axum HTTP server (serves API + static files)
+  app/           # Primary Dioxus 0.7 WASM app (strategy editor, admin, chat)
+  server/        # Axum backend for Dioxus app (REST + WebSocket)
+  types/         # Shared types between app and server
+  api-client/    # HTTP client (web + native)
+  site/          # Legacy Leptos 0.8 CSR site (trunk build → dist/)
+  admin/         # Legacy Leptos 0.8 CSR admin SPA (trunk build → dist/admin/)
+  site-server/   # Legacy Axum server for site/admin (API + static files)
   db/            # SurrealDB client, migrations, queries
   auth/          # OAuth, sessions, crypto (shared crate)
-  ui/            # Shared Leptos UI components (scuffed-ui)
+  ui/            # Legacy Leptos 0.8 shared UI components (scuffed-ui)
 ```
 
 ## SurrealDB Gotchas
 
 - **`$token` is a reserved variable.** Never use `$token` as a bind parameter name. Use `$tok` or similar.
-- **chrono DateTime<Utc> does NOT serialize correctly for SCHEMAFULL tables.** SurrealDB rejects chrono's string-serialized datetime (`"2026-02-27T..."`) because it expects a native datetime type. Use `surrealdb::sql::Datetime` (aliased as `SurrealDatetime`) in all `Db*` structs. Convert to/from chrono in the conversion layer:
+- **chrono DateTime<Utc> does NOT serialize correctly for SCHEMAFULL tables.** SurrealDB rejects chrono's string-serialized datetime (`"2026-02-27T..."`) because it expects a native datetime type. Use `surrealdb::types::Datetime` (aliased as `SurrealDatetime`) in all `Db*` structs. Convert to/from chrono in the conversion layer:
   - Rust → DB: `SurrealDatetime::from(Utc::now())`
   - DB → Rust: `db.field.into()` (implements `From<SurrealDatetime> for DateTime<Utc>`)
   - Optional: `db.field.map(|d| d.into())`
 - **Raw SurrealQL datetimes work fine:** `time::now()`, `time::now() + 365d`, etc.
-- **`type::thing()` does NOT work in SurrealDB 2.x.** Use `RecordId` bindings instead: `.bind(("rid", surrealdb::RecordId::from(("table", id))))` and `$rid` in the query. For `RELATE`: `RELATE $member_rid -> edge -> $team_rid`.
+- **We use SurrealDB v3 only (never v2).** `type::thing()` does NOT work. Use `RecordId` bindings instead: `.bind(("rid", surrealdb::RecordId::from(("table", id))))` and `$rid` in the query. For `RELATE`: `RELATE $member_rid -> edge -> $team_rid`.
 
 ## Dev Mode
 

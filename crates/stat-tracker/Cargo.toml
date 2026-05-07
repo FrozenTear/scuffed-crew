@@ -1,0 +1,46 @@
+[package]
+name = "scuffed-stat-tracker"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+gui = ["dep:dioxus", "dep:tray-icon", "dep:base64", "dep:gtk"]
+
+[dependencies]
+scuffed-types = { path = "../types" }
+image = "0.25"
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", features = ["serde"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+thiserror = "2"
+dirs = "6"
+toml = "0.8"
+reqwest = { version = "0.12", features = ["json"] }
+libwayshot = "0.7"
+ashpd = { version = "0.13", features = ["screenshot"] }
+leptess = "0.14"
+evdev = { version = "0.13", features = ["tokio"] }
+surrealdb = { version = "3", features = ["kv-surrealkv"] }
+surrealdb-types = "3"
+tempfile = "3"
+strsim = "0.11"
+dioxus = { workspace = true, features = ["desktop", "router"], optional = true }
+tray-icon = { version = "0.23", optional = true }
+base64 = { version = "0.22", optional = true }
+gtk = { version = "0.18", optional = true }
+
+[lib]
+name = "stat_tracker"
+path = "src/lib.rs"
+
+[[bin]]
+name = "scuffed-stat-tracker"
+path = "src/main.rs"
+
+[[bin]]
+name = "stat-tracker-gui"
+path = "src/gui/main.rs"
+required-features = ["gui"]

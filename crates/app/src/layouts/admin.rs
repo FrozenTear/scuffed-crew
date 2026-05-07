@@ -139,6 +139,7 @@ pub fn AdminLayout() -> Element {
                     Link { to: Route::AdminArticles {}, "Articles" }
                     if is_admin {
                         Link { to: Route::AdminModeration {}, "Moderation" }
+                        Link { to: Route::AdminRelay {}, "Relay" }
                         Link { to: Route::AdminAuditLog {}, "Audit Log" }
                         Link { to: Route::AdminSettings {}, "Settings" }
                     }

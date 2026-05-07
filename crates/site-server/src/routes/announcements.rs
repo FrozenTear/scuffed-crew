@@ -7,20 +7,22 @@ use serde::Deserialize;
 
 use scuffed_auth::server::session::ErrorResponse;
 use scuffed_db::{Announcement, AuditAction, AuditTargetType};
+use scuffed_types::api::{CursorResponse, PaginationParams};
 
 use crate::extractors::OfficerUser;
 use crate::routes::audit_log::audit;
 use crate::state::AppState;
 
-/// GET /api/announcements — list active announcements (public)
+/// GET /api/announcements — list active announcements (cursor-paginated, public)
 pub async fn list_announcements(
     State(state): State<AppState>,
-) -> Result<Json<Vec<Announcement>>, (StatusCode, Json<ErrorResponse>)> {
-    state
+    axum::extract::Query(pagination): axum::extract::Query<PaginationParams>,
+) -> Result<Json<CursorResponse<Announcement>>, (StatusCode, Json<ErrorResponse>)> {
+    let (limit, offset) = pagination.resolve();
+    let items = state
         .db
-        .list_announcements()
+        .list_announcements_paginated(limit, offset)
         .await
-        .map(Json)
         .map_err(|e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -28,7 +30,8 @@ pub async fn list_announcements(
                     error: e.to_string(),
                 }),
             )
-        })
+        })?;
+    Ok(Json(CursorResponse::from_oversized(items, limit, offset)))
 }
 
 #[derive(Deserialize)]

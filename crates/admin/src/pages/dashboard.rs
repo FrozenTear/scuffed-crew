@@ -34,11 +34,11 @@ struct Announcement {
 
 #[component]
 pub fn DashboardPage() -> impl IntoView {
-    let members = LocalResource::new(|| async { api::get::<Vec<Member>>("/api/members").await.ok() });
+    let members = LocalResource::new(|| async { api::get_list::<Member>("/api/members").await.ok() });
     let apps = LocalResource::new(|| async { api::get::<Vec<Application>>("/api/applications").await.ok() });
-    let events = LocalResource::new(|| async { api::get::<Vec<Event>>("/api/events").await.ok() });
-    let teams = LocalResource::new(|| async { api::get::<Vec<Team>>("/api/teams").await.ok() });
-    let announcements = LocalResource::new(|| async { api::get::<Vec<Announcement>>("/api/announcements").await.ok() });
+    let events = LocalResource::new(|| async { api::get_list::<Event>("/api/events").await.ok() });
+    let teams = LocalResource::new(|| async { api::get_list::<Team>("/api/teams").await.ok() });
+    let announcements = LocalResource::new(|| async { api::get_list::<Announcement>("/api/announcements").await.ok() });
 
     view! {
         <h1>"Dashboard"</h1>

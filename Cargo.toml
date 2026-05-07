@@ -1,7 +1,9 @@
 [workspace]
 resolver = "2"
 members = [
-    # Existing Leptos crates (kept until Dioxus frontend is verified)
+    # Legacy Leptos crates — approved exception (CTO: THE-321).
+    # These predate the Dioxus standard. New frontend work MUST use Dioxus.
+    # CI guardrail: scripts/check-frontend-deps.sh blocks new leptos deps.
     "crates/auth",
     "crates/ui",
     "crates/site",
@@ -15,6 +17,13 @@ members = [
     "crates/api-client",
     # Map pipeline tooling
     "crates/map-pipeline",
+    "crates/map-renderer",
+    # Nostr relay
+    "crates/relay-policy",
+    # Nostr chat backend
+    "crates/chat",
+    # Overwatch stat tracker
+    "crates/stat-tracker",
 ]
 
 [workspace.dependencies]

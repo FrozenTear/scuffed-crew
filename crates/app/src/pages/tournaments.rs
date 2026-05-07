@@ -24,6 +24,8 @@ struct Tournament {
     created_at: String,
 }
 
+use crate::hooks::CursorPage;
+
 fn format_label(f: &str) -> &str {
     match f {
         "single_elim" => "Single Elimination",
@@ -133,7 +135,7 @@ const PAGE_CSS: &str = r#"
 #[component]
 pub fn Tournaments() -> Element {
     let tournaments = use_resource(|| async {
-        ApiClient::web().fetch::<Vec<Tournament>>("/api/tournaments").await.ok()
+        ApiClient::web().fetch::<CursorPage<Tournament>>("/api/tournaments").await.ok().map(|r| r.data)
     });
 
     rsx! {

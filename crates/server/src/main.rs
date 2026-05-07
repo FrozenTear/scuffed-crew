@@ -126,12 +126,47 @@ async fn main() {
         tracing::info!("Matrix notifications not configured — running without");
     }
 
+    // Nostr challenge signing key: from env or deterministic dev fallback
+    let nostr_challenge_key: [u8; 32] = match std::env::var("NOSTR_CHALLENGE_SECRET") {
+        Ok(secret) if !secret.is_empty() => {
+            *blake3::hash(secret.as_bytes()).as_bytes()
+        }
+        _ => {
+            if is_dev {
+                tracing::warn!("Using deterministic dev key for Nostr challenges — NOT for production");
+            }
+            *blake3::hash(b"scuffed-crew-dev-nostr-challenge-key").as_bytes()
+        }
+    };
+
+    // Initialize CryptoService once from env
+    let crypto = match scuffed_auth::crypto::CryptoService::from_env() {
+        Ok(c) => {
+            if c.is_none() {
+                tracing::info!("ENCRYPTION_KEY not set — Nostr key encryption disabled");
+            }
+            c
+        }
+        Err(e) => {
+            tracing::error!("CryptoService init failed: {e} — running without encryption");
+            None
+        }
+    };
+
+    let relay_url = std::env::var("NOSTR_RELAY_URL").ok();
+    if let Some(ref url) = relay_url {
+        tracing::info!("Nostr relay configured: {url}");
+    }
+
     let state = AppState {
         db: db.clone(),
         session_config: SessionConfig::default(),
         oauth_config,
         upload_dir,
         notifier,
+        nostr_challenge_key,
+        crypto,
+        relay_url,
     };
 
     // Create the collaboration room manager
@@ -153,10 +188,22 @@ async fn main() {
         }
     });
 
-    // Build the unified router: existing org routes + strategy routes + WebSocket,
+    // Build the unified router: existing org routes + strategy routes + chat + WebSocket,
     // then apply production middleware to the combined router.
     let app = create_router(state.clone())
-        .merge(routes::strategy_routes(state))
+        .merge(routes::strategy_routes(state.clone()))
+        .route(
+            "/api/chat/auth-token",
+            axum::routing::post(routes::chat::provision_auth_token).with_state(state.clone()),
+        )
+        .route(
+            "/api/chat/send-encrypted",
+            axum::routing::post(routes::chat::send_encrypted).with_state(state.clone()),
+        )
+        .route(
+            "/api/chat/decrypt",
+            axum::routing::post(routes::chat::decrypt_message).with_state(state),
+        )
         .route("/api/strategy/ws", get(routes::ws::websocket_handler).with_state(ws_state))
         .layer(DefaultBodyLimit::max(10 * 1024 * 1024))
         .layer(CompressionLayer::new())

@@ -1,9 +1,12 @@
 use dioxus::prelude::*;
 use serde::{Deserialize, Serialize};
 
-use crate::components::{Toast, use_toast};
-use crate::state::auth::use_auth;
 use scuffed_api_client::ApiClient;
+use crate::components::{Toast, use_toast};
+use crate::hooks::CursorPage;
+use crate::state::auth::use_auth;
+
+// --- Types ---
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 struct Event {
@@ -14,9 +17,19 @@ struct Event {
     timezone: String,
     duration_minutes: u32,
     is_recurring: bool,
+    #[allow(dead_code)]
+    team_id: Option<String>,
+    #[allow(dead_code)]
+    created_by: String,
+    is_active: bool,
 }
 
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Serialize)]
+struct RsvpRequest {
+    status: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
 struct RsvpSummary {
     #[allow(dead_code)]
     event_id: String,
@@ -25,12 +38,7 @@ struct RsvpSummary {
     no_count: u32,
 }
 
-#[derive(Debug, Clone, Serialize)]
-struct RsvpRequest {
-    status: String,
-}
-
-const DAYS: [&str; 7] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+const DAYS: [&str; 7] = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
 
 const PAGE_CSS: &str = r#"
     .events-page {
@@ -38,7 +46,7 @@ const PAGE_CSS: &str = r#"
         max-width: 1100px;
         margin: 0 auto;
     }
-    .events-page-title {
+    .events-page h1 {
         font-family: 'Bebas Neue', sans-serif;
         font-size: 2.5rem;
         color: var(--text-bright);
@@ -46,78 +54,68 @@ const PAGE_CSS: &str = r#"
         margin: 0 0 0.5rem;
     }
     .events-subtitle {
-        color: var(--text-secondary);
-        font-size: 0.9rem;
+        color: var(--text-muted);
+        font-size: 0.85rem;
         margin: 0 0 2rem;
-        line-height: 1.6;
     }
     .events-week {
-        display: grid;
-        grid-template-columns: repeat(7, 1fr);
-        gap: 0.75rem;
-    }
-    @media (max-width: 900px) {
-        .events-week {
-            grid-template-columns: repeat(2, 1fr);
-        }
-    }
-    @media (max-width: 480px) {
-        .events-week {
-            grid-template-columns: 1fr;
-        }
+        display: flex;
+        flex-direction: column;
+        gap: 1.5rem;
     }
     .events-day {
         display: flex;
         flex-direction: column;
-        gap: 0.5rem;
+        gap: 0.75rem;
     }
-    .events-day-label {
+    .events-day-header {
         font-family: 'Rajdhani', sans-serif;
         font-weight: 700;
-        font-size: 0.75rem;
+        font-size: 1.1rem;
+        color: #a78bfa;
         text-transform: uppercase;
-        letter-spacing: 0.08em;
-        color: var(--text-muted);
+        letter-spacing: 0.06em;
         padding-bottom: 0.35rem;
-        border-bottom: 1px solid var(--border);
+        border-bottom: 1px solid #7c3aed33;
     }
-    .events-day-label.has-events {
-        color: var(--accent);
-        border-color: var(--accent-soft);
+    .events-day-cards {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+        gap: 0.75rem;
     }
     .event-card {
         background: var(--bg-card);
         border: 1px solid var(--border);
         border-radius: 10px;
-        padding: 1rem;
+        padding: 1.25rem;
         display: flex;
         flex-direction: column;
-        gap: 0.5rem;
+        gap: 0.6rem;
         transition: border-color 0.2s;
     }
     .event-card:hover {
         border-color: var(--accent-soft);
     }
-    .event-title {
+    .event-card-title {
         font-family: 'Rajdhani', sans-serif;
         font-weight: 700;
-        font-size: 1rem;
+        font-size: 1.1rem;
         color: var(--text-bright);
         margin: 0;
     }
-    .event-meta {
+    .event-card-meta {
         display: flex;
-        flex-direction: column;
-        gap: 0.2rem;
-        font-size: 0.75rem;
-        color: var(--text-secondary);
+        flex-wrap: wrap;
+        gap: 0.75rem;
+        font-size: 0.78rem;
+        color: var(--text-muted);
     }
-    .event-meta-row {
+    .event-card-meta span {
         display: flex;
         align-items: center;
-        gap: 0.4rem;
+        gap: 0.25rem;
     }
-    .event-recurring-pill {
+    .event-recurring-badge {
         display: inline-block;
         font-size: 0.6rem;
         padding: 0.1rem 0.5rem;
@@ -125,134 +123,168 @@ const PAGE_CSS: &str = r#"
         font-weight: 600;
         text-transform: uppercase;
         letter-spacing: 0.04em;
-        background: #7c3aed22;
+        background: #7c3aed33;
         color: #a78bfa;
-        width: fit-content;
     }
-    .event-rsvp-summary {
+    .event-rsvp-row {
         display: flex;
-        gap: 0.6rem;
+        gap: 0.5rem;
+        align-items: center;
+        flex-wrap: wrap;
+        margin-top: 0.25rem;
+    }
+    .event-rsvp-btn {
+        padding: 0.3rem 0.75rem;
+        border-radius: 6px;
+        border: 1px solid var(--border);
+        background: transparent;
+        color: var(--text-secondary);
+        font-size: 0.75rem;
+        font-weight: 600;
+        cursor: pointer;
+        transition: background 0.15s, color 0.15s, border-color 0.15s;
+    }
+    .event-rsvp-btn:hover {
+        background: var(--bg-card);
+        color: var(--text-bright);
+        border-color: var(--accent-soft);
+    }
+    .event-rsvp-btn.active-yes {
+        background: #10b98133;
+        color: #34d399;
+        border-color: #10b98155;
+    }
+    .event-rsvp-btn.active-maybe {
+        background: #f9731633;
+        color: #f97316;
+        border-color: #f9731655;
+    }
+    .event-rsvp-btn.active-no {
+        background: #ef444433;
+        color: #f87171;
+        border-color: #ef444455;
+    }
+    .event-rsvp-counts {
+        display: flex;
+        gap: 0.75rem;
         font-size: 0.7rem;
         color: var(--text-muted);
-        padding-top: 0.35rem;
-        border-top: 1px solid var(--border);
+        margin-top: 0.15rem;
     }
-    .rsvp-count {
+    .event-rsvp-counts span {
         display: flex;
         align-items: center;
         gap: 0.2rem;
     }
-    .rsvp-count.yes { color: #34d399; }
-    .rsvp-count.maybe { color: #fbbf24; }
-    .rsvp-count.no { color: #f87171; }
-    .event-rsvp-actions {
-        display: flex;
-        gap: 0.35rem;
+    .rsvp-dot {
+        width: 6px;
+        height: 6px;
+        border-radius: 50%;
+        display: inline-block;
     }
-    .rsvp-btn {
-        flex: 1;
-        padding: 0.35rem 0;
-        border: 1px solid var(--border);
-        border-radius: 6px;
-        background: transparent;
-        color: var(--text-secondary);
-        font-size: 0.65rem;
-        font-weight: 600;
-        text-transform: uppercase;
-        letter-spacing: 0.04em;
-        cursor: pointer;
-        transition: background 0.15s, color 0.15s, border-color 0.15s;
-    }
-    .rsvp-btn:hover {
-        color: var(--text-bright);
-        border-color: var(--accent-soft);
-    }
-    .rsvp-btn.active-yes {
-        background: #10b98133;
-        border-color: #34d399;
-        color: #34d399;
-    }
-    .rsvp-btn.active-maybe {
-        background: #f59e0b22;
-        border-color: #fbbf24;
-        color: #fbbf24;
-    }
-    .rsvp-btn.active-no {
-        background: #ef444422;
-        border-color: #f87171;
-        color: #f87171;
-    }
-    .events-day-empty {
-        color: var(--text-muted);
-        font-size: 0.75rem;
-        font-style: italic;
-        padding: 0.5rem 0;
-    }
+    .rsvp-dot.yes { background: #34d399; }
+    .rsvp-dot.maybe { background: #f97316; }
+    .rsvp-dot.no { background: #f87171; }
     .events-loading, .events-empty {
         color: var(--text-muted);
         text-align: center;
         padding: 3rem 0;
     }
+    .events-no-day {
+        color: var(--text-muted);
+        font-size: 0.8rem;
+        font-style: italic;
+        padding: 0.25rem 0;
+    }
+    @media (max-width: 640px) {
+        .events-day-cards {
+            grid-template-columns: 1fr;
+        }
+        .events-page {
+            padding: 2rem 1rem;
+        }
+    }
 "#;
+
+fn format_duration(minutes: u32) -> String {
+    if minutes >= 60 {
+        let h = minutes / 60;
+        let m = minutes % 60;
+        if m == 0 {
+            format!("{h}h")
+        } else {
+            format!("{h}h {m}m")
+        }
+    } else {
+        format!("{minutes}m")
+    }
+}
 
 #[component]
 pub fn Events() -> Element {
-    let events = use_resource(|| async {
+    let refresh = use_signal(|| 0u64);
+
+    let events = use_resource(move || async move {
+        let _ = refresh();
         ApiClient::web()
-            .fetch::<Vec<Event>>("/api/events")
+            .fetch::<CursorPage<Event>>("/api/events")
             .await
             .ok()
+            .map(|r| r.data)
     });
 
     rsx! {
         style { {PAGE_CSS} }
 
         main { class: "events-page",
-            h1 { class: "events-page-title", "Events" }
-            p { class: "events-subtitle",
-                "Our weekly schedule. RSVP to let the crew know you\u{2019}re showing up."
-            }
+            h1 { "Events" }
+            p { class: "events-subtitle", "Weekly recurring schedule" }
 
             {
                 let data = events.read();
                 let data = data.as_ref().and_then(|d| d.as_ref());
                 match data {
                     None => rsx! { p { class: "events-loading", "Loading..." } },
-                    Some(list) if list.is_empty() => rsx! {
-                        p { class: "events-empty", "No events scheduled yet." }
-                    },
-                    Some(list) => rsx! {
-                        div { class: "events-week",
-                            for (day_idx, day_name) in DAYS.iter().enumerate() {
-                                {
-                                    let day_events: Vec<&Event> = list.iter()
-                                        .filter(|e| e.day_of_week == day_idx as u8)
-                                        .collect();
-                                    let has_events = !day_events.is_empty();
-                                    let label_class = if has_events {
-                                        "events-day-label has-events"
-                                    } else {
-                                        "events-day-label"
-                                    };
-
-                                    rsx! {
-                                        div { class: "events-day",
-                                            div { class: "{label_class}", "{day_name}" }
-                                            if day_events.is_empty() {
-                                                div { class: "events-day-empty", "\u{2014}" }
-                                            }
-                                            for event in day_events.iter() {
-                                                EventCard {
-                                                    key: "{event.id}",
-                                                    event: (*event).clone(),
-                                                }
-                                            }
-                                        }
+                    Some(list) => {
+                        let active: Vec<&Event> = list.iter()
+                            .filter(|e| e.is_active)
+                            .collect();
+                        if active.is_empty() {
+                            rsx! { p { class: "events-empty", "No events scheduled yet." } }
+                        } else {
+                            rsx! {
+                                div { class: "events-week",
+                                    for day_idx in 0u8..7u8 {
+                                        {render_day_group(&active, day_idx, refresh)}
                                     }
                                 }
                             }
                         }
-                    },
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn render_day_group(events: &[&Event], day: u8, refresh: Signal<u64>) -> Element {
+    let day_events: Vec<Event> = events.iter()
+        .filter(|e| e.day_of_week == day)
+        .map(|e| (*e).clone())
+        .collect();
+
+    if day_events.is_empty() {
+        return rsx! {};
+    }
+
+    let day_name = DAYS.get(day as usize).unwrap_or(&"Unknown");
+
+    rsx! {
+        div { class: "events-day",
+            div { class: "events-day-header", "{day_name}" }
+            div { class: "events-day-cards",
+                for evt in day_events.iter() {
+                    EventCard { event: evt.clone(), refresh: refresh }
                 }
             }
         }
@@ -260,15 +292,12 @@ pub fn Events() -> Element {
 }
 
 #[component]
-fn EventCard(event: Event) -> Element {
-    let auth = use_auth();
-    let mut toast = use_toast();
-    let is_member = auth().user.as_ref().and_then(|u| u.role).is_some();
-
+fn EventCard(event: Event, refresh: Signal<u64>) -> Element {
     let event_id = event.id.clone();
     let summary = use_resource(move || {
         let eid = event_id.clone();
         async move {
+            let _ = refresh();
             ApiClient::web()
                 .fetch::<RsvpSummary>(&format!("/api/events/{eid}/rsvp-summary"))
                 .await
@@ -276,116 +305,168 @@ fn EventCard(event: Event) -> Element {
         }
     });
 
-    let duration_text = if event.duration_minutes >= 60 {
-        let h = event.duration_minutes / 60;
-        let m = event.duration_minutes % 60;
-        if m == 0 {
-            format!("{h}h")
-        } else {
-            format!("{h}h {m}m")
-        }
-    } else {
-        format!("{}m", event.duration_minutes)
-    };
-
-    let s = summary.read();
-    let s = s.as_ref().and_then(|d| d.as_ref());
-    let yes = s.map(|s| s.yes_count).unwrap_or(0);
-    let maybe = s.map(|s| s.maybe_count).unwrap_or(0);
-    let no = s.map(|s| s.no_count).unwrap_or(0);
+    let duration_text = format_duration(event.duration_minutes);
 
     rsx! {
         div { class: "event-card",
-            h3 { class: "event-title", "{event.title}" }
-            div { class: "event-meta",
-                div { class: "event-meta-row",
-                    span { "{event.time}" }
-                    span { "{event.timezone}" }
-                    span { "{duration_text}" }
-                }
+            h3 { class: "event-card-title", "{event.title}" }
+            div { class: "event-card-meta",
+                span { "{event.time} {event.timezone}" }
+                span { "{duration_text}" }
                 if event.is_recurring {
-                    span { class: "event-recurring-pill", "Weekly" }
+                    span { class: "event-recurring-badge", "Recurring" }
                 }
             }
 
-            div { class: "event-rsvp-summary",
-                span { class: "rsvp-count yes", "Going {yes}" }
-                span { class: "rsvp-count maybe", "Maybe {maybe}" }
-                span { class: "rsvp-count no", "Can\u{2019}t {no}" }
-            }
-
-            if is_member {
-                {
-                    let eid_yes = event.id.clone();
-                    let eid_maybe = event.id.clone();
-                    let eid_no = event.id.clone();
-                    let mut summary_ref = summary;
-
-                    rsx! {
-                        div { class: "event-rsvp-actions",
-                            button {
-                                class: "rsvp-btn",
-                                onclick: move |_| {
-                                    let eid = eid_yes.clone();
-                                    spawn(async move {
-                                        let body = RsvpRequest { status: "yes".to_string() };
-                                        match ApiClient::web()
-                                            .post_json_empty(&format!("/api/events/{eid}/rsvp"), &body)
-                                            .await
-                                        {
-                                            Ok(_) => {
-                                                toast.show(Toast::success("RSVP'd as Going!"));
-                                                summary_ref.restart();
-                                            }
-                                            Err(e) => toast.show(Toast::error(format!("RSVP failed: {e}"))),
-                                        }
-                                    });
-                                },
-                                "Going"
+            // RSVP summary counts
+            {
+                let s = summary.read();
+                let s = s.as_ref().and_then(|d| d.as_ref());
+                match s {
+                    Some(counts) if counts.yes_count > 0 || counts.maybe_count > 0 || counts.no_count > 0 => rsx! {
+                        div { class: "event-rsvp-counts",
+                            span {
+                                span { class: "rsvp-dot yes" }
+                                "{counts.yes_count} going"
                             }
-                            button {
-                                class: "rsvp-btn",
-                                onclick: move |_| {
-                                    let eid = eid_maybe.clone();
-                                    spawn(async move {
-                                        let body = RsvpRequest { status: "maybe".to_string() };
-                                        match ApiClient::web()
-                                            .post_json_empty(&format!("/api/events/{eid}/rsvp"), &body)
-                                            .await
-                                        {
-                                            Ok(_) => {
-                                                toast.show(Toast::success("RSVP'd as Maybe."));
-                                                summary_ref.restart();
-                                            }
-                                            Err(e) => toast.show(Toast::error(format!("RSVP failed: {e}"))),
-                                        }
-                                    });
-                                },
-                                "Maybe"
+                            span {
+                                span { class: "rsvp-dot maybe" }
+                                "{counts.maybe_count} maybe"
                             }
-                            button {
-                                class: "rsvp-btn",
-                                onclick: move |_| {
-                                    let eid = eid_no.clone();
-                                    spawn(async move {
-                                        let body = RsvpRequest { status: "no".to_string() };
-                                        match ApiClient::web()
-                                            .post_json_empty(&format!("/api/events/{eid}/rsvp"), &body)
-                                            .await
-                                        {
-                                            Ok(_) => {
-                                                toast.show(Toast::success("Marked as Can't make it."));
-                                                summary_ref.restart();
-                                            }
-                                            Err(e) => toast.show(Toast::error(format!("RSVP failed: {e}"))),
-                                        }
-                                    });
-                                },
-                                "Can\u{2019}t"
+                            span {
+                                span { class: "rsvp-dot no" }
+                                "{counts.no_count} can't"
                             }
                         }
-                    }
+                    },
+                    _ => rsx! {},
                 }
+            }
+
+            // RSVP buttons (logged-in members only)
+            {
+                let auth = use_auth();
+                if auth().is_logged_in() {
+                    rsx! { RsvpButtons { event_id: event.id.clone(), refresh: refresh } }
+                } else {
+                    rsx! {}
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn RsvpButtons(event_id: String, refresh: Signal<u64>) -> Element {
+    let mut toast = use_toast();
+    let mut selected = use_signal(|| Option::<String>::None);
+    let mut submitting = use_signal(|| false);
+
+    let sel = selected();
+    let yes_class = if sel.as_deref() == Some("yes") {
+        "event-rsvp-btn active-yes"
+    } else {
+        "event-rsvp-btn"
+    };
+    let maybe_class = if sel.as_deref() == Some("maybe") {
+        "event-rsvp-btn active-maybe"
+    } else {
+        "event-rsvp-btn"
+    };
+    let no_class = if sel.as_deref() == Some("no") {
+        "event-rsvp-btn active-no"
+    } else {
+        "event-rsvp-btn"
+    };
+
+    let is_submitting = submitting();
+
+    let eid_yes = event_id.clone();
+    let eid_maybe = event_id.clone();
+    let eid_no = event_id.clone();
+
+    rsx! {
+        div { class: "event-rsvp-row",
+            button {
+                class: yes_class,
+                disabled: is_submitting,
+                onclick: move |_| {
+                    let eid = eid_yes.clone();
+                    selected.set(Some("yes".to_string()));
+                    submitting.set(true);
+                    spawn(async move {
+                        let body = RsvpRequest { status: "yes".to_string() };
+                        match ApiClient::web()
+                            .post_json::<_, serde_json::Value>(&format!("/api/events/{eid}/rsvp"), &body)
+                            .await
+                        {
+                            Ok(_) => {
+                                toast.show(Toast::success("RSVP: Going".to_string()));
+                                refresh += 1;
+                            }
+                            Err(e) => {
+                                toast.show(Toast::error(format!("RSVP failed: {e}")));
+                                selected.set(None);
+                            }
+                        }
+                        submitting.set(false);
+                    });
+                },
+                "Going"
+            }
+            button {
+                class: maybe_class,
+                disabled: is_submitting,
+                onclick: move |_| {
+                    let eid = eid_maybe.clone();
+                    selected.set(Some("maybe".to_string()));
+                    submitting.set(true);
+                    spawn(async move {
+                        let body = RsvpRequest { status: "maybe".to_string() };
+                        match ApiClient::web()
+                            .post_json::<_, serde_json::Value>(&format!("/api/events/{eid}/rsvp"), &body)
+                            .await
+                        {
+                            Ok(_) => {
+                                toast.show(Toast::success("RSVP: Maybe".to_string()));
+                                refresh += 1;
+                            }
+                            Err(e) => {
+                                toast.show(Toast::error(format!("RSVP failed: {e}")));
+                                selected.set(None);
+                            }
+                        }
+                        submitting.set(false);
+                    });
+                },
+                "Maybe"
+            }
+            button {
+                class: no_class,
+                disabled: is_submitting,
+                onclick: move |_| {
+                    let eid = eid_no.clone();
+                    selected.set(Some("no".to_string()));
+                    submitting.set(true);
+                    spawn(async move {
+                        let body = RsvpRequest { status: "no".to_string() };
+                        match ApiClient::web()
+                            .post_json::<_, serde_json::Value>(&format!("/api/events/{eid}/rsvp"), &body)
+                            .await
+                        {
+                            Ok(_) => {
+                                toast.show(Toast::success("RSVP: Can't make it".to_string()));
+                                refresh += 1;
+                            }
+                            Err(e) => {
+                                toast.show(Toast::error(format!("RSVP failed: {e}")));
+                                selected.set(None);
+                            }
+                        }
+                        submitting.set(false);
+                    });
+                },
+                "Can't"
             }
         }
     }

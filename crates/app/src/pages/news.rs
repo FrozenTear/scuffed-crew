@@ -13,6 +13,8 @@ struct Announcement {
     created_at: String,
 }
 
+use crate::hooks::CursorPage;
+
 const PAGE_CSS: &str = r#"
     .news-page {
         padding: 3rem 2rem;
@@ -80,7 +82,7 @@ const PAGE_CSS: &str = r#"
 #[component]
 pub fn News() -> Element {
     let announcements = use_resource(|| async {
-        ApiClient::web().fetch::<Vec<Announcement>>("/api/announcements").await.ok()
+        ApiClient::web().fetch::<CursorPage<Announcement>>("/api/announcements").await.ok().map(|r| r.data)
     });
 
     rsx! {

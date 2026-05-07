@@ -2,7 +2,7 @@ use dioxus::prelude::*;
 use serde::Deserialize;
 
 use crate::components::SummaryCard;
-use crate::hooks::use_api;
+use crate::hooks::{use_api, use_api_list};
 
 #[derive(Debug, Clone, Deserialize)]
 struct Member {
@@ -37,11 +37,11 @@ struct Announcement {
 
 #[component]
 pub fn AdminDashboard() -> Element {
-    let members = use_api::<Vec<Member>>("/api/members");
+    let members = use_api_list::<Member>("/api/members");
     let applications = use_api::<Vec<Application>>("/api/applications");
-    let teams = use_api::<Vec<Team>>("/api/teams");
-    let events = use_api::<Vec<Event>>("/api/events");
-    let announcements = use_api::<Vec<Announcement>>("/api/announcements");
+    let teams = use_api_list::<Team>("/api/teams");
+    let events = use_api_list::<Event>("/api/events");
+    let announcements = use_api_list::<Announcement>("/api/announcements");
 
     let member_count = members.data.read().as_ref()
         .and_then(|d| d.as_ref()).map(|v| v.len()).unwrap_or(0);

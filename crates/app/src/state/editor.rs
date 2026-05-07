@@ -586,4 +586,108 @@ mod tests {
         );
         assert!((d - 5.0).abs() < 1e-10);
     }
+
+    #[test]
+    fn select_at_finds_route_by_segment() {
+        let route = StrategyElement::new(
+            ElementType::Route {
+                points: vec![
+                    Position::new(0.0, 0.0),
+                    Position::new(100.0, 0.0),
+                    Position::new(100.0, 100.0),
+                ],
+            },
+            Position::new(0.0, 0.0),
+        );
+        let route_id = route.id;
+        let state = StrategyState {
+            elements: vec![route],
+            ..Default::default()
+        };
+
+        // Click on the midpoint of the first segment — should select the route.
+        let found = state.select_at(Position::new(50.0, 2.0), 10.0);
+        assert_eq!(found, Some(route_id));
+
+        // Click on the second segment midpoint.
+        let found = state.select_at(Position::new(102.0, 50.0), 10.0);
+        assert_eq!(found, Some(route_id));
+
+        // Click far away — no match.
+        let found = state.select_at(Position::new(200.0, 200.0), 10.0);
+        assert!(found.is_none());
+    }
+
+    #[test]
+    fn select_at_finds_arrow_by_shaft() {
+        let arrow = StrategyElement::new(
+            ElementType::Arrow {
+                end: Position::new(100.0, 0.0),
+            },
+            Position::new(0.0, 0.0),
+        );
+        let arrow_id = arrow.id;
+        let state = StrategyState {
+            elements: vec![arrow],
+            ..Default::default()
+        };
+
+        // Click on midpoint of arrow shaft.
+        let found = state.select_at(Position::new(50.0, 2.0), 10.0);
+        assert_eq!(found, Some(arrow_id));
+    }
+
+    #[test]
+    fn remove_selected_element_clears_selection() {
+        let mut state = StrategyState::default();
+        let elem = StrategyElement::new(ElementType::PlayerMarker, Position::new(10.0, 10.0));
+        let id = elem.id;
+        state.add_element(elem);
+        state.selected_element = Some(id);
+
+        state.remove_element(id);
+        assert!(state.selected_element.is_none());
+    }
+
+    #[test]
+    fn strategy_serialization_roundtrip() {
+        let mut state = StrategyState::default();
+        state.name = "Test Strategy".to_string();
+        state.description = Some("A test".to_string());
+        state.visibility = Visibility::Public;
+
+        let marker = StrategyElement::new(ElementType::PlayerMarker, Position::new(42.0, 99.0));
+        state.add_element(marker);
+        state.add_phase("Attack".to_string());
+
+        let strategy = state.to_strategy();
+
+        // Load it back.
+        let mut loaded = StrategyState::default();
+        loaded.load_strategy(strategy);
+
+        assert_eq!(loaded.name, "Test Strategy");
+        assert_eq!(loaded.description, Some("A test".to_string()));
+        assert_eq!(loaded.visibility, Visibility::Public);
+        assert_eq!(loaded.elements.len(), 1);
+        assert_eq!(loaded.phases.len(), 2);
+        assert!(!loaded.has_unsaved_changes);
+    }
+
+    #[test]
+    fn remove_phase_reorders_remaining() {
+        let mut state = StrategyState::default();
+        let p1 = state.phases[0].id;
+        let p2 = state.add_phase("Attack".to_string());
+        let p3 = state.add_phase("Cleanup".to_string());
+        assert_eq!(state.phases.len(), 3);
+
+        // Remove the middle phase.
+        state.remove_phase(p2);
+        assert_eq!(state.phases.len(), 2);
+        assert_eq!(state.phases[0].order, 0);
+        assert_eq!(state.phases[1].order, 1);
+        assert_eq!(state.phases[0].id, p1);
+        assert_eq!(state.phases[1].id, p3);
+    }
 }

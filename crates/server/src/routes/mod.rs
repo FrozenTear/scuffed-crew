@@ -1,3 +1,4 @@
+pub mod chat;
 mod strategy;
 pub mod ws;
 

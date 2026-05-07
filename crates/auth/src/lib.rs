@@ -3,6 +3,9 @@ pub mod types;
 #[cfg(feature = "crypto")]
 pub mod crypto;
 
+#[cfg(feature = "crypto")]
+pub mod nip49;
+
 #[cfg(feature = "server")]
 pub mod server;
 

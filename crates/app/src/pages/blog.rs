@@ -6,19 +6,15 @@ use scuffed_api_client::ApiClient;
 use crate::routes::Route;
 
 #[derive(Debug, Clone, Deserialize)]
-struct Article {
+struct BlogArticle {
+    #[allow(dead_code)]
+    id: String,
     slug: String,
     title: String,
     summary: Option<String>,
     cover_image_url: Option<String>,
     author_member_id: String,
     published_at: Option<String>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct ArticleListResponse {
-    articles: Vec<Article>,
-    total: u64,
 }
 
 const PAGE_CSS: &str = r#"
@@ -34,17 +30,17 @@ const PAGE_CSS: &str = r#"
         letter-spacing: 3px;
         margin: 0 0 2rem;
     }
-    .blog-grid {
-        display: grid;
-        grid-template-columns: 1fr;
+    .blog-list {
+        display: flex;
+        flex-direction: column;
         gap: 1.5rem;
     }
     .blog-card {
         background: var(--bg-card);
         border: 1px solid var(--border);
-        border-radius: 12px;
+        border-radius: 10px;
         overflow: hidden;
-        transition: border-color 0.2s, transform 0.2s;
+        transition: border-color 0.2s, transform 0.15s;
         cursor: pointer;
         text-decoration: none;
         color: inherit;
@@ -61,9 +57,12 @@ const PAGE_CSS: &str = r#"
         display: block;
     }
     .blog-card-body {
-        padding: 1.25rem;
+        padding: 1.25rem 1.5rem;
     }
     .blog-card-meta {
+        display: flex;
+        align-items: center;
+        gap: 0.75rem;
         font-size: 0.7rem;
         color: var(--text-muted);
         margin-bottom: 0.5rem;
@@ -78,7 +77,7 @@ const PAGE_CSS: &str = r#"
     .blog-card-summary {
         color: var(--text-secondary);
         font-size: 0.85rem;
-        line-height: 1.6;
+        line-height: 1.7;
         margin: 0;
     }
     .blog-loading, .blog-empty {
@@ -86,49 +85,17 @@ const PAGE_CSS: &str = r#"
         text-align: center;
         padding: 3rem 0;
     }
-    .blog-pagination {
-        display: flex;
-        justify-content: center;
-        align-items: center;
-        gap: 1rem;
-        margin-top: 2rem;
-    }
-    .blog-pagination button {
-        background: var(--bg-card);
-        border: 1px solid var(--border);
-        color: var(--text-secondary);
-        padding: 0.4rem 1rem;
-        border-radius: 6px;
-        cursor: pointer;
-        font-size: 0.8rem;
-    }
-    .blog-pagination button:disabled {
-        opacity: 0.4;
-        cursor: default;
-    }
-    .blog-pagination span {
-        color: var(--text-muted);
-        font-size: 0.8rem;
-    }
-    @media (min-width: 600px) {
-        .blog-grid {
-            grid-template-columns: repeat(2, 1fr);
-        }
+    @media (max-width: 600px) {
+        .blog-page { padding: 2rem 1rem; }
+        .blog-card-cover { height: 150px; }
     }
 "#;
 
-const PAGE_SIZE: u64 = 10;
-
 #[component]
 pub fn Blog() -> Element {
-    let mut page = use_signal(|| 0u64);
-
-    let articles = use_resource(move || async move {
-        let offset = page() * PAGE_SIZE;
+    let articles = use_resource(|| async {
         ApiClient::web()
-            .fetch::<ArticleListResponse>(&format!(
-                "/api/articles?limit={PAGE_SIZE}&offset={offset}"
-            ))
+            .fetch::<Vec<BlogArticle>>("/api/articles?limit=50")
             .await
             .ok()
     });
@@ -144,31 +111,13 @@ pub fn Blog() -> Element {
                 let data = data.as_ref().and_then(|d| d.as_ref());
                 match data {
                     None => rsx! { p { class: "blog-loading", "Loading..." } },
-                    Some(resp) if resp.articles.is_empty() => rsx! {
-                        p { class: "blog-empty", "No articles published yet." }
+                    Some(list) if list.is_empty() => rsx! {
+                        p { class: "blog-empty", "No articles yet." }
                     },
-                    Some(resp) => {
-                        let total_pages = (resp.total.saturating_sub(1) / PAGE_SIZE) + 1;
-                        rsx! {
-                            div { class: "blog-grid",
-                                for a in resp.articles.iter() {
-                                    {render_blog_card(a)}
-                                }
-                            }
-                            if total_pages > 1 {
-                                div { class: "blog-pagination",
-                                    button {
-                                        disabled: page() == 0,
-                                        onclick: move |_| page -= 1,
-                                        "Previous"
-                                    }
-                                    span { "Page {page() + 1} of {total_pages}" }
-                                    button {
-                                        disabled: page() + 1 >= total_pages,
-                                        onclick: move |_| page += 1,
-                                        "Next"
-                                    }
-                                }
+                    Some(list) => rsx! {
+                        div { class: "blog-list",
+                            for a in list.iter() {
+                                {render_blog_card(a)}
                             }
                         }
                     },
@@ -178,17 +127,18 @@ pub fn Blog() -> Element {
     }
 }
 
-fn render_blog_card(a: &Article) -> Element {
+fn render_blog_card(a: &BlogArticle) -> Element {
     let date: String = a
         .published_at
         .as_deref()
         .map(|d| d.chars().take(10).collect())
-        .unwrap_or_default();
+        .unwrap_or_else(|| "Draft".to_string());
+
     let slug = a.slug.clone();
 
     rsx! {
         Link {
-            to: Route::BlogArticle { slug },
+            to: Route::BlogPost { slug },
             class: "blog-card",
             if let Some(ref cover) = a.cover_image_url {
                 img {
@@ -200,6 +150,7 @@ fn render_blog_card(a: &Article) -> Element {
             div { class: "blog-card-body",
                 div { class: "blog-card-meta",
                     time { "{date}" }
+                    span { "by {a.author_member_id}" }
                 }
                 h2 { class: "blog-card-title", "{a.title}" }
                 if let Some(ref summary) = a.summary {

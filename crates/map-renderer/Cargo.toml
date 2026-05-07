@@ -1,0 +1,39 @@
+[package]
+name = "scuffed-map-renderer"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+scuffed-map-pipeline = { path = "../map-pipeline" }
+
+# Rendering engine
+bevy = { version = "0.18", default-features = false, features = [
+    "bevy_render",
+    "bevy_core_pipeline",
+    "bevy_pbr",
+    "bevy_gltf",
+    "bevy_scene",
+    "bevy_asset",
+    "bevy_log",
+    "multi_threaded",
+    "png",
+] }
+crossbeam-channel = "0.5"
+
+# Image export
+image = { version = "0.25", default-features = false, features = ["png"] }
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Scene bounds computation (without Bevy, for pre-pass)
+gltf = { version = "1", features = ["utils", "names"] }
+glam = "0.30"
+
+# Config
+toml = "0.8"
+serde = { workspace = true }
+
+# Error handling + logging
+anyhow = "1"
+tracing = { workspace = true }

@@ -34,6 +34,8 @@ pub struct UpdateSettingsRequest {
     pub recruitment_open: Option<bool>,
     pub recruitment_message: Option<String>,
     pub min_age: Option<u32>,
+    pub forum_backend: Option<String>,
+    pub extra_relay_urls: Option<String>,
 }
 
 /// PUT /api/settings — admin only
@@ -50,6 +52,8 @@ pub async fn update_settings(
             body.recruitment_open,
             body.recruitment_message.as_deref(),
             body.min_age,
+            body.forum_backend.as_deref(),
+            body.extra_relay_urls.as_deref(),
         )
         .await
         .map_err(|e| {

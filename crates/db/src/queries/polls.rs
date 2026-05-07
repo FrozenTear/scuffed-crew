@@ -1,10 +1,10 @@
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use surrealdb::types::Datetime as SurrealDatetime;
 use surrealdb_types::RecordId;
 use surrealdb_types::SurrealValue;
 
-use crate::types::{Poll, PollOptionResult, PollResults};
+use crate::types::{Poll, PollOptionResult, PollResults, PollVote};
 use crate::{with_timeout, Database, DbResult};
 
 #[derive(Debug, Clone, Serialize, Deserialize, SurrealValue)]
@@ -18,9 +18,8 @@ struct DbPoll {
     close_at: Option<SurrealDatetime>,
     allow_multiple: bool,
     created_by: String,
-    is_active: bool,
     created_at: SurrealDatetime,
-    updated_at: SurrealDatetime,
+    is_active: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, SurrealValue)]
@@ -30,19 +29,8 @@ struct DbPollVote {
     id: Option<RecordId>,
     poll_id: String,
     member_id: String,
-    option_index: i64,
-    created_at: SurrealDatetime,
-}
-
-#[derive(Debug, Clone, Deserialize, SurrealValue)]
-struct PollVoteCount {
-    option_index: i64,
-    count: u64,
-}
-
-#[derive(Debug, Clone, Deserialize, SurrealValue)]
-struct PollVoteIndex {
-    option_index: i64,
+    option_index: u32,
+    voted_at: SurrealDatetime,
 }
 
 fn db_to_poll(db: DbPoll) -> Poll {
@@ -50,29 +38,40 @@ fn db_to_poll(db: DbPoll) -> Poll {
         .id
         .map(|r| crate::record_id_key_to_string(r.key))
         .unwrap_or_else(|| "unknown".to_string());
-
     Poll {
         id,
         title: db.title,
         description: db.description,
         options: db.options,
-        close_at: db.close_at.map(Into::into),
+        close_at: db.close_at.map(|d| d.into()),
         allow_multiple: db.allow_multiple,
         created_by: db.created_by,
-        is_active: db.is_active,
         created_at: db.created_at.into(),
-        updated_at: db.updated_at.into(),
+        is_active: db.is_active,
+    }
+}
+
+fn db_to_vote(db: DbPollVote) -> PollVote {
+    let id = db
+        .id
+        .map(|r| crate::record_id_key_to_string(r.key))
+        .unwrap_or_else(|| "unknown".to_string());
+    PollVote {
+        id,
+        poll_id: db.poll_id,
+        member_id: db.member_id,
+        option_index: db.option_index,
+        voted_at: db.voted_at.into(),
     }
 }
 
 impl Database {
-    /// Create a new poll.
     pub async fn create_poll(
         &self,
         title: &str,
         description: Option<&str>,
-        options: Vec<String>,
-        close_at: Option<DateTime<Utc>>,
+        options: &[String],
+        close_at: Option<chrono::DateTime<Utc>>,
         allow_multiple: bool,
         created_by: &str,
     ) -> DbResult<Poll> {
@@ -82,16 +81,15 @@ impl Database {
                 id: None,
                 title: title.to_string(),
                 description: description.map(|s| s.to_string()),
-                options,
+                options: options.to_vec(),
                 close_at: close_at.map(SurrealDatetime::from),
                 allow_multiple,
                 created_by: created_by.to_string(),
+                created_at: now,
                 is_active: true,
-                created_at: now.clone(),
-                updated_at: now,
             };
-
-            let created: Option<DbPoll> = self.client.create("poll").content(db_poll).await?;
+            let created: Option<DbPoll> =
+                self.client.create("poll").content(db_poll).await?;
             Ok(db_to_poll(created.ok_or_else(|| {
                 crate::DbError::NotFound("Failed to create poll".into())
             })?))
@@ -99,72 +97,51 @@ impl Database {
         .await
     }
 
-    /// List active polls ordered by newest first.
     pub async fn list_polls(&self) -> DbResult<Vec<Poll>> {
         with_timeout(async {
             let mut result = self
                 .client
                 .query("SELECT * FROM poll WHERE is_active = true ORDER BY created_at DESC")
                 .await?;
-
             let polls: Vec<DbPoll> = result.take(0)?;
             Ok(polls.into_iter().map(db_to_poll).collect())
         })
         .await
     }
 
-    /// Get a poll by id if it is active.
-    pub async fn get_poll(&self, id: &str) -> DbResult<Option<Poll>> {
+    pub async fn get_poll(&self, id: &str) -> DbResult<Poll> {
         with_timeout(async {
-            let record: Option<DbPoll> = self.client.select(("poll", id)).await?;
-            Ok(record.filter(|poll| poll.is_active).map(db_to_poll))
+            let poll: Option<DbPoll> = self.client.select(("poll", id)).await?;
+            poll.map(db_to_poll)
+                .ok_or_else(|| crate::DbError::NotFound(format!("Poll {id} not found")))
         })
         .await
     }
 
-    /// Cast a vote for a poll option.
     pub async fn vote_poll(
         &self,
         poll_id: &str,
         member_id: &str,
         option_index: u32,
-        allow_multiple: bool,
-    ) -> DbResult<()> {
+    ) -> DbResult<PollVote> {
         with_timeout(async {
-            if !allow_multiple {
-                self.client
-                    .query("DELETE poll_vote WHERE poll_id = $pid AND member_id = $mid")
-                    .bind(("pid", poll_id.to_string()))
-                    .bind(("mid", member_id.to_string()))
-                    .await?;
-            }
-
-            let mut existing_result = self
-                .client
-                .query("SELECT * FROM poll_vote WHERE poll_id = $pid AND member_id = $mid AND option_index = $idx LIMIT 1")
-                .bind(("pid", poll_id.to_string()))
-                .bind(("mid", member_id.to_string()))
-                .bind(("idx", option_index as i64))
-                .await?;
-            let existing: Vec<DbPollVote> = existing_result.take(0)?;
-
-            if existing.is_empty() {
-                let vote = DbPollVote {
-                    id: None,
-                    poll_id: poll_id.to_string(),
-                    member_id: member_id.to_string(),
-                    option_index: option_index as i64,
-                    created_at: SurrealDatetime::from(Utc::now()),
-                };
-                let _: Option<DbPollVote> = self.client.create("poll_vote").content(vote).await?;
-            }
-
-            Ok(())
+            let now = SurrealDatetime::from(Utc::now());
+            let vote = DbPollVote {
+                id: None,
+                poll_id: poll_id.to_string(),
+                member_id: member_id.to_string(),
+                option_index,
+                voted_at: now,
+            };
+            let created: Option<DbPollVote> =
+                self.client.create("poll_vote").content(vote).await?;
+            Ok(db_to_vote(created.ok_or_else(|| {
+                crate::DbError::NotFound("Failed to record vote".into())
+            })?))
         })
         .await
     }
 
-    /// Remove one vote for a specific poll option.
     pub async fn unvote_poll(
         &self,
         poll_id: &str,
@@ -173,103 +150,90 @@ impl Database {
     ) -> DbResult<()> {
         with_timeout(async {
             self.client
-                .query("DELETE poll_vote WHERE poll_id = $pid AND member_id = $mid AND option_index = $idx")
+                .query("DELETE FROM poll_vote WHERE poll_id = $pid AND member_id = $mid AND option_index = $oidx")
                 .bind(("pid", poll_id.to_string()))
                 .bind(("mid", member_id.to_string()))
-                .bind(("idx", option_index as i64))
+                .bind(("oidx", option_index as i64))
                 .await?;
             Ok(())
         })
         .await
     }
 
-    /// Aggregate poll results (counts + percentages per option).
-    pub async fn get_poll_results(&self, poll_id: &str) -> DbResult<PollResults> {
+    pub async fn get_poll_results(
+        &self,
+        poll_id: &str,
+        viewer_member_id: Option<&str>,
+    ) -> DbResult<PollResults> {
         with_timeout(async {
-            let poll = self
-                .get_poll(poll_id)
-                .await?
-                .ok_or_else(|| crate::DbError::NotFound(format!("Poll {poll_id} not found")))?;
+            let poll = self.get_poll(poll_id).await?;
 
             let mut result = self
                 .client
-                .query("SELECT option_index, count() AS count FROM poll_vote WHERE poll_id = $pid GROUP BY option_index ORDER BY option_index ASC")
+                .query("SELECT option_index, count() AS count FROM poll_vote WHERE poll_id = $pid GROUP BY option_index")
                 .bind(("pid", poll_id.to_string()))
                 .await?;
 
-            let rows: Vec<PollVoteCount> = result.take(0)?;
-            let mut counts = vec![0u32; poll.options.len()];
-            for row in rows {
-                if row.option_index < 0 {
-                    continue;
-                }
-                let idx = row.option_index as usize;
-                if idx < counts.len() {
-                    counts[idx] = row.count as u32;
-                }
+            #[derive(Debug, Clone, Serialize, Deserialize, SurrealValue)]
+            struct VoteCount {
+                option_index: u32,
+                count: u32,
             }
+            let counts: Vec<VoteCount> = result.take(0)?;
 
-            let total_votes: u32 = counts.iter().sum();
-            let options = poll
+            let mut votes: Vec<PollOptionResult> = poll
                 .options
                 .iter()
                 .enumerate()
-                .map(|(idx, text)| {
-                    let vote_count = counts[idx];
-                    let percentage = if total_votes > 0 {
-                        (vote_count as f64 / total_votes as f64) * 100.0
-                    } else {
-                        0.0
-                    };
+                .map(|(i, label)| {
+                    let count = counts
+                        .iter()
+                        .find(|c| c.option_index == i as u32)
+                        .map(|c| c.count)
+                        .unwrap_or(0);
                     PollOptionResult {
-                        option_index: idx as u32,
-                        option_text: text.clone(),
-                        vote_count,
-                        percentage,
+                        option_index: i as u32,
+                        label: label.clone(),
+                        count,
                     }
                 })
                 .collect();
+            votes.sort_by(|a, b| b.count.cmp(&a.count));
+
+            let total_votes = votes.iter().map(|v| v.count).sum();
+
+            let my_votes = if let Some(mid) = viewer_member_id {
+                #[derive(Debug, Clone, Deserialize, SurrealValue)]
+                struct VoteIdx {
+                    option_index: u32,
+                }
+                let mut r = self
+                    .client
+                    .query("SELECT option_index FROM poll_vote WHERE poll_id = $pid AND member_id = $mid")
+                    .bind(("pid", poll_id.to_string()))
+                    .bind(("mid", mid.to_string()))
+                    .await?;
+                let v: Vec<VoteIdx> = r.take(0)?;
+                v.into_iter().map(|v| v.option_index).collect()
+            } else {
+                vec![]
+            };
 
             Ok(PollResults {
-                poll_id: poll.id,
+                poll,
+                votes,
                 total_votes,
-                options,
+                my_votes,
             })
         })
         .await
     }
 
-    /// Get option indices voted by a specific member for one poll.
-    pub async fn get_member_poll_votes(
-        &self,
-        poll_id: &str,
-        member_id: &str,
-    ) -> DbResult<Vec<u32>> {
-        with_timeout(async {
-            let mut result = self
-                .client
-                .query("SELECT option_index FROM poll_vote WHERE poll_id = $pid AND member_id = $mid ORDER BY option_index ASC")
-                .bind(("pid", poll_id.to_string()))
-                .bind(("mid", member_id.to_string()))
-                .await?;
-
-            let rows: Vec<PollVoteIndex> = result.take(0)?;
-            Ok(rows
-                .into_iter()
-                .filter(|row| row.option_index >= 0)
-                .map(|row| row.option_index as u32)
-                .collect())
-        })
-        .await
-    }
-
-    /// Soft-delete a poll.
     pub async fn deactivate_poll(&self, id: &str) -> DbResult<()> {
         with_timeout(async {
             self.client
-                .query("UPDATE $rid SET is_active = false, updated_at = $now")
+                .query("UPDATE $rid SET is_active = false")
                 .bind(("rid", RecordId::new("poll", id)))
-                .bind(("now", SurrealDatetime::from(Utc::now())))
                 .await?;
             Ok(())
         })

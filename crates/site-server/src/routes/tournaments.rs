@@ -12,6 +12,7 @@ use scuffed_db::{
     TournamentBracket, TournamentFormat, TournamentMatch, TournamentParticipant,
     TournamentRound, TournamentStatus,
 };
+use scuffed_types::api::{CursorResponse, PaginationParams};
 
 use crate::extractors::OfficerUser;
 use crate::routes::audit_log::audit;
@@ -52,13 +53,20 @@ fn not_found(msg: &str) -> (StatusCode, Json<ErrorResponse>) {
 pub struct ListTournamentsQuery {
     pub status: Option<String>,
     pub game_id: Option<String>,
+    pub cursor: Option<String>,
+    #[serde(default = "default_pagination_limit")]
+    pub limit: u32,
 }
 
-/// GET /api/tournaments
+fn default_pagination_limit() -> u32 {
+    25
+}
+
+/// GET /api/tournaments (cursor-paginated)
 pub async fn list_tournaments(
     State(state): State<AppState>,
     axum::extract::Query(query): axum::extract::Query<ListTournamentsQuery>,
-) -> ApiResult<Json<Vec<Tournament>>> {
+) -> ApiResult<Json<CursorResponse<Tournament>>> {
     let status = query.status.as_deref().and_then(|s| match s {
         "draft" => Some(TournamentStatus::Draft),
         "registration" => Some(TournamentStatus::Registration),
@@ -68,12 +76,17 @@ pub async fn list_tournaments(
         _ => None,
     });
 
-    state
+    let pagination = PaginationParams {
+        cursor: query.cursor,
+        limit: query.limit,
+    };
+    let (limit, offset) = pagination.resolve();
+    let items = state
         .db
-        .list_tournaments(status, query.game_id.as_deref())
+        .list_tournaments_paginated(status, query.game_id.as_deref(), limit, offset)
         .await
-        .map(Json)
-        .map_err(internal_err)
+        .map_err(internal_err)?;
+    Ok(Json(CursorResponse::from_oversized(items, limit, offset)))
 }
 
 /// GET /api/tournaments/:id

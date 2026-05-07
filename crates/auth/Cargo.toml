@@ -25,7 +25,7 @@ client = [
     "dep:js-sys",
     "dep:gloo-timers",
 ]
-crypto = ["dep:blake3", "dep:aes-gcm", "dep:zeroize", "dep:rand", "dep:base64"]
+crypto = ["dep:blake3", "dep:aes-gcm", "dep:zeroize", "dep:rand", "dep:base64", "dep:scrypt", "dep:chacha20poly1305", "dep:bech32", "dep:hex"]
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
@@ -49,6 +49,10 @@ base64 = { version = "0.22", optional = true }
 blake3 = { version = "1", optional = true }
 aes-gcm = { version = "0.10", optional = true }
 zeroize = { version = "1", optional = true }
+scrypt = { version = "0.11", optional = true }
+chacha20poly1305 = { version = "0.10", optional = true }
+bech32 = { version = "0.11", optional = true }
+hex = { version = "0.4", optional = true }
 
 # client deps
 leptos = { version = "0.8", features = ["csr"], optional = true }

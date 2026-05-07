@@ -9,6 +9,7 @@ scuffed-site-server = { path = "../site-server" }
 scuffed-types = { path = "../types" }
 scuffed-auth = { path = "../auth", features = ["server"] }
 scuffed-db = { path = "../db" }
+scuffed-chat = { path = "../chat" }
 
 axum = { workspace = true, features = ["ws"] }
 axum-extra = { workspace = true }
@@ -27,3 +28,4 @@ thiserror = { workspace = true }
 dotenvy = "0.15"
 dashmap = "6"
 futures = "0.3"
+blake3 = "1"

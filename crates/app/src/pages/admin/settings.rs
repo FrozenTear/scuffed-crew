@@ -14,6 +14,8 @@ pub fn AdminSettings() -> Element {
     let mut recruitment_open = use_signal(|| false);
     let mut recruitment_message = use_signal(String::new);
     let mut min_age = use_signal(|| "16".to_string());
+    let mut forum_backend = use_signal(|| "local".to_string());
+    let mut extra_relay_urls = use_signal(String::new);
 
     let _settings = use_resource(move || async move {
         match ApiClient::web().fetch::<SiteSettings>("/api/settings").await {
@@ -23,6 +25,8 @@ pub fn AdminSettings() -> Element {
                 recruitment_open.set(s.recruitment_open);
                 recruitment_message.set(s.recruitment_message);
                 min_age.set(s.min_age.to_string());
+                forum_backend.set(s.forum_backend);
+                extra_relay_urls.set(s.extra_relay_urls);
                 Some(true)
             }
             Err(_) => None,
@@ -37,6 +41,8 @@ pub fn AdminSettings() -> Element {
             recruitment_open: Some(recruitment_open()),
             recruitment_message: Some(recruitment_message().trim().to_string()),
             min_age: Some(age),
+            forum_backend: Some(forum_backend()),
+            extra_relay_urls: Some(extra_relay_urls().trim().to_string()),
         };
 
         saving.set(true);
@@ -118,6 +124,39 @@ pub fn AdminSettings() -> Element {
                         min: "0",
                         value: "{min_age}",
                         oninput: move |e| min_age.set(e.value()),
+                    }
+                }
+            }
+        }
+
+        div { class: "form-section",
+            h2 { "Forum" }
+            div { class: "form-inline",
+                div { class: "form-field",
+                    label { class: "form-label", "Forum Backend" }
+                    select {
+                        class: "form-input",
+                        value: "{forum_backend}",
+                        onchange: move |e| forum_backend.set(e.value()),
+                        option { value: "local", "Local (SurrealDB)" }
+                        option { value: "nostr", "Nostr (Relay)" }
+                    }
+                    p {
+                        style: "font-size: 0.75rem; color: var(--text-muted); margin-top: 0.35rem;",
+                        "Controls where forum data is stored. \"Local\" uses the database. \"Nostr\" uses the relay (requires relay setup)."
+                    }
+                }
+                div { class: "form-field",
+                    label { class: "form-label", "Extra Relay URLs" }
+                    textarea {
+                        class: "form-textarea",
+                        placeholder: "ws://relay2:7777\nwss://relay.example.com",
+                        value: "{extra_relay_urls}",
+                        oninput: move |e| extra_relay_urls.set(e.value()),
+                    }
+                    p {
+                        style: "font-size: 0.75rem; color: var(--text-muted); margin-top: 0.35rem;",
+                        "Additional relay URLs for multi-relay publishing (one per line). Events are published to the primary relay (NOSTR_RELAY_URL) and all extra relays."
                     }
                 }
             }

@@ -1,4 +1,5 @@
 use chrono::{DateTime, Utc};
+use scuffed_auth::crypto::EncryptedBlob;
 use serde::{Deserialize, Serialize};
 
 /// Organization role levels, ordered by privilege.
@@ -37,6 +38,25 @@ impl std::fmt::Display for OrgRole {
     }
 }
 
+/// How a member's Nostr keypair is managed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NostrKeyMode {
+    /// Server generated and stored the key — server signs on behalf of the member.
+    ServerManaged,
+    /// Member linked their own external key — signs client-side (NIP-07).
+    External,
+}
+
+impl std::fmt::Display for NostrKeyMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            NostrKeyMode::ServerManaged => write!(f, "server_managed"),
+            NostrKeyMode::External => write!(f, "external"),
+        }
+    }
+}
+
 /// An org member (extends a user with org-specific data).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Member {
@@ -49,6 +69,12 @@ pub struct Member {
     pub timezone: Option<String>,
     pub pronouns: Option<String>,
     pub availability_status: Option<String>,
+    pub nostr_pubkey: Option<String>,
+    pub nostr_key_mode: Option<NostrKeyMode>,
+    /// Encrypted secret key — only populated for `ServerManaged` mode.
+    /// Never exposed via API responses; only used server-side.
+    #[serde(skip_serializing)]
+    pub nostr_secret_key_encrypted: Option<EncryptedBlob>,
     pub joined_at: DateTime<Utc>,
     pub is_active: bool,
 }
@@ -452,6 +478,71 @@ pub struct TournamentBracket {
     pub matches: Vec<TournamentMatch>,
 }
 
+/// A personal match record (stat-tracker upload).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PersonalMatch {
+    pub id: String,
+    pub member_id: String,
+    pub hero: String,
+    pub map_name: String,
+    pub game_mode: String,
+    pub role: String,
+    pub outcome: String,
+    pub elims: u32,
+    pub deaths: u32,
+    pub assists: u32,
+    pub damage: u32,
+    pub healing: u32,
+    pub mitigation: u32,
+    pub played_at: DateTime<Utc>,
+    pub uploaded_at: DateTime<Utc>,
+}
+
+/// Aggregated personal stats for a member.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PersonalStats {
+    pub member_id: String,
+    pub total_matches: u32,
+    pub wins: u32,
+    pub losses: u32,
+    pub draws: u32,
+}
+
+/// Aggregated stats per hero.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HeroStats {
+    pub hero: String,
+    pub matches: u32,
+    pub wins: u32,
+    pub losses: u32,
+    pub draws: u32,
+    pub avg_elims: f64,
+    pub avg_deaths: f64,
+    pub avg_damage: f64,
+    pub avg_healing: f64,
+}
+
+/// Aggregated stats per map.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MapStats {
+    pub map_name: String,
+    pub matches: u32,
+    pub wins: u32,
+    pub losses: u32,
+    pub draws: u32,
+}
+
+/// A daemon authentication token.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DaemonToken {
+    pub id: String,
+    pub member_id: String,
+    pub label: String,
+    pub is_active: bool,
+    pub created_at: DateTime<Utc>,
+    pub last_used_at: Option<DateTime<Utc>>,
+}
+
 /// Audit log action types.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -487,11 +578,28 @@ pub enum AuditAction {
     AddedTournamentParticipant,
     RemovedTournamentParticipant,
     ReportedTournamentMatch,
+    PublishedCommunity,
+    PublishedPost,
+    PublishedReaction,
+    CreatedPoll,
+    DeletedPoll,
+    CreatedScrim,
+    UpdatedScrimStatus,
     CreatedArticle,
     UpdatedArticle,
     PublishedArticle,
     UnpublishedArticle,
     DeletedArticle,
+    CreatedWikiPage,
+    UpdatedWikiPage,
+    DeletedWikiPage,
+    PinnedForumThread,
+    LockedForumThread,
+    DeletedForumThread,
+    DeletedForumReply,
+    UploadedPersonalStats,
+    CreatedDaemonToken,
+    RevokedDaemonToken,
 }
 
 impl std::fmt::Display for AuditAction {
@@ -522,7 +630,14 @@ pub enum AuditTargetType {
     Tournament,
     TournamentParticipant,
     TournamentMatch,
+    Poll,
+    Scrim,
     Article,
+    WikiPage,
+    ForumThread,
+    ForumReply,
+    PersonalStats,
+    DaemonToken,
 }
 
 impl std::fmt::Display for AuditTargetType {
@@ -532,6 +647,69 @@ impl std::fmt::Display for AuditTargetType {
             .and_then(|v| v.as_str().map(|s| s.to_string()))
             .unwrap_or_else(|| format!("{self:?}"));
         write!(f, "{s}")
+    }
+}
+
+/// Type of NIP-29 group channel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum GroupType {
+    Public,
+    Officer,
+}
+
+impl std::fmt::Display for GroupType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            GroupType::Public => write!(f, "public"),
+            GroupType::Officer => write!(f, "officer"),
+        }
+    }
+}
+
+/// A team's auto-provisioned NIP-29 group on the relay.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TeamChannel {
+    pub id: String,
+    pub team_id: String,
+    pub group_id: String,
+    pub group_type: GroupType,
+    pub relay_url: String,
+    pub is_active: bool,
+    pub created_at: DateTime<Utc>,
+    pub synced_at: Option<DateTime<Utc>>,
+}
+
+/// Per-member read cursor for unread badge tracking.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GroupLastSeen {
+    pub id: String,
+    pub member_id: String,
+    pub group_id: String,
+    pub last_seen_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// NIP-29 group role derived from org role.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Nip29GroupRole {
+    GroupAdmin,
+    GroupMember,
+}
+
+impl OrgRole {
+    /// Map org role to NIP-29 group role.
+    pub fn to_nip29_role(&self) -> Nip29GroupRole {
+        match self {
+            OrgRole::Admin | OrgRole::Officer => Nip29GroupRole::GroupAdmin,
+            OrgRole::Member | OrgRole::Recruit => Nip29GroupRole::GroupMember,
+        }
+    }
+
+    /// Whether this role can access officer-only (encrypted) channels.
+    pub fn can_access_officer_channel(&self) -> bool {
+        matches!(self, OrgRole::Admin | OrgRole::Officer)
     }
 }
 
@@ -590,6 +768,8 @@ pub struct SiteSettings {
     pub recruitment_open: bool,
     pub recruitment_message: String,
     pub min_age: u32,
+    pub forum_backend: String,
+    pub extra_relay_urls: String,
     pub updated_at: DateTime<Utc>,
 }
 
@@ -743,4 +923,128 @@ pub struct AttendanceStats {
     pub no_show: u32,
     pub excused: u32,
     pub total: u32,
+}
+
+/// A poll/survey.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Poll {
+    pub id: String,
+    pub title: String,
+    pub description: Option<String>,
+    pub options: Vec<String>,
+    pub close_at: Option<DateTime<Utc>>,
+    pub allow_multiple: bool,
+    pub created_by: String,
+    pub created_at: DateTime<Utc>,
+    pub is_active: bool,
+}
+
+/// A vote on a poll option.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PollVote {
+    pub id: String,
+    pub poll_id: String,
+    pub member_id: String,
+    pub option_index: u32,
+    pub voted_at: DateTime<Utc>,
+}
+
+/// Aggregated results for a poll.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PollResults {
+    pub poll: Poll,
+    pub votes: Vec<PollOptionResult>,
+    pub total_votes: u32,
+    pub my_votes: Vec<u32>,
+}
+
+/// Vote count for a single poll option.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PollOptionResult {
+    pub option_index: u32,
+    pub label: String,
+    pub count: u32,
+}
+
+/// A scrim (practice match) request on the scrim board.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Scrim {
+    pub id: String,
+    pub team_id: String,
+    pub game_id: String,
+    pub requested_by: String,
+    pub opponent_name: Option<String>,
+    pub scheduled_at: DateTime<Utc>,
+    pub duration_minutes: u32,
+    pub status: String,
+    pub notes: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// A blog article.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Article {
+    pub id: String,
+    pub slug: String,
+    pub title: String,
+    pub content_markdown: String,
+    pub summary: Option<String>,
+    pub cover_image_url: Option<String>,
+    pub author_member_id: String,
+    pub published: bool,
+    pub published_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// A wiki page.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WikiPage {
+    pub id: String,
+    pub topic: String,
+    pub title: String,
+    pub content_markdown: String,
+    pub author_member_id: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub is_active: bool,
+}
+
+/// A revision of a wiki page.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WikiRevision {
+    pub id: String,
+    pub page_id: String,
+    pub content_markdown: String,
+    pub edited_by: String,
+    pub edited_at: DateTime<Utc>,
+    pub revision_note: Option<String>,
+}
+
+/// A forum discussion thread.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ForumThread {
+    pub id: String,
+    pub title: String,
+    pub category: String,
+    pub author_member_id: String,
+    pub content: String,
+    pub pinned: bool,
+    pub locked: bool,
+    pub nostr_event_id: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub is_active: bool,
+}
+
+/// A reply within a forum thread.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ForumReply {
+    pub id: String,
+    pub thread_id: String,
+    pub author_member_id: String,
+    pub content: String,
+    pub created_at: DateTime<Utc>,
+    pub is_active: bool,
 }

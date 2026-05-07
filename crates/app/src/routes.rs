@@ -24,14 +24,36 @@ pub enum Route {
         Tournaments {},
         #[route("/tournaments/:id")]
         Tournament { id: String },
+        #[route("/identity")]
+        IdentitySettings {},
+        #[route("/community")]
+        Community {},
+        #[route("/feed")]
+        Feed {},
+        #[route("/polls")]
+        Polls {},
+        #[route("/scrims")]
+        Scrims {},
         #[route("/events")]
         Events {},
-        #[route("/identity")]
-        Identity {},
         #[route("/blog")]
         Blog {},
         #[route("/blog/:slug")]
-        BlogArticle { slug: String },
+        BlogPost { slug: String },
+        #[route("/wiki")]
+        Wiki {},
+        #[route("/wiki/:topic")]
+        WikiPage { topic: String },
+        #[route("/forum")]
+        Forum {},
+        #[route("/forum/:id")]
+        ForumThread { id: String },
+        #[route("/stats")]
+        Stats {},
+        #[route("/stats/tokens")]
+        StatsTokens {},
+        #[route("/stats/member/:id")]
+        StatsMember { id: String },
     #[end_layout]
 
     // Admin panel (sidebar layout, auth guarded)
@@ -60,6 +82,8 @@ pub enum Route {
         AdminAuditLog {},
         #[route("/admin/moderation")]
         AdminModeration {},
+        #[route("/admin/relay")]
+        AdminRelay {},
         #[route("/admin/settings")]
         AdminSettings {},
     #[end_layout]

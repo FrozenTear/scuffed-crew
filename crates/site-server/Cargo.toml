@@ -5,7 +5,9 @@ edition = "2024"
 
 [dependencies]
 scuffed-auth = { path = "../auth", features = ["server"] }
+scuffed-chat = { path = "../chat" }
 scuffed-db = { path = "../db" }
+scuffed-types = { path = "../types" }
 axum = { version = "0.8", features = ["multipart"] }
 uuid = { version = "1", features = ["v4"] }
 axum-extra = { version = "0.10", features = ["cookie"] }
@@ -20,3 +22,11 @@ serde_json = "1"
 chrono = { version = "0.4", features = ["serde"] }
 reqwest = { version = "0.12", features = ["json"] }
 urlencoding = "2"
+nostr = { version = "0.44", default-features = false, features = ["std"] }
+blake3 = "1"
+rand = "0.8"
+base64 = "0.22"
+
+[dev-dependencies]
+http-body-util = "0.1"
+tower = { version = "0.5", features = ["util"] }

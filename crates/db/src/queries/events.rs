@@ -87,6 +87,22 @@ impl Database {
         .await
     }
 
+    /// List active events with cursor-based pagination.
+    pub async fn list_events_paginated(&self, limit: u32, offset: u32) -> DbResult<Vec<Event>> {
+        with_timeout(async {
+            let fetch = limit + 1;
+            let mut result = self
+                .client
+                .query("SELECT * FROM event WHERE is_active = true ORDER BY day_of_week ASC, time ASC LIMIT $lim START $off")
+                .bind(("lim", fetch))
+                .bind(("off", offset))
+                .await?;
+            let events: Vec<DbEvent> = result.take(0)?;
+            Ok(events.into_iter().map(db_to_event).collect())
+        })
+        .await
+    }
+
     pub async fn update_event(
         &self,
         id: &str,

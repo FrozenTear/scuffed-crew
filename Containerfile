@@ -16,10 +16,12 @@ COPY crates/ui/Cargo.toml crates/ui/Cargo.toml
 COPY crates/site/Cargo.toml crates/site/Cargo.toml
 COPY crates/admin/Cargo.toml crates/admin/Cargo.toml
 COPY crates/site-server/Cargo.toml crates/site-server/Cargo.toml
+COPY crates/relay-policy/Cargo.toml crates/relay-policy/Cargo.toml
 
 # Dummy source files so cargo can resolve the workspace and cache deps.
 RUN mkdir -p crates/auth/src crates/db/src crates/ui/src \
              crates/site/src crates/admin/src crates/site-server/src \
+             crates/relay-policy/src \
     && echo "" > crates/auth/src/lib.rs \
     && echo "" > crates/db/src/lib.rs \
     && echo "" > crates/ui/src/lib.rs \
@@ -27,6 +29,7 @@ RUN mkdir -p crates/auth/src crates/db/src crates/ui/src \
     && echo "fn main(){}" > crates/admin/src/main.rs \
     && echo "" > crates/site-server/src/lib.rs \
     && echo "fn main(){}" > crates/site-server/src/main.rs \
+    && echo "fn main(){}" > crates/relay-policy/src/main.rs \
     && cargo build --release -p scuffed-site-server 2>/dev/null || true
 
 # ── Copy real source ───────────────────────────────────────

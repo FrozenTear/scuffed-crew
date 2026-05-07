@@ -84,6 +84,22 @@ impl Database {
         .await
     }
 
+    /// List active teams with cursor-based pagination.
+    pub async fn list_teams_paginated(&self, limit: u32, offset: u32) -> DbResult<Vec<Team>> {
+        with_timeout(async {
+            let fetch = limit + 1;
+            let mut result = self
+                .client
+                .query("SELECT * FROM team WHERE is_active = true ORDER BY name ASC LIMIT $lim START $off")
+                .bind(("lim", fetch))
+                .bind(("off", offset))
+                .await?;
+            let teams: Vec<DbTeam> = result.take(0)?;
+            Ok(teams.into_iter().map(db_to_team).collect())
+        })
+        .await
+    }
+
     /// Get a team by ID.
     pub async fn get_team(&self, id: &str) -> DbResult<Option<Team>> {
         with_timeout(async {

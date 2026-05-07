@@ -2,7 +2,7 @@ use leptos::prelude::*;
 use leptos::task::spawn_local;
 use serde::{Deserialize, Serialize};
 
-use scuffed_auth::client::api::{fetch_json, post_json};
+use scuffed_auth::client::api::{fetch_json, fetch_json_list, post_json};
 
 use crate::app::use_site_auth;
 use crate::components::SectionHeader;
@@ -35,7 +35,7 @@ const DAY_NAMES: [&str; 7] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 #[component]
 pub fn Schedule() -> impl IntoView {
     let events = LocalResource::new(|| async {
-        fetch_json::<Vec<Event>>("/api/events").await.ok()
+        fetch_json_list::<Event>("/api/events").await.ok()
     });
 
     view! {

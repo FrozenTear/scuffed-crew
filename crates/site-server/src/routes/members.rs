@@ -6,25 +6,34 @@ use axum::{
 use serde::Deserialize;
 
 use scuffed_auth::server::session::ErrorResponse;
-use scuffed_db::{AuditAction, AuditTargetType, GameAccount, Member, OrgRole};
+use scuffed_chat::{EventBuilder, publish_event_oneshot};
+use scuffed_db::{AuditAction, AuditTargetType, GameAccount, Member, NostrKeyMode, OrgRole};
+use scuffed_types::api::{CursorResponse, PaginationParams};
 
 use crate::extractors::{AdminUser, OrgMember};
 use crate::routes::audit_log::audit;
 use crate::state::AppState;
 
-/// GET /api/members — list all active members
+/// GET /api/members — list active members (cursor-paginated)
 pub async fn list_members(
     State(state): State<AppState>,
     _member: OrgMember,
-) -> Result<Json<Vec<Member>>, (StatusCode, Json<ErrorResponse>)> {
-    state.db.list_members().await.map(Json).map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: e.to_string(),
-            }),
-        )
-    })
+    axum::extract::Query(pagination): axum::extract::Query<PaginationParams>,
+) -> Result<Json<CursorResponse<Member>>, (StatusCode, Json<ErrorResponse>)> {
+    let (limit, offset) = pagination.resolve();
+    let items = state
+        .db
+        .list_members_paginated(limit, offset)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: e.to_string(),
+                }),
+            )
+        })?;
+    Ok(Json(CursorResponse::from_oversized(items, limit, offset)))
 }
 
 /// GET /api/members/:id — get member profile
@@ -64,7 +73,13 @@ pub struct UpdateMemberRequest {
     pub timezone: Option<Option<String>>,
     pub pronouns: Option<Option<String>>,
     pub availability_status: Option<Option<String>>,
+    pub nostr_pubkey: Option<Option<String>>,
     pub is_active: Option<bool>,
+}
+
+/// Validate a Nostr pubkey: must be a 64-character lowercase hex string.
+fn validate_nostr_pubkey(pubkey: &str) -> bool {
+    pubkey.len() == 64 && pubkey.chars().all(|c| c.is_ascii_hexdigit())
 }
 
 /// PUT /api/members/:id — update member profile (self or officer+)
@@ -108,6 +123,18 @@ pub async fn update_member(
         ));
     }
 
+    // Validate nostr_pubkey if provided
+    if let Some(Some(ref pubkey)) = body.nostr_pubkey {
+        if !validate_nostr_pubkey(pubkey) {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: "Invalid Nostr pubkey: must be a 64-character hex string".into(),
+                }),
+            ));
+        }
+    }
+
     let updated = state
         .db
         .update_member(
@@ -118,6 +145,7 @@ pub async fn update_member(
             body.timezone.as_ref().map(|t| t.as_deref()),
             body.pronouns.as_ref().map(|p| p.as_deref()),
             body.availability_status.as_ref().map(|a| a.as_deref()),
+            body.nostr_pubkey.as_ref().map(|n| n.as_deref()),
             body.is_active,
         )
         .await
@@ -140,7 +168,86 @@ pub async fn update_member(
     )
     .await;
 
+    // Fire-and-forget: publish NIP-01 kind 0 profile metadata to relay
+    publish_profile_metadata(&state, &updated);
+
     Ok(Json(updated))
+}
+
+/// Spawn a fire-and-forget task to publish a NIP-01 kind 0 profile metadata event
+/// for a member with a server-managed Nostr key.
+fn publish_profile_metadata(state: &AppState, member: &Member) {
+    let relay_url = match state.relay_url {
+        Some(ref url) => url.clone(),
+        None => return,
+    };
+
+    // Only publish for members with server-managed keys
+    if member.nostr_key_mode != Some(NostrKeyMode::ServerManaged) || member.nostr_pubkey.is_none() {
+        return;
+    }
+
+    let db = state.db.clone();
+    let member_id = member.id.clone();
+    let display_name = member.display_name.clone();
+    let bio = member.bio.clone();
+    let avatar_url = member.avatar_url.clone();
+
+    tokio::spawn(async move {
+        let secret_hex = match db.get_nostr_secret_key(&member_id).await {
+            Ok(Some(s)) => s,
+            Ok(None) => {
+                tracing::debug!("No server-managed secret key for member {member_id}");
+                return;
+            }
+            Err(e) => {
+                tracing::error!("Failed to decrypt Nostr secret key for profile metadata: {e}");
+                return;
+            }
+        };
+
+        let keys = match EventBuilder::keys_from_hex(&secret_hex) {
+            Ok(k) => k,
+            Err(e) => {
+                tracing::error!("Invalid Nostr secret key for profile metadata: {e}");
+                return;
+            }
+        };
+
+        // Build NIP-05 identifier from display name
+        let nip05_name: String = display_name
+            .to_lowercase()
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric() || *c == '_')
+            .collect();
+        let nip05 = if nip05_name.is_empty() {
+            None
+        } else {
+            Some(format!("{nip05_name}@scuffed.gg"))
+        };
+
+        let event = match EventBuilder::build_profile_metadata(
+            &keys,
+            &display_name,
+            bio.as_deref(),
+            avatar_url.as_deref(),
+            nip05.as_deref(),
+            None,
+        ) {
+            Ok(e) => e,
+            Err(e) => {
+                tracing::error!("Failed to build kind 0 profile metadata event: {e}");
+                return;
+            }
+        };
+
+        let relay_event = EventBuilder::to_relay_event(&event);
+        if let Err(e) = publish_event_oneshot(&relay_url, relay_event).await {
+            tracing::error!("Failed to publish kind 0 profile metadata: {e}");
+        } else {
+            tracing::info!("Published kind 0 profile metadata for member {member_id}");
+        }
+    });
 }
 
 #[derive(Deserialize)]

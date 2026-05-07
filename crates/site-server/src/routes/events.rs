@@ -7,23 +7,31 @@ use serde::Deserialize;
 
 use scuffed_auth::server::session::ErrorResponse;
 use scuffed_db::{AuditAction, AuditTargetType, Event};
+use scuffed_types::api::{CursorResponse, PaginationParams};
 
 use crate::extractors::OfficerUser;
 use crate::routes::audit_log::audit;
 use crate::state::AppState;
 
-/// GET /api/events — list all active events (public)
+/// GET /api/events — list active events (cursor-paginated, public)
 pub async fn list_events(
     State(state): State<AppState>,
-) -> Result<Json<Vec<Event>>, (StatusCode, Json<ErrorResponse>)> {
-    state.db.list_events().await.map(Json).map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: e.to_string(),
-            }),
-        )
-    })
+    axum::extract::Query(pagination): axum::extract::Query<PaginationParams>,
+) -> Result<Json<CursorResponse<Event>>, (StatusCode, Json<ErrorResponse>)> {
+    let (limit, offset) = pagination.resolve();
+    let items = state
+        .db
+        .list_events_paginated(limit, offset)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: e.to_string(),
+                }),
+            )
+        })?;
+    Ok(Json(CursorResponse::from_oversized(items, limit, offset)))
 }
 
 #[derive(Deserialize)]

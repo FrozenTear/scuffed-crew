@@ -1,0 +1,52 @@
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StatsUploadEntry {
+    pub hero: String,
+    pub map_name: String,
+    pub game_mode: String,
+    pub role: String,
+    pub outcome: String,
+    #[serde(default)]
+    pub elims: u32,
+    #[serde(default)]
+    pub deaths: u32,
+    #[serde(default)]
+    pub assists: u32,
+    #[serde(default)]
+    pub damage: u32,
+    #[serde(default)]
+    pub healing: u32,
+    #[serde(default)]
+    pub mitigation: u32,
+    pub played_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StatsUploadRequest {
+    pub matches: Vec<StatsUploadEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StatsUploadResponse {
+    pub inserted: u32,
+    pub skipped: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateDaemonTokenRequest {
+    #[serde(default = "default_label")]
+    pub label: String,
+}
+
+fn default_label() -> String {
+    "default".to_string()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateDaemonTokenResponse {
+    pub id: String,
+    pub token: String,
+    pub label: String,
+}

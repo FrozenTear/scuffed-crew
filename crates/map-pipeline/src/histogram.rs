@@ -83,7 +83,8 @@ pub fn find_valleys(signal: &[f64], peak_indices: &[usize]) -> Vec<(usize, f64)>
 
     let mut valleys = Vec::with_capacity(peak_indices.len() - 1);
     for window in peak_indices.windows(2) {
-        let (start, end) = (window[0], window[1]);
+        let start = window[0].min(signal.len() - 1);
+        let end = window[1].min(signal.len() - 1);
         let (min_idx, min_val) = signal[start..=end]
             .iter()
             .enumerate()

@@ -12,4 +12,8 @@ pub struct UpdateSettingsRequest {
     pub recruitment_message: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub min_age: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub forum_backend: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub extra_relay_urls: Option<String>,
 }

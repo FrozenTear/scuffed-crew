@@ -751,7 +751,7 @@ fn EditorLayout(initial_strategy: Option<Strategy>) -> Element {
 
     rsx! {
         style { {EDITOR_CSS} }
-        style { {crate::components::strategy::map_canvas::MAP_CANVAS_CSS} }
+        style { {crate::components::strategy::MAP_CANVAS_CSS} }
 
         div { class: "editor-page",
 
@@ -822,6 +822,11 @@ fn EditorLayout(initial_strategy: Option<Strategy>) -> Element {
                                         elem.position = pos;
                                         s.has_unsaved_changes = true;
                                     }
+                                });
+                            },
+                            on_element_drag_end: move |(id, before, after): (Uuid, Position, Position)| {
+                                undo_manager.with_mut(|u| {
+                                    u.push(UndoableAction::MoveElement { id, before, after });
                                 });
                             },
                             on_pan_change: move |pos: Position| {
@@ -1118,6 +1123,15 @@ fn apply_undo(strategy_state: &mut Signal<StrategyState>, action: UndoableAction
                 s.update_element(id, before);
             });
         }
+        UndoableAction::MoveElement { id, before, .. } => {
+            // Undo move = restore previous position
+            strategy_state.with_mut(|s| {
+                if let Some(elem) = s.elements.iter_mut().find(|e| e.id == id) {
+                    elem.position = before;
+                    s.has_unsaved_changes = true;
+                }
+            });
+        }
         UndoableAction::AddPhase { phase } => {
             strategy_state.with_mut(|s| {
                 s.remove_phase(phase.id);
@@ -1180,6 +1194,15 @@ fn apply_redo(strategy_state: &mut Signal<StrategyState>, action: UndoableAction
         UndoableAction::UpdateElement { id, after, .. } => {
             strategy_state.with_mut(|s| {
                 s.update_element(id, after);
+            });
+        }
+        UndoableAction::MoveElement { id, after, .. } => {
+            // Redo move = apply new position
+            strategy_state.with_mut(|s| {
+                if let Some(elem) = s.elements.iter_mut().find(|e| e.id == id) {
+                    elem.position = after;
+                    s.has_unsaved_changes = true;
+                }
             });
         }
         UndoableAction::AddPhase { phase } => {

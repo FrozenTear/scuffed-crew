@@ -1,8 +1,13 @@
 .playwright-mcp/
 *.png
+!crates/stat-tracker/portraits/*.png
 target/
 .env
 dist/
 .dioxus/
 dist.old/
 .worktrees/
+*.jpeg
+maps/render/
+node_modules/
+cachyos-repo.tar.xz

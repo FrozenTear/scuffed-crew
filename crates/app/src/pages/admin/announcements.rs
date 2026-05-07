@@ -4,7 +4,7 @@ use serde::Deserialize;
 use scuffed_api_client::ApiClient;
 use scuffed_types::api::{CreateAnnouncementRequest, UpdateAnnouncementRequest};
 use crate::components::{DataTable, FormModal, ConfirmDialog, Toast, use_toast};
-use crate::hooks::{use_api, ModalController};
+use crate::hooks::{use_api_list, ModalController};
 
 // Local response type (field name `is_pinned` differs from shared `pinned`).
 #[derive(Debug, Clone, Deserialize)]
@@ -18,7 +18,7 @@ struct Announcement {
 
 #[component]
 pub fn AdminAnnouncements() -> Element {
-    let mut announcements = use_api::<Vec<Announcement>>("/api/announcements");
+    let mut announcements = use_api_list::<Announcement>("/api/announcements");
     let mut toast = use_toast();
 
     // Form modal state

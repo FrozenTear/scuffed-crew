@@ -177,12 +177,12 @@ pub fn TournamentsPage() -> impl IntoView {
             } else {
                 format!("/api/tournaments?status={sf}")
             };
-            api::get::<Vec<Tournament>>(&url).await.ok()
+            api::get_list::<Tournament>(&url).await.ok()
         }
     });
 
     let games = LocalResource::new(|| async { api::get::<Vec<Game>>("/api/games").await.ok() });
-    let teams = LocalResource::new(|| async { api::get::<Vec<Team>>("/api/teams").await.ok() });
+    let teams = LocalResource::new(|| async { api::get_list::<Team>("/api/teams").await.ok() });
 
     // ── Tournament Form State ──
     let form_open = RwSignal::new(false);

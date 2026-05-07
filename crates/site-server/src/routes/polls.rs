@@ -1,12 +1,10 @@
 use axum::{
-    Json,
     extract::{Path, State},
     http::StatusCode,
+    Json,
 };
-use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
-use scuffed_auth::server::AuthUser;
 use scuffed_auth::server::session::ErrorResponse;
 use scuffed_db::{AuditAction, AuditTargetType, Poll, PollResults};
 
@@ -14,110 +12,65 @@ use crate::extractors::{OfficerUser, OrgMember};
 use crate::routes::audit_log::audit;
 use crate::state::AppState;
 
-#[derive(Debug, Clone, Serialize)]
-pub struct PollDetailResponse {
-    pub poll: Poll,
-    pub results: PollResults,
-    pub viewer_votes: Vec<u32>,
-}
-
-fn internal_error(err: impl ToString) -> (StatusCode, Json<ErrorResponse>) {
-    (
-        StatusCode::INTERNAL_SERVER_ERROR,
-        Json(ErrorResponse {
-            error: err.to_string(),
-        }),
-    )
-}
-
-fn bad_request(message: impl Into<String>) -> (StatusCode, Json<ErrorResponse>) {
-    (
-        StatusCode::BAD_REQUEST,
-        Json(ErrorResponse {
-            error: message.into(),
-        }),
-    )
-}
-
-fn poll_not_found() -> (StatusCode, Json<ErrorResponse>) {
-    (
-        StatusCode::NOT_FOUND,
-        Json(ErrorResponse {
-            error: "Poll not found".to_string(),
-        }),
-    )
-}
-
-fn poll_is_closed(poll: &Poll) -> bool {
-    poll.close_at.is_some_and(|close_at| close_at <= Utc::now())
-}
-
-/// GET /api/polls — list active polls (public)
+/// GET /api/polls — list active polls with results and viewer's votes (member)
 pub async fn list_polls(
     State(state): State<AppState>,
-) -> Result<Json<Vec<Poll>>, (StatusCode, Json<ErrorResponse>)> {
-    state
-        .db
-        .list_polls()
-        .await
-        .map(Json)
-        .map_err(internal_error)
+    member: OrgMember,
+) -> Result<Json<Vec<PollResults>>, (StatusCode, Json<ErrorResponse>)> {
+    let polls = state.db.list_polls().await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: e.to_string(),
+            }),
+        )
+    })?;
+    let mut results = Vec::with_capacity(polls.len());
+    for poll in &polls {
+        let r = state
+            .db
+            .get_poll_results(&poll.id, Some(&member.member.id))
+            .await
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse {
+                        error: e.to_string(),
+                    }),
+                )
+            })?;
+        results.push(r);
+    }
+    Ok(Json(results))
 }
 
-/// GET /api/polls/:id — get poll with aggregated results + viewer votes
+/// GET /api/polls/:id — get poll with results + viewer's votes (authed)
 pub async fn get_poll(
     State(state): State<AppState>,
+    member: OrgMember,
     Path(id): Path<String>,
-    viewer: Result<
-        AuthUser<AppState>,
-        <AuthUser<AppState> as axum::extract::FromRequestParts<AppState>>::Rejection,
-    >,
-) -> Result<Json<PollDetailResponse>, (StatusCode, Json<ErrorResponse>)> {
-    let poll = state
-        .db
-        .get_poll(&id)
-        .await
-        .map_err(internal_error)?
-        .ok_or_else(poll_not_found)?;
-
+) -> Result<Json<PollResults>, (StatusCode, Json<ErrorResponse>)> {
     let results = state
         .db
-        .get_poll_results(&id)
+        .get_poll_results(&id, Some(&member.member.id))
         .await
-        .map_err(internal_error)?;
-
-    let viewer_votes = if let Ok(auth_user) = viewer {
-        if let Some(member) = state
-            .db
-            .get_member_by_user(&auth_user.id)
-            .await
-            .map_err(internal_error)?
-        {
-            state
-                .db
-                .get_member_poll_votes(&id, &member.id)
-                .await
-                .map_err(internal_error)?
-        } else {
-            Vec::new()
-        }
-    } else {
-        Vec::new()
-    };
-
-    Ok(Json(PollDetailResponse {
-        poll,
-        results,
-        viewer_votes,
-    }))
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: e.to_string(),
+                }),
+            )
+        })?;
+    Ok(Json(results))
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Deserialize)]
 pub struct CreatePollRequest {
     pub title: String,
     pub description: Option<String>,
     pub options: Vec<String>,
-    pub close_at: Option<DateTime<Utc>>,
+    pub close_at: Option<chrono::DateTime<chrono::Utc>>,
     #[serde(default)]
     pub allow_multiple: bool,
 }
@@ -128,50 +81,34 @@ pub async fn create_poll(
     officer: OfficerUser,
     Json(body): Json<CreatePollRequest>,
 ) -> Result<(StatusCode, Json<Poll>), (StatusCode, Json<ErrorResponse>)> {
-    let title = body.title.trim().to_string();
-    if title.is_empty() {
-        return Err(bad_request("Title is required"));
+    if body.options.len() < 2 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "Poll must have at least 2 options".into(),
+            }),
+        ));
     }
-
-    let options: Vec<String> = body
-        .options
-        .iter()
-        .map(|o| o.trim())
-        .filter(|o| !o.is_empty())
-        .map(|o| o.to_string())
-        .collect();
-
-    if options.len() < 2 {
-        return Err(bad_request("At least two non-empty options are required"));
-    }
-
-    if let Some(close_at) = body.close_at.as_ref() {
-        if *close_at <= Utc::now() {
-            return Err(bad_request("close_at must be in the future"));
-        }
-    }
-
-    let description = body.description.as_ref().and_then(|d| {
-        let trimmed = d.trim();
-        if trimmed.is_empty() {
-            None
-        } else {
-            Some(trimmed)
-        }
-    });
 
     let poll = state
         .db
         .create_poll(
-            &title,
-            description,
-            options,
+            &body.title,
+            body.description.as_deref(),
+            &body.options,
             body.close_at,
             body.allow_multiple,
             &officer.member.id,
         )
         .await
-        .map_err(internal_error)?;
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: e.to_string(),
+                }),
+            )
+        })?;
 
     audit(
         &state.db,
@@ -186,8 +123,8 @@ pub async fn create_poll(
     Ok((StatusCode::CREATED, Json(poll)))
 }
 
-#[derive(Debug, Clone, Deserialize)]
-pub struct VotePollRequest {
+#[derive(Deserialize)]
+pub struct VoteRequest {
     pub option_index: u32,
 }
 
@@ -196,50 +133,40 @@ pub async fn vote_poll(
     State(state): State<AppState>,
     member: OrgMember,
     Path(id): Path<String>,
-    Json(body): Json<VotePollRequest>,
-) -> Result<Json<PollDetailResponse>, (StatusCode, Json<ErrorResponse>)> {
-    let poll = state
-        .db
-        .get_poll(&id)
-        .await
-        .map_err(internal_error)?
-        .ok_or_else(poll_not_found)?;
-
-    if poll_is_closed(&poll) {
-        return Err(bad_request("Poll is closed"));
-    }
+    Json(body): Json<VoteRequest>,
+) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
+    let poll = state.db.get_poll(&id).await.map_err(|e| {
+        (
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: e.to_string(),
+            }),
+        )
+    })?;
 
     if body.option_index as usize >= poll.options.len() {
-        return Err(bad_request("Invalid option_index"));
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "Invalid option index".into(),
+            }),
+        ));
     }
 
     state
         .db
-        .vote_poll(
-            &id,
-            &member.member.id,
-            body.option_index,
-            poll.allow_multiple,
-        )
+        .vote_poll(&id, &member.member.id, body.option_index)
         .await
-        .map_err(internal_error)?;
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: e.to_string(),
+                }),
+            )
+        })?;
 
-    let results = state
-        .db
-        .get_poll_results(&id)
-        .await
-        .map_err(internal_error)?;
-    let viewer_votes = state
-        .db
-        .get_member_poll_votes(&id, &member.member.id)
-        .await
-        .map_err(internal_error)?;
-
-    Ok(Json(PollDetailResponse {
-        poll,
-        results,
-        viewer_votes,
-    }))
+    Ok(StatusCode::OK)
 }
 
 /// DELETE /api/polls/:id/vote/:option_index — remove vote (member)
@@ -247,53 +174,36 @@ pub async fn unvote_poll(
     State(state): State<AppState>,
     member: OrgMember,
     Path((id, option_index)): Path<(String, u32)>,
-) -> Result<Json<PollDetailResponse>, (StatusCode, Json<ErrorResponse>)> {
-    let poll = state
-        .db
-        .get_poll(&id)
-        .await
-        .map_err(internal_error)?
-        .ok_or_else(poll_not_found)?;
-
-    if option_index as usize >= poll.options.len() {
-        return Err(bad_request("Invalid option_index"));
-    }
-
+) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
     state
         .db
         .unvote_poll(&id, &member.member.id, option_index)
         .await
-        .map_err(internal_error)?;
-
-    let results = state
-        .db
-        .get_poll_results(&id)
-        .await
-        .map_err(internal_error)?;
-    let viewer_votes = state
-        .db
-        .get_member_poll_votes(&id, &member.member.id)
-        .await
-        .map_err(internal_error)?;
-
-    Ok(Json(PollDetailResponse {
-        poll,
-        results,
-        viewer_votes,
-    }))
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: e.to_string(),
+                }),
+            )
+        })?;
+    Ok(StatusCode::OK)
 }
 
 /// DELETE /api/polls/:id — deactivate poll (officer+)
-pub async fn delete_poll(
+pub async fn deactivate_poll(
     State(state): State<AppState>,
     officer: OfficerUser,
     Path(id): Path<String>,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
-    state
-        .db
-        .deactivate_poll(&id)
-        .await
-        .map_err(internal_error)?;
+    state.db.deactivate_poll(&id).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: e.to_string(),
+            }),
+        )
+    })?;
 
     audit(
         &state.db,
@@ -301,7 +211,7 @@ pub async fn delete_poll(
         AuditAction::DeletedPoll,
         AuditTargetType::Poll,
         &id,
-        None,
+        Some("Deactivated poll"),
     )
     .await;
 

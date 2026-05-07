@@ -1,0 +1,35 @@
+# ── Stage 1: Build strfry29 (Go) ──────────────────────────
+FROM golang:1.23-alpine AS strfry29-builder
+
+RUN apk add --no-cache git
+
+WORKDIR /build
+RUN git clone --depth 1 https://github.com/fiatjaf/relay29.git \
+    && cd relay29/strfry29 \
+    && CGO_ENABLED=0 go build -o /usr/local/bin/strfry29 .
+
+# ── Stage 2: Build relay-policy (Rust) ────────────────────
+FROM rust:1.86-alpine AS relay-policy-builder
+
+RUN apk add --no-cache musl-dev
+
+WORKDIR /build
+COPY Cargo.toml Cargo.lock ./
+COPY crates/relay-policy crates/relay-policy
+COPY crates/db crates/db
+COPY crates/types crates/types
+COPY crates/auth crates/auth
+RUN cargo build --release -p relay-policy \
+    && cp target/release/relay-policy /usr/local/bin/relay-policy
+
+# ── Stage 3: Runtime (strfry + plugins) ───────────────────
+FROM dockurr/strfry:latest
+
+COPY --from=strfry29-builder /usr/local/bin/strfry29 /usr/local/bin/strfry29
+COPY --from=relay-policy-builder /usr/local/bin/relay-policy /usr/local/bin/relay-policy
+
+COPY relay/strfry.conf /etc/strfry.conf
+
+EXPOSE 7777
+
+ENTRYPOINT ["strfry", "relay"]

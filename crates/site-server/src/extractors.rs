@@ -1,6 +1,6 @@
 use axum::{
     extract::FromRequestParts,
-    http::{request::Parts, StatusCode},
+    http::{header::AUTHORIZATION, request::Parts, StatusCode},
     Json,
 };
 
@@ -135,5 +135,108 @@ impl FromRequestParts<AppState> for AdminUser {
             user: org_member.user,
             member: org_member.member,
         })
+    }
+}
+
+/// Extractor: daemon token authentication (stat-tracker uploads).
+pub struct DaemonUser {
+    pub member: Member,
+}
+
+impl FromRequestParts<AppState> for DaemonUser {
+    type Rejection = (StatusCode, Json<ErrorResponse>);
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
+        let auth_header = parts
+            .headers
+            .get(AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.strip_prefix("Bearer "))
+            .ok_or_else(|| {
+                (
+                    StatusCode::UNAUTHORIZED,
+                    Json(ErrorResponse {
+                        error: "Missing Bearer token".into(),
+                    }),
+                )
+            })?;
+
+        let member_id = state
+            .db
+            .validate_daemon_token(auth_header)
+            .await
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse {
+                        error: e.to_string(),
+                    }),
+                )
+            })?
+            .ok_or_else(|| {
+                (
+                    StatusCode::UNAUTHORIZED,
+                    Json(ErrorResponse {
+                        error: "Invalid or revoked daemon token".into(),
+                    }),
+                )
+            })?;
+
+        let member = state
+            .db
+            .get_member(&member_id)
+            .await
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse {
+                        error: e.to_string(),
+                    }),
+                )
+            })?
+            .ok_or_else(|| {
+                (
+                    StatusCode::FORBIDDEN,
+                    Json(ErrorResponse {
+                        error: "Member not found".into(),
+                    }),
+                )
+            })?;
+
+        if !member.is_active {
+            return Err((
+                StatusCode::FORBIDDEN,
+                Json(ErrorResponse {
+                    error: "Membership inactive".into(),
+                }),
+            ));
+        }
+
+        let suspended_or_banned = state
+            .db
+            .is_member_suspended_or_banned(&member.id)
+            .await
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse {
+                        error: e.to_string(),
+                    }),
+                )
+            })?;
+
+        if suspended_or_banned {
+            return Err((
+                StatusCode::FORBIDDEN,
+                Json(ErrorResponse {
+                    error: "Member is suspended or banned".into(),
+                }),
+            ));
+        }
+
+        Ok(DaemonUser { member })
     }
 }
