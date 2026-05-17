@@ -355,15 +355,142 @@ async fn delete_strategy(
 }
 
 // =============================================================================
-// Stubs for hero/meta (future OverFast proxy)
+// Hero / meta endpoint
 // =============================================================================
+
+#[derive(Debug, Serialize)]
+struct MetaResponse {
+    updated: String,
+    source: String,
+    heroes: Vec<HeroMeta>,
+    /// Personal stats for the authenticated org member, when available.
+    /// `None` for anonymous requests or non-members.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    personal: Option<PersonalMeta>,
+}
+
+#[derive(Debug, Serialize)]
+struct HeroMeta {
+    id: String,
+    name: String,
+    role: String,
+    portrait_url: String,
+    pickrate: f64,
+    winrate: f64,
+}
+
+#[derive(Debug, Serialize)]
+struct PersonalMeta {
+    member_id: String,
+    heroes: Vec<HeroPersonalEntry>,
+    maps: Vec<MapPersonalEntry>,
+}
+
+#[derive(Debug, Serialize)]
+struct HeroPersonalEntry {
+    hero: String,
+    matches: u32,
+    wins: u32,
+    losses: u32,
+    draws: u32,
+    winrate: f64,
+}
+
+#[derive(Debug, Serialize)]
+struct MapPersonalEntry {
+    map_name: String,
+    matches: u32,
+    wins: u32,
+    losses: u32,
+    draws: u32,
+    winrate: f64,
+}
+
+fn winrate_pct(wins: u32, matches: u32) -> f64 {
+    if matches == 0 {
+        0.0
+    } else {
+        (wins as f64 / matches as f64) * 100.0
+    }
+}
 
 async fn list_heroes() -> Json<Value> {
     Json(json!({ "data": [] }))
 }
 
-async fn get_meta() -> Json<Value> {
-    Json(json!({ "data": [] }))
+/// GET /api/strategy/meta — global meta data + personal winrates per hero/map.
+///
+/// Anonymous: returns the global stub only. Authed org members: also returns
+/// `personal.heroes` and `personal.maps` from their stat-tracker uploads.
+async fn get_meta(State(state): State<AppState>, jar: CookieJar) -> Json<MetaResponse> {
+    let mut response = MetaResponse {
+        updated: chrono::Utc::now().to_rfc3339(),
+        source: "Scuffed Crew".into(),
+        heroes: Vec::new(),
+        personal: None,
+    };
+
+    let Some(user) = try_get_user(&state, &jar).await else {
+        return Json(response);
+    };
+
+    let Ok(Some(member)) = state.db.get_member_by_user(&user.id).await else {
+        return Json(response);
+    };
+
+    if !member.is_active {
+        return Json(response);
+    }
+
+    let hero_rows = state
+        .db
+        .get_hero_stats(&member.id)
+        .await
+        .unwrap_or_else(|e| {
+            tracing::error!("Failed to load personal hero stats: {e}");
+            Vec::new()
+        });
+
+    let map_rows = state
+        .db
+        .get_map_stats(&member.id)
+        .await
+        .unwrap_or_else(|e| {
+            tracing::error!("Failed to load personal map stats: {e}");
+            Vec::new()
+        });
+
+    let heroes = hero_rows
+        .into_iter()
+        .map(|h| HeroPersonalEntry {
+            winrate: winrate_pct(h.wins, h.matches),
+            hero: h.hero,
+            matches: h.matches,
+            wins: h.wins,
+            losses: h.losses,
+            draws: h.draws,
+        })
+        .collect();
+
+    let maps = map_rows
+        .into_iter()
+        .map(|m| MapPersonalEntry {
+            winrate: winrate_pct(m.wins, m.matches),
+            map_name: m.map_name,
+            matches: m.matches,
+            wins: m.wins,
+            losses: m.losses,
+            draws: m.draws,
+        })
+        .collect();
+
+    response.personal = Some(PersonalMeta {
+        member_id: member.id,
+        heroes,
+        maps,
+    });
+
+    Json(response)
 }
 
 // =============================================================================

@@ -24,7 +24,7 @@
 //! Ported from Leptos to Dioxus 0.7.
 
 use dioxus::prelude::*;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
@@ -35,7 +35,7 @@ use scuffed_types::strategy::{
     Visibility,
 };
 
-use crate::components::strategy::MapCanvas;
+use crate::components::strategy::{HeroPicker, HeroWinRate, MapCanvas};
 use crate::keybindings::{self, EditorAction};
 use crate::state::editor::{CanvasState, DrawingState, StrategyState};
 use crate::state::undo::{UndoManager, UndoableAction};
@@ -56,6 +56,25 @@ struct CreateStrategyRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     team_id: Option<String>,
     visibility: String,
+}
+
+/// Subset of `/api/strategy/meta` consumed by the editor for inline winrate badges.
+#[derive(Debug, Clone, Deserialize)]
+struct EditorMetaResponse {
+    #[serde(default)]
+    personal: Option<EditorMetaPersonal>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct EditorMetaPersonal {
+    #[serde(default)]
+    heroes: Vec<EditorHeroEntry>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct EditorHeroEntry {
+    hero: String,
+    winrate: f64,
 }
 
 #[derive(Debug, Serialize)]
@@ -422,6 +441,26 @@ fn EditorLayout(initial_strategy: Option<Strategy>) -> Element {
     // Save status
     let mut save_in_progress = use_signal(|| false);
 
+    // Personal winrates per hero from /api/strategy/meta — fetched once on mount.
+    // None while loading or when the user is not an authed org member.
+    let hero_winrates = use_resource(|| async {
+        let resp = ApiClient::web()
+            .fetch::<EditorMetaResponse>("/api/strategy/meta")
+            .await
+            .ok()?;
+        let personal = resp.personal?;
+        Some(
+            personal
+                .heroes
+                .into_iter()
+                .map(|h| HeroWinRate {
+                    hero_name: h.hero,
+                    winrate: h.winrate,
+                })
+                .collect::<Vec<_>>(),
+        )
+    });
+
     // Track previous tool for space-to-pan behavior
     let prev_tool = use_hook(|| std::cell::Cell::new(Tool::Select));
 
@@ -776,8 +815,18 @@ fn EditorLayout(initial_strategy: Option<Strategy>) -> Element {
                     div { class: "sidebar-content",
                         // TODO: TeamPanel component
                         div { class: "panel-placeholder", "TeamPanel" }
-                        // TODO: HeroPicker component
-                        div { class: "panel-placeholder", "HeroPicker" }
+                        {
+                            let winrates = hero_winrates.read().as_ref().and_then(|r| r.clone());
+                            rsx! {
+                                HeroPicker {
+                                    selected_hero: hero_val.clone(),
+                                    on_select: move |id: String| {
+                                        drawing_state.with_mut(|d| d.selected_hero = Some(id));
+                                    },
+                                    hero_winrates: winrates,
+                                }
+                            }
+                        }
                     }
                 }
 

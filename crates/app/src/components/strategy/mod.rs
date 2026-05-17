@@ -20,6 +20,6 @@ pub use map_canvas::MapCanvas;
 pub use desktop_map_canvas::DesktopMapCanvas as MapCanvas;
 pub use toolbar::Toolbar;
 pub use properties_panel::PropertiesPanel;
-pub use hero_picker::HeroPicker;
+pub use hero_picker::{HeroPicker, HeroWinRate};
 pub use team_panel::TeamPanel;
 pub use timeline::Timeline;
