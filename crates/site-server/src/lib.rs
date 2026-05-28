@@ -249,7 +249,7 @@ pub fn create_router(state: AppState) -> Router {
         )
         .route(
             "/api/polls/{id}",
-            get(routes::polls::get_poll).delete(routes::polls::delete_poll),
+            get(routes::polls::get_poll).delete(routes::polls::deactivate_poll),
         )
         .route("/api/polls/{id}/vote", post(routes::polls::vote_poll))
         .route(
@@ -334,25 +334,6 @@ pub fn create_router(state: AppState) -> Router {
             "/api/scrims/{id}",
             patch(routes::scrims::update_scrim_status),
         )
-        // Article routes (blog)
-        .route(
-            "/api/articles",
-            get(routes::articles::list_articles)
-                .post(routes::articles::create_article),
-        )
-        .route(
-            "/api/articles/{slug}",
-            get(routes::articles::get_article)
-                .put(routes::articles::update_article),
-        )
-        .route(
-            "/api/articles/{slug}/publish",
-            post(routes::articles::publish_article),
-        )
-        .route(
-            "/api/articles/{slug}/delete",
-            delete(routes::articles::delete_article),
-        )
         // Wiki routes
         .route(
             "/api/wiki",
@@ -390,23 +371,6 @@ pub fn create_router(state: AppState) -> Router {
         .route(
             "/api/forum/threads/{id}/lock",
             patch(routes::forum::lock_thread),
-        )
-        // Poll routes
-        .route(
-            "/api/polls",
-            get(routes::polls::list_polls).post(routes::polls::create_poll),
-        )
-        .route(
-            "/api/polls/{id}",
-            get(routes::polls::get_poll).delete(routes::polls::deactivate_poll),
-        )
-        .route(
-            "/api/polls/{id}/vote",
-            post(routes::polls::vote_poll),
-        )
-        .route(
-            "/api/polls/{id}/vote/{option_index}",
-            delete(routes::polls::unvote_poll),
         )
         // Nostr identity verification (Phase 1.5)
         .route(

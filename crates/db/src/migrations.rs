@@ -185,7 +185,7 @@ pub async fn run_migrations(client: &Surreal<Any>) -> DbResult<()> {
         DEFINE FIELD member_id ON poll_vote TYPE string;
         DEFINE FIELD option_index ON poll_vote TYPE int
             ASSERT $value >= 0;
-        DEFINE FIELD created_at ON poll_vote TYPE datetime DEFAULT time::now();
+        DEFINE FIELD voted_at ON poll_vote TYPE datetime DEFAULT time::now();
 
         DEFINE INDEX poll_vote_unique_idx ON poll_vote
             COLUMNS poll_id, member_id, option_index UNIQUE;
@@ -417,33 +417,6 @@ pub async fn run_migrations(client: &Surreal<Any>) -> DbResult<()> {
         DEFINE INDEX gls_member_group_idx ON group_last_seen
             COLUMNS member_id, group_id UNIQUE;
         DEFINE INDEX gls_member_idx ON group_last_seen COLUMNS member_id;
-
-        -- ================================================
-        -- Polls
-        -- ================================================
-        DEFINE TABLE poll SCHEMAFULL;
-        DEFINE FIELD title ON poll TYPE string;
-        DEFINE FIELD description ON poll TYPE option<string>;
-        DEFINE FIELD options ON poll TYPE array<string>;
-        DEFINE FIELD close_at ON poll TYPE option<datetime>;
-        DEFINE FIELD allow_multiple ON poll TYPE bool DEFAULT false;
-        DEFINE FIELD created_by ON poll TYPE string;
-        DEFINE FIELD created_at ON poll TYPE datetime DEFAULT time::now();
-        DEFINE FIELD is_active ON poll TYPE bool DEFAULT true;
-
-        DEFINE INDEX poll_active_idx ON poll COLUMNS is_active, created_at;
-
-        -- ================================================
-        -- Poll Votes
-        -- ================================================
-        DEFINE TABLE poll_vote SCHEMAFULL;
-        DEFINE FIELD poll_id ON poll_vote TYPE string;
-        DEFINE FIELD member_id ON poll_vote TYPE string;
-        DEFINE FIELD option_index ON poll_vote TYPE int;
-        DEFINE FIELD voted_at ON poll_vote TYPE datetime DEFAULT time::now();
-
-        DEFINE INDEX poll_vote_member_idx ON poll_vote
-            COLUMNS poll_id, member_id, option_index UNIQUE;
 
         -- ================================================
         -- Scrims (scrim board / practice match requests)
