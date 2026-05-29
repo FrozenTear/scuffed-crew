@@ -17,13 +17,25 @@ pub struct Toast {
 
 impl Toast {
     pub fn success(msg: impl Into<String>) -> Self {
-        Self { id: 0, message: msg.into(), level: ToastLevel::Success }
+        Self {
+            id: 0,
+            message: msg.into(),
+            level: ToastLevel::Success,
+        }
     }
     pub fn error(msg: impl Into<String>) -> Self {
-        Self { id: 0, message: msg.into(), level: ToastLevel::Error }
+        Self {
+            id: 0,
+            message: msg.into(),
+            level: ToastLevel::Error,
+        }
     }
     pub fn info(msg: impl Into<String>) -> Self {
-        Self { id: 0, message: msg.into(), level: ToastLevel::Info }
+        Self {
+            id: 0,
+            message: msg.into(),
+            level: ToastLevel::Info,
+        }
     }
 }
 

@@ -1,8 +1,8 @@
 use dioxus::prelude::*;
 use serde::Serialize;
 
-use scuffed_api_client::ApiClient;
 use crate::components::{Toast, ToastState, use_toast};
+use scuffed_api_client::ApiClient;
 
 const QUICK_EMOJIS: &[(&str, &str)] = &[
     ("\u{1f44d}", "thumbs up"),
@@ -167,12 +167,7 @@ pub fn ReactionBar(
     }
 }
 
-fn render_pill(
-    r: ReactionCount,
-    event_id: String,
-    author: String,
-    toasts: ToastState,
-) -> Element {
+fn render_pill(r: ReactionCount, event_id: String, author: String, toasts: ToastState) -> Element {
     let pill_class = if r.reacted_by_me {
         "reaction-pill reaction-pill--mine"
     } else {
@@ -228,12 +223,7 @@ fn render_picker_btn(
     }
 }
 
-async fn send_reaction(
-    event_id: &str,
-    author_pubkey: &str,
-    content: &str,
-    mut toasts: ToastState,
-) {
+async fn send_reaction(event_id: &str, author_pubkey: &str, content: &str, mut toasts: ToastState) {
     let body = ReactBody {
         event_id: event_id.to_string(),
         event_author_pubkey: author_pubkey.to_string(),
@@ -246,7 +236,7 @@ async fn send_reaction(
     {
         Ok(_) => {}
         Err(e) => {
-            toasts.show(Toast::error(&format!("Reaction failed: {e}")));
+            toasts.show(Toast::error(format!("Reaction failed: {e}")));
         }
     }
 }

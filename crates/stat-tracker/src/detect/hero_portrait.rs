@@ -21,18 +21,18 @@ impl PortraitMatcher {
         if let Ok(entries) = std::fs::read_dir(portraits_dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
-                if path.extension().and_then(|e| e.to_str()) == Some("png") {
-                    if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                        match image::open(&path) {
-                            Ok(img) => {
-                                let resized = img
-                                    .resize_exact(PORTRAIT_SIZE, PORTRAIT_SIZE, FilterType::Lanczos3)
-                                    .to_rgb8();
-                                references.insert(stem.to_string(), resized);
-                            }
-                            Err(e) => {
-                                tracing::warn!(path = %path.display(), error = %e, "failed to load portrait reference");
-                            }
+                if path.extension().and_then(|e| e.to_str()) == Some("png")
+                    && let Some(stem) = path.file_stem().and_then(|s| s.to_str())
+                {
+                    match image::open(&path) {
+                        Ok(img) => {
+                            let resized = img
+                                .resize_exact(PORTRAIT_SIZE, PORTRAIT_SIZE, FilterType::Lanczos3)
+                                .to_rgb8();
+                            references.insert(stem.to_string(), resized);
+                        }
+                        Err(e) => {
+                            tracing::warn!(path = %path.display(), error = %e, "failed to load portrait reference");
                         }
                     }
                 }
@@ -103,11 +103,11 @@ impl PortraitMatcher {
         let player_row = detect_player_row_inner(scoreboard, team_size);
         let crops = extract_portrait_crops_inner(scoreboard, team_size);
 
-        if let Some(idx) = player_row {
-            if let Some(result) = crops.get(idx).and_then(|crop| self.match_portrait(crop)) {
-                tracing::info!(row = idx, hero = %result.0, confidence = result.1, "matched player portrait via highlighted row");
-                return Some((result.0, result.1, idx));
-            }
+        if let Some(idx) = player_row
+            && let Some(result) = crops.get(idx).and_then(|crop| self.match_portrait(crop))
+        {
+            tracing::info!(row = idx, hero = %result.0, confidence = result.1, "matched player portrait via highlighted row");
+            return Some((result.0, result.1, idx));
         }
 
         // Log all team 1 portrait matches for debugging, but do NOT use them
@@ -215,7 +215,7 @@ fn extract_portrait_crops_inner(scoreboard: &DynamicImage, team_size: usize) -> 
     let (w, h) = (scoreboard.width(), scoreboard.height());
     let portrait_w = w * 6 / 100;
     let portrait_h = portrait_w; // square
-    let portrait_x = w * 1 / 100;
+    let portrait_x = w / 100;
 
     // Adjust row height based on team size
     // 5v5: rows take ~7% of height each, 6v6: rows take ~5.8% each
@@ -281,11 +281,7 @@ pub fn detect_team_size(scoreboard: &DynamicImage) -> usize {
         row_count += 1;
     }
 
-    if row_count >= 6 {
-        6
-    } else {
-        5
-    }
+    if row_count >= 6 { 6 } else { 5 }
 }
 
 fn mean_absolute_difference(a: &RgbImage, b: &RgbImage) -> f64 {

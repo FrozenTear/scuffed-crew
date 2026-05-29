@@ -5,11 +5,11 @@ use leptos_router::{
     path,
 };
 
-use scuffed_ui::{scuffed_crew_theme, ThemeProvider};
 use scuffed_ui::components::button::BUTTON_STYLES;
 use scuffed_ui::components::card::CARD_STYLES;
 use scuffed_ui::components::modal::MODAL_STYLES;
 use scuffed_ui::components::toast::{ToastContainer, ToastState, TOAST_STYLES};
+use scuffed_ui::{scuffed_crew_theme, ThemeProvider};
 
 use crate::components::confirm_dialog::CONFIRM_DIALOG_STYLES;
 use crate::components::form_modal::FORM_MODAL_STYLES;
@@ -280,8 +280,13 @@ pub fn AdminApp() -> impl IntoView {
 
     let styles = format!(
         "{}\n{}\n{}\n{}\n{}\n{}\n{}",
-        BUTTON_STYLES, CARD_STYLES, TOAST_STYLES, MODAL_STYLES,
-        CONFIRM_DIALOG_STYLES, FORM_MODAL_STYLES, ADMIN_STYLES,
+        BUTTON_STYLES,
+        CARD_STYLES,
+        TOAST_STYLES,
+        MODAL_STYLES,
+        CONFIRM_DIALOG_STYLES,
+        FORM_MODAL_STYLES,
+        ADMIN_STYLES,
     );
 
     view! {

@@ -2,12 +2,12 @@ use dioxus::prelude::*;
 use serde::{Deserialize, Serialize};
 use wasm_bindgen::JsCast;
 
-use scuffed_api_client::ApiClient;
-use scuffed_types::api::{ChangeRoleRequest, ToggleActiveRequest, CreateGameAccountRequest};
 use crate::components::{
-    DataTable, FormModal, ConfirmDialog, StatusPill, RolePill, SummaryCard, Toast, use_toast,
+    ConfirmDialog, DataTable, FormModal, RolePill, StatusPill, SummaryCard, Toast, use_toast,
 };
-use crate::hooks::{use_api, use_api_list, ModalController};
+use crate::hooks::{ModalController, use_api, use_api_list};
+use scuffed_api_client::ApiClient;
+use scuffed_types::api::{ChangeRoleRequest, CreateGameAccountRequest, ToggleActiveRequest};
 
 // --- Types ---
 // These local types have API-enriched fields (joined names, computed stats)
@@ -169,7 +169,9 @@ pub fn AdminMembers() -> Element {
         if let Some(member) = toggle_modal.get_target() {
             let id = member.id.clone();
             let new_active = !member.is_active;
-            let body = ToggleActiveRequest { is_active: Some(new_active) };
+            let body = ToggleActiveRequest {
+                is_active: Some(new_active),
+            };
             toggle_modal.close();
             spawn(async move {
                 let result = ApiClient::web()
@@ -177,7 +179,11 @@ pub fn AdminMembers() -> Element {
                     .await;
                 match result {
                     Ok(_) => {
-                        let action = if new_active { "activated" } else { "deactivated" };
+                        let action = if new_active {
+                            "activated"
+                        } else {
+                            "deactivated"
+                        };
                         toast.show(Toast::success(format!("Member {action}.")));
                         members.refresh += 1;
                         games.refresh += 1;
@@ -262,7 +268,11 @@ pub fn AdminMembers() -> Element {
         let body = CreateGameAccountRequest {
             game_id,
             account_name: acct_name,
-            account_id: if acct_id_raw.is_empty() { None } else { Some(acct_id_raw) },
+            account_id: if acct_id_raw.is_empty() {
+                None
+            } else {
+                Some(acct_id_raw)
+            },
         };
         if let Some(member) = accts_modal.get_target() {
             let mid = member.id.clone();
@@ -291,24 +301,24 @@ pub fn AdminMembers() -> Element {
     };
 
     let on_del_acct_confirm = move |_| {
-        if let Some(acct) = del_acct_modal.get_target() {
-            if let Some(member) = accts_modal.get_target() {
-                let mid = member.id.clone();
-                let aid = acct.id.clone();
-                del_acct_modal.close();
-                spawn(async move {
-                    match ApiClient::web()
-                        .delete(&format!("/api/members/{mid}/game-accounts/{aid}"))
-                        .await
-                    {
-                        Ok(_) => {
-                            toast.show(Toast::success("Game account removed."));
-                            accts_refresh += 1;
-                        }
-                        Err(e) => toast.show(Toast::error(format!("Delete failed: {e}"))),
+        if let Some(acct) = del_acct_modal.get_target()
+            && let Some(member) = accts_modal.get_target()
+        {
+            let mid = member.id.clone();
+            let aid = acct.id.clone();
+            del_acct_modal.close();
+            spawn(async move {
+                match ApiClient::web()
+                    .delete(&format!("/api/members/{mid}/game-accounts/{aid}"))
+                    .await
+                {
+                    Ok(_) => {
+                        toast.show(Toast::success("Game account removed."));
+                        accts_refresh += 1;
                     }
-                });
-            }
+                    Err(e) => toast.show(Toast::error(format!("Delete failed: {e}"))),
+                }
+            });
         }
     };
 
@@ -331,14 +341,12 @@ pub fn AdminMembers() -> Element {
         // Access the file input via DOM query to get the web_sys::File
         let window = web_sys::window().unwrap();
         let document = window.document().unwrap();
-        if let Some(el) = document.get_element_by_id("avatar-file-input") {
-            if let Ok(input) = el.dyn_into::<web_sys::HtmlInputElement>() {
-                if let Some(file_list) = input.files() {
-                    if let Some(file) = file_list.get(0) {
-                        avatar_file.set(Some(file));
-                    }
-                }
-            }
+        if let Some(el) = document.get_element_by_id("avatar-file-input")
+            && let Ok(input) = el.dyn_into::<web_sys::HtmlInputElement>()
+            && let Some(file_list) = input.files()
+            && let Some(file) = file_list.get(0)
+        {
+            avatar_file.set(Some(file));
         }
     };
 
@@ -351,7 +359,9 @@ pub fn AdminMembers() -> Element {
             toast.show(Toast::error("File must be under 2MB."));
             return;
         }
-        let Some(member) = avatar_modal.get_target() else { return };
+        let Some(member) = avatar_modal.get_target() else {
+            return;
+        };
         let mid = member.id.clone();
         avatar_uploading.set(true);
         spawn(async move {
@@ -364,10 +374,12 @@ pub fn AdminMembers() -> Element {
             opts.set_body(&form_data.into());
             opts.set_credentials(web_sys::RequestCredentials::SameOrigin);
 
-            let request = web_sys::Request::new_with_str_and_init("/api/upload/avatar", &opts).unwrap();
+            let request =
+                web_sys::Request::new_with_str_and_init("/api/upload/avatar", &opts).unwrap();
 
             let window = web_sys::window().unwrap();
-            let resp_val = wasm_bindgen_futures::JsFuture::from(window.fetch_with_request(&request)).await;
+            let resp_val =
+                wasm_bindgen_futures::JsFuture::from(window.fetch_with_request(&request)).await;
 
             match resp_val {
                 Ok(resp_val) => {
@@ -377,14 +389,21 @@ pub fn AdminMembers() -> Element {
                         if let Ok(text) = text {
                             let text_str = text.as_string().unwrap_or_default();
                             if let Ok(upload) = serde_json::from_str::<UploadResponse>(&text_str) {
-                                let body = UpdateAvatarBody { avatar_url: Some(upload.url) };
-                                match ApiClient::web().put_json_empty(&format!("/api/members/{mid}"), &body).await {
+                                let body = UpdateAvatarBody {
+                                    avatar_url: Some(upload.url),
+                                };
+                                match ApiClient::web()
+                                    .put_json_empty(&format!("/api/members/{mid}"), &body)
+                                    .await
+                                {
                                     Ok(_) => {
                                         toast.show(Toast::success("Avatar updated."));
                                         avatar_modal.close();
                                         members.refresh += 1;
                                     }
-                                    Err(e) => toast.show(Toast::error(format!("Failed to update profile: {e}"))),
+                                    Err(e) => toast.show(Toast::error(format!(
+                                        "Failed to update profile: {e}"
+                                    ))),
                                 }
                             } else {
                                 toast.show(Toast::error("Failed to parse upload response."));
@@ -393,7 +412,10 @@ pub fn AdminMembers() -> Element {
                             toast.show(Toast::error("Failed to read upload response."));
                         }
                     } else {
-                        toast.show(Toast::error(format!("Upload failed: HTTP {}", resp.status())));
+                        toast.show(Toast::error(format!(
+                            "Upload failed: HTTP {}",
+                            resp.status()
+                        )));
                     }
                 }
                 Err(_) => toast.show(Toast::error("Upload request failed.")),

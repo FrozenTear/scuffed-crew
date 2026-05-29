@@ -1,7 +1,5 @@
 use dashmap::DashMap;
-use scuffed_types::strategy::{
-    CollabUserInfo, ServerMessage, StrategyId, WsResponse,
-};
+use scuffed_types::strategy::{CollabUserInfo, ServerMessage, StrategyId, WsResponse};
 use std::collections::HashMap;
 use tokio::sync::mpsc;
 
@@ -24,10 +22,8 @@ impl Room {
     }
 
     pub fn add_user(&mut self, user: CollabUserInfo, tx: mpsc::Sender<WsResponse>) {
-        self.users.insert(
-            user.id.clone(),
-            RoomUser { info: user, tx },
-        );
+        self.users
+            .insert(user.id.clone(), RoomUser { info: user, tx });
     }
 
     pub fn remove_user(&mut self, user_id: &str) -> Option<CollabUserInfo> {
@@ -49,10 +45,8 @@ impl Room {
         let mut dead_clients = Vec::new();
 
         for (user_id, user) in &self.users {
-            if user_id != sender_id {
-                if user.tx.try_send(response.clone()).is_err() {
-                    dead_clients.push(user_id.clone());
-                }
+            if user_id != sender_id && user.tx.try_send(response.clone()).is_err() {
+                dead_clients.push(user_id.clone());
             }
         }
 
@@ -105,15 +99,10 @@ impl RoomManager {
         user: CollabUserInfo,
         tx: mpsc::Sender<WsResponse>,
     ) {
-        let mut room = self
-            .rooms
-            .entry(strategy_id.clone())
-            .or_insert_with(Room::new);
+        let mut room = self.rooms.entry(strategy_id.clone()).or_default();
 
         // Notify existing users
-        room.broadcast_all(ServerMessage::UserJoined {
-            user: user.clone(),
-        });
+        room.broadcast_all(ServerMessage::UserJoined { user: user.clone() });
 
         room.add_user(user, tx);
     }
@@ -151,12 +140,14 @@ impl RoomManager {
         }
     }
 
-    /// Get number of rooms
+    /// Get number of rooms (observability helper; not yet wired to a metrics endpoint)
+    #[allow(dead_code)]
     pub fn room_count(&self) -> usize {
         self.rooms.len()
     }
 
-    /// Get total users across all rooms
+    /// Get total users across all rooms (observability helper; not yet wired up)
+    #[allow(dead_code)]
     pub fn total_users(&self) -> usize {
         self.rooms.iter().map(|r| r.users.len()).sum()
     }

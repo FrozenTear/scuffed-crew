@@ -192,18 +192,13 @@ pub struct Application {
 }
 
 /// Match type classification.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum MatchType {
+    #[default]
     Scrim,
     Official,
     Tournament,
-}
-
-impl Default for MatchType {
-    fn default() -> Self {
-        MatchType::Scrim
-    }
 }
 
 impl std::fmt::Display for MatchType {
@@ -581,8 +576,6 @@ pub enum AuditAction {
     PublishedCommunity,
     PublishedPost,
     PublishedReaction,
-    CreatedPoll,
-    DeletedPoll,
     CreatedScrim,
     UpdatedScrimStatus,
     CreatedArticle,
@@ -632,7 +625,6 @@ pub enum AuditTargetType {
     Tournament,
     TournamentParticipant,
     TournamentMatch,
-    Poll,
     Scrim,
     Article,
     WikiPage,
@@ -776,23 +768,6 @@ pub struct SiteSettings {
     pub updated_at: DateTime<Utc>,
 }
 
-/// A long-form blog article (NIP-23 compatible).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Article {
-    pub id: String,
-    pub slug: String,
-    pub title: String,
-    pub content_markdown: String,
-    pub summary: Option<String>,
-    pub cover_image_url: Option<String>,
-    pub author_member_id: String,
-    pub published: bool,
-    pub nostr_event_id: Option<String>,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
-    pub published_at: Option<DateTime<Utc>>,
-}
-
 /// An announcement/news post.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Announcement {
@@ -804,38 +779,6 @@ pub struct Announcement {
     pub is_active: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
-}
-
-/// A poll that members can vote on.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Poll {
-    pub id: String,
-    pub title: String,
-    pub description: Option<String>,
-    pub options: Vec<String>,
-    pub close_at: Option<DateTime<Utc>>,
-    pub allow_multiple: bool,
-    pub created_by: String,
-    pub is_active: bool,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
-}
-
-/// Aggregated vote count for a single option.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PollOptionResult {
-    pub option_index: u32,
-    pub option_text: String,
-    pub vote_count: u32,
-    pub percentage: f64,
-}
-
-/// Poll results for all options.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PollResults {
-    pub poll_id: String,
-    pub total_votes: u32,
-    pub options: Vec<PollOptionResult>,
 }
 
 /// A linked game account for a member.
@@ -940,6 +883,7 @@ pub struct Poll {
     pub created_by: String,
     pub created_at: DateTime<Utc>,
     pub is_active: bool,
+    pub updated_at: DateTime<Utc>,
 }
 
 /// A vote on a poll option.
@@ -996,6 +940,7 @@ pub struct Article {
     pub cover_image_url: Option<String>,
     pub author_member_id: String,
     pub published: bool,
+    pub nostr_event_id: Option<String>,
     pub published_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,

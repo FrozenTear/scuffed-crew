@@ -23,17 +23,14 @@ pub async fn capture_with_output(
         }
 
         let output = if let Some(ref name) = target {
-            outputs
-                .iter()
-                .find(|o| o.name == *name)
-                .ok_or_else(|| {
-                    let available: Vec<_> = outputs.iter().map(|o| o.name.as_str()).collect();
-                    format!(
-                        "output '{}' not found — available: {}",
-                        name,
-                        available.join(", ")
-                    )
-                })?
+            outputs.iter().find(|o| o.name == *name).ok_or_else(|| {
+                let available: Vec<_> = outputs.iter().map(|o| o.name.as_str()).collect();
+                format!(
+                    "output '{}' not found — available: {}",
+                    name,
+                    available.join(", ")
+                )
+            })?
         } else {
             &outputs[0]
         };
@@ -50,4 +47,3 @@ pub async fn capture_with_output(
     })
     .await?
 }
-

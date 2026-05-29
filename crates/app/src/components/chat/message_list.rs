@@ -135,10 +135,7 @@ const MESSAGE_LIST_CSS: &str = r#"
 
 /// Scrollable message feed component.
 #[component]
-pub fn MessageList(
-    messages: Vec<ChatMessage>,
-    #[props(default = false)] loading: bool,
-) -> Element {
+pub fn MessageList(messages: Vec<ChatMessage>, #[props(default = false)] loading: bool) -> Element {
     if messages.is_empty() && !loading {
         return rsx! {
             style { {MESSAGE_LIST_CSS} }

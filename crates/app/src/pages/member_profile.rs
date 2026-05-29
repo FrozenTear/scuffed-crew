@@ -1,8 +1,8 @@
 use dioxus::prelude::*;
 use serde::Deserialize;
 
-use scuffed_api_client::ApiClient;
 use crate::routes::Route;
+use scuffed_api_client::ApiClient;
 
 #[derive(Debug, Clone, Deserialize)]
 struct MemberTeamInfo {

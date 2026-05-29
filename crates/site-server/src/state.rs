@@ -6,6 +6,7 @@ use scuffed_auth::server::HasAuth;
 use scuffed_auth::{AuthError, SessionConfig, User};
 use scuffed_db::Database;
 
+use crate::dm_subscriber::DmEventBus;
 use crate::notifications::MatrixNotifier;
 
 /// Application state shared across handlers.
@@ -25,6 +26,10 @@ pub struct AppState {
     /// Used for publishing kind 0 profile metadata and NIP-05 relay hints.
     /// `None` when `NOSTR_RELAY_URL` is not set.
     pub relay_url: Option<String>,
+    /// In-process event bus fed by the persistent DM relay subscriber.
+    /// `None` when real-time delivery is disabled (no relay or no encryption
+    /// configured); SSE handlers should treat that as a 503.
+    pub dm_events: Option<DmEventBus>,
 }
 
 /// OAuth configuration loaded from environment.
@@ -76,25 +81,18 @@ impl HasAuth for AppState {
     }
 
     async fn get_session_user(&self, token: &str) -> Result<Option<User>, AuthError> {
-        let user_id = self
-            .db
-            .get_session(token)
-            .await
-            .map_err(|e| {
-                tracing::error!("Session lookup failed: {e}");
-                AuthError::Database(e.to_string())
-            })?;
+        let user_id = self.db.get_session(token).await.map_err(|e| {
+            tracing::error!("Session lookup failed: {e}");
+            AuthError::Database(e.to_string())
+        })?;
 
         match user_id {
             Some(uid) => {
                 tracing::debug!("Session resolved to user_id={uid}");
-                self.db
-                    .get_user(&uid)
-                    .await
-                    .map_err(|e| {
-                        tracing::error!("User lookup failed for uid={uid}: {e}");
-                        AuthError::Database(e.to_string())
-                    })
+                self.db.get_user(&uid).await.map_err(|e| {
+                    tracing::error!("User lookup failed for uid={uid}: {e}");
+                    AuthError::Database(e.to_string())
+                })
             }
             None => Ok(None),
         }

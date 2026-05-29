@@ -1,8 +1,8 @@
 use dioxus::prelude::*;
 use serde::Deserialize;
 
-use scuffed_api_client::ApiClient;
 use crate::routes::Route;
+use scuffed_api_client::ApiClient;
 
 #[derive(Debug, Clone, Deserialize)]
 struct PublicMember {
@@ -155,7 +155,8 @@ pub fn Members() -> Element {
 }
 
 fn render_member_card(m: &PublicMember) -> Element {
-    let initials: String = m.display_name
+    let initials: String = m
+        .display_name
         .split_whitespace()
         .filter_map(|w| w.chars().next())
         .take(2)

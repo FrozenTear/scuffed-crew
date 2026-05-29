@@ -96,7 +96,7 @@ impl NostrFilter {
         let mut tags = HashMap::new();
         tags.insert(format!("#{}", "h"), vec![group_id.to_string()]);
         Self {
-            kinds: Some(vec![9]),     // NIP-29 group chat message
+            kinds: Some(vec![9]), // NIP-29 group chat message
             limit,
             tags,
             ..Default::default()
@@ -232,13 +232,9 @@ pub enum RelayMessage {
         message: String,
     },
     /// End of stored events for a subscription.
-    Eose {
-        subscription_id: String,
-    },
+    Eose { subscription_id: String },
     /// NIP-42 AUTH challenge from relay.
-    Auth {
-        challenge: String,
-    },
+    Auth { challenge: String },
     /// Human-readable notice from relay.
     Notice(String),
 }

@@ -1,5 +1,5 @@
-use leptos::prelude::*;
 use crate::components::SectionHeader;
+use leptos::prelude::*;
 
 #[component]
 pub fn Comms() -> impl IntoView {

@@ -203,14 +203,10 @@ impl EncryptionService {
 
         for pubkey_hex in recipient_pubkeys_hex {
             let recipient_pk = Self::parse_pubkey(pubkey_hex)?;
-            let gift_wrap = NostrEventBuilder::gift_wrap(
-                &sender_keys,
-                &recipient_pk,
-                rumor.clone(),
-                [],
-            )
-            .await
-            .map_err(|e| EncryptionError::GiftWrapFailed(e.to_string()))?;
+            let gift_wrap =
+                NostrEventBuilder::gift_wrap(&sender_keys, &recipient_pk, rumor.clone(), [])
+                    .await
+                    .map_err(|e| EncryptionError::GiftWrapFailed(e.to_string()))?;
 
             wrapped_events.push(GiftWrappedEvent {
                 event: gift_wrap,

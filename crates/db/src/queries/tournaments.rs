@@ -266,7 +266,7 @@ impl Database {
                 starts_at: starts_at.map(SurrealDatetime::from),
                 ends_at: ends_at.map(SurrealDatetime::from),
                 created_by: created_by.to_string(),
-                created_at: now.clone(),
+                created_at: now,
                 updated_at: now,
             };
             let created: Option<DbTournament> =
@@ -414,11 +414,9 @@ impl Database {
         ends_at: Option<Option<DateTime<Utc>>>,
     ) -> DbResult<Tournament> {
         with_timeout(async {
-            let existing: Option<DbTournament> =
-                self.client.select(("tournament", id)).await?;
-            let mut db = existing.ok_or_else(|| {
-                crate::DbError::NotFound(format!("Tournament {id} not found"))
-            })?;
+            let existing: Option<DbTournament> = self.client.select(("tournament", id)).await?;
+            let mut db = existing
+                .ok_or_else(|| crate::DbError::NotFound(format!("Tournament {id} not found")))?;
 
             if let Some(n) = name {
                 db.name = n.to_string();
@@ -461,11 +459,8 @@ impl Database {
             }
             db.updated_at = SurrealDatetime::from(Utc::now());
 
-            let updated: Option<DbTournament> = self
-                .client
-                .update(("tournament", id))
-                .content(db)
-                .await?;
+            let updated: Option<DbTournament> =
+                self.client.update(("tournament", id)).content(db).await?;
             Ok(db_to_tournament(updated.ok_or_else(|| {
                 crate::DbError::NotFound(format!("Tournament {id} not found after update"))
             })?))
@@ -479,19 +474,14 @@ impl Database {
         status: TournamentStatus,
     ) -> DbResult<Tournament> {
         with_timeout(async {
-            let existing: Option<DbTournament> =
-                self.client.select(("tournament", id)).await?;
-            let mut db = existing.ok_or_else(|| {
-                crate::DbError::NotFound(format!("Tournament {id} not found"))
-            })?;
+            let existing: Option<DbTournament> = self.client.select(("tournament", id)).await?;
+            let mut db = existing
+                .ok_or_else(|| crate::DbError::NotFound(format!("Tournament {id} not found")))?;
             db.status = status.to_string();
             db.updated_at = SurrealDatetime::from(Utc::now());
 
-            let updated: Option<DbTournament> = self
-                .client
-                .update(("tournament", id))
-                .content(db)
-                .await?;
+            let updated: Option<DbTournament> =
+                self.client.update(("tournament", id)).content(db).await?;
             Ok(db_to_tournament(updated.ok_or_else(|| {
                 crate::DbError::NotFound(format!("Tournament {id} not found after update"))
             })?))
@@ -555,13 +545,10 @@ impl Database {
         group_label: Option<Option<&str>>,
     ) -> DbResult<TournamentParticipant> {
         with_timeout(async {
-            let existing: Option<DbTournamentParticipant> = self
-                .client
-                .select(("tournament_participant", id))
-                .await?;
-            let mut db = existing.ok_or_else(|| {
-                crate::DbError::NotFound(format!("Participant {id} not found"))
-            })?;
+            let existing: Option<DbTournamentParticipant> =
+                self.client.select(("tournament_participant", id)).await?;
+            let mut db = existing
+                .ok_or_else(|| crate::DbError::NotFound(format!("Participant {id} not found")))?;
 
             if let Some(s) = seed {
                 db.seed = s;
@@ -587,10 +574,8 @@ impl Database {
 
     pub async fn remove_tournament_participant(&self, id: &str) -> DbResult<()> {
         with_timeout(async {
-            let _: Option<DbTournamentParticipant> = self
-                .client
-                .delete(("tournament_participant", id))
-                .await?;
+            let _: Option<DbTournamentParticipant> =
+                self.client.delete(("tournament_participant", id)).await?;
             Ok(())
         })
         .await
@@ -613,11 +598,8 @@ impl Database {
                 status: "pending".to_string(),
                 created_at: SurrealDatetime::from(Utc::now()),
             };
-            let created: Option<DbTournamentRound> = self
-                .client
-                .create("tournament_round")
-                .content(db)
-                .await?;
+            let created: Option<DbTournamentRound> =
+                self.client.create("tournament_round").content(db).await?;
             Ok(db_to_round(created.ok_or_else(|| {
                 crate::DbError::NotFound("Failed to create round".into())
             })?))
@@ -647,13 +629,10 @@ impl Database {
         status: RoundStatus,
     ) -> DbResult<TournamentRound> {
         with_timeout(async {
-            let existing: Option<DbTournamentRound> = self
-                .client
-                .select(("tournament_round", id))
-                .await?;
-            let mut db = existing.ok_or_else(|| {
-                crate::DbError::NotFound(format!("Round {id} not found"))
-            })?;
+            let existing: Option<DbTournamentRound> =
+                self.client.select(("tournament_round", id)).await?;
+            let mut db = existing
+                .ok_or_else(|| crate::DbError::NotFound(format!("Round {id} not found")))?;
             db.status = status.to_string();
 
             let updated: Option<DbTournamentRound> = self
@@ -705,11 +684,8 @@ impl Database {
                 notes: None,
                 replay_codes: vec![],
             };
-            let created: Option<DbTournamentMatch> = self
-                .client
-                .create("tournament_match")
-                .content(db)
-                .await?;
+            let created: Option<DbTournamentMatch> =
+                self.client.create("tournament_match").content(db).await?;
             Ok(db_to_match(created.ok_or_else(|| {
                 crate::DbError::NotFound("Failed to create match".into())
             })?))
@@ -754,9 +730,8 @@ impl Database {
         with_timeout(async {
             let existing: Option<DbTournamentMatch> =
                 self.client.select(("tournament_match", id)).await?;
-            let mut db = existing.ok_or_else(|| {
-                crate::DbError::NotFound(format!("Match {id} not found"))
-            })?;
+            let mut db = existing
+                .ok_or_else(|| crate::DbError::NotFound(format!("Match {id} not found")))?;
 
             db.score_a = Some(score_a);
             db.score_b = Some(score_b);
@@ -790,18 +765,13 @@ impl Database {
         with_timeout(async {
             let existing: Option<DbTournamentMatch> =
                 self.client.select(("tournament_match", match_id)).await?;
-            let mut db = existing.ok_or_else(|| {
-                crate::DbError::NotFound(format!("Match {match_id} not found"))
-            })?;
+            let mut db = existing
+                .ok_or_else(|| crate::DbError::NotFound(format!("Match {match_id} not found")))?;
 
             match slot {
                 "a" => db.participant_a_id = Some(participant_id.to_string()),
                 "b" => db.participant_b_id = Some(participant_id.to_string()),
-                _ => {
-                    return Err(crate::DbError::NotFound(format!(
-                        "Invalid slot: {slot}"
-                    )))
-                }
+                _ => return Err(crate::DbError::NotFound(format!("Invalid slot: {slot}"))),
             }
 
             let _: Option<DbTournamentMatch> = self
@@ -833,10 +803,7 @@ impl Database {
         })
     }
 
-    pub async fn get_swiss_standings(
-        &self,
-        tournament_id: &str,
-    ) -> DbResult<Vec<SwissStanding>> {
+    pub async fn get_swiss_standings(&self, tournament_id: &str) -> DbResult<Vec<SwissStanding>> {
         let participants = self.list_tournament_participants(tournament_id).await?;
         let matches = self.list_tournament_matches(tournament_id).await?;
 
@@ -960,10 +927,7 @@ impl Database {
         .await
     }
 
-    pub async fn generate_single_elim_bracket(
-        &self,
-        tournament_id: &str,
-    ) -> DbResult<()> {
+    pub async fn generate_single_elim_bracket(&self, tournament_id: &str) -> DbResult<()> {
         let participants = self.list_tournament_participants(tournament_id).await?;
         let n = participants.len();
         if n < 2 {
@@ -1030,7 +994,10 @@ impl Database {
                     a,
                     b,
                     status,
-                    None, None, None, None,
+                    None,
+                    None,
+                    None,
+                    None,
                 )
                 .await?;
             match_ids[0].push(m.id);
@@ -1045,9 +1012,13 @@ impl Database {
                         tournament_id,
                         &round_ids[r],
                         i as u32,
-                        None, None,
+                        None,
+                        None,
                         TournamentMatchStatus::Pending,
-                        None, None, None, None,
+                        None,
+                        None,
+                        None,
+                        None,
                     )
                     .await?;
                 match_ids[r].push(m.id);
@@ -1070,13 +1041,9 @@ impl Database {
         for mid in &match_ids[0] {
             let m = self.get_tournament_match(mid).await?.unwrap();
             if m.status == TournamentMatchStatus::Bye {
-                let winner = m
-                    .participant_a_id
-                    .as_ref()
-                    .or(m.participant_b_id.as_ref());
+                let winner = m.participant_a_id.as_ref().or(m.participant_b_id.as_ref());
                 if let Some(winner_id) = winner {
-                    if let (Some(next_id), Some(next_slot)) =
-                        (&m.next_match_id, &m.next_match_slot)
+                    if let (Some(next_id), Some(next_slot)) = (&m.next_match_id, &m.next_match_slot)
                     {
                         self.set_match_participant(next_id, next_slot, winner_id)
                             .await?;
@@ -1088,10 +1055,7 @@ impl Database {
         Ok(())
     }
 
-    pub async fn generate_double_elim_bracket(
-        &self,
-        tournament_id: &str,
-    ) -> DbResult<()> {
+    pub async fn generate_double_elim_bracket(&self, tournament_id: &str) -> DbResult<()> {
         let participants = self.list_tournament_participants(tournament_id).await?;
         let n = participants.len();
         if n < 2 {
@@ -1115,11 +1079,7 @@ impl Database {
         }
 
         // Losers bracket: for N winners rounds, there are 2*(w_rounds-1) losers rounds
-        let l_round_count = if w_rounds > 1 {
-            2 * (w_rounds - 1)
-        } else {
-            0
-        };
+        let l_round_count = if w_rounds > 1 { 2 * (w_rounds - 1) } else { 0 };
         let mut l_round_ids = Vec::new();
         for r in 1..=l_round_count {
             let round = self
@@ -1134,7 +1094,8 @@ impl Database {
             .await?;
 
         // Seed participants
-        let mut seeded: Vec<Option<String>> = participants.iter().map(|p| Some(p.id.clone())).collect();
+        let mut seeded: Vec<Option<String>> =
+            participants.iter().map(|p| Some(p.id.clone())).collect();
         while seeded.len() < size {
             seeded.push(None);
         }
@@ -1162,9 +1123,16 @@ impl Database {
 
             let m = self
                 .create_tournament_match(
-                    tournament_id, &w_round_ids[0], i as u32,
-                    a, b, status,
-                    None, None, None, None,
+                    tournament_id,
+                    &w_round_ids[0],
+                    i as u32,
+                    a,
+                    b,
+                    status,
+                    None,
+                    None,
+                    None,
+                    None,
                 )
                 .await?;
             w_match_ids[0].push(m.id);
@@ -1175,9 +1143,16 @@ impl Database {
             for i in 0..num_matches {
                 let m = self
                     .create_tournament_match(
-                        tournament_id, &w_round_ids[r], i as u32,
-                        None, None, TournamentMatchStatus::Pending,
-                        None, None, None, None,
+                        tournament_id,
+                        &w_round_ids[r],
+                        i as u32,
+                        None,
+                        None,
+                        TournamentMatchStatus::Pending,
+                        None,
+                        None,
+                        None,
+                        None,
                     )
                     .await?;
                 w_match_ids[r].push(m.id);
@@ -1190,14 +1165,24 @@ impl Database {
             // Losers bracket sizing: round 1 has first_round_matches/2 matches,
             // then alternates between same count and halved count
             let mut l_count = first_round_matches / 2;
+            // `r` is both an index into l_round_ids and a parity check below,
+            // so the range loop is clearer than enumerate here.
+            #[allow(clippy::needless_range_loop)]
             for r in 0..l_round_count as usize {
                 let mut round_matches = Vec::new();
                 for i in 0..l_count {
                     let m = self
                         .create_tournament_match(
-                            tournament_id, &l_round_ids[r], i as u32,
-                            None, None, TournamentMatchStatus::Pending,
-                            None, None, None, None,
+                            tournament_id,
+                            &l_round_ids[r],
+                            i as u32,
+                            None,
+                            None,
+                            TournamentMatchStatus::Pending,
+                            None,
+                            None,
+                            None,
+                            None,
                         )
                         .await?;
                     round_matches.push(m.id);
@@ -1205,7 +1190,7 @@ impl Database {
                 l_match_ids.push(round_matches);
                 // Even rounds keep same count, odd rounds halve
                 if r % 2 == 1 {
-                    l_count = (l_count + 1) / 2;
+                    l_count = l_count.div_ceil(2);
                 }
             }
         }
@@ -1213,9 +1198,16 @@ impl Database {
         // Grand final match
         let gf = self
             .create_tournament_match(
-                tournament_id, &gf_round.id, 0,
-                None, None, TournamentMatchStatus::Pending,
-                None, None, None, None,
+                tournament_id,
+                &gf_round.id,
+                0,
+                None,
+                None,
+                TournamentMatchStatus::Pending,
+                None,
+                None,
+                None,
+                None,
             )
             .await?;
 
@@ -1281,8 +1273,7 @@ impl Database {
             if m.status == TournamentMatchStatus::Bye {
                 let winner = m.participant_a_id.as_ref().or(m.participant_b_id.as_ref());
                 if let Some(winner_id) = winner {
-                    if let (Some(next_id), Some(next_slot)) =
-                        (&m.next_match_id, &m.next_match_slot)
+                    if let (Some(next_id), Some(next_slot)) = (&m.next_match_id, &m.next_match_slot)
                     {
                         self.set_match_participant(next_id, next_slot, winner_id)
                             .await?;
@@ -1294,10 +1285,7 @@ impl Database {
         Ok(())
     }
 
-    pub async fn generate_round_robin_pairings(
-        &self,
-        tournament_id: &str,
-    ) -> DbResult<()> {
+    pub async fn generate_round_robin_pairings(&self, tournament_id: &str) -> DbResult<()> {
         let participants = self.list_tournament_participants(tournament_id).await?;
         let n = participants.len();
         if n < 2 {
@@ -1333,16 +1321,30 @@ impl Database {
                 if a.is_none() || b.is_none() {
                     // Bye match
                     self.create_tournament_match(
-                        tournament_id, &round.id, i as u32,
-                        a, b, TournamentMatchStatus::Bye,
-                        None, None, None, None,
+                        tournament_id,
+                        &round.id,
+                        i as u32,
+                        a,
+                        b,
+                        TournamentMatchStatus::Bye,
+                        None,
+                        None,
+                        None,
+                        None,
                     )
                     .await?;
                 } else {
                     self.create_tournament_match(
-                        tournament_id, &round.id, i as u32,
-                        a, b, TournamentMatchStatus::Pending,
-                        None, None, None, None,
+                        tournament_id,
+                        &round.id,
+                        i as u32,
+                        a,
+                        b,
+                        TournamentMatchStatus::Pending,
+                        None,
+                        None,
+                        None,
+                        None,
                     )
                     .await?;
                 }
@@ -1356,10 +1358,7 @@ impl Database {
         Ok(())
     }
 
-    pub async fn generate_swiss_round(
-        &self,
-        tournament_id: &str,
-    ) -> DbResult<TournamentRound> {
+    pub async fn generate_swiss_round(&self, tournament_id: &str) -> DbResult<TournamentRound> {
         let rounds = self.list_tournament_rounds(tournament_id).await?;
         let round_number = rounds.len() as u32 + 1;
 
@@ -1371,7 +1370,7 @@ impl Database {
             std::collections::HashSet::new();
         for m in &matches {
             if let (Some(a), Some(b)) = (&m.participant_a_id, &m.participant_b_id) {
-                let mut pair = vec![a.clone(), b.clone()];
+                let mut pair = [a.clone(), b.clone()];
                 pair.sort();
                 previous_pairings.insert((pair[0].clone(), pair[1].clone()));
             }
@@ -1382,7 +1381,8 @@ impl Database {
             .await?;
 
         // Pair by standings order, avoiding rematches
-        let mut available: Vec<String> = standings.iter().map(|s| s.participant_id.clone()).collect();
+        let mut available: Vec<String> =
+            standings.iter().map(|s| s.participant_id.clone()).collect();
         let mut position = 0u32;
 
         while available.len() >= 2 {
@@ -1390,14 +1390,21 @@ impl Database {
             let mut paired = false;
             for i in 0..available.len() {
                 let b = &available[i];
-                let mut pair = vec![a.clone(), b.clone()];
+                let mut pair = [a.clone(), b.clone()];
                 pair.sort();
                 if !previous_pairings.contains(&(pair[0].clone(), pair[1].clone())) {
                     let b = available.remove(i);
                     self.create_tournament_match(
-                        tournament_id, &round.id, position,
-                        Some(&a), Some(&b), TournamentMatchStatus::Pending,
-                        None, None, None, None,
+                        tournament_id,
+                        &round.id,
+                        position,
+                        Some(&a),
+                        Some(&b),
+                        TournamentMatchStatus::Pending,
+                        None,
+                        None,
+                        None,
+                        None,
                     )
                     .await?;
                     position += 1;
@@ -1409,9 +1416,16 @@ impl Database {
                 // No non-rematch available, pair with first available
                 let b = available.remove(0);
                 self.create_tournament_match(
-                    tournament_id, &round.id, position,
-                    Some(&a), Some(&b), TournamentMatchStatus::Pending,
-                    None, None, None, None,
+                    tournament_id,
+                    &round.id,
+                    position,
+                    Some(&a),
+                    Some(&b),
+                    TournamentMatchStatus::Pending,
+                    None,
+                    None,
+                    None,
+                    None,
                 )
                 .await?;
                 position += 1;
@@ -1422,9 +1436,16 @@ impl Database {
         if available.len() == 1 {
             let a = &available[0];
             self.create_tournament_match(
-                tournament_id, &round.id, position,
-                Some(a), None, TournamentMatchStatus::Bye,
-                None, None, None, None,
+                tournament_id,
+                &round.id,
+                position,
+                Some(a),
+                None,
+                TournamentMatchStatus::Bye,
+                None,
+                None,
+                None,
+                None,
             )
             .await?;
         }
@@ -1443,9 +1464,8 @@ impl Database {
         with_timeout(async {
             let existing: Option<DbTournamentMatch> =
                 self.client.select(("tournament_match", match_id)).await?;
-            let mut db = existing.ok_or_else(|| {
-                crate::DbError::NotFound(format!("Match {match_id} not found"))
-            })?;
+            let mut db = existing
+                .ok_or_else(|| crate::DbError::NotFound(format!("Match {match_id} not found")))?;
             db.next_match_id = Some(next_match_id.to_string());
             db.next_match_slot = Some(slot.to_string());
             let _: Option<DbTournamentMatch> = self
@@ -1467,9 +1487,8 @@ impl Database {
         with_timeout(async {
             let existing: Option<DbTournamentMatch> =
                 self.client.select(("tournament_match", match_id)).await?;
-            let mut db = existing.ok_or_else(|| {
-                crate::DbError::NotFound(format!("Match {match_id} not found"))
-            })?;
+            let mut db = existing
+                .ok_or_else(|| crate::DbError::NotFound(format!("Match {match_id} not found")))?;
             db.loser_next_match_id = Some(loser_next_match_id.to_string());
             db.loser_next_match_slot = Some(slot.to_string());
             let _: Option<DbTournamentMatch> = self
@@ -1483,10 +1502,7 @@ impl Database {
     }
 
     /// Count participants in a tournament.
-    pub async fn count_tournament_participants(
-        &self,
-        tournament_id: &str,
-    ) -> DbResult<u64> {
+    pub async fn count_tournament_participants(&self, tournament_id: &str) -> DbResult<u64> {
         with_timeout(async {
             #[derive(Deserialize, SurrealValue)]
             struct CountResult {

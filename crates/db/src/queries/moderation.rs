@@ -1,7 +1,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use surrealdb_types::RecordId;
 use surrealdb::types::Datetime as SurrealDatetime;
+use surrealdb_types::RecordId;
 use surrealdb_types::SurrealValue;
 
 use crate::types::{ModerationAction, ModerationActionType};
@@ -82,10 +82,7 @@ impl Database {
     }
 
     /// List moderation actions for a specific member.
-    pub async fn list_member_moderation(
-        &self,
-        member_id: &str,
-    ) -> DbResult<Vec<ModerationAction>> {
+    pub async fn list_member_moderation(&self, member_id: &str) -> DbResult<Vec<ModerationAction>> {
         with_timeout(async {
             let mut result = self
                 .client
@@ -153,9 +150,7 @@ impl Database {
                 .content(db)
                 .await?;
             Ok(db_to_action(updated.ok_or_else(|| {
-                crate::DbError::NotFound(format!(
-                    "Moderation action {id} not found after update"
-                ))
+                crate::DbError::NotFound(format!("Moderation action {id} not found after update"))
             })?))
         })
         .await

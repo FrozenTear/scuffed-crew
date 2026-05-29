@@ -1,16 +1,17 @@
 use dioxus::prelude::*;
 use serde::{Deserialize, Serialize};
 
-use scuffed_api_client::ApiClient;
-use scuffed_types::{SiteSettings, Game};
 use crate::components::{Toast, use_toast};
 use crate::hooks::use_api;
 use crate::state::auth::use_auth;
+use scuffed_api_client::ApiClient;
+use scuffed_types::{Game, SiteSettings};
 
 // Local minimal type for checking existing application status.
 #[derive(Debug, Clone, Deserialize)]
 struct Application {
-    #[allow(dead_code)] id: String,
+    #[allow(dead_code)]
+    id: String,
     status: String,
 }
 

@@ -78,10 +78,9 @@ impl RelayClient {
     /// Returns a receiver for incoming relay messages. The caller should spawn
     /// a task to process these messages.
     pub async fn connect(&self) -> Result<mpsc::Receiver<RelayMessage>, RelayError> {
-        let (ws_stream, _response) =
-            tokio_tungstenite::connect_async(self.url.as_str())
-                .await
-                .map_err(|e| RelayError::ConnectionFailed(e.to_string()))?;
+        let (ws_stream, _response) = tokio_tungstenite::connect_async(self.url.as_str())
+            .await
+            .map_err(|e| RelayError::ConnectionFailed(e.to_string()))?;
 
         let (mut ws_sink, mut ws_stream_read) = ws_stream.split();
 
@@ -154,7 +153,8 @@ impl RelayClient {
 
     /// Send a NIP-42 AUTH event.
     pub async fn send_auth(&self, auth_event: NostrEvent) -> Result<(), RelayError> {
-        self.send_message(ClientRelayMessage::Auth(auth_event)).await
+        self.send_message(ClientRelayMessage::Auth(auth_event))
+            .await
     }
 
     /// Create a subscription with the given filters.
@@ -213,10 +213,7 @@ impl RelayClient {
 /// Connects, sends the EVENT message, waits for the relay OK response
 /// (with a timeout), then disconnects. Suitable for fire-and-forget
 /// publishing where maintaining a persistent connection is unnecessary.
-pub async fn publish_event_oneshot(
-    relay_url: &str,
-    event: NostrEvent,
-) -> Result<(), RelayError> {
+pub async fn publish_event_oneshot(relay_url: &str, event: NostrEvent) -> Result<(), RelayError> {
     let (ws_stream, _) = tokio_tungstenite::connect_async(relay_url)
         .await
         .map_err(|e| RelayError::ConnectionFailed(e.to_string()))?;
@@ -235,8 +232,9 @@ pub async fn publish_event_oneshot(
     let result = tokio::time::timeout(std::time::Duration::from_secs(5), async {
         while let Some(Ok(msg)) = stream.next().await {
             if let Message::Text(text) = msg {
-                if let Ok(RelayMessage::Ok { accepted, message, .. }) =
-                    RelayMessage::from_json(&text)
+                if let Ok(RelayMessage::Ok {
+                    accepted, message, ..
+                }) = RelayMessage::from_json(&text)
                 {
                     if !accepted {
                         return Err(RelayError::EventRejected(message));
@@ -288,27 +286,24 @@ pub async fn query_events_oneshot(
 
     let mut events = Vec::new();
 
-    let result = tokio::time::timeout(
-        std::time::Duration::from_secs(timeout_secs),
-        async {
-            while let Some(Ok(msg)) = stream.next().await {
-                if let Message::Text(text) = msg {
-                    match RelayMessage::from_json(&text) {
-                        Ok(RelayMessage::Event { event, .. }) => {
-                            events.push(event);
-                        }
-                        Ok(RelayMessage::Eose { .. }) => {
-                            break;
-                        }
-                        Ok(RelayMessage::Notice(notice)) => {
-                            tracing::warn!("Relay notice during query: {notice}");
-                        }
-                        _ => {}
+    let result = tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), async {
+        while let Some(Ok(msg)) = stream.next().await {
+            if let Message::Text(text) = msg {
+                match RelayMessage::from_json(&text) {
+                    Ok(RelayMessage::Event { event, .. }) => {
+                        events.push(event);
                     }
+                    Ok(RelayMessage::Eose { .. }) => {
+                        break;
+                    }
+                    Ok(RelayMessage::Notice(notice)) => {
+                        tracing::warn!("Relay notice during query: {notice}");
+                    }
+                    _ => {}
                 }
             }
-        },
-    )
+        }
+    })
     .await;
 
     // Close subscription and disconnect

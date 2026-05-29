@@ -129,6 +129,9 @@ impl PolicyEngine {
     }
 
     /// Replace the group membership map.
+    /// Currently exercised only by tests — the binary does not yet load group
+    /// membership from the DB (NIP-29 group enforcement is not wired into `main`).
+    #[allow(dead_code)]
     pub fn update_group_members(&mut self, groups: HashMap<String, HashSet<String>>) {
         self.group_members = groups;
     }
@@ -190,7 +193,7 @@ impl PolicyEngine {
         let cutoff =
             Instant::now() - std::time::Duration::from_secs(self.config.rate_limit_window_secs * 2);
         self.rate_buckets
-            .retain(|_, bucket| bucket.timestamps.last().map_or(false, |t| *t > cutoff));
+            .retain(|_, bucket| bucket.timestamps.last().is_some_and(|t| *t > cutoff));
     }
 }
 
@@ -198,6 +201,9 @@ impl PolicyEngine {
 /// Only fields needed for policy decisions — never the encrypted content.
 #[derive(Debug, Clone)]
 pub struct EventInfo {
+    /// Carried for completeness/logging; policy decisions key off the strfry
+    /// input's own id, so this field is not read directly.
+    #[allow(dead_code)]
     pub id: String,
     pub pubkey: String,
     pub kind: u64,
@@ -216,6 +222,8 @@ impl EventInfo {
     }
 
     /// Check if this is a NIP-29 group event (has an `h` tag).
+    /// Used by tests; `evaluate` calls `group_id()` directly.
+    #[allow(dead_code)]
     pub fn is_group_event(&self) -> bool {
         self.group_id().is_some()
     }
@@ -264,7 +272,9 @@ mod tests {
     fn reject_unknown_pubkey() {
         let mut engine = make_engine();
         let event = make_event(&"ff".repeat(32), 9);
-        assert!(matches!(engine.evaluate(&event), Decision::Reject(msg) if msg.contains("allowlist")));
+        assert!(
+            matches!(engine.evaluate(&event), Decision::Reject(msg) if msg.contains("allowlist"))
+        );
     }
 
     #[test]
@@ -295,7 +305,9 @@ mod tests {
         }
         // 4th should be rate-limited
         let event = make_event(&pubkey, 9);
-        assert!(matches!(engine.evaluate(&event), Decision::Reject(msg) if msg.contains("rate-limited")));
+        assert!(
+            matches!(engine.evaluate(&event), Decision::Reject(msg) if msg.contains("rate-limited"))
+        );
     }
 
     #[test]
@@ -326,11 +338,15 @@ mod tests {
 
         // Non-member of team-alpha gets rejected
         let event = make_group_event(&nonmember_pubkey, 9, "team-alpha");
-        assert!(matches!(engine.evaluate(&event), Decision::Reject(msg) if msg.contains("not a member")));
+        assert!(
+            matches!(engine.evaluate(&event), Decision::Reject(msg) if msg.contains("not a member"))
+        );
 
         // Unknown group gets rejected
         let event = make_group_event(&member_pubkey, 9, "unknown-group");
-        assert!(matches!(engine.evaluate(&event), Decision::Reject(msg) if msg.contains("unknown group")));
+        assert!(
+            matches!(engine.evaluate(&event), Decision::Reject(msg) if msg.contains("unknown group"))
+        );
     }
 
     #[test]
@@ -381,7 +397,11 @@ mod tests {
         let pubkey = "aabbccdd".repeat(8);
         for kind in [9000, 9001, 9002, 9003, 9004, 9005, 9006, 9007, 9008] {
             let event = make_event(&pubkey, kind);
-            assert_eq!(engine.evaluate(&event), Decision::Accept, "kind {kind} should be accepted");
+            assert_eq!(
+                engine.evaluate(&event),
+                Decision::Accept,
+                "kind {kind} should be accepted"
+            );
         }
     }
 

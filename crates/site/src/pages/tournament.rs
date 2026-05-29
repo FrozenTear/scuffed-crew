@@ -5,8 +5,10 @@ use std::collections::HashMap;
 
 use scuffed_auth::client::api::{fetch_json, fetch_json_list};
 
-use crate::components::bracket::{BracketMatch, BracketRound, BracketView, SwissStanding, BRACKET_STYLES};
 use crate::components::Nav;
+use crate::components::bracket::{
+    BRACKET_STYLES, BracketMatch, BracketRound, BracketView, SwissStanding,
+};
 use crate::sections::Footer;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -93,9 +95,7 @@ pub fn TournamentPage() -> impl IntoView {
     });
 
     // Fetch teams for name resolution
-    let teams = LocalResource::new(|| async {
-        fetch_json_list::<Team>("/api/teams").await.ok()
-    });
+    let teams = LocalResource::new(|| async { fetch_json_list::<Team>("/api/teams").await.ok() });
 
     // Fetch swiss standings if applicable
     let standings = LocalResource::new(move || {

@@ -1,7 +1,7 @@
-mod public;
 mod admin;
+mod public;
 mod strategy;
 
-pub use public::PublicLayout;
 pub use admin::AdminLayout;
+pub use public::PublicLayout;
 pub use strategy::StrategyLayout;

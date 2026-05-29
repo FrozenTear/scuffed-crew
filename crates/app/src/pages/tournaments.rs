@@ -1,9 +1,9 @@
 use dioxus::prelude::*;
 use serde::Deserialize;
 
-use scuffed_api_client::ApiClient;
 use crate::components::bracket::BRACKET_STYLES;
 use crate::routes::Route;
+use scuffed_api_client::ApiClient;
 
 #[derive(Debug, Clone, Deserialize)]
 struct Tournament {
@@ -135,7 +135,11 @@ const PAGE_CSS: &str = r#"
 #[component]
 pub fn Tournaments() -> Element {
     let tournaments = use_resource(|| async {
-        ApiClient::web().fetch::<CursorPage<Tournament>>("/api/tournaments").await.ok().map(|r| r.data)
+        ApiClient::web()
+            .fetch::<CursorPage<Tournament>>("/api/tournaments")
+            .await
+            .ok()
+            .map(|r| r.data)
     });
 
     rsx! {
@@ -176,10 +180,14 @@ fn render_tournament_card(t: &Tournament) -> Element {
     let format_text = format_label(&t.format);
     let status_text = status_label(&t.status);
     let status_class = format!("tournament-card-status {}", t.status);
-    let date: String = t.starts_at.as_ref()
+    let date: String = t
+        .starts_at
+        .as_ref()
         .map(|d| d.chars().take(10).collect())
         .unwrap_or_default();
-    let desc_preview: Option<String> = t.description.as_ref()
+    let desc_preview: Option<String> = t
+        .description
+        .as_ref()
         .map(|d| d.chars().take(120).collect());
 
     rsx! {

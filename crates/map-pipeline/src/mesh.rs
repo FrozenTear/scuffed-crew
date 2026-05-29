@@ -105,7 +105,11 @@ mod tests {
             Vec3::new(0.0, 0.0, 1.0),
             Vec3::new(1.0, 0.0, 0.0),
         );
-        assert!((tri.normal.y - 1.0).abs() < 0.01, "Normal should be (0,1,0), got {:?}", tri.normal);
+        assert!(
+            (tri.normal.y - 1.0).abs() < 0.01,
+            "Normal should be (0,1,0), got {:?}",
+            tri.normal
+        );
         assert!(tri.is_walkable(50.0));
     }
 
@@ -117,7 +121,11 @@ mod tests {
             Vec3::new(0.0, 1.0, 0.0),
             Vec3::new(0.0, 0.0, 1.0),
         );
-        assert!(tri.normal.y.abs() < 0.01, "Wall normal Y should be ~0, got {}", tri.normal.y);
+        assert!(
+            tri.normal.y.abs() < 0.01,
+            "Wall normal Y should be ~0, got {}",
+            tri.normal.y
+        );
         assert!(!tri.is_walkable(50.0));
     }
 

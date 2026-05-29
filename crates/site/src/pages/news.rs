@@ -19,7 +19,9 @@ struct Announcement {
 #[component]
 pub fn NewsPage() -> impl IntoView {
     let announcements = LocalResource::new(|| async {
-        fetch_json_list::<Announcement>("/api/announcements").await.ok()
+        fetch_json_list::<Announcement>("/api/announcements")
+            .await
+            .ok()
     });
 
     view! {

@@ -7,9 +7,9 @@ pub mod styles;
 pub mod swiss;
 
 pub use bracket_view::BracketView;
-pub use match_card::{MatchCard, MatchCardState, TeamSlot};
-pub use single_elim::{BracketMatch, BracketRound, BracketSingleElim};
 pub use double_elim::BracketDoubleElim;
+pub use match_card::{MatchCard, MatchCardState, TeamSlot};
 pub use round_robin::RoundRobinTable;
-pub use swiss::{SwissStanding, SwissStandings};
+pub use single_elim::{BracketMatch, BracketRound, BracketSingleElim};
 pub use styles::BRACKET_STYLES;
+pub use swiss::{SwissStanding, SwissStandings};

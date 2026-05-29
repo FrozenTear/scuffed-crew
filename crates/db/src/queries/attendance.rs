@@ -119,10 +119,7 @@ impl Database {
     }
 
     /// Get attendance stats for a member.
-    pub async fn get_member_attendance_stats(
-        &self,
-        member_id: &str,
-    ) -> DbResult<AttendanceStats> {
+    pub async fn get_member_attendance_stats(&self, member_id: &str) -> DbResult<AttendanceStats> {
         with_timeout(async {
             #[derive(Deserialize, SurrealValue)]
             struct CountResult {
@@ -166,10 +163,7 @@ impl Database {
     }
 
     /// Get member attendance history.
-    pub async fn list_member_attendance(
-        &self,
-        member_id: &str,
-    ) -> DbResult<Vec<EventAttendance>> {
+    pub async fn list_member_attendance(&self, member_id: &str) -> DbResult<Vec<EventAttendance>> {
         with_timeout(async {
             let mut result = self
                 .client

@@ -63,15 +63,25 @@ impl Modifiers {
     }
 
     pub fn shift() -> Self {
-        Self { shift: true, ..Default::default() }
+        Self {
+            shift: true,
+            ..Default::default()
+        }
     }
 
     pub fn ctrl() -> Self {
-        Self { ctrl: true, ..Default::default() }
+        Self {
+            ctrl: true,
+            ..Default::default()
+        }
     }
 
     pub fn ctrl_shift() -> Self {
-        Self { ctrl: true, shift: true, ..Default::default() }
+        Self {
+            ctrl: true,
+            shift: true,
+            ..Default::default()
+        }
     }
 
     pub fn from_keyboard_event(event: &web_sys::KeyboardEvent) -> Self {
@@ -173,24 +183,23 @@ impl KeybindingManager {
             (Keybinding::new("7"), EditorAction::TextTool),
             (Keybinding::new("e"), EditorAction::EraserTool),
             (Keybinding::new("8"), EditorAction::EraserTool),
-
             // ---- Panel toggles ----
             (Keybinding::new("tab"), EditorAction::ToggleLeftPanel),
-            (Keybinding::new("tab").with_shift(), EditorAction::ToggleRightPanel),
+            (
+                Keybinding::new("tab").with_shift(),
+                EditorAction::ToggleRightPanel,
+            ),
             (Keybinding::new("["), EditorAction::ToggleBottomPanel),
             (Keybinding::new("\\"), EditorAction::ToggleHealthPacks),
-
             // ---- Element actions ----
             (Keybinding::new("delete"), EditorAction::Delete),
             (Keybinding::new("backspace"), EditorAction::Delete),
-
             // ---- Zoom ----
             (Keybinding::new("+"), EditorAction::ZoomIn),
             (Keybinding::new("="), EditorAction::ZoomIn),
             (Keybinding::new("-"), EditorAction::ZoomOut),
             (Keybinding::new("_"), EditorAction::ZoomOut),
             (Keybinding::new("0"), EditorAction::ZoomReset),
-
             // ---- Playback ----
             (Keybinding::new("k"), EditorAction::PlayPause),
             (Keybinding::new(" "), EditorAction::PlayPause),
@@ -200,12 +209,13 @@ impl KeybindingManager {
             (Keybinding::new("arrowleft"), EditorAction::PrevPhase),
             (Keybinding::new("home"), EditorAction::FirstPhase),
             (Keybinding::new("end"), EditorAction::LastPhase),
-
             // ---- History ----
             (Keybinding::new("z").with_ctrl(), EditorAction::Undo),
-            (Keybinding::new("z").with_ctrl().with_shift(), EditorAction::Redo),
+            (
+                Keybinding::new("z").with_ctrl().with_shift(),
+                EditorAction::Redo,
+            ),
             (Keybinding::new("y").with_ctrl(), EditorAction::Redo),
-
             // ---- File ----
             (Keybinding::new("s").with_ctrl(), EditorAction::Save),
         ];
@@ -223,10 +233,10 @@ impl KeybindingManager {
 
     /// Remove a keybinding.
     pub fn unbind(&mut self, binding: &Keybinding) {
-        if let Some(action) = self.bindings.remove(binding) {
-            if let Some(keys) = self.action_keys.get_mut(&action) {
-                keys.retain(|k| k != binding);
-            }
+        if let Some(action) = self.bindings.remove(binding)
+            && let Some(keys) = self.action_keys.get_mut(&action)
+        {
+            keys.retain(|k| k != binding);
         }
     }
 

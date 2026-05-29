@@ -1,7 +1,7 @@
 use axum::{
+    Json,
     extract::{Path, Query, State},
     http::StatusCode,
-    Json,
 };
 use serde::{Deserialize, Serialize};
 
@@ -111,11 +111,7 @@ pub async fn list_threads(
 
     let mut items = Vec::with_capacity(threads.len());
     for thread in threads {
-        let reply_count = state
-            .db
-            .count_forum_replies(&thread.id)
-            .await
-            .unwrap_or(0);
+        let reply_count = state.db.count_forum_replies(&thread.id).await.unwrap_or(0);
         items.push(ThreadWithReplyCount {
             thread,
             reply_count,
@@ -183,7 +179,12 @@ pub async fn create_thread(
 
     let thread = state
         .db
-        .create_forum_thread(&body.title, &body.category, &member.member.id, &body.content)
+        .create_forum_thread(
+            &body.title,
+            &body.category,
+            &member.member.id,
+            &body.content,
+        )
         .await
         .map_err(|e| {
             (
@@ -256,8 +257,13 @@ pub async fn create_reply(
             )
         })?;
 
-    maybe_publish_reply_to_relay(&state, &member.member, &reply, thread.nostr_event_id.as_deref())
-        .await;
+    maybe_publish_reply_to_relay(
+        &state,
+        &member.member,
+        &reply,
+        thread.nostr_event_id.as_deref(),
+    )
+    .await;
 
     Ok((StatusCode::CREATED, Json(reply)))
 }
@@ -401,7 +407,10 @@ async fn maybe_publish_thread_to_relay(
             tracing::error!("Failed to publish forum thread {thread_id} to relay: {e}");
         } else {
             tracing::info!("Dual-published forum thread {thread_id} to Nostr relay");
-            if let Err(e) = db.update_thread_nostr_event_id(&thread_id, &nostr_event_id).await {
+            if let Err(e) = db
+                .update_thread_nostr_event_id(&thread_id, &nostr_event_id)
+                .await
+            {
                 tracing::error!("Failed to store nostr_event_id for thread {thread_id}: {e}");
             }
         }

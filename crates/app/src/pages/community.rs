@@ -1,8 +1,8 @@
 use dioxus::prelude::*;
 use serde::{Deserialize, Serialize};
 
-use scuffed_api_client::ApiClient;
 use crate::components::{Toast, use_toast};
+use scuffed_api_client::ApiClient;
 
 #[derive(Debug, Clone, Deserialize)]
 struct PublicOverview {
@@ -228,12 +228,7 @@ pub fn Community() -> Element {
         .as_ref()
         .and_then(|d| d.as_ref())
         .and_then(|m| m.member.as_ref())
-        .map(|member| {
-            matches!(
-                member.org_role.as_str(),
-                "officer" | "admin"
-            )
-        })
+        .map(|member| matches!(member.org_role.as_str(), "officer" | "admin"))
         .unwrap_or(false);
 
     rsx! {
@@ -328,7 +323,7 @@ fn OfficerCommunityActions() -> Element {
                     toasts.show(Toast::success("Community definition published to relay"));
                 }
                 Err(e) => {
-                    toasts.show(Toast::error(&format!("Failed to publish: {e}")));
+                    toasts.show(Toast::error(format!("Failed to publish: {e}")));
                 }
             }
             publishing.set(false);

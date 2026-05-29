@@ -69,7 +69,7 @@ pub fn AdminAuditLog() -> Element {
                     p { class: "empty-state", "No audit log entries." }
                 },
                 Some(resp) => {
-                    let total_pages = (resp.total + PAGE_SIZE - 1) / PAGE_SIZE;
+                    let total_pages = resp.total.div_ceil(PAGE_SIZE);
                     let current = page() + 1;
                     rsx! {
                         DataTable { headers: vec!["Time", "Actor", "Action", "Target", "Details"],

@@ -1,5 +1,12 @@
+// Many components, the canvas rendering subsystem, and helper tables are built
+// ahead of the routes/pages that will consume them (features pending wiring
+// after the desktop-canvas merge). Allow dead_code crate-wide rather than delete
+// in-progress work; tighten once everything is wired up.
+#![allow(dead_code)]
+
 mod canvas;
 mod components;
+mod hooks;
 mod keybindings;
 mod layouts;
 mod pages;
@@ -7,7 +14,6 @@ mod routes;
 mod state;
 mod styles;
 mod theme;
-mod hooks;
 
 use dioxus::prelude::*;
 

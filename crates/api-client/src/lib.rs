@@ -130,15 +130,27 @@ impl ApiClient {
         web_impl::post_empty(&self.base_url, path).await
     }
     #[cfg(feature = "web")]
-    async fn do_post_json<B: serde::Serialize, T: DeserializeOwned>(&self, path: &str, body: &B) -> Result<T, ClientError> {
+    async fn do_post_json<B: serde::Serialize, T: DeserializeOwned>(
+        &self,
+        path: &str,
+        body: &B,
+    ) -> Result<T, ClientError> {
         web_impl::post_json(&self.base_url, path, body).await
     }
     #[cfg(feature = "web")]
-    async fn do_put_json<B: serde::Serialize, T: DeserializeOwned>(&self, path: &str, body: &B) -> Result<T, ClientError> {
+    async fn do_put_json<B: serde::Serialize, T: DeserializeOwned>(
+        &self,
+        path: &str,
+        body: &B,
+    ) -> Result<T, ClientError> {
         web_impl::put_json(&self.base_url, path, body).await
     }
     #[cfg(feature = "web")]
-    async fn do_patch_json<B: serde::Serialize, T: DeserializeOwned>(&self, path: &str, body: &B) -> Result<T, ClientError> {
+    async fn do_patch_json<B: serde::Serialize, T: DeserializeOwned>(
+        &self,
+        path: &str,
+        body: &B,
+    ) -> Result<T, ClientError> {
         web_impl::patch_json(&self.base_url, path, body).await
     }
     #[cfg(feature = "web")]
@@ -155,15 +167,27 @@ impl ApiClient {
         native_impl::post_empty(&self.base_url, path, self.token.as_deref()).await
     }
     #[cfg(feature = "native")]
-    async fn do_post_json<B: serde::Serialize, T: DeserializeOwned>(&self, path: &str, body: &B) -> Result<T, ClientError> {
+    async fn do_post_json<B: serde::Serialize, T: DeserializeOwned>(
+        &self,
+        path: &str,
+        body: &B,
+    ) -> Result<T, ClientError> {
         native_impl::post_json(&self.base_url, path, body, self.token.as_deref()).await
     }
     #[cfg(feature = "native")]
-    async fn do_put_json<B: serde::Serialize, T: DeserializeOwned>(&self, path: &str, body: &B) -> Result<T, ClientError> {
+    async fn do_put_json<B: serde::Serialize, T: DeserializeOwned>(
+        &self,
+        path: &str,
+        body: &B,
+    ) -> Result<T, ClientError> {
         native_impl::put_json(&self.base_url, path, body, self.token.as_deref()).await
     }
     #[cfg(feature = "native")]
-    async fn do_patch_json<B: serde::Serialize, T: DeserializeOwned>(&self, path: &str, body: &B) -> Result<T, ClientError> {
+    async fn do_patch_json<B: serde::Serialize, T: DeserializeOwned>(
+        &self,
+        path: &str,
+        body: &B,
+    ) -> Result<T, ClientError> {
         native_impl::patch_json(&self.base_url, path, body, self.token.as_deref()).await
     }
     #[cfg(feature = "native")]

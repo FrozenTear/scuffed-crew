@@ -20,7 +20,9 @@ struct PublicMember {
 #[component]
 pub fn MembersPage() -> impl IntoView {
     let members = LocalResource::new(|| async {
-        fetch_json_list::<PublicMember>("/api/public/members").await.ok()
+        fetch_json_list::<PublicMember>("/api/public/members")
+            .await
+            .ok()
     });
 
     view! {

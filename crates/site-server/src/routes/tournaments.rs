@@ -1,16 +1,15 @@
 use axum::{
+    Json,
     extract::{Path, State},
     http::StatusCode,
-    Json,
 };
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
 
 use scuffed_auth::server::session::ErrorResponse;
 use scuffed_db::{
-    AuditAction, AuditTargetType, ParticipantStatus, SwissStanding, Tournament,
-    TournamentBracket, TournamentFormat, TournamentMatch, TournamentParticipant,
-    TournamentRound, TournamentStatus,
+    AuditAction, AuditTargetType, ParticipantStatus, SwissStanding, Tournament, TournamentBracket,
+    TournamentFormat, TournamentMatch, TournamentParticipant, TournamentRound, TournamentStatus,
 };
 use scuffed_types::api::{CursorResponse, PaginationParams};
 
@@ -589,8 +588,7 @@ pub async fn report_match(
         .map_err(internal_err)?;
 
     // Auto-advance winner to next match
-    if let (Some(next_id), Some(next_slot)) = (&reported.next_match_id, &reported.next_match_slot)
-    {
+    if let (Some(next_id), Some(next_slot)) = (&reported.next_match_id, &reported.next_match_slot) {
         state
             .db
             .set_match_participant(next_id, next_slot, &body.winner_id)
@@ -599,9 +597,10 @@ pub async fn report_match(
     }
 
     // Auto-advance loser to losers bracket (double elim)
-    if let (Some(loser_next_id), Some(loser_slot)) =
-        (&reported.loser_next_match_id, &reported.loser_next_match_slot)
-    {
+    if let (Some(loser_next_id), Some(loser_slot)) = (
+        &reported.loser_next_match_id,
+        &reported.loser_next_match_slot,
+    ) {
         let loser_id = if reported.participant_a_id.as_deref() == Some(&body.winner_id) {
             &reported.participant_b_id
         } else {
@@ -625,18 +624,18 @@ pub async fn report_match(
         };
         if let Some(loser) = loser_id {
             let tournament = state.db.get_tournament(&id).await.map_err(internal_err)?;
-            if let Some(t) = &tournament {
-                if t.format == TournamentFormat::SingleElim {
-                    let _ = state
-                        .db
-                        .update_tournament_participant(
-                            loser,
-                            None,
-                            Some(ParticipantStatus::Eliminated),
-                            None,
-                        )
-                        .await;
-                }
+            if let Some(t) = &tournament
+                && t.format == TournamentFormat::SingleElim
+            {
+                let _ = state
+                    .db
+                    .update_tournament_participant(
+                        loser,
+                        None,
+                        Some(ParticipantStatus::Eliminated),
+                        None,
+                    )
+                    .await;
             }
         }
     }

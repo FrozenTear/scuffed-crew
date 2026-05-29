@@ -2,8 +2,10 @@ use dioxus::prelude::*;
 use serde::Deserialize;
 use std::collections::HashMap;
 
+use crate::components::bracket::{
+    BRACKET_STYLES, BracketMatch, BracketRound, BracketView, SwissStanding,
+};
 use scuffed_api_client::ApiClient;
-use crate::components::bracket::{BracketView, BracketMatch, BracketRound, SwissStanding, BRACKET_STYLES};
 
 #[derive(Debug, Clone, Deserialize)]
 #[allow(dead_code)]
@@ -178,7 +180,11 @@ pub fn Tournament(id: String) -> Element {
     });
 
     let teams = use_resource(|| async {
-        ApiClient::web().fetch::<CursorPage<Team>>("/api/teams").await.ok().map(|r| r.data)
+        ApiClient::web()
+            .fetch::<CursorPage<Team>>("/api/teams")
+            .await
+            .ok()
+            .map(|r| r.data)
     });
 
     let standings = use_resource(move || {

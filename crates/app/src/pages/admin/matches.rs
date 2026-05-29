@@ -1,10 +1,10 @@
 use dioxus::prelude::*;
 use serde::Deserialize;
 
+use crate::components::{DataTable, FormModal, Toast, use_toast};
+use crate::hooks::{ModalController, use_api_list, use_api_list_with};
 use scuffed_api_client::ApiClient;
 use scuffed_types::api::MatchPayload;
-use crate::components::{DataTable, FormModal, Toast, use_toast};
-use crate::hooks::{use_api_list, use_api_list_with, ModalController};
 
 // Local response types with String-typed fields for display.
 #[derive(Debug, Clone, Deserialize)]
@@ -33,11 +33,9 @@ pub fn AdminMatches() -> Element {
     // Team selector
     let mut selected_team = use_signal(|| None::<String>);
 
-    let mut matches = use_api_list_with::<MatchResult>(move || {
-        match selected_team() {
-            Some(id) => format!("/api/teams/{id}/matches"),
-            None => String::new(),
-        }
+    let mut matches = use_api_list_with::<MatchResult>(move || match selected_team() {
+        Some(id) => format!("/api/teams/{id}/matches"),
+        None => String::new(),
     });
 
     // Form modal state
@@ -95,19 +93,31 @@ pub fn AdminMatches() -> Element {
                 opponent,
                 score_us,
                 score_them,
-                map_name: if map_name_val.is_empty() { None } else { Some(map_name_val) },
+                map_name: if map_name_val.is_empty() {
+                    None
+                } else {
+                    Some(map_name_val)
+                },
                 match_type: match_type_val,
                 played_at: played_at_val,
-                notes: if notes_val.is_empty() { None } else { Some(notes_val) },
+                notes: if notes_val.is_empty() {
+                    None
+                } else {
+                    Some(notes_val)
+                },
             };
 
             let result = match edit_id {
                 Some(id) => {
                     let path = format!("/api/matches/{id}");
-                    ApiClient::web().put_json::<_, MatchResult>(&path, &payload).await
+                    ApiClient::web()
+                        .put_json::<_, MatchResult>(&path, &payload)
+                        .await
                 }
                 None => {
-                    ApiClient::web().post_json::<_, MatchResult>("/api/matches", &payload).await
+                    ApiClient::web()
+                        .post_json::<_, MatchResult>("/api/matches", &payload)
+                        .await
                 }
             };
 
@@ -123,7 +133,11 @@ pub fn AdminMatches() -> Element {
         });
     };
 
-    let modal_title = if modal.get_target().is_some() { "Edit Match" } else { "New Match" };
+    let modal_title = if modal.get_target().is_some() {
+        "Edit Match"
+    } else {
+        "New Match"
+    };
 
     rsx! {
 

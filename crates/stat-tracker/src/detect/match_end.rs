@@ -9,6 +9,51 @@ pub fn detect_outcome(img: &DynamicImage) -> MatchOutcome {
     detect_commendation_screen(img)
 }
 
+/// Text-based outcome fallback for the *captured scoreboard frame*.
+///
+/// The color-flood detectors above only fire on the brief full-screen
+/// VICTORY/DEFEAT banner and the blue commendation screen. The poller samples
+/// every few seconds and routinely misses that transient banner, so by the time
+/// the user presses Tab we're on the post-match scoreboard — which prints the
+/// VICTORY / DEFEAT header at top-center but has none of the color flood. This
+/// reads that header text directly, and is meant to be called only when
+/// `detect_outcome` returns `Unknown` and no outcome was carried over from the
+/// poller.
+pub fn detect_outcome_text(img: &DynamicImage) -> MatchOutcome {
+    let (w, h) = (img.width(), img.height());
+    // Top-center band where OW2 renders the result header.
+    let x = w * 30 / 100;
+    let y = h * 2 / 100;
+    let band_w = w * 40 / 100;
+    let band_h = h * 22 / 100;
+    if band_w == 0 || band_h == 0 || x + band_w > w || y + band_h > h {
+        return MatchOutcome::Unknown;
+    }
+    let region = img.crop_imm(x, y, band_w, band_h);
+
+    match crate::ocr::recognize_region(&region) {
+        Ok(text) => {
+            let upper = text.to_uppercase();
+            if upper.contains("VICTORY") {
+                tracing::info!(text = %text.trim(), "outcome read from scoreboard header text");
+                MatchOutcome::Victory
+            } else if upper.contains("DEFEAT") {
+                tracing::info!(text = %text.trim(), "outcome read from scoreboard header text");
+                MatchOutcome::Defeat
+            } else if upper.contains("DRAW") {
+                MatchOutcome::Draw
+            } else {
+                tracing::debug!(text = %text.trim(), "scoreboard header text did not contain an outcome");
+                MatchOutcome::Unknown
+            }
+        }
+        Err(e) => {
+            tracing::debug!(error = %e, "scoreboard header OCR failed");
+            MatchOutcome::Unknown
+        }
+    }
+}
+
 // Detect the brief VICTORY/DEFEAT full-screen banner (gold or red backdrop).
 // OW2 banners saturate >40% of the screen with a very specific color range.
 // Previous thresholds (15%, loose color ranges) caused false positives on

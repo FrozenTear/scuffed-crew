@@ -21,19 +21,26 @@ fn generate_vevent(event: &Event, host: &str) -> String {
 
     // Parse time (expected "HH:MM" format)
     let time_parts: Vec<&str> = event.time.split(':').collect();
-    let hour: u32 = time_parts.first().and_then(|h| h.parse().ok()).unwrap_or(20);
+    let hour: u32 = time_parts
+        .first()
+        .and_then(|h| h.parse().ok())
+        .unwrap_or(20);
     let minute: u32 = time_parts.get(1).and_then(|m| m.parse().ok()).unwrap_or(0);
 
     // DTSTART with TZID
-    let dtstart = format!("DTSTART;TZID={}:{:04}{:02}{:02}T{:02}{:02}00",
-        event.timezone, 2026, 1, 1, hour, minute);
+    let dtstart = format!(
+        "DTSTART;TZID={}:{:04}{:02}{:02}T{:02}{:02}00",
+        event.timezone, 2026, 1, 1, hour, minute
+    );
 
     // Calculate end time
     let end_minutes = hour * 60 + minute + event.duration_minutes;
     let end_hour = (end_minutes / 60) % 24;
     let end_min = end_minutes % 60;
-    let dtend = format!("DTEND;TZID={}:{:04}{:02}{:02}T{:02}{:02}00",
-        event.timezone, 2026, 1, 1, end_hour, end_min);
+    let dtend = format!(
+        "DTEND;TZID={}:{:04}{:02}{:02}T{:02}{:02}00",
+        event.timezone, 2026, 1, 1, end_hour, end_min
+    );
 
     let mut vevent = String::new();
     vevent.push_str("BEGIN:VEVENT\r\n");

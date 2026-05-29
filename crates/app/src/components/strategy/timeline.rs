@@ -227,9 +227,9 @@ pub fn Timeline(
     let mut new_phase_name = use_signal(String::new);
 
     let total = phases.len();
-    let current_index = selected_phase.and_then(|sel| {
-        phases.iter().position(|p| p.id == sel).map(|i| i + 1)
-    }).unwrap_or(0);
+    let current_index = selected_phase
+        .and_then(|sel| phases.iter().position(|p| p.id == sel).map(|i| i + 1))
+        .unwrap_or(0);
 
     let is_playing = playback_state == PlaybackState::Playing;
 

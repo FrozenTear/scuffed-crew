@@ -1,4 +1,5 @@
 pub mod calendar;
+pub mod dm_subscriber;
 pub mod extractors;
 pub mod notifications;
 pub mod routes;
@@ -41,10 +42,7 @@ pub fn create_router(state: AppState) -> Router {
 
     Router::new()
         // NIP-05 Nostr identity verification (must be before fallback)
-        .route(
-            "/.well-known/nostr.json",
-            get(routes::nostr::nostr_json),
-        )
+        .route("/.well-known/nostr.json", get(routes::nostr::nostr_json))
         // Health check
         .route("/api/health", get(routes::health::health))
         // Dev login (sets session cookie for in-memory dev mode)
@@ -157,39 +155,15 @@ pub fn create_router(state: AppState) -> Router {
             "/api/teams/{id}/matches",
             get(routes::matches::list_team_matches),
         )
-        .route(
-            "/api/matches",
-            post(routes::matches::record_match),
-        )
-        .route(
-            "/api/matches/{id}",
-            put(routes::matches::update_match),
-        )
+        .route("/api/matches", post(routes::matches::record_match))
+        .route("/api/matches/{id}", put(routes::matches::update_match))
         // Personal stats routes
-        .route(
-            "/api/stats/upload",
-            post(routes::stats::upload_stats),
-        )
-        .route(
-            "/api/stats/me",
-            get(routes::stats::my_stats),
-        )
-        .route(
-            "/api/stats/me/matches",
-            get(routes::stats::my_matches),
-        )
-        .route(
-            "/api/stats/me/heroes",
-            get(routes::stats::my_hero_stats),
-        )
-        .route(
-            "/api/stats/me/maps",
-            get(routes::stats::my_map_stats),
-        )
-        .route(
-            "/api/stats/member/{id}",
-            get(routes::stats::member_stats),
-        )
+        .route("/api/stats/upload", post(routes::stats::upload_stats))
+        .route("/api/stats/me", get(routes::stats::my_stats))
+        .route("/api/stats/me/matches", get(routes::stats::my_matches))
+        .route("/api/stats/me/heroes", get(routes::stats::my_hero_stats))
+        .route("/api/stats/me/maps", get(routes::stats::my_map_stats))
+        .route("/api/stats/member/{id}", get(routes::stats::member_stats))
         .route(
             "/api/stats/member/{id}/heroes",
             get(routes::stats::member_hero_stats),
@@ -337,8 +311,7 @@ pub fn create_router(state: AppState) -> Router {
         // Wiki routes
         .route(
             "/api/wiki",
-            get(routes::wiki::list_wiki_pages)
-                .post(routes::wiki::create_wiki_page),
+            get(routes::wiki::list_wiki_pages).post(routes::wiki::create_wiki_page),
         )
         .route(
             "/api/wiki/{topic}",
@@ -353,13 +326,9 @@ pub fn create_router(state: AppState) -> Router {
         // Forum routes
         .route(
             "/api/forum/threads",
-            get(routes::forum::list_threads)
-                .post(routes::forum::create_thread),
+            get(routes::forum::list_threads).post(routes::forum::create_thread),
         )
-        .route(
-            "/api/forum/threads/{id}",
-            get(routes::forum::get_thread),
-        )
+        .route("/api/forum/threads/{id}", get(routes::forum::get_thread))
         .route(
             "/api/forum/threads/{id}/replies",
             post(routes::forum::create_reply),
@@ -373,18 +342,9 @@ pub fn create_router(state: AppState) -> Router {
             patch(routes::forum::lock_thread),
         )
         // Nostr identity verification (Phase 1.5)
-        .route(
-            "/api/nostr/challenge",
-            post(routes::nostr::nostr_challenge),
-        )
-        .route(
-            "/api/nostr/verify",
-            post(routes::nostr::nostr_verify),
-        )
-        .route(
-            "/api/nostr/identity",
-            delete(routes::nostr::nostr_unlink),
-        )
+        .route("/api/nostr/challenge", post(routes::nostr::nostr_challenge))
+        .route("/api/nostr/verify", post(routes::nostr::nostr_verify))
+        .route("/api/nostr/identity", delete(routes::nostr::nostr_unlink))
         .route(
             "/api/nostr/export-backup",
             post(routes::nostr::nostr_export_backup),
@@ -393,51 +353,22 @@ pub fn create_router(state: AppState) -> Router {
             "/api/nostr/import-key",
             post(routes::nostr::nostr_import_key),
         )
-        .route(
-            "/api/nostr/community",
-            post(routes::nostr::nostr_community),
-        )
-        .route(
-            "/api/nostr/react",
-            post(routes::nostr::nostr_react),
-        )
-        .route(
-            "/api/nostr/post",
-            post(routes::nostr::nostr_post),
-        )
-        .route(
-            "/api/nostr/feed",
-            get(routes::nostr::nostr_feed),
-        )
-        .route(
-            "/api/nostr/health",
-            get(routes::nostr::nostr_health),
-        )
+        .route("/api/nostr/community", post(routes::nostr::nostr_community))
+        .route("/api/nostr/react", post(routes::nostr::nostr_react))
+        .route("/api/nostr/post", post(routes::nostr::nostr_post))
+        .route("/api/nostr/feed", get(routes::nostr::nostr_feed))
+        .route("/api/nostr/health", get(routes::nostr::nostr_health))
         // Phase 5: Encrypted Direct Messages (NIP-44 + NIP-59)
-        .route(
-            "/api/nostr/dm/send",
-            post(routes::nostr::dm_send),
-        )
-        .route(
-            "/api/nostr/dm/sync",
-            post(routes::nostr::dm_sync),
-        )
-        .route(
-            "/api/nostr/dm/inbox",
-            get(routes::nostr::dm_inbox),
-        )
+        .route("/api/nostr/dm/send", post(routes::nostr::dm_send))
+        .route("/api/nostr/dm/sync", post(routes::nostr::dm_sync))
+        .route("/api/nostr/dm/inbox", get(routes::nostr::dm_inbox))
         .route(
             "/api/nostr/dm/conversations",
             get(routes::nostr::dm_conversations),
         )
-        .route(
-            "/api/nostr/dm/thread",
-            get(routes::nostr::dm_thread),
-        )
-        .route(
-            "/api/nostr/dm/mark-read",
-            post(routes::nostr::dm_mark_read),
-        )
+        .route("/api/nostr/dm/thread", get(routes::nostr::dm_thread))
+        .route("/api/nostr/dm/mark-read", post(routes::nostr::dm_mark_read))
+        .route("/api/nostr/dm/stream", get(routes::nostr::dm_stream))
         // Upload routes
         .route("/api/upload/avatar", post(routes::uploads::upload_avatar))
         .route("/api/upload/image", post(routes::uploads::upload_image))

@@ -136,8 +136,8 @@ const CREATE_CSS: &str = r#"
 
 #[component]
 pub fn PollCreate(on_created: EventHandler<()>) -> Element {
-    let mut title = use_signal(|| String::new());
-    let mut description = use_signal(|| String::new());
+    let mut title = use_signal(String::new);
+    let mut description = use_signal(String::new);
     let mut options = use_signal(|| vec!["".to_string(), "".to_string()]);
     let mut allow_multiple = use_signal(|| false);
     let mut submitting = use_signal(|| false);
@@ -191,7 +191,7 @@ pub fn PollCreate(on_created: EventHandler<()>) -> Element {
                     on_created.call(());
                 }
                 Err(e) => {
-                    toasts.show(Toast::error(&format!("Failed to create poll: {e}")));
+                    toasts.show(Toast::error(format!("Failed to create poll: {e}")));
                 }
             }
             submitting.set(false);

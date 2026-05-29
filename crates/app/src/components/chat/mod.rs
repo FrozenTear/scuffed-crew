@@ -8,10 +8,4 @@ pub mod reaction_bar;
 #[cfg(feature = "web")]
 pub mod relay_status;
 
-#[cfg(feature = "web")]
-pub use chat_widget::ChatWidget;
-#[cfg(feature = "web")]
-pub use encrypted_chat::{EncryptedChat, KeyMode};
 pub use reaction_bar::{ReactionBar, ReactionCount};
-#[cfg(feature = "web")]
-pub use relay_status::RelayStatus;

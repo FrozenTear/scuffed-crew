@@ -1,7 +1,7 @@
 use axum::{
+    Json,
     extract::{Path, State},
     http::StatusCode,
-    Json,
 };
 use serde::Serialize;
 
@@ -252,18 +252,14 @@ pub async fn public_member_profile(
     }
 
     // Get game accounts
-    let game_accounts = state
-        .db
-        .list_member_game_accounts(&id)
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: e.to_string(),
-                }),
-            )
-        })?;
+    let game_accounts = state.db.list_member_game_accounts(&id).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: e.to_string(),
+            }),
+        )
+    })?;
 
     Ok(Json(PublicMemberProfile {
         member: member_to_public(member),

@@ -10,6 +10,7 @@ use bevy::{
     image::TextureFormatPixelInfo,
     prelude::*,
     render::{
+        Extract, Render, RenderApp, RenderSystems,
         render_asset::RenderAssets,
         render_graph::{self, NodeRunError, RenderGraph, RenderGraphContext, RenderLabel},
         render_resource::{
@@ -18,7 +19,6 @@ use bevy::{
         },
         renderer::{RenderContext, RenderDevice, RenderQueue},
         texture::GpuImage,
-        Extract, Render, RenderApp, RenderSystems,
     },
     window::ExitCondition,
 };
@@ -26,8 +26,8 @@ use crossbeam_channel::{Receiver, Sender};
 use std::{
     path::PathBuf,
     sync::{
-        atomic::{AtomicBool, Ordering},
         Arc,
+        atomic::{AtomicBool, Ordering},
     },
     time::Duration,
 };
@@ -94,12 +94,7 @@ pub fn create_render_target(
     let render_target_handle = images.add(render_target_image);
 
     // CPU-side image for readback
-    let cpu_image = Image::new_target_texture(
-        width,
-        height,
-        TextureFormat::bevy_default(),
-        None,
-    );
+    let cpu_image = Image::new_target_texture(width, height, TextureFormat::bevy_default(), None);
     let cpu_image_handle = images.add(cpu_image);
 
     // Image copier (GPU -> CPU buffer)
@@ -138,7 +133,10 @@ impl Plugin for ImageCopyPlugin {
         render_app
             .insert_resource(RenderWorldSender(s))
             .add_systems(ExtractSchedule, image_copy_extract)
-            .add_systems(Render, receive_image_from_buffer.after(RenderSystems::Render));
+            .add_systems(
+                Render,
+                receive_image_from_buffer.after(RenderSystems::Render),
+            );
     }
 }
 
@@ -496,8 +494,8 @@ pub fn build_headless_app(asset_dir: String) -> App {
         )
         .add_plugins(ImageCopyPlugin)
         .add_plugins(CaptureFramePlugin)
-        .add_plugins(ScheduleRunnerPlugin::run_loop(
-            Duration::from_secs_f64(1.0 / 60.0),
-        ));
+        .add_plugins(ScheduleRunnerPlugin::run_loop(Duration::from_secs_f64(
+            1.0 / 60.0,
+        )));
     app
 }

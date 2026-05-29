@@ -3,8 +3,8 @@
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 
-use crate::UserInfo;
 use super::api::{self, ApiError};
+use crate::UserInfo;
 
 /// Client-side authentication state.
 ///

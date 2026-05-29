@@ -82,13 +82,25 @@ pub fn BracketDoubleElim(
     matches: Vec<BracketMatch>,
     participant_names: HashMap<String, String>,
 ) -> Element {
-    let mut winners: Vec<BracketRound> = rounds.iter().filter(|r| r.stage == "winners").cloned().collect();
+    let mut winners: Vec<BracketRound> = rounds
+        .iter()
+        .filter(|r| r.stage == "winners")
+        .cloned()
+        .collect();
     winners.sort_by_key(|r| r.round_number);
 
-    let mut losers: Vec<BracketRound> = rounds.iter().filter(|r| r.stage == "losers").cloned().collect();
+    let mut losers: Vec<BracketRound> = rounds
+        .iter()
+        .filter(|r| r.stage == "losers")
+        .cloned()
+        .collect();
     losers.sort_by_key(|r| r.round_number);
 
-    let gf: Vec<BracketRound> = rounds.iter().filter(|r| r.stage == "grand_final").cloned().collect();
+    let gf: Vec<BracketRound> = rounds
+        .iter()
+        .filter(|r| r.stage == "grand_final")
+        .cloned()
+        .collect();
 
     rsx! {
         div { class: "double-elim-container",

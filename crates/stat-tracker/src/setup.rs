@@ -219,9 +219,7 @@ fn download_and_extract_font(dir: &Path) -> Result<(), Box<dyn std::error::Error
 }
 
 fn install_font(dir: &Path) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let font_dir = dirs::data_dir()
-        .ok_or("no data dir")?
-        .join("fonts");
+    let font_dir = dirs::data_dir().ok_or("no data dir")?.join("fonts");
     std::fs::create_dir_all(&font_dir)?;
 
     for entry in std::fs::read_dir(dir)? {
@@ -258,7 +256,10 @@ fn generate_tessdata_lstm(dir: &Path) -> Result<(), Box<dyn std::error::Error + 
     let eng_traineddata = find_system_traineddata()
         .ok_or("eng.traineddata not found — install tesseract-data-eng for LSTM training")?;
 
-    tracing::info!("LSTM fine-tuning: using base model from {}", eng_traineddata.display());
+    tracing::info!(
+        "LSTM fine-tuning: using base model from {}",
+        eng_traineddata.display()
+    );
 
     let eng_lstm = dir.join("eng.lstm");
     let result = Command::new("combine_tessdata")
@@ -279,7 +280,12 @@ fn generate_tessdata_lstm(dir: &Path) -> Result<(), Box<dyn std::error::Error + 
 
         let output_base = dir.join(&page_name);
 
-        tracing::debug!(page = i, xsize = page.xsize, ysize = page.ysize, "generating training image");
+        tracing::debug!(
+            page = i,
+            xsize = page.xsize,
+            ysize = page.ysize,
+            "generating training image"
+        );
         let result = Command::new("text2image")
             .arg("--text")
             .arg(&training_txt)
@@ -344,7 +350,10 @@ fn generate_tessdata_lstm(dir: &Path) -> Result<(), Box<dyn std::error::Error + 
         .join("\n");
     std::fs::write(&train_list, &list_content)?;
 
-    tracing::info!(max_iterations = LSTM_MAX_ITERATIONS, "starting LSTM fine-tuning");
+    tracing::info!(
+        max_iterations = LSTM_MAX_ITERATIONS,
+        "starting LSTM fine-tuning"
+    );
     let model_output = dir.join("koverwatch");
     let result = Command::new("lstmtraining")
         .arg("--continue_from")
@@ -367,10 +376,7 @@ fn generate_tessdata_lstm(dir: &Path) -> Result<(), Box<dyn std::error::Error + 
 
     let checkpoint = dir.join("koverwatch_checkpoint");
     if !checkpoint.exists() {
-        return Err(format!(
-            "lstmtraining produced no checkpoint: {}",
-            stderr
-        ).into());
+        return Err(format!("lstmtraining produced no checkpoint: {}", stderr).into());
     }
 
     tracing::info!("finalizing traineddata from checkpoint");
@@ -388,7 +394,8 @@ fn generate_tessdata_lstm(dir: &Path) -> Result<(), Box<dyn std::error::Error + 
         return Err(format!(
             "lstmtraining --stop_training failed: {}",
             String::from_utf8_lossy(&result.stderr)
-        ).into());
+        )
+        .into());
     }
 
     Ok(())
@@ -425,7 +432,8 @@ fn generate_tessdata_legacy(dir: &Path) -> Result<(), Box<dyn std::error::Error 
         return Err(format!(
             "text2image failed: {}",
             String::from_utf8_lossy(&result.stderr)
-        ).into());
+        )
+        .into());
     }
 
     let tif = dir.join("koverwatch.tif");
@@ -443,7 +451,8 @@ fn generate_tessdata_legacy(dir: &Path) -> Result<(), Box<dyn std::error::Error 
         return Err(format!(
             "tesseract box.train failed: {}",
             String::from_utf8_lossy(&result.stderr)
-        ).into());
+        )
+        .into());
     }
 
     let box_file = dir.join("koverwatch.box");
@@ -473,7 +482,8 @@ fn generate_tessdata_legacy(dir: &Path) -> Result<(), Box<dyn std::error::Error 
         return Err(format!(
             "mftraining failed: {}",
             String::from_utf8_lossy(&result.stderr)
-        ).into());
+        )
+        .into());
     }
 
     let result = Command::new("cntraining")
@@ -500,7 +510,8 @@ fn generate_tessdata_legacy(dir: &Path) -> Result<(), Box<dyn std::error::Error 
         return Err(format!(
             "combine_tessdata failed: {}",
             String::from_utf8_lossy(&result.stderr)
-        ).into());
+        )
+        .into());
     }
 
     Ok(())

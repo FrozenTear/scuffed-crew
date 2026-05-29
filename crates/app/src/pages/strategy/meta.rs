@@ -101,8 +101,14 @@ fn sort_heroes(heroes: &[HeroMeta], col: SortColumn, dir: SortDir) -> Vec<HeroMe
         let ord = match col {
             SortColumn::Name => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
             SortColumn::Role => a.role.to_lowercase().cmp(&b.role.to_lowercase()),
-            SortColumn::Pickrate => a.pickrate.partial_cmp(&b.pickrate).unwrap_or(std::cmp::Ordering::Equal),
-            SortColumn::Winrate => a.winrate.partial_cmp(&b.winrate).unwrap_or(std::cmp::Ordering::Equal),
+            SortColumn::Pickrate => a
+                .pickrate
+                .partial_cmp(&b.pickrate)
+                .unwrap_or(std::cmp::Ordering::Equal),
+            SortColumn::Winrate => a
+                .winrate
+                .partial_cmp(&b.winrate)
+                .unwrap_or(std::cmp::Ordering::Equal),
         };
         match dir {
             SortDir::Asc => ord,
@@ -350,8 +356,8 @@ pub fn StrategyMeta() -> Element {
     });
 
     let mut role_filter = use_signal(|| "All".to_string());
-    let mut sort_col = use_signal(|| SortColumn::Pickrate);
-    let mut sort_dir = use_signal(|| SortDir::Desc);
+    let sort_col = use_signal(|| SortColumn::Pickrate);
+    let sort_dir = use_signal(|| SortDir::Desc);
 
     rsx! {
         style { {PAGE_CSS} }
@@ -465,7 +471,11 @@ fn render_role_card(s: &RoleSummary) -> Element {
 
 fn render_filter_chip(label: &str, current: &str, signal: &mut Signal<String>) -> Element {
     let is_active = label == current;
-    let class = if is_active { "meta-chip active" } else { "meta-chip" };
+    let class = if is_active {
+        "meta-chip active"
+    } else {
+        "meta-chip"
+    };
     let label_owned = label.to_string();
     let mut sig = *signal;
 
@@ -517,7 +527,10 @@ fn render_hero_row(hero: &HeroMeta) -> Element {
     // Pickrate bar: scale so 25% = full width
     let pr_width = format!("{:.1}%", (hero.pickrate / 25.0 * 100.0).min(100.0));
     // Winrate bar: scale 40-60% range to 0-100% width
-    let wr_width = format!("{:.1}%", ((hero.winrate - 40.0) / 20.0 * 100.0).clamp(0.0, 100.0));
+    let wr_width = format!(
+        "{:.1}%",
+        ((hero.winrate - 40.0) / 20.0 * 100.0).clamp(0.0, 100.0)
+    );
 
     rsx! {
         tr {

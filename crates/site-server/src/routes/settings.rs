@@ -1,4 +1,4 @@
-use axum::{extract::State, http::StatusCode, Json};
+use axum::{Json, extract::State, http::StatusCode};
 use serde::Deserialize;
 
 use scuffed_auth::server::session::ErrorResponse;
@@ -12,19 +12,14 @@ use crate::state::AppState;
 pub async fn get_settings(
     State(state): State<AppState>,
 ) -> Result<Json<SiteSettings>, (StatusCode, Json<ErrorResponse>)> {
-    state
-        .db
-        .get_settings()
-        .await
-        .map(Json)
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: e.to_string(),
-                }),
-            )
-        })
+    state.db.get_settings().await.map(Json).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: e.to_string(),
+            }),
+        )
+    })
 }
 
 #[derive(Deserialize)]

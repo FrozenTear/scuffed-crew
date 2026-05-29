@@ -3,8 +3,8 @@
 //! Builds properly signed Nostr events for NIP-42 AUTH, NIP-29 group messages,
 //! and NIP-29 group management operations.
 
-use nostr::{Event, EventBuilder as NostrEventBuilder, Kind, Tag, TagKind};
 pub use nostr::key::Keys;
+use nostr::{Event, EventBuilder as NostrEventBuilder, Kind, Tag, TagKind};
 
 use scuffed_types::nostr::NostrEvent;
 
@@ -36,20 +36,17 @@ impl EventBuilder {
         relay_url: &str,
         challenge: &str,
     ) -> Result<Event, EventError> {
-        let event = NostrEventBuilder::new(
-            Kind::Custom(22242),
-            "",
-        )
-        .tag(Tag::custom(
-            TagKind::custom("relay"),
-            vec![relay_url.to_string()],
-        ))
-        .tag(Tag::custom(
-            TagKind::custom("challenge"),
-            vec![challenge.to_string()],
-        ))
-        .sign_with_keys(keys)
-        .map_err(|e| EventError::SigningFailed(e.to_string()))?;
+        let event = NostrEventBuilder::new(Kind::Custom(22242), "")
+            .tag(Tag::custom(
+                TagKind::custom("relay"),
+                vec![relay_url.to_string()],
+            ))
+            .tag(Tag::custom(
+                TagKind::custom("challenge"),
+                vec![challenge.to_string()],
+            ))
+            .sign_with_keys(keys)
+            .map_err(|e| EventError::SigningFailed(e.to_string()))?;
 
         Ok(event)
     }
@@ -63,11 +60,10 @@ impl EventBuilder {
         content: &str,
         reply_to: Option<&str>,
     ) -> Result<Event, EventError> {
-        let mut builder = NostrEventBuilder::new(Kind::Custom(9), content)
-            .tag(Tag::custom(
-                TagKind::custom("h"),
-                vec![group_id.to_string()],
-            ));
+        let mut builder = NostrEventBuilder::new(Kind::Custom(9), content).tag(Tag::custom(
+            TagKind::custom("h"),
+            vec![group_id.to_string()],
+        ));
 
         if let Some(event_id) = reply_to {
             builder = builder.tag(Tag::custom(
@@ -133,10 +129,7 @@ impl EventBuilder {
                 TagKind::custom("d"),
                 vec![group_id.to_string()],
             ))
-            .tag(Tag::custom(
-                TagKind::custom("name"),
-                vec![name.to_string()],
-            ));
+            .tag(Tag::custom(TagKind::custom("name"), vec![name.to_string()]));
 
         if let Some(about_text) = about {
             builder = builder.tag(Tag::custom(
@@ -146,7 +139,10 @@ impl EventBuilder {
         }
 
         if !is_public {
-            builder = builder.tag(Tag::custom(TagKind::custom("private"), Vec::<String>::new()));
+            builder = builder.tag(Tag::custom(
+                TagKind::custom("private"),
+                Vec::<String>::new(),
+            ));
         }
         if !is_open {
             builder = builder.tag(Tag::custom(TagKind::custom("closed"), Vec::<String>::new()));
@@ -163,16 +159,10 @@ impl EventBuilder {
         event_ids: &[&str],
         reason: Option<&str>,
     ) -> Result<Event, EventError> {
-        let mut builder = NostrEventBuilder::new(
-            Kind::Custom(5),
-            reason.unwrap_or(""),
-        );
+        let mut builder = NostrEventBuilder::new(Kind::Custom(5), reason.unwrap_or(""));
 
         for eid in event_ids {
-            builder = builder.tag(Tag::custom(
-                TagKind::custom("e"),
-                vec![eid.to_string()],
-            ));
+            builder = builder.tag(Tag::custom(TagKind::custom("e"), vec![eid.to_string()]));
         }
 
         builder
@@ -253,10 +243,7 @@ impl EventBuilder {
                 TagKind::custom("d"),
                 vec![community_id.to_string()],
             ))
-            .tag(Tag::custom(
-                TagKind::custom("name"),
-                vec![name.to_string()],
-            ));
+            .tag(Tag::custom(TagKind::custom("name"), vec![name.to_string()]));
 
         if let Some(desc) = description {
             builder = builder.tag(Tag::custom(
@@ -271,10 +258,7 @@ impl EventBuilder {
             ));
         }
         if let Some(img) = image {
-            builder = builder.tag(Tag::custom(
-                TagKind::custom("image"),
-                vec![img.to_string()],
-            ));
+            builder = builder.tag(Tag::custom(TagKind::custom("image"), vec![img.to_string()]));
         }
 
         for pubkey in moderator_pubkeys {
@@ -331,24 +315,15 @@ impl EventBuilder {
         let mut builder = NostrEventBuilder::new(Kind::Custom(1), content);
 
         for hashtag in hashtags {
-            builder = builder.tag(Tag::custom(
-                TagKind::custom("t"),
-                vec![hashtag.to_string()],
-            ));
+            builder = builder.tag(Tag::custom(TagKind::custom("t"), vec![hashtag.to_string()]));
         }
 
         if let Some(cid) = community_id {
-            builder = builder.tag(Tag::custom(
-                TagKind::custom("a"),
-                vec![cid.to_string()],
-            ));
+            builder = builder.tag(Tag::custom(TagKind::custom("a"), vec![cid.to_string()]));
         }
 
         if let Some(gid) = group_id {
-            builder = builder.tag(Tag::custom(
-                TagKind::custom("h"),
-                vec![gid.to_string()],
-            ));
+            builder = builder.tag(Tag::custom(TagKind::custom("h"), vec![gid.to_string()]));
         }
 
         if let Some(root_id) = root {
@@ -471,13 +446,9 @@ mod tests {
     #[test]
     fn build_group_message_with_reply() {
         let keys = test_keys();
-        let event = EventBuilder::build_group_message(
-            &keys,
-            "team-alpha",
-            "replying",
-            Some("abc123def"),
-        )
-        .unwrap();
+        let event =
+            EventBuilder::build_group_message(&keys, "team-alpha", "replying", Some("abc123def"))
+                .unwrap();
         let relay_event = EventBuilder::to_relay_event(&event);
         assert_eq!(relay_event.tag_value("e"), Some("abc123def"));
     }
@@ -486,12 +457,9 @@ mod tests {
     fn build_add_user_event() {
         let keys = test_keys();
         let user_keys = Keys::generate();
-        let event = EventBuilder::build_add_user(
-            &keys,
-            "team-alpha",
-            &user_keys.public_key().to_hex(),
-        )
-        .unwrap();
+        let event =
+            EventBuilder::build_add_user(&keys, "team-alpha", &user_keys.public_key().to_hex())
+                .unwrap();
         assert_eq!(event.kind, Kind::Custom(9000));
         let relay_event = EventBuilder::to_relay_event(&event);
         assert_eq!(relay_event.group_id(), Some("team-alpha"));
@@ -546,8 +514,7 @@ mod tests {
     #[test]
     fn to_relay_event_roundtrip() {
         let keys = test_keys();
-        let event =
-            EventBuilder::build_group_message(&keys, "general", "test msg", None).unwrap();
+        let event = EventBuilder::build_group_message(&keys, "general", "test msg", None).unwrap();
         let relay_event = EventBuilder::to_relay_event(&event);
 
         assert_eq!(relay_event.id, event.id.to_hex());
@@ -577,10 +544,7 @@ mod tests {
         let keys = test_keys();
         let mod1 = Keys::generate();
         let mod2 = Keys::generate();
-        let mods = vec![
-            mod1.public_key().to_hex(),
-            mod2.public_key().to_hex(),
-        ];
+        let mods = vec![mod1.public_key().to_hex(), mod2.public_key().to_hex()];
 
         let event = EventBuilder::build_community_definition(
             &keys,
@@ -599,9 +563,15 @@ mod tests {
         let relay_event = EventBuilder::to_relay_event(&event);
         assert_eq!(relay_event.tag_value("d"), Some("scuffed-crew"));
         assert_eq!(relay_event.tag_value("name"), Some("Scuffed Crew"));
-        assert_eq!(relay_event.tag_value("description"), Some("A gaming community"));
+        assert_eq!(
+            relay_event.tag_value("description"),
+            Some("A gaming community")
+        );
         assert_eq!(relay_event.tag_value("rules"), Some("Be respectful"));
-        assert_eq!(relay_event.tag_value("image"), Some("https://scuffed.gg/logo.png"));
+        assert_eq!(
+            relay_event.tag_value("image"),
+            Some("https://scuffed.gg/logo.png")
+        );
 
         let p_tags = relay_event.tag_values("p");
         assert_eq!(p_tags.len(), 2);
@@ -634,13 +604,9 @@ mod tests {
     #[test]
     fn build_reaction_like() {
         let keys = test_keys();
-        let event = EventBuilder::build_reaction(
-            &keys,
-            "abcdef1234567890",
-            "target_author_pubkey",
-            "+",
-        )
-        .unwrap();
+        let event =
+            EventBuilder::build_reaction(&keys, "abcdef1234567890", "target_author_pubkey", "+")
+                .unwrap();
 
         assert_eq!(event.kind, Kind::Custom(7));
         assert_eq!(event.content, "+");
@@ -654,13 +620,8 @@ mod tests {
     #[test]
     fn build_reaction_emoji() {
         let keys = test_keys();
-        let event = EventBuilder::build_reaction(
-            &keys,
-            "event123",
-            "author456",
-            "\u{1f525}",
-        )
-        .unwrap();
+        let event =
+            EventBuilder::build_reaction(&keys, "event123", "author456", "\u{1f525}").unwrap();
 
         assert_eq!(event.kind, Kind::Custom(7));
         assert_eq!(event.content, "\u{1f525}");
@@ -669,9 +630,16 @@ mod tests {
     #[test]
     fn build_community_post_basic() {
         let keys = test_keys();
-        let event =
-            EventBuilder::build_community_post(&keys, "hello community", &[], None, None, None, None)
-                .unwrap();
+        let event = EventBuilder::build_community_post(
+            &keys,
+            "hello community",
+            &[],
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
 
         assert_eq!(event.kind, Kind::Custom(1));
         assert_eq!(event.content, "hello community");
@@ -774,15 +742,9 @@ mod tests {
     #[test]
     fn build_profile_metadata_minimal() {
         let keys = test_keys();
-        let event = EventBuilder::build_profile_metadata(
-            &keys,
-            "MinimalUser",
-            None,
-            None,
-            None,
-            None,
-        )
-        .unwrap();
+        let event =
+            EventBuilder::build_profile_metadata(&keys, "MinimalUser", None, None, None, None)
+                .unwrap();
         assert_eq!(event.kind, Kind::Custom(0));
 
         let content: serde_json::Value = serde_json::from_str(&event.content).unwrap();

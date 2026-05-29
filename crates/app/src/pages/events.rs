@@ -1,10 +1,10 @@
 use dioxus::prelude::*;
 use serde::{Deserialize, Serialize};
 
-use scuffed_api_client::ApiClient;
 use crate::components::{Toast, use_toast};
 use crate::hooks::CursorPage;
 use crate::state::auth::use_auth;
+use scuffed_api_client::ApiClient;
 
 // --- Types ---
 
@@ -38,7 +38,15 @@ struct RsvpSummary {
     no_count: u32,
 }
 
-const DAYS: [&str; 7] = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
+const DAYS: [&str; 7] = [
+    "Monday",
+    "Tuesday",
+    "Wednesday",
+    "Thursday",
+    "Friday",
+    "Saturday",
+    "Sunday",
+];
 
 const PAGE_CSS: &str = r#"
     .events-page {
@@ -268,7 +276,8 @@ pub fn Events() -> Element {
 }
 
 fn render_day_group(events: &[&Event], day: u8, refresh: Signal<u64>) -> Element {
-    let day_events: Vec<Event> = events.iter()
+    let day_events: Vec<Event> = events
+        .iter()
         .filter(|e| e.day_of_week == day)
         .map(|e| (*e).clone())
         .collect();

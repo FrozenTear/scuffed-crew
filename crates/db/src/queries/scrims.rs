@@ -66,11 +66,10 @@ impl Database {
                 duration_minutes: duration_minutes as i64,
                 status: "open".to_string(),
                 notes: notes.map(|s| s.to_string()),
-                created_at: now.clone(),
+                created_at: now,
                 updated_at: now,
             };
-            let created: Option<DbScrim> =
-                self.client.create("scrim").content(db_scrim).await?;
+            let created: Option<DbScrim> = self.client.create("scrim").content(db_scrim).await?;
             Ok(db_to_scrim(created.ok_or_else(|| {
                 crate::DbError::NotFound("Failed to create scrim".into())
             })?))
@@ -140,8 +139,7 @@ impl Database {
     ) -> DbResult<Scrim> {
         with_timeout(async {
             let now = SurrealDatetime::from(Utc::now());
-            let mut query_str =
-                String::from("UPDATE $rid SET status = $st, updated_at = $now");
+            let mut query_str = String::from("UPDATE $rid SET status = $st, updated_at = $now");
 
             if opponent_name.is_some() {
                 query_str.push_str(", opponent_name = $opp");

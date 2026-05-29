@@ -1,7 +1,7 @@
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
-use surrealdb_types::RecordId;
 use surrealdb::types::Datetime as SurrealDatetime;
+use surrealdb_types::RecordId;
 use surrealdb_types::SurrealValue;
 
 use crate::types::SiteSettings;
@@ -60,8 +60,8 @@ impl Database {
                 org_name: "The Scuffed Crew".to_string(),
                 site_description: "EMEA Gaming Organization".to_string(),
                 recruitment_open: true,
-                recruitment_message:
-                    "We are currently recruiting! Apply now to join the crew.".to_string(),
+                recruitment_message: "We are currently recruiting! Apply now to join the crew."
+                    .to_string(),
                 min_age: 16,
                 forum_backend: "local".to_string(),
                 extra_relay_urls: String::new(),
@@ -97,9 +97,8 @@ impl Database {
 
             let existing: Option<DbSiteSettings> =
                 self.client.select(("site_settings", id.as_str())).await?;
-            let mut db = existing.ok_or_else(|| {
-                crate::DbError::NotFound("Settings not found".into())
-            })?;
+            let mut db =
+                existing.ok_or_else(|| crate::DbError::NotFound("Settings not found".into()))?;
 
             if let Some(name) = org_name {
                 db.org_name = name.to_string();

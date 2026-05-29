@@ -6,8 +6,8 @@ use axum::{
 use axum_extra::extract::cookie::CookieJar;
 use std::future::Future;
 
-use crate::{AuthError, SessionConfig, User};
 use super::session::ErrorResponse;
+use crate::{AuthError, SessionConfig, User};
 
 /// Trait that app states implement to enable the generic AuthUser extractor.
 ///
@@ -53,12 +53,10 @@ fn unauthorized() -> (StatusCode, Json<ErrorResponse>) {
 impl<S: HasAuth> FromRequestParts<S> for AuthUser<S> {
     type Rejection = (StatusCode, Json<ErrorResponse>);
 
-    async fn from_request_parts(
-        parts: &mut Parts,
-        state: &S,
-    ) -> Result<Self, Self::Rejection> {
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
         // Try bearer token first (for desktop/API clients)
-        let token = if let Some(auth_header) = parts.headers.get(axum::http::header::AUTHORIZATION) {
+        let token = if let Some(auth_header) = parts.headers.get(axum::http::header::AUTHORIZATION)
+        {
             let header_str = auth_header.to_str().map_err(|_| unauthorized())?;
             if let Some(bearer_token) = header_str.strip_prefix("Bearer ") {
                 bearer_token.to_string()

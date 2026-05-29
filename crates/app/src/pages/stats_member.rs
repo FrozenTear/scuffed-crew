@@ -122,17 +122,13 @@ pub fn StatsMember(id: String) -> Element {
     let member_id_h = id.clone();
     let member_id_m = id.clone();
 
-    let stats = use_api_with::<PersonalStats>(move || {
-        format!("/api/stats/member/{member_id}")
-    });
+    let stats = use_api_with::<PersonalStats>(move || format!("/api/stats/member/{member_id}"));
 
-    let heroes = use_api_with::<Vec<HeroStats>>(move || {
-        format!("/api/stats/member/{member_id_h}/heroes")
-    });
+    let heroes =
+        use_api_with::<Vec<HeroStats>>(move || format!("/api/stats/member/{member_id_h}/heroes"));
 
-    let maps = use_api_with::<Vec<MapStats>>(move || {
-        format!("/api/stats/member/{member_id_m}/maps")
-    });
+    let maps =
+        use_api_with::<Vec<MapStats>>(move || format!("/api/stats/member/{member_id_m}/maps"));
 
     let mut tab = use_signal(|| MemberStatsTab::Overview);
 
@@ -199,7 +195,7 @@ pub fn StatsMember(id: String) -> Element {
                             },
                             Some(list) => {
                                 let mut sorted: Vec<_> = list.iter().collect();
-                                sorted.sort_by(|a, b| b.matches.cmp(&a.matches));
+                                sorted.sort_by_key(|b| std::cmp::Reverse(b.matches));
                                 rsx! {
                                     DataTable { headers: vec!["Hero", "Matches", "Win %", "Avg Elims", "Avg Deaths", "Avg Dmg", "Avg Heal"],
                                         for hero in sorted.iter() {
@@ -236,7 +232,7 @@ pub fn StatsMember(id: String) -> Element {
                             },
                             Some(list) => {
                                 let mut sorted: Vec<_> = list.iter().collect();
-                                sorted.sort_by(|a, b| b.matches.cmp(&a.matches));
+                                sorted.sort_by_key(|b| std::cmp::Reverse(b.matches));
                                 rsx! {
                                     DataTable { headers: vec!["Map", "Matches", "Win %", "Wins", "Losses", "Draws"],
                                         for map in sorted.iter() {

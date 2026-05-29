@@ -1,12 +1,12 @@
 use axum::{
-    extract::FromRequestParts,
-    http::{header::AUTHORIZATION, request::Parts, StatusCode},
     Json,
+    extract::FromRequestParts,
+    http::{StatusCode, header::AUTHORIZATION, request::Parts},
 };
 
-use scuffed_auth::server::session::ErrorResponse;
-use scuffed_auth::server::AuthUser;
 use scuffed_auth::User;
+use scuffed_auth::server::AuthUser;
+use scuffed_auth::server::session::ErrorResponse;
 use scuffed_db::{Member, OrgRole};
 
 use crate::state::AppState;

@@ -1,7 +1,7 @@
 use axum::{
+    Json,
     extract::{Path, State},
     http::StatusCode,
-    Json,
 };
 use serde::Deserialize;
 
@@ -124,15 +124,15 @@ pub async fn update_member(
     }
 
     // Validate nostr_pubkey if provided
-    if let Some(Some(ref pubkey)) = body.nostr_pubkey {
-        if !validate_nostr_pubkey(pubkey) {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                Json(ErrorResponse {
-                    error: "Invalid Nostr pubkey: must be a 64-character hex string".into(),
-                }),
-            ));
-        }
+    if let Some(Some(ref pubkey)) = body.nostr_pubkey
+        && !validate_nostr_pubkey(pubkey)
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "Invalid Nostr pubkey: must be a 64-character hex string".into(),
+            }),
+        ));
     }
 
     let updated = state

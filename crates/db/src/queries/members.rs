@@ -1,7 +1,7 @@
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
-use surrealdb_types::RecordId;
 use surrealdb::types::Datetime as SurrealDatetime;
+use surrealdb_types::RecordId;
 use surrealdb_types::SurrealValue;
 
 use scuffed_auth::crypto::EncryptedBlob;
@@ -62,9 +62,9 @@ fn db_to_member(db: DbMember) -> Member {
         availability_status: db.availability_status,
         nostr_pubkey: db.nostr_pubkey,
         nostr_key_mode: db.nostr_key_mode.as_deref().map(parse_key_mode),
-        nostr_secret_key_encrypted: db.nostr_secret_key_encrypted.and_then(|v| {
-            serde_json::from_value(v).ok()
-        }),
+        nostr_secret_key_encrypted: db
+            .nostr_secret_key_encrypted
+            .and_then(|v| serde_json::from_value(v).ok()),
         joined_at: db.joined_at.into(),
         is_active: db.is_active,
     }
@@ -111,11 +111,10 @@ impl Database {
                 joined_at: SurrealDatetime::from(Utc::now()),
                 is_active: true,
             };
-            let created: Option<DbMember> =
-                self.client.create("member").content(db_member).await?;
-            Ok(db_to_member(
-                created.ok_or_else(|| crate::DbError::NotFound("Failed to create member".into()))?,
-            ))
+            let created: Option<DbMember> = self.client.create("member").content(db_member).await?;
+            Ok(db_to_member(created.ok_or_else(|| {
+                crate::DbError::NotFound("Failed to create member".into())
+            })?))
         })
         .await
     }
@@ -135,11 +134,7 @@ impl Database {
 
     /// List active members with cursor-based pagination.
     /// Fetches `limit + 1` rows so the caller can detect a next page.
-    pub async fn list_members_paginated(
-        &self,
-        limit: u32,
-        offset: u32,
-    ) -> DbResult<Vec<Member>> {
+    pub async fn list_members_paginated(&self, limit: u32, offset: u32) -> DbResult<Vec<Member>> {
         with_timeout(async {
             let fetch = limit + 1;
             let mut result = self
@@ -234,8 +229,7 @@ impl Database {
                 db.is_active = active;
             }
 
-            let updated: Option<DbMember> =
-                self.client.update(("member", id)).content(db).await?;
+            let updated: Option<DbMember> = self.client.update(("member", id)).content(db).await?;
             Ok(db_to_member(updated.ok_or_else(|| {
                 crate::DbError::NotFound(format!("Member {id} not found after update"))
             })?))
@@ -273,11 +267,10 @@ impl Database {
 
             db.nostr_pubkey = pubkey.map(|s| s.to_string());
             db.nostr_key_mode = key_mode.map(|s| s.to_string());
-            db.nostr_secret_key_encrypted = encrypted_secret
-                .and_then(|blob| serde_json::to_value(blob).ok());
+            db.nostr_secret_key_encrypted =
+                encrypted_secret.and_then(|blob| serde_json::to_value(blob).ok());
 
-            let updated: Option<DbMember> =
-                self.client.update(("member", id)).content(db).await?;
+            let updated: Option<DbMember> = self.client.update(("member", id)).content(db).await?;
             Ok(db_to_member(updated.ok_or_else(|| {
                 crate::DbError::NotFound(format!("Member {id} not found after update"))
             })?))
@@ -286,10 +279,7 @@ impl Database {
     }
 
     /// Get a member by their Nostr public key.
-    pub async fn get_member_by_nostr_pubkey(
-        &self,
-        pubkey: &str,
-    ) -> DbResult<Option<Member>> {
+    pub async fn get_member_by_nostr_pubkey(&self, pubkey: &str) -> DbResult<Option<Member>> {
         with_timeout(async {
             let mut result = self
                 .client
@@ -311,8 +301,7 @@ impl Database {
 
             db.org_role = new_role.to_string();
 
-            let updated: Option<DbMember> =
-                self.client.update(("member", id)).content(db).await?;
+            let updated: Option<DbMember> = self.client.update(("member", id)).content(db).await?;
             Ok(db_to_member(updated.ok_or_else(|| {
                 crate::DbError::NotFound(format!("Member {id} not found after update"))
             })?))

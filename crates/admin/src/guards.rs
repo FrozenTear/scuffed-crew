@@ -21,9 +21,8 @@ pub fn RequireOfficer(children: Children) -> impl IntoView {
     {
         let state = use_admin_state();
 
-        let authorized = move || {
-            !state.loading.get() && state.is_authenticated() && state.is_officer_or_above()
-        };
+        let authorized =
+            move || !state.loading.get() && state.is_authenticated() && state.is_officer_or_above();
 
         view! {
             {move || {

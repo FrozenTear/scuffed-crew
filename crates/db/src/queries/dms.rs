@@ -94,9 +94,8 @@ impl Database {
             };
             let created: Option<DbDmMessage> =
                 self.client.create("dm_message").content(row).await?;
-            let inserted = created.ok_or_else(|| {
-                crate::DbError::NotFound("Failed to insert dm_message".into())
-            })?;
+            let inserted = created
+                .ok_or_else(|| crate::DbError::NotFound("Failed to insert dm_message".into()))?;
             Ok((db_to_dm(inserted), true))
         })
         .await
@@ -182,16 +181,13 @@ impl Database {
     /// Highest `created_at` across all DMs the member has touched. Used as
     /// the floor when subscribing to the relay so we don't refetch ancient
     /// gift wraps on every sync.
-    pub async fn dm_inbox_high_water(
-        &self,
-        me_pubkey: &str,
-    ) -> DbResult<Option<DateTime<Utc>>> {
+    pub async fn dm_inbox_high_water(&self, me_pubkey: &str) -> DbResult<Option<DateTime<Utc>>> {
         let me = me_pubkey.to_string();
         with_timeout(async {
             let mut result = self
                 .client
                 .query(
-                    "SELECT created_at FROM dm_message \
+                    "SELECT * FROM dm_message \
                      WHERE sender_pubkey = $me OR recipient_pubkey = $me \
                      ORDER BY created_at DESC LIMIT 1",
                 )
@@ -243,13 +239,13 @@ impl Database {
             // Unread = inbound after the read marker for this peer.
             if msg.sender_pubkey != me_pubkey {
                 let read_floor = marker_map.get(&peer).copied();
-                if read_floor.map_or(true, |floor| msg.created_at > floor) {
+                if read_floor.is_none_or(|floor| msg.created_at > floor) {
                     entry.unread_count += 1;
                 }
             }
         }
         let mut convs: Vec<DmConversation> = latest.into_values().collect();
-        convs.sort_by(|a, b| b.last_message_at.cmp(&a.last_message_at));
+        convs.sort_by_key(|b| std::cmp::Reverse(b.last_message_at));
         Ok(convs)
     }
 
@@ -348,16 +344,9 @@ mod tests {
         db.insert_dm_message("gw2", &bob, &alice, "hi alice", None, ts(200))
             .await
             .unwrap();
-        db.insert_dm_message(
-            "gw3",
-            &alice,
-            &bob,
-            "second from alice",
-            None,
-            ts(300),
-        )
-        .await
-        .unwrap();
+        db.insert_dm_message("gw3", &alice, &bob, "second from alice", None, ts(300))
+            .await
+            .unwrap();
 
         let thread = db.list_dm_thread(&alice, &bob, 50, None).await.unwrap();
         assert_eq!(thread.len(), 3);

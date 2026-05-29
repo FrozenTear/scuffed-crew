@@ -75,11 +75,15 @@ pub struct EventAnnouncement {
 
 /// Build a LFG event (kind 30400).
 pub fn build_lfg_event(keys: &Keys, lfg: &LfgRequest) -> Result<NostrEvent, EventError> {
-    let content = serde_json::to_string(lfg).map_err(|e| EventError::SerializationFailed(e.to_string()))?;
+    let content =
+        serde_json::to_string(lfg).map_err(|e| EventError::SerializationFailed(e.to_string()))?;
 
     let mut tags = vec![
         vec!["h".into(), lfg.group_id.clone()],
-        vec!["d".into(), format!("lfg-{}", chrono::Utc::now().timestamp())],
+        vec![
+            "d".into(),
+            format!("lfg-{}", chrono::Utc::now().timestamp()),
+        ],
         vec!["game".into(), lfg.game.clone()],
         vec!["players_needed".into(), lfg.players_needed.to_string()],
     ];
@@ -100,8 +104,8 @@ pub fn build_match_result_event(
     keys: &Keys,
     result: &MatchResult,
 ) -> Result<NostrEvent, EventError> {
-    let content =
-        serde_json::to_string(result).map_err(|e| EventError::SerializationFailed(e.to_string()))?;
+    let content = serde_json::to_string(result)
+        .map_err(|e| EventError::SerializationFailed(e.to_string()))?;
 
     let mut tags = vec![
         vec!["h".into(), result.group_id.clone()],
@@ -196,9 +200,6 @@ mod tests {
         let event = build_event_announcement(&keys, &announcement).unwrap();
         assert_eq!(event.kind, kinds::EVENT_ANNOUNCEMENT);
         assert_eq!(event.tag_value("title"), Some("Friday Night Customs"));
-        assert_eq!(
-            event.tag_value("d"),
-            Some("friday-customs-2026-04-05")
-        );
+        assert_eq!(event.tag_value("d"), Some("friday-customs-2026-04-05"));
     }
 }

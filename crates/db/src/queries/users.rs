@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
-use surrealdb_types::RecordId;
 use surrealdb::types::Datetime as SurrealDatetime;
+use surrealdb_types::RecordId;
 use surrealdb_types::SurrealValue;
 
 use scuffed_auth::crypto::{hash_provider_id, EncryptedBlob};
@@ -32,9 +32,7 @@ impl Database {
         avatar_url: Option<String>,
     ) -> DbResult<User> {
         with_timeout(async {
-            if let Some(mut existing) =
-                self.get_user_by_provider(provider, &provider_id).await?
-            {
+            if let Some(mut existing) = self.get_user_by_provider(provider, &provider_id).await? {
                 if existing.username != username || existing.avatar_url != avatar_url {
                     existing.username = username;
                     existing.avatar_url = avatar_url;
@@ -116,7 +114,9 @@ impl Database {
                 avatar_url: user.avatar_url.clone(),
                 provider_id: None,
                 provider_id_hash: Some(id_hash),
-                provider_id_encrypted: Some(serde_json::to_value(id_encrypted).map_err(|e| DbError::Config(format!("Failed to serialize encrypted blob: {e}")))?),
+                provider_id_encrypted: Some(serde_json::to_value(id_encrypted).map_err(|e| {
+                    DbError::Config(format!("Failed to serialize encrypted blob: {e}"))
+                })?),
                 created_at: SurrealDatetime::from(user.created_at),
             }
         } else {
@@ -154,7 +154,9 @@ impl Database {
                 avatar_url: user.avatar_url.clone(),
                 provider_id: None,
                 provider_id_hash: Some(id_hash),
-                provider_id_encrypted: Some(serde_json::to_value(id_encrypted).map_err(|e| DbError::Config(format!("Failed to serialize encrypted blob: {e}")))?),
+                provider_id_encrypted: Some(serde_json::to_value(id_encrypted).map_err(|e| {
+                    DbError::Config(format!("Failed to serialize encrypted blob: {e}"))
+                })?),
                 created_at: SurrealDatetime::from(user.created_at),
             }
         } else {
@@ -189,8 +191,10 @@ impl Database {
         };
 
         let provider_id = if let Some(ref encrypted_json) = db.provider_id_encrypted {
-            let encrypted: EncryptedBlob = serde_json::from_value(encrypted_json.clone())
-                .map_err(|e| DbError::Config(format!("Failed to deserialize encrypted blob: {e}")))?;
+            let encrypted: EncryptedBlob =
+                serde_json::from_value(encrypted_json.clone()).map_err(|e| {
+                    DbError::Config(format!("Failed to deserialize encrypted blob: {e}"))
+                })?;
             if let Some(ref crypto) = self.crypto {
                 crypto.decrypt(&encrypted)?
             } else {
@@ -201,7 +205,9 @@ impl Database {
         } else if let Some(plaintext) = db.provider_id {
             plaintext
         } else {
-            return Err(DbError::Config("No provider_id found on user record".into()));
+            return Err(DbError::Config(
+                "No provider_id found on user record".into(),
+            ));
         };
 
         let id = db

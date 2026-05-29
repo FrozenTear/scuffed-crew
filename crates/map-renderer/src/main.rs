@@ -10,8 +10,8 @@ use bevy::render::renderer::RenderDevice;
 use scuffed_map_pipeline::config::MapConfig;
 use scuffed_map_renderer::bounds::analyze_glb;
 use scuffed_map_renderer::plugin::{
-    apply_floor_filter, build_headless_app, create_render_target, setup_materials,
-    spawn_gltf_meshes, FloorFilter, LoadState, MeshPlacements, PendingGltf, RenderJob,
+    FloorFilter, LoadState, MeshPlacements, PendingGltf, RenderJob, apply_floor_filter,
+    build_headless_app, create_render_target, setup_materials, spawn_gltf_meshes,
 };
 
 #[derive(Parser)]
@@ -63,8 +63,8 @@ fn main() -> Result<()> {
     std::fs::create_dir_all(&cli.output)?;
 
     // Resolve GLB to absolute path for Bevy's asset server
-    let glb_abs = std::fs::canonicalize(&cli.glb)
-        .with_context(|| format!("GLB not found: {:?}", cli.glb))?;
+    let glb_abs =
+        std::fs::canonicalize(&cli.glb).with_context(|| format!("GLB not found: {:?}", cli.glb))?;
     let asset_dir = glb_abs
         .parent()
         .expect("GLB has no parent dir")
@@ -135,7 +135,10 @@ fn main() -> Result<()> {
         app.insert_resource(FloorFilter { y_min, y_max });
         app.insert_resource(MeshPlacements(scene_info.mesh_instances.clone()));
         app.add_systems(Startup, setup_scene);
-        app.add_systems(Update, (spawn_gltf_meshes, setup_materials, apply_floor_filter));
+        app.add_systems(
+            Update,
+            (spawn_gltf_meshes, setup_materials, apply_floor_filter),
+        );
         app.run();
 
         eprintln!("  -> {:?}", cli.output.join(format!("{}.png", floor.id)));
@@ -161,9 +164,8 @@ fn setup_scene(
     );
 
     // Load GLB as Gltf asset (mesh/material handles only — no scene spawner)
-    let gltf_handle = asset_server.load::<bevy::gltf::Gltf>(
-        job.glb_path.to_string_lossy().to_string(),
-    );
+    let gltf_handle =
+        asset_server.load::<bevy::gltf::Gltf>(job.glb_path.to_string_lossy().to_string());
     commands.insert_resource(PendingGltf(gltf_handle));
 
     // Directional light from above at slight angle to reveal geometry
@@ -176,7 +178,7 @@ fn setup_scene(
         Transform::from_rotation(Quat::from_euler(
             EulerRot::XYZ,
             -std::f32::consts::FRAC_PI_3, // 60° from horizontal = 30° off vertical
-            0.3,                           // slight yaw offset
+            0.3,                          // slight yaw offset
             0.0,
         )),
     ));

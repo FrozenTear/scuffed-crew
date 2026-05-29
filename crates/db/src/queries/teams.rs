@@ -1,7 +1,7 @@
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
-use surrealdb_types::RecordId;
 use surrealdb::types::Datetime as SurrealDatetime;
+use surrealdb_types::RecordId;
 use surrealdb_types::SurrealValue;
 
 use crate::types::Team;
@@ -63,10 +63,9 @@ impl Database {
                 created_at: SurrealDatetime::from(Utc::now()),
             };
             let created: Option<DbTeam> = self.client.create("team").content(db_team).await?;
-            Ok(db_to_team(
-                created
-                    .ok_or_else(|| crate::DbError::NotFound("Failed to create team".into()))?,
-            ))
+            Ok(db_to_team(created.ok_or_else(|| {
+                crate::DbError::NotFound("Failed to create team".into())
+            })?))
         })
         .await
     }
@@ -121,8 +120,8 @@ impl Database {
     ) -> DbResult<Team> {
         with_timeout(async {
             let existing: Option<DbTeam> = self.client.select(("team", id)).await?;
-            let mut db = existing
-                .ok_or_else(|| crate::DbError::NotFound(format!("Team {id} not found")))?;
+            let mut db =
+                existing.ok_or_else(|| crate::DbError::NotFound(format!("Team {id} not found")))?;
 
             if let Some(n) = name {
                 db.name = n.to_string();
@@ -140,8 +139,7 @@ impl Database {
                 db.lore_quote = q.map(|s| s.to_string());
             }
 
-            let updated: Option<DbTeam> =
-                self.client.update(("team", id)).content(db).await?;
+            let updated: Option<DbTeam> = self.client.update(("team", id)).content(db).await?;
             Ok(db_to_team(updated.ok_or_else(|| {
                 crate::DbError::NotFound(format!("Team {id} not found after update"))
             })?))

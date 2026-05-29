@@ -4,7 +4,13 @@ use rayon::prelude::*;
 use std::path::Path;
 
 /// Calculate the number of tiles at a given zoom level.
-pub fn tiles_at_zoom(full_width: u32, full_height: u32, tile_size: u32, zoom: u32, max_zoom: u32) -> (u32, u32) {
+pub fn tiles_at_zoom(
+    full_width: u32,
+    full_height: u32,
+    tile_size: u32,
+    zoom: u32,
+    max_zoom: u32,
+) -> (u32, u32) {
     let scale = 1u32 << (max_zoom - zoom.min(max_zoom));
     let scaled_w = full_width / scale;
     let scaled_h = full_height / scale;
@@ -41,9 +47,16 @@ pub fn generate_tile_pyramid(
         .with_context(|| format!("Failed to open floor image: {:?}", image_path))?;
 
     let (full_width, full_height) = img.dimensions();
-    let max_zoom = max_zoom.unwrap_or_else(|| calculate_max_zoom(full_width, full_height, tile_size));
+    let max_zoom =
+        max_zoom.unwrap_or_else(|| calculate_max_zoom(full_width, full_height, tile_size));
 
-    tracing::info!("Generating tiles for floor '{}': {}x{}, max_zoom={}", floor_id, full_width, full_height, max_zoom);
+    tracing::info!(
+        "Generating tiles for floor '{}': {}x{}, max_zoom={}",
+        floor_id,
+        full_width,
+        full_height,
+        max_zoom
+    );
 
     for zoom in 0..=max_zoom {
         generate_zoom_level(&img, output_dir, floor_id, tile_size, zoom, max_zoom)?;
@@ -75,43 +88,52 @@ fn generate_zoom_level(
 
     let (cols, rows) = tiles_at_zoom(full_w, full_h, tile_size, zoom, max_zoom);
 
-    tracing::info!("  Zoom {}: {}x{} -> {}x{} tiles", zoom, scaled_w, scaled_h, cols, rows);
+    tracing::info!(
+        "  Zoom {}: {}x{} -> {}x{} tiles",
+        zoom,
+        scaled_w,
+        scaled_h,
+        cols,
+        rows
+    );
 
     // Generate tiles in parallel
     let tile_coords: Vec<(u32, u32)> = (0..rows)
         .flat_map(|y| (0..cols).map(move |x| (x, y)))
         .collect();
 
-    tile_coords.par_iter().try_for_each(|&(x, y)| -> anyhow::Result<()> {
-        let tile_dir = output_dir.join(format!("floors/{}/{}", floor_id, zoom));
-        std::fs::create_dir_all(tile_dir.join(format!("{}", x)))?;
+    tile_coords
+        .par_iter()
+        .try_for_each(|&(x, y)| -> anyhow::Result<()> {
+            let tile_dir = output_dir.join(format!("floors/{}/{}", floor_id, zoom));
+            std::fs::create_dir_all(tile_dir.join(format!("{}", x)))?;
 
-        let src_x = x * tile_size;
-        let src_y = y * tile_size;
-        let crop_w = tile_size.min(scaled_w.saturating_sub(src_x));
-        let crop_h = tile_size.min(scaled_h.saturating_sub(src_y));
+            let src_x = x * tile_size;
+            let src_y = y * tile_size;
+            let crop_w = tile_size.min(scaled_w.saturating_sub(src_x));
+            let crop_h = tile_size.min(scaled_h.saturating_sub(src_y));
 
-        if crop_w == 0 || crop_h == 0 {
-            return Ok(());
-        }
+            if crop_w == 0 || crop_h == 0 {
+                return Ok(());
+            }
 
-        // Crop the tile from the scaled image
-        let tile_img = scaled_img.crop_imm(src_x, src_y, crop_w, crop_h);
+            // Crop the tile from the scaled image
+            let tile_img = scaled_img.crop_imm(src_x, src_y, crop_w, crop_h);
 
-        // If tile is smaller than tile_size, pad with transparent pixels
-        let final_tile = if crop_w < tile_size || crop_h < tile_size {
-            let mut padded = RgbaImage::new(tile_size, tile_size);
-            image::imageops::overlay(&mut padded, &tile_img.to_rgba8(), 0, 0);
-            DynamicImage::ImageRgba8(padded)
-        } else {
-            tile_img
-        };
+            // If tile is smaller than tile_size, pad with transparent pixels
+            let final_tile = if crop_w < tile_size || crop_h < tile_size {
+                let mut padded = RgbaImage::new(tile_size, tile_size);
+                image::imageops::overlay(&mut padded, &tile_img.to_rgba8(), 0, 0);
+                DynamicImage::ImageRgba8(padded)
+            } else {
+                tile_img
+            };
 
-        let tile_path = tile_dir.join(format!("{}/{}.webp", x, y));
-        final_tile.save_with_format(&tile_path, ImageFormat::WebP)?;
+            let tile_path = tile_dir.join(format!("{}/{}.webp", x, y));
+            final_tile.save_with_format(&tile_path, ImageFormat::WebP)?;
 
-        Ok(())
-    })?;
+            Ok(())
+        })?;
 
     Ok(())
 }

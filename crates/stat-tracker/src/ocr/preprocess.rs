@@ -11,12 +11,12 @@ const STAT_COLUMNS: usize = 6;
 
 /// Fallback column boundaries if dynamic detection fails.
 const STAT_COL_BOUNDARIES_FALLBACK: [(f64, f64); STAT_COLUMNS] = [
-    (0.465, 0.033),  // Elims
-    (0.503, 0.030),  // Assists (no overlap with E)
-    (0.538, 0.029),  // Deaths
-    (0.575, 0.070),  // Damage
-    (0.650, 0.070),  // Healing
-    (0.725, 0.050),  // Mitigation (narrow to exclude UI warning icon)
+    (0.465, 0.033), // Elims
+    (0.503, 0.030), // Assists (no overlap with E)
+    (0.538, 0.029), // Deaths
+    (0.575, 0.070), // Damage
+    (0.650, 0.070), // Healing
+    (0.725, 0.050), // Mitigation (narrow to exclude UI warning icon)
 ];
 
 /// Player name column within each row
@@ -256,16 +256,48 @@ pub fn detect_column_offset(scoreboard: &DynamicImage) -> f64 {
 
 pub fn crop_scoreboard(img: &DynamicImage) -> DynamicImage {
     let (w, h) = (img.width(), img.height());
-    let x = (w as f64 * SCOREBOARD_X_RATIO) as u32;
-    let y = (h as f64 * SCOREBOARD_Y_RATIO) as u32;
-    let crop_w = (w as f64 * SCOREBOARD_W_RATIO) as u32;
-    let crop_h = (h as f64 * SCOREBOARD_H_RATIO) as u32;
+    // OW2's scoreboard renders inside a 16:9 region centered on the frame. On
+    // non-16:9 displays (ultrawide, 16:10) the ratios below must apply to that
+    // inner region, not the whole frame, or the crop drifts off the scoreboard.
+    let (gx, gy, gw, gh) = game_rect_16_9(w, h);
+    let x = gx + (gw as f64 * SCOREBOARD_X_RATIO) as u32;
+    let y = gy + (gh as f64 * SCOREBOARD_Y_RATIO) as u32;
+    let crop_w = ((gw as f64 * SCOREBOARD_W_RATIO) as u32).min(w.saturating_sub(x));
+    let crop_h = ((gh as f64 * SCOREBOARD_H_RATIO) as u32).min(h.saturating_sub(y));
     img.crop_imm(x, y, crop_w, crop_h)
+}
+
+/// Compute the centered 16:9 sub-rectangle of a frame as (x, y, w, h).
+///
+/// OW2 renders its HUD within a 16:9 area: wider-than-16:9 frames (ultrawide)
+/// are pillarboxed (full height, narrower centered width); taller-than-16:9
+/// frames (e.g. 16:10) are letterboxed (full width, shorter centered height).
+/// For an exact 16:9 frame this returns the whole frame, so 16:9 capture is
+/// byte-for-byte unchanged from the previous behavior.
+pub fn game_rect_16_9(w: u32, h: u32) -> (u32, u32, u32, u32) {
+    const TARGET: f64 = 16.0 / 9.0;
+    if h == 0 {
+        return (0, 0, w, h);
+    }
+    let actual = w as f64 / h as f64;
+    if (actual - TARGET).abs() < 0.01 {
+        (0, 0, w, h)
+    } else if actual > TARGET {
+        let gw = (h as f64 * TARGET).round() as u32;
+        ((w - gw) / 2, 0, gw, h)
+    } else {
+        let gh = (w as f64 / TARGET).round() as u32;
+        (0, (h - gh) / 2, w, gh)
+    }
 }
 
 /// Extract a single player row from the scoreboard crop.
 /// `row_index` is 0..(team_size*2-1). `team_size` is 5 or 6.
-pub fn crop_player_row(scoreboard: &DynamicImage, row_index: usize, team_size: usize) -> Option<DynamicImage> {
+pub fn crop_player_row(
+    scoreboard: &DynamicImage,
+    row_index: usize,
+    team_size: usize,
+) -> Option<DynamicImage> {
     let total_rows = team_size * 2;
     if row_index >= total_rows {
         return None;
@@ -296,7 +328,11 @@ pub fn crop_player_row(scoreboard: &DynamicImage, row_index: usize, team_size: u
 
 /// Extract a stat cell from a player row using dynamic column boundaries.
 /// `col_index` is 0-5 (E, A, D, DMG, HLG, MIT).
-pub fn crop_stat_cell(row: &DynamicImage, col_index: usize, columns: &StatColumns) -> Option<DynamicImage> {
+pub fn crop_stat_cell(
+    row: &DynamicImage,
+    col_index: usize,
+    columns: &StatColumns,
+) -> Option<DynamicImage> {
     if col_index >= STAT_COLUMNS {
         return None;
     }
@@ -448,7 +484,8 @@ fn sauvola_threshold(img: &GrayImage, window_size: u32, k: f64, r_param: f64) ->
             row_sum += val;
             row_sq_sum += val * val;
             integral[(y + 1) * stride + (x + 1)] = row_sum + integral[y * stride + (x + 1)];
-            integral_sq[(y + 1) * stride + (x + 1)] = row_sq_sum + integral_sq[y * stride + (x + 1)];
+            integral_sq[(y + 1) * stride + (x + 1)] =
+                row_sq_sum + integral_sq[y * stride + (x + 1)];
         }
     }
 
@@ -461,10 +498,14 @@ fn sauvola_threshold(img: &GrayImage, window_size: u32, k: f64, r_param: f64) ->
             let y2 = ((y + r + 1) as usize).min(h as usize);
 
             let area = ((x2 - x1) * (y2 - y1)) as f64;
-            let sum = integral[y2 * stride + x2] - integral[y1 * stride + x2]
-                - integral[y2 * stride + x1] + integral[y1 * stride + x1];
-            let sq_sum = integral_sq[y2 * stride + x2] - integral_sq[y1 * stride + x2]
-                - integral_sq[y2 * stride + x1] + integral_sq[y1 * stride + x1];
+            let sum = integral[y2 * stride + x2]
+                - integral[y1 * stride + x2]
+                - integral[y2 * stride + x1]
+                + integral[y1 * stride + x1];
+            let sq_sum = integral_sq[y2 * stride + x2]
+                - integral_sq[y1 * stride + x2]
+                - integral_sq[y2 * stride + x1]
+                + integral_sq[y1 * stride + x1];
 
             let mean = sum as f64 / area;
             let variance = (sq_sum as f64 / area) - (mean * mean);
@@ -489,8 +530,8 @@ fn local_contrast_enhance(img: &GrayImage, tile_size: u32) -> GrayImage {
     let (w, h) = img.dimensions();
     let mut output = GrayImage::new(w, h);
 
-    let tiles_x = (w + tile_size - 1) / tile_size;
-    let tiles_y = (h + tile_size - 1) / tile_size;
+    let tiles_x = w.div_ceil(tile_size);
+    let tiles_y = h.div_ceil(tile_size);
 
     // Compute per-tile min/max
     let mut tile_stats: Vec<(u8, u8)> = vec![(255, 0); (tiles_x * tiles_y) as usize];
@@ -520,9 +561,7 @@ fn local_contrast_enhance(img: &GrayImage, tile_size: u32) -> GrayImage {
                 // Near-uniform tile — just pass through
                 val
             } else {
-                let norm = (val.saturating_sub(local_min) as f64 / range * 255.0)
-                    .clamp(0.0, 255.0) as u8;
-                norm
+                (val.saturating_sub(local_min) as f64 / range * 255.0).clamp(0.0, 255.0) as u8
             };
             output.put_pixel(x, y, Luma([stretched]));
         }
@@ -536,7 +575,6 @@ fn morphological_close(img: &GrayImage, radius: u32) -> GrayImage {
     let dilated = morphological_op(img, radius, true);
     morphological_op(&dilated, radius, false)
 }
-
 
 /// Generic morphological operation: dilate (max) or erode (min) with square kernel.
 fn morphological_op(img: &GrayImage, radius: u32, dilate: bool) -> GrayImage {

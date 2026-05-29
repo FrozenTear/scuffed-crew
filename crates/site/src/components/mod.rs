@@ -1,8 +1,8 @@
-mod nav;
-mod divider;
-mod section_header;
 pub mod bracket;
+mod divider;
+mod nav;
+mod section_header;
 
-pub use nav::Nav;
 pub use divider::Divider;
+pub use nav::Nav;
 pub use section_header::SectionHeader;

@@ -24,19 +24,18 @@ struct Overview {
 
 #[component]
 pub fn Hero() -> impl IntoView {
-    let overview = LocalResource::new(|| async {
-        fetch_json::<Overview>("/api/public/overview").await.ok()
-    });
+    let overview =
+        LocalResource::new(|| async { fetch_json::<Overview>("/api/public/overview").await.ok() });
 
-    let team_count = move || {
-        overview.get().flatten().map(|o| o.teams.len()).unwrap_or(0)
-    };
+    let team_count = move || overview.get().flatten().map(|o| o.teams.len()).unwrap_or(0);
     let member_count = move || {
-        overview.get().flatten().map(|o| o.member_count).unwrap_or(0)
+        overview
+            .get()
+            .flatten()
+            .map(|o| o.member_count)
+            .unwrap_or(0)
     };
-    let game_count = move || {
-        overview.get().flatten().map(|o| o.games.len()).unwrap_or(0)
-    };
+    let game_count = move || overview.get().flatten().map(|o| o.games.len()).unwrap_or(0);
 
     view! {
         <section class="hero">

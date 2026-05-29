@@ -31,8 +31,14 @@ fn end_to_end_tile_generation() {
         },
         cleanup: CleanupConfig::default(),
         detection: DetectionConfig::default(),
-        render: RenderConfig { pixels_per_meter: 32.0, camera_padding: 5.0 },
-        tiles: TileConfig { tile_size: 256, max_zoom: 2 },
+        render: RenderConfig {
+            pixels_per_meter: 32.0,
+            camera_padding: 5.0,
+        },
+        tiles: TileConfig {
+            tile_size: 256,
+            max_zoom: 2,
+        },
         floors: vec![
             FloorConfig {
                 id: "ground".into(),

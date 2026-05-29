@@ -1,15 +1,13 @@
-use std::collections::HashMap;
 use dioxus::prelude::*;
 use serde::Deserialize;
+use std::collections::HashMap;
 
+use crate::components::{ConfirmDialog, DataTable, FormModal, StatusPill, Toast, use_toast};
+use crate::hooks::{ModalController, use_api, use_api_list};
 use scuffed_api_client::ApiClient;
 use scuffed_types::api::{
-    CreateTournamentRequest, StatusChangeRequest, AddParticipantRequest, MatchReportRequest,
+    AddParticipantRequest, CreateTournamentRequest, MatchReportRequest, StatusChangeRequest,
 };
-use crate::components::{
-    DataTable, FormModal, ConfirmDialog, StatusPill, Toast, use_toast,
-};
-use crate::hooks::{use_api, use_api_list, ModalController};
 
 // --- Types ---
 // Local response types with simplified/string-typed fields for display.
@@ -72,7 +70,14 @@ struct Member {
 }
 
 const FORMATS: [&str; 4] = ["single_elim", "double_elim", "round_robin", "swiss"];
-const STATUS_FILTERS: [&str; 6] = ["all", "draft", "registration", "active", "completed", "in_progress"];
+const STATUS_FILTERS: [&str; 6] = [
+    "all",
+    "draft",
+    "registration",
+    "active",
+    "completed",
+    "in_progress",
+];
 
 #[component]
 pub fn AdminTournaments() -> Element {
@@ -119,7 +124,6 @@ pub fn AdminTournaments() -> Element {
     let mut match_winner = use_signal(String::new);
     let mut match_replays = use_signal(String::new);
 
-
     // Detail data loader
     let _detail_loader = use_resource(move || async move {
         let _ = detail_refresh();
@@ -157,7 +161,11 @@ pub fn AdminTournaments() -> Element {
         form_name.set(t.name);
         form_format.set(t.format);
         form_game_id.set(t.game_name.map(|_| String::new()));
-        form_max.set(t.max_participants.map(|n| n.to_string()).unwrap_or_default());
+        form_max.set(
+            t.max_participants
+                .map(|n| n.to_string())
+                .unwrap_or_default(),
+        );
         // Split "2026-03-11T18:00:00Z" into date + time
         let raw = t.starts_at.unwrap_or_default();
         if let Some((d, rest)) = raw.split_once('T') {
@@ -179,7 +187,11 @@ pub fn AdminTournaments() -> Element {
             return;
         }
         let max_str = form_max().trim().to_string();
-        let max_val = if max_str.is_empty() { None } else { max_str.parse::<u32>().ok() };
+        let max_val = if max_str.is_empty() {
+            None
+        } else {
+            max_str.parse::<u32>().ok()
+        };
         let date = form_date().trim().to_string();
         let time = form_time().trim().to_string();
         let starts_at = if date.is_empty() {
@@ -201,9 +213,13 @@ pub fn AdminTournaments() -> Element {
         spawn(async move {
             let client = ApiClient::web();
             let result = if let Some(id) = edit_id {
-                client.put_json::<_, Tournament>(&format!("/api/tournaments/{id}"), &body).await
+                client
+                    .put_json::<_, Tournament>(&format!("/api/tournaments/{id}"), &body)
+                    .await
             } else {
-                client.post_json::<_, Tournament>("/api/tournaments", &body).await
+                client
+                    .post_json::<_, Tournament>("/api/tournaments", &body)
+                    .await
             };
             modal.end_submit();
             match result {
@@ -228,7 +244,10 @@ pub fn AdminTournaments() -> Element {
             let id = t.id.clone();
             delete_modal.close();
             spawn(async move {
-                match ApiClient::web().delete(&format!("/api/tournaments/{id}")).await {
+                match ApiClient::web()
+                    .delete(&format!("/api/tournaments/{id}"))
+                    .await
+                {
                     Ok(_) => {
                         toast.show(Toast::success("Tournament deleted."));
                         tournaments.refresh += 1;
@@ -246,7 +265,9 @@ pub fn AdminTournaments() -> Element {
     };
 
     let change_status = move |(id, new_status): (String, String)| {
-        let body = StatusChangeRequest { status: new_status.clone() };
+        let body = StatusChangeRequest {
+            status: new_status.clone(),
+        };
         spawn(async move {
             let result = ApiClient::web()
                 .patch_json_empty(&format!("/api/tournaments/{id}"), &body)
@@ -316,23 +337,23 @@ pub fn AdminTournaments() -> Element {
     };
 
     let on_remove_part_confirm = move |_| {
-        if let Some(p) = remove_part_modal.get_target() {
-            if let Some(tid) = detail_id() {
-                let pid = p.id.clone();
-                remove_part_modal.close();
-                spawn(async move {
-                    match ApiClient::web()
-                        .delete(&format!("/api/tournaments/{tid}/participants/{pid}"))
-                        .await
-                    {
-                        Ok(_) => {
-                            toast.show(Toast::success("Participant removed."));
-                            detail_refresh += 1;
-                        }
-                        Err(e) => toast.show(Toast::error(format!("Remove failed: {e}"))),
+        if let Some(p) = remove_part_modal.get_target()
+            && let Some(tid) = detail_id()
+        {
+            let pid = p.id.clone();
+            remove_part_modal.close();
+            spawn(async move {
+                match ApiClient::web()
+                    .delete(&format!("/api/tournaments/{tid}/participants/{pid}"))
+                    .await
+                {
+                    Ok(_) => {
+                        toast.show(Toast::success("Participant removed."));
+                        detail_refresh += 1;
                     }
-                });
-            }
+                    Err(e) => toast.show(Toast::error(format!("Remove failed: {e}"))),
+                }
+            });
         }
     };
 
@@ -387,38 +408,51 @@ pub fn AdminTournaments() -> Element {
     };
 
     let on_match_submit = move |_| {
-        if let Some(m) = match_modal.get_target() {
-            if let Some(tid) = detail_id() {
-                let mid = m.id.clone();
-                let sa = match_score_a().trim().to_string();
-                let sb = match_score_b().trim().to_string();
-                let winner_raw = match_winner().trim().to_string();
-                let replays_raw = match_replays().trim().to_string();
-                let body = MatchReportRequest {
-                    score_a: if sa.is_empty() { None } else { sa.parse::<u32>().ok() },
-                    score_b: if sb.is_empty() { None } else { sb.parse::<u32>().ok() },
-                    winner_id: if winner_raw.is_empty() { None } else { Some(winner_raw) },
-                    replay_codes: if replays_raw.is_empty() { None } else { Some(replays_raw) },
-                };
-                match_modal.start_submit();
-                spawn(async move {
-                    let result = ApiClient::web()
-                        .put_json_empty(
-                            &format!("/api/tournaments/{tid}/matches/{mid}"),
-                            &body,
-                        )
-                        .await;
-                    match_modal.end_submit();
-                    match result {
-                        Ok(_) => {
-                            toast.show(Toast::success("Match result saved."));
-                            match_modal.close();
-                            detail_refresh += 1;
-                        }
-                        Err(e) => toast.show(Toast::error(format!("Failed: {e}"))),
+        if let Some(m) = match_modal.get_target()
+            && let Some(tid) = detail_id()
+        {
+            let mid = m.id.clone();
+            let sa = match_score_a().trim().to_string();
+            let sb = match_score_b().trim().to_string();
+            let winner_raw = match_winner().trim().to_string();
+            let replays_raw = match_replays().trim().to_string();
+            let body = MatchReportRequest {
+                score_a: if sa.is_empty() {
+                    None
+                } else {
+                    sa.parse::<u32>().ok()
+                },
+                score_b: if sb.is_empty() {
+                    None
+                } else {
+                    sb.parse::<u32>().ok()
+                },
+                winner_id: if winner_raw.is_empty() {
+                    None
+                } else {
+                    Some(winner_raw)
+                },
+                replay_codes: if replays_raw.is_empty() {
+                    None
+                } else {
+                    Some(replays_raw)
+                },
+            };
+            match_modal.start_submit();
+            spawn(async move {
+                let result = ApiClient::web()
+                    .put_json_empty(&format!("/api/tournaments/{tid}/matches/{mid}"), &body)
+                    .await;
+                match_modal.end_submit();
+                match result {
+                    Ok(_) => {
+                        toast.show(Toast::success("Match result saved."));
+                        match_modal.close();
+                        detail_refresh += 1;
                     }
-                });
-            }
+                    Err(e) => toast.show(Toast::error(format!("Failed: {e}"))),
+                }
+            });
         }
     };
 

@@ -1,10 +1,9 @@
 use dioxus::prelude::*;
 use serde::{Deserialize, Serialize};
-use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
+use wasm_bindgen::prelude::*;
 
 use scuffed_api_client::ApiClient;
-use scuffed_types::MeResponse;
 
 use crate::components::{Toast, use_toast};
 
@@ -338,9 +337,7 @@ pub fn IdentitySettings() -> Element {
         .and_then(|o| o.as_ref())
         .and_then(|me| me.member.as_ref());
 
-    let has_pubkey = member
-        .map(|m| m.nostr_pubkey.is_some())
-        .unwrap_or(false);
+    let has_pubkey = member.map(|m| m.nostr_pubkey.is_some()).unwrap_or(false);
     let is_server_managed = member
         .map(|m| m.nostr_key_mode.as_deref() == Some("server_managed"))
         .unwrap_or(false);

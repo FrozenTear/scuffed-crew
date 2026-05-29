@@ -1,7 +1,7 @@
 use axum::{
+    Json,
     extract::{Path, State},
     http::StatusCode,
-    Json,
 };
 use serde::{Deserialize, Serialize};
 
@@ -186,22 +186,18 @@ pub async fn list_wiki_revisions(
     Path(topic): Path<String>,
 ) -> Result<Json<WikiRevisionsResponse>, (StatusCode, Json<ErrorResponse>)> {
     // Look up page to get the ID
-    let page = state
-        .db
-        .get_wiki_page_by_topic(&topic)
-        .await
-        .map_err(|e| {
-            let status = match &e {
-                scuffed_db::DbError::NotFound(_) => StatusCode::NOT_FOUND,
-                _ => StatusCode::INTERNAL_SERVER_ERROR,
-            };
-            (
-                status,
-                Json(ErrorResponse {
-                    error: e.to_string(),
-                }),
-            )
-        })?;
+    let page = state.db.get_wiki_page_by_topic(&topic).await.map_err(|e| {
+        let status = match &e {
+            scuffed_db::DbError::NotFound(_) => StatusCode::NOT_FOUND,
+            _ => StatusCode::INTERNAL_SERVER_ERROR,
+        };
+        (
+            status,
+            Json(ErrorResponse {
+                error: e.to_string(),
+            }),
+        )
+    })?;
 
     let revisions = state
         .db
@@ -226,35 +222,27 @@ pub async fn delete_wiki_page(
     Path(topic): Path<String>,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
     // Get page ID for audit log before deactivating
-    let page = state
-        .db
-        .get_wiki_page_by_topic(&topic)
-        .await
-        .map_err(|e| {
-            let status = match &e {
-                scuffed_db::DbError::NotFound(_) => StatusCode::NOT_FOUND,
-                _ => StatusCode::INTERNAL_SERVER_ERROR,
-            };
-            (
-                status,
-                Json(ErrorResponse {
-                    error: e.to_string(),
-                }),
-            )
-        })?;
+    let page = state.db.get_wiki_page_by_topic(&topic).await.map_err(|e| {
+        let status = match &e {
+            scuffed_db::DbError::NotFound(_) => StatusCode::NOT_FOUND,
+            _ => StatusCode::INTERNAL_SERVER_ERROR,
+        };
+        (
+            status,
+            Json(ErrorResponse {
+                error: e.to_string(),
+            }),
+        )
+    })?;
 
-    state
-        .db
-        .deactivate_wiki_page(&topic)
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: e.to_string(),
-                }),
-            )
-        })?;
+    state.db.deactivate_wiki_page(&topic).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: e.to_string(),
+            }),
+        )
+    })?;
 
     audit(
         &state.db,

@@ -3,8 +3,8 @@ use serde::Deserialize;
 
 use scuffed_auth::client::api::fetch_json_list;
 
-use crate::components::bracket::BRACKET_STYLES;
 use crate::components::Nav;
+use crate::components::bracket::BRACKET_STYLES;
 use crate::sections::Footer;
 
 #[derive(Debug, Clone, Deserialize)]

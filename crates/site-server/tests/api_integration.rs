@@ -7,17 +7,17 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use axum::body::Body;
-use axum::http::{header, Method, Request, StatusCode};
+use axum::http::{Method, Request, StatusCode, header};
 use http_body_util::BodyExt;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tower::ServiceExt;
 
-use scuffed_auth::crypto::hash_session_token;
 use scuffed_auth::SessionConfig;
-use scuffed_db::migrations::run_migrations;
+use scuffed_auth::crypto::hash_session_token;
 use scuffed_db::Database;
-use scuffed_site_server::state::{AppState, OAuthConfig};
+use scuffed_db::migrations::run_migrations;
 use scuffed_site_server::create_router;
+use scuffed_site_server::state::{AppState, OAuthConfig};
 
 // ─── Test Harness ───────────────────────────────────────────────────────────
 
@@ -27,9 +27,7 @@ async fn test_state() -> AppState {
         .await
         .expect("in-memory DB connect");
 
-    run_migrations(&db.client)
-        .await
-        .expect("migrations");
+    run_migrations(&db.client).await.expect("migrations");
 
     AppState {
         db: Arc::new(db),
@@ -47,6 +45,7 @@ async fn test_state() -> AppState {
         nostr_challenge_key: *blake3::hash(b"test-nostr-challenge-key").as_bytes(),
         crypto: None,
         relay_url: None,
+        dm_events: None,
     }
 }
 
@@ -156,10 +155,42 @@ const RECRUIT_TOKEN: &str = "test-recruit-token";
 
 /// Seed the standard set of test users (admin, officer, member, recruit).
 async fn seed_all_roles(db: &Database) {
-    seed_user(db, "adminuser", "adminmember", "TestAdmin", "admin", ADMIN_TOKEN).await;
-    seed_user(db, "officeruser", "officermember", "TestOfficer", "officer", OFFICER_TOKEN).await;
-    seed_user(db, "memberuser", "membermember", "TestMember", "member", MEMBER_TOKEN).await;
-    seed_user(db, "recruituser", "recruitmember", "TestRecruit", "recruit", RECRUIT_TOKEN).await;
+    seed_user(
+        db,
+        "adminuser",
+        "adminmember",
+        "TestAdmin",
+        "admin",
+        ADMIN_TOKEN,
+    )
+    .await;
+    seed_user(
+        db,
+        "officeruser",
+        "officermember",
+        "TestOfficer",
+        "officer",
+        OFFICER_TOKEN,
+    )
+    .await;
+    seed_user(
+        db,
+        "memberuser",
+        "membermember",
+        "TestMember",
+        "member",
+        MEMBER_TOKEN,
+    )
+    .await;
+    seed_user(
+        db,
+        "recruituser",
+        "recruitmember",
+        "TestRecruit",
+        "recruit",
+        RECRUIT_TOKEN,
+    )
+    .await;
 }
 
 /// Build a request with Bearer token authentication.
@@ -985,7 +1016,10 @@ async fn nip05_json_returns_empty_when_no_identities() {
     let app = create_router(state);
 
     let resp = app
-        .oneshot(unauthed_request(Method::GET, "/.well-known/nostr.json?name=_"))
+        .oneshot(unauthed_request(
+            Method::GET,
+            "/.well-known/nostr.json?name=_",
+        ))
         .await
         .unwrap();
 
@@ -1065,7 +1099,10 @@ async fn nip05_json_has_cors_header() {
     let app = create_router(state);
 
     let resp = app
-        .oneshot(unauthed_request(Method::GET, "/.well-known/nostr.json?name=_"))
+        .oneshot(unauthed_request(
+            Method::GET,
+            "/.well-known/nostr.json?name=_",
+        ))
         .await
         .unwrap();
 
@@ -1168,7 +1205,12 @@ async fn nostr_challenge_accepts_valid_hex_pubkey() {
 
     assert_eq!(resp.status(), StatusCode::OK);
     let json = body_json(resp).await;
-    assert!(json["challenge"].as_str().unwrap().starts_with("scuffedclan-verify:"));
+    assert!(
+        json["challenge"]
+            .as_str()
+            .unwrap()
+            .starts_with("scuffedclan-verify:")
+    );
     assert!(!json["token"].as_str().unwrap().is_empty());
     assert_eq!(json["pubkey_hex"].as_str().unwrap(), pubkey_hex);
     assert_eq!(json["expires_in_secs"], 300);
@@ -1337,8 +1379,7 @@ async fn nostr_import_key_rejects_wrong_password() {
     // Create a valid ncryptsec with known password
     let keys = nostr::Keys::generate();
     let secret_hex = keys.secret_key().to_secret_hex();
-    let ncryptsec =
-        scuffed_auth::nip49::encrypt(&secret_hex, "correct-password").expect("encrypt");
+    let ncryptsec = scuffed_auth::nip49::encrypt(&secret_hex, "correct-password").expect("encrypt");
 
     let app = create_router(state);
     let resp = app

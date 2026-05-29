@@ -3,6 +3,9 @@ use std::collections::HashMap;
 
 use super::single_elim::BracketMatch;
 
+/// Per-cell result: (my_score, their_score, winner_id, replay_codes).
+type CellResult = (Option<u32>, Option<u32>, Option<String>, Vec<String>);
+
 #[component]
 pub fn RoundRobinTable(
     matches: Vec<BracketMatch>,
@@ -10,17 +13,26 @@ pub fn RoundRobinTable(
     participant_ids: Vec<String>,
 ) -> Element {
     // Build results grid: (row_id, col_id) -> (my_score, their_score, winner, codes)
-    let mut results: HashMap<(String, String), (Option<u32>, Option<u32>, Option<String>, Vec<String>)> =
-        HashMap::new();
+    let mut results: HashMap<(String, String), CellResult> = HashMap::new();
     for m in &matches {
         if let (Some(a), Some(b)) = (&m.participant_a_id, &m.participant_b_id) {
             results.insert(
                 (a.clone(), b.clone()),
-                (m.score_a, m.score_b, m.winner_id.clone(), m.replay_codes.clone()),
+                (
+                    m.score_a,
+                    m.score_b,
+                    m.winner_id.clone(),
+                    m.replay_codes.clone(),
+                ),
             );
             results.insert(
                 (b.clone(), a.clone()),
-                (m.score_b, m.score_a, m.winner_id.clone(), m.replay_codes.clone()),
+                (
+                    m.score_b,
+                    m.score_a,
+                    m.winner_id.clone(),
+                    m.replay_codes.clone(),
+                ),
             );
         }
     }
@@ -34,8 +46,12 @@ pub fn RoundRobinTable(
             let mut draws = 0u32;
             let mut diff = 0i32;
             for other in &participant_ids {
-                if other == pid { continue; }
-                if let Some((my_score, their_score, winner, _)) = results.get(&(pid.clone(), other.clone())) {
+                if other == pid {
+                    continue;
+                }
+                if let Some((my_score, their_score, winner, _)) =
+                    results.get(&(pid.clone(), other.clone()))
+                {
                     diff += my_score.unwrap_or(0) as i32 - their_score.unwrap_or(0) as i32;
                     if winner.as_ref() == Some(pid) {
                         wins += 1;

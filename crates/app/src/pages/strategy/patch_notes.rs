@@ -84,12 +84,15 @@ fn patch_matches_search(patch: &Patch, query: &str) -> bool {
     if patch.version.to_lowercase().contains(&q) {
         return true;
     }
-    if let Some(title) = &patch.title {
-        if title.to_lowercase().contains(&q) {
-            return true;
-        }
+    if let Some(title) = &patch.title
+        && title.to_lowercase().contains(&q)
+    {
+        return true;
     }
-    patch.hero_updates.iter().any(|h| h.hero_name.to_lowercase().contains(&q))
+    patch
+        .hero_updates
+        .iter()
+        .any(|h| h.hero_name.to_lowercase().contains(&q))
 }
 
 // --- Change type helpers ---
@@ -424,7 +427,7 @@ pub fn StrategyPatchNotes() -> Element {
             .ok()
     });
 
-    let mut search_query = use_signal(|| String::new());
+    let mut search_query = use_signal(String::new);
     let mut active_filter = use_signal(|| "All".to_string());
     let mut expanded: Signal<Vec<usize>> = use_signal(|| vec![0]);
 
@@ -493,7 +496,11 @@ pub fn StrategyPatchNotes() -> Element {
 
 fn render_filter_chip(label: &str, current: &str, signal: &mut Signal<String>) -> Element {
     let is_active = label == current;
-    let class = if is_active { "patch-chip active" } else { "patch-chip" };
+    let class = if is_active {
+        "patch-chip active"
+    } else {
+        "patch-chip"
+    };
     let label_owned = label.to_string();
     let mut sig = *signal;
 

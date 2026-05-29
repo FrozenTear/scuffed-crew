@@ -1,12 +1,12 @@
 use axum::{
+    Json,
     extract::{Path, Query, State},
     http::StatusCode,
-    Json,
 };
 use serde::Deserialize;
 
-use scuffed_auth::server::session::ErrorResponse;
 use scuffed_auth::server::AuthUser;
+use scuffed_auth::server::session::ErrorResponse;
 use scuffed_db::{Application, ApplicationStatus, AuditAction, AuditTargetType, OrgRole};
 
 use crate::extractors::OfficerUser;
@@ -60,19 +60,14 @@ pub async fn list_applications(
     State(state): State<AppState>,
     _officer: OfficerUser,
 ) -> Result<Json<Vec<Application>>, (StatusCode, Json<ErrorResponse>)> {
-    state
-        .db
-        .list_applications()
-        .await
-        .map(Json)
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: e.to_string(),
-                }),
-            )
-        })
+    state.db.list_applications().await.map(Json).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: e.to_string(),
+            }),
+        )
+    })
 }
 
 /// GET /api/applications/mine — own application status (any logged-in)
@@ -162,11 +157,7 @@ pub async fn update_application(
                     }
                 }
                 Err(e) => {
-                    tracing::error!(
-                        "Failed to auto-create member for application {}: {}",
-                        id,
-                        e
-                    );
+                    tracing::error!("Failed to auto-create member for application {}: {}", id, e);
                 }
             }
         }

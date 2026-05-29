@@ -271,8 +271,18 @@ pub fn TournamentsPage() -> impl IntoView {
         form_external_url.set(t.external_url.clone().unwrap_or_default());
         form_rules.set(t.rules.clone().unwrap_or_default());
         form_description.set(t.description.clone().unwrap_or_default());
-        form_starts_at.set(t.starts_at.as_deref().map(|s| s.chars().take(16).collect()).unwrap_or_default());
-        form_ends_at.set(t.ends_at.as_deref().map(|s| s.chars().take(16).collect()).unwrap_or_default());
+        form_starts_at.set(
+            t.starts_at
+                .as_deref()
+                .map(|s| s.chars().take(16).collect())
+                .unwrap_or_default(),
+        );
+        form_ends_at.set(
+            t.ends_at
+                .as_deref()
+                .map(|s| s.chars().take(16).collect())
+                .unwrap_or_default(),
+        );
         form_open.set(true);
     };
 
@@ -307,16 +317,28 @@ pub fn TournamentsPage() -> impl IntoView {
             let result = if let Some(id) = editing_id {
                 let body = UpdateTournamentBody {
                     name: Some(name),
-                    game_id: Some(if game_id.is_empty() { None } else { Some(game_id) }),
+                    game_id: Some(if game_id.is_empty() {
+                        None
+                    } else {
+                        Some(game_id)
+                    }),
                     format: Some(format),
                     max_teams: Some(max_teams),
                     best_of: Some(best_of),
                     swiss_rounds: Some(swiss_rounds),
                     is_external: Some(is_external),
                     is_open: Some(is_open),
-                    external_url: Some(if external_url.is_empty() { None } else { Some(external_url) }),
+                    external_url: Some(if external_url.is_empty() {
+                        None
+                    } else {
+                        Some(external_url)
+                    }),
                     rules: Some(if rules.is_empty() { None } else { Some(rules) }),
-                    description: Some(if description.is_empty() { None } else { Some(description) }),
+                    description: Some(if description.is_empty() {
+                        None
+                    } else {
+                        Some(description)
+                    }),
                     starts_at: Some(to_iso(starts_at)),
                     ends_at: Some(to_iso(ends_at)),
                 };
@@ -326,16 +348,28 @@ pub fn TournamentsPage() -> impl IntoView {
             } else {
                 let body = CreateTournamentBody {
                     name,
-                    game_id: if game_id.is_empty() { None } else { Some(game_id) },
+                    game_id: if game_id.is_empty() {
+                        None
+                    } else {
+                        Some(game_id)
+                    },
                     format,
                     max_teams,
                     best_of,
                     swiss_rounds,
                     is_external,
                     is_open,
-                    external_url: if external_url.is_empty() { None } else { Some(external_url) },
+                    external_url: if external_url.is_empty() {
+                        None
+                    } else {
+                        Some(external_url)
+                    },
                     rules: if rules.is_empty() { None } else { Some(rules) },
-                    description: if description.is_empty() { None } else { Some(description) },
+                    description: if description.is_empty() {
+                        None
+                    } else {
+                        Some(description)
+                    },
                     starts_at: to_iso(starts_at),
                     ends_at: to_iso(ends_at),
                 };
@@ -369,8 +403,16 @@ pub fn TournamentsPage() -> impl IntoView {
 
         spawn_local(async move {
             let body = AddParticipantBody {
-                team_id: if team_id.is_empty() { None } else { Some(team_id) },
-                external_name: if ext_name.is_empty() { None } else { Some(ext_name) },
+                team_id: if team_id.is_empty() {
+                    None
+                } else {
+                    Some(team_id)
+                },
+                external_name: if ext_name.is_empty() {
+                    None
+                } else {
+                    Some(ext_name)
+                },
                 seed,
             };
             match api::post::<_, TournamentParticipant>(
@@ -425,8 +467,11 @@ pub fn TournamentsPage() -> impl IntoView {
     let do_transition_status = move |new_status: String| {
         let tid = detail_id.get().unwrap_or_default();
         spawn_local(async move {
-            let body = StatusTransitionBody { status: new_status.clone() };
-            match api::patch::<_, Tournament>(&format!("/api/tournaments/{tid}/status"), &body).await
+            let body = StatusTransitionBody {
+                status: new_status.clone(),
+            };
+            match api::patch::<_, Tournament>(&format!("/api/tournaments/{tid}/status"), &body)
+                .await
             {
                 Ok(_) => {
                     toast.show(Toast::success(format!("Status changed to {new_status}")));
@@ -450,20 +495,26 @@ pub fn TournamentsPage() -> impl IntoView {
             return;
         }
 
-        let codes: Vec<String> = report_replay_codes.get()
+        let codes: Vec<String> = report_replay_codes
+            .get()
             .split([',', '\n'])
             .map(|s| s.trim().to_uppercase())
             .filter(|s| !s.is_empty())
             .collect();
 
         // Validate replay codes: OW2 format is [A-Z0-9]{6}
-        let invalid: Vec<&String> = codes.iter()
+        let invalid: Vec<&String> = codes
+            .iter()
             .filter(|c| c.len() != 6 || !c.chars().all(|ch| ch.is_ascii_alphanumeric()))
             .collect();
         if !invalid.is_empty() {
             toast.show(Toast::warning(format!(
                 "Invalid replay code(s): {}. Expected 6 alphanumeric characters.",
-                invalid.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")
+                invalid
+                    .iter()
+                    .map(|s| s.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
             )));
             return;
         }
@@ -474,7 +525,14 @@ pub fn TournamentsPage() -> impl IntoView {
                 score_a,
                 score_b,
                 winner_id,
-                notes: { let n = report_notes.get(); if n.trim().is_empty() { None } else { Some(n) } },
+                notes: {
+                    let n = report_notes.get();
+                    if n.trim().is_empty() {
+                        None
+                    } else {
+                        Some(n)
+                    }
+                },
                 replay_codes: if codes.is_empty() { None } else { Some(codes) },
             };
             match api::patch::<_, TournamentMatch>(

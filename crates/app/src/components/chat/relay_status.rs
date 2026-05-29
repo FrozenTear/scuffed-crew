@@ -100,10 +100,7 @@ const RELAY_STATUS_CSS: &str = r#"
 
 /// Compact pill showing relay connection state.
 #[component]
-pub fn RelayStatus(
-    state: RelayConnectionState,
-    on_retry: EventHandler<()>,
-) -> Element {
+pub fn RelayStatus(state: RelayConnectionState, on_retry: EventHandler<()>) -> Element {
     let modifier = match state {
         RelayConnectionState::Ready => "ready",
         RelayConnectionState::Connected => "connected",

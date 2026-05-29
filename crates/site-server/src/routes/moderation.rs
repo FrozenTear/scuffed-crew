@@ -1,7 +1,7 @@
 use axum::{
+    Json,
     extract::{Path, Query, State},
     http::StatusCode,
-    Json,
 };
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
@@ -134,18 +134,14 @@ pub async fn lift_moderation_action(
     admin: AdminUser,
     Path(id): Path<String>,
 ) -> Result<Json<ModerationAction>, (StatusCode, Json<ErrorResponse>)> {
-    let action = state
-        .db
-        .lift_moderation_action(&id)
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: e.to_string(),
-                }),
-            )
-        })?;
+    let action = state.db.lift_moderation_action(&id).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: e.to_string(),
+            }),
+        )
+    })?;
 
     audit(
         &state.db,
@@ -153,7 +149,10 @@ pub async fn lift_moderation_action(
         AuditAction::LiftedModerationAction,
         AuditTargetType::Moderation,
         &id,
-        Some(&format!("Lifted {} on member {}", action.action_type, action.member_id)),
+        Some(&format!(
+            "Lifted {} on member {}",
+            action.action_type, action.member_id
+        )),
     )
     .await;
 

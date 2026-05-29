@@ -1,6 +1,6 @@
 use oauth2::{
-    basic::BasicClient, AuthUrl, AuthorizationCode, ClientId, ClientSecret, CsrfToken,
-    RedirectUrl, Scope, TokenResponse, TokenUrl,
+    basic::BasicClient, AuthUrl, AuthorizationCode, ClientId, ClientSecret, CsrfToken, RedirectUrl,
+    Scope, TokenResponse, TokenUrl,
 };
 use serde::de::DeserializeOwned;
 use std::collections::HashMap;
@@ -105,8 +105,7 @@ fn create_client(config: &ProviderConfig) -> BasicClient {
         Some(ClientSecret::new(config.client_secret.clone())),
         AuthUrl::new(config.auth_url.to_string()).expect("Invalid auth URL (this is a bug)"),
         Some(
-            TokenUrl::new(config.token_url.to_string())
-                .expect("Invalid token URL (this is a bug)"),
+            TokenUrl::new(config.token_url.to_string()).expect("Invalid token URL (this is a bug)"),
         ),
     )
     .set_redirect_uri(

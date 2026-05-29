@@ -20,9 +20,10 @@ pub fn ProgressionPanel() -> Element {
             };
             let sessions = store.get_multi_capture_sessions().await.unwrap_or_default();
             let snaps = match sid {
-                Some(ref session_id) => {
-                    store.get_session_snapshots(session_id).await.unwrap_or_default()
-                }
+                Some(ref session_id) => store
+                    .get_session_snapshots(session_id)
+                    .await
+                    .unwrap_or_default(),
                 None => Vec::new(),
             };
             (sessions, snaps)
@@ -202,7 +203,11 @@ fn StatChart(props: StatChartProps) -> Element {
 
     let min_val = values.iter().cloned().fold(f64::INFINITY, f64::min);
     let max_val = values.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-    let range = if (max_val - min_val).abs() < 0.001 { 1.0 } else { max_val - min_val };
+    let range = if (max_val - min_val).abs() < 0.001 {
+        1.0
+    } else {
+        max_val - min_val
+    };
 
     let width = 200.0_f64;
     let height = 60.0_f64;

@@ -1,6 +1,6 @@
-pub mod sidebar;
-pub mod data_table;
-pub mod forms;
-pub mod status_pill;
 pub mod confirm_dialog;
+pub mod data_table;
 pub mod form_modal;
+pub mod forms;
+pub mod sidebar;
+pub mod status_pill;

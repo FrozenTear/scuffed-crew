@@ -152,7 +152,7 @@ fn db_summary_to_summary(db: DbStrategySummary) -> StrategySummary {
         map_id: db.map_id,
         sub_map_id: db.sub_map_id,
         game_mode: parse_game_mode(&db.game_mode),
-        owner_name: db.owner_name.unwrap_or_else(|| db.owner_id),
+        owner_name: db.owner_name.unwrap_or(db.owner_id),
         visibility: parse_visibility(&db.visibility),
         element_count: db.element_count as usize,
         updated_at: db.updated_at.into(),
@@ -192,15 +192,14 @@ impl Database {
                 phases: serde_json::to_value(vec![TimelinePhase::default()])
                     .unwrap_or(serde_json::Value::Array(vec![])),
                 coordinate_version: coordinate_version_to_string(CoordinateVersion::V2),
-                created_at: now.clone(),
+                created_at: now,
                 updated_at: now,
             };
 
-            let created: Option<DbStrategy> =
-                self.client.create("strategy").content(db).await?;
-            db_to_strategy(created.ok_or_else(|| {
-                DbError::NotFound("Failed to create strategy".into())
-            })?)
+            let created: Option<DbStrategy> = self.client.create("strategy").content(db).await?;
+            db_to_strategy(
+                created.ok_or_else(|| DbError::NotFound("Failed to create strategy".into()))?,
+            )
         })
         .await
     }
@@ -226,11 +225,9 @@ impl Database {
         visibility: Option<Visibility>,
     ) -> DbResult<Strategy> {
         with_timeout(async {
-            let existing: Option<DbStrategy> =
-                self.client.select(("strategy", id)).await?;
-            let mut db = existing.ok_or_else(|| {
-                DbError::NotFound(format!("Strategy {id} not found"))
-            })?;
+            let existing: Option<DbStrategy> = self.client.select(("strategy", id)).await?;
+            let mut db =
+                existing.ok_or_else(|| DbError::NotFound(format!("Strategy {id} not found")))?;
 
             if let Some(n) = name {
                 db.name = n.to_string();
@@ -243,11 +240,8 @@ impl Database {
             }
             db.updated_at = SurrealDatetime::from(Utc::now());
 
-            let updated: Option<DbStrategy> = self
-                .client
-                .update(("strategy", id))
-                .content(db)
-                .await?;
+            let updated: Option<DbStrategy> =
+                self.client.update(("strategy", id)).content(db).await?;
             db_to_strategy(updated.ok_or_else(|| {
                 DbError::NotFound(format!("Strategy {id} not found after update"))
             })?)
@@ -306,9 +300,8 @@ impl Database {
             let where_clause = conditions.join(" AND ");
 
             // Count total
-            let count_query = format!(
-                "SELECT count() as total FROM strategy WHERE {where_clause} GROUP ALL"
-            );
+            let count_query =
+                format!("SELECT count() as total FROM strategy WHERE {where_clause} GROUP ALL");
             let mut count_result = self.client.query(&count_query).await?;
 
             #[derive(Debug, Deserialize, SurrealValue)]
@@ -332,10 +325,7 @@ impl Database {
                 .await?;
             let rows: Vec<DbStrategySummary> = data_result.take(0)?;
 
-            Ok((
-                rows.into_iter().map(db_summary_to_summary).collect(),
-                total,
-            ))
+            Ok((rows.into_iter().map(db_summary_to_summary).collect(), total))
         })
         .await
     }
@@ -377,9 +367,8 @@ impl Database {
         with_timeout(async {
             let existing: Option<DbStrategy> =
                 self.client.select(("strategy", strategy_id)).await?;
-            let mut db = existing.ok_or_else(|| {
-                DbError::NotFound(format!("Strategy {strategy_id} not found"))
-            })?;
+            let mut db = existing
+                .ok_or_else(|| DbError::NotFound(format!("Strategy {strategy_id} not found")))?;
 
             let mut elements: Vec<serde_json::Value> =
                 serde_json::from_value(db.elements.clone()).unwrap_or_default();
@@ -410,9 +399,8 @@ impl Database {
         with_timeout(async {
             let existing: Option<DbStrategy> =
                 self.client.select(("strategy", strategy_id)).await?;
-            let mut db = existing.ok_or_else(|| {
-                DbError::NotFound(format!("Strategy {strategy_id} not found"))
-            })?;
+            let mut db = existing
+                .ok_or_else(|| DbError::NotFound(format!("Strategy {strategy_id} not found")))?;
 
             let mut elements: Vec<StrategyElement> =
                 serde_json::from_value(db.elements.clone()).unwrap_or_default();
@@ -420,8 +408,8 @@ impl Database {
                 *existing_elem = element.clone();
             }
 
-            db.elements = serde_json::to_value(&elements)
-                .unwrap_or(serde_json::Value::Array(vec![]));
+            db.elements =
+                serde_json::to_value(&elements).unwrap_or(serde_json::Value::Array(vec![]));
             db.updated_at = SurrealDatetime::from(Utc::now());
 
             let _: Option<DbStrategy> = self
@@ -443,16 +431,15 @@ impl Database {
         with_timeout(async {
             let existing: Option<DbStrategy> =
                 self.client.select(("strategy", strategy_id)).await?;
-            let mut db = existing.ok_or_else(|| {
-                DbError::NotFound(format!("Strategy {strategy_id} not found"))
-            })?;
+            let mut db = existing
+                .ok_or_else(|| DbError::NotFound(format!("Strategy {strategy_id} not found")))?;
 
             let mut elements: Vec<StrategyElement> =
                 serde_json::from_value(db.elements.clone()).unwrap_or_default();
             elements.retain(|e| e.id != element_id);
 
-            db.elements = serde_json::to_value(&elements)
-                .unwrap_or(serde_json::Value::Array(vec![]));
+            db.elements =
+                serde_json::to_value(&elements).unwrap_or(serde_json::Value::Array(vec![]));
             db.updated_at = SurrealDatetime::from(Utc::now());
 
             let _: Option<DbStrategy> = self
@@ -474,9 +461,8 @@ impl Database {
         with_timeout(async {
             let existing: Option<DbStrategy> =
                 self.client.select(("strategy", strategy_id)).await?;
-            let mut db = existing.ok_or_else(|| {
-                DbError::NotFound(format!("Strategy {strategy_id} not found"))
-            })?;
+            let mut db = existing
+                .ok_or_else(|| DbError::NotFound(format!("Strategy {strategy_id} not found")))?;
 
             let mut phases: Vec<serde_json::Value> =
                 serde_json::from_value(db.phases.clone()).unwrap_or_default();
@@ -507,9 +493,8 @@ impl Database {
         with_timeout(async {
             let existing: Option<DbStrategy> =
                 self.client.select(("strategy", strategy_id)).await?;
-            let mut db = existing.ok_or_else(|| {
-                DbError::NotFound(format!("Strategy {strategy_id} not found"))
-            })?;
+            let mut db = existing
+                .ok_or_else(|| DbError::NotFound(format!("Strategy {strategy_id} not found")))?;
 
             let mut phases: Vec<TimelinePhase> =
                 serde_json::from_value(db.phases.clone()).unwrap_or_default();
@@ -517,8 +502,7 @@ impl Database {
                 *existing_phase = phase.clone();
             }
 
-            db.phases = serde_json::to_value(&phases)
-                .unwrap_or(serde_json::Value::Array(vec![]));
+            db.phases = serde_json::to_value(&phases).unwrap_or(serde_json::Value::Array(vec![]));
             db.updated_at = SurrealDatetime::from(Utc::now());
 
             let _: Option<DbStrategy> = self
@@ -532,24 +516,18 @@ impl Database {
     }
 
     /// Delete a phase from a strategy (for WS collab persistence).
-    pub async fn delete_strategy_phase(
-        &self,
-        strategy_id: &str,
-        phase_id: Uuid,
-    ) -> DbResult<()> {
+    pub async fn delete_strategy_phase(&self, strategy_id: &str, phase_id: Uuid) -> DbResult<()> {
         with_timeout(async {
             let existing: Option<DbStrategy> =
                 self.client.select(("strategy", strategy_id)).await?;
-            let mut db = existing.ok_or_else(|| {
-                DbError::NotFound(format!("Strategy {strategy_id} not found"))
-            })?;
+            let mut db = existing
+                .ok_or_else(|| DbError::NotFound(format!("Strategy {strategy_id} not found")))?;
 
             let mut phases: Vec<TimelinePhase> =
                 serde_json::from_value(db.phases.clone()).unwrap_or_default();
             phases.retain(|p| p.id != phase_id);
 
-            db.phases = serde_json::to_value(&phases)
-                .unwrap_or(serde_json::Value::Array(vec![]));
+            db.phases = serde_json::to_value(&phases).unwrap_or(serde_json::Value::Array(vec![]));
             db.updated_at = SurrealDatetime::from(Utc::now());
 
             let _: Option<DbStrategy> = self
@@ -563,11 +541,7 @@ impl Database {
     }
 
     /// Check if a user can access a strategy (view).
-    pub async fn can_access_strategy(
-        &self,
-        id: &str,
-        user_id: Option<&str>,
-    ) -> DbResult<bool> {
+    pub async fn can_access_strategy(&self, id: &str, user_id: Option<&str>) -> DbResult<bool> {
         let strategy = self.get_strategy(id).await?;
         match strategy {
             None => Ok(false),
@@ -579,11 +553,7 @@ impl Database {
     }
 
     /// Check if a user can edit a strategy (must be owner).
-    pub async fn can_edit_strategy(
-        &self,
-        id: &str,
-        user_id: &str,
-    ) -> DbResult<bool> {
+    pub async fn can_edit_strategy(&self, id: &str, user_id: &str) -> DbResult<bool> {
         let strategy = self.get_strategy(id).await?;
         match strategy {
             None => Ok(false),

@@ -3,11 +3,7 @@
 //! Provides server-managed key generation, relay auth event signing,
 //! and encrypted group messaging for officer/private channels.
 
-use axum::{
-    extract::State,
-    http::StatusCode,
-    Json,
-};
+use axum::{Json, extract::State, http::StatusCode};
 use scuffed_auth::server::session::ErrorResponse;
 use scuffed_chat::{AuthTokenRequest, AuthTokenResponse, EncryptionService, NostrAuthService};
 use scuffed_db::NostrKeyMode;
@@ -41,14 +37,12 @@ pub async fn provision_auth_token(
 
     // Check key mode
     match member.nostr_key_mode {
-        Some(NostrKeyMode::External) => {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                Json(ErrorResponse {
-                    error: "External key users must sign AUTH events client-side (NIP-07)".into(),
-                }),
-            ));
-        }
+        Some(NostrKeyMode::External) => Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "External key users must sign AUTH events client-side (NIP-07)".into(),
+            }),
+        )),
         Some(NostrKeyMode::ServerManaged) => {
             // Use existing encrypted key
             let encrypted = member.nostr_secret_key_encrypted.as_ref().ok_or_else(|| {
@@ -174,7 +168,9 @@ pub struct DecryptMessageResponse {
 }
 
 /// Extract CryptoService from AppState.
-fn require_crypto(state: &AppState) -> Result<scuffed_auth::crypto::CryptoService, (StatusCode, Json<ErrorResponse>)> {
+fn require_crypto(
+    state: &AppState,
+) -> Result<scuffed_auth::crypto::CryptoService, (StatusCode, Json<ErrorResponse>)> {
     state.crypto.clone().ok_or_else(|| {
         (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -205,17 +201,16 @@ pub async fn send_encrypted(
 
     // Verify sender has server-managed keys
     let sender_encrypted_key = match member.nostr_key_mode {
-        Some(NostrKeyMode::ServerManaged) => member
-            .nostr_secret_key_encrypted
-            .as_ref()
-            .ok_or_else(|| {
+        Some(NostrKeyMode::ServerManaged) => {
+            member.nostr_secret_key_encrypted.as_ref().ok_or_else(|| {
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     Json(ErrorResponse {
                         error: "Server-managed key missing encrypted secret".into(),
                     }),
                 )
-            })?,
+            })?
+        }
         Some(NostrKeyMode::External) => {
             return Err((
                 StatusCode::BAD_REQUEST,
@@ -293,10 +288,10 @@ pub async fn send_encrypted(
                 }),
             )
         })?;
-        if let Some(m) = m {
-            if let Some(pubkey) = &m.nostr_pubkey {
-                recipient_pubkeys.push(pubkey.clone());
-            }
+        if let Some(m) = m
+            && let Some(pubkey) = &m.nostr_pubkey
+        {
+            recipient_pubkeys.push(pubkey.clone());
         }
     }
 
@@ -388,17 +383,16 @@ pub async fn decrypt_message(
     let member = &caller.member;
 
     let encrypted_key = match member.nostr_key_mode {
-        Some(NostrKeyMode::ServerManaged) => member
-            .nostr_secret_key_encrypted
-            .as_ref()
-            .ok_or_else(|| {
+        Some(NostrKeyMode::ServerManaged) => {
+            member.nostr_secret_key_encrypted.as_ref().ok_or_else(|| {
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     Json(ErrorResponse {
                         error: "Server-managed key missing encrypted secret".into(),
                     }),
                 )
-            })?,
+            })?
+        }
         Some(NostrKeyMode::External) => {
             return Err((
                 StatusCode::BAD_REQUEST,

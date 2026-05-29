@@ -104,30 +104,45 @@ impl RoleAgg {
     }
 
     fn avg_elims(&self) -> f64 {
-        if self.matches == 0 { 0.0 } else { self.weighted_elims / self.matches as f64 }
+        if self.matches == 0 {
+            0.0
+        } else {
+            self.weighted_elims / self.matches as f64
+        }
     }
 
     fn avg_deaths(&self) -> f64 {
-        if self.matches == 0 { 0.0 } else { self.weighted_deaths / self.matches as f64 }
+        if self.matches == 0 {
+            0.0
+        } else {
+            self.weighted_deaths / self.matches as f64
+        }
     }
 
     fn avg_damage(&self) -> f64 {
-        if self.matches == 0 { 0.0 } else { self.weighted_damage / self.matches as f64 }
+        if self.matches == 0 {
+            0.0
+        } else {
+            self.weighted_damage / self.matches as f64
+        }
     }
 
     fn avg_healing(&self) -> f64 {
-        if self.matches == 0 { 0.0 } else { self.weighted_healing / self.matches as f64 }
+        if self.matches == 0 {
+            0.0
+        } else {
+            self.weighted_healing / self.matches as f64
+        }
     }
 }
 
 fn hero_to_role(name: &str) -> &'static str {
     match name {
-        "D.Va" | "Domina" | "Doomfist" | "Hazard" | "Junker Queen" | "Mauga"
-        | "Orisa" | "Ramattra" | "Reinhardt" | "Roadhog" | "Sigma"
-        | "Winston" | "Wrecking Ball" | "Zarya" => "Tank",
-        "Ana" | "Baptiste" | "Brigitte" | "Illari" | "Juno" | "Kiriko"
-        | "Lifeweaver" | "Lúcio" | "Mercy" | "Mizuki" | "Moira"
-        | "Wuyang" | "Zenyatta" => "Support",
+        "D.Va" | "Domina" | "Doomfist" | "Hazard" | "Junker Queen" | "Mauga" | "Orisa"
+        | "Ramattra" | "Reinhardt" | "Roadhog" | "Sigma" | "Winston" | "Wrecking Ball"
+        | "Zarya" => "Tank",
+        "Ana" | "Baptiste" | "Brigitte" | "Illari" | "Juno" | "Kiriko" | "Lifeweaver" | "Lúcio"
+        | "Mercy" | "Mizuki" | "Moira" | "Wuyang" | "Zenyatta" => "Support",
         _ => "Damage",
     }
 }
@@ -158,12 +173,23 @@ fn aggregate_roles(heroes: &[HeroStats]) -> Vec<RoleAgg> {
 
 fn map_game_mode(name: &str) -> &'static str {
     match name {
-        "Circuit Royal" | "Dorado" | "Havana" | "Junkertown" | "Rialto"
-        | "Route 66" | "Shambali Monastery" | "Watchpoint: Gibraltar" => "Escort",
-        "Blizzard World" | "Eichenwalde" | "Hollywood" | "King's Row"
-        | "Midtown" | "Numbani" | "Paraíso" => "Hybrid",
-        "Antarctic Peninsula" | "Busan" | "Ilios" | "Lijiang Tower"
-        | "Nepal" | "Oasis" | "Samoa" => "Control",
+        "Circuit Royal"
+        | "Dorado"
+        | "Havana"
+        | "Junkertown"
+        | "Rialto"
+        | "Route 66"
+        | "Shambali Monastery"
+        | "Watchpoint: Gibraltar" => "Escort",
+        "Blizzard World" | "Eichenwalde" | "Hollywood" | "King's Row" | "Midtown" | "Numbani"
+        | "Paraíso" => "Hybrid",
+        "Antarctic Peninsula"
+        | "Busan"
+        | "Ilios"
+        | "Lijiang Tower"
+        | "Nepal"
+        | "Oasis"
+        | "Samoa" => "Control",
         "Colosseo" | "Esperança" | "New Queen Street" | "Runasapi" => "Push",
         "Aatlis" | "New Junk City" | "Suravasa" => "Flashpoint",
         "Hanaoka" | "Throne of Anubis" => "Clash",
@@ -171,7 +197,15 @@ fn map_game_mode(name: &str) -> &'static str {
     }
 }
 
-const MODE_ORDER: &[&str] = &["Escort", "Hybrid", "Control", "Push", "Flashpoint", "Clash", "Other"];
+const MODE_ORDER: &[&str] = &[
+    "Escort",
+    "Hybrid",
+    "Control",
+    "Push",
+    "Flashpoint",
+    "Clash",
+    "Other",
+];
 
 fn mode_color(mode: &str) -> &'static str {
     match mode {
@@ -459,7 +493,13 @@ fn format_date(dt: &DateTime<Utc>) -> String {
 }
 
 fn wr_bar_color(pct: f64) -> &'static str {
-    if pct >= 55.0 { "#34d399" } else if pct >= 45.0 { "#fbbf24" } else { "#f87171" }
+    if pct >= 55.0 {
+        "#34d399"
+    } else if pct >= 45.0 {
+        "#fbbf24"
+    } else {
+        "#f87171"
+    }
 }
 
 #[component]
@@ -619,7 +659,7 @@ pub fn Stats() -> Element {
                             },
                             Some(list) => {
                                 let mut sorted: Vec<_> = list.iter().collect();
-                                sorted.sort_by(|a, b| b.matches.cmp(&a.matches));
+                                sorted.sort_by_key(|b| std::cmp::Reverse(b.matches));
 
                                 // Top heroes by win rate (min 3 matches, top 8)
                                 let mut by_wr: Vec<_> = list.iter()
@@ -705,7 +745,7 @@ pub fn Stats() -> Element {
                                         let mc = mode_color(mode);
 
                                         let mut sorted_maps: Vec<&&MapStats> = maps_in_mode.iter().collect();
-                                        sorted_maps.sort_by(|a, b| b.matches.cmp(&a.matches));
+                                        sorted_maps.sort_by_key(|b| std::cmp::Reverse(b.matches));
 
                                         let bar_entries: Vec<BarEntry> = sorted_maps.iter().map(|m| {
                                             let wr = winrate_pct(m.wins, m.matches);

@@ -1,7 +1,7 @@
 use axum::{
     extract::{
-        ws::{Message, WebSocket, WebSocketUpgrade},
         State,
+        ws::{Message, WebSocket, WebSocketUpgrade},
     },
     response::IntoResponse,
 };
@@ -43,10 +43,7 @@ pub async fn websocket_handler(
 }
 
 /// Extract user info from session cookie
-async fn get_user_from_cookie(
-    app: &AppState,
-    jar: &CookieJar,
-) -> Option<CollabUserInfo> {
+async fn get_user_from_cookie(app: &AppState, jar: &CookieJar) -> Option<CollabUserInfo> {
     let config = app.session_config();
     let token = jar.get(&config.cookie_name)?.value().to_string();
 
@@ -78,11 +75,11 @@ async fn handle_socket(socket: WebSocket, state: WsState, user: Option<CollabUse
                 }
                 Err(e) => {
                     tracing::error!("Failed to serialize WebSocket message: {}", e);
-                    if let Ok(error_json) = serde_json::to_string(&WsResponse::from(
-                        ServerMessage::Error {
+                    if let Ok(error_json) =
+                        serde_json::to_string(&WsResponse::from(ServerMessage::Error {
                             message: "Internal serialization error".into(),
-                        },
-                    )) {
+                        }))
+                    {
                         let _ = ws_sender.send(Message::Text(error_json.into())).await;
                     }
                 }
@@ -115,9 +112,7 @@ async fn handle_socket(socket: WebSocket, state: WsState, user: Option<CollabUse
                 }
             }
             Message::Ping(_data) => {
-                let _ = tx
-                    .send(WsResponse::from(ServerMessage::Pong))
-                    .await;
+                let _ = tx.send(WsResponse::from(ServerMessage::Pong)).await;
             }
             Message::Close(_) => break,
             _ => {}
@@ -125,10 +120,10 @@ async fn handle_socket(socket: WebSocket, state: WsState, user: Option<CollabUse
     }
 
     // Leave room on disconnect
-    if let Some(room_id) = current_room {
-        if let Some(ref uid) = user_id {
-            state.rooms.leave_room(&room_id, uid);
-        }
+    if let Some(room_id) = current_room
+        && let Some(ref uid) = user_id
+    {
+        state.rooms.leave_room(&room_id, uid);
     }
 
     send_task.abort();
@@ -192,9 +187,7 @@ async fn handle_message(
             *current_room = Some(strategy_id.clone());
 
             // Get users in room
-            let users = state.rooms
-                .get_room_users(&strategy_id)
-                .unwrap_or_default();
+            let users = state.rooms.get_room_users(&strategy_id).unwrap_or_default();
 
             Some(ServerMessage::RoomJoined { strategy, users })
         }
@@ -220,7 +213,13 @@ async fn handle_message(
             };
 
             // Permission check via DB
-            if !state.app.db.can_edit_strategy(room_id, &u.id).await.unwrap_or(false) {
+            if !state
+                .app
+                .db
+                .can_edit_strategy(room_id, &u.id)
+                .await
+                .unwrap_or(false)
+            {
                 return Some(ServerMessage::Error {
                     message: "Permission denied".into(),
                 });
@@ -260,7 +259,13 @@ async fn handle_message(
                 });
             };
 
-            if !state.app.db.can_edit_strategy(room_id, &u.id).await.unwrap_or(false) {
+            if !state
+                .app
+                .db
+                .can_edit_strategy(room_id, &u.id)
+                .await
+                .unwrap_or(false)
+            {
                 return Some(ServerMessage::Error {
                     message: "Permission denied".into(),
                 });
@@ -272,12 +277,12 @@ async fn handle_message(
             let patch = changes.clone();
             tokio::spawn(async move {
                 // Read-modify-write: load current element, apply patch, save
-                if let Ok(Some(strategy)) = db.get_strategy(&rid).await {
-                    if let Some(mut elem) = strategy.elements.into_iter().find(|e| e.id == id) {
-                        elem.apply_patch(&patch);
-                        if let Err(e) = db.update_strategy_element(&rid, id, &elem).await {
-                            tracing::error!("Failed to persist element update for strategy {rid}: {e}");
-                        }
+                if let Ok(Some(strategy)) = db.get_strategy(&rid).await
+                    && let Some(mut elem) = strategy.elements.into_iter().find(|e| e.id == id)
+                {
+                    elem.apply_patch(&patch);
+                    if let Err(e) = db.update_strategy_element(&rid, id, &elem).await {
+                        tracing::error!("Failed to persist element update for strategy {rid}: {e}");
                     }
                 }
             });
@@ -307,7 +312,13 @@ async fn handle_message(
                 });
             };
 
-            if !state.app.db.can_edit_strategy(room_id, &u.id).await.unwrap_or(false) {
+            if !state
+                .app
+                .db
+                .can_edit_strategy(room_id, &u.id)
+                .await
+                .unwrap_or(false)
+            {
                 return Some(ServerMessage::Error {
                     message: "Permission denied".into(),
                 });
@@ -346,7 +357,13 @@ async fn handle_message(
                 });
             };
 
-            if !state.app.db.can_edit_strategy(room_id, &u.id).await.unwrap_or(false) {
+            if !state
+                .app
+                .db
+                .can_edit_strategy(room_id, &u.id)
+                .await
+                .unwrap_or(false)
+            {
                 return Some(ServerMessage::Error {
                     message: "Permission denied".into(),
                 });
@@ -386,7 +403,13 @@ async fn handle_message(
                 });
             };
 
-            if !state.app.db.can_edit_strategy(room_id, &u.id).await.unwrap_or(false) {
+            if !state
+                .app
+                .db
+                .can_edit_strategy(room_id, &u.id)
+                .await
+                .unwrap_or(false)
+            {
                 return Some(ServerMessage::Error {
                     message: "Permission denied".into(),
                 });
@@ -397,12 +420,12 @@ async fn handle_message(
             let rid = room_id.clone();
             let patch = changes.clone();
             tokio::spawn(async move {
-                if let Ok(Some(strategy)) = db.get_strategy(&rid).await {
-                    if let Some(mut phase) = strategy.phases.into_iter().find(|p| p.id == id) {
-                        phase.apply_patch(&patch);
-                        if let Err(e) = db.update_strategy_phase(&rid, id, &phase).await {
-                            tracing::error!("Failed to persist phase update for strategy {rid}: {e}");
-                        }
+                if let Ok(Some(strategy)) = db.get_strategy(&rid).await
+                    && let Some(mut phase) = strategy.phases.into_iter().find(|p| p.id == id)
+                {
+                    phase.apply_patch(&patch);
+                    if let Err(e) = db.update_strategy_phase(&rid, id, &phase).await {
+                        tracing::error!("Failed to persist phase update for strategy {rid}: {e}");
                     }
                 }
             });
@@ -432,7 +455,13 @@ async fn handle_message(
                 });
             };
 
-            if !state.app.db.can_edit_strategy(room_id, &u.id).await.unwrap_or(false) {
+            if !state
+                .app
+                .db
+                .can_edit_strategy(room_id, &u.id)
+                .await
+                .unwrap_or(false)
+            {
                 return Some(ServerMessage::Error {
                     message: "Permission denied".into(),
                 });

@@ -101,7 +101,10 @@ async fn load_pubkey_allowlist(db: &scuffed_db::Database) -> HashSet<String> {
                 .filter(|pk| pk.len() == 64 && pk.chars().all(|c| c.is_ascii_hexdigit()))
                 .map(|pk| pk.to_lowercase())
                 .collect();
-            tracing::info!(count = pubkeys.len(), "loaded pubkey allowlist from database");
+            tracing::info!(
+                count = pubkeys.len(),
+                "loaded pubkey allowlist from database"
+            );
             pubkeys
         }
         Err(e) => {
@@ -263,7 +266,7 @@ fn main() {
         }
 
         events_processed += 1;
-        if events_processed % 1000 == 0 {
+        if events_processed.is_multiple_of(1000) {
             tracing::info!(events_processed, "policy checkpoint");
         }
     }

@@ -37,46 +37,46 @@ impl MultiKeyboardStream {
         let mut count = 0usize;
 
         for (path, device) in devices {
-            if let Some(keys) = device.supported_keys() {
-                if keys.contains(KeyCode::KEY_TAB)
-                    && keys.contains(KeyCode::KEY_A)
-                    && keys.contains(KeyCode::KEY_ENTER)
-                {
-                    let name = device.name().unwrap_or("unknown").to_string();
-                    let path_str = path.display().to_string();
-                    tracing::info!(
-                        name = %name,
-                        path = %path_str,
-                        "listening on keyboard device"
-                    );
+            if let Some(keys) = device.supported_keys()
+                && keys.contains(KeyCode::KEY_TAB)
+                && keys.contains(KeyCode::KEY_A)
+                && keys.contains(KeyCode::KEY_ENTER)
+            {
+                let name = device.name().unwrap_or("unknown").to_string();
+                let path_str = path.display().to_string();
+                tracing::info!(
+                    name = %name,
+                    path = %path_str,
+                    "listening on keyboard device"
+                );
 
-                    let tx = tx.clone();
-                    tokio::spawn(async move {
-                        let mut stream = match device.into_event_stream() {
-                            Ok(s) => s,
-                            Err(e) => {
-                                tracing::warn!(device = %name, error = %e, "failed to open event stream");
-                                return;
-                            }
-                        };
-                        loop {
-                            match stream.next_event().await {
-                                Ok(event) => {
-                                    if let EventSummary::Key(_, KeyCode::KEY_TAB, 1) = event.destructure() {
-                                        if tx.send(()).is_err() {
-                                            return;
-                                        }
-                                    }
-                                }
-                                Err(e) => {
-                                    tracing::debug!(device = %name, error = %e, "keyboard stream ended");
+                let tx = tx.clone();
+                tokio::spawn(async move {
+                    let mut stream = match device.into_event_stream() {
+                        Ok(s) => s,
+                        Err(e) => {
+                            tracing::warn!(device = %name, error = %e, "failed to open event stream");
+                            return;
+                        }
+                    };
+                    loop {
+                        match stream.next_event().await {
+                            Ok(event) => {
+                                if let EventSummary::Key(_, KeyCode::KEY_TAB, 1) =
+                                    event.destructure()
+                                    && tx.send(()).is_err()
+                                {
                                     return;
                                 }
                             }
+                            Err(e) => {
+                                tracing::debug!(device = %name, error = %e, "keyboard stream ended");
+                                return;
+                            }
                         }
-                    });
-                    count += 1;
-                }
+                    }
+                });
+                count += 1;
             }
         }
 
@@ -84,7 +84,10 @@ impl MultiKeyboardStream {
             return Err("no keyboard device found — ensure user is in the 'input' group".into());
         }
 
-        tracing::info!(device_count = count, "keyboard monitoring active on all devices");
+        tracing::info!(
+            device_count = count,
+            "keyboard monitoring active on all devices"
+        );
         Ok(MultiKeyboardStream { rx })
     }
 

@@ -16,8 +16,6 @@ pub enum Route {
         MemberProfile { id: String },
         #[route("/news")]
         News {},
-        #[route("/polls")]
-        Polls {},
         #[route("/apply")]
         Apply {},
         #[route("/tournaments")]
@@ -26,6 +24,10 @@ pub enum Route {
         Tournament { id: String },
         #[route("/identity")]
         IdentitySettings {},
+        #[route("/dm")]
+        DmInbox {},
+        #[route("/dm/:peer_pubkey")]
+        DmThread { peer_pubkey: String },
         #[route("/community")]
         Community {},
         #[route("/feed")]

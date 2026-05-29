@@ -93,8 +93,8 @@ const COMPOSE_CSS: &str = r#"
 
 #[component]
 pub fn PostCompose(on_post: EventHandler<FeedPost>) -> Element {
-    let mut content = use_signal(|| String::new());
-    let mut tags_input = use_signal(|| String::new());
+    let mut content = use_signal(String::new);
+    let mut tags_input = use_signal(String::new);
     let mut submitting = use_signal(|| false);
     let mut toasts = use_toast();
 
@@ -144,7 +144,7 @@ pub fn PostCompose(on_post: EventHandler<FeedPost>) -> Element {
                     toasts.show(Toast::success("Post published"));
                 }
                 Err(e) => {
-                    toasts.show(Toast::error(&format!("Failed to post: {e}")));
+                    toasts.show(Toast::error(format!("Failed to post: {e}")));
                 }
             }
             submitting.set(false);

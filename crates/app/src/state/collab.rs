@@ -7,8 +7,8 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
+use wasm_bindgen::prelude::*;
 use web_sys::{MessageEvent, WebSocket};
 
 use scuffed_types::strategy::{
@@ -144,10 +144,10 @@ fn setup_ws_connection(shared: &Rc<SharedWsState>, strategy_id: &StrategyId) {
                         strategy_id: strategy_id_open.clone(),
                     },
                 };
-                if let Some(socket) = shared_open.socket.borrow().as_ref() {
-                    if let Ok(json) = serde_json::to_string(&msg) {
-                        let _ = socket.send_with_str(&json);
-                    }
+                if let Some(socket) = shared_open.socket.borrow().as_ref()
+                    && let Ok(json) = serde_json::to_string(&msg)
+                {
+                    let _ = socket.send_with_str(&json);
                 }
             }) as Box<dyn FnMut(JsValue)>);
             ws.set_onopen(Some(onopen.as_ref().unchecked_ref()));
@@ -212,7 +212,8 @@ fn setup_ws_connection(shared: &Rc<SharedWsState>, strategy_id: &StrategyId) {
                         let callback = Closure::once(Box::new(move || {
                             *shared_timer.reconnect_timer_id.borrow_mut() = None;
                             setup_ws_connection(&shared_timer, &room_id);
-                        }) as Box<dyn FnOnce()>);
+                        })
+                            as Box<dyn FnOnce()>);
 
                         let Some(window) = web_sys::window() else {
                             tracing::error!("No window for reconnect timer");
@@ -346,10 +347,10 @@ impl CollabManager {
 
     /// Cancel any pending reconnection timer.
     fn cancel_reconnect_timer(&self) {
-        if let Some(timer_id) = self.shared.reconnect_timer_id.borrow_mut().take() {
-            if let Some(window) = web_sys::window() {
-                window.clear_timeout_with_handle(timer_id);
-            }
+        if let Some(timer_id) = self.shared.reconnect_timer_id.borrow_mut().take()
+            && let Some(window) = web_sys::window()
+        {
+            window.clear_timeout_with_handle(timer_id);
         }
     }
 }

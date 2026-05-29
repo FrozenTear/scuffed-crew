@@ -1,15 +1,12 @@
 mod bracket_view;
-mod match_card;
-mod single_elim;
 mod double_elim;
+mod match_card;
 mod round_robin;
-mod swiss;
+mod single_elim;
 mod styles;
+mod swiss;
 
 pub use bracket_view::BracketView;
-pub use match_card::{MatchCard, MatchCardState, TeamSlot};
-pub use single_elim::{BracketSingleElim, BracketMatch, BracketRound};
-pub use double_elim::BracketDoubleElim;
-pub use round_robin::RoundRobinTable;
-pub use swiss::{SwissStanding, SwissStandings};
+pub use single_elim::{BracketMatch, BracketRound};
 pub use styles::BRACKET_STYLES;
+pub use swiss::SwissStanding;

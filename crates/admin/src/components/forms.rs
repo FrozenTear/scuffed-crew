@@ -47,10 +47,7 @@ pub fn SelectField(
 
 /// Checkbox field for admin forms.
 #[component]
-pub fn CheckboxField(
-    label: &'static str,
-    value: RwSignal<bool>,
-) -> impl IntoView {
+pub fn CheckboxField(label: &'static str, value: RwSignal<bool>) -> impl IntoView {
     view! {
         <div class="form-group">
             <label class="checkbox-label">

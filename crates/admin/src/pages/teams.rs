@@ -315,9 +315,8 @@ pub fn TeamsPage() -> impl IntoView {
         }
     });
 
-    let roster_title = Signal::derive(move || {
-        format!("Roster \u{2014} {}", roster_team_name.get())
-    });
+    let roster_title =
+        Signal::derive(move || format!("Roster \u{2014} {}", roster_team_name.get()));
 
     view! {
         <h1>"Teams"</h1>

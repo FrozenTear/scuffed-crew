@@ -427,13 +427,13 @@ fn ScrimCard(
             if show_actions && status == "open" {
                 div { class: "scrim-actions",
                     { let scrim_id = scrim.id.clone();
-                      let on_change = on_change.clone();
+                      let on_change = on_change;
                       rsx! {
                         button {
                             class: "scrim-btn confirm",
                             onclick: move |_| {
                                 let sid = scrim_id.clone();
-                                let on_change = on_change.clone();
+                                let on_change = on_change;
                                 spawn(async move {
                                     let mut toast = use_toast();
                                     let body = UpdateScrimBody {
@@ -453,13 +453,13 @@ fn ScrimCard(
                         }
                     }}
                     { let scrim_id = scrim.id.clone();
-                      let on_change = on_change.clone();
+                      let on_change = on_change;
                       rsx! {
                         button {
                             class: "scrim-btn cancel",
                             onclick: move |_| {
                                 let sid = scrim_id.clone();
-                                let on_change = on_change.clone();
+                                let on_change = on_change;
                                 spawn(async move {
                                     let mut toast = use_toast();
                                     let body = UpdateScrimBody {
@@ -483,13 +483,13 @@ fn ScrimCard(
             if show_actions && status == "confirmed" {
                 div { class: "scrim-actions",
                     { let scrim_id = scrim.id.clone();
-                      let on_change = on_change.clone();
+                      let on_change = on_change;
                       rsx! {
                         button {
                             class: "scrim-btn complete",
                             onclick: move |_| {
                                 let sid = scrim_id.clone();
-                                let on_change = on_change.clone();
+                                let on_change = on_change;
                                 spawn(async move {
                                     let mut toast = use_toast();
                                     let body = UpdateScrimBody {
@@ -509,13 +509,13 @@ fn ScrimCard(
                         }
                     }}
                     { let scrim_id = scrim.id.clone();
-                      let on_change = on_change.clone();
+                      let on_change = on_change;
                       rsx! {
                         button {
                             class: "scrim-btn cancel",
                             onclick: move |_| {
                                 let sid = scrim_id.clone();
-                                let on_change = on_change.clone();
+                                let on_change = on_change;
                                 spawn(async move {
                                     let mut toast = use_toast();
                                     let body = UpdateScrimBody {
@@ -541,11 +541,7 @@ fn ScrimCard(
 }
 
 #[component]
-fn ScrimCreateForm(
-    teams: Vec<Team>,
-    games: Vec<Game>,
-    on_created: EventHandler<()>,
-) -> Element {
+fn ScrimCreateForm(teams: Vec<Team>, games: Vec<Game>, on_created: EventHandler<()>) -> Element {
     let mut team_id = use_signal(String::new);
     let mut game_id = use_signal(String::new);
     let mut scheduled_at = use_signal(String::new);
@@ -624,7 +620,7 @@ fn ScrimCreateForm(
                     let sched = scheduled_at().clone();
                     let dur_str = duration().clone();
                     let n = notes().clone();
-                    let on_created = on_created.clone();
+                    let on_created = on_created;
 
                     if tid.is_empty() || gid.is_empty() || sched.is_empty() {
                         let mut toast = use_toast();

@@ -38,9 +38,8 @@ pub fn PreviewPanel() -> Element {
                     match data_uri {
                         Ok(uri) => {
                             preview_src.set(Some(uri));
-                            preview_time.set(Some(
-                                chrono::Local::now().format("%H:%M:%S").to_string(),
-                            ));
+                            preview_time
+                                .set(Some(chrono::Local::now().format("%H:%M:%S").to_string()));
                         }
                         Err(e) => error_msg.set(Some(format!("Encode failed: {e}"))),
                     }

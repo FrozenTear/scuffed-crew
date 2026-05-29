@@ -1,9 +1,9 @@
 use dioxus::prelude::*;
 use serde::Deserialize;
 
-use scuffed_api_client::ApiClient;
 use crate::routes::Route;
 use crate::state::auth::use_auth;
+use scuffed_api_client::ApiClient;
 
 #[derive(Debug, Clone, Deserialize)]
 struct WikiPageData {
@@ -239,8 +239,8 @@ pub fn WikiPage(topic: String) -> Element {
     });
 
     let mut editing = use_signal(|| false);
-    let mut edit_content = use_signal(|| String::new());
-    let mut revision_note = use_signal(|| String::new());
+    let mut edit_content = use_signal(String::new);
+    let mut revision_note = use_signal(String::new);
     let mut save_error = use_signal(|| Option::<String>::None);
 
     rsx! {

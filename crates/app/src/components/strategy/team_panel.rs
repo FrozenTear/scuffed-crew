@@ -133,21 +133,48 @@ const TEAM_PANEL_CSS: &str = r#"
 /// Hero name lookup by ID (minimal inline table).
 fn hero_name(id: &str) -> &'static str {
     match id {
-        "dva" => "D.Va", "doomfist" => "Doomfist", "junker-queen" => "Junker Queen",
-        "mauga" => "Mauga", "orisa" => "Orisa", "ramattra" => "Ramattra",
-        "reinhardt" => "Reinhardt", "roadhog" => "Roadhog", "sigma" => "Sigma",
-        "winston" => "Winston", "wrecking-ball" => "Wrecking Ball", "zarya" => "Zarya",
+        "dva" => "D.Va",
+        "doomfist" => "Doomfist",
+        "junker-queen" => "Junker Queen",
+        "mauga" => "Mauga",
+        "orisa" => "Orisa",
+        "ramattra" => "Ramattra",
+        "reinhardt" => "Reinhardt",
+        "roadhog" => "Roadhog",
+        "sigma" => "Sigma",
+        "winston" => "Winston",
+        "wrecking-ball" => "Wrecking Ball",
+        "zarya" => "Zarya",
         "hazard" => "Hazard",
-        "ashe" => "Ashe", "bastion" => "Bastion", "cassidy" => "Cassidy",
-        "echo" => "Echo", "genji" => "Genji", "hanzo" => "Hanzo",
-        "junkrat" => "Junkrat", "mei" => "Mei", "pharah" => "Pharah",
-        "reaper" => "Reaper", "sojourn" => "Sojourn", "soldier-76" => "Soldier: 76",
-        "sombra" => "Sombra", "symmetra" => "Symmetra", "torbjorn" => "Torbjorn",
-        "tracer" => "Tracer", "venture" => "Venture", "widowmaker" => "Widowmaker",
-        "ana" => "Ana", "baptiste" => "Baptiste", "brigitte" => "Brigitte",
-        "illari" => "Illari", "juno" => "Juno", "kiriko" => "Kiriko",
-        "lifeweaver" => "Lifeweaver", "lucio" => "Lucio", "mercy" => "Mercy",
-        "moira" => "Moira", "zenyatta" => "Zenyatta",
+        "ashe" => "Ashe",
+        "bastion" => "Bastion",
+        "cassidy" => "Cassidy",
+        "echo" => "Echo",
+        "genji" => "Genji",
+        "hanzo" => "Hanzo",
+        "junkrat" => "Junkrat",
+        "mei" => "Mei",
+        "pharah" => "Pharah",
+        "reaper" => "Reaper",
+        "sojourn" => "Sojourn",
+        "soldier-76" => "Soldier: 76",
+        "sombra" => "Sombra",
+        "symmetra" => "Symmetra",
+        "torbjorn" => "Torbjorn",
+        "tracer" => "Tracer",
+        "venture" => "Venture",
+        "widowmaker" => "Widowmaker",
+        "ana" => "Ana",
+        "baptiste" => "Baptiste",
+        "brigitte" => "Brigitte",
+        "illari" => "Illari",
+        "juno" => "Juno",
+        "kiriko" => "Kiriko",
+        "lifeweaver" => "Lifeweaver",
+        "lucio" => "Lucio",
+        "mercy" => "Mercy",
+        "moira" => "Moira",
+        "zenyatta" => "Zenyatta",
         _ => "Unknown",
     }
 }
@@ -155,11 +182,10 @@ fn hero_name(id: &str) -> &'static str {
 /// Hero role lookup by ID.
 fn hero_role(id: &str) -> HeroRole {
     match id {
-        "dva" | "doomfist" | "junker-queen" | "mauga" | "orisa" | "ramattra"
-        | "reinhardt" | "roadhog" | "sigma" | "winston" | "wrecking-ball"
-        | "zarya" | "hazard" => HeroRole::Tank,
-        "ana" | "baptiste" | "brigitte" | "illari" | "juno" | "kiriko"
-        | "lifeweaver" | "lucio" | "mercy" | "moira" | "zenyatta" => HeroRole::Support,
+        "dva" | "doomfist" | "junker-queen" | "mauga" | "orisa" | "ramattra" | "reinhardt"
+        | "roadhog" | "sigma" | "winston" | "wrecking-ball" | "zarya" | "hazard" => HeroRole::Tank,
+        "ana" | "baptiste" | "brigitte" | "illari" | "juno" | "kiriko" | "lifeweaver" | "lucio"
+        | "mercy" | "moira" | "zenyatta" => HeroRole::Support,
         _ => HeroRole::Damage,
     }
 }

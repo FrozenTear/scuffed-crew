@@ -49,11 +49,7 @@ const MODAL_CSS: &str = r#"
 "#;
 
 #[component]
-pub fn Modal(
-    open: Signal<bool>,
-    on_close: EventHandler<()>,
-    children: Element,
-) -> Element {
+pub fn Modal(open: Signal<bool>, on_close: EventHandler<()>, children: Element) -> Element {
     if !open() {
         return rsx! {};
     }

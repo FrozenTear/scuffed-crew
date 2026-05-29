@@ -2,9 +2,14 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use scuffed_auth::SessionConfig;
-use scuffed_db::{Database, DbConfig};
 use scuffed_db::migrations::run_migrations;
-use scuffed_site_server::{create_router, notifications::MatrixNotifier, state::{AppState, OAuthConfig}, uploads};
+use scuffed_db::{Database, DbConfig};
+use scuffed_site_server::{
+    create_router,
+    notifications::MatrixNotifier,
+    state::{AppState, OAuthConfig},
+    uploads,
+};
 use tracing_subscriber::EnvFilter;
 
 const DEV_SESSION_TOKEN: &str = "dev-session-token-do-not-use-in-production";
@@ -24,15 +29,12 @@ async fn main() {
     // Connect to SurrealDB (remote or in-memory fallback)
     let db = match std::env::var("SURREALDB_URL") {
         Ok(url) => {
-            let user =
-                std::env::var("SURREALDB_USER").unwrap_or_else(|_| "root".to_string());
-            let pass =
-                std::env::var("SURREALDB_PASSWORD").unwrap_or_else(|_| "root".to_string());
+            let user = std::env::var("SURREALDB_USER").unwrap_or_else(|_| "root".to_string());
+            let pass = std::env::var("SURREALDB_PASSWORD").unwrap_or_else(|_| "root".to_string());
             let config = DbConfig {
                 namespace: std::env::var("SURREALDB_NS")
                     .unwrap_or_else(|_| "scuffed_crew".to_string()),
-                database: std::env::var("SURREALDB_DB")
-                    .unwrap_or_else(|_| "main".to_string()),
+                database: std::env::var("SURREALDB_DB").unwrap_or_else(|_| "main".to_string()),
             };
             Database::connect(&url, &user, &pass, config)
                 .await
@@ -57,7 +59,8 @@ async fn main() {
         let token_hash = hash_session_token(DEV_SESSION_TOKEN);
 
         db.client
-            .query(r#"
+            .query(
+                r#"
                 CREATE user:devadmin SET
                     provider = 'discord',
                     username = 'DevAdmin',
@@ -84,7 +87,8 @@ async fn main() {
                     token = $token_hash,
                     expires_at = time::now() + 365d,
                     created_at = time::now();
-            "#)
+            "#,
+            )
             .bind(("token_hash", token_hash))
             .await
             .expect("Failed to seed dev data");
@@ -233,9 +237,16 @@ async fn main() {
             // Semi 1: participant A wins (seed 1 beats seed 4)
             let s1 = &semis[0];
             let winner1 = s1.participant_a_id.as_ref().unwrap();
-            db.report_tournament_match(&s1.id, 2, 0, winner1, Some("Dominant performance"), vec!["ABC123".to_string(), "DEF456".to_string()])
-                .await
-                .expect("Failed to report semi 1");
+            db.report_tournament_match(
+                &s1.id,
+                2,
+                0,
+                winner1,
+                Some("Dominant performance"),
+                vec!["ABC123".to_string(), "DEF456".to_string()],
+            )
+            .await
+            .expect("Failed to report semi 1");
             // Advance winner to final
             if let (Some(next_id), Some(next_slot)) = (&s1.next_match_id, &s1.next_match_slot) {
                 db.set_match_participant(next_id, next_slot, winner1)
@@ -246,9 +257,20 @@ async fn main() {
             // Semi 2: participant A wins (seed 2 beats seed 3)
             let s2 = &semis[1];
             let winner2 = s2.participant_a_id.as_ref().unwrap();
-            db.report_tournament_match(&s2.id, 2, 1, winner2, Some("Close series"), vec!["GHI789".to_string(), "JKL012".to_string(), "MNO345".to_string()])
-                .await
-                .expect("Failed to report semi 2");
+            db.report_tournament_match(
+                &s2.id,
+                2,
+                1,
+                winner2,
+                Some("Close series"),
+                vec![
+                    "GHI789".to_string(),
+                    "JKL012".to_string(),
+                    "MNO345".to_string(),
+                ],
+            )
+            .await
+            .expect("Failed to report semi 2");
             // Advance winner to final
             if let (Some(next_id), Some(next_slot)) = (&s2.next_match_id, &s2.next_match_slot) {
                 db.set_match_participant(next_id, next_slot, winner2)
@@ -261,7 +283,8 @@ async fn main() {
 
         // ── Round Robin tournament seed ──
         db.client
-            .query(r#"
+            .query(
+                r#"
                 CREATE team:echo SET
                     name = 'Echo Company',
                     game_id = 'overwatch2',
@@ -302,7 +325,8 @@ async fn main() {
                 CREATE tournament_participant:rr4 SET
                     tournament_id = 'rr_demo', team_id = 'echo', external_name = NONE,
                     seed = 4, group_label = NONE, status = 'registered', created_at = time::now();
-            "#)
+            "#,
+            )
             .await
             .expect("Failed to seed RR tournament");
 
@@ -350,7 +374,8 @@ async fn main() {
 
         // ── Swiss tournament seed ──
         db.client
-            .query(r#"
+            .query(
+                r#"
                 CREATE tournament:swiss_demo SET
                     name = 'Scuffed Swiss Open',
                     game_id = 'overwatch2',
@@ -381,7 +406,8 @@ async fn main() {
                 CREATE tournament_participant:sw4 SET
                     tournament_id = 'swiss_demo', team_id = 'delta', external_name = NONE,
                     seed = 4, group_label = NONE, status = 'registered', created_at = time::now();
-            "#)
+            "#,
+            )
             .await
             .expect("Failed to seed Swiss tournament");
 
@@ -432,9 +458,8 @@ async fn main() {
 
     let db = Arc::new(db);
 
-    let upload_dir = PathBuf::from(
-        std::env::var("UPLOAD_DIR").unwrap_or_else(|_| "data/uploads".to_string()),
-    );
+    let upload_dir =
+        PathBuf::from(std::env::var("UPLOAD_DIR").unwrap_or_else(|_| "data/uploads".to_string()));
     uploads::ensure_upload_dir(&upload_dir)
         .await
         .expect("Failed to create upload directory");
@@ -452,7 +477,9 @@ async fn main() {
         }
         _ => {
             if is_dev {
-                tracing::warn!("Using deterministic dev key for Nostr challenges — NOT for production");
+                tracing::warn!(
+                    "Using deterministic dev key for Nostr challenges — NOT for production"
+                );
             }
             let hash = blake3::hash(b"scuffed-crew-dev-nostr-challenge-key");
             *hash.as_bytes()
@@ -480,6 +507,12 @@ async fn main() {
         tracing::info!("NOSTR_RELAY_URL not set — kind 0 profile publishing disabled");
     }
 
+    // Start the persistent NIP-44 DM relay subscriber (Phase 5 real-time delivery,
+    // [THE-878]). Falls back silently when relay or encryption is not configured —
+    // clients keep using `POST /api/nostr/dm/sync` for polling-based delivery.
+    let dm_events =
+        scuffed_site_server::dm_subscriber::start(db.clone(), crypto.clone(), relay_url.clone());
+
     let state = AppState {
         db: db.clone(),
         session_config: SessionConfig::default(),
@@ -489,6 +522,7 @@ async fn main() {
         nostr_challenge_key,
         crypto,
         relay_url,
+        dm_events,
     };
 
     // Spawn hourly session cleanup task

@@ -90,8 +90,7 @@ impl CryptoService {
             return Err(CryptoError::InvalidKey);
         }
 
-        let cipher =
-            Aes256Gcm::new_from_slice(&key_bytes).map_err(|_| CryptoError::InvalidKey)?;
+        let cipher = Aes256Gcm::new_from_slice(&key_bytes).map_err(|_| CryptoError::InvalidKey)?;
 
         Ok(Self {
             cipher,
@@ -123,7 +122,7 @@ impl CryptoService {
     pub fn generate_key() -> String {
         let mut key = [0u8; 32];
         OsRng.fill_bytes(&mut key);
-        let encoded = BASE64.encode(&key);
+        let encoded = BASE64.encode(key);
         key.zeroize();
         encoded
     }
@@ -144,7 +143,7 @@ impl CryptoService {
 
         Ok(EncryptedBlob {
             ciphertext: BASE64.encode(&ciphertext),
-            nonce: BASE64.encode(&nonce_bytes),
+            nonce: BASE64.encode(nonce_bytes),
             key_version: self.key_version,
         })
     }

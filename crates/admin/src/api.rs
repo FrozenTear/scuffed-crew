@@ -51,11 +51,14 @@ async fn do_fetch(method: &str, url: &str, body: Option<String>) -> ApiResult<Re
 
     if !resp.ok() {
         let status = resp.status();
-        let text = JsFuture::from(resp.text().map_err(|e| ApiError::Network(format!("{e:?}")))?)
-            .await
-            .map_err(|e| ApiError::Network(format!("{e:?}")))?
-            .as_string()
-            .unwrap_or_default();
+        let text = JsFuture::from(
+            resp.text()
+                .map_err(|e| ApiError::Network(format!("{e:?}")))?,
+        )
+        .await
+        .map_err(|e| ApiError::Network(format!("{e:?}")))?
+        .as_string()
+        .unwrap_or_default();
         return Err(ApiError::Status {
             status,
             message: text,
@@ -117,8 +120,7 @@ pub async fn delete(url: &str) -> ApiResult<()> {
 
 /// Upload a file via multipart form data.
 pub async fn upload_file<T: DeserializeOwned>(url: &str, file: web_sys::File) -> ApiResult<T> {
-    let form_data =
-        web_sys::FormData::new().map_err(|e| ApiError::Network(format!("{e:?}")))?;
+    let form_data = web_sys::FormData::new().map_err(|e| ApiError::Network(format!("{e:?}")))?;
     form_data
         .append_with_blob("file", &file)
         .map_err(|e| ApiError::Network(format!("{e:?}")))?;
@@ -143,11 +145,14 @@ pub async fn upload_file<T: DeserializeOwned>(url: &str, file: web_sys::File) ->
 
     if !resp.ok() {
         let status = resp.status();
-        let text = JsFuture::from(resp.text().map_err(|e| ApiError::Network(format!("{e:?}")))?)
-            .await
-            .map_err(|e| ApiError::Network(format!("{e:?}")))?
-            .as_string()
-            .unwrap_or_default();
+        let text = JsFuture::from(
+            resp.text()
+                .map_err(|e| ApiError::Network(format!("{e:?}")))?,
+        )
+        .await
+        .map_err(|e| ApiError::Network(format!("{e:?}")))?
+        .as_string()
+        .unwrap_or_default();
         return Err(ApiError::Status {
             status,
             message: text,

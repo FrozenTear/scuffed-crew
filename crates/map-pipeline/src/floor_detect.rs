@@ -26,8 +26,10 @@ pub fn detect_floors(
         .collect();
 
     if walkable_samples.is_empty() {
-        anyhow::bail!("No walkable surfaces found. Check walkable_slope_max_degrees ({} deg).",
-            config.walkable_slope_max_degrees);
+        anyhow::bail!(
+            "No walkable surfaces found. Check walkable_slope_max_degrees ({} deg).",
+            config.walkable_slope_max_degrees
+        );
     }
 
     tracing::info!("Found {} walkable faces", walkable_samples.len());
@@ -49,11 +51,17 @@ pub fn detect_floors(
     };
     let min_distance = (config.min_floor_gap / config.histogram_bin_width).ceil() as usize;
     let peaks = find_peaks_in_signal(&smoothed, prominence, min_distance);
-    tracing::info!("Peak detection: max_signal={:.1}, prominence_threshold={:.1}", max_signal, prominence);
+    tracing::info!(
+        "Peak detection: max_signal={:.1}, prominence_threshold={:.1}",
+        max_signal,
+        prominence
+    );
 
     if peaks.is_empty() {
-        anyhow::bail!("No floor peaks detected. Try lowering peak_min_prominence (currently {}).",
-            config.peak_min_prominence);
+        anyhow::bail!(
+            "No floor peaks detected. Try lowering peak_min_prominence (currently {}).",
+            config.peak_min_prominence
+        );
     }
 
     tracing::info!("Detected {} floor peaks", peaks.len());
@@ -85,7 +93,13 @@ pub fn detect_floors(
         let name = format!("Floor {}", i + 1);
         let id = format!("floor_{}", i + 1);
 
-        tracing::info!("  {} (peak Y={:.1}m): [{:.1}m, {:.1}m]", name, peak_y, floor_y_min, floor_y_max);
+        tracing::info!(
+            "  {} (peak Y={:.1}m): [{:.1}m, {:.1}m]",
+            name,
+            peak_y,
+            floor_y_min,
+            floor_y_max
+        );
 
         floors.push(FloorConfig {
             id,
@@ -97,7 +111,9 @@ pub fn detect_floors(
     }
 
     // Make the floor closest to y=0 the default (most likely "ground")
-    if let Some(ground_idx) = floors.iter().enumerate()
+    if let Some(ground_idx) = floors
+        .iter()
+        .enumerate()
         .min_by_key(|(_, f)| {
             let mid = (f.y_min + f.y_max) / 2.0;
             (mid.abs() * 1000.0) as i64
@@ -133,8 +149,14 @@ fn find_peaks_in_signal(signal: &[f64], min_prominence: f64, min_distance: usize
 
 /// Print a simple ASCII histogram to the terminal for diagnostics.
 pub fn print_histogram(result: &FloorDetectionResult) {
-    let max_val = result.histogram_values.iter().cloned().fold(0.0f64, f64::max);
-    if max_val == 0.0 { return; }
+    let max_val = result
+        .histogram_values
+        .iter()
+        .cloned()
+        .fold(0.0f64, f64::max);
+    if max_val == 0.0 {
+        return;
+    }
 
     let bar_width = 60;
     println!("\n  Y (m)  | Walkable surface area");
@@ -144,7 +166,11 @@ pub fn print_histogram(result: &FloorDetectionResult) {
         let y = result.histogram_edges[i];
         let bar_len = ((val / max_val) * bar_width as f64).round() as usize;
         let bar: String = "#".repeat(bar_len);
-        let marker = if result.peak_indices.contains(&i) { " <-- FLOOR" } else { "" };
+        let marker = if result.peak_indices.contains(&i) {
+            " <-- FLOOR"
+        } else {
+            ""
+        };
         println!("  {:6.1} | {}{}", y, bar, marker);
     }
     println!();
@@ -161,18 +187,20 @@ mod tests {
         // so the histogram has a clear peak for detection.
         // Winding order produces upward (+Y) normal.
         let scale = (area * 2.0).sqrt();
-        (0..count).map(|i| {
-            let x = i as f32 * scale;
-            // Triangular distribution: more samples near center
-            let t = i as f32 / count as f32; // 0..1
-            let t_centered = (t - 0.5) * 2.0; // -1..1
-            let y_offset = t_centered * t_centered.abs() * 1.5; // cubic-ish, ±1.5m, concentrated at 0
-            Triangle::new(
-                Vec3::new(x, y + y_offset, 0.0),
-                Vec3::new(x, y + y_offset, scale),
-                Vec3::new(x + scale, y + y_offset, 0.0),
-            )
-        }).collect()
+        (0..count)
+            .map(|i| {
+                let x = i as f32 * scale;
+                // Triangular distribution: more samples near center
+                let t = i as f32 / count as f32; // 0..1
+                let t_centered = (t - 0.5) * 2.0; // -1..1
+                let y_offset = t_centered * t_centered.abs() * 1.5; // cubic-ish, ±1.5m, concentrated at 0
+                Triangle::new(
+                    Vec3::new(x, y + y_offset, 0.0),
+                    Vec3::new(x, y + y_offset, scale),
+                    Vec3::new(x + scale, y + y_offset, 0.0),
+                )
+            })
+            .collect()
     }
 
     #[test]
@@ -218,13 +246,11 @@ mod tests {
         let config = DetectionConfig::default();
 
         // All vertical walls — no walkable surfaces
-        let triangles = vec![
-            Triangle::new(
-                Vec3::new(0.0, 0.0, 0.0),
-                Vec3::new(0.0, 5.0, 0.0),
-                Vec3::new(0.0, 0.0, 5.0),
-            ),
-        ];
+        let triangles = vec![Triangle::new(
+            Vec3::new(0.0, 0.0, 0.0),
+            Vec3::new(0.0, 5.0, 0.0),
+            Vec3::new(0.0, 0.0, 5.0),
+        )];
 
         let result = detect_floors(&triangles, &config);
         assert!(result.is_err());
@@ -249,6 +275,10 @@ mod tests {
         // Floor closest to y=0 should be default
         let default_floor = result.floors.iter().find(|f| f.is_default).unwrap();
         let default_mid = (default_floor.y_min + default_floor.y_max) / 2.0;
-        assert!(default_mid.abs() < 2.0, "Default floor mid={} should be near y=0", default_mid);
+        assert!(
+            default_mid.abs() < 2.0,
+            "Default floor mid={} should be near y=0",
+            default_mid
+        );
     }
 }

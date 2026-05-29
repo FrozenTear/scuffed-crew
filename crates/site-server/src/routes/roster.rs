@@ -1,7 +1,7 @@
 use axum::{
+    Json,
     extract::{Path, State},
     http::StatusCode,
-    Json,
 };
 use serde::Deserialize;
 
@@ -63,7 +63,10 @@ pub async fn add_to_roster(
         AuditAction::AddedToRoster,
         AuditTargetType::Roster,
         &team_id,
-        Some(&format!("Added member {} as {}", body.member_id, body.team_role)),
+        Some(&format!(
+            "Added member {} as {}",
+            body.member_id, body.team_role
+        )),
     )
     .await;
 

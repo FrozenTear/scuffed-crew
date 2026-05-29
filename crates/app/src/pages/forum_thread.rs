@@ -1,10 +1,10 @@
 use dioxus::prelude::*;
 use serde::{Deserialize, Serialize};
 
-use scuffed_api_client::ApiClient;
 use crate::components::{Toast, use_toast};
 use crate::routes::Route;
 use crate::state::auth::use_auth;
+use scuffed_api_client::ApiClient;
 
 #[derive(Debug, Clone, Deserialize)]
 struct ForumThreadData {

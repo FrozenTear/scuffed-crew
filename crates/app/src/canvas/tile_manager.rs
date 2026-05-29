@@ -7,8 +7,8 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use scuffed_types::TilePyramidInfo;
-use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
+use wasm_bindgen::prelude::*;
 use web_sys::HtmlImageElement;
 
 /// Key for identifying a tile: (floor_id, zoom_level, tile_x, tile_y)
@@ -41,7 +41,10 @@ impl std::fmt::Debug for TileManager {
             .field("loading_len", &self.loading.len())
             .field("cache_limit", &self.cache_limit)
             .field("lru_order_len", &self.lru_order.len())
-            .field("on_tile_loaded", &self.on_tile_loaded.as_ref().map(|_| ".."))
+            .field(
+                "on_tile_loaded",
+                &self.on_tile_loaded.as_ref().map(|_| ".."),
+            )
             .finish()
     }
 }
@@ -131,7 +134,9 @@ impl TileManager {
 
         let onload = Closure::<dyn Fn()>::new(move || {
             // Store in pending queue - will be processed on next render
-            pending.borrow_mut().push((key_clone.clone(), img_clone.clone()));
+            pending
+                .borrow_mut()
+                .push((key_clone.clone(), img_clone.clone()));
             if let Some(ref callback) = on_loaded {
                 callback();
             }

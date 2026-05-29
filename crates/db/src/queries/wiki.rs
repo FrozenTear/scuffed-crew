@@ -81,7 +81,7 @@ impl Database {
                 title: title.to_string(),
                 content_markdown: content_markdown.to_string(),
                 author_member_id: author_member_id.to_string(),
-                created_at: now.clone(),
+                created_at: now,
                 updated_at: now,
                 is_active: true,
             };
@@ -180,7 +180,7 @@ impl Database {
                 page_id: page_id.clone(),
                 content_markdown: page.content_markdown.clone(),
                 edited_by: edited_by.to_string(),
-                edited_at: now.clone(),
+                edited_at: now,
                 revision_note: revision_note.map(|s| s.to_string()),
             };
             let _: Option<DbWikiRevision> = self

@@ -18,6 +18,7 @@ struct DbArticle {
     cover_image_url: Option<String>,
     author_member_id: String,
     published: bool,
+    nostr_event_id: Option<String>,
     published_at: Option<SurrealDatetime>,
     created_at: SurrealDatetime,
     updated_at: SurrealDatetime,
@@ -37,6 +38,7 @@ fn db_to_article(db: DbArticle) -> Article {
         cover_image_url: db.cover_image_url,
         author_member_id: db.author_member_id,
         published: db.published,
+        nostr_event_id: db.nostr_event_id,
         published_at: db.published_at.map(|d| d.into()),
         created_at: db.created_at.into(),
         updated_at: db.updated_at.into(),
@@ -65,8 +67,9 @@ impl Database {
                 cover_image_url: cover_image_url.map(|s| s.to_string()),
                 author_member_id: author_member_id.to_string(),
                 published: false,
+                nostr_event_id: None,
                 published_at: None,
-                created_at: now.clone(),
+                created_at: now,
                 updated_at: now,
             };
             let created: Option<DbArticle> =
@@ -79,11 +82,7 @@ impl Database {
     }
 
     /// List published articles, ordered by published_at descending.
-    pub async fn list_published_articles(
-        &self,
-        limit: u32,
-        offset: u32,
-    ) -> DbResult<Vec<Article>> {
+    pub async fn list_published_articles(&self, limit: u32, offset: u32) -> DbResult<Vec<Article>> {
         with_timeout(async {
             let mut result = self
                 .client
@@ -98,11 +97,7 @@ impl Database {
     }
 
     /// List all articles (admin/officer view), ordered by created_at descending.
-    pub async fn list_all_articles(
-        &self,
-        limit: u32,
-        offset: u32,
-    ) -> DbResult<Vec<Article>> {
+    pub async fn list_all_articles(&self, limit: u32, offset: u32) -> DbResult<Vec<Article>> {
         with_timeout(async {
             let mut result = self
                 .client
@@ -129,7 +124,9 @@ impl Database {
                 .into_iter()
                 .next()
                 .map(db_to_article)
-                .ok_or_else(|| crate::DbError::NotFound(format!("Article with slug '{slug}' not found")))
+                .ok_or_else(|| {
+                    crate::DbError::NotFound(format!("Article with slug '{slug}' not found"))
+                })
         })
         .await
     }
@@ -144,11 +141,9 @@ impl Database {
         cover_image_url: Option<Option<&str>>,
     ) -> DbResult<Article> {
         with_timeout(async {
-            let existing: Option<DbArticle> =
-                self.client.select(("article", id)).await?;
-            let mut db = existing.ok_or_else(|| {
-                crate::DbError::NotFound(format!("Article {id} not found"))
-            })?;
+            let existing: Option<DbArticle> = self.client.select(("article", id)).await?;
+            let mut db = existing
+                .ok_or_else(|| crate::DbError::NotFound(format!("Article {id} not found")))?;
 
             if let Some(t) = title {
                 db.title = t.to_string();
@@ -164,11 +159,8 @@ impl Database {
             }
             db.updated_at = SurrealDatetime::from(Utc::now());
 
-            let updated: Option<DbArticle> = self
-                .client
-                .update(("article", id))
-                .content(db)
-                .await?;
+            let updated: Option<DbArticle> =
+                self.client.update(("article", id)).content(db).await?;
             Ok(db_to_article(updated.ok_or_else(|| {
                 crate::DbError::NotFound(format!("Article {id} not found after update"))
             })?))

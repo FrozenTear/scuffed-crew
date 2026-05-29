@@ -36,7 +36,8 @@ pub fn AppNav(
     #[prop(default = vec![])]
     links: Vec<NavLink>,
     /// User menu area (rendered in header-right), typically auth-dependent
-    #[prop(optional)] user_menu: Option<Children>,
+    #[prop(optional)]
+    user_menu: Option<Children>,
 ) -> impl IntoView {
     let (mobile_open, set_mobile_open) = signal(false);
     let close_nav = move |_: ev::MouseEvent| set_mobile_open.set(false);

@@ -1,20 +1,20 @@
 use axum::{
+    Json,
     extract::{Path, Query, State},
     http::StatusCode,
     response::{IntoResponse, Redirect},
-    Json,
 };
 use axum_extra::extract::cookie::CookieJar;
 use serde::Deserialize;
 
+use scuffed_auth::server::AuthUser;
+use scuffed_auth::server::OAuthProvider;
 use scuffed_auth::server::discord::DiscordProvider;
 use scuffed_auth::server::google::GoogleProvider;
 use scuffed_auth::server::session::{
     build_csrf_cookie, build_session_cookie, clear_session_cookie, generate_session_token,
     validate_csrf_state,
 };
-use scuffed_auth::server::OAuthProvider;
-use scuffed_auth::server::AuthUser;
 use scuffed_auth::{AuthProvider, UserInfo};
 use scuffed_db::Member;
 
@@ -45,8 +45,7 @@ pub async fn login(
                 redirect_base_url: config.redirect_base_url.clone(),
             };
             let (auth_url, csrf_token) = discord.get_auth_url();
-            let csrf_cookie =
-                build_csrf_cookie(&state.session_config, csrf_token.secret().clone());
+            let csrf_cookie = build_csrf_cookie(&state.session_config, csrf_token.secret().clone());
             (jar.add(csrf_cookie), Redirect::temporary(&auth_url)).into_response()
         }
         "google" => {
@@ -59,8 +58,7 @@ pub async fn login(
                 redirect_base_url: config.redirect_base_url.clone(),
             };
             let (auth_url, csrf_token) = google.get_auth_url();
-            let csrf_cookie =
-                build_csrf_cookie(&state.session_config, csrf_token.secret().clone());
+            let csrf_cookie = build_csrf_cookie(&state.session_config, csrf_token.secret().clone());
             (jar.add(csrf_cookie), Redirect::temporary(&auth_url)).into_response()
         }
         _ => (StatusCode::BAD_REQUEST, "Unknown provider").into_response(),
@@ -81,8 +79,7 @@ pub async fn callback(
     };
 
     // Validate CSRF
-    if let Err(rejection) =
-        validate_csrf_state(&jar, &state.session_config, params.state.as_ref())
+    if let Err(rejection) = validate_csrf_state(&jar, &state.session_config, params.state.as_ref())
     {
         return rejection.into_response();
     }
@@ -93,7 +90,10 @@ pub async fn callback(
     let (provider_id, username, avatar_url) = match auth_provider {
         AuthProvider::Discord => {
             if config.discord_client_id.is_empty() {
-                return (StatusCode::SERVICE_UNAVAILABLE, "Discord OAuth not configured")
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "Discord OAuth not configured",
+                )
                     .into_response();
             }
             let discord = DiscordProvider {
@@ -123,7 +123,10 @@ pub async fn callback(
         }
         AuthProvider::Google => {
             if config.google_client_id.is_empty() {
-                return (StatusCode::SERVICE_UNAVAILABLE, "Google OAuth not configured")
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "Google OAuth not configured",
+                )
                     .into_response();
             }
             let google = GoogleProvider {
@@ -219,11 +222,7 @@ pub async fn me(
                 .await
                 .ok()
                 .flatten();
-            Json(MeResponse {
-                user: info,
-                member,
-            })
-            .into_response()
+            Json(MeResponse { user: info, member }).into_response()
         }
         Err(rejection) => rejection.into_response(),
     }
@@ -231,10 +230,10 @@ pub async fn me(
 
 /// POST /api/auth/logout — clear session
 pub async fn logout(State(state): State<AppState>, jar: CookieJar) -> impl IntoResponse {
-    if let Some(cookie) = jar.get(&state.session_config.cookie_name) {
-        if let Err(e) = state.db.delete_session(cookie.value()).await {
-            tracing::warn!("Failed to delete session from DB: {e}");
-        }
+    if let Some(cookie) = jar.get(&state.session_config.cookie_name)
+        && let Err(e) = state.db.delete_session(cookie.value()).await
+    {
+        tracing::warn!("Failed to delete session from DB: {e}");
     }
     let clear_cookie = clear_session_cookie(&state.session_config);
     (jar.add(clear_cookie), StatusCode::OK).into_response()

@@ -3,6 +3,9 @@ use std::collections::HashMap;
 
 use super::single_elim::BracketMatch;
 
+/// Per-cell result: (score_a, score_b, winner_id, replay_codes).
+type CellResult = (Option<u32>, Option<u32>, Option<String>, Vec<String>);
+
 /// Round robin cross-table display.
 #[component]
 pub fn RoundRobinTable(
@@ -11,17 +14,26 @@ pub fn RoundRobinTable(
     participant_ids: Vec<String>,
 ) -> impl IntoView {
     // Build results grid: (row_id, col_id) -> (score_a, score_b, winner, replay_codes)
-    let mut results: HashMap<(String, String), (Option<u32>, Option<u32>, Option<String>, Vec<String>)> =
-        HashMap::new();
+    let mut results: HashMap<(String, String), CellResult> = HashMap::new();
     for m in &matches {
         if let (Some(a), Some(b)) = (&m.participant_a_id, &m.participant_b_id) {
             results.insert(
                 (a.clone(), b.clone()),
-                (m.score_a, m.score_b, m.winner_id.clone(), m.replay_codes.clone()),
+                (
+                    m.score_a,
+                    m.score_b,
+                    m.winner_id.clone(),
+                    m.replay_codes.clone(),
+                ),
             );
             results.insert(
                 (b.clone(), a.clone()),
-                (m.score_b, m.score_a, m.winner_id.clone(), m.replay_codes.clone()),
+                (
+                    m.score_b,
+                    m.score_a,
+                    m.winner_id.clone(),
+                    m.replay_codes.clone(),
+                ),
             );
         }
     }
@@ -38,7 +50,9 @@ pub fn RoundRobinTable(
                 if other == pid {
                     continue;
                 }
-                if let Some((my_score, their_score, winner, _)) = results.get(&(pid.clone(), other.clone())) {
+                if let Some((my_score, their_score, winner, _)) =
+                    results.get(&(pid.clone(), other.clone()))
+                {
                     diff += my_score.unwrap_or(0) as i32 - their_score.unwrap_or(0) as i32;
                     if winner.as_ref() == Some(pid) {
                         wins += 1;
@@ -79,7 +93,7 @@ pub fn RoundRobinTable(
                         let stats = standings.iter().find(|s| &s.0 == row_id).cloned();
                         let (wins, losses, draws) = stats.map(|s| (s.1, s.2, s.3)).unwrap_or((0, 0, 0));
 
-                        let cells = sorted_ids.iter().enumerate().map(|(_col_idx, col_id)| {
+                        let cells = sorted_ids.iter().map(|col_id| {
                             if row_id == col_id {
                                 view! { <td class="rr-self">"\u{2014}"</td> }.into_any()
                             } else if let Some((my_score, their_score, winner, codes)) = results.get(&(row_id.clone(), col_id.clone())) {

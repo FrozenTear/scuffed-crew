@@ -1,6 +1,8 @@
+use crate::components::{Divider, Nav};
+use crate::sections::{
+    About, Announcements, Comms, Footer, Hero, Recruit, Schedule, Teams, Tournaments,
+};
 use leptos::prelude::*;
-use crate::components::{Nav, Divider};
-use crate::sections::{Hero, About, Teams, Comms, Schedule, Announcements, Tournaments, Recruit, Footer};
 
 #[component]
 pub fn HomePage() -> impl IntoView {

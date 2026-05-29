@@ -257,17 +257,13 @@ impl MapName {
             | Self::Oasis
             | Self::Samoa => GameMode::Control,
 
-            Self::Colosseo
-            | Self::Esperanca
-            | Self::NewQueenStreet
-            | Self::Runasapi => GameMode::Push,
+            Self::Colosseo | Self::Esperanca | Self::NewQueenStreet | Self::Runasapi => {
+                GameMode::Push
+            }
 
-            Self::Aatlis
-            | Self::NewJunkCity
-            | Self::Suravasa => GameMode::Flashpoint,
+            Self::Aatlis | Self::NewJunkCity | Self::Suravasa => GameMode::Flashpoint,
 
-            Self::Hanaoka
-            | Self::ThroneOfAnubis => GameMode::Clash,
+            Self::Hanaoka | Self::ThroneOfAnubis => GameMode::Clash,
         }
     }
 

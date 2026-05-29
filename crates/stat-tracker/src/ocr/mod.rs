@@ -7,6 +7,9 @@ use image::DynamicImage;
 
 use crate::detect::hero_portrait::detect_team_size;
 
+/// Number of stat columns per scoreboard row: E, A, D, DMG, HLG, MIT.
+const STATS_PER_ROW: usize = 6;
+
 #[derive(Debug)]
 pub struct OcrResult {
     pub raw_text: String,
@@ -27,12 +30,11 @@ pub struct RowOcrResult {
 }
 
 fn tessdata_path_for_lang(lang: &str) -> Option<PathBuf> {
-    let custom = dirs::data_dir()
-        .map(|d| d.join("scuffed-stat-tracker").join("tessdata"));
-    if let Some(ref custom_dir) = custom {
-        if custom_dir.join(format!("{lang}.traineddata")).exists() {
-            return Some(custom_dir.clone());
-        }
+    let custom = dirs::data_dir().map(|d| d.join("scuffed-stat-tracker").join("tessdata"));
+    if let Some(ref custom_dir) = custom
+        && custom_dir.join(format!("{lang}.traineddata")).exists()
+    {
+        return Some(custom_dir.clone());
     }
     let system = PathBuf::from("/usr/share/tessdata");
     if system.join(format!("{lang}.traineddata")).exists() {
@@ -50,14 +52,12 @@ fn tessdata_lang() -> &'static str {
                 .exists()
         })
         .unwrap_or(false);
-    if has_koverwatch {
-        "koverwatch"
-    } else {
-        "eng"
-    }
+    if has_koverwatch { "koverwatch" } else { "eng" }
 }
 
-pub fn recognize_region(img: &DynamicImage) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+pub fn recognize_region(
+    img: &DynamicImage,
+) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
     let preprocessed = preprocess::prepare(img);
 
     let mut png_buf = Vec::new();
@@ -78,11 +78,16 @@ pub fn recognize_region(img: &DynamicImage) -> Result<String, Box<dyn std::error
 /// Per-cell OCR: extract and recognize a single stat cell.
 /// Uses PSM 7 (single text line) for short numeric strings.
 /// `whitelist` controls which characters Tesseract will consider.
-pub fn recognize_cell(img: &DynamicImage) -> Result<CellOcrResult, Box<dyn std::error::Error + Send + Sync>> {
+pub fn recognize_cell(
+    img: &DynamicImage,
+) -> Result<CellOcrResult, Box<dyn std::error::Error + Send + Sync>> {
     recognize_cell_with_whitelist(img, "0123456789,")
 }
 
-fn recognize_cell_with_whitelist(img: &DynamicImage, whitelist: &str) -> Result<CellOcrResult, Box<dyn std::error::Error + Send + Sync>> {
+fn recognize_cell_with_whitelist(
+    img: &DynamicImage,
+    whitelist: &str,
+) -> Result<CellOcrResult, Box<dyn std::error::Error + Send + Sync>> {
     let preprocessed = preprocess::prepare_cell(img);
 
     let mut png_buf = Vec::new();
@@ -108,7 +113,9 @@ fn recognize_cell_with_whitelist(img: &DynamicImage, whitelist: &str) -> Result<
 }
 
 /// Recognize a player name cell.
-pub fn recognize_name(img: &DynamicImage) -> Result<CellOcrResult, Box<dyn std::error::Error + Send + Sync>> {
+pub fn recognize_name(
+    img: &DynamicImage,
+) -> Result<CellOcrResult, Box<dyn std::error::Error + Send + Sync>> {
     let preprocessed = preprocess::prepare_name_cell(img);
 
     let mut png_buf = Vec::new();
@@ -139,17 +146,29 @@ pub fn recognize_row(row_img: &DynamicImage, columns: &preprocess::StatColumns) 
         recognize_name(&name_crop).ok()
     };
 
-    let cells = preprocess::extract_row_cells(row_img, columns);
-    let stats: Vec<CellOcrResult> = cells
-        .iter()
-        .enumerate()
-        .filter_map(|(i, cell)| {
+    // Produce exactly STATS_PER_ROW positional cells (E, A, D, DMG, HLG, MIT).
+    // A failed crop or OCR yields an empty placeholder rather than being dropped,
+    // so downstream indexing into `stats` always maps to the correct column —
+    // dropping a cell here would silently shift every later column's value.
+    let stats: Vec<CellOcrResult> = (0..STATS_PER_ROW)
+        .map(|i| {
             let whitelist = if i < 3 { "0123456789" } else { "0123456789," };
-            recognize_cell_with_whitelist(cell, whitelist).ok()
+            preprocess::crop_stat_cell(row_img, i, columns)
+                .and_then(|cell| recognize_cell_with_whitelist(&cell, whitelist).ok())
+                .unwrap_or_else(|| CellOcrResult {
+                    value: String::new(),
+                    confidence: 0,
+                })
         })
         .collect();
 
-    let confidences: Vec<i32> = stats.iter().map(|s| s.confidence).collect();
+    // Average only over cells that actually produced text — empty placeholders
+    // would otherwise drag a good row's confidence toward zero.
+    let confidences: Vec<i32> = stats
+        .iter()
+        .filter(|s| !s.value.is_empty())
+        .map(|s| s.confidence)
+        .collect();
     let mean_confidence = if confidences.is_empty() {
         0
     } else {
@@ -177,7 +196,10 @@ pub fn recognize_scoreboard_cells(img: &DynamicImage) -> Vec<RowOcrResult> {
 }
 
 /// OCR with explicit team size override. Pass None to auto-detect.
-pub fn recognize_scoreboard_cells_with_team_size(img: &DynamicImage, team_size_override: Option<usize>) -> Vec<RowOcrResult> {
+pub fn recognize_scoreboard_cells_with_team_size(
+    img: &DynamicImage,
+    team_size_override: Option<usize>,
+) -> Vec<RowOcrResult> {
     let cropped = preprocess::crop_scoreboard(img);
     let team_size = team_size_override.unwrap_or_else(|| {
         let detected = detect_team_size(&cropped);
@@ -262,9 +284,10 @@ fn calibrate_columns(scoreboard: &DynamicImage, team_size: usize) -> preprocess:
         fine_offset += 0.005;
     }
 
+    let board_w = scoreboard.width() as f64;
     tracing::debug!(
-        header_offset_px = (header_offset * 1664.0) as i32,
-        final_offset_px = (best_offset * 1664.0) as i32,
+        header_offset_px = (header_offset * board_w) as i32,
+        final_offset_px = (best_offset * board_w) as i32,
         valid_cells = best_valid,
         probe_count = probe_rows.len(),
         "two-phase column calibration"
@@ -276,12 +299,12 @@ fn calibrate_columns(scoreboard: &DynamicImage, team_size: usize) -> preprocess:
 fn count_valid_cells(row: &DynamicImage, cols: &preprocess::StatColumns) -> i32 {
     let mut valid = 0i32;
     for col_idx in 0..6 {
-        if let Some(cell) = preprocess::crop_stat_cell(row, col_idx, cols) {
-            if let Ok(result) = recognize_cell(&cell) {
-                let text = result.value.trim();
-                if is_clean_stat(text) {
-                    valid += 1;
-                }
+        if let Some(cell) = preprocess::crop_stat_cell(row, col_idx, cols)
+            && let Ok(result) = recognize_cell(&cell)
+        {
+            let text = result.value.trim();
+            if is_clean_stat(text) {
+                valid += 1;
             }
         }
     }
@@ -299,7 +322,9 @@ fn is_clean_stat(text: &str) -> bool {
 
 /// Full-image OCR (original approach with adaptive preprocessing).
 /// Used as fallback and for compatibility with the existing parse pipeline.
-pub fn recognize(img: &DynamicImage) -> Result<OcrResult, Box<dyn std::error::Error + Send + Sync>> {
+pub fn recognize(
+    img: &DynamicImage,
+) -> Result<OcrResult, Box<dyn std::error::Error + Send + Sync>> {
     let cropped = preprocess::crop_scoreboard(img);
 
     // Primary path: adaptive thresholding
@@ -311,11 +336,7 @@ pub fn recognize(img: &DynamicImage) -> Result<OcrResult, Box<dyn std::error::Er
     let lang = tessdata_lang();
     let primary = run_ocr(lang, &png_buf)?;
 
-    tracing::debug!(
-        confidence = primary.confidence,
-        lang,
-        "adaptive OCR result"
-    );
+    tracing::debug!(confidence = primary.confidence, lang, "adaptive OCR result");
 
     // If adaptive result is good enough, use it
     if primary.confidence >= 65 {
@@ -338,7 +359,9 @@ pub fn recognize(img: &DynamicImage) -> Result<OcrResult, Box<dyn std::error::Er
         }
 
         if let Ok(result) = run_ocr(lang, &buf) {
-            let dominated = best.as_ref().is_some_and(|b| b.confidence >= result.confidence);
+            let dominated = best
+                .as_ref()
+                .is_some_and(|b| b.confidence >= result.confidence);
             if !dominated {
                 best = Some(result);
                 png_buf = buf;
@@ -363,7 +386,11 @@ fn try_fallback(
     primary: OcrResult,
     png_buf: &[u8],
 ) -> Result<OcrResult, Box<dyn std::error::Error + Send + Sync>> {
-    let fallback_lang = if lang == "koverwatch" { "eng" } else { return Ok(primary); };
+    let fallback_lang = if lang == "koverwatch" {
+        "eng"
+    } else {
+        return Ok(primary);
+    };
 
     if primary.confidence >= 65 {
         return Ok(primary);

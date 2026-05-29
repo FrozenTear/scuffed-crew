@@ -1,10 +1,10 @@
 use dioxus::prelude::*;
 use serde::Deserialize;
 
+use crate::components::{ConfirmDialog, DataTable, StatusPill, Toast, use_toast};
+use crate::hooks::{ModalController, use_api};
 use scuffed_api_client::ApiClient;
 use scuffed_types::api::PatchApplicationRequest;
-use crate::components::{DataTable, ConfirmDialog, StatusPill, Toast, use_toast};
-use crate::hooks::{use_api, ModalController};
 
 // Local response type with API-enriched fields (user_display_name).
 #[derive(Debug, Clone, Deserialize)]
@@ -33,7 +33,10 @@ pub fn AdminApplications() -> Element {
                 review_notes: None,
             };
             let path = format!("/api/applications/{id}");
-            match ApiClient::web().patch_json::<_, Application>(&path, &body).await {
+            match ApiClient::web()
+                .patch_json::<_, Application>(&path, &body)
+                .await
+            {
                 Ok(_) => {
                     toast.show(Toast::success("Application accepted"));
                     applications.refresh += 1;
@@ -54,7 +57,10 @@ pub fn AdminApplications() -> Element {
                 review_notes: if notes.is_empty() { None } else { Some(notes) },
             };
             let path = format!("/api/applications/{id}");
-            match ApiClient::web().patch_json::<_, Application>(&path, &body).await {
+            match ApiClient::web()
+                .patch_json::<_, Application>(&path, &body)
+                .await
+            {
                 Ok(_) => {
                     toast.show(Toast::success("Application rejected"));
                     applications.refresh += 1;

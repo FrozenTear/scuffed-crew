@@ -30,8 +30,16 @@ pub fn FormModal(
     if !open {
         return rsx! {};
     }
-    let save_class = if danger { "btn-save danger" } else { "btn-save" };
-    let modal_class = if wide { "form-modal wide" } else { "form-modal" };
+    let save_class = if danger {
+        "btn-save danger"
+    } else {
+        "btn-save"
+    };
+    let modal_class = if wide {
+        "form-modal wide"
+    } else {
+        "form-modal"
+    };
     rsx! {
         div {
             class: "form-modal-overlay",
@@ -72,7 +80,11 @@ pub fn ConfirmDialog(
     if !open {
         return rsx! {};
     }
-    let btn_class = if danger { "btn-save danger" } else { "btn-save" };
+    let btn_class = if danger {
+        "btn-save danger"
+    } else {
+        "btn-save"
+    };
     rsx! {
         div {
             class: "form-modal-overlay",

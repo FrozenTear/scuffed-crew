@@ -71,7 +71,12 @@ fn start_daemon(data_dir: &std::path::Path) -> Result<u32, String> {
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::from(log_file))
         .stderr(std::process::Stdio::from(stderr_file))
-        .env("RUST_LOG", std::env::var("RUST_LOG").unwrap_or_else(|_| "scuffed_stat_tracker=info,stat_tracker=info,surrealdb=warn".into()))
+        .env(
+            "RUST_LOG",
+            std::env::var("RUST_LOG").unwrap_or_else(|_| {
+                "scuffed_stat_tracker=info,stat_tracker=info,surrealdb=warn".into()
+            }),
+        )
         .spawn()
         .map_err(|e| format!("Failed to spawn daemon: {e}"))?;
 

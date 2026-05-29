@@ -106,10 +106,7 @@ const CONNECTION_STATUS_CSS: &str = r#"
 /// Displays a colored dot and status text. When the connection is in an error
 /// or disconnected state, a retry button is shown.
 #[component]
-pub fn ConnectionStatus(
-    state: ConnectionState,
-    on_retry: EventHandler<()>,
-) -> Element {
+pub fn ConnectionStatus(state: ConnectionState, on_retry: EventHandler<()>) -> Element {
     let modifier = match state {
         ConnectionState::Connected => "connected",
         ConnectionState::Connecting => "connecting",
@@ -118,7 +115,10 @@ pub fn ConnectionStatus(
         ConnectionState::Error => "error",
     };
 
-    let show_retry = matches!(state, ConnectionState::Error | ConnectionState::Disconnected);
+    let show_retry = matches!(
+        state,
+        ConnectionState::Error | ConnectionState::Disconnected
+    );
 
     rsx! {
         style { {CONNECTION_STATUS_CSS} }

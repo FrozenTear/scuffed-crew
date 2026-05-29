@@ -1,7 +1,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use surrealdb_types::RecordId;
 use surrealdb::types::Datetime as SurrealDatetime;
+use surrealdb_types::RecordId;
 use surrealdb_types::SurrealValue;
 
 use crate::types::{MatchResult, MatchType, TeamRecord};
@@ -80,11 +80,8 @@ impl Database {
                 recorded_by: recorded_by.to_string(),
                 notes: notes.map(|s| s.to_string()),
             };
-            let created: Option<DbMatchResult> = self
-                .client
-                .create("match_result")
-                .content(db_match)
-                .await?;
+            let created: Option<DbMatchResult> =
+                self.client.create("match_result").content(db_match).await?;
             Ok(db_to_match(created.ok_or_else(|| {
                 crate::DbError::NotFound("Failed to record match".into())
             })?))
@@ -96,9 +93,7 @@ impl Database {
         with_timeout(async {
             let mut result = self
                 .client
-                .query(
-                    "SELECT * FROM match_result WHERE team_id = $tid ORDER BY played_at DESC",
-                )
+                .query("SELECT * FROM match_result WHERE team_id = $tid ORDER BY played_at DESC")
                 .bind(("tid", team_id.to_string()))
                 .await?;
             let matches: Vec<DbMatchResult> = result.take(0)?;
@@ -143,8 +138,7 @@ impl Database {
         notes: Option<Option<&str>>,
     ) -> DbResult<MatchResult> {
         with_timeout(async {
-            let existing: Option<DbMatchResult> =
-                self.client.select(("match_result", id)).await?;
+            let existing: Option<DbMatchResult> = self.client.select(("match_result", id)).await?;
             let mut db = existing
                 .ok_or_else(|| crate::DbError::NotFound(format!("Match {id} not found")))?;
 
@@ -170,11 +164,8 @@ impl Database {
                 db.notes = n.map(|s| s.to_string());
             }
 
-            let updated: Option<DbMatchResult> = self
-                .client
-                .update(("match_result", id))
-                .content(db)
-                .await?;
+            let updated: Option<DbMatchResult> =
+                self.client.update(("match_result", id)).content(db).await?;
             Ok(db_to_match(updated.ok_or_else(|| {
                 crate::DbError::NotFound(format!("Match {id} not found after update"))
             })?))

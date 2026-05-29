@@ -9,16 +9,16 @@ fn main() {
     let portraits_dir = Path::new("portraits");
     let mut entries = Vec::new();
 
-    if portraits_dir.exists() {
-        if let Ok(read_dir) = fs::read_dir(portraits_dir) {
-            for entry in read_dir.flatten() {
-                let path = entry.path();
-                if path.extension().and_then(|e| e.to_str()) == Some("png") {
-                    if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                        let abs_path = fs::canonicalize(&path).unwrap();
-                        entries.push((stem.to_string(), abs_path.display().to_string()));
-                    }
-                }
+    if portraits_dir.exists()
+        && let Ok(read_dir) = fs::read_dir(portraits_dir)
+    {
+        for entry in read_dir.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) == Some("png")
+                && let Some(stem) = path.file_stem().and_then(|s| s.to_str())
+            {
+                let abs_path = fs::canonicalize(&path).unwrap();
+                entries.push((stem.to_string(), abs_path.display().to_string()));
             }
         }
     }
@@ -27,7 +27,9 @@ fn main() {
 
     let mut code = String::new();
     code.push_str("/// Auto-generated bundled hero portraits.\n");
-    code.push_str("/// To update: add/replace PNGs in crates/stat-tracker/portraits/ and rebuild.\n");
+    code.push_str(
+        "/// To update: add/replace PNGs in crates/stat-tracker/portraits/ and rebuild.\n",
+    );
     code.push_str("pub fn bundled_portraits() -> &'static [(&'static str, &'static [u8])] {\n");
     code.push_str("    &[\n");
 

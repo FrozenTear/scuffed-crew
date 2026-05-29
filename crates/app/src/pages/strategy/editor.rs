@@ -26,8 +26,8 @@
 use dioxus::prelude::*;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
-use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
+use wasm_bindgen::prelude::*;
 
 use scuffed_api_client::ApiClient;
 use scuffed_types::strategy::{
@@ -462,7 +462,7 @@ fn EditorLayout(initial_strategy: Option<Strategy>) -> Element {
     });
 
     // Track previous tool for space-to-pan behavior
-    let prev_tool = use_hook(|| std::cell::Cell::new(Tool::Select));
+    let _prev_tool = use_hook(|| std::cell::Cell::new(Tool::Select));
 
     // =========================================================================
     // Playback auto-advance effect
@@ -517,12 +517,12 @@ fn EditorLayout(initial_strategy: Option<Strategy>) -> Element {
             let keydown_handler = Closure::<dyn FnMut(web_sys::KeyboardEvent)>::new(
                 move |event: web_sys::KeyboardEvent| {
                     // Don't handle shortcuts when typing in an input
-                    if let Some(target) = event.target() {
-                        if let Ok(element) = target.dyn_into::<web_sys::HtmlElement>() {
-                            let tag = element.tag_name().to_lowercase();
-                            if tag == "input" || tag == "textarea" || tag == "select" {
-                                return;
-                            }
+                    if let Some(target) = event.target()
+                        && let Ok(element) = target.dyn_into::<web_sys::HtmlElement>()
+                    {
+                        let tag = element.tag_name().to_lowercase();
+                        if tag == "input" || tag == "textarea" || tag == "select" {
+                            return;
                         }
                     }
 
@@ -572,8 +572,7 @@ fn EditorLayout(initial_strategy: Option<Strategy>) -> Element {
                         }
                         EditorAction::ToggleHealthPacks => {
                             event.prevent_default();
-                            canvas_state
-                                .with_mut(|c| c.show_health_packs = !c.show_health_packs);
+                            canvas_state.with_mut(|c| c.show_health_packs = !c.show_health_packs);
                         }
 
                         // Element actions
@@ -669,8 +668,8 @@ fn EditorLayout(initial_strategy: Option<Strategy>) -> Element {
 
                             // Snapshot current state for the async save
                             let snapshot = strategy_state.read().clone();
-                            let map_id = canvas_state.read().current_map.clone()
-                                .unwrap_or_default();
+                            let map_id =
+                                canvas_state.read().current_map.clone().unwrap_or_default();
                             let sub_map_id = canvas_state.read().selected_sub_map.clone();
 
                             spawn(async move {
@@ -680,14 +679,18 @@ fn EditorLayout(initial_strategy: Option<Strategy>) -> Element {
                                     let body = UpdateStrategyRequest {
                                         name: Some(snapshot.name.clone()),
                                         description: Some(snapshot.description.clone()),
-                                        visibility: Some(visibility_to_str(snapshot.visibility).to_string()),
+                                        visibility: Some(
+                                            visibility_to_str(snapshot.visibility).to_string(),
+                                        ),
                                         elements: Some(snapshot.elements.clone()),
                                         phases: Some(snapshot.phases.clone()),
                                     };
-                                    client.put_json::<_, Strategy>(
-                                        &format!("/api/strategy/strategies/{id}"),
-                                        &body,
-                                    ).await
+                                    client
+                                        .put_json::<_, Strategy>(
+                                            &format!("/api/strategy/strategies/{id}"),
+                                            &body,
+                                        )
+                                        .await
                                 } else {
                                     // Create new strategy
                                     let body = CreateStrategyRequest {
@@ -697,12 +700,12 @@ fn EditorLayout(initial_strategy: Option<Strategy>) -> Element {
                                         sub_map_id,
                                         game_mode: "control".to_string(),
                                         team_id: None,
-                                        visibility: visibility_to_str(snapshot.visibility).to_string(),
+                                        visibility: visibility_to_str(snapshot.visibility)
+                                            .to_string(),
                                     };
-                                    client.post_json::<_, Strategy>(
-                                        "/api/strategy/strategies",
-                                        &body,
-                                    ).await
+                                    client
+                                        .post_json::<_, Strategy>("/api/strategy/strategies", &body)
+                                        .await
                                 };
 
                                 match result {
@@ -749,11 +752,7 @@ fn EditorLayout(initial_strategy: Option<Strategy>) -> Element {
     let bottom_collapsed = !*bottom_open.read();
 
     // Derive display values
-    let map_display = cs
-        .current_map
-        .as_deref()
-        .unwrap_or("None")
-        .to_string();
+    let map_display = cs.current_map.as_deref().unwrap_or("None").to_string();
     let element_count = ss.elements.len();
     let tool_display = format!("{}", ds.active_tool);
     let phase_display = {
@@ -1197,11 +1196,7 @@ fn apply_undo(strategy_state: &mut Signal<StrategyState>, action: UndoableAction
                 s.has_unsaved_changes = true;
             });
         }
-        UndoableAction::AssignHeroToSlot {
-            slot,
-            previous,
-            ..
-        } => {
+        UndoableAction::AssignHeroToSlot { slot, previous, .. } => {
             strategy_state.with_mut(|s| {
                 if let Some(prev_hero) = previous {
                     s.assign_hero_to_slot(slot, prev_hero);
@@ -1265,9 +1260,7 @@ fn apply_redo(strategy_state: &mut Signal<StrategyState>, action: UndoableAction
                 s.remove_phase(phase.id);
             });
         }
-        UndoableAction::AssignHeroToSlot {
-            slot, hero_id, ..
-        } => {
+        UndoableAction::AssignHeroToSlot { slot, hero_id, .. } => {
             strategy_state.with_mut(|s| {
                 s.assign_hero_to_slot(slot, hero_id);
             });

@@ -34,7 +34,7 @@ impl SyncClient {
                 damage: m.damage,
                 healing: m.healing,
                 mitigation: m.mitigation,
-                played_at: chrono::DateTime::<chrono::Utc>::from(m.played_at.clone()),
+                played_at: chrono::DateTime::<chrono::Utc>::from(m.played_at),
             })
             .collect();
 

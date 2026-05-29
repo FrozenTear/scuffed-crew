@@ -14,15 +14,15 @@ use std::rc::Rc;
 use dioxus::prelude::*;
 use js_sys::Array;
 use uuid::Uuid;
-use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
+use wasm_bindgen::prelude::*;
 use web_sys::{CanvasRenderingContext2d, HtmlCanvasElement, HtmlImageElement};
 
 use scuffed_types::strategy::{
     Color, ElementType, HealthPack, HealthPackSize, MapMetadata, Position, StrategyElement, Tool,
 };
 
-use crate::canvas::tile_manager::{create_tile_manager, SharedTileManager};
+use crate::canvas::tile_manager::{SharedTileManager, create_tile_manager};
 
 // =============================================================================
 // CSS
@@ -236,7 +236,7 @@ pub fn MapCanvas(
 
     // Image version counter — incremented when map image or tiles load.
     // Subscribing to this in effects triggers redraws.
-    let mut image_version = use_signal(|| 0u32);
+    let image_version = use_signal(|| 0u32);
 
     // =========================================================================
     // Shared non-reactive state (Rc<RefCell<>>)
@@ -247,8 +247,7 @@ pub fn MapCanvas(
     let tile_update_scheduled: Rc<RefCell<bool>> = use_hook(|| Rc::new(RefCell::new(false)));
 
     // Map fallback image
-    let map_image: Rc<RefCell<Option<HtmlImageElement>>> =
-        use_hook(|| Rc::new(RefCell::new(None)));
+    let map_image: Rc<RefCell<Option<HtmlImageElement>>> = use_hook(|| Rc::new(RefCell::new(None)));
     let current_loaded_map: Rc<RefCell<Option<String>>> = use_hook(|| Rc::new(RefCell::new(None)));
 
     // Hero portrait cache
@@ -288,7 +287,7 @@ pub fn MapCanvas(
 
                 // Set up tile loaded callback with debouncing via requestAnimationFrame
                 let tile_update_scheduled_cb = tile_update_scheduled.clone();
-                let mut version_signal = image_version;
+                let version_signal = image_version;
                 tile_manager
                     .borrow_mut()
                     .set_on_tile_loaded(Rc::new(move || {
@@ -402,10 +401,8 @@ pub fn MapCanvas(
                     // Fallback: draw full image
                     let _ = ctx.draw_image_with_html_image_element(img, 0.0, 0.0);
 
-                    if show_hp {
-                        if let Some(ref meta) = metadata {
-                            draw_health_packs(&ctx, &meta.health_packs, Some(meta));
-                        }
+                    if show_hp && let Some(ref meta) = metadata {
+                        draw_health_packs(&ctx, &meta.health_packs, Some(meta));
                     }
                 } else {
                     // Placeholder grid while loading
@@ -729,9 +726,9 @@ pub fn MapCanvas(
                         }
                         Tool::Select => {
                             // Check if clicking on already-selected element to start dragging
-                            if let Some(sel_id) = selected_element {
-                                if let Some(element) = elements_4.iter().find(|e| e.id == sel_id) {
-                                    if crate::state::editor::is_position_near_element(pos, element, 30.0) {
+                            if let Some(sel_id) = selected_element
+                                && let Some(element) = elements_4.iter().find(|e| e.id == sel_id)
+                                    && crate::state::editor::is_position_near_element(pos, element, 30.0) {
                                         is_dragging.set(true);
                                         drag_start_pos.set(Some((sel_id, element.position)));
                                         drag_offset.set(Position::new(
@@ -740,8 +737,6 @@ pub fn MapCanvas(
                                         ));
                                         return;
                                     }
-                                }
-                            }
                             // Try to select an element at click position
                             let found = elements_3
                                 .iter()
@@ -754,13 +749,11 @@ pub fn MapCanvas(
                             on_erase_at.call(pos);
                         }
                         Tool::Text => {
-                            if let Some(window) = web_sys::window() {
-                                if let Ok(Some(text)) = window.prompt_with_message("Enter text:") {
-                                    if !text.is_empty() {
+                            if let Some(window) = web_sys::window()
+                                && let Ok(Some(text)) = window.prompt_with_message("Enter text:")
+                                    && !text.is_empty() {
                                         on_text_create.call((pos, text));
                                     }
-                                }
-                            }
                         }
                     }
                 },
@@ -891,12 +884,11 @@ pub fn MapCanvas(
                 onkeydown: move |evt: Event<KeyboardData>| {
                     let key = evt.data().key();
                     match key {
-                        Key::Delete | Key::Backspace => {
-                            if selected_element.is_some() {
+                        Key::Delete | Key::Backspace
+                            if selected_element.is_some() => {
                                 // Parent handles deletion through element select -> delete flow
                                 on_element_select.call(None);
                             }
-                        }
                         Key::Escape => {
                             on_element_select.call(None);
                             arrow_start.set(None);
@@ -931,6 +923,7 @@ pub fn MapCanvas(
 // Background tile rendering
 // =============================================================================
 
+#[allow(clippy::too_many_arguments)]
 fn render_background_tiles(
     ctx: &CanvasRenderingContext2d,
     canvas: &HtmlCanvasElement,
@@ -1209,13 +1202,11 @@ fn draw_element(
             ctx.stroke();
 
             // Label (only for plain markers)
-            if !drew_portrait {
-                if let Some(ref label) = element.label {
-                    ctx.set_fill_style_str("#fff");
-                    ctx.set_font("14px sans-serif");
-                    ctx.set_text_align("center");
-                    let _ = ctx.fill_text(label, x, y + 5.0);
-                }
+            if !drew_portrait && let Some(ref label) = element.label {
+                ctx.set_fill_style_str("#fff");
+                ctx.set_font("14px sans-serif");
+                ctx.set_text_align("center");
+                let _ = ctx.fill_text(label, x, y + 5.0);
             }
         }
         ElementType::Route { points } => {
@@ -1326,11 +1317,7 @@ fn draw_element(
 // Element number badge
 // =============================================================================
 
-fn draw_element_number(
-    ctx: &CanvasRenderingContext2d,
-    element: &StrategyElement,
-    number: usize,
-) {
+fn draw_element_number(ctx: &CanvasRenderingContext2d, element: &StrategyElement, number: usize) {
     let (badge_x, badge_y) = match &element.element_type {
         ElementType::PlayerMarker => (element.position.x + 18.0, element.position.y - 18.0),
         ElementType::Route { points }

@@ -13,8 +13,12 @@ pub use community::{
     EventAnnouncement, LfgRequest, MatchResult,
 };
 pub use nostr::auth::{AuthError, AuthTokenRequest, AuthTokenResponse, KeyMode, NostrAuthService};
-pub use nostr::encryption::{EncryptionError, EncryptionService, GiftWrappedEvent, UnwrappedMessage};
+pub use nostr::encryption::{
+    EncryptionError, EncryptionService, GiftWrappedEvent, UnwrappedMessage,
+};
 pub use nostr::events::{EventBuilder, EventError};
 pub use nostr::groups::{GroupError, GroupManager};
 pub use nostr::relay::{publish_event_oneshot, RelayClient, RelayError};
-pub use provisioning::{provision_team_channels, sync_team_roster, ProvisionedChannels, ProvisioningError};
+pub use provisioning::{
+    provision_team_channels, sync_team_roster, ProvisionedChannels, ProvisioningError,
+};

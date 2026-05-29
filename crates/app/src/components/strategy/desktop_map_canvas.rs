@@ -94,7 +94,9 @@ pub fn DesktopMapCanvas(
                 .as_deref()
                 .map(|s| format!(r#""{}""#, s))
                 .unwrap_or_else(|| "null".to_string());
-            document::eval(&format!("if(window.owCanvas)window.owCanvas.setMap({init_id})"));
+            document::eval(&format!(
+                "if(window.owCanvas)window.owCanvas.setMap({init_id})"
+            ));
         });
     }
 
@@ -195,7 +197,10 @@ pub fn DesktopMapCanvas(
                 .map(|s| format!(r#""{}""#, s))
                 .unwrap_or_else(|| "null".to_string());
 
-            let els: Vec<String> = elements_overlay.iter().map(|e| element_to_json(e)).collect();
+            let els: Vec<String> = elements_overlay
+                .iter()
+                .map(|e| element_to_json(e))
+                .collect();
 
             let js = format!(
                 "if(window.owCanvas)window.owCanvas.renderOverlay({{zoom:{},pan:{},drawColor:{},isDrawing:{},drawingPoints:[{}],arrowStart:{},arrowEnd:{},selectedElement:{},selectedPhase:{},elements:[{}]}})",

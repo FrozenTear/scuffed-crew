@@ -88,7 +88,7 @@ impl LayerManager {
     }
 
     pub fn is_visible(&self, layer_type: LayerType) -> bool {
-        self.get_layer(layer_type).map_or(false, |l| l.visible)
+        self.get_layer(layer_type).is_some_and(|l| l.visible)
     }
 
     pub fn opacity(&self, layer_type: LayerType) -> f32 {

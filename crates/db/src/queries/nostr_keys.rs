@@ -18,10 +18,9 @@ pub struct NostrKeypair {
 /// Uses secp256k1 directly — a Nostr keypair is just a secp256k1 keypair
 /// with the public key in x-only (Schnorr) format.
 pub fn generate_encrypted_keypair(db: &Database) -> DbResult<NostrKeypair> {
-    let crypto = db
-        .crypto
-        .as_ref()
-        .ok_or_else(|| DbError::Config("CryptoService not configured — set ENCRYPTION_KEY".into()))?;
+    let crypto = db.crypto.as_ref().ok_or_else(|| {
+        DbError::Config("CryptoService not configured — set ENCRYPTION_KEY".into())
+    })?;
 
     let secp = Secp256k1::new();
     let (secret_key, public_key) = secp.generate_keypair(&mut OsRng);
@@ -102,11 +101,7 @@ impl Database {
     ///
     /// Sets the pubkey to the externally-provided one, clears the encrypted
     /// secret key, and sets mode to `external`.
-    pub async fn set_external_nostr_key(
-        &self,
-        member_id: &str,
-        pubkey: &str,
-    ) -> DbResult<()> {
+    pub async fn set_external_nostr_key(&self, member_id: &str, pubkey: &str) -> DbResult<()> {
         self.update_member_nostr_keys(
             member_id,
             Some(pubkey),
@@ -190,7 +185,10 @@ mod tests {
             .unwrap();
 
         assert!(member.nostr_pubkey.is_some());
-        assert_eq!(member.nostr_key_mode, Some(crate::types::NostrKeyMode::ServerManaged));
+        assert_eq!(
+            member.nostr_key_mode,
+            Some(crate::types::NostrKeyMode::ServerManaged)
+        );
         assert!(member.nostr_secret_key_encrypted.is_some());
 
         // Pubkey should be valid 64-char hex
@@ -236,22 +234,36 @@ mod tests {
             .unwrap();
 
         // Should start as server_managed
-        assert_eq!(member.nostr_key_mode, Some(crate::types::NostrKeyMode::ServerManaged));
+        assert_eq!(
+            member.nostr_key_mode,
+            Some(crate::types::NostrKeyMode::ServerManaged)
+        );
 
         // Simulate linking an external key via update_member
         let external_pubkey = "a".repeat(64); // fake 64-char hex
         let updated = db
             .update_member(
                 &member.id,
-                None, None, None, None, None, None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
                 Some(Some(&external_pubkey)),
                 None,
             )
             .await
             .unwrap();
 
-        assert_eq!(updated.nostr_key_mode, Some(crate::types::NostrKeyMode::External));
-        assert_eq!(updated.nostr_pubkey.as_deref(), Some(external_pubkey.as_str()));
+        assert_eq!(
+            updated.nostr_key_mode,
+            Some(crate::types::NostrKeyMode::External)
+        );
+        assert_eq!(
+            updated.nostr_pubkey.as_deref(),
+            Some(external_pubkey.as_str())
+        );
         assert!(updated.nostr_secret_key_encrypted.is_none());
     }
 }

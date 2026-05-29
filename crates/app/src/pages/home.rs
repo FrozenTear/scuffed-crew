@@ -2,10 +2,10 @@ use dioxus::prelude::*;
 use serde::Deserialize;
 use std::collections::HashMap;
 
-use scuffed_api_client::ApiClient;
 use crate::components::SectionHeader;
 use crate::components::bracket::BRACKET_STYLES;
 use crate::routes::Route;
+use scuffed_api_client::ApiClient;
 
 // --- Data types ---
 
@@ -17,7 +17,10 @@ struct Overview {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-struct OverviewGame { id: String, name: String }
+struct OverviewGame {
+    id: String,
+    name: String,
+}
 
 #[derive(Debug, Clone, Deserialize)]
 struct OverviewTeam {
@@ -30,11 +33,15 @@ struct OverviewTeam {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-struct TeamRecord { wins: u32, losses: u32 }
+struct TeamRecord {
+    wins: u32,
+    losses: u32,
+}
 
 #[derive(Debug, Clone, Deserialize)]
 struct Announcement {
-    #[allow(dead_code)] id: String,
+    #[allow(dead_code)]
+    id: String,
     title: String,
     content: String,
     pinned: bool,
@@ -53,7 +60,8 @@ struct HomeTournament {
 
 #[derive(Debug, Clone, Deserialize)]
 struct Event {
-    #[allow(dead_code)] id: String,
+    #[allow(dead_code)]
+    id: String,
     title: String,
     day_of_week: u8,
     time: String,
@@ -173,22 +181,41 @@ const HOME_CSS: &str = r#"
 #[component]
 pub fn Home() -> Element {
     let overview = use_resource(|| async {
-        ApiClient::web().fetch::<Overview>("/api/public/overview").await.ok()
+        ApiClient::web()
+            .fetch::<Overview>("/api/public/overview")
+            .await
+            .ok()
     });
     let announcements = use_resource(|| async {
-        ApiClient::web().fetch::<CursorPage<Announcement>>("/api/announcements").await.ok().map(|r| r.data)
+        ApiClient::web()
+            .fetch::<CursorPage<Announcement>>("/api/announcements")
+            .await
+            .ok()
+            .map(|r| r.data)
     });
     let tournaments_res = use_resource(|| async {
-        ApiClient::web().fetch::<CursorPage<HomeTournament>>("/api/tournaments").await.ok().map(|r| r.data)
+        ApiClient::web()
+            .fetch::<CursorPage<HomeTournament>>("/api/tournaments")
+            .await
+            .ok()
+            .map(|r| r.data)
     });
     let events = use_resource(|| async {
-        ApiClient::web().fetch::<CursorPage<Event>>("/api/events").await.ok().map(|r| r.data)
+        ApiClient::web()
+            .fetch::<CursorPage<Event>>("/api/events")
+            .await
+            .ok()
+            .map(|r| r.data)
     });
 
     let (team_count, member_count, game_count) = {
         let o = overview.read();
         let o = o.as_ref().and_then(|o| o.as_ref());
-        (o.map(|o| o.teams.len()).unwrap_or(0), o.map(|o| o.member_count).unwrap_or(0), o.map(|o| o.games.len()).unwrap_or(0))
+        (
+            o.map(|o| o.teams.len()).unwrap_or(0),
+            o.map(|o| o.member_count).unwrap_or(0),
+            o.map(|o| o.games.len()).unwrap_or(0),
+        )
     };
 
     rsx! {
@@ -423,13 +450,26 @@ pub fn Home() -> Element {
 // --- Render helpers ---
 
 fn render_team_card(team: &OverviewTeam, game_map: &HashMap<String, String>) -> Element {
-    let game_name = game_map.get(&team.game_id).cloned().unwrap_or_else(|| team.game_id.clone());
-    let badge_class = if game_name.to_lowercase().contains("overwatch") { "team-game game-ow" }
-        else if game_name.to_lowercase().contains("destiny") { "team-game game-dest" }
-        else { "team-game game-other" };
-    let wl = if team.record.wins == 0 && team.record.losses == 0 { "\u{2014}".to_string() }
-        else { format!("{}-{}", team.record.wins, team.record.losses) };
-    let division = team.division.clone().unwrap_or_else(|| "Scrims & Internal".into());
+    let game_name = game_map
+        .get(&team.game_id)
+        .cloned()
+        .unwrap_or_else(|| team.game_id.clone());
+    let badge_class = if game_name.to_lowercase().contains("overwatch") {
+        "team-game game-ow"
+    } else if game_name.to_lowercase().contains("destiny") {
+        "team-game game-dest"
+    } else {
+        "team-game game-other"
+    };
+    let wl = if team.record.wins == 0 && team.record.losses == 0 {
+        "\u{2014}".to_string()
+    } else {
+        format!("{}-{}", team.record.wins, team.record.losses)
+    };
+    let division = team
+        .division
+        .clone()
+        .unwrap_or_else(|| "Scrims & Internal".into());
     let lore = team.lore_quote.clone().unwrap_or_default();
 
     rsx! {
@@ -465,10 +505,25 @@ fn render_news_card(a: &Announcement) -> Element {
 }
 
 fn render_tournament_card(t: &HomeTournament) -> Element {
-    let fmt = match t.format.as_str() { "single_elim" => "Single Elim", "double_elim" => "Double Elim", "round_robin" => "Round Robin", "swiss" => "Swiss", _ => &t.format };
-    let status = match t.status.as_str() { "registration" => "Registration Open", "in_progress" => "Live", "completed" => "Completed", _ => &t.status };
+    let fmt = match t.format.as_str() {
+        "single_elim" => "Single Elim",
+        "double_elim" => "Double Elim",
+        "round_robin" => "Round Robin",
+        "swiss" => "Swiss",
+        _ => &t.format,
+    };
+    let status = match t.status.as_str() {
+        "registration" => "Registration Open",
+        "in_progress" => "Live",
+        "completed" => "Completed",
+        _ => &t.status,
+    };
     let status_class = format!("tournament-card-status {}", t.status);
-    let date: String = t.starts_at.as_ref().map(|d| d.chars().take(10).collect()).unwrap_or_default();
+    let date: String = t
+        .starts_at
+        .as_ref()
+        .map(|d| d.chars().take(10).collect())
+        .unwrap_or_default();
 
     rsx! {
         Link { to: Route::Tournament { id: t.id.clone() }, class: "tournament-card",

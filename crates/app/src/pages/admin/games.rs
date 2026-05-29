@@ -1,9 +1,12 @@
 use dioxus::prelude::*;
 
-use scuffed_api_client::ApiClient;
-use scuffed_types::{Game, api::{CreateGameRequest, UpdateGameRequest}};
 use crate::components::{DataTable, FormModal, Toast, use_toast};
-use crate::hooks::{use_api, ModalController};
+use crate::hooks::{ModalController, use_api};
+use scuffed_api_client::ApiClient;
+use scuffed_types::{
+    Game,
+    api::{CreateGameRequest, UpdateGameRequest},
+};
 
 #[component]
 pub fn AdminGames() -> Element {
@@ -37,7 +40,11 @@ pub fn AdminGames() -> Element {
             return;
         }
         let abbr_raw = form_abbr().trim().to_string();
-        let abbr = if abbr_raw.is_empty() { None } else { Some(abbr_raw) };
+        let abbr = if abbr_raw.is_empty() {
+            None
+        } else {
+            Some(abbr_raw)
+        };
         let edit_id = modal.get_target();
 
         modal.start_submit();
@@ -48,9 +55,14 @@ pub fn AdminGames() -> Element {
                     name: Some(name),
                     abbreviation: Some(abbr),
                 };
-                client.put_json::<_, Game>(&format!("/api/games/{id}"), &body).await
+                client
+                    .put_json::<_, Game>(&format!("/api/games/{id}"), &body)
+                    .await
             } else {
-                let body = CreateGameRequest { name, abbreviation: abbr };
+                let body = CreateGameRequest {
+                    name,
+                    abbreviation: abbr,
+                };
                 client.post_json::<_, Game>("/api/games", &body).await
             };
 

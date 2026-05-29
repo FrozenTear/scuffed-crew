@@ -1,7 +1,7 @@
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
-use surrealdb_types::RecordId;
 use surrealdb::types::Datetime as SurrealDatetime;
+use surrealdb_types::RecordId;
 use surrealdb_types::SurrealValue;
 
 use scuffed_auth::crypto::hash_session_token;
@@ -34,7 +34,9 @@ impl Database {
                 id: None,
                 user_id: user_id.to_string(),
                 token: token_hash,
-                expires_at: SurrealDatetime::from(Utc::now() + chrono::Duration::hours(duration_hours)),
+                expires_at: SurrealDatetime::from(
+                    Utc::now() + chrono::Duration::hours(duration_hours),
+                ),
                 created_at: SurrealDatetime::from(Utc::now()),
             };
             let _: Option<DbSession> = self.client.create("session").content(session).await?;
@@ -49,9 +51,7 @@ impl Database {
             let token_hash = hash_session_token(raw_token);
             let mut result = self
                 .client
-                .query(
-                    "SELECT * FROM session WHERE token = $tok AND expires_at > time::now()",
-                )
+                .query("SELECT * FROM session WHERE token = $tok AND expires_at > time::now()")
                 .bind(("tok", token_hash))
                 .await?;
             let sessions: Vec<DbSession> = result.take(0)?;
@@ -83,9 +83,7 @@ impl Database {
 
             let mut result = self
                 .client
-                .query(
-                    "SELECT count() FROM session WHERE expires_at <= time::now() GROUP ALL",
-                )
+                .query("SELECT count() FROM session WHERE expires_at <= time::now() GROUP ALL")
                 .await?;
             let counts: Vec<CountResult> = result.take(0)?;
             let count = counts.first().map(|c| c.count).unwrap_or(0);

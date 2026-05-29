@@ -1,11 +1,13 @@
 use dioxus::prelude::*;
 use serde::Deserialize;
 
-use scuffed_api_client::ApiClient;
 use crate::routes::Route;
+use scuffed_api_client::ApiClient;
 
 fn encode_uri(s: &str) -> String {
-    js_sys::encode_uri_component(s).as_string().unwrap_or_default()
+    js_sys::encode_uri_component(s)
+        .as_string()
+        .unwrap_or_default()
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -119,7 +121,7 @@ const PAGE_CSS: &str = r#"
 
 #[component]
 pub fn Wiki() -> Element {
-    let mut search_text = use_signal(|| String::new());
+    let mut search_text = use_signal(String::new);
 
     let pages = use_resource(move || {
         let q = search_text();
@@ -129,10 +131,7 @@ pub fn Wiki() -> Element {
             } else {
                 format!("/api/wiki?q={}", encode_uri(&q))
             };
-            ApiClient::web()
-                .fetch::<WikiListResponse>(&url)
-                .await
-                .ok()
+            ApiClient::web().fetch::<WikiListResponse>(&url).await.ok()
         }
     });
 

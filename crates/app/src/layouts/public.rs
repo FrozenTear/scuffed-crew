@@ -116,6 +116,8 @@ const NAV_CSS: &str = r#"
 #[component]
 pub fn PublicLayout() -> Element {
     let mut menu_open = use_signal(|| false);
+    let auth = crate::state::auth::use_auth();
+    let is_logged_in = auth().is_logged_in();
 
     let hamburger_class = if menu_open() {
         "nav-hamburger open"
@@ -150,6 +152,9 @@ pub fn PublicLayout() -> Element {
                 li { Link { to: Route::Forum {}, "Forum" } }
                 li { Link { to: Route::StrategyBrowse {}, "Strategy" } }
                 li { Link { to: Route::Stats {}, "Stats" } }
+                if is_logged_in {
+                    li { Link { to: Route::DmInbox {}, "DMs" } }
+                }
                 li { Link { to: Route::Apply {}, class: "nav-cta", "Apply" } }
             }
             button {
@@ -176,6 +181,9 @@ pub fn PublicLayout() -> Element {
             Link { to: Route::Forum {}, onclick: move |_| menu_open.set(false), "Forum" }
             Link { to: Route::StrategyBrowse {}, onclick: move |_| menu_open.set(false), "Strategy" }
             Link { to: Route::Stats {}, onclick: move |_| menu_open.set(false), "Stats" }
+            if is_logged_in {
+                Link { to: Route::DmInbox {}, onclick: move |_| menu_open.set(false), "DMs" }
+            }
             Link { to: Route::Apply {}, onclick: move |_| menu_open.set(false),
                 class: "nav-cta",
                 style: "display: inline-block; padding: 0.5rem 1.5rem; border-radius: 6px; margin-top: 1rem;",

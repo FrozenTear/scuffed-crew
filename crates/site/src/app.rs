@@ -5,20 +5,23 @@ use leptos_router::{
     components::{Route, Router, Routes},
     path,
 };
-use serde::Deserialize;
-use scuffed_ui::{scuffed_crew_theme, ThemeProvider};
-use scuffed_ui::components::toast::{ToastContainer, ToastState};
+use scuffed_auth::client::api;
+use scuffed_ui::components::auth_buttons::AUTH_BUTTONS_STYLES;
+use scuffed_ui::components::avatar::AVATAR_STYLES;
+use scuffed_ui::components::badge::BADGE_STYLES;
 use scuffed_ui::components::button::BUTTON_STYLES;
 use scuffed_ui::components::card::CARD_STYLES;
+use scuffed_ui::components::modal::MODAL_STYLES;
 use scuffed_ui::components::nav::NAV_STYLES;
 use scuffed_ui::components::toast::TOAST_STYLES;
-use scuffed_ui::components::badge::BADGE_STYLES;
-use scuffed_ui::components::modal::MODAL_STYLES;
-use scuffed_ui::components::avatar::AVATAR_STYLES;
-use scuffed_ui::components::auth_buttons::AUTH_BUTTONS_STYLES;
-use scuffed_auth::client::api;
+use scuffed_ui::components::toast::{ToastContainer, ToastState};
+use scuffed_ui::{ThemeProvider, scuffed_crew_theme};
+use serde::Deserialize;
 
-use crate::pages::{ApplyPage, HomePage, MemberProfilePage, MembersPage, NewsPage, PropagandaPage, SettingsPage, TournamentPage, TournamentsPage};
+use crate::pages::{
+    ApplyPage, HomePage, MemberProfilePage, MembersPage, NewsPage, PropagandaPage, SettingsPage,
+    TournamentPage, TournamentsPage,
+};
 
 /// Response from /api/auth/me
 #[derive(Debug, Clone, Deserialize)]
@@ -50,6 +53,12 @@ pub struct SiteAuth {
     pub user: RwSignal<Option<MeUser>>,
     pub member: RwSignal<Option<MeMember>>,
     pub loading: RwSignal<bool>,
+}
+
+impl Default for SiteAuth {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl SiteAuth {
@@ -108,8 +117,14 @@ pub fn App() -> impl IntoView {
     // Collect all scuffed-ui component styles
     let component_styles = format!(
         "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
-        BUTTON_STYLES, CARD_STYLES, NAV_STYLES, TOAST_STYLES,
-        BADGE_STYLES, MODAL_STYLES, AVATAR_STYLES, AUTH_BUTTONS_STYLES,
+        BUTTON_STYLES,
+        CARD_STYLES,
+        NAV_STYLES,
+        TOAST_STYLES,
+        BADGE_STYLES,
+        MODAL_STYLES,
+        AVATAR_STYLES,
+        AUTH_BUTTONS_STYLES,
     );
 
     view! {

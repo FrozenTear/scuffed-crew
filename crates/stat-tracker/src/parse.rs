@@ -1,3 +1,4 @@
+use crate::ocr::RowOcrResult;
 use crate::storage::PersonalMatch;
 use chrono::Utc;
 use strsim::normalized_levenshtein;
@@ -27,7 +28,7 @@ pub fn parse_scoreboard(
         .or_else(|| {
             player_name
                 .and_then(|name| find_player_row(&lines, name))
-                .and_then(|r| extract_row_stats(r))
+                .and_then(extract_row_stats)
         })
         .or_else(|| find_best_stat_row(&lines));
 
@@ -55,6 +56,116 @@ pub fn parse_scoreboard(
     })
 }
 
+/// Build a match from the column-calibrated per-cell OCR rows.
+///
+/// This is the preferred path: stats come from individually-cropped, per-column
+/// OCR cells (positionally stable, numeric whitelists) rather than scraping
+/// numbers out of a full-image text dump. `raw_text` is still the full-image OCR
+/// and is used only for hero/map name lookup, which the per-cell pipeline does
+/// not read. Returns `None` if no row yields plausible stats.
+pub fn parse_scoreboard_cells(
+    rows: &[RowOcrResult],
+    player_row_index: Option<usize>,
+    raw_text: &str,
+    outcome: &str,
+    player_name: Option<&str>,
+) -> Option<PersonalMatch> {
+    let stats = player_row_index
+        .and_then(|idx| rows.get(idx))
+        .and_then(stats_from_row)
+        // Portrait row detection missed — fall back to the first row whose cells
+        // pass validation, then to scraping the full-image text (by player name
+        // if we have one, else the first plausible stat line).
+        .or_else(|| rows.iter().find_map(stats_from_row))
+        .or_else(|| {
+            let lines: Vec<&str> = raw_text
+                .lines()
+                .map(|l| l.trim())
+                .filter(|l| !l.is_empty())
+                .collect();
+            player_name
+                .and_then(|name| find_player_row(&lines, name))
+                .and_then(extract_row_stats)
+                .or_else(|| find_best_stat_row(&lines))
+        })?;
+
+    let lines: Vec<&str> = raw_text
+        .lines()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty())
+        .collect();
+
+    let hero = find_hero(&lines).unwrap_or_else(|| "Unknown".to_string());
+    let role = guess_role(&hero);
+    let map_name = find_map(&lines).unwrap_or_default();
+
+    Some(PersonalMatch {
+        hero,
+        map_name,
+        game_mode: String::new(),
+        role,
+        outcome: outcome.to_string(),
+        elims: stats.elims,
+        deaths: stats.deaths,
+        assists: stats.assists,
+        damage: stats.damage,
+        healing: stats.healing,
+        mitigation: stats.mitigation,
+        played_at: SurrealDatetime::from(Utc::now()),
+        synced: false,
+        session_id: String::new(),
+    })
+}
+
+/// Extract the six stats from one OCR'd row. Columns are positional:
+/// 0=Elims, 1=Assists, 2=Deaths, 3=Damage, 4=Healing, 5=Mitigation.
+/// Returns `None` if any cell is unreadable or the narrow E/A/D columns hold
+/// implausibly large values (a sign columns are misaligned and a damage figure
+/// has leaked into a kill column).
+fn stats_from_row(row: &RowOcrResult) -> Option<PlayerStats> {
+    if row.stats.len() < 6 {
+        return None;
+    }
+    let n: Vec<u32> = row
+        .stats
+        .iter()
+        .take(6)
+        .map(|c| parse_cell_number(&c.value))
+        .collect::<Option<Vec<_>>>()?;
+
+    let stats = PlayerStats {
+        elims: n[0],
+        assists: n[1],
+        deaths: n[2],
+        damage: n[3],
+        healing: n[4],
+        mitigation: n[5],
+    };
+
+    // Sanity gate: eliminations/assists/deaths are small two-digit figures in
+    // OW2. A large value here means the wider DMG/HLG/MIT columns bled left.
+    if stats.elims > 200 || stats.assists > 200 || stats.deaths > 200 {
+        tracing::debug!(
+            elims = stats.elims,
+            assists = stats.assists,
+            deaths = stats.deaths,
+            "rejecting row: kill-column value out of plausible range"
+        );
+        return None;
+    }
+
+    Some(stats)
+}
+
+fn parse_cell_number(s: &str) -> Option<u32> {
+    let cleaned: String = s.chars().filter(|c| c.is_ascii_digit()).collect();
+    if cleaned.is_empty() {
+        None
+    } else {
+        cleaned.parse::<u32>().ok()
+    }
+}
+
 struct PlayerStats {
     elims: u32,
     deaths: u32,
@@ -66,10 +177,13 @@ struct PlayerStats {
 
 fn find_player_row<'a>(lines: &[&'a str], player_name: &str) -> Option<&'a str> {
     let name_lower = player_name.to_lowercase();
-    lines.iter().find(|line| {
-        let lower = line.to_lowercase();
-        lower.contains(&name_lower)
-    }).copied()
+    lines
+        .iter()
+        .find(|line| {
+            let lower = line.to_lowercase();
+            lower.contains(&name_lower)
+        })
+        .copied()
 }
 
 fn extract_row_stats(line: &str) -> Option<PlayerStats> {
@@ -90,7 +204,9 @@ fn find_stat_row_by_index(lines: &[&str], row_index: usize) -> Option<PlayerStat
         "looking up stat row by portrait index"
     );
 
-    stat_rows.get(row_index).and_then(|line| extract_row_stats(line))
+    stat_rows
+        .get(row_index)
+        .and_then(|line| extract_row_stats(line))
 }
 
 fn find_best_stat_row(lines: &[&str]) -> Option<PlayerStats> {
@@ -131,15 +247,57 @@ fn extract_numbers(s: &str) -> Vec<u32> {
 }
 
 const HEROES: &[&str] = &[
-    "Ana", "Anran", "Ashe", "Baptiste", "Bastion", "Brigitte", "Cassidy",
-    "D.Va", "Domina", "Doomfist", "Echo", "Emre", "Freja",
-    "Genji", "Hanzo", "Hazard",
-    "Illari", "Jetpack Cat", "Junker Queen", "Junkrat", "Juno", "Kiriko",
-    "Lifeweaver", "Lucio", "Mauga", "Mei", "Mercy", "Mizuki", "Moira",
-    "Orisa", "Pharah", "Ramattra", "Reaper", "Reinhardt",
-    "Roadhog", "Sierra", "Sigma", "Sojourn", "Soldier: 76", "Sombra",
-    "Symmetra", "Torbjorn", "Tracer", "Vendetta", "Venture",
-    "Widowmaker", "Winston", "Wrecking Ball", "Wuyang", "Zarya", "Zenyatta",
+    "Ana",
+    "Anran",
+    "Ashe",
+    "Baptiste",
+    "Bastion",
+    "Brigitte",
+    "Cassidy",
+    "D.Va",
+    "Domina",
+    "Doomfist",
+    "Echo",
+    "Emre",
+    "Freja",
+    "Genji",
+    "Hanzo",
+    "Hazard",
+    "Illari",
+    "Jetpack Cat",
+    "Junker Queen",
+    "Junkrat",
+    "Juno",
+    "Kiriko",
+    "Lifeweaver",
+    "Lucio",
+    "Mauga",
+    "Mei",
+    "Mercy",
+    "Mizuki",
+    "Moira",
+    "Orisa",
+    "Pharah",
+    "Ramattra",
+    "Reaper",
+    "Reinhardt",
+    "Roadhog",
+    "Sierra",
+    "Sigma",
+    "Sojourn",
+    "Soldier: 76",
+    "Sombra",
+    "Symmetra",
+    "Torbjorn",
+    "Tracer",
+    "Vendetta",
+    "Venture",
+    "Widowmaker",
+    "Winston",
+    "Wrecking Ball",
+    "Wuyang",
+    "Zarya",
+    "Zenyatta",
 ];
 
 fn find_hero(lines: &[&str]) -> Option<String> {
@@ -224,11 +382,7 @@ fn fuzzy_match_hero(text: &str) -> Option<String> {
     }
 
     if let Some(hero) = best_hero {
-        tracing::debug!(
-            hero = hero,
-            score = best_score,
-            "fuzzy matched hero name"
-        );
+        tracing::debug!(hero = hero, score = best_score, "fuzzy matched hero name");
     }
 
     best_hero.map(|h| h.to_string())
@@ -240,13 +394,13 @@ pub fn guess_role_public(hero: &str) -> String {
 
 fn guess_role(hero: &str) -> String {
     match hero.to_lowercase().as_str() {
-        "d.va" | "dva" | "doomfist" | "domina" | "junker queen" | "junker_queen"
-        | "mauga" | "orisa" | "ramattra" | "reinhardt" | "roadhog" | "sigma"
-        | "winston" | "wrecking ball" | "wrecking_ball" | "zarya"
-        | "hazard" => "Tank".to_string(),
-        "ana" | "baptiste" | "brigitte" | "illari" | "jetpack cat" | "juno"
-        | "kiriko" | "lifeweaver" | "lucio" | "mercy" | "mizuki" | "moira"
-        | "wuyang" | "zenyatta" => "Support".to_string(),
+        "d.va" | "dva" | "doomfist" | "domina" | "junker queen" | "junker_queen" | "mauga"
+        | "orisa" | "ramattra" | "reinhardt" | "roadhog" | "sigma" | "winston"
+        | "wrecking ball" | "wrecking_ball" | "zarya" | "hazard" => "Tank".to_string(),
+        "ana" | "baptiste" | "brigitte" | "illari" | "jetpack cat" | "juno" | "kiriko"
+        | "lifeweaver" | "lucio" | "mercy" | "mizuki" | "moira" | "wuyang" | "zenyatta" => {
+            "Support".to_string()
+        }
         _ => "Damage".to_string(),
     }
 }
@@ -330,11 +484,7 @@ fn fuzzy_match_map(text: &str) -> Option<String> {
     }
 
     if let Some(map_name) = best_map {
-        tracing::debug!(
-            map = map_name,
-            score = best_score,
-            "fuzzy matched map name"
-        );
+        tracing::debug!(map = map_name, score = best_score, "fuzzy matched map name");
     }
 
     best_map.map(|m| m.to_string())

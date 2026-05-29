@@ -1,12 +1,12 @@
 use axum::{
+    Json, Router,
     extract::{Path, Query, State},
     http::StatusCode,
     routing::get,
-    Json, Router,
 };
 use axum_extra::extract::cookie::CookieJar;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use scuffed_auth::server::{AuthUser, HasAuth};
 use scuffed_site_server::state::AppState;
@@ -24,7 +24,9 @@ pub fn strategy_routes(state: AppState) -> Router {
         .route("/api/strategy/strategies/mine", get(list_my_strategies))
         .route(
             "/api/strategy/strategies/{id}",
-            get(get_strategy).put(update_strategy).delete(delete_strategy),
+            get(get_strategy)
+                .put(update_strategy)
+                .delete(delete_strategy),
         )
         .route("/api/strategy/heroes", get(list_heroes))
         .route("/api/strategy/meta", get(get_meta))
@@ -172,14 +174,10 @@ async fn list_my_strategies(
     State(state): State<AppState>,
     user: AuthUser<AppState>,
 ) -> Result<Json<Value>, StatusCode> {
-    let data = state
-        .db
-        .get_user_strategies(&user.id)
-        .await
-        .map_err(|e| {
-            tracing::error!("Failed to list user strategies: {e}");
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
+    let data = state.db.get_user_strategies(&user.id).await.map_err(|e| {
+        tracing::error!("Failed to list user strategies: {e}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
 
     Ok(Json(json!({ "data": data })))
 }
@@ -300,12 +298,7 @@ async fn update_strategy(
 
     let strategy = state
         .db
-        .update_strategy(
-            &id,
-            body.name.as_deref(),
-            description,
-            visibility,
-        )
+        .update_strategy(&id, body.name.as_deref(), description, visibility)
         .await
         .map_err(|e| {
             tracing::error!("Failed to update strategy: {e}");
@@ -523,10 +516,7 @@ fn parse_visibility_str(s: &str) -> Visibility {
 }
 
 /// Try to extract a user from the request without requiring auth.
-async fn try_get_user(
-    state: &AppState,
-    jar: &CookieJar,
-) -> Option<scuffed_auth::User> {
+async fn try_get_user(state: &AppState, jar: &CookieJar) -> Option<scuffed_auth::User> {
     let config = state.session_config();
     let token = jar.get(&config.cookie_name)?.value().to_string();
     state.get_session_user(&token).await.ok().flatten()

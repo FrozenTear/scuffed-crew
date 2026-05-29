@@ -28,12 +28,13 @@ pub fn StatusPanel() -> Element {
         }
     });
 
-    let outputs = use_signal(|| {
-        stat_tracker::capture::wayshot::list_outputs().unwrap_or_default()
-    });
+    let outputs = use_signal(|| stat_tracker::capture::wayshot::list_outputs().unwrap_or_default());
 
     let selected_output = config().capture_output.clone().unwrap_or_else(|| {
-        outputs().first().cloned().unwrap_or_else(|| "unknown".into())
+        outputs()
+            .first()
+            .cloned()
+            .unwrap_or_else(|| "unknown".into())
     });
 
     let tessdata_installed = use_memo(|| {
@@ -52,7 +53,11 @@ pub fn StatusPanel() -> Element {
     let db_locked = db_locked();
 
     let (count, unsynced, last_capture) = match &*stats.read() {
-        Some(Some(s)) => (s.total_matches, s.unsynced_count, s.last_capture_time.clone()),
+        Some(Some(s)) => (
+            s.total_matches,
+            s.unsynced_count,
+            s.last_capture_time.clone(),
+        ),
         _ => (0, 0, None),
     };
 

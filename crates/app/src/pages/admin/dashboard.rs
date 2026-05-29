@@ -43,18 +43,41 @@ pub fn AdminDashboard() -> Element {
     let events = use_api_list::<Event>("/api/events");
     let announcements = use_api_list::<Announcement>("/api/announcements");
 
-    let member_count = members.data.read().as_ref()
-        .and_then(|d| d.as_ref()).map(|v| v.len()).unwrap_or(0);
-    let pending_count = applications.data.read().as_ref()
+    let member_count = members
+        .data
+        .read()
+        .as_ref()
+        .and_then(|d| d.as_ref())
+        .map(|v| v.len())
+        .unwrap_or(0);
+    let pending_count = applications
+        .data
+        .read()
+        .as_ref()
         .and_then(|d| d.as_ref())
         .map(|v| v.iter().filter(|a| a.status == "pending").count())
         .unwrap_or(0);
-    let team_count = teams.data.read().as_ref()
-        .and_then(|d| d.as_ref()).map(|v| v.len()).unwrap_or(0);
-    let event_count = events.data.read().as_ref()
-        .and_then(|d| d.as_ref()).map(|v| v.len()).unwrap_or(0);
-    let announcement_count = announcements.data.read().as_ref()
-        .and_then(|d| d.as_ref()).map(|v| v.len()).unwrap_or(0);
+    let team_count = teams
+        .data
+        .read()
+        .as_ref()
+        .and_then(|d| d.as_ref())
+        .map(|v| v.len())
+        .unwrap_or(0);
+    let event_count = events
+        .data
+        .read()
+        .as_ref()
+        .and_then(|d| d.as_ref())
+        .map(|v| v.len())
+        .unwrap_or(0);
+    let announcement_count = announcements
+        .data
+        .read()
+        .as_ref()
+        .and_then(|d| d.as_ref())
+        .map(|v| v.len())
+        .unwrap_or(0);
 
     rsx! {
 

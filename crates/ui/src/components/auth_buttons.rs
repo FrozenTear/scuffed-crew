@@ -40,8 +40,8 @@ fn provider_display_name(p: AuthProvider) -> &'static str {
 fn provider_icon(p: AuthProvider) -> &'static str {
     match p {
         AuthProvider::Discord => "\u{1f3ae}", // game controller
-        AuthProvider::Google => "\u{1f310}",   // globe
-        AuthProvider::Matrix => "\u{1f5a7}",   // networked computers
+        AuthProvider::Google => "\u{1f310}",  // globe
+        AuthProvider::Matrix => "\u{1f5a7}",  // networked computers
     }
 }
 

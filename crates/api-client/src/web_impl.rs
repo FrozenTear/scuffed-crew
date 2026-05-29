@@ -57,8 +57,8 @@ async fn json_request<B: serde::Serialize, T: serde::de::DeserializeOwned>(
     body: &B,
 ) -> Result<T, ClientError> {
     let url = format!("{base_url}{path}");
-    let json_body = serde_json::to_string(body)
-        .map_err(|e| ClientError::Network(format!("Serialize: {e}")))?;
+    let json_body =
+        serde_json::to_string(body).map_err(|e| ClientError::Network(format!("Serialize: {e}")))?;
 
     let request = build_json_request(method, &url, &json_body)?;
     let (status, text) = do_fetch(&request).await?;

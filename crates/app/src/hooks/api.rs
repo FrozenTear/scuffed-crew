@@ -1,7 +1,7 @@
 use dioxus::prelude::*;
 use scuffed_api_client::ApiClient;
-use serde::de::DeserializeOwned;
 use serde::Deserialize;
+use serde::de::DeserializeOwned;
 
 /// A resource that fetches data from an API endpoint with built-in refresh support.
 #[derive(Clone, Copy)]

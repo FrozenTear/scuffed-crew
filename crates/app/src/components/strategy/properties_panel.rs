@@ -147,31 +147,70 @@ const PRESET_COLORS: [(Color, &str); 5] = [
 
 /// Known heroes for the dropdown.
 const HEROES: &[(HeroRole, &[(&str, &str)])] = &[
-    (HeroRole::Tank, &[
-        ("dva", "D.Va"), ("doomfist", "Doomfist"), ("junker-queen", "Junker Queen"),
-        ("mauga", "Mauga"), ("orisa", "Orisa"), ("ramattra", "Ramattra"),
-        ("reinhardt", "Reinhardt"), ("roadhog", "Roadhog"), ("sigma", "Sigma"),
-        ("winston", "Winston"), ("wrecking-ball", "Wrecking Ball"), ("zarya", "Zarya"),
-        ("hazard", "Hazard"),
-    ]),
-    (HeroRole::Damage, &[
-        ("ashe", "Ashe"), ("bastion", "Bastion"), ("cassidy", "Cassidy"),
-        ("echo", "Echo"), ("genji", "Genji"), ("hanzo", "Hanzo"),
-        ("junkrat", "Junkrat"), ("mei", "Mei"), ("pharah", "Pharah"),
-        ("reaper", "Reaper"), ("sojourn", "Sojourn"), ("soldier-76", "Soldier: 76"),
-        ("sombra", "Sombra"), ("symmetra", "Symmetra"), ("torbjorn", "Torbjorn"),
-        ("tracer", "Tracer"), ("venture", "Venture"), ("widowmaker", "Widowmaker"),
-    ]),
-    (HeroRole::Support, &[
-        ("ana", "Ana"), ("baptiste", "Baptiste"), ("brigitte", "Brigitte"),
-        ("illari", "Illari"), ("juno", "Juno"), ("kiriko", "Kiriko"),
-        ("lifeweaver", "Lifeweaver"), ("lucio", "Lucio"), ("mercy", "Mercy"),
-        ("moira", "Moira"), ("zenyatta", "Zenyatta"),
-    ]),
+    (
+        HeroRole::Tank,
+        &[
+            ("dva", "D.Va"),
+            ("doomfist", "Doomfist"),
+            ("junker-queen", "Junker Queen"),
+            ("mauga", "Mauga"),
+            ("orisa", "Orisa"),
+            ("ramattra", "Ramattra"),
+            ("reinhardt", "Reinhardt"),
+            ("roadhog", "Roadhog"),
+            ("sigma", "Sigma"),
+            ("winston", "Winston"),
+            ("wrecking-ball", "Wrecking Ball"),
+            ("zarya", "Zarya"),
+            ("hazard", "Hazard"),
+        ],
+    ),
+    (
+        HeroRole::Damage,
+        &[
+            ("ashe", "Ashe"),
+            ("bastion", "Bastion"),
+            ("cassidy", "Cassidy"),
+            ("echo", "Echo"),
+            ("genji", "Genji"),
+            ("hanzo", "Hanzo"),
+            ("junkrat", "Junkrat"),
+            ("mei", "Mei"),
+            ("pharah", "Pharah"),
+            ("reaper", "Reaper"),
+            ("sojourn", "Sojourn"),
+            ("soldier-76", "Soldier: 76"),
+            ("sombra", "Sombra"),
+            ("symmetra", "Symmetra"),
+            ("torbjorn", "Torbjorn"),
+            ("tracer", "Tracer"),
+            ("venture", "Venture"),
+            ("widowmaker", "Widowmaker"),
+        ],
+    ),
+    (
+        HeroRole::Support,
+        &[
+            ("ana", "Ana"),
+            ("baptiste", "Baptiste"),
+            ("brigitte", "Brigitte"),
+            ("illari", "Illari"),
+            ("juno", "Juno"),
+            ("kiriko", "Kiriko"),
+            ("lifeweaver", "Lifeweaver"),
+            ("lucio", "Lucio"),
+            ("mercy", "Mercy"),
+            ("moira", "Moira"),
+            ("zenyatta", "Zenyatta"),
+        ],
+    ),
 ];
 
 fn all_heroes() -> Vec<(&'static str, &'static str)> {
-    HEROES.iter().flat_map(|(_, heroes)| heroes.iter().copied()).collect()
+    HEROES
+        .iter()
+        .flat_map(|(_, heroes)| heroes.iter().copied())
+        .collect()
 }
 
 #[component]

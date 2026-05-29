@@ -1,3 +1,7 @@
+// Components/pages built ahead of the routes that consume them; preserve the
+// in-progress work rather than deleting it to satisfy the dead_code lint.
+#![allow(dead_code)]
+
 pub mod app;
 pub mod components;
 pub mod pages;

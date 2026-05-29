@@ -89,9 +89,8 @@ pub fn bounding_box(points: &[Position]) -> Option<(Position, Position)> {
 
 /// Calculate bounds as a `scuffed_types::Bounds` struct
 pub fn calculate_bounds(points: &[Position]) -> Option<scuffed_types::Bounds> {
-    bounding_box(points).map(|(min, max)| {
-        scuffed_types::Bounds::new(min.x, min.y, max.x - min.x, max.y - min.y)
-    })
+    bounding_box(points)
+        .map(|(min, max)| scuffed_types::Bounds::new(min.x, min.y, max.x - min.x, max.y - min.y))
 }
 
 /// Simplify a path using the Ramer-Douglas-Peucker algorithm
@@ -125,7 +124,7 @@ pub fn simplify_path(points: &[Position], epsilon: f64) -> Vec<Position> {
         left.extend(right);
         left
     } else {
-        vec![start.clone(), end.clone()]
+        vec![*start, *end]
     }
 }
 
@@ -172,7 +171,7 @@ pub fn smooth_path(points: &[Position], segments: usize) -> Vec<Position> {
         }
     }
 
-    result.push(points.last().unwrap().clone());
+    result.push(*points.last().unwrap());
     result
 }
 
@@ -218,12 +217,7 @@ mod tests {
         let end = Position::new(100.0, 0.0);
         assert!(point_on_line(&Position::new(50.0, 0.0), &start, &end, 1.0));
         assert!(point_on_line(&Position::new(50.0, 0.5), &start, &end, 1.0));
-        assert!(!point_on_line(
-            &Position::new(50.0, 5.0),
-            &start,
-            &end,
-            1.0
-        ));
+        assert!(!point_on_line(&Position::new(50.0, 5.0), &start, &end, 1.0));
     }
 
     #[test]
@@ -286,10 +280,7 @@ mod tests {
 
     #[test]
     fn test_calculate_bounds() {
-        let points = vec![
-            Position::new(10.0, 20.0),
-            Position::new(50.0, 80.0),
-        ];
+        let points = vec![Position::new(10.0, 20.0), Position::new(50.0, 80.0)];
         let bounds = calculate_bounds(&points).unwrap();
         assert_eq!(bounds.x, 10.0);
         assert_eq!(bounds.y, 20.0);

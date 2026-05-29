@@ -280,7 +280,9 @@ pub fn SchedulePage() -> impl IntoView {
             match api::post::<_, Vec<serde_json::Value>>(
                 &format!("/api/events/{event_id}/attendance"),
                 &body,
-            ).await {
+            )
+            .await
+            {
                 Ok(_) => {
                     toast.show(Toast::success("Attendance recorded"));
                     att_open.set(false);
@@ -299,9 +301,8 @@ pub fn SchedulePage() -> impl IntoView {
         }
     });
 
-    let att_modal_title = Signal::derive(move || {
-        format!("Attendance \u{2014} {}", att_event_title.get())
-    });
+    let att_modal_title =
+        Signal::derive(move || format!("Attendance \u{2014} {}", att_event_title.get()));
 
     view! {
         <h1>"Schedule"</h1>

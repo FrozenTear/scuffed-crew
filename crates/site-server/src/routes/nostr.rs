@@ -1,10 +1,12 @@
 use std::collections::HashMap;
+use std::convert::Infallible;
 
 use axum::{
-    extract::{Query, State},
-    http::{header, StatusCode},
-    response::IntoResponse,
     Json,
+    extract::{Query, State},
+    http::{StatusCode, header},
+    response::IntoResponse,
+    response::sse::{Event, KeepAlive, Sse},
 };
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
@@ -87,10 +89,7 @@ pub async fn nostr_json(
     (
         StatusCode::OK,
         [(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")],
-        Json(Nip05Response {
-            names,
-            relays,
-        }),
+        Json(Nip05Response { names, relays }),
     )
 }
 
@@ -126,8 +125,7 @@ fn resolve_pubkey_hex(input: &str) -> Result<String, &'static str> {
     }
 
     if trimmed.starts_with("npub1") {
-        let pk = nostr::PublicKey::from_bech32(trimmed)
-            .map_err(|_| "Invalid npub address")?;
+        let pk = nostr::PublicKey::from_bech32(trimmed).map_err(|_| "Invalid npub address")?;
         return Ok(pk.to_hex());
     }
 
@@ -153,10 +151,7 @@ fn sign_challenge_token(
 }
 
 /// Parse and verify a challenge token. Returns (challenge, member_id).
-fn verify_challenge_token(
-    key: &[u8; 32],
-    token: &str,
-) -> Result<(String, String), &'static str> {
+fn verify_challenge_token(key: &[u8; 32], token: &str) -> Result<(String, String), &'static str> {
     use base64::Engine;
     let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .decode(token)
@@ -222,10 +217,7 @@ pub async fn nostr_challenge(
     // Generate random challenge
     let mut challenge_bytes = [0u8; 32];
     rand::thread_rng().fill_bytes(&mut challenge_bytes);
-    let challenge_hex: String = challenge_bytes
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect();
+    let challenge_hex: String = challenge_bytes.iter().map(|b| format!("{b:02x}")).collect();
     let challenge = format!("scuffedclan-verify:{challenge_hex}");
 
     let expires_ts = std::time::SystemTime::now()
@@ -488,16 +480,14 @@ pub async fn nostr_import_key(
         })?;
 
     // Derive pubkey from the decrypted secret
-    let keys = Keys::new(
-        SecretKey::from_hex(&secret_hex).map_err(|e| {
-            (
-                StatusCode::BAD_REQUEST,
-                Json(ErrorResponse {
-                    error: format!("Invalid key in backup: {e}"),
-                }),
-            )
-        })?,
-    );
+    let keys = Keys::new(SecretKey::from_hex(&secret_hex).map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: format!("Invalid key in backup: {e}"),
+            }),
+        )
+    })?);
     let pubkey_hex = keys.public_key().to_hex();
 
     // Update member to external mode with this key
@@ -855,21 +845,17 @@ pub async fn nostr_feed(
         filter.since = Some(since);
     }
 
-    let events = scuffed_chat::nostr::relay::query_events_oneshot(
-        &relay_url,
-        vec![filter],
-        5,
-    )
-    .await
-    .map_err(|e| {
-        tracing::error!("Failed to query relay feed: {e}");
-        (
-            StatusCode::BAD_GATEWAY,
-            Json(ErrorResponse {
-                error: "Failed to query relay".into(),
-            }),
-        )
-    })?;
+    let events = scuffed_chat::nostr::relay::query_events_oneshot(&relay_url, vec![filter], 5)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to query relay feed: {e}");
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(ErrorResponse {
+                    error: "Failed to query relay".into(),
+                }),
+            )
+        })?;
 
     let is_officer = {
         let cookie_name = &state.session_config.cookie_name;
@@ -908,7 +894,9 @@ pub async fn nostr_feed(
             .filter(|e| {
                 !e.tags.iter().any(|t| {
                     t.first().map(|s| s.as_str()) == Some("h")
-                        && t.get(1).map(|g| officer_groups.contains(g)).unwrap_or(false)
+                        && t.get(1)
+                            .map(|g| officer_groups.contains(g))
+                            .unwrap_or(false)
                 })
             })
             .collect()
@@ -917,9 +905,7 @@ pub async fn nostr_feed(
     let members = state.db.list_nostr_identities().await.unwrap_or_default();
     let pubkey_names: HashMap<String, String> = members
         .into_iter()
-        .filter_map(|m| {
-            m.nostr_pubkey.map(|pk| (pk, m.display_name))
-        })
+        .filter_map(|m| m.nostr_pubkey.map(|pk| (pk, m.display_name)))
         .collect();
 
     let mut posts: Vec<FeedPostResponse> = events
@@ -946,7 +932,7 @@ pub async fn nostr_feed(
         })
         .collect();
 
-    posts.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    posts.sort_by_key(|b| std::cmp::Reverse(b.created_at));
 
     Ok(Json(posts))
 }
@@ -1099,9 +1085,7 @@ pub struct RelayInfoResponse {
 }
 
 /// GET /api/nostr/health — relay connectivity and configuration status.
-pub async fn nostr_health(
-    State(state): State<AppState>,
-) -> Json<RelayHealthResponse> {
+pub async fn nostr_health(State(state): State<AppState>) -> Json<RelayHealthResponse> {
     let settings = state.db.get_settings().await.ok();
     let forum_backend = settings
         .as_ref()
@@ -1170,7 +1154,10 @@ fn validate_pubkey_hex(pk: &str) -> Result<(), &'static str> {
     if pk.len() != 64 {
         return Err("pubkey must be 64 hex characters");
     }
-    if !pk.chars().all(|c| c.is_ascii_hexdigit() && (c.is_numeric() || c.is_ascii_lowercase())) {
+    if !pk
+        .chars()
+        .all(|c| c.is_ascii_hexdigit() && (c.is_numeric() || c.is_ascii_lowercase()))
+    {
         return Err("pubkey must be lowercase hex");
     }
     Ok(())
@@ -1330,7 +1317,9 @@ fn require_encryption_service(
     Ok(scuffed_chat::EncryptionService::new(crypto))
 }
 
-fn parse_rfc3339(value: &str) -> Result<chrono::DateTime<chrono::Utc>, (StatusCode, Json<ErrorResponse>)> {
+fn parse_rfc3339(
+    value: &str,
+) -> Result<chrono::DateTime<chrono::Utc>, (StatusCode, Json<ErrorResponse>)> {
     chrono::DateTime::parse_from_rfc3339(value)
         .map(|dt| dt.with_timezone(&chrono::Utc))
         .map_err(|e| {
@@ -1368,7 +1357,8 @@ pub async fn dm_send(
         ));
     }
 
-    let (relay_url, sender_pubkey, sender_blob) = require_server_managed_dm_caller(&state, &caller)?;
+    let (relay_url, sender_pubkey, sender_blob) =
+        require_server_managed_dm_caller(&state, &caller)?;
     let encryption = require_encryption_service(&state)?;
 
     if recipient == sender_pubkey {
@@ -1388,7 +1378,7 @@ pub async fn dm_send(
     let wraps = encryption
         .build_gift_wraps(
             &sender_blob,
-            &[recipient.clone()],
+            std::slice::from_ref(&recipient),
             content,
             &context_id,
             body.reply_to_event_id.as_deref(),
@@ -1492,11 +1482,7 @@ pub async fn dm_sync(
         let secs = dt.timestamp();
         // 60s overlap window
         let lower = secs - 60;
-        if lower < 0 {
-            0
-        } else {
-            lower as u64
-        }
+        if lower < 0 { 0 } else { lower as u64 }
     });
 
     let mut tags = std::collections::HashMap::new();
@@ -1530,7 +1516,10 @@ pub async fn dm_sync(
                 continue;
             }
         };
-        let unwrapped = match encryption.unwrap_gift_wrap_json(&my_blob, &event_json).await {
+        let unwrapped = match encryption
+            .unwrap_gift_wrap_json(&my_blob, &event_json)
+            .await
+        {
             Ok(u) => u,
             Err(e) => {
                 tracing::debug!("Skipping unwrap failure: {e}");
@@ -1551,11 +1540,9 @@ pub async fn dm_sync(
                 None
             }
         });
-        let created_at = chrono::DateTime::<chrono::Utc>::from_timestamp(
-            unwrapped.created_at as i64,
-            0,
-        )
-        .unwrap_or_else(chrono::Utc::now);
+        let created_at =
+            chrono::DateTime::<chrono::Utc>::from_timestamp(unwrapped.created_at as i64, 0)
+                .unwrap_or_else(chrono::Utc::now);
 
         match state
             .db
@@ -1608,11 +1595,7 @@ pub async fn dm_inbox(
 ) -> Result<Json<Vec<DmMessageResponse>>, (StatusCode, Json<ErrorResponse>)> {
     let (_, my_pubkey, _) = require_server_managed_dm_caller(&state, &caller)?;
     let limit = query.limit.unwrap_or(100).min(500);
-    let since = query
-        .since_ts
-        .as_deref()
-        .map(parse_rfc3339)
-        .transpose()?;
+    let since = query.since_ts.as_deref().map(parse_rfc3339).transpose()?;
 
     let messages = state
         .db
@@ -1680,11 +1663,7 @@ pub async fn dm_thread(
         )
     })?;
     let limit = query.limit.unwrap_or(50).min(200);
-    let before = query
-        .before_ts
-        .as_deref()
-        .map(parse_rfc3339)
-        .transpose()?;
+    let before = query.before_ts.as_deref().map(parse_rfc3339).transpose()?;
     let messages = state
         .db
         .list_dm_thread(&my_pubkey, &peer, limit, before)
@@ -1698,6 +1677,72 @@ pub async fn dm_thread(
             )
         })?;
     Ok(Json(messages.into_iter().map(Into::into).collect()))
+}
+
+/// GET /api/nostr/dm/stream — Server-Sent Events stream of new DMs for the caller.
+///
+/// Backed by [`crate::dm_subscriber`]. Each event is a JSON-encoded
+/// [`DmEvent`] with `event: "dm"`. Clients should treat each event as a hint
+/// to refetch (`/api/nostr/dm/inbox` or `/api/nostr/dm/conversations`) — the
+/// server already inserted the message before publishing.
+///
+/// Returns 503 if the subscriber is not running (e.g. relay or encryption
+/// not configured), in which case clients should fall back to polling
+/// `POST /api/nostr/dm/sync`.
+pub async fn dm_stream(
+    State(state): State<AppState>,
+    caller: OrgMember,
+) -> Result<
+    Sse<impl tokio_stream::Stream<Item = Result<Event, Infallible>>>,
+    (StatusCode, Json<ErrorResponse>),
+> {
+    let (_, my_pubkey, _) = require_server_managed_dm_caller(&state, &caller)?;
+    let bus = state.dm_events.clone().ok_or_else(|| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(ErrorResponse {
+                error: "Real-time DM delivery not configured".into(),
+            }),
+        )
+    })?;
+
+    let mut rx = bus.subscribe();
+    let (out_tx, out_rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(64);
+
+    tokio::spawn(async move {
+        loop {
+            match rx.recv().await {
+                Ok(dm) => {
+                    if dm.recipient_pubkey != my_pubkey {
+                        continue;
+                    }
+                    let event = match Event::default().event("dm").json_data(&dm) {
+                        Ok(e) => e,
+                        Err(e) => {
+                            tracing::warn!("Failed to encode DM SSE event: {e}");
+                            continue;
+                        }
+                    };
+                    if out_tx.send(Ok(event)).await.is_err() {
+                        break;
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                    tracing::warn!(
+                        "DM SSE consumer lagged by {n} events; client will refetch on next event"
+                    );
+                    let event = Event::default().event("lagged").data(n.to_string());
+                    if out_tx.send(Ok(event)).await.is_err() {
+                        break;
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    });
+
+    let stream = tokio_stream::wrappers::ReceiverStream::new(out_rx);
+    Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
 }
 
 /// POST /api/nostr/dm/mark-read — advance the read marker for a peer.

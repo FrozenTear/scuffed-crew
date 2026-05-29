@@ -34,11 +34,7 @@ fn db_to_game(db: DbGame) -> Game {
 
 impl Database {
     /// Create a new game.
-    pub async fn create_game(
-        &self,
-        name: &str,
-        abbreviation: Option<&str>,
-    ) -> DbResult<Game> {
+    pub async fn create_game(&self, name: &str, abbreviation: Option<&str>) -> DbResult<Game> {
         with_timeout(async {
             let db_game = DbGame {
                 id: None,
@@ -48,10 +44,9 @@ impl Database {
                 created_at: SurrealDatetime::from(Utc::now()),
             };
             let created: Option<DbGame> = self.client.create("game").content(db_game).await?;
-            Ok(db_to_game(
-                created
-                    .ok_or_else(|| crate::DbError::NotFound("Failed to create game".into()))?,
-            ))
+            Ok(db_to_game(created.ok_or_else(|| {
+                crate::DbError::NotFound("Failed to create game".into())
+            })?))
         })
         .await
     }
@@ -87,8 +82,8 @@ impl Database {
     ) -> DbResult<Game> {
         with_timeout(async {
             let existing: Option<DbGame> = self.client.select(("game", id)).await?;
-            let mut db = existing
-                .ok_or_else(|| crate::DbError::NotFound(format!("Game {id} not found")))?;
+            let mut db =
+                existing.ok_or_else(|| crate::DbError::NotFound(format!("Game {id} not found")))?;
 
             if let Some(n) = name {
                 db.name = n.to_string();
@@ -97,8 +92,7 @@ impl Database {
                 db.abbreviation = a.map(|s| s.to_string());
             }
 
-            let updated: Option<DbGame> =
-                self.client.update(("game", id)).content(db).await?;
+            let updated: Option<DbGame> = self.client.update(("game", id)).content(db).await?;
             Ok(db_to_game(updated.ok_or_else(|| {
                 crate::DbError::NotFound(format!("Game {id} not found after update"))
             })?))

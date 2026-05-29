@@ -20,10 +20,9 @@ impl Drop for PidGuard {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| EnvFilter::new("scuffed_stat_tracker=info,stat_tracker=info,surrealdb=warn")),
-        )
+        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+            EnvFilter::new("scuffed_stat_tracker=info,stat_tracker=info,surrealdb=warn")
+        }))
         .init();
 
     let collect_portraits = std::env::args().any(|a| a == "--collect-portraits");
@@ -50,11 +49,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let pid_path = config.data_dir.join("daemon.pid");
     if let Ok(existing_pid) = std::fs::read_to_string(&pid_path) {
-        if let Ok(pid) = existing_pid.trim().parse::<u32>() {
-            if std::fs::metadata(format!("/proc/{pid}")).is_ok() {
-                tracing::error!(pid, "another daemon is already running — stop it first");
-                return Err(format!("another daemon is already running (PID {pid})").into());
-            }
+        if let Ok(pid) = existing_pid.trim().parse::<u32>()
+            && std::fs::metadata(format!("/proc/{pid}")).is_ok()
+        {
+            tracing::error!(pid, "another daemon is already running — stop it first");
+            return Err(format!("another daemon is already running (PID {pid})").into());
         }
         let _ = std::fs::remove_file(&pid_path);
     }
@@ -83,7 +82,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing::info!(stored_matches = count, "local store ready");
 
     let portraits_path = detect::hero_portrait::portraits_dir(&config.data_dir);
-    let portrait_matcher = Arc::new(detect::hero_portrait::PortraitMatcher::load(&portraits_path));
+    let portrait_matcher = Arc::new(detect::hero_portrait::PortraitMatcher::load(
+        &portraits_path,
+    ));
 
     let data_dir = config.data_dir.clone();
 
@@ -102,7 +103,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing::info!("daemon ready — press Tab in-game to capture scoreboard");
 
     if collect_portraits {
-        tracing::info!("portrait collection mode enabled — will save portrait references when OCR identifies heroes");
+        tracing::info!(
+            "portrait collection mode enabled — will save portrait references when OCR identifies heroes"
+        );
     }
 
     run_loop(
@@ -120,6 +123,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_loop(
     backend: &capture::CaptureBackend,
     store: &storage::LocalStore,
@@ -164,12 +168,11 @@ async fn run_loop(
             result = kbd.wait_tab() => {
                 match result {
                     Ok(()) => {
-                        if let Some(last) = last_tab_capture {
-                            if last.elapsed() < tab_debounce {
+                        if let Some(last) = last_tab_capture
+                            && last.elapsed() < tab_debounce {
                                 tracing::debug!("Tab debounced — ignoring rapid press");
                                 continue;
                             }
-                        }
 
                         // Wait for the game to render the scoreboard overlay after Tab press
                         tokio::time::sleep(tokio::time::Duration::from_millis(750)).await;
@@ -186,11 +189,10 @@ async fn run_loop(
                         } else {
                             new_match_pending = false;
                             capture_count += 1;
-                            if let Some(client) = sync_client {
-                                if capture_count % SYNC_EVERY_N_CAPTURES == 0 {
+                            if let Some(client) = sync_client
+                                && capture_count.is_multiple_of(SYNC_EVERY_N_CAPTURES) {
                                     try_sync(store, client).await;
                                 }
-                            }
                         }
                     }
                     Err(e) => {
@@ -236,28 +238,25 @@ async fn run_loop(
                         }
 
                         match phase {
-                            detect::GamePhase::MapVote { maps } => {
-                                if !new_match_pending {
+                            detect::GamePhase::MapVote { maps }
+                                if !new_match_pending => {
                                     tracing::info!(?maps, "auto-detect: map vote — new match starting");
                                     new_match_pending = true;
                                     pending_maps = maps;
                                     last_auto_detect = Some(Instant::now());
                                 }
-                            }
-                            detect::GamePhase::HeroBan => {
-                                if !new_match_pending {
+                            detect::GamePhase::HeroBan
+                                if !new_match_pending => {
                                     tracing::info!("auto-detect: hero ban phase — new match starting");
                                     new_match_pending = true;
                                     last_auto_detect = Some(Instant::now());
                                 }
-                            }
-                            detect::GamePhase::HeroSelect => {
-                                if !new_match_pending {
+                            detect::GamePhase::HeroSelect
+                                if !new_match_pending => {
                                     tracing::info!("auto-detect: hero select — new match starting");
                                     new_match_pending = true;
                                     last_auto_detect = Some(Instant::now());
                                 }
-                            }
                             _ => {}
                         }
                     }
@@ -277,6 +276,7 @@ async fn run_loop(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_capture(
     backend: &capture::CaptureBackend,
     store: &storage::LocalStore,
@@ -294,24 +294,46 @@ async fn handle_capture(
     let img = capture::capture_screen_output(backend, capture_output).await?;
 
     let matcher = Arc::clone(portrait_matcher);
-    let (outcome, ocr_result, portrait_hero, scoreboard_img, player_row_idx) = tokio::task::spawn_blocking(move || {
-        let outcome = polled_outcome
-            .unwrap_or_else(|| detect::match_end::detect_outcome(&img));
-        let ocr = ocr::recognize(&img);
+    let (outcome, ocr_result, rows, portrait_hero, scoreboard_img, player_row_idx) =
+        tokio::task::spawn_blocking(move || {
+            // Outcome: prefer the poller's carried-over result; else color-flood
+            // detection; else read the VICTORY/DEFEAT header text off this frame.
+            // The last step recovers the common case where the poller missed the
+            // brief color banner and we're now sitting on the post-match scoreboard.
+            let outcome = polled_outcome.unwrap_or_else(|| {
+                let o = detect::match_end::detect_outcome(&img);
+                if matches!(o, detect::MatchOutcome::Unknown) {
+                    detect::match_end::detect_outcome_text(&img)
+                } else {
+                    o
+                }
+            });
 
-        // Try portrait matching — detect the player's highlighted row first
-        let scoreboard = ocr::preprocess::crop_scoreboard(&img);
-        let player_match = matcher.match_player_hero(&scoreboard);
-        let portrait_match = player_match.as_ref().map(|(name, conf, _)| (name.clone(), *conf));
-        let row_idx = player_match.map(|(_, _, idx)| idx);
+            // Detect team size + the player's highlighted row once, then reuse the
+            // team size for the per-cell OCR so the row index and the OCR rows share
+            // the same layout (player is always team 1, so the index lines up).
+            let scoreboard = ocr::preprocess::crop_scoreboard(&img);
+            let team_size = detect::hero_portrait::detect_team_size(&scoreboard);
+            let player_match = matcher.match_player_hero(&scoreboard);
+            let portrait_match = player_match
+                .as_ref()
+                .map(|(name, conf, _)| (name.clone(), *conf));
+            let row_idx = player_match.map(|(_, _, idx)| idx);
 
-        (outcome, ocr, portrait_match, scoreboard, row_idx)
-    })
-    .await?;
+            // Stats come from the column-calibrated per-cell pipeline. Full-image OCR
+            // text is kept only for hero/map name lookup (the cell pipeline doesn't
+            // read names).
+            let rows = ocr::recognize_scoreboard_cells_with_team_size(&img, Some(team_size));
+            let ocr = ocr::recognize(&img);
+
+            (outcome, ocr, rows, portrait_match, scoreboard, row_idx)
+        })
+        .await?;
     let ocr_result = ocr_result?;
 
     tracing::info!(?outcome, "frame analysis");
-    let preview_end = ocr_result.raw_text
+    let preview_end = ocr_result
+        .raw_text
         .char_indices()
         .map(|(i, _)| i)
         .take_while(|&i| i <= 120)
@@ -323,13 +345,16 @@ async fn handle_capture(
         "OCR result"
     );
 
-    if ocr_result.confidence < 55 {
-        tracing::warn!(
-            confidence = ocr_result.confidence,
-            "OCR confidence too low — skipping (debug images saved to data_dir/debug/)"
-        );
-        return Ok(());
-    }
+    let player_row_conf = player_row_idx
+        .and_then(|i| rows.get(i))
+        .map(|r| r.mean_confidence);
+    tracing::info!(
+        ?player_row_idx,
+        player_row_conf,
+        rows = rows.len(),
+        text_confidence = ocr_result.confidence,
+        "scoreboard cell OCR complete"
+    );
 
     let outcome_str = match outcome {
         detect::MatchOutcome::Victory => "victory",
@@ -338,7 +363,13 @@ async fn handle_capture(
         detect::MatchOutcome::Unknown => "unknown",
     };
 
-    if let Some(mut parsed) = parse::parse_scoreboard(&ocr_result.raw_text, outcome_str, player_name, player_row_idx) {
+    if let Some(mut parsed) = parse::parse_scoreboard_cells(
+        &rows,
+        player_row_idx,
+        &ocr_result.raw_text,
+        outcome_str,
+        player_name,
+    ) {
         if let Some((hero_name, confidence)) = &portrait_hero {
             tracing::info!(
                 hero = %hero_name,
@@ -361,7 +392,7 @@ async fn handle_capture(
             let portraits_path = detect::hero_portrait::portraits_dir(data_dir);
             let (sw, sh) = (scoreboard_img.width(), scoreboard_img.height());
             let portrait_w = sw * 6 / 100;
-            let portrait_x = sw * 1 / 100;
+            let portrait_x = sw / 100;
             let row_height = sh * 7 / 100;
             let start_y = sh * 12 / 100;
             let row_y = start_y + player_row_idx.unwrap_or(0) as u32 * row_height;
@@ -391,8 +422,8 @@ async fn handle_capture(
                 hero: parsed.hero.clone(),
                 map_name: parsed.map_name.clone(),
                 role: parsed.role.clone(),
-                started_at: now.clone(),
-                last_capture_at: now.clone(),
+                started_at: now,
+                last_capture_at: now,
                 capture_count: 1,
                 final_outcome: outcome_str.to_string(),
             };
@@ -402,19 +433,20 @@ async fn handle_capture(
             tracing::info!(session_id = %sid, "started new match session (phase-detected boundary)");
             sid
         } else {
-            match store.find_active_session(&parsed.hero, session_window_secs).await {
+            match store
+                .find_active_session(&parsed.hero, session_window_secs)
+                .await
+            {
                 Ok(Some(session)) => {
                     // Inherit map name from session if this capture doesn't have one
                     if parsed.map_name.is_empty() && !session.map_name.is_empty() {
                         parsed.map_name = session.map_name.clone();
                     }
                     let new_count = session.capture_count + 1;
-                    if let Err(e) = store.update_session(
-                        &session.session_id,
-                        now.clone(),
-                        new_count,
-                        outcome_str,
-                    ).await {
+                    if let Err(e) = store
+                        .update_session(&session.session_id, now, new_count, outcome_str)
+                        .await
+                    {
                         tracing::warn!(error = %e, "failed to update session");
                     }
                     tracing::info!(
@@ -431,8 +463,8 @@ async fn handle_capture(
                         hero: parsed.hero.clone(),
                         map_name: parsed.map_name.clone(),
                         role: parsed.role.clone(),
-                        started_at: now.clone(),
-                        last_capture_at: now.clone(),
+                        started_at: now,
+                        last_capture_at: now,
                         capture_count: 1,
                         final_outcome: outcome_str.to_string(),
                     };
@@ -455,9 +487,11 @@ async fn handle_capture(
             "parsed scoreboard"
         );
         storage::append_match_log(data_dir, &parsed);
-        store.insert_match(parsed).await.map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
-            format!("store insert failed: {e}").into()
-        })?;
+        store.insert_match(parsed).await.map_err(
+            |e| -> Box<dyn std::error::Error + Send + Sync> {
+                format!("store insert failed: {e}").into()
+            },
+        )?;
     } else {
         tracing::warn!("could not parse scoreboard from OCR text");
     }
@@ -480,7 +514,11 @@ async fn try_sync(store: &storage::LocalStore, client: &sync::SyncClient) {
             tracing::info!(count = unsynced.len(), "syncing unsynced matches");
             match client.upload_matches(&unsynced).await {
                 Ok(resp) => {
-                    tracing::info!(inserted = resp.inserted, skipped = resp.skipped, "sync complete");
+                    tracing::info!(
+                        inserted = resp.inserted,
+                        skipped = resp.skipped,
+                        "sync complete"
+                    );
                     if let Err(e) = store.mark_synced(unsynced.len()).await {
                         tracing::error!(error = %e, "failed to mark matches as synced");
                     }

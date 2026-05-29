@@ -8,6 +8,8 @@ pub mod members;
 pub mod moderation;
 pub mod settings;
 pub mod stats;
+pub mod teams;
+pub mod tournaments;
 
 pub use announcements::*;
 pub use applications::*;
@@ -19,6 +21,8 @@ pub use members::*;
 pub use moderation::*;
 pub use settings::*;
 pub use stats::*;
+pub use teams::*;
+pub use tournaments::*;
 
 use serde::{Deserialize, Serialize};
 
@@ -60,11 +64,7 @@ impl PaginationParams {
     /// Returns clamped limit (1..=100) and decoded offset.
     pub fn resolve(&self) -> (u32, u32) {
         let limit = self.limit.clamp(1, 100);
-        let offset = self
-            .cursor
-            .as_deref()
-            .and_then(decode_cursor)
-            .unwrap_or(0);
+        let offset = self.cursor.as_deref().and_then(decode_cursor).unwrap_or(0);
         (limit, offset)
     }
 }

@@ -5,8 +5,8 @@ use axum::extract::DefaultBodyLimit;
 use axum::http::HeaderValue;
 use axum::routing::get;
 use scuffed_auth::SessionConfig;
-use scuffed_db::{Database, DbConfig};
 use scuffed_db::migrations::run_migrations;
+use scuffed_db::{Database, DbConfig};
 use scuffed_site_server::{
     create_router,
     notifications::MatrixNotifier,
@@ -77,15 +77,12 @@ async fn main() {
     // Connect to SurrealDB (remote or in-memory fallback)
     let db = match std::env::var("SURREALDB_URL") {
         Ok(url) => {
-            let user =
-                std::env::var("SURREALDB_USER").unwrap_or_else(|_| "root".to_string());
-            let pass =
-                std::env::var("SURREALDB_PASSWORD").unwrap_or_else(|_| "root".to_string());
+            let user = std::env::var("SURREALDB_USER").unwrap_or_else(|_| "root".to_string());
+            let pass = std::env::var("SURREALDB_PASSWORD").unwrap_or_else(|_| "root".to_string());
             let config = DbConfig {
                 namespace: std::env::var("SURREALDB_NS")
                     .unwrap_or_else(|_| "scuffed_crew".to_string()),
-                database: std::env::var("SURREALDB_DB")
-                    .unwrap_or_else(|_| "main".to_string()),
+                database: std::env::var("SURREALDB_DB").unwrap_or_else(|_| "main".to_string()),
             };
             Database::connect(&url, &user, &pass, config)
                 .await
@@ -114,9 +111,8 @@ async fn main() {
 
     let db = Arc::new(db);
 
-    let upload_dir = PathBuf::from(
-        std::env::var("UPLOAD_DIR").unwrap_or_else(|_| "data/uploads".to_string()),
-    );
+    let upload_dir =
+        PathBuf::from(std::env::var("UPLOAD_DIR").unwrap_or_else(|_| "data/uploads".to_string()));
     uploads::ensure_upload_dir(&upload_dir)
         .await
         .expect("Failed to create upload directory");
@@ -128,12 +124,12 @@ async fn main() {
 
     // Nostr challenge signing key: from env or deterministic dev fallback
     let nostr_challenge_key: [u8; 32] = match std::env::var("NOSTR_CHALLENGE_SECRET") {
-        Ok(secret) if !secret.is_empty() => {
-            *blake3::hash(secret.as_bytes()).as_bytes()
-        }
+        Ok(secret) if !secret.is_empty() => *blake3::hash(secret.as_bytes()).as_bytes(),
         _ => {
             if is_dev {
-                tracing::warn!("Using deterministic dev key for Nostr challenges — NOT for production");
+                tracing::warn!(
+                    "Using deterministic dev key for Nostr challenges — NOT for production"
+                );
             }
             *blake3::hash(b"scuffed-crew-dev-nostr-challenge-key").as_bytes()
         }
@@ -158,6 +154,15 @@ async fn main() {
         tracing::info!("Nostr relay configured: {url}");
     }
 
+    // Start the persistent NIP-44 DM relay subscriber (Phase 5 real-time delivery,
+    // [THE-878]). Falls back silently when relay or encryption is not configured —
+    // clients keep using `POST /api/nostr/dm/sync` for polling-based delivery.
+    let dm_events =
+        scuffed_site_server::dm_subscriber::start(db.clone(), crypto.clone(), relay_url.clone());
+    if dm_events.is_none() {
+        tracing::info!("DM relay subscriber disabled (relay_url or encryption key not configured)");
+    }
+
     let state = AppState {
         db: db.clone(),
         session_config: SessionConfig::default(),
@@ -167,6 +172,7 @@ async fn main() {
         nostr_challenge_key,
         crypto,
         relay_url,
+        dm_events,
     };
 
     // Create the collaboration room manager
@@ -204,7 +210,10 @@ async fn main() {
             "/api/chat/decrypt",
             axum::routing::post(routes::chat::decrypt_message).with_state(state),
         )
-        .route("/api/strategy/ws", get(routes::ws::websocket_handler).with_state(ws_state))
+        .route(
+            "/api/strategy/ws",
+            get(routes::ws::websocket_handler).with_state(ws_state),
+        )
         .layer(DefaultBodyLimit::max(10 * 1024 * 1024))
         .layer(CompressionLayer::new())
         .layer(axum::middleware::from_fn(security_headers));

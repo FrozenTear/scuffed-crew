@@ -82,7 +82,11 @@ const PAGE_CSS: &str = r#"
 #[component]
 pub fn News() -> Element {
     let announcements = use_resource(|| async {
-        ApiClient::web().fetch::<CursorPage<Announcement>>("/api/announcements").await.ok().map(|r| r.data)
+        ApiClient::web()
+            .fetch::<CursorPage<Announcement>>("/api/announcements")
+            .await
+            .ok()
+            .map(|r| r.data)
     });
 
     rsx! {
@@ -114,7 +118,11 @@ pub fn News() -> Element {
 
 fn render_news_card(a: &Announcement) -> Element {
     let date: String = a.created_at.chars().take(10).collect();
-    let card_class = if a.pinned { "news-card pinned" } else { "news-card" };
+    let card_class = if a.pinned {
+        "news-card pinned"
+    } else {
+        "news-card"
+    };
 
     rsx! {
         article { class: "{card_class}",

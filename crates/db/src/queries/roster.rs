@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
-use surrealdb_types::RecordId;
 use surrealdb::types::Datetime as SurrealDatetime;
+use surrealdb_types::RecordId;
 use surrealdb_types::SurrealValue;
 
 use crate::types::{RosterEntry, TeamRole};
@@ -48,11 +48,7 @@ fn db_to_roster_entry(db: DbRosterEntry) -> RosterEntry {
         .as_deref()
         .map(extract_record_id)
         .unwrap_or_default();
-    let team_id = db
-        .out
-        .as_deref()
-        .map(extract_record_id)
-        .unwrap_or_default();
+    let team_id = db.out.as_deref().map(extract_record_id).unwrap_or_default();
 
     RosterEntry {
         id,
@@ -95,9 +91,11 @@ impl Database {
                 .bind(("role", role.to_string()))
                 .await?;
             let entries: Vec<DbRosterEntry> = result.take(1)?;
-            entries.into_iter().next().map(db_to_roster_entry).ok_or_else(|| {
-                crate::DbError::NotFound("Failed to create roster entry".into())
-            })
+            entries
+                .into_iter()
+                .next()
+                .map(db_to_roster_entry)
+                .ok_or_else(|| crate::DbError::NotFound("Failed to create roster entry".into()))
         })
         .await
     }

@@ -198,27 +198,59 @@ struct AbilityDef {
 fn heroes_by_role(role: HeroRole) -> Vec<HeroDef> {
     let roster: &[(&str, &str)] = match role {
         HeroRole::Tank => &[
-            ("dva", "D.Va"), ("domina", "Domina"), ("doomfist", "Doomfist"),
-            ("hazard", "Hazard"), ("junker-queen", "Junker Queen"),
-            ("mauga", "Mauga"), ("orisa", "Orisa"), ("ramattra", "Ramattra"),
-            ("reinhardt", "Reinhardt"), ("roadhog", "Roadhog"), ("sigma", "Sigma"),
-            ("winston", "Winston"), ("wrecking-ball", "Wrecking Ball"), ("zarya", "Zarya"),
+            ("dva", "D.Va"),
+            ("domina", "Domina"),
+            ("doomfist", "Doomfist"),
+            ("hazard", "Hazard"),
+            ("junker-queen", "Junker Queen"),
+            ("mauga", "Mauga"),
+            ("orisa", "Orisa"),
+            ("ramattra", "Ramattra"),
+            ("reinhardt", "Reinhardt"),
+            ("roadhog", "Roadhog"),
+            ("sigma", "Sigma"),
+            ("winston", "Winston"),
+            ("wrecking-ball", "Wrecking Ball"),
+            ("zarya", "Zarya"),
         ],
         HeroRole::Damage => &[
-            ("anran", "Anran"), ("ashe", "Ashe"), ("bastion", "Bastion"),
-            ("cassidy", "Cassidy"), ("echo", "Echo"), ("emre", "Emre"),
-            ("freja", "Freja"), ("genji", "Genji"), ("hanzo", "Hanzo"),
-            ("junkrat", "Junkrat"), ("mei", "Mei"), ("pharah", "Pharah"),
-            ("reaper", "Reaper"), ("sierra", "Sierra"), ("sojourn", "Sojourn"),
-            ("soldier-76", "Soldier: 76"), ("sombra", "Sombra"), ("symmetra", "Symmetra"),
-            ("torbjorn", "Torbjorn"), ("tracer", "Tracer"), ("vendetta", "Vendetta"),
-            ("venture", "Venture"), ("widowmaker", "Widowmaker"),
+            ("anran", "Anran"),
+            ("ashe", "Ashe"),
+            ("bastion", "Bastion"),
+            ("cassidy", "Cassidy"),
+            ("echo", "Echo"),
+            ("emre", "Emre"),
+            ("freja", "Freja"),
+            ("genji", "Genji"),
+            ("hanzo", "Hanzo"),
+            ("junkrat", "Junkrat"),
+            ("mei", "Mei"),
+            ("pharah", "Pharah"),
+            ("reaper", "Reaper"),
+            ("sierra", "Sierra"),
+            ("sojourn", "Sojourn"),
+            ("soldier-76", "Soldier: 76"),
+            ("sombra", "Sombra"),
+            ("symmetra", "Symmetra"),
+            ("torbjorn", "Torbjorn"),
+            ("tracer", "Tracer"),
+            ("vendetta", "Vendetta"),
+            ("venture", "Venture"),
+            ("widowmaker", "Widowmaker"),
         ],
         HeroRole::Support => &[
-            ("ana", "Ana"), ("baptiste", "Baptiste"), ("brigitte", "Brigitte"),
-            ("illari", "Illari"), ("juno", "Juno"), ("kiriko", "Kiriko"),
-            ("lifeweaver", "Lifeweaver"), ("lucio", "Lucio"), ("mercy", "Mercy"),
-            ("mizuki", "Mizuki"), ("moira", "Moira"), ("wuyang", "Wuyang"),
+            ("ana", "Ana"),
+            ("baptiste", "Baptiste"),
+            ("brigitte", "Brigitte"),
+            ("illari", "Illari"),
+            ("juno", "Juno"),
+            ("kiriko", "Kiriko"),
+            ("lifeweaver", "Lifeweaver"),
+            ("lucio", "Lucio"),
+            ("mercy", "Mercy"),
+            ("mizuki", "Mizuki"),
+            ("moira", "Moira"),
+            ("wuyang", "Wuyang"),
             ("zenyatta", "Zenyatta"),
         ],
     };
@@ -263,9 +295,13 @@ fn normalize_hero_id(name: &str) -> String {
 }
 
 fn wr_badge_class(pct: f64) -> &'static str {
-    if pct >= 55.0 { "hero-wr-badge high" }
-    else if pct >= 45.0 { "hero-wr-badge mid" }
-    else { "hero-wr-badge low" }
+    if pct >= 55.0 {
+        "hero-wr-badge high"
+    } else if pct >= 45.0 {
+        "hero-wr-badge mid"
+    } else {
+        "hero-wr-badge low"
+    }
 }
 
 #[component]

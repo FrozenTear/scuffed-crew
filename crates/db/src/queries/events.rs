@@ -65,12 +65,10 @@ impl Database {
                 created_by: created_by.to_string(),
                 is_active: true,
             };
-            let created: Option<DbEvent> =
-                self.client.create("event").content(db_event).await?;
-            Ok(db_to_event(
-                created
-                    .ok_or_else(|| crate::DbError::NotFound("Failed to create event".into()))?,
-            ))
+            let created: Option<DbEvent> = self.client.create("event").content(db_event).await?;
+            Ok(db_to_event(created.ok_or_else(|| {
+                crate::DbError::NotFound("Failed to create event".into())
+            })?))
         })
         .await
     }
@@ -79,7 +77,9 @@ impl Database {
         with_timeout(async {
             let mut result = self
                 .client
-                .query("SELECT * FROM event WHERE is_active = true ORDER BY day_of_week ASC, time ASC")
+                .query(
+                    "SELECT * FROM event WHERE is_active = true ORDER BY day_of_week ASC, time ASC",
+                )
                 .await?;
             let events: Vec<DbEvent> = result.take(0)?;
             Ok(events.into_iter().map(db_to_event).collect())
@@ -141,8 +141,7 @@ impl Database {
                 db.team_id = tid.map(|s| s.to_string());
             }
 
-            let updated: Option<DbEvent> =
-                self.client.update(("event", id)).content(db).await?;
+            let updated: Option<DbEvent> = self.client.update(("event", id)).content(db).await?;
             Ok(db_to_event(updated.ok_or_else(|| {
                 crate::DbError::NotFound(format!("Event {id} not found after update"))
             })?))

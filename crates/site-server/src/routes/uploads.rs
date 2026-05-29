@@ -1,7 +1,7 @@
 use axum::{
+    Json,
     extract::{Multipart, State},
     http::StatusCode,
-    Json,
 };
 use serde::Serialize;
 
@@ -59,16 +59,22 @@ pub async fn upload_avatar(
         )
     })?;
 
-    let url = save_upload(&state.upload_dir, "avatars", &data, &content_type, AVATAR_MAX_BYTES)
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::BAD_REQUEST,
-                Json(ErrorResponse {
-                    error: e.to_string(),
-                }),
-            )
-        })?;
+    let url = save_upload(
+        &state.upload_dir,
+        "avatars",
+        &data,
+        &content_type,
+        AVATAR_MAX_BYTES,
+    )
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: e.to_string(),
+            }),
+        )
+    })?;
 
     Ok(Json(UploadResponse { url }))
 }
@@ -113,16 +119,22 @@ pub async fn upload_image(
         )
     })?;
 
-    let url = save_upload(&state.upload_dir, "images", &data, &content_type, IMAGE_MAX_BYTES)
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::BAD_REQUEST,
-                Json(ErrorResponse {
-                    error: e.to_string(),
-                }),
-            )
-        })?;
+    let url = save_upload(
+        &state.upload_dir,
+        "images",
+        &data,
+        &content_type,
+        IMAGE_MAX_BYTES,
+    )
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: e.to_string(),
+            }),
+        )
+    })?;
 
     Ok(Json(UploadResponse { url }))
 }

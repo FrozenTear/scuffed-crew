@@ -1,10 +1,10 @@
 use dioxus::prelude::*;
 use serde::Deserialize;
 
+use crate::components::{ConfirmDialog, DataTable, FormModal, StatusPill, Toast, use_toast};
+use crate::hooks::{ModalController, use_api, use_api_list};
 use scuffed_api_client::ApiClient;
 use scuffed_types::api::CreateModerationRequest;
-use crate::components::{DataTable, FormModal, ConfirmDialog, StatusPill, Toast, use_toast};
-use crate::hooks::{use_api, use_api_list, ModalController};
 
 // Local response types with API-enriched fields (joined names, computed fields).
 #[derive(Debug, Clone, Deserialize)]
@@ -74,7 +74,11 @@ pub fn AdminModeration() -> Element {
 
         modal.start_submit();
         spawn(async move {
-            let expires_at = if duration.is_empty() { None } else { Some(duration) };
+            let expires_at = if duration.is_empty() {
+                None
+            } else {
+                Some(duration)
+            };
             let payload = CreateModerationRequest {
                 member_id,
                 action_type,
@@ -82,7 +86,10 @@ pub fn AdminModeration() -> Element {
                 expires_at,
             };
 
-            match ApiClient::web().post_json::<_, ModerationAction>("/api/moderation", &payload).await {
+            match ApiClient::web()
+                .post_json::<_, ModerationAction>("/api/moderation", &payload)
+                .await
+            {
                 Ok(_) => {
                     toast.show(Toast::success("Moderation action created"));
                     modal.close();
@@ -99,7 +106,10 @@ pub fn AdminModeration() -> Element {
         lift_modal.close();
         spawn(async move {
             let path = format!("/api/moderation/{id}/lift");
-            match ApiClient::web().patch_json_empty(&path, &serde_json::json!({})).await {
+            match ApiClient::web()
+                .patch_json_empty(&path, &serde_json::json!({}))
+                .await
+            {
                 Ok(_) => {
                     toast.show(Toast::success("Action lifted"));
                     actions.refresh += 1;

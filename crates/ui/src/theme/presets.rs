@@ -1,5 +1,5 @@
-use super::Theme;
 use super::tokens::{ColorTokens, FontTokens};
+use super::Theme;
 
 /// The Scuffed Crew clan site theme.
 ///

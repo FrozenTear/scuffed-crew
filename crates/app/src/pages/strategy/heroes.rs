@@ -157,7 +157,7 @@ const PAGE_CSS: &str = r#"
 
 #[component]
 pub fn StrategyHeroes() -> Element {
-    let mut selected_hero: Signal<Option<Hero>> = use_signal(|| None);
+    let selected_hero: Signal<Option<Hero>> = use_signal(|| None);
     let mut search_filter: Signal<String> = use_signal(String::new);
 
     let heroes = use_resource(|| async {
@@ -300,7 +300,11 @@ fn render_hero_button(
     selected_hero: &mut Signal<Option<Hero>>,
 ) -> Element {
     let is_selected = hero.id == selected_id;
-    let btn_class = if is_selected { "hero-btn selected" } else { "hero-btn" };
+    let btn_class = if is_selected {
+        "hero-btn selected"
+    } else {
+        "hero-btn"
+    };
     let hero_clone = hero.clone();
     let portrait_url = hero.portrait_url.clone();
     let initial = hero.initial();
@@ -433,15 +437,13 @@ fn render_hero_detail(hero: &Hero) -> Element {
 }
 
 fn render_ability_card(ability: &Ability) -> Element {
-    let cooldown_text = ability
-        .cooldown
-        .map(|cd| {
-            if cd == cd.floor() {
-                format!("{:.0}s", cd)
-            } else {
-                format!("{:.1}s", cd)
-            }
-        });
+    let cooldown_text = ability.cooldown.map(|cd| {
+        if cd == cd.floor() {
+            format!("{:.0}s", cd)
+        } else {
+            format!("{:.1}s", cd)
+        }
+    });
 
     rsx! {
         div { class: "ability-card", key: "{ability.key}-{ability.name}",

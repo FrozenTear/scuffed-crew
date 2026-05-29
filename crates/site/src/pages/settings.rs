@@ -5,7 +5,7 @@ use wasm_bindgen::JsCast;
 
 use scuffed_auth::client::api::{fetch_json, post_json};
 use scuffed_ui::components::button::{Button, ButtonVariant};
-use scuffed_ui::components::toast::{use_toast, Toast};
+use scuffed_ui::components::toast::{Toast, use_toast};
 
 use crate::app::use_site_auth;
 use crate::components::Nav;

@@ -49,7 +49,7 @@ pub async fn provision_team_channels(
     let existing = db.get_team_channels(team_id).await?;
 
     // Create public channel if not exists
-    let public_group_id = format!("{team_slug}");
+    let public_group_id = team_slug.to_string();
     if !existing.iter().any(|c| c.group_type == GroupType::Public) {
         group_manager
             .create_group(
@@ -69,9 +69,7 @@ pub async fn provision_team_channels(
 
     // Create officer channel if not exists
     let officer_group_id = format!("{team_slug}-officers");
-    let has_officer = existing
-        .iter()
-        .any(|c| c.group_type == GroupType::Officer);
+    let has_officer = existing.iter().any(|c| c.group_type == GroupType::Officer);
 
     if !has_officer {
         group_manager
@@ -135,10 +133,7 @@ pub async fn sync_team_roster(
             // Officers/admins get all channels; members/recruits only public
             let has_access = match channel.group_type {
                 GroupType::Public => true,
-                GroupType::Officer => matches!(
-                    nip29_role,
-                    Nip29GroupRole::GroupAdmin
-                ),
+                GroupType::Officer => matches!(nip29_role, Nip29GroupRole::GroupAdmin),
             };
 
             if has_access {

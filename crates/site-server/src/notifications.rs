@@ -45,12 +45,7 @@ impl MatrixNotifier {
     }
 
     /// Send a message to a Matrix room. Uses m.notice (no push) or m.text (triggers push).
-    async fn send_message(
-        &self,
-        room_id: &str,
-        body: &str,
-        urgent: bool,
-    ) -> Result<(), String> {
+    async fn send_message(&self, room_id: &str, body: &str, urgent: bool) -> Result<(), String> {
         let txn_id = Uuid::new_v4().to_string();
         let msgtype = if urgent { "m.text" } else { "m.notice" };
         let url = format!(

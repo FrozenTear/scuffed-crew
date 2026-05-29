@@ -7,7 +7,7 @@ use scuffed_api_client::ApiClient;
 use scuffed_types::api::{CreateDaemonTokenRequest, CreateDaemonTokenResponse};
 
 use crate::components::{DataTable, FormModal, Toast, use_toast};
-use crate::hooks::{use_api, ModalController};
+use crate::hooks::{ModalController, use_api};
 
 #[derive(Debug, Clone, Deserialize)]
 struct DaemonToken {

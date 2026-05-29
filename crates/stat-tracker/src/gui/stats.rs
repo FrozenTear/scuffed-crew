@@ -591,7 +591,11 @@ fn WinTrendChart(props: WinTrendChartProps) -> Element {
 
     let polyline_points = points.join(" ");
     let last_wr = values.last().copied().unwrap_or(50.0);
-    let line_color = if last_wr >= 50.0 { "#22c55e" } else { "#ef4444" };
+    let line_color = if last_wr >= 50.0 {
+        "#22c55e"
+    } else {
+        "#ef4444"
+    };
 
     let fifty_y = padding + usable_h - ((50.0 - min_val) / range) * usable_h;
 
@@ -632,7 +636,12 @@ fn MapBarChart(props: MapBarChartProps) -> Element {
         return rsx! {};
     }
 
-    let max_games = props.maps.iter().map(|m| m.1 + m.2 + m.3).max().unwrap_or(1);
+    let max_games = props
+        .maps
+        .iter()
+        .map(|m| m.1 + m.2 + m.3)
+        .max()
+        .unwrap_or(1);
     let bar_height = 24.0_f64;
     let gap = 4.0_f64;
     let label_width = 120.0_f64;

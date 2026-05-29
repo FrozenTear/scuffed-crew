@@ -13,6 +13,7 @@ chrono = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }
 pulldown-cmark = { version = "0.12", default-features = false, features = ["html"] }
+bech32 = { version = "0.11", default-features = false, features = ["alloc"] }
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
 serde-wasm-bindgen = "0.6"

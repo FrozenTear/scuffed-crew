@@ -28,6 +28,12 @@ pub struct AdminState {
     pub error: RwSignal<Option<String>>,
 }
 
+impl Default for AdminState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl AdminState {
     pub fn new() -> Self {
         Self {

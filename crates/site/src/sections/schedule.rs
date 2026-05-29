@@ -34,9 +34,8 @@ const DAY_NAMES: [&str; 7] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 
 #[component]
 pub fn Schedule() -> impl IntoView {
-    let events = LocalResource::new(|| async {
-        fetch_json_list::<Event>("/api/events").await.ok()
-    });
+    let events =
+        LocalResource::new(|| async { fetch_json_list::<Event>("/api/events").await.ok() });
 
     view! {
         <section id="schedule">
@@ -115,11 +114,11 @@ fn EventRsvp(event_id: String) -> impl IntoView {
     let do_rsvp = move |status: &'static str| {
         let eid = eid.get_value();
         spawn_local(async move {
-            let body = RsvpRequest { status: status.to_string() };
-            let _ = post_json::<_, serde_json::Value>(
-                &format!("/api/events/{eid}/rsvp"),
-                &body,
-            ).await;
+            let body = RsvpRequest {
+                status: status.to_string(),
+            };
+            let _ =
+                post_json::<_, serde_json::Value>(&format!("/api/events/{eid}/rsvp"), &body).await;
             refresh.update(|n| *n += 1);
         });
     };

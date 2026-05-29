@@ -62,19 +62,17 @@ pub fn encrypt(secret_key_hex: &str, password: &str) -> Result<String, Nip49Erro
     payload.extend_from_slice(&nonce_bytes);
     payload.extend_from_slice(&ciphertext);
 
-    let encoded = bech32::encode::<bech32::Bech32>(
-        bech32::Hrp::parse("ncryptsec").unwrap(),
-        &payload,
-    )
-    .map_err(|e| Nip49Error::EncodingFailed(e.to_string()))?;
+    let encoded =
+        bech32::encode::<bech32::Bech32>(bech32::Hrp::parse("ncryptsec").unwrap(), &payload)
+            .map_err(|e| Nip49Error::EncodingFailed(e.to_string()))?;
 
     Ok(encoded)
 }
 
 /// Decrypt an ncryptsec bech32 string with a password, returning the hex-encoded secret key.
 pub fn decrypt(ncryptsec: &str, password: &str) -> Result<String, Nip49Error> {
-    let (hrp, payload) = bech32::decode(ncryptsec)
-        .map_err(|e| Nip49Error::InvalidFormat(e.to_string()))?;
+    let (hrp, payload) =
+        bech32::decode(ncryptsec).map_err(|e| Nip49Error::InvalidFormat(e.to_string()))?;
 
     if hrp.as_str() != "ncryptsec" {
         return Err(Nip49Error::InvalidFormat(format!(

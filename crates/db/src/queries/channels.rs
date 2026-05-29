@@ -104,9 +104,7 @@ impl Database {
         with_timeout(async {
             let mut result = self
                 .client
-                .query(
-                    "SELECT * FROM team_channel WHERE team_id = $tid AND is_active = true",
-                )
+                .query("SELECT * FROM team_channel WHERE team_id = $tid AND is_active = true")
                 .bind(("tid", tid))
                 .await?;
             let channels: Vec<DbTeamChannel> = result.take(0)?;
@@ -116,10 +114,7 @@ impl Database {
     }
 
     /// Get a channel by its NIP-29 group ID.
-    pub async fn get_channel_by_group_id(
-        &self,
-        group_id: &str,
-    ) -> DbResult<Option<TeamChannel>> {
+    pub async fn get_channel_by_group_id(&self, group_id: &str) -> DbResult<Option<TeamChannel>> {
         let gid = group_id.to_string();
         with_timeout(async {
             let mut result = self
@@ -138,9 +133,7 @@ impl Database {
         let gid = group_id.to_string();
         with_timeout(async {
             self.client
-                .query(
-                    "UPDATE team_channel SET synced_at = time::now() WHERE group_id = $gid",
-                )
+                .query("UPDATE team_channel SET synced_at = time::now() WHERE group_id = $gid")
                 .bind(("gid", gid))
                 .await?;
             Ok(())
@@ -168,9 +161,7 @@ impl Database {
         let gid = group_id.to_string();
         with_timeout(async {
             self.client
-                .query(
-                    "UPDATE team_channel SET is_active = false WHERE group_id = $gid",
-                )
+                .query("UPDATE team_channel SET is_active = false WHERE group_id = $gid")
                 .bind(("gid", gid))
                 .await?;
             Ok(())
@@ -179,11 +170,7 @@ impl Database {
     }
 
     /// Upsert a member's last-seen timestamp for a group (for unread badges).
-    pub async fn upsert_last_seen(
-        &self,
-        member_id: &str,
-        group_id: &str,
-    ) -> DbResult<()> {
+    pub async fn upsert_last_seen(&self, member_id: &str, group_id: &str) -> DbResult<()> {
         let mid = member_id.to_string();
         let gid = group_id.to_string();
         with_timeout(async {
@@ -226,10 +213,7 @@ impl Database {
     }
 
     /// Get all last-seen entries for a member (for computing unread state across groups).
-    pub async fn get_member_last_seen_all(
-        &self,
-        member_id: &str,
-    ) -> DbResult<Vec<GroupLastSeen>> {
+    pub async fn get_member_last_seen_all(&self, member_id: &str) -> DbResult<Vec<GroupLastSeen>> {
         let mid = member_id.to_string();
         with_timeout(async {
             let mut result = self

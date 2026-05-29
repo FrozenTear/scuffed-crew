@@ -2,10 +2,7 @@ use leptos::prelude::*;
 
 /// A simple data table component.
 #[component]
-pub fn DataTable(
-    headers: Vec<&'static str>,
-    children: Children,
-) -> impl IntoView {
+pub fn DataTable(headers: Vec<&'static str>, children: Children) -> impl IntoView {
     view! {
         <table class="data-table">
             <thead>

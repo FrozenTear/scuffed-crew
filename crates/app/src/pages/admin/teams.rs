@@ -1,10 +1,10 @@
 use dioxus::prelude::*;
 use serde::Deserialize;
 
+use crate::components::{ConfirmDialog, DataTable, FormModal, Toast, use_toast};
+use crate::hooks::{ModalController, use_api, use_api_list};
 use scuffed_api_client::ApiClient;
-use scuffed_types::api::{CreateTeamRequest, AddRosterMemberRequest, UpdateRosterRoleRequest};
-use crate::components::{DataTable, FormModal, ConfirmDialog, Toast, use_toast};
-use crate::hooks::{use_api, use_api_list, ModalController};
+use scuffed_types::api::{AddRosterMemberRequest, CreateTeamRequest, UpdateRosterRoleRequest};
 
 // --- Types ---
 // Local response types with API-enriched fields (joined names).
@@ -73,13 +73,12 @@ pub fn AdminTeams() -> Element {
     // Fetch roster when team selected
     let _roster_loader = use_resource(move || async move {
         let _ = roster_refresh();
-        if let Some(team) = roster_modal.get_target() {
-            if let Ok(entries) = ApiClient::web()
+        if let Some(team) = roster_modal.get_target()
+            && let Ok(entries) = ApiClient::web()
                 .fetch::<Vec<RosterEntry>>(&format!("/api/teams/{}/roster", team.id))
                 .await
-            {
-                roster_data.set(entries);
-            }
+        {
+            roster_data.set(entries);
         }
     });
 
@@ -115,15 +114,25 @@ pub fn AdminTeams() -> Element {
         let body = CreateTeamRequest {
             name,
             game_id,
-            color: if color_raw.is_empty() { None } else { Some(color_raw) },
-            division: if div_raw.is_empty() { None } else { Some(div_raw) },
+            color: if color_raw.is_empty() {
+                None
+            } else {
+                Some(color_raw)
+            },
+            division: if div_raw.is_empty() {
+                None
+            } else {
+                Some(div_raw)
+            },
         };
         let edit_id = modal.get_target();
         modal.start_submit();
         spawn(async move {
             let client = ApiClient::web();
             let result = if let Some(id) = edit_id {
-                client.put_json::<_, Team>(&format!("/api/teams/{id}"), &body).await
+                client
+                    .put_json::<_, Team>(&format!("/api/teams/{id}"), &body)
+                    .await
             } else {
                 client.post_json::<_, Team>("/api/teams", &body).await
             };
@@ -216,7 +225,9 @@ pub fn AdminTeams() -> Element {
     let on_role_change = move |(member_id, new_role): (String, String)| {
         if let Some(team) = roster_modal.get_target() {
             let team_id = team.id.clone();
-            let body = UpdateRosterRoleRequest { team_role: new_role };
+            let body = UpdateRosterRoleRequest {
+                team_role: new_role,
+            };
             spawn(async move {
                 let result = ApiClient::web()
                     .put_json::<_, RosterEntry>(
@@ -240,24 +251,24 @@ pub fn AdminTeams() -> Element {
     };
 
     let on_remove_confirm = move |_| {
-        if let Some(entry) = remove_modal.get_target() {
-            if let Some(team) = roster_modal.get_target() {
-                let team_id = team.id.clone();
-                let member_id = entry.member_id.clone();
-                remove_modal.close();
-                spawn(async move {
-                    match ApiClient::web()
-                        .delete(&format!("/api/teams/{team_id}/roster/{member_id}"))
-                        .await
-                    {
-                        Ok(_) => {
-                            toast.show(Toast::success("Member removed from roster."));
-                            roster_refresh += 1;
-                        }
-                        Err(e) => toast.show(Toast::error(format!("Remove failed: {e}"))),
+        if let Some(entry) = remove_modal.get_target()
+            && let Some(team) = roster_modal.get_target()
+        {
+            let team_id = team.id.clone();
+            let member_id = entry.member_id.clone();
+            remove_modal.close();
+            spawn(async move {
+                match ApiClient::web()
+                    .delete(&format!("/api/teams/{team_id}/roster/{member_id}"))
+                    .await
+                {
+                    Ok(_) => {
+                        toast.show(Toast::success("Member removed from roster."));
+                        roster_refresh += 1;
                     }
-                });
-            }
+                    Err(e) => toast.show(Toast::error(format!("Remove failed: {e}"))),
+                }
+            });
         }
     };
 

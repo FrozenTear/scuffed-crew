@@ -8,8 +8,14 @@ pub fn build_histogram(
         return (Vec::new(), Vec::new());
     }
 
-    let min_val = samples.iter().map(|(v, _)| *v).fold(f64::INFINITY, f64::min);
-    let max_val = samples.iter().map(|(v, _)| *v).fold(f64::NEG_INFINITY, f64::max);
+    let min_val = samples
+        .iter()
+        .map(|(v, _)| *v)
+        .fold(f64::INFINITY, f64::min);
+    let max_val = samples
+        .iter()
+        .map(|(v, _)| *v)
+        .fold(f64::NEG_INFINITY, f64::max);
 
     let n_bins = ((max_val - min_val) / bin_width).ceil() as usize + 1;
     let mut counts = vec![0.0f64; n_bins];
@@ -105,8 +111,16 @@ mod tests {
     fn histogram_basic() {
         // 10 samples clustered at 0.0 and 3.0
         let samples: Vec<(f64, f64)> = vec![
-            (0.0, 1.0), (0.1, 1.0), (0.2, 1.0), (0.1, 1.0), (0.15, 1.0),
-            (3.0, 1.0), (3.1, 1.0), (3.2, 1.0), (3.05, 1.0), (3.15, 1.0),
+            (0.0, 1.0),
+            (0.1, 1.0),
+            (0.2, 1.0),
+            (0.1, 1.0),
+            (0.15, 1.0),
+            (3.0, 1.0),
+            (3.1, 1.0),
+            (3.2, 1.0),
+            (3.05, 1.0),
+            (3.15, 1.0),
         ];
         let (edges, counts) = build_histogram(&samples, 0.5);
         // Should have bins from 0.0 to ~3.5
@@ -142,9 +156,12 @@ mod tests {
         let smoothed = gaussian_smooth(&signal, 0.001, 1.0);
         assert_eq!(smoothed.len(), 5);
         // Peak should still be at index 2
-        let max_idx = smoothed.iter().enumerate()
+        let max_idx = smoothed
+            .iter()
+            .enumerate()
             .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
-            .unwrap().0;
+            .unwrap()
+            .0;
         assert_eq!(max_idx, 2);
     }
 
@@ -157,9 +174,12 @@ mod tests {
         assert!(smoothed[2] > 0.0);
         assert!(smoothed[4] > 0.0);
         // Peak should still be at center
-        let max_idx = smoothed.iter().enumerate()
+        let max_idx = smoothed
+            .iter()
+            .enumerate()
             .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
-            .unwrap().0;
+            .unwrap()
+            .0;
         assert_eq!(max_idx, 3);
     }
 

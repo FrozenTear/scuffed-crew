@@ -14,10 +14,10 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
+use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::JsFuture;
-use web_sys::{MessageEvent, Request, RequestInit, RequestCredentials, Response, WebSocket};
+use web_sys::{MessageEvent, Request, RequestCredentials, RequestInit, Response, WebSocket};
 
 use scuffed_types::nostr::{
     ChatMessage, ClientRelayMessage, NostrEvent, NostrFilter, RelayMessage,
@@ -100,9 +100,7 @@ pub enum NostrRelayEvent {
         event: NostrEvent,
     },
     /// End of stored events for a subscription.
-    Eose {
-        subscription_id: String,
-    },
+    Eose { subscription_id: String },
     /// An event we published was acknowledged.
     EventPublished {
         event_id: String,
@@ -188,16 +186,16 @@ fn setup_relay_connection(shared: &Rc<SharedRelayState>) {
 
                 // Re-subscribe to active subscriptions after reconnect
                 let subs = shared_open.subscriptions.borrow().clone();
-                if !subs.is_empty() {
-                    if let Some(socket) = shared_open.socket.borrow().as_ref() {
-                        for (sub_id, filters) in &subs {
-                            let msg = ClientRelayMessage::Req {
-                                subscription_id: sub_id.clone(),
-                                filters: filters.clone(),
-                            };
-                            if let Ok(json) = msg.to_json() {
-                                let _ = socket.send_with_str(&json);
-                            }
+                if !subs.is_empty()
+                    && let Some(socket) = shared_open.socket.borrow().as_ref()
+                {
+                    for (sub_id, filters) in &subs {
+                        let msg = ClientRelayMessage::Req {
+                            subscription_id: sub_id.clone(),
+                            filters: filters.clone(),
+                        };
+                        if let Ok(json) = msg.to_json() {
+                            let _ = socket.send_with_str(&json);
                         }
                     }
                 }
@@ -245,8 +243,7 @@ fn setup_relay_connection(shared: &Rc<SharedRelayState>) {
                 if attempts < MAX_RECONNECT_ATTEMPTS {
                     let delay = reconnect_delay(attempts);
                     let new_attempt = attempts + 1;
-                    shared_close
-                        .emit_state(RelayConnectionState::Reconnecting(new_attempt));
+                    shared_close.emit_state(RelayConnectionState::Reconnecting(new_attempt));
                     *shared_close.reconnect_attempts.borrow_mut() = new_attempt;
 
                     tracing::info!(
@@ -301,11 +298,11 @@ fn handle_relay_message(shared: &Rc<SharedRelayState>, msg: RelayMessage) {
             subscription_id,
             event,
         } => {
-            if event.is_group_chat() {
-                if let Some(chat_msg) = ChatMessage::from_event(&event) {
-                    shared.emit_event(NostrRelayEvent::ChatMessage(chat_msg));
-                    return;
-                }
+            if event.is_group_chat()
+                && let Some(chat_msg) = ChatMessage::from_event(&event)
+            {
+                shared.emit_event(NostrRelayEvent::ChatMessage(chat_msg));
+                return;
             }
             shared.emit_event(NostrRelayEvent::RawEvent {
                 subscription_id,
@@ -382,10 +379,10 @@ async fn fetch_auth_event(
     });
     let body_str = serde_json::to_string(&body).map_err(|e| e.to_string())?;
 
-    let mut opts = RequestInit::new();
-    opts.method("POST");
-    opts.body(Some(&JsValue::from_str(&body_str)));
-    opts.credentials(RequestCredentials::SameOrigin);
+    let opts = RequestInit::new();
+    opts.set_method("POST");
+    opts.set_body(&JsValue::from_str(&body_str));
+    opts.set_credentials(RequestCredentials::SameOrigin);
 
     let request = Request::new_with_str_and_init(endpoint, &opts).map_err(|e| format!("{e:?}"))?;
     request
@@ -617,10 +614,10 @@ impl NostrRelayManager {
 
     /// Send a raw client relay message.
     fn send_raw(&self, message: ClientRelayMessage) {
-        if let Some(socket) = self.shared.socket.borrow().as_ref() {
-            if let Ok(json) = message.to_json() {
-                let _ = socket.send_with_str(&json);
-            }
+        if let Some(socket) = self.shared.socket.borrow().as_ref()
+            && let Ok(json) = message.to_json()
+        {
+            let _ = socket.send_with_str(&json);
         }
     }
 
@@ -634,10 +631,10 @@ impl NostrRelayManager {
 
     /// Cancel any pending reconnection timer.
     fn cancel_reconnect_timer(&self) {
-        if let Some(timer_id) = self.shared.reconnect_timer_id.borrow_mut().take() {
-            if let Some(window) = web_sys::window() {
-                window.clear_timeout_with_handle(timer_id);
-            }
+        if let Some(timer_id) = self.shared.reconnect_timer_id.borrow_mut().take()
+            && let Some(window) = web_sys::window()
+        {
+            window.clear_timeout_with_handle(timer_id);
         }
     }
 }

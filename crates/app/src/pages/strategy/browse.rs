@@ -1,8 +1,8 @@
 use dioxus::prelude::*;
 use serde::Deserialize;
 
-use scuffed_api_client::ApiClient;
 use crate::routes::Route;
+use scuffed_api_client::ApiClient;
 
 // --- Types ---
 
@@ -29,7 +29,13 @@ struct ListResponse {
 // --- Constants ---
 
 const GAME_MODES: &[&str] = &[
-    "All", "Escort", "Hybrid", "Control", "Push", "Flashpoint", "Clash",
+    "All",
+    "Escort",
+    "Hybrid",
+    "Control",
+    "Push",
+    "Flashpoint",
+    "Clash",
 ];
 
 const PAGE_CSS: &str = r#"

@@ -106,10 +106,8 @@ pub struct DonutSegment {
 #[component]
 pub fn DonutChart(
     segments: Vec<DonutSegment>,
-    #[props(default)]
-    center_value: Option<String>,
-    #[props(default)]
-    center_label: Option<String>,
+    #[props(default)] center_value: Option<String>,
+    #[props(default)] center_label: Option<String>,
 ) -> Element {
     let total: f64 = segments.iter().map(|s| s.value).sum();
     if total == 0.0 {

@@ -1,8 +1,8 @@
 use dioxus::prelude::*;
 
+use crate::components::{Toast, use_toast};
 use scuffed_api_client::ApiClient;
 use scuffed_types::{SiteSettings, api::UpdateSettingsRequest};
-use crate::components::{Toast, use_toast};
 
 #[component]
 pub fn AdminSettings() -> Element {
@@ -18,7 +18,10 @@ pub fn AdminSettings() -> Element {
     let mut extra_relay_urls = use_signal(String::new);
 
     let _settings = use_resource(move || async move {
-        match ApiClient::web().fetch::<SiteSettings>("/api/settings").await {
+        match ApiClient::web()
+            .fetch::<SiteSettings>("/api/settings")
+            .await
+        {
             Ok(s) => {
                 org_name.set(s.org_name);
                 site_description.set(s.site_description);
@@ -48,7 +51,10 @@ pub fn AdminSettings() -> Element {
         saving.set(true);
         spawn(async move {
             let client = ApiClient::web();
-            match client.put_json::<_, SiteSettings>("/api/settings", &body).await {
+            match client
+                .put_json::<_, SiteSettings>("/api/settings", &body)
+                .await
+            {
                 Ok(_) => {
                     toast.show(Toast::success("Settings saved."));
                 }

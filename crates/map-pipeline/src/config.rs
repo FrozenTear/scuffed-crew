@@ -82,19 +82,45 @@ pub struct FloorConfig {
 }
 
 // Default value functions
-fn default_max_distance() -> f64 { 200.0 }
-fn default_min_object_size() -> f64 { 0.01 }
-fn default_true() -> bool { true }
-fn default_skybox_threshold() -> f64 { 500.0 }
-fn default_slope() -> f64 { 50.0 }
-fn default_bin_width() -> f64 { 0.25 }
-fn default_sigma() -> f64 { 0.4 }
-fn default_floor_gap() -> f64 { 2.0 }
-fn default_prominence() -> f64 { 10.0 }
-fn default_ppm() -> f64 { 32.0 }
-fn default_padding() -> f64 { 5.0 }
-fn default_tile_size() -> u32 { 256 }
-fn default_max_zoom() -> u32 { 4 }
+fn default_max_distance() -> f64 {
+    200.0
+}
+fn default_min_object_size() -> f64 {
+    0.01
+}
+fn default_true() -> bool {
+    true
+}
+fn default_skybox_threshold() -> f64 {
+    500.0
+}
+fn default_slope() -> f64 {
+    50.0
+}
+fn default_bin_width() -> f64 {
+    0.25
+}
+fn default_sigma() -> f64 {
+    0.4
+}
+fn default_floor_gap() -> f64 {
+    2.0
+}
+fn default_prominence() -> f64 {
+    10.0
+}
+fn default_ppm() -> f64 {
+    32.0
+}
+fn default_padding() -> f64 {
+    5.0
+}
+fn default_tile_size() -> u32 {
+    256
+}
+fn default_max_zoom() -> u32 {
+    4
+}
 
 impl Default for CleanupConfig {
     fn default() -> Self {

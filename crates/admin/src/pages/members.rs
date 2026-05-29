@@ -155,7 +155,9 @@ pub fn MembersPage() -> impl IntoView {
         stats_loading.set(true);
         stats_open.set(true);
         spawn_local(async move {
-            match api::get::<AttendanceStats>(&format!("/api/members/{member_id}/attendance/stats")).await {
+            match api::get::<AttendanceStats>(&format!("/api/members/{member_id}/attendance/stats"))
+                .await
+            {
                 Ok(data) => stats_data.set(Some(data)),
                 Err(e) => toast.show(Toast::error(format!("Failed to load stats: {e}"))),
             }
@@ -186,11 +188,16 @@ pub fn MembersPage() -> impl IntoView {
         acct_open.set(true);
         spawn_local(async move {
             let (accounts, games) = (
-                api::get::<Vec<GameAccount>>(&format!("/api/members/{member_id}/game-accounts")).await,
+                api::get::<Vec<GameAccount>>(&format!("/api/members/{member_id}/game-accounts"))
+                    .await,
                 api::get::<Vec<Game>>("/api/games").await,
             );
-            if let Ok(a) = accounts { acct_list.set(a); }
-            if let Ok(g) = games { acct_games.set(g); }
+            if let Ok(a) = accounts {
+                acct_list.set(a);
+            }
+            if let Ok(g) = games {
+                acct_games.set(g);
+            }
             acct_loading.set(false);
         });
     };
@@ -209,11 +216,17 @@ pub fn MembersPage() -> impl IntoView {
         let body = UpsertGameAccountBody {
             game_id,
             account_name,
-            account_id: if account_id.is_empty() { None } else { Some(account_id) },
+            account_id: if account_id.is_empty() {
+                None
+            } else {
+                Some(account_id)
+            },
         };
         acct_submitting.set(true);
         spawn_local(async move {
-            match api::put::<_, GameAccount>(&format!("/api/members/{mid}/game-accounts"), &body).await {
+            match api::put::<_, GameAccount>(&format!("/api/members/{mid}/game-accounts"), &body)
+                .await
+            {
                 Ok(_) => {
                     toast.show(Toast::success("Account added"));
                     acct_form_open.set(false);
@@ -221,7 +234,10 @@ pub fn MembersPage() -> impl IntoView {
                     acct_name.set(String::new());
                     acct_id_val.set(String::new());
                     // Refresh list
-                    if let Ok(a) = api::get::<Vec<GameAccount>>(&format!("/api/members/{mid}/game-accounts")).await {
+                    if let Ok(a) =
+                        api::get::<Vec<GameAccount>>(&format!("/api/members/{mid}/game-accounts"))
+                            .await
+                    {
                         acct_list.set(a);
                     }
                 }
@@ -236,7 +252,11 @@ pub fn MembersPage() -> impl IntoView {
             match api::delete(&format!("/api/members/{member_id}/game-accounts/{acct_id}")).await {
                 Ok(_) => {
                     toast.show(Toast::success("Account removed"));
-                    if let Ok(a) = api::get::<Vec<GameAccount>>(&format!("/api/members/{member_id}/game-accounts")).await {
+                    if let Ok(a) = api::get::<Vec<GameAccount>>(&format!(
+                        "/api/members/{member_id}/game-accounts"
+                    ))
+                    .await
+                    {
                         acct_list.set(a);
                     }
                 }
@@ -278,14 +298,18 @@ pub fn MembersPage() -> impl IntoView {
         spawn_local(async move {
             match api::upload_file::<UploadResponse>("/api/upload/avatar", file).await {
                 Ok(resp) => {
-                    let body = UpdateAvatarBody { avatar_url: Some(resp.url) };
+                    let body = UpdateAvatarBody {
+                        avatar_url: Some(resp.url),
+                    };
                     match api::put::<_, Member>(&format!("/api/members/{mid}"), &body).await {
                         Ok(_) => {
                             toast.show(Toast::success("Avatar updated"));
                             avatar_open.set(false);
                             refresh.update(|n| *n += 1);
                         }
-                        Err(e) => toast.show(Toast::error(format!("Failed to update profile: {e}"))),
+                        Err(e) => {
+                            toast.show(Toast::error(format!("Failed to update profile: {e}")))
+                        }
                     }
                 }
                 Err(e) => toast.show(Toast::error(format!("Upload failed: {e}"))),
@@ -301,10 +325,8 @@ pub fn MembersPage() -> impl IntoView {
         mod_loading.set(true);
         mod_open.set(true);
         spawn_local(async move {
-            match api::get::<Vec<ModerationAction>>(&format!(
-                "/api/members/{member_id}/moderation"
-            ))
-            .await
+            match api::get::<Vec<ModerationAction>>(&format!("/api/members/{member_id}/moderation"))
+                .await
             {
                 Ok(history) => mod_history.set(history),
                 Err(e) => toast.show(Toast::error(format!("Failed to load history: {e}"))),
@@ -394,13 +416,12 @@ pub fn MembersPage() -> impl IntoView {
                     mod_reason.set(String::new());
                     mod_duration_days.set(String::new());
                     // Refresh moderation history
-                    match api::get::<Vec<ModerationAction>>(&format!(
+                    if let Ok(history) = api::get::<Vec<ModerationAction>>(&format!(
                         "/api/members/{member_id}/moderation"
                     ))
                     .await
                     {
-                        Ok(history) => mod_history.set(history),
-                        Err(_) => {}
+                        mod_history.set(history)
                     }
                 }
                 Err(e) => toast.show(Toast::error(format!("Failed: {e}"))),
@@ -423,13 +444,12 @@ pub fn MembersPage() -> impl IntoView {
                     toast.show(Toast::success("Moderation action lifted"));
                     lift_open.set(false);
                     // Refresh moderation history
-                    match api::get::<Vec<ModerationAction>>(&format!(
+                    if let Ok(history) = api::get::<Vec<ModerationAction>>(&format!(
                         "/api/members/{member_id}/moderation"
                     ))
                     .await
                     {
-                        Ok(history) => mod_history.set(history),
-                        Err(_) => {}
+                        mod_history.set(history)
                     }
                 }
                 Err(e) => toast.show(Toast::error(format!("Failed: {e}"))),
@@ -439,9 +459,8 @@ pub fn MembersPage() -> impl IntoView {
 
     let is_admin = move || state.is_admin();
 
-    let role_title = Signal::derive(move || {
-        format!("Change Role \u{2014} {}", role_member_name.get())
-    });
+    let role_title =
+        Signal::derive(move || format!("Change Role \u{2014} {}", role_member_name.get()));
 
     let toggle_title = Signal::derive(move || {
         let action = if toggle_currently_active.get() {
@@ -465,17 +484,13 @@ pub fn MembersPage() -> impl IntoView {
 
     let toggle_danger = Signal::derive(move || toggle_currently_active.get());
 
-    let mod_title = Signal::derive(move || {
-        format!("Moderation \u{2014} {}", mod_member_name.get())
-    });
+    let mod_title =
+        Signal::derive(move || format!("Moderation \u{2014} {}", mod_member_name.get()));
 
-    let mod_form_title = Signal::derive(move || {
-        format!("New Action \u{2014} {}", mod_member_name.get())
-    });
+    let mod_form_title =
+        Signal::derive(move || format!("New Action \u{2014} {}", mod_member_name.get()));
 
-    let lift_title = Signal::derive(move || {
-        format!("Lift {}", lift_action_type.get())
-    });
+    let lift_title = Signal::derive(move || format!("Lift {}", lift_action_type.get()));
 
     let lift_message = Signal::derive(move || {
         format!(

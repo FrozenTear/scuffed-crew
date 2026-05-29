@@ -21,9 +21,7 @@ const MAX_HISTORY: usize = 50;
 #[derive(Debug, Clone)]
 pub enum UndoableAction {
     /// An element was added to the canvas.
-    AddElement {
-        element: StrategyElement,
-    },
+    AddElement { element: StrategyElement },
     /// An element was removed from the canvas (stores the element and its
     /// original index so it can be re-inserted in the right place).
     RemoveElement {
@@ -43,14 +41,9 @@ pub enum UndoableAction {
         after: Position,
     },
     /// A timeline phase was added.
-    AddPhase {
-        phase: TimelinePhase,
-    },
+    AddPhase { phase: TimelinePhase },
     /// A timeline phase was removed.
-    RemovePhase {
-        phase: TimelinePhase,
-        index: usize,
-    },
+    RemovePhase { phase: TimelinePhase, index: usize },
     /// A hero was assigned to a team slot.
     AssignHeroToSlot {
         slot: TeamSlot,
@@ -63,9 +56,7 @@ pub enum UndoableAction {
         previous_hero_id: HeroId,
     },
     /// All team slots were cleared at once.
-    ClearAllSlots {
-        previous: Vec<HeroSelection>,
-    },
+    ClearAllSlots { previous: Vec<HeroSelection> },
 }
 
 // =============================================================================
@@ -262,9 +253,7 @@ mod tests {
 
         let action = mgr.undo().unwrap();
         match action {
-            UndoableAction::MoveElement {
-                before, after, ..
-            } => {
+            UndoableAction::MoveElement { before, after, .. } => {
                 assert_eq!(before.x, 10.0);
                 assert_eq!(after.x, 50.0);
             }
@@ -273,9 +262,7 @@ mod tests {
 
         let action = mgr.redo().unwrap();
         match action {
-            UndoableAction::MoveElement {
-                before, after, ..
-            } => {
+            UndoableAction::MoveElement { before, after, .. } => {
                 assert_eq!(before.x, 10.0);
                 assert_eq!(after.x, 50.0);
             }

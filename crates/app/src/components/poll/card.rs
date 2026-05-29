@@ -125,7 +125,7 @@ pub fn PollCard(
     is_officer: bool,
     on_change: EventHandler<()>,
 ) -> Element {
-    let mut toasts = use_toast();
+    let toasts = use_toast();
 
     let poll_id = results.poll.id.clone();
     let total = results.total_votes;
@@ -150,7 +150,7 @@ pub fn PollCard(
                         let class_str = if is_voted { "poll-option voted" } else { "poll-option" };
                         let poll_id = poll_id.clone();
                         let oidx = opt.option_index;
-                        let mut on_change = on_change;
+                        let on_change = on_change;
 
                         rsx! {
                             div {
@@ -174,7 +174,7 @@ pub fn PollCard(
                                                 on_change.call(());
                                             }
                                             Err(e) => {
-                                                toasts.show(Toast::error(&format!("Vote failed: {e}")));
+                                                toasts.show(Toast::error(format!("Vote failed: {e}")));
                                             }
                                         }
                                     });
@@ -205,7 +205,7 @@ pub fn PollCard(
                 if is_officer {
                     {
                         let poll_id = poll_id.clone();
-                        let mut on_change = on_change;
+                        let on_change = on_change;
                         rsx! {
                             button {
                                 class: "poll-delete-btn",
@@ -219,7 +219,7 @@ pub fn PollCard(
                                                 on_change.call(());
                                             }
                                             Err(e) => {
-                                                toasts.show(Toast::error(&format!("Delete failed: {e}")));
+                                                toasts.show(Toast::error(format!("Delete failed: {e}")));
                                             }
                                         }
                                     });

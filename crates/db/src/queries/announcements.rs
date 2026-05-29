@@ -1,7 +1,7 @@
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
-use surrealdb_types::RecordId;
 use surrealdb::types::Datetime as SurrealDatetime;
+use surrealdb_types::RecordId;
 use surrealdb_types::SurrealValue;
 
 use crate::types::Announcement;
@@ -56,7 +56,7 @@ impl Database {
                 author_id: author_id.to_string(),
                 pinned,
                 is_active: true,
-                created_at: now.clone(),
+                created_at: now,
                 updated_at: now,
             };
             let created: Option<DbAnnouncement> =
@@ -114,11 +114,9 @@ impl Database {
         pinned: Option<bool>,
     ) -> DbResult<Announcement> {
         with_timeout(async {
-            let existing: Option<DbAnnouncement> =
-                self.client.select(("announcement", id)).await?;
-            let mut db = existing.ok_or_else(|| {
-                crate::DbError::NotFound(format!("Announcement {id} not found"))
-            })?;
+            let existing: Option<DbAnnouncement> = self.client.select(("announcement", id)).await?;
+            let mut db = existing
+                .ok_or_else(|| crate::DbError::NotFound(format!("Announcement {id} not found")))?;
 
             if let Some(t) = title {
                 db.title = t.to_string();
@@ -131,11 +129,8 @@ impl Database {
             }
             db.updated_at = SurrealDatetime::from(Utc::now());
 
-            let updated: Option<DbAnnouncement> = self
-                .client
-                .update(("announcement", id))
-                .content(db)
-                .await?;
+            let updated: Option<DbAnnouncement> =
+                self.client.update(("announcement", id)).content(db).await?;
             Ok(db_to_announcement(updated.ok_or_else(|| {
                 crate::DbError::NotFound(format!("Announcement {id} not found after update"))
             })?))

@@ -1,7 +1,5 @@
 use crate::config::MapConfig;
-use scuffed_types::{
-    CoordinateTransform, FloorLevel, MapMetadata, TilePyramidInfo, WorldBounds,
-};
+use scuffed_types::{CoordinateTransform, FloorLevel, MapMetadata, TilePyramidInfo, WorldBounds};
 use std::path::Path;
 
 /// Build MapMetadata from pipeline config and detected image dimensions.
@@ -15,7 +13,8 @@ pub fn build_metadata(
         .iter()
         .fold((0u32, 0u32), |(w, h), (_, fw, fh)| (w.max(*fw), h.max(*fh)));
 
-    let transform = CoordinateTransform::from_bounds(&world_bounds, composite_width, composite_height);
+    let transform =
+        CoordinateTransform::from_bounds(&world_bounds, composite_width, composite_height);
 
     let tile_pyramid = Some(TilePyramidInfo {
         tile_size: config.tiles.tile_size,
@@ -75,7 +74,12 @@ pub fn estimate_world_bounds(triangles: &[crate::mesh::Triangle]) -> WorldBounds
         }
     }
 
-    WorldBounds { x_min, x_max, z_min, z_max }
+    WorldBounds {
+        x_min,
+        x_max,
+        z_min,
+        z_max,
+    }
 }
 
 #[cfg(test)]
@@ -94,11 +98,29 @@ mod tests {
             },
             cleanup: CleanupConfig::default(),
             detection: DetectionConfig::default(),
-            render: RenderConfig { pixels_per_meter: 32.0, camera_padding: 5.0 },
-            tiles: TileConfig { tile_size: 256, max_zoom: 3 },
+            render: RenderConfig {
+                pixels_per_meter: 32.0,
+                camera_padding: 5.0,
+            },
+            tiles: TileConfig {
+                tile_size: 256,
+                max_zoom: 3,
+            },
             floors: vec![
-                FloorConfig { id: "ground".into(), name: "Ground".into(), y_min: 0.0, y_max: 4.0, is_default: true },
-                FloorConfig { id: "upper".into(), name: "Upper".into(), y_min: 4.0, y_max: 8.0, is_default: false },
+                FloorConfig {
+                    id: "ground".into(),
+                    name: "Ground".into(),
+                    y_min: 0.0,
+                    y_max: 4.0,
+                    is_default: true,
+                },
+                FloorConfig {
+                    id: "upper".into(),
+                    name: "Upper".into(),
+                    y_min: 4.0,
+                    y_max: 8.0,
+                    is_default: false,
+                },
             ],
         }
     }
@@ -106,7 +128,12 @@ mod tests {
     #[test]
     fn build_metadata_basic() {
         let config = test_config();
-        let bounds = WorldBounds { x_min: -40.0, x_max: 40.0, z_min: -30.0, z_max: 30.0 };
+        let bounds = WorldBounds {
+            x_min: -40.0,
+            x_max: 40.0,
+            z_min: -30.0,
+            z_max: 30.0,
+        };
         let sizes = vec![
             ("ground".into(), 2560u32, 1920u32),
             ("upper".into(), 2560u32, 1920u32),
@@ -130,7 +157,12 @@ mod tests {
     #[test]
     fn metadata_serializes_to_json() {
         let config = test_config();
-        let bounds = WorldBounds { x_min: -40.0, x_max: 40.0, z_min: -30.0, z_max: 30.0 };
+        let bounds = WorldBounds {
+            x_min: -40.0,
+            x_max: 40.0,
+            z_min: -30.0,
+            z_max: 30.0,
+        };
         let sizes = vec![("ground".into(), 2560u32, 1920u32)];
 
         let meta = build_metadata(&config, &sizes, bounds);
@@ -144,13 +176,11 @@ mod tests {
 
     #[test]
     fn estimate_bounds_from_triangles() {
-        let triangles = vec![
-            crate::mesh::Triangle::new(
-                Vec3::new(-10.0, 0.0, -5.0),
-                Vec3::new(10.0, 0.0, -5.0),
-                Vec3::new(0.0, 0.0, 5.0),
-            ),
-        ];
+        let triangles = vec![crate::mesh::Triangle::new(
+            Vec3::new(-10.0, 0.0, -5.0),
+            Vec3::new(10.0, 0.0, -5.0),
+            Vec3::new(0.0, 0.0, 5.0),
+        )];
         let bounds = estimate_world_bounds(&triangles);
         assert_eq!(bounds.x_min, -10.0);
         assert_eq!(bounds.x_max, 10.0);

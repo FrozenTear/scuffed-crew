@@ -14,10 +14,17 @@ impl std::fmt::Display for UploadError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             UploadError::InvalidContentType => {
-                write!(f, "Invalid content type. Only JPEG, PNG, WebP, and GIF are allowed")
+                write!(
+                    f,
+                    "Invalid content type. Only JPEG, PNG, WebP, and GIF are allowed"
+                )
             }
             UploadError::FileTooLarge { max_bytes } => {
-                write!(f, "File too large. Maximum size is {} MB", max_bytes / (1024 * 1024))
+                write!(
+                    f,
+                    "File too large. Maximum size is {} MB",
+                    max_bytes / (1024 * 1024)
+                )
             }
             UploadError::IoError(e) => write!(f, "IO error: {e}"),
         }
@@ -60,9 +67,7 @@ pub async fn save_upload(
     let filename = format!("{}.{ext}", Uuid::new_v4());
     let path = dir.join(&filename);
 
-    fs::write(&path, data)
-        .await
-        .map_err(UploadError::IoError)?;
+    fs::write(&path, data).await.map_err(UploadError::IoError)?;
 
     Ok(format!("/uploads/{category}/{filename}"))
 }

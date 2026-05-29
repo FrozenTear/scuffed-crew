@@ -256,8 +256,8 @@ impl StrategyState {
 
         let prev_idx = match self.current_phase_index() {
             Some(idx) if idx > 0 => idx - 1,
-            Some(_) => return,              // already at first phase
-            None => self.phases.len() - 1,  // nothing selected, go to last
+            Some(_) => return,             // already at first phase
+            None => self.phases.len() - 1, // nothing selected, go to last
         };
 
         if let Some(phase) = self.phases.get(prev_idx) {
@@ -467,14 +467,12 @@ mod tests {
         state.add_element(global);
 
         // Phase-specific element.
-        let mut phased =
-            StrategyElement::new(ElementType::PlayerMarker, Position::new(10.0, 10.0));
+        let mut phased = StrategyElement::new(ElementType::PlayerMarker, Position::new(10.0, 10.0));
         phased.phase_id = Some(phase_id);
         state.add_element(phased);
 
         // Other-phase element.
-        let mut other =
-            StrategyElement::new(ElementType::PlayerMarker, Position::new(20.0, 20.0));
+        let mut other = StrategyElement::new(ElementType::PlayerMarker, Position::new(20.0, 20.0));
         other.phase_id = Some(Uuid::new_v4());
         state.add_element(other);
 

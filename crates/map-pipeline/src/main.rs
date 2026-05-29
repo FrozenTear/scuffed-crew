@@ -83,21 +83,33 @@ enum Commands {
 
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_default_env().add_directive("scuffed_map_pipeline=info".parse()?))
+        .with_env_filter(
+            EnvFilter::from_default_env().add_directive("scuffed_map_pipeline=info".parse()?),
+        )
         .init();
 
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::DetectFloors { glb, output, name, id } => {
-            cmd_detect_floors(&glb, &output, &name, &id)
-        }
-        Commands::GenerateTiles { config, images, output } => {
-            cmd_generate_tiles(&config, &images, &output)
-        }
-        Commands::ProcessMap { glb, images, output, config, name, id } => {
-            cmd_process_map(&glb, &images, &output, config.as_deref(), &name, &id)
-        }
+        Commands::DetectFloors {
+            glb,
+            output,
+            name,
+            id,
+        } => cmd_detect_floors(&glb, &output, &name, &id),
+        Commands::GenerateTiles {
+            config,
+            images,
+            output,
+        } => cmd_generate_tiles(&config, &images, &output),
+        Commands::ProcessMap {
+            glb,
+            images,
+            output,
+            config,
+            name,
+            id,
+        } => cmd_process_map(&glb, &images, &output, config.as_deref(), &name, &id),
     }
 }
 
@@ -134,7 +146,11 @@ fn cmd_detect_floors(glb: &Path, output: &Path, name: &str, id: &str) -> Result<
     std::fs::write(output, &toml_str)?;
     tracing::info!("Wrote config to {:?}", output);
 
-    println!("\nDetected {} floors. Review and edit {:?} before generating tiles.", config.floors.len(), output);
+    println!(
+        "\nDetected {} floors. Review and edit {:?} before generating tiles.",
+        config.floors.len(),
+        output
+    );
 
     Ok(())
 }
@@ -171,11 +187,16 @@ fn cmd_generate_tiles(config_path: &Path, images_dir: &Path, output_dir: &Path) 
     }
 
     if floor_sizes.is_empty() {
-        anyhow::bail!("No floor images found in {:?}. Expected files like ground.png, upper.png", images_dir);
+        anyhow::bail!(
+            "No floor images found in {:?}. Expected files like ground.png, upper.png",
+            images_dir
+        );
     }
 
     // Generate thumbnail from the default floor
-    let default_floor = config.floors.iter()
+    let default_floor = config
+        .floors
+        .iter()
         .find(|f| f.is_default)
         .unwrap_or(&config.floors[0]);
     let default_img = images_dir.join(format!("{}.png", default_floor.id));
@@ -185,7 +206,8 @@ fn cmd_generate_tiles(config_path: &Path, images_dir: &Path, output_dir: &Path) 
 
     // Build and write metadata
     // Estimate world bounds from render config and image dimensions
-    let (max_w, max_h) = floor_sizes.iter()
+    let (max_w, max_h) = floor_sizes
+        .iter()
         .fold((0u32, 0u32), |(w, h), (_, fw, fh)| (w.max(*fw), h.max(*fh)));
     let world_width = max_w as f64 / config.render.pixels_per_meter;
     let world_height = max_h as f64 / config.render.pixels_per_meter;
@@ -199,7 +221,11 @@ fn cmd_generate_tiles(config_path: &Path, images_dir: &Path, output_dir: &Path) 
     let meta = metadata::build_metadata(&config, &floor_sizes, world_bounds);
     metadata::write_metadata(&meta, output_dir)?;
 
-    println!("\nGenerated tiles for {} floors in {:?}", floor_sizes.len(), output_dir);
+    println!(
+        "\nGenerated tiles for {} floors in {:?}",
+        floor_sizes.len(),
+        output_dir
+    );
 
     Ok(())
 }
@@ -224,12 +250,17 @@ fn cmd_process_map(
     // Step 1: Detect floors (if config doesn't already have floors)
     if !config_path.exists() || {
         let content = std::fs::read_to_string(config_path).unwrap_or_default();
-        MapConfig::from_toml(&content).map(|c| c.floors.is_empty()).unwrap_or(true)
+        MapConfig::from_toml(&content)
+            .map(|c| c.floors.is_empty())
+            .unwrap_or(true)
     } {
         tracing::info!("No existing floor config — running detection");
         std::fs::create_dir_all(output_dir)?;
         cmd_detect_floors(glb, config_path, name, id)?;
-        println!("\nFloor detection complete. Review the config at {:?} then re-run to generate tiles.", config_path);
+        println!(
+            "\nFloor detection complete. Review the config at {:?} then re-run to generate tiles.",
+            config_path
+        );
         return Ok(());
     }
 

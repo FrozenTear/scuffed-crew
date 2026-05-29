@@ -85,10 +85,7 @@ impl Database {
     }
 
     /// List all game accounts for a member.
-    pub async fn list_member_game_accounts(
-        &self,
-        member_id: &str,
-    ) -> DbResult<Vec<GameAccount>> {
+    pub async fn list_member_game_accounts(&self, member_id: &str) -> DbResult<Vec<GameAccount>> {
         with_timeout(async {
             let mut result = self
                 .client

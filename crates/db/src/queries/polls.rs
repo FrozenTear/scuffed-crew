@@ -20,6 +20,7 @@ struct DbPoll {
     created_by: String,
     created_at: SurrealDatetime,
     is_active: bool,
+    updated_at: SurrealDatetime,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, SurrealValue)]
@@ -48,6 +49,7 @@ fn db_to_poll(db: DbPoll) -> Poll {
         created_by: db.created_by,
         created_at: db.created_at.into(),
         is_active: db.is_active,
+        updated_at: db.updated_at.into(),
     }
 }
 
@@ -87,9 +89,9 @@ impl Database {
                 created_by: created_by.to_string(),
                 created_at: now,
                 is_active: true,
+                updated_at: now,
             };
-            let created: Option<DbPoll> =
-                self.client.create("poll").content(db_poll).await?;
+            let created: Option<DbPoll> = self.client.create("poll").content(db_poll).await?;
             Ok(db_to_poll(created.ok_or_else(|| {
                 crate::DbError::NotFound("Failed to create poll".into())
             })?))
@@ -133,8 +135,7 @@ impl Database {
                 option_index,
                 voted_at: now,
             };
-            let created: Option<DbPollVote> =
-                self.client.create("poll_vote").content(vote).await?;
+            let created: Option<DbPollVote> = self.client.create("poll_vote").content(vote).await?;
             Ok(db_to_vote(created.ok_or_else(|| {
                 crate::DbError::NotFound("Failed to record vote".into())
             })?))
@@ -198,7 +199,7 @@ impl Database {
                     }
                 })
                 .collect();
-            votes.sort_by(|a, b| b.count.cmp(&a.count));
+            votes.sort_by_key(|b| std::cmp::Reverse(b.count));
 
             let total_votes = votes.iter().map(|v| v.count).sum();
 

@@ -174,7 +174,7 @@ fn render_tag(tag: String, handler: &Option<EventHandler<String>>) -> Element {
     let tag_emit = tag.clone();
     match handler {
         Some(h) => {
-            let h = h.clone();
+            let h = *h;
             rsx! {
                 span {
                     class: "post-tag",

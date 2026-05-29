@@ -4,10 +4,8 @@ use leptos::prelude::*;
 pub fn SectionHeader(
     label: &'static str,
     title: &'static str,
-    #[prop(default = "purple")]
-    color: &'static str,
-    #[prop(optional, into)]
-    description: Option<&'static str>,
+    #[prop(default = "purple")] color: &'static str,
+    #[prop(optional, into)] description: Option<&'static str>,
 ) -> impl IntoView {
     let label_class = format!("sec-label sec-label-{color}");
 

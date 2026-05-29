@@ -1,3 +1,8 @@
+// Query functions in this crate take many primitive columns by value, mirroring
+// their SurrealDB table shape. Refactoring each into a parameter struct would add
+// indirection without improving clarity, so we allow the lint crate-wide.
+#![allow(clippy::too_many_arguments)]
+
 mod client;
 pub mod migrations;
 pub mod queries;

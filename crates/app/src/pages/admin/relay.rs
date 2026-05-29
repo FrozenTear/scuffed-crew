@@ -1,7 +1,7 @@
 use dioxus::prelude::*;
 use serde::Deserialize;
 
-use crate::components::{SummaryCard, StatusPill};
+use crate::components::{StatusPill, SummaryCard};
 use crate::hooks::use_api;
 
 #[derive(Debug, Clone, Deserialize)]

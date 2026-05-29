@@ -1,7 +1,7 @@
 use serde::Deserialize;
 
-use crate::AuthProvider;
 use super::oauth::{OAuthProvider, ProviderConfig};
+use crate::AuthProvider;
 
 /// Google user info from API
 #[derive(Debug, Deserialize)]

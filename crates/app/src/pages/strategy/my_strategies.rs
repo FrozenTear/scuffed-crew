@@ -1,11 +1,11 @@
 use dioxus::prelude::*;
 use serde::Deserialize;
 
-use scuffed_api_client::ApiClient;
 use crate::components::{ConfirmDialog, Toast, use_toast};
 use crate::hooks::use_api;
 use crate::routes::Route;
 use crate::state::auth::use_auth;
+use scuffed_api_client::ApiClient;
 
 // --- Types ---
 

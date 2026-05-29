@@ -1,18 +1,13 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum MatchType {
+    #[default]
     Scrim,
     Official,
     Tournament,
-}
-
-impl Default for MatchType {
-    fn default() -> Self {
-        MatchType::Scrim
-    }
 }
 
 impl std::fmt::Display for MatchType {

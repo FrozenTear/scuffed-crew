@@ -1,7 +1,7 @@
 use serde::Deserialize;
 
-use crate::AuthProvider;
 use super::oauth::{OAuthProvider, ProviderConfig};
+use crate::AuthProvider;
 
 /// Matrix user info from MAS (Matrix Authentication Service) OIDC
 ///
@@ -36,7 +36,7 @@ impl OAuthProvider for MatrixProvider {
         // These will be populated from discovery in the full implementation
         ProviderConfig {
             auth_url: "https://example.com/authorize", // TODO: from OIDC discovery
-            token_url: "https://example.com/token",     // TODO: from OIDC discovery
+            token_url: "https://example.com/token",    // TODO: from OIDC discovery
             user_info_url: "https://example.com/userinfo", // TODO: from OIDC discovery
             client_id: self.client_id.clone(),
             client_secret: self.client_secret.clone(),

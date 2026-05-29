@@ -1,10 +1,10 @@
 use dioxus::prelude::*;
 use serde::Deserialize;
 
+use crate::components::{ConfirmDialog, DataTable, FormModal, Toast, use_toast};
+use crate::hooks::{ModalController, use_api_list};
 use scuffed_api_client::ApiClient;
 use scuffed_types::api::{CreateAnnouncementRequest, UpdateAnnouncementRequest};
-use crate::components::{DataTable, FormModal, ConfirmDialog, Toast, use_toast};
-use crate::hooks::{use_api_list, ModalController};
 
 // Local response type (field name `is_pinned` differs from shared `pinned`).
 #[derive(Debug, Clone, Deserialize)]
@@ -65,11 +65,23 @@ pub fn AdminAnnouncements() -> Element {
         spawn(async move {
             let client = ApiClient::web();
             let result = if let Some(id) = edit_id {
-                let body = UpdateAnnouncementRequest { title, content, is_pinned };
-                client.put_json::<_, Announcement>(&format!("/api/announcements/{id}"), &body).await
+                let body = UpdateAnnouncementRequest {
+                    title,
+                    content,
+                    is_pinned,
+                };
+                client
+                    .put_json::<_, Announcement>(&format!("/api/announcements/{id}"), &body)
+                    .await
             } else {
-                let body = CreateAnnouncementRequest { title, content, is_pinned };
-                client.post_json::<_, Announcement>("/api/announcements", &body).await
+                let body = CreateAnnouncementRequest {
+                    title,
+                    content,
+                    is_pinned,
+                };
+                client
+                    .post_json::<_, Announcement>("/api/announcements", &body)
+                    .await
             };
 
             modal.end_submit();
@@ -87,7 +99,9 @@ pub fn AdminAnnouncements() -> Element {
     };
 
     let on_confirm_delete = move |_| {
-        let Some(target) = delete_modal.get_target() else { return };
+        let Some(target) = delete_modal.get_target() else {
+            return;
+        };
         let id = target.id.clone();
         delete_modal.close();
         spawn(async move {

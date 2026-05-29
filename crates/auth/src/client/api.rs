@@ -142,8 +142,7 @@ async fn send_request<T: DeserializeOwned>(request: Request) -> ApiResult<T> {
 
     if resp.ok() {
         let text = get_response_text(&resp).await?;
-        serde_json::from_str(&text)
-            .map_err(|e| ApiError::Parse(format!("JSON parse error: {}", e)))
+        serde_json::from_str(&text).map_err(|e| ApiError::Parse(format!("JSON parse error: {}", e)))
     } else {
         Err(status_error(&resp).await)
     }

@@ -177,12 +177,16 @@ fn detect_hero_select(img: &DynamicImage) -> bool {
     let avg_g = colors.iter().map(|c| c[1] as f64).sum::<f64>() / colors.len() as f64;
     let avg_b = colors.iter().map(|c| c[2] as f64).sum::<f64>() / colors.len() as f64;
 
-    let variance = colors.iter().map(|c| {
-        let dr = c[0] as f64 - avg_r;
-        let dg = c[1] as f64 - avg_g;
-        let db = c[2] as f64 - avg_b;
-        dr * dr + dg * dg + db * db
-    }).sum::<f64>() / colors.len() as f64;
+    let variance = colors
+        .iter()
+        .map(|c| {
+            let dr = c[0] as f64 - avg_r;
+            let dg = c[1] as f64 - avg_g;
+            let db = c[2] as f64 - avg_b;
+            dr * dr + dg * dg + db * db
+        })
+        .sum::<f64>()
+        / colors.len() as f64;
 
     if variance < 2000.0 {
         return false;
@@ -193,9 +197,8 @@ fn detect_hero_select(img: &DynamicImage) -> bool {
     match crate::ocr::recognize_region(&top_region) {
         Ok(text) => {
             let upper = text.to_uppercase();
-            let is_hero_select = upper.contains("CHOOSE")
-                || upper.contains("HERO")
-                || upper.contains("ASSEMBLE");
+            let is_hero_select =
+                upper.contains("CHOOSE") || upper.contains("HERO") || upper.contains("ASSEMBLE");
             if is_hero_select {
                 tracing::info!(variance, "hero select screen detected");
             }
@@ -206,13 +209,40 @@ fn detect_hero_select(img: &DynamicImage) -> bool {
 }
 
 const MAP_NAMES: &[&str] = &[
-    "CIRCUIT ROYAL", "DORADO", "HAVANA", "JUNKERTOWN", "RIALTO",
-    "ROUTE 66", "SHAMBALI", "WATCHPOINT", "GIBRALTAR",
-    "BLIZZARD WORLD", "EICHENWALDE", "HOLLYWOOD", "KING", "ROW",
-    "MIDTOWN", "NUMBANI", "PARAISO",
-    "ANTARCTIC", "BUSAN", "ILIOS", "LIJIANG", "NEPAL", "OASIS", "SAMOA",
-    "COLOSSEO", "ESPERANCA", "NEW QUEEN", "RUNASAPI",
-    "NEW JUNK", "SURAVASA", "HANAOKA", "THRONE", "ANUBIS", "AATLIS",
+    "CIRCUIT ROYAL",
+    "DORADO",
+    "HAVANA",
+    "JUNKERTOWN",
+    "RIALTO",
+    "ROUTE 66",
+    "SHAMBALI",
+    "WATCHPOINT",
+    "GIBRALTAR",
+    "BLIZZARD WORLD",
+    "EICHENWALDE",
+    "HOLLYWOOD",
+    "KING",
+    "ROW",
+    "MIDTOWN",
+    "NUMBANI",
+    "PARAISO",
+    "ANTARCTIC",
+    "BUSAN",
+    "ILIOS",
+    "LIJIANG",
+    "NEPAL",
+    "OASIS",
+    "SAMOA",
+    "COLOSSEO",
+    "ESPERANCA",
+    "NEW QUEEN",
+    "RUNASAPI",
+    "NEW JUNK",
+    "SURAVASA",
+    "HANAOKA",
+    "THRONE",
+    "ANUBIS",
+    "AATLIS",
 ];
 
 fn extract_map_names(text: &str) -> Vec<String> {

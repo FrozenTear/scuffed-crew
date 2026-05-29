@@ -1,7 +1,7 @@
 use chrono::{Duration, Utc};
 use serde::{Deserialize, Serialize};
-use surrealdb_types::RecordId;
 use surrealdb::types::Datetime as SurrealDatetime;
+use surrealdb_types::RecordId;
 use surrealdb_types::SurrealValue;
 
 use crate::types::{Application, ApplicationStatus};
@@ -81,7 +81,7 @@ impl Database {
                 trial_started_at: None,
                 trial_ends_at: None,
                 mentor_id: None,
-                created_at: now.clone(),
+                created_at: now,
                 updated_at: now,
             };
             let created: Option<DbApplication> =
@@ -105,10 +105,7 @@ impl Database {
         .await
     }
 
-    pub async fn get_application_by_user(
-        &self,
-        user_id: &str,
-    ) -> DbResult<Option<Application>> {
+    pub async fn get_application_by_user(&self, user_id: &str) -> DbResult<Option<Application>> {
         with_timeout(async {
             let mut result = self
                 .client
@@ -129,11 +126,9 @@ impl Database {
         review_notes: Option<&str>,
     ) -> DbResult<Application> {
         with_timeout(async {
-            let existing: Option<DbApplication> =
-                self.client.select(("application", id)).await?;
-            let mut db = existing.ok_or_else(|| {
-                crate::DbError::NotFound(format!("Application {id} not found"))
-            })?;
+            let existing: Option<DbApplication> = self.client.select(("application", id)).await?;
+            let mut db = existing
+                .ok_or_else(|| crate::DbError::NotFound(format!("Application {id} not found")))?;
 
             db.status = status.to_string();
             db.reviewed_by = Some(reviewed_by.to_string());
@@ -147,11 +142,8 @@ impl Database {
                 db.trial_ends_at = Some(SurrealDatetime::from(now + Duration::days(14)));
             }
 
-            let updated: Option<DbApplication> = self
-                .client
-                .update(("application", id))
-                .content(db)
-                .await?;
+            let updated: Option<DbApplication> =
+                self.client.update(("application", id)).content(db).await?;
             Ok(db_to_application(updated.ok_or_else(|| {
                 crate::DbError::NotFound(format!("Application {id} not found after update"))
             })?))

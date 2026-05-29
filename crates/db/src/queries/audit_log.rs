@@ -1,7 +1,7 @@
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
-use surrealdb_types::RecordId;
 use surrealdb::types::Datetime as SurrealDatetime;
+use surrealdb_types::RecordId;
 use surrealdb_types::SurrealValue;
 
 use crate::types::{AuditAction, AuditLogEntry, AuditTargetType};
@@ -56,23 +56,20 @@ impl Database {
                 details: details.map(|s| s.to_string()),
                 created_at: SurrealDatetime::from(Utc::now()),
             };
-            let _: Option<DbAuditLogEntry> =
-                self.client.create("audit_log").content(entry).await?;
+            let _: Option<DbAuditLogEntry> = self.client.create("audit_log").content(entry).await?;
             Ok(())
         })
         .await
     }
 
     /// List audit log entries with pagination.
-    pub async fn list_audit_log(
-        &self,
-        limit: u32,
-        offset: u32,
-    ) -> DbResult<Vec<AuditLogEntry>> {
+    pub async fn list_audit_log(&self, limit: u32, offset: u32) -> DbResult<Vec<AuditLogEntry>> {
         with_timeout(async {
             let mut result = self
                 .client
-                .query("SELECT * FROM audit_log ORDER BY created_at DESC LIMIT $limit START $offset")
+                .query(
+                    "SELECT * FROM audit_log ORDER BY created_at DESC LIMIT $limit START $offset",
+                )
                 .bind(("limit", limit))
                 .bind(("offset", offset))
                 .await?;

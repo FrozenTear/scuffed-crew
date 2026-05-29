@@ -5,25 +5,27 @@ use stat_tracker::config::{AutoDetectConfig, Config, SyncConfig};
 #[component]
 pub fn SettingsPanel() -> Element {
     let mut config = use_signal(|| Config::load().unwrap_or_default());
-    let outputs = use_signal(|| {
-        stat_tracker::capture::wayshot::list_outputs().unwrap_or_default()
-    });
+    let outputs = use_signal(|| stat_tracker::capture::wayshot::list_outputs().unwrap_or_default());
     let mut toast: Signal<Option<(String, bool)>> = use_signal(|| None);
 
-    let mut player_name = use_signal(|| {
-        config().player_name.clone().unwrap_or_default()
-    });
-    let mut capture_output = use_signal(|| {
-        config().capture_output.clone().unwrap_or_default()
-    });
+    let mut player_name = use_signal(|| config().player_name.clone().unwrap_or_default());
+    let mut capture_output = use_signal(|| config().capture_output.clone().unwrap_or_default());
     let mut auto_detect_enabled = use_signal(|| config().auto_detect.enabled);
     let mut poll_interval = use_signal(|| config().auto_detect.poll_interval_secs.to_string());
     let mut cooldown = use_signal(|| config().auto_detect.cooldown_secs.to_string());
     let mut sync_url = use_signal(|| {
-        config().sync.as_ref().map(|s| s.server_url.clone()).unwrap_or_default()
+        config()
+            .sync
+            .as_ref()
+            .map(|s| s.server_url.clone())
+            .unwrap_or_default()
     });
     let mut sync_token = use_signal(|| {
-        config().sync.as_ref().map(|s| s.token.clone()).unwrap_or_default()
+        config()
+            .sync
+            .as_ref()
+            .map(|s| s.token.clone())
+            .unwrap_or_default()
     });
 
     let save = move |_| {

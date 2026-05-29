@@ -1,13 +1,10 @@
 use dioxus::prelude::*;
 use serde::Deserialize;
 
+use crate::components::{ConfirmDialog, DataTable, FormModal, Toast, use_toast};
+use crate::hooks::{ModalController, use_api_list, use_api_with};
 use scuffed_api_client::ApiClient;
-use scuffed_types::api::{
-    CreateEventRequest, BatchAttendanceRequest,
-    AttendanceEntry,
-};
-use crate::components::{DataTable, FormModal, ConfirmDialog, Toast, use_toast};
-use crate::hooks::{use_api, use_api_list, use_api_with, ModalController};
+use scuffed_types::api::{AttendanceEntry, BatchAttendanceRequest, CreateEventRequest};
 
 // --- Types ---
 // Local response types with API-enriched fields (joined names).
@@ -48,9 +45,8 @@ struct RsvpSummary {
 /// Inline RSVP summary cell for the schedule table.
 #[component]
 fn RsvpCell(event_id: String) -> Element {
-    let summary = use_api_with::<RsvpSummary>(move || {
-        format!("/api/events/{}/rsvp-summary", event_id)
-    });
+    let summary =
+        use_api_with::<RsvpSummary>(move || format!("/api/events/{}/rsvp-summary", event_id));
 
     let data = summary.data.read();
     let data = data.as_ref().and_then(|d| d.as_ref());
@@ -69,7 +65,13 @@ fn RsvpCell(event_id: String) -> Element {
 }
 
 const DAYS: [&str; 7] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
-const TIMEZONES: [&str; 5] = ["UTC", "Europe/London", "Europe/Berlin", "US/Eastern", "US/Pacific"];
+const TIMEZONES: [&str; 5] = [
+    "UTC",
+    "Europe/London",
+    "Europe/Berlin",
+    "US/Eastern",
+    "US/Pacific",
+];
 
 #[component]
 pub fn AdminSchedule() -> Element {
@@ -94,7 +96,6 @@ pub fn AdminSchedule() -> Element {
     let mut att_modal = ModalController::<Event>::new();
     let mut att_date = use_signal(String::new);
     let mut att_entries: Signal<Vec<AttendanceEntry>> = use_signal(Vec::new);
-
 
     // --- Event form handlers ---
 
@@ -138,7 +139,9 @@ pub fn AdminSchedule() -> Element {
         spawn(async move {
             let client = ApiClient::web();
             let result = if let Some(id) = edit_id {
-                client.put_json::<_, Event>(&format!("/api/events/{id}"), &body).await
+                client
+                    .put_json::<_, Event>(&format!("/api/events/{id}"), &body)
+                    .await
             } else {
                 client.post_json::<_, Event>("/api/events", &body).await
             };

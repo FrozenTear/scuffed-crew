@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use scuffed_auth::client::api::{fetch_json, post_json};
 use scuffed_ui::components::button::{Button, ButtonVariant};
-use scuffed_ui::components::toast::{use_toast, Toast};
+use scuffed_ui::components::toast::{Toast, use_toast};
 
 use crate::app::use_site_auth;
 use crate::components::Nav;
@@ -41,20 +41,20 @@ pub fn ApplyPage() -> impl IntoView {
     let auth = use_site_auth();
     let toast = use_toast();
 
-    let settings = LocalResource::new(|| async {
-        fetch_json::<SiteSettings>("/api/settings").await.ok()
-    });
+    let settings =
+        LocalResource::new(|| async { fetch_json::<SiteSettings>("/api/settings").await.ok() });
 
-    let games = LocalResource::new(|| async {
-        fetch_json::<Vec<Game>>("/api/games").await.ok()
-    });
+    let games = LocalResource::new(|| async { fetch_json::<Vec<Game>>("/api/games").await.ok() });
 
     let app_refresh = RwSignal::new(0u32);
     let my_app = LocalResource::new(move || {
         app_refresh.get();
         async move {
             // This endpoint returns 401 if not logged in, which is fine
-            fetch_json::<Option<Application>>("/api/applications/mine").await.ok().flatten()
+            fetch_json::<Option<Application>>("/api/applications/mine")
+                .await
+                .ok()
+                .flatten()
         }
     });
 
@@ -85,7 +85,11 @@ pub fn ApplyPage() -> impl IntoView {
         let body = ApplyBody {
             preferred_games: games,
             preferred_roles: vec![],
-            message: if msg.trim().is_empty() { None } else { Some(msg) },
+            message: if msg.trim().is_empty() {
+                None
+            } else {
+                Some(msg)
+            },
         };
 
         submitting.set(true);

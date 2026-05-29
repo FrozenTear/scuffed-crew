@@ -1,9 +1,9 @@
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+use surrealdb::Surreal;
 use surrealdb::engine::local::SurrealKv;
 use surrealdb_types::Datetime as SurrealDatetime;
-use surrealdb::Surreal;
 use surrealdb_types::SurrealValue;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, SurrealValue)]
@@ -48,12 +48,9 @@ impl LocalStore {
         let db_path = data_dir.join("stats.surrealkv");
         std::fs::create_dir_all(&db_path)?;
 
-        let db = Surreal::new::<SurrealKv>(
-            db_path
-                .to_str()
-                .ok_or("data_dir path is not valid UTF-8")?,
-        )
-        .await?;
+        let db =
+            Surreal::new::<SurrealKv>(db_path.to_str().ok_or("data_dir path is not valid UTF-8")?)
+                .await?;
         db.use_ns("stat_tracker").use_db("local").await?;
 
         db.query(
@@ -77,11 +74,7 @@ impl LocalStore {
         &self,
         match_data: PersonalMatch,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let _: Option<PersonalMatch> = self
-            .db
-            .create("personal_match")
-            .content(match_data)
-            .await?;
+        let _: Option<PersonalMatch> = self.db.create("personal_match").content(match_data).await?;
         tracing::debug!("match inserted into local store");
         Ok(())
     }
@@ -189,10 +182,14 @@ impl LocalStore {
         Ok(matches)
     }
 
-    pub async fn get_multi_capture_sessions(&self) -> Result<Vec<MatchSession>, Box<dyn std::error::Error>> {
+    pub async fn get_multi_capture_sessions(
+        &self,
+    ) -> Result<Vec<MatchSession>, Box<dyn std::error::Error>> {
         let mut result = self
             .db
-            .query("SELECT * FROM match_session WHERE capture_count > 1 ORDER BY last_capture_at DESC")
+            .query(
+                "SELECT * FROM match_session WHERE capture_count > 1 ORDER BY last_capture_at DESC",
+            )
             .await?;
         let sessions: Vec<MatchSession> = result.take(0)?;
         Ok(sessions)
@@ -277,8 +274,8 @@ pub fn read_match_log(data_dir: &Path) -> Vec<PersonalMatch> {
         .filter_map(|line| serde_json::from_str(line).ok())
         .collect();
     matches.sort_by(|a, b| {
-        let da: chrono::DateTime<chrono::Utc> = b.played_at.clone().into();
-        let db_time: chrono::DateTime<chrono::Utc> = a.played_at.clone().into();
+        let da: chrono::DateTime<chrono::Utc> = b.played_at.into();
+        let db_time: chrono::DateTime<chrono::Utc> = a.played_at.into();
         da.cmp(&db_time)
     });
     matches

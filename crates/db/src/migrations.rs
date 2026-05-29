@@ -1,5 +1,5 @@
-use surrealdb::Surreal;
 use surrealdb::engine::any::Any;
+use surrealdb::Surreal;
 
 use crate::DbResult;
 

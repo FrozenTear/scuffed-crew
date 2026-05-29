@@ -71,7 +71,12 @@ pub struct Bounds {
 
 impl Bounds {
     pub fn new(x: f64, y: f64, width: f64, height: f64) -> Self {
-        Self { x, y, width, height }
+        Self {
+            x,
+            y,
+            width,
+            height,
+        }
     }
 
     pub fn contains(&self, pos: &Position) -> bool {
@@ -298,7 +303,12 @@ pub struct CoordinateTransform {
 
 impl CoordinateTransform {
     pub fn new(origin_x: f64, origin_z: f64, pixels_per_meter: f64) -> Self {
-        Self { origin_x, origin_z, pixels_per_meter, z_flip: true }
+        Self {
+            origin_x,
+            origin_z,
+            pixels_per_meter,
+            z_flip: true,
+        }
     }
 
     pub fn world_to_pixel(&self, world_x: f64, world_z: f64) -> (f64, f64) {
@@ -356,8 +366,8 @@ pub struct TilePyramidInfo {
 impl TilePyramidInfo {
     pub fn tiles_at_zoom(&self, zoom: u32) -> (u32, u32) {
         let scale = 1 << (self.max_zoom - zoom.min(self.max_zoom));
-        let width = (self.full_width / scale + self.tile_size - 1) / self.tile_size;
-        let height = (self.full_height / scale + self.tile_size - 1) / self.tile_size;
+        let width = (self.full_width / scale).div_ceil(self.tile_size);
+        let height = (self.full_height / scale).div_ceil(self.tile_size);
         (width.max(1), height.max(1))
     }
 
@@ -424,14 +434,19 @@ pub struct MapMetadata {
 
 impl MapMetadata {
     pub fn default_floor(&self) -> Option<&FloorLevel> {
-        self.floors.iter().find(|f| f.is_default).or(self.floors.first())
+        self.floors
+            .iter()
+            .find(|f| f.is_default)
+            .or(self.floors.first())
     }
 
     pub fn playable_pixel_bounds(&self) -> (f64, f64, f64, f64) {
-        let (min_x, max_y) =
-            self.transform.world_to_pixel(self.world_bounds.x_min, self.world_bounds.z_min);
-        let (max_x, min_y) =
-            self.transform.world_to_pixel(self.world_bounds.x_max, self.world_bounds.z_max);
+        let (min_x, max_y) = self
+            .transform
+            .world_to_pixel(self.world_bounds.x_min, self.world_bounds.z_min);
+        let (max_x, min_y) = self
+            .transform
+            .world_to_pixel(self.world_bounds.x_max, self.world_bounds.z_max);
         (min_x, min_y, max_x - min_x, max_y - min_y)
     }
 
@@ -445,7 +460,10 @@ impl MapMetadata {
     }
 
     pub fn health_packs_for_floor(&self, floor: &FloorLevel) -> Vec<&HealthPack> {
-        self.health_packs.iter().filter(|hp| hp.y >= floor.y_min && hp.y <= floor.y_max).collect()
+        self.health_packs
+            .iter()
+            .filter(|hp| hp.y >= floor.y_min && hp.y <= floor.y_max)
+            .collect()
     }
 }
 
@@ -584,13 +602,29 @@ impl StrategyElement {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ElementType {
     PlayerMarker,
-    Route { points: Vec<Position> },
-    Area { points: Vec<Position> },
-    Ability { ability_id: AbilityId },
-    Text { content: String, font_size: f32 },
-    Icon { icon_type: IconType },
-    Drawing { points: Vec<Position>, stroke_width: f32 },
-    Arrow { end: Position },
+    Route {
+        points: Vec<Position>,
+    },
+    Area {
+        points: Vec<Position>,
+    },
+    Ability {
+        ability_id: AbilityId,
+    },
+    Text {
+        content: String,
+        font_size: f32,
+    },
+    Icon {
+        icon_type: IconType,
+    },
+    Drawing {
+        points: Vec<Position>,
+        stroke_width: f32,
+    },
+    Arrow {
+        end: Position,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -750,18 +784,50 @@ pub enum ClientMessage {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ServerMessage {
-    RoomJoined { strategy: Strategy, users: Vec<CollabUserInfo> },
-    UserJoined { user: CollabUserInfo },
-    UserLeft { user_id: String },
-    ElementAdded { by: String, element: StrategyElement },
-    ElementUpdated { by: String, id: Uuid, changes: ElementPatch },
-    ElementDeleted { by: String, id: Uuid },
-    PhaseAdded { by: String, phase: TimelinePhase },
-    PhaseUpdated { by: String, id: Uuid, changes: PhasePatch },
-    PhaseDeleted { by: String, id: Uuid },
-    CursorMoved { user_id: String, position: Position },
+    RoomJoined {
+        strategy: Strategy,
+        users: Vec<CollabUserInfo>,
+    },
+    UserJoined {
+        user: CollabUserInfo,
+    },
+    UserLeft {
+        user_id: String,
+    },
+    ElementAdded {
+        by: String,
+        element: StrategyElement,
+    },
+    ElementUpdated {
+        by: String,
+        id: Uuid,
+        changes: ElementPatch,
+    },
+    ElementDeleted {
+        by: String,
+        id: Uuid,
+    },
+    PhaseAdded {
+        by: String,
+        phase: TimelinePhase,
+    },
+    PhaseUpdated {
+        by: String,
+        id: Uuid,
+        changes: PhasePatch,
+    },
+    PhaseDeleted {
+        by: String,
+        id: Uuid,
+    },
+    CursorMoved {
+        user_id: String,
+        position: Position,
+    },
     Pong,
-    Error { message: String },
+    Error {
+        message: String,
+    },
 }
 
 /// Wrapper for WS requests with optional request tracking
@@ -783,7 +849,10 @@ pub struct WsResponse {
 
 impl From<ServerMessage> for WsResponse {
     fn from(message: ServerMessage) -> Self {
-        Self { request_id: None, message }
+        Self {
+            request_id: None,
+            message,
+        }
     }
 }
 

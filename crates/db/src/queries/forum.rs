@@ -91,12 +91,15 @@ impl Database {
                 pinned: false,
                 locked: false,
                 nostr_event_id: None,
-                created_at: now.clone(),
+                created_at: now,
                 updated_at: now,
                 is_active: true,
             };
-            let created: Option<DbForumThread> =
-                self.client.create("forum_thread").content(db_thread).await?;
+            let created: Option<DbForumThread> = self
+                .client
+                .create("forum_thread")
+                .content(db_thread)
+                .await?;
             Ok(db_to_thread(created.ok_or_else(|| {
                 crate::DbError::NotFound("Failed to create forum thread".into())
             })?))
@@ -142,8 +145,7 @@ impl Database {
     /// Get a single forum thread by ID.
     pub async fn get_forum_thread(&self, id: &str) -> DbResult<ForumThread> {
         with_timeout(async {
-            let db: Option<DbForumThread> =
-                self.client.select(("forum_thread", id)).await?;
+            let db: Option<DbForumThread> = self.client.select(("forum_thread", id)).await?;
             Ok(db_to_thread(db.ok_or_else(|| {
                 crate::DbError::NotFound(format!("Forum thread {id} not found"))
             })?))
