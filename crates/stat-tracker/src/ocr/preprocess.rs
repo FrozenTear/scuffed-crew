@@ -19,9 +19,12 @@ const STAT_COL_BOUNDARIES_FALLBACK: [(f64, f64); STAT_COLUMNS] = [
     (0.725, 0.050), // Mitigation (narrow to exclude UI warning icon)
 ];
 
-/// Player name column within each row
-const NAME_COL_X: f64 = 0.09;
-const NAME_COL_W: f64 = 0.22;
+/// Player name column within each row.
+/// Layout (left→right): portrait + level/rank badges (0–26%), name text (26–38%), ability icons (38%+).
+/// Original value of 0.09 only captured the portrait area, not the name text.
+/// Upper bound set to ~38% to exclude the circular hero-ability icons that OCR reads as "Q"/"O".
+const NAME_COL_X: f64 = 0.26;
+const NAME_COL_W: f64 = 0.12;
 
 /// Row layout: header takes ~2.5% of scoreboard height.
 /// Team 1 starts immediately after header. Team 2 starts at ~56.5% (measured from
@@ -143,6 +146,75 @@ pub fn prepare_name_cell(img: &DynamicImage) -> GrayImage {
     }
 
     add_white_border(&binary, 8)
+}
+
+/// Prepare a large title-text region (e.g. the post-match VICTORY/DEFEAT
+/// header). Unlike the scoreboard cell paths, this is bright, anti-aliased text
+/// over a dark/gradient background, so the HSV white-mask + fixed-threshold
+/// pipeline erases it. Instead: grayscale, upscale small crops, then Otsu —
+/// which adapts to either cyan (VICTORY) or red (DEFEAT) text without a
+/// hand-tuned threshold. Text is the brighter cluster, so it becomes black on
+/// white for Tesseract.
+pub fn prepare_title(img: &DynamicImage) -> GrayImage {
+    let gray = img.to_luma8();
+    let (w, h) = gray.dimensions();
+    // Upscale small crops so the glyphs are tall enough for Tesseract.
+    let scale = (120 / h.max(1)).clamp(1, 4);
+    let work = if scale > 1 {
+        image::imageops::resize(
+            &gray,
+            w * scale,
+            h * scale,
+            image::imageops::FilterType::Lanczos3,
+        )
+    } else {
+        gray
+    };
+
+    let threshold = otsu_threshold(&work);
+    let (ww, hh) = work.dimensions();
+    let mut binary = GrayImage::new(ww, hh);
+    for y in 0..hh {
+        for x in 0..ww {
+            let v = work.get_pixel(x, y).0[0];
+            binary.put_pixel(x, y, Luma([if v > threshold { 0 } else { 255 }]));
+        }
+    }
+
+    add_white_border(&binary, 12)
+}
+
+/// Otsu's method: pick the gray level that maximizes between-class variance.
+fn otsu_threshold(img: &GrayImage) -> u8 {
+    let mut hist = [0u32; 256];
+    for p in img.pixels() {
+        hist[p.0[0] as usize] += 1;
+    }
+    let total: u32 = img.width() * img.height();
+    if total == 0 {
+        return 128;
+    }
+    let sum: f64 = hist.iter().enumerate().map(|(i, &c)| i as f64 * c as f64).sum();
+    let (mut sum_b, mut w_b, mut max_var, mut threshold) = (0.0f64, 0u32, -1.0f64, 128u8);
+    for (t, &count) in hist.iter().enumerate() {
+        w_b += count;
+        if w_b == 0 {
+            continue;
+        }
+        let w_f = total - w_b;
+        if w_f == 0 {
+            break;
+        }
+        sum_b += t as f64 * count as f64;
+        let m_b = sum_b / w_b as f64;
+        let m_f = (sum - sum_b) / w_f as f64;
+        let var = w_b as f64 * w_f as f64 * (m_b - m_f) * (m_b - m_f);
+        if var > max_var {
+            max_var = var;
+            threshold = t as u8;
+        }
+    }
+    threshold
 }
 
 /// Column boundaries as (left_edge_fraction, width_fraction) for each of the 6 stat columns.
@@ -289,6 +361,35 @@ pub fn game_rect_16_9(w: u32, h: u32) -> (u32, u32, u32, u32) {
         let gh = (w as f64 / TARGET).round() as u32;
         (0, (h - gh) / 2, w, gh)
     }
+}
+
+/// Crop the top-bar map-name label (top-right, e.g. "WATCHPOINT: GIBRALTAR").
+///
+/// This sits ABOVE the scoreboard crop, so scoreboard OCR never sees it. White
+/// text on a dark bar — pass to `recognize_region`.
+pub fn crop_map_name(img: &DynamicImage) -> DynamicImage {
+    let (w, h) = (img.width(), img.height());
+    let (gx, gy, gw, gh) = game_rect_16_9(w, h);
+    let x = gx + (gw as f64 * 0.68) as u32;
+    let y = gy + (gh as f64 * 0.022) as u32;
+    let cw = ((gw as f64 * 0.27) as u32).min(w.saturating_sub(x));
+    let ch = ((gh as f64 * 0.040) as u32).min(h.saturating_sub(y));
+    img.crop_imm(x, y, cw, ch)
+}
+
+/// Crop the right-side career panel's hero-name title (e.g. "MOIRA").
+///
+/// This is the player's currently-selected hero, read as plain text — far more
+/// reliable than portrait template matching for confusable heroes (e.g. the
+/// orange-haired supports Moira / Illari). White text on a dark panel.
+pub fn crop_career_hero(img: &DynamicImage) -> DynamicImage {
+    let (w, h) = (img.width(), img.height());
+    let (gx, gy, gw, gh) = game_rect_16_9(w, h);
+    let x = gx + (gw as f64 * 0.57) as u32;
+    let y = gy + (gh as f64 * 0.33) as u32;
+    let cw = ((gw as f64 * 0.25) as u32).min(w.saturating_sub(x));
+    let ch = ((gh as f64 * 0.045) as u32).min(h.saturating_sub(y));
+    img.crop_imm(x, y, cw, ch)
 }
 
 /// Extract a single player row from the scoreboard crop.

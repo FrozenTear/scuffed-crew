@@ -6,7 +6,7 @@ pub fn detect_outcome(img: &DynamicImage) -> MatchOutcome {
     if let Some(outcome) = detect_banner(img) {
         return outcome;
     }
-    detect_commendation_screen(img)
+    detect_accolade_screen(img)
 }
 
 /// Text-based outcome fallback for the *captured scoreboard frame*.
@@ -107,58 +107,81 @@ fn detect_banner(img: &DynamicImage) -> Option<MatchOutcome> {
     }
 }
 
-// Detect the post-match commendation/voting screen (after Play of the Game).
-// OW2 commendation screens have 57-66% blue-dominant pixels — well above any
-// normal desktop content. Previous 20% threshold caused false positives on
-// websites with blue themes.
-fn detect_commendation_screen(img: &DynamicImage) -> MatchOutcome {
+// Detect the post-match accolade / MVP screen (after Play of the Game). This
+// screen is on-screen ~15-20s while players endorse, so a few-second poller
+// catches it reliably (unlike the ~3s VICTORY/DEFEAT banner).
+//
+// The screen is a light blue-gray body under a dark navy header — NOT the
+// saturated blue the old detector required, which is why it never fired.
+// Measured on a real frame: ~80% of pixels are blue-margin-dominant under a
+// loose test. The result word ("VICTORY"/"DEFEAT") sits in the top-LEFT corner
+// in large cyan/red text — not top-center.
+fn detect_accolade_screen(img: &DynamicImage) -> MatchOutcome {
     let rgb = img.to_rgb8();
     let (w, h) = rgb.dimensions();
+    if w == 0 || h == 0 {
+        return MatchOutcome::Unknown;
+    }
 
-    let mut blue_margin_count = 0u32;
+    let mut blue_count = 0u32;
     let mut total = 0u32;
-
     for pixel in rgb.pixels() {
         let [r, g, b] = pixel.0;
         total += 1;
-        // Tighter blue check: blue must strongly dominate both red and green
-        if b > 140 && (b as i32 - r as i32) > 60 && (b as i32 - g as i32) > 30 {
-            blue_margin_count += 1;
+        // Loose blue-margin test: blue merely leans above red and green. Catches
+        // both the dark navy header and the light periwinkle body.
+        if (b as i32 - r as i32) > 15 && (b as i32 - g as i32) > 5 {
+            blue_count += 1;
         }
     }
 
-    if total == 0 {
+    let blue_ratio = blue_count as f32 / total as f32;
+    // Real accolade frames measure ~80%; 0.6 rejects most desktop/web content
+    // while leaving headroom. The result-word OCR below is the real guard.
+    if blue_ratio < 0.6 {
         return MatchOutcome::Unknown;
     }
 
-    let blue_ratio = blue_margin_count as f32 / total as f32;
-    // Require at least 45% — real OW2 commendation screens are 57-66%.
-    // This eliminates blue-themed websites while still catching all OW2 screens.
-    if blue_ratio < 0.45 {
+    tracing::debug!(blue_ratio, "post-match accolade screen detected");
+    read_result_word(img)
+}
+
+/// Read the large top-left VICTORY/DEFEAT title off the accolade screen.
+/// Region calibrated against a native 16:9 accolade frame: x 0.5-14%, y 3.5-9.5%.
+fn read_result_word(img: &DynamicImage) -> MatchOutcome {
+    let (w, h) = (img.width(), img.height());
+    let x = w * 5 / 1000;
+    let y = h * 35 / 1000;
+    let cw = w * 135 / 1000;
+    let ch = h * 60 / 1000;
+    if cw == 0 || ch == 0 || x + cw > w || y + ch > h {
         return MatchOutcome::Unknown;
     }
+    let crop = img.crop_imm(x, y, cw, ch);
+    let prepared = crate::ocr::preprocess::prepare_title(&crop);
 
-    tracing::debug!(blue_ratio, "post-match commendation screen detected");
-
-    // OCR the top-left corner to distinguish VICTORY from DEFEAT
-    let corner_w = w * 15 / 100;
-    let corner_h = h * 8 / 100;
-    let corner = img.crop_imm(0, 0, corner_w, corner_h);
-
-    match crate::ocr::recognize_region(&corner) {
+    match crate::ocr::recognize_prepared(
+        &prepared,
+        "7",
+        Some("ABCDEFGHIJKLMNOPQRSTUVWXYZ"),
+    ) {
         Ok(text) => {
             let upper = text.to_uppercase();
             if upper.contains("VICTORY") {
+                tracing::info!(text = %text.trim(), "accolade screen: VICTORY");
                 MatchOutcome::Victory
             } else if upper.contains("DEFEAT") {
+                tracing::info!(text = %text.trim(), "accolade screen: DEFEAT");
                 MatchOutcome::Defeat
+            } else if upper.contains("DRAW") {
+                MatchOutcome::Draw
             } else {
-                tracing::debug!(ocr_text = %text.trim(), "post-match screen detected but could not read outcome text");
+                tracing::debug!(ocr_text = %text.trim(), "accolade screen detected but result text unreadable");
                 MatchOutcome::Unknown
             }
         }
         Err(e) => {
-            tracing::warn!(error = %e, "post-match corner OCR failed");
+            tracing::warn!(error = %e, "accolade result OCR failed");
             MatchOutcome::Unknown
         }
     }

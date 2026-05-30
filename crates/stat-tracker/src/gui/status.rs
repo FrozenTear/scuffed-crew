@@ -37,10 +37,13 @@ pub fn StatusPanel() -> Element {
             .unwrap_or_else(|| "unknown".into())
     });
 
-    let tessdata_installed = use_memo(|| {
-        stat_tracker::setup::tessdata_dir()
-            .join("koverwatch.traineddata")
-            .exists()
+    let tessdata_installed = use_resource(move || {
+        let _tick = refresh_tick();
+        async move {
+            stat_tracker::setup::tessdata_dir()
+                .join("koverwatch.traineddata")
+                .exists()
+        }
     });
 
     use_future(move || async move {
@@ -109,10 +112,14 @@ pub fn StatusPanel() -> Element {
                 div { class: "stat-row",
                     span { class: "label", "Koverwatch tessdata" }
                     span { class: "value",
-                        span {
-                            class: if tessdata_installed() { "status-dot ok" } else { "status-dot err" },
+                        {
+                            let data = tessdata_installed.read();
+                            let installed = data.as_ref().copied().unwrap_or(false);
+                            rsx! {
+                                span { class: if installed { "status-dot ok" } else { "status-dot err" } }
+                                if installed { "installed" } else { "missing — see Settings" }
+                            }
                         }
-                        if tessdata_installed() { "installed" } else { "missing" }
                     }
                 }
             }

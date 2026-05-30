@@ -5,66 +5,16 @@ const FONT_ZIP_URL: &str = "https://font.download/dl/font/koverwatch.zip";
 const FONT_FAMILY: &str = "Koverwatch";
 
 const TRAINING_PAGES: &[TrainingPage] = &[
-    TrainingPage {
-        text: TRAINING_DIGITS,
-        xsize: 2400,
-        ysize: 200,
-        exposure: 0,
-    },
-    TrainingPage {
-        text: TRAINING_DIGITS_COMMAS,
-        xsize: 3200,
-        ysize: 300,
-        exposure: 0,
-    },
-    TrainingPage {
-        text: TRAINING_HEROES_1,
-        xsize: 3600,
-        ysize: 400,
-        exposure: 0,
-    },
-    TrainingPage {
-        text: TRAINING_HEROES_2,
-        xsize: 3600,
-        ysize: 400,
-        exposure: 0,
-    },
-    TrainingPage {
-        text: TRAINING_MAPS,
-        xsize: 3600,
-        ysize: 480,
-        exposure: 0,
-    },
-    TrainingPage {
-        text: TRAINING_MIXED,
-        xsize: 3600,
-        ysize: 480,
-        exposure: 0,
-    },
-    TrainingPage {
-        text: TRAINING_DIGITS,
-        xsize: 1800,
-        ysize: 150,
-        exposure: 1,
-    },
-    TrainingPage {
-        text: TRAINING_BATTLETAGS,
-        xsize: 3600,
-        ysize: 400,
-        exposure: 0,
-    },
-    TrainingPage {
-        text: TRAINING_SCOREBOARD_SIM,
-        xsize: 3600,
-        ysize: 600,
-        exposure: 0,
-    },
-    TrainingPage {
-        text: TRAINING_DIGITS_COMMAS,
-        xsize: 1600,
-        ysize: 200,
-        exposure: 1,
-    },
+    TrainingPage { text: TRAINING_DIGITS,          xsize: 1200, ysize: 100, exposure: 0 },
+    TrainingPage { text: TRAINING_DIGITS_COMMAS,   xsize: 1600, ysize: 150, exposure: 0 },
+    TrainingPage { text: TRAINING_HEROES_1,        xsize: 1800, ysize: 200, exposure: 0 },
+    TrainingPage { text: TRAINING_HEROES_2,        xsize: 1800, ysize: 200, exposure: 0 },
+    TrainingPage { text: TRAINING_MAPS,            xsize: 1800, ysize: 240, exposure: 0 },
+    TrainingPage { text: TRAINING_MIXED,           xsize: 1800, ysize: 240, exposure: 0 },
+    TrainingPage { text: TRAINING_DIGITS,          xsize:  900, ysize:  80, exposure: 1 },
+    TrainingPage { text: TRAINING_BATTLETAGS,      xsize: 1800, ysize: 200, exposure: 0 },
+    TrainingPage { text: TRAINING_SCOREBOARD_SIM,  xsize: 1800, ysize: 300, exposure: 0 },
+    TrainingPage { text: TRAINING_DIGITS_COMMAS,   xsize:  800, ysize: 100, exposure: 1 },
 ];
 
 struct TrainingPage {
@@ -286,24 +236,33 @@ fn generate_tessdata_lstm(dir: &Path) -> Result<(), Box<dyn std::error::Error + 
             ysize = page.ysize,
             "generating training image"
         );
-        let result = Command::new("text2image")
-            .arg("--text")
-            .arg(&training_txt)
-            .arg("--outputbase")
-            .arg(&output_base)
-            .arg("--font")
-            .arg(FONT_FAMILY)
-            .arg(format!("--exposure={}", page.exposure))
-            .arg(format!("--xsize={}", page.xsize))
-            .arg(format!("--ysize={}", page.ysize))
-            .output()?;
-        if !result.status.success() {
-            tracing::warn!(
-                page = i,
-                stderr = %String::from_utf8_lossy(&result.stderr),
-                "text2image failed for page, skipping"
-            );
-            continue;
+        let result = run_with_timeout(
+            Command::new("text2image")
+                .arg("--text")
+                .arg(&training_txt)
+                .arg("--outputbase")
+                .arg(&output_base)
+                .arg("--font")
+                .arg(FONT_FAMILY)
+                .arg(format!("--exposure={}", page.exposure))
+                .arg(format!("--xsize={}", page.xsize))
+                .arg(format!("--ysize={}", page.ysize)),
+            std::time::Duration::from_secs(30),
+        );
+        match result {
+            Ok(o) if o.status.success() => {}
+            Ok(o) => {
+                tracing::warn!(
+                    page = i,
+                    stderr = %String::from_utf8_lossy(&o.stderr),
+                    "text2image failed for page, skipping"
+                );
+                continue;
+            }
+            Err(e) => {
+                tracing::warn!(page = i, error = %e, "text2image timed out or errored, skipping");
+                continue;
+            }
         }
 
         let tif = dir.join(format!("{page_name}.tif"));
@@ -401,6 +360,30 @@ fn generate_tessdata_lstm(dir: &Path) -> Result<(), Box<dyn std::error::Error + 
     Ok(())
 }
 
+/// Spawn a command with a wall-clock timeout. Kills the child if it exceeds the limit.
+fn run_with_timeout(
+    cmd: &mut Command,
+    timeout: std::time::Duration,
+) -> Result<std::process::Output, Box<dyn std::error::Error + Send + Sync>> {
+    let mut child = cmd.spawn()?;
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        if let Some(status) = child.try_wait()? {
+            let output = std::process::Output {
+                status,
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+            };
+            return Ok(output);
+        }
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            return Err("process timed out".into());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+}
+
 fn generate_tessdata_legacy(dir: &Path) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     tracing::info!("using legacy Tesseract 3.x training pipeline as fallback");
 
@@ -417,17 +400,19 @@ fn generate_tessdata_legacy(dir: &Path) -> Result<(), Box<dyn std::error::Error 
 
     let output_base = dir.join("koverwatch");
 
-    let result = Command::new("text2image")
-        .arg("--text")
-        .arg(&training_txt)
-        .arg("--outputbase")
-        .arg(&output_base)
-        .arg("--font")
-        .arg(FONT_FAMILY)
-        .arg("--exposure=0")
-        .arg("--xsize=3600")
-        .arg("--ysize=480")
-        .output()?;
+    let result = run_with_timeout(
+        Command::new("text2image")
+            .arg("--text")
+            .arg(&training_txt)
+            .arg("--outputbase")
+            .arg(&output_base)
+            .arg("--font")
+            .arg(FONT_FAMILY)
+            .arg("--exposure=0")
+            .arg("--xsize=1800")
+            .arg("--ysize=240"),
+        std::time::Duration::from_secs(30),
+    )?;
     if !result.status.success() {
         return Err(format!(
             "text2image failed: {}",

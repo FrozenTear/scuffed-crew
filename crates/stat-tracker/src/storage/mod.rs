@@ -160,6 +160,40 @@ impl LocalStore {
         Ok(())
     }
 
+    /// Append a capture to an existing session: bump the capture count and time,
+    /// and refresh the final outcome (the active game owns the authoritative value).
+    pub async fn append_capture(
+        &self,
+        session_id: &str,
+        capture_time: SurrealDatetime,
+        outcome: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        self.db
+            .query("UPDATE match_session SET last_capture_at = $time, capture_count += 1, final_outcome = $outcome WHERE session_id = $sid")
+            .bind(("time", capture_time))
+            .bind(("outcome", outcome.to_string()))
+            .bind(("sid", session_id.to_string()))
+            .await?;
+        Ok(())
+    }
+
+    /// Back-fill a detected outcome onto a session and every capture snapshot it
+    /// contains, re-queuing those snapshots for sync so the corrected result
+    /// (e.g. a VICTORY read off the accolade screen after the stats were already
+    /// captured with `unknown`) propagates to the server.
+    pub async fn set_session_outcome(
+        &self,
+        session_id: &str,
+        outcome: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        self.db
+            .query("UPDATE match_session SET final_outcome = $outcome WHERE session_id = $sid; UPDATE personal_match SET outcome = $outcome, synced = false WHERE session_id = $sid")
+            .bind(("outcome", outcome.to_string()))
+            .bind(("sid", session_id.to_string()))
+            .await?;
+        Ok(())
+    }
+
     pub async fn get_all_sessions(&self) -> Result<Vec<MatchSession>, Box<dyn std::error::Error>> {
         let mut result = self
             .db

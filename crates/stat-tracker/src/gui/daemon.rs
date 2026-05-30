@@ -81,11 +81,60 @@ fn start_daemon(data_dir: &std::path::Path) -> Result<u32, String> {
         .map_err(|e| format!("Failed to spawn daemon: {e}"))?;
 
     let pid = child.id();
-    let _ = std::fs::create_dir_all(data_dir);
-    std::fs::write(pid_file(data_dir), pid.to_string())
-        .map_err(|e| format!("Failed to write PID file: {e}"))?;
+    // Forget the Child handle so it gets reparented to init on GUI exit
+    // rather than becoming a zombie when dropped.
+    std::mem::forget(child);
 
+    // The daemon writes its own PID file on startup — don't write it here
+    // or the daemon will see its own PID as "already running" and refuse to start.
     Ok(pid)
+}
+
+fn systemd_unit() -> &'static str {
+    "scuffed-stat-tracker.service"
+}
+
+fn systemd_enabled() -> bool {
+    std::process::Command::new("systemctl")
+        .args(["--user", "is-enabled", "--quiet", systemd_unit()])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+fn systemd_enable() -> Result<(), String> {
+    let out = std::process::Command::new("systemctl")
+        .args(["--user", "enable", "--now", systemd_unit()])
+        .output()
+        .map_err(|e| format!("systemctl: {e}"))?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
+    }
+}
+
+fn systemd_disable() -> Result<(), String> {
+    let out = std::process::Command::new("systemctl")
+        .args(["--user", "disable", "--now", systemd_unit()])
+        .output()
+        .map_err(|e| format!("systemctl: {e}"))?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
+    }
+}
+
+fn service_file_installed() -> bool {
+    dirs::config_dir()
+        .map(|d| {
+            d.join("systemd")
+                .join("user")
+                .join(systemd_unit())
+                .exists()
+        })
+        .unwrap_or(false)
 }
 
 fn stop_daemon(data_dir: &std::path::Path) -> Result<(), String> {
@@ -106,12 +155,15 @@ fn stop_daemon(data_dir: &std::path::Path) -> Result<(), String> {
 pub fn DaemonCard() -> Element {
     let config = use_signal(|| Config::load().unwrap_or_default());
     let mut daemon_pid: Signal<Option<u32>> = use_signal(|| daemon_running(&config().data_dir));
+    let mut autostart: Signal<bool> = use_signal(systemd_enabled);
     let mut toast: Signal<Option<(String, bool)>> = use_signal(|| None);
+    let service_installed = service_file_installed();
 
     use_future(move || async move {
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(10)).await;
             daemon_pid.set(daemon_running(&config().data_dir));
+            autostart.set(systemd_enabled());
         }
     });
 
@@ -146,6 +198,32 @@ pub fn DaemonCard() -> Element {
         });
     };
 
+    let on_toggle_autostart = move |_| {
+        let enabled = autostart();
+        let result = if enabled {
+            systemd_disable()
+        } else {
+            systemd_enable()
+        };
+        match result {
+            Ok(()) => {
+                autostart.set(!enabled);
+                daemon_pid.set(daemon_running(&config().data_dir));
+                let msg = if enabled {
+                    "Autostart disabled — daemon will not start on login."
+                } else {
+                    "Autostart enabled — daemon will start automatically on login."
+                };
+                toast.set(Some((msg.into(), true)));
+            }
+            Err(e) => toast.set(Some((format!("systemctl error: {e}"), false))),
+        }
+        spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(4)).await;
+            toast.set(None);
+        });
+    };
+
     let running = daemon_pid().is_some();
 
     rsx! {
@@ -170,11 +248,32 @@ pub fn DaemonCard() -> Element {
                     span { class: "value text-dim", "{daemon_log_path(&config().data_dir).display()}" }
                 }
             }
+            div { class: "stat-row",
+                span { class: "label", "Autostart" }
+                span { class: "value",
+                    if !service_installed {
+                        span { class: "text-dim", "service not installed" }
+                    } else if autostart() {
+                        span { class: "status-dot ok" }
+                        "enabled"
+                    } else {
+                        span { class: "status-dot err" }
+                        "disabled"
+                    }
+                }
+            }
             div { class: "actions",
                 if running {
-                    button { class: "btn btn-secondary", onclick: on_stop, "Stop Daemon" }
+                    button { class: "btn btn-secondary", onclick: on_stop, "Stop" }
                 } else {
-                    button { class: "btn btn-primary", onclick: on_start, "Start Daemon" }
+                    button { class: "btn btn-primary", onclick: on_start, "Start" }
+                }
+                if service_installed {
+                    button {
+                        class: if autostart() { "btn btn-secondary" } else { "btn btn-outline" },
+                        onclick: on_toggle_autostart,
+                        if autostart() { "Disable Autostart" } else { "Enable Autostart" }
+                    }
                 }
             }
         }

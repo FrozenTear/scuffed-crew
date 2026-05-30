@@ -27,6 +27,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let collect_portraits = std::env::args().any(|a| a == "--collect-portraits");
 
+    if std::env::args().any(|a| a == "--generate-tessdata") {
+        match setup::ensure_koverwatch_tessdata() {
+            Ok(()) => {
+                println!("koverwatch.traineddata generated successfully.");
+                return Ok(());
+            }
+            Err(e) => {
+                eprintln!("tessdata generation failed: {e}");
+                std::process::exit(1);
+            }
+        }
+    }
+
     if std::env::args().any(|a| a == "--list-outputs") {
         match capture::wayshot::list_outputs() {
             Ok(outputs) => {
@@ -41,9 +54,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    let config = config::Config::load()?;
+    let mut config = config::Config::load()?;
     tracing::info!("Scuffed Stat Tracker starting");
     tracing::info!(data_dir = %config.data_dir.display(), "using data directory");
+
+    // If player_name is not set locally, try fetching it from the server.
+    // This is the "first run via GUI" path: user set their name in the web UI
+    // and launched the daemon with just a token — no manual config editing needed.
+    if config.player_name.is_none() {
+        if let Some(sync_cfg) = &config.sync {
+            let client = sync::SyncClient::new(sync_cfg.clone());
+            match client.fetch_daemon_config().await {
+                Ok(remote) if remote.player_name.is_some() => {
+                    tracing::info!(
+                        player_name = %remote.player_name.as_deref().unwrap_or(""),
+                        "player_name fetched from server"
+                    );
+                    config.player_name = remote.player_name;
+                }
+                Ok(_) => {
+                    tracing::info!("server has no player_name configured — set it in the web UI under My Stats → Settings");
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "could not fetch daemon config from server (continuing without player_name)");
+                }
+            }
+        }
+    }
 
     std::fs::create_dir_all(&config.data_dir)?;
 
@@ -61,9 +98,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let _pid_guard = PidGuard(pid_path);
 
-    if let Err(e) = setup::ensure_koverwatch_tessdata() {
-        tracing::warn!(error = %e, "koverwatch tessdata setup failed — falling back to eng");
-    }
+    // Tessdata generation is triggered manually via --generate-tessdata or the GUI button.
+    // Don't run it at daemon startup — it can take minutes and blocks Tab capture.
 
     let backend = capture::detect_backend().await;
     tracing::info!(?backend, "capture backend selected");
@@ -115,12 +151,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         config.player_name.as_deref(),
         config.capture_output.as_deref(),
         &config.auto_detect,
-        config.session_window_secs,
         &portrait_matcher,
         collect_portraits,
         &data_dir,
     )
     .await
+}
+
+/// The game currently in progress. Opened when the poller sees a game-start
+/// screen (map vote / hero select / ban) and reused for every Tab capture until
+/// the next game starts — so captures taken across hero swaps all land in one
+/// session. `outcome` is filled in when the poller reads the post-match accolade
+/// screen, then back-filled onto the captured snapshots.
+struct ActiveGame {
+    session_id: String,
+    outcome: detect::MatchOutcome,
+    maps: Vec<String>,
+    /// Whether the `match_session` row has been created (on the first capture).
+    session_created: bool,
+}
+
+fn outcome_str(outcome: &detect::MatchOutcome) -> &'static str {
+    match outcome {
+        detect::MatchOutcome::Victory => "victory",
+        detect::MatchOutcome::Defeat => "defeat",
+        detect::MatchOutcome::Draw => "draw",
+        detect::MatchOutcome::Unknown => "unknown",
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -131,7 +188,6 @@ async fn run_loop(
     player_name: Option<&str>,
     capture_output: Option<&str>,
     auto_detect: &config::AutoDetectConfig,
-    session_window_secs: u64,
     portrait_matcher: &Arc<detect::hero_portrait::PortraitMatcher>,
     collect_portraits: bool,
     data_dir: &std::path::Path,
@@ -148,17 +204,17 @@ async fn run_loop(
 
     let mut capture_count: u32 = 0;
     let poll_interval = tokio::time::Duration::from_secs(auto_detect.poll_interval_secs);
-    let cooldown_duration = std::time::Duration::from_secs(auto_detect.cooldown_secs);
-    let mut last_auto_detect: Option<Instant> = None;
+    let new_game_debounce = std::time::Duration::from_secs(auto_detect.cooldown_secs);
+    let mut last_game_open: Option<Instant> = None;
     let mut last_tab_capture: Option<Instant> = None;
     let tab_debounce = std::time::Duration::from_secs(3);
 
-    // Pending outcome detected by the poller, consumed by the next Tab capture
+    // The game currently in progress — opened at the map-vote / hero-select
+    // screen, reused for every capture until the next game starts.
+    let mut active_game: Option<ActiveGame> = None;
+    // Outcome detected by the poller while no game was open — applied to the
+    // next game that opens (e.g. daemon started after the match began).
     let mut pending_outcome: Option<detect::MatchOutcome> = None;
-    // When true, the next capture starts a fresh session regardless of hero/time
-    let mut new_match_pending = false;
-    // Maps detected from vote screen
-    let mut pending_maps: Vec<String> = Vec::new();
 
     let mut poll_timer = tokio::time::interval(poll_interval);
     poll_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -175,19 +231,33 @@ async fn run_loop(
                             }
 
                         // Wait for the game to render the scoreboard overlay after Tab press
-                        tokio::time::sleep(tokio::time::Duration::from_millis(750)).await;
-
+                        tokio::time::sleep(tokio::time::Duration::from_millis(400)).await;
                         last_tab_capture = Some(Instant::now());
-                        let outcome = pending_outcome.take();
-                        if outcome.is_some() {
-                            tracing::info!("Tab pressed — using pending outcome from auto-detect");
+
+                        // No game open (daemon started mid-match, or the start
+                        // screen was missed) — open one now, inheriting any
+                        // outcome the poller already saw.
+                        if active_game.is_none() {
+                            active_game = Some(ActiveGame {
+                                session_id: format!("{:016x}", rand_id()),
+                                outcome: pending_outcome.take().unwrap_or(detect::MatchOutcome::Unknown),
+                                maps: Vec::new(),
+                                session_created: false,
+                            });
+                            last_game_open = Some(Instant::now());
                         }
-                        let force_new = new_match_pending;
-                        let maps = std::mem::take(&mut pending_maps);
-                        if let Err(e) = handle_capture(backend, store, player_name, capture_output, outcome, session_window_secs, force_new, &maps, portrait_matcher, collect_portraits, data_dir).await {
+
+                        let (sid, create, outcome, maps) = {
+                            let g = active_game.as_ref().expect("active_game set above");
+                            (g.session_id.clone(), !g.session_created, g.outcome.clone(), g.maps.clone())
+                        };
+
+                        if let Err(e) = handle_capture(backend, store, player_name, capture_output, &sid, create, outcome, &maps, portrait_matcher, collect_portraits, data_dir).await {
                             tracing::error!(error = %e, "capture cycle failed");
                         } else {
-                            new_match_pending = false;
+                            if let Some(g) = active_game.as_mut() {
+                                g.session_created = true;
+                            }
                             capture_count += 1;
                             if let Some(client) = sync_client
                                 && capture_count.is_multiple_of(SYNC_EVERY_N_CAPTURES) {
@@ -214,12 +284,6 @@ async fn run_loop(
                 }
             }
             _ = poll_timer.tick(), if auto_detect.enabled => {
-                let in_cooldown = last_auto_detect
-                    .is_some_and(|t| t.elapsed() < cooldown_duration);
-                if in_cooldown {
-                    continue;
-                }
-
                 match capture::capture_screen_output(backend, capture_output).await {
                     Ok(img) => {
                         let (outcome, phase) = tokio::task::spawn_blocking(move || {
@@ -228,35 +292,52 @@ async fn run_loop(
                             (outcome, phase)
                         }).await.unwrap_or((detect::MatchOutcome::Unknown, detect::GamePhase::Unknown));
 
-                        match outcome {
-                            detect::MatchOutcome::Victory | detect::MatchOutcome::Defeat => {
-                                tracing::info!(?outcome, "auto-detect: match end detected — press Tab on scoreboard to capture stats");
-                                last_auto_detect = Some(Instant::now());
-                                pending_outcome = Some(outcome);
+                        // Post-match accolade screen → record the outcome on the
+                        // open game. Idempotent: the screen shows for ~20s (several
+                        // ticks) but only the first, while the outcome is still
+                        // Unknown, writes it.
+                        if matches!(outcome, detect::MatchOutcome::Victory | detect::MatchOutcome::Defeat | detect::MatchOutcome::Draw) {
+                            match active_game.as_mut() {
+                                Some(g) if matches!(g.outcome, detect::MatchOutcome::Unknown) => {
+                                    g.outcome = outcome.clone();
+                                    tracing::info!(?outcome, session_id = %g.session_id, "auto-detect: outcome read from accolade screen");
+                                    if g.session_created
+                                        && let Err(e) = store.set_session_outcome(&g.session_id, outcome_str(&outcome)).await {
+                                            tracing::warn!(error = %e, "failed to back-fill session outcome");
+                                        }
+                                }
+                                Some(_) => { /* outcome already recorded for this game */ }
+                                None => {
+                                    // No game open yet — apply to the next capture.
+                                    pending_outcome = Some(outcome);
+                                }
                             }
-                            _ => {}
                         }
 
+                        // Game-start screens open a new game. Map vote is the
+                        // unambiguous boundary (debounced so a lingering screen
+                        // across ticks opens only one game); hero select/ban only
+                        // open a game when none is active (fallback if the map
+                        // vote was missed).
                         match phase {
-                            detect::GamePhase::MapVote { maps }
-                                if !new_match_pending => {
-                                    tracing::info!(?maps, "auto-detect: map vote — new match starting");
-                                    new_match_pending = true;
-                                    pending_maps = maps;
-                                    last_auto_detect = Some(Instant::now());
+                            detect::GamePhase::MapVote { maps } => {
+                                let can_open = active_game.is_none()
+                                    || last_game_open.is_none_or(|t| t.elapsed() >= new_game_debounce);
+                                if can_open {
+                                    let sid = format!("{:016x}", rand_id());
+                                    tracing::info!(?maps, session_id = %sid, "auto-detect: map vote — new game");
+                                    active_game = Some(ActiveGame { session_id: sid, outcome: detect::MatchOutcome::Unknown, maps, session_created: false });
+                                    last_game_open = Some(Instant::now());
                                 }
-                            detect::GamePhase::HeroBan
-                                if !new_match_pending => {
-                                    tracing::info!("auto-detect: hero ban phase — new match starting");
-                                    new_match_pending = true;
-                                    last_auto_detect = Some(Instant::now());
-                                }
-                            detect::GamePhase::HeroSelect
-                                if !new_match_pending => {
-                                    tracing::info!("auto-detect: hero select — new match starting");
-                                    new_match_pending = true;
-                                    last_auto_detect = Some(Instant::now());
-                                }
+                            }
+                            detect::GamePhase::HeroBan | detect::GamePhase::HeroSelect
+                                if active_game.is_none() =>
+                            {
+                                let sid = format!("{:016x}", rand_id());
+                                tracing::info!(session_id = %sid, "auto-detect: hero select/ban — new game (map vote missed)");
+                                active_game = Some(ActiveGame { session_id: sid, outcome: detect::MatchOutcome::Unknown, maps: Vec::new(), session_created: false });
+                                last_game_open = Some(Instant::now());
+                            }
                             _ => {}
                         }
                     }
@@ -282,9 +363,9 @@ async fn handle_capture(
     store: &storage::LocalStore,
     player_name: Option<&str>,
     capture_output: Option<&str>,
-    polled_outcome: Option<detect::MatchOutcome>,
-    session_window_secs: u64,
-    force_new_session: bool,
+    session_id: &str,
+    create_session: bool,
+    game_outcome: detect::MatchOutcome,
     detected_maps: &[String],
     portrait_matcher: &Arc<detect::hero_portrait::PortraitMatcher>,
     collect_portraits: bool,
@@ -294,39 +375,56 @@ async fn handle_capture(
     let img = capture::capture_screen_output(backend, capture_output).await?;
 
     let matcher = Arc::clone(portrait_matcher);
-    let (outcome, ocr_result, rows, portrait_hero, scoreboard_img, player_row_idx) =
+    // Clone player_name so the blocking closure can own it.
+    let player_name_owned = player_name.map(|s| s.to_string());
+    let (outcome, ocr_result, rows, portrait_hero, career_hero, map_from_panel, scoreboard_img, player_row_idx) =
         tokio::task::spawn_blocking(move || {
-            // Outcome: prefer the poller's carried-over result; else color-flood
-            // detection; else read the VICTORY/DEFEAT header text off this frame.
-            // The last step recovers the common case where the poller missed the
-            // brief color banner and we're now sitting on the post-match scoreboard.
-            let outcome = polled_outcome.unwrap_or_else(|| {
+            // Outcome: prefer the open game's result (read off the accolade
+            // screen by the poller); else color-flood detection; else read the
+            // VICTORY/DEFEAT header text off this frame. The last step recovers
+            // the case where the poller missed the screens and we're sitting on
+            // a post-match scoreboard that prints the result header.
+            let outcome = if matches!(game_outcome, detect::MatchOutcome::Unknown) {
                 let o = detect::match_end::detect_outcome(&img);
                 if matches!(o, detect::MatchOutcome::Unknown) {
                     detect::match_end::detect_outcome_text(&img)
                 } else {
                     o
                 }
-            });
+            } else {
+                game_outcome
+            };
 
-            // Detect team size + the player's highlighted row once, then reuse the
-            // team size for the per-cell OCR so the row index and the OCR rows share
-            // the same layout (player is always team 1, so the index lines up).
             let scoreboard = ocr::preprocess::crop_scoreboard(&img);
             let team_size = detect::hero_portrait::detect_team_size(&scoreboard);
             let player_match = matcher.match_player_hero(&scoreboard);
             let portrait_match = player_match
                 .as_ref()
                 .map(|(name, conf, _)| (name.clone(), *conf));
-            let row_idx = player_match.map(|(_, _, idx)| idx);
+            let brightness_row_idx = player_match.map(|(_, _, idx)| idx);
 
-            // Stats come from the column-calibrated per-cell pipeline. Full-image OCR
-            // text is kept only for hero/map name lookup (the cell pipeline doesn't
-            // read names).
             let rows = ocr::recognize_scoreboard_cells_with_team_size(&img, Some(team_size));
             let ocr = ocr::recognize(&img);
 
-            (outcome, ocr, rows, portrait_match, scoreboard, row_idx)
+            // Player row: if a player name is configured, scan ALL rows (both teams)
+            // for a name match — this handles replays and post-match screens where the
+            // player may be on team 2. Fall back to brightness-detected row otherwise.
+            let row_idx = player_name_owned
+                .as_deref()
+                .and_then(|name| parse::find_player_row_by_name(&rows, name))
+                .or(brightness_row_idx);
+
+            // Career-panel hero title. Guard against garbage OCR (happens when there
+            // is no career panel — replay, post-match — by requiring the result to
+            // actually match a known hero name, which match_hero_in_text already does).
+            let career_hero = ocr::recognize_region(&ocr::preprocess::crop_career_hero(&img))
+                .ok()
+                .and_then(|t| parse::match_hero_in_text(&t));
+            let map_from_panel = ocr::recognize_region(&ocr::preprocess::crop_map_name(&img))
+                .ok()
+                .and_then(|t| parse::match_map_in_text(&t));
+
+            (outcome, ocr, rows, portrait_match, career_hero, map_from_panel, scoreboard, row_idx)
         })
         .await?;
     let ocr_result = ocr_result?;
@@ -356,21 +454,22 @@ async fn handle_capture(
         "scoreboard cell OCR complete"
     );
 
-    let outcome_str = match outcome {
-        detect::MatchOutcome::Victory => "victory",
-        detect::MatchOutcome::Defeat => "defeat",
-        detect::MatchOutcome::Draw => "draw",
-        detect::MatchOutcome::Unknown => "unknown",
-    };
+    let outcome_label = outcome_str(&outcome);
 
     if let Some(mut parsed) = parse::parse_scoreboard_cells(
         &rows,
         player_row_idx,
         &ocr_result.raw_text,
-        outcome_str,
+        outcome_label,
         player_name,
     ) {
-        if let Some((hero_name, confidence)) = &portrait_hero {
+        // Hero priority: career-panel title (plain text, most reliable) >
+        // portrait template match > scoreboard-text guess already in `parsed`.
+        if let Some(hero_name) = &career_hero {
+            tracing::info!(hero = %hero_name, source = "career_panel", "hero identified via career-panel title");
+            parsed.hero = hero_name.clone();
+            parsed.role = parse::guess_role_public(&parsed.hero);
+        } else if let Some((hero_name, confidence)) = &portrait_hero {
             tracing::info!(
                 hero = %hero_name,
                 confidence = confidence,
@@ -383,7 +482,7 @@ async fn handle_capture(
             tracing::info!(
                 hero = %parsed.hero,
                 source = "ocr_text",
-                "hero identified via OCR text (portrait row detection missed)"
+                "hero identified via OCR text (career panel + portrait missed)"
             );
         }
 
@@ -410,74 +509,36 @@ async fn handle_capture(
 
         let now = SurrealDatetime::from(Utc::now());
 
-        // Populate map name: prefer auto-detected maps, then OCR-parsed map
-        if !detected_maps.is_empty() && parsed.map_name.is_empty() {
+        // Map priority: auto-detected map-vote > top-bar label OCR > whatever
+        // the scoreboard-text fuzzy match found (least reliable, kept last).
+        if !detected_maps.is_empty() {
             parsed.map_name = detected_maps[0].clone();
+        } else if let Some(map) = &map_from_panel {
+            parsed.map_name = map.clone();
         }
 
-        let session_id = if force_new_session {
-            let sid = format!("{:016x}", rand_id());
+        // The session is owned by the active game (map-vote → accolade). The
+        // first capture creates the session row; later captures (including hero
+        // swaps and the post-match scoreboard) append to the same session.
+        parsed.session_id = session_id.to_string();
+        if create_session {
             let session = storage::MatchSession {
-                session_id: sid.clone(),
+                session_id: session_id.to_string(),
                 hero: parsed.hero.clone(),
                 map_name: parsed.map_name.clone(),
                 role: parsed.role.clone(),
                 started_at: now,
                 last_capture_at: now,
                 capture_count: 1,
-                final_outcome: outcome_str.to_string(),
+                final_outcome: outcome_label.to_string(),
             };
             if let Err(e) = store.create_session(&session).await {
                 tracing::warn!(error = %e, "failed to create session");
             }
-            tracing::info!(session_id = %sid, "started new match session (phase-detected boundary)");
-            sid
-        } else {
-            match store
-                .find_active_session(&parsed.hero, session_window_secs)
-                .await
-            {
-                Ok(Some(session)) => {
-                    // Inherit map name from session if this capture doesn't have one
-                    if parsed.map_name.is_empty() && !session.map_name.is_empty() {
-                        parsed.map_name = session.map_name.clone();
-                    }
-                    let new_count = session.capture_count + 1;
-                    if let Err(e) = store
-                        .update_session(&session.session_id, now, new_count, outcome_str)
-                        .await
-                    {
-                        tracing::warn!(error = %e, "failed to update session");
-                    }
-                    tracing::info!(
-                        session_id = %session.session_id,
-                        capture_num = new_count,
-                        "appending to existing match session"
-                    );
-                    session.session_id
-                }
-                _ => {
-                    let sid = format!("{:016x}", rand_id());
-                    let session = storage::MatchSession {
-                        session_id: sid.clone(),
-                        hero: parsed.hero.clone(),
-                        map_name: parsed.map_name.clone(),
-                        role: parsed.role.clone(),
-                        started_at: now,
-                        last_capture_at: now,
-                        capture_count: 1,
-                        final_outcome: outcome_str.to_string(),
-                    };
-                    if let Err(e) = store.create_session(&session).await {
-                        tracing::warn!(error = %e, "failed to create session");
-                    }
-                    tracing::info!(session_id = %sid, "started new match session");
-                    sid
-                }
-            }
-        };
-
-        parsed.session_id = session_id;
+            tracing::info!(session_id = %session_id, "started new match session");
+        } else if let Err(e) = store.append_capture(session_id, now, outcome_label).await {
+            tracing::warn!(error = %e, "failed to append capture to session");
+        }
 
         tracing::info!(
             hero = %parsed.hero,

@@ -99,6 +99,15 @@ struct ComputedStats {
     rolling_wr: Vec<f64>,
 }
 
+// The daemon records outcomes as "victory"/"defeat"/"draw"/"unknown". Accept
+// the legacy "win"/"loss" spellings too so older local data still classifies.
+fn outcome_is_win(outcome: &str) -> bool {
+    outcome.eq_ignore_ascii_case("victory") || outcome.eq_ignore_ascii_case("win")
+}
+fn outcome_is_loss(outcome: &str) -> bool {
+    outcome.eq_ignore_ascii_case("defeat") || outcome.eq_ignore_ascii_case("loss")
+}
+
 fn compute_stats(matches: &[PersonalMatch]) -> ComputedStats {
     let mut wins = 0usize;
     let mut losses = 0usize;
@@ -122,15 +131,16 @@ fn compute_stats(matches: &[PersonalMatch]) -> ComputedStats {
     let mut hero_map_acc: HashMap<String, HashMap<String, (usize, usize)>> = HashMap::new();
 
     for m in matches {
-        let is_win = m.outcome.eq_ignore_ascii_case("win");
-        let is_loss = m.outcome.eq_ignore_ascii_case("loss");
+        let is_win = outcome_is_win(&m.outcome);
+        let is_loss = outcome_is_loss(&m.outcome);
         if is_win {
             wins += 1;
         } else if is_loss {
             losses += 1;
-        } else {
+        } else if m.outcome.eq_ignore_ascii_case("draw") {
             draws += 1;
         }
+        // "unknown"/unparsed outcomes are excluded from the W/L/D totals.
 
         let entry = hero_acc.entry(m.hero.clone()).or_insert_with(|| Acc {
             role: m.role.clone(),
@@ -252,16 +262,11 @@ fn compute_stats(matches: &[PersonalMatch]) -> ComputedStats {
     let chronological: Vec<&PersonalMatch> = matches.iter().rev().collect();
     let mut win_count = 0usize;
     for (i, m) in chronological.iter().enumerate() {
-        if m.outcome.eq_ignore_ascii_case("win") {
+        if outcome_is_win(&m.outcome) {
             win_count += 1;
         }
-        if i >= window {
-            if chronological[i - window]
-                .outcome
-                .eq_ignore_ascii_case("win")
-            {
-                win_count -= 1;
-            }
+        if i >= window && outcome_is_win(&chronological[i - window].outcome) {
+            win_count -= 1;
         }
         let denom = (i + 1).min(window);
         rolling_wr.push((win_count as f64 / denom as f64) * 100.0);

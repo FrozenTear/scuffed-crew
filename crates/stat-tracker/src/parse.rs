@@ -392,6 +392,86 @@ pub fn guess_role_public(hero: &str) -> String {
     guess_role(hero)
 }
 
+/// Find which row (across all rows, both teams) best matches the configured
+/// player name. Returns the row index and match score.
+///
+/// Used for replay and post-match screens where the player may be on team 2,
+/// so brightness-based team-1 scanning can't find them. The name cells from
+/// `recognize_row` are noisy OCR, so we use a generous fuzzy threshold (0.55)
+/// and pick the best score across all rows.
+pub fn find_player_row_by_name(rows: &[RowOcrResult], player_name: &str) -> Option<usize> {
+    let name_lower = player_name.to_lowercase();
+
+    let mut best_row: Option<usize> = None;
+    let mut best_score = 0.0f64;
+
+    for (i, row) in rows.iter().enumerate() {
+        let cell_text = match &row.name {
+            Some(c) if !c.value.is_empty() => c.value.to_lowercase(),
+            _ => continue,
+        };
+
+        // Try substring match first (handles "FROZEN" inside "L7 mRoE FROZEN")
+        if cell_text.contains(&name_lower) {
+            tracing::debug!(row = i, text = %cell_text, "player name found via substring in row");
+            return Some(i);
+        }
+
+        // Fuzzy: slide a window the length of the player name over the cell text
+        let name_chars: Vec<char> = name_lower.chars().collect();
+        let cell_chars: Vec<char> = cell_text.chars().collect();
+        let window = name_chars.len();
+        if window == 0 || window > cell_chars.len() + 4 {
+            continue;
+        }
+        // Also compare whole cell text against the name
+        let score_whole = normalized_levenshtein(&cell_text, &name_lower);
+        let score_window = if cell_chars.len() >= window {
+            (0..=(cell_chars.len().saturating_sub(window)))
+                .map(|s| {
+                    let slice: String = cell_chars[s..s + window].iter().collect();
+                    normalized_levenshtein(&slice, &name_lower)
+                })
+                .fold(0.0f64, f64::max)
+        } else {
+            0.0
+        };
+        let score = score_whole.max(score_window);
+
+        if score > best_score {
+            best_score = score;
+            best_row = Some(i);
+        }
+    }
+
+    if best_score >= 0.55 {
+        tracing::debug!(row = ?best_row, score = best_score, "player name fuzzy-matched in row");
+        best_row
+    } else {
+        None
+    }
+}
+
+/// Match a hero name from arbitrary OCR text (e.g. the career-panel title).
+pub fn match_hero_in_text(text: &str) -> Option<String> {
+    let lines: Vec<&str> = text
+        .lines()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty())
+        .collect();
+    find_hero(&lines)
+}
+
+/// Match a map name from arbitrary OCR text (e.g. the top-bar map label).
+pub fn match_map_in_text(text: &str) -> Option<String> {
+    let lines: Vec<&str> = text
+        .lines()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty())
+        .collect();
+    find_map(&lines)
+}
+
 fn guess_role(hero: &str) -> String {
     match hero.to_lowercase().as_str() {
         "d.va" | "dva" | "doomfist" | "domina" | "junker queen" | "junker_queen" | "mauga"
@@ -452,7 +532,10 @@ fn find_map(lines: &[&str]) -> Option<String> {
     fuzzy_match_map(&text)
 }
 
-const FUZZY_MAP_THRESHOLD: f64 = 0.75;
+// Higher than the hero threshold: the map label is only OCR'd from a dedicated
+// region, and a loose threshold here was false-matching player names / stat
+// fragments to maps (e.g. "King's Row").
+const FUZZY_MAP_THRESHOLD: f64 = 0.85;
 
 fn fuzzy_match_map(text: &str) -> Option<String> {
     let words: Vec<&str> = text.split_whitespace().collect();

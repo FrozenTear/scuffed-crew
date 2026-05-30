@@ -1,0 +1,11 @@
+[Desktop Entry]
+Name=Scuffed Stat Tracker
+GenericName=OW2 Stats Tracker
+Comment=Capture your Overwatch 2 personal stats automatically
+Exec=stat-tracker-gui
+Icon=applications-games
+Type=Application
+Categories=Game;Utility;
+Keywords=overwatch;stats;gaming;tracker;
+StartupNotify=true
+Terminal=false

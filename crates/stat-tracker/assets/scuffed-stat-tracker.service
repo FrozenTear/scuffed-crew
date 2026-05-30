@@ -1,0 +1,15 @@
+[Unit]
+Description=Scuffed Stat Tracker — OW2 personal stats capture daemon
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/scuffed-stat-tracker
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=graphical-session.target

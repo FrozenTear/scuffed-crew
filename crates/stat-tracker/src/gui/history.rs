@@ -119,8 +119,8 @@ pub fn HistoryPanel() -> Element {
 #[allow(non_snake_case)]
 fn MatchRow(props: MatchDisplayProps) -> Element {
     let outcome_class = match props.outcome.to_lowercase().as_str() {
-        "win" => "outcome-win",
-        "loss" => "outcome-loss",
+        "victory" | "win" => "outcome-win",
+        "defeat" | "loss" => "outcome-loss",
         _ => "outcome-draw",
     };
 

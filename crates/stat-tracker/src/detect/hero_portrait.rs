@@ -132,43 +132,54 @@ impl PortraitMatcher {
 }
 
 /// Detect which row in team 1 is the player's own row.
-/// OW2 highlights the player's row with a brighter/glowing background.
-/// Returns the row index (0-based within team 1).
+/// OW2 highlights the player's row with a slightly lighter/brighter background.
+///
+/// Crops each row via `crop_player_row` so the geometry matches the OCR pipeline
+/// exactly. Within each row image, samples a thin horizontal strip at the row
+/// center (x 34–50% = right name field, before stat columns; y center ±15%) and
+/// measures the mean of background-range pixels [15, 90], filtering out both deep
+/// shadows and bright icon/title-text outliers.
 fn detect_player_row_inner(scoreboard: &DynamicImage, team_size: usize) -> Option<usize> {
-    let rgb = scoreboard.to_rgb8();
-    let (w, h) = rgb.dimensions();
-
-    let row_height = match team_size {
-        6 => h * 58 / 1000,
-        _ => h * 7 / 100,
-    };
-    let start_y = h * 12 / 100;
-
-    // Sample a horizontal strip in the name area (right of portrait, left of stats)
-    let sample_x_start = w * 10 / 100;
-    let sample_x_end = w * 30 / 100;
-    let row_margin = row_height / 4;
-
     let mut brightnesses: Vec<(usize, f64)> = Vec::new();
 
-    for row in 0..team_size as u32 {
-        let y_start = start_y + row * row_height + row_margin;
-        let y_end = start_y + (row + 1) * row_height - row_margin;
+    for row in 0..team_size {
+        let Some(row_img) =
+            crate::ocr::preprocess::crop_player_row(scoreboard, row, team_size)
+        else {
+            continue;
+        };
 
-        let mut total: u64 = 0;
-        let mut count: u64 = 0;
+        let (rw, rh) = (row_img.width(), row_img.height());
+        if rw < 10 || rh < 4 {
+            continue;
+        }
 
-        for y in y_start..y_end.min(h) {
-            for x in sample_x_start..sample_x_end.min(w) {
+        let x0 = rw * 34 / 100;
+        let x1 = (rw * 50 / 100).min(rw);
+        let cy = rh / 2;
+        let half_y = (rh * 15 / 100).max(2);
+        let y0 = cy.saturating_sub(half_y);
+        let y1 = (cy + half_y).min(rh);
+
+        let rgb = row_img.to_rgb8();
+        let mut total = 0u64;
+        let mut count = 0u64;
+        for y in y0..y1 {
+            for x in x0..x1 {
                 let [r, g, b] = rgb.get_pixel(x, y).0;
-                total += r as u64 + g as u64 + b as u64;
-                count += 1;
+                let br = (r as u32 + g as u32 + b as u32) / 3;
+                if br >= 15 && br <= 90 {
+                    total += br as u64;
+                    count += 1;
+                }
             }
         }
 
-        if count > 0 {
-            brightnesses.push((row as usize, total as f64 / (count * 3) as f64));
+        if count < 20 {
+            continue;
         }
+
+        brightnesses.push((row, total as f64 / count as f64));
     }
 
     if brightnesses.is_empty() {
@@ -180,15 +191,15 @@ fn detect_player_row_inner(scoreboard: &DynamicImage, team_size: usize) -> Optio
         .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
         .unwrap();
 
-    let avg: f64 = brightnesses.iter().map(|(_, b)| b).sum::<f64>() / brightnesses.len() as f64;
+    let avg: f64 =
+        brightnesses.iter().map(|(_, b)| b).sum::<f64>() / brightnesses.len() as f64;
 
-    // The highlighted row should be meaningfully brighter than the average
-    if *max_brightness > avg * 1.15 {
+    if *max_brightness > avg * 1.12 {
         tracing::debug!(
             row = max_row,
             brightness = format!("{max_brightness:.1}"),
             avg = format!("{avg:.1}"),
-            "detected player row via brightness"
+            "detected player row via background brightness"
         );
         Some(*max_row)
     } else {
@@ -244,44 +255,82 @@ fn extract_portrait_crops_inner(scoreboard: &DynamicImage, team_size: usize) -> 
     crops
 }
 
-/// Detect whether the scoreboard shows 5v5 or 6v6 by counting distinct
-/// portrait-sized bright regions in the left column.
+/// Detect whether the scoreboard shows 5v5 or 6v6 via the team-1 row pitch.
+///
+/// Counting hero portraits fails when rows are empty ("WAITING FOR PLAYER") or
+/// when custom team colors make the colored row bars contiguous with no dark
+/// gaps. Instead we measure saturation across the name strip per scanline: every
+/// row — occupied or empty — has white text that dips saturation once per row,
+/// so the dip-to-dip pitch reveals the row count regardless of empty slots or
+/// team colors. 6v6 rows are tighter (~7.4% of crop height) than 5v5 (~8.3%).
 pub fn detect_team_size(scoreboard: &DynamicImage) -> usize {
     let rgb = scoreboard.to_rgb8();
     let (w, h) = rgb.dimensions();
-    let scan_x = w * 3 / 100; // center of portrait column
-    let start_y = h * 10 / 100;
-    let end_y = h * 55 / 100; // first team only occupies top half
+    if w == 0 || h == 0 {
+        return 5;
+    }
 
-    // Scan vertically and count transitions from dark to non-dark
-    let mut in_row = false;
-    let mut row_count = 0;
-    let row_min_height = h * 3 / 100; // minimum height to count as a row
-    let mut row_pixels = 0u32;
-
-    for y in start_y..end_y {
-        let pixel = rgb.get_pixel(scan_x, y);
-        let [r, g, b] = pixel.0;
-        let brightness = (r as u32 + g as u32 + b as u32) / 3;
-
-        if brightness > 40 {
-            if !in_row {
-                in_row = true;
-                row_pixels = 0;
+    // Name strip: right of the portrait column, left of the stat columns and the
+    // right-side career panel.
+    let x0 = (w as f64 * 0.06) as u32;
+    let x1 = (w as f64 * 0.55) as u32;
+    let denom = (x1 - x0).max(1) as f64;
+    let mut sat = vec![0f64; h as usize];
+    for y in 0..h {
+        let mut sum = 0.0;
+        for x in x0..x1 {
+            let [r, g, b] = rgb.get_pixel(x, y).0;
+            let max = r.max(g).max(b) as f64;
+            let min = r.min(g).min(b) as f64;
+            if max > 0.0 {
+                sum += (max - min) / max;
             }
-            row_pixels += 1;
-        } else {
-            if in_row && row_pixels >= row_min_height {
-                row_count += 1;
-            }
-            in_row = false;
+        }
+        sat[y as usize] = sum / denom;
+    }
+
+    // Smooth to suppress per-glyph noise.
+    let win = (h as f64 * 0.01).max(2.0) as usize;
+    let smooth: Vec<f64> = (0..sat.len())
+        .map(|i| {
+            let lo = i.saturating_sub(win);
+            let hi = (i + win + 1).min(sat.len());
+            sat[lo..hi].iter().sum::<f64>() / (hi - lo) as f64
+        })
+        .collect();
+
+    // Row-center dips within team 1 (above the VS divider, ~bottom of team 1).
+    let y_lo = (h as f64 * 0.04) as usize;
+    let y_hi = ((h as f64 * 0.45) as usize).min(smooth.len().saturating_sub(1));
+    let sep = (h as f64 * 0.035).max(2.0) as usize;
+    let mut dips: Vec<usize> = Vec::new();
+    for y in (y_lo + 1)..y_hi {
+        let lo = y.saturating_sub(sep);
+        let hi = (y + sep).min(smooth.len() - 1);
+        let is_min = (lo..=hi).all(|j| smooth[y] <= smooth[j]);
+        let region_max = (lo..=hi).map(|j| smooth[j]).fold(0.0_f64, f64::max);
+        if is_min && region_max - smooth[y] > 0.04 && dips.last().is_none_or(|&d| y - d >= sep) {
+            dips.push(y);
         }
     }
-    if in_row && row_pixels >= row_min_height {
-        row_count += 1;
-    }
 
-    if row_count >= 6 { 6 } else { 5 }
+    let mut pitches: Vec<f64> = dips.windows(2).map(|p| (p[1] - p[0]) as f64).collect();
+    if pitches.is_empty() {
+        tracing::debug!("team size: no row dips found, defaulting to 5");
+        return 5;
+    }
+    pitches.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let median_pitch = pitches[pitches.len() / 2] / h as f64;
+
+    // Threshold sits between the measured 5v5 (~8.3%) and 6v6 (~7.4%) pitches.
+    let team_size = if median_pitch < 0.079 { 6 } else { 5 };
+    tracing::debug!(
+        median_pitch,
+        dip_count = dips.len(),
+        team_size,
+        "team size via row pitch"
+    );
+    team_size
 }
 
 fn mean_absolute_difference(a: &RgbImage, b: &RgbImage) -> f64 {

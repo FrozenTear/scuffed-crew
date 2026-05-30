@@ -1,7 +1,9 @@
 use crate::config::SyncConfig;
 use crate::storage::PersonalMatch;
 
-use scuffed_types::api::{StatsUploadEntry, StatsUploadRequest, StatsUploadResponse};
+use scuffed_types::api::{
+    DaemonConfigResponse, StatsUploadEntry, StatsUploadRequest, StatsUploadResponse,
+};
 
 pub struct SyncClient {
     config: SyncConfig,
@@ -14,6 +16,28 @@ impl SyncClient {
             http: reqwest::Client::new(),
             config,
         }
+    }
+
+    /// Fetch daemon configuration from the server (player_name, etc.).
+    /// Called on startup when local config has no player_name.
+    pub async fn fetch_daemon_config(
+        &self,
+    ) -> Result<DaemonConfigResponse, Box<dyn std::error::Error>> {
+        let url = format!("{}/api/stats/daemon-config", self.config.server_url);
+        let resp = self
+            .http
+            .get(&url)
+            .bearer_auth(&self.config.token)
+            .send()
+            .await?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(format!("daemon-config fetch failed ({status}): {body}").into());
+        }
+
+        Ok(resp.json::<DaemonConfigResponse>().await?)
     }
 
     pub async fn upload_matches(
