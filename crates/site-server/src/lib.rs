@@ -180,6 +180,14 @@ pub fn create_router(state: AppState) -> Router {
             "/api/stats/tokens/{id}",
             delete(routes::stats::revoke_daemon_token),
         )
+        .route(
+            "/api/stats/settings",
+            get(routes::stats::get_member_settings).put(routes::stats::update_member_settings),
+        )
+        .route(
+            "/api/stats/daemon-config",
+            get(routes::stats::daemon_config),
+        )
         // Calendar routes
         .route(
             "/api/calendar/all.ics",

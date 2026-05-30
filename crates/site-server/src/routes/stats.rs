@@ -6,11 +6,13 @@ use axum::{
 
 use scuffed_auth::server::session::ErrorResponse;
 use scuffed_db::{
-    AuditAction, AuditTargetType, DaemonToken, HeroStats, MapStats, PersonalMatch, PersonalStats,
+    AuditAction, AuditTargetType, DaemonToken, HeroStats, MapStats, PersonalMatch,
+    PersonalStats,
 };
 use scuffed_types::api::{
-    CreateDaemonTokenRequest, CreateDaemonTokenResponse, CursorResponse, PaginationParams,
-    StatsUploadRequest, StatsUploadResponse,
+    CreateDaemonTokenRequest, CreateDaemonTokenResponse, CursorResponse, DaemonConfigResponse,
+    MemberSettingsResponse, PaginationParams, StatsUploadRequest, StatsUploadResponse,
+    UpdateMemberSettingsRequest,
 };
 
 use crate::extractors::{DaemonUser, OrgMember};
@@ -319,6 +321,80 @@ pub async fn revoke_daemon_token(
     .await;
 
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// GET /api/stats/settings — load player's daemon settings (session auth)
+pub async fn get_member_settings(
+    State(state): State<AppState>,
+    member: OrgMember,
+) -> Result<Json<MemberSettingsResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let settings = state
+        .db
+        .get_member_settings(&member.member.id)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: e.to_string(),
+                }),
+            )
+        })?;
+    Ok(Json(MemberSettingsResponse {
+        player_name: settings.and_then(|s| s.player_name),
+    }))
+}
+
+/// PUT /api/stats/settings — save player's daemon settings (session auth)
+pub async fn update_member_settings(
+    State(state): State<AppState>,
+    member: OrgMember,
+    Json(body): Json<UpdateMemberSettingsRequest>,
+) -> Result<Json<MemberSettingsResponse>, (StatusCode, Json<ErrorResponse>)> {
+    // Trim and treat empty string as None
+    let player_name = body
+        .player_name
+        .as_deref()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty());
+
+    let settings = state
+        .db
+        .upsert_member_settings(&member.member.id, player_name)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: e.to_string(),
+                }),
+            )
+        })?;
+    Ok(Json(MemberSettingsResponse {
+        player_name: settings.player_name,
+    }))
+}
+
+/// GET /api/stats/daemon-config — fetch config for daemon (token auth)
+pub async fn daemon_config(
+    State(state): State<AppState>,
+    daemon: DaemonUser,
+) -> Result<Json<DaemonConfigResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let settings = state
+        .db
+        .get_member_settings(&daemon.member.id)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: e.to_string(),
+                }),
+            )
+        })?;
+    Ok(Json(DaemonConfigResponse {
+        player_name: settings.and_then(|s| s.player_name),
+    }))
 }
 
 fn generate_token() -> String {

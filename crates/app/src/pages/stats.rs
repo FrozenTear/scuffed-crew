@@ -3,8 +3,11 @@ use dioxus::prelude::*;
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
 
+use scuffed_api_client::ApiClient;
+use scuffed_types::api::{MemberSettingsResponse, UpdateMemberSettingsRequest};
+
 use crate::components::charts::{BarEntry, DonutChart, DonutSegment, HBarChart};
-use crate::components::{DataTable, SummaryCard};
+use crate::components::{DataTable, SummaryCard, Toast, use_toast};
 use crate::hooks::{use_api, use_api_with};
 use crate::routes::Route;
 
@@ -450,6 +453,61 @@ const STATS_CSS: &str = r#"
             grid-column: 1 / -1;
         }
     }
+
+    /* Daemon settings panel */
+    .daemon-settings {
+        background: var(--bg-card);
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 1.25rem;
+        margin-bottom: 1.5rem;
+    }
+    .daemon-settings summary {
+        font-family: var(--font-display);
+        font-size: 0.85rem;
+        color: var(--text-muted);
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+        cursor: pointer;
+        user-select: none;
+        list-style: none;
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+    }
+    .daemon-settings summary::-webkit-details-marker { display: none; }
+    .daemon-settings[open] summary { margin-bottom: 1rem; }
+    .daemon-settings-row {
+        display: flex;
+        gap: 0.75rem;
+        align-items: center;
+        flex-wrap: wrap;
+    }
+    .daemon-settings-label {
+        font-size: 0.8rem;
+        color: var(--text-secondary);
+        white-space: nowrap;
+    }
+    .daemon-settings-input {
+        flex: 1;
+        min-width: 160px;
+        padding: 0.4rem 0.75rem;
+        background: var(--bg-surface);
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        color: var(--text-bright);
+        font-size: 0.85rem;
+        font-family: var(--font-mono);
+    }
+    .daemon-settings-input:focus {
+        outline: none;
+        border-color: var(--accent-soft);
+    }
+    .daemon-settings-hint {
+        font-size: 0.75rem;
+        color: var(--text-muted);
+        margin-top: 0.5rem;
+    }
 "#;
 
 fn winrate_pct(wins: u32, total: u32) -> f64 {
@@ -507,8 +565,47 @@ pub fn Stats() -> Element {
     let stats = use_api::<PersonalStats>("/api/stats/me");
     let heroes = use_api::<Vec<HeroStats>>("/api/stats/me/heroes");
     let maps = use_api::<Vec<MapStats>>("/api/stats/me/maps");
+    let server_settings = use_api::<MemberSettingsResponse>("/api/stats/settings");
 
     let mut tab = use_signal(|| StatsTab::Overview);
+    let mut toast = use_toast();
+
+    // Local editable state for the player_name field
+    let mut player_name_input: Signal<String> = use_signal(String::new);
+    let mut settings_saving = use_signal(|| false);
+
+    // Populate input once settings load (only on first load, not on every re-render)
+    let mut settings_loaded = use_signal(|| false);
+    {
+        let data = server_settings.data.read();
+        if !settings_loaded() {
+            let s = data.as_ref().and_then(|d| d.as_ref());
+            if let Some(s) = s {
+                let name = s.player_name.clone().unwrap_or_default();
+                drop(data);
+                player_name_input.set(name);
+                settings_loaded.set(true);
+            }
+        }
+    }
+
+    let save_settings = move |_| {
+        let name = player_name_input().trim().to_string();
+        settings_saving.set(true);
+        spawn(async move {
+            let body = UpdateMemberSettingsRequest {
+                player_name: if name.is_empty() { None } else { Some(name) },
+            };
+            match ApiClient::web()
+                .put_json::<_, MemberSettingsResponse>("/api/stats/settings", &body)
+                .await
+            {
+                Ok(_) => toast.show(Toast::success("Settings saved.")),
+                Err(e) => toast.show(Toast::error(format!("Save failed: {e}"))),
+            }
+            settings_saving.set(false);
+        });
+    };
 
     let mut page_cursor = use_signal(|| Option::<String>::None);
     let mut cursor_history: Signal<Vec<Option<String>>> = use_signal(|| vec![None]);
@@ -530,6 +627,31 @@ pub fn Stats() -> Element {
                 h1 { "My Stats" }
                 div { class: "stats-header-actions",
                     Link { to: Route::StatsTokens {}, "Daemon Tokens" }
+                }
+            }
+
+            // Daemon settings (collapsible)
+            details { class: "daemon-settings",
+                summary { "⚙ Daemon Settings" }
+                div { class: "daemon-settings-row",
+                    label { class: "daemon-settings-label", r#for: "player-name-input", "In-game name" }
+                    input {
+                        id: "player-name-input",
+                        class: "daemon-settings-input",
+                        r#type: "text",
+                        placeholder: "e.g. FROZEN",
+                        value: player_name_input(),
+                        oninput: move |e| player_name_input.set(e.value()),
+                    }
+                    button {
+                        class: "btn-primary",
+                        disabled: settings_saving(),
+                        onclick: save_settings,
+                        if settings_saving() { "Saving…" } else { "Save" }
+                    }
+                }
+                p { class: "daemon-settings-hint",
+                    "The daemon uses this name to find your row on replay and post-match scoreboards."
                 }
             }
 

@@ -527,6 +527,13 @@ pub struct MapStats {
     pub draws: u32,
 }
 
+/// Per-member daemon/app settings.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemberSettings {
+    pub member_id: String,
+    pub player_name: Option<String>,
+}
+
 /// A daemon authentication token.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DaemonToken {

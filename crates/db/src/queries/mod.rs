@@ -11,6 +11,7 @@ pub mod forum;
 pub mod game_accounts;
 pub mod games;
 pub mod matches;
+pub mod member_settings;
 pub mod members;
 pub mod moderation;
 pub mod nostr_keys;

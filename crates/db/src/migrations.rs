@@ -574,6 +574,15 @@ pub async fn run_migrations(client: &Surreal<Any>) -> DbResult<()> {
 
         DEFINE INDEX dt_token_hash_idx ON daemon_token COLUMNS token_hash UNIQUE;
         DEFINE INDEX dt_member_idx ON daemon_token COLUMNS member_id;
+
+        -- ================================================
+        -- Member Settings (per-member daemon / app config)
+        -- ================================================
+        DEFINE TABLE member_settings SCHEMAFULL;
+        DEFINE FIELD member_id ON member_settings TYPE string;
+        DEFINE FIELD player_name ON member_settings TYPE option<string>;
+
+        DEFINE INDEX ms_member_idx ON member_settings COLUMNS member_id UNIQUE;
     "#,
         )
         .await?

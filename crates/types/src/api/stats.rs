@@ -50,3 +50,21 @@ pub struct CreateDaemonTokenResponse {
     pub token: String,
     pub label: String,
 }
+
+/// Per-member settings returned by GET /api/stats/settings (session auth).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemberSettingsResponse {
+    pub player_name: Option<String>,
+}
+
+/// Body for PUT /api/stats/settings.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateMemberSettingsRequest {
+    pub player_name: Option<String>,
+}
+
+/// Daemon configuration returned by GET /api/stats/daemon-config (token auth).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DaemonConfigResponse {
+    pub player_name: Option<String>,
+}
