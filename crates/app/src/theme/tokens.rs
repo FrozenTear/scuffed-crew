@@ -17,6 +17,8 @@ pub fn theme_css(brand: &BrandConfig) -> String {
   --space-6: 24px; --space-8: 32px; --space-12: 48px;
 
   --radius-sm: 7px; --radius-md: 9px; --radius-lg: 12px; --radius-pill: 999px;
+
+  --overlay: rgba(0,0,0,0.6);
 }}
 
 [data-theme="dark"] {{

@@ -29,7 +29,11 @@ fn initial_mode() -> ThemeMode {
             if let Ok(Some(storage)) = win.local_storage()
                 && let Ok(Some(v)) = storage.get_item("sc-theme")
             {
-                return if v == "light" { ThemeMode::Light } else { ThemeMode::Dark };
+                return if v == "light" {
+                    ThemeMode::Light
+                } else {
+                    ThemeMode::Dark
+                };
             }
             if let Ok(Some(mql)) = win.match_media("(prefers-color-scheme: light)")
                 && mql.matches()
