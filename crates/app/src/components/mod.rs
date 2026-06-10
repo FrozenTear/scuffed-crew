@@ -9,6 +9,7 @@ pub mod post;
 pub mod section_header;
 pub mod strategy;
 pub mod toast;
+pub mod ui;
 
 pub use admin_shared::*;
 pub use section_header::SectionHeader;

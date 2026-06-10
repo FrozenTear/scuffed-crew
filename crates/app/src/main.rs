@@ -61,6 +61,7 @@ fn App() -> Element {
         }
         style { {theme::theme_css_current()} }
         style { {styles::common::CSS} }
+        style { {components::ui::ui_css()} }
         theme::ThemeProvider {
             ToastProvider {
                 Router::<Route> {}
