@@ -10,7 +10,7 @@ const MESSAGE_THREAD_CSS: &str = r#"
     display: flex;
     flex-direction: column;
     height: 100%;
-    background: var(--bg-card);
+    background: var(--surface);
     border: 1px solid var(--border);
     border-radius: 10px;
     overflow: hidden;
@@ -27,7 +27,7 @@ const MESSAGE_THREAD_CSS: &str = r#"
     height: 36px;
     border-radius: 50%;
     background: var(--accent-soft);
-    color: var(--accent-bright);
+    color: var(--accent);
     display: flex;
     align-items: center;
     justify-content: center;
@@ -36,15 +36,15 @@ const MESSAGE_THREAD_CSS: &str = r#"
     flex-shrink: 0;
 }
 .dm-thread-name {
-    font-family: 'Rajdhani', sans-serif;
+    font-family: var(--font-head);
     font-weight: 700;
     font-size: 1.05rem;
-    color: var(--text-bright);
+    color: var(--text);
 }
 .dm-thread-pubkey {
-    font-family: monospace;
+    font-family: var(--font-mono);
     font-size: 0.7rem;
-    color: var(--text-muted);
+    color: var(--text-3);
 }
 .dm-thread-scroll {
     flex: 1;
@@ -57,7 +57,7 @@ const MESSAGE_THREAD_CSS: &str = r#"
 .dm-thread-load-older {
     align-self: center;
     background: transparent;
-    color: var(--text-secondary);
+    color: var(--text-2);
     border: 1px solid var(--border);
     border-radius: 6px;
     padding: 0.35rem 0.75rem;
@@ -65,7 +65,7 @@ const MESSAGE_THREAD_CSS: &str = r#"
     cursor: pointer;
     margin-bottom: 0.5rem;
 }
-.dm-thread-load-older:hover { color: var(--text-bright); border-color: var(--accent-soft); }
+.dm-thread-load-older:hover { color: var(--text); border-color: var(--accent-soft); }
 .dm-thread-load-older:disabled { opacity: 0.5; cursor: not-allowed; }
 .dm-msg {
     display: flex;
@@ -73,31 +73,31 @@ const MESSAGE_THREAD_CSS: &str = r#"
     max-width: 75%;
     padding: 0.55rem 0.75rem;
     border-radius: 10px;
-    background: var(--bg-surface, #1a1a2e);
+    background: var(--bg);
     border: 1px solid var(--border);
     word-wrap: break-word;
     overflow-wrap: anywhere;
 }
 .dm-msg.outgoing {
     align-self: flex-end;
-    background: rgba(124, 58, 237, 0.15);
-    border-color: rgba(124, 58, 237, 0.4);
+    background: color-mix(in srgb, var(--accent) 15%, transparent);
+    border-color: color-mix(in srgb, var(--accent) 40%, transparent);
 }
 .dm-msg-meta {
     font-size: 0.65rem;
-    color: var(--text-muted);
+    color: var(--text-3);
     margin-top: 0.25rem;
     display: flex;
     justify-content: flex-end;
     gap: 0.4rem;
 }
-.dm-msg-content { font-size: 0.9rem; color: var(--text-bright); white-space: pre-wrap; }
+.dm-msg-content { font-size: 0.9rem; color: var(--text); white-space: pre-wrap; }
 .dm-thread-empty {
     display: flex;
     flex: 1;
     align-items: center;
     justify-content: center;
-    color: var(--text-muted);
+    color: var(--text-3);
     font-size: 0.9rem;
     padding: 2rem;
     text-align: center;
@@ -107,7 +107,7 @@ const MESSAGE_THREAD_CSS: &str = r#"
     flex: 1;
     align-items: center;
     justify-content: center;
-    color: var(--text-muted);
+    color: var(--text-3);
     font-size: 0.9rem;
 }
 "#;

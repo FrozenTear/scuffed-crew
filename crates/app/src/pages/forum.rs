@@ -48,9 +48,9 @@ const PAGE_CSS: &str = r#"
         margin: 0 auto;
     }
     .forum-page-title {
-        font-family: 'Bebas Neue', sans-serif;
+        font-family: var(--font-head);
         font-size: 2.5rem;
-        color: var(--text-bright);
+        color: var(--text);
         letter-spacing: 3px;
         margin: 0 0 1.5rem;
     }
@@ -66,20 +66,20 @@ const PAGE_CSS: &str = r#"
         background: none;
         border: none;
         border-bottom: 2px solid transparent;
-        color: var(--text-secondary);
+        color: var(--text-2);
         font-size: 0.85rem;
         cursor: pointer;
         transition: color 0.15s, border-color 0.15s;
-        font-family: 'Rajdhani', sans-serif;
+        font-family: var(--font-head);
         font-weight: 600;
         text-transform: uppercase;
         letter-spacing: 0.04em;
     }
     .forum-tab:hover {
-        color: var(--text-bright);
+        color: var(--text);
     }
     .forum-tab.active {
-        color: var(--text-bright);
+        color: var(--text);
         border-bottom-color: var(--accent);
     }
     .forum-toolbar {
@@ -93,7 +93,7 @@ const PAGE_CSS: &str = r#"
         gap: 0.4rem;
         padding: 0.5rem 1rem;
         background: var(--accent);
-        color: white;
+        color: var(--accent-fg);
         border: none;
         border-radius: 6px;
         font-size: 0.85rem;
@@ -114,7 +114,7 @@ const PAGE_CSS: &str = r#"
         align-items: center;
         gap: 1rem;
         padding: 1rem 1.25rem;
-        background: var(--bg-card);
+        background: var(--surface);
         border: 1px solid var(--border);
         border-radius: 8px;
         text-decoration: none;
@@ -125,7 +125,7 @@ const PAGE_CSS: &str = r#"
     }
     .forum-thread-card.pinned {
         border-color: var(--accent-soft);
-        background: rgba(124, 58, 237, 0.04);
+        background: color-mix(in srgb, var(--accent) 4%, var(--surface));
     }
     .forum-thread-info {
         flex: 1;
@@ -138,10 +138,10 @@ const PAGE_CSS: &str = r#"
         margin-bottom: 0.25rem;
     }
     .forum-thread-title {
-        font-family: 'Rajdhani', sans-serif;
+        font-family: var(--font-head);
         font-weight: 700;
         font-size: 1rem;
-        color: var(--text-bright);
+        color: var(--text);
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: nowrap;
@@ -155,53 +155,53 @@ const PAGE_CSS: &str = r#"
         white-space: nowrap;
     }
     .forum-badge-pin {
-        background: #7c3aed33;
-        color: #a78bfa;
+        background: color-mix(in srgb, var(--accent) 20%, transparent);
+        color: var(--accent);
     }
     .forum-badge-locked {
-        background: #ef444433;
-        color: #f87171;
+        background: color-mix(in srgb, var(--danger) 20%, transparent);
+        color: var(--danger);
     }
     .forum-badge-cat {
-        background: #3b82f622;
-        color: #60a5fa;
+        background: color-mix(in srgb, var(--text-2) 15%, transparent);
+        color: var(--text-2);
     }
     .forum-thread-meta {
         font-size: 0.7rem;
-        color: var(--text-muted);
+        color: var(--text-3);
     }
     .forum-thread-replies {
         text-align: center;
         min-width: 60px;
     }
     .forum-thread-replies-count {
-        font-family: 'Rajdhani', sans-serif;
+        font-family: var(--font-head);
         font-weight: 700;
         font-size: 1.1rem;
-        color: var(--text-secondary);
+        color: var(--text-2);
     }
     .forum-thread-replies-label {
         font-size: 0.65rem;
-        color: var(--text-muted);
+        color: var(--text-3);
         text-transform: uppercase;
     }
     .forum-empty, .forum-loading {
-        color: var(--text-muted);
+        color: var(--text-3);
         text-align: center;
         padding: 3rem 0;
     }
     .forum-compose {
-        background: var(--bg-card);
+        background: var(--surface);
         border: 1px solid var(--border);
         border-radius: 10px;
         padding: 1.5rem;
         margin-bottom: 1.5rem;
     }
     .forum-compose-title {
-        font-family: 'Rajdhani', sans-serif;
+        font-family: var(--font-head);
         font-weight: 700;
         font-size: 1.1rem;
-        color: var(--text-bright);
+        color: var(--text);
         margin: 0 0 1rem;
     }
     .forum-field {
@@ -210,7 +210,7 @@ const PAGE_CSS: &str = r#"
     .forum-label {
         display: block;
         font-size: 0.75rem;
-        color: var(--text-muted);
+        color: var(--text-3);
         text-transform: uppercase;
         letter-spacing: 0.04em;
         margin-bottom: 0.35rem;
@@ -218,10 +218,10 @@ const PAGE_CSS: &str = r#"
     }
     .forum-input, .forum-textarea, .forum-select {
         width: 100%;
-        background: var(--bg-surface);
+        background: var(--bg);
         border: 1px solid var(--border);
         border-radius: 6px;
-        color: var(--text-bright);
+        color: var(--text);
         padding: 0.6rem 0.75rem;
         font-size: 0.9rem;
         font-family: inherit;
@@ -241,8 +241,8 @@ const PAGE_CSS: &str = r#"
     }
     .forum-cancel-btn {
         padding: 0.5rem 1rem;
-        background: var(--bg-surface);
-        color: var(--text-secondary);
+        background: var(--bg);
+        color: var(--text-2);
         border: 1px solid var(--border);
         border-radius: 6px;
         font-size: 0.85rem;
@@ -251,7 +251,7 @@ const PAGE_CSS: &str = r#"
     .forum-submit-btn {
         padding: 0.5rem 1rem;
         background: var(--accent);
-        color: white;
+        color: var(--accent-fg);
         border: none;
         border-radius: 6px;
         font-size: 0.85rem;

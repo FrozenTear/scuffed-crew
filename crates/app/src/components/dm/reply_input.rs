@@ -13,17 +13,17 @@ const REPLY_INPUT_CSS: &str = r#"
     display: flex;
     flex-direction: column;
     gap: 0.45rem;
-    background: var(--bg-card);
+    background: var(--surface);
 }
 .dm-reply-banner {
-    background: rgba(239, 68, 68, 0.08);
-    border: 1px solid rgba(239, 68, 68, 0.4);
+    background: color-mix(in srgb, var(--danger) 8%, transparent);
+    border: 1px solid color-mix(in srgb, var(--danger) 40%, transparent);
     border-radius: 8px;
     padding: 0.5rem 0.75rem;
-    color: #fca5a5;
+    color: var(--danger);
     font-size: 0.8rem;
 }
-.dm-reply-banner a { color: #f87171; font-weight: 600; text-decoration: underline; }
+.dm-reply-banner a { color: var(--danger); font-weight: 600; text-decoration: underline; }
 .dm-reply-row {
     display: flex;
     gap: 0.5rem;
@@ -31,23 +31,23 @@ const REPLY_INPUT_CSS: &str = r#"
 }
 .dm-reply-textarea {
     flex: 1;
-    background: var(--bg-surface);
+    background: var(--bg);
     border: 1px solid var(--border);
     border-radius: 8px;
     padding: 0.55rem 0.7rem;
-    color: var(--text-bright);
+    color: var(--text);
     font-size: 0.9rem;
-    font-family: 'Source Sans 3', sans-serif;
+    font-family: var(--font-body);
     line-height: 1.5;
     min-height: 44px;
     max-height: 160px;
     resize: vertical;
 }
-.dm-reply-textarea:focus { outline: none; border-color: #7c3aed; }
-.dm-reply-textarea::placeholder { color: var(--text-muted); }
+.dm-reply-textarea:focus { outline: none; border-color: var(--accent); }
+.dm-reply-textarea::placeholder { color: var(--text-3); }
 .dm-reply-send {
-    background: #7c3aed;
-    color: white;
+    background: var(--accent);
+    color: var(--accent-fg);
     border: none;
     border-radius: 8px;
     padding: 0 1.1rem;
@@ -63,9 +63,9 @@ const REPLY_INPUT_CSS: &str = r#"
     display: flex;
     justify-content: space-between;
     font-size: 0.7rem;
-    color: var(--text-muted);
+    color: var(--text-3);
 }
-.dm-reply-counter.over { color: #f87171; }
+.dm-reply-counter.over { color: var(--danger); }
 "#;
 
 const MAX_BODY_CHARS: usize = 2000;

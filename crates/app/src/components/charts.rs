@@ -25,15 +25,15 @@ const CHARTS_CSS: &str = r#"
         pointer-events: none;
     }
     .donut-center-value {
-        font-family: var(--font-display);
+        font-family: var(--font-head);
         font-size: 1.2rem;
         font-weight: 700;
-        color: var(--text-bright);
+        color: var(--text);
         line-height: 1.1;
     }
     .donut-center-label {
         font-size: 0.6rem;
-        color: var(--text-muted);
+        color: var(--text-3);
         text-transform: uppercase;
         letter-spacing: 0.06em;
     }
@@ -54,10 +54,10 @@ const CHARTS_CSS: &str = r#"
         border-radius: 2px;
         flex-shrink: 0;
     }
-    .legend-name { color: var(--text-secondary); }
+    .legend-name { color: var(--text-2); }
     .legend-val {
         margin-left: auto;
-        color: var(--text-muted);
+        color: var(--text-3);
         font-size: 0.8rem;
         padding-left: 0.5rem;
     }
@@ -67,7 +67,7 @@ const CHARTS_CSS: &str = r#"
     .hbar-label {
         min-width: 110px;
         font-size: 0.8rem;
-        color: var(--text-secondary);
+        color: var(--text-2);
         text-align: right;
         overflow: hidden;
         text-overflow: ellipsis;
@@ -76,7 +76,7 @@ const CHARTS_CSS: &str = r#"
     .hbar-track {
         flex: 1;
         height: 20px;
-        background: var(--bg-card);
+        background: var(--surface);
         border-radius: 4px;
         overflow: hidden;
     }
@@ -91,9 +91,9 @@ const CHARTS_CSS: &str = r#"
         font-size: 0.8rem;
         font-weight: 600;
     }
-    .hbar-val.high { color: #34d399; }
-    .hbar-val.mid { color: #fbbf24; }
-    .hbar-val.low { color: #f87171; }
+    .hbar-val.high { color: var(--ok); }
+    .hbar-val.mid { color: var(--warn); }
+    .hbar-val.low { color: var(--danger); }
 "#;
 
 #[derive(Clone, PartialEq)]

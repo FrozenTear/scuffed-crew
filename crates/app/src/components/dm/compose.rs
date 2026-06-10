@@ -10,14 +10,14 @@ const COMPOSE_CSS: &str = r#"
 .dm-compose-overlay {
     position: fixed;
     inset: 0;
-    background: rgba(0, 0, 0, 0.7);
+    background: var(--overlay);
     z-index: 1000;
     display: flex;
     align-items: center;
     justify-content: center;
 }
 .dm-compose-modal {
-    background: var(--bg-card);
+    background: var(--surface);
     border: 1px solid var(--border);
     border-radius: 12px;
     width: min(560px, 92vw);
@@ -34,70 +34,70 @@ const COMPOSE_CSS: &str = r#"
     border-bottom: 1px solid var(--border);
 }
 .dm-compose-title {
-    font-family: 'Rajdhani', sans-serif;
+    font-family: var(--font-head);
     font-weight: 700;
     font-size: 1.1rem;
-    color: var(--text-bright);
+    color: var(--text);
     margin: 0;
     letter-spacing: 0.02em;
 }
 .dm-compose-close {
     background: transparent;
     border: none;
-    color: var(--text-muted);
+    color: var(--text-3);
     font-size: 1.25rem;
     cursor: pointer;
     padding: 0.25rem 0.5rem;
     border-radius: 4px;
 }
-.dm-compose-close:hover { color: var(--text-bright); background: var(--bg-elevated); }
+.dm-compose-close:hover { color: var(--text); background: var(--surface-2); }
 .dm-compose-body { padding: 1rem 1.25rem; display: flex; flex-direction: column; gap: 0.85rem; overflow-y: auto; }
 .dm-compose-banner {
-    background: rgba(239, 68, 68, 0.08);
-    border: 1px solid rgba(239, 68, 68, 0.4);
+    background: color-mix(in srgb, var(--danger) 8%, transparent);
+    border: 1px solid color-mix(in srgb, var(--danger) 40%, transparent);
     border-radius: 8px;
     padding: 0.75rem 1rem;
-    color: #fca5a5;
+    color: var(--danger);
     font-size: 0.85rem;
 }
-.dm-compose-banner a { color: #f87171; font-weight: 600; text-decoration: underline; }
+.dm-compose-banner a { color: var(--danger); font-weight: 600; text-decoration: underline; }
 .dm-compose-field { display: flex; flex-direction: column; gap: 0.35rem; position: relative; }
 .dm-compose-label {
-    font-family: 'Rajdhani', sans-serif;
+    font-family: var(--font-head);
     font-weight: 600;
     font-size: 0.8rem;
-    color: var(--text-secondary);
+    color: var(--text-2);
     text-transform: uppercase;
     letter-spacing: 0.05em;
 }
 .dm-compose-input,
 .dm-compose-textarea {
-    background: var(--bg-surface);
+    background: var(--bg);
     border: 1px solid var(--border);
     border-radius: 8px;
     padding: 0.6rem 0.75rem;
-    color: var(--text-bright);
+    color: var(--text);
     font-size: 0.9rem;
-    font-family: 'Source Sans 3', sans-serif;
+    font-family: var(--font-body);
 }
 .dm-compose-textarea { min-height: 110px; resize: vertical; line-height: 1.5; }
 .dm-compose-input:focus,
-.dm-compose-textarea:focus { outline: none; border-color: #7c3aed; }
+.dm-compose-textarea:focus { outline: none; border-color: var(--accent); }
 .dm-compose-input::placeholder,
-.dm-compose-textarea::placeholder { color: var(--text-muted); }
+.dm-compose-textarea::placeholder { color: var(--text-3); }
 .dm-compose-suggestions {
     position: absolute;
     top: 100%;
     left: 0;
     right: 0;
     margin-top: 0.25rem;
-    background: var(--bg-card);
+    background: var(--surface);
     border: 1px solid var(--border);
     border-radius: 8px;
     max-height: 220px;
     overflow-y: auto;
     z-index: 10;
-    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+    box-shadow: 0 8px 24px var(--overlay);
 }
 .dm-compose-suggestion {
     display: flex;
@@ -108,15 +108,15 @@ const COMPOSE_CSS: &str = r#"
     border-bottom: 1px solid var(--border);
 }
 .dm-compose-suggestion:last-child { border-bottom: none; }
-.dm-compose-suggestion:hover { background: rgba(124, 58, 237, 0.12); }
-.dm-compose-suggestion-name { font-weight: 600; font-size: 0.9rem; color: var(--text-bright); }
-.dm-compose-suggestion-pk { font-family: monospace; font-size: 0.7rem; color: var(--text-muted); }
+.dm-compose-suggestion:hover { background: color-mix(in srgb, var(--accent) 12%, transparent); }
+.dm-compose-suggestion-name { font-weight: 600; font-size: 0.9rem; color: var(--text); }
+.dm-compose-suggestion-pk { font-family: var(--font-mono); font-size: 0.7rem; color: var(--text-3); }
 .dm-compose-counter {
     align-self: flex-end;
     font-size: 0.7rem;
-    color: var(--text-muted);
+    color: var(--text-3);
 }
-.dm-compose-counter.over { color: #f87171; }
+.dm-compose-counter.over { color: var(--danger); }
 .dm-compose-footer {
     display: flex;
     justify-content: space-between;
@@ -125,7 +125,7 @@ const COMPOSE_CSS: &str = r#"
     border-top: 1px solid var(--border);
     gap: 0.75rem;
 }
-.dm-compose-hint { font-size: 0.7rem; color: var(--text-muted); }
+.dm-compose-hint { font-size: 0.7rem; color: var(--text-3); }
 .dm-compose-actions { display: flex; gap: 0.5rem; }
 .dm-compose-cancel,
 .dm-compose-submit {
@@ -136,9 +136,9 @@ const COMPOSE_CSS: &str = r#"
     font-weight: 600;
     cursor: pointer;
 }
-.dm-compose-cancel { background: transparent; color: var(--text-secondary); border: 1px solid var(--border); }
-.dm-compose-cancel:hover { color: var(--text-bright); border-color: var(--accent-soft); }
-.dm-compose-submit { background: #7c3aed; color: white; }
+.dm-compose-cancel { background: transparent; color: var(--text-2); border: 1px solid var(--border); }
+.dm-compose-cancel:hover { color: var(--text); border-color: var(--accent-soft); }
+.dm-compose-submit { background: var(--accent); color: var(--accent-fg); }
 .dm-compose-submit:hover:not(:disabled) { filter: brightness(1.15); }
 .dm-compose-submit:disabled { opacity: 0.5; cursor: not-allowed; }
 "#;

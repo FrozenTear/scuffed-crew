@@ -14,28 +14,28 @@ const PAGE_CSS: &str = r#"
         margin: 0 auto;
     }
     .identity-page-title {
-        font-family: 'Bebas Neue', sans-serif;
+        font-family: var(--font-head);
         font-size: 2.5rem;
-        color: var(--text-bright);
+        color: var(--text);
         letter-spacing: 3px;
         margin: 0 0 2rem;
     }
     .identity-section {
-        background: var(--bg-card);
+        background: var(--surface);
         border: 1px solid var(--border);
         border-radius: 10px;
         padding: 1.5rem;
         margin-bottom: 1.25rem;
     }
     .identity-section h2 {
-        font-family: 'Rajdhani', sans-serif;
+        font-family: var(--font-head);
         font-size: 1.15rem;
         font-weight: 700;
-        color: var(--text-bright);
+        color: var(--text);
         margin: 0 0 0.75rem;
     }
     .identity-section p {
-        color: var(--text-secondary);
+        color: var(--text-2);
         font-size: 0.85rem;
         line-height: 1.5;
         margin: 0 0 1rem;
@@ -47,7 +47,7 @@ const PAGE_CSS: &str = r#"
         display: block;
         font-size: 0.75rem;
         font-weight: 600;
-        color: var(--text-muted);
+        color: var(--text-3);
         text-transform: uppercase;
         letter-spacing: 0.05em;
         margin-bottom: 0.35rem;
@@ -55,10 +55,10 @@ const PAGE_CSS: &str = r#"
     .identity-input {
         width: 100%;
         padding: 0.5rem 0.75rem;
-        background: var(--bg-surface, #1a1a2e);
+        background: var(--bg);
         border: 1px solid var(--border);
         border-radius: 6px;
-        color: var(--text-bright);
+        color: var(--text);
         font-size: 0.875rem;
         outline: none;
         transition: border-color 0.15s;
@@ -68,29 +68,29 @@ const PAGE_CSS: &str = r#"
         border-color: var(--accent);
     }
     .identity-mono {
-        font-family: monospace;
+        font-family: var(--font-mono);
         font-size: 0.8rem;
-        background: var(--bg-surface, #1a1a2e);
+        background: var(--bg);
         padding: 0.5rem 0.75rem;
         border-radius: 6px;
         word-break: break-all;
         display: block;
-        color: var(--text-bright);
+        color: var(--text);
         border: 1px solid var(--border);
     }
     .identity-pill {
         display: inline-block;
         font-size: 0.7rem;
         padding: 0.15rem 0.6rem;
-        border-radius: 999px;
+        border-radius: var(--radius-pill);
         font-weight: 600;
         text-transform: uppercase;
         letter-spacing: 0.04em;
-        background: #7c3aed33;
-        color: #a78bfa;
+        background: color-mix(in srgb, var(--accent) 20%, transparent);
+        color: var(--accent);
     }
     .identity-nip05 {
-        color: var(--text-secondary);
+        color: var(--text-2);
         font-size: 0.85rem;
     }
     .identity-row {
@@ -114,36 +114,36 @@ const PAGE_CSS: &str = r#"
     }
     .identity-btn-primary {
         background: var(--accent);
-        color: white;
+        color: var(--accent-fg);
     }
     .identity-btn-primary:hover:not(:disabled) {
         filter: brightness(1.15);
     }
     .identity-btn-danger {
-        background: #ef4444;
-        color: white;
+        background: var(--danger);
+        color: var(--accent-fg);
     }
     .identity-btn-danger:hover:not(:disabled) {
         filter: brightness(1.15);
     }
     .identity-btn-outline {
         background: transparent;
-        color: var(--text-secondary);
+        color: var(--text-2);
         border: 1px solid var(--border);
     }
     .identity-btn-outline:hover:not(:disabled) {
-        border-color: var(--text-bright);
-        color: var(--text-bright);
+        border-color: var(--text);
+        color: var(--text);
     }
     .identity-backup-box {
         margin-top: 1rem;
         padding: 1rem;
-        background: var(--bg-surface, #1a1a2e);
+        background: var(--bg);
         border-radius: 8px;
         border: 1px solid var(--border);
     }
     .identity-warning {
-        color: #f97316;
+        color: var(--warn);
         font-size: 0.75rem;
         margin-top: 0.5rem;
     }

@@ -19,6 +19,8 @@ pub fn theme_css(brand: &BrandConfig) -> String {
   --radius-sm: 7px; --radius-md: 9px; --radius-lg: 12px; --radius-pill: 999px;
 
   --overlay: rgba(0,0,0,0.6);
+
+  --chart-1: #8f73ff; --chart-2: #46d8a4; --chart-3: #fbbf24; --chart-4: #f06a6a; --chart-5: #38bdf8; --chart-6: #c084fc;
 }}
 
 [data-theme="dark"] {{
@@ -33,6 +35,7 @@ pub fn theme_css(brand: &BrandConfig) -> String {
   --text: #16161c; --text-2: #545462; --text-3: #83838f;
   --accent: {accent_l}; --accent-fg: #ffffff; --accent-soft: {soft_l};
   --ok: #0ea66e; --warn: #c2830a; --danger: #d63031;
+  --chart-1: #6d4aff; --chart-2: #0ea66e; --chart-3: #c2830a; --chart-4: #d63031; --chart-5: #0284c7; --chart-6: #9333ea;
 }}
 
 html, body {{

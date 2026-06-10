@@ -47,9 +47,9 @@ const PAGE_CSS: &str = r#"
         gap: 1rem;
     }
     .wiki-page-title {
-        font-family: 'Bebas Neue', sans-serif;
+        font-family: var(--font-head);
         font-size: 2.5rem;
-        color: var(--text-bright);
+        color: var(--text);
         letter-spacing: 3px;
         margin: 0;
     }
@@ -62,14 +62,14 @@ const PAGE_CSS: &str = r#"
     .wiki-search input {
         flex: 1;
         padding: 0.5rem 0.75rem;
-        background: var(--bg-card);
+        background: var(--surface);
         border: 1px solid var(--border);
         border-radius: 6px;
-        color: var(--text-bright);
+        color: var(--text);
         font-size: 0.85rem;
     }
     .wiki-search input::placeholder {
-        color: var(--text-muted);
+        color: var(--text-3);
     }
     .wiki-search input:focus {
         outline: none;
@@ -81,7 +81,7 @@ const PAGE_CSS: &str = r#"
         gap: 0.75rem;
     }
     .wiki-card {
-        background: var(--bg-card);
+        background: var(--surface);
         border: 1px solid var(--border);
         border-radius: 10px;
         padding: 1.25rem;
@@ -96,24 +96,24 @@ const PAGE_CSS: &str = r#"
         transform: translateY(-1px);
     }
     .wiki-card-title {
-        font-family: 'Rajdhani', sans-serif;
+        font-family: var(--font-head);
         font-weight: 700;
         font-size: 1.1rem;
-        color: var(--text-bright);
+        color: var(--text);
     }
     .wiki-card-meta {
         display: flex;
         gap: 0.75rem;
         font-size: 0.7rem;
-        color: var(--text-muted);
+        color: var(--text-3);
     }
     .wiki-card-topic {
         font-size: 0.75rem;
-        color: #a78bfa;
-        font-family: monospace;
+        color: var(--accent);
+        font-family: var(--font-mono);
     }
     .wiki-loading, .wiki-empty {
-        color: var(--text-muted);
+        color: var(--text-3);
         text-align: center;
         padding: 3rem 0;
     }

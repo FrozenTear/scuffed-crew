@@ -20,30 +20,30 @@ const RELAY_STATUS_CSS: &str = r#"
 }
 
 .relay-status--ready {
-    background-color: rgba(34, 197, 94, 0.15);
-    color: #22c55e;
+    background-color: color-mix(in srgb, var(--ok) 15%, transparent);
+    color: var(--ok);
 }
 
 .relay-status--connected,
 .relay-status--authenticating {
-    background-color: rgba(234, 179, 8, 0.15);
-    color: #eab308;
+    background-color: color-mix(in srgb, var(--warn) 15%, transparent);
+    color: var(--warn);
 }
 
 .relay-status--connecting {
-    background-color: rgba(234, 179, 8, 0.15);
-    color: #eab308;
+    background-color: color-mix(in srgb, var(--warn) 15%, transparent);
+    color: var(--warn);
 }
 
 .relay-status--reconnecting {
-    background-color: rgba(249, 115, 22, 0.15);
-    color: #f97316;
+    background-color: color-mix(in srgb, var(--danger) 15%, transparent);
+    color: var(--danger);
 }
 
 .relay-status--disconnected,
 .relay-status--error {
-    background-color: rgba(239, 68, 68, 0.15);
-    color: #ef4444;
+    background-color: color-mix(in srgb, var(--danger) 15%, transparent);
+    color: var(--danger);
 }
 
 .relay-status__dot {
@@ -55,24 +55,24 @@ const RELAY_STATUS_CSS: &str = r#"
 }
 
 .relay-status--ready .relay-status__dot {
-    background-color: #22c55e;
+    background-color: var(--ok);
 }
 
 .relay-status--connected .relay-status__dot,
 .relay-status--authenticating .relay-status__dot,
 .relay-status--connecting .relay-status__dot {
-    background-color: #eab308;
+    background-color: var(--warn);
     animation: relay-pulse 1.5s ease-in-out infinite;
 }
 
 .relay-status--reconnecting .relay-status__dot {
-    background-color: #f97316;
+    background-color: var(--danger);
     animation: relay-pulse 1s ease-in-out infinite;
 }
 
 .relay-status--disconnected .relay-status__dot,
 .relay-status--error .relay-status__dot {
-    background-color: #ef4444;
+    background-color: var(--danger);
 }
 
 .relay-status__retry {
@@ -89,7 +89,7 @@ const RELAY_STATUS_CSS: &str = r#"
 }
 
 .relay-status__retry:hover {
-    background-color: rgba(239, 68, 68, 0.2);
+    background-color: color-mix(in srgb, var(--danger) 20%, transparent);
 }
 
 @keyframes relay-pulse {

@@ -18,9 +18,9 @@ const PAGE_CSS: &str = r#"
     box-sizing: border-box;
 }
 .dm-page-title {
-    font-family: 'Bebas Neue', sans-serif;
+    font-family: var(--font-head);
     font-size: 2.25rem;
-    color: var(--text-bright);
+    color: var(--text);
     letter-spacing: 3px;
     margin: 0 0 1.25rem;
 }
@@ -35,41 +35,41 @@ const PAGE_CSS: &str = r#"
     display: flex;
     align-items: center;
     justify-content: center;
-    background: var(--bg-card);
+    background: var(--surface);
     border: 1px solid var(--border);
     border-radius: 10px;
-    color: var(--text-muted);
+    color: var(--text-3);
     font-size: 0.95rem;
     text-align: center;
     padding: 2rem;
 }
 .dm-loading {
-    color: var(--text-muted);
+    color: var(--text-3);
     text-align: center;
     padding: 3rem 0;
     font-size: 0.9rem;
 }
 .dm-error {
-    background: rgba(239, 68, 68, 0.08);
-    border: 1px solid rgba(239, 68, 68, 0.4);
+    background: color-mix(in srgb, var(--danger) 8%, transparent);
+    border: 1px solid color-mix(in srgb, var(--danger) 40%, transparent);
     border-radius: 8px;
     padding: 1rem 1.25rem;
-    color: #fca5a5;
+    color: var(--danger);
     font-size: 0.85rem;
     margin-bottom: 1rem;
 }
 .dm-error a {
-    color: #f87171;
+    color: var(--danger);
     font-weight: 600;
     text-decoration: underline;
 }
 .dm-login-needed {
-    background: var(--bg-card);
+    background: var(--surface);
     border: 1px solid var(--border);
     border-radius: 10px;
     padding: 2.5rem 2rem;
     text-align: center;
-    color: var(--text-secondary);
+    color: var(--text-2);
 }
 @media (max-width: 720px) {
     .dm-page-grid {

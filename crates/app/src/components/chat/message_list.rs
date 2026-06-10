@@ -19,7 +19,7 @@ const MESSAGE_LIST_CSS: &str = r#"
     display: flex;
     align-items: center;
     justify-content: center;
-    color: var(--text-muted);
+    color: var(--text-3);
     font-size: 13px;
     font-style: italic;
     padding: 2rem;
@@ -34,7 +34,7 @@ const MESSAGE_LIST_CSS: &str = r#"
 }
 
 .chat-msg:hover {
-    background: var(--bg-card-alt);
+    background: var(--surface-2);
 }
 
 .chat-msg__avatar {
@@ -42,7 +42,7 @@ const MESSAGE_LIST_CSS: &str = r#"
     height: 28px;
     border-radius: 50%;
     background: var(--accent-soft);
-    color: var(--accent-bright);
+    color: var(--accent);
     display: flex;
     align-items: center;
     justify-content: center;
@@ -74,7 +74,7 @@ const MESSAGE_LIST_CSS: &str = r#"
 .chat-msg__author {
     font-size: 13px;
     font-weight: 600;
-    color: var(--accent-bright);
+    color: var(--accent);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -83,13 +83,13 @@ const MESSAGE_LIST_CSS: &str = r#"
 
 .chat-msg__time {
     font-size: 10px;
-    color: var(--text-muted);
+    color: var(--text-3);
     white-space: nowrap;
 }
 
 .chat-msg__content {
     font-size: 13px;
-    color: var(--text-primary);
+    color: var(--text);
     line-height: 1.4;
     word-wrap: break-word;
     overflow-wrap: break-word;
@@ -97,7 +97,7 @@ const MESSAGE_LIST_CSS: &str = r#"
 
 .chat-msg__encrypted {
     font-size: 12px;
-    color: var(--text-muted);
+    color: var(--text-3);
     font-style: italic;
     display: flex;
     align-items: center;
@@ -114,7 +114,7 @@ const MESSAGE_LIST_CSS: &str = r#"
     align-items: center;
     justify-content: center;
     padding: 12px;
-    color: var(--text-muted);
+    color: var(--text-3);
     font-size: 12px;
 }
 

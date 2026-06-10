@@ -27,38 +27,38 @@ const TOKENS_CSS: &str = r#"
         padding: 2rem 1.5rem;
     }
     .tokens-page h1 {
-        font-family: var(--font-display);
+        font-family: var(--font-head);
         font-size: 1.8rem;
-        color: var(--text-bright);
+        color: var(--text);
         text-transform: uppercase;
         letter-spacing: 0.04em;
     }
     .token-reveal {
-        background: var(--bg-card);
+        background: var(--surface);
         border: 1px solid var(--accent);
         border-radius: 8px;
         padding: 1rem;
         margin-bottom: 1.5rem;
     }
     .token-reveal p {
-        color: var(--text-secondary);
+        color: var(--text-2);
         font-size: 0.85rem;
         margin-bottom: 0.5rem;
     }
     .token-reveal .warning {
-        color: #fbbf24;
+        color: var(--warn);
         font-size: 0.8rem;
         font-weight: 600;
     }
     .token-reveal code {
         display: block;
-        background: var(--bg-surface);
+        background: var(--bg);
         border: 1px solid var(--border);
         border-radius: 4px;
         padding: 0.6rem 0.75rem;
         font-family: var(--font-mono);
         font-size: 0.8rem;
-        color: var(--accent-bright);
+        color: var(--accent);
         word-break: break-all;
         margin: 0.5rem 0;
         user-select: all;

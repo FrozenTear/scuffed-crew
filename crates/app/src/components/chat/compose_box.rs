@@ -8,7 +8,7 @@ const COMPOSE_BOX_CSS: &str = r#"
     gap: 8px;
     padding: 8px 12px;
     border-top: 1px solid var(--border);
-    background: var(--bg-card);
+    background: var(--surface);
     align-items: flex-end;
 }
 
@@ -19,8 +19,8 @@ const COMPOSE_BOX_CSS: &str = r#"
     padding: 8px 12px;
     border: 1px solid var(--border);
     border-radius: 8px;
-    background: var(--bg-surface);
-    color: var(--text-primary);
+    background: var(--bg);
+    color: var(--text);
     font-family: var(--font-body);
     font-size: 13px;
     line-height: 1.4;
@@ -30,7 +30,7 @@ const COMPOSE_BOX_CSS: &str = r#"
 }
 
 .chat-compose__input::placeholder {
-    color: var(--text-muted);
+    color: var(--text-3);
 }
 
 .chat-compose__input:focus {
@@ -47,7 +47,7 @@ const COMPOSE_BOX_CSS: &str = r#"
     border: none;
     border-radius: 8px;
     background: var(--accent);
-    color: #fff;
+    color: var(--accent-fg);
     font-size: 13px;
     font-weight: 600;
     cursor: pointer;
@@ -70,9 +70,9 @@ const COMPOSE_BOX_CSS: &str = r#"
 
 .chat-compose__hint {
     font-size: 10px;
-    color: var(--text-muted);
+    color: var(--text-3);
     padding: 2px 12px 4px;
-    background: var(--bg-card);
+    background: var(--surface);
 }
 "#;
 

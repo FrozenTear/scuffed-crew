@@ -44,22 +44,22 @@ const REACTION_CSS: &str = r#"
     padding: 1px 6px;
     border-radius: 10px;
     border: 1px solid var(--border);
-    background: var(--bg-surface);
+    background: var(--bg);
     font-size: 12px;
     cursor: pointer;
     transition: border-color 0.15s, background 0.15s;
-    color: var(--text-secondary);
+    color: var(--text-2);
     line-height: 1.6;
 }
 
 .reaction-pill:hover {
     border-color: var(--accent-soft);
-    background: var(--bg-card-alt);
+    background: var(--surface-2);
 }
 
 .reaction-pill--mine {
     border-color: var(--accent);
-    background: #7c3aed18;
+    background: color-mix(in srgb, var(--accent) 9%, transparent);
 }
 
 .reaction-pill__count {
@@ -80,14 +80,14 @@ const REACTION_CSS: &str = r#"
     background: none;
     cursor: pointer;
     font-size: 12px;
-    color: var(--text-muted);
+    color: var(--text-3);
     transition: border-color 0.15s, color 0.15s;
     position: relative;
 }
 
 .reaction-add:hover {
     border-color: var(--accent-soft);
-    color: var(--text-secondary);
+    color: var(--text-2);
 }
 
 .reaction-picker {
@@ -98,10 +98,10 @@ const REACTION_CSS: &str = r#"
     display: flex;
     gap: 2px;
     padding: 4px 6px;
-    background: var(--bg-card);
+    background: var(--surface);
     border: 1px solid var(--border);
     border-radius: 8px;
-    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+    box-shadow: 0 4px 12px var(--overlay);
     z-index: 20;
 }
 
@@ -117,7 +117,7 @@ const REACTION_CSS: &str = r#"
 }
 
 .reaction-picker button:hover {
-    background: var(--bg-surface);
+    background: var(--bg);
 }
 "#;
 

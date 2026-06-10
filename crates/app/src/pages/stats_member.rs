@@ -71,9 +71,9 @@ const MEMBER_STATS_CSS: &str = r#"
         padding: 2rem 1.5rem;
     }
     .stats-page h1 {
-        font-family: var(--font-display);
+        font-family: var(--font-head);
         font-size: 1.8rem;
-        color: var(--text-bright);
+        color: var(--text);
         text-transform: uppercase;
         letter-spacing: 0.04em;
         margin-bottom: 1.5rem;
@@ -88,8 +88,8 @@ const MEMBER_STATS_CSS: &str = r#"
         padding: 0.6rem 1.2rem;
         border: none;
         background: none;
-        color: var(--text-secondary);
-        font-family: var(--font-display);
+        color: var(--text-2);
+        font-family: var(--font-head);
         font-size: 0.9rem;
         font-weight: 600;
         text-transform: uppercase;
@@ -99,7 +99,7 @@ const MEMBER_STATS_CSS: &str = r#"
         margin-bottom: -1px;
         transition: color 0.15s, border-color 0.15s;
     }
-    .stats-tab:hover { color: var(--text-bright); }
+    .stats-tab:hover { color: var(--text); }
     .stats-tab.active {
         color: var(--accent);
         border-bottom-color: var(--accent);
@@ -111,9 +111,9 @@ const MEMBER_STATS_CSS: &str = r#"
         font-size: 0.8rem;
         font-weight: 600;
     }
-    .stats-winrate.high { color: #34d399; }
-    .stats-winrate.mid { color: #fbbf24; }
-    .stats-winrate.low { color: #f87171; }
+    .stats-winrate.high { color: var(--ok); }
+    .stats-winrate.mid { color: var(--warn); }
+    .stats-winrate.low { color: var(--danger); }
 "#;
 
 #[component]

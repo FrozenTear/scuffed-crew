@@ -20,18 +20,18 @@ pub const BRACKET_STYLES: &str = r#"
 }
 .bracket-round-title {
     text-align: center;
-    font-family: 'Rajdhani', sans-serif;
+    font-family: var(--font-head);
     font-weight: 700;
     font-size: 0.75rem;
     text-transform: uppercase;
     letter-spacing: 0.06em;
-    color: var(--text-muted);
+    color: var(--text-3);
     margin-bottom: 0.5rem;
 }
 
 /* --- Match Card --- */
 .match-card {
-    background: var(--bg-card);
+    background: var(--surface);
     border: 1px solid var(--border);
     border-radius: 6px;
     overflow: hidden;
@@ -42,8 +42,8 @@ pub const BRACKET_STYLES: &str = r#"
     border-color: var(--accent-soft);
 }
 .match-card.live {
-    border-color: var(--accent);
-    box-shadow: 0 0 12px var(--accent-glow);
+    border-color: var(--ok);
+    box-shadow: 0 0 12px color-mix(in srgb, var(--ok) 30%, transparent);
 }
 .match-card.completed {
     opacity: 0.85;
@@ -62,36 +62,36 @@ pub const BRACKET_STYLES: &str = r#"
     transition: opacity 0.2s;
 }
 .team-slot + .team-slot {
-    border-top: 1px solid rgba(255,255,255,0.06);
+    border-top: 1px solid color-mix(in srgb, var(--text) 6%, transparent);
 }
 .team-slot.winner {
-    background: rgba(124, 58, 237, 0.08);
+    background: color-mix(in srgb, var(--accent) 8%, transparent);
 }
 .team-slot.loser {
     opacity: 0.45;
 }
 .team-slot-seed {
-    font-family: 'DM Mono', monospace;
+    font-family: var(--font-mono);
     font-size: 0.65rem;
-    color: var(--text-muted);
+    color: var(--text-3);
     min-width: 1.5rem;
 }
 .team-slot-name {
     flex: 1;
     font-size: 0.82rem;
     font-weight: 600;
-    color: var(--text-primary);
+    color: var(--text);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
 }
 .team-slot-name.tbd {
     font-style: italic;
-    color: var(--text-muted);
+    color: var(--text-3);
     font-weight: 400;
 }
 .team-slot-score {
-    font-family: 'DM Mono', monospace;
+    font-family: var(--font-mono);
     font-size: 0.85rem;
     font-weight: 700;
     min-width: 1.5rem;
@@ -103,15 +103,15 @@ pub const BRACKET_STYLES: &str = r#"
 
 .match-card-status {
     text-align: center;
-    font-family: 'DM Mono', monospace;
+    font-family: var(--font-mono);
     font-size: 0.6rem;
     text-transform: uppercase;
     letter-spacing: 0.06em;
     padding: 0.15rem 0;
-    color: var(--text-muted);
+    color: var(--text-3);
 }
 .match-card-status.live {
-    color: var(--accent);
+    color: var(--ok);
 }
 .match-card-status.live::before {
     content: '';
@@ -119,7 +119,7 @@ pub const BRACKET_STYLES: &str = r#"
     width: 6px;
     height: 6px;
     border-radius: 50%;
-    background: var(--accent);
+    background: var(--ok);
     margin-right: 0.3rem;
     vertical-align: middle;
     animation: pulse-dot 1.5s ease-in-out infinite;
@@ -137,10 +137,10 @@ pub const BRACKET_STYLES: &str = r#"
     flex-wrap: wrap;
 }
 .replay-code {
-    font-family: 'DM Mono', monospace;
+    font-family: var(--font-mono);
     font-size: 0.6rem;
-    color: var(--text-muted);
-    background: var(--bg-elevated);
+    color: var(--text-3);
+    background: var(--surface-2);
     padding: 0.1rem 0.35rem;
     border-radius: 3px;
     letter-spacing: 0.04em;
@@ -148,8 +148,8 @@ pub const BRACKET_STYLES: &str = r#"
     transition: background 0.15s, color 0.15s;
 }
 .replay-code:hover {
-    background: rgba(124, 58, 237, 0.15);
-    color: var(--text-primary);
+    background: color-mix(in srgb, var(--accent) 15%, transparent);
+    color: var(--text);
 }
 
 /* --- Double Elim Layout --- */
@@ -159,7 +159,7 @@ pub const BRACKET_STYLES: &str = r#"
     gap: 2rem;
 }
 .double-elim-section-label {
-    font-family: 'Rajdhani', sans-serif;
+    font-family: var(--font-head);
     font-weight: 700;
     font-size: 0.8rem;
     text-transform: uppercase;
@@ -180,31 +180,31 @@ pub const BRACKET_STYLES: &str = r#"
     min-width: 3rem;
 }
 .rr-table th {
-    background: var(--bg-elevated);
-    color: var(--text-muted);
-    font-family: 'DM Mono', monospace;
+    background: var(--surface-2);
+    color: var(--text-3);
+    font-family: var(--font-mono);
     font-size: 0.7rem;
     text-transform: uppercase;
 }
 .rr-table .rr-name {
     text-align: left;
     font-weight: 600;
-    color: var(--text-primary);
+    color: var(--text);
     white-space: nowrap;
 }
-.rr-table .rr-self { background: var(--bg-surface); }
-.rr-table .rr-win { color: var(--green); font-weight: 700; }
-.rr-table .rr-loss { color: var(--red); font-weight: 700; }
-.rr-table .rr-pending { color: var(--text-muted); }
-.rr-score-with-codes { border-bottom: 1px dotted var(--text-muted); cursor: help; }
+.rr-table .rr-self { background: var(--bg); }
+.rr-table .rr-win { color: var(--ok); font-weight: 700; }
+.rr-table .rr-loss { color: var(--danger); font-weight: 700; }
+.rr-table .rr-pending { color: var(--text-3); }
+.rr-score-with-codes { border-bottom: 1px dotted var(--text-3); cursor: help; }
 
 /* --- Swiss Standings --- */
 .swiss-standings { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
 .swiss-standings th {
     text-align: left;
     padding: 0.5rem 0.75rem;
-    background: var(--bg-elevated);
-    color: var(--text-muted);
+    background: var(--surface-2);
+    color: var(--text-3);
     font-size: 0.7rem;
     text-transform: uppercase;
     letter-spacing: 0.05em;
@@ -212,11 +212,11 @@ pub const BRACKET_STYLES: &str = r#"
 }
 .swiss-standings td {
     padding: 0.5rem 0.75rem;
-    border-bottom: 1px solid rgba(255,255,255,0.06);
-    color: var(--text-primary);
+    border-bottom: 1px solid color-mix(in srgb, var(--text) 6%, transparent);
+    color: var(--text);
 }
-.swiss-standings .rank-col { font-family: 'DM Mono', monospace; color: var(--text-muted); width: 2.5rem; }
-.swiss-standings .record-col { font-family: 'DM Mono', monospace; font-weight: 700; }
+.swiss-standings .rank-col { font-family: var(--font-mono); color: var(--text-3); width: 2.5rem; }
+.swiss-standings .record-col { font-family: var(--font-mono); font-weight: 700; }
 
 /* --- Mobile Fallback --- */
 .bracket-mobile { display: none; }
@@ -228,12 +228,12 @@ pub const BRACKET_STYLES: &str = r#"
 }
 .bracket-mobile-round { margin-bottom: 1.5rem; }
 .bracket-mobile-round-title {
-    font-family: 'Rajdhani', sans-serif;
+    font-family: var(--font-head);
     font-weight: 700;
     font-size: 0.8rem;
     text-transform: uppercase;
     letter-spacing: 0.06em;
-    color: var(--text-muted);
+    color: var(--text-3);
     margin-bottom: 0.5rem;
     padding-bottom: 0.25rem;
     border-bottom: 1px solid var(--border);
@@ -252,9 +252,9 @@ pub const BRACKET_STYLES: &str = r#"
     margin: 0 auto;
 }
 .tournaments-page h1, .tournament-detail-page h1 {
-    font-family: 'Bebas Neue', sans-serif;
+    font-family: var(--font-head);
     font-size: 3rem;
-    color: var(--text-bright);
+    color: var(--text);
     letter-spacing: 3px;
     margin-bottom: 0.5rem;
     text-align: center;
@@ -277,7 +277,7 @@ pub const BRACKET_STYLES: &str = r#"
     gap: 1rem;
 }
 .tournament-card {
-    background: var(--bg-card);
+    background: var(--surface);
     border: 1px solid var(--border);
     border-radius: 8px;
     padding: 1.25rem;
@@ -292,10 +292,10 @@ pub const BRACKET_STYLES: &str = r#"
     transform: translateY(-2px);
 }
 .tournament-card-name {
-    font-family: 'Rajdhani', sans-serif;
+    font-family: var(--font-head);
     font-weight: 700;
     font-size: 1.2rem;
-    color: var(--text-bright);
+    color: var(--text);
     margin-bottom: 0.4rem;
 }
 .tournament-card-meta {
@@ -304,10 +304,10 @@ pub const BRACKET_STYLES: &str = r#"
     gap: 0.75rem;
     flex-wrap: wrap;
     font-size: 0.78rem;
-    color: var(--text-muted);
+    color: var(--text-3);
 }
 .tournament-card-desc {
-    color: var(--text-secondary);
+    color: var(--text-2);
     font-size: 0.82rem;
     margin-top: 0.4rem;
     line-height: 1.5;
@@ -315,17 +315,33 @@ pub const BRACKET_STYLES: &str = r#"
 .tournament-card-status {
     display: inline-block;
     padding: 0.15rem 0.5rem;
-    border-radius: 999px;
+    border-radius: var(--radius-pill);
     font-size: 0.65rem;
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.04em;
     margin-top: 0.5rem;
 }
-.tournament-card-status.registration { background: #7c3aed33; color: #a78bfa; }
-.tournament-card-status.in_progress { background: #10b98133; color: #34d399; }
-.tournament-card-status.completed { background: #6b728033; color: #9ca3af; }
-.tournament-card-status.draft { background: #f59e0b33; color: #fbbf24; }
+/* registration/upcoming → accent (upcoming opportunity) */
+.tournament-card-status.registration {
+    background: color-mix(in srgb, var(--accent) 20%, transparent);
+    color: var(--accent);
+}
+/* in_progress → ok (active/live) */
+.tournament-card-status.in_progress {
+    background: color-mix(in srgb, var(--ok) 20%, transparent);
+    color: var(--ok);
+}
+/* completed → text-2 (neutral, past) */
+.tournament-card-status.completed {
+    background: color-mix(in srgb, var(--text-2) 15%, transparent);
+    color: var(--text-2);
+}
+/* draft → warn (pending/not yet open) */
+.tournament-card-status.draft {
+    background: color-mix(in srgb, var(--warn) 20%, transparent);
+    color: var(--warn);
+}
 
 .tournament-header { margin-bottom: 2rem; text-align: center; }
 .tournament-meta {
@@ -333,13 +349,13 @@ pub const BRACKET_STYLES: &str = r#"
     justify-content: center;
     gap: 1.5rem;
     flex-wrap: wrap;
-    color: var(--text-secondary);
+    color: var(--text-2);
     font-size: 0.85rem;
     margin-bottom: 1rem;
 }
-.tournament-meta span { font-family: 'DM Mono', monospace; font-size: 0.8rem; }
+.tournament-meta span { font-family: var(--font-mono); font-size: 0.8rem; }
 .tournament-description {
-    color: var(--text-secondary);
+    color: var(--text-2);
     max-width: 700px;
     line-height: 1.7;
     margin: 0 auto 1rem;
@@ -357,12 +373,12 @@ pub const BRACKET_STYLES: &str = r#"
     gap: 1rem;
 }
 .tournament-section-title {
-    font-family: 'Rajdhani', sans-serif;
+    font-family: var(--font-head);
     font-weight: 700;
     font-size: 1rem;
     text-transform: uppercase;
     letter-spacing: 0.06em;
-    color: var(--text-muted);
+    color: var(--text-3);
     margin: 2rem 0 1rem;
     padding-bottom: 0.5rem;
     border-bottom: 1px solid var(--border);

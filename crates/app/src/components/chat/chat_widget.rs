@@ -22,11 +22,11 @@ const CHAT_WIDGET_CSS: &str = r#"
     max-height: 520px;
     display: flex;
     flex-direction: column;
-    background: var(--bg-card);
+    background: var(--surface);
     border: 1px solid var(--border);
     border-bottom: none;
     border-radius: 12px 12px 0 0;
-    box-shadow: 0 -4px 24px rgba(0, 0, 0, 0.3);
+    box-shadow: 0 -4px 24px var(--overlay);
     z-index: 1000;
     transition: transform 0.25s ease, opacity 0.2s ease;
     overflow: hidden;
@@ -46,7 +46,7 @@ const CHAT_WIDGET_CSS: &str = r#"
     align-items: center;
     justify-content: space-between;
     padding: 10px 14px;
-    background: var(--bg-elevated);
+    background: var(--surface-2);
     border-bottom: 1px solid var(--border);
     cursor: pointer;
     user-select: none;
@@ -62,7 +62,7 @@ const CHAT_WIDGET_CSS: &str = r#"
 .chat-widget__title {
     font-size: 13px;
     font-weight: 600;
-    color: var(--text-bright);
+    color: var(--text);
 }
 
 .chat-widget__header-right {
@@ -79,7 +79,7 @@ const CHAT_WIDGET_CSS: &str = r#"
     justify-content: center;
     border: none;
     background: transparent;
-    color: var(--text-secondary);
+    color: var(--text-2);
     cursor: pointer;
     border-radius: 4px;
     font-size: 16px;
@@ -87,8 +87,8 @@ const CHAT_WIDGET_CSS: &str = r#"
 }
 
 .chat-widget__toggle:hover {
-    color: var(--text-bright);
-    background: var(--bg-card-alt);
+    color: var(--text);
+    background: var(--surface-2);
 }
 
 .chat-widget__body {
@@ -118,7 +118,7 @@ const CHAT_WIDGET_CSS: &str = r#"
     border: 1px solid var(--border);
     border-radius: 12px;
     background: transparent;
-    color: var(--text-secondary);
+    color: var(--text-2);
     font-size: 11px;
     font-weight: 500;
     cursor: pointer;
@@ -128,13 +128,13 @@ const CHAT_WIDGET_CSS: &str = r#"
 
 .chat-widget__channel:hover {
     border-color: var(--accent);
-    color: var(--text-primary);
+    color: var(--text);
 }
 
 .chat-widget__channel--active {
     background: var(--accent-soft);
     border-color: var(--accent);
-    color: var(--accent-bright);
+    color: var(--accent);
 }
 
 .chat-widget__presence {
@@ -144,14 +144,14 @@ const CHAT_WIDGET_CSS: &str = r#"
     padding: 4px 12px;
     border-bottom: 1px solid var(--border);
     font-size: 11px;
-    color: var(--text-muted);
+    color: var(--text-3);
 }
 
 .chat-widget__presence-dot {
     width: 6px;
     height: 6px;
     border-radius: 50%;
-    background: #22c55e;
+    background: var(--ok);
 }
 
 .chat-widget__voice-btn {
@@ -160,7 +160,7 @@ const CHAT_WIDGET_CSS: &str = r#"
     border: 1px solid var(--accent);
     border-radius: 8px;
     background: transparent;
-    color: var(--accent-bright);
+    color: var(--accent);
     font-size: 10px;
     font-weight: 600;
     cursor: pointer;
