@@ -98,7 +98,7 @@ pub fn AdminRelay() -> Element {
 
                         if !h.configured {
                             p {
-                                style: "margin-top: 1rem; color: var(--text-muted); font-size: 0.85rem;",
+                                style: "margin-top: 1rem; color: var(--text-3); font-size: 0.85rem;",
                                 "Set the NOSTR_RELAY_URL environment variable to connect to a relay."
                             }
                         }
@@ -122,7 +122,7 @@ pub fn AdminRelay() -> Element {
                                 }
                             }
                             p {
-                                style: "margin-top: 0.5rem; color: var(--text-muted); font-size: 0.85rem;",
+                                style: "margin-top: 0.5rem; color: var(--text-3); font-size: 0.85rem;",
                                 "Configure extra relays in Settings > Forum > Extra Relay URLs."
                             }
                         }
