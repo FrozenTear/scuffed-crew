@@ -1,16 +1,13 @@
 [workspace]
 resolver = "2"
 members = [
-    # Legacy Leptos crates — approved exception (CTO: THE-321).
-    # These predate the Dioxus standard. New frontend work MUST use Dioxus.
-    # CI guardrail: scripts/check-frontend-deps.sh blocks new leptos deps.
+    # Leptos migration complete (THE-321): legacy site/admin/ui crates removed.
+    # The frontend standard is Dioxus; scripts/check-frontend-deps.sh blocks
+    # new leptos deps (crates/auth keeps a dormant optional client feature).
     "crates/auth",
-    "crates/ui",
-    "crates/site",
     "crates/site-server",
     "crates/db",
-    "crates/admin",
-    # New Dioxus crates
+    # Dioxus crates
     "crates/types",
     "crates/app",
     "crates/server",
