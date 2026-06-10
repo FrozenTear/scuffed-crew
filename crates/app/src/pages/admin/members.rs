@@ -646,11 +646,11 @@ pub fn AdminMembers() -> Element {
                             div {
                                 style: "text-align:center;margin-top:1rem;",
                                 span {
-                                    style: "font-family:'Bebas Neue',sans-serif;font-size:2.5rem;color:var(--accent);",
+                                    style: "font-family:var(--font-head);font-size:2.5rem;color:var(--accent);",
                                     "{stats.attendance_rate:.1}%"
                                 }
                                 div {
-                                    style: "font-size:0.75rem;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.05em;",
+                                    style: "font-size:0.75rem;color:var(--text-3);text-transform:uppercase;letter-spacing:0.05em;",
                                     "Attendance Rate"
                                 }
                             }
@@ -725,7 +725,7 @@ pub fn AdminMembers() -> Element {
                         div {
                             style: "border-top:1px solid var(--border);padding-top:1rem;margin-top:1rem;",
                             h3 {
-                                style: "font-family:'Rajdhani',sans-serif;font-size:0.9rem;font-weight:700;color:var(--text-bright);text-transform:uppercase;margin-bottom:0.75rem;",
+                                style: "font-family:var(--font-head);font-size:0.9rem;font-weight:700;color:var(--text);text-transform:uppercase;margin-bottom:0.75rem;",
                                 "Add Account"
                             }
                             div { style: "display:flex;gap:0.5rem;flex-wrap:wrap;align-items:flex-end;",
@@ -755,7 +755,7 @@ pub fn AdminMembers() -> Element {
                                     input {
                                         class: "form-input",
                                         r#type: "text",
-                                        placeholder: "e.g. Player#1234",
+                                        placeholder: "e.g. Player#TAG",
                                         value: "{add_acct_name}",
                                         oninput: move |e| add_acct_name.set(e.value()),
                                     }
