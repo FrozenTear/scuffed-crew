@@ -30,14 +30,14 @@ const PAGE_CSS: &str = r#"
         display: inline-flex;
         align-items: center;
         gap: 0.4rem;
-        color: var(--text-muted);
+        color: var(--text-3);
         font-size: 0.8rem;
         margin-bottom: 1.5rem;
         text-decoration: none;
         transition: color 0.15s;
     }
     .blog-post-back:hover {
-        color: var(--text-bright);
+        color: var(--text);
     }
     .blog-post-cover {
         width: 100%;
@@ -47,9 +47,9 @@ const PAGE_CSS: &str = r#"
         margin-bottom: 1.5rem;
     }
     .blog-post-title {
-        font-family: 'Bebas Neue', sans-serif;
+        font-family: var(--font-head);
         font-size: 2.2rem;
-        color: var(--text-bright);
+        color: var(--text);
         letter-spacing: 2px;
         margin: 0 0 0.75rem;
     }
@@ -58,20 +58,20 @@ const PAGE_CSS: &str = r#"
         align-items: center;
         gap: 0.75rem;
         font-size: 0.75rem;
-        color: var(--text-muted);
+        color: var(--text-3);
         margin-bottom: 2rem;
         padding-bottom: 1.5rem;
         border-bottom: 1px solid var(--border);
     }
     .blog-post-content {
-        color: var(--text-secondary);
+        color: var(--text-2);
         font-size: 0.9rem;
         line-height: 1.85;
         white-space: pre-wrap;
         word-wrap: break-word;
     }
     .blog-post-loading, .blog-post-error {
-        color: var(--text-muted);
+        color: var(--text-3);
         text-align: center;
         padding: 3rem 0;
     }

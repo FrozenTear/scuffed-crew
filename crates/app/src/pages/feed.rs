@@ -10,14 +10,14 @@ const PAGE_CSS: &str = r#"
         margin: 0 auto;
     }
     .feed-page-title {
-        font-family: 'Bebas Neue', sans-serif;
+        font-family: var(--font-head);
         font-size: 2.5rem;
-        color: var(--text-bright);
+        color: var(--text);
         letter-spacing: 3px;
         margin: 0 0 0.25rem;
     }
     .feed-subtitle {
-        color: var(--text-secondary);
+        color: var(--text-2);
         font-size: 0.9rem;
         margin: 0 0 2rem;
     }
@@ -25,8 +25,8 @@ const PAGE_CSS: &str = r#"
         display: inline-flex;
         align-items: center;
         gap: 0.4rem;
-        background: #7c3aed22;
-        color: #a78bfa;
+        background: var(--accent-soft);
+        color: var(--accent);
         padding: 0.25rem 0.75rem;
         border-radius: 999px;
         font-size: 0.7rem;
@@ -41,7 +41,7 @@ const PAGE_CSS: &str = r#"
         gap: 1rem;
     }
     .feed-loading, .feed-empty {
-        color: var(--text-muted);
+        color: var(--text-3);
         text-align: center;
         padding: 3rem 0;
     }
@@ -56,8 +56,8 @@ const PAGE_CSS: &str = r#"
         display: inline-flex;
         align-items: center;
         gap: 0.3rem;
-        background: #7c3aed33;
-        color: #a78bfa;
+        background: var(--accent-soft);
+        color: var(--accent);
         padding: 0.2rem 0.6rem;
         border-radius: 999px;
         font-size: 0.75rem;
@@ -66,7 +66,7 @@ const PAGE_CSS: &str = r#"
     .feed-filter-clear {
         background: none;
         border: 1px solid var(--border);
-        color: var(--text-muted);
+        color: var(--text-3);
         border-radius: 999px;
         padding: 0.15rem 0.5rem;
         font-size: 0.7rem;
@@ -74,8 +74,8 @@ const PAGE_CSS: &str = r#"
         transition: border-color 0.15s, color 0.15s;
     }
     .feed-filter-clear:hover {
-        border-color: var(--text-secondary);
-        color: var(--text-secondary);
+        border-color: var(--text-2);
+        color: var(--text-2);
     }
     @media (max-width: 768px) {
         .feed-page { padding: 2rem 1rem; }

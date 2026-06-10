@@ -26,7 +26,7 @@ pub struct ReactionCountDto {
 
 const CARD_CSS: &str = r#"
 .post-card {
-    background: var(--bg-card);
+    background: var(--surface);
     border: 1px solid var(--border);
     border-radius: 10px;
     padding: 1.25rem 1.5rem;
@@ -45,8 +45,8 @@ const CARD_CSS: &str = r#"
     width: 36px;
     height: 36px;
     border-radius: 50%;
-    background: #7c3aed33;
-    color: #a78bfa;
+    background: var(--accent-soft);
+    color: var(--accent);
     display: flex;
     align-items: center;
     justify-content: center;
@@ -55,17 +55,17 @@ const CARD_CSS: &str = r#"
     flex-shrink: 0;
 }
 .post-author {
-    font-family: 'Rajdhani', sans-serif;
+    font-family: var(--font-head);
     font-weight: 700;
     font-size: 0.95rem;
-    color: var(--text-bright);
+    color: var(--text);
 }
 .post-time {
     font-size: 0.7rem;
-    color: var(--text-muted);
+    color: var(--text-3);
 }
 .post-content {
-    color: var(--text-secondary);
+    color: var(--text-2);
     font-size: 0.9rem;
     line-height: 1.7;
     margin-bottom: 0.75rem;
@@ -73,7 +73,7 @@ const CARD_CSS: &str = r#"
     word-break: break-word;
 }
 .post-content a {
-    color: #a78bfa;
+    color: var(--accent);
     text-decoration: underline;
 }
 .post-tags {
@@ -83,8 +83,8 @@ const CARD_CSS: &str = r#"
     margin-bottom: 0.75rem;
 }
 .post-tag {
-    background: #7c3aed22;
-    color: #a78bfa;
+    background: var(--accent-soft);
+    color: var(--accent);
     padding: 0.1rem 0.5rem;
     border-radius: 999px;
     font-size: 0.7rem;
@@ -93,7 +93,7 @@ const CARD_CSS: &str = r#"
     transition: background 0.15s;
 }
 .post-tag:hover {
-    background: #7c3aed44;
+    background: color-mix(in srgb, var(--accent) 27%, transparent);
 }
 .post-footer {
     display: flex;
@@ -102,7 +102,7 @@ const CARD_CSS: &str = r#"
 }
 .post-reply-count {
     font-size: 0.75rem;
-    color: var(--text-muted);
+    color: var(--text-3);
     display: flex;
     align-items: center;
     gap: 0.3rem;

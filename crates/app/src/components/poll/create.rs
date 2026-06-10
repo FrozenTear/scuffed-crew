@@ -1,6 +1,7 @@
 use dioxus::prelude::*;
 use serde::Serialize;
 
+use crate::components::ui::{BtnVariant, Button};
 use crate::components::{Toast, use_toast};
 use scuffed_api_client::ApiClient;
 
@@ -16,45 +17,45 @@ struct CreatePollBody {
 
 const CREATE_CSS: &str = r#"
 .poll-create {
-    background: var(--bg-card);
+    background: var(--surface);
     border: 1px solid var(--border);
     border-radius: 10px;
     padding: 1.25rem 1.5rem;
     margin-bottom: 1.5rem;
 }
 .poll-create-title {
-    font-family: var(--font-display);
+    font-family: var(--font-head);
     font-weight: 700;
     font-size: 1rem;
-    color: var(--text-bright);
+    color: var(--text);
     margin: 0 0 0.75rem;
 }
 .poll-create input[type="text"],
 .poll-create textarea {
     width: 100%;
-    background: var(--bg-surface);
+    background: var(--surface-2);
     border: 1px solid var(--border);
     border-radius: 8px;
     padding: 0.5rem 0.75rem;
-    color: var(--text-bright);
+    color: var(--text);
     font-size: 0.85rem;
-    font-family: 'Source Sans 3', sans-serif;
+    font-family: var(--font-body);
 }
 .poll-create input[type="text"]:focus,
 .poll-create textarea:focus {
     outline: none;
-    border-color: #7c3aed;
+    border-color: var(--accent);
 }
 .poll-create input::placeholder,
 .poll-create textarea::placeholder {
-    color: var(--text-muted);
+    color: var(--text-3);
 }
 .poll-create-field {
     margin-bottom: 0.5rem;
 }
 .poll-create-field label {
     display: block;
-    color: var(--text-secondary);
+    color: var(--text-2);
     font-size: 0.75rem;
     margin-bottom: 0.25rem;
     text-transform: uppercase;
@@ -76,20 +77,20 @@ const CREATE_CSS: &str = r#"
 .poll-create-remove-btn {
     background: none;
     border: 1px solid var(--border);
-    color: var(--text-muted);
+    color: var(--text-3);
     border-radius: 4px;
     padding: 0.25rem 0.5rem;
     font-size: 0.75rem;
     cursor: pointer;
 }
 .poll-create-remove-btn:hover {
-    border-color: #ef4444;
-    color: #ef4444;
+    border-color: var(--danger);
+    color: var(--danger);
 }
 .poll-create-add-btn {
     background: none;
     border: 1px dashed var(--border);
-    color: var(--text-muted);
+    color: var(--text-3);
     border-radius: 6px;
     padding: 0.35rem 0.75rem;
     font-size: 0.8rem;
@@ -98,39 +99,21 @@ const CREATE_CSS: &str = r#"
     transition: border-color 0.15s, color 0.15s;
 }
 .poll-create-add-btn:hover {
-    border-color: var(--text-secondary);
-    color: var(--text-secondary);
+    border-color: var(--text-2);
+    color: var(--text-2);
 }
 .poll-create-check {
     display: flex;
     align-items: center;
     gap: 0.5rem;
     margin: 0.5rem 0;
-    color: var(--text-secondary);
+    color: var(--text-2);
     font-size: 0.85rem;
 }
 .poll-create-actions {
     display: flex;
     justify-content: flex-end;
     margin-top: 0.75rem;
-}
-.poll-create-submit {
-    background: #7c3aed;
-    color: white;
-    border: none;
-    border-radius: 6px;
-    padding: 0.45rem 1.25rem;
-    font-size: 0.85rem;
-    font-weight: 600;
-    cursor: pointer;
-    transition: filter 0.15s;
-}
-.poll-create-submit:hover:not(:disabled) {
-    filter: brightness(1.15);
-}
-.poll-create-submit:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
 }
 "#;
 
@@ -271,8 +254,8 @@ pub fn PollCreate(on_created: EventHandler<()>) -> Element {
             }
 
             div { class: "poll-create-actions",
-                button {
-                    class: "poll-create-submit",
+                Button {
+                    variant: BtnVariant::Primary,
                     disabled: !can_submit,
                     onclick: handle_submit,
                     if submitting() { "Creating..." } else { "Create Poll" }

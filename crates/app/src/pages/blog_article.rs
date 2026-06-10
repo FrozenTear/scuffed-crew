@@ -35,13 +35,13 @@ const PAGE_CSS: &str = r#"
         display: inline-flex;
         align-items: center;
         gap: 0.3rem;
-        color: var(--text-muted);
+        color: var(--text-3);
         font-size: 0.8rem;
         margin-bottom: 1.5rem;
         text-decoration: none;
     }
     .article-back:hover {
-        color: var(--text-secondary);
+        color: var(--text-2);
     }
     .article-cover {
         width: 100%;
@@ -54,27 +54,27 @@ const PAGE_CSS: &str = r#"
         margin-bottom: 2rem;
     }
     .article-title {
-        font-family: 'Bebas Neue', sans-serif;
+        font-family: var(--font-head);
         font-size: 2.2rem;
-        color: var(--text-bright);
+        color: var(--text);
         letter-spacing: 2px;
         margin: 0 0 0.5rem;
         line-height: 1.2;
     }
     .article-meta {
-        color: var(--text-muted);
+        color: var(--text-3);
         font-size: 0.75rem;
     }
     .article-content {
-        color: var(--text-secondary);
+        color: var(--text-2);
         font-size: 0.95rem;
         line-height: 1.8;
     }
     .article-content h1,
     .article-content h2,
     .article-content h3 {
-        color: var(--text-bright);
-        font-family: 'Rajdhani', sans-serif;
+        color: var(--text);
+        font-family: var(--font-head);
         margin: 1.5em 0 0.5em;
     }
     .article-content h1 { font-size: 1.6rem; }
@@ -90,12 +90,12 @@ const PAGE_CSS: &str = r#"
         border-left: 3px solid var(--accent-soft);
         margin: 1em 0;
         padding: 0.5em 1em;
-        color: var(--text-muted);
-        background: rgba(255,255,255,0.02);
+        color: var(--text-3);
+        background: color-mix(in srgb, var(--text) 4%, transparent);
         border-radius: 0 6px 6px 0;
     }
     .article-content pre {
-        background: var(--bg-card);
+        background: var(--surface);
         border: 1px solid var(--border);
         border-radius: 8px;
         padding: 1em;
@@ -103,7 +103,7 @@ const PAGE_CSS: &str = r#"
         font-size: 0.85rem;
     }
     .article-content code {
-        background: var(--bg-card);
+        background: var(--surface);
         padding: 0.15em 0.35em;
         border-radius: 4px;
         font-size: 0.85em;
@@ -129,15 +129,15 @@ const PAGE_CSS: &str = r#"
         text-align: left;
     }
     .article-content th {
-        background: var(--bg-card);
-        color: var(--text-bright);
+        background: var(--surface);
+        color: var(--text);
     }
     .article-content ul, .article-content ol {
         margin: 0 0 1em;
         padding-left: 1.5em;
     }
     .article-loading, .article-error {
-        color: var(--text-muted);
+        color: var(--text-3);
         text-align: center;
         padding: 3rem 0;
     }

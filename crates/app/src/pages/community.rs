@@ -1,6 +1,7 @@
 use dioxus::prelude::*;
 use serde::{Deserialize, Serialize};
 
+use crate::components::ui::{BtnVariant, Button};
 use crate::components::{Toast, use_toast};
 use scuffed_api_client::ApiClient;
 
@@ -28,19 +29,19 @@ const PAGE_CSS: &str = r#"
         margin: 0 auto;
     }
     .community-page-title {
-        font-family: 'Bebas Neue', sans-serif;
+        font-family: var(--font-head);
         font-size: 2.5rem;
-        color: var(--text-bright);
+        color: var(--text);
         letter-spacing: 3px;
         margin: 0 0 0.5rem;
     }
     .community-subtitle {
-        color: var(--text-secondary);
+        color: var(--text-2);
         font-size: 0.95rem;
         margin: 0 0 2rem;
     }
     .community-hero {
-        background: var(--bg-card);
+        background: var(--surface);
         border: 1px solid var(--border);
         border-radius: 12px;
         overflow: hidden;
@@ -55,29 +56,29 @@ const PAGE_CSS: &str = r#"
     .community-banner-placeholder {
         width: 100%;
         height: 200px;
-        background: linear-gradient(135deg, #7c3aed 0%, #4c1d95 100%);
+        background: linear-gradient(135deg, var(--accent) 0%, color-mix(in srgb, var(--accent) 40%, var(--bg)) 100%);
         display: flex;
         align-items: center;
         justify-content: center;
     }
     .community-banner-placeholder span {
-        font-family: 'Bebas Neue', sans-serif;
+        font-family: var(--font-head);
         font-size: 3rem;
-        color: rgba(255, 255, 255, 0.3);
+        color: color-mix(in srgb, var(--text) 30%, transparent);
         letter-spacing: 8px;
     }
     .community-body {
         padding: 1.5rem 2rem 2rem;
     }
     .community-name {
-        font-family: 'Rajdhani', sans-serif;
+        font-family: var(--font-head);
         font-size: 1.5rem;
         font-weight: 700;
-        color: var(--text-bright);
+        color: var(--text);
         margin: 0 0 0.5rem;
     }
     .community-desc {
-        color: var(--text-secondary);
+        color: var(--text-2);
         font-size: 0.9rem;
         line-height: 1.6;
         margin: 0 0 1.5rem;
@@ -91,13 +92,13 @@ const PAGE_CSS: &str = r#"
         text-align: center;
     }
     .community-stat-value {
-        font-family: 'Bebas Neue', sans-serif;
+        font-family: var(--font-head);
         font-size: 2rem;
         color: var(--accent);
     }
     .community-stat-label {
         font-size: 0.75rem;
-        color: var(--text-muted);
+        color: var(--text-3);
         text-transform: uppercase;
         letter-spacing: 0.05em;
     }
@@ -105,20 +106,20 @@ const PAGE_CSS: &str = r#"
         margin-top: 2rem;
     }
     .community-section-title {
-        font-family: 'Rajdhani', sans-serif;
+        font-family: var(--font-head);
         font-size: 1.1rem;
         font-weight: 700;
-        color: var(--text-bright);
+        color: var(--text);
         margin: 0 0 0.75rem;
         padding-bottom: 0.5rem;
         border-bottom: 1px solid var(--border);
     }
     .community-rules {
-        background: var(--bg-surface);
+        background: var(--surface-2);
         border: 1px solid var(--border);
         border-radius: 8px;
         padding: 1rem 1.25rem;
-        color: var(--text-secondary);
+        color: var(--text-2);
         font-size: 0.85rem;
         line-height: 1.6;
         white-space: pre-wrap;
@@ -133,7 +134,7 @@ const PAGE_CSS: &str = r#"
         align-items: center;
         gap: 0.5rem;
         padding: 0.5rem 0.75rem;
-        background: var(--bg-surface);
+        background: var(--surface-2);
         border: 1px solid var(--border);
         border-radius: 8px;
     }
@@ -142,7 +143,7 @@ const PAGE_CSS: &str = r#"
         height: 28px;
         border-radius: 50%;
         background: var(--accent-soft);
-        color: var(--accent-bright);
+        color: var(--accent);
         display: flex;
         align-items: center;
         justify-content: center;
@@ -158,33 +159,33 @@ const PAGE_CSS: &str = r#"
     }
     .community-mod-name {
         font-size: 0.85rem;
-        color: var(--text-bright);
+        color: var(--text);
         font-weight: 600;
     }
     .community-relay {
         display: inline-flex;
         align-items: center;
         gap: 0.5rem;
-        background: var(--bg-surface);
+        background: var(--surface-2);
         border: 1px solid var(--border);
         border-radius: 6px;
         padding: 0.5rem 1rem;
-        font-family: monospace;
+        font-family: var(--font-mono);
         font-size: 0.8rem;
-        color: var(--text-secondary);
+        color: var(--text-2);
     }
     .community-relay-dot {
         width: 8px;
         height: 8px;
         border-radius: 50%;
-        background: #22c55e;
+        background: var(--ok);
     }
     .community-nostr-badge {
         display: inline-flex;
         align-items: center;
         gap: 0.4rem;
-        background: #7c3aed22;
-        color: #a78bfa;
+        background: var(--accent-soft);
+        color: var(--accent);
         padding: 0.25rem 0.75rem;
         border-radius: 999px;
         font-size: 0.7rem;
@@ -194,7 +195,7 @@ const PAGE_CSS: &str = r#"
         margin-bottom: 1rem;
     }
     .community-loading {
-        color: var(--text-muted);
+        color: var(--text-3);
         text-align: center;
         padding: 3rem 0;
     }
@@ -333,9 +334,8 @@ fn OfficerCommunityActions() -> Element {
     rsx! {
         div { class: "community-section",
             h3 { class: "community-section-title", "Officer Actions" }
-            button {
-                class: "nav-cta",
-                style: "display: inline-block; padding: 0.5rem 1.25rem; border-radius: 6px; border: none; cursor: pointer; font-size: 0.85rem;",
+            Button {
+                variant: BtnVariant::Primary,
                 disabled: publishing(),
                 onclick: publish_community,
                 if publishing() { "Publishing..." } else { "Publish Community to Relay" }
