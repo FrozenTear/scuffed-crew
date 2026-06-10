@@ -37,7 +37,7 @@ pub async fn list_wiki_pages(
 ) -> Result<Json<WikiListResponse>, (StatusCode, Json<ErrorResponse>)> {
     let pages = state
         .db
-        .list_wiki_pages(query.q.as_deref(), query.limit, query.offset)
+        .list_wiki_pages(query.q.as_deref(), query.limit.min(100), query.offset)
         .await
         .map_err(|e| {
             (

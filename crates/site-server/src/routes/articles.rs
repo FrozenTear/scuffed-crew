@@ -31,7 +31,7 @@ pub async fn list_articles(
 ) -> Result<Json<Vec<Article>>, (StatusCode, Json<ErrorResponse>)> {
     state
         .db
-        .list_published_articles(query.limit, query.offset)
+        .list_published_articles(query.limit.min(100), query.offset)
         .await
         .map(Json)
         .map_err(|e| {
@@ -52,7 +52,7 @@ pub async fn list_all_articles(
 ) -> Result<Json<Vec<Article>>, (StatusCode, Json<ErrorResponse>)> {
     state
         .db
-        .list_all_articles(query.limit, query.offset)
+        .list_all_articles(query.limit.min(100), query.offset)
         .await
         .map(Json)
         .map_err(|e| {

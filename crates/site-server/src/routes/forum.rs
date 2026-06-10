@@ -98,7 +98,7 @@ pub async fn list_threads(
 ) -> Result<Json<ThreadListResponse>, (StatusCode, Json<ErrorResponse>)> {
     let threads = state
         .db
-        .list_forum_threads(query.category.as_deref(), query.limit, query.offset)
+        .list_forum_threads(query.category.as_deref(), query.limit.min(100), query.offset)
         .await
         .map_err(|e| {
             (
@@ -142,7 +142,7 @@ pub async fn get_thread(
 
     let replies = state
         .db
-        .list_forum_replies(&id, query.limit, query.offset)
+        .list_forum_replies(&id, query.limit.min(100), query.offset)
         .await
         .map_err(|e| {
             (

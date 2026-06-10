@@ -33,7 +33,7 @@ pub async fn list_audit_log(
 ) -> Result<Json<AuditLogResponse>, (StatusCode, Json<ErrorResponse>)> {
     let entries = state
         .db
-        .list_audit_log(query.limit, query.offset)
+        .list_audit_log(query.limit.min(100), query.offset)
         .await
         .map_err(|e| {
             (
