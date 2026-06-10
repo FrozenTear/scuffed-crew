@@ -3,6 +3,14 @@ name = "scuffed-app"
 version = "0.1.0"
 edition = "2024"
 
+[lib]
+name = "scuffed_app"
+path = "src/lib.rs"
+
+[[bin]]
+name = "scuffed-app"
+path = "src/main.rs"
+
 [dependencies]
 dioxus = { workspace = true, features = ["router"] }
 scuffed-types = { path = "../types" }
