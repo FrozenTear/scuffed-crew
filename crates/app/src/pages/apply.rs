@@ -1,6 +1,7 @@
 use dioxus::prelude::*;
 use serde::{Deserialize, Serialize};
 
+use crate::components::ui::{BtnVariant, Button, Card, Pill, PillTone, Textarea};
 use crate::components::{Toast, use_toast};
 use crate::hooks::use_api;
 use crate::state::auth::use_auth;
@@ -25,32 +26,19 @@ struct ApplyBody {
 
 const APPLY_CSS: &str = r#"
     .apply-page { min-height: 100vh; padding: 2rem; max-width: 600px; margin: 0 auto; }
-    .apply-title { font-family: 'Bebas Neue', sans-serif; font-size: 2.5rem; color: var(--text-bright); letter-spacing: 3px; text-align: center; margin-bottom: 2rem; }
-    .apply-card { background: var(--bg-card); border: 1px solid var(--border); border-radius: 12px; padding: 2rem; }
-    .apply-card-title { font-family: 'Rajdhani', sans-serif; font-weight: 700; font-size: 1.3rem; color: var(--text-bright); margin: 0 0 0.5rem; }
-    .apply-card-desc { color: var(--text-secondary); font-size: 0.9rem; line-height: 1.6; }
+    .apply-title { font-family: var(--font-head); font-size: 2.5rem; color: var(--text); letter-spacing: 3px; text-align: center; margin-bottom: 2rem; }
+    .apply-card-title { font-family: var(--font-head); font-weight: 700; font-size: 1.3rem; color: var(--text); margin: 0 0 0.5rem; }
+    .apply-card-desc { color: var(--text-2); font-size: 0.9rem; line-height: 1.6; }
     .apply-auth-buttons { margin-top: 1.5rem; display: flex; gap: 0.75rem; flex-wrap: wrap; }
-    .apply-auth-buttons a { display: inline-flex; align-items: center; gap: 0.5rem; padding: 0.6rem 1.4rem; border-radius: 6px; font-size: 0.9rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.03em; text-decoration: none; transition: all 0.2s; background: var(--accent); color: white; }
-    .apply-auth-buttons a:hover { filter: brightness(1.15); }
     .apply-status-row { margin: 1rem 0; }
-    .apply-status-pill { display: inline-block; padding: 0.2rem 0.75rem; border-radius: 999px; font-size: 0.75rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; }
-    .apply-status-pill.pending { background: #f59e0b33; color: #fbbf24; }
-    .apply-status-pill.trial { background: #3b82f633; color: #60a5fa; }
-    .apply-status-pill.accepted { background: #10b98133; color: #34d399; }
-    .apply-status-pill.rejected { background: #ef444433; color: #f87171; }
     .apply-field { margin-top: 1.5rem; }
-    .apply-label { font-family: 'Rajdhani', sans-serif; font-weight: 600; font-size: 0.85rem; color: var(--text-bright); text-transform: uppercase; letter-spacing: 0.04em; display: block; margin-bottom: 0.5rem; }
+    .apply-label { font-family: var(--font-head); font-weight: 600; font-size: 0.85rem; color: var(--text); text-transform: uppercase; letter-spacing: 0.04em; display: block; margin-bottom: 0.5rem; }
     .apply-game-grid { display: flex; gap: 0.5rem; flex-wrap: wrap; }
-    .apply-game-btn { padding: 0.4rem 1rem; border-radius: 6px; border: 1px solid var(--border); background: var(--bg-card); color: var(--text-secondary); font-size: 0.85rem; cursor: pointer; transition: all 0.15s; }
-    .apply-game-btn:hover { border-color: var(--accent-soft); color: var(--text-bright); }
-    .apply-game-btn.selected { background: var(--accent); color: white; border-color: var(--accent); }
-    .apply-textarea { width: 100%; background: var(--bg-surface); border: 1px solid var(--border); border-radius: 8px; color: var(--text-bright); padding: 0.75rem; font-size: 0.9rem; font-family: inherit; resize: vertical; }
-    .apply-textarea:focus { outline: none; border-color: var(--accent); }
+    .apply-game-btn { padding: 0.4rem 1rem; border-radius: 6px; border: 1px solid var(--border); background: var(--surface); color: var(--text-2); font-size: 0.85rem; cursor: pointer; transition: all 0.15s; }
+    .apply-game-btn:hover { border-color: var(--accent-soft); color: var(--text); }
+    .apply-game-btn.selected { background: var(--accent); color: var(--accent-fg); border-color: var(--accent); }
     .apply-actions { margin-top: 1.5rem; }
-    .apply-btn { display: inline-flex; align-items: center; gap: 0.5rem; padding: 0.6rem 1.4rem; border-radius: 6px; font-size: 0.9rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.03em; text-decoration: none; transition: all 0.2s; border: none; cursor: pointer; background: var(--accent); color: white; }
-    .apply-btn:hover { filter: brightness(1.15); box-shadow: 0 0 20px var(--accent-glow); }
-    .apply-btn:disabled { opacity: 0.5; cursor: not-allowed; }
-    .apply-loading { color: var(--text-muted); text-align: center; padding: 2rem; }
+    .apply-loading { color: var(--text-3); text-align: center; padding: 2rem; }
 "#;
 
 #[component]
@@ -81,23 +69,29 @@ pub fn Apply() -> Element {
 
                     if !s.recruitment_open {
                         rsx! {
-                            div { class: "apply-card",
+                            Card {
                                 h2 { class: "apply-card-title", "Recruitment Closed" }
                                 p { class: "apply-card-desc", "{s.recruitment_message}" }
                             }
                         }
                     } else if !auth().is_logged_in() {
                         rsx! {
-                            div { class: "apply-card",
+                            Card {
                                 h2 { class: "apply-card-title", "Log In to Apply" }
                                 p { class: "apply-card-desc", "You need to sign in before submitting an application." }
                                 div { class: "apply-auth-buttons",
-                                    a { href: "/api/auth/discord/login", "Sign in with Discord" }
+                                    a { href: "/api/auth/discord/login", class: "ui-btn ui-btn--primary ui-btn--md", "Sign in with Discord" }
                                 }
                             }
                         }
                     } else if let Some(app) = my_app.data.read().as_ref().and_then(|a| a.as_ref()).and_then(|a| a.as_ref()) {
-                        let status_class = format!("apply-status-pill {}", app.status);
+                        let status_tone = match app.status.as_str() {
+                            "pending" => PillTone::Warn,
+                            "trial" => PillTone::Accent,
+                            "accepted" => PillTone::Ok,
+                            "rejected" => PillTone::Danger,
+                            _ => PillTone::Neutral,
+                        };
                         let status_label = match app.status.as_str() {
                             "pending" => "Pending Review",
                             "trial" => "Trial Period",
@@ -115,10 +109,10 @@ pub fn Apply() -> Element {
                         };
 
                         rsx! {
-                            div { class: "apply-card",
+                            Card {
                                 h2 { class: "apply-card-title", "Application Status" }
                                 div { class: "apply-status-row",
-                                    span { class: "{status_class}", "{status_label}" }
+                                    Pill { tone: status_tone, "{status_label}" }
                                 }
                                 p { class: "apply-card-desc", "{desc}" }
                             }
@@ -127,7 +121,7 @@ pub fn Apply() -> Element {
                         let game_list = games.data.read().as_ref().and_then(|g| g.as_ref()).cloned().unwrap_or_default();
 
                         rsx! {
-                            div { class: "apply-card",
+                            Card {
                                 h2 { class: "apply-card-title", "Apply" }
                                 p { class: "apply-card-desc", "Tell us which games you play and a bit about yourself." }
 
@@ -160,18 +154,16 @@ pub fn Apply() -> Element {
 
                                 div { class: "apply-field",
                                     label { class: "apply-label", "Message (optional)" }
-                                    textarea {
-                                        class: "apply-textarea",
-                                        rows: 4,
+                                    Textarea {
+                                        value: message(),
                                         placeholder: "Tell us about yourself, your experience, what you're looking for...",
-                                        value: "{message}",
-                                        oninput: move |e| message.set(e.value()),
+                                        oninput: move |e: FormEvent| message.set(e.value()),
                                     }
                                 }
 
                                 div { class: "apply-actions",
-                                    button {
-                                        class: "apply-btn",
+                                    Button {
+                                        variant: BtnVariant::Primary,
                                         disabled: submitting(),
                                         onclick: move |_| {
                                             let games = selected_games();

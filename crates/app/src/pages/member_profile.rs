@@ -1,6 +1,7 @@
 use dioxus::prelude::*;
 use serde::Deserialize;
 
+use crate::components::ui::{Card, Pill, PillTone};
 use crate::routes::Route;
 use scuffed_api_client::ApiClient;
 
@@ -45,7 +46,7 @@ const PAGE_CSS: &str = r#"
         margin: 0 auto;
     }
     .profile-loading {
-        color: var(--text-muted);
+        color: var(--text-3);
         text-align: center;
         padding: 3rem 0;
     }
@@ -60,7 +61,7 @@ const PAGE_CSS: &str = r#"
         height: 120px;
         border-radius: 50%;
         overflow: hidden;
-        background: var(--bg-surface);
+        background: var(--surface-2);
         display: flex;
         align-items: center;
         justify-content: center;
@@ -72,7 +73,7 @@ const PAGE_CSS: &str = r#"
         object-fit: cover;
     }
     .profile-avatar-large .member-initials {
-        font-family: 'Bebas Neue', sans-serif;
+        font-family: var(--font-head);
         font-size: 2.4rem;
         color: var(--accent);
         letter-spacing: 3px;
@@ -83,35 +84,15 @@ const PAGE_CSS: &str = r#"
         gap: 0.4rem;
     }
     .profile-name {
-        font-family: 'Bebas Neue', sans-serif;
+        font-family: var(--font-head);
         font-size: 2.2rem;
-        color: var(--text-bright);
+        color: var(--text);
         letter-spacing: 2px;
         margin: 0;
         line-height: 1;
     }
-    .member-role-pill {
-        display: inline-block;
-        font-size: 0.65rem;
-        padding: 0.15rem 0.6rem;
-        border-radius: 999px;
-        font-weight: 600;
-        text-transform: uppercase;
-        letter-spacing: 0.04em;
-        background: #7c3aed33;
-        color: #a78bfa;
-        width: fit-content;
-    }
-    .member-role-pill.admin {
-        background: #ef444433;
-        color: #f87171;
-    }
-    .member-role-pill.officer {
-        background: #f9731633;
-        color: #f97316;
-    }
     .profile-joined {
-        color: var(--text-muted);
+        color: var(--text-3);
         font-size: 0.8rem;
         margin: 0;
     }
@@ -119,16 +100,16 @@ const PAGE_CSS: &str = r#"
         margin-bottom: 2rem;
     }
     .profile-section h2 {
-        font-family: 'Rajdhani', sans-serif;
+        font-family: var(--font-head);
         font-size: 1.2rem;
         font-weight: 700;
-        color: var(--text-bright);
+        color: var(--text);
         margin: 0 0 0.75rem;
         text-transform: uppercase;
         letter-spacing: 0.04em;
     }
     .profile-bio {
-        color: var(--text-secondary);
+        color: var(--text-2);
         font-size: 0.9rem;
         line-height: 1.7;
         margin: 0;
@@ -138,43 +119,31 @@ const PAGE_CSS: &str = r#"
         grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
         gap: 0.75rem;
     }
-    .profile-team-card {
-        background: var(--bg-card);
-        border: 1px solid var(--border);
-        border-radius: 8px;
-        padding: 1rem;
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-    }
     .profile-team-name {
-        font-family: 'Rajdhani', sans-serif;
+        font-family: var(--font-head);
         font-weight: 700;
-        color: var(--text-bright);
+        color: var(--text);
     }
     .profile-team-role {
         font-size: 0.7rem;
-        color: var(--text-muted);
+        color: var(--text-3);
         text-transform: uppercase;
     }
-    .profile-account-card {
-        background: var(--bg-card);
-        border: 1px solid var(--border);
-        border-radius: 8px;
-        padding: 1rem;
+    .profile-account-name {
+        font-family: var(--font-head);
+        font-weight: 700;
+        color: var(--text);
+    }
+    .profile-account-id {
+        font-family: var(--font-mono);
+        font-size: 0.75rem;
+        color: var(--text-3);
+    }
+    .profile-card-row {
         display: flex;
         justify-content: space-between;
         align-items: center;
-    }
-    .profile-account-name {
-        font-family: 'Rajdhani', sans-serif;
-        font-weight: 700;
-        color: var(--text-bright);
-    }
-    .profile-account-id {
-        font-family: 'DM Mono', monospace;
-        font-size: 0.75rem;
-        color: var(--text-muted);
+        gap: var(--space-3);
     }
     .profile-back {
         margin-top: 2rem;
@@ -230,7 +199,11 @@ pub fn MemberProfile(id: String) -> Element {
                             .take(2)
                             .collect::<String>()
                             .to_uppercase();
-                        let role_class = format!("member-role-pill {}", m.org_role);
+                        let role_tone = match m.org_role.as_str() {
+                            "admin" => PillTone::Danger,
+                            "officer" => PillTone::Warn,
+                            _ => PillTone::Accent,
+                        };
                         let joined = m.joined_at.chars().take(10).collect::<String>();
                         let bio = m.bio.clone().unwrap_or_default();
 
@@ -245,7 +218,7 @@ pub fn MemberProfile(id: String) -> Element {
                                 }
                                 div { class: "profile-info",
                                     h1 { class: "profile-name", "{m.display_name}" }
-                                    span { class: "{role_class}", "{m.org_role}" }
+                                    Pill { tone: role_tone, "{m.org_role}" }
                                     p { class: "profile-joined", "Joined {joined}" }
                                 }
                             }
@@ -262,9 +235,11 @@ pub fn MemberProfile(id: String) -> Element {
                                     h2 { "Teams" }
                                     div { class: "profile-teams",
                                         for t in m.teams.iter() {
-                                            div { class: "profile-team-card",
-                                                span { class: "profile-team-name", "{t.team_name}" }
-                                                span { class: "profile-team-role", "{t.team_role}" }
+                                            Card {
+                                                div { class: "profile-card-row",
+                                                    span { class: "profile-team-name", "{t.team_name}" }
+                                                    span { class: "profile-team-role", "{t.team_role}" }
+                                                }
                                             }
                                         }
                                     }
@@ -296,10 +271,12 @@ pub fn MemberProfile(id: String) -> Element {
 fn render_account_card(a: &GameAccount) -> Element {
     let id_display = a.account_id.clone().unwrap_or_default();
     rsx! {
-        div { class: "profile-account-card",
-            span { class: "profile-account-name", "{a.account_name}" }
-            if !id_display.is_empty() {
-                span { class: "profile-account-id", "{id_display}" }
+        Card {
+            div { class: "profile-card-row",
+                span { class: "profile-account-name", "{a.account_name}" }
+                if !id_display.is_empty() {
+                    span { class: "profile-account-id", "{id_display}" }
+                }
             }
         }
     }

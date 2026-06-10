@@ -5,18 +5,18 @@ pub mod field;
 pub mod label;
 pub mod pill;
 pub mod shell;
-// TODO(task-9): drop this allow once pages/layouts consume the ui re-exports.
 #[allow(unused_imports)]
-pub use button::{BtnSize, BtnVariant, Button};
-#[allow(unused_imports)]
+pub use button::BtnSize;
+pub use button::{BtnVariant, Button};
 pub use card::Card;
+pub use feedback::EmptyState;
 #[allow(unused_imports)]
-pub use feedback::{EmptyState, Spinner};
+pub use feedback::Spinner;
+pub use field::Textarea;
 #[allow(unused_imports)]
-pub use field::{Input, Select, Textarea};
+pub use field::{Input, Select};
 #[allow(unused_imports)]
 pub use label::Label;
-#[allow(unused_imports)]
 pub use pill::{Pill, PillTone};
 #[allow(unused_imports)]
 pub use shell::PageShell;
