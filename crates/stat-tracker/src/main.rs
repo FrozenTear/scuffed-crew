@@ -73,7 +73,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     config.player_name = remote.player_name;
                 }
                 Ok(_) => {
-                    tracing::info!("server has no player_name configured — set it in the web UI under My Stats → Settings");
+                    tracing::info!(
+                        "server has no player_name configured — set it in the web UI under My Stats → Settings"
+                    );
                 }
                 Err(e) => {
                     tracing::warn!(error = %e, "could not fetch daemon config from server (continuing without player_name)");
@@ -377,56 +379,73 @@ async fn handle_capture(
     let matcher = Arc::clone(portrait_matcher);
     // Clone player_name so the blocking closure can own it.
     let player_name_owned = player_name.map(|s| s.to_string());
-    let (outcome, ocr_result, rows, portrait_hero, career_hero, map_from_panel, scoreboard_img, player_row_idx) =
-        tokio::task::spawn_blocking(move || {
-            // Outcome: prefer the open game's result (read off the accolade
-            // screen by the poller); else color-flood detection; else read the
-            // VICTORY/DEFEAT header text off this frame. The last step recovers
-            // the case where the poller missed the screens and we're sitting on
-            // a post-match scoreboard that prints the result header.
-            let outcome = if matches!(game_outcome, detect::MatchOutcome::Unknown) {
-                let o = detect::match_end::detect_outcome(&img);
-                if matches!(o, detect::MatchOutcome::Unknown) {
-                    detect::match_end::detect_outcome_text(&img)
-                } else {
-                    o
-                }
+    let (
+        outcome,
+        ocr_result,
+        rows,
+        portrait_hero,
+        career_hero,
+        map_from_panel,
+        scoreboard_img,
+        player_row_idx,
+    ) = tokio::task::spawn_blocking(move || {
+        // Outcome: prefer the open game's result (read off the accolade
+        // screen by the poller); else color-flood detection; else read the
+        // VICTORY/DEFEAT header text off this frame. The last step recovers
+        // the case where the poller missed the screens and we're sitting on
+        // a post-match scoreboard that prints the result header.
+        let outcome = if matches!(game_outcome, detect::MatchOutcome::Unknown) {
+            let o = detect::match_end::detect_outcome(&img);
+            if matches!(o, detect::MatchOutcome::Unknown) {
+                detect::match_end::detect_outcome_text(&img)
             } else {
-                game_outcome
-            };
+                o
+            }
+        } else {
+            game_outcome
+        };
 
-            let scoreboard = ocr::preprocess::crop_scoreboard(&img);
-            let team_size = detect::hero_portrait::detect_team_size(&scoreboard);
-            let player_match = matcher.match_player_hero(&scoreboard);
-            let portrait_match = player_match
-                .as_ref()
-                .map(|(name, conf, _)| (name.clone(), *conf));
-            let brightness_row_idx = player_match.map(|(_, _, idx)| idx);
+        let scoreboard = ocr::preprocess::crop_scoreboard(&img);
+        let team_size = detect::hero_portrait::detect_team_size(&scoreboard);
+        let player_match = matcher.match_player_hero(&scoreboard);
+        let portrait_match = player_match
+            .as_ref()
+            .map(|(name, conf, _)| (name.clone(), *conf));
+        let brightness_row_idx = player_match.map(|(_, _, idx)| idx);
 
-            let rows = ocr::recognize_scoreboard_cells_with_team_size(&img, Some(team_size));
-            let ocr = ocr::recognize(&img);
+        let rows = ocr::recognize_scoreboard_cells_with_team_size(&img, Some(team_size));
+        let ocr = ocr::recognize(&img);
 
-            // Player row: if a player name is configured, scan ALL rows (both teams)
-            // for a name match — this handles replays and post-match screens where the
-            // player may be on team 2. Fall back to brightness-detected row otherwise.
-            let row_idx = player_name_owned
-                .as_deref()
-                .and_then(|name| parse::find_player_row_by_name(&rows, name))
-                .or(brightness_row_idx);
+        // Player row: if a player name is configured, scan ALL rows (both teams)
+        // for a name match — this handles replays and post-match screens where the
+        // player may be on team 2. Fall back to brightness-detected row otherwise.
+        let row_idx = player_name_owned
+            .as_deref()
+            .and_then(|name| parse::find_player_row_by_name(&rows, name))
+            .or(brightness_row_idx);
 
-            // Career-panel hero title. Guard against garbage OCR (happens when there
-            // is no career panel — replay, post-match — by requiring the result to
-            // actually match a known hero name, which match_hero_in_text already does).
-            let career_hero = ocr::recognize_region(&ocr::preprocess::crop_career_hero(&img))
-                .ok()
-                .and_then(|t| parse::match_hero_in_text(&t));
-            let map_from_panel = ocr::recognize_region(&ocr::preprocess::crop_map_name(&img))
-                .ok()
-                .and_then(|t| parse::match_map_in_text(&t));
+        // Career-panel hero title. Guard against garbage OCR (happens when there
+        // is no career panel — replay, post-match — by requiring the result to
+        // actually match a known hero name, which match_hero_in_text already does).
+        let career_hero = ocr::recognize_region(&ocr::preprocess::crop_career_hero(&img))
+            .ok()
+            .and_then(|t| parse::match_hero_in_text(&t));
+        let map_from_panel = ocr::recognize_region(&ocr::preprocess::crop_map_name(&img))
+            .ok()
+            .and_then(|t| parse::match_map_in_text(&t));
 
-            (outcome, ocr, rows, portrait_match, career_hero, map_from_panel, scoreboard, row_idx)
-        })
-        .await?;
+        (
+            outcome,
+            ocr,
+            rows,
+            portrait_match,
+            career_hero,
+            map_from_panel,
+            scoreboard,
+            row_idx,
+        )
+    })
+    .await?;
     let ocr_result = ocr_result?;
 
     tracing::info!(?outcome, "frame analysis");

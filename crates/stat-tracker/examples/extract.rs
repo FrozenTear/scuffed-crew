@@ -56,7 +56,8 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     // Career-panel hero title (plain text) and top-bar map label — both read
     // from dedicated regions outside the scoreboard crop.
-    let career_raw = ocr::recognize_region(&ocr::preprocess::crop_career_hero(&img)).unwrap_or_default();
+    let career_raw =
+        ocr::recognize_region(&ocr::preprocess::crop_career_hero(&img)).unwrap_or_default();
     let map_raw = ocr::recognize_region(&ocr::preprocess::crop_map_name(&img)).unwrap_or_default();
     println!(
         "career hero: raw={:?} -> {:?}",

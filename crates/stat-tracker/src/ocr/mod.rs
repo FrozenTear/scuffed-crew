@@ -73,9 +73,7 @@ fn ocr_with(
 }
 
 /// Encode a preprocessed grayscale image to an in-memory PNG for Tesseract.
-fn encode_png(
-    img: image::GrayImage,
-) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
+fn encode_png(img: image::GrayImage) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
     let mut buf = Vec::new();
     DynamicImage::ImageLuma8(img).write_to(&mut Cursor::new(&mut buf), image::ImageFormat::Png)?;
     Ok(buf)
@@ -196,16 +194,19 @@ pub fn recognize_row(row_img: &DynamicImage, columns: &preprocess::StatColumns) 
     // Run in parallel — each cell creates its own Tesseract instance so there is
     // no shared state. Index order is preserved by collecting into a fixed-size array.
     let mut stats: Vec<(usize, CellOcrResult)> = ocr_pool().install(|| {
-        (0..STATS_PER_ROW).into_par_iter().map(|i| {
-            let whitelist = if i < 3 { "0123456789" } else { "0123456789," };
-            let result = preprocess::crop_stat_cell(row_img, i, columns)
-                .and_then(|cell| recognize_cell_with_whitelist(&cell, whitelist).ok())
-                .unwrap_or_else(|| CellOcrResult {
-                    value: String::new(),
-                    confidence: 0,
-                });
-            (i, result)
-        }).collect()
+        (0..STATS_PER_ROW)
+            .into_par_iter()
+            .map(|i| {
+                let whitelist = if i < 3 { "0123456789" } else { "0123456789," };
+                let result = preprocess::crop_stat_cell(row_img, i, columns)
+                    .and_then(|cell| recognize_cell_with_whitelist(&cell, whitelist).ok())
+                    .unwrap_or_else(|| CellOcrResult {
+                        value: String::new(),
+                        confidence: 0,
+                    });
+                (i, result)
+            })
+            .collect()
     });
     stats.sort_unstable_by_key(|(i, _)| *i);
     let stats: Vec<CellOcrResult> = stats.into_iter().map(|(_, c)| c).collect();

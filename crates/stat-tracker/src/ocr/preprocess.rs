@@ -194,7 +194,11 @@ fn otsu_threshold(img: &GrayImage) -> u8 {
     if total == 0 {
         return 128;
     }
-    let sum: f64 = hist.iter().enumerate().map(|(i, &c)| i as f64 * c as f64).sum();
+    let sum: f64 = hist
+        .iter()
+        .enumerate()
+        .map(|(i, &c)| i as f64 * c as f64)
+        .sum();
     let (mut sum_b, mut w_b, mut max_var, mut threshold) = (0.0f64, 0u32, -1.0f64, 128u8);
     for (t, &count) in hist.iter().enumerate() {
         w_b += count;

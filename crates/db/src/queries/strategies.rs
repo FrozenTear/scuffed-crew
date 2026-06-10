@@ -293,8 +293,9 @@ impl Database {
             }
             if search.is_some() {
                 // Simple CONTAINS search on name
-                conditions
-                    .push("string::lowercase(name) CONTAINS string::lowercase($search)".to_string());
+                conditions.push(
+                    "string::lowercase(name) CONTAINS string::lowercase($search)".to_string(),
+                );
             }
             let where_clause = conditions.join(" AND ");
 

@@ -98,7 +98,11 @@ pub async fn list_threads(
 ) -> Result<Json<ThreadListResponse>, (StatusCode, Json<ErrorResponse>)> {
     let threads = state
         .db
-        .list_forum_threads(query.category.as_deref(), query.limit.min(100), query.offset)
+        .list_forum_threads(
+            query.category.as_deref(),
+            query.limit.min(100),
+            query.offset,
+        )
         .await
         .map_err(|e| {
             (

@@ -128,12 +128,7 @@ fn systemd_disable() -> Result<(), String> {
 
 fn service_file_installed() -> bool {
     dirs::config_dir()
-        .map(|d| {
-            d.join("systemd")
-                .join("user")
-                .join(systemd_unit())
-                .exists()
-        })
+        .map(|d| d.join("systemd").join("user").join(systemd_unit()).exists())
         .unwrap_or(false)
 }
 

@@ -71,10 +71,9 @@ impl Config {
         };
 
         // CLI / env overlay: --token / SCUFFED_TOKEN and --server / SCUFFED_SERVER
-        let cli_token = Self::arg_value("--token")
-            .or_else(|| std::env::var("SCUFFED_TOKEN").ok());
-        let cli_server = Self::arg_value("--server")
-            .or_else(|| std::env::var("SCUFFED_SERVER").ok());
+        let cli_token = Self::arg_value("--token").or_else(|| std::env::var("SCUFFED_TOKEN").ok());
+        let cli_server =
+            Self::arg_value("--server").or_else(|| std::env::var("SCUFFED_SERVER").ok());
 
         if let Some(token) = cli_token {
             let server = cli_server.unwrap_or_else(|| {
@@ -85,7 +84,10 @@ impl Config {
                     .map(|s| s.server_url.clone())
                     .unwrap_or_default()
             });
-            config.sync = Some(SyncConfig { server_url: server, token });
+            config.sync = Some(SyncConfig {
+                server_url: server,
+                token,
+            });
         }
 
         // Auto-save if we built a usable sync config from CLI args and there was
@@ -108,9 +110,7 @@ impl Config {
     /// Find a `--key value` pair in std::env::args().
     fn arg_value(key: &str) -> Option<String> {
         let args: Vec<String> = std::env::args().collect();
-        args.windows(2)
-            .find(|w| w[0] == key)
-            .map(|w| w[1].clone())
+        args.windows(2).find(|w| w[0] == key).map(|w| w[1].clone())
     }
 }
 

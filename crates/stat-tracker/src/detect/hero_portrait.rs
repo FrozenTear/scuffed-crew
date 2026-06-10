@@ -143,8 +143,7 @@ fn detect_player_row_inner(scoreboard: &DynamicImage, team_size: usize) -> Optio
     let mut brightnesses: Vec<(usize, f64)> = Vec::new();
 
     for row in 0..team_size {
-        let Some(row_img) =
-            crate::ocr::preprocess::crop_player_row(scoreboard, row, team_size)
+        let Some(row_img) = crate::ocr::preprocess::crop_player_row(scoreboard, row, team_size)
         else {
             continue;
         };
@@ -191,8 +190,7 @@ fn detect_player_row_inner(scoreboard: &DynamicImage, team_size: usize) -> Optio
         .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
         .unwrap();
 
-    let avg: f64 =
-        brightnesses.iter().map(|(_, b)| b).sum::<f64>() / brightnesses.len() as f64;
+    let avg: f64 = brightnesses.iter().map(|(_, b)| b).sum::<f64>() / brightnesses.len() as f64;
 
     if *max_brightness > avg * 1.12 {
         tracing::debug!(

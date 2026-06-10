@@ -14,7 +14,9 @@ fn saturation(r: u8, g: u8, b: u8) -> f64 {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let path = std::env::args().nth(1).ok_or("usage: profile <image.png>")?;
+    let path = std::env::args()
+        .nth(1)
+        .ok_or("usage: profile <image.png>")?;
     let img = image::open(&path)?;
     let board: DynamicImage = ocr::preprocess::crop_scoreboard(&img);
     let rgb = board.to_rgb8();
@@ -42,12 +44,18 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut start: Option<u32> = None;
     for (y, &s) in sat_rows.iter().enumerate() {
         if s >= thresh {
-            if start.is_none() { start = Some(y as u32); }
+            if start.is_none() {
+                start = Some(y as u32);
+            }
         } else if let Some(st) = start.take() {
-            if y as u32 - st >= h / 50 { bands.push((st, y as u32)); }
+            if y as u32 - st >= h / 50 {
+                bands.push((st, y as u32));
+            }
         }
     }
-    if let Some(st) = start { bands.push((st, h)); }
+    if let Some(st) = start {
+        bands.push((st, h));
+    }
 
     println!("\ncolored bands (y px / y% / height%):");
     for (s, e) in &bands {
@@ -72,20 +80,26 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     // --- Header column centers via existing dark-text detector for reference.
     let off = ocr::preprocess::detect_column_offset(&board);
-    println!("\ndetect_column_offset returned: {off:.4} ({} px)", (off * w as f64) as i32);
+    println!(
+        "\ndetect_column_offset returned: {off:.4} ({} px)",
+        (off * w as f64) as i32
+    );
 
     // --- Player-row brightness: mean at center thin slice, multiple x zones ---
     let team_size = detect::hero_portrait::detect_team_size(&board);
     {
         let rgb = board.to_rgb8();
         let (bw, bh) = rgb.dimensions();
-        let row_height = match team_size { 6 => bh * 58 / 1000, _ => bh * 7 / 100 };
+        let row_height = match team_size {
+            6 => bh * 58 / 1000,
+            _ => bh * 7 / 100,
+        };
         let start_y = bh * 12 / 100;
         // Probe multiple x windows to find where the signal lives
         let zones: &[(&str, u32, u32)] = &[
-            ("10-30%", bw*10/100, bw*30/100),
-            ("34-50%", bw*34/100, bw*50/100),
-            ("10-50%", bw*10/100, bw*50/100),
+            ("10-30%", bw * 10 / 100, bw * 30 / 100),
+            ("34-50%", bw * 34 / 100, bw * 50 / 100),
+            ("10-50%", bw * 10 / 100, bw * 50 / 100),
         ];
         // Thin-strip (center ±15% row_h) + brightness-filtered [15..90] at 34-50%.
         // Thin strip avoids separator borders; filter clips bright icons/title-text.
@@ -94,16 +108,31 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         for row in 0..team_size as u32 {
             let center = start_y + row * row_height + row_height / 2;
             let half = (row_height * 15 / 100).max(4);
-            let y0 = center.saturating_sub(half); let y1 = (center + half).min(bh);
-            let mut total = 0u64; let mut count = 0u64; let mut all_count = 0u64;
-            for y in y0..y1 { for x in x0_f..x1_f {
-                let [r,g,b] = rgb.get_pixel(x,y).0;
-                let br = (r as u32 + g as u32 + b as u32) / 3;
-                all_count += 1;
-                if br >= 15 && br <= 90 { total += br as u64; count += 1; }
-            } }
-            let fm = if count > 0 { total as f64 / count as f64 } else { 0.0 };
-            println!("  row {row}: filtered_mean={fm:.1} kept={}/{all_count}", count);
+            let y0 = center.saturating_sub(half);
+            let y1 = (center + half).min(bh);
+            let mut total = 0u64;
+            let mut count = 0u64;
+            let mut all_count = 0u64;
+            for y in y0..y1 {
+                for x in x0_f..x1_f {
+                    let [r, g, b] = rgb.get_pixel(x, y).0;
+                    let br = (r as u32 + g as u32 + b as u32) / 3;
+                    all_count += 1;
+                    if br >= 15 && br <= 90 {
+                        total += br as u64;
+                        count += 1;
+                    }
+                }
+            }
+            let fm = if count > 0 {
+                total as f64 / count as f64
+            } else {
+                0.0
+            };
+            println!(
+                "  row {row}: filtered_mean={fm:.1} kept={}/{all_count}",
+                count
+            );
         }
         for &(label, x0, x1) in zones {
             println!("\nteam1 row brightness {label} [center ±15% row_h]:");
@@ -112,12 +141,20 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 let half = (row_height * 15 / 100).max(4);
                 let y0 = center.saturating_sub(half);
                 let y1 = (center + half).min(bh);
-                let mut total = 0u64; let mut count = 0u64;
-                for y in y0..y1 { for x in x0..x1 {
-                    let [r,g,b] = rgb.get_pixel(x,y).0;
-                    total += (r as u64 + g as u64 + b as u64) / 3; count += 1;
-                } }
-                let mean = if count > 0 { total as f64 / count as f64 } else { 0.0 };
+                let mut total = 0u64;
+                let mut count = 0u64;
+                for y in y0..y1 {
+                    for x in x0..x1 {
+                        let [r, g, b] = rgb.get_pixel(x, y).0;
+                        total += (r as u64 + g as u64 + b as u64) / 3;
+                        count += 1;
+                    }
+                }
+                let mean = if count > 0 {
+                    total as f64 / count as f64
+                } else {
+                    0.0
+                };
                 println!("  row {row}: mean={mean:.1}");
             }
         }
@@ -160,12 +197,21 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         p.sort_by(|a, b| a.partial_cmp(b).unwrap());
         p[p.len() / 2] / h as f64
     };
-    let team_size = if median_pitch > 0.0 && median_pitch < 0.078 { 6 } else { 5 };
+    let team_size = if median_pitch > 0.0 && median_pitch < 0.078 {
+        6
+    } else {
+        5
+    };
     println!(
         "\nrow dips (y%): {:?}",
-        dips.iter().map(|&d| (d as f64 / h as f64 * 100.0).round() / 1.0).collect::<Vec<_>>()
+        dips.iter()
+            .map(|&d| (d as f64 / h as f64 * 100.0).round() / 1.0)
+            .collect::<Vec<_>>()
     );
-    println!("median pitch: {:.2}% -> team_size = {team_size}", median_pitch * 100.0);
+    println!(
+        "median pitch: {:.2}% -> team_size = {team_size}",
+        median_pitch * 100.0
+    );
 
     Ok(())
 }
