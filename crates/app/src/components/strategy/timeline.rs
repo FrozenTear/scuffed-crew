@@ -6,14 +6,14 @@ const TIMELINE_CSS: &str = r#"
     .timeline-panel {
         display: flex;
         flex-direction: column;
-        background: var(--bg-surface);
+        background: var(--surface);
         border-top: 1px solid var(--border);
         overflow-y: auto;
     }
     .timeline-panel .panel-title {
-        font-family: var(--font-display);
+        font-family: var(--font-head);
         font-size: 0.75rem;
-        color: var(--text-muted);
+        color: var(--text-3);
         text-transform: uppercase;
         letter-spacing: 0.08em;
         padding: 0.75rem 0.75rem 0.5rem;
@@ -35,7 +35,7 @@ const TIMELINE_CSS: &str = r#"
         transition: background 0.12s;
     }
     .timeline-phase:hover {
-        background: var(--bg-card);
+        background: var(--surface-2);
     }
     .timeline-phase.active {
         background: var(--accent-soft);
@@ -53,12 +53,12 @@ const TIMELINE_CSS: &str = r#"
         width: 10px;
         height: 10px;
         border-radius: 50%;
-        background: var(--text-muted);
+        background: var(--text-3);
         flex-shrink: 0;
     }
     .timeline-phase.active .phase-dot {
         background: var(--accent);
-        box-shadow: 0 0 6px var(--accent-glow);
+        box-shadow: 0 0 6px var(--accent-soft);
     }
     .phase-line {
         width: 2px;
@@ -81,16 +81,16 @@ const TIMELINE_CSS: &str = r#"
     }
     .phase-name {
         font-size: 0.8rem;
-        color: var(--text-secondary);
+        color: var(--text-2);
     }
     .timeline-phase.active .phase-name {
-        color: var(--accent-bright);
+        color: var(--accent);
         font-weight: 600;
     }
     .phase-timestamp {
         font-size: 0.65rem;
-        color: var(--text-muted);
-        background: var(--bg-card);
+        color: var(--text-3);
+        background: var(--surface-2);
         padding: 0.1rem 0.3rem;
         border-radius: 3px;
     }
@@ -101,7 +101,7 @@ const TIMELINE_CSS: &str = r#"
     .phase-action-btn {
         background: none;
         border: none;
-        color: var(--text-muted);
+        color: var(--text-3);
         font-size: 0.75rem;
         cursor: pointer;
         padding: 0.1rem 0.3rem;
@@ -109,8 +109,8 @@ const TIMELINE_CSS: &str = r#"
         transition: color 0.12s, background 0.12s;
     }
     .phase-action-btn:hover {
-        color: #ef5350;
-        background: rgba(239, 83, 80, 0.1);
+        color: var(--danger);
+        background: color-mix(in srgb, var(--danger) 10%, transparent);
     }
 
     /* ---- Add phase form ---- */
@@ -122,10 +122,10 @@ const TIMELINE_CSS: &str = r#"
     }
     .add-phase-form input {
         flex: 1;
-        background: var(--bg-card);
+        background: var(--surface-2);
         border: 1px solid var(--border);
         border-radius: 4px;
-        color: var(--text-bright);
+        color: var(--text);
         font-size: 0.8rem;
         padding: 0.3rem 0.4rem;
         outline: none;
@@ -139,7 +139,7 @@ const TIMELINE_CSS: &str = r#"
         border: none;
         border-radius: 4px;
         background: var(--accent);
-        color: #fff;
+        color: var(--accent-fg);
         font-size: 0.85rem;
         font-weight: 700;
         cursor: pointer;
@@ -166,18 +166,18 @@ const TIMELINE_CSS: &str = r#"
         border: 1px solid var(--border);
         border-radius: 4px;
         background: none;
-        color: var(--text-secondary);
+        color: var(--text-2);
         font-size: 0.75rem;
         cursor: pointer;
         transition: background 0.12s, color 0.12s;
     }
     .tl-ctrl-btn:hover {
-        background: var(--bg-card);
-        color: var(--text-bright);
+        background: var(--surface-2);
+        color: var(--text);
     }
     .tl-ctrl-btn.playing {
         background: var(--accent-soft);
-        color: var(--accent-bright);
+        color: var(--accent);
         border-color: var(--accent);
     }
 
@@ -185,7 +185,7 @@ const TIMELINE_CSS: &str = r#"
     .timeline-progress {
         text-align: center;
         font-size: 0.7rem;
-        color: var(--text-muted);
+        color: var(--text-3);
         padding: 0.35rem;
     }
 
@@ -195,7 +195,7 @@ const TIMELINE_CSS: &str = r#"
     }
     .timeline-info .hint {
         font-size: 0.7rem;
-        color: var(--text-muted);
+        color: var(--text-3);
         opacity: 0.7;
         margin: 0;
     }

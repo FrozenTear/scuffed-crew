@@ -48,7 +48,7 @@ const STRATEGY_CSS: &str = r#"
 #[component]
 pub fn StrategyLayout() -> Element {
     rsx! {
-        div { "data-theme": "strategy",
+        div { "data-accent": "strategy",
             style { {STRATEGY_CSS} }
             nav { class: "strategy-nav",
                 span { class: "brand", "Strategy Planner" }

@@ -23,6 +23,11 @@ use scuffed_types::strategy::{
 };
 
 use crate::canvas::tile_manager::{SharedTileManager, create_tile_manager};
+use crate::theme::tokens::{
+    CANVAS_BADGE_BG, CANVAS_BG, CANVAS_GRID_LOADING, CANVAS_MARKER_BORDER, CANVAS_SELECTION_COLOR,
+    CANVAS_TEXT_LOADING, CANVAS_TILE_PLACEHOLDER, CANVAS_WHITE, HP_GLOW, HP_LARGE_FILL,
+    HP_LARGE_STROKE, HP_SMALL_FILL, HP_SMALL_STROKE, STRATEGY_ACCENT,
+};
 
 // =============================================================================
 // CSS
@@ -34,7 +39,7 @@ pub const MAP_CANVAS_CSS: &str = r#"
         width: 100%;
         height: 100%;
         overflow: hidden;
-        background: #1a1a2e;
+        background: var(--bg);
     }
     .map-canvas {
         position: absolute;
@@ -63,12 +68,12 @@ pub const MAP_CANVAS_CSS: &str = r#"
         display: flex;
         align-items: center;
         justify-content: center;
-        background: rgba(10, 10, 20, 0.85);
+        background: var(--overlay);
         z-index: 10;
     }
     .map-selector-content {
-        background: var(--bg-surface, #1e1e30);
-        border: 1px solid var(--border, #333);
+        background: var(--surface);
+        border: 1px solid var(--border);
         border-radius: 12px;
         padding: 2rem;
         max-width: 600px;
@@ -77,13 +82,13 @@ pub const MAP_CANVAS_CSS: &str = r#"
         overflow-y: auto;
     }
     .map-selector-content h2 {
-        font-family: var(--font-display, sans-serif);
+        font-family: var(--font-head);
         font-size: 1.5rem;
-        color: var(--text-bright, #fff);
+        color: var(--text);
         margin-bottom: 0.5rem;
     }
     .map-selector-content p {
-        color: var(--text-secondary, #999);
+        color: var(--text-2);
         margin-bottom: 1.5rem;
     }
     .map-selector-modes {
@@ -92,14 +97,14 @@ pub const MAP_CANVAS_CSS: &str = r#"
         gap: 0.5rem;
     }
     .map-selector-mode-group {
-        border: 1px solid var(--border, #333);
+        border: 1px solid var(--border);
         border-radius: 8px;
         overflow: hidden;
     }
     .map-selector-mode-title {
         padding: 0.6rem 1rem;
-        background: var(--bg-card, #252540);
-        color: var(--text-bright, #fff);
+        background: var(--surface-2);
+        color: var(--text);
         font-weight: 600;
         cursor: pointer;
         display: flex;
@@ -108,8 +113,8 @@ pub const MAP_CANVAS_CSS: &str = r#"
     }
     .map-count {
         font-size: 0.8rem;
-        color: var(--text-muted, #666);
-        background: var(--bg-surface, #1e1e30);
+        color: var(--text-3);
+        background: var(--surface);
         padding: 0.1rem 0.5rem;
         border-radius: 10px;
     }
@@ -125,14 +130,14 @@ pub const MAP_CANVAS_CSS: &str = r#"
         text-align: left;
         background: transparent;
         border: none;
-        color: var(--text-secondary, #999);
+        color: var(--text-2);
         cursor: pointer;
         transition: background 0.15s, color 0.15s;
     }
     .map-selector-btn:hover,
     .map-selector-btn-submap:hover {
-        background: var(--bg-card, #252540);
-        color: var(--text-bright, #fff);
+        background: var(--surface-2);
+        color: var(--text);
     }
     .map-selector-btn-submap {
         padding-left: 2rem;
@@ -144,7 +149,7 @@ pub const MAP_CANVAS_CSS: &str = r#"
     .map-selector-expand-hint {
         margin-left: 0.5rem;
         font-size: 0.8rem;
-        color: var(--text-muted, #666);
+        color: var(--text-3);
     }
     .map-selector-submaps {
         padding-left: 0.5rem;
@@ -372,7 +377,7 @@ pub fn MapCanvas(
             ctx.set_image_smoothing_enabled(false);
 
             // Clear canvas
-            ctx.set_fill_style_str("#1a1a2e");
+            ctx.set_fill_style_str(CANVAS_BG);
             ctx.fill_rect(0.0, 0.0, canvas.width() as f64, canvas.height() as f64);
 
             ctx.save();
@@ -406,7 +411,7 @@ pub fn MapCanvas(
                     }
                 } else {
                     // Placeholder grid while loading
-                    ctx.set_stroke_style_str("#333");
+                    ctx.set_stroke_style_str(CANVAS_GRID_LOADING);
                     ctx.set_line_width(1.0);
 
                     for x in (0..5000i32).step_by(100) {
@@ -422,7 +427,7 @@ pub fn MapCanvas(
                         ctx.stroke();
                     }
 
-                    ctx.set_fill_style_str("#666");
+                    ctx.set_fill_style_str(CANVAS_TEXT_LOADING);
                     ctx.set_font("24px sans-serif");
                     let _ = ctx.fill_text("Loading map...", 20.0, 40.0);
                 }
@@ -576,7 +581,7 @@ pub fn MapCanvas(
                 .collect();
 
             if let Some(element) = visible.iter().find(|e| e.id == sel) {
-                ctx.set_stroke_style_str("#00ff00");
+                ctx.set_stroke_style_str(CANVAS_SELECTION_COLOR);
                 ctx.set_line_width(2.0);
                 let dash = Array::of2(&4.0.into(), &4.0.into());
                 let _ = ctx.set_line_dash(&dash);
@@ -908,7 +913,7 @@ pub fn MapCanvas(
                         div { class: "map-selector-modes",
                             // Map selection handled by parent component's map picker
                             p {
-                                style: "color: var(--text-muted); text-align: center; padding: 2rem;",
+                                style: "color: var(--text-3); text-align: center; padding: 2rem;",
                                 "Use the status bar or toolbar to select a map."
                             }
                         }
@@ -1021,7 +1026,7 @@ fn render_background_tiles(
                     );
                     ctx.set_global_alpha(1.0);
                 } else {
-                    ctx.set_fill_style_str("#2a2a3e");
+                    ctx.set_fill_style_str(CANVAS_TILE_PLACEHOLDER);
                     ctx.fill_rect(draw_x, draw_y, draw_w, draw_h);
                 }
             }
@@ -1036,7 +1041,7 @@ fn render_background_tiles(
                     tile_img, draw_x, draw_y, draw_w, draw_h,
                 );
             } else if !is_overlay_mode {
-                ctx.set_fill_style_str("#2a2a3e");
+                ctx.set_fill_style_str(CANVAS_TILE_PLACEHOLDER);
                 ctx.fill_rect(draw_x, draw_y, draw_w, draw_h);
             }
         }
@@ -1194,7 +1199,7 @@ fn draw_element(
                 ctx.set_stroke_style_str(&color);
                 ctx.set_line_width(3.0);
             } else {
-                ctx.set_stroke_style_str("#fff");
+                ctx.set_stroke_style_str(CANVAS_MARKER_BORDER);
                 ctx.set_line_width(2.0);
             }
             ctx.begin_path();
@@ -1203,7 +1208,7 @@ fn draw_element(
 
             // Label (only for plain markers)
             if !drew_portrait && let Some(ref label) = element.label {
-                ctx.set_fill_style_str("#fff");
+                ctx.set_fill_style_str(CANVAS_WHITE);
                 ctx.set_font("14px sans-serif");
                 ctx.set_text_align("center");
                 let _ = ctx.fill_text(label, x, y + 5.0);
@@ -1338,7 +1343,7 @@ fn draw_element_number(ctx: &CanvasRenderingContext2d, element: &StrategyElement
     let text = number.to_string();
 
     // Badge background
-    ctx.set_fill_style_str("rgba(0, 0, 0, 0.7)");
+    ctx.set_fill_style_str(CANVAS_BADGE_BG);
     ctx.begin_path();
     let _ = ctx.arc(
         badge_x,
@@ -1350,12 +1355,12 @@ fn draw_element_number(ctx: &CanvasRenderingContext2d, element: &StrategyElement
     ctx.fill();
 
     // Badge border (strategy accent color)
-    ctx.set_stroke_style_str("#ff6a00");
+    ctx.set_stroke_style_str(STRATEGY_ACCENT);
     ctx.set_line_width(1.5);
     ctx.stroke();
 
     // Number text
-    ctx.set_fill_style_str("#fff");
+    ctx.set_fill_style_str(CANVAS_WHITE);
     ctx.set_font("bold 10px sans-serif");
     ctx.set_text_align("center");
     ctx.set_text_baseline("middle");
@@ -1406,12 +1411,12 @@ fn draw_health_packs(
         };
 
         let (radius, fill_color, stroke_color) = match pack.size {
-            HealthPackSize::Small => (8.0, "#ffeb3b", "#ffc107"),
-            HealthPackSize::Large => (12.0, "#ff9800", "#f57c00"),
+            HealthPackSize::Small => (8.0, HP_SMALL_FILL, HP_SMALL_STROKE),
+            HealthPackSize::Large => (12.0, HP_LARGE_FILL, HP_LARGE_STROKE),
         };
 
         // Outer glow
-        ctx.set_shadow_color("rgba(255, 255, 255, 0.5)");
+        ctx.set_shadow_color(HP_GLOW);
         ctx.set_shadow_blur(6.0);
 
         // Circle background
@@ -1430,7 +1435,7 @@ fn draw_health_packs(
 
         // Cross symbol
         let cross_size = radius * 0.6;
-        ctx.set_stroke_style_str("#fff");
+        ctx.set_stroke_style_str(CANVAS_WHITE);
         ctx.set_line_width(2.5);
         ctx.set_line_cap("round");
 

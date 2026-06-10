@@ -6,6 +6,8 @@
 use scuffed_types::{Color, Position};
 use web_sys::CanvasRenderingContext2d;
 
+use crate::theme::tokens::CANVAS_BG;
+
 use super::layers::LayerManager;
 
 /// Canvas renderer for strategy visualization
@@ -60,7 +62,7 @@ impl CanvasRenderer {
     }
 
     pub fn clear(&self) {
-        self.ctx.set_fill_style_str("#1a1a2e");
+        self.ctx.set_fill_style_str(CANVAS_BG);
         self.ctx.fill_rect(0.0, 0.0, self.width, self.height);
     }
 

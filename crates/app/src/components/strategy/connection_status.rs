@@ -27,24 +27,24 @@ const CONNECTION_STATUS_CSS: &str = r#"
 }
 
 .connection-status--connected {
-    background-color: rgba(34, 197, 94, 0.15);
-    color: #22c55e;
+    background-color: color-mix(in srgb, var(--ok) 15%, transparent);
+    color: var(--ok);
 }
 
 .connection-status--connecting {
-    background-color: rgba(234, 179, 8, 0.15);
-    color: #eab308;
+    background-color: color-mix(in srgb, var(--warn) 15%, transparent);
+    color: var(--warn);
 }
 
 .connection-status--reconnecting {
-    background-color: rgba(249, 115, 22, 0.15);
-    color: #f97316;
+    background-color: color-mix(in srgb, var(--accent) 15%, transparent);
+    color: var(--accent);
 }
 
 .connection-status--disconnected,
 .connection-status--error {
-    background-color: rgba(239, 68, 68, 0.15);
-    color: #ef4444;
+    background-color: color-mix(in srgb, var(--danger) 15%, transparent);
+    color: var(--danger);
 }
 
 .connection-status__dot {
@@ -56,22 +56,22 @@ const CONNECTION_STATUS_CSS: &str = r#"
 }
 
 .connection-status--connected .connection-status__dot {
-    background-color: #22c55e;
+    background-color: var(--ok);
 }
 
 .connection-status--connecting .connection-status__dot {
-    background-color: #eab308;
+    background-color: var(--warn);
     animation: connection-pulse 1.5s ease-in-out infinite;
 }
 
 .connection-status--reconnecting .connection-status__dot {
-    background-color: #f97316;
+    background-color: var(--accent);
     animation: connection-pulse 1s ease-in-out infinite;
 }
 
 .connection-status--disconnected .connection-status__dot,
 .connection-status--error .connection-status__dot {
-    background-color: #ef4444;
+    background-color: var(--danger);
 }
 
 .connection-status__retry {
@@ -88,7 +88,7 @@ const CONNECTION_STATUS_CSS: &str = r#"
 }
 
 .connection-status__retry:hover {
-    background-color: rgba(239, 68, 68, 0.2);
+    background-color: color-mix(in srgb, var(--danger) 20%, transparent);
 }
 
 @keyframes connection-pulse {

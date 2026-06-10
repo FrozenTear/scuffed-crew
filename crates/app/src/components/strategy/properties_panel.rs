@@ -6,15 +6,15 @@ const PROPERTIES_CSS: &str = r#"
     .props-panel {
         display: flex;
         flex-direction: column;
-        background: var(--bg-surface);
+        background: var(--surface);
         border-left: 1px solid var(--border);
         width: 240px;
         overflow-y: auto;
     }
     .props-title {
-        font-family: var(--font-display);
+        font-family: var(--font-head);
         font-size: 0.75rem;
-        color: var(--text-muted);
+        color: var(--text-3);
         text-transform: uppercase;
         letter-spacing: 0.08em;
         padding: 0.75rem 0.75rem 0.5rem;
@@ -26,13 +26,13 @@ const PROPERTIES_CSS: &str = r#"
         text-align: center;
     }
     .props-empty p {
-        color: var(--text-muted);
+        color: var(--text-3);
         font-size: 0.8rem;
         margin: 0.25rem 0;
     }
     .props-empty .hint {
         font-size: 0.7rem;
-        color: var(--text-muted);
+        color: var(--text-3);
         opacity: 0.7;
     }
     .props-content {
@@ -47,21 +47,21 @@ const PROPERTIES_CSS: &str = r#"
     .prop-label {
         display: block;
         font-size: 0.65rem;
-        color: var(--text-muted);
+        color: var(--text-3);
         text-transform: uppercase;
         letter-spacing: 0.06em;
         margin-bottom: 0.3rem;
     }
     .prop-value {
         font-size: 0.8rem;
-        color: var(--text-secondary);
+        color: var(--text-2);
     }
     .prop-input {
         width: 100%;
-        background: var(--bg-card);
+        background: var(--surface-2);
         border: 1px solid var(--border);
         border-radius: 4px;
-        color: var(--text-bright);
+        color: var(--text);
         font-size: 0.8rem;
         padding: 0.3rem 0.4rem;
         outline: none;
@@ -91,8 +91,8 @@ const PROPERTIES_CSS: &str = r#"
         transform: scale(1.15);
     }
     .prop-color-btn.active {
-        border-color: var(--accent-bright);
-        box-shadow: 0 0 0 2px var(--accent-glow);
+        border-color: var(--accent);
+        box-shadow: 0 0 0 2px var(--accent-soft);
     }
 
     /* ---- Layer controls ---- */
@@ -104,16 +104,16 @@ const PROPERTIES_CSS: &str = r#"
         flex: 1;
         padding: 0.25rem 0.4rem;
         font-size: 0.7rem;
-        background: var(--bg-card);
+        background: var(--surface-2);
         border: 1px solid var(--border);
         border-radius: 4px;
-        color: var(--text-secondary);
+        color: var(--text-2);
         cursor: pointer;
         transition: background 0.12s, color 0.12s;
     }
     .prop-layer-controls button:hover {
-        background: var(--bg-elevated, var(--bg-card));
-        color: var(--text-bright);
+        background: var(--surface-2);
+        color: var(--text);
     }
 
     /* ---- Actions ---- */
@@ -123,16 +123,16 @@ const PROPERTIES_CSS: &str = r#"
     .prop-delete-btn {
         width: 100%;
         padding: 0.35rem;
-        border: 1px solid #ef5350;
+        border: 1px solid var(--danger);
         border-radius: 4px;
-        background: rgba(239, 83, 80, 0.1);
-        color: #ef5350;
+        background: color-mix(in srgb, var(--danger) 10%, transparent);
+        color: var(--danger);
         font-size: 0.8rem;
         cursor: pointer;
         transition: background 0.12s;
     }
     .prop-delete-btn:hover {
-        background: rgba(239, 83, 80, 0.25);
+        background: color-mix(in srgb, var(--danger) 25%, transparent);
     }
 "#;
 

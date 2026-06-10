@@ -5,13 +5,13 @@ const TEAM_PANEL_CSS: &str = r#"
     .team-panel {
         display: flex;
         flex-direction: column;
-        background: var(--bg-surface);
+        background: var(--surface);
         overflow-y: auto;
     }
     .team-panel .panel-title {
-        font-family: var(--font-display);
+        font-family: var(--font-head);
         font-size: 0.75rem;
-        color: var(--text-muted);
+        color: var(--text-3);
         text-transform: uppercase;
         letter-spacing: 0.08em;
         padding: 0.75rem 0.75rem 0.5rem;
@@ -32,18 +32,18 @@ const TEAM_PANEL_CSS: &str = r#"
         border: 1px solid var(--border);
         border-radius: 4px;
         background: none;
-        color: var(--text-secondary);
+        color: var(--text-2);
         font-size: 0.8rem;
         font-weight: 600;
         cursor: pointer;
         transition: background 0.12s, color 0.12s, border-color 0.12s;
     }
     .format-btn:hover {
-        background: var(--bg-card);
+        background: var(--surface-2);
     }
     .format-btn.active {
         background: var(--accent-soft);
-        color: var(--accent-bright);
+        color: var(--accent);
         border-color: var(--accent);
     }
 
@@ -62,7 +62,7 @@ const TEAM_PANEL_CSS: &str = r#"
     }
     .slot-label {
         font-size: 0.7rem;
-        color: var(--text-muted);
+        color: var(--text-3);
         text-transform: uppercase;
         letter-spacing: 0.04em;
         min-width: 55px;
@@ -74,7 +74,7 @@ const TEAM_PANEL_CSS: &str = r#"
     }
     .slot-empty {
         font-size: 0.75rem;
-        color: var(--text-muted);
+        color: var(--text-3);
         font-style: italic;
     }
 
@@ -90,7 +90,7 @@ const TEAM_PANEL_CSS: &str = r#"
         height: 24px;
         border-radius: 50%;
         object-fit: cover;
-        background: var(--bg-card);
+        background: var(--surface-2);
     }
     .slot-hero-name {
         flex: 1;
@@ -99,14 +99,14 @@ const TEAM_PANEL_CSS: &str = r#"
     .slot-remove-btn {
         background: none;
         border: none;
-        color: var(--text-muted);
+        color: var(--text-3);
         font-size: 0.85rem;
         cursor: pointer;
         padding: 0 0.2rem;
         transition: color 0.12s;
     }
     .slot-remove-btn:hover {
-        color: #ef5350;
+        color: var(--danger);
     }
 
     /* ---- Actions ---- */
@@ -119,14 +119,14 @@ const TEAM_PANEL_CSS: &str = r#"
         border: 1px solid var(--border);
         border-radius: 4px;
         background: none;
-        color: var(--text-secondary);
+        color: var(--text-2);
         font-size: 0.75rem;
         cursor: pointer;
         transition: background 0.12s, color 0.12s;
     }
     .team-clear-btn:hover {
-        background: var(--bg-card);
-        color: var(--text-bright);
+        background: var(--surface-2);
+        color: var(--text);
     }
 "#;
 

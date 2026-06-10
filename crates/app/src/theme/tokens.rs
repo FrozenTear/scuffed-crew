@@ -42,6 +42,8 @@ html, body {{
   background: var(--bg); color: var(--text);
   font-family: var(--font-body); font-size: var(--text-base);
 }}
+
+[data-accent="strategy"] {{ --accent: #ff7a1a; --accent-soft: rgba(255,122,26,.16); }}
 "#,
         accent_d = brand.accent_dark,
         accent_l = brand.accent_light,
@@ -49,6 +51,22 @@ html, body {{
         soft_l = brand.accent_soft_light,
     )
 }
+
+/// Concrete colors for the strategy canvas (2D context needs literal strings, not CSS vars).
+pub const CANVAS_BG: &str = "#14141c";
+pub const CANVAS_TILE_PLACEHOLDER: &str = "#2a2a3e";
+pub const CANVAS_GRID_LOADING: &str = "#333";
+pub const CANVAS_TEXT_LOADING: &str = "#666";
+pub const STRATEGY_ACCENT: &str = "#ff7a1a";
+pub const CANVAS_SELECTION_COLOR: &str = "#00ff00";
+pub const CANVAS_BADGE_BG: &str = "rgba(0,0,0,0.7)";
+pub const CANVAS_WHITE: &str = "#fff";
+pub const HP_SMALL_FILL: &str = "#ffeb3b";
+pub const HP_SMALL_STROKE: &str = "#ffc107";
+pub const HP_LARGE_FILL: &str = "#ff9800";
+pub const HP_LARGE_STROKE: &str = "#f57c00";
+pub const HP_GLOW: &str = "rgba(255,255,255,0.5)";
+pub const CANVAS_MARKER_BORDER: &str = "#fff";
 
 /// Convenience for the app root.
 pub fn theme_css_current() -> String {
@@ -70,5 +88,6 @@ mod tests {
         assert!(css.contains("--bg:"));
         assert!(css.contains("--text-2:"));
         assert!(css.contains("--space-1:"));
+        assert!(css.contains("[data-accent=\"strategy\"]"));
     }
 }

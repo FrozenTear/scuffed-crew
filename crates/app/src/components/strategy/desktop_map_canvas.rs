@@ -511,7 +511,7 @@ pub fn DesktopMapCanvas(
                         p { "Choose a map to start creating your strategy" }
                         div { class: "map-selector-modes",
                             p {
-                                style: "color: var(--text-muted); text-align: center; padding: 2rem;",
+                                style: "color: var(--text-3); text-align: center; padding: 2rem;",
                                 "Use the status bar or toolbar to select a map."
                             }
                         }

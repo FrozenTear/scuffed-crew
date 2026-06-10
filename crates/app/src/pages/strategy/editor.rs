@@ -100,8 +100,8 @@ const EDITOR_CSS: &str = r#"
         display: flex;
         flex-direction: column;
         height: 100vh;
-        background: var(--bg-base, #0d0d1a);
-        color: var(--text-primary, #e0e0e0);
+        background: var(--bg);
+        color: var(--text);
         overflow: hidden;
     }
 
@@ -117,8 +117,8 @@ const EDITOR_CSS: &str = r#"
         flex-direction: column;
         width: 260px;
         min-width: 260px;
-        background: var(--bg-surface, #1a1a2e);
-        border-color: var(--border, #2a2a3e);
+        background: var(--surface);
+        border-color: var(--border);
         transition: width 0.2s ease, min-width 0.2s ease;
         overflow: hidden;
     }
@@ -127,10 +127,10 @@ const EDITOR_CSS: &str = r#"
         min-width: 36px;
     }
     .editor-sidebar-left {
-        border-right: 1px solid var(--border, #2a2a3e);
+        border-right: 1px solid var(--border);
     }
     .editor-sidebar-right {
-        border-left: 1px solid var(--border, #2a2a3e);
+        border-left: 1px solid var(--border);
     }
 
     .sidebar-header {
@@ -138,13 +138,13 @@ const EDITOR_CSS: &str = r#"
         align-items: center;
         justify-content: space-between;
         padding: 0.5rem;
-        border-bottom: 1px solid var(--border, #2a2a3e);
+        border-bottom: 1px solid var(--border);
         min-height: 36px;
     }
     .sidebar-title {
         font-size: 0.8rem;
         font-weight: 600;
-        color: var(--text-bright, #fff);
+        color: var(--text);
         text-transform: uppercase;
         letter-spacing: 0.05em;
         white-space: nowrap;
@@ -156,7 +156,7 @@ const EDITOR_CSS: &str = r#"
     .sidebar-collapse-btn {
         background: none;
         border: none;
-        color: var(--text-muted, #666);
+        color: var(--text-3);
         cursor: pointer;
         padding: 0.2rem 0.4rem;
         font-size: 0.7rem;
@@ -165,8 +165,8 @@ const EDITOR_CSS: &str = r#"
         flex-shrink: 0;
     }
     .sidebar-collapse-btn:hover {
-        background: var(--bg-card, #252540);
-        color: var(--text-bright, #fff);
+        background: var(--surface-2);
+        color: var(--text);
     }
     .sidebar-content {
         flex: 1;
@@ -194,8 +194,8 @@ const EDITOR_CSS: &str = r#"
 
     /* Bottom panel (element list) */
     .element-list-wrapper {
-        border-top: 1px solid var(--border, #2a2a3e);
-        background: var(--bg-surface, #1a1a2e);
+        border-top: 1px solid var(--border);
+        background: var(--surface);
         max-height: 200px;
         overflow-y: auto;
         transition: max-height 0.2s ease;
@@ -210,16 +210,16 @@ const EDITOR_CSS: &str = r#"
         width: 100%;
         padding: 0.15rem;
         text-align: center;
-        background: var(--bg-card, #252540);
+        background: var(--surface-2);
         border: none;
-        color: var(--text-muted, #666);
+        color: var(--text-3);
         cursor: pointer;
         font-size: 0.65rem;
         transition: background 0.15s, color 0.15s;
     }
     .panel-collapse-btn:hover {
-        background: var(--border, #2a2a3e);
-        color: var(--text-bright, #fff);
+        background: var(--border);
+        color: var(--text);
     }
 
     /* Element list items */
@@ -234,19 +234,19 @@ const EDITOR_CSS: &str = r#"
         border-radius: 4px;
         cursor: pointer;
         font-size: 0.8rem;
-        color: var(--text-secondary, #999);
+        color: var(--text-2);
         transition: background 0.1s;
     }
     .element-list-item:hover {
-        background: var(--bg-card, #252540);
+        background: var(--surface-2);
     }
     .element-list-item.selected {
-        background: rgba(255, 106, 0, 0.15);
-        color: var(--text-bright, #fff);
+        background: var(--accent-soft);
+        color: var(--text);
     }
     .element-list-item .el-number {
         font-size: 0.7rem;
-        color: var(--text-muted, #666);
+        color: var(--text-3);
         width: 1.5em;
         text-align: right;
     }
@@ -254,8 +254,8 @@ const EDITOR_CSS: &str = r#"
         font-size: 0.7rem;
         padding: 0.1rem 0.35rem;
         border-radius: 3px;
-        background: rgba(255, 255, 255, 0.05);
-        color: #ff6a00;
+        background: var(--accent-soft);
+        color: var(--accent);
         text-transform: uppercase;
         letter-spacing: 0.04em;
     }
@@ -273,10 +273,10 @@ const EDITOR_CSS: &str = r#"
         gap: 1rem;
         padding: 0 0.75rem;
         height: 28px;
-        background: var(--bg-surface, #1a1a2e);
-        border-top: 1px solid var(--border, #2a2a3e);
+        background: var(--surface);
+        border-top: 1px solid var(--border);
         font-size: 0.75rem;
-        color: var(--text-muted, #666);
+        color: var(--text-3);
     }
     .status-item {
         white-space: nowrap;
@@ -284,21 +284,21 @@ const EDITOR_CSS: &str = r#"
     .status-map-link {
         background: none;
         border: none;
-        color: var(--text-secondary, #999);
+        color: var(--text-2);
         cursor: pointer;
         font-size: 0.75rem;
         padding: 0;
         transition: color 0.15s;
     }
     .status-map-link:hover {
-        color: #ff6a00;
+        color: var(--accent);
     }
     .status-item.unsaved {
-        color: #ff6a00;
+        color: var(--accent);
         font-weight: 600;
     }
     .status-item.collaborators {
-        color: var(--text-secondary, #999);
+        color: var(--text-2);
     }
 
     /* Map picker modal */
@@ -308,15 +308,15 @@ const EDITOR_CSS: &str = r#"
         left: 0;
         width: 100%;
         height: 100%;
-        background: rgba(0, 0, 0, 0.7);
+        background: var(--overlay);
         display: flex;
         align-items: center;
         justify-content: center;
         z-index: 100;
     }
     .map-picker-dialog {
-        background: var(--bg-surface, #1e1e30);
-        border: 1px solid var(--border, #333);
+        background: var(--surface);
+        border: 1px solid var(--border);
         border-radius: 12px;
         max-width: 600px;
         width: 90%;
@@ -329,24 +329,24 @@ const EDITOR_CSS: &str = r#"
         align-items: center;
         justify-content: space-between;
         padding: 1rem 1.5rem;
-        border-bottom: 1px solid var(--border, #333);
+        border-bottom: 1px solid var(--border);
     }
     .map-picker-header h3 {
         margin: 0;
-        color: var(--text-bright, #fff);
-        font-family: var(--font-display, sans-serif);
+        color: var(--text);
+        font-family: var(--font-head);
     }
     .map-picker-close {
         background: none;
         border: none;
-        color: var(--text-muted, #666);
+        color: var(--text-3);
         font-size: 1.2rem;
         cursor: pointer;
         padding: 0.25rem;
         transition: color 0.15s;
     }
     .map-picker-close:hover {
-        color: var(--text-bright, #fff);
+        color: var(--text);
     }
     .map-picker-content {
         padding: 1rem;
@@ -354,11 +354,11 @@ const EDITOR_CSS: &str = r#"
         flex: 1;
     }
 
-    /* Placeholder sections for components not yet ported */
+    /* Placeholder sections for components not yet wired */
     .panel-placeholder {
         padding: 0.75rem;
         text-align: center;
-        color: var(--text-muted, #666);
+        color: var(--text-3);
         font-size: 0.8rem;
         font-style: italic;
     }
@@ -394,13 +394,13 @@ pub fn StrategyEditor(id: String) -> Element {
     match data.as_ref() {
         None => rsx! {
             div {
-                style: "display: flex; align-items: center; justify-content: center; height: 100vh; color: #aaa;",
+                style: "display: flex; align-items: center; justify-content: center; height: 100vh; color: var(--text-3);",
                 "Loading strategy..."
             }
         },
         Some(None) => rsx! {
             div {
-                style: "display: flex; align-items: center; justify-content: center; height: 100vh; color: #f88;",
+                style: "display: flex; align-items: center; justify-content: center; height: 100vh; color: var(--danger);",
                 "Strategy not found or access denied."
             }
         },
@@ -833,7 +833,7 @@ fn EditorLayout(initial_strategy: Option<Strategy>) -> Element {
                 div { class: "editor-main",
 
                     // TODO: Toolbar component
-                    div { class: "panel-placeholder", style: "border-bottom: 1px solid var(--border, #2a2a3e); padding: 0.4rem 0.75rem;",
+                    div { class: "panel-placeholder", style: "border-bottom: 1px solid var(--border); padding: 0.4rem 0.75rem;",
                         "Toolbar: {tool_display}"
                     }
 
@@ -1025,7 +1025,7 @@ fn EditorLayout(initial_strategy: Option<Strategy>) -> Element {
                                             }
                                             span { class: "el-type", "{type_name}" }
                                             if !label.is_empty() {
-                                                span { style: "color: var(--text-secondary);", "{label}" }
+                                                span { style: "color: var(--text-2);", "{label}" }
                                             }
                                         }
                                     }
@@ -1111,7 +1111,7 @@ fn EditorLayout(initial_strategy: Option<Strategy>) -> Element {
                         div { class: "map-picker-content",
                             // TODO: Populate with map data from scuffed_types::constants
                             p {
-                                style: "color: var(--text-muted); text-align: center; padding: 2rem;",
+                                style: "color: var(--text-3); text-align: center; padding: 2rem;",
                                 "Map picker — will be populated when map constants are available."
                             }
                         }

@@ -4,7 +4,7 @@ pub const MAP_CANVAS_CSS: &str = r#"
         width: 100%;
         height: 100%;
         overflow: hidden;
-        background: #1a1a2e;
+        background: var(--bg);
     }
     .map-canvas {
         position: absolute;
@@ -33,12 +33,12 @@ pub const MAP_CANVAS_CSS: &str = r#"
         display: flex;
         align-items: center;
         justify-content: center;
-        background: rgba(10, 10, 20, 0.85);
+        background: var(--overlay);
         z-index: 10;
     }
     .map-selector-content {
-        background: var(--bg-surface, #1e1e30);
-        border: 1px solid var(--border, #333);
+        background: var(--surface);
+        border: 1px solid var(--border);
         border-radius: 12px;
         padding: 2rem;
         max-width: 600px;
@@ -47,13 +47,13 @@ pub const MAP_CANVAS_CSS: &str = r#"
         overflow-y: auto;
     }
     .map-selector-content h2 {
-        font-family: var(--font-display, sans-serif);
+        font-family: var(--font-head);
         font-size: 1.5rem;
-        color: var(--text-bright, #fff);
+        color: var(--text);
         margin-bottom: 0.5rem;
     }
     .map-selector-content p {
-        color: var(--text-secondary, #999);
+        color: var(--text-2);
         margin-bottom: 1.5rem;
     }
     .map-selector-modes {
@@ -62,14 +62,14 @@ pub const MAP_CANVAS_CSS: &str = r#"
         gap: 0.5rem;
     }
     .map-selector-mode-group {
-        border: 1px solid var(--border, #333);
+        border: 1px solid var(--border);
         border-radius: 8px;
         overflow: hidden;
     }
     .map-selector-mode-title {
         padding: 0.6rem 1rem;
-        background: var(--bg-card, #252540);
-        color: var(--text-bright, #fff);
+        background: var(--surface-2);
+        color: var(--text);
         font-weight: 600;
         cursor: pointer;
         display: flex;
@@ -78,8 +78,8 @@ pub const MAP_CANVAS_CSS: &str = r#"
     }
     .map-count {
         font-size: 0.8rem;
-        color: var(--text-muted, #666);
-        background: var(--bg-surface, #1e1e30);
+        color: var(--text-3);
+        background: var(--surface);
         padding: 0.1rem 0.5rem;
         border-radius: 10px;
     }
@@ -95,14 +95,14 @@ pub const MAP_CANVAS_CSS: &str = r#"
         text-align: left;
         background: transparent;
         border: none;
-        color: var(--text-secondary, #999);
+        color: var(--text-2);
         cursor: pointer;
         transition: background 0.15s, color 0.15s;
     }
     .map-selector-btn:hover,
     .map-selector-btn-submap:hover {
-        background: var(--bg-card, #252540);
-        color: var(--text-bright, #fff);
+        background: var(--surface-2);
+        color: var(--text);
     }
     .map-selector-btn-submap {
         padding-left: 2rem;
@@ -114,7 +114,7 @@ pub const MAP_CANVAS_CSS: &str = r#"
     .map-selector-expand-hint {
         margin-left: 0.5rem;
         font-size: 0.8rem;
-        color: var(--text-muted, #666);
+        color: var(--text-3);
     }
     .map-selector-submaps {
         padding-left: 0.5rem;

@@ -53,9 +53,9 @@ const PAGE_CSS: &str = r#"
         margin-bottom: 1.5rem;
     }
     .strategy-browse-title {
-        font-family: var(--font-display-hero);
+        font-family: var(--font-head);
         font-size: 2rem;
-        color: var(--text-bright);
+        color: var(--text);
         text-transform: uppercase;
         letter-spacing: 2px;
     }
@@ -78,7 +78,7 @@ const PAGE_CSS: &str = r#"
     }
     .btn-create:hover {
         filter: brightness(1.15);
-        box-shadow: 0 0 15px var(--accent-glow);
+        box-shadow: 0 0 15px var(--accent-soft);
     }
 
     /* Search */
@@ -91,14 +91,14 @@ const PAGE_CSS: &str = r#"
         padding: 0.6rem 1rem;
         border-radius: 6px;
         border: 1px solid var(--border);
-        background: var(--bg-surface);
-        color: var(--text-bright);
+        background: var(--surface);
+        color: var(--text);
         font-size: 0.9rem;
         font-family: inherit;
         transition: border-color 0.2s;
     }
     .strategy-search-input::placeholder {
-        color: var(--text-muted);
+        color: var(--text-3);
     }
     .strategy-search-input:focus {
         outline: none;
@@ -116,8 +116,8 @@ const PAGE_CSS: &str = r#"
         padding: 0.3rem 0.75rem;
         border-radius: 999px;
         border: 1px solid var(--border);
-        background: var(--bg-surface);
-        color: var(--text-secondary);
+        background: var(--surface);
+        color: var(--text-2);
         font-size: 0.78rem;
         font-weight: 600;
         cursor: pointer;
@@ -127,7 +127,7 @@ const PAGE_CSS: &str = r#"
     }
     .filter-chip:hover {
         border-color: var(--accent-soft);
-        color: var(--text-bright);
+        color: var(--text);
     }
     .filter-chip.active {
         background: var(--accent);
@@ -142,7 +142,7 @@ const PAGE_CSS: &str = r#"
         gap: 1.25rem;
     }
     .strategy-card {
-        background: var(--bg-card);
+        background: var(--surface);
         border: 1px solid var(--border);
         border-radius: 10px;
         padding: 1.25rem;
@@ -157,17 +157,17 @@ const PAGE_CSS: &str = r#"
         transform: translateY(-2px);
     }
     .strategy-card-name {
-        font-family: var(--font-display);
+        font-family: var(--font-head);
         font-weight: 700;
         font-size: 1.1rem;
-        color: var(--text-bright);
+        color: var(--text);
     }
     .strategy-card-meta {
         display: flex;
         gap: 0.75rem;
         flex-wrap: wrap;
         font-size: 0.75rem;
-        color: var(--text-muted);
+        color: var(--text-3);
     }
     .strategy-card-meta span {
         display: inline-flex;
@@ -183,11 +183,11 @@ const PAGE_CSS: &str = r#"
         text-transform: uppercase;
         letter-spacing: 0.04em;
         background: var(--accent-soft);
-        color: var(--accent-bright);
+        color: var(--accent);
         width: fit-content;
     }
     .strategy-card-owner {
-        color: var(--text-secondary);
+        color: var(--text-2);
         font-size: 0.8rem;
     }
     .strategy-card-footer {
@@ -198,12 +198,12 @@ const PAGE_CSS: &str = r#"
         padding-top: 0.5rem;
         border-top: 1px solid var(--border);
         font-size: 0.7rem;
-        color: var(--text-muted);
+        color: var(--text-3);
     }
 
     /* States */
     .strategy-loading, .strategy-empty {
-        color: var(--text-muted);
+        color: var(--text-3);
         text-align: center;
         padding: 4rem 1rem;
         font-size: 0.95rem;

@@ -8,7 +8,7 @@ const TOOLBAR_CSS: &str = r#"
         gap: 0.5rem;
         padding: 0 0.75rem;
         height: 44px;
-        background: var(--bg-surface);
+        background: var(--surface);
         border-bottom: 1px solid var(--border);
         flex-shrink: 0;
         overflow-x: auto;
@@ -28,7 +28,7 @@ const TOOLBAR_CSS: &str = r#"
     }
     .tb-label {
         font-size: 0.65rem;
-        color: var(--text-muted);
+        color: var(--text-3);
         text-transform: uppercase;
         letter-spacing: 0.06em;
         margin-right: 0.25rem;
@@ -48,18 +48,18 @@ const TOOLBAR_CSS: &str = r#"
         border: 1px solid transparent;
         border-radius: 5px;
         background: none;
-        color: var(--text-secondary);
+        color: var(--text-2);
         font-size: 0.85rem;
         cursor: pointer;
         transition: background 0.12s, color 0.12s, border-color 0.12s;
     }
     .tb-tool-btn:hover {
-        background: var(--bg-card);
-        color: var(--text-bright);
+        background: var(--surface-2);
+        color: var(--text);
     }
     .tb-tool-btn.active {
         background: var(--accent-soft);
-        color: var(--accent-bright);
+        color: var(--accent);
         border-color: var(--accent);
     }
     .tb-tool-btn:disabled {
@@ -80,8 +80,8 @@ const TOOLBAR_CSS: &str = r#"
         transform: scale(1.15);
     }
     .tb-color-btn.active {
-        border-color: var(--accent-bright);
-        box-shadow: 0 0 0 2px var(--accent-glow);
+        border-color: var(--accent);
+        box-shadow: 0 0 0 2px var(--accent-soft);
     }
 
     /* ---- Opacity slider ---- */
@@ -96,7 +96,7 @@ const TOOLBAR_CSS: &str = r#"
     }
     .tb-opacity-val {
         font-size: 0.7rem;
-        color: var(--text-muted);
+        color: var(--text-3);
         min-width: 2.2em;
         text-align: right;
     }
@@ -104,7 +104,7 @@ const TOOLBAR_CSS: &str = r#"
     /* ---- Zoom display ---- */
     .tb-zoom-display {
         font-size: 0.75rem;
-        color: var(--text-muted);
+        color: var(--text-3);
         min-width: 3em;
         text-align: center;
         user-select: none;
@@ -112,10 +112,10 @@ const TOOLBAR_CSS: &str = r#"
 
     /* ---- Floor selector ---- */
     .tb-floor-select {
-        background: var(--bg-card);
+        background: var(--surface-2);
         border: 1px solid var(--border);
         border-radius: 4px;
-        color: var(--text-secondary);
+        color: var(--text-2);
         font-size: 0.75rem;
         padding: 0.2rem 0.35rem;
     }
@@ -130,25 +130,25 @@ const TOOLBAR_CSS: &str = r#"
         border: 1px solid transparent;
         border-radius: 5px;
         background: none;
-        color: var(--text-secondary);
+        color: var(--text-2);
         font-size: 0.9rem;
         cursor: pointer;
         transition: background 0.12s, color 0.12s;
     }
     .tb-hp-toggle.active {
-        background: rgba(80, 200, 120, 0.15);
-        color: #64c878;
+        background: color-mix(in srgb, var(--ok) 15%, transparent);
+        color: var(--ok);
     }
     .tb-hp-toggle:hover {
-        background: var(--bg-card);
+        background: var(--surface-2);
     }
 
     /* ---- Strategy name input ---- */
     .tb-name-input {
-        background: var(--bg-card);
+        background: var(--surface-2);
         border: 1px solid var(--border);
         border-radius: 5px;
-        color: var(--text-bright);
+        color: var(--text);
         font-size: 0.8rem;
         padding: 0.3rem 0.5rem;
         width: 160px;
@@ -168,7 +168,7 @@ const TOOLBAR_CSS: &str = r#"
         border: none;
         border-radius: 5px;
         background: var(--accent);
-        color: #fff;
+        color: var(--accent-fg);
         font-size: 0.8rem;
         font-weight: 600;
         cursor: pointer;
@@ -186,15 +186,15 @@ const TOOLBAR_CSS: &str = r#"
         width: 6px;
         height: 6px;
         border-radius: 50%;
-        background: #fbbf24;
+        background: var(--warn);
     }
 
     /* ---- Visibility dropdown ---- */
     .tb-visibility-select {
-        background: var(--bg-card);
+        background: var(--surface-2);
         border: 1px solid var(--border);
         border-radius: 4px;
-        color: var(--text-secondary);
+        color: var(--text-2);
         font-size: 0.75rem;
         padding: 0.2rem 0.35rem;
     }
