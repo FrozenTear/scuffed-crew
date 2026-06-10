@@ -66,8 +66,9 @@ impl CanvasRenderer {
 
     pub fn begin_frame(&self) {
         self.ctx.save();
-        self.ctx.translate(self.pan.x, self.pan.y).unwrap();
-        self.ctx.scale(self.zoom, self.zoom).unwrap();
+        // Canvas 2D ops only fail on context loss; a dropped frame beats a WASM panic.
+        let _ = self.ctx.translate(self.pan.x, self.pan.y);
+        let _ = self.ctx.scale(self.zoom, self.zoom);
     }
 
     pub fn end_frame(&self) {
@@ -104,9 +105,9 @@ impl CanvasRenderer {
     pub fn draw_circle(&self, pos: &Position, radius: f64, fill: &Color, stroke: Option<&Color>) {
         self.ctx.set_fill_style_str(&fill.to_css());
         self.ctx.begin_path();
-        self.ctx
-            .arc(pos.x, pos.y, radius, 0.0, std::f64::consts::PI * 2.0)
-            .unwrap();
+        let _ = self
+            .ctx
+            .arc(pos.x, pos.y, radius, 0.0, std::f64::consts::PI * 2.0);
         self.ctx.fill();
 
         if let Some(stroke_color) = stroke {
@@ -178,7 +179,7 @@ impl CanvasRenderer {
     pub fn draw_text(&self, text: &str, pos: &Position, color: &Color, font_size: f64) {
         self.ctx.set_fill_style_str(&color.to_css());
         self.ctx.set_font(&format!("{}px sans-serif", font_size));
-        self.ctx.fill_text(text, pos.x, pos.y).unwrap();
+        let _ = self.ctx.fill_text(text, pos.x, pos.y);
     }
 
     pub fn draw_arrowhead(&self, from: &Position, to: &Position, color: &Color, size: f64) {
