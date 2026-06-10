@@ -339,8 +339,9 @@ pub fn AdminMembers() -> Element {
 
     let on_avatar_file_change = move |_e: Event<FormData>| {
         // Access the file input via DOM query to get the web_sys::File
-        let window = web_sys::window().unwrap();
-        let document = window.document().unwrap();
+        let Some(document) = web_sys::window().and_then(|w| w.document()) else {
+            return;
+        };
         if let Some(el) = document.get_element_by_id("avatar-file-input")
             && let Ok(input) = el.dyn_into::<web_sys::HtmlInputElement>()
             && let Some(file_list) = input.files()
@@ -366,7 +367,11 @@ pub fn AdminMembers() -> Element {
         avatar_uploading.set(true);
         spawn(async move {
             // Upload via FormData
-            let form_data = web_sys::FormData::new().unwrap();
+            let Ok(form_data) = web_sys::FormData::new() else {
+                toast.show(Toast::error("Could not prepare upload."));
+                avatar_uploading.set(false);
+                return;
+            };
             let _ = form_data.append_with_blob("file", &file);
 
             let opts = web_sys::RequestInit::new();
@@ -374,10 +379,18 @@ pub fn AdminMembers() -> Element {
             opts.set_body(&form_data.into());
             opts.set_credentials(web_sys::RequestCredentials::SameOrigin);
 
-            let request =
-                web_sys::Request::new_with_str_and_init("/api/upload/avatar", &opts).unwrap();
+            let Ok(request) = web_sys::Request::new_with_str_and_init("/api/upload/avatar", &opts)
+            else {
+                toast.show(Toast::error("Could not build upload request."));
+                avatar_uploading.set(false);
+                return;
+            };
 
-            let window = web_sys::window().unwrap();
+            let Some(window) = web_sys::window() else {
+                toast.show(Toast::error("Upload failed: no browser window."));
+                avatar_uploading.set(false);
+                return;
+            };
             let resp_val =
                 wasm_bindgen_futures::JsFuture::from(window.fetch_with_request(&request)).await;
 
@@ -385,7 +398,15 @@ pub fn AdminMembers() -> Element {
                 Ok(resp_val) => {
                     let resp: web_sys::Response = resp_val.unchecked_into();
                     if resp.ok() {
-                        let text = wasm_bindgen_futures::JsFuture::from(resp.text().unwrap()).await;
+                        let text_promise = match resp.text() {
+                            Ok(p) => p,
+                            Err(_) => {
+                                toast.show(Toast::error("Failed to read upload response."));
+                                avatar_uploading.set(false);
+                                return;
+                            }
+                        };
+                        let text = wasm_bindgen_futures::JsFuture::from(text_promise).await;
                         if let Ok(text) = text {
                             let text_str = text.as_string().unwrap_or_default();
                             if let Ok(upload) = serde_json::from_str::<UploadResponse>(&text_str) {
