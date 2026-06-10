@@ -193,7 +193,7 @@ impl Database {
                 )
                 .bind(("me", me))
                 .await?;
-            let rows: Vec<DbDmMessage> = result.take(0).unwrap_or_default();
+            let rows: Vec<DbDmMessage> = result.take(0)?;
             Ok(rows.into_iter().next().map(|r| r.created_at.into()))
         })
         .await
