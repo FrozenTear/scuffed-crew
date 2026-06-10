@@ -1,6 +1,7 @@
 use dioxus::prelude::*;
 
 use crate::routes::Route;
+use crate::theme::ThemeToggle;
 
 const NAV_CSS: &str = r#"
     .site-nav {
@@ -14,7 +15,7 @@ const NAV_CSS: &str = r#"
         justify-content: space-between;
         padding: 0 2rem;
         height: 60px;
-        background: rgba(8, 8, 12, 0.85);
+        background: color-mix(in srgb, var(--surface) 85%, transparent);
         backdrop-filter: blur(12px);
         border-bottom: 1px solid var(--border);
     }
@@ -22,9 +23,9 @@ const NAV_CSS: &str = r#"
         display: flex;
         align-items: center;
         gap: 0.6rem;
-        font-family: var(--font-display-hero);
+        font-family: var(--font-head);
         font-size: 1.1rem;
-        color: var(--text-bright);
+        color: var(--text);
         text-transform: uppercase;
         letter-spacing: 0.04em;
     }
@@ -38,7 +39,7 @@ const NAV_CSS: &str = r#"
         justify-content: center;
         font-weight: 700;
         font-size: 0.75rem;
-        color: white;
+        color: var(--accent-fg);
     }
     .nav-links {
         display: flex;
@@ -47,23 +48,28 @@ const NAV_CSS: &str = r#"
     }
     .nav-links a {
         padding: 0.4rem 0.75rem;
-        color: var(--text-secondary);
+        color: var(--text-2);
         font-size: 0.85rem;
         border-radius: 6px;
         transition: color 0.15s, background 0.15s;
     }
     .nav-links a:hover {
-        color: var(--text-bright);
-        background: var(--bg-card);
+        color: var(--text);
+        background: var(--surface-2);
     }
     .nav-cta {
         background: var(--accent) !important;
-        color: white !important;
+        color: var(--accent-fg) !important;
         padding: 0.4rem 1rem !important;
         font-weight: 600;
     }
     .nav-cta:hover {
         filter: brightness(1.15);
+    }
+    .nav-right {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
     }
     .nav-hamburger {
         display: none;
@@ -77,7 +83,7 @@ const NAV_CSS: &str = r#"
     .nav-hamburger span {
         width: 22px;
         height: 2px;
-        background: var(--text-secondary);
+        background: var(--text-2);
         transition: transform 0.2s, opacity 0.2s;
     }
     .nav-hamburger.open span:nth-child(1) { transform: rotate(45deg) translate(5px, 5px); }
@@ -88,7 +94,7 @@ const NAV_CSS: &str = r#"
         position: fixed;
         inset: 0;
         z-index: 99;
-        background: rgba(8, 8, 12, 0.97);
+        background: color-mix(in srgb, var(--bg) 97%, transparent);
         flex-direction: column;
         align-items: center;
         justify-content: center;
@@ -96,17 +102,31 @@ const NAV_CSS: &str = r#"
     }
     .nav-overlay.open { display: flex; }
     .nav-overlay a {
-        color: var(--text-bright);
+        color: var(--text);
         font-size: 1.2rem;
-        font-family: var(--font-display);
+        font-family: var(--font-head);
     }
     .site-footer {
         border-top: 1px solid var(--border);
         padding: 2rem;
         text-align: center;
-        color: var(--text-muted);
+        color: var(--text-3);
         font-size: 0.8rem;
     }
+    .theme-toggle {
+        background: transparent;
+        border: 1px solid var(--border);
+        color: var(--text);
+        width: 34px;
+        height: 34px;
+        border-radius: var(--radius-md);
+        cursor: pointer;
+        font-size: 1rem;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+    }
+    .theme-toggle:hover { background: var(--surface-2); }
     @media (max-width: 768px) {
         .nav-links { display: none; }
         .nav-hamburger { display: flex; }
@@ -157,13 +177,16 @@ pub fn PublicLayout() -> Element {
                 }
                 li { Link { to: Route::Apply {}, class: "nav-cta", "Apply" } }
             }
-            button {
-                class: hamburger_class,
-                aria_label: "Toggle menu",
-                onclick: move |_| menu_open.toggle(),
-                span {}
-                span {}
-                span {}
+            div { class: "nav-right",
+                ThemeToggle {}
+                button {
+                    class: hamburger_class,
+                    aria_label: "Toggle menu",
+                    onclick: move |_| menu_open.toggle(),
+                    span {}
+                    span {}
+                    span {}
+                }
             }
         }
 

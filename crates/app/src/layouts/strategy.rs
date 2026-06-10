@@ -9,11 +9,11 @@ const STRATEGY_CSS: &str = r#"
         gap: 1.5rem;
         padding: 0 2rem;
         height: 50px;
-        background: var(--bg-surface);
+        background: var(--surface);
         border-bottom: 1px solid var(--border);
     }
     .strategy-nav .brand {
-        font-family: var(--font-display-hero);
+        font-family: var(--font-head);
         font-size: 0.95rem;
         color: var(--accent);
         text-transform: uppercase;
@@ -25,23 +25,23 @@ const STRATEGY_CSS: &str = r#"
     }
     .strategy-nav .links a {
         padding: 0.35rem 0.7rem;
-        color: var(--text-secondary);
+        color: var(--text-2);
         font-size: 0.85rem;
         border-radius: 5px;
         transition: color 0.15s, background 0.15s;
     }
     .strategy-nav .links a:hover {
-        color: var(--text-bright);
-        background: var(--bg-card);
+        color: var(--text);
+        background: var(--surface-2);
     }
     .strategy-nav .back-link {
         margin-left: auto;
-        color: var(--text-muted);
+        color: var(--text-3);
         font-size: 0.8rem;
         transition: color 0.15s;
     }
     .strategy-nav .back-link:hover {
-        color: var(--text-secondary);
+        color: var(--text-2);
     }
 "#;
 
