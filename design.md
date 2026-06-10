@@ -1,5 +1,11 @@
 # The Scuffed Crew — Design System
 
+> **NOTE (2026-06-10):** File references to `crates/ui` and `crates/site` below
+> describe the removed legacy Leptos stack. The aesthetic direction still
+> applies, but the implementation now lives in the Dioxus app (`crates/app`,
+> styles in `crates/app/assets/`). This document is pending a rewrite as part
+> of the design upgrade.
+
 ## Aesthetic Direction
 
 Dark, utilitarian esports aesthetic. Think clan sites from the mid-2000s updated with modern type hierarchy and restrained motion. The visual language is direct and structural — no gradients, no rounded bubbly shapes, no pastel softness. Everything communicates that this is an org with real structure.

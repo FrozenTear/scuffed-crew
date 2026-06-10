@@ -9,7 +9,6 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: "-D warnings"
-  TRUNK_VERSION: "0.21.14"
 
 jobs:
   dep-guardrails:
@@ -54,8 +53,6 @@ jobs:
         run: |
           cargo clippy \
             --workspace \
-            --exclude scuffed-site \
-            --exclude scuffed-admin \
             --exclude scuffed-app \
             --exclude scuffed-stat-tracker \
             -- -D warnings
@@ -64,8 +61,6 @@ jobs:
         run: |
           cargo clippy \
             --target wasm32-unknown-unknown \
-            -p scuffed-site \
-            -p scuffed-admin \
             -p scuffed-app \
             -- -D warnings
 
@@ -89,13 +84,13 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Build (native crates)
-        run: cargo build --workspace --exclude scuffed-site --exclude scuffed-admin --exclude scuffed-app --exclude scuffed-stat-tracker
+        run: cargo build --workspace --exclude scuffed-app --exclude scuffed-stat-tracker
 
       - name: Test (workspace)
-        run: cargo test --workspace --exclude scuffed-site --exclude scuffed-admin --exclude scuffed-app --exclude scuffed-stat-tracker
+        run: cargo test --workspace --exclude scuffed-app --exclude scuffed-stat-tracker
 
-  wasm-build:
-    name: WASM Build (Trunk)
+  app-build:
+    name: App Build (Dioxus)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -106,15 +101,9 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Install trunk
-        run: |
-          curl -fsSL "https://github.com/trunk-rs/trunk/releases/download/v${TRUNK_VERSION}/trunk-x86_64-unknown-linux-gnu.tar.gz" \
-            | tar -xzf - -C /usr/local/bin
+      - name: Install dioxus-cli
+        run: cargo install --locked dioxus-cli@0.7.4
 
-      - name: Build site
-        working-directory: crates/site
-        run: trunk build
-
-      - name: Build admin
-        working-directory: crates/admin
-        run: trunk build --features dev-noauth
+      - name: Build app
+        working-directory: crates/app
+        run: dx build --release

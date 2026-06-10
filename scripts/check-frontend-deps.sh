@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# CI guardrail: block new leptos dependencies outside approved legacy crates.
-# Approved exceptions (legacy, pending Dioxus migration):
-#   crates/site, crates/admin, crates/ui, crates/auth
+# CI guardrail: block new leptos dependencies outside approved crates.
+# Approved exceptions:
+#   crates/auth — dormant optional `client` feature from the Leptos era
 #
 # To add a new exception, append the crate path to ALLOWED_CRATES below
 # and document the reason in a PR comment with CTO approval.
@@ -11,9 +11,6 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
 ALLOWED_CRATES=(
-  "crates/site"
-  "crates/admin"
-  "crates/ui"
   "crates/auth"
 )
 
