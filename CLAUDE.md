@@ -1,22 +1,26 @@
 # The Scuffed Crew
 
-Gaming org community site. Rust monorepo: Dioxus 0.7 app + legacy Leptos frontends + Axum backends + SurrealDB.
+Gaming org community site. Rust monorepo: Dioxus 0.7 app + Axum backends + SurrealDB. (Legacy Leptos frontends removed 2026-06.)
 
 ## Architecture
 
 ```
 crates/
-  app/           # Primary Dioxus 0.7 WASM app (strategy editor, admin, chat)
-  server/        # Axum backend for Dioxus app (REST + WebSocket)
+  app/           # Dioxus 0.7 WASM app (site, admin, strategy editor, chat) → dx build → dist/
+  server/        # Unified Axum binary: site-server routes + strategy WebSocket + chat (scuffed-server)
+  site-server/   # Core REST API library + main (sessions, members, tournaments, uploads, SPA fallback)
   types/         # Shared types between app and server
   api-client/    # HTTP client (web + native)
-  site/          # Legacy Leptos 0.8 CSR site (trunk build → dist/)
-  admin/         # Legacy Leptos 0.8 CSR admin SPA (trunk build → dist/admin/)
-  site-server/   # Legacy Axum server for site/admin (API + static files)
   db/            # SurrealDB client, migrations, queries
   auth/          # OAuth, sessions, crypto (shared crate)
-  ui/            # Legacy Leptos 0.8 shared UI components (scuffed-ui)
+  chat/          # Nostr chat backend (relay client, NIP-44/59 crypto)
+  stat-tracker/  # Overwatch stat tracker (OCR capture daemon + optional Dioxus desktop GUI)
+  map-pipeline/  # Map asset processing tooling
+  map-renderer/  # Map rendering tooling
+  relay-policy/  # Nostr relay policy plugin (NIP-42/29, rate limits) — standalone, not yet in deploy (future work)
 ```
+
+Production = `scuffed-server` serving `dist/` (built by `dx build` from crates/app). See `scripts/build.sh` and `Containerfile`.
 
 ## SurrealDB Gotchas
 
@@ -31,16 +35,15 @@ crates/
 ## Dev Mode
 
 - `SURREALDB_URL` unset → in-memory database with auto-seeded dev data (user=devadmin, role=admin)
-- Visit `/api/dev/login` to set the session cookie, then go to `/admin/`
-- Admin SPA `dev-noauth` feature bypasses frontend auth guards but NOT server-side extractors
-- Build admin: `cd crates/admin && trunk build --features dev-noauth`
-- Run server: `PORT=3030 cargo run -p scuffed-site-server`
+- `/api/dev/login` sets the session cookie (route only registered in dev mode), then go to `/admin/`
+- Run app: `cd crates/app && dx serve` (or `dx build` then serve `dist/` via the server)
+- Run server: `PORT=3030 cargo run -p scuffed-server`
 
 ## Conventions
 
 - DB internal structs (`Db*`) are private to `crates/db/src/queries/` — public types live in `crates/db/src/types.rs`
 - Auth extractors: `OrgMember` (any member) → `OfficerUser` (officer+) → `AdminUser` (admin only)
-- Refresh pattern in admin: `RwSignal<u32>` as `LocalResource` dependency, increment after mutations
+- Refresh pattern in admin: list resources depend on a refresh counter signal; increment it after mutations (e.g. `members.refresh += 1`)
 - Toast feedback for all user-facing mutations: `use_toast().show(Toast::success(...))`
 - Audit log: fire-and-forget after successful mutations, log error but don't fail the request
 
