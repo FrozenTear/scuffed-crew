@@ -57,12 +57,14 @@ fn App() -> Element {
         }
         document::Link {
             rel: "stylesheet",
-            href: "https://fonts.googleapis.com/css2?family=Bebas+Neue&family=DM+Mono:wght@400;500&family=Rajdhani:wght@400;500;600;700&family=Source+Sans+3:wght@300;400;500;600;700&display=swap",
+            href: "https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&family=JetBrains+Mono:wght@500&display=swap",
         }
-        style { {theme::THEME_CSS} }
+        style { {theme::theme_css_current()} }
         style { {styles::common::CSS} }
-        ToastProvider {
-            Router::<Route> {}
+        theme::ThemeProvider {
+            ToastProvider {
+                Router::<Route> {}
+            }
         }
     }
 }
