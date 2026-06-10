@@ -11,3 +11,4 @@ dist.old/
 maps/render/
 node_modules/
 cachyos-repo.tar.xz
+.superpowers/
