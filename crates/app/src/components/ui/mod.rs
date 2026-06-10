@@ -1,5 +1,6 @@
 pub mod button;
 pub mod card;
+pub mod field;
 pub mod label;
 pub mod pill;
 pub mod shell;
@@ -8,6 +9,8 @@ pub mod shell;
 pub use button::{BtnSize, BtnVariant, Button};
 #[allow(unused_imports)]
 pub use card::Card;
+#[allow(unused_imports)]
+pub use field::{Input, Select, Textarea};
 #[allow(unused_imports)]
 pub use label::Label;
 #[allow(unused_imports)]
@@ -23,6 +26,7 @@ pub fn ui_css() -> String {
         pill::PILL_CSS,
         label::LABEL_CSS,
         shell::SHELL_CSS,
+        field::FIELD_CSS,
     ]
     .concat()
 }
