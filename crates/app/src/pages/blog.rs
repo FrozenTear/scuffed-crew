@@ -24,9 +24,9 @@ const PAGE_CSS: &str = r#"
         margin: 0 auto;
     }
     .blog-page-title {
-        font-family: 'Bebas Neue', sans-serif;
+        font-family: var(--font-head);
         font-size: 2.5rem;
-        color: var(--text-bright);
+        color: var(--text);
         letter-spacing: 3px;
         margin: 0 0 2rem;
     }
@@ -36,7 +36,7 @@ const PAGE_CSS: &str = r#"
         gap: 1.5rem;
     }
     .blog-card {
-        background: var(--bg-card);
+        background: var(--surface);
         border: 1px solid var(--border);
         border-radius: 10px;
         overflow: hidden;
@@ -64,24 +64,24 @@ const PAGE_CSS: &str = r#"
         align-items: center;
         gap: 0.75rem;
         font-size: 0.7rem;
-        color: var(--text-muted);
+        color: var(--text-3);
         margin-bottom: 0.5rem;
     }
     .blog-card-title {
-        font-family: 'Rajdhani', sans-serif;
+        font-family: var(--font-head);
         font-size: 1.3rem;
         font-weight: 700;
-        color: var(--text-bright);
+        color: var(--text);
         margin: 0 0 0.5rem;
     }
     .blog-card-summary {
-        color: var(--text-secondary);
+        color: var(--text-2);
         font-size: 0.85rem;
         line-height: 1.7;
         margin: 0;
     }
     .blog-loading, .blog-empty {
-        color: var(--text-muted);
+        color: var(--text-3);
         text-align: center;
         padding: 3rem 0;
     }

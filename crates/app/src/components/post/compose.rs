@@ -2,6 +2,7 @@ use dioxus::prelude::*;
 use serde::Serialize;
 
 use super::card::FeedPost;
+use crate::components::ui::{BtnVariant, Button};
 use crate::components::{Toast, use_toast};
 use scuffed_api_client::ApiClient;
 
@@ -13,81 +14,63 @@ struct CreatePostBody {
 
 const COMPOSE_CSS: &str = r#"
 .post-compose {
-    background: var(--bg-card);
+    background: var(--surface);
     border: 1px solid var(--border);
     border-radius: 10px;
     padding: 1.25rem 1.5rem;
     margin-bottom: 1.5rem;
 }
 .post-compose-label {
-    font-family: 'Rajdhani', sans-serif;
+    font-family: var(--font-head);
     font-weight: 700;
     font-size: 1rem;
-    color: var(--text-bright);
+    color: var(--text);
     margin: 0 0 0.75rem;
 }
 .post-compose textarea {
     width: 100%;
     min-height: 80px;
-    background: var(--bg-surface);
+    background: var(--surface-2);
     border: 1px solid var(--border);
     border-radius: 8px;
     padding: 0.75rem;
-    color: var(--text-bright);
+    color: var(--text);
     font-size: 0.85rem;
-    font-family: 'Source Sans 3', sans-serif;
+    font-family: var(--font-body);
     resize: vertical;
     line-height: 1.6;
 }
 .post-compose textarea:focus {
     outline: none;
-    border-color: #7c3aed;
+    border-color: var(--accent);
 }
 .post-compose textarea::placeholder {
-    color: var(--text-muted);
+    color: var(--text-3);
 }
 .post-compose-tags {
     margin-top: 0.5rem;
 }
 .post-compose-tags input {
     width: 100%;
-    background: var(--bg-surface);
+    background: var(--surface-2);
     border: 1px solid var(--border);
     border-radius: 8px;
     padding: 0.5rem 0.75rem;
-    color: var(--text-bright);
+    color: var(--text);
     font-size: 0.8rem;
-    font-family: 'Source Sans 3', sans-serif;
+    font-family: var(--font-body);
 }
 .post-compose-tags input:focus {
     outline: none;
-    border-color: #7c3aed;
+    border-color: var(--accent);
 }
 .post-compose-tags input::placeholder {
-    color: var(--text-muted);
+    color: var(--text-3);
 }
 .post-compose-actions {
     display: flex;
     justify-content: flex-end;
     margin-top: 0.75rem;
-}
-.post-compose-submit {
-    background: #7c3aed;
-    color: white;
-    border: none;
-    border-radius: 6px;
-    padding: 0.45rem 1.25rem;
-    font-size: 0.85rem;
-    font-weight: 600;
-    cursor: pointer;
-    transition: filter 0.15s;
-}
-.post-compose-submit:hover:not(:disabled) {
-    filter: brightness(1.15);
-}
-.post-compose-submit:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
 }
 "#;
 
@@ -169,8 +152,8 @@ pub fn PostCompose(on_post: EventHandler<FeedPost>) -> Element {
                 }
             }
             div { class: "post-compose-actions",
-                button {
-                    class: "post-compose-submit",
+                Button {
+                    variant: BtnVariant::Primary,
                     disabled: !can_submit,
                     onclick: handle_submit,
                     if submitting() { "Posting..." } else { "Post" }

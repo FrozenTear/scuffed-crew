@@ -55,14 +55,14 @@ const PAGE_CSS: &str = r#"
         margin: 0 auto;
     }
     .events-page h1 {
-        font-family: 'Bebas Neue', sans-serif;
+        font-family: var(--font-head);
         font-size: 2.5rem;
-        color: var(--text-bright);
+        color: var(--text);
         letter-spacing: 3px;
         margin: 0 0 0.5rem;
     }
     .events-subtitle {
-        color: var(--text-muted);
+        color: var(--text-3);
         font-size: 0.85rem;
         margin: 0 0 2rem;
     }
@@ -77,14 +77,14 @@ const PAGE_CSS: &str = r#"
         gap: 0.75rem;
     }
     .events-day-header {
-        font-family: 'Rajdhani', sans-serif;
+        font-family: var(--font-head);
         font-weight: 700;
         font-size: 1.1rem;
-        color: #a78bfa;
+        color: var(--accent);
         text-transform: uppercase;
         letter-spacing: 0.06em;
         padding-bottom: 0.35rem;
-        border-bottom: 1px solid #7c3aed33;
+        border-bottom: 1px solid var(--accent-soft);
     }
     .events-day-cards {
         display: grid;
@@ -92,7 +92,7 @@ const PAGE_CSS: &str = r#"
         gap: 0.75rem;
     }
     .event-card {
-        background: var(--bg-card);
+        background: var(--surface);
         border: 1px solid var(--border);
         border-radius: 10px;
         padding: 1.25rem;
@@ -105,10 +105,10 @@ const PAGE_CSS: &str = r#"
         border-color: var(--accent-soft);
     }
     .event-card-title {
-        font-family: 'Rajdhani', sans-serif;
+        font-family: var(--font-head);
         font-weight: 700;
         font-size: 1.1rem;
-        color: var(--text-bright);
+        color: var(--text);
         margin: 0;
     }
     .event-card-meta {
@@ -116,7 +116,7 @@ const PAGE_CSS: &str = r#"
         flex-wrap: wrap;
         gap: 0.75rem;
         font-size: 0.78rem;
-        color: var(--text-muted);
+        color: var(--text-3);
     }
     .event-card-meta span {
         display: flex;
@@ -131,8 +131,8 @@ const PAGE_CSS: &str = r#"
         font-weight: 600;
         text-transform: uppercase;
         letter-spacing: 0.04em;
-        background: #7c3aed33;
-        color: #a78bfa;
+        background: var(--accent-soft);
+        color: var(--accent);
     }
     .event-rsvp-row {
         display: flex;
@@ -146,37 +146,37 @@ const PAGE_CSS: &str = r#"
         border-radius: 6px;
         border: 1px solid var(--border);
         background: transparent;
-        color: var(--text-secondary);
+        color: var(--text-2);
         font-size: 0.75rem;
         font-weight: 600;
         cursor: pointer;
         transition: background 0.15s, color 0.15s, border-color 0.15s;
     }
     .event-rsvp-btn:hover {
-        background: var(--bg-card);
-        color: var(--text-bright);
+        background: var(--surface);
+        color: var(--text);
         border-color: var(--accent-soft);
     }
     .event-rsvp-btn.active-yes {
-        background: #10b98133;
-        color: #34d399;
-        border-color: #10b98155;
+        background: color-mix(in srgb, var(--ok) 20%, transparent);
+        color: var(--ok);
+        border-color: color-mix(in srgb, var(--ok) 33%, transparent);
     }
     .event-rsvp-btn.active-maybe {
-        background: #f9731633;
-        color: #f97316;
-        border-color: #f9731655;
+        background: color-mix(in srgb, var(--warn) 20%, transparent);
+        color: var(--warn);
+        border-color: color-mix(in srgb, var(--warn) 33%, transparent);
     }
     .event-rsvp-btn.active-no {
-        background: #ef444433;
-        color: #f87171;
-        border-color: #ef444455;
+        background: color-mix(in srgb, var(--danger) 20%, transparent);
+        color: var(--danger);
+        border-color: color-mix(in srgb, var(--danger) 33%, transparent);
     }
     .event-rsvp-counts {
         display: flex;
         gap: 0.75rem;
         font-size: 0.7rem;
-        color: var(--text-muted);
+        color: var(--text-3);
         margin-top: 0.15rem;
     }
     .event-rsvp-counts span {
@@ -190,16 +190,16 @@ const PAGE_CSS: &str = r#"
         border-radius: 50%;
         display: inline-block;
     }
-    .rsvp-dot.yes { background: #34d399; }
-    .rsvp-dot.maybe { background: #f97316; }
-    .rsvp-dot.no { background: #f87171; }
+    .rsvp-dot.yes { background: var(--ok); }
+    .rsvp-dot.maybe { background: var(--warn); }
+    .rsvp-dot.no { background: var(--danger); }
     .events-loading, .events-empty {
-        color: var(--text-muted);
+        color: var(--text-3);
         text-align: center;
         padding: 3rem 0;
     }
     .events-no-day {
-        color: var(--text-muted);
+        color: var(--text-3);
         font-size: 0.8rem;
         font-style: italic;
         padding: 0.25rem 0;

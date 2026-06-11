@@ -58,29 +58,29 @@ impl SortDir {
 
 fn role_color(role: &str) -> &'static str {
     match role {
-        "Tank" | "tank" => "#3b82f6",
-        "Damage" | "damage" => "#ef4444",
-        "Support" | "support" => "#22c55e",
-        _ => "#94a3b8",
+        "Tank" | "tank" => "var(--chart-5)",
+        "Damage" | "damage" => "var(--danger)",
+        "Support" | "support" => "var(--ok)",
+        _ => "var(--text-3)",
     }
 }
 
 fn role_bg(role: &str) -> &'static str {
     match role {
-        "Tank" | "tank" => "rgba(59, 130, 246, 0.12)",
-        "Damage" | "damage" => "rgba(239, 68, 68, 0.12)",
-        "Support" | "support" => "rgba(34, 197, 94, 0.12)",
-        _ => "rgba(148, 163, 184, 0.12)",
+        "Tank" | "tank" => "color-mix(in srgb, var(--chart-5) 12%, transparent)",
+        "Damage" | "damage" => "color-mix(in srgb, var(--danger) 12%, transparent)",
+        "Support" | "support" => "color-mix(in srgb, var(--ok) 12%, transparent)",
+        _ => "color-mix(in srgb, var(--text-3) 12%, transparent)",
     }
 }
 
 fn winrate_bar_color(wr: f64) -> &'static str {
     if wr >= 52.0 {
-        "#22c55e"
+        "var(--ok)"
     } else if wr <= 48.0 {
-        "#ef4444"
+        "var(--danger)"
     } else {
-        "#94a3b8"
+        "var(--text-3)"
     }
 }
 
@@ -163,9 +163,9 @@ const PAGE_CSS: &str = r#"
         margin: 0 auto;
     }
     .meta-page-title {
-        font-family: var(--font-display-hero);
+        font-family: var(--font-head);
         font-size: 2.2rem;
-        color: var(--text-bright);
+        color: var(--text);
         letter-spacing: 2px;
         text-transform: uppercase;
         margin: 0 0 1.5rem;
@@ -177,7 +177,7 @@ const PAGE_CSS: &str = r#"
         margin-bottom: 1.5rem;
     }
     .meta-role-card {
-        background: var(--bg-card);
+        background: var(--surface);
         border: 1px solid var(--border);
         border-radius: 8px;
         padding: 1rem 1.25rem;
@@ -186,7 +186,7 @@ const PAGE_CSS: &str = r#"
         gap: 0.35rem;
     }
     .meta-role-card-title {
-        font-family: var(--font-display);
+        font-family: var(--font-head);
         font-weight: 700;
         font-size: 1rem;
         text-transform: uppercase;
@@ -194,10 +194,10 @@ const PAGE_CSS: &str = r#"
     }
     .meta-role-card-stat {
         font-size: 0.8rem;
-        color: var(--text-secondary);
+        color: var(--text-2);
     }
     .meta-role-card-stat strong {
-        color: var(--text-bright);
+        color: var(--text);
         font-weight: 600;
     }
     .meta-filters {
@@ -212,27 +212,27 @@ const PAGE_CSS: &str = r#"
         font-size: 0.78rem;
         font-weight: 600;
         border: 1px solid var(--border);
-        background: var(--bg-card);
-        color: var(--text-secondary);
+        background: var(--surface);
+        color: var(--text-2);
         cursor: pointer;
         transition: all 0.15s;
         text-transform: uppercase;
         letter-spacing: 0.03em;
     }
     .meta-chip:hover {
-        border-color: var(--border-light);
-        color: var(--text-primary);
+        border-color: var(--accent-soft);
+        color: var(--text);
     }
     .meta-chip.active {
         border-color: var(--accent);
         background: var(--accent-soft);
-        color: var(--accent-bright);
+        color: var(--accent);
     }
     .meta-table-wrap {
         overflow-x: auto;
         border: 1px solid var(--border);
         border-radius: 8px;
-        background: var(--bg-card);
+        background: var(--surface);
     }
     .meta-table {
         width: 100%;
@@ -242,12 +242,12 @@ const PAGE_CSS: &str = r#"
     .meta-table th {
         padding: 0.65rem 0.75rem;
         text-align: left;
-        font-family: var(--font-display);
+        font-family: var(--font-head);
         font-weight: 700;
         font-size: 0.75rem;
         text-transform: uppercase;
         letter-spacing: 0.06em;
-        color: var(--text-muted);
+        color: var(--text-3);
         border-bottom: 1px solid var(--border);
         cursor: pointer;
         user-select: none;
@@ -255,10 +255,10 @@ const PAGE_CSS: &str = r#"
         transition: color 0.15s;
     }
     .meta-table th:hover {
-        color: var(--text-secondary);
+        color: var(--text-2);
     }
     .meta-table th.sorted {
-        color: var(--accent-bright);
+        color: var(--accent);
     }
     .meta-table th .sort-ind {
         margin-left: 0.3rem;
@@ -273,7 +273,7 @@ const PAGE_CSS: &str = r#"
         border-bottom: none;
     }
     .meta-table tr:hover td {
-        background: var(--bg-card-alt);
+        background: var(--surface-2);
     }
     .meta-hero-cell {
         display: flex;
@@ -285,11 +285,11 @@ const PAGE_CSS: &str = r#"
         height: 28px;
         border-radius: 4px;
         object-fit: cover;
-        background: var(--bg-surface);
+        background: var(--surface);
         flex-shrink: 0;
     }
     .meta-hero-name {
-        color: var(--text-bright);
+        color: var(--text);
         font-weight: 500;
     }
     .meta-role-pill {
@@ -311,12 +311,12 @@ const PAGE_CSS: &str = r#"
         text-align: right;
         font-family: var(--font-mono);
         font-size: 0.8rem;
-        color: var(--text-primary);
+        color: var(--text);
     }
     .meta-bar-track {
         flex: 1;
         height: 6px;
-        background: var(--bg-surface);
+        background: var(--surface);
         border-radius: 3px;
         overflow: hidden;
         min-width: 60px;
@@ -329,11 +329,11 @@ const PAGE_CSS: &str = r#"
     .meta-footer {
         margin-top: 1rem;
         font-size: 0.75rem;
-        color: var(--text-muted);
+        color: var(--text-3);
         text-align: right;
     }
     .meta-loading, .meta-empty {
-        color: var(--text-muted);
+        color: var(--text-3);
         text-align: center;
         padding: 3rem 0;
     }

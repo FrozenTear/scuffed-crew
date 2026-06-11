@@ -39,9 +39,9 @@ const PAGE_CSS: &str = r#"
         margin-bottom: 1.5rem;
     }
     .my-strategies-title {
-        font-family: var(--font-display-hero);
+        font-family: var(--font-head);
         font-size: 2rem;
-        color: var(--text-bright);
+        color: var(--text);
         text-transform: uppercase;
         letter-spacing: 2px;
     }
@@ -64,7 +64,7 @@ const PAGE_CSS: &str = r#"
     }
     .btn-create:hover {
         filter: brightness(1.15);
-        box-shadow: 0 0 15px var(--accent-glow);
+        box-shadow: 0 0 15px var(--accent-soft);
     }
 
     /* Card grid */
@@ -74,7 +74,7 @@ const PAGE_CSS: &str = r#"
         gap: 1.25rem;
     }
     .my-strategy-card {
-        background: var(--bg-card);
+        background: var(--surface);
         border: 1px solid var(--border);
         border-radius: 10px;
         padding: 1.25rem;
@@ -84,20 +84,20 @@ const PAGE_CSS: &str = r#"
         transition: border-color 0.2s;
     }
     .my-strategy-card:hover {
-        border-color: var(--border-light);
+        border-color: var(--accent-soft);
     }
     .my-strategy-card-name {
-        font-family: var(--font-display);
+        font-family: var(--font-head);
         font-weight: 700;
         font-size: 1.1rem;
-        color: var(--text-bright);
+        color: var(--text);
     }
     .my-strategy-card-meta {
         display: flex;
         gap: 0.75rem;
         flex-wrap: wrap;
         font-size: 0.75rem;
-        color: var(--text-muted);
+        color: var(--text-3);
     }
     .my-strategy-card-mode {
         display: inline-block;
@@ -108,7 +108,7 @@ const PAGE_CSS: &str = r#"
         text-transform: uppercase;
         letter-spacing: 0.04em;
         background: var(--accent-soft);
-        color: var(--accent-bright);
+        color: var(--accent);
         width: fit-content;
     }
 
@@ -123,16 +123,16 @@ const PAGE_CSS: &str = r#"
         letter-spacing: 0.04em;
     }
     .visibility-badge.public {
-        background: #22c55e33;
-        color: #4ade80;
+        background: color-mix(in srgb, var(--ok) 20%, transparent);
+        color: var(--ok);
     }
     .visibility-badge.unlisted {
-        background: #fbbf2433;
-        color: #fbbf24;
+        background: color-mix(in srgb, var(--warn) 20%, transparent);
+        color: var(--warn);
     }
     .visibility-badge.private {
-        background: #6b728033;
-        color: #9ca3af;
+        background: color-mix(in srgb, var(--text-3) 20%, transparent);
+        color: var(--text-3);
     }
 
     .my-strategy-card-footer {
@@ -143,7 +143,7 @@ const PAGE_CSS: &str = r#"
         padding-top: 0.5rem;
         border-top: 1px solid var(--border);
         font-size: 0.7rem;
-        color: var(--text-muted);
+        color: var(--text-3);
     }
 
     /* Card actions */
@@ -156,8 +156,8 @@ const PAGE_CSS: &str = r#"
         padding: 0.3rem 0.65rem;
         border-radius: 5px;
         border: 1px solid var(--border);
-        background: var(--bg-surface);
-        color: var(--text-secondary);
+        background: var(--surface);
+        color: var(--text-2);
         font-size: 0.75rem;
         font-weight: 600;
         cursor: pointer;
@@ -168,16 +168,16 @@ const PAGE_CSS: &str = r#"
     }
     .card-btn:hover {
         border-color: var(--accent-soft);
-        color: var(--text-bright);
+        color: var(--text);
     }
     .card-btn.danger:hover {
-        border-color: #f87171;
-        color: #f87171;
+        border-color: var(--danger);
+        color: var(--danger);
     }
 
     /* States */
     .my-strategies-loading, .my-strategies-empty {
-        color: var(--text-muted);
+        color: var(--text-3);
         text-align: center;
         padding: 4rem 1rem;
         font-size: 0.95rem;
@@ -187,13 +187,13 @@ const PAGE_CSS: &str = r#"
         padding: 5rem 2rem;
     }
     .my-strategies-login h2 {
-        font-family: var(--font-display);
+        font-family: var(--font-head);
         font-size: 1.4rem;
-        color: var(--text-bright);
+        color: var(--text);
         margin-bottom: 0.75rem;
     }
     .my-strategies-login p {
-        color: var(--text-secondary);
+        color: var(--text-2);
         margin-bottom: 1.5rem;
         font-size: 0.9rem;
     }
@@ -210,7 +210,7 @@ const PAGE_CSS: &str = r#"
     }
     .login-link:hover {
         filter: brightness(1.15);
-        box-shadow: 0 0 15px var(--accent-glow);
+        box-shadow: 0 0 15px var(--accent-soft);
     }
 "#;
 

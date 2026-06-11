@@ -99,21 +99,21 @@ fn patch_matches_search(patch: &Patch, query: &str) -> bool {
 
 fn change_type_color(ct: &str) -> &'static str {
     match ct {
-        "buff" => "#34d399",
-        "nerf" => "#f87171",
-        "adjustment" => "#fbbf24",
-        "bugfix" => "#9ca3af",
-        _ => "#94a3b8",
+        "buff" => "var(--ok)",
+        "nerf" => "var(--danger)",
+        "adjustment" => "var(--warn)",
+        "bugfix" => "var(--text-3)",
+        _ => "var(--text-3)",
     }
 }
 
 fn change_type_bg(ct: &str) -> &'static str {
     match ct {
-        "buff" => "rgba(52, 211, 153, 0.12)",
-        "nerf" => "rgba(248, 113, 113, 0.12)",
-        "adjustment" => "rgba(251, 191, 36, 0.12)",
-        "bugfix" => "rgba(156, 163, 175, 0.12)",
-        _ => "rgba(148, 163, 184, 0.12)",
+        "buff" => "color-mix(in srgb, var(--ok) 12%, transparent)",
+        "nerf" => "color-mix(in srgb, var(--danger) 12%, transparent)",
+        "adjustment" => "color-mix(in srgb, var(--warn) 12%, transparent)",
+        "bugfix" => "color-mix(in srgb, var(--text-3) 12%, transparent)",
+        _ => "color-mix(in srgb, var(--text-3) 12%, transparent)",
     }
 }
 
@@ -130,15 +130,15 @@ fn change_type_label(ct: &str) -> &'static str {
 fn section_tag_color(category: &str) -> &'static str {
     let cat = category.to_lowercase();
     if cat.contains("hero") || cat.contains("balance") {
-        "#34d399"
+        "var(--ok)"
     } else if cat.contains("bug") || cat.contains("fix") {
-        "#9ca3af"
+        "var(--text-3)"
     } else if cat.contains("map") {
-        "#60a5fa"
+        "var(--chart-5)"
     } else if cat.contains("competitive") || cat.contains("ranked") {
-        "#f97316"
+        "var(--accent)"
     } else {
-        "#94a3b8"
+        "var(--text-3)"
     }
 }
 
@@ -158,9 +158,9 @@ const PAGE_CSS: &str = r#"
         flex-wrap: wrap;
     }
     .patch-page-title {
-        font-family: var(--font-display-hero);
+        font-family: var(--font-head);
         font-size: 2.2rem;
-        color: var(--text-bright);
+        color: var(--text);
         letter-spacing: 2px;
         text-transform: uppercase;
         margin: 0;
@@ -172,15 +172,15 @@ const PAGE_CSS: &str = r#"
         padding: 0.45rem 0.75rem;
         border-radius: 6px;
         border: 1px solid var(--border);
-        background: var(--bg-card);
-        color: var(--text-primary);
+        background: var(--surface);
+        color: var(--text);
         font-size: 0.85rem;
         font-family: var(--font-body);
         outline: none;
         transition: border-color 0.15s;
     }
     .patch-search::placeholder {
-        color: var(--text-muted);
+        color: var(--text-3);
     }
     .patch-search:focus {
         border-color: var(--accent);
@@ -197,21 +197,21 @@ const PAGE_CSS: &str = r#"
         font-size: 0.75rem;
         font-weight: 600;
         border: 1px solid var(--border);
-        background: var(--bg-card);
-        color: var(--text-secondary);
+        background: var(--surface);
+        color: var(--text-2);
         cursor: pointer;
         transition: all 0.15s;
         text-transform: uppercase;
         letter-spacing: 0.03em;
     }
     .patch-chip:hover {
-        border-color: var(--border-light);
-        color: var(--text-primary);
+        border-color: var(--accent-soft);
+        color: var(--text);
     }
     .patch-chip.active {
         border-color: var(--accent);
         background: var(--accent-soft);
-        color: var(--accent-bright);
+        color: var(--accent);
     }
     .patch-timeline {
         display: flex;
@@ -219,14 +219,14 @@ const PAGE_CSS: &str = r#"
         gap: 1rem;
     }
     .patch-card {
-        background: var(--bg-card);
+        background: var(--surface);
         border: 1px solid var(--border);
         border-radius: 8px;
         overflow: hidden;
         transition: border-color 0.2s;
     }
     .patch-card:hover {
-        border-color: var(--border-light);
+        border-color: var(--accent-soft);
     }
     .patch-card-header {
         display: flex;
@@ -238,7 +238,7 @@ const PAGE_CSS: &str = r#"
         flex-wrap: wrap;
     }
     .patch-card-header:hover {
-        background: var(--bg-card-alt);
+        background: var(--surface-2);
     }
     .patch-version-badge {
         font-family: var(--font-mono);
@@ -247,14 +247,14 @@ const PAGE_CSS: &str = r#"
         padding: 0.15rem 0.55rem;
         border-radius: 4px;
         background: var(--accent-soft);
-        color: var(--accent-bright);
+        color: var(--accent);
         flex-shrink: 0;
     }
     .patch-card-title {
-        font-family: var(--font-display);
+        font-family: var(--font-head);
         font-weight: 700;
         font-size: 0.95rem;
-        color: var(--text-bright);
+        color: var(--text);
         flex: 1;
         min-width: 0;
         overflow: hidden;
@@ -263,13 +263,13 @@ const PAGE_CSS: &str = r#"
     }
     .patch-card-date {
         font-size: 0.75rem;
-        color: var(--text-muted);
+        color: var(--text-3);
         flex-shrink: 0;
     }
     .patch-hero-count {
         font-size: 0.7rem;
-        color: var(--text-secondary);
-        background: var(--bg-elevated);
+        color: var(--text-2);
+        background: var(--surface-2);
         padding: 0.1rem 0.45rem;
         border-radius: 999px;
         flex-shrink: 0;
@@ -289,7 +289,7 @@ const PAGE_CSS: &str = r#"
     }
     .patch-expand-icon {
         font-size: 0.7rem;
-        color: var(--text-muted);
+        color: var(--text-3);
         flex-shrink: 0;
         transition: transform 0.2s;
     }
@@ -301,10 +301,10 @@ const PAGE_CSS: &str = r#"
         border-top: 1px solid var(--border);
     }
     .patch-section-title {
-        font-family: var(--font-display);
+        font-family: var(--font-head);
         font-weight: 700;
         font-size: 0.85rem;
-        color: var(--text-bright);
+        color: var(--text);
         text-transform: uppercase;
         letter-spacing: 0.04em;
         margin: 1rem 0 0.6rem;
@@ -315,7 +315,7 @@ const PAGE_CSS: &str = r#"
         gap: 0.75rem;
     }
     .patch-hero-card {
-        background: var(--bg-surface);
+        background: var(--surface-2);
         border: 1px solid var(--border);
         border-radius: 6px;
         padding: 0.85rem 1rem;
@@ -327,10 +327,10 @@ const PAGE_CSS: &str = r#"
         margin-bottom: 0.5rem;
     }
     .patch-hero-name {
-        font-family: var(--font-display);
+        font-family: var(--font-head);
         font-weight: 700;
         font-size: 0.9rem;
-        color: var(--text-bright);
+        color: var(--text);
     }
     .patch-change-badge {
         font-size: 0.6rem;
@@ -342,11 +342,11 @@ const PAGE_CSS: &str = r#"
     }
     .patch-dev-comment {
         font-size: 0.78rem;
-        color: var(--text-secondary);
+        color: var(--text-2);
         font-style: italic;
         padding: 0.5rem 0.75rem;
         margin: 0.4rem 0 0.6rem;
-        border-left: 2px solid var(--border-light);
+        border-left: 2px solid var(--border);
         line-height: 1.5;
     }
     .patch-change-list {
@@ -359,7 +359,7 @@ const PAGE_CSS: &str = r#"
     }
     .patch-change-item {
         font-size: 0.8rem;
-        color: var(--text-primary);
+        color: var(--text);
         line-height: 1.5;
         padding-left: 0.75rem;
         position: relative;
@@ -368,11 +368,11 @@ const PAGE_CSS: &str = r#"
         content: "\2022";
         position: absolute;
         left: 0;
-        color: var(--text-muted);
+        color: var(--text-3);
     }
     .patch-change-ability {
         font-weight: 700;
-        color: var(--text-bright);
+        color: var(--text);
     }
     .patch-section-items {
         list-style: none;
@@ -384,7 +384,7 @@ const PAGE_CSS: &str = r#"
     }
     .patch-section-item {
         font-size: 0.8rem;
-        color: var(--text-primary);
+        color: var(--text);
         line-height: 1.5;
         padding-left: 0.75rem;
         position: relative;
@@ -393,14 +393,14 @@ const PAGE_CSS: &str = r#"
         content: "\2022";
         position: absolute;
         left: 0;
-        color: var(--text-muted);
+        color: var(--text-3);
     }
     .patch-external-link {
         display: inline-flex;
         align-items: center;
         gap: 0.3rem;
         font-size: 0.75rem;
-        color: var(--accent-bright);
+        color: var(--accent);
         text-decoration: none;
         margin-top: 0.75rem;
         transition: opacity 0.15s;
@@ -410,7 +410,7 @@ const PAGE_CSS: &str = r#"
         text-decoration: underline;
     }
     .patch-loading, .patch-empty {
-        color: var(--text-muted);
+        color: var(--text-3);
         text-align: center;
         padding: 3rem 0;
     }
@@ -616,7 +616,7 @@ fn render_patch_card(
 
 fn render_tag_pill(category: &str) -> Element {
     let color = section_tag_color(category);
-    let bg = format!("{color}1f");
+    let bg = format!("color-mix(in srgb, {color} 12%, transparent)");
     rsx! {
         span {
             class: "patch-tag-pill",

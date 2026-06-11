@@ -5,16 +5,66 @@ const FONT_ZIP_URL: &str = "https://font.download/dl/font/koverwatch.zip";
 const FONT_FAMILY: &str = "Koverwatch";
 
 const TRAINING_PAGES: &[TrainingPage] = &[
-    TrainingPage { text: TRAINING_DIGITS,          xsize: 1200, ysize: 100, exposure: 0 },
-    TrainingPage { text: TRAINING_DIGITS_COMMAS,   xsize: 1600, ysize: 150, exposure: 0 },
-    TrainingPage { text: TRAINING_HEROES_1,        xsize: 1800, ysize: 200, exposure: 0 },
-    TrainingPage { text: TRAINING_HEROES_2,        xsize: 1800, ysize: 200, exposure: 0 },
-    TrainingPage { text: TRAINING_MAPS,            xsize: 1800, ysize: 240, exposure: 0 },
-    TrainingPage { text: TRAINING_MIXED,           xsize: 1800, ysize: 240, exposure: 0 },
-    TrainingPage { text: TRAINING_DIGITS,          xsize:  900, ysize:  80, exposure: 1 },
-    TrainingPage { text: TRAINING_BATTLETAGS,      xsize: 1800, ysize: 200, exposure: 0 },
-    TrainingPage { text: TRAINING_SCOREBOARD_SIM,  xsize: 1800, ysize: 300, exposure: 0 },
-    TrainingPage { text: TRAINING_DIGITS_COMMAS,   xsize:  800, ysize: 100, exposure: 1 },
+    TrainingPage {
+        text: TRAINING_DIGITS,
+        xsize: 1200,
+        ysize: 100,
+        exposure: 0,
+    },
+    TrainingPage {
+        text: TRAINING_DIGITS_COMMAS,
+        xsize: 1600,
+        ysize: 150,
+        exposure: 0,
+    },
+    TrainingPage {
+        text: TRAINING_HEROES_1,
+        xsize: 1800,
+        ysize: 200,
+        exposure: 0,
+    },
+    TrainingPage {
+        text: TRAINING_HEROES_2,
+        xsize: 1800,
+        ysize: 200,
+        exposure: 0,
+    },
+    TrainingPage {
+        text: TRAINING_MAPS,
+        xsize: 1800,
+        ysize: 240,
+        exposure: 0,
+    },
+    TrainingPage {
+        text: TRAINING_MIXED,
+        xsize: 1800,
+        ysize: 240,
+        exposure: 0,
+    },
+    TrainingPage {
+        text: TRAINING_DIGITS,
+        xsize: 900,
+        ysize: 80,
+        exposure: 1,
+    },
+    TrainingPage {
+        text: TRAINING_BATTLETAGS,
+        xsize: 1800,
+        ysize: 200,
+        exposure: 0,
+    },
+    TrainingPage {
+        text: TRAINING_SCOREBOARD_SIM,
+        xsize: 1800,
+        ysize: 300,
+        exposure: 0,
+    },
+    TrainingPage {
+        text: TRAINING_DIGITS_COMMAS,
+        xsize: 800,
+        ysize: 100,
+        exposure: 1,
+    },
 ];
 
 struct TrainingPage {

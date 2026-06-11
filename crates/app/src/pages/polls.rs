@@ -11,14 +11,14 @@ const PAGE_CSS: &str = r#"
     margin: 0 auto;
 }
 .polls-page-title {
-    font-family: 'Bebas Neue', sans-serif;
+    font-family: var(--font-head);
     font-size: 2.5rem;
-    color: var(--text-bright);
+    color: var(--text);
     letter-spacing: 3px;
     margin: 0 0 0.25rem;
 }
 .polls-subtitle {
-    color: var(--text-secondary);
+    color: var(--text-2);
     font-size: 0.9rem;
     margin: 0 0 2rem;
 }
@@ -28,7 +28,7 @@ const PAGE_CSS: &str = r#"
     gap: 1rem;
 }
 .polls-loading, .polls-empty {
-    color: var(--text-muted);
+    color: var(--text-3);
     text-align: center;
     padding: 3rem 0;
 }

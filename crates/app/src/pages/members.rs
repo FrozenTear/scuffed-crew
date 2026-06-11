@@ -1,6 +1,7 @@
 use dioxus::prelude::*;
 use serde::Deserialize;
 
+use crate::components::ui::{EmptyState, Pill, PillTone};
 use crate::routes::Route;
 use scuffed_api_client::ApiClient;
 
@@ -27,9 +28,9 @@ const PAGE_CSS: &str = r#"
         margin: 0 auto;
     }
     .members-page-title {
-        font-family: 'Bebas Neue', sans-serif;
+        font-family: var(--font-head);
         font-size: 2.5rem;
-        color: var(--text-bright);
+        color: var(--text);
         letter-spacing: 3px;
         margin: 0 0 2rem;
     }
@@ -39,7 +40,7 @@ const PAGE_CSS: &str = r#"
         gap: 1.25rem;
     }
     .member-card {
-        background: var(--bg-card);
+        background: var(--surface);
         border: 1px solid var(--border);
         border-radius: 10px;
         padding: 1.5rem;
@@ -58,7 +59,7 @@ const PAGE_CSS: &str = r#"
         border-radius: 50%;
         margin: 0 auto 1rem;
         overflow: hidden;
-        background: var(--bg-surface);
+        background: var(--surface-2);
         display: flex;
         align-items: center;
         justify-content: center;
@@ -69,39 +70,20 @@ const PAGE_CSS: &str = r#"
         object-fit: cover;
     }
     .member-initials {
-        font-family: 'Bebas Neue', sans-serif;
+        font-family: var(--font-head);
         font-size: 1.4rem;
         color: var(--accent);
         letter-spacing: 2px;
     }
     .member-name {
-        font-family: 'Rajdhani', sans-serif;
+        font-family: var(--font-head);
         font-size: 1.1rem;
         font-weight: 700;
-        color: var(--text-bright);
+        color: var(--text);
         margin: 0 0 0.5rem;
     }
-    .member-role-pill {
-        display: inline-block;
-        font-size: 0.65rem;
-        padding: 0.15rem 0.6rem;
-        border-radius: 999px;
-        font-weight: 600;
-        text-transform: uppercase;
-        letter-spacing: 0.04em;
-        background: #7c3aed33;
-        color: #a78bfa;
-    }
-    .member-role-pill.admin {
-        background: #ef444433;
-        color: #f87171;
-    }
-    .member-role-pill.officer {
-        background: #f9731633;
-        color: #f97316;
-    }
     .member-bio {
-        color: var(--text-secondary);
+        color: var(--text-2);
         font-size: 0.8rem;
         line-height: 1.5;
         margin-top: 0.75rem;
@@ -110,8 +92,8 @@ const PAGE_CSS: &str = r#"
         -webkit-line-clamp: 3;
         -webkit-box-orient: vertical;
     }
-    .members-loading, .members-empty {
-        color: var(--text-muted);
+    .members-loading {
+        color: var(--text-3);
         text-align: center;
         padding: 3rem 0;
     }
@@ -139,7 +121,7 @@ pub fn Members() -> Element {
                 match data {
                     None => rsx! { p { class: "members-loading", "Loading..." } },
                     Some(list) if list.is_empty() => rsx! {
-                        p { class: "members-empty", "No members yet." }
+                        EmptyState { title: "No members yet.", message: "Check back soon." }
                     },
                     Some(list) => rsx! {
                         div { class: "members-grid",
@@ -162,7 +144,11 @@ fn render_member_card(m: &PublicMember) -> Element {
         .take(2)
         .collect::<String>()
         .to_uppercase();
-    let role_class = format!("member-role-pill {}", m.org_role);
+    let role_tone = match m.org_role.as_str() {
+        "admin" => PillTone::Danger,
+        "officer" => PillTone::Warn,
+        _ => PillTone::Accent,
+    };
     let bio = m.bio.clone().unwrap_or_default();
 
     rsx! {
@@ -175,7 +161,7 @@ fn render_member_card(m: &PublicMember) -> Element {
                 }
             }
             h3 { class: "member-name", "{m.display_name}" }
-            span { class: "{role_class}", "{m.org_role}" }
+            Pill { tone: role_tone, "{m.org_role}" }
             if !bio.is_empty() {
                 p { class: "member-bio", "{bio}" }
             }

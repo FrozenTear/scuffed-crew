@@ -27,6 +27,7 @@ nostr = { version = "0.44", default-features = false, features = ["std"] }
 blake3 = "1"
 rand = "0.8"
 base64 = "0.22"
+tower_governor = "0.8.0"
 
 [dev-dependencies]
 http-body-util = "0.1"

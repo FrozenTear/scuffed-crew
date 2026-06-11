@@ -83,9 +83,9 @@ const PAGE_CSS: &str = r#"
         margin-bottom: 2.5rem;
     }
     .tournament-header h1 {
-        font-family: 'Bebas Neue', sans-serif;
+        font-family: var(--font-head);
         font-size: 2.5rem;
-        color: var(--text-bright);
+        color: var(--text);
         letter-spacing: 3px;
         margin: 0 0 0.75rem;
     }
@@ -95,36 +95,40 @@ const PAGE_CSS: &str = r#"
         flex-wrap: wrap;
         align-items: center;
         font-size: 0.8rem;
-        color: var(--text-muted);
+        color: var(--text-3);
         margin-bottom: 1rem;
     }
     .tournament-card-status {
         display: inline-block;
         font-size: 0.65rem;
         padding: 0.15rem 0.6rem;
-        border-radius: 999px;
+        border-radius: var(--radius-pill);
         font-weight: 600;
         text-transform: uppercase;
         letter-spacing: 0.04em;
     }
     .tournament-card-status.registration {
-        background: #10b98133;
-        color: #34d399;
+        background: color-mix(in srgb, var(--accent) 20%, transparent);
+        color: var(--accent);
     }
     .tournament-card-status.in_progress {
-        background: #f9731633;
-        color: #f97316;
+        background: color-mix(in srgb, var(--ok) 20%, transparent);
+        color: var(--ok);
     }
     .tournament-card-status.completed {
-        background: #6b728033;
-        color: #9ca3af;
+        background: color-mix(in srgb, var(--text-2) 15%, transparent);
+        color: var(--text-2);
     }
     .tournament-card-status.archived {
-        background: #6b728033;
-        color: #6b7280;
+        background: color-mix(in srgb, var(--text-3) 15%, transparent);
+        color: var(--text-3);
+    }
+    .tournament-card-status.draft {
+        background: color-mix(in srgb, var(--warn) 20%, transparent);
+        color: var(--warn);
     }
     .tournament-description {
-        color: var(--text-secondary);
+        color: var(--text-2);
         font-size: 0.9rem;
         line-height: 1.7;
         margin: 0 0 1rem;
@@ -139,10 +143,10 @@ const PAGE_CSS: &str = r#"
         text-decoration: underline;
     }
     .tournament-section-title {
-        font-family: 'Rajdhani', sans-serif;
+        font-family: var(--font-head);
         font-weight: 700;
         font-size: 1.2rem;
-        color: var(--text-bright);
+        color: var(--text);
         text-transform: uppercase;
         letter-spacing: 0.04em;
         margin: 2rem 0 1rem;
@@ -150,12 +154,12 @@ const PAGE_CSS: &str = r#"
         border-top: 1px solid var(--border);
     }
     .tournament-loading {
-        color: var(--text-muted);
+        color: var(--text-3);
         text-align: center;
         padding: 3rem 0;
     }
     .tournament-no-bracket {
-        color: var(--text-muted);
+        color: var(--text-3);
         text-align: center;
         padding: 2rem 0;
     }

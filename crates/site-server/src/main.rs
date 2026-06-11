@@ -547,5 +547,11 @@ async fn main() {
     tracing::info!("Scuffed Crew server listening on {addr}");
 
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
-    axum::serve(listener, app).await.unwrap();
+    // ConnectInfo is required by the auth rate limiter's peer-IP fallback.
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .await
+    .unwrap();
 }

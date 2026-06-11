@@ -539,7 +539,7 @@ pub fn AdminTournaments() -> Element {
                         div { style: "margin-bottom:2rem;",
                             div { style: "display:flex;justify-content:space-between;align-items:center;margin-bottom:0.75rem;",
                                 h2 {
-                                    style: "font-family:'Rajdhani',sans-serif;font-size:1.1rem;font-weight:700;color:var(--text-bright);text-transform:uppercase;letter-spacing:0.04em;margin:0;",
+                                    style: "font-family:var(--font-head),sans-serif;font-size:1.1rem;font-weight:700;color:var(--text);text-transform:uppercase;letter-spacing:0.04em;margin:0;",
                                     "Participants"
                                 }
                                 button {
@@ -582,7 +582,7 @@ pub fn AdminTournaments() -> Element {
                         // Rounds & matches section
                         div {
                             h2 {
-                                style: "font-family:'Rajdhani',sans-serif;font-size:1.1rem;font-weight:700;color:var(--text-bright);text-transform:uppercase;letter-spacing:0.04em;margin-bottom:0.75rem;",
+                                style: "font-family:var(--font-head),sans-serif;font-size:1.1rem;font-weight:700;color:var(--text);text-transform:uppercase;letter-spacing:0.04em;margin-bottom:0.75rem;",
                                 "Bracket"
                             }
                             {
@@ -602,7 +602,7 @@ pub fn AdminTournaments() -> Element {
                                                     rsx! {
                                                         div { style: "margin-bottom:1.5rem;",
                                                             h3 {
-                                                                style: "font-family:'Rajdhani',sans-serif;font-size:0.9rem;font-weight:600;color:var(--text-secondary);text-transform:uppercase;margin-bottom:0.5rem;",
+                                                                style: "font-family:var(--font-head),sans-serif;font-size:0.9rem;font-weight:600;color:var(--text-2);text-transform:uppercase;margin-bottom:0.5rem;",
                                                                 "Round {round.round_number} \u{2014} {round.stage}"
                                                             }
                                                             DataTable { headers: vec!["#", "Player A", "Score", "Player B", "Status", "Actions"],

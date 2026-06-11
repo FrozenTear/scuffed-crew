@@ -6,8 +6,7 @@ use axum::{
 
 use scuffed_auth::server::session::ErrorResponse;
 use scuffed_db::{
-    AuditAction, AuditTargetType, DaemonToken, HeroStats, MapStats, PersonalMatch,
-    PersonalStats,
+    AuditAction, AuditTargetType, DaemonToken, HeroStats, MapStats, PersonalMatch, PersonalStats,
 };
 use scuffed_types::api::{
     CreateDaemonTokenRequest, CreateDaemonTokenResponse, CursorResponse, DaemonConfigResponse,

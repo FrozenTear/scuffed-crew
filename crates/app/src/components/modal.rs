@@ -4,7 +4,7 @@ const MODAL_CSS: &str = r#"
     .modal-backdrop {
         position: fixed;
         inset: 0;
-        background: rgba(0, 0, 0, 0.7);
+        background: var(--overlay);
         z-index: 1000;
         display: flex;
         align-items: center;
@@ -12,7 +12,7 @@ const MODAL_CSS: &str = r#"
         animation: modal-fade-in 0.2s ease-out;
     }
     .modal-content {
-        background: var(--bg-card);
+        background: var(--surface);
         border: 1px solid var(--border);
         border-radius: 12px;
         padding: 2rem;
@@ -28,15 +28,15 @@ const MODAL_CSS: &str = r#"
         right: 0.75rem;
         background: none;
         border: none;
-        color: var(--text-muted);
+        color: var(--text-3);
         font-size: 1.2rem;
         cursor: pointer;
         padding: 0.25rem 0.5rem;
         border-radius: 4px;
     }
     .modal-close:hover {
-        color: var(--text-bright);
-        background: var(--bg-elevated);
+        color: var(--text);
+        background: var(--surface-2);
     }
     @keyframes modal-fade-in {
         from { opacity: 0; }

@@ -82,7 +82,7 @@ pub async fn list_moderation(
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
     let entries = state
         .db
-        .list_all_moderation(q.limit, q.offset)
+        .list_all_moderation(q.limit.min(100), q.offset)
         .await
         .map_err(|e| {
             (

@@ -285,24 +285,31 @@ impl Database {
         offset: u32,
     ) -> DbResult<(Vec<StrategySummary>, u64)> {
         with_timeout(async {
-            // Build WHERE clause dynamically
+            // Build WHERE clause dynamically with bound placeholders (never
+            // interpolate user input — see SurrealDB gotchas in CLAUDE.md)
             let mut conditions = vec!["visibility = 'public'".to_string()];
-            if let Some(gm) = game_mode {
-                conditions.push(format!("game_mode = '{gm}'"));
+            if game_mode.is_some() {
+                conditions.push("game_mode = $game_mode".to_string());
             }
-            if let Some(q) = search {
+            if search.is_some() {
                 // Simple CONTAINS search on name
-                conditions.push(format!(
-                    "string::lowercase(name) CONTAINS string::lowercase('{}')",
-                    q.replace('\'', "''")
-                ));
+                conditions.push(
+                    "string::lowercase(name) CONTAINS string::lowercase($search)".to_string(),
+                );
             }
             let where_clause = conditions.join(" AND ");
 
             // Count total
             let count_query =
                 format!("SELECT count() as total FROM strategy WHERE {where_clause} GROUP ALL");
-            let mut count_result = self.client.query(&count_query).await?;
+            let mut count_q = self.client.query(&count_query);
+            if let Some(gm) = game_mode {
+                count_q = count_q.bind(("game_mode", gm.to_string()));
+            }
+            if let Some(q) = search {
+                count_q = count_q.bind(("search", q.to_string()));
+            }
+            let mut count_result = count_q.await?;
 
             #[derive(Debug, Deserialize, SurrealValue)]
             struct CountRow {
@@ -317,12 +324,18 @@ impl Database {
                  FROM strategy WHERE {where_clause} \
                  ORDER BY updated_at DESC LIMIT $lim START $off"
             );
-            let mut data_result = self
+            let mut data_q = self
                 .client
                 .query(&data_query)
                 .bind(("lim", limit as i64))
-                .bind(("off", offset as i64))
-                .await?;
+                .bind(("off", offset as i64));
+            if let Some(gm) = game_mode {
+                data_q = data_q.bind(("game_mode", gm.to_string()));
+            }
+            if let Some(q) = search {
+                data_q = data_q.bind(("search", q.to_string()));
+            }
+            let mut data_result = data_q.await?;
             let rows: Vec<DbStrategySummary> = data_result.take(0)?;
 
             Ok((rows.into_iter().map(db_summary_to_summary).collect(), total))

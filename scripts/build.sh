@@ -3,19 +3,18 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
-echo "==> Building site WASM (crates/site)"
-cd "$ROOT/crates/site"
-trunk build --release
+echo "==> Building Dioxus app (crates/app)"
+cd "$ROOT/crates/app"
+dx build --release
 
-echo "==> Building admin SPA (crates/admin)"
-cd "$ROOT/crates/admin"
-trunk build --release
-
-echo "==> Building server (scuffed-site-server)"
+echo "==> Staging app bundle into dist/"
 cd "$ROOT"
-cargo build --release -p scuffed-site-server
+rm -rf dist
+cp -r target/dx/scuffed-app/release/web/public dist
+
+echo "==> Building server (scuffed-server)"
+cargo build --release -p scuffed-server
 
 echo "==> Done"
-echo "    dist/index.html       — public site"
-echo "    dist/admin/index.html — admin SPA"
-echo "    target/release/scuffed-site-server"
+echo "    dist/index.html — Dioxus app"
+echo "    target/release/scuffed-server"

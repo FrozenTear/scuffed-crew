@@ -7,7 +7,9 @@
 use stat_tracker::detect;
 
 fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let path = std::env::args().nth(1).ok_or("usage: polltick <frame.png>")?;
+    let path = std::env::args()
+        .nth(1)
+        .ok_or("usage: polltick <frame.png>")?;
     let img = image::open(&path)?;
     println!("frame: {}x{}", img.width(), img.height());
 

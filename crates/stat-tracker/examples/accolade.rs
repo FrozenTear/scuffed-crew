@@ -7,7 +7,9 @@
 use stat_tracker::ocr;
 
 fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let path = std::env::args().nth(1).ok_or("usage: accolade <image.png>")?;
+    let path = std::env::args()
+        .nth(1)
+        .ok_or("usage: accolade <image.png>")?;
     let img = image::open(&path)?;
     let (w, h) = (img.width(), img.height());
     println!("image: {w}x{h}");
@@ -70,12 +72,8 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let (cw, ch) = ((w as f64 * (x1 - x0)) as u32, (h as f64 * (y1 - y0)) as u32);
         let crop = img.crop_imm(xs, ys, cw, ch).to_luma8();
         // Upscale 3x + threshold at 110 (cyan text ~ bright on dark header).
-        let up = image::imageops::resize(
-            &crop,
-            cw * 3,
-            ch * 3,
-            image::imageops::FilterType::Lanczos3,
-        );
+        let up =
+            image::imageops::resize(&crop, cw * 3, ch * 3, image::imageops::FilterType::Lanczos3);
         let bin = image::GrayImage::from_fn(up.width(), up.height(), |x, y| {
             if up.get_pixel(x, y).0[0] > 110 {
                 image::Luma([0u8])

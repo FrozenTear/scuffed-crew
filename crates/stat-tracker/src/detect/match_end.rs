@@ -160,11 +160,7 @@ fn read_result_word(img: &DynamicImage) -> MatchOutcome {
     let crop = img.crop_imm(x, y, cw, ch);
     let prepared = crate::ocr::preprocess::prepare_title(&crop);
 
-    match crate::ocr::recognize_prepared(
-        &prepared,
-        "7",
-        Some("ABCDEFGHIJKLMNOPQRSTUVWXYZ"),
-    ) {
+    match crate::ocr::recognize_prepared(&prepared, "7", Some("ABCDEFGHIJKLMNOPQRSTUVWXYZ")) {
         Ok(text) => {
             let upper = text.to_uppercase();
             if upper.contains("VICTORY") {

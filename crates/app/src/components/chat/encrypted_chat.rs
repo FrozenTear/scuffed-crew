@@ -26,10 +26,10 @@ const ENCRYPTED_CHAT_CSS: &str = r#"
     align-items: center;
     gap: 6px;
     padding: 6px 12px;
-    background: rgba(124, 58, 237, 0.1);
+    background: var(--accent-soft);
     border-bottom: 1px solid var(--border);
     font-size: 11px;
-    color: var(--accent-bright);
+    color: var(--accent);
 }
 
 .encrypted-chat__badge-icon {
@@ -44,14 +44,14 @@ const ENCRYPTED_CHAT_CSS: &str = r#"
     gap: 12px;
     padding: 2rem;
     text-align: center;
-    color: var(--text-secondary);
+    color: var(--text-2);
     font-size: 13px;
     flex: 1;
 }
 
 .encrypted-chat__no-key-title {
     font-weight: 600;
-    color: var(--text-bright);
+    color: var(--text);
     font-size: 14px;
 }
 "#;

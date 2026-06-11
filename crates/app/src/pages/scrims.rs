@@ -61,33 +61,33 @@ const PAGE_CSS: &str = r#"
     margin: 0 auto;
 }
 .scrims-page-title {
-    font-family: 'Bebas Neue', sans-serif;
+    font-family: var(--font-head);
     font-size: 2.5rem;
-    color: var(--text-bright);
+    color: var(--text);
     letter-spacing: 3px;
     margin: 0 0 0.25rem;
 }
 .scrims-subtitle {
-    color: var(--text-secondary);
+    color: var(--text-2);
     font-size: 0.9rem;
     margin: 0 0 2rem;
 }
 .scrims-section-title {
-    font-family: 'Rajdhani', sans-serif;
+    font-family: var(--font-head);
     font-weight: 700;
     font-size: 1.2rem;
-    color: var(--text-bright);
+    color: var(--text);
     margin: 2rem 0 0.75rem;
     display: flex;
     align-items: center;
     gap: 0.5rem;
 }
 .scrims-section-title .count {
-    background: var(--bg-elevated);
-    color: var(--text-muted);
+    background: var(--surface-2);
+    color: var(--text-3);
     font-size: 0.7rem;
     padding: 0.1rem 0.5rem;
-    border-radius: 999px;
+    border-radius: var(--radius-pill);
 }
 .scrims-list {
     display: flex;
@@ -95,7 +95,7 @@ const PAGE_CSS: &str = r#"
     gap: 0.75rem;
 }
 .scrim-card {
-    background: var(--bg-card);
+    background: var(--surface);
     border: 1px solid var(--border);
     border-radius: 10px;
     padding: 1.25rem 1.5rem;
@@ -103,10 +103,10 @@ const PAGE_CSS: &str = r#"
     flex-direction: column;
     gap: 0.5rem;
 }
-.scrim-card.open { border-left: 3px solid #34d399; }
-.scrim-card.confirmed { border-left: 3px solid #60a5fa; }
-.scrim-card.completed { border-left: 3px solid var(--text-muted); }
-.scrim-card.cancelled { border-left: 3px solid #f87171; opacity: 0.6; }
+.scrim-card.open { border-left: 3px solid var(--ok); }
+.scrim-card.confirmed { border-left: 3px solid var(--accent); }
+.scrim-card.completed { border-left: 3px solid var(--text-3); }
+.scrim-card.cancelled { border-left: 3px solid var(--danger); opacity: 0.6; }
 .scrim-header {
     display: flex;
     align-items: center;
@@ -115,35 +115,47 @@ const PAGE_CSS: &str = r#"
     flex-wrap: wrap;
 }
 .scrim-team {
-    font-family: 'Rajdhani', sans-serif;
+    font-family: var(--font-head);
     font-weight: 700;
     font-size: 1.05rem;
-    color: var(--text-bright);
+    color: var(--text);
 }
 .scrim-status {
     display: inline-block;
     padding: 0.15rem 0.6rem;
-    border-radius: 999px;
+    border-radius: var(--radius-pill);
     font-size: 0.65rem;
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.04em;
 }
-.scrim-status.open { background: #10b98122; color: #34d399; }
-.scrim-status.confirmed { background: #3b82f622; color: #60a5fa; }
-.scrim-status.completed { background: #6b728022; color: #9ca3af; }
-.scrim-status.cancelled { background: #ef444422; color: #f87171; }
+.scrim-status.open {
+    background: color-mix(in srgb, var(--ok) 15%, transparent);
+    color: var(--ok);
+}
+.scrim-status.confirmed {
+    background: color-mix(in srgb, var(--accent) 15%, transparent);
+    color: var(--accent);
+}
+.scrim-status.completed {
+    background: color-mix(in srgb, var(--text-2) 15%, transparent);
+    color: var(--text-2);
+}
+.scrim-status.cancelled {
+    background: color-mix(in srgb, var(--danger) 15%, transparent);
+    color: var(--danger);
+}
 .scrim-details {
     display: flex;
     gap: 1.25rem;
     font-size: 0.8rem;
-    color: var(--text-secondary);
+    color: var(--text-2);
     flex-wrap: wrap;
 }
 .scrim-details span { display: flex; align-items: center; gap: 0.25rem; }
 .scrim-notes {
     font-size: 0.8rem;
-    color: var(--text-muted);
+    color: var(--text-3);
     font-style: italic;
 }
 .scrim-opponent {
@@ -163,35 +175,50 @@ const PAGE_CSS: &str = r#"
     text-transform: uppercase;
     letter-spacing: 0.03em;
     border: 1px solid var(--border);
-    background: var(--bg-elevated);
-    color: var(--text-secondary);
+    background: var(--surface-2);
+    color: var(--text-2);
     cursor: pointer;
     transition: all 0.15s;
 }
-.scrim-btn:hover { border-color: var(--accent-soft); color: var(--text-bright); }
-.scrim-btn.confirm { border-color: #3b82f644; color: #60a5fa; }
-.scrim-btn.confirm:hover { background: #3b82f622; }
-.scrim-btn.cancel { border-color: #ef444444; color: #f87171; }
-.scrim-btn.cancel:hover { background: #ef444422; }
-.scrim-btn.complete { border-color: #10b98144; color: #34d399; }
-.scrim-btn.complete:hover { background: #10b98122; }
+.scrim-btn:hover { border-color: var(--accent-soft); color: var(--text); }
+.scrim-btn.confirm {
+    border-color: color-mix(in srgb, var(--accent) 40%, transparent);
+    color: var(--accent);
+}
+.scrim-btn.confirm:hover {
+    background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+.scrim-btn.cancel {
+    border-color: color-mix(in srgb, var(--danger) 40%, transparent);
+    color: var(--danger);
+}
+.scrim-btn.cancel:hover {
+    background: color-mix(in srgb, var(--danger) 12%, transparent);
+}
+.scrim-btn.complete {
+    border-color: color-mix(in srgb, var(--ok) 40%, transparent);
+    color: var(--ok);
+}
+.scrim-btn.complete:hover {
+    background: color-mix(in srgb, var(--ok) 12%, transparent);
+}
 .scrims-loading, .scrims-empty {
-    color: var(--text-muted);
+    color: var(--text-3);
     text-align: center;
     padding: 3rem 0;
 }
 .scrim-create-form {
-    background: var(--bg-card);
+    background: var(--surface);
     border: 1px solid var(--border);
     border-radius: 10px;
     padding: 1.5rem;
     margin-bottom: 1.5rem;
 }
 .scrim-create-title {
-    font-family: 'Rajdhani', sans-serif;
+    font-family: var(--font-head);
     font-weight: 700;
     font-size: 1.1rem;
-    color: var(--text-bright);
+    color: var(--text);
     margin: 0 0 1rem;
 }
 .scrim-form-row {
@@ -212,13 +239,13 @@ const PAGE_CSS: &str = r#"
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.04em;
-    color: var(--text-muted);
+    color: var(--text-3);
 }
 .scrim-form-input, .scrim-form-select, .scrim-form-textarea {
-    background: var(--bg-surface);
+    background: var(--bg);
     border: 1px solid var(--border);
     border-radius: 6px;
-    color: var(--text-bright);
+    color: var(--text);
     padding: 0.5rem 0.75rem;
     font-size: 0.85rem;
     font-family: inherit;
@@ -237,11 +264,11 @@ const PAGE_CSS: &str = r#"
     letter-spacing: 0.03em;
     border: none;
     background: var(--accent);
-    color: white;
+    color: var(--accent-fg);
     cursor: pointer;
     transition: all 0.15s;
 }
-.scrim-form-submit:hover { filter: brightness(1.15); box-shadow: 0 0 20px var(--accent-glow); }
+.scrim-form-submit:hover { filter: brightness(1.15); box-shadow: 0 0 20px var(--accent-soft); }
 .scrim-form-submit:disabled { opacity: 0.5; cursor: not-allowed; }
 @media (max-width: 768px) {
     .scrims-page { padding: 2rem 1rem; }

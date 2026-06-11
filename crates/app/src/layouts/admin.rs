@@ -2,18 +2,19 @@ use dioxus::prelude::*;
 
 use crate::routes::Route;
 use crate::state::use_auth;
+use crate::theme::ThemeToggle;
 
 const ADMIN_CSS: &str = r#"
     .admin-layout {
         display: flex;
         min-height: 100vh;
-        background: var(--bg-void);
-        color: var(--text-primary);
+        background: var(--bg);
+        color: var(--text);
         font-family: var(--font-body);
     }
     .admin-sidebar {
         width: 220px;
-        background: var(--bg-surface);
+        background: var(--surface);
         border-right: 1px solid var(--border);
         padding: 1.5rem 0;
         display: flex;
@@ -26,17 +27,21 @@ const ADMIN_CSS: &str = r#"
         padding: 0 1.25rem 1.25rem;
         border-bottom: 1px solid var(--border);
         margin-bottom: 1rem;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 0.5rem;
     }
-    .admin-sidebar .brand h2 {
-        font-family: var(--font-display-hero);
+    .admin-sidebar .brand-text h2 {
+        font-family: var(--font-head);
         font-size: 1.2rem;
         color: var(--accent);
         text-transform: uppercase;
         margin: 0;
     }
-    .admin-sidebar .brand span {
+    .admin-sidebar .brand-text span {
         font-size: 0.7rem;
-        color: var(--text-muted);
+        color: var(--text-3);
         text-transform: uppercase;
         letter-spacing: 0.05em;
     }
@@ -49,14 +54,14 @@ const ADMIN_CSS: &str = r#"
     .admin-sidebar nav a {
         display: block;
         padding: 0.6rem 1.25rem;
-        color: var(--text-secondary);
+        color: var(--text-2);
         text-decoration: none;
         font-size: 0.9rem;
         transition: background 0.15s, color 0.15s;
     }
     .admin-sidebar nav a:hover {
-        background: var(--bg-card);
-        color: var(--text-bright);
+        background: var(--surface-2);
+        color: var(--text);
     }
     .admin-sidebar .user-info {
         padding: 1rem 1.25rem 0;
@@ -64,13 +69,13 @@ const ADMIN_CSS: &str = r#"
         margin-top: auto;
     }
     .admin-sidebar .user-info .name {
-        color: var(--text-bright);
+        color: var(--text);
         font-size: 0.85rem;
         font-weight: 600;
     }
     .admin-sidebar .user-info .role {
         font-size: 0.7rem;
-        color: var(--text-muted);
+        color: var(--text-3);
         text-transform: uppercase;
     }
     .admin-main {
@@ -79,9 +84,9 @@ const ADMIN_CSS: &str = r#"
         overflow-y: auto;
     }
     .admin-main h1 {
-        font-family: var(--font-display);
+        font-family: var(--font-head);
         font-size: 1.8rem;
-        color: var(--text-bright);
+        color: var(--text);
         margin-bottom: 1.5rem;
         text-transform: uppercase;
         letter-spacing: 0.04em;
@@ -109,8 +114,8 @@ pub fn AdminLayout() -> Element {
     if !auth().loading && !auth().is_officer_or_above() {
         return rsx! {
             div {
-                style: "display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:100vh;color:var(--text-secondary);",
-                h2 { style: "color:var(--text-bright);margin-bottom:0.5rem;", "Access Denied" }
+                style: "display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:100vh;color:var(--text-2);",
+                h2 { style: "color:var(--text);margin-bottom:0.5rem;", "Access Denied" }
                 p { "You need officer permissions to access the admin panel." }
                 Link { to: Route::Home {}, style: "color:var(--accent);margin-top:1rem;", "Return home" }
             }
@@ -123,8 +128,11 @@ pub fn AdminLayout() -> Element {
         div { class: "admin-layout",
             aside { class: "admin-sidebar",
                 div { class: "brand",
-                    h2 { "Scuffed Crew" }
-                    span { "Admin Panel" }
+                    div { class: "brand-text",
+                        h2 { "Scuffed Crew" }
+                        span { "Admin Panel" }
+                    }
+                    ThemeToggle {}
                 }
                 nav {
                     Link { to: Route::AdminDashboard {}, "Dashboard" }

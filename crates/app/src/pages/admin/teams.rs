@@ -398,7 +398,7 @@ pub fn AdminTeams() -> Element {
                 input {
                     class: "form-input",
                     r#type: "text",
-                    placeholder: "#7c3aed",
+                    placeholder: "e.g. #rrggbb",
                     value: "{form_color}",
                     oninput: move |e| form_color.set(e.value()),
                 }

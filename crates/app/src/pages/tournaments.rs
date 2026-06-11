@@ -54,9 +54,9 @@ const PAGE_CSS: &str = r#"
         margin: 0 auto;
     }
     .tournaments-page h1 {
-        font-family: 'Bebas Neue', sans-serif;
+        font-family: var(--font-head);
         font-size: 2.5rem;
-        color: var(--text-bright);
+        color: var(--text);
         letter-spacing: 3px;
         margin: 0 0 2rem;
     }
@@ -66,7 +66,7 @@ const PAGE_CSS: &str = r#"
         gap: 1.25rem;
     }
     .tournament-card {
-        background: var(--bg-card);
+        background: var(--surface);
         border: 1px solid var(--border);
         border-radius: 10px;
         padding: 1.25rem;
@@ -81,20 +81,20 @@ const PAGE_CSS: &str = r#"
         transform: translateY(-2px);
     }
     .tournament-card-name {
-        font-family: 'Rajdhani', sans-serif;
+        font-family: var(--font-head);
         font-weight: 700;
         font-size: 1.15rem;
-        color: var(--text-bright);
+        color: var(--text);
     }
     .tournament-card-meta {
         display: flex;
         gap: 0.75rem;
         flex-wrap: wrap;
         font-size: 0.75rem;
-        color: var(--text-muted);
+        color: var(--text-3);
     }
     .tournament-card-desc {
-        color: var(--text-secondary);
+        color: var(--text-2);
         font-size: 0.8rem;
         line-height: 1.5;
         margin: 0;
@@ -103,30 +103,34 @@ const PAGE_CSS: &str = r#"
         display: inline-block;
         font-size: 0.65rem;
         padding: 0.15rem 0.6rem;
-        border-radius: 999px;
+        border-radius: var(--radius-pill);
         font-weight: 600;
         text-transform: uppercase;
         letter-spacing: 0.04em;
         width: fit-content;
     }
     .tournament-card-status.registration {
-        background: #10b98133;
-        color: #34d399;
+        background: color-mix(in srgb, var(--accent) 20%, transparent);
+        color: var(--accent);
     }
     .tournament-card-status.in_progress {
-        background: #f9731633;
-        color: #f97316;
+        background: color-mix(in srgb, var(--ok) 20%, transparent);
+        color: var(--ok);
     }
     .tournament-card-status.completed {
-        background: #6b728033;
-        color: #9ca3af;
+        background: color-mix(in srgb, var(--text-2) 15%, transparent);
+        color: var(--text-2);
     }
     .tournament-card-status.archived {
-        background: #6b728033;
-        color: #6b7280;
+        background: color-mix(in srgb, var(--text-3) 15%, transparent);
+        color: var(--text-3);
+    }
+    .tournament-card-status.draft {
+        background: color-mix(in srgb, var(--warn) 20%, transparent);
+        color: var(--warn);
     }
     .tournaments-loading, .tournaments-empty {
-        color: var(--text-muted);
+        color: var(--text-3);
         text-align: center;
         padding: 3rem 0;
     }

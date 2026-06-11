@@ -148,7 +148,7 @@ pub fn AdminSettings() -> Element {
                         option { value: "nostr", "Nostr (Relay)" }
                     }
                     p {
-                        style: "font-size: 0.75rem; color: var(--text-muted); margin-top: 0.35rem;",
+                        style: "font-size: 0.75rem; color: var(--text-3); margin-top: 0.35rem;",
                         "Controls where forum data is stored. \"Local\" uses the database. \"Nostr\" uses the relay (requires relay setup)."
                     }
                 }
@@ -161,7 +161,7 @@ pub fn AdminSettings() -> Element {
                         oninput: move |e| extra_relay_urls.set(e.value()),
                     }
                     p {
-                        style: "font-size: 0.75rem; color: var(--text-muted); margin-top: 0.35rem;",
+                        style: "font-size: 0.75rem; color: var(--text-3); margin-top: 0.35rem;",
                         "Additional relay URLs for multi-relay publishing (one per line). Events are published to the primary relay (NOSTR_RELAY_URL) and all extra relays."
                     }
                 }

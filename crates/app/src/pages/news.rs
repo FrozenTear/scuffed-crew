@@ -1,6 +1,7 @@
 use dioxus::prelude::*;
 use serde::Deserialize;
 
+use crate::components::ui::{EmptyState, Pill, PillTone};
 use scuffed_api_client::ApiClient;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -22,9 +23,9 @@ const PAGE_CSS: &str = r#"
         margin: 0 auto;
     }
     .news-page-title {
-        font-family: 'Bebas Neue', sans-serif;
+        font-family: var(--font-head);
         font-size: 2.5rem;
-        color: var(--text-bright);
+        color: var(--text);
         letter-spacing: 3px;
         margin: 0 0 2rem;
     }
@@ -34,7 +35,7 @@ const PAGE_CSS: &str = r#"
         gap: 1.25rem;
     }
     .news-card {
-        background: var(--bg-card);
+        background: var(--surface);
         border: 1px solid var(--border);
         border-radius: 10px;
         padding: 1.5rem;
@@ -47,33 +48,24 @@ const PAGE_CSS: &str = r#"
         align-items: center;
         gap: 0.5rem;
         font-size: 0.7rem;
-        color: var(--text-muted);
+        color: var(--text-3);
         margin-bottom: 0.5rem;
     }
-    .news-pin {
-        background: #7c3aed33;
-        color: #a78bfa;
-        padding: 0.1rem 0.4rem;
-        border-radius: 4px;
-        font-size: 0.6rem;
-        font-weight: 600;
-        text-transform: uppercase;
-    }
     .news-title {
-        font-family: 'Rajdhani', sans-serif;
+        font-family: var(--font-head);
         font-size: 1.2rem;
         font-weight: 700;
-        color: var(--text-bright);
+        color: var(--text);
         margin: 0 0 0.5rem;
     }
     .news-body {
-        color: var(--text-secondary);
+        color: var(--text-2);
         font-size: 0.85rem;
         line-height: 1.7;
         margin: 0;
     }
-    .news-loading, .news-empty {
-        color: var(--text-muted);
+    .news-loading {
+        color: var(--text-3);
         text-align: center;
         padding: 3rem 0;
     }
@@ -101,7 +93,7 @@ pub fn News() -> Element {
                 match data {
                     None => rsx! { p { class: "news-loading", "Loading..." } },
                     Some(list) if list.is_empty() => rsx! {
-                        p { class: "news-empty", "No announcements yet." }
+                        EmptyState { title: "No announcements yet.", message: "Check back soon." }
                     },
                     Some(list) => rsx! {
                         div { class: "news-list",
@@ -129,7 +121,7 @@ fn render_news_card(a: &Announcement) -> Element {
             div { class: "news-meta",
                 time { "{date}" }
                 if a.pinned {
-                    span { class: "news-pin", "Pinned" }
+                    Pill { tone: PillTone::Accent, "Pinned" }
                 }
             }
             h2 { class: "news-title", "{a.title}" }

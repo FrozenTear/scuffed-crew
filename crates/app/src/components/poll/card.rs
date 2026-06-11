@@ -7,7 +7,7 @@ use super::PollResultsData;
 
 const CARD_CSS: &str = r#"
 .poll-card {
-    background: var(--bg-card);
+    background: var(--surface);
     border: 1px solid var(--border);
     border-radius: 10px;
     padding: 1.25rem 1.5rem;
@@ -17,13 +17,13 @@ const CARD_CSS: &str = r#"
     border-color: var(--accent-soft);
 }
 .poll-card-title {
-    font-family: var(--font-display);
+    font-family: var(--font-head);
     font-size: 1.15rem;
-    color: var(--text-bright);
+    color: var(--text);
     margin: 0 0 0.25rem;
 }
 .poll-card-desc {
-    color: var(--text-secondary);
+    color: var(--text-2);
     font-size: 0.85rem;
     margin: 0 0 1rem;
 }
@@ -34,7 +34,7 @@ const CARD_CSS: &str = r#"
 }
 .poll-option {
     position: relative;
-    background: var(--bg-surface);
+    background: var(--surface-2);
     border: 1px solid var(--border);
     border-radius: 6px;
     padding: 0.6rem 0.75rem;
@@ -46,19 +46,19 @@ const CARD_CSS: &str = r#"
     border-color: var(--accent-soft);
 }
 .poll-option.voted {
-    border-color: #7c3aed;
+    border-color: var(--accent);
 }
 .poll-option-bar {
     position: absolute;
     top: 0;
     left: 0;
     bottom: 0;
-    background: #7c3aed18;
+    background: color-mix(in srgb, var(--accent) 9%, transparent);
     border-radius: 6px;
     transition: width 0.3s ease;
 }
 .poll-option.voted .poll-option-bar {
-    background: #7c3aed30;
+    background: color-mix(in srgb, var(--accent) 19%, transparent);
 }
 .poll-option-content {
     position: relative;
@@ -68,11 +68,11 @@ const CARD_CSS: &str = r#"
     z-index: 1;
 }
 .poll-option-label {
-    color: var(--text-bright);
+    color: var(--text);
     font-size: 0.9rem;
 }
 .poll-option-stats {
-    color: var(--text-muted);
+    color: var(--text-3);
     font-size: 0.8rem;
     white-space: nowrap;
 }
@@ -81,15 +81,15 @@ const CARD_CSS: &str = r#"
     justify-content: space-between;
     align-items: center;
     margin-top: 0.75rem;
-    color: var(--text-muted);
+    color: var(--text-3);
     font-size: 0.75rem;
 }
 .poll-total-votes {
-    color: var(--text-secondary);
+    color: var(--text-2);
 }
 .poll-badge-multiple {
-    background: #7c3aed22;
-    color: #a78bfa;
+    background: var(--accent-soft);
+    color: var(--accent);
     padding: 0.15rem 0.5rem;
     border-radius: 999px;
     font-size: 0.65rem;
@@ -100,7 +100,7 @@ const CARD_CSS: &str = r#"
 .poll-delete-btn {
     background: none;
     border: 1px solid var(--border);
-    color: var(--text-muted);
+    color: var(--text-3);
     border-radius: 4px;
     padding: 0.2rem 0.5rem;
     font-size: 0.7rem;
@@ -108,8 +108,8 @@ const CARD_CSS: &str = r#"
     transition: border-color 0.15s, color 0.15s;
 }
 .poll-delete-btn:hover {
-    border-color: #ef4444;
-    color: #ef4444;
+    border-color: var(--danger);
+    color: var(--danger);
 }
 "#;
 

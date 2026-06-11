@@ -95,26 +95,26 @@ const TOAST_CSS: &str = r#"
         padding: 0.75rem 1rem;
         border-radius: 8px;
         border: 1px solid var(--border);
-        background: var(--bg-elevated);
-        color: var(--text-bright);
+        background: var(--surface-2);
+        color: var(--text);
         font-size: 0.85rem;
         min-width: 250px;
         animation: toast-in 0.3s ease-out;
     }
-    .toast-success { border-left: 3px solid #34d399; }
-    .toast-error { border-left: 3px solid #f87171; }
-    .toast-warning { border-left: 3px solid #fbbf24; }
-    .toast-info { border-left: 3px solid #60a5fa; }
+    .toast-success { border-left: 3px solid var(--ok); }
+    .toast-error { border-left: 3px solid var(--danger); }
+    .toast-warning { border-left: 3px solid var(--warn); }
+    .toast-info { border-left: 3px solid var(--accent); }
     .toast-dismiss {
         margin-left: auto;
         background: none;
         border: none;
-        color: var(--text-muted);
+        color: var(--text-3);
         cursor: pointer;
         font-size: 1rem;
         padding: 0 0.25rem;
     }
-    .toast-dismiss:hover { color: var(--text-bright); }
+    .toast-dismiss:hover { color: var(--text); }
     @keyframes toast-in {
         from { opacity: 0; transform: translateX(1rem); }
         to { opacity: 1; transform: translateX(0); }

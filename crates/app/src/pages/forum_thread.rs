@@ -54,12 +54,12 @@ const PAGE_CSS: &str = r#"
         display: inline-flex;
         align-items: center;
         gap: 0.35rem;
-        color: var(--text-muted);
+        color: var(--text-3);
         font-size: 0.8rem;
         margin-bottom: 1.5rem;
         text-decoration: none;
     }
-    .thread-back:hover { color: var(--text-bright); }
+    .thread-back:hover { color: var(--text); }
     .thread-header {
         margin-bottom: 2rem;
     }
@@ -71,9 +71,9 @@ const PAGE_CSS: &str = r#"
         margin-bottom: 0.5rem;
     }
     .thread-title {
-        font-family: 'Bebas Neue', sans-serif;
+        font-family: var(--font-head);
         font-size: 2rem;
-        color: var(--text-bright);
+        color: var(--text);
         letter-spacing: 2px;
         margin: 0;
     }
@@ -84,32 +84,41 @@ const PAGE_CSS: &str = r#"
         font-weight: 600;
         text-transform: uppercase;
     }
-    .thread-badge-pin { background: #7c3aed33; color: #a78bfa; }
-    .thread-badge-locked { background: #ef444433; color: #f87171; }
-    .thread-badge-cat { background: #3b82f622; color: #60a5fa; }
+    .thread-badge-pin {
+        background: color-mix(in srgb, var(--accent) 20%, transparent);
+        color: var(--accent);
+    }
+    .thread-badge-locked {
+        background: color-mix(in srgb, var(--danger) 20%, transparent);
+        color: var(--danger);
+    }
+    .thread-badge-cat {
+        background: color-mix(in srgb, var(--text-2) 15%, transparent);
+        color: var(--text-2);
+    }
     .thread-meta {
         font-size: 0.75rem;
-        color: var(--text-muted);
+        color: var(--text-3);
     }
     .thread-op {
-        background: var(--bg-card);
+        background: var(--surface);
         border: 1px solid var(--border);
         border-radius: 10px;
         padding: 1.5rem;
         margin-bottom: 2rem;
     }
     .thread-op-content {
-        color: var(--text-secondary);
+        color: var(--text-2);
         font-size: 0.9rem;
         line-height: 1.7;
         white-space: pre-wrap;
         margin: 0;
     }
     .thread-replies-heading {
-        font-family: 'Rajdhani', sans-serif;
+        font-family: var(--font-head);
         font-weight: 700;
         font-size: 1.1rem;
-        color: var(--text-bright);
+        color: var(--text);
         margin: 0 0 1rem;
     }
     .thread-replies-list {
@@ -119,42 +128,42 @@ const PAGE_CSS: &str = r#"
         margin-bottom: 2rem;
     }
     .thread-reply-card {
-        background: var(--bg-card);
+        background: var(--surface);
         border: 1px solid var(--border);
         border-radius: 8px;
         padding: 1rem 1.25rem;
     }
     .thread-reply-meta {
         font-size: 0.7rem;
-        color: var(--text-muted);
+        color: var(--text-3);
         margin-bottom: 0.5rem;
     }
     .thread-reply-content {
-        color: var(--text-secondary);
+        color: var(--text-2);
         font-size: 0.85rem;
         line-height: 1.6;
         white-space: pre-wrap;
         margin: 0;
     }
     .thread-compose {
-        background: var(--bg-card);
+        background: var(--surface);
         border: 1px solid var(--border);
         border-radius: 10px;
         padding: 1.5rem;
     }
     .thread-compose-title {
-        font-family: 'Rajdhani', sans-serif;
+        font-family: var(--font-head);
         font-weight: 700;
         font-size: 1rem;
-        color: var(--text-bright);
+        color: var(--text);
         margin: 0 0 0.75rem;
     }
     .thread-compose-textarea {
         width: 100%;
-        background: var(--bg-surface);
+        background: var(--bg);
         border: 1px solid var(--border);
         border-radius: 6px;
-        color: var(--text-bright);
+        color: var(--text);
         padding: 0.6rem 0.75rem;
         font-size: 0.9rem;
         font-family: inherit;
@@ -173,7 +182,7 @@ const PAGE_CSS: &str = r#"
     .thread-reply-btn {
         padding: 0.5rem 1rem;
         background: var(--accent);
-        color: white;
+        color: var(--accent-fg);
         border: none;
         border-radius: 6px;
         font-size: 0.85rem;
@@ -183,21 +192,21 @@ const PAGE_CSS: &str = r#"
     .thread-reply-btn:hover { filter: brightness(1.15); }
     .thread-reply-btn:disabled { opacity: 0.5; cursor: not-allowed; }
     .thread-locked-notice {
-        color: var(--text-muted);
+        color: var(--text-3);
         font-size: 0.85rem;
         text-align: center;
         padding: 1rem;
-        background: var(--bg-card);
+        background: var(--surface);
         border: 1px solid var(--border);
         border-radius: 8px;
     }
     .thread-loading, .thread-error {
-        color: var(--text-muted);
+        color: var(--text-3);
         text-align: center;
         padding: 3rem 0;
     }
     .thread-no-replies {
-        color: var(--text-muted);
+        color: var(--text-3);
         font-size: 0.85rem;
         text-align: center;
         padding: 1.5rem;

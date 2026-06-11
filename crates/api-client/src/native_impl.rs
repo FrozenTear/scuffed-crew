@@ -1,5 +1,14 @@
 use crate::ClientError;
 
+use std::time::Duration;
+
+fn client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new())
+}
+
 async fn json_request<B: serde::Serialize, T: serde::de::DeserializeOwned>(
     method: reqwest::Method,
     base_url: &str,
@@ -8,7 +17,7 @@ async fn json_request<B: serde::Serialize, T: serde::de::DeserializeOwned>(
     token: Option<&str>,
 ) -> Result<T, ClientError> {
     let url = format!("{base_url}{path}");
-    let client = reqwest::Client::new();
+    let client = client();
     let mut req = client.request(method, &url).json(body);
 
     if let Some(tok) = token {
@@ -37,7 +46,7 @@ pub async fn get<T: serde::de::DeserializeOwned>(
     token: Option<&str>,
 ) -> Result<T, ClientError> {
     let url = format!("{base_url}{path}");
-    let client = reqwest::Client::new();
+    let client = client();
     let mut req = client.get(&url);
 
     if let Some(tok) = token {
@@ -66,7 +75,7 @@ pub async fn post_empty(
     token: Option<&str>,
 ) -> Result<(), ClientError> {
     let url = format!("{base_url}{path}");
-    let client = reqwest::Client::new();
+    let client = client();
     let mut req = client.post(&url);
 
     if let Some(tok) = token {
@@ -117,7 +126,7 @@ pub async fn patch_json<B: serde::Serialize, T: serde::de::DeserializeOwned>(
 
 pub async fn delete(base_url: &str, path: &str, token: Option<&str>) -> Result<(), ClientError> {
     let url = format!("{base_url}{path}");
-    let client = reqwest::Client::new();
+    let client = client();
     let mut req = client.delete(&url);
 
     if let Some(tok) = token {

@@ -12,6 +12,9 @@ use axum::{
     http::{HeaderValue, Method, header},
     routing::{delete, get, patch, post, put},
 };
+use tower_governor::{
+    GovernorLayer, governor::GovernorConfigBuilder, key_extractor::SmartIpKeyExtractor,
+};
 use tower_http::cors::CorsLayer;
 use tower_http::services::{ServeDir, ServeFile};
 use tower_http::trace::TraceLayer;
@@ -40,16 +43,39 @@ pub fn create_router(state: AppState) -> Router {
         .allow_headers([header::CONTENT_TYPE, header::AUTHORIZATION, header::COOKIE])
         .allow_credentials(true);
 
-    Router::new()
+    // Per-IP rate limit for the OAuth endpoints: 5-burst, then 1 every 2s.
+    // SmartIpKeyExtractor reads forwarded headers (reverse proxy) before
+    // falling back to the peer address (requires ConnectInfo, see main.rs).
+    let governor_config = std::sync::Arc::new(
+        GovernorConfigBuilder::default()
+            .key_extractor(SmartIpKeyExtractor)
+            .per_second(2)
+            .burst_size(5)
+            .finish()
+            .expect("valid governor config"),
+    );
+    let auth_routes = Router::new()
+        .route("/api/auth/{provider}/login", get(routes::auth::login))
+        .route("/api/auth/{provider}/callback", get(routes::auth::callback))
+        .layer(GovernorLayer::new(governor_config));
+
+    // Dev mode mirrors main.rs: in-memory DB when SURREALDB_URL is unset.
+    let dev_mode = std::env::var("SURREALDB_URL").is_err();
+
+    let mut router = Router::new()
         // NIP-05 Nostr identity verification (must be before fallback)
         .route("/.well-known/nostr.json", get(routes::nostr::nostr_json))
         // Health check
-        .route("/api/health", get(routes::health::health))
-        // Dev login (sets session cookie for in-memory dev mode)
-        .route("/api/dev/login", get(routes::dev::dev_login))
-        // Auth routes
-        .route("/api/auth/{provider}/login", get(routes::auth::login))
-        .route("/api/auth/{provider}/callback", get(routes::auth::callback))
+        .route("/api/health", get(routes::health::health));
+
+    if dev_mode {
+        // Dev login (sets session cookie for in-memory dev mode) — never registered in prod
+        router = router.route("/api/dev/login", get(routes::dev::dev_login));
+    }
+
+    router
+        // Auth routes (login/callback are rate-limited, see auth_routes above)
+        .merge(auth_routes)
         .route("/api/auth/me", get(routes::auth::me))
         .route("/api/auth/logout", post(routes::auth::logout))
         // Member routes

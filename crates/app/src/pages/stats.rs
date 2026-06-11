@@ -151,9 +151,11 @@ fn hero_to_role(name: &str) -> &'static str {
 }
 
 fn aggregate_roles(heroes: &[HeroStats]) -> Vec<RoleAgg> {
-    let mut tank = RoleAgg::new("Tank", "#3b82f6");
-    let mut damage = RoleAgg::new("Damage", "#ef4444");
-    let mut support = RoleAgg::new("Support", "#22c55e");
+    // Role colors use chart palette tokens (var(--chart-N)) expressed as CSS
+    // variable references so the DonutSegment color field renders them inline.
+    let mut tank = RoleAgg::new("Tank", "var(--chart-5)");
+    let mut damage = RoleAgg::new("Damage", "var(--chart-4)");
+    let mut support = RoleAgg::new("Support", "var(--chart-2)");
 
     for h in heroes {
         let agg = match hero_to_role(&h.hero) {
@@ -210,15 +212,16 @@ const MODE_ORDER: &[&str] = &[
     "Other",
 ];
 
+/// Return a CSS variable reference for map mode color (chart palette).
 fn mode_color(mode: &str) -> &'static str {
     match mode {
-        "Escort" => "#60a5fa",
-        "Hybrid" => "#a78bfa",
-        "Control" => "#34d399",
-        "Push" => "#fbbf24",
-        "Flashpoint" => "#fb923c",
-        "Clash" => "#f87171",
-        _ => "#94a3b8",
+        "Escort" => "var(--chart-5)",
+        "Hybrid" => "var(--chart-1)",
+        "Control" => "var(--chart-2)",
+        "Push" => "var(--chart-3)",
+        "Flashpoint" => "var(--chart-6)",
+        "Clash" => "var(--chart-4)",
+        _ => "var(--text-3)",
     }
 }
 
@@ -231,9 +234,9 @@ const STATS_CSS: &str = r#"
         padding: 2rem 1.5rem;
     }
     .stats-page h1 {
-        font-family: var(--font-display);
+        font-family: var(--font-head);
         font-size: 1.8rem;
-        color: var(--text-bright);
+        color: var(--text);
         text-transform: uppercase;
         letter-spacing: 0.04em;
         margin-bottom: 0.5rem;
@@ -254,15 +257,15 @@ const STATS_CSS: &str = r#"
         padding: 0.4rem 1rem;
         border-radius: 6px;
         border: 1px solid var(--border);
-        background: var(--bg-surface);
-        color: var(--text-secondary);
+        background: var(--bg);
+        color: var(--text-2);
         font-size: 0.8rem;
         cursor: pointer;
         transition: all 0.15s;
         text-decoration: none;
     }
     .stats-header-actions a:hover, .stats-header-actions button:hover {
-        color: var(--text-bright);
+        color: var(--text);
         border-color: var(--accent-soft);
     }
     .stats-tabs {
@@ -276,8 +279,8 @@ const STATS_CSS: &str = r#"
         padding: 0.6rem 1.2rem;
         border: none;
         background: none;
-        color: var(--text-secondary);
-        font-family: var(--font-display);
+        color: var(--text-2);
+        font-family: var(--font-head);
         font-size: 0.9rem;
         font-weight: 600;
         text-transform: uppercase;
@@ -288,7 +291,7 @@ const STATS_CSS: &str = r#"
         transition: color 0.15s, border-color 0.15s;
     }
     .stats-tab:hover {
-        color: var(--text-bright);
+        color: var(--text);
     }
     .stats-tab.active {
         color: var(--accent);
@@ -301,14 +304,14 @@ const STATS_CSS: &str = r#"
         font-size: 0.8rem;
         font-weight: 600;
     }
-    .stats-winrate.high { color: #34d399; }
-    .stats-winrate.mid { color: #fbbf24; }
-    .stats-winrate.low { color: #f87171; }
-    .outcome-win { color: #34d399; font-weight: 600; }
-    .outcome-loss { color: #f87171; font-weight: 600; }
-    .outcome-draw { color: #fbbf24; font-weight: 600; }
+    .stats-winrate.high { color: var(--ok); }
+    .stats-winrate.mid { color: var(--warn); }
+    .stats-winrate.low { color: var(--danger); }
+    .outcome-win { color: var(--ok); font-weight: 600; }
+    .outcome-loss { color: var(--danger); font-weight: 600; }
+    .outcome-draw { color: var(--warn); font-weight: 600; }
     .match-card {
-        background: var(--bg-card);
+        background: var(--surface);
         border: 1px solid var(--border);
         border-radius: 8px;
         padding: 0.75rem 1rem;
@@ -319,18 +322,18 @@ const STATS_CSS: &str = r#"
         font-size: 0.85rem;
         transition: background 0.15s;
     }
-    .match-card:hover { background: var(--bg-card-alt); }
+    .match-card:hover { background: var(--surface-2); }
     .match-cards { display: flex; flex-direction: column; gap: 0.5rem; }
     .match-card .match-outcome {
-        font-family: var(--font-display);
+        font-family: var(--font-head);
         font-size: 1rem;
         font-weight: 700;
         text-transform: uppercase;
     }
-    .match-card .match-hero { color: var(--text-bright); font-weight: 500; }
-    .match-card .match-map { color: var(--text-secondary); font-size: 0.8rem; }
-    .match-card .match-scoreline { color: var(--text-muted); font-size: 0.8rem; }
-    .match-card .match-date { color: var(--text-muted); font-size: 0.75rem; text-align: right; }
+    .match-card .match-hero { color: var(--text); font-weight: 500; }
+    .match-card .match-map { color: var(--text-2); font-size: 0.8rem; }
+    .match-card .match-scoreline { color: var(--text-3); font-size: 0.8rem; }
+    .match-card .match-date { color: var(--text-3); font-size: 0.75rem; text-align: right; }
     .stats-pagination {
         display: flex;
         justify-content: center;
@@ -341,14 +344,14 @@ const STATS_CSS: &str = r#"
         padding: 0.4rem 1rem;
         border-radius: 6px;
         border: 1px solid var(--border);
-        background: var(--bg-surface);
-        color: var(--text-secondary);
+        background: var(--bg);
+        color: var(--text-2);
         font-size: 0.8rem;
         cursor: pointer;
         transition: all 0.15s;
     }
     .stats-pagination button:hover:not(:disabled) {
-        color: var(--text-bright);
+        color: var(--text);
         border-color: var(--accent-soft);
     }
     .stats-pagination button:disabled { opacity: 0.4; cursor: not-allowed; }
@@ -361,15 +364,15 @@ const STATS_CSS: &str = r#"
         margin-top: 1rem;
     }
     .overview-section {
-        background: var(--bg-card);
+        background: var(--surface);
         border: 1px solid var(--border);
         border-radius: 10px;
         padding: 1.25rem;
     }
     .overview-section h3 {
-        font-family: var(--font-display);
+        font-family: var(--font-head);
         font-size: 0.85rem;
-        color: var(--text-muted);
+        color: var(--text-3);
         text-transform: uppercase;
         letter-spacing: 0.06em;
         margin: 0 0 1rem;
@@ -381,37 +384,37 @@ const STATS_CSS: &str = r#"
         gap: 0.75rem;
         padding: 0.6rem 0.75rem;
         border-radius: 8px;
-        background: var(--bg-surface);
+        background: var(--bg);
         border-left: 3px solid transparent;
     }
     .role-card-info { flex: 1; }
     .role-card-name {
         font-weight: 600;
         font-size: 0.85rem;
-        color: var(--text-bright);
+        color: var(--text);
     }
     .role-card-sub {
         font-size: 0.75rem;
-        color: var(--text-muted);
+        color: var(--text-3);
         margin-top: 0.15rem;
     }
     .role-card-wr {
-        font-family: var(--font-display);
+        font-family: var(--font-head);
         font-size: 1.1rem;
         font-weight: 700;
     }
-    .role-card-wr.high { color: #34d399; }
-    .role-card-wr.mid { color: #fbbf24; }
-    .role-card-wr.low { color: #f87171; }
+    .role-card-wr.high { color: var(--ok); }
+    .role-card-wr.mid { color: var(--warn); }
+    .role-card-wr.low { color: var(--danger); }
 
     /* Heroes: chart + table */
     .heroes-chart-section {
         margin-bottom: 1.5rem;
     }
     .section-title {
-        font-family: var(--font-display);
+        font-family: var(--font-head);
         font-size: 0.8rem;
-        color: var(--text-muted);
+        color: var(--text-3);
         text-transform: uppercase;
         letter-spacing: 0.06em;
         margin-bottom: 0.75rem;
@@ -428,7 +431,7 @@ const STATS_CSS: &str = r#"
         border-bottom: 1px solid var(--border);
     }
     .map-mode-name {
-        font-family: var(--font-display);
+        font-family: var(--font-head);
         font-size: 0.85rem;
         font-weight: 600;
         text-transform: uppercase;
@@ -436,7 +439,7 @@ const STATS_CSS: &str = r#"
     }
     .map-mode-agg {
         font-size: 0.75rem;
-        color: var(--text-muted);
+        color: var(--text-3);
         margin-left: auto;
     }
 
@@ -456,16 +459,16 @@ const STATS_CSS: &str = r#"
 
     /* Daemon settings panel */
     .daemon-settings {
-        background: var(--bg-card);
+        background: var(--surface);
         border: 1px solid var(--border);
         border-radius: 10px;
         padding: 1.25rem;
         margin-bottom: 1.5rem;
     }
     .daemon-settings summary {
-        font-family: var(--font-display);
+        font-family: var(--font-head);
         font-size: 0.85rem;
-        color: var(--text-muted);
+        color: var(--text-3);
         text-transform: uppercase;
         letter-spacing: 0.06em;
         cursor: pointer;
@@ -485,17 +488,17 @@ const STATS_CSS: &str = r#"
     }
     .daemon-settings-label {
         font-size: 0.8rem;
-        color: var(--text-secondary);
+        color: var(--text-2);
         white-space: nowrap;
     }
     .daemon-settings-input {
         flex: 1;
         min-width: 160px;
         padding: 0.4rem 0.75rem;
-        background: var(--bg-surface);
+        background: var(--bg);
         border: 1px solid var(--border);
         border-radius: 6px;
-        color: var(--text-bright);
+        color: var(--text);
         font-size: 0.85rem;
         font-family: var(--font-mono);
     }
@@ -505,7 +508,7 @@ const STATS_CSS: &str = r#"
     }
     .daemon-settings-hint {
         font-size: 0.75rem;
-        color: var(--text-muted);
+        color: var(--text-3);
         margin-top: 0.5rem;
     }
 "#;
@@ -550,13 +553,14 @@ fn format_date(dt: &DateTime<Utc>) -> String {
     dt.format("%b %d, %Y").to_string()
 }
 
+/// Return a CSS variable reference for bar chart win-rate color.
 fn wr_bar_color(pct: f64) -> &'static str {
     if pct >= 55.0 {
-        "#34d399"
+        "var(--ok)"
     } else if pct >= 45.0 {
-        "#fbbf24"
+        "var(--warn)"
     } else {
-        "#f87171"
+        "var(--danger)"
     }
 }
 

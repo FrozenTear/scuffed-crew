@@ -4,6 +4,7 @@ use std::collections::HashMap;
 
 use crate::components::SectionHeader;
 use crate::components::bracket::BRACKET_STYLES;
+use crate::components::ui::{Pill, PillTone};
 use crate::routes::Route;
 use scuffed_api_client::ApiClient;
 
@@ -74,101 +75,91 @@ use crate::hooks::CursorPage;
 
 const HOME_CSS: &str = r#"
     .hero { position: relative; min-height: 100vh; display: flex; align-items: center; justify-content: center; overflow: hidden; }
-    .hero-bg { position: absolute; inset: 0; background: radial-gradient(ellipse at 50% 40%, rgba(124,58,237,0.10), transparent 70%); }
+    .hero-bg { position: absolute; inset: 0; background: radial-gradient(ellipse at 50% 40%, var(--accent-soft), transparent 70%); }
     .hero-content { position: relative; z-index: 2; text-align: center; max-width: 700px; padding: 2rem; }
-    .hero-badge { display: inline-flex; align-items: center; gap: 0.5rem; padding: 0.3rem 0.8rem; border: 1px solid var(--border); border-radius: 999px; font-size: 0.7rem; color: var(--text-muted); margin-bottom: 1.5rem; text-transform: uppercase; letter-spacing: 0.06em; }
+    .hero-badge { display: inline-flex; align-items: center; gap: 0.5rem; padding: 0.3rem 0.8rem; border: 1px solid var(--border); border-radius: 999px; font-size: 0.7rem; color: var(--text-3); margin-bottom: 1.5rem; text-transform: uppercase; letter-spacing: 0.06em; }
     .badge-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); }
-    .hero-title { font-family: 'Bebas Neue', sans-serif; font-size: clamp(3rem, 8vw, 6rem); line-height: 0.95; color: var(--text-bright); letter-spacing: 4px; margin: 0; }
+    .hero-title { font-family: var(--font-head); font-size: clamp(3rem, 8vw, 6rem); line-height: 0.95; color: var(--text); letter-spacing: 4px; margin: 0; }
     .hero-title .purple { color: var(--accent); }
-    .hero-sub { color: var(--text-secondary); font-size: 1rem; line-height: 1.7; margin: 1.5rem auto; max-width: 550px; }
+    .hero-sub { color: var(--text-2); font-size: 1rem; line-height: 1.7; margin: 1.5rem auto; max-width: 550px; }
     .hero-actions { display: flex; gap: 1rem; justify-content: center; flex-wrap: wrap; margin: 2rem 0; }
     .hero-stats { display: flex; gap: 3rem; justify-content: center; margin-top: 2rem; }
-    .hero-stat-val { font-family: 'Bebas Neue', sans-serif; font-size: 2rem; color: var(--text-bright); }
-    .hero-stat-label { font-size: 0.7rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.06em; }
-    .hero-emblem { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); width: 400px; height: 400px; color: rgba(124,58,237,0.08); pointer-events: none; }
+    .hero-stat-val { font-family: var(--font-head); font-size: 2rem; color: var(--text); }
+    .hero-stat-label { font-size: 0.7rem; color: var(--text-3); text-transform: uppercase; letter-spacing: 0.06em; }
+    .hero-emblem { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); width: 400px; height: 400px; color: var(--accent-soft); pointer-events: none; }
     .divider { height: 1px; background: var(--border); margin: 0 2rem; }
     section { padding: 5rem 2rem; max-width: 1000px; margin: 0 auto; }
-    .sec-label { font-family: 'DM Mono', monospace; font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 0.5rem; }
+    .sec-label { font-family: var(--font-mono); font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 0.5rem; }
     .sec-label-purple { color: var(--accent); }
-    .sec-label-red { color: #ef4444; }
-    .sec-label-blue { color: #3b82f6; }
-    .sec-title { font-family: 'Bebas Neue', sans-serif; font-size: 2.5rem; color: var(--text-bright); letter-spacing: 3px; margin: 0 0 0.5rem; }
-    .sec-desc { color: var(--text-secondary); max-width: 600px; line-height: 1.7; }
+    .sec-title { font-family: var(--font-head); font-size: 2.5rem; color: var(--text); letter-spacing: 3px; margin: 0 0 0.5rem; }
+    .sec-desc { color: var(--text-2); max-width: 600px; line-height: 1.7; }
     .pillars { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 1.25rem; margin-top: 2rem; }
-    .pillar { background: var(--bg-card); border: 1px solid var(--border); border-radius: 10px; padding: 1.5rem; transition: border-color 0.2s; }
+    .pillar { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 1.5rem; transition: border-color 0.2s; }
     .pillar:hover { border-color: var(--accent-soft); }
-    .pillar h3 { font-family: 'Rajdhani', sans-serif; font-size: 1.1rem; font-weight: 700; margin: 0.75rem 0 0.5rem; color: var(--text-bright); }
-    .pillar p { color: var(--text-secondary); font-size: 0.85rem; line-height: 1.6; }
+    .pillar h3 { font-family: var(--font-head); font-size: 1.1rem; font-weight: 700; margin: 0.75rem 0 0.5rem; color: var(--text); }
+    .pillar p { color: var(--text-2); font-size: 0.85rem; line-height: 1.6; }
     .pillar-icon { width: 36px; height: 36px; color: var(--accent); }
     .pillar-icon svg { width: 100%; height: 100%; }
     .teams-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 1rem; margin-top: 2rem; }
-    .team-card { background: var(--bg-card); border: 1px solid var(--border); border-radius: 10px; padding: 1.25rem; transition: border-color 0.2s; }
+    .team-card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 1.25rem; transition: border-color 0.2s; }
     .team-card:hover { border-color: var(--accent-soft); }
     .team-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.5rem; }
-    .team-name { font-family: 'Rajdhani', sans-serif; font-weight: 700; font-size: 1.1rem; color: var(--text-bright); }
+    .team-name { font-family: var(--font-head); font-weight: 700; font-size: 1.1rem; color: var(--text); }
     .team-game { font-size: 0.65rem; padding: 0.1rem 0.5rem; border-radius: 999px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; }
-    .game-ow { background: #f9731633; color: #f97316; }
-    .game-dest { background: #3b82f633; color: #60a5fa; }
-    .game-other { background: #6b728033; color: #9ca3af; }
-    .team-lore { color: var(--text-muted); font-style: italic; font-size: 0.8rem; margin-bottom: 0.75rem; line-height: 1.5; }
+    .game-ow { background: color-mix(in srgb, var(--warn) 20%, transparent); color: var(--warn); }
+    .game-dest { background: color-mix(in srgb, var(--accent) 20%, transparent); color: var(--accent); }
+    .game-other { background: var(--surface-2); color: var(--text-3); }
+    .team-lore { color: var(--text-3); font-style: italic; font-size: 0.8rem; margin-bottom: 0.75rem; line-height: 1.5; }
     .team-meta { display: flex; gap: 1.5rem; }
-    .team-meta-val { font-family: 'DM Mono', monospace; font-weight: 700; color: var(--text-bright); }
-    .team-meta-label { font-size: 0.65rem; color: var(--text-muted); text-transform: uppercase; }
-    .team-division { margin-top: 0.75rem; font-size: 0.75rem; color: var(--text-muted); }
+    .team-meta-val { font-family: var(--font-mono); font-weight: 700; color: var(--text); }
+    .team-meta-label { font-size: 0.65rem; color: var(--text-3); text-transform: uppercase; }
+    .team-division { margin-top: 0.75rem; font-size: 0.75rem; color: var(--text-3); }
     .news-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 1rem; margin-top: 2rem; }
-    .news-card { background: var(--bg-card); border: 1px solid var(--border); border-radius: 10px; padding: 1.25rem; }
-    .news-meta { display: flex; align-items: center; gap: 0.5rem; font-size: 0.7rem; color: var(--text-muted); margin-bottom: 0.5rem; }
-    .news-pin { background: #7c3aed33; color: #a78bfa; padding: 0.1rem 0.4rem; border-radius: 4px; font-size: 0.6rem; font-weight: 600; text-transform: uppercase; }
-    .news-title { font-family: 'Rajdhani', sans-serif; font-size: 1.1rem; font-weight: 700; color: var(--text-bright); margin: 0 0 0.4rem; }
-    .news-body { color: var(--text-secondary); font-size: 0.85rem; line-height: 1.6; }
+    .news-card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 1.25rem; }
+    .news-meta { display: flex; align-items: center; gap: 0.5rem; font-size: 0.7rem; color: var(--text-3); margin-bottom: 0.5rem; }
+    .news-title { font-family: var(--font-head); font-size: 1.1rem; font-weight: 700; color: var(--text); margin: 0 0 0.4rem; }
+    .news-body { color: var(--text-2); font-size: 0.85rem; line-height: 1.6; }
     .news-more { text-align: center; margin-top: 1.5rem; }
     .comms-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 1.25rem; margin-top: 2rem; }
-    .comm-card { background: var(--bg-card); border: 1px solid var(--border); border-radius: 10px; padding: 1.5rem; }
+    .comm-card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 1.5rem; }
     .comm-card-header { display: flex; align-items: center; gap: 0.75rem; margin-bottom: 0.75rem; }
-    .comm-card-header h3 { font-family: 'Rajdhani', sans-serif; font-weight: 700; font-size: 1.1rem; color: var(--text-bright); margin: 0; }
+    .comm-card-header h3 { font-family: var(--font-head); font-weight: 700; font-size: 1.1rem; color: var(--text); margin: 0; }
     .comm-icon-svg { width: 28px; height: 28px; color: var(--accent); }
     .comm-icon-svg svg { width: 100%; height: 100%; }
-    .comm-card p { color: var(--text-secondary); font-size: 0.85rem; line-height: 1.6; }
+    .comm-card p { color: var(--text-2); font-size: 0.85rem; line-height: 1.6; }
     .comm-tags { margin-top: 0.75rem; }
     .comm-tag { font-size: 0.65rem; padding: 0.15rem 0.5rem; border-radius: 999px; font-weight: 600; text-transform: uppercase; }
-    .comm-public { background: #10b98133; color: #34d399; }
-    .comm-members { background: #3b82f633; color: #60a5fa; }
-    .why-matrix { margin-top: 2rem; background: var(--bg-card); border: 1px solid var(--border); border-radius: 10px; padding: 1.5rem; }
-    .why-matrix-header { font-family: 'Rajdhani', sans-serif; font-weight: 700; font-size: 1rem; color: var(--text-bright); margin-bottom: 0.75rem; }
-    .why-matrix-body p { color: var(--text-secondary); font-size: 0.85rem; line-height: 1.6; margin-bottom: 0.75rem; }
+    .comm-public { background: color-mix(in srgb, var(--ok) 20%, transparent); color: var(--ok); }
+    .comm-members { background: color-mix(in srgb, var(--accent) 20%, transparent); color: var(--accent); }
+    .why-matrix { margin-top: 2rem; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 1.5rem; }
+    .why-matrix-header { font-family: var(--font-head); font-weight: 700; font-size: 1rem; color: var(--text); margin-bottom: 0.75rem; }
+    .why-matrix-body p { color: var(--text-2); font-size: 0.85rem; line-height: 1.6; margin-bottom: 0.75rem; }
     .why-tradeoffs { display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; margin-top: 1rem; }
-    .why-tradeoff h4 { font-family: 'Rajdhani', sans-serif; font-weight: 700; color: var(--text-bright); margin: 0 0 0.5rem; font-size: 0.9rem; }
-    .why-tradeoff-item { font-size: 0.8rem; color: var(--text-secondary); margin-bottom: 0.35rem; display: flex; gap: 0.5rem; }
+    .why-tradeoff h4 { font-family: var(--font-head); font-weight: 700; color: var(--text); margin: 0 0 0.5rem; font-size: 0.9rem; }
+    .why-tradeoff-item { font-size: 0.8rem; color: var(--text-2); margin-bottom: 0.35rem; display: flex; gap: 0.5rem; }
     .why-tradeoff-item .marker { color: var(--accent); font-weight: 700; }
     .sched-strip { display: grid; grid-template-columns: repeat(7, 1fr); gap: 0.5rem; margin-top: 2rem; }
-    .sched-active { background: var(--bg-card); border: 1px solid var(--border); border-radius: 8px; padding: 1rem; text-align: center; }
-    .sched-off { background: var(--bg-card); border: 1px solid var(--border); border-radius: 8px; padding: 1rem; text-align: center; opacity: 0.3; color: var(--text-muted); font-size: 0.85rem; }
-    .day-label { font-family: 'DM Mono', monospace; font-size: 0.7rem; color: var(--text-muted); text-transform: uppercase; margin-bottom: 0.25rem; }
-    .day-event { font-weight: 600; font-size: 0.85rem; color: var(--text-bright); }
-    .day-time { font-size: 0.7rem; color: var(--text-muted); margin-top: 0.25rem; }
+    .sched-active { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 1rem; text-align: center; }
+    .sched-off { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 1rem; text-align: center; opacity: 0.3; color: var(--text-3); font-size: 0.85rem; }
+    .day-label { font-family: var(--font-mono); font-size: 0.7rem; color: var(--text-3); text-transform: uppercase; margin-bottom: 0.25rem; }
+    .day-event { font-weight: 600; font-size: 0.85rem; color: var(--text); }
+    .day-time { font-size: 0.7rem; color: var(--text-3); margin-top: 0.25rem; }
     .sched-calendar-link { text-align: center; margin-top: 1.5rem; }
     .recruit-wrap { display: grid; grid-template-columns: 1fr 1fr; gap: 3rem; }
-    .recruit-wrap h2 { font-family: 'Bebas Neue', sans-serif; font-size: 2.5rem; color: var(--text-bright); letter-spacing: 3px; margin: 0.5rem 0; }
-    .recruit-wrap h3 { font-family: 'Rajdhani', sans-serif; font-weight: 700; color: var(--text-bright); margin: 0 0 1rem; }
-    .recruit-left p { color: var(--text-secondary); font-size: 0.9rem; line-height: 1.7; }
-    .req { display: flex; gap: 0.5rem; color: var(--text-secondary); font-size: 0.85rem; margin-bottom: 0.5rem; }
+    .recruit-wrap h2 { font-family: var(--font-head); font-size: 2.5rem; color: var(--text); letter-spacing: 3px; margin: 0.5rem 0; }
+    .recruit-wrap h3 { font-family: var(--font-head); font-weight: 700; color: var(--text); margin: 0 0 1rem; }
+    .recruit-left p { color: var(--text-2); font-size: 0.9rem; line-height: 1.7; }
+    .req { display: flex; gap: 0.5rem; color: var(--text-2); font-size: 0.85rem; margin-bottom: 0.5rem; }
     .req-marker { color: var(--accent); }
     .recruit-seeking { margin-top: 1.5rem; }
-    .recruit-seeking-label { font-size: 0.7rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 0.5rem; }
+    .recruit-seeking-label { font-size: 0.7rem; color: var(--text-3); text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 0.5rem; }
     .recruit-seeking-tags { display: flex; gap: 0.5rem; flex-wrap: wrap; }
     .recruit-tag { font-size: 0.7rem; padding: 0.2rem 0.6rem; border-radius: 999px; font-weight: 600; }
-    .recruit-tag-ow { background: #f9731633; color: #f97316; }
-    .recruit-tag-dest { background: #3b82f633; color: #60a5fa; }
-    .never-ask { margin-top: 1.5rem; background: var(--bg-surface); border-radius: 8px; padding: 1rem; }
-    .never-ask-header { font-family: 'Rajdhani', sans-serif; font-weight: 700; font-size: 0.85rem; color: var(--text-bright); margin-bottom: 0.5rem; }
-    .never-ask-body { color: var(--text-muted); font-size: 0.8rem; line-height: 1.6; }
-    .btn { display: inline-flex; align-items: center; gap: 0.5rem; padding: 0.6rem 1.4rem; border-radius: 6px; font-size: 0.9rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.03em; text-decoration: none; transition: all 0.2s; border: none; cursor: pointer; }
-    .btn-primary { background: var(--accent); color: white; }
-    .btn-primary:hover { filter: brightness(1.15); box-shadow: 0 0 20px var(--accent-glow); }
-    .btn-outline { background: transparent; border: 1px solid var(--border); color: var(--text-secondary); }
-    .btn-outline:hover { border-color: var(--accent-soft); color: var(--text-bright); }
-    .btn-secondary { background: var(--bg-card); border: 1px solid var(--border); color: var(--text-secondary); }
-    .btn-secondary:hover { border-color: var(--accent-soft); color: var(--text-bright); }
+    .recruit-tag-ow { background: color-mix(in srgb, var(--warn) 20%, transparent); color: var(--warn); }
+    .recruit-tag-dest { background: color-mix(in srgb, var(--accent) 20%, transparent); color: var(--accent); }
+    .never-ask { margin-top: 1.5rem; background: var(--surface-2); border-radius: 8px; padding: 1rem; }
+    .never-ask-header { font-family: var(--font-head); font-weight: 700; font-size: 0.85rem; color: var(--text); margin-bottom: 0.5rem; }
+    .never-ask-body { color: var(--text-3); font-size: 0.8rem; line-height: 1.6; }
     @media (max-width: 768px) {
         .sched-strip { grid-template-columns: 1fr; }
         .recruit-wrap { grid-template-columns: 1fr; gap: 2rem; }
@@ -242,8 +233,8 @@ pub fn Home() -> Element {
                 h1 { class: "hero-title", "The Scuffed" br {} span { class: "purple", "Crew" } }
                 p { class: "hero-sub", "A multi-game crew built on old-school clan principles. Small teams, real structure, scheduled play nights. No ghost members. No dead servers." }
                 div { class: "hero-actions",
-                    Link { to: Route::Apply {}, class: "btn btn-primary", "Apply to Join" }
-                    a { href: "#teams", class: "btn btn-outline", "Our Teams" }
+                    Link { to: Route::Apply {}, class: "ui-btn ui-btn--primary ui-btn--md", "Apply to Join" }
+                    a { href: "#teams", class: "ui-btn ui-btn--ghost ui-btn--md", "Our Teams" }
                 }
                 div { class: "hero-stats",
                     div { class: "hero-stat", div { class: "hero-stat-val", "{team_count}" } div { class: "hero-stat-label", "Active Teams" } }
@@ -257,7 +248,7 @@ pub fn Home() -> Element {
 
         // About
         section { id: "about",
-            SectionHeader { label: "// The Ethos", title: "Not a server. A clan.", color: "purple", description: "A structured gaming org with game-specific squads and scheduled play nights. No drama. Life comes first \u{2014} the games come second, but we still show up." }
+            SectionHeader { label: "// The Ethos", title: "Not a server. A clan.", color: "accent", description: "A structured gaming org with game-specific squads and scheduled play nights. No drama. Life comes first \u{2014} the games come second, but we still show up." }
             div { class: "pillars",
                 div { class: "pillar",
                     div { class: "pillar-icon", svg { view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", circle { cx: "12", cy: "6", r: "2" } circle { cx: "6", cy: "18", r: "2" } circle { cx: "18", cy: "18", r: "2" } } }
@@ -286,14 +277,14 @@ pub fn Home() -> Element {
 
         // Teams
         section { id: "teams",
-            SectionHeader { label: "// Active Squads", title: "The Teams", color: "red", description: "Each team carries a name from the lore of the game they play. Your team is your identity within the org." }
+            SectionHeader { label: "// Active Squads", title: "The Teams", color: "accent", description: "Each team carries a name from the lore of the game they play. Your team is your identity within the org." }
             div { class: "teams-grid",
                 {match overview.read().as_ref().and_then(|o| o.as_ref()) {
                     Some(data) => {
                         let game_map: HashMap<String, String> = data.games.iter().map(|g| (g.id.clone(), g.name.clone())).collect();
                         rsx! { for team in data.teams.iter() { { render_team_card(team, &game_map) } } }
                     },
-                    None => rsx! { p { style: "color: var(--text-muted); text-align: center;", "Loading teams..." } },
+                    None => rsx! { p { style: "color: var(--text-3); text-align: center;", "Loading teams..." } },
                 }}
             }
         }
@@ -302,25 +293,27 @@ pub fn Home() -> Element {
 
         // Announcements
         section { id: "news",
-            SectionHeader { label: "// Latest News", title: "Announcements", color: "purple", description: "What's happening in the crew." }
+            SectionHeader { label: "// Latest News", title: "Announcements", color: "accent", description: "What's happening in the crew." }
             div { class: "news-grid",
                 { let list = announcements.read().as_ref().and_then(|a| a.as_ref()).cloned().unwrap_or_default();
                   rsx! { for a in list.iter().take(3) { { render_news_card(a) } } }
                 }
             }
-            div { class: "news-more", Link { to: Route::News {}, class: "btn btn-secondary", "View All News" } }
+            div { class: "news-more",
+                Link { to: Route::News {}, class: "ui-btn ui-btn--ghost ui-btn--md", "View All News" }
+            }
         }
 
         div { class: "divider" }
 
         // Tournaments
         section { id: "tournaments",
-            SectionHeader { label: "// Compete", title: "Tournaments", color: "purple", description: "Active and upcoming tournaments." }
+            SectionHeader { label: "// Compete", title: "Tournaments", color: "accent", description: "Active and upcoming tournaments." }
             {
                 let list = tournaments_res.read().as_ref().and_then(|t| t.as_ref()).cloned().unwrap_or_default();
                 let visible: Vec<&HomeTournament> = list.iter().filter(|t| t.status == "registration" || t.status == "in_progress").take(4).collect();
                 if visible.is_empty() {
-                    rsx! { p { style: "color: var(--text-muted); text-align: center;", "No active tournaments right now." } }
+                    rsx! { p { style: "color: var(--text-3); text-align: center;", "No active tournaments right now." } }
                 } else {
                     rsx! {
                         div { class: "tournament-home-grid",
@@ -329,14 +322,16 @@ pub fn Home() -> Element {
                     }
                 }
             }
-            div { style: "text-align: center; margin-top: 1.5rem;", Link { to: Route::Tournaments {}, class: "btn btn-secondary", "View All Tournaments" } }
+            div { style: "text-align: center; margin-top: 1.5rem;",
+                Link { to: Route::Tournaments {}, class: "ui-btn ui-btn--ghost ui-btn--md", "View All Tournaments" }
+            }
         }
 
         div { class: "divider" }
 
         // Comms
         section { id: "comms",
-            SectionHeader { label: "// Communication", title: "How we talk", color: "blue", description: "Matrix for text, TeamSpeak for voice. Self-hosted, no middleman." }
+            SectionHeader { label: "// Communication", title: "How we talk", color: "accent", description: "Matrix for text, TeamSpeak for voice. Self-hosted, no middleman." }
             div { class: "comms-grid",
                 div { class: "comm-card",
                     div { class: "comm-card-header",
@@ -344,7 +339,9 @@ pub fn Home() -> Element {
                         h3 { "Matrix (Commet)" }
                     }
                     p { "All text lives here \u{2014} announcements, scheduling, casual chat, recruitment. Self-hosted on our server." }
-                    div { class: "comm-tags", span { class: "comm-tag comm-public", "Open to all" } }
+                    div { class: "comm-tags",
+                        Pill { tone: PillTone::Ok, "Open to all" }
+                    }
                 }
                 div { class: "comm-card",
                     div { class: "comm-card-header",
@@ -352,7 +349,9 @@ pub fn Home() -> Element {
                         h3 { "TeamSpeak" }
                     }
                     p { "Voice comms for play nights and scrims. Self-hosted, low latency, no distractions mid-match." }
-                    div { class: "comm-tags", span { class: "comm-tag comm-members", "Rostered members" } }
+                    div { class: "comm-tags",
+                        Pill { tone: PillTone::Accent, "Rostered members" }
+                    }
                 }
             }
             div { class: "why-matrix",
@@ -385,7 +384,7 @@ pub fn Home() -> Element {
 
         // Schedule
         section { id: "schedule",
-            SectionHeader { label: "// Weekly Rhythm", title: "Play Nights", color: "purple", description: "No obligation to hit every session. Show up when life allows." }
+            SectionHeader { label: "// Weekly Rhythm", title: "Play Nights", color: "accent", description: "No obligation to hit every session. Show up when life allows." }
             div { class: "sched-strip",
                 {
                     let event_list = events.read().as_ref().and_then(|e| e.as_ref()).cloned().unwrap_or_default();
@@ -405,7 +404,9 @@ pub fn Home() -> Element {
                     }
                 }
             }
-            div { class: "sched-calendar-link", a { href: "/api/calendar/all.ics", class: "btn btn-outline", "Subscribe to Calendar" } }
+            div { class: "sched-calendar-link",
+                a { href: "/api/calendar/all.ics", class: "ui-btn ui-btn--ghost ui-btn--md", "Subscribe to Calendar" }
+            }
         }
 
         div { class: "divider" }
@@ -418,7 +419,7 @@ pub fn Home() -> Element {
                     h2 { "Want in?" }
                     p { "We keep rosters intentional. Join our Matrix server, hop in a few play nights, and we\u{2019}ll match you with a team that fits your schedule and skill level." }
                     div { style: "display:flex;gap:1rem;flex-wrap:wrap;margin-top:1rem;",
-                        a { href: "#", class: "btn btn-primary", "Join Matrix" }
+                        a { href: "#", class: "ui-btn ui-btn--primary ui-btn--md", "Join Matrix" }
                     }
                     div { class: "recruit-seeking",
                         div { class: "recruit-seeking-label", "Currently looking for" }
@@ -496,7 +497,9 @@ fn render_news_card(a: &Announcement) -> Element {
         article { class: "news-card",
             div { class: "news-meta",
                 time { "{date}" }
-                if a.pinned { span { class: "news-pin", "Pinned" } }
+                if a.pinned {
+                    Pill { tone: PillTone::Accent, "Pinned" }
+                }
             }
             h3 { class: "news-title", "{a.title}" }
             p { class: "news-body", "{a.content}" }
