@@ -31,11 +31,13 @@ use wasm_bindgen::prelude::*;
 
 use scuffed_api_client::ApiClient;
 use scuffed_types::strategy::{
-    ElementType, PlaybackState, Position, Strategy, StrategyElement, TimelinePhase, Tool,
-    Visibility,
+    Color, ElementType, HeroId, PlaybackState, Position, Strategy, StrategyElement, TeamFormat,
+    TeamSlot, TimelinePhase, Tool, Visibility,
 };
 
-use crate::components::strategy::{HeroPicker, HeroWinRate, MapCanvas};
+use crate::components::strategy::{
+    HeroPicker, HeroWinRate, MapCanvas, PropertiesPanel, TeamPanel, Timeline, Toolbar,
+};
 use crate::keybindings::{self, EditorAction};
 use crate::state::editor::{CanvasState, DrawingState, StrategyState};
 use crate::state::undo::{UndoManager, UndoableAction};
@@ -439,7 +441,7 @@ fn EditorLayout(initial_strategy: Option<Strategy>) -> Element {
     let mut show_map_picker = use_signal(|| false);
 
     // Save status
-    let mut save_in_progress = use_signal(|| false);
+    let save_in_progress = use_signal(|| false);
 
     // Personal winrates per hero from /api/strategy/meta — fetched once on mount.
     // None while loading or when the user is not an authed org member.
@@ -661,68 +663,7 @@ fn EditorLayout(initial_strategy: Option<Strategy>) -> Element {
                         // Save
                         EditorAction::Save => {
                             event.prevent_default();
-                            if *save_in_progress.peek() {
-                                return;
-                            }
-                            save_in_progress.set(true);
-
-                            // Snapshot current state for the async save
-                            let snapshot = strategy_state.read().clone();
-                            let map_id =
-                                canvas_state.read().current_map.clone().unwrap_or_default();
-                            let sub_map_id = canvas_state.read().selected_sub_map.clone();
-
-                            spawn(async move {
-                                let client = ApiClient::web();
-                                let result = if let Some(ref id) = snapshot.strategy_id {
-                                    // Update existing strategy
-                                    let body = UpdateStrategyRequest {
-                                        name: Some(snapshot.name.clone()),
-                                        description: Some(snapshot.description.clone()),
-                                        visibility: Some(
-                                            visibility_to_str(snapshot.visibility).to_string(),
-                                        ),
-                                        elements: Some(snapshot.elements.clone()),
-                                        phases: Some(snapshot.phases.clone()),
-                                    };
-                                    client
-                                        .put_json::<_, Strategy>(
-                                            &format!("/api/strategy/strategies/{id}"),
-                                            &body,
-                                        )
-                                        .await
-                                } else {
-                                    // Create new strategy
-                                    let body = CreateStrategyRequest {
-                                        name: snapshot.name.clone(),
-                                        description: snapshot.description.clone(),
-                                        map_id,
-                                        sub_map_id,
-                                        game_mode: "control".to_string(),
-                                        team_id: None,
-                                        visibility: visibility_to_str(snapshot.visibility)
-                                            .to_string(),
-                                    };
-                                    client
-                                        .post_json::<_, Strategy>("/api/strategy/strategies", &body)
-                                        .await
-                                };
-
-                                match result {
-                                    Ok(saved) => {
-                                        strategy_state.with_mut(|s| {
-                                            s.strategy_id = Some(saved.id);
-                                            s.owner_id = Some(saved.owner_id);
-                                            s.has_unsaved_changes = false;
-                                        });
-                                        tracing::info!("Strategy saved successfully");
-                                    }
-                                    Err(e) => {
-                                        tracing::error!("Failed to save strategy: {e}");
-                                    }
-                                }
-                                save_in_progress.set(false);
-                            });
+                            save_strategy(strategy_state, canvas_state, save_in_progress);
                         }
                     }
                 },
@@ -769,9 +710,15 @@ fn EditorLayout(initial_strategy: Option<Strategy>) -> Element {
     let zoom_val = cs.zoom;
     let pan_val = cs.pan_offset;
     let floor_val = cs.selected_floor.clone();
+    let floor_val_toolbar = cs.selected_floor.clone();
     let show_hp = cs.show_health_packs;
     let metadata_val = cs.map_metadata.clone();
     let map_id_val = cs.current_map.clone();
+    let floors_val = cs
+        .map_metadata
+        .as_ref()
+        .map(|m| m.floors.clone())
+        .unwrap_or_default();
     let tool_val = ds.active_tool;
     let color_val = ds.draw_color;
     let opacity_val = ds.fill_opacity;
@@ -782,10 +729,25 @@ fn EditorLayout(initial_strategy: Option<Strategy>) -> Element {
     let sel_elem = ss.selected_element;
     let sel_phase = ss.selected_phase;
 
+    // Panel-bound values
+    let team_format_val = ss.team_format;
+    let composition_val = ss.team_composition.clone();
+    let phases_val = ss.phases.clone();
+    let playback_val = ss.playback_state;
+    let name_val = ss.name.clone();
+    let visibility_val = ss.visibility;
+    let selected_element_obj = ss
+        .selected_element
+        .and_then(|id| ss.elements.iter().find(|e| e.id == id).cloned());
+
     // Drop borrows before rsx (we've cloned what we need)
     drop(cs);
     drop(ds);
     drop(ss);
+
+    let can_undo = undo_manager.read().can_undo();
+    let can_redo = undo_manager.read().can_redo();
+    let saving_val = *save_in_progress.read();
 
     rsx! {
         style { {EDITOR_CSS} }
@@ -812,8 +774,45 @@ fn EditorLayout(initial_strategy: Option<Strategy>) -> Element {
                         }
                     }
                     div { class: "sidebar-content",
-                        // TODO: TeamPanel component
-                        div { class: "panel-placeholder", "TeamPanel" }
+                        TeamPanel {
+                            team_format: team_format_val,
+                            composition: composition_val,
+                            on_format_change: move |f: TeamFormat| {
+                                strategy_state.with_mut(|s| {
+                                    s.team_format = f;
+                                    s.has_unsaved_changes = true;
+                                });
+                            },
+                            on_clear_slot: move |slot: TeamSlot| {
+                                let prev = strategy_state
+                                    .read()
+                                    .team_composition
+                                    .iter()
+                                    .find(|h| h.slot == slot)
+                                    .map(|h| h.hero_id.clone());
+                                strategy_state.with_mut(|s| s.clear_slot(slot));
+                                if let Some(hero_id) = prev {
+                                    undo_manager.with_mut(|u| {
+                                        u.push(UndoableAction::ClearSlot {
+                                            slot,
+                                            previous_hero_id: hero_id,
+                                        });
+                                    });
+                                }
+                            },
+                            on_clear_all: move |_| {
+                                let prev = strategy_state.read().team_composition.clone();
+                                if !prev.is_empty() {
+                                    strategy_state.with_mut(|s| {
+                                        s.team_composition.clear();
+                                        s.has_unsaved_changes = true;
+                                    });
+                                    undo_manager.with_mut(|u| {
+                                        u.push(UndoableAction::ClearAllSlots { previous: prev });
+                                    });
+                                }
+                            },
+                        }
                         {
                             let winrates = hero_winrates.read().as_ref().and_then(|r| r.clone());
                             rsx! {
@@ -832,9 +831,74 @@ fn EditorLayout(initial_strategy: Option<Strategy>) -> Element {
                 // ---- Main canvas area ----
                 div { class: "editor-main",
 
-                    // TODO: Toolbar component
-                    div { class: "panel-placeholder", style: "border-bottom: 1px solid var(--border); padding: 0.4rem 0.75rem;",
-                        "Toolbar: {tool_display}"
+                    Toolbar {
+                        active_tool: tool_val,
+                        on_tool_change: move |t: Tool| {
+                            drawing_state.with_mut(|d| d.active_tool = t);
+                        },
+                        draw_color: color_val,
+                        on_color_change: move |c: Color| {
+                            drawing_state.with_mut(|d| d.draw_color = c);
+                        },
+                        fill_opacity: opacity_val,
+                        on_fill_opacity_change: move |o: f32| {
+                            drawing_state.with_mut(|d| d.fill_opacity = o);
+                        },
+                        can_undo,
+                        can_redo,
+                        on_undo: move |_| {
+                            let action = undo_manager.with_mut(|u| u.undo());
+                            if let Some(action) = action {
+                                apply_undo(&mut strategy_state, action);
+                            }
+                        },
+                        on_redo: move |_| {
+                            let action = undo_manager.with_mut(|u| u.redo());
+                            if let Some(action) = action {
+                                apply_redo(&mut strategy_state, action);
+                            }
+                        },
+                        zoom: zoom_val,
+                        on_zoom_in: move |_| {
+                            canvas_state.with_mut(|c| c.zoom = (c.zoom * 1.2).clamp(0.03, 4.0));
+                        },
+                        on_zoom_out: move |_| {
+                            canvas_state.with_mut(|c| c.zoom = (c.zoom / 1.2).clamp(0.03, 4.0));
+                        },
+                        on_zoom_reset: move |_| {
+                            canvas_state.with_mut(|c| {
+                                c.zoom = 1.0;
+                                c.pan_offset = Position::new(0.0, 0.0);
+                            });
+                        },
+                        floors: floors_val,
+                        selected_floor: floor_val_toolbar,
+                        on_floor_change: move |f: String| {
+                            canvas_state.with_mut(|c| c.selected_floor = Some(f));
+                        },
+                        show_health_packs: show_hp,
+                        on_toggle_health_packs: move |_| {
+                            canvas_state.with_mut(|c| c.show_health_packs = !c.show_health_packs);
+                        },
+                        strategy_name: name_val,
+                        on_name_change: move |n: String| {
+                            strategy_state.with_mut(|s| {
+                                s.name = n;
+                                s.has_unsaved_changes = true;
+                            });
+                        },
+                        has_unsaved_changes: has_unsaved,
+                        on_save: move |_| {
+                            save_strategy(strategy_state, canvas_state, save_in_progress);
+                        },
+                        saving: saving_val,
+                        visibility: visibility_val,
+                        on_visibility_change: move |v: Visibility| {
+                            strategy_state.with_mut(|s| {
+                                s.visibility = v;
+                                s.has_unsaved_changes = true;
+                            });
+                        },
                     }
 
                     div { class: "canvas-container",
@@ -1054,10 +1118,119 @@ fn EditorLayout(initial_strategy: Option<Strategy>) -> Element {
                         span { class: "sidebar-title", "Properties" }
                     }
                     div { class: "sidebar-content",
-                        // TODO: PropertiesPanel component
-                        div { class: "panel-placeholder", "PropertiesPanel" }
-                        // TODO: Timeline component
-                        div { class: "panel-placeholder", "Timeline" }
+                        PropertiesPanel {
+                            element: selected_element_obj,
+                            phases: phases_val.clone(),
+                            on_label_change: move |(id, label): (Uuid, Option<String>)| {
+                                update_element_field(strategy_state, undo_manager, id, move |e| {
+                                    e.label = label;
+                                });
+                            },
+                            on_color_change: move |(id, color): (Uuid, Color)| {
+                                update_element_field(strategy_state, undo_manager, id, move |e| {
+                                    e.color = color;
+                                });
+                            },
+                            on_hero_change: move |(id, hero): (Uuid, Option<HeroId>)| {
+                                update_element_field(strategy_state, undo_manager, id, move |e| {
+                                    e.hero_id = hero;
+                                });
+                            },
+                            on_phase_change: move |(id, phase): (Uuid, Option<Uuid>)| {
+                                update_element_field(strategy_state, undo_manager, id, move |e| {
+                                    e.phase_id = phase;
+                                });
+                            },
+                            on_move_up: move |id: Uuid| {
+                                strategy_state.with_mut(|s| {
+                                    if let Some(i) = s.elements.iter().position(|e| e.id == id)
+                                        && i > 0
+                                    {
+                                        s.elements.swap(i, i - 1);
+                                        s.has_unsaved_changes = true;
+                                    }
+                                });
+                            },
+                            on_move_down: move |id: Uuid| {
+                                strategy_state.with_mut(|s| {
+                                    if let Some(i) = s.elements.iter().position(|e| e.id == id)
+                                        && i + 1 < s.elements.len()
+                                    {
+                                        s.elements.swap(i, i + 1);
+                                        s.has_unsaved_changes = true;
+                                    }
+                                });
+                            },
+                            on_delete: move |id: Uuid| {
+                                let removed = strategy_state.with_mut(|s| s.remove_element(id));
+                                if let Some((idx, elem)) = removed {
+                                    undo_manager.with_mut(|u| {
+                                        u.push(UndoableAction::RemoveElement {
+                                            element: elem,
+                                            index: idx,
+                                        });
+                                    });
+                                }
+                            },
+                        }
+                        Timeline {
+                            phases: phases_val,
+                            selected_phase: sel_phase,
+                            playback_state: playback_val,
+                            on_select_phase: move |p: Option<Uuid>| {
+                                strategy_state.with_mut(|s| s.selected_phase = p);
+                            },
+                            on_add_phase: move |name: String| {
+                                let id = strategy_state.with_mut(|s| s.add_phase(name));
+                                let phase = strategy_state
+                                    .read()
+                                    .phases
+                                    .iter()
+                                    .find(|p| p.id == id)
+                                    .cloned();
+                                if let Some(phase) = phase {
+                                    undo_manager.with_mut(|u| {
+                                        u.push(UndoableAction::AddPhase { phase });
+                                    });
+                                }
+                            },
+                            on_delete_phase: move |id: Uuid| {
+                                let removed = strategy_state.with_mut(|s| s.remove_phase(id));
+                                if let Some((index, phase)) = removed {
+                                    undo_manager.with_mut(|u| {
+                                        u.push(UndoableAction::RemovePhase { phase, index });
+                                    });
+                                }
+                            },
+                            on_play_pause: move |_| {
+                                strategy_state.with_mut(|s| {
+                                    s.playback_state = match s.playback_state {
+                                        PlaybackState::Playing => PlaybackState::Paused,
+                                        _ => PlaybackState::Playing,
+                                    };
+                                });
+                            },
+                            on_next_phase: move |_| {
+                                strategy_state.with_mut(|s| s.next_phase());
+                            },
+                            on_prev_phase: move |_| {
+                                strategy_state.with_mut(|s| s.prev_phase());
+                            },
+                            on_first_phase: move |_| {
+                                strategy_state.with_mut(|s| {
+                                    if let Some(p) = s.phases.first() {
+                                        s.selected_phase = Some(p.id);
+                                    }
+                                });
+                            },
+                            on_last_phase: move |_| {
+                                strategy_state.with_mut(|s| {
+                                    if let Some(p) = s.phases.last() {
+                                        s.selected_phase = Some(p.id);
+                                    }
+                                });
+                            },
+                        }
                     }
                 }
             }
@@ -1125,6 +1298,97 @@ fn EditorLayout(initial_strategy: Option<Strategy>) -> Element {
 // =============================================================================
 // Helpers
 // =============================================================================
+
+/// Apply a single-field edit to an element and record it for undo.
+/// Shared by the PropertiesPanel callbacks (label/color/hero/phase).
+fn update_element_field(
+    mut strategy_state: Signal<StrategyState>,
+    mut undo_manager: Signal<UndoManager>,
+    id: Uuid,
+    mutate: impl FnOnce(&mut StrategyElement),
+) {
+    let before = strategy_state
+        .read()
+        .elements
+        .iter()
+        .find(|e| e.id == id)
+        .cloned();
+    if let Some(before) = before {
+        let mut after = before.clone();
+        mutate(&mut after);
+        if after == before {
+            return;
+        }
+        strategy_state.with_mut(|s| s.update_element(id, after.clone()));
+        undo_manager.with_mut(|u| {
+            u.push(UndoableAction::UpdateElement { id, before, after });
+        });
+    }
+}
+
+/// Persist the strategy to the API. Shared by the Save keybinding and the
+/// Toolbar's save button. No-op while a save is already in flight.
+fn save_strategy(
+    mut strategy_state: Signal<StrategyState>,
+    canvas_state: Signal<CanvasState>,
+    mut save_in_progress: Signal<bool>,
+) {
+    if *save_in_progress.peek() {
+        return;
+    }
+    save_in_progress.set(true);
+
+    // Snapshot current state for the async save
+    let snapshot = strategy_state.read().clone();
+    let map_id = canvas_state.read().current_map.clone().unwrap_or_default();
+    let sub_map_id = canvas_state.read().selected_sub_map.clone();
+
+    spawn(async move {
+        let client = ApiClient::web();
+        let result = if let Some(ref id) = snapshot.strategy_id {
+            // Update existing strategy
+            let body = UpdateStrategyRequest {
+                name: Some(snapshot.name.clone()),
+                description: Some(snapshot.description.clone()),
+                visibility: Some(visibility_to_str(snapshot.visibility).to_string()),
+                elements: Some(snapshot.elements.clone()),
+                phases: Some(snapshot.phases.clone()),
+            };
+            client
+                .put_json::<_, Strategy>(&format!("/api/strategy/strategies/{id}"), &body)
+                .await
+        } else {
+            // Create new strategy
+            let body = CreateStrategyRequest {
+                name: snapshot.name.clone(),
+                description: snapshot.description.clone(),
+                map_id,
+                sub_map_id,
+                game_mode: "control".to_string(),
+                team_id: None,
+                visibility: visibility_to_str(snapshot.visibility).to_string(),
+            };
+            client
+                .post_json::<_, Strategy>("/api/strategy/strategies", &body)
+                .await
+        };
+
+        match result {
+            Ok(saved) => {
+                strategy_state.with_mut(|s| {
+                    s.strategy_id = Some(saved.id);
+                    s.owner_id = Some(saved.owner_id);
+                    s.has_unsaved_changes = false;
+                });
+                tracing::info!("Strategy saved successfully");
+            }
+            Err(e) => {
+                tracing::error!("Failed to save strategy: {e}");
+            }
+        }
+        save_in_progress.set(false);
+    });
+}
 
 fn visibility_to_str(v: Visibility) -> &'static str {
     match v {
