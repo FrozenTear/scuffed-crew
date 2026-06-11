@@ -1,5 +1,5 @@
 use dioxus::prelude::*;
-use scuffed_types::{HeroRole, HeroSelection, TeamFormat, TeamSlot};
+use scuffed_types::{HeroId, HeroRole, HeroSelection, TeamFormat, TeamSlot};
 
 const TEAM_PANEL_CSS: &str = r#"
     .team-panel {
@@ -76,6 +76,23 @@ const TEAM_PANEL_CSS: &str = r#"
         font-size: 0.75rem;
         color: var(--text-3);
         font-style: italic;
+    }
+    .slot-assign-btn {
+        flex: 1;
+        text-align: left;
+        background: none;
+        border: 1px dashed var(--border);
+        border-radius: 4px;
+        color: var(--accent);
+        font-size: 0.75rem;
+        font-weight: 600;
+        padding: 0.2rem 0.45rem;
+        cursor: pointer;
+        transition: background 0.12s, border-color 0.12s;
+    }
+    .slot-assign-btn:hover {
+        background: var(--accent-soft);
+        border-color: var(--accent);
     }
 
     /* ---- Assigned hero display ---- */
@@ -198,10 +215,17 @@ pub fn TeamPanel(
     /// Current hero selections in team slots.
     composition: Vec<HeroSelection>,
 
+    /// The hero currently picked in the hero picker, if any. When set, empty
+    /// slots that accept this hero's role offer one-click assignment.
+    #[props(default)]
+    selected_hero: Option<HeroId>,
+
     // ---- Mutation callbacks ----
     on_format_change: EventHandler<TeamFormat>,
     on_clear_slot: EventHandler<TeamSlot>,
     on_clear_all: EventHandler<()>,
+    /// Assign the currently-picked hero to the given slot.
+    on_assign: EventHandler<TeamSlot>,
 ) -> Element {
     let slots = team_format.slots();
     let is_6v6 = team_format == TeamFormat::SixVSix;
@@ -291,9 +315,29 @@ pub fn TeamPanel(
                                             }
                                         }
                                     }
-                                    None => rsx! {
-                                        span { class: "slot-empty", "Empty" }
-                                    },
+                                    None => {
+                                        // Offer one-click assignment when a hero is picked and
+                                        // its role fits this slot (6v6 slots accept any role).
+                                        let assignable_hero = selected_hero.as_ref().filter(|h| {
+                                            is_6v6 || hero_role(h) == slot.required_role()
+                                        });
+                                        match assignable_hero {
+                                            Some(hid) => {
+                                                let hname = hero_name(hid);
+                                                rsx! {
+                                                    button {
+                                                        class: "slot-assign-btn",
+                                                        title: "Assign {hname} to this slot",
+                                                        onclick: move |_| on_assign.call(slot),
+                                                        "+ {hname}"
+                                                    }
+                                                }
+                                            }
+                                            None => rsx! {
+                                                span { class: "slot-empty", "Empty" }
+                                            },
+                                        }
+                                    }
                                 }
                             }
                         }

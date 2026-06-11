@@ -777,11 +777,32 @@ fn EditorLayout(initial_strategy: Option<Strategy>) -> Element {
                         TeamPanel {
                             team_format: team_format_val,
                             composition: composition_val,
+                            selected_hero: hero_val.clone(),
                             on_format_change: move |f: TeamFormat| {
                                 strategy_state.with_mut(|s| {
                                     s.team_format = f;
                                     s.has_unsaved_changes = true;
                                 });
+                            },
+                            on_assign: move |slot: TeamSlot| {
+                                let hero = drawing_state.read().selected_hero.clone();
+                                if let Some(hero_id) = hero {
+                                    let previous = strategy_state
+                                        .read()
+                                        .team_composition
+                                        .iter()
+                                        .find(|h| h.slot == slot)
+                                        .map(|h| h.hero_id.clone());
+                                    strategy_state
+                                        .with_mut(|s| s.assign_hero_to_slot(slot, hero_id.clone()));
+                                    undo_manager.with_mut(|u| {
+                                        u.push(UndoableAction::AssignHeroToSlot {
+                                            slot,
+                                            hero_id,
+                                            previous,
+                                        });
+                                    });
+                                }
                             },
                             on_clear_slot: move |slot: TeamSlot| {
                                 let prev = strategy_state
