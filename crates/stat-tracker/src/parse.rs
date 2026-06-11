@@ -62,7 +62,15 @@ pub fn parse_scoreboard(
 /// OCR cells (positionally stable, numeric whitelists) rather than scraping
 /// numbers out of a full-image text dump. `raw_text` is still the full-image OCR
 /// and is used only for hero/map name lookup, which the per-cell pipeline does
-/// not read. Returns `None` if no row yields plausible stats.
+/// not read.
+///
+/// The player's row must be POSITIVELY identified — by `player_row_index`
+/// (name match across row cells or the brightness-highlighted row) or by the
+/// configured player name appearing in the raw text. There is deliberately no
+/// "first plausible row" fallback: it silently recorded a teammate's stats as
+/// the player's, which corrupts every aggregate downstream. A dropped capture
+/// is recoverable (press Tab again); a wrong row is not. Returns `None` when
+/// the player row can't be identified or its cells don't parse.
 pub fn parse_scoreboard_cells(
     rows: &[RowOcrResult],
     player_row_index: Option<usize>,
@@ -73,10 +81,6 @@ pub fn parse_scoreboard_cells(
     let stats = player_row_index
         .and_then(|idx| rows.get(idx))
         .and_then(stats_from_row)
-        // Portrait row detection missed — fall back to the first row whose cells
-        // pass validation, then to scraping the full-image text (by player name
-        // if we have one, else the first plausible stat line).
-        .or_else(|| rows.iter().find_map(stats_from_row))
         .or_else(|| {
             let lines: Vec<&str> = raw_text
                 .lines()
@@ -86,7 +90,6 @@ pub fn parse_scoreboard_cells(
             player_name
                 .and_then(|name| find_player_row(&lines, name))
                 .and_then(extract_row_stats)
-                .or_else(|| find_best_stat_row(&lines))
         })?;
 
     let lines: Vec<&str> = raw_text
@@ -115,6 +118,29 @@ pub fn parse_scoreboard_cells(
         synced: false,
         session_id: String::new(),
     })
+}
+
+/// Whether the OCR'd rows plausibly come from an actual scoreboard, as opposed
+/// to a menu, a replay browser, or an arbitrary desktop frame that happened to
+/// be captured (Tab is a global hook). A real scoreboard renders a full team of
+/// stat rows (early-game zeros are still clean cells); non-scoreboard frames
+/// measured 0-1 rows with ≥4 clean cells (rank screen: 1, menus/in-game: 0).
+/// Requiring 3 keeps 3x margin over the worst observed negative while staying
+/// far below what any readable scoreboard produces — a false rejection drops a
+/// real capture, so this is deliberately a weak gate; the strict per-row
+/// validation in `stats_from_row` remains the primary defense.
+pub fn looks_like_scoreboard(rows: &[RowOcrResult]) -> bool {
+    let plausible_rows = rows
+        .iter()
+        .filter(|r| {
+            r.stats
+                .iter()
+                .filter(|c| crate::ocr::is_clean_stat(c.value.trim()))
+                .count()
+                >= 4
+        })
+        .count();
+    plausible_rows >= 3
 }
 
 /// Extract the six stats from one OCR'd row. Columns are positional:
@@ -571,4 +597,92 @@ fn fuzzy_match_map(text: &str) -> Option<String> {
     }
 
     best_map.map(|m| m.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ocr::{CellOcrResult, RowOcrResult};
+
+    fn cell(value: &str) -> CellOcrResult {
+        CellOcrResult {
+            value: value.to_string(),
+            confidence: 80,
+        }
+    }
+
+    fn row(name: Option<&str>, stats: [&str; 6]) -> RowOcrResult {
+        RowOcrResult {
+            name: name.map(cell),
+            stats: stats.iter().map(|s| cell(s)).collect(),
+            mean_confidence: 80,
+        }
+    }
+
+    fn valid_row(name: &str) -> RowOcrResult {
+        row(Some(name), ["5", "3", "2", "4,316", "1,200", "899"])
+    }
+
+    fn garbage_row() -> RowOcrResult {
+        row(None, ["", "x", "", "", "9o", ""])
+    }
+
+    #[test]
+    fn identified_player_row_parses() {
+        let rows = vec![valid_row("OTHER"), valid_row("FROZEN")];
+        let parsed = parse_scoreboard_cells(&rows, Some(1), "", "victory", Some("FROZEN")).unwrap();
+        assert_eq!(parsed.elims, 5);
+        assert_eq!(parsed.damage, 4316);
+        assert_eq!(parsed.outcome, "victory");
+    }
+
+    #[test]
+    fn unidentified_player_row_records_nothing() {
+        // Valid rows exist, but none was positively identified as the player's.
+        // The old "first plausible row" fallback recorded a teammate here.
+        let rows = vec![valid_row("TEAMMATE"), valid_row("ANOTHER")];
+        assert!(parse_scoreboard_cells(&rows, None, "", "victory", None).is_none());
+        // A configured name that matches nothing must not change that.
+        assert!(
+            parse_scoreboard_cells(&rows, None, "no match here", "victory", Some("FROZEN"))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn raw_text_fallback_is_name_anchored() {
+        // No per-cell row index, but the player's line is present in the
+        // full-image OCR text → stats come from that line, not an arbitrary one.
+        let raw = "SOMEONE 9 9 9 9999 9999 9999\nFROZEN 7 1 3 5,155 1,326 3,316";
+        let parsed = parse_scoreboard_cells(&[], None, raw, "defeat", Some("FROZEN")).unwrap();
+        assert_eq!(parsed.elims, 7);
+        assert_eq!(parsed.mitigation, 3316);
+    }
+
+    #[test]
+    fn scoreboard_check_accepts_real_rows() {
+        let rows: Vec<RowOcrResult> = (0..10).map(|_| valid_row("X")).collect();
+        assert!(looks_like_scoreboard(&rows));
+        // Early-game all-zero rows are still clean cells.
+        let zeros: Vec<RowOcrResult> = (0..10)
+            .map(|_| row(Some("X"), ["0", "0", "0", "0", "0", "0"]))
+            .collect();
+        assert!(looks_like_scoreboard(&zeros));
+        // A poorly-OCR'd but real scoreboard: only 3 of 10 rows readable.
+        let mut sparse: Vec<RowOcrResult> = (0..3).map(|_| valid_row("X")).collect();
+        sparse.extend((0..7).map(|_| garbage_row()));
+        assert!(looks_like_scoreboard(&sparse));
+    }
+
+    #[test]
+    fn scoreboard_check_rejects_garbage_frames() {
+        assert!(!looks_like_scoreboard(&[]));
+        let rows: Vec<RowOcrResult> = (0..10).map(|_| garbage_row()).collect();
+        assert!(!looks_like_scoreboard(&rows));
+        // 1-2 valid-looking rows among garbage (e.g. the rank screen flukes
+        // digit cells, a desktop frame with a number column) is not enough.
+        let mut mixed: Vec<RowOcrResult> = (0..2).map(|_| valid_row("X")).collect();
+        mixed.extend((0..8).map(|_| garbage_row()));
+        assert!(!looks_like_scoreboard(&mixed));
+    }
 }

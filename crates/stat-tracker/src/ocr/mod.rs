@@ -383,7 +383,9 @@ fn count_valid_cells(row: &DynamicImage, cols: &preprocess::StatColumns) -> i32 
     valid
 }
 
-fn is_clean_stat(text: &str) -> bool {
+/// Whether a cell's OCR text looks like a real stat value: at least one digit,
+/// nothing but digits and thousands-separator commas.
+pub(crate) fn is_clean_stat(text: &str) -> bool {
     if text.is_empty() {
         return false;
     }

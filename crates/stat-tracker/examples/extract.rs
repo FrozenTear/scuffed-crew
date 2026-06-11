@@ -84,6 +84,10 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         println!("player name '{name}' -> row {idx}");
     }
     println!("rows returned: {}", rows.len());
+    println!(
+        "looks_like_scoreboard: {}",
+        parse::looks_like_scoreboard(&rows)
+    );
     println!("\nper-cell OCR rows (E A D DMG HLG MIT):");
     for (i, row) in rows.iter().enumerate() {
         let name = row.name.as_ref().map(|n| n.value.as_str()).unwrap_or("?");

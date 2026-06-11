@@ -21,6 +21,11 @@ const OUTCOME_CONFIRM_WINDOW: std::time::Duration = std::time::Duration::from_se
 /// before the frames are copied out. Frames are a few MB each.
 const POLL_DUMP_KEEP: usize = 150;
 
+/// How many rejected-capture frames are kept in `<data_dir>/debug/rejected/`.
+/// A rejected capture records nothing, so the frame is the only evidence for
+/// diagnosing why ("it didn't record my game" is undebuggable otherwise).
+const REJECTED_KEEP: usize = 30;
+
 struct PidGuard(std::path::PathBuf);
 
 impl Drop for PidGuard {
@@ -304,17 +309,21 @@ async fn run_loop(
                             (g.session_id.clone(), !g.session_created, g.outcome.clone(), g.maps.clone())
                         };
 
-                        if let Err(e) = handle_capture(backend, store, player_name, capture_output, &sid, create, outcome, &maps, portrait_matcher, collect_portraits, data_dir).await {
-                            tracing::error!(error = %e, "capture cycle failed");
-                        } else {
-                            if let Some(g) = active_game.as_mut() {
-                                g.session_created = true;
-                            }
-                            capture_count += 1;
-                            if let Some(client) = sync_client
-                                && capture_count.is_multiple_of(SYNC_EVERY_N_CAPTURES) {
-                                    try_sync(store, client).await;
+                        match handle_capture(backend, store, player_name, capture_output, &sid, create, outcome, &maps, portrait_matcher, collect_portraits, data_dir).await {
+                            Err(e) => tracing::error!(error = %e, "capture cycle failed"),
+                            // Rejected by a trust gate — nothing was recorded, so
+                            // the session must not be marked as created.
+                            Ok(false) => {}
+                            Ok(true) => {
+                                if let Some(g) = active_game.as_mut() {
+                                    g.session_created = true;
                                 }
+                                capture_count += 1;
+                                if let Some(client) = sync_client
+                                    && capture_count.is_multiple_of(SYNC_EVERY_N_CAPTURES) {
+                                        try_sync(store, client).await;
+                                    }
+                            }
                         }
                     }
                     Err(e) => {
@@ -346,7 +355,7 @@ async fn run_loop(
                         let dump_dir = dump_poll_frames.then(|| data_dir.join("debug").join("poll"));
                         let (signal, phase) = tokio::task::spawn_blocking(move || {
                             if let Some(dir) = &dump_dir {
-                                save_poll_frame(dir, &img);
+                                save_frame_ring(dir, "poll", &img, POLL_DUMP_KEEP);
                             }
                             let signal = detect::match_end::detect_outcome_signal(&img);
                             let phase = detect::match_start::detect_phase(&img);
@@ -468,7 +477,7 @@ async fn handle_capture(
     portrait_matcher: &Arc<detect::hero_portrait::PortraitMatcher>,
     collect_portraits: bool,
     data_dir: &std::path::Path,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
     tracing::info!("Tab detected — capturing screen (hold Tab to keep scoreboard visible)");
     let img = capture::capture_screen_output(backend, capture_output).await?;
 
@@ -484,6 +493,7 @@ async fn handle_capture(
         map_from_panel,
         scoreboard_img,
         player_row_idx,
+        frame_img,
     ) = tokio::task::spawn_blocking(move || {
         // Outcome: prefer the open game's result (read off the accolade
         // screen by the poller); else color-flood detection; else read the
@@ -539,6 +549,7 @@ async fn handle_capture(
             map_from_panel,
             scoreboard,
             row_idx,
+            img,
         )
     })
     .await?;
@@ -568,6 +579,18 @@ async fn handle_capture(
         text_confidence = ocr_result.confidence,
         "scoreboard cell OCR complete"
     );
+
+    // Trust gate: don't parse frames that don't look like a scoreboard (menus,
+    // replay browser, desktop). Better to record nothing than to scrape stats
+    // out of a random screen.
+    if !parse::looks_like_scoreboard(&rows) {
+        tracing::warn!(
+            rows = rows.len(),
+            "capture rejected — frame does not look like a scoreboard (saved to debug/rejected)"
+        );
+        save_rejected_frame(data_dir, frame_img, "noscoreboard");
+        return Ok(false);
+    }
 
     let outcome_label = outcome_str(&outcome);
 
@@ -668,40 +691,58 @@ async fn handle_capture(
                 format!("store insert failed: {e}").into()
             },
         )?;
+        Ok(true)
     } else {
-        tracing::warn!("could not parse scoreboard from OCR text");
+        // Scoreboard-shaped frame, but the player's row couldn't be positively
+        // identified (no name match, no highlighted row) — recording another
+        // row's stats would be worse than recording nothing.
+        tracing::warn!(
+            "capture rejected — player row not identified (saved to debug/rejected; \
+             set player_name in config.toml if it is missing)"
+        );
+        save_rejected_frame(data_dir, frame_img, "noplayerrow");
+        Ok(false)
     }
-
-    Ok(())
 }
 
-/// Save a poll-tick frame for offline detector tuning (`--dump-poll-frames`),
-/// pruning the oldest beyond POLL_DUMP_KEEP. Timestamped names sort
-/// chronologically, so lexicographic order is age order.
-fn save_poll_frame(dir: &std::path::Path, img: &image::DynamicImage) {
+/// Save a debug frame into `dir` as `<prefix>_<timestamp>.png`, keeping at
+/// most `keep` PNGs in the directory (oldest by mtime evicted). Each ring gets
+/// a dedicated directory (`debug/poll`, `debug/rejected`), so every PNG there
+/// participates in the same ring regardless of prefix.
+fn save_frame_ring(dir: &std::path::Path, prefix: &str, img: &image::DynamicImage, keep: usize) {
     if std::fs::create_dir_all(dir).is_err() {
         return;
     }
-    let name = format!("poll_{}.png", chrono::Local::now().format("%Y%m%d_%H%M%S"));
+    let name = format!(
+        "{prefix}_{}.png",
+        chrono::Local::now().format("%Y%m%d_%H%M%S")
+    );
     if let Err(e) = img.save(dir.join(&name)) {
-        tracing::debug!(error = %e, "failed to save poll frame");
+        tracing::debug!(error = %e, "failed to save debug frame");
         return;
     }
     if let Ok(entries) = std::fs::read_dir(dir) {
-        let mut frames: Vec<String> = entries
+        let mut frames: Vec<(std::time::SystemTime, std::path::PathBuf)> = entries
             .flatten()
-            .filter_map(|e| {
-                let n = e.file_name().into_string().ok()?;
-                (n.starts_with("poll_") && n.ends_with(".png")).then_some(n)
-            })
+            .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("png"))
+            .filter_map(|e| Some((e.metadata().ok()?.modified().ok()?, e.path())))
             .collect();
-        if frames.len() > POLL_DUMP_KEEP {
-            frames.sort_unstable();
-            for old in &frames[..frames.len() - POLL_DUMP_KEEP] {
-                let _ = std::fs::remove_file(dir.join(old));
+        if frames.len() > keep {
+            frames.sort_by_key(|(t, _)| *t);
+            for (_, old) in &frames[..frames.len() - keep] {
+                let _ = std::fs::remove_file(old);
             }
         }
     }
+}
+
+/// Archive a frame whose capture was rejected by a trust gate, for diagnosis.
+/// Runs the PNG encode off the async runtime; fire-and-forget.
+fn save_rejected_frame(data_dir: &std::path::Path, img: image::DynamicImage, reason: &'static str) {
+    let dir = data_dir.join("debug").join("rejected");
+    tokio::task::spawn_blocking(move || {
+        save_frame_ring(&dir, &format!("rejected_{reason}"), &img, REJECTED_KEEP);
+    });
 }
 
 fn rand_id() -> u64 {
