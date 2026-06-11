@@ -6,11 +6,13 @@ on:
     paths:
       - "crates/stat-tracker/**"
       - "crates/types/**"
+      - ".github/workflows/stat-tracker.yml"
   pull_request:
     branches: [main]
     paths:
       - "crates/stat-tracker/**"
       - "crates/types/**"
+      - ".github/workflows/stat-tracker.yml"
 
 env:
   CARGO_TERM_COLOR: always
@@ -45,6 +47,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             libwayland-dev libxkbcommon-dev \
+            libegl-dev libgbm-dev \
             tesseract-ocr libtesseract-dev libleptonica-dev \
             libevdev-dev libudev-dev \
             pkg-config
@@ -72,6 +75,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             libwayland-dev libxkbcommon-dev \
+            libegl-dev libgbm-dev \
             tesseract-ocr libtesseract-dev libleptonica-dev \
             libevdev-dev libudev-dev \
             pkg-config

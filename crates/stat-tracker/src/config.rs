@@ -92,15 +92,15 @@ impl Config {
 
         // Auto-save if we built a usable sync config from CLI args and there was
         // no file yet — avoids requiring flags on every subsequent start.
-        if !config_path.exists() {
-            if let Some(sync) = &config.sync {
-                if !sync.server_url.is_empty() && !sync.token.is_empty() {
-                    let _ = std::fs::create_dir_all(&config_dir);
-                    if let Ok(toml) = toml::to_string_pretty(&config) {
-                        let _ = std::fs::write(&config_path, toml);
-                        tracing::info!(path = %config_path.display(), "wrote initial config.toml");
-                    }
-                }
+        if !config_path.exists()
+            && let Some(sync) = &config.sync
+            && !sync.server_url.is_empty()
+            && !sync.token.is_empty()
+        {
+            let _ = std::fs::create_dir_all(&config_dir);
+            if let Ok(toml) = toml::to_string_pretty(&config) {
+                let _ = std::fs::write(&config_path, toml);
+                tracing::info!(path = %config_path.display(), "wrote initial config.toml");
             }
         }
 
