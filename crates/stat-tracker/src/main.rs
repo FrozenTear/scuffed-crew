@@ -61,25 +61,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // If player_name is not set locally, try fetching it from the server.
     // This is the "first run via GUI" path: user set their name in the web UI
     // and launched the daemon with just a token — no manual config editing needed.
-    if config.player_name.is_none() {
-        if let Some(sync_cfg) = &config.sync {
-            let client = sync::SyncClient::new(sync_cfg.clone());
-            match client.fetch_daemon_config().await {
-                Ok(remote) if remote.player_name.is_some() => {
-                    tracing::info!(
-                        player_name = %remote.player_name.as_deref().unwrap_or(""),
-                        "player_name fetched from server"
-                    );
-                    config.player_name = remote.player_name;
-                }
-                Ok(_) => {
-                    tracing::info!(
-                        "server has no player_name configured — set it in the web UI under My Stats → Settings"
-                    );
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "could not fetch daemon config from server (continuing without player_name)");
-                }
+    if config.player_name.is_none()
+        && let Some(sync_cfg) = &config.sync
+    {
+        let client = sync::SyncClient::new(sync_cfg.clone());
+        match client.fetch_daemon_config().await {
+            Ok(remote) if remote.player_name.is_some() => {
+                tracing::info!(
+                    player_name = %remote.player_name.as_deref().unwrap_or(""),
+                    "player_name fetched from server"
+                );
+                config.player_name = remote.player_name;
+            }
+            Ok(_) => {
+                tracing::info!(
+                    "server has no player_name configured — set it in the web UI under My Stats → Settings"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "could not fetch daemon config from server (continuing without player_name)");
             }
         }
     }
