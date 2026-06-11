@@ -9,6 +9,18 @@ use tracing_subscriber::EnvFilter;
 
 const SYNC_EVERY_N_CAPTURES: u32 = 5;
 
+/// Window for two word-OCR outcome reads to confirm each other. Sized to span
+/// the accolade → rank-screen transition under a starved poller (measured 45s
+/// between the last accolade tick and the first rank-screen tick) while still
+/// bounding how long a single stray read stays actionable.
+const OUTCOME_CONFIRM_WINDOW: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// How many poll-tick frames `--dump-poll-frames` keeps (ring buffer on disk).
+/// At a 4s poll interval this is ~10 minutes — enough that a defeat's
+/// post-match sequence survives even if the next game is already underway
+/// before the frames are copied out. Frames are a few MB each.
+const POLL_DUMP_KEEP: usize = 150;
+
 struct PidGuard(std::path::PathBuf);
 
 impl Drop for PidGuard {
@@ -26,6 +38,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .init();
 
     let collect_portraits = std::env::args().any(|a| a == "--collect-portraits");
+    let dump_poll_frames = std::env::args().any(|a| a == "--dump-poll-frames");
 
     if std::env::args().any(|a| a == "--generate-tessdata") {
         match setup::ensure_koverwatch_tessdata() {
@@ -138,6 +151,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "auto-detect mode enabled — polling for match end screens"
         );
     }
+    if config.game_process_names.is_empty() {
+        tracing::info!("game-process gate disabled (game_process_names is empty)");
+    } else {
+        tracing::info!(
+            processes = ?config.game_process_names,
+            "captures gated on game process — set game_process_names in config.toml if yours differs"
+        );
+    }
+    if dump_poll_frames {
+        tracing::info!(
+            dir = %config.data_dir.join("debug").join("poll").display(),
+            "poll-frame dumping enabled (keeps the last {POLL_DUMP_KEEP} frames)"
+        );
+    }
     tracing::info!("daemon ready — press Tab in-game to capture scoreboard");
 
     if collect_portraits {
@@ -153,8 +180,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         config.player_name.as_deref(),
         config.capture_output.as_deref(),
         &config.auto_detect,
+        &config.game_process_names,
         &portrait_matcher,
         collect_portraits,
+        dump_poll_frames,
         &data_dir,
     )
     .await
@@ -190,10 +219,13 @@ async fn run_loop(
     player_name: Option<&str>,
     capture_output: Option<&str>,
     auto_detect: &config::AutoDetectConfig,
+    game_process_names: &[String],
     portrait_matcher: &Arc<detect::hero_portrait::PortraitMatcher>,
     collect_portraits: bool,
+    dump_poll_frames: bool,
     data_dir: &std::path::Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let mut game_gate = detect::game_running::GameProcessGate::new(game_process_names);
     let mut kbd = match detect::MultiKeyboardStream::open() {
         Ok(s) => s,
         Err(e) => {
@@ -217,6 +249,14 @@ async fn run_loop(
     // Outcome detected by the poller while no game was open — applied to the
     // next game that opens (e.g. daemon started after the match began).
     let mut pending_outcome: Option<detect::MatchOutcome> = None;
+    // Last result-word OCR read, for confirmation: a word outcome is only
+    // trusted once two reads agree within OUTCOME_CONFIRM_WINDOW, so a single
+    // hallucinated OCR read can't finish the open game with a wrong outcome.
+    // The reads may come from different screens (accolade → rank screen) and
+    // need not be consecutive ticks: heavy Tab-capture OCR starves the poller
+    // (a measured session had 45-70s tick gaps), so the accolade screen may get
+    // only one tick. Garbage/transition frames between reads don't reset it.
+    let mut word_outcome_streak: Option<(detect::MatchOutcome, Instant)> = None;
 
     let mut poll_timer = tokio::time::interval(poll_interval);
     poll_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -226,6 +266,11 @@ async fn run_loop(
             result = kbd.wait_tab() => {
                 match result {
                     Ok(()) => {
+                        if !game_gate.is_running() {
+                            tracing::debug!("Tab ignored — game process not running");
+                            continue;
+                        }
+
                         if let Some(last) = last_tab_capture
                             && last.elapsed() < tab_debounce {
                                 tracing::debug!("Tab debounced — ignoring rapid press");
@@ -236,10 +281,15 @@ async fn run_loop(
                         tokio::time::sleep(tokio::time::Duration::from_millis(400)).await;
                         last_tab_capture = Some(Instant::now());
 
-                        // No game open (daemon started mid-match, or the start
-                        // screen was missed) — open one now, inheriting any
-                        // outcome the poller already saw.
-                        if active_game.is_none() {
+                        // Open a fresh game when none is active (daemon started
+                        // mid-match, or the start screen was missed) OR when the
+                        // current game already has a recorded outcome — a finished
+                        // game must not leak its result onto the next match's
+                        // capture. Inherit any outcome the poller already saw.
+                        let start_fresh_game = active_game
+                            .as_ref()
+                            .is_none_or(|g| !matches!(g.outcome, detect::MatchOutcome::Unknown));
+                        if start_fresh_game {
                             active_game = Some(ActiveGame {
                                 session_id: format!("{:016x}", rand_id()),
                                 outcome: pending_outcome.take().unwrap_or(detect::MatchOutcome::Unknown),
@@ -286,23 +336,58 @@ async fn run_loop(
                 }
             }
             _ = poll_timer.tick(), if auto_detect.enabled => {
+                if !game_gate.is_running() {
+                    word_outcome_streak = None;
+                    continue;
+                }
+
                 match capture::capture_screen_output(backend, capture_output).await {
                     Ok(img) => {
-                        let (outcome, phase) = tokio::task::spawn_blocking(move || {
-                            let outcome = detect::match_end::detect_outcome(&img);
+                        let dump_dir = dump_poll_frames.then(|| data_dir.join("debug").join("poll"));
+                        let (signal, phase) = tokio::task::spawn_blocking(move || {
+                            if let Some(dir) = &dump_dir {
+                                save_poll_frame(dir, &img);
+                            }
+                            let signal = detect::match_end::detect_outcome_signal(&img);
                             let phase = detect::match_start::detect_phase(&img);
-                            (outcome, phase)
-                        }).await.unwrap_or((detect::MatchOutcome::Unknown, detect::GamePhase::Unknown));
+                            (signal, phase)
+                        }).await.unwrap_or((None, detect::GamePhase::Unknown));
+
+                        // The banner color-flood is specific enough to act on
+                        // immediately (and only lasts ~3s — a second tick may
+                        // never come). A word-OCR outcome (accolade or rank
+                        // screen) needs a second agreeing read within the
+                        // confirmation window.
+                        let confirmed = match signal {
+                            Some((outcome, detect::match_end::OutcomeSource::Banner)) => {
+                                Some(outcome)
+                            }
+                            Some((outcome, source)) => {
+                                let agreed = word_outcome_streak
+                                    .as_ref()
+                                    .is_some_and(|(prev, t)| *prev == outcome && t.elapsed() <= OUTCOME_CONFIRM_WINDOW);
+                                word_outcome_streak = Some((outcome.clone(), Instant::now()));
+                                if agreed {
+                                    Some(outcome)
+                                } else {
+                                    tracing::debug!(?outcome, ?source, "result word read — awaiting agreeing read");
+                                    None
+                                }
+                            }
+                            // No signal this tick (transition/garbage frame) —
+                            // keep the streak; the window bounds its lifetime.
+                            None => None,
+                        };
 
                         // Post-match accolade screen → record the outcome on the
                         // open game. Idempotent: the screen shows for ~20s (several
                         // ticks) but only the first, while the outcome is still
                         // Unknown, writes it.
-                        if matches!(outcome, detect::MatchOutcome::Victory | detect::MatchOutcome::Defeat | detect::MatchOutcome::Draw) {
+                        if let Some(outcome) = confirmed {
                             match active_game.as_mut() {
                                 Some(g) if matches!(g.outcome, detect::MatchOutcome::Unknown) => {
                                     g.outcome = outcome.clone();
-                                    tracing::info!(?outcome, session_id = %g.session_id, "auto-detect: outcome read from accolade screen");
+                                    tracing::info!(?outcome, session_id = %g.session_id, "auto-detect: outcome confirmed from post-match screens");
                                     if g.session_created
                                         && let Err(e) = store.set_session_outcome(&g.session_id, outcome_str(&outcome)).await {
                                             tracing::warn!(error = %e, "failed to back-fill session outcome");
@@ -321,24 +406,35 @@ async fn run_loop(
                         // across ticks opens only one game); hero select/ban only
                         // open a game when none is active (fallback if the map
                         // vote was missed).
+                        // A game whose outcome has already been recorded is
+                        // finished; the next start screen must begin a fresh game
+                        // so the previous result can't carry over to it.
+                        let game_finished = active_game
+                            .as_ref()
+                            .is_some_and(|g| !matches!(g.outcome, detect::MatchOutcome::Unknown));
                         match phase {
                             detect::GamePhase::MapVote { maps } => {
                                 let can_open = active_game.is_none()
+                                    || game_finished
                                     || last_game_open.is_none_or(|t| t.elapsed() >= new_game_debounce);
                                 if can_open {
                                     let sid = format!("{:016x}", rand_id());
                                     tracing::info!(?maps, session_id = %sid, "auto-detect: map vote — new game");
                                     active_game = Some(ActiveGame { session_id: sid, outcome: detect::MatchOutcome::Unknown, maps, session_created: false });
                                     last_game_open = Some(Instant::now());
+                                    // Evidence about the previous match must not
+                                    // confirm into this one.
+                                    word_outcome_streak = None;
                                 }
                             }
                             detect::GamePhase::HeroBan | detect::GamePhase::HeroSelect
-                                if active_game.is_none() =>
+                                if active_game.is_none() || game_finished =>
                             {
                                 let sid = format!("{:016x}", rand_id());
                                 tracing::info!(session_id = %sid, "auto-detect: hero select/ban — new game (map vote missed)");
                                 active_game = Some(ActiveGame { session_id: sid, outcome: detect::MatchOutcome::Unknown, maps: Vec::new(), session_created: false });
                                 last_game_open = Some(Instant::now());
+                                word_outcome_streak = None;
                             }
                             _ => {}
                         }
@@ -577,6 +673,35 @@ async fn handle_capture(
     }
 
     Ok(())
+}
+
+/// Save a poll-tick frame for offline detector tuning (`--dump-poll-frames`),
+/// pruning the oldest beyond POLL_DUMP_KEEP. Timestamped names sort
+/// chronologically, so lexicographic order is age order.
+fn save_poll_frame(dir: &std::path::Path, img: &image::DynamicImage) {
+    if std::fs::create_dir_all(dir).is_err() {
+        return;
+    }
+    let name = format!("poll_{}.png", chrono::Local::now().format("%Y%m%d_%H%M%S"));
+    if let Err(e) = img.save(dir.join(&name)) {
+        tracing::debug!(error = %e, "failed to save poll frame");
+        return;
+    }
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        let mut frames: Vec<String> = entries
+            .flatten()
+            .filter_map(|e| {
+                let n = e.file_name().into_string().ok()?;
+                (n.starts_with("poll_") && n.ends_with(".png")).then_some(n)
+            })
+            .collect();
+        if frames.len() > POLL_DUMP_KEEP {
+            frames.sort_unstable();
+            for old in &frames[..frames.len() - POLL_DUMP_KEEP] {
+                let _ = std::fs::remove_file(dir.join(old));
+            }
+        }
+    }
 }
 
 fn rand_id() -> u64 {

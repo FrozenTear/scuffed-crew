@@ -47,10 +47,10 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             if start.is_none() {
                 start = Some(y as u32);
             }
-        } else if let Some(st) = start.take() {
-            if y as u32 - st >= h / 50 {
-                bands.push((st, y as u32));
-            }
+        } else if let Some(st) = start.take()
+            && y as u32 - st >= h / 50
+        {
+            bands.push((st, y as u32));
         }
     }
     if let Some(st) = start {
@@ -118,7 +118,7 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                     let [r, g, b] = rgb.get_pixel(x, y).0;
                     let br = (r as u32 + g as u32 + b as u32) / 3;
                     all_count += 1;
-                    if br >= 15 && br <= 90 {
+                    if (15..=90).contains(&br) {
                         total += br as u64;
                         count += 1;
                     }
@@ -182,10 +182,8 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let hi = (y + sep).min(smooth.len() - 1);
         let local_min = (lo..=hi).all(|j| smooth[y] <= smooth[j]);
         let region_max = (lo..=hi).map(|j| smooth[j]).fold(0.0_f64, f64::max);
-        if local_min && region_max - smooth[y] > 0.04 {
-            if dips.last().is_none_or(|&d| y - d >= sep) {
-                dips.push(y);
-            }
+        if local_min && region_max - smooth[y] > 0.04 && dips.last().is_none_or(|&d| y - d >= sep) {
+            dips.push(y);
         }
         y += 1;
     }

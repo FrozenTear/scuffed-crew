@@ -643,7 +643,7 @@ fn benchmark_ocr_accuracy() {
                 || gt
                     .name
                     .to_uppercase()
-                    .contains(&name_ocr.to_uppercase().trim());
+                    .contains(name_ocr.to_uppercase().trim());
             total_names += 1;
             if name_ok {
                 correct_names += 1;

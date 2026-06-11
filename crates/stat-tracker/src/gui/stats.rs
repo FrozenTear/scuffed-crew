@@ -217,7 +217,7 @@ fn compute_stats(matches: &[PersonalMatch]) -> ComputedStats {
             }
         })
         .collect();
-    heroes.sort_by(|a, b| b.games.cmp(&a.games));
+    heroes.sort_by_key(|h| std::cmp::Reverse(h.games));
 
     let role_order = ["Tank", "Damage", "Support"];
     let mut roles: Vec<RoleStats> = role_map
@@ -240,7 +240,7 @@ fn compute_stats(matches: &[PersonalMatch]) -> ComputedStats {
             losses,
         })
         .collect();
-    maps.sort_by(|a, b| b.games.cmp(&a.games));
+    maps.sort_by_key(|m| std::cmp::Reverse(m.games));
 
     let mut hero_maps: HashMap<String, Vec<HeroMapBreakdown>> = HashMap::new();
     for (hero, map_data) in hero_map_acc {
@@ -252,7 +252,7 @@ fn compute_stats(matches: &[PersonalMatch]) -> ComputedStats {
                 wins,
             })
             .collect();
-        breakdowns.sort_by(|a, b| b.games.cmp(&a.games));
+        breakdowns.sort_by_key(|b| std::cmp::Reverse(b.games));
         hero_maps.insert(hero, breakdowns);
     }
 

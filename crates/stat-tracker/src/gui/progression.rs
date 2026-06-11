@@ -58,7 +58,7 @@ pub fn ProgressionPanel() -> Element {
                                     let sid = session.session_id.clone();
                                     let is_selected = selected_session().as_deref() == Some(&sid);
                                     let class_name = if is_selected { "session-item session-item-active" } else { "session-item" };
-                                    let dt: chrono::DateTime<chrono::Utc> = session.started_at.clone().into();
+                                    let dt: chrono::DateTime<chrono::Utc> = session.started_at.into();
                                     let local = dt.with_timezone(&chrono::Local);
                                     let time_str = local.format("%m/%d %H:%M").to_string();
                                     let captures = session.capture_count;
@@ -164,7 +164,7 @@ fn ProgressionCharts(props: ProgressionChartsProps) -> Element {
                 }
                 for (i, snap) in snaps.iter().enumerate() {
                     {
-                        let dt: chrono::DateTime<chrono::Utc> = snap.played_at.clone().into();
+                        let dt: chrono::DateTime<chrono::Utc> = snap.played_at.into();
                         let local = dt.with_timezone(&chrono::Local);
                         let time_str = local.format("%H:%M:%S").to_string();
                         let num = i + 1;

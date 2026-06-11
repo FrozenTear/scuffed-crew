@@ -1,3 +1,4 @@
+pub mod game_running;
 pub mod hero_portrait;
 pub mod match_end;
 pub mod match_start;

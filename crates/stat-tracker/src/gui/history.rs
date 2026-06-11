@@ -84,7 +84,7 @@ pub fn HistoryPanel() -> Element {
                         }
                         for pm in m.iter() {
                             {
-                                let dt: chrono::DateTime<chrono::Utc> = pm.played_at.clone().into();
+                                let dt: chrono::DateTime<chrono::Utc> = pm.played_at.into();
                                 let local = dt.with_timezone(&chrono::Local);
                                 let time_str = local.format("%m/%d %H:%M").to_string();
                                 rsx! {

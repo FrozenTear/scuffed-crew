@@ -31,12 +31,12 @@ fn daemon_running(data_dir: &std::path::Path) -> Option<u32> {
 }
 
 fn find_daemon_binary() -> Option<PathBuf> {
-    if let Ok(current_exe) = std::env::current_exe() {
-        if let Some(dir) = current_exe.parent() {
-            let sibling = dir.join(DAEMON_BIN);
-            if sibling.exists() {
-                return Some(sibling);
-            }
+    if let Ok(current_exe) = std::env::current_exe()
+        && let Some(dir) = current_exe.parent()
+    {
+        let sibling = dir.join(DAEMON_BIN);
+        if sibling.exists() {
+            return Some(sibling);
         }
     }
     for dir in std::env::var("PATH").unwrap_or_default().split(':') {

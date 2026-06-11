@@ -2,6 +2,7 @@
 name = "scuffed-stat-tracker"
 version = "0.1.0"
 edition = "2024"
+default-run = "scuffed-stat-tracker"
 
 [features]
 gui = ["dep:dioxus", "dep:tray-icon", "dep:base64", "dep:gtk"]

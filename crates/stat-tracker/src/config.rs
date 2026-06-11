@@ -15,10 +15,20 @@ pub struct Config {
     pub auto_detect: AutoDetectConfig,
     #[serde(default = "default_session_window_secs")]
     pub session_window_secs: u64,
+    /// Process names (as they appear in /proc/<pid>/comm) that must be running
+    /// for captures and auto-detect polling to fire. Prevents Tab presses on the
+    /// desktop / in other apps from recording garbage frames. Empty list
+    /// disables the gate.
+    #[serde(default = "default_game_process_names")]
+    pub game_process_names: Vec<String>,
 }
 
 fn default_session_window_secs() -> u64 {
     1800
+}
+
+fn default_game_process_names() -> Vec<String> {
+    vec!["Overwatch.exe".to_string()]
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize)]
@@ -127,6 +137,7 @@ impl Default for Config {
             sync: None,
             auto_detect: AutoDetectConfig::default(),
             session_window_secs: default_session_window_secs(),
+            game_process_names: default_game_process_names(),
         }
     }
 }

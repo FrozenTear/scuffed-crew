@@ -55,6 +55,7 @@ pub fn SettingsPanel() -> Element {
                 cooldown_secs: cooldown().parse().unwrap_or(120),
             },
             session_window_secs: config().session_window_secs,
+            game_process_names: config().game_process_names.clone(),
         };
 
         match save_config(&new_config) {

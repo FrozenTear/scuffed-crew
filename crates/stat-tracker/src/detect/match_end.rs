@@ -2,11 +2,47 @@ use image::DynamicImage;
 
 use super::MatchOutcome;
 
+/// Which detector produced an outcome. The banner color-flood is specific
+/// enough to act on from a single frame; the word-OCR sources (accolade
+/// screen, competitive rank screen) are cheap but weaker evidence, so the
+/// poller requires two agreeing word reads inside a confirmation window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutcomeSource {
+    Banner,
+    /// Top-left result word on the post-match accolade screen.
+    ResultWord,
+    /// Result word under the "COMPETITIVE" title on the rank-update screen.
+    RankScreen,
+}
+
+/// One-shot outcome read for a single frame (Tab captures, dev tools).
 pub fn detect_outcome(img: &DynamicImage) -> MatchOutcome {
+    detect_outcome_signal(img)
+        .map(|(outcome, _)| outcome)
+        .unwrap_or(MatchOutcome::Unknown)
+}
+
+/// Outcome detection with its evidence source, for the poller.
+///
+/// Order: the full-screen VICTORY/DEFEAT banner color-flood first (fast, very
+/// specific), then OCR of the accolade screen's top-left result word. The word
+/// OCR runs unconditionally — it used to be gated behind a "60% of pixels lean
+/// blue" accolade-screen check, but custom UI color schemes (e.g. magenta)
+/// break any assumption about the screen's dominant color, and the full-frame
+/// pixel scan cost more than the small-crop OCR it was guarding. The Otsu-based
+/// `read_result_word` is color-scheme-independent.
+pub fn detect_outcome_signal(img: &DynamicImage) -> Option<(MatchOutcome, OutcomeSource)> {
     if let Some(outcome) = detect_banner(img) {
-        return outcome;
+        return Some((outcome, OutcomeSource::Banner));
     }
-    detect_accolade_screen(img)
+    match read_result_word(img) {
+        MatchOutcome::Unknown => {}
+        outcome => return Some((outcome, OutcomeSource::ResultWord)),
+    }
+    match read_rank_screen_result(img) {
+        MatchOutcome::Unknown => None,
+        outcome => Some((outcome, OutcomeSource::RankScreen)),
+    }
 }
 
 /// Text-based outcome fallback for the *captured scoreboard frame*.
@@ -107,53 +143,38 @@ fn detect_banner(img: &DynamicImage) -> Option<MatchOutcome> {
     }
 }
 
-// Detect the post-match accolade / MVP screen (after Play of the Game). This
-// screen is on-screen ~15-20s while players endorse, so a few-second poller
-// catches it reliably (unlike the ~3s VICTORY/DEFEAT banner).
-//
-// The screen is a light blue-gray body under a dark navy header — NOT the
-// saturated blue the old detector required, which is why it never fired.
-// Measured on a real frame: ~80% of pixels are blue-margin-dominant under a
-// loose test. The result word ("VICTORY"/"DEFEAT") sits in the top-LEFT corner
-// in large cyan/red text — not top-center.
-fn detect_accolade_screen(img: &DynamicImage) -> MatchOutcome {
-    let rgb = img.to_rgb8();
-    let (w, h) = rgb.dimensions();
-    if w == 0 || h == 0 {
-        return MatchOutcome::Unknown;
-    }
-
-    let mut blue_count = 0u32;
-    let mut total = 0u32;
-    for pixel in rgb.pixels() {
-        let [r, g, b] = pixel.0;
-        total += 1;
-        // Loose blue-margin test: blue merely leans above red and green. Catches
-        // both the dark navy header and the light periwinkle body.
-        if (b as i32 - r as i32) > 15 && (b as i32 - g as i32) > 5 {
-            blue_count += 1;
-        }
-    }
-
-    let blue_ratio = blue_count as f32 / total as f32;
-    // Real accolade frames measure ~80%; 0.6 rejects most desktop/web content
-    // while leaving headroom. The result-word OCR below is the real guard.
-    if blue_ratio < 0.6 {
-        return MatchOutcome::Unknown;
-    }
-
-    tracing::debug!(blue_ratio, "post-match accolade screen detected");
-    read_result_word(img)
+/// Read the large top-left VICTORY/DEFEAT title off the post-match accolade /
+/// MVP screen (shown ~15-20s after Play of the Game).
+/// Region calibrated against a native 16:9 accolade frame: x 0.5-14%, y 3.5-9.5%.
+/// Validated on a custom magenta UI theme (2026-06-11 defeat frame).
+fn read_result_word(img: &DynamicImage) -> MatchOutcome {
+    ocr_outcome_word(img, 5, 35, 135, 60, "accolade screen")
 }
 
-/// Read the large top-left VICTORY/DEFEAT title off the accolade screen.
-/// Region calibrated against a native 16:9 accolade frame: x 0.5-14%, y 3.5-9.5%.
-fn read_result_word(img: &DynamicImage) -> MatchOutcome {
+/// Read the result word off the competitive summary (rank update) screen —
+/// VICTORY/DEFEAT printed under the big "COMPETITIVE" title, top-left. The
+/// background is dark regardless of UI color theme, and the screen stays up
+/// 40s+ (the longest-lived outcome signal, surviving even a starved poller).
+/// Region measured from a real 16:9 frame: word spans x 4-12.5%, y 16-21%.
+fn read_rank_screen_result(img: &DynamicImage) -> MatchOutcome {
+    ocr_outcome_word(img, 10, 145, 150, 80, "rank screen")
+}
+
+/// OCR a crop (given in 1/1000ths of the 16:9 frame) prepared as title text,
+/// and map VICTORY/DEFEAT/DRAW to an outcome.
+fn ocr_outcome_word(
+    img: &DynamicImage,
+    x_pm: u32,
+    y_pm: u32,
+    w_pm: u32,
+    h_pm: u32,
+    context: &str,
+) -> MatchOutcome {
     let (w, h) = (img.width(), img.height());
-    let x = w * 5 / 1000;
-    let y = h * 35 / 1000;
-    let cw = w * 135 / 1000;
-    let ch = h * 60 / 1000;
+    let x = w * x_pm / 1000;
+    let y = h * y_pm / 1000;
+    let cw = w * w_pm / 1000;
+    let ch = h * h_pm / 1000;
     if cw == 0 || ch == 0 || x + cw > w || y + ch > h {
         return MatchOutcome::Unknown;
     }
@@ -164,21 +185,55 @@ fn read_result_word(img: &DynamicImage) -> MatchOutcome {
         Ok(text) => {
             let upper = text.to_uppercase();
             if upper.contains("VICTORY") {
-                tracing::info!(text = %text.trim(), "accolade screen: VICTORY");
+                tracing::info!(text = %text.trim(), context, "result word: VICTORY");
                 MatchOutcome::Victory
             } else if upper.contains("DEFEAT") {
-                tracing::info!(text = %text.trim(), "accolade screen: DEFEAT");
+                tracing::info!(text = %text.trim(), context, "result word: DEFEAT");
                 MatchOutcome::Defeat
             } else if upper.contains("DRAW") {
                 MatchOutcome::Draw
             } else {
-                tracing::debug!(ocr_text = %text.trim(), "accolade screen detected but result text unreadable");
+                tracing::trace!(ocr_text = %text.trim(), context, "no result word in region");
                 MatchOutcome::Unknown
             }
         }
         Err(e) => {
-            tracing::warn!(error = %e, "accolade result OCR failed");
+            // Runs every poll tick now — a broken Tesseract setup would make a
+            // warn here fire every few seconds; captures fail loudly anyway.
+            tracing::debug!(error = %e, context, "result word OCR failed");
             MatchOutcome::Unknown
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use image::{Rgb, RgbImage};
+
+    fn flood(color: [u8; 3]) -> DynamicImage {
+        DynamicImage::ImageRgb8(RgbImage::from_pixel(640, 360, Rgb(color)))
+    }
+
+    #[test]
+    fn gold_flood_is_victory_banner() {
+        assert_eq!(
+            detect_outcome_signal(&flood([230, 180, 20])),
+            Some((MatchOutcome::Victory, OutcomeSource::Banner))
+        );
+    }
+
+    #[test]
+    fn red_flood_is_defeat_banner() {
+        assert_eq!(
+            detect_outcome_signal(&flood([200, 30, 30])),
+            Some((MatchOutcome::Defeat, OutcomeSource::Banner))
+        );
+    }
+
+    #[test]
+    fn black_frame_is_no_signal() {
+        assert_eq!(detect_outcome_signal(&flood([0, 0, 0])), None);
+        assert_eq!(detect_outcome(&flood([0, 0, 0])), MatchOutcome::Unknown);
     }
 }
