@@ -167,7 +167,7 @@ fn detect_player_row_inner(scoreboard: &DynamicImage, team_size: usize) -> Optio
             for x in x0..x1 {
                 let [r, g, b] = rgb.get_pixel(x, y).0;
                 let br = (r as u32 + g as u32 + b as u32) / 3;
-                if br >= 15 && br <= 90 {
+                if (15..=90).contains(&br) {
                     total += br as u64;
                     count += 1;
                 }
