@@ -20,10 +20,19 @@ pub fn StatusPanel() -> Element {
                     db_locked.set(false);
                     load_stats(&store).await
                 }
-                Err(_) => {
-                    db_locked.set(true);
-                    None
-                }
+                // Daemon holds the store lock — serve the dashboard from its
+                // live snapshot. Only flag "locked" when no snapshot exists
+                // (daemon predating the snapshot feature).
+                Err(_) => match stat_tracker::storage::read_snapshot(&data_dir) {
+                    Some(snap) => {
+                        db_locked.set(false);
+                        Some(stats_from_snapshot(&snap))
+                    }
+                    None => {
+                        db_locked.set(true);
+                        None
+                    }
+                },
             }
         }
     });
@@ -75,7 +84,7 @@ pub fn StatusPanel() -> Element {
             if db_locked {
                 div { class: "card card-warning",
                     h3 { "Database locked" }
-                    p { "Stats database is in use by the running daemon. Live stats will appear here when the daemon stops, or check the database directly." }
+                    p { "Stats database is in use by the running daemon, which hasn't written a live snapshot yet (older build?). Stats will appear when the daemon stops or after its first capture." }
                 }
             }
 
@@ -191,4 +200,18 @@ async fn load_stats(store: &LocalStore) -> Option<DashboardStats> {
         unsynced_count: unsynced,
         last_capture_time: last,
     })
+}
+
+fn stats_from_snapshot(snap: &stat_tracker::storage::Snapshot) -> DashboardStats {
+    DashboardStats {
+        total_matches: snap.matches.len(),
+        unsynced_count: snap.matches.iter().filter(|m| !m.synced).count(),
+        // Matches are newest-first in the snapshot.
+        last_capture_time: snap.matches.first().map(|m| {
+            let dt: chrono::DateTime<chrono::Utc> = m.played_at.into();
+            dt.with_timezone(&chrono::Local)
+                .format("%Y-%m-%d %H:%M:%S")
+                .to_string()
+        }),
+    }
 }

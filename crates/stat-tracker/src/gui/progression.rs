@@ -16,7 +16,29 @@ pub fn ProgressionPanel() -> Element {
         async move {
             let store = match LocalStore::open(&data_dir).await {
                 Ok(s) => s,
-                Err(_) => return (Vec::new(), Vec::new()),
+                Err(_) => {
+                    // Daemon holds the store lock — serve the panel from its
+                    // live snapshot instead of showing nothing mid-session.
+                    let Some(snap) = stat_tracker::storage::read_snapshot(&data_dir) else {
+                        return (Vec::new(), Vec::new());
+                    };
+                    let sessions: Vec<_> = snap
+                        .sessions
+                        .into_iter()
+                        .filter(|s| s.capture_count > 1)
+                        .collect();
+                    let mut snaps: Vec<PersonalMatch> = match sid {
+                        Some(ref session_id) => snap
+                            .matches
+                            .into_iter()
+                            .filter(|m| &m.session_id == session_id)
+                            .collect(),
+                        None => Vec::new(),
+                    };
+                    // Mirror get_session_snapshots: oldest capture first.
+                    snaps.sort_by_key(|m| chrono::DateTime::<chrono::Utc>::from(m.played_at));
+                    return (sessions, snaps);
+                }
             };
             let sessions = store.get_multi_capture_sessions().await.unwrap_or_default();
             let snaps = match sid {

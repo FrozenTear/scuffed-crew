@@ -298,8 +298,13 @@ pub fn StatsPanel() -> Element {
                     store.get_all_matches().await.unwrap_or_default()
                 }
                 Err(_) => {
+                    // Daemon holds the store lock — read its live snapshot,
+                    // which includes back-filled outcomes the append-only log
+                    // never sees. Log only as a last resort (old daemon build).
                     db_locked.set(true);
-                    stat_tracker::storage::read_match_log(&data_dir)
+                    stat_tracker::storage::read_snapshot(&data_dir)
+                        .map(|s| s.matches)
+                        .unwrap_or_else(|| stat_tracker::storage::read_match_log(&data_dir))
                 }
             }
         }
@@ -320,7 +325,7 @@ pub fn StatsPanel() -> Element {
 
             if db_locked {
                 div { class: "card card-info",
-                    p { class: "text-dim text-sm", "Reading from log file (daemon is running)" }
+                    p { class: "text-dim text-sm", "Live view from daemon snapshot (daemon is running)" }
                 }
             }
 

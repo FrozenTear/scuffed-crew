@@ -236,6 +236,24 @@ impl LocalStore {
         Ok(())
     }
 
+    /// Export all matches and sessions to `live_snapshot.json` (atomic via
+    /// tmp+rename). SurrealKV is single-process, so while the daemon holds the
+    /// store open the GUI cannot read it — this snapshot is the GUI's live
+    /// data source, refreshed by the daemon after every mutation. Unlike
+    /// `matches.jsonl` (append-only insert log), it reflects back-filled
+    /// outcomes and sync-state changes.
+    pub async fn export_snapshot(&self, data_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
+        let snapshot = Snapshot {
+            matches: self.get_all_matches().await?,
+            sessions: self.get_all_sessions().await?,
+        };
+        let json = serde_json::to_vec(&snapshot)?;
+        let tmp = data_dir.join("live_snapshot.json.tmp");
+        std::fs::write(&tmp, &json)?;
+        std::fs::rename(&tmp, snapshot_path(data_dir))?;
+        Ok(())
+    }
+
     pub async fn last_capture_time(&self) -> Option<String> {
         let mut result = self
             .db
@@ -260,6 +278,27 @@ struct CountRow {
 #[derive(Deserialize, SurrealValue)]
 struct LastCaptureRow {
     played_at: SurrealDatetime,
+}
+
+/// The daemon's live export of the full store, for readers (the GUI) that
+/// can't open SurrealKV while the daemon has it locked.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Snapshot {
+    /// All matches, newest first (mirrors `get_all_matches`).
+    pub matches: Vec<PersonalMatch>,
+    /// All sessions, most recently captured first (mirrors `get_all_sessions`).
+    pub sessions: Vec<MatchSession>,
+}
+
+fn snapshot_path(data_dir: &Path) -> PathBuf {
+    data_dir.join("live_snapshot.json")
+}
+
+/// Read the daemon's live snapshot. `None` if it doesn't exist yet or is
+/// unreadable — callers fall back to the append-only match log.
+pub fn read_snapshot(data_dir: &Path) -> Option<Snapshot> {
+    let content = std::fs::read(snapshot_path(data_dir)).ok()?;
+    serde_json::from_slice(&content).ok()
 }
 
 fn match_log_path(data_dir: &Path) -> PathBuf {

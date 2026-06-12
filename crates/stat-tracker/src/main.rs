@@ -137,6 +137,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let count = store.match_count().await?;
     tracing::info!(stored_matches = count, "local store ready");
 
+    // Initial snapshot so the GUI has current data from the moment the daemon
+    // takes the store lock (refreshed after every mutation from here on).
+    if let Err(e) = store.export_snapshot(&config.data_dir).await {
+        tracing::warn!(error = %e, "failed to write initial live snapshot");
+    }
+
     let portraits_path = detect::hero_portrait::portraits_dir(&config.data_dir);
     let portrait_matcher = Arc::new(detect::hero_portrait::PortraitMatcher::load(
         &portraits_path,
@@ -300,6 +306,9 @@ async fn run_loop(
     data_dir: &std::path::Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut game_gate = detect::game_running::GameProcessGate::new(game_process_names);
+    // The GUI's Stop button (and systemd) send SIGTERM — shut down as
+    // gracefully as Ctrl+C, with a final sync.
+    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     let mut kbd = match detect::MultiKeyboardStream::open() {
         Ok(s) => s,
         Err(e) => {
@@ -406,8 +415,9 @@ async fn run_loop(
                                 capture_count += 1;
                                 if let Some(client) = sync_client
                                     && capture_count.is_multiple_of(SYNC_EVERY_N_CAPTURES) {
-                                        try_sync(store, client).await;
+                                        try_sync(store, client, data_dir).await;
                                     }
+                                refresh_snapshot(store, data_dir).await;
                             }
                         }
                     }
@@ -421,7 +431,7 @@ async fn run_loop(
                             Err(e2) => {
                                 tracing::error!(error = %e2, "failed to reopen keyboard — exiting");
                                 if let Some(client) = sync_client {
-                                    try_sync(store, client).await;
+                                    try_sync(store, client, data_dir).await;
                                 }
                                 return Ok(());
                             }
@@ -482,10 +492,12 @@ async fn run_loop(
                                 Some(g) if !g.finished() => {
                                     g.record_outcome(outcome.clone());
                                     tracing::info!(?outcome, session_id = %g.session_id, "auto-detect: outcome confirmed from post-match screens");
-                                    if g.session_created
-                                        && let Err(e) = store.set_session_outcome(&g.session_id, outcome_str(&outcome)).await {
+                                    if g.session_created {
+                                        if let Err(e) = store.set_session_outcome(&g.session_id, outcome_str(&outcome)).await {
                                             tracing::warn!(error = %e, "failed to back-fill session outcome");
                                         }
+                                        refresh_snapshot(store, data_dir).await;
+                                    }
                                 }
                                 Some(_) => { /* outcome already recorded for this game */ }
                                 None => {
@@ -540,7 +552,14 @@ async fn run_loop(
             _ = tokio::signal::ctrl_c() => {
                 tracing::info!("shutting down");
                 if let Some(client) = sync_client {
-                    try_sync(store, client).await;
+                    try_sync(store, client, data_dir).await;
+                }
+                return Ok(());
+            }
+            _ = sigterm.recv() => {
+                tracing::info!("SIGTERM received — shutting down");
+                if let Some(client) = sync_client {
+                    try_sync(store, client, data_dir).await;
                 }
                 return Ok(());
             }
@@ -847,7 +866,19 @@ fn rand_id() -> u64 {
     seed ^ (std::process::id() as u64).wrapping_mul(0x517cc1b727220a95)
 }
 
-async fn try_sync(store: &storage::LocalStore, client: &sync::SyncClient) {
+/// Refresh the GUI's live snapshot after a store mutation. Failures are
+/// logged but never block the capture/poll path.
+async fn refresh_snapshot(store: &storage::LocalStore, data_dir: &std::path::Path) {
+    if let Err(e) = store.export_snapshot(data_dir).await {
+        tracing::debug!(error = %e, "live snapshot refresh failed");
+    }
+}
+
+async fn try_sync(
+    store: &storage::LocalStore,
+    client: &sync::SyncClient,
+    data_dir: &std::path::Path,
+) {
     match store.get_unsynced().await {
         Ok(unsynced) if !unsynced.is_empty() => {
             tracing::info!(count = unsynced.len(), "syncing unsynced matches");
@@ -861,6 +892,7 @@ async fn try_sync(store: &storage::LocalStore, client: &sync::SyncClient) {
                     if let Err(e) = store.mark_synced(unsynced.len()).await {
                         tracing::error!(error = %e, "failed to mark matches as synced");
                     }
+                    refresh_snapshot(store, data_dir).await;
                 }
                 Err(e) => tracing::error!(error = %e, "sync upload failed"),
             }
