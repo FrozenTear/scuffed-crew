@@ -197,14 +197,83 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// The game currently in progress. Opened when the poller sees a game-start
 /// screen (map vote / hero select / ban) and reused for every Tab capture until
 /// the next game starts — so captures taken across hero swaps all land in one
-/// session. `outcome` is filled in when the poller reads the post-match accolade
-/// screen, then back-filled onto the captured snapshots.
+/// session. `outcome` is filled in when the poller reads the post-match screens
+/// (or recovered from a captured frame), then back-filled onto the snapshots.
 struct ActiveGame {
     session_id: String,
     outcome: detect::MatchOutcome,
     maps: Vec<String>,
     /// Whether the `match_session` row has been created (on the first capture).
     session_created: bool,
+    /// When `outcome` was recorded. Drives the post-match grace window: Tab
+    /// presses shortly after the outcome (the post-match scoreboard) still
+    /// belong to this game; later ones belong to the next.
+    outcome_recorded_at: Option<Instant>,
+}
+
+impl ActiveGame {
+    fn finished(&self) -> bool {
+        !matches!(self.outcome, detect::MatchOutcome::Unknown)
+    }
+
+    fn record_outcome(&mut self, outcome: detect::MatchOutcome) {
+        self.outcome = outcome;
+        self.outcome_recorded_at = Some(Instant::now());
+    }
+}
+
+/// How long after a game's outcome is recorded that Tab captures still belong
+/// to it. The post-match scoreboard is typically inspected right after the
+/// result screens; without this window each such Tab opened a duplicate
+/// session for the same match and double-counted it. Past the window, the
+/// finished result must not leak onto the next match's captures.
+const POST_MATCH_GRACE: std::time::Duration = std::time::Duration::from_secs(75);
+
+/// Whether a Tab capture should open a fresh session instead of reusing the
+/// active one.
+fn should_start_fresh_session(game: Option<&ActiveGame>, now: Instant) -> bool {
+    match game {
+        // No game open — daemon started mid-match or the start screen was missed.
+        None => true,
+        // Mid-game capture.
+        Some(g) if !g.finished() => false,
+        // Finished: reuse within the grace window (post-match scoreboard of the
+        // same match), start fresh after it. An unstamped outcome is treated as
+        // stale so a finished result can never leak forward.
+        Some(g) => g
+            .outcome_recorded_at
+            .is_none_or(|t| now.duration_since(t) > POST_MATCH_GRACE),
+    }
+}
+
+/// How long an outcome seen with no game open stays applicable to the next
+/// session that opens. Covers "daemon started during the post-match screens";
+/// without the bound, an outcome from hours ago could stamp a future game.
+const PENDING_OUTCOME_TTL: std::time::Duration = std::time::Duration::from_secs(90);
+
+/// Take the pending outcome if it is still fresh; stale ones are discarded.
+fn take_fresh_pending(
+    pending: &mut Option<(detect::MatchOutcome, Instant)>,
+    now: Instant,
+) -> Option<detect::MatchOutcome> {
+    let (outcome, seen_at) = pending.take()?;
+    if now.duration_since(seen_at) <= PENDING_OUTCOME_TTL {
+        Some(outcome)
+    } else {
+        tracing::debug!(?outcome, "discarding stale pending outcome");
+        None
+    }
+}
+
+/// What a Tab capture actually did, reported back to the session state machine.
+struct CaptureReport {
+    /// A snapshot row was written (and the session row created if this was the
+    /// session's first capture). False = rejected by a trust gate.
+    recorded: bool,
+    /// Outcome stored on the snapshot — may have been recovered from the frame
+    /// itself (banner colors / header text) when the game's outcome was still
+    /// Unknown, in which case the caller back-fills it onto the session.
+    outcome: detect::MatchOutcome,
 }
 
 fn outcome_str(outcome: &detect::MatchOutcome) -> &'static str {
@@ -252,8 +321,8 @@ async fn run_loop(
     // screen, reused for every capture until the next game starts.
     let mut active_game: Option<ActiveGame> = None;
     // Outcome detected by the poller while no game was open — applied to the
-    // next game that opens (e.g. daemon started after the match began).
-    let mut pending_outcome: Option<detect::MatchOutcome> = None;
+    // next session that opens, if still fresh (PENDING_OUTCOME_TTL).
+    let mut pending_outcome: Option<(detect::MatchOutcome, Instant)> = None;
     // Last result-word OCR read, for confirmation: a word outcome is only
     // trusted once two reads agree within OUTCOME_CONFIRM_WINDOW, so a single
     // hallucinated OCR read can't finish the open game with a wrong outcome.
@@ -286,18 +355,16 @@ async fn run_loop(
                         tokio::time::sleep(tokio::time::Duration::from_millis(400)).await;
                         last_tab_capture = Some(Instant::now());
 
-                        // Open a fresh game when none is active (daemon started
-                        // mid-match, or the start screen was missed) OR when the
-                        // current game already has a recorded outcome — a finished
-                        // game must not leak its result onto the next match's
-                        // capture. Inherit any outcome the poller already saw.
-                        let start_fresh_game = active_game
-                            .as_ref()
-                            .is_none_or(|g| !matches!(g.outcome, detect::MatchOutcome::Unknown));
-                        if start_fresh_game {
+                        // Session choice: reuse the active game (mid-game, or
+                        // post-match scoreboard within the grace window), or
+                        // open a fresh one, inheriting a still-fresh outcome
+                        // the poller saw before any game was open.
+                        if should_start_fresh_session(active_game.as_ref(), Instant::now()) {
+                            let inherited = take_fresh_pending(&mut pending_outcome, Instant::now());
                             active_game = Some(ActiveGame {
                                 session_id: format!("{:016x}", rand_id()),
-                                outcome: pending_outcome.take().unwrap_or(detect::MatchOutcome::Unknown),
+                                outcome_recorded_at: inherited.as_ref().map(|_| Instant::now()),
+                                outcome: inherited.unwrap_or(detect::MatchOutcome::Unknown),
                                 maps: Vec::new(),
                                 session_created: false,
                             });
@@ -313,10 +380,28 @@ async fn run_loop(
                             Err(e) => tracing::error!(error = %e, "capture cycle failed"),
                             // Rejected by a trust gate — nothing was recorded, so
                             // the session must not be marked as created.
-                            Ok(false) => {}
-                            Ok(true) => {
+                            Ok(report) if !report.recorded => {}
+                            Ok(report) => {
                                 if let Some(g) = active_game.as_mut() {
                                     g.session_created = true;
+                                    // The capture recovered an outcome the game
+                                    // didn't have yet (banner / header text on
+                                    // the frame) — adopt it so the in-memory
+                                    // state agrees with what was stored, and
+                                    // back-fill earlier snapshots.
+                                    if !g.finished()
+                                        && !matches!(report.outcome, detect::MatchOutcome::Unknown)
+                                    {
+                                        g.record_outcome(report.outcome.clone());
+                                        tracing::info!(
+                                            outcome = ?report.outcome,
+                                            session_id = %g.session_id,
+                                            "outcome recovered from captured frame — back-filling session"
+                                        );
+                                        if let Err(e) = store.set_session_outcome(&g.session_id, outcome_str(&g.outcome)).await {
+                                            tracing::warn!(error = %e, "failed to back-fill session outcome");
+                                        }
+                                    }
                                 }
                                 capture_count += 1;
                                 if let Some(client) = sync_client
@@ -394,8 +479,8 @@ async fn run_loop(
                         // Unknown, writes it.
                         if let Some(outcome) = confirmed {
                             match active_game.as_mut() {
-                                Some(g) if matches!(g.outcome, detect::MatchOutcome::Unknown) => {
-                                    g.outcome = outcome.clone();
+                                Some(g) if !g.finished() => {
+                                    g.record_outcome(outcome.clone());
                                     tracing::info!(?outcome, session_id = %g.session_id, "auto-detect: outcome confirmed from post-match screens");
                                     if g.session_created
                                         && let Err(e) = store.set_session_outcome(&g.session_id, outcome_str(&outcome)).await {
@@ -404,8 +489,9 @@ async fn run_loop(
                                 }
                                 Some(_) => { /* outcome already recorded for this game */ }
                                 None => {
-                                    // No game open yet — apply to the next capture.
-                                    pending_outcome = Some(outcome);
+                                    // No game open yet — applies to the next
+                                    // session if one opens within the TTL.
+                                    pending_outcome = Some((outcome, Instant::now()));
                                 }
                             }
                         }
@@ -418,9 +504,7 @@ async fn run_loop(
                         // A game whose outcome has already been recorded is
                         // finished; the next start screen must begin a fresh game
                         // so the previous result can't carry over to it.
-                        let game_finished = active_game
-                            .as_ref()
-                            .is_some_and(|g| !matches!(g.outcome, detect::MatchOutcome::Unknown));
+                        let game_finished = active_game.as_ref().is_some_and(ActiveGame::finished);
                         match phase {
                             detect::GamePhase::MapVote { maps } => {
                                 let can_open = active_game.is_none()
@@ -429,7 +513,7 @@ async fn run_loop(
                                 if can_open {
                                     let sid = format!("{:016x}", rand_id());
                                     tracing::info!(?maps, session_id = %sid, "auto-detect: map vote — new game");
-                                    active_game = Some(ActiveGame { session_id: sid, outcome: detect::MatchOutcome::Unknown, maps, session_created: false });
+                                    active_game = Some(ActiveGame { session_id: sid, outcome: detect::MatchOutcome::Unknown, maps, session_created: false, outcome_recorded_at: None });
                                     last_game_open = Some(Instant::now());
                                     // Evidence about the previous match must not
                                     // confirm into this one.
@@ -441,7 +525,7 @@ async fn run_loop(
                             {
                                 let sid = format!("{:016x}", rand_id());
                                 tracing::info!(session_id = %sid, "auto-detect: hero select/ban — new game (map vote missed)");
-                                active_game = Some(ActiveGame { session_id: sid, outcome: detect::MatchOutcome::Unknown, maps: Vec::new(), session_created: false });
+                                active_game = Some(ActiveGame { session_id: sid, outcome: detect::MatchOutcome::Unknown, maps: Vec::new(), session_created: false, outcome_recorded_at: None });
                                 last_game_open = Some(Instant::now());
                                 word_outcome_streak = None;
                             }
@@ -477,7 +561,7 @@ async fn handle_capture(
     portrait_matcher: &Arc<detect::hero_portrait::PortraitMatcher>,
     collect_portraits: bool,
     data_dir: &std::path::Path,
-) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<CaptureReport, Box<dyn std::error::Error + Send + Sync>> {
     tracing::info!("Tab detected — capturing screen (hold Tab to keep scoreboard visible)");
     let img = capture::capture_screen_output(backend, capture_output).await?;
 
@@ -589,7 +673,10 @@ async fn handle_capture(
             "capture rejected — frame does not look like a scoreboard (saved to debug/rejected)"
         );
         save_rejected_frame(data_dir, frame_img, "noscoreboard");
-        return Ok(false);
+        return Ok(CaptureReport {
+            recorded: false,
+            outcome,
+        });
     }
 
     let outcome_label = outcome_str(&outcome);
@@ -691,7 +778,10 @@ async fn handle_capture(
                 format!("store insert failed: {e}").into()
             },
         )?;
-        Ok(true)
+        Ok(CaptureReport {
+            recorded: true,
+            outcome,
+        })
     } else {
         // Scoreboard-shaped frame, but the player's row couldn't be positively
         // identified (no name match, no highlighted row) — recording another
@@ -701,7 +791,10 @@ async fn handle_capture(
              set player_name in config.toml if it is missing)"
         );
         save_rejected_frame(data_dir, frame_img, "noplayerrow");
-        Ok(false)
+        Ok(CaptureReport {
+            recorded: false,
+            outcome,
+        })
     }
 }
 
@@ -774,5 +867,81 @@ async fn try_sync(store: &storage::LocalStore, client: &sync::SyncClient) {
         }
         Ok(_) => {}
         Err(e) => tracing::error!(error = %e, "failed to query unsynced matches"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    // Tests construct `now` in the future so subtracting ages can't underflow
+    // the monotonic clock on a freshly-booted machine.
+    fn test_now() -> Instant {
+        Instant::now() + Duration::from_secs(600)
+    }
+
+    fn game(
+        outcome: detect::MatchOutcome,
+        recorded_secs_ago: Option<u64>,
+        now: Instant,
+    ) -> ActiveGame {
+        ActiveGame {
+            session_id: "test".into(),
+            outcome,
+            maps: Vec::new(),
+            session_created: true,
+            outcome_recorded_at: recorded_secs_ago.map(|s| now - Duration::from_secs(s)),
+        }
+    }
+
+    #[test]
+    fn tab_with_no_game_starts_fresh() {
+        assert!(should_start_fresh_session(None, test_now()));
+    }
+
+    #[test]
+    fn tab_mid_game_reuses_session() {
+        let now = test_now();
+        let g = game(detect::MatchOutcome::Unknown, None, now);
+        assert!(!should_start_fresh_session(Some(&g), now));
+    }
+
+    #[test]
+    fn tab_on_post_match_scoreboard_reuses_finished_session() {
+        // Within the grace window the Tab capture is the post-match scoreboard
+        // of the SAME match — a fresh session would double-count the game.
+        let now = test_now();
+        let g = game(detect::MatchOutcome::Defeat, Some(30), now);
+        assert!(!should_start_fresh_session(Some(&g), now));
+    }
+
+    #[test]
+    fn tab_long_after_finish_starts_fresh() {
+        let now = test_now();
+        let g = game(detect::MatchOutcome::Victory, Some(120), now);
+        assert!(should_start_fresh_session(Some(&g), now));
+        // An unstamped outcome is treated as stale: a finished result must
+        // never leak onto the next match's captures.
+        let g = game(detect::MatchOutcome::Victory, None, now);
+        assert!(should_start_fresh_session(Some(&g), now));
+    }
+
+    #[test]
+    fn pending_outcome_expires() {
+        let now = test_now();
+
+        let mut fresh = Some((detect::MatchOutcome::Defeat, now - Duration::from_secs(30)));
+        assert_eq!(
+            take_fresh_pending(&mut fresh, now),
+            Some(detect::MatchOutcome::Defeat)
+        );
+        assert!(fresh.is_none());
+
+        let mut stale = Some((detect::MatchOutcome::Defeat, now - Duration::from_secs(200)));
+        assert_eq!(take_fresh_pending(&mut stale, now), None);
+        assert!(stale.is_none());
+
+        assert_eq!(take_fresh_pending(&mut None, now), None);
     }
 }
