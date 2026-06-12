@@ -320,6 +320,19 @@ pub fn append_match_log(data_dir: &Path, m: &PersonalMatch) {
     }
 }
 
+/// Collapse capture snapshots (multiple Tab presses during one match) to one
+/// row per game. Snapshots of the same game share a `session_id`, and the
+/// newest snapshot carries the final scoreboard — so with newest-first input
+/// (the order of `get_all_matches`, the live snapshot, and `read_match_log`)
+/// the first row seen per session wins. Rows without a session_id (legacy
+/// data) pass through individually.
+pub fn latest_per_game(matches: Vec<PersonalMatch>) -> Vec<PersonalMatch> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out = matches;
+    out.retain(|m| m.session_id.is_empty() || seen.insert(m.session_id.clone()));
+    out
+}
+
 /// Remove the on-disk exports (append-only log + live snapshot). Called by
 /// every clear path — a stale snapshot would resurrect cleared data in the
 /// GUI's locked-store view.
@@ -356,4 +369,45 @@ pub fn read_match_log(data_dir: &Path) -> Vec<PersonalMatch> {
         da.cmp(&db_time)
     });
     matches
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Utc;
+
+    fn snap(session_id: &str, elims: u32) -> PersonalMatch {
+        PersonalMatch {
+            hero: "Test".into(),
+            map_name: String::new(),
+            game_mode: String::new(),
+            role: "Tank".into(),
+            outcome: "victory".into(),
+            elims,
+            deaths: 0,
+            assists: 0,
+            damage: 0,
+            healing: 0,
+            mitigation: 0,
+            played_at: SurrealDatetime::from(Utc::now()),
+            synced: false,
+            session_id: session_id.into(),
+        }
+    }
+
+    #[test]
+    fn latest_per_game_keeps_final_snapshot_per_session() {
+        // Newest-first input: the first snapshot per session is the final one.
+        let rows = vec![snap("b", 30), snap("a", 20), snap("a", 10), snap("a", 5)];
+        let games = latest_per_game(rows);
+        assert_eq!(games.len(), 2);
+        assert_eq!(games[0].session_id, "b");
+        assert_eq!(games[1].elims, 20);
+    }
+
+    #[test]
+    fn latest_per_game_passes_legacy_rows_through() {
+        let rows = vec![snap("", 1), snap("", 2), snap("a", 3), snap("a", 4)];
+        assert_eq!(latest_per_game(rows).len(), 3);
+    }
 }

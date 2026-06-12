@@ -292,7 +292,7 @@ pub fn StatsPanel() -> Element {
         let data_dir = config().data_dir.clone();
         let _tick = refresh_tick();
         async move {
-            match LocalStore::open(&data_dir).await {
+            let rows = match LocalStore::open(&data_dir).await {
                 Ok(store) => {
                     db_locked.set(false);
                     store.get_all_matches().await.unwrap_or_default()
@@ -306,7 +306,10 @@ pub fn StatsPanel() -> Element {
                         .map(|s| s.matches)
                         .unwrap_or_else(|| stat_tracker::storage::read_match_log(&data_dir))
                 }
-            }
+            };
+            // Stats are per GAME: collapse the capture snapshots of each
+            // session to its final scoreboard.
+            stat_tracker::storage::latest_per_game(rows)
         }
     });
 

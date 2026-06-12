@@ -192,7 +192,10 @@ struct DashboardStats {
 }
 
 async fn load_stats(store: &LocalStore) -> Option<DashboardStats> {
-    let total = store.match_count().await.unwrap_or(0);
+    // Count games (one per session), not capture snapshots.
+    let total =
+        stat_tracker::storage::latest_per_game(store.get_all_matches().await.unwrap_or_default())
+            .len();
     let unsynced = store.get_unsynced().await.map(|v| v.len()).unwrap_or(0);
     let last = store.last_capture_time().await;
     Some(DashboardStats {
@@ -204,7 +207,7 @@ async fn load_stats(store: &LocalStore) -> Option<DashboardStats> {
 
 fn stats_from_snapshot(snap: &stat_tracker::storage::Snapshot) -> DashboardStats {
     DashboardStats {
-        total_matches: snap.matches.len(),
+        total_matches: stat_tracker::storage::latest_per_game(snap.matches.clone()).len(),
         unsynced_count: snap.matches.iter().filter(|m| !m.synced).count(),
         // Matches are newest-first in the snapshot.
         last_capture_time: snap.matches.first().map(|m| {

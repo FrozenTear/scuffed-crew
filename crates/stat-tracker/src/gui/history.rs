@@ -28,7 +28,7 @@ pub fn HistoryPanel() -> Element {
         let data_dir = config().data_dir.clone();
         let _tick = refresh_tick();
         async move {
-            match LocalStore::open(&data_dir).await {
+            let rows = match LocalStore::open(&data_dir).await {
                 Ok(store) => {
                     db_locked.set(false);
                     store.get_all_matches().await.unwrap_or_default()
@@ -42,7 +42,9 @@ pub fn HistoryPanel() -> Element {
                         .map(|s| s.matches)
                         .unwrap_or_else(|| stat_tracker::storage::read_match_log(&data_dir))
                 }
-            }
+            };
+            // One row per game — per-capture detail lives in Progression.
+            stat_tracker::storage::latest_per_game(rows)
         }
     });
 
