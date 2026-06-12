@@ -320,10 +320,14 @@ pub fn append_match_log(data_dir: &Path, m: &PersonalMatch) {
     }
 }
 
+/// Remove the on-disk exports (append-only log + live snapshot). Called by
+/// every clear path — a stale snapshot would resurrect cleared data in the
+/// GUI's locked-store view.
 pub fn clear_match_log(data_dir: &Path) {
-    let path = match_log_path(data_dir);
-    if path.exists() {
-        let _ = std::fs::remove_file(&path);
+    for path in [match_log_path(data_dir), snapshot_path(data_dir)] {
+        if path.exists() {
+            let _ = std::fs::remove_file(&path);
+        }
     }
 }
 
