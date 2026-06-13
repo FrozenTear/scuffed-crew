@@ -51,6 +51,23 @@ enum Route {
 
 #[component]
 fn Dashboard() -> Element {
+    // Diagnostics: SST_VIEW=matches|stats|settings|preview jumps straight to
+    // that view at startup — used by screenshot tooling for UI review.
+    use_hook(|| {
+        static APPLIED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        if !APPLIED.swap(true, std::sync::atomic::Ordering::SeqCst)
+            && let Ok(view) = std::env::var("SST_VIEW")
+        {
+            let nav = navigator();
+            match view.as_str() {
+                "matches" => nav.push(Route::Matches {}),
+                "stats" => nav.push(Route::Stats {}),
+                "settings" => nav.push(Route::Settings {}),
+                "preview" => nav.push(Route::Preview {}),
+                _ => None,
+            };
+        }
+    });
     rsx! {
         div { class: "app",
             Nav {}

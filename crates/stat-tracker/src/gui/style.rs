@@ -699,4 +699,24 @@ body {
 
 /* Link styled as a button */
 a.btn { text-decoration: none; display: inline-block; }
+
+/* Native form controls fight the dark theme in webkitgtk — restyle. */
+.field select {
+    appearance: none;
+    -webkit-appearance: none;
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='8'><path d='M1 1l5 5 5-5' fill='none' stroke='%238888a0' stroke-width='2'/></svg>");
+    background-repeat: no-repeat;
+    background-position: right 0.8rem center;
+    padding-right: 2rem;
+}
+
+.btn-outline {
+    background: transparent;
+    border: 1px solid var(--accent);
+    color: var(--accent);
+}
+.btn-outline:hover { background: rgba(124, 58, 237, 0.15); color: var(--text); }
+
+/* Let all overview blocks share one row regardless of count. */
+.stats-grid { grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); }
 "#;

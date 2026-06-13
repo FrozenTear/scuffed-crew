@@ -166,7 +166,7 @@ pub fn StatusPanel() -> Element {
             div { class: "card",
                 h3 { "Storage" }
                 div { class: "stat-row",
-                    span { class: "label", "Stored matches" }
+                    span { class: "label", "Games recorded" }
                     span { class: "value",
                         if db_locked {
                             span { class: "text-dim", "locked" }
@@ -191,7 +191,7 @@ pub fn StatusPanel() -> Element {
                         }
                     }
                     div { class: "stat-row",
-                        span { class: "label", "Unsynced matches" }
+                        span { class: "label", "Unsynced captures" }
                         span { class: "value",
                             if db_locked {
                                 span { class: "text-dim", "locked" }
