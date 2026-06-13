@@ -219,6 +219,22 @@ impl LocalStore {
         Ok(())
     }
 
+    /// Set a session's map and stamp it onto ALL its snapshots, re-queuing
+    /// them for sync. A game has exactly one map, so snapshots that disagree
+    /// (missed or misread the label) are corrected, not preserved.
+    pub async fn set_session_map(
+        &self,
+        session_id: &str,
+        map: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        self.db
+            .query("UPDATE match_session SET map_name = $map WHERE session_id = $sid; UPDATE personal_match SET map_name = $map, synced = false WHERE session_id = $sid AND map_name != $map")
+            .bind(("map", map.to_string()))
+            .bind(("sid", session_id.to_string()))
+            .await?;
+        Ok(())
+    }
+
     /// Back-fill a detected outcome onto a session and every capture snapshot it
     /// contains, re-queuing those snapshots for sync so the corrected result
     /// (e.g. a VICTORY read off the accolade screen after the stats were already
@@ -445,6 +461,22 @@ pub fn majority_hero(snapshots: &[PersonalMatch]) -> Option<String> {
         .map(|(hero, _)| hero.to_string())
 }
 
+/// Majority map across a session's snapshots (empty reads don't vote).
+/// Repair helper for sessions whose map was missed at creation or polluted
+/// by misreads.
+pub fn majority_map(snapshots: &[PersonalMatch]) -> Option<String> {
+    let mut counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    for m in snapshots {
+        if !m.map_name.is_empty() {
+            *counts.entry(m.map_name.as_str()).or_default() += 1;
+        }
+    }
+    counts
+        .into_iter()
+        .max_by(|a, b| a.1.cmp(&b.1).then(b.0.cmp(a.0)))
+        .map(|(map, _)| map.to_string())
+}
+
 /// Collapse capture snapshots (multiple Tab presses during one match) to one
 /// row per game. Snapshots of the same game share a `session_id`, and the
 /// newest snapshot carries the final scoreboard — so with newest-first input
@@ -554,6 +586,18 @@ mod tests {
         );
         // Consumed — second take is empty.
         assert!(take_commands(dir.path()).is_empty());
+    }
+
+    #[test]
+    fn majority_map_ignores_empty_and_picks_dominant() {
+        let mut rows: Vec<PersonalMatch> = (0..5).map(|_| snap("a", 1)).collect();
+        rows[0].map_name = "King's Row".into();
+        for r in rows.iter_mut().skip(2) {
+            r.map_name = "Circuit Royal".into();
+        }
+        // rows[1] stays empty — doesn't vote
+        assert_eq!(majority_map(&rows).as_deref(), Some("Circuit Royal"));
+        assert_eq!(majority_map(&[snap("a", 1)]), None);
     }
 
     #[test]

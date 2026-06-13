@@ -221,8 +221,10 @@ const MAP_NAMES: &[&str] = &[
     "BLIZZARD WORLD",
     "EICHENWALDE",
     "HOLLYWOOD",
-    "KING",
-    "ROW",
+    // Not bare "KING"/"ROW" — they substring-match unrelated text
+    // ("WRECKING", "BROWN"); apostrophe loss in OCR is covered by both forms.
+    "KING'S ROW",
+    "KINGS ROW",
     "MIDTOWN",
     "NUMBANI",
     "PARAISO",

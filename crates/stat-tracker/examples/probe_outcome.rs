@@ -47,6 +47,10 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     );
     println!("detect_outcome()      => {:?}", detect_outcome(&img));
     println!("detect_outcome_text() => {:?}", detect_outcome_text(&img));
+    println!(
+        "read_accolade_map()   => {:?}",
+        stat_tracker::detect::match_end::read_accolade_map(&img)
+    );
 
     // Reproduce read_result_word's exact crop + prepare_title path.
     let x = w * 5 / 1000;

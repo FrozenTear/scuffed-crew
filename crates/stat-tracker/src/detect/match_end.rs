@@ -160,6 +160,32 @@ fn read_rank_screen_result(img: &DynamicImage) -> MatchOutcome {
     ocr_outcome_word(img, 10, 145, 150, 80, "rank screen")
 }
 
+/// Read the map name printed beside the accolade screen's result word
+/// ("DEFEAT  |  COLOSSEO / MATCH TIME: 10:10"). Color-scheme-independent like
+/// the result word itself, and the most reliable map source when the in-game
+/// top-bar OCR missed all game. Region measured on a real 16:9 frame: map
+/// text block spans x 13.5-19%, y 4-8.5%; the crop starts right of the title
+/// (a clipped title glyph is harmless — we only search for map names).
+pub fn read_accolade_map(img: &DynamicImage) -> Option<String> {
+    let (w, h) = (img.width(), img.height());
+    let x = w * 125 / 1000;
+    let y = h * 35 / 1000;
+    let cw = w * 325 / 1000;
+    let ch = h * 55 / 1000;
+    if cw == 0 || ch == 0 || x + cw > w || y + ch > h {
+        return None;
+    }
+    let crop = img.crop_imm(x, y, cw, ch);
+    let prepared = crate::ocr::preprocess::prepare_title(&crop);
+    // PSM 6 (block): the crop holds two short lines (map, match time).
+    let text = crate::ocr::recognize_prepared(&prepared, "6", None).ok()?;
+    let map = crate::parse::match_map_in_text(&text);
+    if let Some(m) = &map {
+        tracing::info!(map = %m, raw = %text.trim(), "map read from accolade screen");
+    }
+    map
+}
+
 /// OCR a crop (given in 1/1000ths of the 16:9 frame) prepared as title text,
 /// and map VICTORY/DEFEAT/DRAW to an outcome.
 fn ocr_outcome_word(

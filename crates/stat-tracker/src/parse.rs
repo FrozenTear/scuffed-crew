@@ -523,7 +523,10 @@ fn guess_role(hero: &str) -> String {
 }
 
 const MAPS: &[(&str, &str)] = &[
-    ("King's Row", "king"),
+    // NOT plain "king": that substring matches "wrecKING ball" in scoreboard
+    // text and fabricated King's Row reads on every Wrecking Ball game. The
+    // fuzzy pass still catches OCR variants like "kings row".
+    ("King's Row", "king's row"),
     ("Circuit Royal", "circuit royal"),
     ("Dorado", "dorado"),
     ("Havana", "havana"),
@@ -679,6 +682,25 @@ mod tests {
         let parsed = parse_scoreboard_cells(&[], None, raw, "defeat", Some("FROZEN")).unwrap();
         assert_eq!(parsed.elims, 7);
         assert_eq!(parsed.mitigation, 3316);
+    }
+
+    #[test]
+    fn wrecking_ball_text_is_not_kings_row() {
+        // "wrecKING ball" used to substring-match the King's Row pattern and
+        // fabricate map reads on every Wrecking Ball game.
+        assert_eq!(
+            match_map_in_text("WRECKING BALL\n31% WEAPON ACCURACY"),
+            None
+        );
+        assert_eq!(
+            match_map_in_text("KING'S ROW").as_deref(),
+            Some("King's Row")
+        );
+        // OCR commonly drops the apostrophe — fuzzy pass must still match.
+        assert_eq!(
+            match_map_in_text("KINGS ROW").as_deref(),
+            Some("King's Row")
+        );
     }
 
     #[test]

@@ -280,6 +280,9 @@ struct CaptureReport {
     /// itself (banner colors / header text) when the game's outcome was still
     /// Unknown, in which case the caller back-fills it onto the session.
     outcome: detect::MatchOutcome,
+    /// Map stored on the snapshot, if one was read — the caller adopts the
+    /// first discovery onto the active game so the whole session shares it.
+    map: Option<String>,
 }
 
 fn outcome_str(outcome: &detect::MatchOutcome) -> &'static str {
@@ -407,6 +410,16 @@ async fn run_loop(
                             Ok(report) => {
                                 if let Some(g) = active_game.as_mut() {
                                     g.session_created = true;
+                                    // First map discovery propagates to the
+                                    // whole session (one game, one map).
+                                    if g.maps.is_empty()
+                                        && let Some(map) = &report.map
+                                    {
+                                        g.maps.push(map.clone());
+                                        if let Err(e) = store.set_session_map(&g.session_id, map).await {
+                                            tracing::warn!(error = %e, "failed to set session map");
+                                        }
+                                    }
                                     // The capture recovered an outcome the game
                                     // didn't have yet (banner / header text on
                                     // the frame) — adopt it so the in-memory
@@ -462,14 +475,23 @@ async fn run_loop(
                 match capture::capture_screen_output(backend, capture_output).await {
                     Ok(img) => {
                         let dump_dir = dump_poll_frames.then(|| data_dir.join("debug").join("poll"));
-                        let (signal, phase) = tokio::task::spawn_blocking(move || {
+                        let (signal, phase, accolade_map) = tokio::task::spawn_blocking(move || {
                             if let Some(dir) = &dump_dir {
                                 save_frame_ring(dir, "poll", &img, POLL_DUMP_KEEP);
                             }
                             let signal = detect::match_end::detect_outcome_signal(&img);
+                            // The accolade screen also prints the map — read it
+                            // while we're here; it recovers games where the
+                            // in-game top-bar OCR missed all match.
+                            let accolade_map = match &signal {
+                                Some((_, detect::match_end::OutcomeSource::ResultWord)) => {
+                                    detect::match_end::read_accolade_map(&img)
+                                }
+                                _ => None,
+                            };
                             let phase = detect::match_start::detect_phase(&img);
-                            (signal, phase)
-                        }).await.unwrap_or((None, detect::GamePhase::Unknown));
+                            (signal, phase, accolade_map)
+                        }).await.unwrap_or((None, detect::GamePhase::Unknown, None));
 
                         // The banner color-flood is specific enough to act on
                         // immediately (and only lasts ~3s — a second tick may
@@ -519,6 +541,20 @@ async fn run_loop(
                                     // session if one opens within the TTL.
                                     pending_outcome = Some((outcome, Instant::now()));
                                 }
+                            }
+                        }
+
+                        if let Some(map) = accolade_map
+                            && let Some(g) = active_game.as_mut()
+                            && g.maps.is_empty()
+                        {
+                            tracing::info!(map = %map, session_id = %g.session_id, "map recovered from accolade screen");
+                            g.maps.push(map.clone());
+                            if g.session_created {
+                                if let Err(e) = store.set_session_map(&g.session_id, &map).await {
+                                    tracing::warn!(error = %e, "failed to set session map");
+                                }
+                                refresh_snapshot(store, data_dir).await;
                             }
                         }
 
@@ -737,6 +773,7 @@ async fn handle_capture(
         return Ok(CaptureReport {
             recorded: false,
             outcome,
+            map: None,
         });
     }
 
@@ -835,6 +872,7 @@ async fn handle_capture(
             deaths = parsed.deaths,
             "parsed scoreboard"
         );
+        let recorded_map = (!parsed.map_name.is_empty()).then(|| parsed.map_name.clone());
         storage::append_match_log(data_dir, &parsed);
         store.insert_match(parsed).await.map_err(
             |e| -> Box<dyn std::error::Error + Send + Sync> {
@@ -858,6 +896,7 @@ async fn handle_capture(
         Ok(CaptureReport {
             recorded: true,
             outcome,
+            map: recorded_map,
         })
     } else {
         // Scoreboard-shaped frame, but the player's row couldn't be positively
@@ -871,6 +910,7 @@ async fn handle_capture(
         Ok(CaptureReport {
             recorded: false,
             outcome,
+            map: None,
         })
     }
 }
