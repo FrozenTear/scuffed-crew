@@ -291,6 +291,15 @@ fn outcome_str(outcome: &detect::MatchOutcome) -> &'static str {
     }
 }
 
+fn outcome_from_str(s: &str) -> detect::MatchOutcome {
+    match s {
+        "victory" => detect::MatchOutcome::Victory,
+        "defeat" => detect::MatchOutcome::Defeat,
+        "draw" => detect::MatchOutcome::Draw,
+        _ => detect::MatchOutcome::Unknown,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_loop(
     backend: &capture::CaptureBackend,
@@ -343,6 +352,11 @@ async fn run_loop(
 
     let mut poll_timer = tokio::time::interval(poll_interval);
     poll_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+    // GUI command queue (manual outcome edits, session deletion) — checked on
+    // its own timer so edits apply even while no game is running.
+    let mut cmd_timer = tokio::time::interval(tokio::time::Duration::from_secs(3));
+    cmd_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     loop {
         tokio::select! {
@@ -547,6 +561,34 @@ async fn run_loop(
                     Err(e) => {
                         tracing::trace!(error = %e, "poll capture failed (game may not be running)");
                     }
+                }
+            }
+            _ = cmd_timer.tick() => {
+                let cmds = storage::take_commands(data_dir);
+                if !cmds.is_empty() {
+                    for cmd in &cmds {
+                        tracing::info!(?cmd, "applying GUI command");
+                        // Keep the in-memory game consistent when the command
+                        // targets the active session, so the poller can't
+                        // overwrite a manual edit or resurrect a deleted game.
+                        match cmd {
+                            storage::StoreCommand::SetOutcome { session_id, outcome } => {
+                                if let Some(g) = active_game.as_mut()
+                                    && g.session_id == *session_id {
+                                        g.record_outcome(outcome_from_str(outcome));
+                                    }
+                            }
+                            storage::StoreCommand::DeleteSession { session_id } => {
+                                if active_game.as_ref().is_some_and(|g| g.session_id == *session_id) {
+                                    active_game = None;
+                                }
+                            }
+                        }
+                        if let Err(e) = store.apply_command(cmd).await {
+                            tracing::warn!(error = %e, "GUI command failed");
+                        }
+                    }
+                    refresh_snapshot(store, data_dir).await;
                 }
             }
             _ = tokio::signal::ctrl_c() => {

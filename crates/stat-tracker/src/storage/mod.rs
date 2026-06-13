@@ -177,6 +177,30 @@ impl LocalStore {
         Ok(())
     }
 
+    /// Delete a session and all its capture snapshots (manual cleanup of a
+    /// junk/misdetected game). Already-synced snapshots remain on the server.
+    pub async fn delete_session(&self, session_id: &str) -> Result<(), Box<dyn std::error::Error>> {
+        self.db
+            .query("DELETE match_session WHERE session_id = $sid; DELETE personal_match WHERE session_id = $sid")
+            .bind(("sid", session_id.to_string()))
+            .await?;
+        Ok(())
+    }
+
+    /// Apply a queued store command (see [`StoreCommand`]).
+    pub async fn apply_command(
+        &self,
+        cmd: &StoreCommand,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        match cmd {
+            StoreCommand::SetOutcome {
+                session_id,
+                outcome,
+            } => self.set_session_outcome(session_id, outcome).await,
+            StoreCommand::DeleteSession { session_id } => self.delete_session(session_id).await,
+        }
+    }
+
     /// Set a session's displayed hero (and role), used to keep the label on
     /// the majority hero across its snapshots rather than whatever the first
     /// capture happened to read.
@@ -338,6 +362,71 @@ pub fn append_match_log(data_dir: &Path, m: &PersonalMatch) {
     }
 }
 
+/// A store mutation requested by the GUI. SurrealKV is single-process, so
+/// while the daemon holds the store the GUI can't write — it queues commands
+/// as JSON files in `<data_dir>/commands/`, which the daemon applies within a
+/// few seconds (and then refreshes the live snapshot). When no daemon runs,
+/// the GUI applies commands directly.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
+pub enum StoreCommand {
+    /// Manually set a session's outcome ("victory"/"defeat"/"draw"/"unknown"),
+    /// back-filled onto all its snapshots and re-queued for sync.
+    SetOutcome { session_id: String, outcome: String },
+    /// Remove a session and all its snapshots.
+    DeleteSession { session_id: String },
+}
+
+fn commands_dir(data_dir: &Path) -> PathBuf {
+    data_dir.join("commands")
+}
+
+/// Queue a command for the daemon to apply (atomic via tmp+rename).
+pub fn queue_command(
+    data_dir: &Path,
+    cmd: &StoreCommand,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let dir = commands_dir(data_dir);
+    std::fs::create_dir_all(&dir)?;
+    let name = format!(
+        "cmd_{}_{}.json",
+        chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default(),
+        std::process::id()
+    );
+    let tmp = dir.join(format!("{name}.tmp"));
+    std::fs::write(&tmp, serde_json::to_vec(cmd)?)?;
+    std::fs::rename(&tmp, dir.join(name))?;
+    Ok(())
+}
+
+/// Take all queued commands, oldest first, removing them from disk.
+/// Unparseable files are discarded (logged), never retried forever.
+pub fn take_commands(data_dir: &Path) -> Vec<StoreCommand> {
+    let Ok(entries) = std::fs::read_dir(commands_dir(data_dir)) else {
+        return Vec::new();
+    };
+    let mut files: Vec<PathBuf> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("json"))
+        .collect();
+    files.sort();
+    let mut cmds = Vec::new();
+    for f in files {
+        match std::fs::read(&f)
+            .map_err(|e| e.to_string())
+            .and_then(|c| serde_json::from_slice::<StoreCommand>(&c).map_err(|e| e.to_string()))
+        {
+            Ok(cmd) => cmds.push(cmd),
+            Err(e) => {
+                tracing::warn!(file = %f.display(), error = %e, "discarding bad command file")
+            }
+        }
+        let _ = std::fs::remove_file(&f);
+    }
+    cmds
+}
+
 /// The majority hero across a session's snapshots. Individual captures can
 /// mislabel — the career panel shows the SPECTATED hero while the player is
 /// dead, and portrait matching can misfire — but across 20+ captures the
@@ -439,6 +528,32 @@ mod tests {
         assert_eq!(games.len(), 2);
         assert_eq!(games[0].session_id, "b");
         assert_eq!(games[1].elims, 20);
+    }
+
+    #[test]
+    fn command_queue_roundtrip() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let a = StoreCommand::SetOutcome {
+            session_id: "s1".into(),
+            outcome: "defeat".into(),
+        };
+        let b = StoreCommand::DeleteSession {
+            session_id: "s2".into(),
+        };
+        queue_command(dir.path(), &a).unwrap();
+        queue_command(dir.path(), &b).unwrap();
+        let cmds = take_commands(dir.path());
+        assert_eq!(cmds.len(), 2);
+        assert!(
+            matches!(&cmds[0], StoreCommand::SetOutcome { session_id, outcome }
+            if session_id == "s1" && outcome == "defeat")
+        );
+        assert!(
+            matches!(&cmds[1], StoreCommand::DeleteSession { session_id }
+            if session_id == "s2")
+        );
+        // Consumed — second take is empty.
+        assert!(take_commands(dir.path()).is_empty());
     }
 
     #[test]
