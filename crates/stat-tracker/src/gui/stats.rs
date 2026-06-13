@@ -267,7 +267,11 @@ fn compute_stats(matches: &[PersonalMatch]) -> ComputedStats {
             losses,
         })
         .collect();
-    maps.sort_by_key(|m| std::cmp::Reverse(m.games));
+    maps.sort_by(|a, b| {
+        b.games
+            .cmp(&a.games)
+            .then_with(|| a.map_name.cmp(&b.map_name))
+    });
 
     let mut hero_maps: HashMap<String, Vec<HeroMapBreakdown>> = HashMap::new();
     for (hero, map_data) in hero_map_acc {
@@ -395,6 +399,20 @@ pub fn StatsPanel() -> Element {
                                         div { class: "stat-label", "Draws" }
                                     }
                                 }
+                                {
+                                    let undecided = stats.overall.total
+                                        - stats.overall.wins
+                                        - stats.overall.losses
+                                        - stats.overall.draws;
+                                    rsx! {
+                                        if undecided > 0 {
+                                            div { class: "stat-block",
+                                                div { class: "stat-big text-dim", "{undecided}" }
+                                                div { class: "stat-label", "Unknown" }
+                                            }
+                                        }
+                                    }
+                                }
                                 div { class: "stat-block",
                                     div { class: "stat-big", "{stats.overall.win_rate():.1}%" }
                                     div { class: "stat-label", "Win Rate" }
@@ -463,8 +481,6 @@ pub fn StatsPanel() -> Element {
                                     }
                                 }
                             }
-
-                            MapBarChart { maps: stats.maps.iter().map(|ms| (ms.map_name.clone(), ms.wins, ms.losses, ms.games.saturating_sub(ms.wins).saturating_sub(ms.losses))).collect() }
                         }
 
                         div { class: "card",
@@ -666,88 +682,6 @@ fn WinTrendChart(props: WinTrendChartProps) -> Element {
                 }
                 span { class: "text-dim text-sm", "Rolling 10-game window" }
             }
-            div { dangerous_inner_html: "{svg_content}" }
-        }
-    }
-}
-
-#[derive(Clone, PartialEq, Props)]
-struct MapBarChartProps {
-    maps: Vec<(String, usize, usize, usize)>,
-}
-
-#[allow(non_snake_case)]
-fn MapBarChart(props: MapBarChartProps) -> Element {
-    if props.maps.is_empty() {
-        return rsx! {};
-    }
-
-    let max_games = props
-        .maps
-        .iter()
-        .map(|m| m.1 + m.2 + m.3)
-        .max()
-        .unwrap_or(1);
-    let bar_height = 24.0_f64;
-    let gap = 4.0_f64;
-    let label_width = 120.0_f64;
-    let chart_width = 300.0_f64;
-    let total_width = label_width + chart_width + 50.0;
-    let total_height = props.maps.len() as f64 * (bar_height + gap) + gap;
-
-    let mut bars = String::new();
-    for (i, (name, wins, losses, draws)) in props.maps.iter().enumerate() {
-        let y = gap + i as f64 * (bar_height + gap);
-        let total = wins + losses + draws;
-        let w_frac = *wins as f64 / max_games as f64;
-        let l_frac = *losses as f64 / max_games as f64;
-        let d_frac = *draws as f64 / max_games as f64;
-
-        let w_width = w_frac * chart_width;
-        let l_width = l_frac * chart_width;
-        let d_width = d_frac * chart_width;
-
-        bars.push_str(&format!(
-            r##"<text x="{}" y="{}" fill="#8888a0" font-size="11" font-family="Inter, sans-serif" text-anchor="end" dominant-baseline="middle">{}</text>"##,
-            label_width - 8.0,
-            y + bar_height / 2.0,
-            name
-        ));
-
-        let mut x = label_width;
-        if *wins > 0 {
-            bars.push_str(&format!(
-                r##"<rect x="{x}" y="{y}" width="{w_width}" height="{bar_height}" rx="3" fill="#22c55e"/>"##
-            ));
-            x += w_width;
-        }
-        if *losses > 0 {
-            bars.push_str(&format!(
-                r##"<rect x="{x}" y="{y}" width="{l_width}" height="{bar_height}" rx="3" fill="#ef4444"/>"##
-            ));
-            x += l_width;
-        }
-        if *draws > 0 {
-            bars.push_str(&format!(
-                r##"<rect x="{x}" y="{y}" width="{d_width}" height="{bar_height}" rx="3" fill="#8888a0"/>"##
-            ));
-        }
-
-        bars.push_str(&format!(
-            r##"<text x="{}" y="{}" fill="#8888a0" font-size="10" font-family="JetBrains Mono, monospace" dominant-baseline="middle">{}</text>"##,
-            label_width + (w_width + l_width + d_width) + 6.0,
-            y + bar_height / 2.0,
-            total
-        ));
-    }
-
-    let svg_content = format!(
-        r##"<svg viewBox="0 0 {total_width} {total_height}" xmlns="http://www.w3.org/2000/svg" class="map-bar-svg">{bars}</svg>"##
-    );
-
-    rsx! {
-        div { class: "card",
-            h3 { "Map Win/Loss" }
             div { dangerous_inner_html: "{svg_content}" }
         }
     }

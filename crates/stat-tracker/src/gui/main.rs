@@ -1,13 +1,14 @@
 mod daemon;
 mod history;
 mod preview;
-mod progression;
 mod settings;
 mod stats;
 mod status;
 mod style;
 mod tray;
 
+use dioxus::desktop::tao::dpi::LogicalSize;
+use dioxus::desktop::{Config as DesktopConfig, WindowBuilder};
 use dioxus::prelude::*;
 
 fn main() {
@@ -25,27 +26,31 @@ fn main() {
         });
     }
 
-    dioxus::launch(app);
+    let window = WindowBuilder::new()
+        .with_title("Scuffed Stat Tracker")
+        .with_inner_size(LogicalSize::new(1240.0, 860.0));
+    dioxus::LaunchBuilder::desktop()
+        .with_cfg(DesktopConfig::new().with_window(window).with_menu(None))
+        .launch(app);
 }
 
 #[derive(Clone, Routable, PartialEq)]
 enum Route {
     #[route("/")]
-    Home {},
-    #[route("/history")]
-    History {},
+    Dashboard {},
+    #[route("/matches")]
+    Matches {},
     #[route("/stats")]
     Stats {},
-    #[route("/progression")]
-    Progression {},
-    #[route("/preview")]
-    Preview {},
     #[route("/settings")]
     Settings {},
+    // Diagnostics view, reachable from Settings (not in the nav).
+    #[route("/preview")]
+    Preview {},
 }
 
 #[component]
-fn Home() -> Element {
+fn Dashboard() -> Element {
     rsx! {
         div { class: "app",
             Nav {}
@@ -55,11 +60,11 @@ fn Home() -> Element {
 }
 
 #[component]
-fn History() -> Element {
+fn Matches() -> Element {
     rsx! {
         div { class: "app",
             Nav {}
-            history::HistoryPanel {}
+            history::MatchesPanel {}
         }
     }
 }
@@ -70,16 +75,6 @@ fn Stats() -> Element {
         div { class: "app",
             Nav {}
             stats::StatsPanel {}
-        }
-    }
-}
-
-#[component]
-fn Progression() -> Element {
-    rsx! {
-        div { class: "app",
-            Nav {}
-            progression::ProgressionPanel {}
         }
     }
 }
@@ -110,11 +105,9 @@ fn Nav() -> Element {
         nav { class: "nav",
             h1 { class: "logo", "Scuffed Stat Tracker" }
             div { class: "nav-links",
-                Link { to: Route::Home {}, "Status" }
-                Link { to: Route::History {}, "Matches" }
+                Link { to: Route::Dashboard {}, "Dashboard" }
+                Link { to: Route::Matches {}, "Matches" }
                 Link { to: Route::Stats {}, "Stats" }
-                Link { to: Route::Progression {}, "Progression" }
-                Link { to: Route::Preview {}, "Preview" }
                 Link { to: Route::Settings {}, "Settings" }
             }
         }

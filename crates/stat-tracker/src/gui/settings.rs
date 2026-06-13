@@ -181,6 +181,16 @@ pub fn SettingsPanel() -> Element {
                 }
             }
 
+            div { class: "card",
+                h3 { "Diagnostics" }
+                p { class: "text-dim text-sm",
+                    "Live view of the capture region and the crops the OCR pipeline sees."
+                }
+                div { class: "actions",
+                    Link { class: "btn btn-secondary", to: crate::Route::Preview {}, "Open capture preview" }
+                }
+            }
+
             div { class: "card card-warning",
                 h3 { "Data Management" }
                 p { class: "text-dim text-sm", "Clear all stored match data, sessions, and logs. This cannot be undone. If the daemon is running, restart it after clearing." }

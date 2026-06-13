@@ -64,13 +64,14 @@ pub fn StatusPanel() -> Element {
 
     let db_locked = db_locked();
 
-    let (count, unsynced, last_capture) = match &*stats.read() {
+    let (count, unsynced, last_capture, recent) = match &*stats.read() {
         Some(Some(s)) => (
             s.total_matches,
             s.unsynced_count,
             s.last_capture_time.clone(),
+            s.recent.clone(),
         ),
-        _ => (0, 0, None),
+        _ => (0, 0, None, Vec::new()),
     };
 
     let sync_configured = config().sync.is_some();
@@ -80,6 +81,35 @@ pub fn StatusPanel() -> Element {
             h2 { "Dashboard" }
 
             DaemonCard {}
+
+            if !recent.is_empty() {
+                div { class: "card",
+                    h3 { "Recent Games" }
+                    div { class: "recent-list",
+                        for g in recent.iter() {
+                            {
+                                let outcome_class = match g.outcome.as_str() {
+                                    "victory" | "win" => "outcome-win",
+                                    "defeat" | "loss" => "outcome-loss",
+                                    "draw" => "outcome-draw",
+                                    _ => "outcome-unknown",
+                                };
+                                let dt: chrono::DateTime<chrono::Utc> = g.played_at.into();
+                                let when = dt.with_timezone(&chrono::Local).format("%a %H:%M").to_string();
+                                let map = if g.map_name.is_empty() { "—".to_string() } else { g.map_name.clone() };
+                                rsx! {
+                                    div { class: "recent-row",
+                                        span { class: "recent-outcome {outcome_class}", "{g.outcome.to_uppercase()}" }
+                                        span { class: "recent-hero", "{g.hero}" }
+                                        span { class: "recent-map text-dim", "{map}" }
+                                        span { class: "recent-time text-dim", "{when}" }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
 
             if db_locked {
                 div { class: "card card-warning",
@@ -189,32 +219,34 @@ struct DashboardStats {
     total_matches: usize,
     unsynced_count: usize,
     last_capture_time: Option<String>,
+    /// The most recent games (final snapshot per session), newest first.
+    recent: Vec<stat_tracker::storage::PersonalMatch>,
 }
 
 async fn load_stats(store: &LocalStore) -> Option<DashboardStats> {
-    // Count games (one per session), not capture snapshots.
-    let total =
-        stat_tracker::storage::latest_per_game(store.get_all_matches().await.unwrap_or_default())
-            .len();
-    let unsynced = store.get_unsynced().await.map(|v| v.len()).unwrap_or(0);
-    let last = store.last_capture_time().await;
-    Some(DashboardStats {
-        total_matches: total,
-        unsynced_count: unsynced,
-        last_capture_time: last,
-    })
+    let rows = store.get_all_matches().await.unwrap_or_default();
+    Some(stats_from_rows(rows))
 }
 
 fn stats_from_snapshot(snap: &stat_tracker::storage::Snapshot) -> DashboardStats {
+    stats_from_rows(snap.matches.clone())
+}
+
+/// Dashboard numbers from the raw snapshot rows (newest first): games are
+/// counted per session, sync state per row.
+fn stats_from_rows(rows: Vec<stat_tracker::storage::PersonalMatch>) -> DashboardStats {
+    let unsynced = rows.iter().filter(|m| !m.synced).count();
+    let last = rows.first().map(|m| {
+        let dt: chrono::DateTime<chrono::Utc> = m.played_at.into();
+        dt.with_timezone(&chrono::Local)
+            .format("%Y-%m-%d %H:%M:%S")
+            .to_string()
+    });
+    let games = stat_tracker::storage::latest_per_game(rows);
     DashboardStats {
-        total_matches: stat_tracker::storage::latest_per_game(snap.matches.clone()).len(),
-        unsynced_count: snap.matches.iter().filter(|m| !m.synced).count(),
-        // Matches are newest-first in the snapshot.
-        last_capture_time: snap.matches.first().map(|m| {
-            let dt: chrono::DateTime<chrono::Utc> = m.played_at.into();
-            dt.with_timezone(&chrono::Local)
-                .format("%Y-%m-%d %H:%M:%S")
-                .to_string()
-        }),
+        total_matches: games.len(),
+        unsynced_count: unsynced,
+        last_capture_time: last,
+        recent: games.into_iter().take(5).collect(),
     }
 }

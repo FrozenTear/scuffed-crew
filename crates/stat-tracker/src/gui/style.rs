@@ -599,4 +599,104 @@ body {
     font-size: 0.75rem;
     color: var(--text-dim);
 }
+
+/* --- Redesign layer --- */
+
+.panel { max-width: 1100px; padding: 2rem 2rem 4rem; }
+.panel-wide { max-width: 1100px; }
+
+.nav { padding: 0.9rem 2rem; position: sticky; top: 0; z-index: 10; }
+.nav-links a[aria-current="page"] {
+    color: var(--text);
+    background: rgba(124, 58, 237, 0.18);
+}
+
+.card-info {
+    border-color: rgba(124, 58, 237, 0.5);
+    padding: 0.7rem 1.2rem;
+}
+.card-info p { margin: 0; }
+
+/* Matches view */
+.day-header {
+    font-size: 0.78rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--text-dim);
+    margin: 1.4rem 0 0.5rem;
+}
+
+.match-row { cursor: pointer; border-left: 3px solid transparent; }
+.match-row.win { border-left-color: var(--success); }
+.match-row.loss { border-left-color: var(--error); }
+.match-row.draw { border-left-color: var(--warning); }
+.match-row.undecided { border-left-color: var(--text-dim); }
+.match-row.selected { background: rgba(124, 58, 237, 0.10); }
+.outcome-unknown { color: var(--text-dim); }
+
+.game-detail {
+    border-top: 1px solid var(--border);
+    background: rgba(124, 58, 237, 0.04);
+    padding: 0.9rem;
+}
+
+.detail-actions {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin-bottom: 0.8rem;
+}
+
+.detail-label {
+    font-size: 0.75rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--text-dim);
+    margin-right: 0.3rem;
+}
+
+.detail-spacer { flex: 1; }
+
+.btn-sm { padding: 0.35rem 0.8rem; font-size: 0.78rem; }
+
+.btn-outcome {
+    background: var(--bg-input);
+    border: 1px solid var(--border);
+    color: var(--text-dim);
+}
+.btn-outcome:hover { border-color: var(--accent); color: var(--text); }
+.btn-outcome.current {
+    background: rgba(124, 58, 237, 0.2);
+    border-color: var(--accent);
+    color: var(--text);
+}
+
+/* Dashboard recent games */
+.recent-list { display: flex; flex-direction: column; }
+
+.recent-row {
+    display: grid;
+    grid-template-columns: 80px 140px 1fr 90px;
+    gap: 0.6rem;
+    align-items: center;
+    padding: 0.45rem 0.2rem;
+    border-top: 1px solid var(--border);
+    font-size: 0.85rem;
+}
+.recent-row:first-child { border-top: none; }
+
+.recent-outcome {
+    font-family: var(--font-mono);
+    font-weight: 700;
+    font-size: 0.72rem;
+    text-transform: uppercase;
+}
+.recent-hero { font-weight: 600; }
+.recent-map { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.recent-time { text-align: right; font-family: var(--font-mono); font-size: 0.75rem; }
+
+/* Link styled as a button */
+a.btn { text-decoration: none; display: inline-block; }
 "#;
