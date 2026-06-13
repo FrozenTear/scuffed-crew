@@ -13,11 +13,13 @@ struct OverallStats {
 }
 
 impl OverallStats {
+    /// Win rate over decided games only — unknown outcomes must not dilute it.
     fn win_rate(&self) -> f64 {
-        if self.total == 0 {
+        let decided = self.wins + self.losses + self.draws;
+        if decided == 0 {
             return 0.0;
         }
-        (self.wins as f64 / self.total as f64) * 100.0
+        (self.wins as f64 / decided as f64) * 100.0
     }
 }
 
@@ -26,6 +28,7 @@ struct HeroStats {
     role: String,
     games: usize,
     wins: usize,
+    decided: usize,
     avg_elims: f64,
     avg_deaths: f64,
     avg_assists: f64,
@@ -36,10 +39,10 @@ struct HeroStats {
 
 impl HeroStats {
     fn win_rate(&self) -> f64 {
-        if self.games == 0 {
+        if self.decided == 0 {
             return 0.0;
         }
-        (self.wins as f64 / self.games as f64) * 100.0
+        (self.wins as f64 / self.decided as f64) * 100.0
     }
 }
 
@@ -47,14 +50,15 @@ struct RoleStats {
     role: String,
     games: usize,
     wins: usize,
+    decided: usize,
 }
 
 impl RoleStats {
     fn win_rate(&self) -> f64 {
-        if self.games == 0 {
+        if self.decided == 0 {
             return 0.0;
         }
-        (self.wins as f64 / self.games as f64) * 100.0
+        (self.wins as f64 / self.decided as f64) * 100.0
     }
 }
 
@@ -67,10 +71,11 @@ struct MapStats {
 
 impl MapStats {
     fn win_rate(&self) -> f64 {
-        if self.games == 0 {
+        let decided = self.wins + self.losses;
+        if decided == 0 {
             return 0.0;
         }
-        (self.wins as f64 / self.games as f64) * 100.0
+        (self.wins as f64 / decided as f64) * 100.0
     }
 }
 
@@ -79,14 +84,15 @@ struct HeroMapBreakdown {
     map_name: String,
     games: usize,
     wins: usize,
+    decided: usize,
 }
 
 impl HeroMapBreakdown {
     fn win_rate(&self) -> f64 {
-        if self.games == 0 {
+        if self.decided == 0 {
             return 0.0;
         }
-        (self.wins as f64 / self.games as f64) * 100.0
+        (self.wins as f64 / self.decided as f64) * 100.0
     }
 }
 
@@ -107,6 +113,9 @@ fn outcome_is_win(outcome: &str) -> bool {
 fn outcome_is_loss(outcome: &str) -> bool {
     outcome.eq_ignore_ascii_case("defeat") || outcome.eq_ignore_ascii_case("loss")
 }
+fn outcome_is_decided(outcome: &str) -> bool {
+    outcome_is_win(outcome) || outcome_is_loss(outcome) || outcome.eq_ignore_ascii_case("draw")
+}
 
 fn compute_stats(matches: &[PersonalMatch]) -> ComputedStats {
     let mut wins = 0usize;
@@ -117,6 +126,7 @@ fn compute_stats(matches: &[PersonalMatch]) -> ComputedStats {
         role: String,
         games: usize,
         wins: usize,
+        decided: usize,
         elims: u64,
         deaths: u64,
         assists: u64,
@@ -126,13 +136,14 @@ fn compute_stats(matches: &[PersonalMatch]) -> ComputedStats {
     }
 
     let mut hero_acc: HashMap<String, Acc> = HashMap::new();
-    let mut role_map: HashMap<String, (usize, usize)> = HashMap::new();
+    let mut role_map: HashMap<String, (usize, usize, usize)> = HashMap::new();
     let mut map_acc: HashMap<String, (usize, usize, usize)> = HashMap::new();
-    let mut hero_map_acc: HashMap<String, HashMap<String, (usize, usize)>> = HashMap::new();
+    let mut hero_map_acc: HashMap<String, HashMap<String, (usize, usize, usize)>> = HashMap::new();
 
     for m in matches {
         let is_win = outcome_is_win(&m.outcome);
         let is_loss = outcome_is_loss(&m.outcome);
+        let is_decided = outcome_is_decided(&m.outcome);
         if is_win {
             wins += 1;
         } else if is_loss {
@@ -146,6 +157,7 @@ fn compute_stats(matches: &[PersonalMatch]) -> ComputedStats {
             role: m.role.clone(),
             games: 0,
             wins: 0,
+            decided: 0,
             elims: 0,
             deaths: 0,
             assists: 0,
@@ -157,6 +169,9 @@ fn compute_stats(matches: &[PersonalMatch]) -> ComputedStats {
         if is_win {
             entry.wins += 1;
         }
+        if is_decided {
+            entry.decided += 1;
+        }
         entry.elims += m.elims as u64;
         entry.deaths += m.deaths as u64;
         entry.assists += m.assists as u64;
@@ -164,10 +179,13 @@ fn compute_stats(matches: &[PersonalMatch]) -> ComputedStats {
         entry.healing += m.healing as u64;
         entry.mitigation += m.mitigation as u64;
 
-        let role_entry = role_map.entry(m.role.clone()).or_insert((0, 0));
+        let role_entry = role_map.entry(m.role.clone()).or_insert((0, 0, 0));
         role_entry.0 += 1;
         if is_win {
             role_entry.1 += 1;
+        }
+        if is_decided {
+            role_entry.2 += 1;
         }
 
         if !m.map_name.is_empty() {
@@ -184,10 +202,13 @@ fn compute_stats(matches: &[PersonalMatch]) -> ComputedStats {
                 .entry(m.hero.clone())
                 .or_default()
                 .entry(m.map_name.clone())
-                .or_insert((0, 0));
+                .or_insert((0, 0, 0));
             hm.0 += 1;
             if is_win {
                 hm.1 += 1;
+            }
+            if is_decided {
+                hm.2 += 1;
             }
         }
     }
@@ -208,6 +229,7 @@ fn compute_stats(matches: &[PersonalMatch]) -> ComputedStats {
                 role: a.role,
                 games: a.games,
                 wins: a.wins,
+                decided: a.decided,
                 avg_elims: a.elims as f64 / g,
                 avg_deaths: a.deaths as f64 / g,
                 avg_assists: a.assists as f64 / g,
@@ -222,7 +244,12 @@ fn compute_stats(matches: &[PersonalMatch]) -> ComputedStats {
     let role_order = ["Tank", "Damage", "Support"];
     let mut roles: Vec<RoleStats> = role_map
         .into_iter()
-        .map(|(role, (games, wins))| RoleStats { role, games, wins })
+        .map(|(role, (games, wins, decided))| RoleStats {
+            role,
+            games,
+            wins,
+            decided,
+        })
         .collect();
     roles.sort_by_key(|r| {
         role_order
@@ -246,20 +273,26 @@ fn compute_stats(matches: &[PersonalMatch]) -> ComputedStats {
     for (hero, map_data) in hero_map_acc {
         let mut breakdowns: Vec<HeroMapBreakdown> = map_data
             .into_iter()
-            .map(|(map_name, (games, wins))| HeroMapBreakdown {
+            .map(|(map_name, (games, wins, decided))| HeroMapBreakdown {
                 map_name,
                 games,
                 wins,
+                decided,
             })
             .collect();
         breakdowns.sort_by_key(|b| std::cmp::Reverse(b.games));
         hero_maps.insert(hero, breakdowns);
     }
 
-    // Rolling 10-game winrate (matches come in DESC order, reverse for chronological)
+    // Rolling 10-game winrate over decided games only (matches come in DESC
+    // order, reverse for chronological).
     let mut rolling_wr = Vec::new();
     let window = 10usize;
-    let chronological: Vec<&PersonalMatch> = matches.iter().rev().collect();
+    let chronological: Vec<&PersonalMatch> = matches
+        .iter()
+        .rev()
+        .filter(|m| outcome_is_decided(&m.outcome))
+        .collect();
     let mut win_count = 0usize;
     for (i, m) in chronological.iter().enumerate() {
         if outcome_is_win(&m.outcome) {

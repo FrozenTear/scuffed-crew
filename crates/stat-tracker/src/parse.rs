@@ -169,8 +169,10 @@ fn stats_from_row(row: &RowOcrResult) -> Option<PlayerStats> {
     };
 
     // Sanity gate: eliminations/assists/deaths are small two-digit figures in
-    // OW2. A large value here means the wider DMG/HLG/MIT columns bled left.
-    if stats.elims > 200 || stats.assists > 200 || stats.deaths > 200 {
+    // OW2 (extreme games top out around 70 elims / 30 deaths). A larger value
+    // means a neighboring column or badge digit bled into the cell — observed
+    // misreads: 110, 118, 311 slipping past the old 200 cap.
+    if stats.elims > 99 || stats.assists > 99 || stats.deaths > 50 {
         tracing::debug!(
             elims = stats.elims,
             assists = stats.assists,
@@ -656,6 +658,17 @@ mod tests {
             parse_scoreboard_cells(&rows, None, "no match here", "victory", Some("FROZEN"))
                 .is_none()
         );
+    }
+
+    #[test]
+    fn implausible_kill_columns_reject_the_row() {
+        // A digit bleeding into the elims cell ("118" for a real ~18) must not
+        // be recorded; the capture is dropped rather than poisoned.
+        let rows = vec![row(
+            Some("FROZEN"),
+            ["118", "3", "2", "4,316", "1,200", "899"],
+        )];
+        assert!(parse_scoreboard_cells(&rows, Some(0), "", "defeat", Some("FROZEN")).is_none());
     }
 
     #[test]
