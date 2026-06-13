@@ -177,6 +177,24 @@ impl LocalStore {
         Ok(())
     }
 
+    /// Set a session's displayed hero (and role), used to keep the label on
+    /// the majority hero across its snapshots rather than whatever the first
+    /// capture happened to read.
+    pub async fn set_session_hero(
+        &self,
+        session_id: &str,
+        hero: &str,
+        role: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        self.db
+            .query("UPDATE match_session SET hero = $hero, role = $role WHERE session_id = $sid")
+            .bind(("hero", hero.to_string()))
+            .bind(("role", role.to_string()))
+            .bind(("sid", session_id.to_string()))
+            .await?;
+        Ok(())
+    }
+
     /// Back-fill a detected outcome onto a session and every capture snapshot it
     /// contains, re-queuing those snapshots for sync so the corrected result
     /// (e.g. a VICTORY read off the accolade screen after the stats were already
@@ -320,6 +338,24 @@ pub fn append_match_log(data_dir: &Path, m: &PersonalMatch) {
     }
 }
 
+/// The majority hero across a session's snapshots. Individual captures can
+/// mislabel — the career panel shows the SPECTATED hero while the player is
+/// dead, and portrait matching can misfire — but across 20+ captures the
+/// player's real hero dominates. "Unknown" rows don't vote; ties break
+/// alphabetically for determinism.
+pub fn majority_hero(snapshots: &[PersonalMatch]) -> Option<String> {
+    let mut counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    for m in snapshots {
+        if m.hero != "Unknown" && !m.hero.is_empty() {
+            *counts.entry(m.hero.as_str()).or_default() += 1;
+        }
+    }
+    counts
+        .into_iter()
+        .max_by(|a, b| a.1.cmp(&b.1).then(b.0.cmp(a.0)))
+        .map(|(hero, _)| hero.to_string())
+}
+
 /// Collapse capture snapshots (multiple Tab presses during one match) to one
 /// row per game. Snapshots of the same game share a `session_id`, and the
 /// newest snapshot carries the final scoreboard — so with newest-first input
@@ -403,6 +439,18 @@ mod tests {
         assert_eq!(games.len(), 2);
         assert_eq!(games[0].session_id, "b");
         assert_eq!(games[1].elims, 20);
+    }
+
+    #[test]
+    fn majority_hero_ignores_unknown_and_picks_dominant() {
+        let mut rows: Vec<PersonalMatch> = (0..5).map(|_| snap("a", 1)).collect();
+        rows[0].hero = "illari".into();
+        rows[1].hero = "Unknown".into();
+        for r in rows.iter_mut().skip(2) {
+            r.hero = "Wrecking Ball".into();
+        }
+        assert_eq!(majority_hero(&rows).as_deref(), Some("Wrecking Ball"));
+        assert_eq!(majority_hero(&[]), None);
     }
 
     #[test]

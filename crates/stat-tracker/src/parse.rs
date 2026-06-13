@@ -478,6 +478,15 @@ pub fn find_player_row_by_name(rows: &[RowOcrResult], player_name: &str) -> Opti
     }
 }
 
+/// Canonicalize a hero identifier to its display name — e.g. a portrait file
+/// stem like "wrecking_ball" or "illari" becomes "Wrecking Ball" / "Illari".
+/// Returns the input (underscores spaced) when nothing matches, so unknown
+/// names still round-trip.
+pub fn canonical_hero(name: &str) -> String {
+    let cleaned = name.replace('_', " ");
+    match_hero_in_text(&cleaned).unwrap_or(cleaned)
+}
+
 /// Match a hero name from arbitrary OCR text (e.g. the career-panel title).
 pub fn match_hero_in_text(text: &str) -> Option<String> {
     let lines: Vec<&str> = text

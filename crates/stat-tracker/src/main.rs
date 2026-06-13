@@ -720,7 +720,9 @@ async fn handle_capture(
                 source = "portrait",
                 "hero identified via portrait template matching"
             );
-            parsed.hero = hero_name.clone();
+            // Portrait references are keyed by file stem ("wrecking_ball") —
+            // canonicalize so they count together with career-panel reads.
+            parsed.hero = parse::canonical_hero(hero_name);
             parsed.role = parse::guess_role_public(&parsed.hero);
         } else {
             tracing::info!(
@@ -797,6 +799,20 @@ async fn handle_capture(
                 format!("store insert failed: {e}").into()
             },
         )?;
+
+        // Keep the session label on the majority hero across its snapshots —
+        // a single capture can mislabel (career panel shows the spectated hero
+        // while dead; portrait matching can misfire), and the label otherwise
+        // froze on whatever the first capture read.
+        if !create_session
+            && let Ok(snaps) = store.get_session_snapshots(session_id).await
+            && let Some(hero) = storage::majority_hero(&snaps)
+        {
+            let role = parse::guess_role_public(&hero);
+            if let Err(e) = store.set_session_hero(session_id, &hero, &role).await {
+                tracing::debug!(error = %e, "failed to refresh session hero");
+            }
+        }
         Ok(CaptureReport {
             recorded: true,
             outcome,
