@@ -228,6 +228,7 @@ const MAP_NAMES: &[&str] = &[
     "MIDTOWN",
     "NUMBANI",
     "PARAISO",
+    "NEON JUNCTION",
     "ANTARCTIC",
     "BUSAN",
     "ILIOS",

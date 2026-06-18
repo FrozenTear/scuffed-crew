@@ -541,6 +541,7 @@ const MAPS: &[(&str, &str)] = &[
     ("Midtown", "midtown"),
     ("Numbani", "numbani"),
     ("Paraiso", "paraiso"),
+    ("Neon Junction", "neon junction"),
     ("Antarctic Peninsula", "antarctic"),
     ("Busan", "busan"),
     ("Ilios", "ilios"),
@@ -554,6 +555,7 @@ const MAPS: &[(&str, &str)] = &[
     ("Runasapi", "runasapi"),
     ("New Junk City", "new junk"),
     ("Suravasa", "suravasa"),
+    ("Aatlis", "aatlis"),
     ("Hanaoka", "hanaoka"),
     ("Throne of Anubis", "anubis"),
 ];
@@ -701,6 +703,17 @@ mod tests {
             match_map_in_text("KINGS ROW").as_deref(),
             Some("King's Row")
         );
+    }
+
+    #[test]
+    fn recent_maps_are_detected() {
+        // Neon Junction (Hybrid, S3) and Aatlis (Flashpoint, S17) — both were
+        // missing from the canonical MAPS list and never got stored.
+        assert_eq!(
+            match_map_in_text("NEON JUNCTION").as_deref(),
+            Some("Neon Junction")
+        );
+        assert_eq!(match_map_in_text("AATLIS").as_deref(), Some("Aatlis"));
     }
 
     #[test]
