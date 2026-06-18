@@ -310,6 +310,7 @@ const HEROES: &[&str] = &[
     "Reaper",
     "Reinhardt",
     "Roadhog",
+    "Shion",
     "Sierra",
     "Sigma",
     "Sojourn",
@@ -703,6 +704,14 @@ mod tests {
             match_map_in_text("KINGS ROW").as_deref(),
             Some("King's Row")
         );
+    }
+
+    #[test]
+    fn shion_is_detected() {
+        // New S3 Damage hero. Text detection (career panel / scoreboard OCR) is
+        // the primary path and needs no portrait reference.
+        assert_eq!(match_hero_in_text("SHION").as_deref(), Some("Shion"));
+        assert_eq!(guess_role("Shion"), "Damage");
     }
 
     #[test]
