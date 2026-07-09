@@ -47,6 +47,53 @@ impl std::str::FromStr for MatchOutcome {
     }
 }
 
+impl MatchOutcome {
+    /// Parse storage/GUI outcome strings, including legacy `win`/`loss` spellings
+    /// from older local data. Unknown / empty / garbage → [`MatchOutcome::Unknown`].
+    pub fn parse_lenient(s: &str) -> Self {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "victory" | "win" => MatchOutcome::Victory,
+            "defeat" | "loss" => MatchOutcome::Defeat,
+            "draw" => MatchOutcome::Draw,
+            // FromStr's canonical spellings are all matched above, so any
+            // other string (incl. "unknown"/"") can only be Unknown.
+            _ => MatchOutcome::Unknown,
+        }
+    }
+
+    pub fn is_win(self) -> bool {
+        matches!(self, MatchOutcome::Victory)
+    }
+
+    pub fn is_loss(self) -> bool {
+        matches!(self, MatchOutcome::Defeat)
+    }
+
+    pub fn is_decided(self) -> bool {
+        !matches!(self, MatchOutcome::Unknown)
+    }
+
+    /// CSS suffix for history/dashboard rows: `win` / `loss` / `draw` / `undecided`.
+    pub fn row_class(self) -> &'static str {
+        match self {
+            MatchOutcome::Victory => "win",
+            MatchOutcome::Defeat => "loss",
+            MatchOutcome::Draw => "draw",
+            MatchOutcome::Unknown => "undecided",
+        }
+    }
+
+    /// CSS class for outcome text colour.
+    pub fn text_class(self) -> &'static str {
+        match self {
+            MatchOutcome::Victory => "outcome-win",
+            MatchOutcome::Defeat => "outcome-loss",
+            MatchOutcome::Draw => "outcome-draw",
+            MatchOutcome::Unknown => "outcome-unknown",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum GamePhase {
     MapVote { maps: Vec<String> },

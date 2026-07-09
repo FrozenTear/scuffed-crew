@@ -2,6 +2,7 @@ use dioxus::prelude::*;
 
 use stat_tracker::capture::CaptureBackend;
 use stat_tracker::config::Config;
+use stat_tracker::detect::MatchOutcome;
 
 use super::daemon::DaemonCard;
 use super::live_data;
@@ -95,12 +96,8 @@ pub fn StatusPanel() -> Element {
                     div { class: "recent-list",
                         for g in recent.iter() {
                             {
-                                let outcome_class = match g.outcome.as_str() {
-                                    "victory" | "win" => "outcome-win",
-                                    "defeat" | "loss" => "outcome-loss",
-                                    "draw" => "outcome-draw",
-                                    _ => "outcome-unknown",
-                                };
+                                let outcome_class =
+                                    MatchOutcome::parse_lenient(&g.outcome).text_class();
                                 let dt: chrono::DateTime<chrono::Utc> = g.played_at.into();
                                 let when = dt.with_timezone(&chrono::Local).format("%a %H:%M").to_string();
                                 let map = if g.map_name.is_empty() { "—".to_string() } else { g.map_name.clone() };

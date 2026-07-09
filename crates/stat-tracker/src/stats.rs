@@ -5,6 +5,7 @@
 
 use std::collections::HashMap;
 
+use crate::detect::MatchOutcome;
 use crate::storage::PersonalMatch;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -112,19 +113,6 @@ pub struct ComputedStats {
     pub rolling_wr: Vec<f64>,
 }
 
-// The daemon records outcomes as "victory"/"defeat"/"draw"/"unknown". Accept
-// the legacy "win"/"loss" spellings too so older local data still classifies.
-// (GUI will switch to typed MatchOutcome in Phase 2 — keep strings for now.)
-fn outcome_is_win(outcome: &str) -> bool {
-    outcome.eq_ignore_ascii_case("victory") || outcome.eq_ignore_ascii_case("win")
-}
-fn outcome_is_loss(outcome: &str) -> bool {
-    outcome.eq_ignore_ascii_case("defeat") || outcome.eq_ignore_ascii_case("loss")
-}
-fn outcome_is_decided(outcome: &str) -> bool {
-    outcome_is_win(outcome) || outcome_is_loss(outcome) || outcome.eq_ignore_ascii_case("draw")
-}
-
 /// Aggregate per-game rows (already collapsed with `latest_per_game` if needed).
 pub fn compute_stats(matches: &[PersonalMatch]) -> ComputedStats {
     let mut wins = 0usize;
@@ -150,17 +138,18 @@ pub fn compute_stats(matches: &[PersonalMatch]) -> ComputedStats {
     let mut hero_map_acc: HashMap<String, HashMap<String, (usize, usize, usize)>> = HashMap::new();
 
     for m in matches {
-        let is_win = outcome_is_win(&m.outcome);
-        let is_loss = outcome_is_loss(&m.outcome);
-        let is_decided = outcome_is_decided(&m.outcome);
+        let outcome = MatchOutcome::parse_lenient(&m.outcome);
+        let is_win = outcome.is_win();
+        let is_loss = outcome.is_loss();
+        let is_decided = outcome.is_decided();
         if is_win {
             wins += 1;
         } else if is_loss {
             losses += 1;
-        } else if m.outcome.eq_ignore_ascii_case("draw") {
+        } else if matches!(outcome, MatchOutcome::Draw) {
             draws += 1;
         }
-        // "unknown"/unparsed outcomes are excluded from the W/L/D totals.
+        // Unknown outcomes are excluded from the W/L/D totals.
 
         let entry = hero_acc.entry(m.hero.clone()).or_insert_with(|| Acc {
             role: m.role.clone(),
@@ -304,14 +293,14 @@ pub fn compute_stats(matches: &[PersonalMatch]) -> ComputedStats {
     let chronological: Vec<&PersonalMatch> = matches
         .iter()
         .rev()
-        .filter(|m| outcome_is_decided(&m.outcome))
+        .filter(|m| MatchOutcome::parse_lenient(&m.outcome).is_decided())
         .collect();
     let mut win_count = 0usize;
     for (i, m) in chronological.iter().enumerate() {
-        if outcome_is_win(&m.outcome) {
+        if MatchOutcome::parse_lenient(&m.outcome).is_win() {
             win_count += 1;
         }
-        if i >= window && outcome_is_win(&chronological[i - window].outcome) {
+        if i >= window && MatchOutcome::parse_lenient(&chronological[i - window].outcome).is_win() {
             win_count -= 1;
         }
         let denom = (i + 1).min(window);

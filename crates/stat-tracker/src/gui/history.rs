@@ -1,6 +1,7 @@
 use dioxus::prelude::*;
 
 use stat_tracker::config::Config;
+use stat_tracker::detect::MatchOutcome;
 use stat_tracker::storage::{self, LocalStore, PersonalMatch, StoreCommand};
 
 use super::live_data;
@@ -131,18 +132,9 @@ pub fn MatchesPanel() -> Element {
                         {
                             let sid = g.session_id.clone();
                             let is_selected = !sid.is_empty() && selected_sid.as_deref() == Some(sid.as_str());
-                            let outcome_class = match g.outcome.as_str() {
-                                "victory" | "win" => "win",
-                                "defeat" | "loss" => "loss",
-                                "draw" => "draw",
-                                _ => "undecided",
-                            };
-                            let outcome_text_class = match outcome_class {
-                                "win" => "outcome-win",
-                                "loss" => "outcome-loss",
-                                "draw" => "outcome-draw",
-                                _ => "outcome-unknown",
-                            };
+                            let outcome = MatchOutcome::parse_lenient(&g.outcome);
+                            let outcome_class = outcome.row_class();
+                            let outcome_text_class = outcome.text_class();
                             let dt: chrono::DateTime<chrono::Utc> = g.played_at.into();
                             let time_str = dt.with_timezone(&chrono::Local).format("%H:%M").to_string();
                             let row_sid = sid.clone();
@@ -182,26 +174,26 @@ pub fn MatchesPanel() -> Element {
                                         div { class: "detail-actions",
                                             span { class: "detail-label", "Set outcome" }
                                             button {
-                                                class: if g.outcome == "victory" { "btn btn-sm btn-outcome current" } else { "btn btn-sm btn-outcome" },
+                                                class: if outcome == MatchOutcome::Victory { "btn btn-sm btn-outcome current" } else { "btn btn-sm btn-outcome" },
                                                 onclick: move |e| {
                                                     e.stop_propagation();
-                                                    send_command(StoreCommand::SetOutcome { session_id: sid_v.clone(), outcome: "victory".into() }, "Outcome set to victory");
+                                                    send_command(StoreCommand::SetOutcome { session_id: sid_v.clone(), outcome: MatchOutcome::Victory.to_string() }, "Outcome set to victory");
                                                 },
                                                 "Victory"
                                             }
                                             button {
-                                                class: if g.outcome == "defeat" { "btn btn-sm btn-outcome current" } else { "btn btn-sm btn-outcome" },
+                                                class: if outcome == MatchOutcome::Defeat { "btn btn-sm btn-outcome current" } else { "btn btn-sm btn-outcome" },
                                                 onclick: move |e| {
                                                     e.stop_propagation();
-                                                    send_command(StoreCommand::SetOutcome { session_id: sid_d.clone(), outcome: "defeat".into() }, "Outcome set to defeat");
+                                                    send_command(StoreCommand::SetOutcome { session_id: sid_d.clone(), outcome: MatchOutcome::Defeat.to_string() }, "Outcome set to defeat");
                                                 },
                                                 "Defeat"
                                             }
                                             button {
-                                                class: if g.outcome == "draw" { "btn btn-sm btn-outcome current" } else { "btn btn-sm btn-outcome" },
+                                                class: if outcome == MatchOutcome::Draw { "btn btn-sm btn-outcome current" } else { "btn btn-sm btn-outcome" },
                                                 onclick: move |e| {
                                                     e.stop_propagation();
-                                                    send_command(StoreCommand::SetOutcome { session_id: sid_w.clone(), outcome: "draw".into() }, "Outcome set to draw");
+                                                    send_command(StoreCommand::SetOutcome { session_id: sid_w.clone(), outcome: MatchOutcome::Draw.to_string() }, "Outcome set to draw");
                                                 },
                                                 "Draw"
                                             }
