@@ -33,12 +33,18 @@ pub async fn upload_stats(
 
     let total = body.matches.len() as u32;
 
+    // Entries whose outcome the schema would reject ('unknown', garbage) are
+    // skipped, not 500'd: a single bad entry used to fail the whole batch,
+    // and the client retried it forever — wedging sync for everything behind
+    // it. Well-behaved clients hold 'unknown' back until the outcome is known.
     let stub_matches: Vec<PersonalMatch> = body
         .matches
         .into_iter()
+        .filter(|e| matches!(e.outcome.as_str(), "victory" | "defeat" | "draw"))
         .map(|e| PersonalMatch {
             id: String::new(),
             member_id: daemon.member.id.clone(),
+            session_id: e.session_id,
             hero: e.hero,
             map_name: e.map_name,
             game_mode: e.game_mode,
@@ -54,10 +60,18 @@ pub async fn upload_stats(
             uploaded_at: chrono::Utc::now(),
         })
         .collect();
+    let dropped = total - stub_matches.len() as u32;
+    if dropped > 0 {
+        tracing::warn!(
+            member_id = %daemon.member.id,
+            dropped,
+            "stats upload contained entries with unstorable outcomes — skipped"
+        );
+    }
 
     let inserted = state
         .db
-        .bulk_insert_personal_matches(&daemon.member.id, &stub_matches)
+        .upsert_personal_matches(&daemon.member.id, &stub_matches)
         .await
         .map_err(|e| {
             (

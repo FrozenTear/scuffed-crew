@@ -1,4 +1,3 @@
-use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use surrealdb::types::Datetime as SurrealDatetime;
 use surrealdb_types::{RecordId, SurrealValue};
@@ -12,6 +11,8 @@ struct DbPersonalMatch {
     #[allow(dead_code)]
     id: Option<RecordId>,
     member_id: String,
+    #[surreal(default)]
+    session_id: String,
     hero: String,
     map_name: String,
     game_mode: String,
@@ -35,6 +36,7 @@ fn db_to_personal_match(db: DbPersonalMatch) -> PersonalMatch {
     PersonalMatch {
         id,
         member_id: db.member_id,
+        session_id: db.session_id,
         hero: db.hero,
         map_name: db.map_name,
         game_mode: db.game_mode,
@@ -51,86 +53,85 @@ fn db_to_personal_match(db: DbPersonalMatch) -> PersonalMatch {
     }
 }
 
-impl Database {
-    pub async fn insert_personal_match(
-        &self,
-        member_id: &str,
-        hero: &str,
-        map_name: &str,
-        game_mode: &str,
-        role: &str,
-        outcome: &str,
-        elims: u32,
-        deaths: u32,
-        assists: u32,
-        damage: u32,
-        healing: u32,
-        mitigation: u32,
-        played_at: DateTime<Utc>,
-    ) -> DbResult<PersonalMatch> {
-        with_timeout(async {
-            let db_match = DbPersonalMatch {
-                id: None,
-                member_id: member_id.to_string(),
-                hero: hero.to_string(),
-                map_name: map_name.to_string(),
-                game_mode: game_mode.to_string(),
-                role: role.to_string(),
-                outcome: outcome.to_string(),
-                elims,
-                deaths,
-                assists,
-                damage,
-                healing,
-                mitigation,
-                played_at: SurrealDatetime::from(played_at),
-                uploaded_at: SurrealDatetime::from(Utc::now()),
-            };
-            let created: Option<DbPersonalMatch> = self
-                .client
-                .create("personal_match")
-                .content(db_match)
-                .await?;
-            Ok(db_to_personal_match(created.ok_or_else(|| {
-                crate::DbError::NotFound("Failed to insert personal match".into())
-            })?))
-        })
-        .await
+/// Stable session id for uploads from pre-session daemons. Derived from the
+/// row's content (FNV-1a — stable across releases, unlike `DefaultHasher`),
+/// so a retried legacy upload updates the same row instead of duplicating —
+/// the same dedup the old `(member, hero, map, played_at)` unique index
+/// provided, without its wedge-the-queue failure mode.
+fn legacy_session_id(member_id: &str, m: &crate::types::PersonalMatch) -> String {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for part in [
+        member_id,
+        &m.hero,
+        &m.map_name,
+        &m.played_at.to_rfc3339(),
+    ] {
+        for b in part.as_bytes() {
+            h ^= u64::from(*b);
+            h = h.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        h ^= u64::from(b'\x1f');
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
     }
+    format!("legacy-{h:016x}")
+}
 
-    pub async fn bulk_insert_personal_matches(
+impl Database {
+    /// Upsert uploaded matches, one server row per (member, session).
+    ///
+    /// Capture snapshots of one game share a session id, so re-uploads and
+    /// outcome/map corrections update the existing row in place — a game can
+    /// never count more than once no matter how many Tab snapshots it produced
+    /// or how often the client retries. Entries without a session id get a
+    /// stable content-derived legacy id (see [`legacy_session_id`]).
+    ///
+    /// Returns the number of rows upserted.
+    pub async fn upsert_personal_matches(
         &self,
         member_id: &str,
         matches: &[crate::types::PersonalMatch],
     ) -> DbResult<u32> {
-        let mut inserted = 0u32;
+        let mut upserted = 0u32;
         for m in matches {
-            match self
-                .insert_personal_match(
-                    member_id,
-                    &m.hero,
-                    &m.map_name,
-                    &m.game_mode,
-                    &m.role,
-                    &m.outcome,
-                    m.elims,
-                    m.deaths,
-                    m.assists,
-                    m.damage,
-                    m.healing,
-                    m.mitigation,
-                    m.played_at,
-                )
-                .await
-            {
-                Ok(_) => inserted += 1,
-                Err(crate::DbError::Surreal(e)) if e.to_string().contains("unique") => {
-                    tracing::debug!("Skipping duplicate personal match: {e}");
-                }
-                Err(e) => return Err(e),
-            }
+            let session_id = if m.session_id.is_empty() {
+                legacy_session_id(member_id, m)
+            } else {
+                m.session_id.clone()
+            };
+            with_timeout(async {
+                self.client
+                    .query(
+                        r#"UPSERT personal_match SET
+                               member_id = $mid, session_id = $sid,
+                               hero = $hero, map_name = $map, game_mode = $mode,
+                               role = $role, outcome = $outcome,
+                               elims = $elims, deaths = $deaths, assists = $assists,
+                               damage = $damage, healing = $healing, mitigation = $mit,
+                               played_at = $played, uploaded_at = time::now()
+                           WHERE member_id = $mid AND session_id = $sid"#,
+                    )
+                    .bind(("mid", member_id.to_string()))
+                    .bind(("sid", session_id))
+                    .bind(("hero", m.hero.clone()))
+                    .bind(("map", m.map_name.clone()))
+                    .bind(("mode", m.game_mode.clone()))
+                    .bind(("role", m.role.clone()))
+                    .bind(("outcome", m.outcome.clone()))
+                    .bind(("elims", m.elims))
+                    .bind(("deaths", m.deaths))
+                    .bind(("assists", m.assists))
+                    .bind(("damage", m.damage))
+                    .bind(("healing", m.healing))
+                    .bind(("mit", m.mitigation))
+                    .bind(("played", SurrealDatetime::from(m.played_at)))
+                    .await?
+                    .check()?;
+                Ok(())
+            })
+            .await?;
+            upserted += 1;
         }
-        Ok(inserted)
+        Ok(upserted)
     }
 
     pub async fn list_personal_matches(
@@ -320,5 +321,131 @@ impl Database {
             Ok(map_stats)
         })
         .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::migrations::run_migrations;
+    use crate::Database;
+    use chrono::{TimeZone, Utc};
+
+    async fn test_db() -> Database {
+        let db = Database::connect_memory().await.unwrap();
+        run_migrations(&db.client).await.unwrap();
+        db
+    }
+
+    fn entry(session_id: &str, outcome: &str, elims: u32) -> crate::types::PersonalMatch {
+        crate::types::PersonalMatch {
+            id: String::new(),
+            member_id: "m1".into(),
+            session_id: session_id.into(),
+            hero: "Ana".into(),
+            map_name: "Oasis".into(),
+            game_mode: "control".into(),
+            role: "Support".into(),
+            outcome: outcome.into(),
+            elims,
+            deaths: 2,
+            assists: 8,
+            damage: 3000,
+            healing: 9000,
+            mitigation: 0,
+            played_at: Utc.with_ymd_and_hms(2026, 7, 1, 20, 0, 0).unwrap(),
+            uploaded_at: Utc::now(),
+        }
+    }
+
+    #[tokio::test]
+    async fn snapshots_of_one_session_collapse_to_one_row() {
+        let db = test_db().await;
+        // Three capture snapshots of the same game, uploaded over two batches
+        // (simulates mid-game sync + retry after the game).
+        db.upsert_personal_matches("m1", &[entry("s1", "victory", 10)])
+            .await
+            .unwrap();
+        db.upsert_personal_matches(
+            "m1",
+            &[entry("s1", "victory", 15), entry("s1", "victory", 22)],
+        )
+        .await
+        .unwrap();
+
+        let rows = db.list_personal_matches("m1", 10, 0).await.unwrap();
+        assert_eq!(rows.len(), 1, "one game must be one server row");
+        assert_eq!(rows[0].elims, 22, "last snapshot wins");
+        let stats = db.get_personal_stats("m1").await.unwrap();
+        assert_eq!((stats.total_matches, stats.wins), (1, 1));
+    }
+
+    #[tokio::test]
+    async fn corrections_update_in_place() {
+        let db = test_db().await;
+        db.upsert_personal_matches("m1", &[entry("s1", "victory", 10)])
+            .await
+            .unwrap();
+        // Outcome + map corrected after the fact (manual edit / accolade read).
+        let mut fixed = entry("s1", "defeat", 10);
+        fixed.map_name = "Circuit Royal".into();
+        db.upsert_personal_matches("m1", &[fixed]).await.unwrap();
+
+        let rows = db.list_personal_matches("m1", 10, 0).await.unwrap();
+        assert_eq!(rows.len(), 1, "correction must not create a second row");
+        assert_eq!(rows[0].outcome, "defeat");
+        assert_eq!(rows[0].map_name, "Circuit Royal");
+        let stats = db.get_personal_stats("m1").await.unwrap();
+        assert_eq!((stats.wins, stats.losses), (0, 1));
+    }
+
+    #[tokio::test]
+    async fn distinct_sessions_stay_distinct() {
+        let db = test_db().await;
+        db.upsert_personal_matches(
+            "m1",
+            &[entry("s1", "victory", 10), entry("s2", "defeat", 5)],
+        )
+        .await
+        .unwrap();
+        let rows = db.list_personal_matches("m1", 10, 0).await.unwrap();
+        assert_eq!(rows.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn legacy_entries_dedup_by_content() {
+        let db = test_db().await;
+        // Pre-session daemon retries the same row → still one row.
+        db.upsert_personal_matches("m1", &[entry("", "victory", 10)])
+            .await
+            .unwrap();
+        db.upsert_personal_matches("m1", &[entry("", "victory", 10)])
+            .await
+            .unwrap();
+        // A different game (different played_at) is a new row.
+        let mut other = entry("", "defeat", 3);
+        other.played_at = Utc.with_ymd_and_hms(2026, 7, 2, 21, 0, 0).unwrap();
+        db.upsert_personal_matches("m1", &[other]).await.unwrap();
+
+        let rows = db.list_personal_matches("m1", 10, 0).await.unwrap();
+        assert_eq!(rows.len(), 2, "legacy dedup by content, not by batch");
+    }
+
+    #[tokio::test]
+    async fn sessions_are_scoped_per_member() {
+        let db = test_db().await;
+        db.upsert_personal_matches("m1", &[entry("s1", "victory", 10)])
+            .await
+            .unwrap();
+        let mut m2 = entry("s1", "defeat", 4);
+        m2.member_id = "m2".into();
+        db.upsert_personal_matches("m2", &[m2]).await.unwrap();
+
+        assert_eq!(db.list_personal_matches("m1", 10, 0).await.unwrap().len(), 1);
+        assert_eq!(db.list_personal_matches("m2", 10, 0).await.unwrap().len(), 1);
+        assert_eq!(
+            db.list_personal_matches("m1", 10, 0).await.unwrap()[0].outcome,
+            "victory",
+            "another member's upload must not touch m1's row"
+        );
     }
 }

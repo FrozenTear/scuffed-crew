@@ -523,10 +523,20 @@ pub async fn run_migrations(client: &Surreal<Any>) -> DbResult<()> {
         DEFINE FIELD mitigation ON personal_match TYPE int DEFAULT 0;
         DEFINE FIELD played_at ON personal_match TYPE datetime;
         DEFINE FIELD uploaded_at ON personal_match TYPE datetime DEFAULT time::now();
+        -- Client-generated game session id. Rows are stored under a
+        -- deterministic record id derived from (member_id, session_id), so
+        -- uploads are idempotent upserts: capture snapshots of one game
+        -- collapse to one row, and outcome/map corrections update in place.
+        -- Legacy rows (uploaded before session ids) keep ''.
+        DEFINE FIELD session_id ON personal_match TYPE string DEFAULT '';
 
         DEFINE INDEX pm_member_idx ON personal_match COLUMNS member_id, played_at;
-        DEFINE INDEX pm_dedup_idx ON personal_match
-            COLUMNS member_id, hero, map_name, played_at UNIQUE;
+        DEFINE INDEX pm_session_idx ON personal_match COLUMNS member_id, session_id;
+        -- Dropped: content-based dedup is obsolete under per-session upserts,
+        -- and it wedged the sync queue — the "unique" error-string check that
+        -- guarded it never matched SurrealDB v3's IndexExists message, so any
+        -- retried or corrected row 500'd the whole upload forever.
+        REMOVE INDEX IF EXISTS pm_dedup_idx ON personal_match;
 
         -- ================================================
         -- Direct Messages (NIP-44 + NIP-59 gift wrap, Phase 5)

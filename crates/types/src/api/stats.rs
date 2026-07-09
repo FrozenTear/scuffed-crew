@@ -3,6 +3,12 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StatsUploadEntry {
+    /// Client-generated game session id. All capture snapshots of one game
+    /// share it; the server upserts per (member, session) so re-uploads and
+    /// corrections update the same row instead of inserting duplicates.
+    /// Empty for uploads from pre-session daemons (server assigns a legacy id).
+    #[serde(default)]
+    pub session_id: String,
     pub hero: String,
     pub map_name: String,
     pub game_mode: String,

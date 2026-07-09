@@ -39,6 +39,7 @@ pub fn parse_scoreboard(
     let map_name = find_map(&lines).unwrap_or_default();
 
     Some(PersonalMatch {
+        id: None,
         hero,
         map_name,
         game_mode: String::new(),
@@ -103,6 +104,7 @@ pub fn parse_scoreboard_cells(
     let map_name = find_map(&lines).unwrap_or_default();
 
     Some(PersonalMatch {
+        id: None,
         hero,
         map_name,
         game_mode: String::new(),

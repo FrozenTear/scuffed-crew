@@ -353,6 +353,13 @@ async fn run_loop(
     // only one tick. Garbage/transition frames between reads don't reset it.
     let mut word_outcome_streak: Option<(detect::MatchOutcome, Instant)> = None;
 
+    // Periodic sync runs as a spawned task so a slow or hung server can't
+    // stall Tab capture, polling, or shutdown. Single-flight: while one sync
+    // is in the air, the next trigger is skipped (the following one picks up
+    // whatever it missed). Shutdown paths still sync inline — bounded by the
+    // client's HTTP timeout.
+    let mut sync_task: Option<tokio::task::JoinHandle<()>> = None;
+
     let mut poll_timer = tokio::time::interval(poll_interval);
     poll_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
@@ -441,8 +448,14 @@ async fn run_loop(
                                 }
                                 capture_count += 1;
                                 if let Some(client) = sync_client
-                                    && capture_count.is_multiple_of(SYNC_EVERY_N_CAPTURES) {
-                                        try_sync(store, client, data_dir).await;
+                                    && capture_count.is_multiple_of(SYNC_EVERY_N_CAPTURES)
+                                    && !sync_task.as_ref().is_some_and(|t| !t.is_finished()) {
+                                        let store = store.clone();
+                                        let client = client.clone();
+                                        let data_dir = data_dir.to_path_buf();
+                                        sync_task = Some(tokio::spawn(async move {
+                                            try_sync(&store, &client, &data_dir).await;
+                                        }));
                                     }
                                 refresh_snapshot(store, data_dir).await;
                             }
@@ -977,26 +990,45 @@ async fn try_sync(
     client: &sync::SyncClient,
     data_dir: &std::path::Path,
 ) {
-    match store.get_unsynced().await {
-        Ok(unsynced) if !unsynced.is_empty() => {
-            tracing::info!(count = unsynced.len(), "syncing unsynced matches");
-            match client.upload_matches(&unsynced).await {
-                Ok(resp) => {
-                    tracing::info!(
-                        inserted = resp.inserted,
-                        skipped = resp.skipped,
-                        "sync complete"
-                    );
-                    if let Err(e) = store.mark_synced(unsynced.len()).await {
-                        tracing::error!(error = %e, "failed to mark matches as synced");
-                    }
-                    refresh_snapshot(store, data_dir).await;
-                }
-                Err(e) => tracing::error!(error = %e, "sync upload failed"),
-            }
+    // Errors are stringified immediately: `Box<dyn Error>` isn't `Send`, and
+    // this future runs on a spawned task.
+    let unsynced = match store.get_unsynced().await.map_err(|e| e.to_string()) {
+        Ok(u) => u,
+        Err(e) => {
+            tracing::error!(error = %e, "failed to query unsynced matches");
+            return;
         }
-        Ok(_) => {}
-        Err(e) => tracing::error!(error = %e, "failed to query unsynced matches"),
+    };
+    if unsynced.is_empty() {
+        return;
+    }
+
+    // The server keeps one row per session, so only the final snapshot of
+    // each session is worth sending — but every fetched row is marked synced
+    // on success (the collapsed ones are represented by the snapshot that
+    // was uploaded).
+    let ids: Vec<_> = unsynced.iter().filter_map(|m| m.id.clone()).collect();
+    let mut newest_first = unsynced;
+    newest_first.reverse(); // get_unsynced is played_at ASC
+    let to_upload = storage::latest_per_game(newest_first);
+    tracing::info!(
+        rows = ids.len(),
+        games = to_upload.len(),
+        "syncing unsynced matches"
+    );
+    match client.upload_matches(&to_upload).await.map_err(|e| e.to_string()) {
+        Ok(resp) => {
+            tracing::info!(
+                inserted = resp.inserted,
+                skipped = resp.skipped,
+                "sync complete"
+            );
+            if let Err(e) = store.mark_synced(ids).await.map_err(|e| e.to_string()) {
+                tracing::error!(error = %e, "failed to mark matches as synced");
+            }
+            refresh_snapshot(store, data_dir).await;
+        }
+        Err(e) => tracing::error!(error = %e, "sync upload failed"),
     }
 }
 

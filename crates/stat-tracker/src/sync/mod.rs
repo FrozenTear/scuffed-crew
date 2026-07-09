@@ -5,6 +5,7 @@ use scuffed_types::api::{
     DaemonConfigResponse, StatsUploadEntry, StatsUploadRequest, StatsUploadResponse,
 };
 
+#[derive(Clone)]
 pub struct SyncClient {
     config: SyncConfig,
     http: reqwest::Client,
@@ -12,17 +13,23 @@ pub struct SyncClient {
 
 impl SyncClient {
     pub fn new(config: SyncConfig) -> Self {
-        Self {
-            http: reqwest::Client::new(),
-            config,
-        }
+        // A hung connection must never hang the caller: sync runs concurrently
+        // with capture, and shutdown does a final inline upload.
+        let http = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .unwrap_or_else(|e| {
+                tracing::warn!(error = %e, "reqwest builder failed — falling back to default client (no timeout)");
+                reqwest::Client::new()
+            });
+        Self { http, config }
     }
 
     /// Fetch daemon configuration from the server (player_name, etc.).
     /// Called on startup when local config has no player_name.
     pub async fn fetch_daemon_config(
         &self,
-    ) -> Result<DaemonConfigResponse, Box<dyn std::error::Error>> {
+    ) -> Result<DaemonConfigResponse, Box<dyn std::error::Error + Send + Sync>> {
         let url = format!("{}/api/stats/daemon-config", self.config.server_url);
         let resp = self
             .http
@@ -43,10 +50,11 @@ impl SyncClient {
     pub async fn upload_matches(
         &self,
         matches: &[PersonalMatch],
-    ) -> Result<StatsUploadResponse, Box<dyn std::error::Error>> {
+    ) -> Result<StatsUploadResponse, Box<dyn std::error::Error + Send + Sync>> {
         let entries: Vec<StatsUploadEntry> = matches
             .iter()
             .map(|m| StatsUploadEntry {
+                session_id: m.session_id.clone(),
                 hero: m.hero.clone(),
                 map_name: m.map_name.clone(),
                 game_mode: m.game_mode.clone(),

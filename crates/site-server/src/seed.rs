@@ -442,12 +442,14 @@ async fn seed_personal_matches(
         .iter()
         .enumerate()
         .map(|(i, r)| {
-            // Spread played_at across the last ~30 days; unique per row to satisfy the
-            // (member_id, hero, map_name, played_at) dedup index.
+            // Spread played_at across the last ~30 days. Each row is its own
+            // game, so each gets its own session id (the server upserts one
+            // row per session).
             let played_at = now - Duration::hours((rows.len() - i) as i64 * 6);
             PersonalMatch {
                 id: String::new(),
                 member_id: member_id.to_string(),
+                session_id: format!("seed-{member_id}-{i}"),
                 hero: r.0.to_string(),
                 map_name: r.2.to_string(),
                 game_mode: r.3.to_string(),
@@ -465,7 +467,7 @@ async fn seed_personal_matches(
         })
         .collect();
 
-    let inserted = db.bulk_insert_personal_matches(member_id, &matches).await?;
+    let inserted = db.upsert_personal_matches(member_id, &matches).await?;
     tracing::info!("Personal stats seed complete: {inserted} matches for {member_id}");
     Ok(())
 }

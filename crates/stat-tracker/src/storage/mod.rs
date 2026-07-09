@@ -8,6 +8,13 @@ use surrealdb_types::SurrealValue;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, SurrealValue)]
 pub struct PersonalMatch {
+    /// Local store record id — set on rows read back from SurrealKV, `None`
+    /// on freshly parsed captures. Excluded from the JSON snapshot/log
+    /// (readers identify games by `session_id`); used to mark exactly the
+    /// fetched rows as synced.
+    #[serde(skip)]
+    #[surreal(default)]
+    pub id: Option<surrealdb_types::RecordId>,
     pub hero: String,
     pub map_name: String,
     pub game_mode: String,
@@ -79,19 +86,33 @@ impl LocalStore {
         Ok(())
     }
 
-    pub async fn get_unsynced(&self) -> Result<Vec<PersonalMatch>, Box<dyn std::error::Error>> {
+    /// Rows awaiting upload. Holds back `unknown` outcomes: the server only
+    /// stores decided games, and one unstorable row at the head of the queue
+    /// used to fail the whole batch forever. An outcome back-fill flips the
+    /// row to a decided outcome and `synced = false`, releasing it here.
+    pub async fn get_unsynced(
+        &self,
+    ) -> Result<Vec<PersonalMatch>, Box<dyn std::error::Error + Send + Sync>> {
         let mut result = self
             .db
-            .query("SELECT * FROM personal_match WHERE synced = false ORDER BY played_at ASC")
+            .query("SELECT * FROM personal_match WHERE synced = false AND outcome != 'unknown' ORDER BY played_at ASC")
             .await?;
         let matches: Vec<PersonalMatch> = result.take(0)?;
         Ok(matches)
     }
 
-    pub async fn mark_synced(&self, count: usize) -> Result<(), Box<dyn std::error::Error>> {
+    /// Mark exactly these rows as synced — by identity, not queue position, so
+    /// rows inserted while an upload was in flight are never marked by mistake.
+    pub async fn mark_synced(
+        &self,
+        ids: Vec<surrealdb_types::RecordId>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        if ids.is_empty() {
+            return Ok(());
+        }
         self.db
-            .query("UPDATE (SELECT id FROM personal_match WHERE synced = false ORDER BY played_at ASC LIMIT $limit) SET synced = true")
-            .bind(("limit", count))
+            .query("UPDATE $ids SET synced = true")
+            .bind(("ids", ids))
             .await?;
         Ok(())
     }
@@ -105,7 +126,9 @@ impl LocalStore {
         Ok(row.map(|r| r.total).unwrap_or(0))
     }
 
-    pub async fn get_all_matches(&self) -> Result<Vec<PersonalMatch>, Box<dyn std::error::Error>> {
+    pub async fn get_all_matches(
+        &self,
+    ) -> Result<Vec<PersonalMatch>, Box<dyn std::error::Error + Send + Sync>> {
         let mut result = self
             .db
             .query("SELECT * FROM personal_match ORDER BY played_at DESC")
@@ -252,7 +275,9 @@ impl LocalStore {
         Ok(())
     }
 
-    pub async fn get_all_sessions(&self) -> Result<Vec<MatchSession>, Box<dyn std::error::Error>> {
+    pub async fn get_all_sessions(
+        &self,
+    ) -> Result<Vec<MatchSession>, Box<dyn std::error::Error + Send + Sync>> {
         let mut result = self
             .db
             .query("SELECT * FROM match_session ORDER BY last_capture_at DESC")
@@ -300,7 +325,10 @@ impl LocalStore {
     /// data source, refreshed by the daemon after every mutation. Unlike
     /// `matches.jsonl` (append-only insert log), it reflects back-filled
     /// outcomes and sync-state changes.
-    pub async fn export_snapshot(&self, data_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    pub async fn export_snapshot(
+        &self,
+        data_dir: &Path,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let snapshot = Snapshot {
             matches: self.get_all_matches().await?,
             sessions: self.get_all_sessions().await?,
@@ -535,6 +563,7 @@ mod tests {
 
     fn snap(session_id: &str, elims: u32) -> PersonalMatch {
         PersonalMatch {
+            id: None,
             hero: "Test".into(),
             map_name: String::new(),
             game_mode: String::new(),

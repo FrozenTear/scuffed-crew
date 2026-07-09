@@ -478,6 +478,9 @@ pub struct TournamentBracket {
 pub struct PersonalMatch {
     pub id: String,
     pub member_id: String,
+    /// Client-generated game session id ('' on legacy rows).
+    #[serde(default)]
+    pub session_id: String,
     pub hero: String,
     pub map_name: String,
     pub game_mode: String,

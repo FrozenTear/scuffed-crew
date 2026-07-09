@@ -13,19 +13,27 @@ use std::collections::BTreeMap;
 use stat_tracker::{config::Config, parse, storage, storage::LocalStore};
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let repair = std::env::args().any(|a| a == "repair" || a == "fix-heroes");
-    let config = Config::load()?;
-    let store = LocalStore::open(&config.data_dir).await?;
+    let config = Config::load().map_err(|e| e.to_string())?;
+    let store = LocalStore::open(&config.data_dir)
+        .await
+        .map_err(|e| e.to_string())?;
 
     if repair {
         for s in store.get_all_sessions().await? {
-            let snaps = store.get_session_snapshots(&s.session_id).await?;
+            let snaps = store
+                .get_session_snapshots(&s.session_id)
+                .await
+                .map_err(|e| e.to_string())?;
             if let Some(hero) = storage::majority_hero(&snaps)
                 && hero != s.hero
             {
                 let role = parse::guess_role_public(&hero);
-                store.set_session_hero(&s.session_id, &hero, &role).await?;
+                store
+                    .set_session_hero(&s.session_id, &hero, &role)
+                    .await
+                    .map_err(|e| e.to_string())?;
                 println!("hero relabeled {}: {} -> {hero}", s.session_id, s.hero);
             }
             // The session's map was set from a dedicated-region read at
@@ -39,7 +47,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             if let Some(map) = map {
                 let stray = snaps.iter().filter(|m| m.map_name != map).count();
                 if stray > 0 || s.map_name.is_empty() {
-                    store.set_session_map(&s.session_id, &map).await?;
+                    store
+                        .set_session_map(&s.session_id, &map)
+                        .await
+                        .map_err(|e| e.to_string())?;
                     println!(
                         "map settled {}: {} ({} snapshots corrected)",
                         s.session_id, map, stray
