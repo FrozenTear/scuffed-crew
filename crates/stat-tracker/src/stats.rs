@@ -337,6 +337,7 @@ mod tests {
 
     fn pm(hero: &str, role: &str, outcome: &str, map: &str) -> PersonalMatch {
         PersonalMatch {
+            id: None,
             session_id: String::new(),
             hero: hero.into(),
             role: role.into(),
