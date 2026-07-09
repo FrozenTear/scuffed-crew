@@ -473,6 +473,8 @@ struct FrameAnalysis {
     scoreboard: image::DynamicImage,
     /// The player's row index, by name match or brightness highlight.
     player_row_idx: Option<usize>,
+    /// Detected team size (5 or 6) — portrait geometry depends on it.
+    team_size: usize,
     /// The full frame, kept for the rejected-capture archive.
     frame: image::DynamicImage,
 }
@@ -1050,6 +1052,7 @@ async fn handle_capture(
             map_from_panel,
             scoreboard,
             player_row_idx: row_idx,
+            team_size,
             frame: img,
         }
     })
@@ -1063,6 +1066,7 @@ async fn handle_capture(
         map_from_panel,
         scoreboard: scoreboard_img,
         player_row_idx,
+        team_size,
         frame: frame_img,
     } = analysis;
     let ocr_result = ocr?;
@@ -1145,14 +1149,16 @@ async fn handle_capture(
         // Auto-collect portrait reference when hero is identified and collection is enabled
         if collect_portraits && parsed.hero != "Unknown" {
             let portraits_path = detect::hero_portrait::portraits_dir(data_dir);
-            let (sw, sh) = (scoreboard_img.width(), scoreboard_img.height());
-            let portrait_w = sw * 6 / 100;
-            let portrait_x = sw / 100;
-            let row_height = sh * 7 / 100;
-            let start_y = sh * 12 / 100;
-            let row_y = start_y + player_row_idx.unwrap_or(0) as u32 * row_height;
-            if portrait_x + portrait_w <= sw && row_y + portrait_w <= sh {
-                let crop = scoreboard_img.crop_imm(portrait_x, row_y, portrait_w, portrait_w);
+            // Shared geometry (5v5/6v6 + team gap) — an inlined 5v5-only copy
+            // here used to mis-crop 6v6/team-2 references into the template
+            // library.
+            let dims = (scoreboard_img.width(), scoreboard_img.height());
+            if let Some(r) = detect::hero_portrait::portrait_rect(
+                dims,
+                player_row_idx.unwrap_or(0),
+                team_size,
+            ) {
+                let crop = scoreboard_img.crop_imm(r.x, r.y, r.w, r.h);
                 if let Err(e) = detect::hero_portrait::save_portrait_reference(
                     &portraits_path,
                     &parsed.hero,
