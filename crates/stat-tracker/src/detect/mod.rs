@@ -8,12 +8,43 @@ use std::path::PathBuf;
 use evdev::{Device, EventSummary, KeyCode};
 use tokio::sync::mpsc;
 
-#[derive(Debug, Clone, PartialEq)]
+/// A match result. The canonical wire/storage spelling is the lowercase
+/// `Display` form ("victory"/"defeat"/"draw"/"unknown") — every layer that
+/// needs a string goes through `to_string()`, and parsing goes through
+/// `FromStr` (strict: anything else is an error, callers decide whether that
+/// means `Unknown`). Do not hand-roll translations of these names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum MatchOutcome {
     Victory,
     Defeat,
     Draw,
     Unknown,
+}
+
+impl std::fmt::Display for MatchOutcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            MatchOutcome::Victory => "victory",
+            MatchOutcome::Defeat => "defeat",
+            MatchOutcome::Draw => "draw",
+            MatchOutcome::Unknown => "unknown",
+        })
+    }
+}
+
+impl std::str::FromStr for MatchOutcome {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "victory" => Ok(MatchOutcome::Victory),
+            "defeat" => Ok(MatchOutcome::Defeat),
+            "draw" => Ok(MatchOutcome::Draw),
+            "unknown" => Ok(MatchOutcome::Unknown),
+            other => Err(format!("not a match outcome: {other:?}")),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]

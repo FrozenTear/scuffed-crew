@@ -271,6 +271,30 @@ fn take_fresh_pending(
     }
 }
 
+/// Everything the blocking vision/OCR pass extracts from one Tab frame.
+/// Replaces a 9-tuple whose adjacent same-typed fields were swap-prone.
+struct FrameAnalysis {
+    /// Outcome for this capture: the game's own if already known, else
+    /// recovered from the frame (banner colors / result header text).
+    outcome: detect::MatchOutcome,
+    /// Full-image OCR (hero/map name lookup); the per-cell rows carry stats.
+    ocr: Result<ocr::OcrResult, Box<dyn std::error::Error + Send + Sync>>,
+    /// Column-calibrated per-cell OCR rows, one per scoreboard row.
+    rows: Vec<ocr::RowOcrResult>,
+    /// Portrait template match: (hero file stem, confidence).
+    portrait_hero: Option<(String, f64)>,
+    /// Career-panel hero title (most reliable source when present).
+    career_hero: Option<String>,
+    /// Top-bar map label OCR.
+    map_from_panel: Option<String>,
+    /// Cropped scoreboard (portrait auto-collection reads from it).
+    scoreboard: image::DynamicImage,
+    /// The player's row index, by name match or brightness highlight.
+    player_row_idx: Option<usize>,
+    /// The full frame, kept for the rejected-capture archive.
+    frame: image::DynamicImage,
+}
+
 /// What a Tab capture actually did, reported back to the session state machine.
 struct CaptureReport {
     /// A snapshot row was written (and the session row created if this was the
@@ -283,24 +307,6 @@ struct CaptureReport {
     /// Map stored on the snapshot, if one was read — the caller adopts the
     /// first discovery onto the active game so the whole session shares it.
     map: Option<String>,
-}
-
-fn outcome_str(outcome: &detect::MatchOutcome) -> &'static str {
-    match outcome {
-        detect::MatchOutcome::Victory => "victory",
-        detect::MatchOutcome::Defeat => "defeat",
-        detect::MatchOutcome::Draw => "draw",
-        detect::MatchOutcome::Unknown => "unknown",
-    }
-}
-
-fn outcome_from_str(s: &str) -> detect::MatchOutcome {
-    match s {
-        "victory" => detect::MatchOutcome::Victory,
-        "defeat" => detect::MatchOutcome::Defeat,
-        "draw" => detect::MatchOutcome::Draw,
-        _ => detect::MatchOutcome::Unknown,
-    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -406,7 +412,7 @@ async fn run_loop(
 
                         let (sid, create, outcome, maps) = {
                             let g = active_game.as_ref().expect("active_game set above");
-                            (g.session_id.clone(), !g.session_created, g.outcome.clone(), g.maps.clone())
+                            (g.session_id.clone(), !g.session_created, g.outcome, g.maps.clone())
                         };
 
                         match handle_capture(backend, store, player_name, capture_output, &sid, create, outcome, &maps, portrait_matcher, collect_portraits, data_dir).await {
@@ -435,13 +441,13 @@ async fn run_loop(
                                     if !g.finished()
                                         && !matches!(report.outcome, detect::MatchOutcome::Unknown)
                                     {
-                                        g.record_outcome(report.outcome.clone());
+                                        g.record_outcome(report.outcome);
                                         tracing::info!(
                                             outcome = ?report.outcome,
                                             session_id = %g.session_id,
                                             "outcome recovered from captured frame — back-filling session"
                                         );
-                                        if let Err(e) = store.set_session_outcome(&g.session_id, outcome_str(&g.outcome)).await {
+                                        if let Err(e) = store.set_session_outcome(&g.session_id, &g.outcome.to_string()).await {
                                             tracing::warn!(error = %e, "failed to back-fill session outcome");
                                         }
                                     }
@@ -449,7 +455,7 @@ async fn run_loop(
                                 capture_count += 1;
                                 if let Some(client) = sync_client
                                     && capture_count.is_multiple_of(SYNC_EVERY_N_CAPTURES)
-                                    && !sync_task.as_ref().is_some_and(|t| !t.is_finished()) {
+                                    && sync_task.as_ref().is_none_or(|t| t.is_finished()) {
                                         let store = store.clone();
                                         let client = client.clone();
                                         let data_dir = data_dir.to_path_buf();
@@ -519,7 +525,7 @@ async fn run_loop(
                                 let agreed = word_outcome_streak
                                     .as_ref()
                                     .is_some_and(|(prev, t)| *prev == outcome && t.elapsed() <= OUTCOME_CONFIRM_WINDOW);
-                                word_outcome_streak = Some((outcome.clone(), Instant::now()));
+                                word_outcome_streak = Some((outcome, Instant::now()));
                                 if agreed {
                                     Some(outcome)
                                 } else {
@@ -539,10 +545,10 @@ async fn run_loop(
                         if let Some(outcome) = confirmed {
                             match active_game.as_mut() {
                                 Some(g) if !g.finished() => {
-                                    g.record_outcome(outcome.clone());
+                                    g.record_outcome(outcome);
                                     tracing::info!(?outcome, session_id = %g.session_id, "auto-detect: outcome confirmed from post-match screens");
                                     if g.session_created {
-                                        if let Err(e) = store.set_session_outcome(&g.session_id, outcome_str(&outcome)).await {
+                                        if let Err(e) = store.set_session_outcome(&g.session_id, &outcome.to_string()).await {
                                             tracing::warn!(error = %e, "failed to back-fill session outcome");
                                         }
                                         refresh_snapshot(store, data_dir).await;
@@ -624,7 +630,7 @@ async fn run_loop(
                             storage::StoreCommand::SetOutcome { session_id, outcome } => {
                                 if let Some(g) = active_game.as_mut()
                                     && g.session_id == *session_id {
-                                        g.record_outcome(outcome_from_str(outcome));
+                                        g.record_outcome(outcome.parse().unwrap_or(detect::MatchOutcome::Unknown));
                                     }
                             }
                             storage::StoreCommand::DeleteSession { session_id } => {
@@ -678,17 +684,7 @@ async fn handle_capture(
     let matcher = Arc::clone(portrait_matcher);
     // Clone player_name so the blocking closure can own it.
     let player_name_owned = player_name.map(|s| s.to_string());
-    let (
-        outcome,
-        ocr_result,
-        rows,
-        portrait_hero,
-        career_hero,
-        map_from_panel,
-        scoreboard_img,
-        player_row_idx,
-        frame_img,
-    ) = tokio::task::spawn_blocking(move || {
+    let analysis = tokio::task::spawn_blocking(move || {
         // Outcome: prefer the open game's result (read off the accolade
         // screen by the poller); else color-flood detection; else read the
         // VICTORY/DEFEAT header text off this frame. The last step recovers
@@ -734,20 +730,31 @@ async fn handle_capture(
             .ok()
             .and_then(|t| parse::match_map_in_text(&t));
 
-        (
+        FrameAnalysis {
             outcome,
             ocr,
             rows,
-            portrait_match,
+            portrait_hero: portrait_match,
             career_hero,
             map_from_panel,
             scoreboard,
-            row_idx,
-            img,
-        )
+            player_row_idx: row_idx,
+            frame: img,
+        }
     })
     .await?;
-    let ocr_result = ocr_result?;
+    let FrameAnalysis {
+        outcome,
+        ocr,
+        rows,
+        portrait_hero,
+        career_hero,
+        map_from_panel,
+        scoreboard: scoreboard_img,
+        player_row_idx,
+        frame: frame_img,
+    } = analysis;
+    let ocr_result = ocr?;
 
     tracing::info!(?outcome, "frame analysis");
     let preview_end = ocr_result
@@ -790,13 +797,13 @@ async fn handle_capture(
         });
     }
 
-    let outcome_label = outcome_str(&outcome);
+    let outcome_label = outcome.to_string();
 
     if let Some(mut parsed) = parse::parse_scoreboard_cells(
         &rows,
         player_row_idx,
         &ocr_result.raw_text,
-        outcome_label,
+        &outcome_label,
         player_name,
     ) {
         // Hero priority: career-panel title (plain text, most reliable) >
@@ -868,13 +875,13 @@ async fn handle_capture(
                 started_at: now,
                 last_capture_at: now,
                 capture_count: 1,
-                final_outcome: outcome_label.to_string(),
+                final_outcome: outcome_label.clone(),
             };
             if let Err(e) = store.create_session(&session).await {
                 tracing::warn!(error = %e, "failed to create session");
             }
             tracing::info!(session_id = %session_id, "started new match session");
-        } else if let Err(e) = store.append_capture(session_id, now, outcome_label).await {
+        } else if let Err(e) = store.append_capture(session_id, now, &outcome_label).await {
             tracing::warn!(error = %e, "failed to append capture to session");
         }
 
