@@ -154,14 +154,28 @@ impl LocalStore {
         Ok(session)
     }
 
+    /// Create the session row, idempotently: if a row with this `session_id`
+    /// already exists (a previous capture created it but its snapshot insert
+    /// failed, so the caller retries "creation"), it is overwritten rather
+    /// than duplicated — there is no unique index protecting `session_id`.
     pub async fn create_session(
         &self,
         session: &MatchSession,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let _: Option<MatchSession> = self
-            .db
-            .create("match_session")
-            .content(session.clone())
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        self.db
+            .query(
+                "UPSERT match_session SET hero = $hero, map_name = $map, role = $role, \
+                 started_at = $started, last_capture_at = $last, capture_count = $count, \
+                 final_outcome = $outcome, session_id = $sid WHERE session_id = $sid",
+            )
+            .bind(("hero", session.hero.clone()))
+            .bind(("map", session.map_name.clone()))
+            .bind(("role", session.role.clone()))
+            .bind(("started", session.started_at))
+            .bind(("last", session.last_capture_at))
+            .bind(("count", session.capture_count))
+            .bind(("outcome", session.final_outcome.clone()))
+            .bind(("sid", session.session_id.clone()))
             .await?;
         Ok(())
     }

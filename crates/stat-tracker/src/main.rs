@@ -125,7 +125,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing::info!(?backend, "capture backend selected");
 
     if let Ok(outputs) = capture::wayshot::list_outputs() {
-        let selected = config.capture_output.as_deref().unwrap_or(&outputs[0]);
+        // `.first()`, not `[0]`: zero outputs (headless / compositor hiccup)
+        // must not panic the daemon at startup.
+        let selected = config
+            .capture_output
+            .as_deref()
+            .or_else(|| outputs.first().map(String::as_str))
+            .unwrap_or("<none>");
         tracing::info!(
             available = ?outputs,
             selected = %selected,
@@ -215,9 +221,28 @@ struct ActiveGame {
     /// presses shortly after the outcome (the post-match scoreboard) still
     /// belong to this game; later ones belong to the next.
     outcome_recorded_at: Option<Instant>,
+    /// When the game was opened (start screen seen or first Tab).
+    opened_at: Instant,
+    /// Last recorded evidence the game is still this game (capture stored,
+    /// outcome/map recorded). Bounds how long an unfinished session can
+    /// absorb captures — see [`UNFINISHED_SESSION_IDLE`].
+    last_activity: Instant,
 }
 
 impl ActiveGame {
+    fn open_now(session_id: String, outcome: detect::MatchOutcome, maps: Vec<String>) -> Self {
+        let now = Instant::now();
+        ActiveGame {
+            session_id,
+            outcome_recorded_at: (outcome != detect::MatchOutcome::Unknown).then_some(now),
+            outcome,
+            maps,
+            session_created: false,
+            opened_at: now,
+            last_activity: now,
+        }
+    }
+
     fn finished(&self) -> bool {
         !matches!(self.outcome, detect::MatchOutcome::Unknown)
     }
@@ -225,7 +250,89 @@ impl ActiveGame {
     fn record_outcome(&mut self, outcome: detect::MatchOutcome) {
         self.outcome = outcome;
         self.outcome_recorded_at = Some(Instant::now());
+        self.last_activity = Instant::now();
     }
+
+    fn touch(&mut self) {
+        self.last_activity = Instant::now();
+    }
+}
+
+/// On-disk mirror of [`ActiveGame`] (wall-clock timestamps instead of
+/// `Instant`s). The session state machine is otherwise memory-only, and daemon
+/// restarts are routine — without this, a restart mid-game either split the
+/// game (new session per Tab) or merged it into whatever came next.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct PersistedGame {
+    session_id: String,
+    outcome: detect::MatchOutcome,
+    maps: Vec<String>,
+    session_created: bool,
+    opened_at: chrono::DateTime<Utc>,
+    last_activity: chrono::DateTime<Utc>,
+    outcome_recorded_at: Option<chrono::DateTime<Utc>>,
+}
+
+fn active_game_path(data_dir: &std::path::Path) -> std::path::PathBuf {
+    data_dir.join("active_game.json")
+}
+
+/// Persist (or clear) the open-game skeleton. Fire-and-forget: losing this
+/// file only degrades restart recovery, never the capture itself.
+fn persist_active_game(data_dir: &std::path::Path, game: Option<&ActiveGame>) {
+    let path = active_game_path(data_dir);
+    let Some(g) = game else {
+        let _ = std::fs::remove_file(&path);
+        return;
+    };
+    let now_i = Instant::now();
+    let now_w = Utc::now();
+    let to_wall = |i: Instant| {
+        now_w - chrono::Duration::from_std(now_i.duration_since(i)).unwrap_or_default()
+    };
+    let persisted = PersistedGame {
+        session_id: g.session_id.clone(),
+        outcome: g.outcome,
+        maps: g.maps.clone(),
+        session_created: g.session_created,
+        opened_at: to_wall(g.opened_at),
+        last_activity: to_wall(g.last_activity),
+        outcome_recorded_at: g.outcome_recorded_at.map(to_wall),
+    };
+    let write = || -> std::io::Result<()> {
+        let tmp = path.with_extension("json.tmp");
+        std::fs::write(&tmp, serde_json::to_vec(&persisted)?)?;
+        std::fs::rename(&tmp, &path)
+    };
+    if let Err(e) = write() {
+        tracing::debug!(error = %e, "failed to persist active game");
+    }
+}
+
+/// Recover the open game from a previous daemon run, if it is still plausibly
+/// the current game (last activity within [`UNFINISHED_SESSION_IDLE`]).
+/// Timestamps that predate the current boot (recovery across a reboot) are
+/// treated as stale rather than clamped.
+fn recover_active_game(data_dir: &std::path::Path) -> Option<ActiveGame> {
+    let bytes = std::fs::read(active_game_path(data_dir)).ok()?;
+    let p: PersistedGame = serde_json::from_slice(&bytes).ok()?;
+    let to_instant =
+        |w: chrono::DateTime<Utc>| Instant::now().checked_sub((Utc::now() - w).to_std().ok()?);
+    let last_activity = to_instant(p.last_activity)?;
+    if last_activity.elapsed() > UNFINISHED_SESSION_IDLE {
+        return None;
+    }
+    Some(ActiveGame {
+        session_id: p.session_id,
+        outcome: p.outcome,
+        maps: p.maps,
+        session_created: p.session_created,
+        opened_at: to_instant(p.opened_at)?,
+        last_activity,
+        // An unrecoverable timestamp behaves as "unstamped", which the grace
+        // logic already treats as stale — the outcome can't leak forward.
+        outcome_recorded_at: p.outcome_recorded_at.and_then(to_instant),
+    })
 }
 
 /// How long after a game's outcome is recorded that Tab captures still belong
@@ -235,14 +342,32 @@ impl ActiveGame {
 /// finished result must not leak onto the next match's captures.
 const POST_MATCH_GRACE: std::time::Duration = std::time::Duration::from_secs(75);
 
+/// How long an unfinished session stays reusable with no recorded activity.
+/// If the poller misses the outcome AND the next game's start screens (likely
+/// under Tab starvation, or with auto-detect off), an unbounded session would
+/// absorb every capture that follows — yesterday's unfinished game swallowing
+/// today's first Tab. Sized comfortably above a long match plus queue time.
+const UNFINISHED_SESSION_IDLE: std::time::Duration = std::time::Duration::from_secs(20 * 60);
+
+/// Minimum age of a poller-opened game before a banner-color outcome read off
+/// a Tab frame is trusted. The color-flood detector can false-positive on
+/// heavy mid-fight red vignettes; a real banner can't appear this early into
+/// a match. The result-header text path stays available regardless, and a
+/// session freshly opened by the Tab itself (daemon joined mid/post match) is
+/// exempt — there the banner is exactly the evidence being recovered.
+const MIN_BANNER_SESSION_AGE: std::time::Duration = std::time::Duration::from_secs(300);
+
 /// Whether a Tab capture should open a fresh session instead of reusing the
 /// active one.
 fn should_start_fresh_session(game: Option<&ActiveGame>, now: Instant) -> bool {
     match game {
         // No game open — daemon started mid-match or the start screen was missed.
         None => true,
-        // Mid-game capture.
-        Some(g) if !g.finished() => false,
+        // Mid-game capture — unless the session has been idle so long it
+        // can't plausibly be the same game.
+        Some(g) if !g.finished() => {
+            now.duration_since(g.last_activity) > UNFINISHED_SESSION_IDLE
+        }
         // Finished: reuse within the grace window (post-match scoreboard of the
         // same match), start fresh after it. An unstamped outcome is treated as
         // stale so a finished result can never leak forward.
@@ -345,8 +470,18 @@ async fn run_loop(
     let tab_debounce = std::time::Duration::from_secs(3);
 
     // The game currently in progress — opened at the map-vote / hero-select
-    // screen, reused for every capture until the next game starts.
-    let mut active_game: Option<ActiveGame> = None;
+    // screen, reused for every capture until the next game starts. Recovered
+    // from the previous run when the daemon restarted mid-game (crash,
+    // upgrade, systemd restart), so the restart neither splits the game into
+    // two sessions nor loses its outcome/map context.
+    let mut active_game: Option<ActiveGame> = recover_active_game(data_dir);
+    if let Some(g) = &active_game {
+        tracing::info!(
+            session_id = %g.session_id,
+            outcome = %g.outcome,
+            "recovered open game from previous run"
+        );
+    }
     // Outcome detected by the poller while no game was open — applied to the
     // next session that opens, if still fresh (PENDING_OUTCOME_TTL).
     let mut pending_outcome: Option<(detect::MatchOutcome, Instant)> = None;
@@ -398,24 +533,35 @@ async fn run_loop(
                         // post-match scoreboard within the grace window), or
                         // open a fresh one, inheriting a still-fresh outcome
                         // the poller saw before any game was open.
-                        if should_start_fresh_session(active_game.as_ref(), Instant::now()) {
+                        let opened_by_this_tab = should_start_fresh_session(active_game.as_ref(), Instant::now());
+                        if opened_by_this_tab {
                             let inherited = take_fresh_pending(&mut pending_outcome, Instant::now());
-                            active_game = Some(ActiveGame {
-                                session_id: format!("{:016x}", rand_id()),
-                                outcome_recorded_at: inherited.as_ref().map(|_| Instant::now()),
-                                outcome: inherited.unwrap_or(detect::MatchOutcome::Unknown),
-                                maps: Vec::new(),
-                                session_created: false,
-                            });
+                            active_game = Some(ActiveGame::open_now(
+                                format!("{:016x}", rand_id()),
+                                inherited.unwrap_or(detect::MatchOutcome::Unknown),
+                                Vec::new(),
+                            ));
                             last_game_open = Some(Instant::now());
+                            // Word reads about the previous match must not
+                            // confirm into this one.
+                            word_outcome_streak = None;
+                            persist_active_game(data_dir, active_game.as_ref());
                         }
 
-                        let (sid, create, outcome, maps) = {
+                        let (sid, create, outcome, maps, banner_ok) = {
                             let g = active_game.as_ref().expect("active_game set above");
-                            (g.session_id.clone(), !g.session_created, g.outcome, g.maps.clone())
+                            // A banner-color outcome off a Tab frame is only
+                            // plausible when the daemon just joined mid/post
+                            // match (fresh Tab session) or the game is old
+                            // enough to have actually ended. Mid-game heavy
+                            // red vignettes otherwise fake a DEFEAT banner and
+                            // split the real game.
+                            let banner_ok = opened_by_this_tab
+                                || g.opened_at.elapsed() >= MIN_BANNER_SESSION_AGE;
+                            (g.session_id.clone(), !g.session_created, g.outcome, g.maps.clone(), banner_ok)
                         };
 
-                        match handle_capture(backend, store, player_name, capture_output, &sid, create, outcome, &maps, portrait_matcher, collect_portraits, data_dir).await {
+                        match handle_capture(backend, store, player_name, capture_output, &sid, create, outcome, &maps, banner_ok, portrait_matcher, collect_portraits, data_dir).await {
                             Err(e) => tracing::error!(error = %e, "capture cycle failed"),
                             // Rejected by a trust gate — nothing was recorded, so
                             // the session must not be marked as created.
@@ -423,6 +569,7 @@ async fn run_loop(
                             Ok(report) => {
                                 if let Some(g) = active_game.as_mut() {
                                     g.session_created = true;
+                                    g.touch();
                                     // First map discovery propagates to the
                                     // whole session (one game, one map).
                                     if g.maps.is_empty()
@@ -451,6 +598,7 @@ async fn run_loop(
                                             tracing::warn!(error = %e, "failed to back-fill session outcome");
                                         }
                                     }
+                                    persist_active_game(data_dir, Some(g));
                                 }
                                 capture_count += 1;
                                 if let Some(client) = sync_client
@@ -553,6 +701,7 @@ async fn run_loop(
                                         }
                                         refresh_snapshot(store, data_dir).await;
                                     }
+                                    persist_active_game(data_dir, Some(g));
                                 }
                                 Some(_) => { /* outcome already recorded for this game */ }
                                 None => {
@@ -569,12 +718,14 @@ async fn run_loop(
                         {
                             tracing::info!(map = %map, session_id = %g.session_id, "map recovered from accolade screen");
                             g.maps.push(map.clone());
+                            g.touch();
                             if g.session_created {
                                 if let Err(e) = store.set_session_map(&g.session_id, &map).await {
                                     tracing::warn!(error = %e, "failed to set session map");
                                 }
                                 refresh_snapshot(store, data_dir).await;
                             }
+                            persist_active_game(data_dir, Some(g));
                         }
 
                         // Game-start screens open a new game. Map vote is the
@@ -594,11 +745,15 @@ async fn run_loop(
                                 if can_open {
                                     let sid = format!("{:016x}", rand_id());
                                     tracing::info!(?maps, session_id = %sid, "auto-detect: map vote — new game");
-                                    active_game = Some(ActiveGame { session_id: sid, outcome: detect::MatchOutcome::Unknown, maps, session_created: false, outcome_recorded_at: None });
+                                    active_game = Some(ActiveGame::open_now(sid, detect::MatchOutcome::Unknown, maps));
                                     last_game_open = Some(Instant::now());
                                     // Evidence about the previous match must not
-                                    // confirm into this one.
+                                    // confirm into this one — and a pending
+                                    // outcome from before any game was open
+                                    // can't be this new game's result either.
                                     word_outcome_streak = None;
+                                    pending_outcome = None;
+                                    persist_active_game(data_dir, active_game.as_ref());
                                 }
                             }
                             detect::GamePhase::HeroBan | detect::GamePhase::HeroSelect
@@ -606,9 +761,11 @@ async fn run_loop(
                             {
                                 let sid = format!("{:016x}", rand_id());
                                 tracing::info!(session_id = %sid, "auto-detect: hero select/ban — new game (map vote missed)");
-                                active_game = Some(ActiveGame { session_id: sid, outcome: detect::MatchOutcome::Unknown, maps: Vec::new(), session_created: false, outcome_recorded_at: None });
+                                active_game = Some(ActiveGame::open_now(sid, detect::MatchOutcome::Unknown, Vec::new()));
                                 last_game_open = Some(Instant::now());
                                 word_outcome_streak = None;
+                                pending_outcome = None;
+                                persist_active_game(data_dir, active_game.as_ref());
                             }
                             _ => {}
                         }
@@ -631,11 +788,13 @@ async fn run_loop(
                                 if let Some(g) = active_game.as_mut()
                                     && g.session_id == *session_id {
                                         g.record_outcome(outcome.parse().unwrap_or(detect::MatchOutcome::Unknown));
+                                        persist_active_game(data_dir, Some(g));
                                     }
                             }
                             storage::StoreCommand::DeleteSession { session_id } => {
                                 if active_game.as_ref().is_some_and(|g| g.session_id == *session_id) {
                                     active_game = None;
+                                    persist_active_game(data_dir, None);
                                 }
                             }
                         }
@@ -674,6 +833,7 @@ async fn handle_capture(
     create_session: bool,
     game_outcome: detect::MatchOutcome,
     detected_maps: &[String],
+    allow_banner_recovery: bool,
     portrait_matcher: &Arc<detect::hero_portrait::PortraitMatcher>,
     collect_portraits: bool,
     data_dir: &std::path::Path,
@@ -686,12 +846,17 @@ async fn handle_capture(
     let player_name_owned = player_name.map(|s| s.to_string());
     let analysis = tokio::task::spawn_blocking(move || {
         // Outcome: prefer the open game's result (read off the accolade
-        // screen by the poller); else color-flood detection; else read the
-        // VICTORY/DEFEAT header text off this frame. The last step recovers
-        // the case where the poller missed the screens and we're sitting on
-        // a post-match scoreboard that prints the result header.
+        // screen by the poller); else color-flood detection (only when the
+        // caller deems a banner plausible — see MIN_BANNER_SESSION_AGE); else
+        // read the VICTORY/DEFEAT header text off this frame. The last step
+        // recovers the case where the poller missed the screens and we're
+        // sitting on a post-match scoreboard that prints the result header.
         let outcome = if matches!(game_outcome, detect::MatchOutcome::Unknown) {
-            let o = detect::match_end::detect_outcome(&img);
+            let o = if allow_banner_recovery {
+                detect::match_end::detect_outcome(&img)
+            } else {
+                detect::MatchOutcome::Unknown
+            };
             if matches!(o, detect::MatchOutcome::Unknown) {
                 detect::match_end::detect_outcome_text(&img)
             } else {
@@ -877,9 +1042,15 @@ async fn handle_capture(
                 capture_count: 1,
                 final_outcome: outcome_label.clone(),
             };
-            if let Err(e) = store.create_session(&session).await {
-                tracing::warn!(error = %e, "failed to create session");
-            }
+            // A failed create must abort the capture: pressing on would write
+            // a snapshot the caller then marks "session created", and every
+            // later outcome/map back-fill would update a session row that
+            // doesn't exist. The Tab can simply be pressed again.
+            store.create_session(&session).await.map_err(
+                |e| -> Box<dyn std::error::Error + Send + Sync> {
+                    format!("session create failed: {e}").into()
+                },
+            )?;
             tracing::info!(session_id = %session_id, "started new match session");
         } else if let Err(e) = store.append_capture(session_id, now, &outcome_label).await {
             tracing::warn!(error = %e, "failed to append capture to session");
@@ -1061,6 +1232,8 @@ mod tests {
             maps: Vec::new(),
             session_created: true,
             outcome_recorded_at: recorded_secs_ago.map(|s| now - Duration::from_secs(s)),
+            opened_at: now - Duration::from_secs(300),
+            last_activity: now - Duration::from_secs(30),
         }
     }
 
@@ -1094,6 +1267,62 @@ mod tests {
         // never leak onto the next match's captures.
         let g = game(detect::MatchOutcome::Victory, None, now);
         assert!(should_start_fresh_session(Some(&g), now));
+    }
+
+    #[test]
+    fn idle_unfinished_session_goes_stale() {
+        // An unfinished session with recent activity is reusable...
+        let now = test_now() + UNFINISHED_SESSION_IDLE * 2;
+        let g = game(detect::MatchOutcome::Unknown, None, now);
+        assert!(!should_start_fresh_session(Some(&g), now));
+        // ...but one idle past the bound can't plausibly be the same game:
+        // yesterday's session must not absorb today's first Tab.
+        let mut stale = game(detect::MatchOutcome::Unknown, None, now);
+        stale.last_activity = now - UNFINISHED_SESSION_IDLE - Duration::from_secs(1);
+        assert!(should_start_fresh_session(Some(&stale), now));
+    }
+
+    #[test]
+    fn active_game_persists_and_recovers() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut g = ActiveGame::open_now("abc123".into(), detect::MatchOutcome::Unknown, vec![
+            "Oasis".into(),
+        ]);
+        g.session_created = true;
+        persist_active_game(dir.path(), Some(&g));
+
+        let r = recover_active_game(dir.path()).expect("recent game recovers");
+        assert_eq!(r.session_id, "abc123");
+        assert_eq!(r.outcome, detect::MatchOutcome::Unknown);
+        assert_eq!(r.maps, vec!["Oasis".to_string()]);
+        assert!(r.session_created);
+
+        // Clearing removes the file — nothing to recover.
+        persist_active_game(dir.path(), None);
+        assert!(recover_active_game(dir.path()).is_none());
+    }
+
+    #[test]
+    fn stale_persisted_game_is_not_recovered() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let stale = PersistedGame {
+            session_id: "old".into(),
+            outcome: detect::MatchOutcome::Unknown,
+            maps: Vec::new(),
+            session_created: true,
+            opened_at: Utc::now() - chrono::Duration::hours(9),
+            last_activity: Utc::now() - chrono::Duration::hours(8),
+            outcome_recorded_at: None,
+        };
+        std::fs::write(
+            active_game_path(dir.path()),
+            serde_json::to_vec(&stale).unwrap(),
+        )
+        .unwrap();
+        assert!(
+            recover_active_game(dir.path()).is_none(),
+            "yesterday's unfinished game must not swallow today's captures"
+        );
     }
 
     #[test]
