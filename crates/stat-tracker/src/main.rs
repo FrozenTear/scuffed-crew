@@ -214,7 +214,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 struct ActiveGame {
     session_id: String,
     outcome: detect::MatchOutcome,
-    maps: Vec<String>,
+    /// The map actually being played, once a trusted read confirms it
+    /// (top-bar label, accolade screen). Never set from the map vote.
+    map: Option<String>,
+    /// Canonicalized names seen on the map-vote screen. The winner is
+    /// unknowable at vote time, so these are CANDIDATES only — they constrain
+    /// later OCR reads (a read that isn't one of them is a misread) but are
+    /// never stored as the played map themselves.
+    map_candidates: Vec<String>,
     /// Whether the `match_session` row has been created (on the first capture).
     session_created: bool,
     /// When `outcome` was recorded. Drives the post-match grace window: Tab
@@ -230,13 +237,18 @@ struct ActiveGame {
 }
 
 impl ActiveGame {
-    fn open_now(session_id: String, outcome: detect::MatchOutcome, maps: Vec<String>) -> Self {
+    fn open_now(
+        session_id: String,
+        outcome: detect::MatchOutcome,
+        map_candidates: Vec<String>,
+    ) -> Self {
         let now = Instant::now();
         ActiveGame {
             session_id,
             outcome_recorded_at: (outcome != detect::MatchOutcome::Unknown).then_some(now),
             outcome,
-            maps,
+            map: None,
+            map_candidates,
             session_created: false,
             opened_at: now,
             last_activity: now,
@@ -266,7 +278,10 @@ impl ActiveGame {
 struct PersistedGame {
     session_id: String,
     outcome: detect::MatchOutcome,
-    maps: Vec<String>,
+    #[serde(default)]
+    map: Option<String>,
+    #[serde(default)]
+    map_candidates: Vec<String>,
     session_created: bool,
     opened_at: chrono::DateTime<Utc>,
     last_activity: chrono::DateTime<Utc>,
@@ -293,7 +308,8 @@ fn persist_active_game(data_dir: &std::path::Path, game: Option<&ActiveGame>) {
     let persisted = PersistedGame {
         session_id: g.session_id.clone(),
         outcome: g.outcome,
-        maps: g.maps.clone(),
+        map: g.map.clone(),
+        map_candidates: g.map_candidates.clone(),
         session_created: g.session_created,
         opened_at: to_wall(g.opened_at),
         last_activity: to_wall(g.last_activity),
@@ -325,7 +341,8 @@ fn recover_active_game(data_dir: &std::path::Path) -> Option<ActiveGame> {
     Some(ActiveGame {
         session_id: p.session_id,
         outcome: p.outcome,
-        maps: p.maps,
+        map: p.map,
+        map_candidates: p.map_candidates,
         session_created: p.session_created,
         opened_at: to_instant(p.opened_at)?,
         last_activity,
@@ -394,6 +411,46 @@ fn take_fresh_pending(
         tracing::debug!(?outcome, "discarding stale pending outcome");
         None
     }
+}
+
+/// The map to store on a capture snapshot.
+///
+/// Priority: the session's confirmed map > top-bar label OCR > the fuzzy
+/// scoreboard-text read. Map-vote names never appear here — the vote winner
+/// is unknowable at vote time (recording candidates as the played map was
+/// wrong ~2/3 of the time with 2+ candidates) — but when candidates are known
+/// they veto OCR reads that aren't among them: the played map must be one of
+/// the voted maps, so a read outside the set is a misread.
+fn resolve_map(
+    session_map: Option<&str>,
+    panel_read: Option<&str>,
+    text_read: &str,
+    candidates: &[String],
+) -> String {
+    if let Some(map) = session_map {
+        return map.to_string();
+    }
+    let plausible = |m: &&str| candidates.is_empty() || candidates.iter().any(|c| c == m);
+    let dropped = |m: &&str| {
+        if !plausible(m) {
+            tracing::debug!(
+                read = %m,
+                ?candidates,
+                "map read is not a vote candidate — dropping as misread"
+            );
+        }
+    };
+    panel_read
+        .inspect(dropped)
+        .filter(plausible)
+        .or_else(|| {
+            Some(text_read)
+                .filter(|m| !m.is_empty())
+                .inspect(dropped)
+                .filter(plausible)
+        })
+        .unwrap_or_default()
+        .to_string()
 }
 
 /// Everything the blocking vision/OCR pass extracts from one Tab frame.
@@ -548,7 +605,7 @@ async fn run_loop(
                             persist_active_game(data_dir, active_game.as_ref());
                         }
 
-                        let (sid, create, outcome, maps, banner_ok) = {
+                        let (sid, create, outcome, session_map, candidates, banner_ok) = {
                             let g = active_game.as_ref().expect("active_game set above");
                             // A banner-color outcome off a Tab frame is only
                             // plausible when the daemon just joined mid/post
@@ -558,10 +615,10 @@ async fn run_loop(
                             // split the real game.
                             let banner_ok = opened_by_this_tab
                                 || g.opened_at.elapsed() >= MIN_BANNER_SESSION_AGE;
-                            (g.session_id.clone(), !g.session_created, g.outcome, g.maps.clone(), banner_ok)
+                            (g.session_id.clone(), !g.session_created, g.outcome, g.map.clone(), g.map_candidates.clone(), banner_ok)
                         };
 
-                        match handle_capture(backend, store, player_name, capture_output, &sid, create, outcome, &maps, banner_ok, portrait_matcher, collect_portraits, data_dir).await {
+                        match handle_capture(backend, store, player_name, capture_output, &sid, create, outcome, session_map.as_deref(), &candidates, banner_ok, portrait_matcher, collect_portraits, data_dir).await {
                             Err(e) => tracing::error!(error = %e, "capture cycle failed"),
                             // Rejected by a trust gate — nothing was recorded, so
                             // the session must not be marked as created.
@@ -570,12 +627,12 @@ async fn run_loop(
                                 if let Some(g) = active_game.as_mut() {
                                     g.session_created = true;
                                     g.touch();
-                                    // First map discovery propagates to the
-                                    // whole session (one game, one map).
-                                    if g.maps.is_empty()
+                                    // First trusted map discovery propagates
+                                    // to the whole session (one game, one map).
+                                    if g.map.is_none()
                                         && let Some(map) = &report.map
                                     {
-                                        g.maps.push(map.clone());
+                                        g.map = Some(map.clone());
                                         if let Err(e) = store.set_session_map(&g.session_id, map).await {
                                             tracing::warn!(error = %e, "failed to set session map");
                                         }
@@ -714,10 +771,17 @@ async fn run_loop(
 
                         if let Some(map) = accolade_map
                             && let Some(g) = active_game.as_mut()
-                            && g.maps.is_empty()
+                            && g.map.is_none()
                         {
+                            // The accolade read is a dedicated-region OCR and
+                            // trusted even alongside vote candidates (which
+                            // used to block this recovery entirely) — but a
+                            // contradiction is worth a trace.
+                            if !g.map_candidates.is_empty() && !g.map_candidates.contains(&map) {
+                                tracing::warn!(map = %map, candidates = ?g.map_candidates, "accolade map is not a vote candidate");
+                            }
                             tracing::info!(map = %map, session_id = %g.session_id, "map recovered from accolade screen");
-                            g.maps.push(map.clone());
+                            g.map = Some(map.clone());
                             g.touch();
                             if g.session_created {
                                 if let Err(e) = store.set_session_map(&g.session_id, &map).await {
@@ -744,8 +808,16 @@ async fn run_loop(
                                     || last_game_open.is_none_or(|t| t.elapsed() >= new_game_debounce);
                                 if can_open {
                                     let sid = format!("{:016x}", rand_id());
-                                    tracing::info!(?maps, session_id = %sid, "auto-detect: map vote — new game");
-                                    active_game = Some(ActiveGame::open_now(sid, detect::MatchOutcome::Unknown, maps));
+                                    // Vote names are screen-text constants
+                                    // ("SHAMBALI") — canonicalize through the
+                                    // MAPS table so candidate checks compare
+                                    // display names with display names.
+                                    let candidates: Vec<String> = maps
+                                        .iter()
+                                        .filter_map(|m| parse::canonical_map(m))
+                                        .collect();
+                                    tracing::info!(?candidates, session_id = %sid, "auto-detect: map vote — new game");
+                                    active_game = Some(ActiveGame::open_now(sid, detect::MatchOutcome::Unknown, candidates));
                                     last_game_open = Some(Instant::now());
                                     // Evidence about the previous match must not
                                     // confirm into this one — and a pending
@@ -832,7 +904,8 @@ async fn handle_capture(
     session_id: &str,
     create_session: bool,
     game_outcome: detect::MatchOutcome,
-    detected_maps: &[String],
+    session_map: Option<&str>,
+    map_candidates: &[String],
     allow_banner_recovery: bool,
     portrait_matcher: &Arc<detect::hero_portrait::PortraitMatcher>,
     collect_portraits: bool,
@@ -1019,13 +1092,12 @@ async fn handle_capture(
 
         let now = SurrealDatetime::from(Utc::now());
 
-        // Map priority: auto-detected map-vote > top-bar label OCR > whatever
-        // the scoreboard-text fuzzy match found (least reliable, kept last).
-        if !detected_maps.is_empty() {
-            parsed.map_name = detected_maps[0].clone();
-        } else if let Some(map) = &map_from_panel {
-            parsed.map_name = map.clone();
-        }
+        parsed.map_name = resolve_map(
+            session_map,
+            map_from_panel.as_deref(),
+            &parsed.map_name,
+            map_candidates,
+        );
 
         // The session is owned by the active game (map-vote → accolade). The
         // first capture creates the session row; later captures (including hero
@@ -1229,7 +1301,8 @@ mod tests {
         ActiveGame {
             session_id: "test".into(),
             outcome,
-            maps: Vec::new(),
+            map: None,
+            map_candidates: Vec::new(),
             session_created: true,
             outcome_recorded_at: recorded_secs_ago.map(|s| now - Duration::from_secs(s)),
             opened_at: now - Duration::from_secs(300),
@@ -1287,14 +1360,17 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let mut g = ActiveGame::open_now("abc123".into(), detect::MatchOutcome::Unknown, vec![
             "Oasis".into(),
+            "Busan".into(),
         ]);
         g.session_created = true;
+        g.map = Some("Oasis".into());
         persist_active_game(dir.path(), Some(&g));
 
         let r = recover_active_game(dir.path()).expect("recent game recovers");
         assert_eq!(r.session_id, "abc123");
         assert_eq!(r.outcome, detect::MatchOutcome::Unknown);
-        assert_eq!(r.maps, vec!["Oasis".to_string()]);
+        assert_eq!(r.map.as_deref(), Some("Oasis"));
+        assert_eq!(r.map_candidates, vec!["Oasis".to_string(), "Busan".to_string()]);
         assert!(r.session_created);
 
         // Clearing removes the file — nothing to recover.
@@ -1308,7 +1384,8 @@ mod tests {
         let stale = PersistedGame {
             session_id: "old".into(),
             outcome: detect::MatchOutcome::Unknown,
-            maps: Vec::new(),
+            map: None,
+            map_candidates: Vec::new(),
             session_created: true,
             opened_at: Utc::now() - chrono::Duration::hours(9),
             last_activity: Utc::now() - chrono::Duration::hours(8),
@@ -1323,6 +1400,30 @@ mod tests {
             recover_active_game(dir.path()).is_none(),
             "yesterday's unfinished game must not swallow today's captures"
         );
+    }
+
+    #[test]
+    fn vote_candidates_constrain_but_never_become_the_map() {
+        let candidates = vec!["Oasis".to_string(), "Busan".to_string()];
+
+        // No trusted read yet: candidates alone must NOT pick a map — the
+        // vote winner is unknowable, and detected_maps[0] used to be wrong
+        // ~2/3 of the time.
+        assert_eq!(resolve_map(None, None, "", &candidates), "");
+
+        // Session's confirmed map always wins.
+        assert_eq!(resolve_map(Some("Busan"), Some("Oasis"), "Ilios", &candidates), "Busan");
+
+        // Panel read accepted when it is a candidate...
+        assert_eq!(resolve_map(None, Some("Busan"), "", &candidates), "Busan");
+        // ...vetoed when it isn't (misread), falling back to a plausible
+        // text read, or to nothing.
+        assert_eq!(resolve_map(None, Some("Ilios"), "Oasis", &candidates), "Oasis");
+        assert_eq!(resolve_map(None, Some("Ilios"), "Nepal", &candidates), "");
+
+        // Without candidates, panel > text (unchanged behavior).
+        assert_eq!(resolve_map(None, Some("Ilios"), "Nepal", &[]), "Ilios");
+        assert_eq!(resolve_map(None, None, "Nepal", &[]), "Nepal");
     }
 
     #[test]

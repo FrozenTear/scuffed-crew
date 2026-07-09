@@ -331,6 +331,23 @@ const HEROES: &[&str] = &[
     "Zenyatta",
 ];
 
+/// Count matches of `needle` in `text` that sit on word boundaries (the
+/// neighbouring characters are not letters). Short hero names are substrings
+/// of longer words — "ana" ⊂ "havana"/"hanaoka", the same trap class as the
+/// fixed "king" ⊂ "wrecking" map bug — so they only count as standalone words.
+fn word_boundary_count(text: &str, needle: &str) -> usize {
+    text.match_indices(needle)
+        .filter(|(i, _)| {
+            let before_ok = text[..*i].chars().next_back().is_none_or(|c| !c.is_alphabetic());
+            let after_ok = text[i + needle.len()..]
+                .chars()
+                .next()
+                .is_none_or(|c| !c.is_alphabetic());
+            before_ok && after_ok
+        })
+        .count()
+}
+
 fn find_hero(lines: &[&str]) -> Option<String> {
     let text = lines.join(" ").to_lowercase();
 
@@ -338,7 +355,13 @@ fn find_hero(lines: &[&str]) -> Option<String> {
     let mut found: Vec<(&str, usize)> = Vec::new();
     for &hero in HEROES {
         let hero_lower = hero.to_lowercase();
-        let count = text.matches(&hero_lower).count();
+        // Names this short appear inside ordinary words and map labels;
+        // longer ones are distinctive enough for plain substring search.
+        let count = if hero_lower.len() <= 4 {
+            word_boundary_count(&text, &hero_lower)
+        } else {
+            text.matches(&hero_lower).count()
+        };
         if count > 0 {
             found.push((hero, count));
         }
@@ -349,12 +372,23 @@ fn find_hero(lines: &[&str]) -> Option<String> {
     }
 
     if found.len() > 1 {
+        // Same short-name rule as the counting pass — without it, a
+        // zero-number "HAVANA" map line reads as Ana's career-title line, and
+        // "havana accuracy" reads as "ana accuracy".
+        fn occurs(haystack: &str, needle: &str, hero_is_short: bool) -> bool {
+            if hero_is_short {
+                word_boundary_count(haystack, needle) > 0
+            } else {
+                haystack.contains(needle)
+            }
+        }
         let panel_keywords = ["accuracy", "critical", "weapon", "kills"];
         for &(hero, _) in &found {
             let hero_lower = hero.to_lowercase();
+            let short = hero_lower.len() <= 4;
             for line in lines {
                 let line_lower = line.to_lowercase();
-                if line_lower.contains(&hero_lower) {
+                if occurs(&line_lower, &hero_lower, short) {
                     let num_count = line
                         .split(|c: char| !c.is_ascii_digit())
                         .filter(|w| !w.is_empty())
@@ -365,14 +399,17 @@ fn find_hero(lines: &[&str]) -> Option<String> {
                 }
             }
             for kw in &panel_keywords {
-                if text.contains(&format!("{} {}", hero_lower, kw))
+                if occurs(&text, &format!("{hero_lower} {kw}"), short)
                     || text.contains(&format!("{} {}", kw, hero_lower))
                 {
                     return Some(hero.to_string());
                 }
             }
         }
-        found.sort_by_key(|&(_, count)| count);
+        // Most-mentioned wins (the player's hero recurs in the career panel
+        // and stat lines); alphabetical only as a deterministic last resort.
+        // This was sorted ascending for a while — least-mentioned won ties.
+        found.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
         return Some(found[0].0.to_string());
     }
 
@@ -500,6 +537,14 @@ pub fn match_hero_in_text(text: &str) -> Option<String> {
         .filter(|l| !l.is_empty())
         .collect();
     find_hero(&lines)
+}
+
+/// Canonicalize a map identifier to its display name in the MAPS table —
+/// e.g. the map-vote screen's "SHAMBALI" becomes "Shambali Monastery".
+/// `None` when nothing matches: an uncanonicalizable name must not be stored,
+/// or the same map fractures into several aggregate rows.
+pub fn canonical_map(name: &str) -> Option<String> {
+    match_map_in_text(name)
 }
 
 /// Match a map name from arbitrary OCR text (e.g. the top-bar map label).
@@ -752,5 +797,38 @@ mod tests {
         let mut mixed: Vec<RowOcrResult> = (0..2).map(|_| valid_row("X")).collect();
         mixed.extend((0..8).map(|_| garbage_row()));
         assert!(!looks_like_scoreboard(&mixed));
+    }
+}
+
+#[cfg(test)]
+mod hero_map_name_tests {
+    use super::*;
+
+    #[test]
+    fn short_hero_names_need_word_boundaries() {
+        // "ana" ⊂ "havana": a bare map label must not read as the hero Ana.
+        assert_eq!(match_hero_in_text("HAVANA"), None);
+        assert_eq!(match_hero_in_text("Hanaoka"), None);
+        // Standalone the name still matches, with or without punctuation.
+        assert_eq!(match_hero_in_text("Ana").as_deref(), Some("Ana"));
+        assert_eq!(match_hero_in_text("ana: 14 elims").as_deref(), Some("Ana"));
+    }
+
+    #[test]
+    fn hero_ties_break_to_most_mentioned() {
+        // A support duo on the scoreboard: the player's hero recurs across
+        // stat lines — most-mentioned must win (this sorted ascending for a
+        // while, so the LEAST-mentioned hero won every multi-match).
+        let text = "HAVANA\nana 14 8 2 3400\nmercy 30 2 11 8000\nmercy 1 2 3 4\nmercy 5 6 7 8";
+        assert_eq!(match_hero_in_text(text).as_deref(), Some("Mercy"));
+    }
+
+    #[test]
+    fn map_vote_names_canonicalize_to_display_names() {
+        assert_eq!(canonical_map("SHAMBALI").as_deref(), Some("Shambali Monastery"));
+        assert_eq!(canonical_map("WATCHPOINT").as_deref(), Some("Watchpoint: Gibraltar"));
+        assert_eq!(canonical_map("ROUTE 66").as_deref(), Some("Route 66"));
+        assert_eq!(canonical_map("NEON JUNCTION").as_deref(), Some("Neon Junction"));
+        assert_eq!(canonical_map("garbage read"), None);
     }
 }
