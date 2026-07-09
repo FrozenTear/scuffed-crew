@@ -80,7 +80,7 @@ impl LocalStore {
     pub async fn insert_match(
         &self,
         match_data: PersonalMatch,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let _: Option<PersonalMatch> = self.db.create("personal_match").content(match_data).await?;
         tracing::debug!("match inserted into local store");
         Ok(())
@@ -204,7 +204,7 @@ impl LocalStore {
         session_id: &str,
         capture_time: SurrealDatetime,
         outcome: &str,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         self.db
             .query("UPDATE match_session SET last_capture_at = $time, capture_count += 1, final_outcome = $outcome WHERE session_id = $sid")
             .bind(("time", capture_time))
@@ -216,7 +216,7 @@ impl LocalStore {
 
     /// Delete a session and all its capture snapshots (manual cleanup of a
     /// junk/misdetected game). Already-synced snapshots remain on the server.
-    pub async fn delete_session(&self, session_id: &str) -> Result<(), Box<dyn std::error::Error>> {
+    pub async fn delete_session(&self, session_id: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         self.db
             .query("DELETE match_session WHERE session_id = $sid; DELETE personal_match WHERE session_id = $sid")
             .bind(("sid", session_id.to_string()))
@@ -228,7 +228,7 @@ impl LocalStore {
     pub async fn apply_command(
         &self,
         cmd: &StoreCommand,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         match cmd {
             StoreCommand::SetOutcome {
                 session_id,
@@ -246,7 +246,7 @@ impl LocalStore {
         session_id: &str,
         hero: &str,
         role: &str,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         self.db
             .query("UPDATE match_session SET hero = $hero, role = $role WHERE session_id = $sid")
             .bind(("hero", hero.to_string()))
@@ -263,7 +263,7 @@ impl LocalStore {
         &self,
         session_id: &str,
         map: &str,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         self.db
             .query("UPDATE match_session SET map_name = $map WHERE session_id = $sid; UPDATE personal_match SET map_name = $map, synced = false WHERE session_id = $sid AND map_name != $map")
             .bind(("map", map.to_string()))
@@ -280,7 +280,7 @@ impl LocalStore {
         &self,
         session_id: &str,
         outcome: &str,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         self.db
             .query("UPDATE match_session SET final_outcome = $outcome WHERE session_id = $sid; UPDATE personal_match SET outcome = $outcome, synced = false WHERE session_id = $sid")
             .bind(("outcome", outcome.to_string()))
@@ -303,7 +303,7 @@ impl LocalStore {
     pub async fn get_session_snapshots(
         &self,
         session_id: &str,
-    ) -> Result<Vec<PersonalMatch>, Box<dyn std::error::Error>> {
+    ) -> Result<Vec<PersonalMatch>, Box<dyn std::error::Error + Send + Sync>> {
         let mut result = self
             .db
             .query("SELECT * FROM personal_match WHERE session_id = $sid ORDER BY played_at ASC")

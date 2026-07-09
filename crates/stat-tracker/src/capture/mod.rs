@@ -1,7 +1,7 @@
 pub mod portal;
 pub mod wayshot;
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CaptureBackend {
     Wayshot,
     Portal,

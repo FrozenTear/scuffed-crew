@@ -558,6 +558,15 @@ async fn run_loop(
     // client's HTTP timeout.
     let mut sync_task: Option<tokio::task::JoinHandle<()>> = None;
 
+    // Tab OCR also runs as a spawned task (single-flight), reporting back on
+    // this channel. Awaited inline, one capture starved the poller for a
+    // measured 45-70s — long enough to miss the ~3s VICTORY/DEFEAT banner and
+    // the whole accolade screen, i.e. the outcome. The 400ms "let the game
+    // render the scoreboard" wait sleeps inside the task too.
+    let (capture_tx, mut capture_rx) =
+        tokio::sync::mpsc::unbounded_channel::<(String, Result<CaptureReport, String>)>();
+    let mut capture_task: Option<tokio::task::JoinHandle<()>> = None;
+
     let mut poll_timer = tokio::time::interval(poll_interval);
     poll_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
@@ -582,8 +591,12 @@ async fn run_loop(
                                 continue;
                             }
 
-                        // Wait for the game to render the scoreboard overlay after Tab press
-                        tokio::time::sleep(tokio::time::Duration::from_millis(400)).await;
+                        // Single-flight: OCR of the previous Tab may still be
+                        // running (it takes seconds) — don't stack captures.
+                        if capture_task.as_ref().is_some_and(|t| !t.is_finished()) {
+                            tracing::debug!("Tab ignored — a capture is already in progress");
+                            continue;
+                        }
                         last_tab_capture = Some(Instant::now());
 
                         // Session choice: reuse the active game (mid-game, or
@@ -618,59 +631,36 @@ async fn run_loop(
                             (g.session_id.clone(), !g.session_created, g.outcome, g.map.clone(), g.map_candidates.clone(), banner_ok)
                         };
 
-                        match handle_capture(backend, store, player_name, capture_output, &sid, create, outcome, session_map.as_deref(), &candidates, banner_ok, portrait_matcher, collect_portraits, data_dir).await {
-                            Err(e) => tracing::error!(error = %e, "capture cycle failed"),
-                            // Rejected by a trust gate — nothing was recorded, so
-                            // the session must not be marked as created.
-                            Ok(report) if !report.recorded => {}
-                            Ok(report) => {
-                                if let Some(g) = active_game.as_mut() {
-                                    g.session_created = true;
-                                    g.touch();
-                                    // First trusted map discovery propagates
-                                    // to the whole session (one game, one map).
-                                    if g.map.is_none()
-                                        && let Some(map) = &report.map
-                                    {
-                                        g.map = Some(map.clone());
-                                        if let Err(e) = store.set_session_map(&g.session_id, map).await {
-                                            tracing::warn!(error = %e, "failed to set session map");
-                                        }
-                                    }
-                                    // The capture recovered an outcome the game
-                                    // didn't have yet (banner / header text on
-                                    // the frame) — adopt it so the in-memory
-                                    // state agrees with what was stored, and
-                                    // back-fill earlier snapshots.
-                                    if !g.finished()
-                                        && !matches!(report.outcome, detect::MatchOutcome::Unknown)
-                                    {
-                                        g.record_outcome(report.outcome);
-                                        tracing::info!(
-                                            outcome = ?report.outcome,
-                                            session_id = %g.session_id,
-                                            "outcome recovered from captured frame — back-filling session"
-                                        );
-                                        if let Err(e) = store.set_session_outcome(&g.session_id, &g.outcome.to_string()).await {
-                                            tracing::warn!(error = %e, "failed to back-fill session outcome");
-                                        }
-                                    }
-                                    persist_active_game(data_dir, Some(g));
-                                }
-                                capture_count += 1;
-                                if let Some(client) = sync_client
-                                    && capture_count.is_multiple_of(SYNC_EVERY_N_CAPTURES)
-                                    && sync_task.as_ref().is_none_or(|t| t.is_finished()) {
-                                        let store = store.clone();
-                                        let client = client.clone();
-                                        let data_dir = data_dir.to_path_buf();
-                                        sync_task = Some(tokio::spawn(async move {
-                                            try_sync(&store, &client, &data_dir).await;
-                                        }));
-                                    }
-                                refresh_snapshot(store, data_dir).await;
-                            }
-                        }
+                        let tx = capture_tx.clone();
+                        let backend = *backend;
+                        let store_task = store.clone();
+                        let player_name = player_name.map(str::to_string);
+                        let capture_output = capture_output.map(str::to_string);
+                        let matcher = Arc::clone(portrait_matcher);
+                        let data_dir_task = data_dir.to_path_buf();
+                        capture_task = Some(tokio::spawn(async move {
+                            // Wait for the game to render the scoreboard
+                            // overlay after the Tab press.
+                            tokio::time::sleep(tokio::time::Duration::from_millis(400)).await;
+                            let result = handle_capture(
+                                &backend,
+                                &store_task,
+                                player_name.as_deref(),
+                                capture_output.as_deref(),
+                                &sid,
+                                create,
+                                outcome,
+                                session_map.as_deref(),
+                                &candidates,
+                                banner_ok,
+                                &matcher,
+                                collect_portraits,
+                                &data_dir_task,
+                            )
+                            .await
+                            .map_err(|e| e.to_string());
+                            let _ = tx.send((sid, result));
+                        }));
                     }
                     Err(e) => {
                         tracing::error!(error = %e, "keyboard devices lost — attempting to reopen");
@@ -681,12 +671,73 @@ async fn run_loop(
                             }
                             Err(e2) => {
                                 tracing::error!(error = %e2, "failed to reopen keyboard — exiting");
+                                drain_capture(capture_task.take()).await;
                                 if let Some(client) = sync_client {
                                     try_sync(store, client, data_dir).await;
                                 }
                                 return Ok(());
                             }
                         }
+                    }
+                }
+            }
+            Some((sid, result)) = capture_rx.recv() => {
+                match result {
+                    Err(e) => tracing::error!(error = %e, "capture cycle failed"),
+                    // Rejected by a trust gate — nothing was recorded, so
+                    // the session must not be marked as created.
+                    Ok(report) if !report.recorded => {}
+                    Ok(report) => {
+                        // Mutate the in-memory game only if it is still the
+                        // game this capture was taken for — a start screen may
+                        // have opened a new one while OCR was running. The
+                        // store writes (keyed by session id) already happened
+                        // inside the capture task and remain correct.
+                        if let Some(g) = active_game.as_mut().filter(|g| g.session_id == sid) {
+                            g.session_created = true;
+                            g.touch();
+                            // First trusted map discovery propagates
+                            // to the whole session (one game, one map).
+                            if g.map.is_none()
+                                && let Some(map) = &report.map
+                            {
+                                g.map = Some(map.clone());
+                                if let Err(e) = store.set_session_map(&g.session_id, map).await {
+                                    tracing::warn!(error = %e, "failed to set session map");
+                                }
+                            }
+                            // The capture recovered an outcome the game
+                            // didn't have yet (banner / header text on
+                            // the frame) — adopt it so the in-memory
+                            // state agrees with what was stored, and
+                            // back-fill earlier snapshots.
+                            if !g.finished()
+                                && !matches!(report.outcome, detect::MatchOutcome::Unknown)
+                            {
+                                g.record_outcome(report.outcome);
+                                tracing::info!(
+                                    outcome = ?report.outcome,
+                                    session_id = %g.session_id,
+                                    "outcome recovered from captured frame — back-filling session"
+                                );
+                                if let Err(e) = store.set_session_outcome(&g.session_id, &g.outcome.to_string()).await {
+                                    tracing::warn!(error = %e, "failed to back-fill session outcome");
+                                }
+                            }
+                            persist_active_game(data_dir, Some(g));
+                        }
+                        capture_count += 1;
+                        if let Some(client) = sync_client
+                            && capture_count.is_multiple_of(SYNC_EVERY_N_CAPTURES)
+                            && sync_task.as_ref().is_none_or(|t| t.is_finished()) {
+                                let store = store.clone();
+                                let client = client.clone();
+                                let data_dir = data_dir.to_path_buf();
+                                sync_task = Some(tokio::spawn(async move {
+                                    try_sync(&store, &client, &data_dir).await;
+                                }));
+                            }
+                        refresh_snapshot(store, data_dir).await;
                     }
                 }
             }
@@ -879,6 +930,7 @@ async fn run_loop(
             }
             _ = tokio::signal::ctrl_c() => {
                 tracing::info!("shutting down");
+                drain_capture(capture_task.take()).await;
                 if let Some(client) = sync_client {
                     try_sync(store, client, data_dir).await;
                 }
@@ -886,6 +938,7 @@ async fn run_loop(
             }
             _ = sigterm.recv() => {
                 tracing::info!("SIGTERM received — shutting down");
+                drain_capture(capture_task.take()).await;
                 if let Some(client) = sync_client {
                     try_sync(store, client, data_dir).await;
                 }
@@ -917,6 +970,7 @@ async fn handle_capture(
     let matcher = Arc::clone(portrait_matcher);
     // Clone player_name so the blocking closure can own it.
     let player_name_owned = player_name.map(|s| s.to_string());
+    let session_map_known = session_map.is_some();
     let analysis = tokio::task::spawn_blocking(move || {
         // Outcome: prefer the open game's result (read off the accolade
         // screen by the poller); else color-flood detection (only when the
@@ -948,7 +1002,6 @@ async fn handle_capture(
         let brightness_row_idx = player_match.map(|(_, _, idx)| idx);
 
         let rows = ocr::recognize_scoreboard_cells_with_team_size(&img, Some(team_size));
-        let ocr = ocr::recognize(&img);
 
         // Player row: if a player name is configured, scan ALL rows (both teams)
         // for a name match — this handles replays and post-match screens where the
@@ -967,6 +1020,26 @@ async fn handle_capture(
         let map_from_panel = ocr::recognize_region(&ocr::preprocess::crop_map_name(&img))
             .ok()
             .and_then(|t| parse::match_map_in_text(&t));
+
+        // Full-board OCR exists only to supply raw text for hero/map name
+        // lookup and the name-in-raw-text stats fallback. On the happy path —
+        // player row found and parseable, hero from the career panel, map
+        // already known — it is pure redundancy (adaptive preprocessing plus
+        // up to three threshold sweeps), so run it lazily.
+        let cells_parse =
+            parse::parse_scoreboard_cells(&rows, row_idx, "", "unknown", None).is_some();
+        let need_full_ocr = !cells_parse
+            || career_hero.is_none()
+            || (!session_map_known && map_from_panel.is_none());
+        let ocr = if need_full_ocr {
+            ocr::recognize(&img)
+        } else {
+            tracing::debug!("skipping full-board OCR — cell path supplied everything");
+            Ok(ocr::OcrResult {
+                raw_text: String::new(),
+                confidence: 0,
+            })
+        };
 
         FrameAnalysis {
             outcome,
@@ -1225,6 +1298,17 @@ fn rand_id() -> u64 {
         .unwrap_or_default()
         .as_nanos() as u64;
     seed ^ (std::process::id() as u64).wrapping_mul(0x517cc1b727220a95)
+}
+
+/// Let an in-flight capture task finish before shutdown's final sync, so its
+/// snapshot is uploaded and no store write is torn by the runtime dropping it.
+async fn drain_capture(task: Option<tokio::task::JoinHandle<()>>) {
+    if let Some(t) = task
+        && !t.is_finished()
+    {
+        tracing::info!("waiting for in-flight capture to finish");
+        let _ = t.await;
+    }
 }
 
 /// Refresh the GUI's live snapshot after a store mutation. Failures are
