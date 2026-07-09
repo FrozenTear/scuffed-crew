@@ -14,14 +14,12 @@ pub struct SyncClient {
 impl SyncClient {
     pub fn new(config: SyncConfig) -> Self {
         // A hung connection must never hang the caller: sync runs concurrently
-        // with capture, and shutdown does a final inline upload.
+        // with capture, and shutdown does a final inline upload. Fail closed —
+        // a client without the timeout re-opens the M4 daemon-stall bug.
         let http = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(30))
             .build()
-            .unwrap_or_else(|e| {
-                tracing::warn!(error = %e, "reqwest builder failed — falling back to default client (no timeout)");
-                reqwest::Client::new()
-            });
+            .expect("reqwest client with timeout must build");
         Self { http, config }
     }
 
