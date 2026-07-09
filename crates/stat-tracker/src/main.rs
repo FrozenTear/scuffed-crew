@@ -104,6 +104,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     std::fs::create_dir_all(&config.data_dir)?;
 
+    // Single wiring point for OCR debug dumps — the lib reads this switch
+    // instead of re-loading config on first use.
+    ocr::set_debug_ocr(config.debug_ocr_enabled());
+
     let pid_path = config.data_dir.join("daemon.pid");
     if let Ok(existing_pid) = std::fs::read_to_string(&pid_path) {
         if let Ok(pid) = existing_pid.trim().parse::<u32>()
@@ -756,7 +760,11 @@ async fn run_loop(
                             if let Some(dir) = &dump_dir {
                                 save_frame_ring(dir, "poll", &img, POLL_DUMP_KEEP);
                             }
-                            let signal = detect::match_end::detect_outcome_signal(&img);
+                            // One RGBA→RGB conversion shared by banner + phase
+                            // detectors (P6); title OCR still uses the original frame.
+                            let rgb = img.to_rgb8();
+                            let signal =
+                                detect::match_end::detect_outcome_signal_with_rgb(&img, &rgb);
                             // The accolade screen also prints the map — read it
                             // while we're here; it recovers games where the
                             // in-game top-bar OCR missed all match.
@@ -766,7 +774,7 @@ async fn run_loop(
                                 }
                                 _ => None,
                             };
-                            let phase = detect::match_start::detect_phase(&img);
+                            let phase = detect::match_start::detect_phase_with_rgb(&img, &rgb);
                             (signal, phase, accolade_map)
                         }).await.unwrap_or((None, detect::GamePhase::Unknown, None));
 
@@ -928,6 +936,11 @@ async fn run_loop(
                         }
                     }
                     refresh_snapshot(store, data_dir).await;
+                } else {
+                    // Trailing edge of the snapshot debounce: a refresh that
+                    // was deferred inside the window flushes here once due,
+                    // so the GUI never waits on the *next* mutation.
+                    flush_snapshot_if_due(store, data_dir).await;
                 }
             }
             _ = tokio::signal::ctrl_c() => {
@@ -936,6 +949,7 @@ async fn run_loop(
                 if let Some(client) = sync_client {
                     try_sync(store, client, data_dir).await;
                 }
+                flush_snapshot_if_dirty(store, data_dir).await;
                 return Ok(());
             }
             _ = sigterm.recv() => {
@@ -944,6 +958,7 @@ async fn run_loop(
                 if let Some(client) = sync_client {
                     try_sync(store, client, data_dir).await;
                 }
+                flush_snapshot_if_dirty(store, data_dir).await;
                 return Ok(());
             }
         }
@@ -997,13 +1012,15 @@ async fn handle_capture(
 
         let scoreboard = ocr::preprocess::crop_scoreboard(&img);
         let team_size = detect::hero_portrait::detect_team_size(&scoreboard);
-        let player_match = matcher.match_player_hero(&scoreboard);
+        // Pass team_size into portrait match + cell OCR so neither re-detects
+        // size or re-crops the full scoreboard (P7).
+        let player_match = matcher.match_player_hero_with_team_size(&scoreboard, team_size);
         let portrait_match = player_match
             .as_ref()
             .map(|(name, conf, _)| (name.clone(), *conf));
         let brightness_row_idx = player_match.map(|(_, _, idx)| idx);
 
-        let rows = ocr::recognize_scoreboard_cells_with_team_size(&img, Some(team_size));
+        let rows = ocr::recognize_scoreboard_cells_pre_cropped(&scoreboard, team_size);
 
         // Player row: if a player name is configured, scan ALL rows (both teams)
         // for a name match — this handles replays and post-match screens where the
@@ -1317,11 +1334,69 @@ async fn drain_capture(task: Option<tokio::task::JoinHandle<()>>) {
     }
 }
 
-/// Refresh the GUI's live snapshot after a store mutation. Failures are
-/// logged but never block the capture/poll path.
+/// Minimum gap between full snapshot rewrites (P11). Capture/poll can mark the
+/// export dirty faster than this; the next due flush (or a forced one after
+/// sync / shutdown) actually rewrites the file.
+const SNAPSHOT_DEBOUNCE: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// (dirty, last successful export). Module-level so capture + sync tasks share it.
+static SNAPSHOT_STATE: std::sync::Mutex<(bool, Option<std::time::Instant>)> =
+    std::sync::Mutex::new((false, None));
+
+/// Mark the live snapshot dirty and export if the debounce window has elapsed.
 async fn refresh_snapshot(store: &storage::LocalStore, data_dir: &std::path::Path) {
-    if let Err(e) = store.export_snapshot(data_dir).await {
-        tracing::debug!(error = %e, "live snapshot refresh failed");
+    refresh_snapshot_inner(store, data_dir, false).await;
+}
+
+/// Export immediately (sync complete, shutdown). Resets dirty.
+async fn refresh_snapshot_force(store: &storage::LocalStore, data_dir: &std::path::Path) {
+    refresh_snapshot_inner(store, data_dir, true).await;
+}
+
+/// Flush a debounce-deferred snapshot once its window has passed. Called from
+/// the cmd-timer tick so a dirty snapshot never waits on the next mutation.
+async fn flush_snapshot_if_due(store: &storage::LocalStore, data_dir: &std::path::Path) {
+    let due = {
+        let state = SNAPSHOT_STATE.lock().unwrap_or_else(|e| e.into_inner());
+        state.0 && state.1.is_none_or(|last| last.elapsed() >= SNAPSHOT_DEBOUNCE)
+    };
+    if due {
+        refresh_snapshot_inner(store, data_dir, true).await;
+    }
+}
+
+/// Shutdown path: export a trailing dirty snapshot regardless of the window —
+/// the GUI must see the final state (try_sync only force-exports on success).
+async fn flush_snapshot_if_dirty(store: &storage::LocalStore, data_dir: &std::path::Path) {
+    let dirty = SNAPSHOT_STATE.lock().unwrap_or_else(|e| e.into_inner()).0;
+    if dirty {
+        refresh_snapshot_inner(store, data_dir, true).await;
+    }
+}
+
+async fn refresh_snapshot_inner(
+    store: &storage::LocalStore,
+    data_dir: &std::path::Path,
+    force: bool,
+) {
+    {
+        let mut state = SNAPSHOT_STATE.lock().unwrap_or_else(|e| e.into_inner());
+        state.0 = true;
+        if !force
+            && let Some(last) = state.1
+            && last.elapsed() < SNAPSHOT_DEBOUNCE
+        {
+            return;
+        }
+    }
+    match store.export_snapshot(data_dir).await {
+        Ok(()) => {
+            if let Ok(mut state) = SNAPSHOT_STATE.lock() {
+                state.0 = false;
+                state.1 = Some(std::time::Instant::now());
+            }
+        }
+        Err(e) => tracing::debug!(error = %e, "live snapshot refresh failed"),
     }
 }
 
@@ -1366,7 +1441,8 @@ async fn try_sync(
             if let Err(e) = store.mark_synced(ids).await.map_err(|e| e.to_string()) {
                 tracing::error!(error = %e, "failed to mark matches as synced");
             }
-            refresh_snapshot(store, data_dir).await;
+            // Sync flips `synced` flags — GUI must see that promptly.
+            refresh_snapshot_force(store, data_dir).await;
         }
         Err(e) => tracing::error!(error = %e, "sync upload failed"),
     }

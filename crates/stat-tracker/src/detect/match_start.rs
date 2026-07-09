@@ -1,22 +1,34 @@
-use image::DynamicImage;
+use image::{DynamicImage, RgbImage};
 
 use super::GamePhase;
 
+/// Detect map-vote / hero-ban / hero-select phase.
+///
+/// Converts the frame to RGB once; detectors share that buffer (P6).
 pub fn detect_phase(img: &DynamicImage) -> GamePhase {
-    if let Some(phase) = detect_map_vote(img) {
+    let rgb = img.to_rgb8();
+    detect_phase_with_rgb(img, &rgb)
+}
+
+/// Same as [`detect_phase`] when the caller already holds an RGB conversion
+/// (e.g. poll tick that also runs banner detection on the same frame).
+pub fn detect_phase_with_rgb(img: &DynamicImage, rgb: &RgbImage) -> GamePhase {
+    if let Some(phase) = detect_map_vote(img, rgb) {
         return phase;
     }
-    if detect_hero_ban(img) {
+    if detect_hero_ban(img, rgb) {
         return GamePhase::HeroBan;
     }
-    if detect_hero_select(img) {
+    if detect_hero_select(img, rgb) {
         return GamePhase::HeroSelect;
     }
     GamePhase::Unknown
 }
 
-fn detect_map_vote(img: &DynamicImage) -> Option<GamePhase> {
-    let rgb = img.to_rgb8();
+/// Pixel-scan stride: ratio tests tolerate 1-in-2 sampling and cut CPU ~4×.
+const SCAN_STRIDE: u32 = 2;
+
+fn detect_map_vote(img: &DynamicImage, rgb: &RgbImage) -> Option<GamePhase> {
     let (w, h) = rgb.dimensions();
 
     // Map vote screen in OW2 has a dark blue/navy background with slight gradient.
@@ -27,8 +39,8 @@ fn detect_map_vote(img: &DynamicImage) -> Option<GamePhase> {
     let mut total = 0u32;
 
     // Sample the top quarter and side margins (avoiding the map cards in center)
-    for y in 0..(h / 4) {
-        for x in 0..w {
+    for y in (0..(h / 4)).step_by(SCAN_STRIDE as usize) {
+        for x in (0..w).step_by(SCAN_STRIDE as usize) {
             let pixel = rgb.get_pixel(x, y);
             let [r, g, b] = pixel.0;
             total += 1;
@@ -64,8 +76,7 @@ fn detect_map_vote(img: &DynamicImage) -> Option<GamePhase> {
     }
 }
 
-fn detect_hero_ban(img: &DynamicImage) -> bool {
-    let rgb = img.to_rgb8();
+fn detect_hero_ban(img: &DynamicImage, rgb: &RgbImage) -> bool {
     let (w, h) = rgb.dimensions();
 
     // Hero ban screen has a distinctive red/orange tint in the header area
@@ -75,8 +86,8 @@ fn detect_hero_ban(img: &DynamicImage) -> bool {
     let mut dark_count = 0u32;
     let mut total = 0u32;
 
-    for y in 0..header_h {
-        for x in 0..w {
+    for y in (0..header_h).step_by(SCAN_STRIDE as usize) {
+        for x in (0..w).step_by(SCAN_STRIDE as usize) {
             let pixel = rgb.get_pixel(x, y);
             let [r, g, b] = pixel.0;
             total += 1;
@@ -117,8 +128,7 @@ fn detect_hero_ban(img: &DynamicImage) -> bool {
     }
 }
 
-fn detect_hero_select(img: &DynamicImage) -> bool {
-    let rgb = img.to_rgb8();
+fn detect_hero_select(img: &DynamicImage, rgb: &RgbImage) -> bool {
     let (w, h) = rgb.dimensions();
 
     // Hero select screen characteristics:
@@ -131,8 +141,8 @@ fn detect_hero_select(img: &DynamicImage) -> bool {
     let mut dark_header = 0u32;
     let mut header_total = 0u32;
 
-    for y in 0..header_h {
-        for x in 0..w {
+    for y in (0..header_h).step_by(SCAN_STRIDE as usize) {
+        for x in (0..w).step_by(SCAN_STRIDE as usize) {
             let pixel = rgb.get_pixel(x, y);
             let [r, g, b] = pixel.0;
             header_total += 1;
@@ -153,8 +163,8 @@ fn detect_hero_select(img: &DynamicImage) -> bool {
 
     // Check for high color variance in the bottom half (hero grid)
     let bottom_start = h / 2;
-    let step_x = w / 50;
-    let step_y = (h - bottom_start) / 20;
+    let step_x = (w / 50).max(1);
+    let step_y = ((h - bottom_start) / 20).max(1);
     let mut colors: Vec<[u8; 3]> = Vec::new();
 
     for sy in 0..20 {

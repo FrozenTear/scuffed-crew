@@ -100,6 +100,16 @@ impl PortraitMatcher {
 
     pub fn match_player_hero(&self, scoreboard: &DynamicImage) -> Option<(String, f64, usize)> {
         let team_size = detect_team_size(scoreboard);
+        self.match_player_hero_with_team_size(scoreboard, team_size)
+    }
+
+    /// Like [`Self::match_player_hero`] when the caller already detected team size
+    /// (avoids a second full scoreboard saturation scan — P7).
+    pub fn match_player_hero_with_team_size(
+        &self,
+        scoreboard: &DynamicImage,
+        team_size: usize,
+    ) -> Option<(String, f64, usize)> {
         let player_row = detect_player_row_inner(scoreboard, team_size);
         let crops = extract_portrait_crops_inner(scoreboard, team_size);
 

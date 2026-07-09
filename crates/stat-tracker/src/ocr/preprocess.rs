@@ -245,16 +245,19 @@ pub fn columns_with_offset(offset: f64) -> StatColumns {
 /// 6 stat columns by their characteristic spacing pattern (3 narrow E/A/D, then
 /// 3 wider DMG/H/MIT). Returns the offset from the fallback E position.
 pub fn detect_column_offset(scoreboard: &DynamicImage) -> f64 {
-    let rgb = scoreboard.to_rgb8();
-    let (w, h) = rgb.dimensions();
+    let (w, h) = (scoreboard.width(), scoreboard.height());
 
     let scan_start = (h as f64 * 0.005) as u32;
     let scan_end = (h as f64 * 0.025).max(15.0) as u32;
-    let scan_rows = scan_end.saturating_sub(scan_start).max(1);
+    let scan_h = scan_end.saturating_sub(scan_start).max(1);
+    // Only convert the thin header strip to RGB — not the whole scoreboard.
+    let header = scoreboard.crop_imm(0, scan_start, w, scan_h.min(h.saturating_sub(scan_start)));
+    let rgb = header.to_rgb8();
+    let scan_rows = rgb.height().max(1);
 
     // Count dark pixels per column in the header area
     let mut col_dark = vec![0u32; w as usize];
-    for y in scan_start..scan_end.min(h) {
+    for y in 0..rgb.height() {
         for x in 0..w {
             let px = rgb.get_pixel(x, y);
             let brightness = (px.0[0] as u32 + px.0[1] as u32 + px.0[2] as u32) / 3;

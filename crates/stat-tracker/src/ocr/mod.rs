@@ -6,7 +6,7 @@ use std::io::Cursor;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
-use image::DynamicImage;
+use image::{DynamicImage, ImageEncoder};
 use rayon::prelude::*;
 
 use crate::detect::hero_portrait::detect_team_size;
@@ -32,22 +32,13 @@ pub fn set_debug_ocr(enabled: bool) {
 }
 
 fn debug_ocr_enabled() -> bool {
-    if DEBUG_OCR.load(std::sync::atomic::Ordering::Relaxed) {
-        return true;
-    }
-    if matches!(
-        std::env::var("STAT_TRACKER_DEBUG_OCR").as_deref(),
-        Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES")
-    ) {
-        return true;
-    }
-    // Config flag without requiring main.rs to call set_debug_ocr (Fable owns main).
-    static FROM_CONFIG: OnceLock<bool> = OnceLock::new();
-    *FROM_CONFIG.get_or_init(|| {
-        crate::config::Config::load()
-            .map(|c| c.debug_ocr)
-            .unwrap_or(false)
-    })
+    // The daemon wires the config flag through set_debug_ocr at startup;
+    // the env var covers GUI/examples that never call it.
+    DEBUG_OCR.load(std::sync::atomic::Ordering::Relaxed)
+        || matches!(
+            std::env::var("STAT_TRACKER_DEBUG_OCR").as_deref(),
+            Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES")
+        )
 }
 
 fn debug_dir() -> Option<PathBuf> {
@@ -121,9 +112,15 @@ fn ocr_with(
 }
 
 /// Encode a preprocessed grayscale image to an in-memory PNG for Tesseract.
-fn encode_png(img: image::GrayImage) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
+fn encode_png(img: &image::GrayImage) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
     let mut buf = Vec::new();
-    DynamicImage::ImageLuma8(img).write_to(&mut Cursor::new(&mut buf), image::ImageFormat::Png)?;
+    // Encode from the buffer without cloning the GrayImage into a DynamicImage.
+    image::codecs::png::PngEncoder::new(&mut buf).write_image(
+        img.as_raw(),
+        img.width(),
+        img.height(),
+        image::ExtendedColorType::L8,
+    )?;
     Ok(buf)
 }
 
@@ -164,21 +161,28 @@ fn tessdata_path_for_lang(lang: &str) -> Option<PathBuf> {
 }
 
 fn tessdata_lang() -> &'static str {
-    let has_koverwatch = dirs::data_dir()
-        .map(|d| {
-            d.join("scuffed-stat-tracker")
-                .join("tessdata")
-                .join("koverwatch.traineddata")
-                .exists()
-        })
-        .unwrap_or(false);
-    if has_koverwatch { "koverwatch" } else { "eng" }
+    static LANG: OnceLock<&'static str> = OnceLock::new();
+    LANG.get_or_init(|| {
+        let has_koverwatch = dirs::data_dir()
+            .map(|d| {
+                d.join("scuffed-stat-tracker")
+                    .join("tessdata")
+                    .join("koverwatch.traineddata")
+                    .exists()
+            })
+            .unwrap_or(false);
+        if has_koverwatch {
+            "koverwatch"
+        } else {
+            "eng"
+        }
+    })
 }
 
 pub fn recognize_region(
     img: &DynamicImage,
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-    let png_buf = encode_png(preprocess::prepare(img))?;
+    let png_buf = encode_png(&preprocess::prepare(img))?;
     let (text, _conf) = ocr_with(tessdata_lang(), "7", None, &png_buf)?;
     Ok(text)
 }
@@ -191,7 +195,7 @@ pub fn recognize_prepared(
     psm: &str,
     whitelist: Option<&str>,
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-    let png_buf = encode_png(img.clone())?;
+    let png_buf = encode_png(img)?;
     let (text, _conf) = ocr_with(tessdata_lang(), psm, whitelist, &png_buf)?;
     Ok(text)
 }
@@ -209,7 +213,8 @@ fn recognize_cell_with_whitelist(
     img: &DynamicImage,
     whitelist: &str,
 ) -> Result<CellOcrResult, Box<dyn std::error::Error + Send + Sync>> {
-    let png_buf = encode_png(preprocess::prepare_cell(img))?;
+    let prepared = preprocess::prepare_cell(img);
+    let png_buf = encode_png(&prepared)?;
     let (text, confidence) = ocr_with("eng", "7", Some(whitelist), &png_buf)?;
 
     Ok(CellOcrResult {
@@ -222,7 +227,8 @@ fn recognize_cell_with_whitelist(
 pub fn recognize_name(
     img: &DynamicImage,
 ) -> Result<CellOcrResult, Box<dyn std::error::Error + Send + Sync>> {
-    let png_buf = encode_png(preprocess::prepare_name_cell(img))?;
+    let prepared = preprocess::prepare_name_cell(img);
+    let png_buf = encode_png(&prepared)?;
     let (text, confidence) = ocr_with(tessdata_lang(), "7", None, &png_buf)?;
 
     Ok(CellOcrResult {
@@ -303,14 +309,23 @@ pub fn recognize_scoreboard_cells_with_team_size(
         tracing::debug!(detected, "auto-detected team size");
         detected
     });
+    recognize_scoreboard_cells_pre_cropped(&cropped, team_size)
+}
+
+/// OCR a scoreboard that the caller has already cropped (and optionally already
+/// measured for team size). Avoids a second full-frame scoreboard crop (P7).
+pub fn recognize_scoreboard_cells_pre_cropped(
+    cropped: &DynamicImage,
+    team_size: usize,
+) -> Vec<RowOcrResult> {
     let total_rows = team_size * 2;
-    let columns = calibrate_columns(&cropped, team_size);
+    let columns = calibrate_columns(cropped, team_size);
 
     tracing::debug!(team_size, total_rows, ?columns, "scoreboard layout");
 
     // Crop all rows first (fast, no OCR), then OCR all rows in parallel.
     let row_images: Vec<(usize, DynamicImage)> = (0..total_rows)
-        .filter_map(|i| preprocess::crop_player_row(&cropped, i, team_size).map(|img| (i, img)))
+        .filter_map(|i| preprocess::crop_player_row(cropped, i, team_size).map(|img| (i, img)))
         .collect();
 
     let mut results: Vec<(usize, RowOcrResult)> = ocr_pool().install(|| {
@@ -326,7 +341,7 @@ pub fn recognize_scoreboard_cells_with_team_size(
     if let Some(dir) = debug_dir() {
         // Prefer dumping the already-cropped board and row crops; full stage
         // re-preprocess only when the debug flag is on (still expensive, but opt-in).
-        preprocess::save_debug_stages(&cropped, &dir);
+        preprocess::save_debug_stages(cropped, &dir);
         for (idx, row_img) in &row_images {
             let _ = row_img.save(dir.join(format!("row_{idx:02}.png")));
         }

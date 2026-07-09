@@ -1,4 +1,4 @@
-use image::DynamicImage;
+use image::{DynamicImage, RgbImage};
 
 use super::MatchOutcome;
 
@@ -32,7 +32,16 @@ pub fn detect_outcome(img: &DynamicImage) -> MatchOutcome {
 /// pixel scan cost more than the small-crop OCR it was guarding. The Otsu-based
 /// `read_result_word` is color-scheme-independent.
 pub fn detect_outcome_signal(img: &DynamicImage) -> Option<(MatchOutcome, OutcomeSource)> {
-    if let Some(outcome) = detect_banner(img) {
+    let rgb = img.to_rgb8();
+    detect_outcome_signal_with_rgb(img, &rgb)
+}
+
+/// Outcome detection when the caller already converted the frame to RGB (P6).
+pub fn detect_outcome_signal_with_rgb(
+    img: &DynamicImage,
+    rgb: &RgbImage,
+) -> Option<(MatchOutcome, OutcomeSource)> {
+    if let Some(outcome) = detect_banner(rgb) {
         return Some((outcome, OutcomeSource::Banner));
     }
     match read_result_word(img) {
@@ -56,13 +65,14 @@ pub fn detect_outcome_signal(img: &DynamicImage) -> Option<(MatchOutcome, Outcom
 /// `detect_outcome` returns `Unknown` and no outcome was carried over from the
 /// poller.
 pub fn detect_outcome_text(img: &DynamicImage) -> MatchOutcome {
-    let (w, h) = (img.width(), img.height());
-    // Top-center band where OW2 renders the result header.
-    let x = w * 30 / 100;
-    let y = h * 2 / 100;
-    let band_w = w * 40 / 100;
-    let band_h = h * 22 / 100;
-    if band_w == 0 || band_h == 0 || x + band_w > w || y + band_h > h {
+    let (fw, fh) = (img.width(), img.height());
+    let (gx, gy, gw, gh) = crate::ocr::preprocess::game_rect_16_9(fw, fh);
+    // Top-center band where OW2 renders the result header (1/1000ths of 16:9).
+    let x = gx + gw * 300 / 1000;
+    let y = gy + gh * 20 / 1000;
+    let band_w = gw * 400 / 1000;
+    let band_h = gh * 220 / 1000;
+    if band_w == 0 || band_h == 0 || x + band_w > fw || y + band_h > fh {
         return MatchOutcome::Unknown;
     }
     let region = img.crop_imm(x, y, band_w, band_h);
@@ -94,20 +104,24 @@ pub fn detect_outcome_text(img: &DynamicImage) -> MatchOutcome {
 // OW2 banners saturate >40% of the screen with a very specific color range.
 // Previous thresholds (15%, loose color ranges) caused false positives on
 // websites with warm/red colors during normal browsing.
-fn detect_banner(img: &DynamicImage) -> Option<MatchOutcome> {
-    let rgb = img.to_rgb8();
+//
+// Pixel scan uses stride 2 — ratio tests tolerate 1-in-2 sampling.
+fn detect_banner(rgb: &RgbImage) -> Option<MatchOutcome> {
     let (w, h) = rgb.dimensions();
+    let (gx, gy, gw, gh) = crate::ocr::preprocess::game_rect_16_9(w, h);
 
-    // Sample the middle horizontal band (30%-70% height) where the banner
-    // text and color flood are most consistent, avoiding HUD/taskbar edges.
-    let y_start = h * 30 / 100;
-    let y_end = h * 70 / 100;
+    // Sample the middle horizontal band (30%-70% of the 16:9 playfield) where
+    // the banner colour flood is most consistent.
+    let y_start = gy + gh * 30 / 100;
+    let y_end = gy + gh * 70 / 100;
+    let x_end = gx + gw;
     let mut gold_count = 0u32;
     let mut red_count = 0u32;
     let mut total = 0u32;
+    const STRIDE: u32 = 2;
 
-    for y in y_start..y_end {
-        for x in 0..w {
+    for y in (y_start..y_end).step_by(STRIDE as usize) {
+        for x in (gx..x_end).step_by(STRIDE as usize) {
             let [r, g, b] = rgb.get_pixel(x, y).0;
             total += 1;
             // OW2 victory gold: saturated warm gold, green channel well above blue
@@ -167,12 +181,13 @@ fn read_rank_screen_result(img: &DynamicImage) -> MatchOutcome {
 /// text block spans x 13.5-19%, y 4-8.5%; the crop starts right of the title
 /// (a clipped title glyph is harmless — we only search for map names).
 pub fn read_accolade_map(img: &DynamicImage) -> Option<String> {
-    let (w, h) = (img.width(), img.height());
-    let x = w * 125 / 1000;
-    let y = h * 35 / 1000;
-    let cw = w * 325 / 1000;
-    let ch = h * 55 / 1000;
-    if cw == 0 || ch == 0 || x + cw > w || y + ch > h {
+    let (fw, fh) = (img.width(), img.height());
+    let (gx, gy, gw, gh) = crate::ocr::preprocess::game_rect_16_9(fw, fh);
+    let x = gx + gw * 125 / 1000;
+    let y = gy + gh * 35 / 1000;
+    let cw = gw * 325 / 1000;
+    let ch = gh * 55 / 1000;
+    if cw == 0 || ch == 0 || x + cw > fw || y + ch > fh {
         return None;
     }
     let crop = img.crop_imm(x, y, cw, ch);
@@ -186,8 +201,8 @@ pub fn read_accolade_map(img: &DynamicImage) -> Option<String> {
     map
 }
 
-/// OCR a crop (given in 1/1000ths of the 16:9 frame) prepared as title text,
-/// and map VICTORY/DEFEAT/DRAW to an outcome.
+/// OCR a crop (given in 1/1000ths of the 16:9 playfield via [`game_rect_16_9`])
+/// prepared as title text, and map VICTORY/DEFEAT/DRAW to an outcome.
 fn ocr_outcome_word(
     img: &DynamicImage,
     x_pm: u32,
@@ -196,15 +211,23 @@ fn ocr_outcome_word(
     h_pm: u32,
     context: &str,
 ) -> MatchOutcome {
-    let (w, h) = (img.width(), img.height());
-    let x = w * x_pm / 1000;
-    let y = h * y_pm / 1000;
-    let cw = w * w_pm / 1000;
-    let ch = h * h_pm / 1000;
-    if cw == 0 || ch == 0 || x + cw > w || y + ch > h {
+    let (fw, fh) = (img.width(), img.height());
+    let (gx, gy, gw, gh) = crate::ocr::preprocess::game_rect_16_9(fw, fh);
+    let x = gx + gw * x_pm / 1000;
+    let y = gy + gh * y_pm / 1000;
+    let cw = gw * w_pm / 1000;
+    let ch = gh * h_pm / 1000;
+    if cw == 0 || ch == 0 || x + cw > fw || y + ch > fh {
         return MatchOutcome::Unknown;
     }
     let crop = img.crop_imm(x, y, cw, ch);
+
+    // P8: most idle ticks are in-game — the title crop is near-black. Skip the
+    // Lanczos+Otsu+Tess pipeline when the crop has no bright glyph mass.
+    if !title_crop_has_signal(&crop) {
+        return MatchOutcome::Unknown;
+    }
+
     let prepared = crate::ocr::preprocess::prepare_title(&crop);
 
     match crate::ocr::recognize_prepared(&prepared, "7", Some("ABCDEFGHIJKLMNOPQRSTUVWXYZ")) {
@@ -230,6 +253,38 @@ fn ocr_outcome_word(
             MatchOutcome::Unknown
         }
     }
+}
+
+/// Cheap pre-gate on a title crop: skip OCR only when the crop is near-black
+/// (no glyph can be present). Deliberately NOT a "does this look like a title"
+/// test — measured on the outcome fixtures, bright in-game frames light up
+/// this region far more than a real DEFEAT title on a custom magenta UI theme
+/// does (0.6% of samples at r+g+b>480 vs 15–22% on gameplay frames), so
+/// brightness cannot distinguish title from game world; anything non-black
+/// must go to the color-independent Otsu+Tesseract path. Max-channel is the
+/// theme-independent glyph test: real titles measure ≥13% at >200 (magenta
+/// defeat: 23%), while the rank crop is exactly 0% on in-game/transition
+/// frames — that skip is the actual per-tick saving.
+fn title_crop_has_signal(crop: &DynamicImage) -> bool {
+    let rgb = crop.to_rgb8();
+    let (w, h) = rgb.dimensions();
+    if w == 0 || h == 0 {
+        return false;
+    }
+    let mut lit = 0u32;
+    let mut total = 0u32;
+    // Sample ~every 4th pixel — enough for a go/no-go decision.
+    for y in (0..h).step_by(4) {
+        for x in (0..w).step_by(4) {
+            let [r, g, b] = rgb.get_pixel(x, y).0;
+            total += 1;
+            if r.max(g).max(b) > 200 {
+                lit += 1;
+            }
+        }
+    }
+    // 1% threshold = 13–23× below every measured real title.
+    total > 0 && (lit as f32 / total as f32) > 0.01
 }
 
 #[cfg(test)]
