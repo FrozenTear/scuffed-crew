@@ -4,5 +4,6 @@ pub mod detect;
 pub mod ocr;
 pub mod parse;
 pub mod setup;
+pub mod stats;
 pub mod storage;
 pub mod sync;

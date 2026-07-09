@@ -26,11 +26,14 @@ pub fn try_create_tray() -> Option<TrayHandle> {
     })
 }
 
-pub fn poll_quit(quit_id: &MenuId) -> bool {
-    if let Ok(event) = MenuEvent::receiver().try_recv() {
-        return event.id() == quit_id;
+/// Block until the tray Quit item is activated (no 1 Hz wakeups).
+pub fn wait_quit(quit_id: &MenuId) {
+    let rx = MenuEvent::receiver();
+    while let Ok(event) = rx.recv() {
+        if event.id == *quit_id {
+            return;
+        }
     }
-    false
 }
 
 fn create_icon() -> Icon {

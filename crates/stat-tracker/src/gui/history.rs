@@ -3,6 +3,8 @@ use dioxus::prelude::*;
 use stat_tracker::config::Config;
 use stat_tracker::storage::{self, LocalStore, PersonalMatch, StoreCommand};
 
+use super::live_data;
+
 /// One row per game, grouped by day, with an expandable detail view: the
 /// session's capture timeline plus manual outcome editing / deletion (applied
 /// directly when the store is free, queued to the daemon otherwise).
@@ -19,18 +21,9 @@ pub fn MatchesPanel() -> Element {
         let data_dir = config().data_dir.clone();
         let _tick = refresh_tick();
         async move {
-            match LocalStore::open(&data_dir).await {
-                Ok(store) => {
-                    db_locked.set(false);
-                    store.get_all_matches().await.unwrap_or_default()
-                }
-                Err(_) => {
-                    db_locked.set(true);
-                    storage::read_snapshot(&data_dir)
-                        .map(|s| s.matches)
-                        .unwrap_or_else(|| storage::read_match_log(&data_dir))
-                }
-            }
+            let live = live_data::fetch_live_matches(&data_dir).await;
+            db_locked.set(live.db_locked);
+            live.matches
         }
     });
 
@@ -66,39 +59,45 @@ pub fn MatchesPanel() -> Element {
         });
     };
 
-    let binding = rows.read();
-    let all: &[PersonalMatch] = binding.as_deref().unwrap_or(&[]);
-    let games = storage::latest_per_game(all.to_vec());
-    let game_count = games.len();
+    // Recompute only when the rows resource or selection changes — not on every
+    // unrelated parent re-render. One clone of the match list; detail filter
+    // runs before `latest_per_game` consumes ownership.
+    let derived = use_memo(move || {
+        let selected_sid = selected();
+        let binding = rows.read();
+        let all: Vec<PersonalMatch> = binding.as_deref().unwrap_or(&[]).to_vec();
 
-    // Group consecutive games (newest first) by local calendar day.
-    let mut groups: Vec<(String, Vec<PersonalMatch>)> = Vec::new();
-    for g in games {
-        let dt: chrono::DateTime<chrono::Utc> = g.played_at.into();
-        let day = dt
-            .with_timezone(&chrono::Local)
-            .format("%A %d %B")
-            .to_string();
-        match groups.last_mut() {
-            Some((d, v)) if *d == day => v.push(g),
-            _ => groups.push((day, vec![g])),
+        let detail_snaps: Vec<PersonalMatch> = selected_sid
+            .as_deref()
+            .map(|sid| {
+                let mut v: Vec<PersonalMatch> = all
+                    .iter()
+                    .filter(|m| m.session_id == sid)
+                    .cloned()
+                    .collect();
+                v.reverse();
+                v
+            })
+            .unwrap_or_default();
+
+        let games = storage::latest_per_game(all);
+        let game_count = games.len();
+        let mut groups: Vec<(String, Vec<PersonalMatch>)> = Vec::new();
+        for g in games {
+            let dt: chrono::DateTime<chrono::Utc> = g.played_at.into();
+            let day = dt
+                .with_timezone(&chrono::Local)
+                .format("%A %d %B")
+                .to_string();
+            match groups.last_mut() {
+                Some((d, v)) if *d == day => v.push(g),
+                _ => groups.push((day, vec![g])),
+            }
         }
-    }
-
+        (game_count, groups, detail_snaps)
+    });
+    let (game_count, groups, detail_snaps) = derived();
     let selected_sid = selected();
-    // Capture timeline of the selected session, oldest first.
-    let detail_snaps: Vec<PersonalMatch> = selected_sid
-        .as_deref()
-        .map(|sid| {
-            let mut v: Vec<PersonalMatch> = all
-                .iter()
-                .filter(|m| m.session_id == sid)
-                .cloned()
-                .collect();
-            v.reverse();
-            v
-        })
-        .unwrap_or_default();
 
     rsx! {
         div { class: "panel panel-wide",

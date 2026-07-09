@@ -21,6 +21,11 @@ pub struct Config {
     /// disables the gate.
     #[serde(default = "default_game_process_names")]
     pub game_process_names: Vec<String>,
+    /// When true, every Tab OCR writes intermediate PNGs under `{data_dir}/debug/`.
+    /// Off by default — the pipeline recomputes preprocess just to dump stages and
+    /// dominated capture latency. Also enabled by env `STAT_TRACKER_DEBUG_OCR=1`.
+    #[serde(default)]
+    pub debug_ocr: bool,
 }
 
 fn default_session_window_secs() -> u64 {
@@ -114,7 +119,24 @@ impl Config {
             }
         }
 
+        // Env overlay for OCR debug dumps (config flag OR STAT_TRACKER_DEBUG_OCR=1).
+        if Self::env_truthy("STAT_TRACKER_DEBUG_OCR") {
+            config.debug_ocr = true;
+        }
+
         Ok(config)
+    }
+
+    /// Whether OCR should write debug PNGs this process (config and/or env).
+    pub fn debug_ocr_enabled(&self) -> bool {
+        self.debug_ocr || Self::env_truthy("STAT_TRACKER_DEBUG_OCR")
+    }
+
+    fn env_truthy(key: &str) -> bool {
+        matches!(
+            std::env::var(key).as_deref(),
+            Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES")
+        )
     }
 
     /// Find a `--key value` pair in std::env::args().
@@ -138,6 +160,7 @@ impl Default for Config {
             auto_detect: AutoDetectConfig::default(),
             session_window_secs: default_session_window_secs(),
             game_process_names: default_game_process_names(),
+            debug_ocr: false,
         }
     }
 }

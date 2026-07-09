@@ -7,6 +7,7 @@ pub fn SettingsPanel() -> Element {
     let mut config = use_signal(|| Config::load().unwrap_or_default());
     let outputs = use_signal(|| stat_tracker::capture::wayshot::list_outputs().unwrap_or_default());
     let mut toast: Signal<Option<(String, bool)>> = use_signal(|| None);
+    let mut confirm_clear = use_signal(|| false);
 
     let mut player_name = use_signal(|| config().player_name.clone().unwrap_or_default());
     let mut capture_output = use_signal(|| config().capture_output.clone().unwrap_or_default());
@@ -56,14 +57,23 @@ pub fn SettingsPanel() -> Element {
             },
             session_window_secs: config().session_window_secs,
             game_process_names: config().game_process_names.clone(),
+            debug_ocr: config().debug_ocr,
         };
 
         match save_config(&new_config) {
             Ok(()) => {
+                let daemon_up = super::daemon::is_daemon_running(&new_config.data_dir);
                 config.set(new_config);
-                toast.set(Some(("Settings saved!".into(), true)));
+                // Daemon reads config once at start — surface that restarts are
+                // required so player name / output / auto-detect actually apply.
+                let msg = if daemon_up {
+                    "Settings saved — restart the daemon for changes to take effect"
+                } else {
+                    "Settings saved!"
+                };
+                toast.set(Some((msg.into(), true)));
                 spawn(async move {
-                    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                    tokio::time::sleep(std::time::Duration::from_secs(4)).await;
                     toast.set(None);
                 });
             }
@@ -193,47 +203,97 @@ pub fn SettingsPanel() -> Element {
 
             div { class: "card card-warning",
                 h3 { "Data Management" }
-                p { class: "text-dim text-sm", "Clear all stored match data, sessions, and logs. This cannot be undone. If the daemon is running, restart it after clearing." }
-                div { class: "actions",
-                    button {
-                        class: "btn btn-danger",
-                        onclick: {
-                            let data_dir = config().data_dir.clone();
-                            move |_| {
-                                let data_dir = data_dir.clone();
-                                spawn(async move {
-                                    let result = async {
-                                        match stat_tracker::storage::LocalStore::open(&data_dir).await {
-                                            Ok(store) => {
-                                                store.clear_all_data().await?;
-                                                stat_tracker::storage::clear_match_log(&data_dir);
-                                            }
-                                            Err(_) => {
-                                                stat_tracker::storage::force_clear_data_dir(&data_dir)?;
-                                            }
-                                        }
-                                        Ok::<(), Box<dyn std::error::Error>>(())
-                                    }.await;
-                                    match result {
-                                        Ok(()) => {
-                                            toast.set(Some(("All match data cleared!".into(), true)));
-                                            spawn(async move {
-                                                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-                                                toast.set(None);
-                                            });
-                                        }
-                                        Err(e) => {
-                                            toast.set(Some((format!("Clear failed: {e}"), false)));
-                                            spawn(async move {
-                                                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                                                toast.set(None);
-                                            });
-                                        }
-                                    }
-                                });
+                p { class: "text-dim text-sm",
+                    "Clear all stored match data, sessions, and logs. This cannot be undone. "
+                    "Stop the daemon first — clearing while it holds the database open is unsafe."
+                }
+                {
+                    let daemon_up = super::daemon::is_daemon_running(&config().data_dir);
+                    rsx! {
+                        if daemon_up {
+                            p { class: "text-dim text-sm",
+                                "Daemon is running — stop it from the Dashboard before clearing data."
                             }
-                        },
-                        "Clear All Match Data"
+                            div { class: "actions",
+                                button {
+                                    class: "btn btn-danger",
+                                    disabled: true,
+                                    "Clear All Match Data"
+                                }
+                            }
+                        } else {
+                            if confirm_clear() {
+                                p { class: "text-dim text-sm",
+                                    "Really delete all local match history? This cannot be undone."
+                                }
+                            }
+                            div { class: "actions",
+                                if confirm_clear() {
+                                    button {
+                                        class: "btn btn-secondary",
+                                        onclick: move |_| confirm_clear.set(false),
+                                        "Cancel"
+                                    }
+                                    button {
+                                        class: "btn btn-danger",
+                                        onclick: {
+                                            let data_dir = config().data_dir.clone();
+                                            move |_| {
+                                                let data_dir = data_dir.clone();
+                                                confirm_clear.set(false);
+                                                spawn(async move {
+                                                    // Re-check: daemon may have started between clicks.
+                                                    if super::daemon::is_daemon_running(&data_dir) {
+                                                        toast.set(Some((
+                                                            "Daemon started while confirming — stop it first".into(),
+                                                            false,
+                                                        )));
+                                                        return;
+                                                    }
+                                                    let result = async {
+                                                        match stat_tracker::storage::LocalStore::open(&data_dir).await {
+                                                            Ok(store) => {
+                                                                store.clear_all_data().await?;
+                                                                stat_tracker::storage::clear_match_log(&data_dir);
+                                                            }
+                                                            Err(_) => {
+                                                                // No daemon — force-clear is safe when the store
+                                                                // can't be opened for other reasons.
+                                                                stat_tracker::storage::force_clear_data_dir(&data_dir)?;
+                                                            }
+                                                        }
+                                                        Ok::<(), Box<dyn std::error::Error>>(())
+                                                    }.await;
+                                                    match result {
+                                                        Ok(()) => {
+                                                            toast.set(Some(("All match data cleared!".into(), true)));
+                                                            spawn(async move {
+                                                                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                                                                toast.set(None);
+                                                            });
+                                                        }
+                                                        Err(e) => {
+                                                            toast.set(Some((format!("Clear failed: {e}"), false)));
+                                                            spawn(async move {
+                                                                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                                                                toast.set(None);
+                                                            });
+                                                        }
+                                                    }
+                                                });
+                                            }
+                                        },
+                                        "Yes, delete everything"
+                                    }
+                                } else {
+                                    button {
+                                        class: "btn btn-danger",
+                                        onclick: move |_| confirm_clear.set(true),
+                                        "Clear All Match Data"
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }

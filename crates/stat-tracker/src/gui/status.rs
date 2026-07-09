@@ -1,9 +1,10 @@
 use dioxus::prelude::*;
 
+use stat_tracker::capture::CaptureBackend;
 use stat_tracker::config::Config;
-use stat_tracker::storage::LocalStore;
 
 use super::daemon::DaemonCard;
+use super::live_data;
 
 #[component]
 pub fn StatusPanel() -> Element {
@@ -15,34 +16,40 @@ pub fn StatusPanel() -> Element {
         let data_dir = config().data_dir.clone();
         let _tick = refresh_tick();
         async move {
-            match LocalStore::open(&data_dir).await {
-                Ok(store) => {
-                    db_locked.set(false);
-                    load_stats(&store).await
-                }
-                // Daemon holds the store lock — serve the dashboard from its
-                // live snapshot. Only flag "locked" when no snapshot exists
-                // (daemon predating the snapshot feature).
-                Err(_) => match stat_tracker::storage::read_snapshot(&data_dir) {
-                    Some(snap) => {
-                        db_locked.set(false);
-                        Some(stats_from_snapshot(&snap))
-                    }
-                    None => {
-                        db_locked.set(true);
-                        None
-                    }
-                },
+            let live = live_data::fetch_live_matches(&data_dir).await;
+            // Snapshot-only path is still "live" data; only flag locked when we
+            // have nothing at all (old daemon, no snapshot).
+            if live.matches.is_empty() && live.db_locked {
+                db_locked.set(true);
+                None
+            } else {
+                db_locked.set(false);
+                Some(stats_from_rows(live.matches))
             }
         }
     });
 
-    let outputs = use_signal(|| stat_tracker::capture::wayshot::list_outputs().unwrap_or_default());
+    let outputs = use_resource(move || async move {
+        tokio::task::spawn_blocking(|| {
+            stat_tracker::capture::wayshot::list_outputs().unwrap_or_default()
+        })
+        .await
+        .unwrap_or_default()
+    });
+
+    let backend_label = use_resource(move || async move {
+        match stat_tracker::capture::detect_backend().await {
+            CaptureBackend::Wayshot => "libwayshot (Wayland)".to_string(),
+            CaptureBackend::Portal => "XDG Desktop Portal".to_string(),
+            CaptureBackend::None => "none available".to_string(),
+        }
+    });
 
     let selected_output = config().capture_output.clone().unwrap_or_else(|| {
-        outputs()
-            .first()
-            .cloned()
+        outputs
+            .read()
+            .as_ref()
+            .and_then(|o| o.first().cloned())
             .unwrap_or_else(|| "unknown".into())
     });
 
@@ -126,7 +133,12 @@ pub fn StatusPanel() -> Element {
                 }
                 div { class: "stat-row",
                     span { class: "label", "Available outputs" }
-                    span { class: "value", "{outputs().len()}" }
+                    span { class: "value",
+                        {
+                            let n = outputs.read().as_ref().map(|o| o.len()).unwrap_or(0);
+                            rsx! { "{n}" }
+                        }
+                    }
                 }
                 div { class: "stat-row",
                     span { class: "label", "Last capture" }
@@ -142,7 +154,16 @@ pub fn StatusPanel() -> Element {
                 }
                 div { class: "stat-row",
                     span { class: "label", "Backend" }
-                    span { class: "value", "libwayshot (Wayland)" }
+                    span { class: "value",
+                        {
+                            let label = backend_label
+                                .read()
+                                .as_ref()
+                                .cloned()
+                                .unwrap_or_else(|| "…".into());
+                            rsx! { "{label}" }
+                        }
+                    }
                 }
             }
 
@@ -221,15 +242,6 @@ struct DashboardStats {
     last_capture_time: Option<String>,
     /// The most recent games (final snapshot per session), newest first.
     recent: Vec<stat_tracker::storage::PersonalMatch>,
-}
-
-async fn load_stats(store: &LocalStore) -> Option<DashboardStats> {
-    let rows = store.get_all_matches().await.unwrap_or_default();
-    Some(stats_from_rows(rows))
-}
-
-fn stats_from_snapshot(snap: &stat_tracker::storage::Snapshot) -> DashboardStats {
-    stats_from_rows(snap.matches.clone())
 }
 
 /// Dashboard numbers from the raw snapshot rows (newest first): games are

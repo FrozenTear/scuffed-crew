@@ -210,43 +210,84 @@ fn detect_player_row_inner(scoreboard: &DynamicImage, team_size: usize) -> Optio
     }
 }
 
-/// Extract hero portrait crops from a scoreboard screenshot.
-/// OW2 Tab scoreboard layout (after crop_scoreboard):
-/// - 5 or 6 player rows per team (5v5 or 6v6)
-/// - Hero portrait is at the left edge of each row
-/// - Rows start ~12% from top
-/// - Portrait occupies roughly leftmost 5-6% of width, square
-fn extract_portrait_crops(scoreboard: &DynamicImage) -> Vec<DynamicImage> {
-    extract_portrait_crops_inner(scoreboard, detect_team_size(scoreboard))
+/// Pixel rectangle of the hero portrait for a scoreboard row.
+///
+/// Coordinates are relative to a scoreboard crop (`crop_scoreboard` output).
+/// `row_idx` is 0-based across both teams (0..team_size*2). Canonical layout
+/// used by portrait matching; call sites that collect portrait references must
+/// use this instead of inlined 5v5-only geometry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PortraitRect {
+    pub x: u32,
+    pub y: u32,
+    pub w: u32,
+    pub h: u32,
 }
 
-fn extract_portrait_crops_inner(scoreboard: &DynamicImage, team_size: usize) -> Vec<DynamicImage> {
-    let (w, h) = (scoreboard.width(), scoreboard.height());
+/// Shared portrait geometry for 5v5 / 6v6 scoreboard crops.
+///
+/// OW2 Tab scoreboard layout (after `crop_scoreboard`):
+/// - 5 or 6 player rows per team
+/// - Hero portrait at the left edge of each row
+/// - Rows start ~12% from top
+/// - Portrait ~leftmost 5–6% of width, square
+/// - One-row team gap between team 1 and team 2
+pub fn portrait_rect(
+    scoreboard_dims: (u32, u32),
+    row_idx: usize,
+    team_size: usize,
+) -> Option<PortraitRect> {
+    let (w, h) = scoreboard_dims;
+    if w == 0 || h == 0 || team_size == 0 {
+        return None;
+    }
+    let total_rows = team_size * 2;
+    if row_idx >= total_rows {
+        return None;
+    }
+
     let portrait_w = w * 6 / 100;
     let portrait_h = portrait_w; // square
     let portrait_x = w / 100;
 
-    // Adjust row height based on team size
-    // 5v5: rows take ~7% of height each, 6v6: rows take ~5.8% each
+    // 5v5: rows take ~7% of height each; 6v6: ~5.8% each
     let row_height = match team_size {
         6 => h * 58 / 1000,
         _ => h * 7 / 100,
     };
     let start_y = h * 12 / 100;
-
-    // Gap between teams scales with team size
+    // Gap between teams scales with team size (one extra row-height of padding)
     let team2_offset = row_height * (team_size as u32 + 1);
 
+    let team = (row_idx / team_size) as u32;
+    let row_in_team = (row_idx % team_size) as u32;
+    let base_y = start_y + if team == 0 { 0 } else { team2_offset };
+    let y = base_y + row_in_team * row_height;
+
+    if y + portrait_h > h || portrait_x + portrait_w > w {
+        return None;
+    }
+
+    Some(PortraitRect {
+        x: portrait_x,
+        y,
+        w: portrait_w,
+        h: portrait_h,
+    })
+}
+
+/// Extract hero portrait crops from a scoreboard screenshot.
+fn extract_portrait_crops(scoreboard: &DynamicImage) -> Vec<DynamicImage> {
+    extract_portrait_crops_inner(scoreboard, detect_team_size(scoreboard))
+}
+
+fn extract_portrait_crops_inner(scoreboard: &DynamicImage, team_size: usize) -> Vec<DynamicImage> {
+    let dims = (scoreboard.width(), scoreboard.height());
     let mut crops = Vec::with_capacity(team_size * 2);
 
-    for team in 0..2u32 {
-        let base_y = start_y + if team == 0 { 0 } else { team2_offset };
-        for row in 0..team_size as u32 {
-            let y = base_y + row * row_height;
-            if y + portrait_h <= h && portrait_x + portrait_w <= w {
-                let crop = scoreboard.crop_imm(portrait_x, y, portrait_w, portrait_h);
-                crops.push(crop);
-            }
+    for row_idx in 0..(team_size * 2) {
+        if let Some(r) = portrait_rect(dims, row_idx, team_size) {
+            crops.push(scoreboard.crop_imm(r.x, r.y, r.w, r.h));
         }
     }
 
@@ -396,5 +437,41 @@ fn unpack_bundled(portraits_dir: &Path) {
 
     if unpacked > 0 {
         tracing::info!(count = unpacked, "unpacked bundled portrait references");
+    }
+}
+
+#[cfg(test)]
+mod portrait_rect_tests {
+    use super::portrait_rect;
+
+    #[test]
+    fn five_v_five_rows_are_spaced() {
+        let dims = (1000u32, 1000u32);
+        let r0 = portrait_rect(dims, 0, 5).expect("row 0");
+        let r1 = portrait_rect(dims, 1, 5).expect("row 1");
+        let r5 = portrait_rect(dims, 5, 5).expect("team2 row 0");
+        assert_eq!(r0.w, r0.h);
+        assert!(r1.y > r0.y);
+        // Team 2 starts after team1 rows + gap (team_size+1 row heights)
+        assert!(r5.y > r1.y);
+        assert_eq!(portrait_rect(dims, 10, 5), None);
+    }
+
+    #[test]
+    fn six_v_six_uses_tighter_row_height() {
+        let dims = (1000u32, 1000u32);
+        let five = portrait_rect(dims, 1, 5).unwrap().y - portrait_rect(dims, 0, 5).unwrap().y;
+        let six = portrait_rect(dims, 1, 6).unwrap().y - portrait_rect(dims, 0, 6).unwrap().y;
+        assert!(six < five, "6v6 rows should be tighter than 5v5 ({six} vs {five})");
+        // Last row of team 2 exists for 6v6
+        assert!(portrait_rect(dims, 11, 6).is_some());
+        assert!(portrait_rect(dims, 12, 6).is_none());
+    }
+
+    #[test]
+    fn rejects_empty_dims() {
+        assert!(portrait_rect((0, 1000), 0, 5).is_none());
+        assert!(portrait_rect((1000, 0), 0, 5).is_none());
+        assert!(portrait_rect((1000, 1000), 0, 0).is_none());
     }
 }

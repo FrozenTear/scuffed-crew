@@ -1,5 +1,6 @@
 mod daemon;
 mod history;
+mod live_data;
 mod preview;
 mod settings;
 mod stats;
@@ -16,13 +17,10 @@ fn main() {
     let _tray = tray::try_create_tray();
     if let Some(ref handle) = _tray {
         let quit_id = handle.quit_id.clone();
+        // Block on menu events instead of 1 Hz polling.
         std::thread::spawn(move || {
-            loop {
-                if tray::poll_quit(&quit_id) {
-                    std::process::exit(0);
-                }
-                std::thread::sleep(std::time::Duration::from_secs(1));
-            }
+            tray::wait_quit(&quit_id);
+            std::process::exit(0);
         });
     }
 

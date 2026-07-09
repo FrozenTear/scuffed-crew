@@ -3,13 +3,61 @@ pub mod preprocess;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::io::Cursor;
-use std::path::PathBuf;
-use std::sync::OnceLock;
+use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 
 use image::DynamicImage;
 use rayon::prelude::*;
 
 use crate::detect::hero_portrait::detect_team_size;
+
+/// Cached column offset from a previous successful calibration (keyed by board
+/// size + team size). Avoids re-running ~300 probe OCRs when the layout is stable.
+struct CalibCache {
+    width: u32,
+    height: u32,
+    team_size: usize,
+    offset: f64,
+}
+
+static COLUMN_OFFSET_CACHE: Mutex<Option<CalibCache>> = Mutex::new(None);
+
+/// Process-wide OCR debug dump switch. Set once from config/env at daemon start
+/// via [`set_debug_ocr`]; GUI/tools that never call it stay off.
+static DEBUG_OCR: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Enable or disable OCR debug PNG dumps for this process.
+pub fn set_debug_ocr(enabled: bool) {
+    DEBUG_OCR.store(enabled, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn debug_ocr_enabled() -> bool {
+    if DEBUG_OCR.load(std::sync::atomic::Ordering::Relaxed) {
+        return true;
+    }
+    if matches!(
+        std::env::var("STAT_TRACKER_DEBUG_OCR").as_deref(),
+        Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES")
+    ) {
+        return true;
+    }
+    // Config flag without requiring main.rs to call set_debug_ocr (Fable owns main).
+    static FROM_CONFIG: OnceLock<bool> = OnceLock::new();
+    *FROM_CONFIG.get_or_init(|| {
+        crate::config::Config::load()
+            .map(|c| c.debug_ocr)
+            .unwrap_or(false)
+    })
+}
+
+fn debug_dir() -> Option<PathBuf> {
+    if !debug_ocr_enabled() {
+        return None;
+    }
+    let dir = dirs::data_dir()?.join("scuffed-stat-tracker").join("debug");
+    let _ = std::fs::create_dir_all(&dir);
+    Some(dir)
+}
 
 // Dedicated thread pool for OCR — capped well below total CPU count so
 // a capture burst doesn't saturate the system and lag the game.
@@ -275,12 +323,12 @@ pub fn recognize_scoreboard_cells_with_team_size(
     results.sort_unstable_by_key(|(idx, _)| *idx);
     let results: Vec<RowOcrResult> = results.into_iter().map(|(_, r)| r).collect();
 
-    if let Some(data_dir) = dirs::data_dir() {
-        let debug_dir = data_dir.join("scuffed-stat-tracker").join("debug");
-        let _ = std::fs::create_dir_all(&debug_dir);
-        preprocess::save_debug_stages(&cropped, &debug_dir);
+    if let Some(dir) = debug_dir() {
+        // Prefer dumping the already-cropped board and row crops; full stage
+        // re-preprocess only when the debug flag is on (still expensive, but opt-in).
+        preprocess::save_debug_stages(&cropped, &dir);
         for (idx, row_img) in &row_images {
-            let _ = row_img.save(debug_dir.join(format!("row_{idx:02}.png")));
+            let _ = row_img.save(dir.join(format!("row_{idx:02}.png")));
         }
     }
 
@@ -288,9 +336,11 @@ pub fn recognize_scoreboard_cells_with_team_size(
 }
 
 /// Two-phase calibration: coarse sweep centered on the header-detected offset,
-/// then fine-tune around the best coarse result.
+/// then fine-tune around the best coarse result. Caches the winning offset per
+/// scoreboard resolution/team size and reuses it when a quick re-score holds.
 fn calibrate_columns(scoreboard: &DynamicImage, team_size: usize) -> preprocess::StatColumns {
     let header_offset = preprocess::detect_column_offset(scoreboard);
+    let (board_w, board_h) = (scoreboard.width(), scoreboard.height());
 
     let probe_rows: Vec<_> = [0usize, 1, team_size]
         .iter()
@@ -301,6 +351,8 @@ fn calibrate_columns(scoreboard: &DynamicImage, team_size: usize) -> preprocess:
         return preprocess::columns_with_offset(header_offset);
     }
 
+    let max_score = (probe_rows.len() * 6) as i32;
+
     // Score an offset by how many probe-row cells OCR as clean numeric stats.
     // Each candidate offset is independent, so the sweeps are evaluated in
     // parallel on the OCR pool — calibration was previously ~288 serial OCR
@@ -309,6 +361,32 @@ fn calibrate_columns(scoreboard: &DynamicImage, team_size: usize) -> preprocess:
         let cols = preprocess::columns_with_offset(offset);
         probe_rows.iter().map(|r| count_valid_cells(r, &cols)).sum()
     };
+
+    // Reuse last good offset when the board geometry matches and validity has
+    // not degraded (threshold: ≥75% of max probe cells still clean).
+    if let Ok(guard) = COLUMN_OFFSET_CACHE.lock()
+        && let Some(cached) = guard.as_ref()
+        && cached.width == board_w
+        && cached.height == board_h
+        && cached.team_size == team_size
+    {
+        let cached_score = score(cached.offset);
+        let reuse_floor = (max_score * 3 / 4).max(1);
+        if cached_score >= reuse_floor {
+            tracing::debug!(
+                offset_px = (cached.offset * board_w as f64) as i32,
+                valid_cells = cached_score,
+                "reusing cached column calibration"
+            );
+            return preprocess::columns_with_offset(cached.offset);
+        }
+        tracing::debug!(
+            valid_cells = cached_score,
+            floor = reuse_floor,
+            "cached column offset degraded — recalibrating"
+        );
+    }
+
     let best_of = |offsets: Vec<f64>| -> (f64, i32) {
         ocr_pool().install(|| {
             offsets
@@ -342,25 +420,44 @@ fn calibrate_columns(scoreboard: &DynamicImage, team_size: usize) -> preprocess:
     }
     let (mut best_offset, mut best_valid) = best_of(coarse);
 
-    // Phase 2: fine-tune ±0.02 around the best coarse result in 0.005 steps
-    let mut fine = Vec::new();
-    let mut fine_offset = best_offset - 0.02;
-    let fine_end = best_offset + 0.02;
-    while fine_offset <= fine_end {
-        fine.push(fine_offset);
-        fine_offset += 0.005;
-    }
-    let (fine_best_offset, fine_best_valid) = best_of(fine);
-    if fine_best_valid > best_valid {
-        best_offset = fine_best_offset;
-        best_valid = fine_best_valid;
+    // Early-exit: perfect coarse score means fine sweep cannot improve.
+    if best_valid < max_score {
+        // Phase 2: fine-tune ±0.02 around the best coarse result in 0.005 steps.
+        // Only offsets not already scored in the coarse grid (skip exact coarse
+        // centre — already known).
+        let mut fine = Vec::new();
+        let mut fine_offset = best_offset - 0.02;
+        let fine_end = best_offset + 0.02;
+        while fine_offset <= fine_end + 1e-9 {
+            let near_coarse = (fine_offset - best_offset).abs() < 1e-9;
+            if !near_coarse {
+                fine.push(fine_offset);
+            }
+            fine_offset += 0.005;
+        }
+        if !fine.is_empty() {
+            let (fine_best_offset, fine_best_valid) = best_of(fine);
+            if fine_best_valid > best_valid {
+                best_offset = fine_best_offset;
+                best_valid = fine_best_valid;
+            }
+        }
     }
 
-    let board_w = scoreboard.width() as f64;
+    if let Ok(mut guard) = COLUMN_OFFSET_CACHE.lock() {
+        *guard = Some(CalibCache {
+            width: board_w,
+            height: board_h,
+            team_size,
+            offset: best_offset,
+        });
+    }
+
     tracing::debug!(
-        header_offset_px = (header_offset * board_w) as i32,
-        final_offset_px = (best_offset * board_w) as i32,
+        header_offset_px = (header_offset * board_w as f64) as i32,
+        final_offset_px = (best_offset * board_w as f64) as i32,
         valid_cells = best_valid,
+        max_score,
         probe_count = probe_rows.len(),
         "two-phase column calibration"
     );
@@ -484,14 +581,26 @@ fn try_fallback(
 }
 
 fn save_debug_images(cropped: &DynamicImage, _preprocessed: &image::GrayImage, png_buf: &[u8]) {
-    if let Some(data_dir) = dirs::data_dir() {
-        let debug_dir = data_dir.join("scuffed-stat-tracker").join("debug");
-        let _ = std::fs::create_dir_all(&debug_dir);
-        let _ = cropped.save(debug_dir.join("crop.png"));
-        let _ = std::fs::write(debug_dir.join("preprocessed.png"), png_buf);
-        preprocess::save_debug_stages(cropped, &debug_dir);
-        tracing::debug!(path = %debug_dir.display(), "saved debug images");
-    }
+    let Some(dir) = debug_dir() else {
+        return;
+    };
+    let _ = cropped.save(dir.join("crop.png"));
+    // Write the already-computed preprocess buffer — do not re-run the pipeline.
+    let _ = std::fs::write(dir.join("preprocessed.png"), png_buf);
+    tracing::debug!(path = %dir.display(), "saved debug images");
+}
+
+/// Optional helper for callers that already hold a debug directory path.
+#[allow(dead_code)]
+pub fn save_debug_images_to(
+    dir: &Path,
+    cropped: &DynamicImage,
+    png_buf: &[u8],
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    std::fs::create_dir_all(dir)?;
+    cropped.save(dir.join("crop.png"))?;
+    std::fs::write(dir.join("preprocessed.png"), png_buf)?;
+    Ok(())
 }
 
 fn run_ocr(
