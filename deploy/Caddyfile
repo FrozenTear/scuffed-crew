@@ -1,7 +1,10 @@
-# Replace scuffed.example.com with your domain.
-# Caddy auto-provisions TLS via Let's Encrypt.
+# Host Caddy (same pattern as news.scuffedcrew.no).
+# 1. DNS: A (or AAAA) for ow.scuffedcrew.no → this VPS
+# 2. Point reverse_proxy at HOST_PORT from data/secrets.env (not always 3000)
+# 3. Set REDIRECT_BASE_URL=https://ow.scuffedcrew.no in data/secrets.env
+# 4. caddy reload / systemctl reload caddy
 
-scuffed.example.com {
+ow.scuffedcrew.no {
 	encode zstd gzip
 
 	# Hashed static assets — cache aggressively
@@ -13,5 +16,6 @@ scuffed.example.com {
 	header X-Frame-Options "DENY"
 	header Referrer-Policy "strict-origin-when-cross-origin"
 
-	reverse_proxy localhost:3000
+	# Keep compose bound to 127.0.0.1 — only Caddy is public
+	reverse_proxy 127.0.0.1:HOST_PORT_HERE
 }
