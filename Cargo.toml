@@ -36,7 +36,7 @@ uuid = { version = "1", features = ["v4", "serde", "js"] }
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
 thiserror = "2"
-dioxus = "0.7"
+dioxus = "0.7.9"
 axum = "0.8"
 axum-extra = { version = "0.10", features = ["cookie"] }
 tower-http = { version = "0.6", features = ["fs", "cors", "trace", "compression-br", "compression-gzip"] }

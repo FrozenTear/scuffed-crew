@@ -3,7 +3,7 @@ FROM rust:1.92-bookworm AS builder
 
 # Install wasm target and the Dioxus CLI (builds crates/app into a web bundle)
 RUN rustup target add wasm32-unknown-unknown \
-    && cargo install --locked dioxus-cli@0.7.4
+    && cargo install --locked dioxus-cli@0.7.9
 
 WORKDIR /build
 
