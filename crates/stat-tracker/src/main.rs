@@ -379,6 +379,14 @@ const UNFINISHED_SESSION_IDLE: std::time::Duration = std::time::Duration::from_s
 /// exempt — there the banner is exactly the evidence being recovered.
 const MIN_BANNER_SESSION_AGE: std::time::Duration = std::time::Duration::from_secs(300);
 
+/// Wall-vs-monotonic divergence treated as a suspend (m4). `Instant` is
+/// CLOCK_MONOTONIC, which freezes during suspend — after resume every
+/// in-memory window (grace, pending TTL, idle bound) silently believes no
+/// time passed, so yesterday's post-match state can swallow today's first
+/// game. Well above tick jitter and NTP step corrections, far below any
+/// meaningful sleep.
+const SUSPEND_RESET_GAP: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// Whether a Tab capture should open a fresh session instead of reusing the
 /// active one.
 fn should_start_fresh_session(game: Option<&ActiveGame>, now: Instant) -> bool {
@@ -557,6 +565,11 @@ async fn run_loop(
     // (a measured session had 45-70s tick gaps), so the accolade screen may get
     // only one tick. Garbage/transition frames between reads don't reset it.
     let mut word_outcome_streak: Option<(detect::MatchOutcome, Instant)> = None;
+
+    // Reference pair for suspend detection (SUSPEND_RESET_GAP): refreshed each
+    // cmd tick; wall time advancing much further than the monotonic clock
+    // between ticks means the machine slept.
+    let mut suspend_probe: (Instant, chrono::DateTime<Utc>) = (Instant::now(), Utc::now());
 
     // Periodic sync runs as a spawned task so a slow or hung server can't
     // stall Tab capture, polling, or shutdown. Single-flight: while one sync
@@ -910,6 +923,29 @@ async fn run_loop(
                 }
             }
             _ = cmd_timer.tick() => {
+                // Suspend detection (m4): after a sleep, every Instant-based
+                // window believes no time passed. Treat resume like a daemon
+                // restart — drop the volatile windows and re-admit the active
+                // game only through the wall-clock recovery bound (the on-disk
+                // skeleton was persisted with correct wall times pre-suspend).
+                let mono = suspend_probe.0.elapsed();
+                let wall = (Utc::now() - suspend_probe.1).to_std().unwrap_or(mono);
+                if wall > mono + SUSPEND_RESET_GAP {
+                    tracing::info!(
+                        gap_secs = (wall - mono).as_secs(),
+                        "suspend/clock-jump detected — resetting session windows"
+                    );
+                    pending_outcome = None;
+                    word_outcome_streak = None;
+                    last_game_open = None;
+                    last_tab_capture = None;
+                    active_game = recover_active_game(data_dir);
+                    if active_game.is_none() {
+                        persist_active_game(data_dir, None);
+                    }
+                }
+                suspend_probe = (Instant::now(), Utc::now());
+
                 let cmds = storage::take_commands(data_dir);
                 if !cmds.is_empty() {
                     for cmd in &cmds {
