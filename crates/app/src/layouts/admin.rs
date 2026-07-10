@@ -127,15 +127,15 @@ pub fn AdminLayout() -> Element {
                 style: "display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:100vh;color:var(--text-2);gap:0.5rem;",
                 h2 { style: "color:var(--text);margin-bottom:0.5rem;", "Access Denied" }
                 p { "You need officer permissions to access the admin panel." }
-                a {
-                    href: "/api/dev/login",
+                Link {
+                    to: Route::Login {},
                     style: "color:var(--accent);margin-top:0.5rem;",
-                    "Dev login"
+                    "Sign in"
                 }
                 a {
-                    href: "/api/auth/discord/login",
+                    href: "/api/dev/login",
                     style: "color:var(--text-2);",
-                    "Discord login"
+                    "Dev login (in-memory only)"
                 }
                 Link { to: Route::Home {}, style: "color:var(--accent);margin-top:1rem;", "Return home" }
             }

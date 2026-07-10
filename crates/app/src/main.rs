@@ -35,6 +35,27 @@ fn App() -> Element {
     use_context_provider(|| auth);
     state::auth::use_auth_init();
 
+    // Redirect to first-boot setup when no admin exists yet.
+    use_future(|| async move {
+        use scuffed_api_client::ApiClient;
+        use scuffed_types::SetupStatusResponse;
+        if let Ok(status) = ApiClient::web()
+            .fetch::<SetupStatusResponse>("/api/auth/setup-status")
+            .await
+        {
+            if status.needs_setup {
+                let path = web_sys::window()
+                    .and_then(|w| w.location().pathname().ok())
+                    .unwrap_or_default();
+                if path != "/setup" {
+                    let _ = web_sys::window().and_then(|w| {
+                        w.location().set_href("/setup").ok()
+                    });
+                }
+            }
+        }
+    });
+
     #[cfg(feature = "desktop")]
     {
         use_hook(|| {

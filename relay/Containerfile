@@ -9,16 +9,12 @@ RUN git clone --depth 1 https://github.com/fiatjaf/relay29.git \
     && CGO_ENABLED=0 go build -o /usr/local/bin/strfry29 .
 
 # ── Stage 2: Build relay-policy (Rust) ────────────────────
-FROM rust:1.86-alpine AS relay-policy-builder
-
-RUN apk add --no-cache musl-dev
+# Full workspace copy so Cargo member paths resolve.
+FROM rust:1.92-bookworm AS relay-policy-builder
 
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
-COPY crates/relay-policy crates/relay-policy
-COPY crates/db crates/db
-COPY crates/types crates/types
-COPY crates/auth crates/auth
+COPY crates/ crates/
 RUN cargo build --release -p relay-policy \
     && cp target/release/relay-policy /usr/local/bin/relay-policy
 

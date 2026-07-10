@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use crate::components::ui::{BtnVariant, Button, Card, Pill, PillTone, Textarea};
 use crate::components::{Toast, use_toast};
 use crate::hooks::use_api;
+use crate::routes::Route;
 use crate::state::auth::use_auth;
 use scuffed_api_client::ApiClient;
 use scuffed_types::{Game, SiteSettings};
@@ -80,7 +81,7 @@ pub fn Apply() -> Element {
                                 h2 { class: "apply-card-title", "Log In to Apply" }
                                 p { class: "apply-card-desc", "You need to sign in before submitting an application." }
                                 div { class: "apply-auth-buttons",
-                                    a { href: "/api/auth/discord/login", class: "ui-btn ui-btn--primary ui-btn--md", "Sign in with Discord" }
+                                    Link { to: Route::Login {}, class: "ui-btn ui-btn--primary ui-btn--md", "Sign in" }
                                     a {
                                         href: "/api/dev/login",
                                         class: "ui-btn ui-btn--md",

@@ -7,6 +7,9 @@ pub mod crypto;
 pub mod nip49;
 
 #[cfg(feature = "server")]
+pub mod password;
+
+#[cfg(feature = "server")]
 pub mod server;
 
 #[cfg(feature = "client")]

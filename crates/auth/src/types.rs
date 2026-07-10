@@ -9,6 +9,7 @@ pub enum AuthProvider {
     Discord,
     Google,
     Matrix,
+    Local,
 }
 
 impl std::fmt::Display for AuthProvider {
@@ -17,6 +18,7 @@ impl std::fmt::Display for AuthProvider {
             AuthProvider::Discord => write!(f, "discord"),
             AuthProvider::Google => write!(f, "google"),
             AuthProvider::Matrix => write!(f, "matrix"),
+            AuthProvider::Local => write!(f, "local"),
         }
     }
 }

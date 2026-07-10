@@ -9255,6 +9255,7 @@ name = "scuffed-auth"
 version = "0.1.0"
 dependencies = [
  "aes-gcm",
+ "argon2",
  "axum",
  "axum-extra",
  "base64 0.22.1",
@@ -9267,6 +9268,7 @@ dependencies = [
  "js-sys",
  "leptos",
  "oauth2",
+ "password-hash",
  "rand 0.8.5",
  "reqwest 0.12.28",
  "scrypt",
@@ -9424,6 +9426,7 @@ dependencies = [
 name = "scuffed-stat-tracker"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "ashpd",
  "base64 0.22.1",
  "chrono",

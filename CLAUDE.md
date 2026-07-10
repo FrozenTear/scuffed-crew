@@ -39,6 +39,13 @@ Production = `scuffed-server` serving `dist/` (built by `dx build` from crates/a
 - Run app: `cd crates/app && dx serve` (or `dx build` then serve `dist/` via the server)
 - Run server: `PORT=3030 cargo run -p scuffed-server`
 
+## Production / VPS
+
+- Prefer `./scripts/install.sh` (generates `data/secrets.env`, free `HOST_PORT`, Podman Compose)
+- First visit: create admin account in the browser (no Discord required)
+- Full runbook: `docs/deploy.md`
+- Optional later: systemd Quadlet (not required for first install)
+
 ## Conventions
 
 - DB internal structs (`Db*`) are private to `crates/db/src/queries/` — public types live in `crates/db/src/types.rs`

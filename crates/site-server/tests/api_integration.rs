@@ -49,6 +49,7 @@ async fn test_state() -> AppState {
     }
 }
 
+
 /// Seed a user + member + session into the database.
 /// Each seed call runs three separate queries to avoid silent batch failures.
 async fn seed_user(
@@ -1428,4 +1429,159 @@ async fn nostr_import_key_success() {
     assert_eq!(resp.status(), StatusCode::OK);
     let json = body_json(resp).await;
     assert_eq!(json["nostr_pubkey"].as_str().unwrap(), expected_pubkey);
+}
+
+// ─── First-boot setup + local login ─────────────────────────────────────────
+
+fn rate_limit_ip(builder: axum::http::request::Builder) -> axum::http::request::Builder {
+    builder.header("x-forwarded-for", "127.0.0.1")
+}
+
+#[tokio::test]
+async fn setup_status_needs_setup_on_empty_db() {
+    let state = test_state().await;
+    let app = create_router(state);
+    let res = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/auth/setup-status")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let json = body_json(res).await;
+    assert_eq!(json["needs_setup"], true);
+    assert_eq!(json["local_login"], false);
+}
+
+#[tokio::test]
+async fn setup_creates_admin_and_blocks_second_setup() {
+    let state = test_state().await;
+    let app = create_router(state);
+
+    let res = app
+        .clone()
+        .oneshot(
+            rate_limit_ip(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/auth/setup")
+                    .header(header::CONTENT_TYPE, "application/json"),
+            )
+            .body(Body::from(
+                serde_json::to_vec(&json!({
+                    "username": "admin",
+                    "password": "a-strong-password"
+                }))
+                .unwrap(),
+            ))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let set_cookie = res
+        .headers()
+        .get(header::SET_COOKIE)
+        .map(|v| v.to_str().unwrap().to_string());
+    assert!(set_cookie.is_some(), "expected session cookie");
+
+    let res2 = app
+        .oneshot(
+            rate_limit_ip(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/auth/setup")
+                    .header(header::CONTENT_TYPE, "application/json"),
+            )
+            .body(Body::from(
+                serde_json::to_vec(&json!({
+                    "username": "other",
+                    "password": "another-password"
+                }))
+                .unwrap(),
+            ))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res2.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn local_login_works_after_setup() {
+    let state = test_state().await;
+    let app = create_router(state);
+
+    let res = app
+        .clone()
+        .oneshot(
+            rate_limit_ip(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/auth/setup")
+                    .header(header::CONTENT_TYPE, "application/json"),
+            )
+            .body(Body::from(
+                serde_json::to_vec(&json!({
+                    "username": "Boss",
+                    "password": "correct-horse-1"
+                }))
+                .unwrap(),
+            ))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let res = app
+        .oneshot(
+            rate_limit_ip(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/auth/local/login")
+                    .header(header::CONTENT_TYPE, "application/json"),
+            )
+            .body(Body::from(
+                serde_json::to_vec(&json!({
+                    "username": "boss",
+                    "password": "correct-horse-1"
+                }))
+                .unwrap(),
+            ))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    assert!(res.headers().get(header::SET_COOKIE).is_some());
+}
+
+#[tokio::test]
+async fn setup_rejects_short_password() {
+    let state = test_state().await;
+    let app = create_router(state);
+    let res = app
+        .oneshot(
+            rate_limit_ip(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/auth/setup")
+                    .header(header::CONTENT_TYPE, "application/json"),
+            )
+            .body(Body::from(
+                serde_json::to_vec(&json!({
+                    "username": "admin",
+                    "password": "short"
+                }))
+                .unwrap(),
+            ))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
 }

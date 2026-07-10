@@ -7,18 +7,36 @@ use axum::{
 use axum_extra::extract::cookie::CookieJar;
 use serde::Deserialize;
 
+use scuffed_auth::password::{MIN_PASSWORD_LEN, hash_password, verify_password};
 use scuffed_auth::server::AuthUser;
 use scuffed_auth::server::OAuthProvider;
 use scuffed_auth::server::discord::DiscordProvider;
 use scuffed_auth::server::google::GoogleProvider;
 use scuffed_auth::server::session::{
-    build_csrf_cookie, build_session_cookie, clear_session_cookie, generate_session_token,
-    validate_csrf_state,
+    ErrorResponse, build_csrf_cookie, build_session_cookie, clear_session_cookie,
+    generate_session_token, validate_csrf_state,
 };
 use scuffed_auth::{AuthProvider, UserInfo};
-use scuffed_db::Member;
+use scuffed_db::{Member, OrgRole};
+use scuffed_types::{
+    AuthProvidersResponse, LocalLoginRequest, OkResponse, SetupRequest, SetupStatusResponse,
+};
 
 use crate::state::AppState;
+
+fn validate_local_username(username: &str) -> Result<String, &'static str> {
+    let u = scuffed_db::Database::normalize_local_username(username);
+    if u.is_empty() || u.len() > 32 {
+        return Err("username must be 1–32 characters");
+    }
+    if !u
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        return Err("username may only contain letters, digits, _ and -");
+    }
+    Ok(u)
+}
 
 #[derive(Deserialize)]
 pub struct CallbackParams {
@@ -237,4 +255,246 @@ pub async fn logout(State(state): State<AppState>, jar: CookieJar) -> impl IntoR
     }
     let clear_cookie = clear_session_cookie(&state.session_config);
     (jar.add(clear_cookie), StatusCode::OK).into_response()
+}
+
+/// GET /api/auth/setup-status — whether first-boot admin creation is required.
+pub async fn setup_status(State(state): State<AppState>) -> impl IntoResponse {
+    let needs_setup = match state.db.has_admin_member().await {
+        Ok(has) => !has,
+        Err(e) => {
+            tracing::error!("setup_status has_admin_member: {e}");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: "database error".into(),
+                }),
+            )
+                .into_response();
+        }
+    };
+    let local_login = match state.db.has_local_login().await {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::error!("setup_status has_local_login: {e}");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: "database error".into(),
+                }),
+            )
+                .into_response();
+        }
+    };
+    Json(SetupStatusResponse {
+        needs_setup,
+        local_login,
+    })
+    .into_response()
+}
+
+/// GET /api/auth/providers — which login methods the UI should offer.
+pub async fn auth_providers(State(state): State<AppState>) -> impl IntoResponse {
+    let needs_setup = state.db.has_admin_member().await.ok().map(|h| !h).unwrap_or(false);
+    let local_login = state.db.has_local_login().await.unwrap_or(false);
+    let config = &state.oauth_config;
+    Json(AuthProvidersResponse {
+        local: local_login || needs_setup,
+        discord: !config.discord_client_id.is_empty() && !config.discord_client_secret.is_empty(),
+        google: !config.google_client_id.is_empty() && !config.google_client_secret.is_empty(),
+    })
+    .into_response()
+}
+
+/// POST /api/auth/setup — one-time first admin account (local username/password).
+pub async fn setup(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Json(body): Json<SetupRequest>,
+) -> impl IntoResponse {
+    match state.db.has_admin_member().await {
+        Ok(true) => {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(ErrorResponse {
+                    error: "setup already completed".into(),
+                }),
+            )
+                .into_response();
+        }
+        Ok(false) => {}
+        Err(e) => {
+            tracing::error!("setup has_admin: {e}");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: "database error".into(),
+                }),
+            )
+                .into_response();
+        }
+    }
+
+    let username = match validate_local_username(&body.username) {
+        Ok(u) => u,
+        Err(msg) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: msg.into(),
+                }),
+            )
+                .into_response();
+        }
+    };
+
+    if body.password.len() < MIN_PASSWORD_LEN {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: format!("password must be at least {MIN_PASSWORD_LEN} characters"),
+            }),
+        )
+            .into_response();
+    }
+
+    let password_hash = match hash_password(&body.password) {
+        Ok(h) => h,
+        Err(e) => {
+            tracing::error!("setup hash_password: {e}");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: "password hashing failed".into(),
+                }),
+            )
+                .into_response();
+        }
+    };
+
+    let user = match state.db.create_local_user(&username, &password_hash).await {
+        Ok(u) => u,
+        Err(e) => {
+            tracing::error!("setup create_local_user: {e}");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: "failed to create user".into(),
+                }),
+            )
+                .into_response();
+        }
+    };
+
+    if let Err(e) = state
+        .db
+        .create_member(&user.id, &username, OrgRole::Admin)
+        .await
+    {
+        tracing::error!("setup create_member: {e}");
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: "failed to create admin member".into(),
+            }),
+        )
+            .into_response();
+    }
+
+    let session_token = generate_session_token();
+    if let Err(e) = state
+        .db
+        .create_session(
+            &user.id,
+            &session_token,
+            state.session_config.duration_hours,
+        )
+        .await
+    {
+        tracing::error!("setup create_session: {e}");
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: "session creation failed".into(),
+            }),
+        )
+            .into_response();
+    }
+
+    tracing::info!("First-boot admin created: {}", user.username);
+    let session_cookie = build_session_cookie(&state.session_config, session_token);
+    (
+        jar.add(session_cookie),
+        Json(OkResponse { ok: true }),
+    )
+        .into_response()
+}
+
+/// POST /api/auth/local/login — username/password login for local accounts.
+pub async fn local_login(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Json(body): Json<LocalLoginRequest>,
+) -> impl IntoResponse {
+    let username = scuffed_db::Database::normalize_local_username(&body.username);
+    let invalid = || {
+        (
+            StatusCode::UNAUTHORIZED,
+            Json(ErrorResponse {
+                error: "invalid username or password".into(),
+            }),
+        )
+            .into_response()
+    };
+
+    let (user, hash) = match state.db.get_local_user_by_username(&username).await {
+        Ok(Some(pair)) => pair,
+        Ok(None) => return invalid(),
+        Err(e) => {
+            tracing::error!("local_login lookup: {e}");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: "database error".into(),
+                }),
+            )
+                .into_response();
+        }
+    };
+
+    match verify_password(&body.password, &hash) {
+        Ok(true) => {}
+        Ok(false) => return invalid(),
+        Err(e) => {
+            tracing::error!("local_login verify: {e}");
+            return invalid();
+        }
+    }
+
+    let session_token = generate_session_token();
+    if let Err(e) = state
+        .db
+        .create_session(
+            &user.id,
+            &session_token,
+            state.session_config.duration_hours,
+        )
+        .await
+    {
+        tracing::error!("local_login create_session: {e}");
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: "session creation failed".into(),
+            }),
+        )
+            .into_response();
+    }
+
+    tracing::info!("User {} logged in via local", user.username);
+    let session_cookie = build_session_cookie(&state.session_config, session_token);
+    (
+        jar.add(session_cookie),
+        Json(OkResponse { ok: true }),
+    )
+        .into_response()
 }

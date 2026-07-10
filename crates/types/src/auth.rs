@@ -49,3 +49,35 @@ pub struct MeMember {
     #[serde(default)]
     pub nostr_key_mode: Option<String>,
 }
+
+/// Public first-boot / login capability flags.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SetupStatusResponse {
+    pub needs_setup: bool,
+    pub local_login: bool,
+}
+
+/// Which auth methods the SPA should show.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AuthProvidersResponse {
+    pub local: bool,
+    pub discord: bool,
+    pub google: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SetupRequest {
+    pub username: String,
+    pub password: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct LocalLoginRequest {
+    pub username: String,
+    pub password: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct OkResponse {
+    pub ok: bool,
+}

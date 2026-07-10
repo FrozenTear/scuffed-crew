@@ -3,6 +3,7 @@
 !crates/stat-tracker/portraits/*.png
 target/
 .env
+data/secrets.env
 dist/
 .dioxus/
 dist.old/

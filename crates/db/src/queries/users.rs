@@ -19,6 +19,8 @@ struct DbUser {
     provider_id: Option<String>,
     provider_id_hash: Option<String>,
     provider_id_encrypted: Option<serde_json::Value>,
+    #[serde(default)]
+    password_hash: Option<String>,
     created_at: SurrealDatetime,
 }
 
@@ -117,6 +119,7 @@ impl Database {
                 provider_id_encrypted: Some(serde_json::to_value(id_encrypted).map_err(|e| {
                     DbError::Config(format!("Failed to serialize encrypted blob: {e}"))
                 })?),
+                password_hash: None,
                 created_at: SurrealDatetime::from(user.created_at),
             }
         } else {
@@ -128,6 +131,7 @@ impl Database {
                 provider_id: Some(user.provider_id.clone()),
                 provider_id_hash: None,
                 provider_id_encrypted: None,
+                password_hash: None,
                 created_at: SurrealDatetime::from(user.created_at),
             }
         };
@@ -157,6 +161,7 @@ impl Database {
                 provider_id_encrypted: Some(serde_json::to_value(id_encrypted).map_err(|e| {
                     DbError::Config(format!("Failed to serialize encrypted blob: {e}"))
                 })?),
+                password_hash: None,
                 created_at: SurrealDatetime::from(user.created_at),
             }
         } else {
@@ -168,6 +173,7 @@ impl Database {
                 provider_id: Some(user.provider_id.clone()),
                 provider_id_hash: None,
                 provider_id_encrypted: None,
+                password_hash: None,
                 created_at: SurrealDatetime::from(user.created_at),
             }
         };
@@ -181,12 +187,146 @@ impl Database {
         Ok(user.clone())
     }
 
+    /// True if any active member has org_role admin.
+    pub async fn has_admin_member(&self) -> DbResult<bool> {
+        with_timeout(async {
+            #[derive(Deserialize, SurrealValue)]
+            struct Cnt {
+                count: u32,
+            }
+            let mut result = self
+                .client
+                .query(
+                    "SELECT count() FROM member WHERE org_role = 'admin' AND is_active = true GROUP ALL",
+                )
+                .await?;
+            let rows: Vec<Cnt> = result.take(0)?;
+            Ok(rows.first().map(|c| c.count > 0).unwrap_or(false))
+        })
+        .await
+    }
+
+    /// True if any local user has a password hash (local login available).
+    pub async fn has_local_login(&self) -> DbResult<bool> {
+        with_timeout(async {
+            #[derive(Deserialize, SurrealValue)]
+            struct Cnt {
+                count: u32,
+            }
+            let mut result = self
+                .client
+                .query(
+                    "SELECT count() FROM user WHERE provider = 'local' AND password_hash != NONE GROUP ALL",
+                )
+                .await?;
+            let rows: Vec<Cnt> = result.take(0)?;
+            Ok(rows.first().map(|c| c.count > 0).unwrap_or(false))
+        })
+        .await
+    }
+
+    /// Normalize local username: trim + lowercase.
+    pub fn normalize_local_username(username: &str) -> String {
+        username.trim().to_lowercase()
+    }
+
+    /// Create a local (username/password) user. `provider_id` is the normalized username.
+    pub async fn create_local_user(
+        &self,
+        username: &str,
+        password_hash: &str,
+    ) -> DbResult<User> {
+        let username = Self::normalize_local_username(username);
+        if username.is_empty() {
+            return Err(DbError::Config("username required".into()));
+        }
+
+        if self.get_local_user_by_username(&username).await?.is_some() {
+            return Err(DbError::Config("username already taken".into()));
+        }
+
+        let user = User::new(
+            AuthProvider::Local,
+            username.clone(),
+            username.clone(),
+            None,
+        );
+
+        with_timeout(async {
+            let db_user = DbUser {
+                id: None,
+                provider: "local".into(),
+                username: username.clone(),
+                avatar_url: None,
+                provider_id: Some(username.clone()),
+                provider_id_hash: None,
+                provider_id_encrypted: None,
+                password_hash: Some(password_hash.to_string()),
+                created_at: SurrealDatetime::from(user.created_at),
+            };
+            let _: Option<DbUser> = self
+                .client
+                .create(("user", user.id.as_str()))
+                .content(db_user)
+                .await?;
+            Ok(user)
+        })
+        .await
+    }
+
+    /// Look up a local user by username; returns user and password hash if present.
+    pub async fn get_local_user_by_username(
+        &self,
+        username: &str,
+    ) -> DbResult<Option<(User, String)>> {
+        let username = Self::normalize_local_username(username);
+        with_timeout(async {
+            let mut result = self
+                .client
+                .query(
+                    "SELECT * FROM user WHERE provider = 'local' AND username = $username LIMIT 1",
+                )
+                .bind(("username", username))
+                .await?;
+            let users: Vec<DbUser> = result.take(0)?;
+            let Some(db) = users.into_iter().next() else {
+                return Ok(None);
+            };
+            let hash = db.password_hash.clone().unwrap_or_default();
+            if hash.is_empty() {
+                return Ok(None);
+            }
+            let user = self.db_user_to_user(db)?;
+            Ok(Some((user, hash)))
+        })
+        .await
+    }
+
+    /// Update password hash for a local user (emergency reset).
+    pub async fn set_local_password_hash(
+        &self,
+        user_id: &str,
+        password_hash: &str,
+    ) -> DbResult<()> {
+        with_timeout(async {
+            let rid = RecordId::new("user", user_id);
+            self.client
+                .query("UPDATE $rid SET password_hash = $hash")
+                .bind(("rid", rid))
+                .bind(("hash", password_hash.to_string()))
+                .await?;
+            Ok(())
+        })
+        .await
+    }
+
     /// Convert a DB user record to the public User type.
     fn db_user_to_user(&self, db: DbUser) -> DbResult<User> {
         let provider = match db.provider.as_str() {
             "discord" => AuthProvider::Discord,
             "google" => AuthProvider::Google,
             "matrix" => AuthProvider::Matrix,
+            "local" => AuthProvider::Local,
             other => return Err(DbError::Config(format!("Unknown provider: {other}"))),
         };
 

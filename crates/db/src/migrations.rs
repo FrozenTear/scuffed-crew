@@ -15,18 +15,21 @@ pub async fn run_migrations(client: &Surreal<Any>) -> DbResult<()> {
         -- ================================================
         DEFINE TABLE user SCHEMAFULL;
         DEFINE FIELD provider ON user TYPE string
-            ASSERT $value IN ['discord', 'google', 'matrix'];
+            ASSERT $value IN ['discord', 'google', 'matrix', 'local'];
         DEFINE FIELD username ON user TYPE string;
         DEFINE FIELD avatar_url ON user TYPE option<string>;
         DEFINE FIELD provider_id ON user TYPE option<string>;
         DEFINE FIELD provider_id_hash ON user TYPE option<string>;
         DEFINE FIELD provider_id_encrypted ON user TYPE option<object> FLEXIBLE;
+        DEFINE FIELD password_hash ON user TYPE option<string>;
         DEFINE FIELD created_at ON user TYPE datetime DEFAULT time::now();
 
         DEFINE INDEX user_provider_idx ON user
             COLUMNS provider, provider_id UNIQUE;
         DEFINE INDEX user_provider_hash_idx ON user
             COLUMNS provider, provider_id_hash UNIQUE;
+        -- Local usernames are unique via create_local_user check (do not UNIQUE
+        -- username for all providers — OAuth usernames can collide).
 
         -- ================================================
         -- Sessions (persistent, replaces DashMap)

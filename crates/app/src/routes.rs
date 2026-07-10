@@ -6,8 +6,12 @@ use crate::pages::*;
 #[derive(Clone, Routable, Debug, PartialEq)]
 #[rustfmt::skip]
 pub enum Route {
-    // Public site (top nav + footer)
+    // First-boot + login (minimal chrome via public layout)
     #[layout(PublicLayout)]
+        #[route("/setup")]
+        Setup {},
+        #[route("/login")]
+        Login {},
         #[route("/")]
         Home {},
         #[route("/members")]

@@ -109,6 +109,34 @@ async fn main() {
         tracing::info!("Dev data seeded — visit /api/dev/login to set session cookie");
     }
 
+    // Emergency local admin password reset (production only). Unset BOOTSTRAP_ADMIN_RESET after use.
+    if !is_dev
+        && std::env::var("BOOTSTRAP_ADMIN_RESET").ok().as_deref() == Some("1")
+        && let Ok(new_password) = std::env::var("BOOTSTRAP_ADMIN_PASSWORD")
+        && !new_password.is_empty()
+    {
+        let username = std::env::var("BOOTSTRAP_ADMIN_USERNAME")
+            .unwrap_or_else(|_| "admin".to_string());
+        match scuffed_auth::password::hash_password(&new_password) {
+            Ok(hash) => match db.get_local_user_by_username(&username).await {
+                Ok(Some((user, _))) => {
+                    if let Err(e) = db.set_local_password_hash(&user.id, &hash).await {
+                        tracing::error!("BOOTSTRAP_ADMIN_RESET failed to update hash: {e}");
+                    } else {
+                        tracing::warn!(
+                            "BOOTSTRAP_ADMIN_RESET applied for local user '{username}' — remove BOOTSTRAP_ADMIN_RESET from env"
+                        );
+                    }
+                }
+                Ok(None) => tracing::error!(
+                    "BOOTSTRAP_ADMIN_RESET: no local user '{username}' — create via first-boot setup first"
+                ),
+                Err(e) => tracing::error!("BOOTSTRAP_ADMIN_RESET lookup failed: {e}"),
+            },
+            Err(e) => tracing::error!("BOOTSTRAP_ADMIN_RESET hash failed: {e}"),
+        }
+    }
+
     let db = Arc::new(db);
 
     let upload_dir =
