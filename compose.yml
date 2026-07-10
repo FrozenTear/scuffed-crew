@@ -15,9 +15,15 @@ services:
       - surrealdb-data:/data
     networks:
       - internal
-    # No healthcheck: the Surreal image is minimal (no curl) and `is-ready` flags
-    # vary by version, so probes mark a running server "unhealthy" and block
-    # depends_on. Server is listen-ready within ~1s of "Started web server".
+    # Minimal image: no curl. `is-ready` was unreliable. `version` only checks
+    # the binary is runnable so compose providers that require a healthcheck
+    # still get a "healthy" status. Server listens within ~1s of start.
+    healthcheck:
+      test: ["CMD", "/surreal", "version"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
     restart: unless-stopped
 
   strfry:
@@ -26,8 +32,7 @@ services:
       context: .
       dockerfile: relay/Containerfile
     depends_on:
-      surrealdb:
-        condition: service_started
+      - surrealdb
     environment:
       SURREALDB_URL: ws://surrealdb:8000
       SURREALDB_USER: ${SURREALDB_USER:-root}
@@ -49,7 +54,7 @@ services:
       dockerfile: Containerfile
     depends_on:
       surrealdb:
-        condition: service_healthy
+        condition: service_started
     environment:
       SURREALDB_URL: ws://surrealdb:8000
       SURREALDB_USER: ${SURREALDB_USER:-root}
