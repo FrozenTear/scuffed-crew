@@ -26,6 +26,10 @@ podman compose --env-file data/secrets.env down
 podman compose --env-file data/secrets.env up -d
 ```
 
+### SurrealDB: `is unhealthy` but logs show “Started web server”
+
+DB is fine; an old healthcheck probe was wrong. Current `compose.yml` does **not** healthcheck Surreal and uses `depends_on: service_started`. Pull latest and `up -d` again.
+
 ## Happy path (novice)
 
 ```bash
