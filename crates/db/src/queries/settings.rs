@@ -19,7 +19,15 @@ struct DbSiteSettings {
     min_age: u32,
     forum_backend: String,
     extra_relay_urls: String,
+    #[serde(default = "default_layout")]
+    public_layout: String,
+    #[serde(default)]
+    homepage_json: String,
     updated_at: SurrealDatetime,
+}
+
+fn default_layout() -> String {
+    "hub".into()
 }
 
 fn db_to_settings(db: DbSiteSettings) -> SiteSettings {
@@ -27,6 +35,11 @@ fn db_to_settings(db: DbSiteSettings) -> SiteSettings {
         .id
         .map(|r| crate::record_id_key_to_string(r.key))
         .unwrap_or_else(|| "unknown".to_string());
+    let public_layout = if db.public_layout == "landing" {
+        "landing".into()
+    } else {
+        "hub".into()
+    };
     SiteSettings {
         id,
         org_name: db.org_name,
@@ -36,6 +49,8 @@ fn db_to_settings(db: DbSiteSettings) -> SiteSettings {
         min_age: db.min_age,
         forum_backend: db.forum_backend,
         extra_relay_urls: db.extra_relay_urls,
+        public_layout,
+        homepage_json: db.homepage_json,
         updated_at: db.updated_at.into(),
     }
 }
@@ -54,7 +69,6 @@ impl Database {
                 return Ok(db_to_settings(settings));
             }
 
-            // Create defaults
             let defaults = DbSiteSettings {
                 id: None,
                 org_name: "The Scuffed Crew".to_string(),
@@ -65,6 +79,8 @@ impl Database {
                 min_age: 16,
                 forum_backend: "local".to_string(),
                 extra_relay_urls: String::new(),
+                public_layout: "hub".into(),
+                homepage_json: String::new(),
                 updated_at: SurrealDatetime::from(Utc::now()),
             };
             let created: Option<DbSiteSettings> = self
@@ -89,9 +105,10 @@ impl Database {
         min_age: Option<u32>,
         forum_backend: Option<&str>,
         extra_relay_urls: Option<&str>,
+        public_layout: Option<&str>,
+        homepage_json: Option<&str>,
     ) -> DbResult<SiteSettings> {
         with_timeout(async {
-            // Ensure settings exist first
             let current = self.get_settings().await?;
             let id = &current.id;
 
@@ -120,6 +137,16 @@ impl Database {
             }
             if let Some(urls) = extra_relay_urls {
                 db.extra_relay_urls = urls.to_string();
+            }
+            if let Some(layout) = public_layout {
+                db.public_layout = if layout == "landing" {
+                    "landing".into()
+                } else {
+                    "hub".into()
+                };
+            }
+            if let Some(json) = homepage_json {
+                db.homepage_json = json.to_string();
             }
             db.updated_at = SurrealDatetime::from(Utc::now());
 

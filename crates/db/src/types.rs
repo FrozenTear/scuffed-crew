@@ -775,7 +775,17 @@ pub struct SiteSettings {
     pub min_age: u32,
     pub forum_backend: String,
     pub extra_relay_urls: String,
+    /// "hub" | "landing"
+    #[serde(default = "default_public_layout")]
+    pub public_layout: String,
+    /// JSON blob of homepage copy (parsed to HomepageContent on the app side).
+    #[serde(default)]
+    pub homepage_json: String,
     pub updated_at: DateTime<Utc>,
+}
+
+fn default_public_layout() -> String {
+    "hub".to_string()
 }
 
 /// An announcement/news post.

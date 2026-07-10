@@ -110,13 +110,33 @@ pub fn AdminLayout() -> Element {
         .map(|r| format!("{r:?}"))
         .unwrap_or_else(|| "—".into());
 
-    // Auth guard: redirect if not officer+
-    if !auth().loading && !auth().is_officer_or_above() {
+    // Auth loading: avoid flashing Access Denied before /api/auth/me resolves
+    if auth().loading {
         return rsx! {
             div {
-                style: "display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:100vh;color:var(--text-2);",
+                style: "display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:100vh;color:var(--text-3);",
+                p { "Checking session…" }
+            }
+        };
+    }
+
+    // Auth guard: officer+ only
+    if !auth().is_officer_or_above() {
+        return rsx! {
+            div {
+                style: "display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:100vh;color:var(--text-2);gap:0.5rem;",
                 h2 { style: "color:var(--text);margin-bottom:0.5rem;", "Access Denied" }
                 p { "You need officer permissions to access the admin panel." }
+                a {
+                    href: "/api/dev/login",
+                    style: "color:var(--accent);margin-top:0.5rem;",
+                    "Dev login"
+                }
+                a {
+                    href: "/api/auth/discord/login",
+                    style: "color:var(--text-2);",
+                    "Discord login"
+                }
                 Link { to: Route::Home {}, style: "color:var(--accent);margin-top:1rem;", "Return home" }
             }
         };

@@ -12,5 +12,8 @@ pub mod toast;
 pub mod ui;
 
 pub use admin_shared::*;
+// Currently unreferenced (home.rs moved to settings-driven sections) — kept
+// per the pending-wiring convention for other pages to adopt.
+#[allow(unused_imports)]
 pub use section_header::SectionHeader;
 pub use toast::{Toast, ToastProvider, ToastState, use_toast};

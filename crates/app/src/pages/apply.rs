@@ -81,6 +81,12 @@ pub fn Apply() -> Element {
                                 p { class: "apply-card-desc", "You need to sign in before submitting an application." }
                                 div { class: "apply-auth-buttons",
                                     a { href: "/api/auth/discord/login", class: "ui-btn ui-btn--primary ui-btn--md", "Sign in with Discord" }
+                                    a {
+                                        href: "/api/dev/login",
+                                        class: "ui-btn ui-btn--md",
+                                        style: "background: var(--surface); border: 1px solid var(--border); color: var(--text);",
+                                        "Dev login"
+                                    }
                                 }
                             }
                         }

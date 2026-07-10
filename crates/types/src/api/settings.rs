@@ -1,6 +1,8 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize)]
+use crate::org::{HomepageContent, PublicLayout};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UpdateSettingsRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub org_name: Option<String>,
@@ -16,4 +18,8 @@ pub struct UpdateSettingsRequest {
     pub forum_backend: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub extra_relay_urls: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub public_layout: Option<PublicLayout>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub homepage: Option<HomepageContent>,
 }

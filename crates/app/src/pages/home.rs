@@ -2,11 +2,10 @@ use dioxus::prelude::*;
 use serde::Deserialize;
 use std::collections::HashMap;
 
-use crate::components::SectionHeader;
-use crate::components::bracket::BRACKET_STYLES;
-use crate::components::ui::{Pill, PillTone};
+use crate::hooks::CursorPage;
 use crate::routes::Route;
 use scuffed_api_client::ApiClient;
+use scuffed_types::{PublicLayout, SiteSettings};
 
 // --- Data types ---
 
@@ -69,108 +68,690 @@ struct Event {
     timezone: String,
 }
 
-use crate::hooks::CursorPage;
-
-// --- CSS ---
-
 const HOME_CSS: &str = r#"
-    .hero { position: relative; min-height: 100vh; display: flex; align-items: center; justify-content: center; overflow: hidden; }
-    .hero-bg { position: absolute; inset: 0; background: radial-gradient(ellipse at 50% 40%, var(--accent-soft), transparent 70%); }
-    .hero-content { position: relative; z-index: 2; text-align: center; max-width: 700px; padding: 2rem; }
-    .hero-badge { display: inline-flex; align-items: center; gap: 0.5rem; padding: 0.3rem 0.8rem; border: 1px solid var(--border); border-radius: 999px; font-size: 0.7rem; color: var(--text-3); margin-bottom: 1.5rem; text-transform: uppercase; letter-spacing: 0.06em; }
-    .badge-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); }
-    .hero-title { font-family: var(--font-head); font-size: clamp(3rem, 8vw, 6rem); line-height: 0.95; color: var(--text); letter-spacing: 4px; margin: 0; }
-    .hero-title .purple { color: var(--accent); }
-    .hero-sub { color: var(--text-2); font-size: 1rem; line-height: 1.7; margin: 1.5rem auto; max-width: 550px; }
-    .hero-actions { display: flex; gap: 1rem; justify-content: center; flex-wrap: wrap; margin: 2rem 0; }
-    .hero-stats { display: flex; gap: 3rem; justify-content: center; margin-top: 2rem; }
-    .hero-stat-val { font-family: var(--font-head); font-size: 2rem; color: var(--text); }
-    .hero-stat-label { font-size: 0.7rem; color: var(--text-3); text-transform: uppercase; letter-spacing: 0.06em; }
-    .hero-emblem { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); width: 400px; height: 400px; color: var(--accent-soft); pointer-events: none; }
-    .divider { height: 1px; background: var(--border); margin: 0 2rem; }
-    section { padding: 5rem 2rem; max-width: 1000px; margin: 0 auto; }
-    .sec-label { font-family: var(--font-mono); font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 0.5rem; }
-    .sec-label-purple { color: var(--accent); }
-    .sec-title { font-family: var(--font-head); font-size: 2.5rem; color: var(--text); letter-spacing: 3px; margin: 0 0 0.5rem; }
-    .sec-desc { color: var(--text-2); max-width: 600px; line-height: 1.7; }
-    .pillars { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 1.25rem; margin-top: 2rem; }
-    .pillar { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 1.5rem; transition: border-color 0.2s; }
-    .pillar:hover { border-color: var(--accent-soft); }
-    .pillar h3 { font-family: var(--font-head); font-size: 1.1rem; font-weight: 700; margin: 0.75rem 0 0.5rem; color: var(--text); }
-    .pillar p { color: var(--text-2); font-size: 0.85rem; line-height: 1.6; }
-    .pillar-icon { width: 36px; height: 36px; color: var(--accent); }
-    .pillar-icon svg { width: 100%; height: 100%; }
-    .teams-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 1rem; margin-top: 2rem; }
-    .team-card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 1.25rem; transition: border-color 0.2s; }
-    .team-card:hover { border-color: var(--accent-soft); }
-    .team-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.5rem; }
-    .team-name { font-family: var(--font-head); font-weight: 700; font-size: 1.1rem; color: var(--text); }
-    .team-game { font-size: 0.65rem; padding: 0.1rem 0.5rem; border-radius: 999px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; }
-    .game-ow { background: color-mix(in srgb, var(--warn) 20%, transparent); color: var(--warn); }
-    .game-dest { background: color-mix(in srgb, var(--accent) 20%, transparent); color: var(--accent); }
-    .game-other { background: var(--surface-2); color: var(--text-3); }
-    .team-lore { color: var(--text-3); font-style: italic; font-size: 0.8rem; margin-bottom: 0.75rem; line-height: 1.5; }
-    .team-meta { display: flex; gap: 1.5rem; }
-    .team-meta-val { font-family: var(--font-mono); font-weight: 700; color: var(--text); }
-    .team-meta-label { font-size: 0.65rem; color: var(--text-3); text-transform: uppercase; }
-    .team-division { margin-top: 0.75rem; font-size: 0.75rem; color: var(--text-3); }
-    .news-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 1rem; margin-top: 2rem; }
-    .news-card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 1.25rem; }
-    .news-meta { display: flex; align-items: center; gap: 0.5rem; font-size: 0.7rem; color: var(--text-3); margin-bottom: 0.5rem; }
-    .news-title { font-family: var(--font-head); font-size: 1.1rem; font-weight: 700; color: var(--text); margin: 0 0 0.4rem; }
-    .news-body { color: var(--text-2); font-size: 0.85rem; line-height: 1.6; }
-    .news-more { text-align: center; margin-top: 1.5rem; }
-    .comms-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 1.25rem; margin-top: 2rem; }
-    .comm-card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 1.5rem; }
-    .comm-card-header { display: flex; align-items: center; gap: 0.75rem; margin-bottom: 0.75rem; }
-    .comm-card-header h3 { font-family: var(--font-head); font-weight: 700; font-size: 1.1rem; color: var(--text); margin: 0; }
-    .comm-icon-svg { width: 28px; height: 28px; color: var(--accent); }
-    .comm-icon-svg svg { width: 100%; height: 100%; }
-    .comm-card p { color: var(--text-2); font-size: 0.85rem; line-height: 1.6; }
-    .comm-tags { margin-top: 0.75rem; }
-    .comm-tag { font-size: 0.65rem; padding: 0.15rem 0.5rem; border-radius: 999px; font-weight: 600; text-transform: uppercase; }
-    .comm-public { background: color-mix(in srgb, var(--ok) 20%, transparent); color: var(--ok); }
-    .comm-members { background: color-mix(in srgb, var(--accent) 20%, transparent); color: var(--accent); }
-    .why-matrix { margin-top: 2rem; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 1.5rem; }
-    .why-matrix-header { font-family: var(--font-head); font-weight: 700; font-size: 1rem; color: var(--text); margin-bottom: 0.75rem; }
-    .why-matrix-body p { color: var(--text-2); font-size: 0.85rem; line-height: 1.6; margin-bottom: 0.75rem; }
-    .why-tradeoffs { display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; margin-top: 1rem; }
-    .why-tradeoff h4 { font-family: var(--font-head); font-weight: 700; color: var(--text); margin: 0 0 0.5rem; font-size: 0.9rem; }
-    .why-tradeoff-item { font-size: 0.8rem; color: var(--text-2); margin-bottom: 0.35rem; display: flex; gap: 0.5rem; }
-    .why-tradeoff-item .marker { color: var(--accent); font-weight: 700; }
-    .sched-strip { display: grid; grid-template-columns: repeat(7, 1fr); gap: 0.5rem; margin-top: 2rem; }
-    .sched-active { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 1rem; text-align: center; }
-    .sched-off { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 1rem; text-align: center; opacity: 0.3; color: var(--text-3); font-size: 0.85rem; }
-    .day-label { font-family: var(--font-mono); font-size: 0.7rem; color: var(--text-3); text-transform: uppercase; margin-bottom: 0.25rem; }
-    .day-event { font-weight: 600; font-size: 0.85rem; color: var(--text); }
-    .day-time { font-size: 0.7rem; color: var(--text-3); margin-top: 0.25rem; }
-    .sched-calendar-link { text-align: center; margin-top: 1.5rem; }
-    .recruit-wrap { display: grid; grid-template-columns: 1fr 1fr; gap: 3rem; }
-    .recruit-wrap h2 { font-family: var(--font-head); font-size: 2.5rem; color: var(--text); letter-spacing: 3px; margin: 0.5rem 0; }
-    .recruit-wrap h3 { font-family: var(--font-head); font-weight: 700; color: var(--text); margin: 0 0 1rem; }
-    .recruit-left p { color: var(--text-2); font-size: 0.9rem; line-height: 1.7; }
-    .req { display: flex; gap: 0.5rem; color: var(--text-2); font-size: 0.85rem; margin-bottom: 0.5rem; }
-    .req-marker { color: var(--accent); }
-    .recruit-seeking { margin-top: 1.5rem; }
-    .recruit-seeking-label { font-size: 0.7rem; color: var(--text-3); text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 0.5rem; }
-    .recruit-seeking-tags { display: flex; gap: 0.5rem; flex-wrap: wrap; }
-    .recruit-tag { font-size: 0.7rem; padding: 0.2rem 0.6rem; border-radius: 999px; font-weight: 600; }
-    .recruit-tag-ow { background: color-mix(in srgb, var(--warn) 20%, transparent); color: var(--warn); }
-    .recruit-tag-dest { background: color-mix(in srgb, var(--accent) 20%, transparent); color: var(--accent); }
-    .never-ask { margin-top: 1.5rem; background: var(--surface-2); border-radius: 8px; padding: 1rem; }
-    .never-ask-header { font-family: var(--font-head); font-weight: 700; font-size: 0.85rem; color: var(--text); margin-bottom: 0.5rem; }
-    .never-ask-body { color: var(--text-3); font-size: 0.8rem; line-height: 1.6; }
-    @media (max-width: 768px) {
-        .sched-strip { grid-template-columns: 1fr; }
-        .recruit-wrap { grid-template-columns: 1fr; gap: 2rem; }
-        .why-tradeoffs { grid-template-columns: 1fr; }
+    .home-wrap {
+        position: relative;
+        min-height: 100%;
+    }
+    /* Film grain — texture without soft SaaS glow */
+    .home-wrap::after {
+        content: '';
+        pointer-events: none;
+        position: fixed;
+        inset: 0;
+        z-index: 50;
+        opacity: 0.045;
+        background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+    }
+    .home {
+        max-width: 1040px;
+        margin: 0 auto;
+        padding: 0 1.25rem 5rem;
+        position: relative;
+        z-index: 1;
+    }
+
+    /* ——— HERO: big, loud, clipped ——— */
+    .home-hero {
+        position: relative;
+        margin: 0 -1.25rem;
+        padding: 3.25rem 1.25rem 2.5rem;
+        overflow: hidden;
+        border-bottom: 1px solid var(--border);
+        background:
+            linear-gradient(105deg, rgba(124,58,237,0.12) 0%, transparent 42%),
+            linear-gradient(180deg, var(--surface) 0%, var(--bg) 100%);
+    }
+    .home-hero::before {
+        content: '';
+        position: absolute;
+        right: -8%;
+        top: -20%;
+        width: min(52vw, 420px);
+        height: 140%;
+        background:
+            repeating-linear-gradient(
+                -18deg,
+                transparent,
+                transparent 11px,
+                rgba(124,58,237,0.06) 11px,
+                rgba(124,58,237,0.06) 12px
+            );
+        transform: skewX(-12deg);
+        pointer-events: none;
+    }
+    .home-hero::after {
+        content: 'SC';
+        position: absolute;
+        right: 4%;
+        bottom: -0.15em;
+        font-family: var(--font-head);
+        font-size: clamp(6rem, 22vw, 12rem);
+        line-height: 0.8;
+        letter-spacing: 0.02em;
+        color: transparent;
+        -webkit-text-stroke: 1px rgba(240,238,232,0.07);
+        pointer-events: none;
+        user-select: none;
+    }
+    .home-hero-inner { position: relative; z-index: 2; max-width: 40rem; }
+    .home-badge {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.5rem;
+        font-family: var(--font-mono);
+        font-size: 0.68rem;
+        letter-spacing: 0.16em;
+        text-transform: uppercase;
+        color: var(--accent);
+        margin-bottom: 1rem;
+        padding: 0.3rem 0.65rem 0.3rem 0.45rem;
+        border: 1px solid rgba(124,58,237,0.45);
+        background: rgba(124,58,237,0.1);
+        clip-path: polygon(0 0, 100% 0, 100% calc(100% - 6px), calc(100% - 6px) 100%, 0 100%);
+    }
+    .home-badge::before {
+        content: '';
+        width: 6px;
+        height: 6px;
+        background: var(--accent);
+        box-shadow: 0 0 8px var(--accent);
+        animation: pulse-dot 1.6s ease-in-out infinite;
+    }
+    @keyframes pulse-dot {
+        0%, 100% { opacity: 1; }
+        50% { opacity: 0.35; }
+    }
+    .home-title {
+        font-family: var(--font-head);
+        font-size: clamp(3.4rem, 12vw, 6.5rem);
+        line-height: 0.88;
+        letter-spacing: 0.02em;
+        color: var(--text);
+        margin: 0;
+        text-transform: uppercase;
+        text-shadow: 3px 0 0 rgba(124,58,237,0.35);
+    }
+    .home-title em {
+        font-style: normal;
+        display: block;
+        color: var(--accent);
+        text-shadow:
+            0 0 40px rgba(124,58,237,0.35),
+            -2px 0 0 rgba(74,158,255,0.25);
+    }
+    .home-sub {
+        margin: 1.25rem 0 0;
+        max-width: 28rem;
+        color: var(--text);
+        font-size: 1.05rem;
+        line-height: 1.55;
+        font-weight: 400;
+        border-left: 3px solid var(--accent);
+        padding-left: 0.9rem;
+    }
+    .home-actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.65rem;
+        margin-top: 1.75rem;
+    }
+    .home-metrics {
+        display: flex;
+        flex-wrap: wrap;
+        margin-top: 2rem;
+        max-width: 28rem;
+        border: 1px solid var(--border);
+        background: rgba(8,8,12,0.55);
+    }
+    .home-metric {
+        padding: 0.85rem 1.15rem;
+        border-right: 1px solid var(--border);
+        min-width: 5.5rem;
+        flex: 1 1 auto;
+    }
+    .home-metric:last-child { border-right: none; }
+    .home-metric strong {
+        display: block;
+        font-family: var(--font-head);
+        font-size: 2rem;
+        letter-spacing: 0.04em;
+        color: var(--text);
+        line-height: 1;
+    }
+    .home-metric span {
+        font-family: var(--font-mono);
+        font-size: 0.6rem;
+        letter-spacing: 0.14em;
+        text-transform: uppercase;
+        color: var(--text-3);
+    }
+    @media (max-width: 520px) {
+        .home-metrics { grid-template-columns: 1fr; }
+        .home-metric { border-right: none; border-bottom: 1px solid var(--border); }
+        .home-metric:last-child { border-bottom: none; }
+    }
+
+    /* ——— Sections (quieter than hero; no competing underlines) ——— */
+    .home-block {
+        padding: 2.25rem 0;
+        border-bottom: 1px solid var(--border);
+    }
+    .home-block:last-of-type { border-bottom: none; }
+    .home-kicker {
+        font-family: var(--font-mono);
+        font-size: 0.62rem;
+        letter-spacing: 0.14em;
+        text-transform: uppercase;
+        color: var(--text-3);
+        margin-bottom: 0.35rem;
+    }
+    .home-kicker.compete {
+        color: #f0b232;
+    }
+    .home-heading {
+        font-family: var(--font-head);
+        font-weight: 700;
+        font-size: clamp(1.15rem, 2.4vw, 1.45rem);
+        color: var(--text);
+        letter-spacing: 0.02em;
+        margin: 0 0 0.5rem;
+        text-transform: none;
+        line-height: 1.2;
+    }
+    /* Underlines only on hero — sections stay quiet */
+    .home-heading::after {
+        content: none;
+    }
+    .home-body {
+        color: var(--text-2);
+        font-size: 0.95rem;
+        line-height: 1.65;
+        max-width: 36rem;
+        margin: 0.5rem 0 0;
+    }
+
+    /* Numbered rules — punchy */
+    .rules {
+        list-style: none;
+        margin: 1.5rem 0 0;
+        padding: 0;
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 0.75rem;
+    }
+    @media (max-width: 700px) {
+        .rules { grid-template-columns: 1fr; }
+    }
+    .rules li {
+        display: grid;
+        grid-template-columns: auto 1fr;
+        gap: 0.85rem;
+        align-items: start;
+        padding: 1rem 1rem 1rem 0.9rem;
+        background: var(--surface-2);
+        border: 1px solid var(--border);
+        border-left: 3px solid var(--accent);
+        color: var(--text);
+        font-size: 0.92rem;
+        line-height: 1.45;
+        transition: border-color 0.15s, transform 0.15s;
+    }
+    .rules li:hover {
+        border-color: rgba(124,58,237,0.45);
+        transform: translateX(2px);
+    }
+    .rules li .rn {
+        font-family: var(--font-head);
+        font-size: 1.5rem;
+        letter-spacing: 0.04em;
+        color: var(--accent);
+        line-height: 1;
+        min-width: 1.5rem;
+    }
+
+    /* Live board — one column when only one side has data */
+    .live-grid {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 1rem;
+        margin-top: 0.85rem;
+    }
+    .live-grid.single {
+        grid-template-columns: 1fr;
+        max-width: 36rem;
+    }
+    @media (max-width: 720px) {
+        .live-grid { grid-template-columns: 1fr; }
+    }
+    .live-panel {
+        background: var(--surface-2);
+        border: 1px solid var(--border);
+        padding: 1.1rem 1.15rem 1.25rem;
+        position: relative;
+        overflow: hidden;
+    }
+    .live-panel::before {
+        content: '';
+        position: absolute;
+        top: 0; left: 0; right: 0;
+        height: 2px;
+        background: linear-gradient(90deg, var(--border), transparent 80%);
+    }
+    /* Compete / tournaments: gold accent (not brand purple) */
+    .live-panel.compete::before {
+        background: linear-gradient(90deg, #f0b232, transparent 75%);
+    }
+    .live-panel .home-heading {
+        font-size: 1.15rem;
+    }
+    .live-list {
+        list-style: none;
+        margin: 0.85rem 0 0;
+        padding: 0;
+    }
+    .live-list li {
+        display: flex;
+        justify-content: space-between;
+        gap: 1rem;
+        align-items: baseline;
+        padding: 0.65rem 0;
+        border-bottom: 1px solid var(--border);
+        font-size: 0.9rem;
+    }
+    .live-list li:last-child { border-bottom: none; }
+    .live-list a {
+        color: var(--text);
+        font-family: var(--font-head);
+        font-weight: 700;
+        font-size: 1rem;
+    }
+    .live-list a:hover { color: var(--accent); }
+    .live-meta {
+        font-family: var(--font-mono);
+        font-size: 0.68rem;
+        color: var(--text-3);
+        white-space: nowrap;
+    }
+    .tag {
+        font-family: var(--font-mono);
+        font-size: 0.58rem;
+        letter-spacing: 0.1em;
+        text-transform: uppercase;
+        color: #f0b232;
+        border: 1px solid rgba(240, 178, 50, 0.4);
+        padding: 0.15rem 0.4rem;
+        background: rgba(240, 178, 50, 0.1);
+    }
+    .tag.live {
+        color: #ff6b6b;
+        border-color: rgba(214, 48, 49, 0.5);
+        background: rgba(214, 48, 49, 0.12);
+    }
+    .tag.open {
+        color: #f0b232;
+        border-color: rgba(240, 178, 50, 0.45);
+        background: rgba(240, 178, 50, 0.1);
+    }
+    .home-link.compete {
+        color: #f0b232;
+    }
+    .home-link.compete:hover {
+        color: #fbbf24;
+        border-bottom-color: #f0b232;
+    }
+
+    /* Team rows — shared fixed tracks so every column lines up across rows */
+    .team-rows {
+        margin-top: 1.1rem;
+        border-top: 1px solid var(--border);
+        /* name | game | roster | division | record */
+        --tm-cols: minmax(0, 1.4fr) minmax(7.5rem, 0.9fr) 5.5rem 6.5rem 3.25rem;
+    }
+    .team-head,
+    .team-row {
+        display: grid;
+        grid-template-columns: var(--tm-cols);
+        column-gap: 1rem;
+        align-items: baseline;
+        padding: 0.7rem 0.5rem 0.7rem 0.65rem;
+    }
+    .team-head {
+        padding-top: 0.55rem;
+        padding-bottom: 0.45rem;
+        border-bottom: 1px solid var(--border);
+        font-family: var(--font-mono);
+        font-size: 0.58rem;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+        color: var(--text-3);
+    }
+    .team-head span:nth-child(3),
+    .team-head span:nth-child(4),
+    .team-head span:nth-child(5) {
+        text-align: right;
+    }
+    .team-row {
+        border-bottom: 1px solid var(--border);
+        font-size: 0.88rem;
+        position: relative;
+        transition: background 0.15s;
+    }
+    .team-row::before {
+        content: '';
+        position: absolute;
+        left: 0; top: 0; bottom: 0;
+        width: 0;
+        background: var(--accent);
+        transition: width 0.15s;
+    }
+    .team-row:hover {
+        background: rgba(124,58,237,0.06);
+    }
+    .team-row:hover::before { width: 3px; }
+    .team-row .tm-name {
+        font-family: var(--font-head);
+        font-weight: 700;
+        color: var(--text);
+        font-size: 1.05rem;
+        letter-spacing: 0.02em;
+        min-width: 0;
+    }
+    .team-row .tm-game {
+        font-family: var(--font-mono);
+        font-size: 0.65rem;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: var(--text-3);
+        min-width: 0;
+    }
+    .team-row .tm-roster {
+        font-family: var(--font-mono);
+        font-size: 0.65rem;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+        color: var(--text-3);
+        text-align: right;
+        font-variant-numeric: tabular-nums;
+        white-space: nowrap;
+    }
+    .team-row .tm-div {
+        color: var(--text-2);
+        font-size: 0.8rem;
+        text-align: right;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+    .team-row .tm-wl {
+        font-family: var(--font-mono);
+        font-size: 0.8rem;
+        letter-spacing: 0.04em;
+        color: var(--text-2);
+        text-align: right;
+        font-variant-numeric: tabular-nums;
+        white-space: nowrap;
+    }
+    .team-lore {
+        grid-column: 1 / -1;
+        color: var(--text-3);
+        font-size: 0.8rem;
+        font-style: italic;
+        margin-top: 0.15rem;
+    }
+    @media (max-width: 720px) {
+        .team-rows {
+            --tm-cols: minmax(0, 1fr) auto;
+        }
+        .team-head span:nth-child(n+3),
+        .team-row .tm-roster,
+        .team-row .tm-div { display: none; }
+        .team-head span:nth-child(2) { display: none; }
+        .team-row .tm-game { display: none; }
+        .team-row .tm-wl { justify-self: end; }
+    }
+
+    /* News */
+    .news-rows { margin-top: 1rem; }
+    .news-row {
+        padding: 1rem 0 1.1rem;
+        border-bottom: 1px solid var(--border);
+        transition: padding-left 0.15s;
+    }
+    .news-row:hover { padding-left: 0.4rem; }
+    .news-row:last-child { border-bottom: none; }
+    .news-row time {
+        font-family: var(--font-mono);
+        font-size: 0.65rem;
+        color: var(--text-3);
+        letter-spacing: 0.1em;
+    }
+    .news-row h3 {
+        font-family: var(--font-head);
+        font-weight: 700;
+        font-size: 1.2rem;
+        color: var(--text);
+        margin: 0.25rem 0 0.4rem;
+    }
+    .news-row p {
+        color: var(--text-2);
+        font-size: 0.9rem;
+        line-height: 1.55;
+        margin: 0;
+        max-width: 40rem;
+    }
+    .pin {
+        font-family: var(--font-mono);
+        font-size: 0.58rem;
+        letter-spacing: 0.1em;
+        text-transform: uppercase;
+        color: var(--accent);
+        margin-left: 0.5rem;
+        border: 1px solid rgba(124,58,237,0.4);
+        padding: 0.05rem 0.3rem;
+    }
+
+    /* Recruit banner */
+    .recruit-banner {
+        margin-top: 0.5rem;
+        display: grid;
+        grid-template-columns: 1.15fr 1fr;
+        gap: 0;
+        border: 1px solid var(--border);
+        background: var(--surface-2);
+        overflow: hidden;
+    }
+    @media (max-width: 720px) {
+        .recruit-banner { grid-template-columns: 1fr; }
+    }
+    .recruit-left {
+        padding: 1.75rem 1.5rem;
+        background:
+            linear-gradient(135deg, rgba(124,58,237,0.18) 0%, transparent 55%),
+            var(--surface-2);
+        border-right: 1px solid var(--border);
+    }
+    @media (max-width: 720px) {
+        .recruit-left { border-right: none; border-bottom: 1px solid var(--border); }
+    }
+    .recruit-right {
+        padding: 1.5rem 1.35rem;
+        background: var(--surface);
+    }
+    .expect-list {
+        list-style: none;
+        margin: 0.5rem 0 0;
+        padding: 0;
+    }
+    .expect-list li {
+        display: flex;
+        gap: 0.55rem;
+        padding: 0.45rem 0;
+        color: var(--text-2);
+        font-size: 0.86rem;
+        border-bottom: 1px solid var(--border);
+    }
+    .expect-list li::before {
+        content: "▸";
+        color: var(--accent);
+        font-weight: 700;
+        flex-shrink: 0;
+    }
+    .never-box {
+        margin-top: 1rem;
+        padding: 0.85rem 0.9rem;
+        border: 1px dashed rgba(124,58,237,0.35);
+        background: rgba(8,8,12,0.4);
+    }
+    .never-box h4 {
+        font-family: var(--font-mono);
+        font-size: 0.62rem;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+        color: var(--accent);
+        margin: 0 0 0.4rem;
+    }
+    .never-box p {
+        margin: 0;
+        font-size: 0.8rem;
+        color: var(--text-2);
+        line-height: 1.5;
+    }
+    .seek-tags {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.4rem;
+        margin-top: 1rem;
+    }
+    .seek-tag {
+        font-family: var(--font-mono);
+        font-size: 0.65rem;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        padding: 0.3rem 0.55rem;
+        border: 1px solid rgba(124,58,237,0.4);
+        color: var(--text);
+        background: rgba(124,58,237,0.12);
+    }
+
+    .home-link {
+        display: inline-block;
+        margin-top: 0.9rem;
+        font-family: var(--font-mono);
+        font-size: 0.7rem;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+        color: var(--accent);
+        border-bottom: 1px solid transparent;
+    }
+    .home-link:hover {
+        color: var(--text);
+        border-bottom-color: var(--accent);
+    }
+
+    .btn {
+        display: inline-flex;
+        align-items: center;
+        padding: 0.7rem 1.25rem;
+        font-family: var(--font-mono);
+        font-size: 0.72rem;
+        letter-spacing: 0.14em;
+        text-transform: uppercase;
+        border-radius: 0;
+        border: 1px solid transparent;
+        cursor: pointer;
+        text-decoration: none;
+        transition: transform 0.15s, filter 0.15s, border-color 0.15s, color 0.15s, box-shadow 0.15s;
+        clip-path: polygon(0 0, 100% 0, 100% calc(100% - 8px), calc(100% - 8px) 100%, 0 100%);
+    }
+    .btn-primary {
+        background: var(--accent);
+        color: #fff;
+        box-shadow: 0 0 0 0 rgba(124,58,237,0.4);
+    }
+    .btn-primary:hover {
+        filter: brightness(1.12);
+        transform: translateY(-1px);
+        box-shadow: 0 0 28px rgba(124,58,237,0.4);
+    }
+    .btn-outline {
+        background: transparent;
+        border-color: var(--border);
+        color: var(--text);
+    }
+    .btn-outline:hover {
+        border-color: var(--text-2);
+        color: var(--text);
+        transform: translateY(-1px);
+    }
+
+    .muted {
+        color: var(--text-3);
+        font-size: 0.88rem;
+    }
+    .home-foot {
+        margin-top: 2.5rem;
+        padding-top: 1.25rem;
+        border-top: 1px solid var(--border);
+        font-family: var(--font-mono);
+        font-size: 0.65rem;
+        letter-spacing: 0.1em;
+        text-transform: uppercase;
+        color: var(--text-3);
+    }
+
+    /* ——— Alignment: Center = hero (+ recruit CTA feel) only; body always left ——— */
+    .home.align-center .home-hero-inner {
+        margin-left: auto;
+        margin-right: auto;
+        text-align: center;
+        max-width: 42rem;
+    }
+    .home.align-center .home-sub {
+        margin-left: auto;
+        margin-right: auto;
+        border-left: none;
+        border-top: 3px solid var(--accent);
+        padding-left: 0;
+        padding-top: 0.85rem;
+        max-width: 32rem;
+    }
+    .home.align-center .home-actions {
+        justify-content: center;
+    }
+    .home.align-center .home-metrics {
+        margin-left: auto;
+        margin-right: auto;
+    }
+    .home.align-center .home-hero::after {
+        right: 50%;
+        transform: translateX(50%);
+        opacity: 0.85;
+    }
+    .home.align-center .home-badge {
+        margin-left: auto;
+        margin-right: auto;
+    }
+    /* Body blocks intentionally stay left — no mixed centered headers over left lists */
+    .home.align-center .home-block {
+        text-align: left;
+    }
+    .home.align-center .recruit-left {
+        text-align: left;
+    }
+    .home.align-center .recruit-left .btn {
+        /* keep CTA easy to hit under centered brand, but block stays left */
     }
 "#;
 
-// --- Component ---
-
 #[component]
 pub fn Home() -> Element {
+    let settings = use_resource(|| async {
+        ApiClient::web()
+            .fetch::<SiteSettings>("/api/settings")
+            .await
+            .ok()
+    });
     let overview = use_resource(|| async {
         ApiClient::web()
             .fetch::<Overview>("/api/public/overview")
@@ -199,344 +780,381 @@ pub fn Home() -> Element {
             .map(|r| r.data)
     });
 
-    let (team_count, member_count, game_count) = {
+    let content = settings
+        .read()
+        .as_ref()
+        .and_then(|s| s.as_ref())
+        .map(|s| s.homepage.clone())
+        .unwrap_or_default();
+    let layout = settings
+        .read()
+        .as_ref()
+        .and_then(|s| s.as_ref())
+        .map(|s| s.public_layout)
+        .unwrap_or(PublicLayout::Hub);
+    let org_name = settings
+        .read()
+        .as_ref()
+        .and_then(|s| s.as_ref())
+        .map(|s| s.org_name.clone())
+        .unwrap_or_else(|| "The Scuffed Crew".into());
+    let recruitment_open = settings
+        .read()
+        .as_ref()
+        .and_then(|s| s.as_ref())
+        .map(|s| s.recruitment_open)
+        .unwrap_or(true);
+
+    // Metrics: only show values that tell a real story (skip empty/zero fluff).
+    let (metric_squads, metric_members, metric_games) = {
         let o = overview.read();
         let o = o.as_ref().and_then(|o| o.as_ref());
-        (
-            o.map(|o| o.teams.len()).unwrap_or(0),
-            o.map(|o| o.member_count).unwrap_or(0),
-            o.map(|o| o.games.len()).unwrap_or(0),
-        )
+        match o {
+            Some(data) => {
+                let with_roster = data
+                    .teams
+                    .iter()
+                    .filter(|t| t.roster_count > 0)
+                    .count();
+                // Prefer squads that actually have people; hide "4 empty teams" as a vanity number.
+                let squads = if with_roster > 0 {
+                    Some(with_roster)
+                } else {
+                    None
+                };
+                let members = (data.member_count > 0).then_some(data.member_count);
+                let games = (!data.games.is_empty()).then_some(data.games.len());
+                (squads, members, games)
+            }
+            None => (None, None, None),
+        }
     };
+    let show_metrics =
+        metric_squads.is_some() || metric_members.is_some() || metric_games.is_some();
+    let home_class = format!("home {}", content.content_align.css_class());
 
     rsx! {
         style { {HOME_CSS} }
-        style { {BRACKET_STYLES} }
-
-        // Hero
-        section { class: "hero",
-            div { class: "hero-bg" }
-            svg { class: "hero-emblem", view_box: "0 0 400 400", fill: "none", stroke: "currentColor", stroke_width: "1.5",
-                path { d: "M200 20 L360 120 L340 320 L200 380 L60 320 L40 120 Z" }
-                path { d: "M200 60 L320 140 L305 290 L200 340 L95 290 L80 140 Z" }
-                path { d: "M200 100 L280 160 L270 260 L200 300 L130 260 L120 160 Z" }
-                line { x1: "200", y1: "20", x2: "200", y2: "380" }
-                line { x1: "40", y1: "120", x2: "340", y2: "320" }
-                line { x1: "360", y1: "120", x2: "60", y2: "320" }
-                path { d: "M200 170 L230 200 L200 230 L170 200 Z" }
-            }
-            div { class: "hero-content",
-                div { class: "hero-badge",
-                    span { class: "badge-dot" }
-                    "Multi-Game Crew \u{2014} EMEA \u{2014} Est. 2026"
-                }
-                h1 { class: "hero-title", "The Scuffed" br {} span { class: "purple", "Crew" } }
-                p { class: "hero-sub", "A multi-game crew built on old-school clan principles. Small teams, real structure, scheduled play nights. No ghost members. No dead servers." }
-                div { class: "hero-actions",
-                    Link { to: Route::Apply {}, class: "ui-btn ui-btn--primary ui-btn--md", "Apply to Join" }
-                    a { href: "#teams", class: "ui-btn ui-btn--ghost ui-btn--md", "Our Teams" }
-                }
-                div { class: "hero-stats",
-                    div { class: "hero-stat", div { class: "hero-stat-val", "{team_count}" } div { class: "hero-stat-label", "Active Teams" } }
-                    div { class: "hero-stat", div { class: "hero-stat-val", "{member_count}" } div { class: "hero-stat-label", "Members" } }
-                    div { class: "hero-stat", div { class: "hero-stat-val", "{game_count}" } div { class: "hero-stat-label", "Games" } }
-                }
-            }
-        }
-
-        div { class: "divider" }
-
-        // About
-        section { id: "about",
-            SectionHeader { label: "// The Ethos", title: "Not a server. A clan.", color: "accent", description: "A structured gaming org with game-specific squads and scheduled play nights. No drama. Life comes first \u{2014} the games come second, but we still show up." }
-            div { class: "pillars",
-                div { class: "pillar",
-                    div { class: "pillar-icon", svg { view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", circle { cx: "12", cy: "6", r: "2" } circle { cx: "6", cy: "18", r: "2" } circle { cx: "18", cy: "18", r: "2" } } }
-                    h3 { "Squad structure" }
-                    p { "Small teams of 5+5 named after in-game lore. Your squad is your crew \u{2014} the org is the scaffold that holds it together." }
-                }
-                div { class: "pillar",
-                    div { class: "pillar-icon", svg { view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", rect { x: "2", y: "4", width: "8", height: "8", rx: "1" } rect { x: "14", y: "12", width: "8", height: "8", rx: "1" } } }
-                    h3 { "Multi-game" }
-                    p { "Overwatch, Destiny 2, and whatever comes next. The crew spans games \u{2014} your squad plays one, the org plays them all." }
-                }
-                div { class: "pillar",
-                    div { class: "pillar-icon", svg { view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", rect { x: "9", y: "2", width: "6", height: "10", rx: "3" } path { d: "M5 10a7 7 0 0 0 14 0" } } }
-                    h3 { "Dedicated voice" }
-                    p { "Play nights run on TeamSpeak \u{2014} self-hosted, low latency, built for competitive gaming. Matrix handles everything else." }
-                }
-                div { class: "pillar",
-                    div { class: "pillar-icon", svg { view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", path { d: "M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" } } }
-                    h3 { "One rule" }
-                    p { "No politics, no drama, no soapboxes. Show up, communicate, have fun. Ghost for weeks and your slot opens up." }
-                }
-            }
-        }
-
-        div { class: "divider" }
-
-        // Teams
-        section { id: "teams",
-            SectionHeader { label: "// Active Squads", title: "The Teams", color: "accent", description: "Each team carries a name from the lore of the game they play. Your team is your identity within the org." }
-            div { class: "teams-grid",
-                {match overview.read().as_ref().and_then(|o| o.as_ref()) {
-                    Some(data) => {
-                        let game_map: HashMap<String, String> = data.games.iter().map(|g| (g.id.clone(), g.name.clone())).collect();
-                        rsx! { for team in data.teams.iter() { { render_team_card(team, &game_map) } } }
-                    },
-                    None => rsx! { p { style: "color: var(--text-3); text-align: center;", "Loading teams..." } },
-                }}
-            }
-        }
-
-        div { class: "divider" }
-
-        // Announcements
-        section { id: "news",
-            SectionHeader { label: "// Latest News", title: "Announcements", color: "accent", description: "What's happening in the crew." }
-            div { class: "news-grid",
-                { let list = announcements.read().as_ref().and_then(|a| a.as_ref()).cloned().unwrap_or_default();
-                  rsx! { for a in list.iter().take(3) { { render_news_card(a) } } }
-                }
-            }
-            div { class: "news-more",
-                Link { to: Route::News {}, class: "ui-btn ui-btn--ghost ui-btn--md", "View All News" }
-            }
-        }
-
-        div { class: "divider" }
-
-        // Tournaments
-        section { id: "tournaments",
-            SectionHeader { label: "// Compete", title: "Tournaments", color: "accent", description: "Active and upcoming tournaments." }
-            {
-                let list = tournaments_res.read().as_ref().and_then(|t| t.as_ref()).cloned().unwrap_or_default();
-                let visible: Vec<&HomeTournament> = list.iter().filter(|t| t.status == "registration" || t.status == "in_progress").take(4).collect();
-                if visible.is_empty() {
-                    rsx! { p { style: "color: var(--text-3); text-align: center;", "No active tournaments right now." } }
-                } else {
-                    rsx! {
-                        div { class: "tournament-home-grid",
-                            for t in visible.iter() { { render_tournament_card(t) } }
+        div { class: "home-wrap",
+        div { class: "{home_class}",
+            // —— Hero ——
+            header { class: "home-hero",
+                div { class: "home-hero-inner",
+                    div { class: "home-badge", "{content.hero_badge}" }
+                    h1 { class: "home-title",
+                        "{content.hero_title}"
+                        if !content.hero_title_accent.is_empty() {
+                            em { "{content.hero_title_accent}" }
                         }
                     }
-                }
-            }
-            div { style: "text-align: center; margin-top: 1.5rem;",
-                Link { to: Route::Tournaments {}, class: "ui-btn ui-btn--ghost ui-btn--md", "View All Tournaments" }
-            }
-        }
-
-        div { class: "divider" }
-
-        // Comms
-        section { id: "comms",
-            SectionHeader { label: "// Communication", title: "How we talk", color: "accent", description: "Matrix for text, TeamSpeak for voice. Self-hosted, no middleman." }
-            div { class: "comms-grid",
-                div { class: "comm-card",
-                    div { class: "comm-card-header",
-                        div { class: "comm-icon-svg", svg { view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", path { d: "M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" } } }
-                        h3 { "Matrix (Commet)" }
-                    }
-                    p { "All text lives here \u{2014} announcements, scheduling, casual chat, recruitment. Self-hosted on our server." }
-                    div { class: "comm-tags",
-                        Pill { tone: PillTone::Ok, "Open to all" }
-                    }
-                }
-                div { class: "comm-card",
-                    div { class: "comm-card-header",
-                        div { class: "comm-icon-svg", svg { view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", path { d: "M3 18v-6a9 9 0 0 1 18 0v6" } path { d: "M21 19a2 2 0 0 1-2 2h-1a2 2 0 0 1-2-2v-3a2 2 0 0 1 2-2h3z" } path { d: "M3 19a2 2 0 0 0 2 2h1a2 2 0 0 0 2-2v-3a2 2 0 0 0-2-2H3z" } } }
-                        h3 { "TeamSpeak" }
-                    }
-                    p { "Voice comms for play nights and scrims. Self-hosted, low latency, no distractions mid-match." }
-                    div { class: "comm-tags",
-                        Pill { tone: PillTone::Accent, "Rostered members" }
-                    }
-                }
-            }
-            div { class: "why-matrix",
-                div { class: "why-matrix-header", "Why Matrix instead of Discord?" }
-                div { class: "why-matrix-body",
-                    p { "We use Matrix because we\u{2019}d rather own our infrastructure than rent it. Our server, our data, our rules." }
-                    div { class: "why-tradeoffs",
-                        div { class: "why-tradeoff",
-                            h4 { "What you gain" }
-                            div { class: "why-tradeoff-item", span { class: "marker", "+" } " Self-hosted \u{2014} we own the server and data" }
-                            div { class: "why-tradeoff-item", span { class: "marker", "+" } " E2E encrypted messages, files, and calls" }
-                            div { class: "why-tradeoff-item", span { class: "marker", "+" } " Built-in calendar rooms with .ics sync" }
-                            div { class: "why-tradeoff-item", span { class: "marker", "+" } " No third-party account required" }
-                            div { class: "why-tradeoff-item", span { class: "marker", "+" } " Community lives on our hardware" }
+                    p { class: "home-sub", "{content.hero_sub}" }
+                    div { class: "home-actions",
+                        if recruitment_open {
+                            Link { to: Route::Apply {}, class: "btn btn-primary", "{content.cta_primary}" }
                         }
-                        div { class: "why-tradeoff",
-                            h4 { "What you give up" }
-                            div { class: "why-tradeoff-item", span { class: "marker", "\u{2212}" } " Smaller bot ecosystem" }
-                            div { class: "why-tradeoff-item", span { class: "marker", "\u{2212}" } " Fewer people already have accounts" }
-                            div { class: "why-tradeoff-item", span { class: "marker", "\u{2212}" } " Screen sharing is less polished" }
-                            div { class: "why-tradeoff-item", span { class: "marker", "\u{2212}" } " Search isn\u{2019}t as refined yet" }
-                            div { class: "why-tradeoff-item", span { class: "marker", "\u{2212}" } " Newer platform \u{2014} still growing" }
-                        }
+                        a { href: "#squads", class: "btn btn-outline", "{content.cta_secondary}" }
                     }
-                }
-            }
-        }
-
-        div { class: "divider" }
-
-        // Schedule
-        section { id: "schedule",
-            SectionHeader { label: "// Weekly Rhythm", title: "Play Nights", color: "accent", description: "No obligation to hit every session. Show up when life allows." }
-            div { class: "sched-strip",
-                {
-                    let event_list = events.read().as_ref().and_then(|e| e.as_ref()).cloned().unwrap_or_default();
-                    let days = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
-                    rsx! {
-                        for (day, day_name) in days.iter().enumerate() {
-                            {
-                                let day_events: Vec<&Event> = event_list.iter().filter(|e| e.day_of_week == day as u8).collect();
-                                if let Some(event) = day_events.first() {
-                                    let time_display = format!("{} {}", event.time, event.timezone);
-                                    rsx! { div { class: "sched-active", div { class: "day-label", "{day_name}" } div { class: "day-event", "{event.title}" } div { class: "day-time", "{time_display}" } } }
-                                } else {
-                                    rsx! { div { class: "sched-off", "{day_name}" } }
+                    if show_metrics {
+                        div { class: "home-metrics",
+                            if let Some(n) = metric_squads {
+                                div { class: "home-metric",
+                                    strong { "{n}" }
+                                    span { "Active squads" }
+                                }
+                            }
+                            if let Some(n) = metric_members {
+                                div { class: "home-metric",
+                                    strong { "{n}" }
+                                    span { "Members" }
+                                }
+                            }
+                            if let Some(n) = metric_games {
+                                div { class: "home-metric",
+                                    strong { "{n}" }
+                                    span { "Games" }
                                 }
                             }
                         }
                     }
                 }
             }
-            div { class: "sched-calendar-link",
-                a { href: "/api/calendar/all.ics", class: "ui-btn ui-btn--ghost ui-btn--md", "Subscribe to Calendar" }
-            }
-        }
 
-        div { class: "divider" }
-
-        // Recruit
-        section { id: "join",
-            div { class: "recruit-wrap",
-                div { class: "recruit-left",
-                    div { class: "sec-label sec-label-purple", "// Recruitment Open" }
-                    h2 { "Want in?" }
-                    p { "We keep rosters intentional. Join our Matrix server, hop in a few play nights, and we\u{2019}ll match you with a team that fits your schedule and skill level." }
-                    div { style: "display:flex;gap:1rem;flex-wrap:wrap;margin-top:1rem;",
-                        a { href: "#", class: "ui-btn ui-btn--primary ui-btn--md", "Join Matrix" }
-                    }
-                    div { class: "recruit-seeking",
-                        div { class: "recruit-seeking-label", "Currently looking for" }
-                        div { class: "recruit-seeking-tags",
-                            span { class: "recruit-tag recruit-tag-ow", "OW2 DPS" }
-                            span { class: "recruit-tag recruit-tag-ow", "OW2 Support" }
-                            span { class: "recruit-tag recruit-tag-dest", "D2 PvP" }
+            // —— Ethos (numbered rules) ——
+            section { class: "home-block",
+                div { class: "home-kicker", "{content.ethos_kicker}" }
+                h2 { class: "home-heading", "{content.ethos_title}" }
+                p { class: "home-body", "{content.ethos_body}" }
+                ul { class: "rules",
+                    for (i, rule) in content.ethos_rules.iter().enumerate() {
+                        {
+                            let n = format!("{:02}", i + 1);
+                            rsx! {
+                                li {
+                                    span { class: "rn", "{n}" }
+                                    span { "{rule}" }
+                                }
+                            }
                         }
                     }
                 }
-                div { class: "recruit-right",
-                    h3 { "What we expect" }
-                    div { class: "req", span { class: "req-marker", "\u{203a}" } span { "16+ \u{2014} old enough to communicate and commit" } }
-                    div { class: "req", span { class: "req-marker", "\u{203a}" } span { "PC only \u{2014} our teams play on PC" } }
-                    div { class: "req", span { class: "req-marker", "\u{203a}" } span { "Communicate \u{2014} let your squad know if you can\u{2019}t make it" } }
-                    div { class: "req", span { class: "req-marker", "\u{203a}" } span { "No toxicity \u{2014} competitive is fine, being a jerk isn\u{2019}t" } }
-                    div { class: "req", span { class: "req-marker", "\u{203a}" } span { "Mic required for play nights" } }
-                    div { class: "req", span { class: "req-marker", "\u{203a}" } span { "Willing to install TeamSpeak when you make a roster" } }
-                    div { class: "never-ask",
-                        div { class: "never-ask-header", "What we\u{2019}ll never ask for" }
-                        div { class: "never-ask-body", "Your real name \u{00b7} Your email \u{00b7} Your phone number \u{00b7} Your social media \u{00b7} Your location \u{00b7} Your government ID \u{00b7} Access to your contacts \u{00b7} Permission to scan your processes" }
+            }
+
+            // —— What's on (schedule + tournaments) ——
+            // Hub: only show panels that have data (no empty twin). Landing: show both.
+            {
+                let event_list = events.read().as_ref().and_then(|e| e.as_ref()).cloned().unwrap_or_default();
+                let tourney_list = tournaments_res.read().as_ref().and_then(|t| t.as_ref()).cloned().unwrap_or_default();
+                let live: Vec<HomeTournament> = tourney_list
+                    .iter()
+                    .filter(|t| t.status == "registration" || t.status == "in_progress")
+                    .take(5)
+                    .cloned()
+                    .collect();
+                let has_events = !event_list.is_empty();
+                let has_tourneys = !live.is_empty();
+                let is_landing = layout == PublicLayout::Landing;
+                let show_schedule = has_events || is_landing;
+                let show_tourneys = has_tourneys || is_landing;
+                let show_live = show_schedule || show_tourneys;
+                let both = show_schedule && show_tourneys;
+                let grid_class = if both { "live-grid" } else { "live-grid single" };
+
+                if show_live {
+                    rsx! {
+                        section { class: "home-block",
+                            div { class: "{grid_class}",
+                                if show_schedule {
+                                    div { class: "live-panel",
+                                        div { class: "home-kicker", "{content.schedule_kicker}" }
+                                        h2 { class: "home-heading", "{content.schedule_title}" }
+                                        if has_events {
+                                            ul { class: "live-list",
+                                                for e in event_list.iter() {
+                                                    {
+                                                        let day = day_name(e.day_of_week);
+                                                        rsx! {
+                                                            li {
+                                                                span { "{e.title}" }
+                                                                span { class: "live-meta", "{day} · {e.time} {e.timezone}" }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            a { href: "/api/calendar/all.ics", class: "home-link", "{content.calendar_cta}" }
+                                        } else {
+                                            p { class: "muted", "{content.schedule_empty}" }
+                                        }
+                                    }
+                                }
+                                if show_tourneys {
+                                    div { class: "live-panel compete",
+                                        div { class: "home-kicker compete", "{content.tournaments_kicker}" }
+                                        h2 { class: "home-heading", "{content.tournaments_title}" }
+                                        if has_tourneys {
+                                            ul { class: "live-list",
+                                                for t in live.iter() {
+                                                    {
+                                                        let status = if t.status == "in_progress" { "Live" } else { "Open" };
+                                                        let tag_class = if t.status == "in_progress" { "tag live" } else { "tag open" };
+                                                        rsx! {
+                                                            li {
+                                                                Link { to: Route::Tournament { id: t.id.clone() }, "{t.name}" }
+                                                                span { class: "live-meta",
+                                                                    span { class: "{tag_class}", "{status}" }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            Link {
+                                                to: Route::Tournaments {},
+                                                class: "home-link compete",
+                                                "{content.tournaments_view_all}"
+                                            }
+                                        } else {
+                                            p { class: "muted", "{content.tournaments_empty}" }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    rsx! {}
+                }
+            }
+
+            // —— Squads ——
+            section { id: "squads", class: "home-block",
+                div { class: "home-kicker", "{content.teams_kicker}" }
+                h2 { class: "home-heading", "{content.teams_title}" }
+                {
+                    match overview.read().as_ref().and_then(|o| o.as_ref()) {
+                        Some(data) if !data.teams.is_empty() => {
+                            let game_map: HashMap<String, String> = data
+                                .games
+                                .iter()
+                                .map(|g| (g.id.clone(), g.name.clone()))
+                                .collect();
+                            rsx! {
+                                div { class: "team-rows",
+                                    div { class: "team-head",
+                                        span { "Squad" }
+                                        span { "Game" }
+                                        span { "Roster" }
+                                        span { "Division" }
+                                        span { "W–L" }
+                                    }
+                                    for team in data.teams.iter() {
+                                        { render_team_row(team, &game_map) }
+                                    }
+                                }
+                            }
+                        }
+                        Some(_) => rsx! { p { class: "muted", "{content.teams_empty}" } },
+                        None => rsx! { p { class: "muted", "Loading squads…" } },
                     }
                 }
             }
+
+            // —— Announcements (skip empty on hub) ——
+            {
+                let list = announcements
+                    .read()
+                    .as_ref()
+                    .and_then(|a| a.as_ref())
+                    .cloned()
+                    .unwrap_or_default();
+                let show = !list.is_empty() || layout == PublicLayout::Landing;
+                if show {
+                    rsx! {
+                        section { class: "home-block",
+                            div { class: "home-kicker", "{content.news_kicker}" }
+                            h2 { class: "home-heading", "{content.news_title}" }
+                            if list.is_empty() {
+                                p { class: "muted", "{content.news_empty}" }
+                            } else {
+                                div { class: "news-rows",
+                                    for a in list.iter().take(4) {
+                                        { render_news_row(a) }
+                                    }
+                                }
+                                Link { to: Route::News {}, class: "home-link", "{content.news_view_all}" }
+                            }
+                        }
+                    }
+                } else {
+                    rsx! {}
+                }
+            }
+
+            // —— Recruit ——
+            if recruitment_open {
+                section { class: "home-block",
+                    div { class: "home-kicker", "{content.recruit_kicker}" }
+                    h2 { class: "home-heading", "{content.recruit_title}" }
+                    div { class: "recruit-banner",
+                        div { class: "recruit-left",
+                            p { class: "home-body", style: "margin-top:0;", "{content.recruit_body}" }
+                            div { style: "margin-top:1.25rem;",
+                                Link { to: Route::Apply {}, class: "btn btn-primary", "{content.recruit_cta}" }
+                            }
+                            if !content.seeking_tags.is_empty() {
+                                div { class: "seek-tags",
+                                    span {
+                                        class: "home-kicker",
+                                        style: "width:100%;margin:0;",
+                                        "{content.seeking_label}"
+                                    }
+                                    for tag in content.seeking_tags.iter() {
+                                        span { class: "seek-tag", "{tag}" }
+                                    }
+                                }
+                            }
+                        }
+                        div { class: "recruit-right",
+                            div { class: "home-kicker", "{content.recruit_expectations_title}" }
+                            ul { class: "expect-list",
+                                for line in content.recruit_expectations.iter() {
+                                    li { "{line}" }
+                                }
+                            }
+                            div { class: "never-box",
+                                h4 { "{content.never_ask_title}" }
+                                p { "{content.never_ask_body}" }
+                            }
+                        }
+                    }
+                }
+            }
+
+            p { class: "home-foot",
+                "{content.footer_note}"
+                " · {org_name}"
+            }
         }
+        } // home-wrap
     }
 }
 
-// --- Render helpers ---
+fn day_name(d: u8) -> &'static str {
+    match d {
+        0 => "Mon",
+        1 => "Tue",
+        2 => "Wed",
+        3 => "Thu",
+        4 => "Fri",
+        5 => "Sat",
+        6 => "Sun",
+        _ => "—",
+    }
+}
 
-fn render_team_card(team: &OverviewTeam, game_map: &HashMap<String, String>) -> Element {
+fn render_team_row(team: &OverviewTeam, game_map: &HashMap<String, String>) -> Element {
     let game_name = game_map
         .get(&team.game_id)
         .cloned()
         .unwrap_or_else(|| team.game_id.clone());
-    let badge_class = if game_name.to_lowercase().contains("overwatch") {
-        "team-game game-ow"
-    } else if game_name.to_lowercase().contains("destiny") {
-        "team-game game-dest"
-    } else {
-        "team-game game-other"
-    };
     let wl = if team.record.wins == 0 && team.record.losses == 0 {
-        "\u{2014}".to_string()
+        "—".to_string()
     } else {
-        format!("{}-{}", team.record.wins, team.record.losses)
+        format!("{}–{}", team.record.wins, team.record.losses)
     };
     let division = team
         .division
         .clone()
-        .unwrap_or_else(|| "Scrims & Internal".into());
+        .unwrap_or_else(|| "Internal".into());
     let lore = team.lore_quote.clone().unwrap_or_default();
+    let roster_n = team.roster_count;
 
     rsx! {
-        div { class: "team-card",
-            div { class: "team-header",
-                div { class: "team-name", "{team.name}" }
-                span { class: "{badge_class}", "{game_name}" }
-            }
-            if !lore.is_empty() {
-                div { class: "team-lore", "\u{201c}{lore}\u{201d}" }
-            }
-            div { class: "team-meta",
-                div { class: "team-meta-item", span { class: "team-meta-val", "{team.roster_count}" } span { class: "team-meta-label", " Roster" } }
-                div { class: "team-meta-item", span { class: "team-meta-val", "{wl}" } span { class: "team-meta-label", " W-L" } }
-            }
-            div { class: "team-division", "{division}" }
-        }
-    }
-}
-
-fn render_news_card(a: &Announcement) -> Element {
-    let date: String = a.created_at.chars().take(10).collect();
-    rsx! {
-        article { class: "news-card",
-            div { class: "news-meta",
-                time { "{date}" }
-                if a.pinned {
-                    Pill { tone: PillTone::Accent, "Pinned" }
+        div { class: "team-row",
+            div { class: "tm-name",
+                "{team.name}"
+                if !lore.is_empty() {
+                    div { class: "team-lore", "“{lore}”" }
                 }
             }
-            h3 { class: "news-title", "{a.title}" }
-            p { class: "news-body", "{a.content}" }
+            div { class: "tm-game", "{game_name}" }
+            div { class: "tm-roster", "{roster_n}" }
+            div { class: "tm-div", "{division}" }
+            div { class: "tm-wl", "{wl}" }
         }
     }
 }
 
-fn render_tournament_card(t: &HomeTournament) -> Element {
-    let fmt = match t.format.as_str() {
-        "single_elim" => "Single Elim",
-        "double_elim" => "Double Elim",
-        "round_robin" => "Round Robin",
-        "swiss" => "Swiss",
-        _ => &t.format,
-    };
-    let status = match t.status.as_str() {
-        "registration" => "Registration Open",
-        "in_progress" => "Live",
-        "completed" => "Completed",
-        _ => &t.status,
-    };
-    let status_class = format!("tournament-card-status {}", t.status);
-    let date: String = t
-        .starts_at
-        .as_ref()
-        .map(|d| d.chars().take(10).collect())
-        .unwrap_or_default();
-
+fn render_news_row(a: &Announcement) -> Element {
+    let date: String = a.created_at.chars().take(10).collect();
     rsx! {
-        Link { to: Route::Tournament { id: t.id.clone() }, class: "tournament-card",
-            div { class: "tournament-card-name", "{t.name}" }
-            div { class: "tournament-card-meta",
-                span { "{fmt}" }
-                if !date.is_empty() { span { "{date}" } }
-                if t.is_external { span { "External" } }
+        article { class: "news-row",
+            time { "{date}" }
+            if a.pinned {
+                span { class: "pin", "Pinned" }
             }
-            span { class: "{status_class}", "{status}" }
+            h3 { "{a.title}" }
+            p { "{a.content}" }
         }
     }
 }
