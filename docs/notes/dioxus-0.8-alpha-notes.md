@@ -1,6 +1,7 @@
 # Dioxus 0.8.0-alpha — notes for Scuffed Crew
 
 **Status:** research only. Production stays on **Dioxus 0.7.9** until stable 0.8 docs exist.  
+**Next action (operator):** desktop Blitz spike on a branch — see **`docs/notes/dioxus-0.8-desktop-blitz-spike.md`**.  
 **Sources reviewed:** GitHub release `v0.8.0-alpha.0` (2026-05-19), shallow clone of that tag, package READMEs in-tree, grep of this monorepo (2026-07-10).
 
 ## Documentation gap
