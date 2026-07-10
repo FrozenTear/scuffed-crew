@@ -71,7 +71,7 @@ impl Config {
     /// CLI args take precedence over the file. If a token/server are supplied
     /// without a pre-existing config file, the resolved config is written back
     /// so the user doesn't have to pass flags on every start.
-    pub fn load() -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn load() -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let config_dir = dirs::config_dir()
             .ok_or("no config directory found")?
             .join("scuffed-stat-tracker");
@@ -132,7 +132,7 @@ impl Config {
     }
 
     /// Path of the user config file (`~/.config/scuffed-stat-tracker/config.toml`).
-    pub fn config_path() -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
+    pub fn config_path() -> Result<std::path::PathBuf, Box<dyn std::error::Error + Send + Sync>> {
         Ok(dirs::config_dir()
             .ok_or("no config directory found")?
             .join("scuffed-stat-tracker")
@@ -141,7 +141,7 @@ impl Config {
 
     /// Serialize and write the config, owner-readable only — the file carries
     /// the sync bearer token.
-    pub fn save(&self) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn save(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let path = Self::config_path()?;
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;

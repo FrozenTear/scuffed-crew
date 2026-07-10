@@ -309,7 +309,7 @@ pub fn SettingsPanel() -> Element {
     }
 }
 
-fn save_config(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
+fn save_config(config: &Config) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Shared save path: writes 0600 (config carries the sync token).
     config.save()
 }

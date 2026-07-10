@@ -3,6 +3,7 @@ use stat_tracker::{capture, config, detect, ocr, parse, setup, storage, sync};
 use std::sync::Arc;
 use std::time::Instant;
 
+use anyhow::Context as _;
 use chrono::Utc;
 use surrealdb_types::Datetime as SurrealDatetime;
 use tracing_subscriber::EnvFilter;
@@ -34,8 +35,35 @@ impl Drop for PidGuard {
     }
 }
 
+/// Long-lived daemon dependencies and configuration, built once in `main` and
+/// threaded as one value instead of 11 positional parameters whose adjacent
+/// same-typed members were swap-prone (A1).
+struct DaemonCtx {
+    backend: capture::CaptureBackend,
+    store: storage::LocalStore,
+    sync_client: Option<sync::SyncClient>,
+    player_name: Option<String>,
+    capture_output: Option<String>,
+    auto_detect: config::AutoDetectConfig,
+    game_process_names: Vec<String>,
+    portrait_matcher: Arc<detect::hero_portrait::PortraitMatcher>,
+    collect_portraits: bool,
+    dump_poll_frames: bool,
+    data_dir: std::path::PathBuf,
+}
+
+/// Per-capture parameters decided by the session state machine at Tab time.
+struct CaptureRequest {
+    session_id: String,
+    create_session: bool,
+    game_outcome: detect::MatchOutcome,
+    session_map: Option<String>,
+    map_candidates: Vec<String>,
+    allow_banner_recovery: bool,
+}
+
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| {
             EnvFilter::new("scuffed_stat_tracker=info,stat_tracker=info,surrealdb=warn")
@@ -72,7 +100,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    let mut config = config::Config::load()?;
+    let mut config = config::Config::load()
+        .map_err(anyhow::Error::from_boxed)
+        .context("failed to load config")?;
     tracing::info!("Scuffed Stat Tracker starting");
     tracing::info!(data_dir = %config.data_dir.display(), "using data directory");
 
@@ -115,7 +145,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             && std::fs::metadata(format!("/proc/{pid}")).is_ok()
         {
             tracing::error!(pid, "another daemon is already running — stop it first");
-            return Err(format!("another daemon is already running (PID {pid})").into());
+            anyhow::bail!("another daemon is already running (PID {pid})");
         }
         let _ = std::fs::remove_file(&pid_path);
     }
@@ -144,8 +174,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
-    let store = storage::LocalStore::open(&config.data_dir).await?;
-    let count = store.match_count().await?;
+    let store = storage::LocalStore::open(&config.data_dir)
+        .await
+        .map_err(anyhow::Error::from_boxed)
+        .context("failed to open local store (is another daemon running?)")?;
+    let count = store
+        .match_count()
+        .await
+        .map_err(anyhow::Error::from_boxed)?;
     tracing::info!(stored_matches = count, "local store ready");
 
     // Initial snapshot so the GUI has current data from the moment the daemon
@@ -195,20 +231,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
-    run_loop(
-        &backend,
-        &store,
-        sync_client.as_ref(),
-        config.player_name.as_deref(),
-        config.capture_output.as_deref(),
-        &config.auto_detect,
-        &config.game_process_names,
-        &portrait_matcher,
+    let ctx = Arc::new(DaemonCtx {
+        backend,
+        store,
+        sync_client,
+        player_name: config.player_name.clone(),
+        capture_output: config.capture_output.clone(),
+        auto_detect: config.auto_detect,
+        game_process_names: config.game_process_names.clone(),
+        portrait_matcher,
         collect_portraits,
         dump_poll_frames,
-        &data_dir,
-    )
-    .await
+        data_dir,
+    });
+    run_loop(ctx).await
 }
 
 /// The game currently in progress. Opened when the poller sees a game-start
@@ -507,20 +543,17 @@ struct CaptureReport {
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn run_loop(
-    backend: &capture::CaptureBackend,
-    store: &storage::LocalStore,
-    sync_client: Option<&sync::SyncClient>,
-    player_name: Option<&str>,
-    capture_output: Option<&str>,
-    auto_detect: &config::AutoDetectConfig,
-    game_process_names: &[String],
-    portrait_matcher: &Arc<detect::hero_portrait::PortraitMatcher>,
-    collect_portraits: bool,
-    dump_poll_frames: bool,
-    data_dir: &std::path::Path,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let mut game_gate = detect::game_running::GameProcessGate::new(game_process_names);
+async fn run_loop(ctx: Arc<DaemonCtx>) -> anyhow::Result<()> {
+    // Ergonomic locals over the shared context; spawned tasks clone the Arc.
+    let backend = &ctx.backend;
+    let store = &ctx.store;
+    let sync_client = ctx.sync_client.as_ref();
+    let capture_output = ctx.capture_output.as_deref();
+    let auto_detect = &ctx.auto_detect;
+    let dump_poll_frames = ctx.dump_poll_frames;
+    let data_dir: &std::path::Path = &ctx.data_dir;
+
+    let mut game_gate = detect::game_running::GameProcessGate::new(&ctx.game_process_names);
     // The GUI's Stop button (and systemd) send SIGTERM — shut down as
     // gracefully as Ctrl+C, with a final sync.
     let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
@@ -652,33 +685,23 @@ async fn run_loop(
                         };
 
                         let tx = capture_tx.clone();
-                        let backend = *backend;
-                        let store_task = store.clone();
-                        let player_name = player_name.map(str::to_string);
-                        let capture_output = capture_output.map(str::to_string);
-                        let matcher = Arc::clone(portrait_matcher);
-                        let data_dir_task = data_dir.to_path_buf();
+                        let ctx_task = Arc::clone(&ctx);
+                        let req = CaptureRequest {
+                            session_id: sid.clone(),
+                            create_session: create,
+                            game_outcome: outcome,
+                            session_map,
+                            map_candidates: candidates,
+                            allow_banner_recovery: banner_ok,
+                        };
                         capture_task = Some(tokio::spawn(async move {
                             // Wait for the game to render the scoreboard
                             // overlay after the Tab press.
                             tokio::time::sleep(tokio::time::Duration::from_millis(400)).await;
-                            let result = handle_capture(
-                                &backend,
-                                &store_task,
-                                player_name.as_deref(),
-                                capture_output.as_deref(),
-                                &sid,
-                                create,
-                                outcome,
-                                session_map.as_deref(),
-                                &candidates,
-                                banner_ok,
-                                &matcher,
-                                collect_portraits,
-                                &data_dir_task,
-                            )
-                            .await
-                            .map_err(|e| e.to_string());
+                            let result = handle_capture(&ctx_task, req)
+                                .await
+                                // `{:#}` keeps anyhow's context chain in the string.
+                                .map_err(|e| format!("{e:#}"));
                             let _ = tx.send((sid, result));
                         }));
                     }
@@ -1010,26 +1033,28 @@ async fn run_loop(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn handle_capture(
-    backend: &capture::CaptureBackend,
-    store: &storage::LocalStore,
-    player_name: Option<&str>,
-    capture_output: Option<&str>,
-    session_id: &str,
-    create_session: bool,
-    game_outcome: detect::MatchOutcome,
-    session_map: Option<&str>,
-    map_candidates: &[String],
-    allow_banner_recovery: bool,
-    portrait_matcher: &Arc<detect::hero_portrait::PortraitMatcher>,
-    collect_portraits: bool,
-    data_dir: &std::path::Path,
-) -> Result<CaptureReport, Box<dyn std::error::Error + Send + Sync>> {
-    tracing::info!("Tab detected — capturing screen (hold Tab to keep scoreboard visible)");
-    let img = capture::capture_screen_output(backend, capture_output).await?;
+async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<CaptureReport> {
+    // Ergonomic locals over the context/request (the body predates A1).
+    let backend = &ctx.backend;
+    let store = &ctx.store;
+    let player_name = ctx.player_name.as_deref();
+    let capture_output = ctx.capture_output.as_deref();
+    let collect_portraits = ctx.collect_portraits;
+    let data_dir: &std::path::Path = &ctx.data_dir;
+    let session_id: &str = &req.session_id;
+    let create_session = req.create_session;
+    let game_outcome = req.game_outcome;
+    let session_map = req.session_map.as_deref();
+    let map_candidates: &[String] = &req.map_candidates;
+    let allow_banner_recovery = req.allow_banner_recovery;
 
-    let matcher = Arc::clone(portrait_matcher);
+    tracing::info!("Tab detected — capturing screen (hold Tab to keep scoreboard visible)");
+    let img = capture::capture_screen_output(backend, capture_output)
+        .await
+        .map_err(anyhow::Error::from_boxed)
+        .context("screen capture failed")?;
+
+    let matcher = Arc::clone(&ctx.portrait_matcher);
     // Clone player_name so the blocking closure can own it.
     let player_name_owned = player_name.map(|s| s.to_string());
     let session_map_known = session_map.is_some();
@@ -1131,7 +1156,9 @@ async fn handle_capture(
         team_size,
         frame: frame_img,
     } = analysis;
-    let ocr_result = ocr?;
+    let ocr_result = ocr
+        .map_err(anyhow::Error::from_boxed)
+        .context("full-board OCR failed")?;
 
     tracing::info!(?outcome, "frame analysis");
     let preview_end = ocr_result
@@ -1259,11 +1286,11 @@ async fn handle_capture(
             // a snapshot the caller then marks "session created", and every
             // later outcome/map back-fill would update a session row that
             // doesn't exist. The Tab can simply be pressed again.
-            store.create_session(&session).await.map_err(
-                |e| -> Box<dyn std::error::Error + Send + Sync> {
-                    format!("session create failed: {e}").into()
-                },
-            )?;
+            store
+                .create_session(&session)
+                .await
+                .map_err(anyhow::Error::from_boxed)
+                .context("session create failed")?;
             tracing::info!(session_id = %session_id, "started new match session");
         } else if let Err(e) = store.append_capture(session_id, now, &outcome_label).await {
             tracing::warn!(error = %e, "failed to append capture to session");
@@ -1278,11 +1305,11 @@ async fn handle_capture(
         );
         let recorded_map = (!parsed.map_name.is_empty()).then(|| parsed.map_name.clone());
         storage::append_match_log(data_dir, &parsed);
-        store.insert_match(parsed).await.map_err(
-            |e| -> Box<dyn std::error::Error + Send + Sync> {
-                format!("store insert failed: {e}").into()
-            },
-        )?;
+        store
+            .insert_match(parsed)
+            .await
+            .map_err(anyhow::Error::from_boxed)
+            .context("store insert failed")?;
 
         // Keep the session label on the majority hero across its snapshots —
         // a single capture can mislabel (career panel shows the spectated hero

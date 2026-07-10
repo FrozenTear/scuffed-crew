@@ -54,7 +54,7 @@ pub struct LocalStore {
 }
 
 impl LocalStore {
-    pub async fn open(data_dir: &Path) -> Result<Self, Box<dyn std::error::Error>> {
+    pub async fn open(data_dir: &Path) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let db_path = data_dir.join("stats.surrealkv");
         std::fs::create_dir_all(&db_path)?;
 
@@ -125,7 +125,7 @@ impl LocalStore {
         Ok(())
     }
 
-    pub async fn match_count(&self) -> Result<usize, Box<dyn std::error::Error>> {
+    pub async fn match_count(&self) -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
         let mut result = self
             .db
             .query("SELECT count() AS total FROM personal_match GROUP ALL")

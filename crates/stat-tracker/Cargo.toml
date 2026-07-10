@@ -9,6 +9,7 @@ gui = ["dep:dioxus", "dep:tray-icon", "dep:base64", "dep:gtk"]
 
 [dependencies]
 scuffed-types = { path = "../types" }
+anyhow = "1"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 tokio = { version = "1", features = [
     "macros",
