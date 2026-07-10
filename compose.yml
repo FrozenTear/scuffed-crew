@@ -1,7 +1,16 @@
 services:
   surrealdb:
     image: surrealdb/surrealdb:v3.0
-    command: start rocksdb:///data/scuffed.db --bind 0.0.0.0:8000 --user ${SURREALDB_USER:-root} --pass ${SURREALDB_PASSWORD:?Set SURREALDB_PASSWORD (run scripts/install.sh)}
+    # Image runs as non-root by default; Podman named volumes are root-owned,
+    # which causes: Failed to create RocksDB directory: Permission denied.
+    # Run as root in the container for single-tenant VPS deploys.
+    user: "0:0"
+    environment:
+      SURREAL_USER: ${SURREALDB_USER:-root}
+      SURREAL_PASS: ${SURREALDB_PASSWORD:?Set SURREALDB_PASSWORD (run scripts/install.sh)}
+      SURREAL_BIND: 0.0.0.0:8000
+    # Absolute path form (rocksdb:/data/...) so data lands on the volume.
+    command: start rocksdb:/data/scuffed.db
     volumes:
       - surrealdb-data:/data
     networks:

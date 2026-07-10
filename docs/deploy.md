@@ -11,6 +11,21 @@ This is the supported path for a **single VPS** with Podman Compose. You do **no
 
 Kubernetes is out of scope. **Quadlet** (systemd-native containers) is an optional later migration if you want boot integration without Compose — no Quadlet units ship yet.
 
+## Troubleshooting
+
+### SurrealDB: `Permission denied` creating RocksDB directory
+
+The official image runs as a non-root user; Podman volumes are often root-owned. `compose.yml` sets `user: "0:0"` on the Surreal service for single-tenant VPS installs.
+
+If you still see the error on an old volume:
+
+```bash
+podman compose --env-file data/secrets.env down
+# optional: remove only if you can lose empty/broken DB data
+# podman volume rm scuffed-crew_surrealdb-data
+podman compose --env-file data/secrets.env up -d
+```
+
 ## Happy path (novice)
 
 ```bash
