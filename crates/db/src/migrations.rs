@@ -484,11 +484,36 @@ pub async fn run_migrations(client: &Surreal<Any>) -> DbResult<()> {
         DEFINE INDEX IF NOT EXISTS wiki_revision_page_idx ON wiki_revision COLUMNS page_id, edited_at;
 
         -- ================================================
+        -- Forum hierarchy (category → board → optional sub-board)
+        -- ================================================
+        DEFINE TABLE IF NOT EXISTS forum_category SCHEMAFULL;
+        DEFINE FIELD OVERWRITE name ON forum_category TYPE string;
+        DEFINE FIELD OVERWRITE slug ON forum_category TYPE string;
+        DEFINE FIELD OVERWRITE description ON forum_category TYPE option<string>;
+        DEFINE FIELD OVERWRITE sort_order ON forum_category TYPE int DEFAULT 0;
+        DEFINE FIELD OVERWRITE is_active ON forum_category TYPE bool DEFAULT true;
+        DEFINE INDEX IF NOT EXISTS forum_category_slug_idx ON forum_category COLUMNS slug UNIQUE;
+
+        DEFINE TABLE IF NOT EXISTS forum_board SCHEMAFULL;
+        DEFINE FIELD OVERWRITE category_id ON forum_board TYPE string;
+        DEFINE FIELD OVERWRITE parent_board_id ON forum_board TYPE option<string>;
+        DEFINE FIELD OVERWRITE name ON forum_board TYPE string;
+        DEFINE FIELD OVERWRITE slug ON forum_board TYPE string;
+        DEFINE FIELD OVERWRITE description ON forum_board TYPE option<string>;
+        DEFINE FIELD OVERWRITE sort_order ON forum_board TYPE int DEFAULT 0;
+        DEFINE FIELD OVERWRITE is_locked ON forum_board TYPE bool DEFAULT false;
+        DEFINE FIELD OVERWRITE min_role ON forum_board TYPE option<string>;
+        DEFINE FIELD OVERWRITE is_active ON forum_board TYPE bool DEFAULT true;
+        DEFINE INDEX IF NOT EXISTS forum_board_slug_idx ON forum_board COLUMNS slug UNIQUE;
+        DEFINE INDEX IF NOT EXISTS forum_board_cat_idx ON forum_board COLUMNS category_id, sort_order;
+
+        -- ================================================
         -- Forum Threads (discussion board)
         -- ================================================
         DEFINE TABLE IF NOT EXISTS forum_thread SCHEMAFULL;
         DEFINE FIELD OVERWRITE title ON forum_thread TYPE string;
         DEFINE FIELD OVERWRITE category ON forum_thread TYPE string DEFAULT 'general';
+        DEFINE FIELD OVERWRITE board_id ON forum_thread TYPE option<string>;
         DEFINE FIELD OVERWRITE author_member_id ON forum_thread TYPE string;
         DEFINE FIELD OVERWRITE content ON forum_thread TYPE string;
         DEFINE FIELD OVERWRITE pinned ON forum_thread TYPE bool DEFAULT false;
@@ -498,6 +523,7 @@ pub async fn run_migrations(client: &Surreal<Any>) -> DbResult<()> {
         DEFINE FIELD OVERWRITE nostr_event_id ON forum_thread TYPE option<string>;
         DEFINE FIELD OVERWRITE is_active ON forum_thread TYPE bool DEFAULT true;
         DEFINE INDEX IF NOT EXISTS forum_thread_cat_idx ON forum_thread COLUMNS category, created_at;
+        DEFINE INDEX IF NOT EXISTS forum_thread_board_idx ON forum_thread COLUMNS board_id, created_at;
 
         -- ================================================
         -- Forum Replies
@@ -603,6 +629,11 @@ pub async fn run_migrations(client: &Surreal<Any>) -> DbResult<()> {
         )
         .await?
         .check()?;
+
+    // Seed default category/board tree and migrate legacy thread.category strings.
+    if let Err(e) = crate::queries::forum::ensure_forum_hierarchy(client).await {
+        tracing::warn!("forum hierarchy seed/migrate: {e}");
+    }
 
     tracing::info!("Database migrations complete");
     Ok(())

@@ -35,7 +35,7 @@ pub use community::Community;
 pub use dm::{DmInbox, DmThread};
 pub use events::Events;
 pub use feed::Feed;
-pub use forum::Forum;
+pub use forum::{Forum, ForumBoardPage};
 pub use forum_thread::ForumThread;
 pub use home::Home;
 pub use identity::IdentitySettings;

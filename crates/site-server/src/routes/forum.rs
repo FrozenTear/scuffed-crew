@@ -6,7 +6,10 @@ use axum::{
 use serde::{Deserialize, Serialize};
 
 use scuffed_auth::server::session::ErrorResponse;
-use scuffed_db::{AuditAction, AuditTargetType, ForumReply, ForumThread, NostrKeyMode};
+use scuffed_db::{
+    AuditAction, AuditTargetType, ForumBoard, ForumCategory, ForumCategoryNode, ForumReply,
+    ForumThread, NostrKeyMode,
+};
 
 use scuffed_chat::nostr::events::EventBuilder;
 use scuffed_chat::nostr::relay::publish_event_oneshot;
@@ -19,6 +22,9 @@ use crate::state::AppState;
 
 #[derive(Deserialize)]
 pub struct ListThreadsQuery {
+    /// Preferred: board slug
+    pub board: Option<String>,
+    /// Deprecated: legacy string category
     pub category: Option<String>,
     #[serde(default = "default_limit")]
     pub limit: u32,
@@ -34,6 +40,8 @@ fn default_limit() -> u32 {
 pub struct ThreadListResponse {
     pub threads: Vec<ThreadWithReplyCount>,
     pub total: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub board: Option<ForumBoard>,
 }
 
 #[derive(Serialize)]
@@ -48,18 +56,60 @@ pub struct ThreadDetailResponse {
     pub thread: ForumThread,
     pub replies: Vec<ForumReply>,
     pub reply_count: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub board: Option<ForumBoard>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub category: Option<ForumCategory>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_board: Option<ForumBoard>,
 }
 
 #[derive(Deserialize)]
 pub struct CreateThreadRequest {
     pub title: String,
     pub content: String,
-    #[serde(default = "default_category")]
-    pub category: String,
+    /// Preferred: board id or slug
+    pub board_id: Option<String>,
+    pub board: Option<String>,
+    /// Deprecated fallback
+    pub category: Option<String>,
 }
 
-fn default_category() -> String {
-    "general".to_string()
+#[derive(Deserialize)]
+pub struct CreateCategoryRequest {
+    pub name: String,
+    pub slug: String,
+    pub description: Option<String>,
+    #[serde(default)]
+    pub sort_order: i32,
+}
+
+#[derive(Deserialize)]
+pub struct UpdateCategoryRequest {
+    pub name: Option<String>,
+    pub description: Option<Option<String>>,
+    pub sort_order: Option<i32>,
+    pub is_active: Option<bool>,
+}
+
+#[derive(Deserialize)]
+pub struct CreateBoardRequest {
+    pub category_id: String,
+    pub parent_board_id: Option<String>,
+    pub name: String,
+    pub slug: String,
+    pub description: Option<String>,
+    #[serde(default)]
+    pub sort_order: i32,
+}
+
+#[derive(Deserialize)]
+pub struct UpdateBoardRequest {
+    pub name: Option<String>,
+    pub description: Option<Option<String>>,
+    pub sort_order: Option<i32>,
+    pub is_locked: Option<bool>,
+    pub is_active: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -91,27 +141,190 @@ fn default_reply_limit() -> u32 {
 
 // ─── Handlers ───────────────────────────────────────────────
 
+fn err_500(e: impl ToString) -> (StatusCode, Json<ErrorResponse>) {
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(ErrorResponse {
+            error: e.to_string(),
+        }),
+    )
+}
+
+fn err_400(msg: impl Into<String>) -> (StatusCode, Json<ErrorResponse>) {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(ErrorResponse {
+            error: msg.into(),
+        }),
+    )
+}
+
+fn err_404(msg: impl Into<String>) -> (StatusCode, Json<ErrorResponse>) {
+    (
+        StatusCode::NOT_FOUND,
+        Json(ErrorResponse {
+            error: msg.into(),
+        }),
+    )
+}
+
+/// GET /api/forum/tree — category → boards → sub-boards
+pub async fn forum_tree(
+    State(state): State<AppState>,
+) -> Result<Json<Vec<ForumCategoryNode>>, (StatusCode, Json<ErrorResponse>)> {
+    state
+        .db
+        .list_forum_tree()
+        .await
+        .map(Json)
+        .map_err(err_500)
+}
+
+/// GET /api/forum/boards/:slug — board meta
+pub async fn get_board(
+    State(state): State<AppState>,
+    Path(slug): Path<String>,
+) -> Result<Json<ForumBoard>, (StatusCode, Json<ErrorResponse>)> {
+    state
+        .db
+        .get_forum_board_by_slug(&slug)
+        .await
+        .map_err(err_500)?
+        .map(Json)
+        .ok_or_else(|| err_404("Board not found"))
+}
+
+/// POST /api/forum/categories — officer+
+pub async fn create_category(
+    State(state): State<AppState>,
+    officer: OfficerUser,
+    Json(body): Json<CreateCategoryRequest>,
+) -> Result<(StatusCode, Json<ForumCategory>), (StatusCode, Json<ErrorResponse>)> {
+    if body.name.trim().is_empty() || body.slug.trim().is_empty() {
+        return Err(err_400("name and slug required"));
+    }
+    let cat = state
+        .db
+        .create_forum_category(
+            body.name.trim(),
+            body.slug.trim(),
+            body.description.as_deref(),
+            body.sort_order,
+        )
+        .await
+        .map_err(err_500)?;
+    let _ = officer;
+    Ok((StatusCode::CREATED, Json(cat)))
+}
+
+/// PATCH /api/forum/categories/:id — officer+
+pub async fn update_category(
+    State(state): State<AppState>,
+    _officer: OfficerUser,
+    Path(id): Path<String>,
+    Json(body): Json<UpdateCategoryRequest>,
+) -> Result<Json<ForumCategory>, (StatusCode, Json<ErrorResponse>)> {
+    let desc = body
+        .description
+        .as_ref()
+        .map(|o| o.as_deref());
+    state
+        .db
+        .update_forum_category(
+            &id,
+            body.name.as_deref(),
+            desc,
+            body.sort_order,
+            body.is_active,
+        )
+        .await
+        .map(Json)
+        .map_err(err_500)
+}
+
+/// POST /api/forum/boards — officer+
+pub async fn create_board(
+    State(state): State<AppState>,
+    _officer: OfficerUser,
+    Json(body): Json<CreateBoardRequest>,
+) -> Result<(StatusCode, Json<ForumBoard>), (StatusCode, Json<ErrorResponse>)> {
+    if body.name.trim().is_empty() || body.slug.trim().is_empty() {
+        return Err(err_400("name and slug required"));
+    }
+    let mut category_id = body.category_id.clone();
+    if let Some(pid) = body.parent_board_id.as_deref() {
+        if let Ok(Some(parent)) = state.db.get_forum_board(pid).await {
+            category_id = parent.category_id;
+        }
+    }
+    let board = state
+        .db
+        .create_forum_board(
+            &category_id,
+            body.parent_board_id.as_deref(),
+            body.name.trim(),
+            body.slug.trim(),
+            body.description.as_deref(),
+            body.sort_order,
+        )
+        .await
+        .map_err(err_500)?;
+    Ok((StatusCode::CREATED, Json(board)))
+}
+
+/// PATCH /api/forum/boards/:id — officer+
+pub async fn update_board(
+    State(state): State<AppState>,
+    _officer: OfficerUser,
+    Path(id): Path<String>,
+    Json(body): Json<UpdateBoardRequest>,
+) -> Result<Json<ForumBoard>, (StatusCode, Json<ErrorResponse>)> {
+    let desc = body.description.as_ref().map(|o| o.as_deref());
+    state
+        .db
+        .update_forum_board(
+            &id,
+            body.name.as_deref(),
+            desc,
+            body.sort_order,
+            body.is_locked,
+            body.is_active,
+        )
+        .await
+        .map(Json)
+        .map_err(err_500)
+}
+
 /// GET /api/forum/threads -- list threads (public)
 pub async fn list_threads(
     State(state): State<AppState>,
     Query(query): Query<ListThreadsQuery>,
 ) -> Result<Json<ThreadListResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let mut board_meta = None;
+    let board_id = if let Some(slug) = query.board.as_deref() {
+        let b = state
+            .db
+            .get_forum_board_by_slug(slug)
+            .await
+            .map_err(err_500)?
+            .ok_or_else(|| err_404("Board not found"))?;
+        let id = b.id.clone();
+        board_meta = Some(b);
+        Some(id)
+    } else {
+        None
+    };
+
     let threads = state
         .db
         .list_forum_threads(
+            board_id.as_deref(),
             query.category.as_deref(),
             query.limit.min(100),
             query.offset,
         )
         .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: e.to_string(),
-                }),
-            )
-        })?;
+        .map_err(err_500)?;
 
     let mut items = Vec::with_capacity(threads.len());
     for thread in threads {
@@ -126,6 +339,7 @@ pub async fn list_threads(
     Ok(Json(ThreadListResponse {
         threads: items,
         total,
+        board: board_meta,
     }))
 }
 
@@ -148,21 +362,30 @@ pub async fn get_thread(
         .db
         .list_forum_replies(&id, query.limit.min(100), query.offset)
         .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: e.to_string(),
-                }),
-            )
-        })?;
+        .map_err(err_500)?;
 
     let reply_count = state.db.count_forum_replies(&id).await.unwrap_or(0);
+
+    let mut board = None;
+    let mut parent_board = None;
+    let mut category = None;
+    if let Some(bid) = thread.board_id.as_deref() {
+        if let Ok(Some(b)) = state.db.get_forum_board(bid).await {
+            if let Some(pid) = b.parent_board_id.as_deref() {
+                parent_board = state.db.get_forum_board(pid).await.ok().flatten();
+            }
+            category = state.db.get_forum_category(&b.category_id).await.ok().flatten();
+            board = Some(b);
+        }
+    }
 
     Ok(Json(ThreadDetailResponse {
         thread,
         replies,
         reply_count,
+        board,
+        category,
+        parent_board,
     }))
 }
 
@@ -173,33 +396,70 @@ pub async fn create_thread(
     Json(body): Json<CreateThreadRequest>,
 ) -> Result<(StatusCode, Json<ForumThread>), (StatusCode, Json<ErrorResponse>)> {
     if body.title.trim().is_empty() || body.content.trim().is_empty() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse {
-                error: "Title and content are required".into(),
-            }),
-        ));
+        return Err(err_400("Title and content are required"));
     }
+
+    // Resolve board_id from board_id, board slug, or legacy category slug
+    let board_id = if let Some(id) = body.board_id.as_deref().filter(|s| !s.is_empty()) {
+        // id or slug
+        if let Ok(Some(b)) = state.db.get_forum_board(id).await {
+            b.id
+        } else if let Ok(Some(b)) = state.db.get_forum_board_by_slug(id).await {
+            b.id
+        } else {
+            return Err(err_404("Board not found"));
+        }
+    } else if let Some(slug) = body.board.as_deref().filter(|s| !s.is_empty()) {
+        state
+            .db
+            .get_forum_board_by_slug(slug)
+            .await
+            .map_err(err_500)?
+            .ok_or_else(|| err_404("Board not found"))?
+            .id
+    } else if let Some(cat) = body.category.as_deref() {
+        // legacy: map category string to board slug
+        let slug = match cat {
+            "general" => "general",
+            "game" => "overwatch",
+            "strategy" => "ow-strategy",
+            "offtopic" => "offtopic-general",
+            other => other,
+        };
+        state
+            .db
+            .get_forum_board_by_slug(slug)
+            .await
+            .map_err(err_500)?
+            .ok_or_else(|| err_404("Board not found for category"))?
+            .id
+    } else {
+        return Err(err_400("board or board_id is required"));
+    };
 
     let thread = state
         .db
         .create_forum_thread(
             &body.title,
-            &body.category,
+            &board_id,
             &member.member.id,
             &body.content,
         )
         .await
         .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: e.to_string(),
-                }),
-            )
+            let msg = e.to_string();
+            if msg.contains("locked") {
+                (
+                    StatusCode::FORBIDDEN,
+                    Json(ErrorResponse { error: msg }),
+                )
+            } else {
+                err_500(e)
+            }
         })?;
 
-    maybe_publish_thread_to_relay(&state, &member.member, &thread, &body.category).await;
+    let tag = thread.category.clone();
+    maybe_publish_thread_to_relay(&state, &member.member, &thread, &tag).await;
 
     Ok((StatusCode::CREATED, Json(thread)))
 }

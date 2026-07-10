@@ -990,12 +990,60 @@ pub struct WikiRevision {
     pub revision_note: Option<String>,
 }
 
+/// A top-level forum section (does not hold threads).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ForumCategory {
+    pub id: String,
+    pub name: String,
+    pub slug: String,
+    pub description: Option<String>,
+    pub sort_order: i32,
+    pub is_active: bool,
+}
+
+/// A board or sub-board (threads live here).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ForumBoard {
+    pub id: String,
+    pub category_id: String,
+    /// `None` = top-level board; `Some` = sub-board of that board.
+    pub parent_board_id: Option<String>,
+    pub name: String,
+    pub slug: String,
+    pub description: Option<String>,
+    pub sort_order: i32,
+    pub is_locked: bool,
+    pub min_role: Option<String>,
+    pub is_active: bool,
+}
+
+/// Board with nested sub-boards for tree responses.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ForumBoardNode {
+    #[serde(flatten)]
+    pub board: ForumBoard,
+    pub sub_boards: Vec<ForumBoard>,
+    pub thread_count: u64,
+}
+
+/// Category with boards for `/api/forum/tree`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ForumCategoryNode {
+    #[serde(flatten)]
+    pub category: ForumCategory,
+    pub boards: Vec<ForumBoardNode>,
+}
+
 /// A forum discussion thread.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ForumThread {
     pub id: String,
     pub title: String,
+    /// Deprecated string category; kept for migration / display fallback.
     pub category: String,
+    /// Board or sub-board id (preferred).
+    #[serde(default)]
+    pub board_id: Option<String>,
     pub author_member_id: String,
     pub content: String,
     pub pinned: bool,

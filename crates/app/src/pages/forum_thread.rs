@@ -12,6 +12,7 @@ struct ForumThreadData {
     id: String,
     title: String,
     category: String,
+    board_id: Option<String>,
     #[allow(dead_code)]
     author_member_id: String,
     content: String,
@@ -20,6 +21,17 @@ struct ForumThreadData {
     created_at: String,
     #[allow(dead_code)]
     is_active: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct BoardMeta {
+    name: String,
+    slug: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct CategoryMeta {
+    name: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -37,6 +49,9 @@ struct ThreadDetailResponse {
     thread: ForumThreadData,
     replies: Vec<ForumReplyData>,
     reply_count: u64,
+    board: Option<BoardMeta>,
+    category: Option<CategoryMeta>,
+    parent_board: Option<BoardMeta>,
 }
 
 #[derive(Serialize)]
@@ -236,26 +251,44 @@ pub fn ForumThread(id: String) -> Element {
         style { {PAGE_CSS} }
 
         main { class: "thread-page",
-            Link { to: Route::Forum {}, class: "thread-back", "< Back to Forum" }
-
             {
                 let data = detail.read();
                 let data = data.as_ref().and_then(|d| d.as_ref());
                 match data {
-                    None => rsx! { p { class: "thread-loading", "Loading..." } },
+                    None => rsx! {
+                        Link { to: Route::Forum {}, class: "thread-back", "< Back to Forum" }
+                        p { class: "thread-loading", "Loading..." }
+                    },
                     Some(resp) => {
                         let t = &resp.thread;
                         let date: String = t.created_at.chars().take(10).collect();
-                        let cat_label = match t.category.as_str() {
-                            "general" => "General",
-                            "game" => "Game",
-                            "strategy" => "Strategy",
-                            "offtopic" => "Off-Topic",
-                            other => other,
-                        };
                         let reply_id = id.clone();
+                        let board_slug = resp.board.as_ref().map(|b| b.slug.clone());
+                        let board_name = resp
+                            .board
+                            .as_ref()
+                            .map(|b| b.name.clone())
+                            .unwrap_or_else(|| t.category.clone());
+                        let cat_name = resp.category.as_ref().map(|c| c.name.clone());
+                        let parent_name = resp.parent_board.as_ref().map(|b| b.name.clone());
+                        let parent_slug = resp.parent_board.as_ref().map(|b| b.slug.clone());
 
                         rsx! {
+                            div { class: "thread-back", style: "display:flex;flex-wrap:wrap;gap:0.35rem;align-items:center;",
+                                Link { to: Route::Forum {}, "Forum" }
+                                if let Some(cn) = cat_name {
+                                    span { " / {cn}" }
+                                }
+                                if let (Some(ps), Some(pn)) = (parent_slug.clone(), parent_name) {
+                                    span { " / " }
+                                    Link { to: Route::ForumBoardPage { slug: ps }, "{pn}" }
+                                }
+                                if let Some(bs) = board_slug.clone() {
+                                    span { " / " }
+                                    Link { to: Route::ForumBoardPage { slug: bs }, "{board_name}" }
+                                }
+                            }
+
                             // Thread header
                             div { class: "thread-header",
                                 div { class: "thread-title-row",
@@ -265,7 +298,7 @@ pub fn ForumThread(id: String) -> Element {
                                     if t.locked {
                                         span { class: "thread-badge thread-badge-locked", "Locked" }
                                     }
-                                    span { class: "thread-badge thread-badge-cat", "{cat_label}" }
+                                    span { class: "thread-badge thread-badge-cat", "{board_name}" }
                                 }
                                 h1 { class: "thread-title", "{t.title}" }
                                 div { class: "thread-meta",

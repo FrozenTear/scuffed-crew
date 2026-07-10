@@ -165,6 +165,7 @@ pub fn AdminLayout() -> Element {
                     Link { to: Route::AdminTournaments {}, "Tournaments" }
                     Link { to: Route::AdminAnnouncements {}, "Announcements" }
                     Link { to: Route::AdminArticles {}, "Articles" }
+                    Link { to: Route::AdminForum {}, "Forum" }
                     if is_admin {
                         Link { to: Route::AdminModeration {}, "Moderation" }
                         Link { to: Route::AdminRelay {}, "Relay" }

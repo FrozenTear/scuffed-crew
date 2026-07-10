@@ -1,7 +1,7 @@
 # Forum hierarchy design (old-school boards)
 
 **Date:** 2026-07-11  
-**Status:** Direction approved — not yet implemented  
+**Status:** Implemented on main (2026-07-11) — hierarchy API + public/admin UI  
 **Scope:** Local forum only (`forum_backend = local`). Nostr-backed forum remains optional/future.
 
 ---

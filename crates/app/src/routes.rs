@@ -52,7 +52,9 @@ pub enum Route {
         WikiPage { topic: String },
         #[route("/forum")]
         Forum {},
-        #[route("/forum/:id")]
+        #[route("/forum/b/:slug")]
+        ForumBoardPage { slug: String },
+        #[route("/forum/t/:id")]
         ForumThread { id: String },
         #[route("/stats")]
         Stats {},
@@ -84,6 +86,8 @@ pub enum Route {
         AdminAnnouncements {},
         #[route("/admin/articles")]
         AdminArticles {},
+        #[route("/admin/forum")]
+        AdminForum {},
         #[route("/admin/audit-log")]
         AdminAuditLog {},
         #[route("/admin/moderation")]
