@@ -134,6 +134,33 @@ impl Database {
         Ok(upserted)
     }
 
+    /// Remove a member's rows for locally-deleted sessions (client tombstones).
+    /// Scoped to the member — a daemon token can only delete its own games.
+    /// Returns the number of rows removed.
+    pub async fn delete_personal_matches_by_sessions(
+        &self,
+        member_id: &str,
+        session_ids: &[String],
+    ) -> DbResult<u32> {
+        if session_ids.is_empty() {
+            return Ok(0);
+        }
+        let mut result = with_timeout(async {
+            Ok(self
+                .client
+                .query(
+                    "DELETE personal_match WHERE member_id = $mid AND session_id IN $sids RETURN BEFORE",
+                )
+                .bind(("mid", member_id.to_string()))
+                .bind(("sids", session_ids.to_vec()))
+                .await?
+                .check()?)
+        })
+        .await?;
+        let deleted: Vec<DbPersonalMatch> = result.take(0)?;
+        Ok(deleted.len() as u32)
+    }
+
     pub async fn list_personal_matches(
         &self,
         member_id: &str,
@@ -409,6 +436,38 @@ mod tests {
         .unwrap();
         let rows = db.list_personal_matches("m1", 10, 0).await.unwrap();
         assert_eq!(rows.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn tombstones_delete_only_that_members_session() {
+        let db = test_db().await;
+        db.upsert_personal_matches(
+            "m1",
+            &[entry("s1", "victory", 10), entry("s2", "defeat", 5)],
+        )
+        .await
+        .unwrap();
+        db.upsert_personal_matches("m2", &[entry("s1", "victory", 9)])
+            .await
+            .unwrap();
+
+        let deleted = db
+            .delete_personal_matches_by_sessions("m1", &["s1".to_string()])
+            .await
+            .unwrap();
+        assert_eq!(deleted, 1);
+        let m1_rows = db.list_personal_matches("m1", 10, 0).await.unwrap();
+        assert_eq!(m1_rows.len(), 1);
+        assert_eq!(m1_rows[0].session_id, "s2");
+        // Another member's identically-named session is untouched.
+        assert_eq!(db.list_personal_matches("m2", 10, 0).await.unwrap().len(), 1);
+        // Empty tombstone list is a no-op.
+        assert_eq!(
+            db.delete_personal_matches_by_sessions("m1", &[])
+                .await
+                .unwrap(),
+            0
+        );
     }
 
     #[tokio::test]

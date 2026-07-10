@@ -32,12 +32,20 @@ pub struct StatsUploadEntry {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StatsUploadRequest {
     pub matches: Vec<StatsUploadEntry>,
+    /// Sessions the user deleted locally — the server removes its rows for
+    /// them (tombstones). Defaulted for older daemons that don't send it.
+    #[serde(default)]
+    pub deleted_sessions: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StatsUploadResponse {
     pub inserted: u32,
     pub skipped: u32,
+    /// Server rows removed via `deleted_sessions`. Defaulted so new daemons
+    /// tolerate older servers that don't report it.
+    #[serde(default)]
+    pub deleted: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

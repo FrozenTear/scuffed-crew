@@ -946,13 +946,15 @@ async fn run_loop(
                 }
                 suspend_probe = (Instant::now(), Utc::now());
 
-                let cmds = storage::take_commands(data_dir);
+                let cmds = storage::read_commands(data_dir);
                 if !cmds.is_empty() {
-                    for cmd in &cmds {
+                    for (cmd_file, cmd) in &cmds {
                         tracing::info!(?cmd, "applying GUI command");
                         // Keep the in-memory game consistent when the command
                         // targets the active session, so the poller can't
                         // overwrite a manual edit or resurrect a deleted game.
+                        // (Idempotent — safe to re-run if the apply below
+                        // fails and the command retries next tick.)
                         match cmd {
                             storage::StoreCommand::SetOutcome { session_id, outcome } => {
                                 if let Some(g) = active_game.as_mut()
@@ -968,8 +970,14 @@ async fn run_loop(
                                 }
                             }
                         }
-                        if let Err(e) = store.apply_command(cmd).await {
-                            tracing::warn!(error = %e, "GUI command failed");
+                        // Two-phase: the file is only removed after a
+                        // successful apply, so a crash or store error here
+                        // retries the edit instead of losing it.
+                        match store.apply_command(cmd).await {
+                            Ok(()) => storage::remove_command_file(cmd_file),
+                            Err(e) => {
+                                tracing::warn!(error = %e, "GUI command failed — will retry")
+                            }
                         }
                     }
                     refresh_snapshot(store, data_dir).await;
@@ -1451,7 +1459,19 @@ async fn try_sync(
             return;
         }
     };
-    if unsynced.is_empty() {
+    // Locally-deleted sessions whose server rows must go too.
+    let tombstones = match store
+        .get_pending_tombstones()
+        .await
+        .map_err(|e| e.to_string())
+    {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::error!(error = %e, "failed to query pending tombstones");
+            Vec::new()
+        }
+    };
+    if unsynced.is_empty() && tombstones.is_empty() {
         return;
     }
 
@@ -1466,17 +1486,30 @@ async fn try_sync(
     tracing::info!(
         rows = ids.len(),
         games = to_upload.len(),
+        tombstones = tombstones.len(),
         "syncing unsynced matches"
     );
-    match client.upload_matches(&to_upload).await.map_err(|e| e.to_string()) {
+    match client
+        .upload_matches(&to_upload, &tombstones)
+        .await
+        .map_err(|e| e.to_string())
+    {
         Ok(resp) => {
             tracing::info!(
                 inserted = resp.inserted,
                 skipped = resp.skipped,
+                deleted = resp.deleted,
                 "sync complete"
             );
             if let Err(e) = store.mark_synced(ids).await.map_err(|e| e.to_string()) {
                 tracing::error!(error = %e, "failed to mark matches as synced");
+            }
+            if let Err(e) = store
+                .clear_tombstones(tombstones)
+                .await
+                .map_err(|e| e.to_string())
+            {
+                tracing::error!(error = %e, "failed to clear acknowledged tombstones");
             }
             // Sync flips `synced` flags — GUI must see that promptly.
             refresh_snapshot_force(store, data_dir).await;

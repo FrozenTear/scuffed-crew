@@ -24,10 +24,11 @@ pub async fn upload_stats(
     daemon: DaemonUser,
     Json(body): Json<StatsUploadRequest>,
 ) -> Result<Json<StatsUploadResponse>, (StatusCode, Json<ErrorResponse>)> {
-    if body.matches.is_empty() {
+    if body.matches.is_empty() && body.deleted_sessions.is_empty() {
         return Ok(Json(StatsUploadResponse {
             inserted: 0,
             skipped: 0,
+            deleted: 0,
         }));
     }
 
@@ -82,19 +83,35 @@ pub async fn upload_stats(
             )
         })?;
 
+    // Tombstones: sessions the user deleted locally. Scoped to this member's
+    // rows by the query itself.
+    let deleted = state
+        .db
+        .delete_personal_matches_by_sessions(&daemon.member.id, &body.deleted_sessions)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: e.to_string(),
+                }),
+            )
+        })?;
+
     audit(
         &state.db,
         &daemon.member.id,
         AuditAction::UploadedPersonalStats,
         AuditTargetType::PersonalStats,
         &daemon.member.id,
-        Some(&format!("{inserted} matches uploaded")),
+        Some(&format!("{inserted} matches uploaded, {deleted} deleted")),
     )
     .await;
 
     Ok(Json(StatsUploadResponse {
         inserted,
         skipped: total - inserted,
+        deleted,
     }))
 }
 

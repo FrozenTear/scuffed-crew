@@ -48,6 +48,9 @@ pub struct MatchSession {
 #[derive(Clone)]
 pub struct LocalStore {
     db: Surreal<surrealdb::engine::local::Db>,
+    /// Home of the side-channel files (`matches.jsonl`, snapshots) that some
+    /// mutations must keep in step with the database.
+    data_dir: PathBuf,
 }
 
 impl LocalStore {
@@ -69,12 +72,17 @@ impl LocalStore {
             DEFINE TABLE IF NOT EXISTS match_session SCHEMALESS;
             DEFINE INDEX IF NOT EXISTS idx_session_id ON match_session FIELDS session_id;
             DEFINE INDEX IF NOT EXISTS idx_last_capture ON match_session FIELDS last_capture_at;
+            DEFINE TABLE IF NOT EXISTS deleted_session SCHEMALESS;
+            DEFINE INDEX IF NOT EXISTS idx_deleted_sid ON deleted_session FIELDS session_id;
         ",
         )
         .await?;
 
         tracing::info!(path = %db_path.display(), "local store opened");
-        Ok(Self { db })
+        Ok(Self {
+            db,
+            data_dir: data_dir.to_path_buf(),
+        })
     }
 
     pub async fn insert_match(
@@ -185,11 +193,41 @@ impl LocalStore {
     }
 
     /// Delete a session and all its capture snapshots (manual cleanup of a
-    /// junk/misdetected game). Already-synced snapshots remain on the server.
+    /// junk/misdetected game). Records a tombstone so the next sync deletes
+    /// the game server-side too, and drops the session from `matches.jsonl`
+    /// so the GUI's log fallback stops showing it.
     pub async fn delete_session(&self, session_id: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         self.db
-            .query("DELETE match_session WHERE session_id = $sid; DELETE personal_match WHERE session_id = $sid")
+            .query("DELETE match_session WHERE session_id = $sid; DELETE personal_match WHERE session_id = $sid; CREATE deleted_session SET session_id = $sid, deleted_at = time::now()")
             .bind(("sid", session_id.to_string()))
+            .await?;
+        rewrite_match_log_session(&self.data_dir, session_id, None);
+        Ok(())
+    }
+
+    /// Session ids deleted locally but not yet propagated to the server.
+    pub async fn get_pending_tombstones(
+        &self,
+    ) -> Result<Vec<String>, Box<dyn std::error::Error + Send + Sync>> {
+        let mut result = self
+            .db
+            .query("SELECT session_id FROM deleted_session")
+            .await?;
+        let rows: Vec<DeletedSession> = result.take(0)?;
+        Ok(rows.into_iter().map(|r| r.session_id).collect())
+    }
+
+    /// Drop tombstones the server has acknowledged.
+    pub async fn clear_tombstones(
+        &self,
+        session_ids: Vec<String>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        if session_ids.is_empty() {
+            return Ok(());
+        }
+        self.db
+            .query("DELETE deleted_session WHERE session_id IN $sids")
+            .bind(("sids", session_ids))
             .await?;
         Ok(())
     }
@@ -239,6 +277,10 @@ impl LocalStore {
             .bind(("map", map.to_string()))
             .bind(("sid", session_id.to_string()))
             .await?;
+        let map = map.to_string();
+        rewrite_match_log_session(&self.data_dir, session_id, Some(&|m| {
+            m.map_name = map.clone();
+        }));
         Ok(())
     }
 
@@ -256,6 +298,10 @@ impl LocalStore {
             .bind(("outcome", outcome.to_string()))
             .bind(("sid", session_id.to_string()))
             .await?;
+        let outcome = outcome.to_string();
+        rewrite_match_log_session(&self.data_dir, session_id, Some(&|m| {
+            m.outcome = outcome.clone();
+        }));
         Ok(())
     }
 
@@ -286,8 +332,11 @@ impl LocalStore {
     
 
     pub async fn clear_all_data(&self) -> Result<(), Box<dyn std::error::Error>> {
+        // Local reset only — deliberately does NOT tombstone: clearing a
+        // machine must not wipe the account's server history.
         self.db.query("DELETE personal_match").await?;
         self.db.query("DELETE match_session").await?;
+        self.db.query("DELETE deleted_session").await?;
         tracing::info!("cleared all match data from local store");
         Ok(())
     }
@@ -364,6 +413,67 @@ fn match_log_path(data_dir: &Path) -> PathBuf {
     data_dir.join("matches.jsonl")
 }
 
+/// Local record of a session deleted while (possibly) already synced — the
+/// next sync sends these so the server row disappears too.
+#[derive(Debug, Serialize, Deserialize, SurrealValue)]
+struct DeletedSession {
+    session_id: String,
+}
+
+/// Rewrite `matches.jsonl` rows of one session (atomic tmp+rename): apply
+/// `update` to each, or drop them entirely when `update` is `None`. The log is
+/// append-only at capture time, so without this back-fills and deletes never
+/// reached the GUI's last-resort fallback — it showed `unknown` outcomes and
+/// deleted games forever (A5). Rare (once per correction), so the O(file)
+/// rewrite is fine; unparseable lines (schema drift) are preserved verbatim.
+fn rewrite_match_log_session(
+    data_dir: &Path,
+    session_id: &str,
+    update: Option<&dyn Fn(&mut PersonalMatch)>,
+) {
+    let path = match_log_path(data_dir);
+    let Ok(content) = std::fs::read_to_string(&path) else {
+        return;
+    };
+    let mut out = String::with_capacity(content.len());
+    let mut changed = false;
+    for line in content.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        match serde_json::from_str::<PersonalMatch>(line) {
+            Ok(mut m) if m.session_id == session_id => {
+                changed = true;
+                if let Some(f) = update {
+                    f(&mut m);
+                    match serde_json::to_string(&m) {
+                        Ok(json) => {
+                            out.push_str(&json);
+                            out.push('\n');
+                        }
+                        Err(_) => {
+                            out.push_str(line);
+                            out.push('\n');
+                        }
+                    }
+                }
+                // update == None → session deleted, drop the line
+            }
+            _ => {
+                out.push_str(line);
+                out.push('\n');
+            }
+        }
+    }
+    if !changed {
+        return;
+    }
+    let tmp = path.with_extension("jsonl.tmp");
+    if std::fs::write(&tmp, out).is_err() || std::fs::rename(&tmp, &path).is_err() {
+        tracing::debug!(session_id, "failed to rewrite match log");
+    }
+}
+
 pub fn append_match_log(data_dir: &Path, m: &PersonalMatch) {
     use std::io::Write;
     let path = match_log_path(data_dir);
@@ -416,9 +526,12 @@ pub fn queue_command(
     Ok(())
 }
 
-/// Take all queued commands, oldest first, removing them from disk.
-/// Unparseable files are discarded (logged), never retried forever.
-pub fn take_commands(data_dir: &Path) -> Vec<StoreCommand> {
+/// First phase of the command queue: list queued commands with their backing
+/// files, oldest first, WITHOUT removing them. The caller applies each command
+/// and then calls [`remove_command_file`] — two-phase, so a crash between read
+/// and apply retries the command instead of silently losing a manual edit.
+/// Unparseable files are removed immediately (never retried forever).
+pub fn read_commands(data_dir: &Path) -> Vec<(PathBuf, StoreCommand)> {
     let Ok(entries) = std::fs::read_dir(commands_dir(data_dir)) else {
         return Vec::new();
     };
@@ -434,14 +547,20 @@ pub fn take_commands(data_dir: &Path) -> Vec<StoreCommand> {
             .map_err(|e| e.to_string())
             .and_then(|c| serde_json::from_slice::<StoreCommand>(&c).map_err(|e| e.to_string()))
         {
-            Ok(cmd) => cmds.push(cmd),
+            Ok(cmd) => cmds.push((f, cmd)),
             Err(e) => {
-                tracing::warn!(file = %f.display(), error = %e, "discarding bad command file")
+                tracing::warn!(file = %f.display(), error = %e, "discarding bad command file");
+                let _ = std::fs::remove_file(&f);
             }
         }
-        let _ = std::fs::remove_file(&f);
     }
     cmds
+}
+
+/// Second phase of the command queue: drop a command file once its command has
+/// been successfully applied.
+pub fn remove_command_file(path: &Path) {
+    let _ = std::fs::remove_file(path);
 }
 
 /// The majority hero across a session's snapshots. Individual captures can
@@ -576,18 +695,73 @@ mod tests {
         };
         queue_command(dir.path(), &a).unwrap();
         queue_command(dir.path(), &b).unwrap();
-        let cmds = take_commands(dir.path());
+        let cmds = read_commands(dir.path());
         assert_eq!(cmds.len(), 2);
         assert!(
-            matches!(&cmds[0], StoreCommand::SetOutcome { session_id, outcome }
+            matches!(&cmds[0].1, StoreCommand::SetOutcome { session_id, outcome }
             if session_id == "s1" && outcome == "defeat")
         );
         assert!(
-            matches!(&cmds[1], StoreCommand::DeleteSession { session_id }
+            matches!(&cmds[1].1, StoreCommand::DeleteSession { session_id }
             if session_id == "s2")
         );
-        // Consumed — second take is empty.
-        assert!(take_commands(dir.path()).is_empty());
+        // Two-phase: still queued until the caller removes the files...
+        assert_eq!(read_commands(dir.path()).len(), 2);
+        // ...and gone once each applied command's file is removed.
+        for (path, _) in &cmds {
+            remove_command_file(path);
+        }
+        assert!(read_commands(dir.path()).is_empty());
+    }
+
+    #[tokio::test]
+    async fn delete_session_tombstones_until_acknowledged() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = LocalStore::open(dir.path()).await.expect("open store");
+        store.insert_match(snap("s1", 1)).await.unwrap();
+        append_match_log(dir.path(), &snap("s1", 1));
+
+        store.delete_session("s1").await.unwrap();
+        // Local rows gone, jsonl fallback cleaned, tombstone pending for sync.
+        assert_eq!(store.match_count().await.unwrap(), 0);
+        assert!(read_match_log(dir.path()).is_empty());
+        assert_eq!(
+            store.get_pending_tombstones().await.unwrap(),
+            vec!["s1".to_string()]
+        );
+
+        // Server acknowledged — tombstone cleared, nothing left to send.
+        store.clear_tombstones(vec!["s1".into()]).await.unwrap();
+        assert!(store.get_pending_tombstones().await.unwrap().is_empty());
+        // Clearing all data never leaks tombstones either.
+        store.clear_all_data().await.unwrap();
+        assert!(store.get_pending_tombstones().await.unwrap().is_empty());
+    }
+
+    #[test]
+    fn match_log_rewrite_backfills_and_deletes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        append_match_log(dir.path(), &snap("keep", 1));
+        append_match_log(dir.path(), &snap("fix", 1));
+        append_match_log(dir.path(), &snap("fix", 2));
+        append_match_log(dir.path(), &snap("gone", 1));
+
+        rewrite_match_log_session(dir.path(), "fix", Some(&|m| m.outcome = "defeat".into()));
+        rewrite_match_log_session(dir.path(), "gone", None);
+
+        let rows = read_match_log(dir.path());
+        assert_eq!(rows.len(), 3);
+        assert!(!rows.iter().any(|m| m.session_id == "gone"));
+        assert!(
+            rows.iter()
+                .filter(|m| m.session_id == "fix")
+                .all(|m| m.outcome == "defeat")
+        );
+        assert!(
+            rows.iter()
+                .filter(|m| m.session_id == "keep")
+                .all(|m| m.outcome == "victory")
+        );
     }
 
     #[test]

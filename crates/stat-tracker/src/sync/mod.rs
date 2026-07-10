@@ -48,6 +48,7 @@ impl SyncClient {
     pub async fn upload_matches(
         &self,
         matches: &[PersonalMatch],
+        deleted_sessions: &[String],
     ) -> Result<StatsUploadResponse, Box<dyn std::error::Error + Send + Sync>> {
         let entries: Vec<StatsUploadEntry> = matches
             .iter()
@@ -73,7 +74,10 @@ impl SyncClient {
             .http
             .post(&url)
             .bearer_auth(&self.config.token)
-            .json(&StatsUploadRequest { matches: entries })
+            .json(&StatsUploadRequest {
+                matches: entries,
+                deleted_sessions: deleted_sessions.to_vec(),
+            })
             .send()
             .await?;
 
@@ -87,6 +91,7 @@ impl SyncClient {
         tracing::info!(
             inserted = result.inserted,
             skipped = result.skipped,
+            deleted = result.deleted,
             "stats upload complete"
         );
         Ok(result)
