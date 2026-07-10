@@ -66,3 +66,8 @@ Prior research: `docs/notes/dioxus-0.8-alpha-notes.md` (Props audit, release the
 ## Operator one-liner (paste to agent)
 
 > Follow `docs/notes/dioxus-0.8-desktop-blitz-spike.md`: branch, Dioxus **0.8 alpha**, Blitz/native for **stat-tracker GUI** only; leave site/VPS on 0.7.9.
+
+---
+
+Related (forum, not this spike): hierarchy design is in  
+`docs/superpowers/specs/2026-07-11-forum-hierarchy-design.md`.
