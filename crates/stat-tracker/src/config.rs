@@ -79,6 +79,9 @@ impl Config {
         let config_path = config_dir.join("config.toml");
 
         let mut config = if config_path.exists() {
+            // The file carries the sync bearer token — tighten permissions on
+            // files written before saves enforced 0600.
+            Self::restrict_permissions(&config_path);
             let content = std::fs::read_to_string(&config_path)?;
             toml::from_str::<Config>(&content)?
         } else {
@@ -112,10 +115,11 @@ impl Config {
             && !sync.server_url.is_empty()
             && !sync.token.is_empty()
         {
-            let _ = std::fs::create_dir_all(&config_dir);
-            if let Ok(toml) = toml::to_string_pretty(&config) {
-                let _ = std::fs::write(&config_path, toml);
-                tracing::info!(path = %config_path.display(), "wrote initial config.toml");
+            match config.save() {
+                Ok(()) => {
+                    tracing::info!(path = %config_path.display(), "wrote initial config.toml")
+                }
+                Err(e) => tracing::warn!(error = %e, "failed to write initial config.toml"),
             }
         }
 
@@ -125,6 +129,38 @@ impl Config {
         }
 
         Ok(config)
+    }
+
+    /// Path of the user config file (`~/.config/scuffed-stat-tracker/config.toml`).
+    pub fn config_path() -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
+        Ok(dirs::config_dir()
+            .ok_or("no config directory found")?
+            .join("scuffed-stat-tracker")
+            .join("config.toml"))
+    }
+
+    /// Serialize and write the config, owner-readable only — the file carries
+    /// the sync bearer token.
+    pub fn save(&self) -> Result<(), Box<dyn std::error::Error>> {
+        let path = Self::config_path()?;
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        let toml = toml::to_string_pretty(self)?;
+        std::fs::write(&path, toml)?;
+        Self::restrict_permissions(&path);
+        Ok(())
+    }
+
+    /// Best-effort chmod 600 (no-op off unix).
+    fn restrict_permissions(path: &std::path::Path) {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+        }
+        #[cfg(not(unix))]
+        let _ = path;
     }
 
     /// Whether OCR should write debug PNGs this process (config and/or env).

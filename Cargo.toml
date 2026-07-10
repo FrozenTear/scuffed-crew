@@ -23,6 +23,11 @@ members = [
     "crates/stat-tracker",
 ]
 
+# Thin LTO: worthwhile binary-size/speed win for the release daemon + server,
+# small compile-time cost only on release builds.
+[profile.release]
+lto = "thin"
+
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

@@ -224,10 +224,7 @@ fn otsu_threshold(img: &GrayImage) -> u8 {
 /// Column boundaries as (left_edge_fraction, width_fraction) for each of the 6 stat columns.
 pub type StatColumns = [(f64, f64); STAT_COLUMNS];
 
-/// Return fallback stat column boundaries.
-pub fn detect_stat_columns(_scoreboard: &DynamicImage) -> StatColumns {
-    STAT_COL_BOUNDARIES_FALLBACK
-}
+
 
 /// Apply a horizontal offset to the fallback column boundaries.
 pub fn columns_with_offset(offset: f64) -> StatColumns {

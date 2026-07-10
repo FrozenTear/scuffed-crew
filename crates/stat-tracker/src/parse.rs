@@ -4,58 +4,7 @@ use chrono::Utc;
 use strsim::normalized_levenshtein;
 use surrealdb_types::Datetime as SurrealDatetime;
 
-pub fn parse_scoreboard(
-    raw_text: &str,
-    outcome: &str,
-    player_name: Option<&str>,
-    player_row_index: Option<usize>,
-) -> Option<PersonalMatch> {
-    let lines: Vec<&str> = raw_text
-        .lines()
-        .map(|l| l.trim())
-        .filter(|l| !l.is_empty())
-        .collect();
 
-    if lines.is_empty() {
-        tracing::warn!("OCR produced no text");
-        return None;
-    }
-
-    tracing::debug!(line_count = lines.len(), "parsing scoreboard text");
-
-    let stats = player_row_index
-        .and_then(|idx| find_stat_row_by_index(&lines, idx))
-        .or_else(|| {
-            player_name
-                .and_then(|name| find_player_row(&lines, name))
-                .and_then(extract_row_stats)
-        })
-        .or_else(|| find_best_stat_row(&lines));
-
-    let stats = stats?;
-
-    let hero = find_hero(&lines).unwrap_or_else(|| "Unknown".to_string());
-    let role = guess_role(&hero);
-    let map_name = find_map(&lines).unwrap_or_default();
-
-    Some(PersonalMatch {
-        id: None,
-        hero,
-        map_name,
-        game_mode: String::new(),
-        role,
-        outcome: outcome.to_string(),
-        elims: stats.elims,
-        deaths: stats.deaths,
-        assists: stats.assists,
-        damage: stats.damage,
-        healing: stats.healing,
-        mitigation: stats.mitigation,
-        played_at: SurrealDatetime::from(Utc::now()),
-        synced: false,
-        session_id: String::new(),
-    })
-}
 
 /// Build a match from the column-calibrated per-cell OCR rows.
 ///
@@ -221,33 +170,9 @@ fn extract_row_stats(line: &str) -> Option<PlayerStats> {
     stats_from_numbers(&numbers)
 }
 
-fn find_stat_row_by_index(lines: &[&str], row_index: usize) -> Option<PlayerStats> {
-    let stat_rows: Vec<&str> = lines
-        .iter()
-        .copied()
-        .filter(|line| extract_numbers(line).len() >= 6)
-        .collect();
 
-    tracing::debug!(
-        stat_row_count = stat_rows.len(),
-        target_index = row_index,
-        "looking up stat row by portrait index"
-    );
 
-    stat_rows
-        .get(row_index)
-        .and_then(|line| extract_row_stats(line))
-}
 
-fn find_best_stat_row(lines: &[&str]) -> Option<PlayerStats> {
-    for line in lines {
-        let numbers = extract_numbers(line);
-        if let Some(stats) = stats_from_numbers(&numbers) {
-            return Some(stats);
-        }
-    }
-    None
-}
 
 // OW2 scoreboard stat columns: E, A, D, DMG, HLG, MIT
 fn stats_from_numbers(numbers: &[u32]) -> Option<PlayerStats> {

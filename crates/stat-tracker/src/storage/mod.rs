@@ -137,22 +137,7 @@ impl LocalStore {
         Ok(matches)
     }
 
-    pub async fn find_active_session(
-        &self,
-        hero: &str,
-        window_secs: u64,
-    ) -> Result<Option<MatchSession>, Box<dyn std::error::Error>> {
-        let cutoff = chrono::Utc::now() - chrono::Duration::seconds(window_secs as i64);
-        let cutoff_dt = SurrealDatetime::from(cutoff);
-        let mut result = self
-            .db
-            .query("SELECT * FROM match_session WHERE hero = $hero AND last_capture_at > $cutoff ORDER BY last_capture_at DESC LIMIT 1")
-            .bind(("hero", hero.to_string()))
-            .bind(("cutoff", cutoff_dt))
-            .await?;
-        let session: Option<MatchSession> = result.take(0)?;
-        Ok(session)
-    }
+    
 
     /// Create the session row, idempotently: if a row with this `session_id`
     /// already exists (a previous capture created it but its snapshot insert
@@ -180,22 +165,7 @@ impl LocalStore {
         Ok(())
     }
 
-    pub async fn update_session(
-        &self,
-        session_id: &str,
-        capture_time: SurrealDatetime,
-        capture_count: u32,
-        outcome: &str,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        self.db
-            .query("UPDATE match_session SET last_capture_at = $time, capture_count = $count, final_outcome = $outcome WHERE session_id = $sid")
-            .bind(("time", capture_time))
-            .bind(("count", capture_count))
-            .bind(("outcome", outcome.to_string()))
-            .bind(("sid", session_id.to_string()))
-            .await?;
-        Ok(())
-    }
+    
 
     /// Append a capture to an existing session: bump the capture count and time,
     /// and refresh the final outcome (the active game owns the authoritative value).
@@ -313,18 +283,7 @@ impl LocalStore {
         Ok(matches)
     }
 
-    pub async fn get_multi_capture_sessions(
-        &self,
-    ) -> Result<Vec<MatchSession>, Box<dyn std::error::Error>> {
-        let mut result = self
-            .db
-            .query(
-                "SELECT * FROM match_session WHERE capture_count > 1 ORDER BY last_capture_at DESC",
-            )
-            .await?;
-        let sessions: Vec<MatchSession> = result.take(0)?;
-        Ok(sessions)
-    }
+    
 
     pub async fn clear_all_data(&self) -> Result<(), Box<dyn std::error::Error>> {
         self.db.query("DELETE personal_match").await?;

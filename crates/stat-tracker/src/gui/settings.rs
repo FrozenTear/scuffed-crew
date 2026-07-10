@@ -310,12 +310,6 @@ pub fn SettingsPanel() -> Element {
 }
 
 fn save_config(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
-    let config_dir = dirs::config_dir()
-        .ok_or("no config directory")?
-        .join("scuffed-stat-tracker");
-    std::fs::create_dir_all(&config_dir)?;
-
-    let toml_str = toml::to_string_pretty(config)?;
-    std::fs::write(config_dir.join("config.toml"), toml_str)?;
-    Ok(())
+    // Shared save path: writes 0600 (config carries the sync token).
+    config.save()
 }

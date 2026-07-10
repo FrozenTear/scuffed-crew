@@ -105,8 +105,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     std::fs::create_dir_all(&config.data_dir)?;
 
     // Single wiring point for OCR debug dumps — the lib reads this switch
-    // instead of re-loading config on first use.
+    // instead of re-loading config on first use; dumps land under data_dir.
     ocr::set_debug_ocr(config.debug_ocr_enabled());
+    ocr::set_debug_dir(config.data_dir.join("debug"));
 
     let pid_path = config.data_dir.join("daemon.pid");
     if let Ok(existing_pid) = std::fs::read_to_string(&pid_path) {

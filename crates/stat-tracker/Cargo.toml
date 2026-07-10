@@ -9,14 +9,20 @@ gui = ["dep:dioxus", "dep:tray-icon", "dep:base64", "dep:gtk"]
 
 [dependencies]
 scuffed-types = { path = "../types" }
-image = "0.25"
-tokio = { version = "1", features = ["full"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+tokio = { version = "1", features = [
+    "macros",
+    "rt-multi-thread",
+    "process",
+    "signal",
+    "sync",
+    "time",
+] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 chrono = { version = "0.4", features = ["serde"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-thiserror = "2"
 dirs = "6"
 toml = "0.8"
 reqwest = { version = "0.12", features = ["json"] }

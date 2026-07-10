@@ -3,7 +3,7 @@ pub mod preprocess;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::io::Cursor;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 
 use image::{DynamicImage, ImageEncoder};
@@ -31,6 +31,18 @@ pub fn set_debug_ocr(enabled: bool) {
     DEBUG_OCR.store(enabled, std::sync::atomic::Ordering::Relaxed);
 }
 
+/// Where debug PNGs land. Set from `config.data_dir` at daemon startup;
+/// unset callers fall back to the default platform data dir.
+static DEBUG_DIR: Mutex<Option<PathBuf>> = Mutex::new(None);
+
+/// Set the directory OCR debug dumps are written to (daemon wires
+/// `{data_dir}/debug` so a custom `--data-dir` keeps dumps alongside the data).
+pub fn set_debug_dir(dir: PathBuf) {
+    if let Ok(mut slot) = DEBUG_DIR.lock() {
+        *slot = Some(dir);
+    }
+}
+
 fn debug_ocr_enabled() -> bool {
     // The daemon wires the config flag through set_debug_ocr at startup;
     // the env var covers GUI/examples that never call it.
@@ -45,7 +57,11 @@ fn debug_dir() -> Option<PathBuf> {
     if !debug_ocr_enabled() {
         return None;
     }
-    let dir = dirs::data_dir()?.join("scuffed-stat-tracker").join("debug");
+    let configured = DEBUG_DIR.lock().ok().and_then(|slot| slot.clone());
+    let dir = match configured {
+        Some(d) => d,
+        None => dirs::data_dir()?.join("scuffed-stat-tracker").join("debug"),
+    };
     let _ = std::fs::create_dir_all(&dir);
     Some(dir)
 }
@@ -605,18 +621,7 @@ fn save_debug_images(cropped: &DynamicImage, _preprocessed: &image::GrayImage, p
     tracing::debug!(path = %dir.display(), "saved debug images");
 }
 
-/// Optional helper for callers that already hold a debug directory path.
-#[allow(dead_code)]
-pub fn save_debug_images_to(
-    dir: &Path,
-    cropped: &DynamicImage,
-    png_buf: &[u8],
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    std::fs::create_dir_all(dir)?;
-    cropped.save(dir.join("crop.png"))?;
-    std::fs::write(dir.join("preprocessed.png"), png_buf)?;
-    Ok(())
-}
+
 
 fn run_ocr(
     lang: &'static str,

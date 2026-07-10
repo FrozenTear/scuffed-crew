@@ -1,0 +1,73 @@
+# scuffed-stat-tracker
+
+Overwatch 2 personal stat tracker for Linux/Wayland. A background daemon
+watches for Tab (scoreboard) presses, OCRs the scoreboard, tracks game
+sessions/outcomes, stores everything locally, and optionally syncs per-game
+results to the Scuffed Crew site. An optional Dioxus desktop GUI
+(`stat-tracker-gui`, behind the `gui` feature) shows live status, history,
+stats, and daemon controls.
+
+## Platform requirements
+
+- **Linux + Wayland.** Capture uses libwayshot (wlr-screencopy compositors:
+  Sway, Hyprland, etc.) with an XDG Desktop Portal fallback.
+- **Keyboard access via evdev.** Tab detection reads `/dev/input` — the user
+  must be in the `input` group (`sudo usermod -aG input $USER`, re-login).
+- **Tesseract + Leptonica** (`leptess` links them) and a tessdata directory.
+  `eng.traineddata` from `/usr/share/tessdata` works out of the box; a
+  game-font-tuned model improves accuracy:
+  `scuffed-stat-tracker --generate-tessdata` writes
+  `koverwatch.traineddata` under `~/.local/share/scuffed-stat-tracker/tessdata/`
+  (picked up automatically on next start).
+
+## Running
+
+```sh
+# daemon (foreground; logs to stderr)
+cargo run -p scuffed-stat-tracker
+
+# GUI
+cargo run -p scuffed-stat-tracker --features gui --bin stat-tracker-gui
+```
+
+First-run sync setup: `scuffed-stat-tracker --token <daemon-token> --server
+https://…` writes `~/.config/scuffed-stat-tracker/config.toml` (chmod 600 —
+it holds the bearer token). Tokens are minted in the site under
+My Stats → Settings.
+
+Useful flags: `--list-outputs`, `--collect-portraits` (build hero-portrait
+references from your own captures), `--dump-poll-frames` (ring buffer of
+poll-tick frames for diagnosis), `--generate-tessdata`.
+
+A user systemd unit named `scuffed-stat-tracker.service` is recognized by the
+GUI's daemon card (start/stop/autostart route through systemd when installed).
+
+## Config (`~/.config/scuffed-stat-tracker/config.toml`)
+
+| Key | Meaning |
+|---|---|
+| `player_name` | Scoreboard name used to find your row (fetched from the server if unset) |
+| `capture_output` | Wayland output to capture (`--list-outputs`) |
+| `data_dir` | Store/log/debug location (default `~/.local/share/scuffed-stat-tracker`) |
+| `auto_detect.*` | Poll-based match start/end detection (interval, cooldown) |
+| `game_process_names` | Only capture while one of these processes runs (empty disables the gate) |
+| `debug_ocr` | Dump OCR intermediate PNGs under `{data_dir}/debug/` (also env `STAT_TRACKER_DEBUG_OCR=1`) |
+
+The daemon reads config once at startup — restart it after changes.
+
+## Data & IPC
+
+Single-process SurrealKV store at `{data_dir}/stats.surrealkv`. Because only
+one process can hold it, the daemon exports `live_snapshot.json` after
+mutations (debounced) and appends to `matches.jsonl`; the GUI reads those when
+the daemon holds the lock and sends manual edits through a file command queue
+(`{data_dir}/commands/`).
+
+## Dev tools
+
+`examples/` contains the diagnosis workflow — each file documents its usage:
+`extract` (full pipeline against a still image), `polltick` (poll-tick CPU
+cost), `probe_outcome`, `accolade`, `profile`, `dumpdb`. Fixture replay tests
+(`tests/`, `#[ignore]`d) validate outcome detection against real frames in
+`tests/fixtures/outcomes/`; scoreboard replays expect (uncommitted) screenshots
+in `tests/fixtures/replays/`.
