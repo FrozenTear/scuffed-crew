@@ -15,11 +15,21 @@ services:
       - surrealdb-data:/data
     networks:
       - internal
+    # Image binary is /surreal (not always on PATH as "surreal"). HTTP /health
+    # is the reliable readiness probe; is-ready CLI flags vary by version.
     healthcheck:
-      test: ["CMD", "surreal", "is-ready", "--conn", "http://localhost:8000"]
-      interval: 10s
+      test:
+        [
+          "CMD",
+          "/surreal",
+          "is-ready",
+          "--endpoint",
+          "http://127.0.0.1:8000",
+        ]
+      interval: 5s
       timeout: 5s
-      retries: 5
+      retries: 12
+      start_period: 20s
     restart: unless-stopped
 
   strfry:
