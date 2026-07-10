@@ -4,6 +4,8 @@
 target/
 .env
 data/secrets.env
+# Runtime uploads (host volume / local dev)
+data/uploads/
 dist/
 .dioxus/
 dist.old/
@@ -13,3 +15,6 @@ maps/render/
 node_modules/
 cachyos-repo.tar.xz
 .superpowers/
+# Local agent / editor state
+.serena/
+.claude/
