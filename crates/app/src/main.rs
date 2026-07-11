@@ -48,9 +48,7 @@ fn App() -> Element {
                     .and_then(|w| w.location().pathname().ok())
                     .unwrap_or_default();
                 if path != "/setup" {
-                    let _ = web_sys::window().and_then(|w| {
-                        w.location().set_href("/setup").ok()
-                    });
+                    let _ = web_sys::window().and_then(|w| w.location().set_href("/setup").ok());
                 }
             }
         }
@@ -64,6 +62,29 @@ fn App() -> Element {
     }
 
     rsx! {
+        // Runtime head — reinforces shell title/meta after WASM boot
+        document::Title { "The Scuffed Crew" }
+        document::Meta {
+            name: "description",
+            content: "The Scuffed Crew — multi-game EMEA gaming org. Small teams, real structure, scheduled play nights.",
+        }
+        document::Meta {
+            property: "og:title",
+            content: "The Scuffed Crew",
+        }
+        document::Meta {
+            property: "og:description",
+            content: "Multi-game EMEA gaming org. Small teams, real structure, scheduled play nights.",
+        }
+        document::Meta {
+            name: "theme-color",
+            content: "#17171d",
+        }
+        document::Link {
+            rel: "icon",
+            href: asset!("/assets/favicon.svg"),
+            r#type: "image/svg+xml",
+        }
         document::Stylesheet {
             href: asset!("/assets/tailwind.css")
         }

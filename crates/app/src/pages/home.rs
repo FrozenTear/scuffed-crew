@@ -89,7 +89,7 @@ const HOME_CSS: &str = r#"
         overflow: hidden;
         border-bottom: 1px solid var(--border);
         background:
-            linear-gradient(105deg, rgba(124,58,237,0.12) 0%, transparent 42%),
+            linear-gradient(105deg, color-mix(in srgb, var(--accent) 12%, transparent) 0%, transparent 42%),
             linear-gradient(180deg, var(--surface) 0%, var(--bg) 100%);
     }
     .home-hero::before {
@@ -104,8 +104,8 @@ const HOME_CSS: &str = r#"
                 -18deg,
                 transparent,
                 transparent 11px,
-                rgba(124,58,237,0.06) 11px,
-                rgba(124,58,237,0.06) 12px
+                color-mix(in srgb, var(--accent) 6%, transparent) 11px,
+                color-mix(in srgb, var(--accent) 6%, transparent) 12px
             );
         transform: skewX(-12deg);
         pointer-events: none;
@@ -120,7 +120,7 @@ const HOME_CSS: &str = r#"
         line-height: 0.8;
         letter-spacing: 0.02em;
         color: transparent;
-        -webkit-text-stroke: 1px rgba(240,238,232,0.07);
+        -webkit-text-stroke: 1px color-mix(in srgb, var(--text) 7%, transparent);
         pointer-events: none;
         user-select: none;
     }
@@ -136,8 +136,8 @@ const HOME_CSS: &str = r#"
         color: var(--accent);
         margin-bottom: 1rem;
         padding: 0.3rem 0.65rem 0.3rem 0.45rem;
-        border: 1px solid rgba(124,58,237,0.45);
-        background: rgba(124,58,237,0.1);
+        border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
+        background: color-mix(in srgb, var(--accent) 10%, transparent);
         clip-path: polygon(0 0, 100% 0, 100% calc(100% - 6px), calc(100% - 6px) 100%, 0 100%);
     }
     .home-badge::before {
@@ -160,15 +160,15 @@ const HOME_CSS: &str = r#"
         color: var(--text);
         margin: 0;
         text-transform: uppercase;
-        text-shadow: 3px 0 0 rgba(124,58,237,0.35);
+        text-shadow: 3px 0 0 color-mix(in srgb, var(--accent) 35%, transparent);
     }
     .home-title em {
         font-style: normal;
         display: block;
         color: var(--accent);
         text-shadow:
-            0 0 40px rgba(124,58,237,0.35),
-            -2px 0 0 rgba(74,158,255,0.25);
+            0 0 40px color-mix(in srgb, var(--accent) 35%, transparent),
+            -2px 0 0 color-mix(in srgb, var(--accent) 25%, transparent);
     }
     .home-sub {
         margin: 1.25rem 0 0;
@@ -192,7 +192,7 @@ const HOME_CSS: &str = r#"
         margin-top: 2rem;
         max-width: 28rem;
         border: 1px solid var(--border);
-        background: rgba(8,8,12,0.55);
+        background: color-mix(in srgb, var(--bg) 55%, transparent);
     }
     .home-metric {
         padding: 0.85rem 1.15rem;
@@ -237,7 +237,7 @@ const HOME_CSS: &str = r#"
         margin-bottom: 0.35rem;
     }
     .home-kicker.compete {
-        color: #f0b232;
+        color: var(--warn);
     }
     .home-heading {
         font-family: var(--font-head);
@@ -288,7 +288,7 @@ const HOME_CSS: &str = r#"
         transition: border-color 0.15s, transform 0.15s;
     }
     .rules li:hover {
-        border-color: rgba(124,58,237,0.45);
+        border-color: color-mix(in srgb, var(--accent) 45%, transparent);
         transform: translateX(2px);
     }
     .rules li .rn {
@@ -330,7 +330,7 @@ const HOME_CSS: &str = r#"
     }
     /* Compete / tournaments: gold accent (not brand purple) */
     .live-panel.compete::before {
-        background: linear-gradient(90deg, #f0b232, transparent 75%);
+        background: linear-gradient(90deg, var(--warn), transparent 75%);
     }
     .live-panel .home-heading {
         font-size: 1.15rem;
@@ -368,27 +368,27 @@ const HOME_CSS: &str = r#"
         font-size: 0.58rem;
         letter-spacing: 0.1em;
         text-transform: uppercase;
-        color: #f0b232;
-        border: 1px solid rgba(240, 178, 50, 0.4);
+        color: var(--warn);
+        border: 1px solid color-mix(in srgb, var(--warn) 40%, transparent);
         padding: 0.15rem 0.4rem;
-        background: rgba(240, 178, 50, 0.1);
+        background: color-mix(in srgb, var(--warn) 10%, transparent);
     }
     .tag.live {
-        color: #ff6b6b;
-        border-color: rgba(214, 48, 49, 0.5);
-        background: rgba(214, 48, 49, 0.12);
+        color: var(--danger);
+        border-color: color-mix(in srgb, var(--danger) 50%, transparent);
+        background: color-mix(in srgb, var(--danger) 12%, transparent);
     }
     .tag.open {
-        color: #f0b232;
-        border-color: rgba(240, 178, 50, 0.45);
-        background: rgba(240, 178, 50, 0.1);
+        color: var(--warn);
+        border-color: color-mix(in srgb, var(--warn) 45%, transparent);
+        background: color-mix(in srgb, var(--warn) 10%, transparent);
     }
     .home-link.compete {
-        color: #f0b232;
+        color: var(--warn);
     }
     .home-link.compete:hover {
-        color: #fbbf24;
-        border-bottom-color: #f0b232;
+        color: var(--warn);
+        border-bottom-color: var(--warn);
     }
 
     /* Team rows — shared fixed tracks so every column lines up across rows */
@@ -436,7 +436,7 @@ const HOME_CSS: &str = r#"
         transition: width 0.15s;
     }
     .team-row:hover {
-        background: rgba(124,58,237,0.06);
+        background: color-mix(in srgb, var(--accent) 6%, transparent);
     }
     .team-row:hover::before { width: 3px; }
     .team-row .tm-name {
@@ -481,6 +481,25 @@ const HOME_CSS: &str = r#"
         text-align: right;
         font-variant-numeric: tabular-nums;
         white-space: nowrap;
+    }
+    .team-row.forming {
+        opacity: 0.92;
+    }
+    .team-row .tm-forming {
+        display: inline-block;
+        margin-left: 0.45rem;
+        font-family: var(--font-mono);
+        font-size: 0.58rem;
+        letter-spacing: 0.1em;
+        text-transform: uppercase;
+        color: var(--warn);
+        border: 1px solid color-mix(in srgb, var(--warn) 40%, transparent);
+        background: color-mix(in srgb, var(--warn) 10%, transparent);
+        padding: 0.1rem 0.35rem;
+        vertical-align: middle;
+    }
+    .team-row .tm-roster.forming {
+        color: var(--warn);
     }
     .team-lore {
         grid-column: 1 / -1;
@@ -537,7 +556,7 @@ const HOME_CSS: &str = r#"
         text-transform: uppercase;
         color: var(--accent);
         margin-left: 0.5rem;
-        border: 1px solid rgba(124,58,237,0.4);
+        border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
         padding: 0.05rem 0.3rem;
     }
 
@@ -557,7 +576,7 @@ const HOME_CSS: &str = r#"
     .recruit-left {
         padding: 1.75rem 1.5rem;
         background:
-            linear-gradient(135deg, rgba(124,58,237,0.18) 0%, transparent 55%),
+            linear-gradient(135deg, color-mix(in srgb, var(--accent) 18%, transparent) 0%, transparent 55%),
             var(--surface-2);
         border-right: 1px solid var(--border);
     }
@@ -590,8 +609,8 @@ const HOME_CSS: &str = r#"
     .never-box {
         margin-top: 1rem;
         padding: 0.85rem 0.9rem;
-        border: 1px dashed rgba(124,58,237,0.35);
-        background: rgba(8,8,12,0.4);
+        border: 1px dashed color-mix(in srgb, var(--accent) 35%, transparent);
+        background: color-mix(in srgb, var(--bg) 40%, transparent);
     }
     .never-box h4 {
         font-family: var(--font-mono);
@@ -619,9 +638,9 @@ const HOME_CSS: &str = r#"
         letter-spacing: 0.08em;
         text-transform: uppercase;
         padding: 0.3rem 0.55rem;
-        border: 1px solid rgba(124,58,237,0.4);
+        border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
         color: var(--text);
-        background: rgba(124,58,237,0.12);
+        background: color-mix(in srgb, var(--accent) 12%, transparent);
     }
 
     .home-link {
@@ -656,13 +675,13 @@ const HOME_CSS: &str = r#"
     }
     .btn-primary {
         background: var(--accent);
-        color: #fff;
-        box-shadow: 0 0 0 0 rgba(124,58,237,0.4);
+        color: var(--accent-fg);
+        box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 40%, transparent);
     }
     .btn-primary:hover {
         filter: brightness(1.12);
         transform: translateY(-1px);
-        box-shadow: 0 0 28px rgba(124,58,237,0.4);
+        box-shadow: 0 0 28px color-mix(in srgb, var(--accent) 40%, transparent);
     }
     .btn-outline {
         background: transparent;
@@ -782,12 +801,6 @@ pub fn Home() -> Element {
         .and_then(|s| s.as_ref())
         .map(|s| s.public_layout)
         .unwrap_or(PublicLayout::Hub);
-    let org_name = settings
-        .read()
-        .as_ref()
-        .and_then(|s| s.as_ref())
-        .map(|s| s.org_name.clone())
-        .unwrap_or_else(|| "The Scuffed Crew".into());
     let recruitment_open = settings
         .read()
         .as_ref()
@@ -801,11 +814,7 @@ pub fn Home() -> Element {
         let o = o.as_ref().and_then(|o| o.as_ref());
         match o {
             Some(data) => {
-                let with_roster = data
-                    .teams
-                    .iter()
-                    .filter(|t| t.roster_count > 0)
-                    .count();
+                let with_roster = data.teams.iter().filter(|t| t.roster_count > 0).count();
                 // Prefer squads that actually have people; hide "4 empty teams" as a vanity number.
                 let squads = if with_roster > 0 {
                     Some(with_roster)
@@ -1080,9 +1089,9 @@ pub fn Home() -> Element {
                 }
             }
 
-            p { class: "home-foot",
-                "{content.footer_note}"
-                " · {org_name}"
+            // Site chrome footer lives in PublicLayout; keep a short page note only.
+            if !content.footer_note.trim().is_empty() {
+                p { class: "home-foot", "{content.footer_note}" }
             }
         }
         } // home-wrap
@@ -1107,28 +1116,44 @@ fn render_team_row(team: &OverviewTeam, game_map: &HashMap<String, String>) -> E
         .get(&team.game_id)
         .cloned()
         .unwrap_or_else(|| team.game_id.clone());
+    let forming = team.roster_count == 0;
     let wl = if team.record.wins == 0 && team.record.losses == 0 {
         "—".to_string()
     } else {
         format!("{}–{}", team.record.wins, team.record.losses)
     };
-    let division = team
-        .division
-        .clone()
-        .unwrap_or_else(|| "Internal".into());
+    let division = team.division.clone().unwrap_or_else(|| "Internal".into());
     let lore = team.lore_quote.clone().unwrap_or_default();
     let roster_n = team.roster_count;
+    let row_class = if forming {
+        "team-row forming"
+    } else {
+        "team-row"
+    };
+    let roster_class = if forming {
+        "tm-roster forming"
+    } else {
+        "tm-roster"
+    };
+    let roster_label = if forming {
+        "Open".to_string()
+    } else {
+        roster_n.to_string()
+    };
 
     rsx! {
-        div { class: "team-row",
+        div { class: "{row_class}",
             div { class: "tm-name",
                 "{team.name}"
+                if forming {
+                    span { class: "tm-forming", "Forming" }
+                }
                 if !lore.is_empty() {
                     div { class: "team-lore", "“{lore}”" }
                 }
             }
             div { class: "tm-game", "{game_name}" }
-            div { class: "tm-roster", "{roster_n}" }
+            div { class: "{roster_class}", "{roster_label}" }
             div { class: "tm-div", "{division}" }
             div { class: "tm-wl", "{wl}" }
         }

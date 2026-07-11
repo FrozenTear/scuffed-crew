@@ -215,6 +215,13 @@ pub fn Community() -> Element {
             .ok()
     });
 
+    let settings = use_resource(|| async {
+        ApiClient::web()
+            .fetch::<scuffed_types::SiteSettings>("/api/settings")
+            .await
+            .ok()
+    });
+
     let me = use_resource(|| async {
         ApiClient::web()
             .fetch::<scuffed_types::MeResponse>("/api/auth/me")
@@ -231,6 +238,13 @@ pub fn Community() -> Element {
         .and_then(|m| m.member.as_ref())
         .map(|member| matches!(member.org_role.as_str(), "officer" | "admin"))
         .unwrap_or(false);
+    let org_name = settings
+        .read()
+        .as_ref()
+        .and_then(|o| o.as_ref())
+        .map(|s| s.org_name.clone())
+        .unwrap_or_else(|| "The Scuffed Crew".into());
+    let banner_label = org_name.to_uppercase();
 
     rsx! {
         style { {PAGE_CSS} }
@@ -243,12 +257,12 @@ pub fn Community() -> Element {
 
             div { class: "community-hero",
                 div { class: "community-banner-placeholder",
-                    span { "SCUFFED CREW" }
+                    span { "{banner_label}" }
                 }
                 div { class: "community-body",
                     span { class: "community-nostr-badge", "Nostr-Native" }
 
-                    h2 { class: "community-name", "The Scuffed Crew" }
+                    h2 { class: "community-name", "{org_name}" }
                     p { class: "community-desc",
                         "A competitive gaming community built on Nostr. No central servers own your identity — your keys, your account, everywhere."
                     }
@@ -268,25 +282,26 @@ pub fn Community() -> Element {
                 }
             }
 
-            CommunityFeatures {}
+            CommunityFeatures { org_name: org_name.clone() }
 
             if is_officer {
-                OfficerCommunityActions {}
+                OfficerCommunityActions { org_name: org_name.clone() }
             }
         }
     }
 }
 
 #[component]
-fn CommunityFeatures() -> Element {
+fn CommunityFeatures(org_name: String) -> Element {
+    let intro = format!("Your {org_name} account is backed by a Nostr keypair.\n\n");
     rsx! {
         div { class: "community-section",
             h3 { class: "community-section-title", "How It Works" }
             div { class: "community-rules",
-                "Your Scuffed Crew account is backed by a Nostr keypair.\n\n\
+                "{intro}\
                  • Your identity is portable — take it to any Nostr-compatible app\n\
                  • Messages flow through relays, not centralized servers\n\
-                 • NIP-05 verification proves your identity: you@scuffed.gg\n\
+                 • NIP-05 verification proves your identity on this org domain\n\
                  • NIP-49 encrypted backups keep your keys safe\n\
                  • NIP-25 reactions let you engage with community content\n\n\
                  Visit the Identity page to set up your Nostr identity."
@@ -296,19 +311,21 @@ fn CommunityFeatures() -> Element {
 }
 
 #[component]
-fn OfficerCommunityActions() -> Element {
+fn OfficerCommunityActions(org_name: String) -> Element {
     let mut toasts = use_toast();
     let mut publishing = use_signal(|| false);
+    let name_for_publish = org_name.clone();
 
     let publish_community = move |_| {
+        let name = name_for_publish.clone();
         spawn(async move {
             publishing.set(true);
             let body = CommunityCreateBody {
                 community_id: "scuffed-crew".to_string(),
-                name: "The Scuffed Crew".to_string(),
-                description: Some(
-                    "Competitive gaming community on Nostr. Your keys, your identity.".to_string(),
-                ),
+                name: name.clone(),
+                description: Some(format!(
+                    "{name} — competitive gaming community on Nostr. Your keys, your identity."
+                )),
                 rules: Some(
                     "1. Be respectful\n2. No drama, no politics\n3. Age 16+\n4. Have fun"
                         .to_string(),

@@ -208,7 +208,11 @@ pub fn Forum() -> Element {
                 Some(Some(_)) => rsx! {
                     p { class: "forum-empty", "No boards yet. An officer can create them in Admin → Forum." }
                 },
-                Some(None) => rsx! { p { class: "forum-empty", "Failed to load forum." } },
+                Some(None) => rsx! {
+                    p { class: "forum-empty",
+                        "Couldn't load the forum. Check your connection and try refreshing."
+                    }
+                },
                 None => rsx! { p { class: "forum-empty", "Loading…" } },
             }
         }
@@ -230,17 +234,14 @@ pub fn ForumBoardPage(slug: String) -> Element {
         let _ = refresh();
         async move {
             ApiClient::web()
-                .fetch::<ThreadListResponse>(&format!(
-                    "/api/forum/threads?board={slug}&limit=50"
-                ))
+                .fetch::<ThreadListResponse>(&format!("/api/forum/threads?board={slug}&limit=50"))
                 .await
                 .ok()
         }
     });
 
     let is_member = auth().is_logged_in();
-    let board_locked = list
-        .value()()
+    let board_locked = list.value()()
         .flatten()
         .and_then(|r| r.board.clone())
         .map(|b| b.is_locked)

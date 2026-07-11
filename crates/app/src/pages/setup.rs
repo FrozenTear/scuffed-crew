@@ -3,7 +3,7 @@ use scuffed_api_client::ApiClient;
 use scuffed_types::{OkResponse, SetupRequest, SetupStatusResponse};
 
 use crate::routes::Route;
-use crate::state::auth::{use_auth, AuthState};
+use crate::state::auth::{AuthState, use_auth};
 use scuffed_types::{MeResponse, OrgRole, UserInfo};
 
 const CSS: &str = r#"

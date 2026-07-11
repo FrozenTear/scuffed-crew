@@ -10,9 +10,10 @@ RUN cargo install --locked dioxus-cli@0.7.9
 WORKDIR /build
 
 COPY Cargo.toml Cargo.lock ./
+COPY Dioxus.toml ./
 COPY crates/ crates/
 
-# Build the Dioxus app bundle
+# Build the Dioxus app bundle (Dioxus.toml at monorepo root supplies title/meta)
 RUN cd crates/app && dx build --release
 
 # Stage the web bundle where the server's SPA fallback expects it

@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <title>The Scuffed Crew</title>
+    <meta charset="UTF-8" />
+    <meta content="text/html;charset=utf-8" http-equiv="Content-Type" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="description"
+      content="The Scuffed Crew — multi-game EMEA gaming org. Small teams, real structure, scheduled play nights."
+    />
+    <meta property="og:title" content="The Scuffed Crew" />
+    <meta
+      property="og:description"
+      content="Multi-game EMEA gaming org. Small teams, real structure, scheduled play nights."
+    />
+    <meta property="og:type" content="website" />
+    <meta name="theme-color" content="#17171d" />
+    <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml" />
+    <style>
+      html, body {
+        margin: 0;
+        min-height: 100%;
+        background: #17171d;
+        color: #f4f4f8;
+        font-family: system-ui, sans-serif;
+      }
+      #main {
+        min-height: 100vh;
+      }
+      /* First paint before WASM boots */
+      #sc-boot {
+        position: fixed;
+        inset: 0;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 0.75rem;
+        pointer-events: none;
+        z-index: 0;
+      }
+      #sc-boot .mark {
+        width: 40px;
+        height: 40px;
+        border-radius: 8px;
+        background: #8f73ff;
+        color: #fff;
+        font-weight: 700;
+        font-size: 0.85rem;
+        letter-spacing: 0.04em;
+        display: grid;
+        place-items: center;
+        box-shadow: 0 0 24px rgba(143, 115, 255, 0.35);
+      }
+      #sc-boot .label {
+        font-size: 0.75rem;
+        letter-spacing: 0.14em;
+        text-transform: uppercase;
+        color: #9696a3;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="sc-boot" aria-hidden="true">
+      <div class="mark">SC</div>
+      <div class="label">Loading</div>
+    </div>
+    <div id="main"></div>
+    <!-- Dioxus injects the WASM loader before </body> -->
+    <script>
+      // Hide boot skeleton once the app mounts content into #main
+      (function () {
+        var main = document.getElementById("main");
+        var boot = document.getElementById("sc-boot");
+        if (!main || !boot) return;
+        var hide = function () {
+          if (main.childElementCount > 0 || main.textContent.trim().length > 0) {
+            boot.style.display = "none";
+            if (obs) obs.disconnect();
+          }
+        };
+        var obs = new MutationObserver(hide);
+        obs.observe(main, { childList: true, subtree: true, characterData: true });
+        // Fallback: hide after long load so we never leave a stuck overlay
+        setTimeout(function () {
+          boot.style.display = "none";
+          if (obs) obs.disconnect();
+        }, 15000);
+      })();
+    </script>
+  </body>
+</html>

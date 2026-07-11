@@ -3,7 +3,7 @@ use scuffed_api_client::ApiClient;
 use scuffed_types::{NavConfig, NavPlacement, SiteSettings};
 
 use crate::routes::Route;
-use crate::state::auth::{use_auth, AuthState};
+use crate::state::auth::{AuthState, use_auth};
 use crate::theme::ThemeToggle;
 
 /// Map catalog id → public route. Unknown ids are skipped.
@@ -27,9 +27,7 @@ fn nav_route(id: &str) -> Option<Route> {
 }
 
 fn nav_label(id: &str) -> String {
-    NavConfig::catalog_label(id)
-        .unwrap_or(id)
-        .to_string()
+    NavConfig::catalog_label(id).unwrap_or(id).to_string()
 }
 
 /// Resolved nav link for rendering (cloneable into rsx closures).
@@ -241,6 +239,13 @@ const NAV_CSS: &str = r#"
         display: inline-block;
         vertical-align: bottom;
     }
+    .nav-mobile-tools {
+        display: none;
+        align-items: center;
+        gap: 0.35rem;
+        margin-left: auto;
+        flex-shrink: 0;
+    }
     .nav-hamburger {
         display: none;
         flex-direction: column;
@@ -294,6 +299,32 @@ const NAV_CSS: &str = r#"
         color: var(--text-3);
         margin: 0.85rem 0 0.25rem;
     }
+    .nav-overlay a.nav-cta {
+        display: inline-flex;
+        align-self: flex-start;
+        margin: 0.35rem 0 0.5rem;
+        background: var(--accent);
+        color: var(--accent-fg);
+        padding: 0.55rem 1rem;
+        border-radius: 6px;
+        font-size: 0.85rem;
+        font-weight: 500;
+    }
+    .nav-overlay-theme {
+        display: flex;
+        align-items: center;
+        gap: 0.65rem;
+        margin-top: 1rem;
+        padding-top: 0.75rem;
+        border-top: 1px solid var(--border);
+    }
+    .nav-overlay-theme span {
+        font-family: var(--font-mono, var(--font-head));
+        font-size: 0.65rem;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+        color: var(--text-3);
+    }
     .site-footer {
         border-top: 1px solid var(--border);
         padding: 2rem;
@@ -318,6 +349,7 @@ const NAV_CSS: &str = r#"
     .theme-toggle:hover { background: var(--surface-2); }
     @media (max-width: 820px) {
         .nav-center, .nav-actions { display: none; }
+        .nav-mobile-tools { display: flex; }
         .nav-hamburger { display: flex; }
         .nav-mark-text { display: none; }
     }
@@ -365,6 +397,24 @@ pub fn PublicLayout() -> Element {
         .unwrap_or_default();
     let loading = auth().loading;
 
+    let org_name = site_settings
+        .read()
+        .as_ref()
+        .and_then(|o| o.as_ref())
+        .map(|s| s.org_name.clone())
+        .unwrap_or_else(|| "The Scuffed Crew".into());
+    let site_description = site_settings
+        .read()
+        .as_ref()
+        .and_then(|o| o.as_ref())
+        .map(|s| s.site_description.trim().to_string())
+        .filter(|d| !d.is_empty());
+    let footer_text = match &site_description {
+        Some(desc) => format!("© {org_name} · {desc}"),
+        None => format!("© {org_name}"),
+    };
+    let mark_label = org_name.clone();
+
     let more_class = if more_open() {
         "nav-drop open"
     } else {
@@ -401,7 +451,7 @@ pub fn PublicLayout() -> Element {
                     account_open.set(false);
                 },
                 div { class: "nav-icon", "SC" }
-                span { class: "nav-mark-text", "Scuffed Crew" }
+                span { class: "nav-mark-text", "{mark_label}" }
             }
 
             ul { class: "nav-center",
@@ -500,17 +550,20 @@ pub fn PublicLayout() -> Element {
                 li { ThemeToggle {} }
             }
 
-            button {
-                class: hamburger_class,
-                aria_label: "Toggle menu",
-                onclick: move |_| {
-                    mobile_open.toggle();
-                    more_open.set(false);
-                    account_open.set(false);
-                },
-                span {}
-                span {}
-                span {}
+            div { class: "nav-mobile-tools",
+                ThemeToggle {}
+                button {
+                    class: hamburger_class,
+                    aria_label: "Toggle menu",
+                    onclick: move |_| {
+                        mobile_open.toggle();
+                        more_open.set(false);
+                        account_open.set(false);
+                    },
+                    span {}
+                    span {}
+                    span {}
+                }
             }
         }
 
@@ -590,6 +643,10 @@ pub fn PublicLayout() -> Element {
                     "Login"
                 }
             }
+            div { class: "nav-overlay-theme",
+                span { "Theme" }
+                ThemeToggle {}
+            }
         }
 
         main { style: "padding-top: 48px; min-height: 100vh;",
@@ -597,7 +654,7 @@ pub fn PublicLayout() -> Element {
         }
 
         footer { class: "site-footer",
-            "© 2026 The Scuffed Crew · Est. EMEA"
+            "{footer_text}"
         }
     }
 }

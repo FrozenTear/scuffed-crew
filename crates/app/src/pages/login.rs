@@ -1,11 +1,9 @@
 use dioxus::prelude::*;
 use scuffed_api_client::ApiClient;
-use scuffed_types::{
-    AuthProvidersResponse, LocalLoginRequest, OkResponse, SetupStatusResponse,
-};
+use scuffed_types::{AuthProvidersResponse, LocalLoginRequest, OkResponse, SetupStatusResponse};
 
 use crate::routes::Route;
-use crate::state::auth::{use_auth, AuthState};
+use crate::state::auth::{AuthState, use_auth};
 use scuffed_types::{MeResponse, OrgRole, UserInfo};
 
 const CSS: &str = r#"
@@ -228,10 +226,12 @@ pub fn Login() -> Element {
                 }
                 if !show_local && !show_discord && !show_google {
                     p { class: "lead", "No login methods are configured." }
-                    a {
-                        href: "/api/dev/login",
-                        style: "color: var(--accent);",
-                        "Dev login (in-memory only)"
+                    if cfg!(debug_assertions) {
+                        a {
+                            href: "/api/dev/login",
+                            style: "color: var(--accent);",
+                            "Dev login (in-memory only)"
+                        }
                     }
                 }
             }

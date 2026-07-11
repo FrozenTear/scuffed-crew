@@ -85,8 +85,7 @@ pub fn AdminArticles() -> Element {
             if c.is_ascii_alphanumeric() {
                 out.push(c);
                 prev_dash = false;
-            } else if (c == '-' || c == '_' || c.is_whitespace()) && !prev_dash && !out.is_empty()
-            {
+            } else if (c == '-' || c == '_' || c.is_whitespace()) && !prev_dash && !out.is_empty() {
                 out.push('-');
                 prev_dash = true;
             }

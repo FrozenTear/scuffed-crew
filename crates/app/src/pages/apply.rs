@@ -54,19 +54,29 @@ pub fn Apply() -> Element {
     let mut message = use_signal(String::new);
     let mut submitting = use_signal(|| false);
 
+    let loading = auth().loading;
+    let s = settings
+        .data
+        .read()
+        .as_ref()
+        .and_then(|s| s.as_ref())
+        .cloned();
+    let org_name = s
+        .as_ref()
+        .map(|x| x.org_name.clone())
+        .unwrap_or_else(|| "The Scuffed Crew".into());
+
     rsx! {
         style { {APPLY_CSS} }
         div { class: "apply-page",
-            h1 { class: "apply-title", "Join The Scuffed Crew" }
+            h1 { class: "apply-title", "Join {org_name}" }
 
-            {
-                let loading = auth().loading;
-                let s = settings.data.read().as_ref().and_then(|s| s.as_ref()).cloned();
-
-                if loading || s.is_none() {
-                    rsx! { p { class: "apply-loading", "Loading..." } }
-                } else {
+            if loading || s.is_none() {
+                p { class: "apply-loading", "Loading..." }
+            } else {
+                {
                     let s = s.unwrap();
+                    let org_name = s.org_name.clone();
 
                     if !s.recruitment_open {
                         rsx! {
@@ -82,16 +92,25 @@ pub fn Apply() -> Element {
                                 p { class: "apply-card-desc", "You need to sign in before submitting an application." }
                                 div { class: "apply-auth-buttons",
                                     Link { to: Route::Login {}, class: "ui-btn ui-btn--primary ui-btn--md", "Sign in" }
-                                    a {
-                                        href: "/api/dev/login",
-                                        class: "ui-btn ui-btn--md",
-                                        style: "background: var(--surface); border: 1px solid var(--border); color: var(--text);",
-                                        "Dev login"
+                                    // Only in debug builds — route is not registered in production
+                                    if cfg!(debug_assertions) {
+                                        a {
+                                            href: "/api/dev/login",
+                                            class: "ui-btn ui-btn--md",
+                                            style: "background: var(--surface); border: 1px solid var(--border); color: var(--text);",
+                                            "Dev login"
+                                        }
                                     }
                                 }
                             }
                         }
-                    } else if let Some(app) = my_app.data.read().as_ref().and_then(|a| a.as_ref()).and_then(|a| a.as_ref()) {
+                    } else if let Some(app) = my_app
+                        .data
+                        .read()
+                        .as_ref()
+                        .and_then(|a| a.as_ref())
+                        .and_then(|a| a.as_ref())
+                    {
                         let status_tone = match app.status.as_str() {
                             "pending" => PillTone::Warn,
                             "trial" => PillTone::Accent,
@@ -108,11 +127,11 @@ pub fn Apply() -> Element {
                             _ => &app.status,
                         };
                         let desc = match app.status.as_str() {
-                            "pending" => "Your application is being reviewed. We'll get back to you soon.",
-                            "trial" => "You're in your trial period. Show up, have fun, and be yourself.",
-                            "accepted" => "Welcome aboard! You're a member of The Scuffed Crew.",
-                            "rejected" => "Unfortunately your application was not accepted at this time.",
-                            _ => "",
+                            "pending" => "Your application is being reviewed. We'll get back to you soon.".to_string(),
+                            "trial" => "You're in your trial period. Show up, have fun, and be yourself.".to_string(),
+                            "accepted" => format!("Welcome aboard! You're a member of {org_name}."),
+                            "rejected" => "Unfortunately your application was not accepted at this time.".to_string(),
+                            _ => String::new(),
                         };
 
                         rsx! {
@@ -125,7 +144,13 @@ pub fn Apply() -> Element {
                             }
                         }
                     } else {
-                        let game_list = games.data.read().as_ref().and_then(|g| g.as_ref()).cloned().unwrap_or_default();
+                        let game_list = games
+                            .data
+                            .read()
+                            .as_ref()
+                            .and_then(|g| g.as_ref())
+                            .cloned()
+                            .unwrap_or_default();
 
                         rsx! {
                             Card {
@@ -140,7 +165,11 @@ pub fn Apply() -> Element {
                                                 let gid = g.id.clone();
                                                 let gid2 = g.id.clone();
                                                 let is_selected = selected_games().contains(&gid);
-                                                let btn_class = if is_selected { "apply-game-btn selected" } else { "apply-game-btn" };
+                                                let btn_class = if is_selected {
+                                                    "apply-game-btn selected"
+                                                } else {
+                                                    "apply-game-btn"
+                                                };
                                                 rsx! {
                                                     button {
                                                         class: "{btn_class}",
@@ -185,9 +214,16 @@ pub fn Apply() -> Element {
                                                 let body = ApplyBody {
                                                     preferred_games: games,
                                                     preferred_roles: vec![],
-                                                    message: if msg.trim().is_empty() { None } else { Some(msg) },
+                                                    message: if msg.trim().is_empty() {
+                                                        None
+                                                    } else {
+                                                        Some(msg)
+                                                    },
                                                 };
-                                                match ApiClient::web().post_json_empty("/api/applications", &body).await {
+                                                match ApiClient::web()
+                                                    .post_json_empty("/api/applications", &body)
+                                                    .await
+                                                {
                                                     Ok(_) => {
                                                         let mut toast = use_toast();
                                                         toast.show(Toast::success("Application submitted!"));
