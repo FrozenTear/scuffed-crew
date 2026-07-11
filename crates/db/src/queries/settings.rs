@@ -18,15 +18,23 @@ struct DbSiteSettings {
     recruitment_message: String,
     min_age: u32,
     forum_backend: String,
+    /// Older rows may omit this — SurrealValue needs `surreal(default)`, not only serde.
+    #[surreal(default)]
+    #[serde(default)]
     extra_relay_urls: String,
+    #[surreal(default)]
     #[serde(default = "default_layout")]
     public_layout: String,
+    #[surreal(default)]
     #[serde(default)]
     homepage_json: String,
+    #[surreal(default)]
     #[serde(default)]
     nav_json: String,
+    #[surreal(default)]
     #[serde(default)]
     page_bg_color: String,
+    #[surreal(default)]
     #[serde(default)]
     page_bg_image_url: String,
     updated_at: SurrealDatetime,

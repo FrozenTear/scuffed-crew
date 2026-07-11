@@ -12,6 +12,8 @@ pub fn AdminSettings() -> Element {
     let mut toast = use_toast();
     let mut saving = use_signal(|| false);
     let mut loaded = use_signal(|| false);
+    let mut load_error = use_signal(|| Option::<String>::None);
+    let mut reload_tick = use_signal(|| 0u32);
 
     let mut org_name = use_signal(String::new);
     let mut site_description = use_signal(String::new);
@@ -27,31 +29,39 @@ pub fn AdminSettings() -> Element {
     let mut page_bg_color = use_signal(String::new);
     let mut page_bg_image_url = use_signal(String::new);
 
-    let _settings = use_resource(move || async move {
-        match ApiClient::web()
-            .fetch::<SiteSettings>("/api/settings")
-            .await
-        {
-            Ok(s) => {
-                org_name.set(s.org_name);
-                site_description.set(s.site_description);
-                recruitment_open.set(s.recruitment_open);
-                recruitment_message.set(s.recruitment_message);
-                min_age.set(s.min_age.to_string());
-                forum_backend.set(s.forum_backend);
-                extra_relay_urls.set(s.extra_relay_urls);
-                public_layout.set(s.public_layout);
-                content_align.set(s.homepage.content_align);
-                homepage.set(s.homepage);
-                let mut n = s.nav;
-                n.normalize();
-                nav.set(n);
-                page_bg_color.set(s.page_bg_color);
-                page_bg_image_url.set(s.page_bg_image_url);
-                loaded.set(true);
-                Some(true)
+    let _settings = use_resource(move || {
+        let _tick = reload_tick();
+        async move {
+            load_error.set(None);
+            match ApiClient::web()
+                .fetch::<SiteSettings>("/api/settings")
+                .await
+            {
+                Ok(s) => {
+                    org_name.set(s.org_name);
+                    site_description.set(s.site_description);
+                    recruitment_open.set(s.recruitment_open);
+                    recruitment_message.set(s.recruitment_message);
+                    min_age.set(s.min_age.to_string());
+                    forum_backend.set(s.forum_backend);
+                    extra_relay_urls.set(s.extra_relay_urls);
+                    public_layout.set(s.public_layout);
+                    content_align.set(s.homepage.content_align);
+                    homepage.set(s.homepage);
+                    let mut n = s.nav;
+                    n.normalize();
+                    nav.set(n);
+                    page_bg_color.set(s.page_bg_color);
+                    page_bg_image_url.set(s.page_bg_image_url);
+                    loaded.set(true);
+                    Some(true)
+                }
+                Err(e) => {
+                    load_error.set(Some(e.to_string()));
+                    loaded.set(false);
+                    None
+                }
             }
-            Err(_) => None,
         }
     });
 
@@ -112,7 +122,20 @@ pub fn AdminSettings() -> Element {
             }
         }
 
-        if !loaded() {
+        if let Some(err) = load_error() {
+            div { style: "padding:1rem;border:1px solid var(--danger);border-radius:8px;background:color-mix(in srgb, var(--danger) 12%, transparent);margin-bottom:1rem;",
+                p { style: "color:var(--danger);margin:0 0 0.75rem;", "Failed to load settings: {err}" }
+                button {
+                    class: "btn-add",
+                    r#type: "button",
+                    onclick: move |_| {
+                        load_error.set(None);
+                        reload_tick.set(reload_tick() + 1);
+                    },
+                    "Retry"
+                }
+            }
+        } else if !loaded() {
             p { style: "color: var(--text-3);", "Loading settings…" }
         } else {
             div { class: "form-section",

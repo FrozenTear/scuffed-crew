@@ -73,6 +73,7 @@ pub async fn get_settings(
         .await
         .map(|s| Json(to_api_settings(s)))
         .map_err(|e| {
+            tracing::error!(error = %e, "GET /api/settings failed");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
