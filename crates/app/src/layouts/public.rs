@@ -1,10 +1,58 @@
 use dioxus::prelude::*;
 use scuffed_api_client::ApiClient;
-use scuffed_types::SiteSettings;
+use scuffed_types::{NavConfig, NavPlacement, SiteSettings};
 
 use crate::routes::Route;
 use crate::state::auth::{use_auth, AuthState};
 use crate::theme::ThemeToggle;
+
+/// Map catalog id → public route. Unknown ids are skipped.
+fn nav_route(id: &str) -> Option<Route> {
+    Some(match id {
+        "members" => Route::Members {},
+        "tournaments" => Route::Tournaments {},
+        "news" => Route::News {},
+        "forum" => Route::Forum {},
+        "events" => Route::Events {},
+        "community" => Route::Community {},
+        "feed" => Route::Feed {},
+        "polls" => Route::Polls {},
+        "blog" => Route::Blog {},
+        "wiki" => Route::Wiki {},
+        "stats" => Route::Stats {},
+        "strategy" => Route::StrategyBrowse {},
+        "scrims" => Route::Scrims {},
+        _ => return None,
+    })
+}
+
+fn nav_label(id: &str) -> String {
+    NavConfig::catalog_label(id)
+        .unwrap_or(id)
+        .to_string()
+}
+
+/// Resolved nav link for rendering (cloneable into rsx closures).
+#[derive(Clone, PartialEq)]
+struct NavLink {
+    id: String,
+    label: String,
+    route: Route,
+}
+
+fn resolve_nav(cfg: &NavConfig, placement: NavPlacement) -> Vec<NavLink> {
+    cfg.items_in(placement)
+        .into_iter()
+        .filter_map(|item| {
+            let route = nav_route(&item.id)?;
+            Some(NavLink {
+                id: item.id.clone(),
+                label: nav_label(&item.id),
+                route,
+            })
+        })
+        .collect()
+}
 
 /// Build a safe CSS snippet that applies admin-configured page background.
 fn page_bg_css(color: &str, image_url: &str) -> String {
@@ -295,6 +343,19 @@ pub fn PublicLayout() -> Element {
         .map(|s| page_bg_css(&s.page_bg_color, &s.page_bg_image_url))
         .unwrap_or_default();
 
+    let nav_cfg = site_settings
+        .read()
+        .as_ref()
+        .and_then(|o| o.as_ref())
+        .map(|s| {
+            let mut n = s.nav.clone();
+            n.normalize();
+            n
+        })
+        .unwrap_or_default();
+    let primary_links = resolve_nav(&nav_cfg, NavPlacement::Primary);
+    let more_links = resolve_nav(&nav_cfg, NavPlacement::More);
+
     let is_logged_in = auth().is_logged_in();
     let is_officer = auth().is_officer_or_above();
     let username = auth()
@@ -344,68 +405,31 @@ pub fn PublicLayout() -> Element {
             }
 
             ul { class: "nav-center",
-                li { Link { to: Route::Members {}, "Members" } }
-                li { Link { to: Route::Tournaments {}, "Tournaments" } }
-                li { Link { to: Route::News {}, "News" } }
-                li { class: "{more_class}",
-                    button {
-                        class: "nav-linkish",
-                        onclick: move |_| {
-                            more_open.toggle();
-                            account_open.set(false);
-                        },
-                        "More ▾"
+                for link in primary_links.iter() {
+                    li {
+                        key: "{link.id}",
+                        Link { to: link.route.clone(), "{link.label}" }
                     }
-                    div { class: "nav-drop-menu left",
-                        Link {
-                            to: Route::Community {},
-                            onclick: move |_| more_open.set(false),
-                            "Community"
+                }
+                if !more_links.is_empty() {
+                    li { class: "{more_class}",
+                        button {
+                            class: "nav-linkish",
+                            onclick: move |_| {
+                                more_open.toggle();
+                                account_open.set(false);
+                            },
+                            "More ▾"
                         }
-                        Link {
-                            to: Route::Feed {},
-                            onclick: move |_| more_open.set(false),
-                            "Feed"
-                        }
-                        Link {
-                            to: Route::Polls {},
-                            onclick: move |_| more_open.set(false),
-                            "Polls"
-                        }
-                        Link {
-                            to: Route::Events {},
-                            onclick: move |_| more_open.set(false),
-                            "Events"
-                        }
-                        Link {
-                            to: Route::Scrims {},
-                            onclick: move |_| more_open.set(false),
-                            "Scrims"
-                        }
-                        Link {
-                            to: Route::Blog {},
-                            onclick: move |_| more_open.set(false),
-                            "Blog"
-                        }
-                        Link {
-                            to: Route::Wiki {},
-                            onclick: move |_| more_open.set(false),
-                            "Wiki"
-                        }
-                        Link {
-                            to: Route::Forum {},
-                            onclick: move |_| more_open.set(false),
-                            "Forum"
-                        }
-                        Link {
-                            to: Route::StrategyBrowse {},
-                            onclick: move |_| more_open.set(false),
-                            "Strategy"
-                        }
-                        Link {
-                            to: Route::Stats {},
-                            onclick: move |_| more_open.set(false),
-                            "Stats"
+                        div { class: "nav-drop-menu left",
+                            for link in more_links.iter() {
+                                Link {
+                                    key: "{link.id}",
+                                    to: link.route.clone(),
+                                    onclick: move |_| more_open.set(false),
+                                    "{link.label}"
+                                }
+                            }
                         }
                     }
                 }
@@ -501,20 +525,13 @@ pub fn PublicLayout() -> Element {
         }
 
         div { class: overlay_class,
-            Link {
-                to: Route::Members {},
-                onclick: move |_| mobile_open.set(false),
-                "Members"
-            }
-            Link {
-                to: Route::Tournaments {},
-                onclick: move |_| mobile_open.set(false),
-                "Tournaments"
-            }
-            Link {
-                to: Route::News {},
-                onclick: move |_| mobile_open.set(false),
-                "News"
+            for link in primary_links.iter() {
+                Link {
+                    key: "m-{link.id}",
+                    to: link.route.clone(),
+                    onclick: move |_| mobile_open.set(false),
+                    "{link.label}"
+                }
             }
             Link {
                 to: Route::Apply {},
@@ -522,56 +539,16 @@ pub fn PublicLayout() -> Element {
                 onclick: move |_| mobile_open.set(false),
                 "Apply"
             }
-            div { class: "nav-overlay-label", "More" }
-            Link {
-                to: Route::Community {},
-                onclick: move |_| mobile_open.set(false),
-                "Community"
-            }
-            Link {
-                to: Route::Feed {},
-                onclick: move |_| mobile_open.set(false),
-                "Feed"
-            }
-            Link {
-                to: Route::Polls {},
-                onclick: move |_| mobile_open.set(false),
-                "Polls"
-            }
-            Link {
-                to: Route::Events {},
-                onclick: move |_| mobile_open.set(false),
-                "Events"
-            }
-            Link {
-                to: Route::Scrims {},
-                onclick: move |_| mobile_open.set(false),
-                "Scrims"
-            }
-            Link {
-                to: Route::Blog {},
-                onclick: move |_| mobile_open.set(false),
-                "Blog"
-            }
-            Link {
-                to: Route::Wiki {},
-                onclick: move |_| mobile_open.set(false),
-                "Wiki"
-            }
-            Link {
-                to: Route::Forum {},
-                onclick: move |_| mobile_open.set(false),
-                "Forum"
-            }
-            Link {
-                to: Route::StrategyBrowse {},
-                onclick: move |_| mobile_open.set(false),
-                "Strategy"
-            }
-            Link {
-                to: Route::Stats {},
-                onclick: move |_| mobile_open.set(false),
-                "Stats"
+            if !more_links.is_empty() {
+                div { class: "nav-overlay-label", "More" }
+                for link in more_links.iter() {
+                    Link {
+                        key: "mm-{link.id}",
+                        to: link.route.clone(),
+                        onclick: move |_| mobile_open.set(false),
+                        "{link.label}"
+                    }
+                }
             }
             div { class: "nav-overlay-label", "Account" }
             if is_logged_in {

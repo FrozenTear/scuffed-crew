@@ -24,6 +24,8 @@ struct DbSiteSettings {
     #[serde(default)]
     homepage_json: String,
     #[serde(default)]
+    nav_json: String,
+    #[serde(default)]
     page_bg_color: String,
     #[serde(default)]
     page_bg_image_url: String,
@@ -55,6 +57,7 @@ fn db_to_settings(db: DbSiteSettings) -> SiteSettings {
         extra_relay_urls: db.extra_relay_urls,
         public_layout,
         homepage_json: db.homepage_json,
+        nav_json: db.nav_json,
         page_bg_color: db.page_bg_color,
         page_bg_image_url: db.page_bg_image_url,
         updated_at: db.updated_at.into(),
@@ -87,6 +90,7 @@ impl Database {
                 extra_relay_urls: String::new(),
                 public_layout: "hub".into(),
                 homepage_json: String::new(),
+                nav_json: String::new(),
                 page_bg_color: String::new(),
                 page_bg_image_url: String::new(),
                 updated_at: SurrealDatetime::from(Utc::now()),
@@ -115,6 +119,7 @@ impl Database {
         extra_relay_urls: Option<&str>,
         public_layout: Option<&str>,
         homepage_json: Option<&str>,
+        nav_json: Option<&str>,
         page_bg_color: Option<&str>,
         page_bg_image_url: Option<&str>,
     ) -> DbResult<SiteSettings> {
@@ -157,6 +162,9 @@ impl Database {
             }
             if let Some(json) = homepage_json {
                 db.homepage_json = json.to_string();
+            }
+            if let Some(json) = nav_json {
+                db.nav_json = json.to_string();
             }
             if let Some(color) = page_bg_color {
                 db.page_bg_color = color.to_string();

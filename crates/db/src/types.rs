@@ -781,6 +781,9 @@ pub struct SiteSettings {
     /// JSON blob of homepage copy (parsed to HomepageContent on the app side).
     #[serde(default)]
     pub homepage_json: String,
+    /// JSON blob of public nav config (parsed to NavConfig on the app side).
+    #[serde(default)]
+    pub nav_json: String,
     /// Optional solid page background color (`#…`). Empty = theme default.
     #[serde(default)]
     pub page_bg_color: String,

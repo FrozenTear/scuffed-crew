@@ -240,6 +240,7 @@ pub async fn run_migrations(client: &Surreal<Any>) -> DbResult<()> {
         DEFINE FIELD OVERWRITE public_layout ON site_settings TYPE string DEFAULT 'hub'
             ASSERT $value IN ['hub', 'landing'];
         DEFINE FIELD OVERWRITE homepage_json ON site_settings TYPE string DEFAULT '';
+        DEFINE FIELD OVERWRITE nav_json ON site_settings TYPE string DEFAULT '';
         DEFINE FIELD OVERWRITE page_bg_color ON site_settings TYPE string DEFAULT '';
         DEFINE FIELD OVERWRITE page_bg_image_url ON site_settings TYPE string DEFAULT '';
         DEFINE FIELD OVERWRITE updated_at ON site_settings TYPE datetime DEFAULT time::now();

@@ -1,7 +1,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use super::{HomepageContent, PublicLayout};
+use super::{HomepageContent, NavConfig, PublicLayout};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SiteSettings {
@@ -19,6 +19,9 @@ pub struct SiteSettings {
     /// Editable homepage copy (with defaults applied server-side).
     #[serde(default)]
     pub homepage: HomepageContent,
+    /// Public navbar: primary / more / hidden catalog items.
+    #[serde(default)]
+    pub nav: NavConfig,
     /// Optional solid page background (`#rgb` / `#rrggbb` / `#rrggbbaa`). Empty = theme default.
     #[serde(default)]
     pub page_bg_color: String,

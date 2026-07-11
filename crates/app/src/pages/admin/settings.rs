@@ -3,7 +3,9 @@ use dioxus::prelude::*;
 use crate::components::{Toast, use_toast};
 use scuffed_api_client::ApiClient;
 use scuffed_types::api::UpdateSettingsRequest;
-use scuffed_types::{ContentAlign, HomepageContent, PublicLayout, SiteSettings};
+use scuffed_types::{
+    ContentAlign, HomepageContent, NavConfig, NavPlacement, PublicLayout, SiteSettings,
+};
 
 #[component]
 pub fn AdminSettings() -> Element {
@@ -21,6 +23,7 @@ pub fn AdminSettings() -> Element {
     let mut public_layout = use_signal(|| PublicLayout::Hub);
     let mut content_align = use_signal(|| ContentAlign::Left);
     let mut homepage = use_signal(HomepageContent::default);
+    let mut nav = use_signal(NavConfig::default);
     let mut page_bg_color = use_signal(String::new);
     let mut page_bg_image_url = use_signal(String::new);
 
@@ -40,6 +43,9 @@ pub fn AdminSettings() -> Element {
                 public_layout.set(s.public_layout);
                 content_align.set(s.homepage.content_align);
                 homepage.set(s.homepage);
+                let mut n = s.nav;
+                n.normalize();
+                nav.set(n);
                 page_bg_color.set(s.page_bg_color);
                 page_bg_image_url.set(s.page_bg_image_url);
                 loaded.set(true);
@@ -54,6 +60,8 @@ pub fn AdminSettings() -> Element {
         // Merge alignment from its own signal so nested write() can't get lost.
         let mut hp = homepage();
         hp.content_align = content_align();
+        let mut n = nav();
+        n.normalize();
         let body = UpdateSettingsRequest {
             org_name: Some(org_name().trim().to_string()),
             site_description: Some(site_description().trim().to_string()),
@@ -64,6 +72,7 @@ pub fn AdminSettings() -> Element {
             extra_relay_urls: Some(extra_relay_urls().trim().to_string()),
             public_layout: Some(public_layout()),
             homepage: Some(hp.clone()),
+            nav: Some(n),
             page_bg_color: Some(page_bg_color().trim().to_string()),
             page_bg_image_url: Some(page_bg_image_url().trim().to_string()),
         };
@@ -79,6 +88,9 @@ pub fn AdminSettings() -> Element {
                     public_layout.set(s.public_layout);
                     content_align.set(s.homepage.content_align);
                     homepage.set(s.homepage);
+                    let mut n = s.nav;
+                    n.normalize();
+                    nav.set(n);
                     page_bg_color.set(s.page_bg_color);
                     page_bg_image_url.set(s.page_bg_image_url);
                     toast.show(Toast::success("Settings saved."));
@@ -120,6 +132,45 @@ pub fn AdminSettings() -> Element {
                         value: "{site_description}",
                         oninput: move |e| site_description.set(e.value()),
                     }
+                }
+            }
+
+            div { class: "form-section",
+                div { style: "display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:0.75rem;margin-bottom:0.5rem;",
+                    h2 { style: "margin:0;", "Navigation" }
+                    button {
+                        class: "btn-add",
+                        r#type: "button",
+                        style: "background:transparent;border:1px solid var(--border);",
+                        onclick: move |_| {
+                            nav.set(NavConfig::default());
+                            toast.show(Toast::success(
+                                "Nav reset to lean defaults — click Save to persist.",
+                            ));
+                        },
+                        "Reset defaults"
+                    }
+                }
+                p { style: "color:var(--text-3);font-size:0.85rem;margin-bottom:0.85rem;",
+                    "Pick which pages show in the top bar, the More menu, or stay hidden. Hidden pages still work via direct URL. Logo, Apply, and account stay fixed."
+                }
+                NavColumn {
+                    title: "Primary bar",
+                    hint: "Shown across the top next to the logo.",
+                    placement: NavPlacement::Primary,
+                    nav: nav,
+                }
+                NavColumn {
+                    title: "More menu",
+                    hint: "Overflow dropdown. Hidden entirely if empty.",
+                    placement: NavPlacement::More,
+                    nav: nav,
+                }
+                NavColumn {
+                    title: "Hidden",
+                    hint: "Not in the nav — promote when you need them.",
+                    placement: NavPlacement::Hidden,
+                    nav: nav,
                 }
             }
 
@@ -350,6 +401,86 @@ pub fn AdminSettings() -> Element {
                     p {
                         style: "font-size: 0.75rem; color: var(--text-3); margin-top: 0.35rem;",
                         "Additional relay URLs for multi-relay publishing (one per line). Events are published to the primary relay (NOSTR_RELAY_URL) and all extra relays."
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn NavColumn(
+    title: &'static str,
+    hint: &'static str,
+    placement: NavPlacement,
+    mut nav: Signal<NavConfig>,
+) -> Element {
+    let items: Vec<(String, String)> = {
+        let cfg = nav();
+        cfg.items_in(placement)
+            .into_iter()
+            .map(|i| {
+                let label = NavConfig::catalog_label(&i.id)
+                    .unwrap_or(i.id.as_str())
+                    .to_string();
+                (i.id.clone(), label)
+            })
+            .collect()
+    };
+
+    rsx! {
+        div { style: "margin-bottom:1rem;padding:0.85rem;border:1px solid var(--border);border-radius:8px;background:var(--surface);",
+            h3 {
+                style: "font-family:var(--font-mono);font-size:0.7rem;letter-spacing:0.1em;text-transform:uppercase;color:var(--text-3);margin:0 0 0.25rem;",
+                "{title}"
+            }
+            p { style: "color:var(--text-3);font-size:0.78rem;margin:0 0 0.65rem;", "{hint}" }
+            if items.is_empty() {
+                p { style: "color:var(--text-3);font-size:0.85rem;margin:0;", "None" }
+            } else {
+                ul { style: "list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:0.4rem;",
+                    for (id, label) in items {
+                        li {
+                            key: "{id}",
+                            style: "display:flex;align-items:center;gap:0.5rem;flex-wrap:wrap;padding:0.4rem 0.55rem;border:1px solid var(--border);border-radius:6px;background:var(--surface-2);",
+                            span { style: "flex:1;min-width:6rem;font-weight:500;", "{label}" }
+                            span { style: "font-family:var(--font-mono);font-size:0.65rem;color:var(--text-3);", "{id}" }
+                            select {
+                                class: "form-input",
+                                style: "width:auto;min-width:7rem;padding:0.25rem 0.4rem;font-size:0.8rem;",
+                                value: "{placement.as_str()}",
+                                onchange: {
+                                    let id = id.clone();
+                                    move |e| {
+                                        let p = NavPlacement::from_str_lossy(&e.value());
+                                        nav.write().set_placement(&id, p);
+                                    }
+                                },
+                                option { value: "primary", "Primary" }
+                                option { value: "more", "More" }
+                                option { value: "hidden", "Hidden" }
+                            }
+                            button {
+                                class: "row-btn",
+                                r#type: "button",
+                                title: "Move up",
+                                onclick: {
+                                    let id = id.clone();
+                                    move |_| nav.write().move_item(&id, -1)
+                                },
+                                "↑"
+                            }
+                            button {
+                                class: "row-btn",
+                                r#type: "button",
+                                title: "Move down",
+                                onclick: {
+                                    let id = id.clone();
+                                    move |_| nav.write().move_item(&id, 1)
+                                },
+                                "↓"
+                            }
+                        }
                     }
                 }
             }
