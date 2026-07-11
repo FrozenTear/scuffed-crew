@@ -50,6 +50,26 @@ pub fn AdminMatches() -> Element {
     let mut f_played_at = use_signal(String::new);
     let mut f_notes = use_signal(String::new);
 
+    /// Server expects RFC3339 `DateTime<Utc>`; date input is YYYY-MM-DD.
+    fn played_at_to_rfc3339(date: &str) -> String {
+        let d = date.trim();
+        if d.is_empty() {
+            // Fallback: today UTC so empty date still validates
+            return "1970-01-01T00:00:00Z".into();
+        }
+        if d.contains('T') {
+            if d.ends_with('Z') || d.contains('+') {
+                return d.to_string();
+            }
+            if d.len() == 16 {
+                // YYYY-MM-DDTHH:MM
+                return format!("{d}:00Z");
+            }
+            return format!("{d}Z");
+        }
+        format!("{d}T00:00:00Z")
+    }
+
     let open_create = move |_| {
         f_opponent.set(String::new());
         f_score_us.set("0".to_string());
@@ -83,7 +103,7 @@ pub fn AdminMatches() -> Element {
         let score_them: u32 = f_score_them().parse().unwrap_or(0);
         let map_name_val = f_map_name().clone();
         let match_type_val = f_match_type().clone();
-        let played_at_val = f_played_at().clone();
+        let played_at_val = played_at_to_rfc3339(&f_played_at());
         let notes_val = f_notes().clone();
 
         modal.start_submit();
@@ -265,10 +285,10 @@ pub fn AdminMatches() -> Element {
                     class: "form-select",
                     value: "{f_match_type}",
                     onchange: move |e| f_match_type.set(e.value()),
+                    // Must match scuffed_db::MatchType / schema ASSERT
                     option { value: "scrim", "Scrim" }
-                    option { value: "ranked", "Ranked" }
+                    option { value: "official", "Official" }
                     option { value: "tournament", "Tournament" }
-                    option { value: "casual", "Casual" }
                 }
             }
             div { class: "form-field",

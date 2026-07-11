@@ -816,12 +816,34 @@ pub fn AdminMembers() -> Element {
                     }
                     div { class: "form-modal-body",
                         div { class: "form-field",
-                            label { class: "form-label", "Select Image (max 2MB)" }
-                            input {
-                                id: "avatar-file-input",
-                                r#type: "file",
-                                accept: "image/*",
-                                onchange: on_avatar_file_change,
+                            label { class: "form-label", "Profile photo" }
+                            p { style: "color:var(--text-3);font-size:0.8rem;margin:0 0 0.65rem;",
+                                "PNG or JPEG, max 2MB. Click the area below to choose a file."
+                            }
+                            {
+                                let file_label = match avatar_file() {
+                                    Some(f) => format!(
+                                        "{} ({:.1} KB)",
+                                        f.name(),
+                                        f.size() as f64 / 1024.0
+                                    ),
+                                    None => "No file selected yet — click here".to_string(),
+                                };
+                                rsx! {
+                                    label {
+                                        r#for: "avatar-file-input",
+                                        style: "display:flex;flex-direction:column;align-items:center;justify-content:center;gap:0.5rem;min-height:7.5rem;padding:1.25rem;border:2px dashed var(--border);border-radius:10px;background:var(--surface-2);cursor:pointer;text-align:center;position:relative;",
+                                        span { style: "font-weight:600;color:var(--text);", "Choose image" }
+                                        span { style: "font-size:0.8rem;color:var(--text-3);", "{file_label}" }
+                                        input {
+                                            id: "avatar-file-input",
+                                            r#type: "file",
+                                            accept: "image/png,image/jpeg,image/webp,image/gif",
+                                            style: "position:absolute;inset:0;width:100%;height:100%;opacity:0;cursor:pointer;",
+                                            onchange: on_avatar_file_change,
+                                        }
+                                    }
+                                }
                             }
                         }
                     }

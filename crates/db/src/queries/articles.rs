@@ -18,6 +18,8 @@ struct DbArticle {
     cover_image_url: Option<String>,
     author_member_id: String,
     published: bool,
+    #[surreal(default)]
+    #[serde(default)]
     nostr_event_id: Option<String>,
     published_at: Option<SurrealDatetime>,
     created_at: SurrealDatetime,

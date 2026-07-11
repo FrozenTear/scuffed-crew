@@ -17,8 +17,14 @@ struct Tournament {
     id: String,
     name: String,
     format: String,
+    /// API may send game_id; game_name is optional enrichment.
+    #[serde(default)]
     game_name: Option<String>,
+    #[serde(default)]
+    game_id: Option<String>,
     status: String,
+    /// Server field is max_teams.
+    #[serde(default, alias = "max_teams")]
     max_participants: Option<u32>,
     starts_at: Option<String>,
 }
@@ -194,18 +200,24 @@ pub fn AdminTournaments() -> Element {
         };
         let date = form_date().trim().to_string();
         let time = form_time().trim().to_string();
+        // Server deserializes starts_at as DateTime<Utc> — need full RFC3339.
         let starts_at = if date.is_empty() {
             None
         } else if time.is_empty() {
-            Some(format!("{date}T00:00"))
+            Some(format!("{date}T00:00:00Z"))
         } else {
-            Some(format!("{date}T{time}"))
+            let t = if time.len() == 5 {
+                format!("{time}:00")
+            } else {
+                time
+            };
+            Some(format!("{date}T{t}Z"))
         };
         let body = CreateTournamentRequest {
             name,
             format: form_format(),
             game_id: form_game_id(),
-            max_participants: max_val,
+            max_teams: max_val,
             starts_at,
         };
         let edit_id = modal.get_target();

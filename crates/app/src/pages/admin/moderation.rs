@@ -6,22 +6,45 @@ use crate::hooks::{ModalController, use_api, use_api_list};
 use scuffed_api_client::ApiClient;
 use scuffed_types::api::CreateModerationRequest;
 
-// Local response types with API-enriched fields (joined names, computed fields).
+// Server returns raw ids; names are optional (enriched when present).
 #[derive(Debug, Clone, Deserialize)]
 struct ModerationAction {
     id: String,
     #[allow(dead_code)]
     member_id: String,
-    member_name: String,
+    #[serde(default)]
+    member_name: Option<String>,
+    #[serde(deserialize_with = "action_type_string")]
     action_type: String,
     reason: String,
-    issued_by_name: String,
+    #[serde(default)]
+    issued_by: Option<String>,
+    #[serde(default)]
+    issued_by_name: Option<String>,
     is_active: bool,
     created_at: String,
     #[allow(dead_code)]
+    #[serde(default)]
     expires_at: Option<String>,
     #[allow(dead_code)]
+    #[serde(default)]
     lifted_at: Option<String>,
+}
+
+fn action_type_string<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize;
+    // Accept string or object/enum-like value via JSON Value
+    let v = serde_json::Value::deserialize(deserializer)?;
+    Ok(match v {
+        serde_json::Value::String(s) => s,
+        other => other
+            .as_str()
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| other.to_string().trim_matches('"').to_string()),
+    })
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -144,10 +167,27 @@ pub fn AdminModeration() -> Element {
                                 let is_active = action.is_active;
                                 rsx! {
                                     tr { key: "{id}",
-                                        td { "{action.member_name}" }
+                                        td {
+                                            {
+                                                let label = action
+                                                    .member_name
+                                                    .clone()
+                                                    .unwrap_or_else(|| action.member_id.clone());
+                                                rsx! { "{label}" }
+                                            }
+                                        }
                                         td { StatusPill { status: action.action_type.clone() } }
                                         td { "{action.reason}" }
-                                        td { "{action.issued_by_name}" }
+                                        td {
+                                            {
+                                                let label = action
+                                                    .issued_by_name
+                                                    .clone()
+                                                    .or_else(|| action.issued_by.clone())
+                                                    .unwrap_or_else(|| "—".into());
+                                                rsx! { "{label}" }
+                                            }
+                                        }
                                         td { StatusPill { status: active_label.to_string() } }
                                         td { "{date}" }
                                         td {

@@ -455,6 +455,7 @@ pub async fn run_migrations(client: &Surreal<Any>) -> DbResult<()> {
         DEFINE FIELD OVERWRITE cover_image_url ON article TYPE option<string>;
         DEFINE FIELD OVERWRITE author_member_id ON article TYPE string;
         DEFINE FIELD OVERWRITE published ON article TYPE bool DEFAULT false;
+        DEFINE FIELD OVERWRITE nostr_event_id ON article TYPE option<string>;
         DEFINE FIELD OVERWRITE published_at ON article TYPE option<datetime>;
         DEFINE FIELD OVERWRITE created_at ON article TYPE datetime DEFAULT time::now();
         DEFINE FIELD OVERWRITE updated_at ON article TYPE datetime DEFAULT time::now();

@@ -6,13 +6,14 @@ use crate::hooks::{ModalController, use_api_list};
 use scuffed_api_client::ApiClient;
 use scuffed_types::api::{CreateAnnouncementRequest, UpdateAnnouncementRequest};
 
-// Local response type (field name `is_pinned` differs from shared `pinned`).
+// Server field is `pinned` (API used to differ; accept both).
 #[derive(Debug, Clone, Deserialize)]
 struct Announcement {
     id: String,
     title: String,
     content: String,
-    is_pinned: bool,
+    #[serde(default, alias = "is_pinned")]
+    pinned: bool,
     created_at: String,
 }
 
@@ -40,7 +41,7 @@ pub fn AdminAnnouncements() -> Element {
     let mut open_edit = move |a: Announcement| {
         form_title.set(a.title);
         form_content.set(a.content);
-        form_pinned.set(a.is_pinned);
+        form_pinned.set(a.pinned);
         modal.show(a.id);
     };
 
@@ -58,7 +59,7 @@ pub fn AdminAnnouncements() -> Element {
         if title.is_empty() || content.is_empty() {
             return;
         }
-        let is_pinned = form_pinned();
+        let pinned = form_pinned();
         let edit_id = modal.get_target();
 
         modal.start_submit();
@@ -68,7 +69,7 @@ pub fn AdminAnnouncements() -> Element {
                 let body = UpdateAnnouncementRequest {
                     title,
                     content,
-                    is_pinned,
+                    pinned,
                 };
                 client
                     .put_json::<_, Announcement>(&format!("/api/announcements/{id}"), &body)
@@ -77,7 +78,7 @@ pub fn AdminAnnouncements() -> Element {
                 let body = CreateAnnouncementRequest {
                     title,
                     content,
-                    is_pinned,
+                    pinned,
                 };
                 client
                     .post_json::<_, Announcement>("/api/announcements", &body)
@@ -143,8 +144,8 @@ pub fn AdminAnnouncements() -> Element {
                             {
                                 let ae = a.clone();
                                 let ad = a.clone();
-                                let pinned_badge = if a.is_pinned { "active" } else { "inactive" };
-                                let pinned_label = if a.is_pinned { "Yes" } else { "No" };
+                                let pinned_badge = if a.pinned { "active" } else { "inactive" };
+                                let pinned_label = if a.pinned { "Yes" } else { "No" };
                                 let date: String = a.created_at.chars().take(10).collect();
                                 rsx! {
                                     tr { key: "{a.id}",

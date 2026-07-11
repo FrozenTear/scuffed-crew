@@ -6,11 +6,11 @@ use crate::hooks::{ModalController, use_api};
 use scuffed_api_client::ApiClient;
 use scuffed_types::api::PatchApplicationRequest;
 
-// Local response type with API-enriched fields (user_display_name).
+// Matches scuffed_db::Application JSON (no joined display name yet).
 #[derive(Debug, Clone, Deserialize)]
 struct Application {
     id: String,
-    user_display_name: String,
+    user_id: String,
     preferred_games: Vec<String>,
     message: Option<String>,
     status: String,
@@ -94,7 +94,7 @@ pub fn AdminApplications() -> Element {
                                 let is_pending = app.status == "pending";
                                 rsx! {
                                     tr { key: "{id}",
-                                        td { "{app.user_display_name}" }
+                                        td { "{app.user_id}" }
                                         td { "{games}" }
                                         td { "{msg}" }
                                         td { StatusPill { status: app.status.clone() } }

@@ -76,13 +76,39 @@ pub fn AdminArticles() -> Element {
         modal.close();
     };
 
+    /// URL-safe slug: lowercase, hyphens, no spaces.
+    fn slugify(raw: &str) -> String {
+        let mut out = String::with_capacity(raw.len());
+        let mut prev_dash = false;
+        for c in raw.chars() {
+            let c = c.to_ascii_lowercase();
+            if c.is_ascii_alphanumeric() {
+                out.push(c);
+                prev_dash = false;
+            } else if (c == '-' || c == '_' || c.is_whitespace()) && !prev_dash && !out.is_empty()
+            {
+                out.push('-');
+                prev_dash = true;
+            }
+        }
+        while out.ends_with('-') {
+            out.pop();
+        }
+        out
+    }
+
     let on_submit = move |_| {
         let title = form_title().trim().to_string();
-        let slug = form_slug().trim().to_string();
+        let slug = slugify(&form_slug());
         let content = form_content().trim().to_string();
         if title.is_empty() || slug.is_empty() || content.is_empty() {
+            toast.show(Toast::error(
+                "Title, a valid slug (letters/numbers/hyphens), and content are required.",
+            ));
             return;
         }
+        // Keep form in sync with what we send
+        form_slug.set(slug.clone());
         let summary_val = form_summary().trim().to_string();
         let cover_val = form_cover().trim().to_string();
         let edit_slug = modal.get_target();
