@@ -97,13 +97,38 @@ else
     exit 1
 fi
 
-echo "Starting stack..."
-"${COMPOSE[@]}" --env-file "$SECRETS" up --build -d
+# Prefer prebuilt image from GHCR (published by .github/workflows/publish-image.yml).
+SITE_SERVER_IMAGE="${SITE_SERVER_IMAGE:-ghcr.io/frozentear/scuffed-crew:main}"
+export SITE_SERVER_IMAGE
+if ! grep -q '^SITE_SERVER_IMAGE=' "$SECRETS" 2>/dev/null; then
+    echo "SITE_SERVER_IMAGE=${SITE_SERVER_IMAGE}" >> "$SECRETS"
+fi
+
+BUILD_FROM_SOURCE="${BUILD_FROM_SOURCE:-0}"
+
+if [[ "$BUILD_FROM_SOURCE" == "1" ]]; then
+    echo "BUILD_FROM_SOURCE=1 — compiling site-server on this machine (slow)..."
+    "${COMPOSE[@]}" --env-file "$SECRETS" up --build -d
+else
+    echo "Pulling prebuilt ${SITE_SERVER_IMAGE} (no local compile)..."
+    if podman pull "${SITE_SERVER_IMAGE}"; then
+        "${COMPOSE[@]}" --env-file "$SECRETS" up -d
+    else
+        echo
+        echo "Pull failed — falling back to local --build (can take a long time)."
+        echo "After the first successful GHCR publish, re-run without BUILD_FROM_SOURCE."
+        echo "  Private package?  podman login ghcr.io"
+        echo "  Or force build:   BUILD_FROM_SOURCE=1 $0"
+        "${COMPOSE[@]}" --env-file "$SECRETS" up --build -d
+    fi
+fi
 
 echo
 echo "Stack starting on 127.0.0.1:${HOST_PORT} (HOST_PORT is persisted in secrets)."
+echo "Image: ${SITE_SERVER_IMAGE}"
 echo "Next steps:"
 echo "  1. If public: point Caddy at 127.0.0.1:${HOST_PORT} (see docs/deploy.md)"
 echo "  2. Open ${REDIRECT_BASE_URL} and create the admin account (first boot)"
-echo "  3. Infra secrets file: ${SECRETS}"
+echo "  3. Later updates: ./scripts/update.sh  (git pull + image pull, no compile)"
+echo "  4. Infra secrets file: ${SECRETS}"
 echo "Optional relay: ${COMPOSE[*]} --env-file ${SECRETS} --profile relay up -d"

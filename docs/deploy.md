@@ -11,6 +11,46 @@ This is the supported path for a **single VPS** with Podman Compose. You do **no
 
 Kubernetes is out of scope. **Quadlet** (systemd-native containers) is an optional later migration if you want boot integration without Compose — no Quadlet units ship yet.
 
+## Prebuilt images (recommended)
+
+GitHub Actions builds the `site-server` image on every push to `main` and publishes to GHCR:
+
+| Tag | Image |
+|-----|--------|
+| `main` / `latest` | `ghcr.io/frozentear/scuffed-crew:main` |
+| commit | `ghcr.io/frozentear/scuffed-crew:sha-<short>` |
+
+**Do not compile on the VPS** unless you must. First CI run can take a while; later runs use Buildx cache.
+
+### First-time package visibility
+
+1. After the workflow **Publish image** succeeds once, open  
+   `https://github.com/users/FrozenTear/packages` (or the package linked from the Actions run).
+2. Package settings → **Change visibility** → **Public** (simplest for a single VPS),  
+   **or** keep private and on the VPS: `podman login ghcr.io` (PAT with `read:packages`).
+
+### Day-to-day update (minutes, not an hour)
+
+```bash
+cd /path/to/scuffed-crew
+./scripts/update.sh
+# = git pull --ff-only + podman pull + recreate site-server
+```
+
+Override image pin in `data/secrets.env` if needed:
+
+```bash
+SITE_SERVER_IMAGE=ghcr.io/frozentear/scuffed-crew:main
+# or a specific sha:  .../scuffed-crew:sha-abc1234
+```
+
+### Build from source (fallback only)
+
+```bash
+BUILD_FROM_SOURCE=1 ./scripts/install.sh
+# or: podman compose --env-file data/secrets.env up --build -d
+```
+
 ## Troubleshooting
 
 ### SurrealDB: `Permission denied` creating RocksDB directory

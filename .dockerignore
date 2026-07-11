@@ -1,0 +1,27 @@
+# Keep image builds lean — only workspace sources are needed for site-server.
+.git
+.github
+.worktrees
+.superpowers
+.serena
+.claude
+.dioxus
+.playwright-mcp
+target
+dist
+dist.old
+data
+node_modules
+maps
+docs
+**/*.md
+!README.md
+# Keep all workspace members under crates/ (Cargo.toml lists them all).
+# Exclude heavy non-source assets only.
+crates/stat-tracker/portraits
+crates/stat-tracker/captures
+*.png
+*.jpeg
+cachyos-repo.tar.xz
+.env
+data/secrets.env

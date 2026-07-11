@@ -49,6 +49,9 @@ services:
     restart: unless-stopped
 
   site-server:
+    # Prefer prebuilt GHCR image (CI publishes on main). Override with SITE_SERVER_IMAGE.
+    # Local rebuild: BUILD_FROM_SOURCE=1 ./scripts/install.sh  or  podman compose ... up --build
+    image: ${SITE_SERVER_IMAGE:-ghcr.io/frozentear/scuffed-crew:main}
     build:
       context: .
       dockerfile: Containerfile
