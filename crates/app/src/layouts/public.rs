@@ -1,9 +1,35 @@
 use dioxus::prelude::*;
 use scuffed_api_client::ApiClient;
+use scuffed_types::SiteSettings;
 
 use crate::routes::Route;
 use crate::state::auth::{use_auth, AuthState};
 use crate::theme::ThemeToggle;
+
+/// Build a safe CSS snippet that applies admin-configured page background.
+fn page_bg_css(color: &str, image_url: &str) -> String {
+    let mut decls = String::new();
+    let color = color.trim();
+    if !color.is_empty()
+        && color.starts_with('#')
+        && color.len() <= 9
+        && color.chars().skip(1).all(|c| c.is_ascii_hexdigit())
+    {
+        decls.push_str(&format!("--page-bg-color:{color};"));
+    }
+    let url = image_url.trim();
+    if !url.is_empty()
+        && !url.contains(['"', '\'', '(', ')', ';', '<', '>', '\\', '\n', '\r'])
+        && (url.starts_with('/') || url.starts_with("https://") || url.starts_with("http://"))
+    {
+        decls.push_str(&format!("--page-bg-image:url(\"{url}\");"));
+    }
+    if decls.is_empty() {
+        String::new()
+    } else {
+        format!(":root{{{decls}}}")
+    }
+}
 
 const NAV_CSS: &str = r#"
     .site-nav {
@@ -256,6 +282,19 @@ pub fn PublicLayout() -> Element {
     let mut account_open = use_signal(|| false);
     let auth = use_auth();
 
+    let site_settings = use_resource(|| async {
+        ApiClient::web()
+            .fetch::<SiteSettings>("/api/settings")
+            .await
+            .ok()
+    });
+    let bg_css = site_settings
+        .read()
+        .as_ref()
+        .and_then(|o| o.as_ref())
+        .map(|s| page_bg_css(&s.page_bg_color, &s.page_bg_image_url))
+        .unwrap_or_default();
+
     let is_logged_in = auth().is_logged_in();
     let is_officer = auth().is_officer_or_above();
     let username = auth()
@@ -288,6 +327,9 @@ pub fn PublicLayout() -> Element {
 
     rsx! {
         style { {NAV_CSS} }
+        if !bg_css.is_empty() {
+            style { {bg_css} }
+        }
         nav { class: "site-nav",
             Link {
                 to: Route::Home {},

@@ -21,6 +21,8 @@ pub fn AdminSettings() -> Element {
     let mut public_layout = use_signal(|| PublicLayout::Hub);
     let mut content_align = use_signal(|| ContentAlign::Left);
     let mut homepage = use_signal(HomepageContent::default);
+    let mut page_bg_color = use_signal(String::new);
+    let mut page_bg_image_url = use_signal(String::new);
 
     let _settings = use_resource(move || async move {
         match ApiClient::web()
@@ -38,6 +40,8 @@ pub fn AdminSettings() -> Element {
                 public_layout.set(s.public_layout);
                 content_align.set(s.homepage.content_align);
                 homepage.set(s.homepage);
+                page_bg_color.set(s.page_bg_color);
+                page_bg_image_url.set(s.page_bg_image_url);
                 loaded.set(true);
                 Some(true)
             }
@@ -60,6 +64,8 @@ pub fn AdminSettings() -> Element {
             extra_relay_urls: Some(extra_relay_urls().trim().to_string()),
             public_layout: Some(public_layout()),
             homepage: Some(hp.clone()),
+            page_bg_color: Some(page_bg_color().trim().to_string()),
+            page_bg_image_url: Some(page_bg_image_url().trim().to_string()),
         };
 
         saving.set(true);
@@ -73,6 +79,8 @@ pub fn AdminSettings() -> Element {
                     public_layout.set(s.public_layout);
                     content_align.set(s.homepage.content_align);
                     homepage.set(s.homepage);
+                    page_bg_color.set(s.page_bg_color);
+                    page_bg_image_url.set(s.page_bg_image_url);
                     toast.show(Toast::success("Settings saved."));
                 }
                 Err(e) => toast.show(Toast::error(format!("Failed to save settings: {e}"))),
@@ -143,6 +151,64 @@ pub fn AdminSettings() -> Element {
                         },
                         option { value: "left", "Left" }
                         option { value: "center", "Center" }
+                    }
+                }
+            }
+
+            div { class: "form-section",
+                h2 { "Page background" }
+                p { style: "color:var(--text-3);font-size:0.85rem;margin-bottom:0.75rem;",
+                    "Solid color and optional image for the public site. Leave color empty to use the theme default (dark/light). Image sits behind content, cover-fitted."
+                }
+                div { class: "form-field", style: "margin-bottom:0.85rem;",
+                    label { class: "form-label", "Background color" }
+                    div { style: "display:flex;align-items:center;gap:0.65rem;flex-wrap:wrap;",
+                        input {
+                            r#type: "color",
+                            // color input needs a full #rrggbb value
+                            value: {
+                                let c = page_bg_color();
+                                if c.len() == 7 && c.starts_with('#') { c } else { "#17171d".into() }
+                            },
+                            oninput: move |e| page_bg_color.set(e.value()),
+                            style: "width:3rem;height:2.25rem;padding:0;border:1px solid var(--border);border-radius:6px;background:transparent;cursor:pointer;",
+                        }
+                        input {
+                            class: "form-input",
+                            style: "flex:1;min-width:8rem;",
+                            placeholder: "#17171d (empty = theme default)",
+                            value: "{page_bg_color}",
+                            oninput: move |e| page_bg_color.set(e.value()),
+                        }
+                        button {
+                            class: "btn-add",
+                            r#type: "button",
+                            style: "background:transparent;border:1px solid var(--border);",
+                            onclick: move |_| page_bg_color.set(String::new()),
+                            "Clear"
+                        }
+                    }
+                }
+                div { class: "form-field",
+                    label { class: "form-label", "Background image URL" }
+                    p { style: "color:var(--text-3);font-size:0.8rem;margin:0 0 0.4rem;",
+                        "https://… or a site path like /uploads/bg.jpg. Leave empty for no image."
+                    }
+                    div { style: "display:flex;align-items:center;gap:0.65rem;flex-wrap:wrap;",
+                        input {
+                            class: "form-input",
+                            style: "flex:1;min-width:12rem;",
+                            placeholder: "https://… or /uploads/…",
+                            value: "{page_bg_image_url}",
+                            oninput: move |e| page_bg_image_url.set(e.value()),
+                        }
+                        button {
+                            class: "btn-add",
+                            r#type: "button",
+                            style: "background:transparent;border:1px solid var(--border);",
+                            onclick: move |_| page_bg_image_url.set(String::new()),
+                            "Clear"
+                        }
                     }
                 }
             }

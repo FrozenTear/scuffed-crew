@@ -19,5 +19,11 @@ pub struct SiteSettings {
     /// Editable homepage copy (with defaults applied server-side).
     #[serde(default)]
     pub homepage: HomepageContent,
+    /// Optional solid page background (`#rgb` / `#rrggbb` / `#rrggbbaa`). Empty = theme default.
+    #[serde(default)]
+    pub page_bg_color: String,
+    /// Optional full-page background image URL (https or site-relative `/…`). Empty = none.
+    #[serde(default)]
+    pub page_bg_image_url: String,
     pub updated_at: DateTime<Utc>,
 }

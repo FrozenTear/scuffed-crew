@@ -8,6 +8,38 @@ use crate::extractors::AdminUser;
 use crate::routes::audit_log::audit;
 use crate::state::AppState;
 
+/// Accept only safe hex colors (`#rgb`, `#rrggbb`, `#rrggbbaa`) or empty.
+fn sanitize_bg_color(raw: &str) -> Result<String, String> {
+    let s = raw.trim();
+    if s.is_empty() {
+        return Ok(String::new());
+    }
+    let hex = s.strip_prefix('#').unwrap_or(s);
+    let ok = matches!(hex.len(), 3 | 6 | 8)
+        && hex.chars().all(|c| c.is_ascii_hexdigit());
+    if ok {
+        Ok(format!("#{}", hex.to_ascii_lowercase()))
+    } else {
+        Err("Page background color must be a hex value like #17171d (or empty for theme default)".into())
+    }
+}
+
+/// Accept https URLs, site-relative paths, or empty. Reject quotes / CSS injection.
+fn sanitize_bg_image_url(raw: &str) -> Result<String, String> {
+    let s = raw.trim();
+    if s.is_empty() {
+        return Ok(String::new());
+    }
+    if s.contains(['"', '\'', '(', ')', ';', '<', '>', '\\', '\n', '\r']) {
+        return Err("Background image URL contains invalid characters".into());
+    }
+    if s.starts_with('/') || s.starts_with("https://") || s.starts_with("http://") {
+        Ok(s.to_string())
+    } else {
+        Err("Background image must be an https/http URL or a path starting with /".into())
+    }
+}
+
 fn to_api_settings(db: scuffed_db::SiteSettings) -> SiteSettings {
     SiteSettings {
         id: db.id,
@@ -20,6 +52,8 @@ fn to_api_settings(db: scuffed_db::SiteSettings) -> SiteSettings {
         extra_relay_urls: db.extra_relay_urls,
         public_layout: PublicLayout::from_str_lossy(&db.public_layout),
         homepage: HomepageContent::from_json(&db.homepage_json),
+        page_bg_color: db.page_bg_color,
+        page_bg_image_url: db.page_bg_image_url,
         updated_at: db.updated_at,
     }
 }
@@ -52,6 +86,25 @@ pub async fn update_settings(
     let homepage_json = body.homepage.as_ref().map(|h| h.to_json());
     let layout = body.public_layout.map(|l| l.as_str().to_string());
 
+    let page_bg_color = match body.page_bg_color.as_deref() {
+        Some(c) => Some(sanitize_bg_color(c).map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse { error: e }),
+            )
+        })?),
+        None => None,
+    };
+    let page_bg_image_url = match body.page_bg_image_url.as_deref() {
+        Some(u) => Some(sanitize_bg_image_url(u).map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse { error: e }),
+            )
+        })?),
+        None => None,
+    };
+
     let settings = state
         .db
         .update_settings(
@@ -64,6 +117,8 @@ pub async fn update_settings(
             body.extra_relay_urls.as_deref(),
             layout.as_deref(),
             homepage_json.as_deref(),
+            page_bg_color.as_deref(),
+            page_bg_image_url.as_deref(),
         )
         .await
         .map_err(|e| {

@@ -52,9 +52,9 @@ services:
     build:
       context: .
       dockerfile: Containerfile
+    # Plain list form: most compatible with docker-compose under podman.
     depends_on:
-      surrealdb:
-        condition: service_started
+      - surrealdb
     environment:
       SURREALDB_URL: ws://surrealdb:8000
       SURREALDB_USER: ${SURREALDB_USER:-root}

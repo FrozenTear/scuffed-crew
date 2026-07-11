@@ -22,4 +22,10 @@ pub struct UpdateSettingsRequest {
     pub public_layout: Option<PublicLayout>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub homepage: Option<HomepageContent>,
+    /// Solid page background color. Empty string clears to theme default.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub page_bg_color: Option<String>,
+    /// Background image URL. Empty string clears.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub page_bg_image_url: Option<String>,
 }

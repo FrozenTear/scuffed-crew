@@ -39,7 +39,14 @@ pub fn theme_css(brand: &BrandConfig) -> String {
 }}
 
 html, body {{
-  background: var(--bg); color: var(--text);
+  /* --page-bg-* set from admin Site Settings when customized */
+  background-color: var(--page-bg-color, var(--bg));
+  background-image: var(--page-bg-image, none);
+  background-size: cover;
+  background-position: center;
+  background-attachment: fixed;
+  background-repeat: no-repeat;
+  color: var(--text);
   font-family: var(--font-body); font-size: var(--text-base);
 }}
 

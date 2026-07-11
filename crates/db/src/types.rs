@@ -781,6 +781,12 @@ pub struct SiteSettings {
     /// JSON blob of homepage copy (parsed to HomepageContent on the app side).
     #[serde(default)]
     pub homepage_json: String,
+    /// Optional solid page background color (`#…`). Empty = theme default.
+    #[serde(default)]
+    pub page_bg_color: String,
+    /// Optional full-page background image URL. Empty = none.
+    #[serde(default)]
+    pub page_bg_image_url: String,
     pub updated_at: DateTime<Utc>,
 }
 
