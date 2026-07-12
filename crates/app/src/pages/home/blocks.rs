@@ -18,6 +18,8 @@ pub fn HeroBlock(
     initials: String,
     recruitment_open: bool,
     show_secondary_cta: bool,
+    /// Anchor for secondary CTA (`#ethos` or `#squads`).
+    secondary_href: String,
     metric_squads: Option<usize>,
     metric_members: Option<usize>,
     metric_games: Option<usize>,
@@ -31,41 +33,43 @@ pub fn HeroBlock(
                 aria_hidden: "true",
                 "{initials}"
             }
-            div { class: "home-hero-inner",
-                div { class: "home-badge", "{content.hero_badge}" }
-                h1 { class: "home-title",
-                    "{content.hero_title}"
-                    if !content.hero_title_accent.is_empty() {
-                        em { "{content.hero_title_accent}" }
-                    }
-                }
-                p { class: "home-sub", "{content.hero_sub}" }
-                div { class: "home-actions",
-                    if recruitment_open {
-                        Link { to: Route::Apply {}, class: "btn btn-primary", "{content.cta_primary}" }
-                    }
-                    if show_secondary_cta {
-                        a { href: "#squads", class: "btn btn-outline", "{content.cta_secondary}" }
-                    }
-                }
-                if show_metrics {
-                    div { class: "home-metrics",
-                        if let Some(n) = metric_squads {
-                            div { class: "home-metric",
-                                strong { "{n}" }
-                                span { "Active squads" }
-                            }
+            div { class: "home-hero-rail",
+                div { class: "home-hero-inner",
+                    div { class: "home-badge", "{content.hero_badge}" }
+                    h1 { class: "home-title",
+                        "{content.hero_title}"
+                        if !content.hero_title_accent.is_empty() {
+                            em { "{content.hero_title_accent}" }
                         }
-                        if let Some(n) = metric_members {
-                            div { class: "home-metric",
-                                strong { "{n}" }
-                                span { "Members" }
-                            }
+                    }
+                    p { class: "home-sub", "{content.hero_sub}" }
+                    div { class: "home-actions",
+                        if recruitment_open {
+                            Link { to: Route::Apply {}, class: "btn btn-primary", "{content.cta_primary}" }
                         }
-                        if let Some(n) = metric_games {
-                            div { class: "home-metric",
-                                strong { "{n}" }
-                                span { "Games" }
+                        if show_secondary_cta {
+                            a { href: "{secondary_href}", class: "btn btn-outline", "{content.cta_secondary}" }
+                        }
+                    }
+                    if show_metrics {
+                        div { class: "home-metrics",
+                            if let Some(n) = metric_squads {
+                                div { class: "home-metric",
+                                    strong { "{n}" }
+                                    span { "Active squads" }
+                                }
+                            }
+                            if let Some(n) = metric_members {
+                                div { class: "home-metric",
+                                    strong { "{n}" }
+                                    span { "Members" }
+                                }
+                            }
+                            if let Some(n) = metric_games {
+                                div { class: "home-metric",
+                                    strong { "{n}" }
+                                    span { "Games" }
+                                }
                             }
                         }
                     }
@@ -82,7 +86,7 @@ pub fn HeroBlock(
 #[component]
 pub fn EthosBlock(content: HomepageContent) -> Element {
     rsx! {
-        section { class: "home-block",
+        section { id: "ethos", class: "home-block",
             div { class: "home-kicker", "{content.ethos_kicker}" }
             h2 { class: "home-heading", "{content.ethos_title}" }
             p { class: "home-body", "{content.ethos_body}" }

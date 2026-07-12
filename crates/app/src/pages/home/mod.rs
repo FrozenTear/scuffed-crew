@@ -163,23 +163,31 @@ pub fn Home() -> Element {
     let section_order = home_shell.section_order();
     let teams_presentation = home_shell.teams_presentation();
 
+    // Secondary CTA: ethos when shown, otherwise squads (recruit landing).
+    let secondary_href = if content.sections.ethos {
+        "#ethos".to_string()
+    } else {
+        "#squads".to_string()
+    };
+
     rsx! {
         style { "{css}" }
         div {
             class: "home-wrap",
             "data-home-shell": "{shell_attr}",
             "data-home-skin": "{skin_attr}",
+            // Full-bleed hero sits outside the constrained body column.
+            HeroBlock {
+                content: content.clone(),
+                initials: initials.clone(),
+                recruitment_open,
+                show_secondary_cta,
+                secondary_href,
+                metric_squads,
+                metric_members,
+                metric_games,
+            }
             div { class: "{home_class}",
-                HeroBlock {
-                    content: content.clone(),
-                    initials: initials.clone(),
-                    recruitment_open,
-                    show_secondary_cta,
-                    metric_squads,
-                    metric_members,
-                    metric_games,
-                }
-
                 for id in section_order.iter().copied() {
                     {
                         match id {
