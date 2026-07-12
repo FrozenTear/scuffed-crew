@@ -82,12 +82,15 @@ remove_our_site_server() {
         "${COMPOSE[@]}" --env-file "$SECRETS" rm -f site-server 2>/dev/null || true
     fi
 
-    # Exact-ish name match for this project only (compose default: <project>-site-server-1)
+    # Name match for this project only. Compose naming varies:
+    #   hyphen:  scuffed-crew-site-server-1   (compose v2 / podman)
+    #   underscore: scuffed-crew_site-server_1 (classic docker-compose)
     local cid name
     while read -r cid name; do
         [[ -n "${cid}" ]] || continue
         case "${name}" in
-            "${PROJECT_NAME}"-site-server|"${PROJECT_NAME}"-site-server-*)
+            "${PROJECT_NAME}"-site-server|"${PROJECT_NAME}"-site-server-*|\
+            "${PROJECT_NAME}"_site-server|"${PROJECT_NAME}"_site-server_*)
                 echo "Removing project container ${name} (${cid})..."
                 podman rm -f "${cid}" 2>/dev/null || true
                 ;;
