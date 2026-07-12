@@ -308,4 +308,23 @@ impl Database {
         })
         .await
     }
+
+    /// Count currently active admin members (is_active = true, org_role = admin).
+    pub async fn count_active_admins(&self) -> DbResult<u64> {
+        with_timeout(async {
+            #[derive(Deserialize, SurrealValue)]
+            struct CountResult {
+                count: u64,
+            }
+            let mut result = self
+                .client
+                .query(
+                    "SELECT count() FROM member WHERE is_active = true AND org_role = 'admin' GROUP ALL",
+                )
+                .await?;
+            let counts: Vec<CountResult> = result.take(0)?;
+            Ok(counts.first().map(|c| c.count).unwrap_or(0))
+        })
+        .await
+    }
 }

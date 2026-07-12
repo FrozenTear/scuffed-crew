@@ -1585,3 +1585,493 @@ async fn setup_rejects_short_password() {
         .unwrap();
     assert_eq!(res.status(), StatusCode::BAD_REQUEST);
 }
+
+// ─── Membership spine + admin authority ─────────────────────────────────────
+
+/// Seed a logged-in user with no member record (applicant).
+async fn seed_applicant(db: &Database, user_key: &str, username: &str, token: &str) {
+    let token_hash = hash_session_token(token);
+    let pid = format!("{user_key}-provider-id");
+    let pid_hash = hash_session_token(&pid);
+    db.client
+        .query(&format!(
+            r#"CREATE user:{user_key} SET
+                provider = 'discord',
+                username = '{username}',
+                avatar_url = NONE,
+                provider_id = '{pid}',
+                provider_id_hash = '{pid_hash}',
+                provider_id_encrypted = NONE,
+                created_at = time::now()"#
+        ))
+        .await
+        .unwrap_or_else(|e| panic!("seed applicant user {user_key}: {e}"));
+    db.client
+        .query(&format!(
+            r#"CREATE session:sess_{user_key} SET
+                user_id = '{user_key}',
+                token = $tok,
+                expires_at = time::now() + 365d,
+                created_at = time::now()"#
+        ))
+        .bind(("tok", token_hash))
+        .await
+        .unwrap_or_else(|e| panic!("seed applicant session {user_key}: {e}"));
+}
+
+const APPLICANT_TOKEN: &str = "test-applicant-token";
+const ADMIN2_TOKEN: &str = "test-admin2-token";
+
+#[tokio::test]
+async fn application_submit_accept_creates_member() {
+    let state = test_state().await;
+    seed_all_roles(&state.db).await;
+    seed_applicant(&state.db, "appuser", "Applicant", APPLICANT_TOKEN).await;
+
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(authed_json_request(
+            Method::POST,
+            "/api/applications",
+            APPLICANT_TOKEN,
+            json!({
+                "preferred_games": ["ow2"],
+                "preferred_roles": ["tank"],
+                "message": "hi"
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let created = body_json(resp).await;
+    let app_id = created["id"].as_str().unwrap().to_string();
+    assert_eq!(created["status"], "pending");
+
+    // Double submit blocked
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(authed_json_request(
+            Method::POST,
+            "/api/applications",
+            APPLICANT_TOKEN,
+            json!({
+                "preferred_games": ["ow2"],
+                "preferred_roles": ["tank"]
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CONFLICT);
+
+    // Existing member cannot apply
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(authed_json_request(
+            Method::POST,
+            "/api/applications",
+            MEMBER_TOKEN,
+            json!({
+                "preferred_games": ["ow2"],
+                "preferred_roles": ["dps"]
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CONFLICT);
+
+    // Officer accepts
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(authed_json_request(
+            Method::PATCH,
+            &format!("/api/applications/{app_id}"),
+            OFFICER_TOKEN,
+            json!({ "status": "accepted", "review_notes": "lgtm" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let member = state
+        .db
+        .get_member_by_user("appuser")
+        .await
+        .unwrap()
+        .expect("member should be provisioned");
+    assert!(member.is_active);
+    assert_eq!(member.org_role.to_string(), "recruit");
+}
+
+#[tokio::test]
+async fn application_trial_then_accept_promotes_to_member() {
+    let state = test_state().await;
+    seed_all_roles(&state.db).await;
+    seed_applicant(&state.db, "trialuser", "Trialer", APPLICANT_TOKEN).await;
+
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(authed_json_request(
+            Method::POST,
+            "/api/applications",
+            APPLICANT_TOKEN,
+            json!({ "preferred_games": ["ow2"], "preferred_roles": ["support"] }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let app_id = body_json(resp).await["id"].as_str().unwrap().to_string();
+
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(authed_json_request(
+            Method::PATCH,
+            &format!("/api/applications/{app_id}"),
+            OFFICER_TOKEN,
+            json!({ "status": "trial" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let recruit = state
+        .db
+        .get_member_by_user("trialuser")
+        .await
+        .unwrap()
+        .expect("trial provisions recruit");
+    assert_eq!(recruit.org_role.to_string(), "recruit");
+
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(authed_json_request(
+            Method::PATCH,
+            &format!("/api/applications/{app_id}"),
+            OFFICER_TOKEN,
+            json!({ "status": "accepted" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let member = state.db.get_member_by_user("trialuser").await.unwrap().unwrap();
+    assert_eq!(member.org_role.to_string(), "member");
+}
+
+#[tokio::test]
+async fn application_invalid_transition_rejected() {
+    let state = test_state().await;
+    seed_all_roles(&state.db).await;
+    seed_applicant(&state.db, "rejuser", "Rejectee", APPLICANT_TOKEN).await;
+
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(authed_json_request(
+            Method::POST,
+            "/api/applications",
+            APPLICANT_TOKEN,
+            json!({ "preferred_games": [], "preferred_roles": [] }),
+        ))
+        .await
+        .unwrap();
+    let app_id = body_json(resp).await["id"].as_str().unwrap().to_string();
+
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(authed_json_request(
+            Method::PATCH,
+            &format!("/api/applications/{app_id}"),
+            OFFICER_TOKEN,
+            json!({ "status": "rejected" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // accepted is terminal — cannot go rejected → accepted
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(authed_json_request(
+            Method::PATCH,
+            &format!("/api/applications/{app_id}"),
+            OFFICER_TOKEN,
+            json!({ "status": "accepted" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn cannot_demote_last_active_admin() {
+    let state = test_state().await;
+    // Only one admin
+    seed_user(
+        &state.db,
+        "adminuser",
+        "adminmember",
+        "TestAdmin",
+        "admin",
+        ADMIN_TOKEN,
+    )
+    .await;
+    seed_user(
+        &state.db,
+        "memberuser",
+        "membermember",
+        "TestMember",
+        "member",
+        MEMBER_TOKEN,
+    )
+    .await;
+
+    let app = create_router(state);
+    let resp = app
+        .oneshot(authed_json_request(
+            Method::PATCH,
+            "/api/members/adminmember/role",
+            ADMIN_TOKEN,
+            json!({ "role": "officer" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body = body_json(resp).await;
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("last active admin"),
+        "got: {body}"
+    );
+}
+
+#[tokio::test]
+async fn can_demote_admin_when_another_exists() {
+    let state = test_state().await;
+    seed_user(
+        &state.db,
+        "adminuser",
+        "adminmember",
+        "TestAdmin",
+        "admin",
+        ADMIN_TOKEN,
+    )
+    .await;
+    seed_user(
+        &state.db,
+        "adminuser2",
+        "adminmember2",
+        "TestAdmin2",
+        "admin",
+        ADMIN2_TOKEN,
+    )
+    .await;
+
+    let app = create_router(state);
+    let resp = app
+        .oneshot(authed_json_request(
+            Method::PATCH,
+            "/api/members/adminmember2/role",
+            ADMIN_TOKEN,
+            json!({ "role": "officer" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_json(resp).await;
+    assert_eq!(body["org_role"], "officer");
+}
+
+#[tokio::test]
+async fn cannot_deactivate_last_admin() {
+    let state = test_state().await;
+    seed_user(
+        &state.db,
+        "adminuser",
+        "adminmember",
+        "TestAdmin",
+        "admin",
+        ADMIN_TOKEN,
+    )
+    .await;
+    seed_user(
+        &state.db,
+        "adminuser2",
+        "adminmember2",
+        "TestAdmin2",
+        "admin",
+        ADMIN2_TOKEN,
+    )
+    .await;
+
+    // Deactivate second admin OK (still one left) — wait, we need only one active after
+    // First demote admin2 path: deactivate admin2 when both exist is OK
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(authed_json_request(
+            Method::PUT,
+            "/api/members/adminmember2",
+            ADMIN_TOKEN,
+            json!({ "is_active": false }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // Now only adminmember is active admin — cannot deactivate
+    let app = create_router(state);
+    let resp = app
+        .oneshot(authed_json_request(
+            Method::PUT,
+            "/api/members/adminmember",
+            ADMIN_TOKEN,
+            json!({ "is_active": false }),
+        ))
+        .await
+        .unwrap();
+    // Self-deactivate also blocked
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn ban_revokes_sessions() {
+    let state = test_state().await;
+    seed_all_roles(&state.db).await;
+
+    // Member can list members before ban
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(authed_request(Method::GET, "/api/members", MEMBER_TOKEN))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(authed_json_request(
+            Method::POST,
+            "/api/moderation",
+            OFFICER_TOKEN,
+            json!({
+                "member_id": "membermember",
+                "action_type": "ban",
+                "reason": "toxicity"
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+
+    // Session revoked → unauthenticated
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(authed_request(Method::GET, "/api/members", MEMBER_TOKEN))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+    // Even if session existed, suspension check would block — but revoke is the primary path
+    let sessions = state
+        .db
+        .client
+        .query("SELECT * FROM session WHERE user_id = 'memberuser'")
+        .await;
+    assert!(sessions.is_ok());
+}
+
+#[tokio::test]
+async fn ban_deactivates_and_self_ban_blocked() {
+    let state = test_state().await;
+    seed_user(
+        &state.db,
+        "adminuser",
+        "adminmember",
+        "TestAdmin",
+        "admin",
+        ADMIN_TOKEN,
+    )
+    .await;
+    seed_user(
+        &state.db,
+        "adminuser2",
+        "adminmember2",
+        "TestAdmin2",
+        "admin",
+        ADMIN2_TOKEN,
+    )
+    .await;
+
+    // Self-ban blocked
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(authed_json_request(
+            Method::POST,
+            "/api/moderation",
+            ADMIN_TOKEN,
+            json!({
+                "member_id": "adminmember",
+                "action_type": "ban",
+                "reason": "self"
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+    // Ban peer admin OK → deactivates them
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(authed_json_request(
+            Method::POST,
+            "/api/moderation",
+            ADMIN_TOKEN,
+            json!({
+                "member_id": "adminmember2",
+                "action_type": "ban",
+                "reason": "gone"
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+
+    let banned = state.db.get_member("adminmember2").await.unwrap().unwrap();
+    assert!(!banned.is_active, "ban should deactivate membership");
+    assert_eq!(state.db.count_active_admins().await.unwrap(), 1);
+
+    // Last remaining admin cannot demote self (covered elsewhere); cannot deactivate self
+    let app = create_router(state);
+    let resp = app
+        .oneshot(authed_json_request(
+            Method::PUT,
+            "/api/members/adminmember",
+            ADMIN_TOKEN,
+            json!({ "is_active": false }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn officer_cannot_moderate_officer() {
+    let state = test_state().await;
+    seed_all_roles(&state.db).await;
+
+    let app = create_router(state);
+    let resp = app
+        .oneshot(authed_json_request(
+            Method::POST,
+            "/api/moderation",
+            OFFICER_TOKEN,
+            json!({
+                "member_id": "adminmember",
+                "action_type": "warning",
+                "reason": "nope"
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+}
+

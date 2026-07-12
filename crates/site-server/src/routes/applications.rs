@@ -7,11 +7,43 @@ use serde::Deserialize;
 
 use scuffed_auth::server::AuthUser;
 use scuffed_auth::server::session::ErrorResponse;
-use scuffed_db::{Application, ApplicationStatus, AuditAction, AuditTargetType, OrgRole};
+use scuffed_db::{Application, ApplicationStatus, AuditAction, AuditTargetType, Member, OrgRole};
 
 use crate::extractors::OfficerUser;
+use crate::membership_policy::{
+    application_blocks_resubmit, application_status_deactivates_member,
+    application_status_ensures_member, is_valid_application_transition, role_on_application_accept,
+};
 use crate::routes::audit_log::audit;
 use crate::state::AppState;
+
+fn internal_err(e: impl std::fmt::Display, ctx: &str) -> (StatusCode, Json<ErrorResponse>) {
+    tracing::error!(error = %e, "{ctx}");
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(ErrorResponse {
+            error: "Internal server error".into(),
+        }),
+    )
+}
+
+fn bad_request(msg: &str) -> (StatusCode, Json<ErrorResponse>) {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(ErrorResponse {
+            error: msg.into(),
+        }),
+    )
+}
+
+fn conflict(msg: &str) -> (StatusCode, Json<ErrorResponse>) {
+    (
+        StatusCode::CONFLICT,
+        Json(ErrorResponse {
+            error: msg.into(),
+        }),
+    )
+}
 
 #[derive(Deserialize)]
 pub struct SubmitApplicationRequest {
@@ -26,6 +58,33 @@ pub async fn submit_application(
     user: AuthUser<AppState>,
     Json(body): Json<SubmitApplicationRequest>,
 ) -> Result<(StatusCode, Json<Application>), (StatusCode, Json<ErrorResponse>)> {
+    // Already an active org member → no application needed
+    if let Some(m) = state
+        .db
+        .get_member_by_user(&user.id)
+        .await
+        .map_err(|e| internal_err(e, "get_member_by_user on submit"))?
+    {
+        if m.is_active {
+            return Err(conflict("Already an active org member"));
+        }
+    }
+
+    // Open pipeline (pending/trial) blocks a second application
+    if let Some(existing) = state
+        .db
+        .get_application_by_user(&user.id)
+        .await
+        .map_err(|e| internal_err(e, "get_application_by_user on submit"))?
+    {
+        if application_blocks_resubmit(existing.status) {
+            return Err(conflict(&format!(
+                "You already have an open application ({})",
+                existing.status
+            )));
+        }
+    }
+
     let app = state
         .db
         .submit_application(
@@ -35,16 +94,8 @@ pub async fn submit_application(
             body.message.as_deref(),
         )
         .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: e.to_string(),
-                }),
-            )
-        })?;
+        .map_err(|e| internal_err(e, "submit_application"))?;
 
-    // Notify officers about new application
     if let Some(ref notifier) = state.notifier {
         notifier.notify_officers(format!(
             "New application received from user {}",
@@ -60,14 +111,12 @@ pub async fn list_applications(
     State(state): State<AppState>,
     _officer: OfficerUser,
 ) -> Result<Json<Vec<Application>>, (StatusCode, Json<ErrorResponse>)> {
-    state.db.list_applications().await.map(Json).map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: e.to_string(),
-            }),
-        )
-    })
+    state
+        .db
+        .list_applications()
+        .await
+        .map(Json)
+        .map_err(|e| internal_err(e, "list_applications"))
 }
 
 /// GET /api/applications/mine — own application status (any logged-in)
@@ -80,14 +129,7 @@ pub async fn my_application(
         .get_application_by_user(&user.id)
         .await
         .map(Json)
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: e.to_string(),
-                }),
-            )
-        })
+        .map_err(|e| internal_err(e, "my_application"))
 }
 
 #[derive(Deserialize)]
@@ -103,6 +145,27 @@ pub async fn update_application(
     Path(id): Path<String>,
     Json(body): Json<UpdateApplicationRequest>,
 ) -> Result<Json<Application>, (StatusCode, Json<ErrorResponse>)> {
+    let existing = state
+        .db
+        .get_application(&id)
+        .await
+        .map_err(|e| internal_err(e, "get_application"))?
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse {
+                    error: "Application not found".into(),
+                }),
+            )
+        })?;
+
+    if !is_valid_application_transition(existing.status, body.status) {
+        return Err(bad_request(&format!(
+            "Invalid transition: {} → {}",
+            existing.status, body.status
+        )));
+    }
+
     let app = state
         .db
         .update_application_status(
@@ -112,56 +175,52 @@ pub async fn update_application(
             body.review_notes.as_deref(),
         )
         .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: e.to_string(),
-                }),
-            )
-        })?;
+        .map_err(|e| internal_err(e, "update_application_status"))?;
 
-    // Auto-create member record when application is accepted
-    if body.status == ApplicationStatus::Accepted {
-        let existing_member = state
+    // Ensure / promote / deactivate member according to pipeline outcome
+    if application_status_ensures_member(body.status) {
+        ensure_member_for_application(
+            &state,
+            &app.user_id,
+            existing.status,
+            body.status,
+            &id,
+        )
+        .await?;
+    } else if application_status_deactivates_member(body.status) {
+        if let Some(member) = state
             .db
             .get_member_by_user(&app.user_id)
             .await
-            .ok()
-            .flatten();
-
-        if existing_member.is_none() {
-            // Look up the user to get their display name
-            let user = state.db.get_user(&app.user_id).await.ok().flatten();
-            let display_name = user
-                .map(|u| u.username)
-                .unwrap_or_else(|| "New Member".to_string());
-
-            match state
-                .db
-                .create_member(&app.user_id, &display_name, OrgRole::Recruit)
-                .await
-            {
-                Ok(member) => {
-                    tracing::info!(
-                        "Auto-created member {} for accepted application {}",
-                        member.id,
-                        id
-                    );
-                    // Notify general room about new member
-                    if let Some(ref notifier) = state.notifier {
-                        let org = state
-                            .db
-                            .get_settings()
-                            .await
-                            .map(|s| s.org_name)
-                            .unwrap_or_else(|_| "the clan".into());
-                        notifier.notify_general(format!("Welcome {display_name} to {org}!"));
-                    }
-                }
-                Err(e) => {
-                    tracing::error!("Failed to auto-create member for application {}: {}", id, e);
-                }
+            .map_err(|e| internal_err(e, "get_member_by_user on reject"))?
+        {
+            // Only auto-deactivate recruits (trial pipeline); leave higher roles alone
+            if member.is_active && member.org_role == OrgRole::Recruit {
+                let _ = state
+                    .db
+                    .update_member(
+                        &member.id,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        Some(false),
+                    )
+                    .await
+                    .map_err(|e| internal_err(e, "deactivate recruit on reject"))?;
+                let _ = state.db.delete_sessions_for_user(&app.user_id).await;
+                audit(
+                    &state.db,
+                    &officer.member.id,
+                    AuditAction::DeactivatedMember,
+                    AuditTargetType::Member,
+                    &member.id,
+                    Some("Deactivated after application rejected/withdrawn"),
+                )
+                .await;
             }
         }
     }
@@ -169,7 +228,9 @@ pub async fn update_application(
     let action = match body.status {
         ApplicationStatus::Accepted => AuditAction::AcceptedApplication,
         ApplicationStatus::Rejected => AuditAction::RejectedApplication,
-        _ => AuditAction::AcceptedApplication, // fallback
+        ApplicationStatus::Trial => AuditAction::StartedTrialApplication,
+        ApplicationStatus::Withdrawn => AuditAction::RejectedApplication,
+        ApplicationStatus::Pending => AuditAction::AcceptedApplication, // unreachable via transitions
     };
 
     audit(
@@ -178,11 +239,112 @@ pub async fn update_application(
         action,
         AuditTargetType::Application,
         &id,
-        Some(&format!("Status: {}", body.status)),
+        Some(&format!("{} → {}", existing.status, body.status)),
     )
     .await;
 
     Ok(Json(app))
+}
+
+/// Create or update member when application moves to trial/accepted.
+async fn ensure_member_for_application(
+    state: &AppState,
+    user_id: &str,
+    from: ApplicationStatus,
+    to: ApplicationStatus,
+    application_id: &str,
+) -> Result<Member, (StatusCode, Json<ErrorResponse>)> {
+    let desired_role = if to == ApplicationStatus::Accepted {
+        role_on_application_accept(from)
+    } else {
+        OrgRole::Recruit
+    };
+
+    let existing_member = state
+        .db
+        .get_member_by_user(user_id)
+        .await
+        .map_err(|e| internal_err(e, "get_member_by_user ensure"))?;
+
+    if let Some(member) = existing_member {
+        // Reactivate if needed
+        let mut current = member;
+        if !current.is_active {
+            current = state
+                .db
+                .update_member(
+                    &current.id,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    Some(true),
+                )
+                .await
+                .map_err(|e| internal_err(e, "reactivate member"))?;
+        }
+        // Promote role when accepting after trial (or if still recruit on direct accept path)
+        if to == ApplicationStatus::Accepted && current.org_role != desired_role {
+            // Don't demote officers/admins via application accept
+            if current.org_role.is_at_least(OrgRole::Officer) {
+                return Ok(current);
+            }
+            current = state
+                .db
+                .change_member_role(&current.id, desired_role)
+                .await
+                .map_err(|e| internal_err(e, "promote on accept"))?;
+        }
+        return Ok(current);
+    }
+
+    let user = state
+        .db
+        .get_user(user_id)
+        .await
+        .map_err(|e| internal_err(e, "get_user for new member"))?
+        .ok_or_else(|| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: "Application user no longer exists".into(),
+                }),
+            )
+        })?;
+    let display_name = user.username.clone();
+
+    let member = state
+        .db
+        .create_member(user_id, &display_name, desired_role)
+        .await
+        .map_err(|e| {
+            // Fail the request — don't leave accepted apps without membership
+            internal_err(e, "create_member for application")
+        })?;
+
+    tracing::info!(
+        member_id = %member.id,
+        application_id,
+        role = %desired_role,
+        "Provisioned member from application"
+    );
+
+    if to == ApplicationStatus::Accepted {
+        if let Some(ref notifier) = state.notifier {
+            let org = state
+                .db
+                .get_settings()
+                .await
+                .map(|s| s.org_name)
+                .unwrap_or_else(|_| "the clan".into());
+            notifier.notify_general(format!("Welcome {display_name} to {org}!"));
+        }
+    }
+
+    Ok(member)
 }
 
 #[derive(Deserialize)]
@@ -206,12 +368,5 @@ pub async fn expiring_trials(
         .list_expiring_trials(query.days)
         .await
         .map(Json)
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: e.to_string(),
-                }),
-            )
-        })
+        .map_err(|e| internal_err(e, "list_expiring_trials"))
 }

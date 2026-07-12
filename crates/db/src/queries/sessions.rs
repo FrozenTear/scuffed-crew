@@ -73,6 +73,36 @@ impl Database {
         .await
     }
 
+    /// Delete all sessions for a user (ban / deactivate / force logout).
+    /// Returns an approximate count of deleted sessions when available.
+    pub async fn delete_sessions_for_user(&self, user_id: &str) -> DbResult<u64> {
+        with_timeout(async {
+            #[derive(Deserialize, SurrealValue)]
+            struct CountResult {
+                count: u64,
+            }
+
+            let mut result = self
+                .client
+                .query("SELECT count() FROM session WHERE user_id = $uid GROUP ALL")
+                .bind(("uid", user_id.to_string()))
+                .await?;
+            let counts: Vec<CountResult> = result.take(0)?;
+            let count = counts.first().map(|c| c.count).unwrap_or(0);
+
+            if count > 0 {
+                self.client
+                    .query("DELETE FROM session WHERE user_id = $uid")
+                    .bind(("uid", user_id.to_string()))
+                    .await?;
+                tracing::info!(user_id, count, "Revoked all sessions for user");
+            }
+
+            Ok(count)
+        })
+        .await
+    }
+
     /// Delete all expired sessions. Returns count removed.
     pub async fn cleanup_expired_sessions(&self) -> DbResult<u64> {
         with_timeout(async {

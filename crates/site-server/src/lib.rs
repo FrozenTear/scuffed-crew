@@ -1,6 +1,7 @@
 pub mod calendar;
 pub mod dm_subscriber;
 pub mod extractors;
+pub mod membership_policy;
 pub mod notifications;
 pub mod routes;
 pub mod seed;

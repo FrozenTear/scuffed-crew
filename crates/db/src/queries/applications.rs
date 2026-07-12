@@ -118,6 +118,15 @@ impl Database {
         .await
     }
 
+    /// Get an application by record id.
+    pub async fn get_application(&self, id: &str) -> DbResult<Option<Application>> {
+        with_timeout(async {
+            let row: Option<DbApplication> = self.client.select(("application", id)).await?;
+            Ok(row.map(db_to_application))
+        })
+        .await
+    }
+
     pub async fn update_application_status(
         &self,
         id: &str,

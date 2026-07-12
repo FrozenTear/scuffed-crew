@@ -131,6 +131,40 @@ pub async fn update_member(
         ));
     }
 
+    // is_active is officer+ only, with last-admin and hierarchy guards
+    let mut is_active = body.is_active;
+    if let Some(new_active) = is_active {
+        if new_active == target.is_active {
+            is_active = None; // no-op
+        } else {
+            let admin_count = state.db.count_active_admins().await.map_err(|e| {
+                tracing::error!(error = %e, "count_active_admins failed");
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse {
+                        error: "Internal server error".into(),
+                    }),
+                )
+            })?;
+            if let Err(msg) = crate::membership_policy::can_set_is_active(
+                &caller.member.id,
+                caller.member.org_role,
+                &target.id,
+                target.org_role,
+                target.is_active,
+                new_active,
+                admin_count,
+            ) {
+                return Err((
+                    StatusCode::FORBIDDEN,
+                    Json(ErrorResponse {
+                        error: msg.into(),
+                    }),
+                ));
+            }
+        }
+    }
+
     let updated = state
         .db
         .update_member(
@@ -142,7 +176,7 @@ pub async fn update_member(
             body.pronouns.as_ref().map(|p| p.as_deref()),
             body.availability_status.as_ref().map(|a| a.as_deref()),
             None, // never set pubkey from this route
-            body.is_active,
+            is_active,
         )
         .await
         .map_err(|e| {
@@ -155,15 +189,31 @@ pub async fn update_member(
             )
         })?;
 
-    audit(
-        &state.db,
-        &caller.member.id,
-        AuditAction::UpdatedMember,
-        AuditTargetType::Member,
-        &id,
-        None,
-    )
-    .await;
+    if crate::membership_policy::deactivation_revokes_sessions(target.is_active, updated.is_active)
+    {
+        if let Err(e) = state.db.delete_sessions_for_user(&target.user_id).await {
+            tracing::error!(error = %e, user_id = %target.user_id, "failed to revoke sessions on deactivate");
+        }
+        audit(
+            &state.db,
+            &caller.member.id,
+            AuditAction::DeactivatedMember,
+            AuditTargetType::Member,
+            &id,
+            Some("Member deactivated; sessions revoked"),
+        )
+        .await;
+    } else {
+        audit(
+            &state.db,
+            &caller.member.id,
+            AuditAction::UpdatedMember,
+            AuditTargetType::Member,
+            &id,
+            None,
+        )
+        .await;
+    }
 
     // Fire-and-forget: publish NIP-01 kind 0 profile metadata to relay
     publish_profile_metadata(&state, &updated);
@@ -259,15 +309,64 @@ pub async fn change_role(
     Path(id): Path<String>,
     Json(body): Json<ChangeRoleRequest>,
 ) -> Result<Json<Member>, (StatusCode, Json<ErrorResponse>)> {
+    let target = state
+        .db
+        .get_member(&id)
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, "get_member for change_role");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: "Internal server error".into(),
+                }),
+            )
+        })?
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse {
+                    error: "Member not found".into(),
+                }),
+            )
+        })?;
+
+    let admin_count = state.db.count_active_admins().await.map_err(|e| {
+        tracing::error!(error = %e, "count_active_admins");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: "Internal server error".into(),
+            }),
+        )
+    })?;
+
+    if let Err(msg) = crate::membership_policy::can_change_role(
+        &admin.member.id,
+        &target.id,
+        target.org_role,
+        target.is_active,
+        body.role,
+        admin_count,
+    ) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: msg.into(),
+            }),
+        ));
+    }
+
     let member = state
         .db
         .change_member_role(&id, body.role)
         .await
         .map_err(|e| {
+            tracing::error!(error = %e, "change_member_role");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
-                    error: e.to_string(),
+                    error: "Internal server error".into(),
                 }),
             )
         })?;
@@ -278,7 +377,7 @@ pub async fn change_role(
         AuditAction::ChangedRole,
         AuditTargetType::Member,
         &id,
-        Some(&format!("Changed role to {}", body.role)),
+        Some(&format!("{} → {}", target.org_role, body.role)),
     )
     .await;
 
