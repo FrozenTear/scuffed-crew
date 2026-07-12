@@ -98,10 +98,11 @@ pub const CSS: &str = r#"
     .form-checkbox-row { display: flex; align-items: center; gap: 0.5rem; }
     .form-checkbox-row input[type="checkbox"] { accent-color: var(--accent); }
 
-    /* Two-column form grid for wider modals on desktop */
+    /* Two-column form grid (modals + settings) */
+    .form-grid { display: grid; grid-template-columns: 1fr; gap: 0.75rem 1rem; }
+    .form-grid .span-full { grid-column: 1 / -1; }
     @media (min-width: 480px) {
-        .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
-        .form-grid .span-full { grid-column: 1 / -1; }
+        .form-grid { grid-template-columns: 1fr 1fr; }
     }
 
     /* Confirm Dialog */
@@ -137,7 +138,146 @@ pub const CSS: &str = r#"
     .form-section h2 {
         font-family: var(--font-head); font-size: 1.1rem; font-weight: 700;
         color: var(--text); text-transform: uppercase; letter-spacing: 0.04em;
-        margin: 0 0 1rem; padding-bottom: 0.5rem; border-bottom: 1px solid var(--border);
+        margin: 0 0 0.4rem; padding-bottom: 0;
+        border-bottom: none;
+    }
+    .form-section-lead {
+        color: var(--text-3); font-size: 0.85rem; line-height: 1.45;
+        margin: 0 0 1rem; max-width: 42rem;
+    }
+    .form-section-card {
+        background: var(--surface); border: 1px solid var(--border);
+        border-radius: 12px; padding: 1.15rem 1.25rem;
     }
     .form-inline { display: flex; flex-direction: column; gap: 1rem; max-width: 500px; }
+
+    /* Ghost / secondary toolbar button */
+    .btn-ghost {
+        display: inline-flex; align-items: center; gap: 0.4rem;
+        padding: 0.5rem 1rem; border-radius: 6px;
+        background: transparent; color: var(--text-2);
+        border: 1px solid var(--border); font-size: 0.85rem; font-weight: 600;
+        cursor: pointer; text-decoration: none; transition: all 0.15s;
+        text-transform: uppercase; letter-spacing: 0.03em;
+    }
+    .btn-ghost:hover { color: var(--text); border-color: var(--accent-soft); }
+
+    /* Identity pack cards */
+    .pack-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(11.5rem, 1fr));
+        gap: 0.65rem;
+        margin-bottom: 1rem;
+    }
+    .pack-card {
+        text-align: left; cursor: pointer;
+        padding: 0.85rem 0.9rem; border-radius: 10px;
+        border: 1px solid var(--border); background: var(--surface-2);
+        color: var(--text); transition: border-color 0.15s, box-shadow 0.15s;
+        display: flex; flex-direction: column; gap: 0.35rem;
+        font: inherit;
+    }
+    .pack-card:hover { border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); }
+    .pack-card.is-selected {
+        border-color: var(--accent);
+        box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 35%, transparent);
+        background: color-mix(in srgb, var(--accent) 8%, var(--surface-2));
+    }
+    .pack-card-name {
+        font-family: var(--font-head); font-weight: 700; font-size: 0.9rem;
+        letter-spacing: 0.02em;
+    }
+    .pack-card-desc {
+        font-size: 0.75rem; color: var(--text-3); line-height: 1.4;
+        display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical;
+        overflow: hidden;
+    }
+    .pack-card-meta {
+        font-family: var(--font-mono); font-size: 0.65rem; color: var(--text-3);
+        letter-spacing: 0.04em; margin-top: 0.15rem;
+    }
+    .pack-actions {
+        display: flex; flex-wrap: wrap; align-items: center; gap: 0.75rem;
+        padding-top: 0.25rem;
+    }
+
+    /* Option tiles (shell / skin) */
+    .option-tiles {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(10.5rem, 1fr));
+        gap: 0.55rem;
+    }
+    .option-tile {
+        text-align: left; cursor: pointer; font: inherit; color: var(--text);
+        padding: 0.7rem 0.8rem; border-radius: 9px;
+        border: 1px solid var(--border); background: var(--surface-2);
+        transition: border-color 0.15s, background 0.15s;
+    }
+    .option-tile:hover { border-color: color-mix(in srgb, var(--accent) 40%, var(--border)); }
+    .option-tile.is-selected {
+        border-color: var(--accent);
+        background: color-mix(in srgb, var(--accent) 10%, var(--surface-2));
+    }
+    .option-tile-title {
+        font-family: var(--font-head); font-weight: 700; font-size: 0.82rem;
+        margin-bottom: 0.25rem;
+    }
+    .option-tile-blurb { font-size: 0.72rem; color: var(--text-3); line-height: 1.35; }
+
+    /* Section visibility chips */
+    .section-chips {
+        display: flex; flex-wrap: wrap; gap: 0.45rem;
+    }
+    .section-chip {
+        display: inline-flex; align-items: center; gap: 0.4rem;
+        padding: 0.4rem 0.7rem; border-radius: 999px;
+        border: 1px solid var(--border); background: var(--surface-2);
+        font-size: 0.78rem; color: var(--text-2); cursor: pointer;
+        user-select: none; transition: all 0.15s;
+    }
+    .section-chip input { accent-color: var(--accent); margin: 0; }
+    .section-chip.is-on {
+        border-color: color-mix(in srgb, var(--accent) 50%, var(--border));
+        color: var(--text);
+        background: color-mix(in srgb, var(--accent) 12%, var(--surface-2));
+    }
+
+    /* Collapsible copy panels */
+    .copy-stack { display: flex; flex-direction: column; gap: 0.5rem; }
+    .copy-panel {
+        border: 1px solid var(--border); border-radius: 10px;
+        background: var(--surface); overflow: hidden;
+    }
+    .copy-panel-head {
+        width: 100%; display: flex; align-items: center; justify-content: space-between;
+        gap: 0.75rem; padding: 0.75rem 1rem; border: none; background: transparent;
+        color: var(--text); cursor: pointer; font: inherit; text-align: left;
+    }
+    .copy-panel-head:hover { background: color-mix(in srgb, var(--surface-2) 80%, transparent); }
+    .copy-panel-title {
+        font-family: var(--font-head); font-weight: 700; font-size: 0.85rem;
+        text-transform: uppercase; letter-spacing: 0.06em;
+    }
+    .copy-panel-chevron {
+        font-family: var(--font-mono); font-size: 0.75rem; color: var(--text-3);
+        transition: transform 0.15s;
+    }
+    .copy-panel.is-open .copy-panel-chevron { transform: rotate(90deg); }
+    .copy-panel-body {
+        padding: 0 1rem 1rem;
+        border-top: 1px solid var(--border);
+        display: flex; flex-direction: column; gap: 0.15rem;
+    }
+    .copy-panel-body .form-grid {
+        display: grid; grid-template-columns: 1fr 1fr; gap: 0.65rem 0.85rem;
+        margin-top: 0.75rem;
+    }
+    .copy-panel-body .form-grid .span-full { grid-column: 1 / -1; }
+    @media (max-width: 640px) {
+        .copy-panel-body .form-grid { grid-template-columns: 1fr; }
+    }
+
+    .settings-hint {
+        font-size: 0.78rem; color: var(--text-3); margin: 0.3rem 0 0; line-height: 1.4;
+    }
 "#;

@@ -36,6 +36,12 @@ pub fn AdminSettings() -> Element {
     // Selected identity pack id for “Apply pack”.
     let mut homepage_preset_id = use_signal(|| "neutral".to_string());
     let mut apply_suggested_brand = use_signal(|| true);
+    // Which homepage-copy accordion panels are expanded (ids: hero, ethos, …).
+    let mut open_copy = use_signal(|| {
+        let mut s = std::collections::HashSet::new();
+        s.insert("hero".to_string());
+        s
+    });
 
     let _settings = use_resource(move || {
         let _tick = reload_tick();
@@ -133,27 +139,15 @@ pub fn AdminSettings() -> Element {
         });
     };
 
-    let shell_blurb = match home_shell() {
-        HomeShell::OpsHub => "Dense command board — schedule, roster table, ops-first.",
-        HomeShell::RecruitLanding => "Marketing layout — recruit early, team cards, more space.",
-        HomeShell::Minimal => "Lean front door — hero + apply, optional teams strip.",
-        HomeShell::Manifesto => "Principles first — ethos-heavy, comps quieter.",
-    };
-    let skin_blurb = match home_skin() {
-        HomeSkin::Clean => "Calmer product look (default for most packs).",
-        HomeSkin::Esports => "Clipped badges, denser competitive DNA.",
-    };
-
     rsx! {
         div { class: "admin-toolbar",
             h1 { "Settings" }
             div { style: "display:flex;gap:0.5rem;flex-wrap:wrap;align-items:center;",
                 a {
-                    class: "btn-add",
+                    class: "btn-ghost",
                     href: "/",
                     target: "_blank",
                     rel: "noopener",
-                    style: "background:transparent;border:1px solid var(--border);text-decoration:none;",
                     "View homepage"
                 }
                 button {
@@ -183,56 +177,73 @@ pub fn AdminSettings() -> Element {
         } else {
             div { class: "form-section",
                 h2 { "Organization" }
-                div { class: "form-field",
-                    label { class: "form-label", "Organization Name" }
-                    input {
-                        class: "form-input",
-                        value: "{org_name}",
-                        oninput: move |e| org_name.set(e.value()),
-                    }
-                    p { style: "color:var(--text-3);font-size:0.8rem;margin:0.35rem 0 0;",
-                        "Used in the nav mark and hero watermark initials."
-                    }
+                p { class: "form-section-lead",
+                    "Public name and blurb. Name feeds nav mark and hero watermark initials."
                 }
-                div { class: "form-field",
-                    label { class: "form-label", "Site Description" }
-                    textarea {
-                        class: "form-textarea",
-                        value: "{site_description}",
-                        oninput: move |e| site_description.set(e.value()),
+                div { class: "form-section-card",
+                    div { class: "form-grid",
+                        div { class: "form-field span-full",
+                            label { class: "form-label", "Organization name" }
+                            input {
+                                class: "form-input",
+                                value: "{org_name}",
+                                oninput: move |e| org_name.set(e.value()),
+                            }
+                        }
+                        div { class: "form-field span-full",
+                            label { class: "form-label", "Site description" }
+                            textarea {
+                                class: "form-textarea",
+                                style: "min-height:4rem;",
+                                value: "{site_description}",
+                                oninput: move |e| site_description.set(e.value()),
+                            }
+                        }
                     }
                 }
             }
 
-            // —— Identity pack (primary homepage product surface) ——
+            // —— Identity pack ——
             div { class: "form-section",
                 h2 { "Homepage identity" }
-                p { style: "color:var(--text-3);font-size:0.85rem;margin-bottom:0.85rem;",
-                    "Packs set starter copy, shell, and skin. Officers can still tweak everything below after applying. Changes need Save."
+                p { class: "form-section-lead",
+                    "Start from a pack, then tune shell, skin, and sections. Apply pack fills copy — Save to persist."
                 }
-
-                // Pack picker
-                div {
-                    style: "margin-bottom:1.1rem;padding:0.9rem;border:1px solid var(--border);border-radius:8px;background:var(--surface-2, transparent);",
-                    div { style: "display:flex;flex-wrap:wrap;align-items:flex-end;gap:0.75rem;",
-                        div { class: "form-field", style: "margin:0;min-width:14rem;flex:1;",
-                            label { class: "form-label", "Identity pack" }
-                            select {
-                                class: "form-input",
-                                value: "{homepage_preset_id}",
-                                onchange: move |e| homepage_preset_id.set(e.value()),
-                                for p in homepage_presets() {
-                                    option { value: "{p.id}", "{p.name}" }
+                div { class: "form-section-card",
+                    label { class: "form-label", style: "margin-bottom:0.5rem;", "Identity pack" }
+                    div { class: "pack-grid",
+                        for p in homepage_presets() {
+                            {
+                                let id = p.id.to_string();
+                                let selected = homepage_preset_id() == p.id;
+                                let card_class = if selected {
+                                    "pack-card is-selected"
+                                } else {
+                                    "pack-card"
+                                };
+                                let shell = p.suggested_shell.as_str();
+                                let skin = p.suggested_skin.as_str();
+                                rsx! {
+                                    button {
+                                        class: "{card_class}",
+                                        r#type: "button",
+                                        onclick: move |_| homepage_preset_id.set(id.clone()),
+                                        span { class: "pack-card-name", "{p.name}" }
+                                        span { class: "pack-card-desc", "{p.description}" }
+                                        span { class: "pack-card-meta", "{shell} · {skin}" }
+                                    }
                                 }
                             }
                         }
-                        div { class: "form-checkbox-row", style: "margin:0 0 0.2rem;",
+                    }
+                    div { class: "pack-actions",
+                        label { class: "section-chip",
                             input {
                                 r#type: "checkbox",
                                 checked: apply_suggested_brand(),
                                 onchange: move |e| apply_suggested_brand.set(e.checked()),
                             }
-                            label { class: "form-label", style: "margin:0;", "Also set brand accents" }
+                            "Also set brand accents"
                         }
                         button {
                             class: "btn-add",
@@ -253,11 +264,14 @@ pub fn AdminSettings() -> Element {
                                         brand_accent_light
                                             .set(preset.suggested_brand.accent_light.into());
                                     }
+                                    open_copy.set({
+                                        let mut s = std::collections::HashSet::new();
+                                        s.insert("hero".to_string());
+                                        s
+                                    });
                                     toast.show(Toast::success(format!(
-                                        "Applied “{}” ({}/{}) — click Save to persist.",
+                                        "Applied “{}” — click Save to persist.",
                                         preset.name,
-                                        preset.suggested_shell.as_str(),
-                                        preset.suggested_skin.as_str(),
                                     )));
                                 } else {
                                     toast.show(Toast::error("Unknown pack."));
@@ -266,59 +280,67 @@ pub fn AdminSettings() -> Element {
                             "Apply pack"
                         }
                     }
-                    {
-                        let pack_meta = homepage_preset_by_id(&homepage_preset_id()).map(|p| {
-                            (
-                                p.description.to_string(),
-                                p.suggested_shell.as_str(),
-                                p.suggested_skin.as_str(),
-                            )
-                        });
-                        if let Some((desc, sh, sk)) = pack_meta {
-                            rsx! {
-                                p { style: "color:var(--text-3);font-size:0.8rem;margin:0.55rem 0 0;",
-                                    "{desc}"
-                                }
-                                p { style: "color:var(--text-2);font-size:0.75rem;margin:0.25rem 0 0;font-family:var(--font-mono);",
-                                    "Applies shell={sh} · skin={sk} · all homepage text & sections"
-                                }
-                            }
-                        } else {
-                            rsx! {}
-                        }
-                    }
                 }
 
-                div { style: "display:grid;grid-template-columns:repeat(auto-fill,minmax(14rem,1fr));gap:0.85rem;margin-bottom:0.85rem;",
-                    div { class: "form-field", style: "margin:0;",
-                        label { class: "form-label", "Shell" }
-                        select {
-                            class: "form-input",
-                            value: "{home_shell().as_str()}",
-                            onchange: move |e| {
-                                let shell = HomeShell::from_str_lossy(&e.value());
-                                home_shell.set(shell);
-                                public_layout.set(shell.to_public_layout());
-                            },
-                            option { value: "ops_hub", "Ops hub" }
-                            option { value: "recruit_landing", "Recruit landing" }
-                            option { value: "minimal", "Minimal" }
-                            option { value: "manifesto", "Manifesto" }
+                div { class: "form-section-card", style: "margin-top:0.85rem;",
+                    label { class: "form-label", style: "margin-bottom:0.55rem;", "Shell" }
+                    div { class: "option-tiles", style: "margin-bottom:1rem;",
+                        {
+                            let shells = [
+                                (HomeShell::OpsHub, "Ops hub", "Dense board — schedule, roster table."),
+                                (HomeShell::RecruitLanding, "Recruit landing", "Apply-first, team cards, more space."),
+                                (HomeShell::Minimal, "Minimal", "Hero + apply; lean front door."),
+                                (HomeShell::Manifesto, "Manifesto", "Principles first; comps quieter."),
+                            ];
+                            rsx! {
+                                for (shell, title, blurb) in shells {
+                                    {
+                                        let selected = home_shell() == shell;
+                                        let cls = if selected { "option-tile is-selected" } else { "option-tile" };
+                                        rsx! {
+                                            button {
+                                                class: "{cls}",
+                                                r#type: "button",
+                                                onclick: move |_| {
+                                                    home_shell.set(shell);
+                                                    public_layout.set(shell.to_public_layout());
+                                                },
+                                                div { class: "option-tile-title", "{title}" }
+                                                div { class: "option-tile-blurb", "{blurb}" }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                         }
-                        p { style: "color:var(--text-3);font-size:0.78rem;margin:0.35rem 0 0;", "{shell_blurb}" }
                     }
-                    div { class: "form-field", style: "margin:0;",
-                        label { class: "form-label", "Skin" }
-                        select {
-                            class: "form-input",
-                            value: "{home_skin().as_str()}",
-                            onchange: move |e| home_skin.set(HomeSkin::from_str_lossy(&e.value())),
-                            option { value: "clean", "Clean" }
-                            option { value: "esports", "Esports" }
+                    label { class: "form-label", style: "margin-bottom:0.55rem;", "Skin" }
+                    div { class: "option-tiles", style: "margin-bottom:1rem;",
+                        {
+                            let skins = [
+                                (HomeSkin::Clean, "Clean", "Calmer product look — default for most packs."),
+                                (HomeSkin::Esports, "Esports", "Clipped badges, denser competitive DNA."),
+                            ];
+                            rsx! {
+                                for (skin, title, blurb) in skins {
+                                    {
+                                        let selected = home_skin() == skin;
+                                        let cls = if selected { "option-tile is-selected" } else { "option-tile" };
+                                        rsx! {
+                                            button {
+                                                class: "{cls}",
+                                                r#type: "button",
+                                                onclick: move |_| home_skin.set(skin),
+                                                div { class: "option-tile-title", "{title}" }
+                                                div { class: "option-tile-blurb", "{blurb}" }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                         }
-                        p { style: "color:var(--text-3);font-size:0.78rem;margin:0.35rem 0 0;", "{skin_blurb}" }
                     }
-                    div { class: "form-field", style: "margin:0;",
+                    div { class: "form-field", style: "max-width:16rem;",
                         label { class: "form-label", "Hero text alignment" }
                         select {
                             class: "form-input",
@@ -329,15 +351,14 @@ pub fn AdminSettings() -> Element {
                             option { value: "left", "Left" }
                             option { value: "center", "Center" }
                         }
-                        p { style: "color:var(--text-3);font-size:0.78rem;margin:0.35rem 0 0;",
-                            "Hero only. Body sections stay left."
-                        }
+                        p { class: "settings-hint", "Hero only. Body blocks stay left." }
                     }
                 }
 
-                Fieldset { title: "Visible sections",
-                    p { style: "color:var(--text-3);font-size:0.8rem;margin:0 0 0.65rem;",
-                        "Hero is always shown. Uncheck to hide a block. Empty data may still hide some blocks depending on shell."
+                div { class: "form-section-card", style: "margin-top:0.85rem;",
+                    label { class: "form-label", style: "margin-bottom:0.35rem;", "Visible sections" }
+                    p { class: "settings-hint", style: "margin-bottom:0.65rem;",
+                        "Hero is always on. Empty data may still hide some blocks depending on shell."
                     }
                     {
                         let sections = [
@@ -349,27 +370,36 @@ pub fn AdminSettings() -> Element {
                             ("recruit", "Recruiting", homepage().sections.recruit),
                         ];
                         rsx! {
-                            div { style: "display:grid;grid-template-columns:repeat(auto-fill,minmax(10rem,1fr));gap:0.5rem;",
+                            div { class: "section-chips",
                                 for (key, label, checked) in sections {
-                                    div { class: "form-checkbox-row", style: "margin:0;",
-                                        input {
-                                            r#type: "checkbox",
-                                            checked: checked,
-                                            onchange: move |e| {
-                                                let on = e.checked();
-                                                let mut hp = homepage.write();
-                                                match key {
-                                                    "ethos" => hp.sections.ethos = on,
-                                                    "schedule" => hp.sections.schedule = on,
-                                                    "tournaments" => hp.sections.tournaments = on,
-                                                    "teams" => hp.sections.teams = on,
-                                                    "news" => hp.sections.news = on,
-                                                    "recruit" => hp.sections.recruit = on,
-                                                    _ => {}
+                                    {
+                                        let chip_class = if checked {
+                                            "section-chip is-on"
+                                        } else {
+                                            "section-chip"
+                                        };
+                                        rsx! {
+                                            label { class: "{chip_class}",
+                                                input {
+                                                    r#type: "checkbox",
+                                                    checked: checked,
+                                                    onchange: move |e| {
+                                                        let on = e.checked();
+                                                        let mut hp = homepage.write();
+                                                        match key {
+                                                            "ethos" => hp.sections.ethos = on,
+                                                            "schedule" => hp.sections.schedule = on,
+                                                            "tournaments" => hp.sections.tournaments = on,
+                                                            "teams" => hp.sections.teams = on,
+                                                            "news" => hp.sections.news = on,
+                                                            "recruit" => hp.sections.recruit = on,
+                                                            _ => {}
+                                                        }
+                                                    },
                                                 }
-                                            },
+                                                "{label}"
+                                            }
                                         }
-                                        label { class: "form-label", style: "margin:0;", "{label}" }
                                     }
                                 }
                             }
@@ -379,12 +409,11 @@ pub fn AdminSettings() -> Element {
             }
 
             div { class: "form-section",
-                div { style: "display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:0.75rem;margin-bottom:0.5rem;",
+                div { style: "display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:0.75rem;margin-bottom:0.35rem;",
                     h2 { style: "margin:0;", "Navigation" }
                     button {
-                        class: "btn-add",
+                        class: "btn-ghost",
                         r#type: "button",
-                        style: "background:transparent;border:1px solid var(--border);",
                         onclick: move |_| {
                             nav.set(NavConfig::default());
                             toast.show(Toast::success(
@@ -394,8 +423,8 @@ pub fn AdminSettings() -> Element {
                         "Reset defaults"
                     }
                 }
-                p { style: "color:var(--text-3);font-size:0.85rem;margin-bottom:0.85rem;",
-                    "Pick which pages show in the top bar, the More menu, or stay hidden. Hidden pages still work via direct URL."
+                p { class: "form-section-lead",
+                    "Primary bar, More menu, or hidden. Hidden routes still work via direct URL."
                 }
                 NavColumn {
                     title: "Primary bar",
@@ -419,118 +448,118 @@ pub fn AdminSettings() -> Element {
 
             div { class: "form-section",
                 h2 { "Brand accents" }
-                p { style: "color:var(--text-3);font-size:0.85rem;margin-bottom:0.75rem;",
-                    "Primary accent for buttons and highlights. Empty = product default purple. Templates can set these when “Also set brand accents” is checked."
+                p { class: "form-section-lead",
+                    "Primary accent for buttons and highlights. Empty = product default purple."
                 }
-                div { style: "display:flex;flex-wrap:wrap;gap:1rem;",
-                    div { class: "form-field", style: "margin:0;min-width:10rem;",
-                        label { class: "form-label", "Dark theme accent" }
-                        div { style: "display:flex;align-items:center;gap:0.5rem;",
-                            input {
-                                r#type: "color",
-                                value: {
-                                    let c = brand_accent_dark();
-                                    if c.len() == 7 && c.starts_with('#') { c } else { "#8f73ff".into() }
-                                },
-                                oninput: move |e| brand_accent_dark.set(e.value()),
-                                style: "width:3rem;height:2.25rem;padding:0;border:1px solid var(--border);border-radius:6px;background:transparent;cursor:pointer;",
-                            }
-                            input {
-                                class: "form-input",
-                                style: "flex:1;min-width:6rem;",
-                                placeholder: "#8f73ff",
-                                value: "{brand_accent_dark}",
-                                oninput: move |e| brand_accent_dark.set(e.value()),
-                            }
-                        }
-                    }
-                    div { class: "form-field", style: "margin:0;min-width:10rem;",
-                        label { class: "form-label", "Light theme accent" }
-                        div { style: "display:flex;align-items:center;gap:0.5rem;",
-                            input {
-                                r#type: "color",
-                                value: {
-                                    let c = brand_accent_light();
-                                    if c.len() == 7 && c.starts_with('#') { c } else { "#6d4aff".into() }
-                                },
-                                oninput: move |e| brand_accent_light.set(e.value()),
-                                style: "width:3rem;height:2.25rem;padding:0;border:1px solid var(--border);border-radius:6px;background:transparent;cursor:pointer;",
-                            }
-                            input {
-                                class: "form-input",
-                                style: "flex:1;min-width:6rem;",
-                                placeholder: "#6d4aff",
-                                value: "{brand_accent_light}",
-                                oninput: move |e| brand_accent_light.set(e.value()),
+                div { class: "form-section-card",
+                    div { style: "display:flex;flex-wrap:wrap;gap:1rem;align-items:flex-end;",
+                        div { class: "form-field", style: "margin:0;min-width:10rem;flex:1;",
+                            label { class: "form-label", "Dark theme" }
+                            div { style: "display:flex;align-items:center;gap:0.5rem;",
+                                input {
+                                    r#type: "color",
+                                    value: {
+                                        let c = brand_accent_dark();
+                                        if c.len() == 7 && c.starts_with('#') { c } else { "#8f73ff".into() }
+                                    },
+                                    oninput: move |e| brand_accent_dark.set(e.value()),
+                                    style: "width:3rem;height:2.25rem;padding:0;border:1px solid var(--border);border-radius:6px;background:transparent;cursor:pointer;",
+                                }
+                                input {
+                                    class: "form-input",
+                                    style: "flex:1;min-width:6rem;",
+                                    placeholder: "#8f73ff",
+                                    value: "{brand_accent_dark}",
+                                    oninput: move |e| brand_accent_dark.set(e.value()),
+                                }
                             }
                         }
-                    }
-                    button {
-                        class: "btn-add",
-                        r#type: "button",
-                        style: "background:transparent;border:1px solid var(--border);align-self:flex-end;",
-                        onclick: move |_| {
-                            brand_accent_dark.set(String::new());
-                            brand_accent_light.set(String::new());
-                        },
-                        "Clear (default)"
+                        div { class: "form-field", style: "margin:0;min-width:10rem;flex:1;",
+                            label { class: "form-label", "Light theme" }
+                            div { style: "display:flex;align-items:center;gap:0.5rem;",
+                                input {
+                                    r#type: "color",
+                                    value: {
+                                        let c = brand_accent_light();
+                                        if c.len() == 7 && c.starts_with('#') { c } else { "#6d4aff".into() }
+                                    },
+                                    oninput: move |e| brand_accent_light.set(e.value()),
+                                    style: "width:3rem;height:2.25rem;padding:0;border:1px solid var(--border);border-radius:6px;background:transparent;cursor:pointer;",
+                                }
+                                input {
+                                    class: "form-input",
+                                    style: "flex:1;min-width:6rem;",
+                                    placeholder: "#6d4aff",
+                                    value: "{brand_accent_light}",
+                                    oninput: move |e| brand_accent_light.set(e.value()),
+                                }
+                            }
+                        }
+                        button {
+                            class: "btn-ghost",
+                            r#type: "button",
+                            onclick: move |_| {
+                                brand_accent_dark.set(String::new());
+                                brand_accent_light.set(String::new());
+                            },
+                            "Clear"
+                        }
                     }
                 }
             }
 
             div { class: "form-section",
                 h2 { "Page background" }
-                p { style: "color:var(--text-3);font-size:0.85rem;margin-bottom:0.75rem;",
-                    "Solid color and optional image for the public site. Leave color empty to use the theme default (dark/light). Image sits behind content, cover-fitted."
+                p { class: "form-section-lead",
+                    "Solid color and optional image. Empty color = theme default. Image is cover-fitted behind content."
                 }
-                div { class: "form-field", style: "margin-bottom:0.85rem;",
-                    label { class: "form-label", "Background color" }
-                    div { style: "display:flex;align-items:center;gap:0.65rem;flex-wrap:wrap;",
-                        input {
-                            r#type: "color",
-                            // color input needs a full #rrggbb value
-                            value: {
-                                let c = page_bg_color();
-                                if c.len() == 7 && c.starts_with('#') { c } else { "#17171d".into() }
-                            },
-                            oninput: move |e| page_bg_color.set(e.value()),
-                            style: "width:3rem;height:2.25rem;padding:0;border:1px solid var(--border);border-radius:6px;background:transparent;cursor:pointer;",
-                        }
-                        input {
-                            class: "form-input",
-                            style: "flex:1;min-width:8rem;",
-                            placeholder: "#17171d (empty = theme default)",
-                            value: "{page_bg_color}",
-                            oninput: move |e| page_bg_color.set(e.value()),
-                        }
-                        button {
-                            class: "btn-add",
-                            r#type: "button",
-                            style: "background:transparent;border:1px solid var(--border);",
-                            onclick: move |_| page_bg_color.set(String::new()),
-                            "Clear"
+                div { class: "form-section-card",
+                    div { class: "form-field", style: "margin-bottom:0.85rem;",
+                        label { class: "form-label", "Background color" }
+                        div { style: "display:flex;align-items:center;gap:0.65rem;flex-wrap:wrap;",
+                            input {
+                                r#type: "color",
+                                value: {
+                                    let c = page_bg_color();
+                                    if c.len() == 7 && c.starts_with('#') { c } else { "#17171d".into() }
+                                },
+                                oninput: move |e| page_bg_color.set(e.value()),
+                                style: "width:3rem;height:2.25rem;padding:0;border:1px solid var(--border);border-radius:6px;background:transparent;cursor:pointer;",
+                            }
+                            input {
+                                class: "form-input",
+                                style: "flex:1;min-width:8rem;",
+                                placeholder: "#17171d (empty = theme default)",
+                                value: "{page_bg_color}",
+                                oninput: move |e| page_bg_color.set(e.value()),
+                            }
+                            button {
+                                class: "btn-ghost",
+                                r#type: "button",
+                                onclick: move |_| page_bg_color.set(String::new()),
+                                "Clear"
+                            }
                         }
                     }
-                }
-                div { class: "form-field",
-                    label { class: "form-label", "Background image URL" }
-                    p { style: "color:var(--text-3);font-size:0.8rem;margin:0 0 0.4rem;",
-                        "https://… or a site path like /uploads/bg.jpg. Leave empty for no image."
-                    }
-                    div { style: "display:flex;align-items:center;gap:0.65rem;flex-wrap:wrap;",
-                        input {
-                            class: "form-input",
-                            style: "flex:1;min-width:12rem;",
-                            placeholder: "https://… or /uploads/…",
-                            value: "{page_bg_image_url}",
-                            oninput: move |e| page_bg_image_url.set(e.value()),
+                    div { class: "form-field",
+                        label { class: "form-label", "Background image URL" }
+                        p { class: "settings-hint", style: "margin-bottom:0.4rem;",
+                            "https://… or /uploads/bg.jpg. Leave empty for none."
                         }
-                        button {
-                            class: "btn-add",
-                            r#type: "button",
-                            style: "background:transparent;border:1px solid var(--border);",
-                            onclick: move |_| page_bg_image_url.set(String::new()),
-                            "Clear"
+                        div { style: "display:flex;align-items:center;gap:0.65rem;flex-wrap:wrap;",
+                            input {
+                                class: "form-input",
+                                style: "flex:1;min-width:12rem;",
+                                placeholder: "https://… or /uploads/…",
+                                value: "{page_bg_image_url}",
+                                oninput: move |e| page_bg_image_url.set(e.value()),
+                            }
+                            button {
+                                class: "btn-ghost",
+                                r#type: "button",
+                                onclick: move |_| page_bg_image_url.set(String::new()),
+                                "Clear"
+                            }
                         }
                     }
                 }
@@ -538,128 +567,184 @@ pub fn AdminSettings() -> Element {
 
             div { class: "form-section",
                 h2 { "Recruitment" }
-                div { class: "form-checkbox-row",
-                    input {
-                        r#type: "checkbox",
-                        checked: recruitment_open(),
-                        onchange: move |e| recruitment_open.set(e.checked()),
+                p { class: "form-section-lead", "Public apply pipeline and age gate." }
+                div { class: "form-section-card",
+                    label { class: "section-chip is-on", style: "margin-bottom:0.85rem;",
+                        input {
+                            r#type: "checkbox",
+                            checked: recruitment_open(),
+                            onchange: move |e| recruitment_open.set(e.checked()),
+                        }
+                        "Recruitment open"
                     }
-                    label { class: "form-label", "Recruitment Open" }
-                }
-                div { class: "form-field",
-                    label { class: "form-label", "Message when closed" }
-                    textarea {
-                        class: "form-textarea",
-                        value: "{recruitment_message}",
-                        oninput: move |e| recruitment_message.set(e.value()),
-                    }
-                }
-                div { class: "form-field",
-                    label { class: "form-label", "Minimum Age" }
-                    input {
-                        class: "form-input",
-                        r#type: "number",
-                        min: "0",
-                        value: "{min_age}",
-                        oninput: move |e| min_age.set(e.value()),
+                    div { class: "form-grid",
+                        div { class: "form-field span-full",
+                            label { class: "form-label", "Message when closed" }
+                            textarea {
+                                class: "form-textarea",
+                                value: "{recruitment_message}",
+                                oninput: move |e| recruitment_message.set(e.value()),
+                            }
+                        }
+                        div { class: "form-field",
+                            label { class: "form-label", "Minimum age" }
+                            input {
+                                class: "form-input",
+                                r#type: "number",
+                                min: "0",
+                                value: "{min_age}",
+                                oninput: move |e| min_age.set(e.value()),
+                            }
+                        }
                     }
                 }
             }
 
             div { class: "form-section",
-                h2 { style: "margin:0 0 0.5rem;", "Homepage text" }
-                p { style: "color:var(--text-3);font-size:0.85rem;margin-bottom:1rem;",
-                    "Fine-tune copy after applying a pack. List fields: one item per line."
+                h2 { "Homepage text" }
+                p { class: "form-section-lead",
+                    "Fine-tune copy after a pack. Expand a section to edit. List fields: one item per line."
                 }
-
-                Fieldset { title: "Hero",
-                    StrField { label: "Badge", value: homepage().hero_badge.clone(), on_change: move |v| homepage.write().hero_badge = v }
-                    StrField { label: "Title", value: homepage().hero_title.clone(), on_change: move |v| homepage.write().hero_title = v }
-                    StrField { label: "Title accent", value: homepage().hero_title_accent.clone(), on_change: move |v| homepage.write().hero_title_accent = v }
-                    AreaField { label: "Subtitle", value: homepage().hero_sub.clone(), on_change: move |v| homepage.write().hero_sub = v }
-                    StrField { label: "Primary CTA", value: homepage().cta_primary.clone(), on_change: move |v| homepage.write().cta_primary = v }
-                    StrField { label: "Secondary CTA", value: homepage().cta_secondary.clone(), on_change: move |v| homepage.write().cta_secondary = v }
-                }
-
-                Fieldset { title: "Ethos",
-                    StrField { label: "Kicker", value: homepage().ethos_kicker.clone(), on_change: move |v| homepage.write().ethos_kicker = v }
-                    StrField { label: "Title", value: homepage().ethos_title.clone(), on_change: move |v| homepage.write().ethos_title = v }
-                    AreaField { label: "Body", value: homepage().ethos_body.clone(), on_change: move |v| homepage.write().ethos_body = v }
-                    LinesField { label: "Rules", value: homepage().ethos_rules.clone(), on_change: move |v| homepage.write().ethos_rules = v }
-                }
-
-                Fieldset { title: "Squads",
-                    StrField { label: "Kicker", value: homepage().teams_kicker.clone(), on_change: move |v| homepage.write().teams_kicker = v }
-                    StrField { label: "Title", value: homepage().teams_title.clone(), on_change: move |v| homepage.write().teams_title = v }
-                    StrField { label: "Empty", value: homepage().teams_empty.clone(), on_change: move |v| homepage.write().teams_empty = v }
-                }
-
-                Fieldset { title: "Announcements",
-                    StrField { label: "Kicker", value: homepage().news_kicker.clone(), on_change: move |v| homepage.write().news_kicker = v }
-                    StrField { label: "Title", value: homepage().news_title.clone(), on_change: move |v| homepage.write().news_title = v }
-                    StrField { label: "Empty", value: homepage().news_empty.clone(), on_change: move |v| homepage.write().news_empty = v }
-                    StrField { label: "View all", value: homepage().news_view_all.clone(), on_change: move |v| homepage.write().news_view_all = v }
-                }
-
-                Fieldset { title: "Tournaments",
-                    StrField { label: "Kicker", value: homepage().tournaments_kicker.clone(), on_change: move |v| homepage.write().tournaments_kicker = v }
-                    StrField { label: "Title", value: homepage().tournaments_title.clone(), on_change: move |v| homepage.write().tournaments_title = v }
-                    StrField { label: "Empty", value: homepage().tournaments_empty.clone(), on_change: move |v| homepage.write().tournaments_empty = v }
-                    StrField { label: "View all", value: homepage().tournaments_view_all.clone(), on_change: move |v| homepage.write().tournaments_view_all = v }
-                }
-
-                Fieldset { title: "Schedule",
-                    StrField { label: "Kicker", value: homepage().schedule_kicker.clone(), on_change: move |v| homepage.write().schedule_kicker = v }
-                    StrField { label: "Title", value: homepage().schedule_title.clone(), on_change: move |v| homepage.write().schedule_title = v }
-                    StrField { label: "Empty", value: homepage().schedule_empty.clone(), on_change: move |v| homepage.write().schedule_empty = v }
-                    StrField { label: "Calendar CTA", value: homepage().calendar_cta.clone(), on_change: move |v| homepage.write().calendar_cta = v }
-                }
-
-                Fieldset { title: "Recruiting",
-                    StrField { label: "Kicker", value: homepage().recruit_kicker.clone(), on_change: move |v| homepage.write().recruit_kicker = v }
-                    StrField { label: "Title", value: homepage().recruit_title.clone(), on_change: move |v| homepage.write().recruit_title = v }
-                    AreaField { label: "Body", value: homepage().recruit_body.clone(), on_change: move |v| homepage.write().recruit_body = v }
-                    StrField { label: "CTA", value: homepage().recruit_cta.clone(), on_change: move |v| homepage.write().recruit_cta = v }
-                    StrField { label: "Expectations title", value: homepage().recruit_expectations_title.clone(), on_change: move |v| homepage.write().recruit_expectations_title = v }
-                    LinesField { label: "Expectations", value: homepage().recruit_expectations.clone(), on_change: move |v| homepage.write().recruit_expectations = v }
-                    StrField { label: "Never-ask title", value: homepage().never_ask_title.clone(), on_change: move |v| homepage.write().never_ask_title = v }
-                    AreaField { label: "Never-ask body", value: homepage().never_ask_body.clone(), on_change: move |v| homepage.write().never_ask_body = v }
-                    StrField { label: "Seeking label", value: homepage().seeking_label.clone(), on_change: move |v| homepage.write().seeking_label = v }
-                    LinesField { label: "Seeking tags", value: homepage().seeking_tags.clone(), on_change: move |v| homepage.write().seeking_tags = v }
-                }
-
-                Fieldset { title: "Footer",
-                    StrField { label: "Footer note", value: homepage().footer_note.clone(), on_change: move |v| homepage.write().footer_note = v }
+                div { class: "copy-stack",
+                    CopyPanel {
+                        id: "hero",
+                        title: "Hero",
+                        open_copy: open_copy,
+                        div { class: "form-grid",
+                            StrField { label: "Badge", value: homepage().hero_badge.clone(), on_change: move |v| homepage.write().hero_badge = v }
+                            StrField { label: "Primary CTA", value: homepage().cta_primary.clone(), on_change: move |v| homepage.write().cta_primary = v }
+                            StrField { label: "Title", value: homepage().hero_title.clone(), on_change: move |v| homepage.write().hero_title = v }
+                            StrField { label: "Title accent", value: homepage().hero_title_accent.clone(), on_change: move |v| homepage.write().hero_title_accent = v }
+                            div { class: "span-full",
+                                AreaField { label: "Subtitle", value: homepage().hero_sub.clone(), on_change: move |v| homepage.write().hero_sub = v }
+                            }
+                            div { class: "span-full",
+                                StrField { label: "Secondary CTA", value: homepage().cta_secondary.clone(), on_change: move |v| homepage.write().cta_secondary = v }
+                            }
+                        }
+                    }
+                    CopyPanel {
+                        id: "ethos",
+                        title: "Ethos",
+                        open_copy: open_copy,
+                        div { class: "form-grid",
+                            StrField { label: "Kicker", value: homepage().ethos_kicker.clone(), on_change: move |v| homepage.write().ethos_kicker = v }
+                            StrField { label: "Title", value: homepage().ethos_title.clone(), on_change: move |v| homepage.write().ethos_title = v }
+                            div { class: "span-full",
+                                AreaField { label: "Body", value: homepage().ethos_body.clone(), on_change: move |v| homepage.write().ethos_body = v }
+                            }
+                            div { class: "span-full",
+                                LinesField { label: "Rules", value: homepage().ethos_rules.clone(), on_change: move |v| homepage.write().ethos_rules = v }
+                            }
+                        }
+                    }
+                    CopyPanel {
+                        id: "squads",
+                        title: "Squads",
+                        open_copy: open_copy,
+                        div { class: "form-grid",
+                            StrField { label: "Kicker", value: homepage().teams_kicker.clone(), on_change: move |v| homepage.write().teams_kicker = v }
+                            StrField { label: "Title", value: homepage().teams_title.clone(), on_change: move |v| homepage.write().teams_title = v }
+                            div { class: "span-full",
+                                StrField { label: "Empty", value: homepage().teams_empty.clone(), on_change: move |v| homepage.write().teams_empty = v }
+                            }
+                        }
+                    }
+                    CopyPanel {
+                        id: "news",
+                        title: "Announcements",
+                        open_copy: open_copy,
+                        div { class: "form-grid",
+                            StrField { label: "Kicker", value: homepage().news_kicker.clone(), on_change: move |v| homepage.write().news_kicker = v }
+                            StrField { label: "Title", value: homepage().news_title.clone(), on_change: move |v| homepage.write().news_title = v }
+                            StrField { label: "Empty", value: homepage().news_empty.clone(), on_change: move |v| homepage.write().news_empty = v }
+                            StrField { label: "View all", value: homepage().news_view_all.clone(), on_change: move |v| homepage.write().news_view_all = v }
+                        }
+                    }
+                    CopyPanel {
+                        id: "tournaments",
+                        title: "Tournaments",
+                        open_copy: open_copy,
+                        div { class: "form-grid",
+                            StrField { label: "Kicker", value: homepage().tournaments_kicker.clone(), on_change: move |v| homepage.write().tournaments_kicker = v }
+                            StrField { label: "Title", value: homepage().tournaments_title.clone(), on_change: move |v| homepage.write().tournaments_title = v }
+                            StrField { label: "Empty", value: homepage().tournaments_empty.clone(), on_change: move |v| homepage.write().tournaments_empty = v }
+                            StrField { label: "View all", value: homepage().tournaments_view_all.clone(), on_change: move |v| homepage.write().tournaments_view_all = v }
+                        }
+                    }
+                    CopyPanel {
+                        id: "schedule",
+                        title: "Schedule",
+                        open_copy: open_copy,
+                        div { class: "form-grid",
+                            StrField { label: "Kicker", value: homepage().schedule_kicker.clone(), on_change: move |v| homepage.write().schedule_kicker = v }
+                            StrField { label: "Title", value: homepage().schedule_title.clone(), on_change: move |v| homepage.write().schedule_title = v }
+                            StrField { label: "Empty", value: homepage().schedule_empty.clone(), on_change: move |v| homepage.write().schedule_empty = v }
+                            StrField { label: "Calendar CTA", value: homepage().calendar_cta.clone(), on_change: move |v| homepage.write().calendar_cta = v }
+                        }
+                    }
+                    CopyPanel {
+                        id: "recruit",
+                        title: "Recruiting",
+                        open_copy: open_copy,
+                        div { class: "form-grid",
+                            StrField { label: "Kicker", value: homepage().recruit_kicker.clone(), on_change: move |v| homepage.write().recruit_kicker = v }
+                            StrField { label: "Title", value: homepage().recruit_title.clone(), on_change: move |v| homepage.write().recruit_title = v }
+                            div { class: "span-full",
+                                AreaField { label: "Body", value: homepage().recruit_body.clone(), on_change: move |v| homepage.write().recruit_body = v }
+                            }
+                            StrField { label: "CTA", value: homepage().recruit_cta.clone(), on_change: move |v| homepage.write().recruit_cta = v }
+                            StrField { label: "Expectations title", value: homepage().recruit_expectations_title.clone(), on_change: move |v| homepage.write().recruit_expectations_title = v }
+                            div { class: "span-full",
+                                LinesField { label: "Expectations", value: homepage().recruit_expectations.clone(), on_change: move |v| homepage.write().recruit_expectations = v }
+                            }
+                            StrField { label: "Never-ask title", value: homepage().never_ask_title.clone(), on_change: move |v| homepage.write().never_ask_title = v }
+                            StrField { label: "Seeking label", value: homepage().seeking_label.clone(), on_change: move |v| homepage.write().seeking_label = v }
+                            div { class: "span-full",
+                                AreaField { label: "Never-ask body", value: homepage().never_ask_body.clone(), on_change: move |v| homepage.write().never_ask_body = v }
+                            }
+                            div { class: "span-full",
+                                LinesField { label: "Seeking tags", value: homepage().seeking_tags.clone(), on_change: move |v| homepage.write().seeking_tags = v }
+                            }
+                        }
+                    }
+                    CopyPanel {
+                        id: "footer",
+                        title: "Footer",
+                        open_copy: open_copy,
+                        StrField { label: "Footer note", value: homepage().footer_note.clone(), on_change: move |v| homepage.write().footer_note = v }
+                    }
                 }
             }
 
             div { class: "form-section",
                 h2 { "Forum" }
-                div { class: "form-field",
-                    label { class: "form-label", "Forum Backend" }
-                    select {
-                        class: "form-input",
-                        value: "{forum_backend}",
-                        onchange: move |e| forum_backend.set(e.value()),
-                        option { value: "local", "Local (SurrealDB)" }
-                        option { value: "nostr", "Nostr (Relay)" }
+                p { class: "form-section-lead", "Where forum threads live and optional extra Nostr relays." }
+                div { class: "form-section-card",
+                    div { class: "form-field",
+                        label { class: "form-label", "Forum backend" }
+                        select {
+                            class: "form-input",
+                            value: "{forum_backend}",
+                            onchange: move |e| forum_backend.set(e.value()),
+                            option { value: "local", "Local (SurrealDB)" }
+                            option { value: "nostr", "Nostr (Relay)" }
+                        }
+                        p { class: "settings-hint",
+                            "Local uses the database. Nostr uses the relay (requires relay setup)."
+                        }
                     }
-                    p {
-                        style: "font-size: 0.75rem; color: var(--text-3); margin-top: 0.35rem;",
-                        "Controls where forum data is stored. \"Local\" uses the database. \"Nostr\" uses the relay (requires relay setup)."
-                    }
-                }
-                div { class: "form-field",
-                    label { class: "form-label", "Extra Relay URLs" }
-                    textarea {
-                        class: "form-textarea",
-                        placeholder: "ws://relay2:7777\nwss://relay.example.com",
-                        value: "{extra_relay_urls}",
-                        oninput: move |e| extra_relay_urls.set(e.value()),
-                    }
-                    p {
-                        style: "font-size: 0.75rem; color: var(--text-3); margin-top: 0.35rem;",
-                        "Additional relay URLs for multi-relay publishing (one per line). Events are published to the primary relay (NOSTR_RELAY_URL) and all extra relays."
+                    div { class: "form-field", style: "margin-top:0.85rem;",
+                        label { class: "form-label", "Extra relay URLs" }
+                        textarea {
+                            class: "form-textarea",
+                            placeholder: "ws://relay2:7777\nwss://relay.example.com",
+                            value: "{extra_relay_urls}",
+                            oninput: move |e| extra_relay_urls.set(e.value()),
+                        }
+                        p { class: "settings-hint",
+                            "One per line. Published to primary relay (NOSTR_RELAY_URL) plus these."
+                        }
                     }
                 }
             }
@@ -748,14 +833,38 @@ fn NavColumn(
 }
 
 #[component]
-fn Fieldset(title: &'static str, children: Element) -> Element {
+fn CopyPanel(
+    id: &'static str,
+    title: &'static str,
+    mut open_copy: Signal<std::collections::HashSet<String>>,
+    children: Element,
+) -> Element {
+    let is_open = open_copy().contains(id);
+    let panel_class = if is_open {
+        "copy-panel is-open"
+    } else {
+        "copy-panel"
+    };
     rsx! {
-        div { style: "margin:1.25rem 0;padding-top:0.75rem;border-top:1px solid var(--border);",
-            h3 {
-                style: "font-family:var(--font-mono);font-size:0.7rem;letter-spacing:0.1em;text-transform:uppercase;color:var(--text-3);margin:0 0 0.75rem;",
-                "{title}"
+        div { class: "{panel_class}",
+            button {
+                class: "copy-panel-head",
+                r#type: "button",
+                onclick: move |_| {
+                    let mut set = open_copy();
+                    if set.contains(id) {
+                        set.remove(id);
+                    } else {
+                        set.insert(id.to_string());
+                    }
+                    open_copy.set(set);
+                },
+                span { class: "copy-panel-title", "{title}" }
+                span { class: "copy-panel-chevron", "▸" }
             }
-            {children}
+            if is_open {
+                div { class: "copy-panel-body", {children} }
+            }
         }
     }
 }
@@ -763,7 +872,7 @@ fn Fieldset(title: &'static str, children: Element) -> Element {
 #[component]
 fn StrField(label: &'static str, value: String, on_change: EventHandler<String>) -> Element {
     rsx! {
-        div { class: "form-field", style: "margin-bottom:0.65rem;",
+        div { class: "form-field",
             label { class: "form-label", "{label}" }
             input {
                 class: "form-input",
@@ -777,7 +886,7 @@ fn StrField(label: &'static str, value: String, on_change: EventHandler<String>)
 #[component]
 fn AreaField(label: &'static str, value: String, on_change: EventHandler<String>) -> Element {
     rsx! {
-        div { class: "form-field", style: "margin-bottom:0.65rem;",
+        div { class: "form-field",
             label { class: "form-label", "{label}" }
             textarea {
                 class: "form-textarea",
@@ -796,7 +905,7 @@ fn LinesField(
 ) -> Element {
     let joined = value.join("\n");
     rsx! {
-        div { class: "form-field", style: "margin-bottom:0.65rem;",
+        div { class: "form-field",
             label { class: "form-label", "{label} (one per line)" }
             textarea {
                 class: "form-textarea",
