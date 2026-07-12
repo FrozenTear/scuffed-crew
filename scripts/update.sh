@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
-# Pull latest git + prebuilt site-server image and recreate the stack.
+# Pull latest git + prebuilt site-server image and recreate this project's site-server.
 # Does NOT compile on the VPS (that is what GH Actions + GHCR are for).
+#
+# Multi-pod hosts: only stop/remove containers from *this* compose project.
+# Never kill arbitrary processes or remove other stacks that share the host.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -21,6 +24,10 @@ set +a
 SITE_SERVER_IMAGE="${SITE_SERVER_IMAGE:-ghcr.io/frozentear/scuffed-crew:main}"
 export SITE_SERVER_IMAGE
 HOST_PORT="${HOST_PORT:-3000}"
+
+# Compose project name → container prefix (e.g. scuffed-crew-site-server-1).
+# Override with COMPOSE_PROJECT_NAME in secrets.env if your project is renamed.
+PROJECT_NAME="${COMPOSE_PROJECT_NAME:-$(basename "$ROOT")}"
 
 if ! command -v podman >/dev/null 2>&1; then
     echo "error: podman is required" >&2
@@ -62,44 +69,30 @@ port_in_use() {
     ss -tln 2>/dev/null | grep -qE "[:.]${port}[[:space:]]"
 }
 
-# Free HOST_PORT: compose stop/rm, any container publishing the port, orphan conmon.
-free_host_port() {
-    local port="$1"
-
-    echo "Stopping site-server..."
-    "${COMPOSE[@]}" --env-file "$SECRETS" stop site-server 2>/dev/null || true
-    echo "Removing site-server container..."
-    "${COMPOSE[@]}" --env-file "$SECRETS" rm -f site-server 2>/dev/null || true
-
-    # Named leftovers (compose project prefixes vary)
-    podman rm -f scuffed-crew-site-server-1 2>/dev/null || true
-    podman ps -aq --filter "name=site-server" 2>/dev/null | while read -r cid; do
-        [[ -n "${cid}" ]] || continue
-        echo "Removing leftover container ${cid}..."
-        podman rm -f "${cid}" 2>/dev/null || true
-    done
-
-    # Containers that still publish this host port
-    podman ps -aq --filter "publish=${port}" 2>/dev/null | while read -r cid; do
-        [[ -n "${cid}" ]] || continue
-        echo "Removing container publishing :${port} (${cid})..."
-        podman rm -f "${cid}" 2>/dev/null || true
-    done
-
-    # Orphan conmon can hold the bind after the container is gone (Podman + docker-compose).
-    if port_in_use "${port}" && command -v ss >/dev/null 2>&1; then
-        local pids pid comm
-        pids="$(ss -tlnp 2>/dev/null | grep -E "[:.]${port}[[:space:]]" | grep -oE 'pid=[0-9]+' | cut -d= -f2 | sort -u || true)"
-        for pid in ${pids}; do
-            comm="$(ps -p "${pid}" -o comm= 2>/dev/null || true)"
-            if [[ "${comm}" == "conmon" ]]; then
-                echo "Killing orphan conmon pid=${pid} still bound to :${port}..."
-                kill "${pid}" 2>/dev/null || true
-                sleep 0.3
-                kill -9 "${pid}" 2>/dev/null || true
-            fi
-        done
+# Remove only containers that belong to this compose project + site-server service.
+# Never: kill random PIDs, rm containers that only "publish HOST_PORT", or touch other pods.
+remove_our_site_server() {
+    echo "Stopping this project's site-server (${PROJECT_NAME})..."
+    # Scope compose to this directory + project name when supported
+    if "${COMPOSE[@]}" version 2>/dev/null | grep -qi project; then
+        COMPOSE_PROJECT_NAME="${PROJECT_NAME}" "${COMPOSE[@]}" --env-file "$SECRETS" stop site-server 2>/dev/null || true
+        COMPOSE_PROJECT_NAME="${PROJECT_NAME}" "${COMPOSE[@]}" --env-file "$SECRETS" rm -f site-server 2>/dev/null || true
+    else
+        "${COMPOSE[@]}" --env-file "$SECRETS" stop site-server 2>/dev/null || true
+        "${COMPOSE[@]}" --env-file "$SECRETS" rm -f site-server 2>/dev/null || true
     fi
+
+    # Exact-ish name match for this project only (compose default: <project>-site-server-1)
+    local cid name
+    while read -r cid name; do
+        [[ -n "${cid}" ]] || continue
+        case "${name}" in
+            "${PROJECT_NAME}"-site-server|"${PROJECT_NAME}"-site-server-*)
+                echo "Removing project container ${name} (${cid})..."
+                podman rm -f "${cid}" 2>/dev/null || true
+                ;;
+        esac
+    done < <(podman ps -a --format '{{.ID}} {{.Names}}' 2>/dev/null || true)
 }
 
 wait_port_free() {
@@ -115,25 +108,44 @@ wait_port_free() {
     return 1
 }
 
-# Avoid --force-recreate: Podman often leaves conmon on HOST_PORT → bind race.
-free_host_port "${HOST_PORT}"
+describe_port_holders() {
+    local port="$1"
+    echo "Port ${port} listeners:" >&2
+    ss -tlnp 2>/dev/null | grep -E "[:.]${port}[[:space:]]" >&2 || true
+    echo "Containers that might be related:" >&2
+    podman ps -a --format 'table {{.ID}}\t{{.Names}}\t{{.Status}}\t{{.Ports}}' 2>/dev/null | grep -E "site-server|${PROJECT_NAME}|:${port}" >&2 || true
+    echo "All running containers (for multi-pod diagnosis):" >&2
+    podman ps --format 'table {{.ID}}\t{{.Names}}\t{{.Ports}}' 2>/dev/null >&2 || true
+}
 
-echo "Waiting for port ${HOST_PORT} to free..."
+# Avoid --force-recreate: races with the previous container still holding HOST_PORT.
+remove_our_site_server
+
+echo "Waiting for port ${HOST_PORT} to free (this project only)..."
 if ! wait_port_free "${HOST_PORT}" 40; then
-    # One more aggressive pass
-    free_host_port "${HOST_PORT}"
-    if ! wait_port_free "${HOST_PORT}" 20; then
-        echo "error: 127.0.0.1:${HOST_PORT} still in use after cleanup" >&2
-        echo "  ss -tlnp | grep ${HOST_PORT}" >&2
-        ss -tlnp 2>/dev/null | grep -E "[:.]${HOST_PORT}[[:space:]]" >&2 || true
-        echo "  podman ps -a" >&2
-        podman ps -a >&2 || true
-        exit 1
-    fi
+    echo "error: 127.0.0.1:${HOST_PORT} still in use after removing *this* project's site-server." >&2
+    echo "This host runs multiple pods — the script will NOT kill other services." >&2
+    echo >&2
+    describe_port_holders "${HOST_PORT}"
+    echo >&2
+    echo "Pick one:" >&2
+    echo "  1) If the listener is an orphan leftover of THIS stack only:" >&2
+    echo "       podman ps -a | grep ${PROJECT_NAME}" >&2
+    echo "       podman rm -f <that-container-id>" >&2
+    echo "       # If only orphan conmon remains and you are sure it is this stack:" >&2
+    echo "       #   kill <conmon-pid>   # from: ss -tlnp | grep ${HOST_PORT}" >&2
+    echo "  2) If another app owns ${HOST_PORT}, give scuffed-crew a free port:" >&2
+    echo "       # edit data/secrets.env → HOST_PORT=<free>  (and Caddy/proxy)" >&2
+    echo "       ./scripts/update.sh" >&2
+    exit 1
 fi
 
-echo "Starting site-server (Surreal left running)..."
-"${COMPOSE[@]}" --env-file "$SECRETS" up -d site-server
+echo "Starting site-server for project ${PROJECT_NAME} (other pods left alone)..."
+if COMPOSE_PROJECT_NAME="${PROJECT_NAME}" "${COMPOSE[@]}" --env-file "$SECRETS" up -d site-server 2>/dev/null; then
+    :
+else
+    "${COMPOSE[@]}" --env-file "$SECRETS" up -d site-server
+fi
 
 echo
 echo "Updated. Health: curl -sS http://127.0.0.1:${HOST_PORT}/api/health"
