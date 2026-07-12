@@ -280,10 +280,12 @@ pub const CSS: &str = r#"
         font-size: 0.78rem; color: var(--text-3); margin: 0.3rem 0 0; line-height: 1.4;
     }
 
-    /* Settings page: readable width + sticky actions */
+    /* Settings page: use most of the content column; still fluid on small screens */
     .settings-page {
-        max-width: 52rem;
+        width: 100%;
+        max-width: min(72rem, 100%);
         padding-bottom: 5rem;
+        box-sizing: border-box;
     }
     .admin-toolbar.sticky-actions {
         position: sticky; top: 0; z-index: 20;

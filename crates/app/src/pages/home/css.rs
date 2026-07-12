@@ -8,18 +8,21 @@ pub const HOME_SHARED_CSS: &str = r#"
         min-height: 100%;
     }
     .home {
-        max-width: 1040px;
+        /* Fluid: use most of the viewport, cap on very wide screens (~1480px) */
+        width: 100%;
+        max-width: min(92.5rem, 100%);
         margin: 0 auto;
-        padding: 0 1.25rem 5rem;
+        padding: 0 clamp(1.25rem, 3.5vw, 2.75rem) 5rem;
         position: relative;
         z-index: 1;
+        box-sizing: border-box;
     }
 
     /* ——— HERO: big, loud, clipped ——— */
     .home-hero {
         position: relative;
-        margin: 0 -1.25rem;
-        padding: 3.25rem 1.25rem 2.5rem;
+        margin: 0 calc(-1 * clamp(1.25rem, 3.5vw, 2.75rem));
+        padding: 3.25rem clamp(1.25rem, 3.5vw, 2.75rem) 2.5rem;
         overflow: hidden;
         border-bottom: 1px solid var(--border);
         background:
@@ -59,7 +62,11 @@ pub const HOME_SHARED_CSS: &str = r#"
         user-select: none;
         z-index: 1;
     }
-    .home-hero-inner { position: relative; z-index: 2; max-width: 40rem; }
+    .home-hero-inner {
+        position: relative;
+        z-index: 2;
+        max-width: min(48rem, 100%);
+    }
     .home-badge {
         display: inline-flex;
         align-items: center;
@@ -724,28 +731,34 @@ pub const HOME_SKIN_ESPORTS_CSS: &str = r#"
 
 /// Shell-specific composition tweaks.
 pub const HOME_SHELL_CSS: &str = r#"
-/* Recruit landing: more air, recruit emphasis */
+/* Recruit landing: more air, recruit emphasis — still wide */
 .home-wrap[data-home-shell="recruit_landing"] .home {
-    max-width: 960px;
+    max-width: min(88rem, 100%);
 }
 .home-wrap[data-home-shell="recruit_landing"] .home-hero {
-    padding: 4rem 1.25rem 3rem;
+    padding: 4rem clamp(1.25rem, 3.5vw, 2.75rem) 3rem;
+}
+.home-wrap[data-home-shell="recruit_landing"] .home-hero-inner {
+    max-width: min(52rem, 100%);
 }
 .home-wrap[data-home-shell="recruit_landing"] .home-sub {
     font-size: 1.05rem;
-    max-width: 36rem;
+    max-width: min(42rem, 100%);
 }
 .home-wrap[data-home-shell="recruit_landing"] .home-metrics {
     opacity: 0.9;
 }
 
-/* Minimal: tight hero, less chrome */
+/* Minimal: compact but not phone-narrow on desktop */
 .home-wrap[data-home-shell="minimal"] .home {
-    max-width: 36rem;
+    max-width: min(48rem, 100%);
 }
 .home-wrap[data-home-shell="minimal"] .home-hero {
-    padding: 2.5rem 1.25rem 2rem;
+    padding: 2.5rem clamp(1.25rem, 3vw, 2rem) 2rem;
     margin: 0;
+}
+.home-wrap[data-home-shell="minimal"] .home-hero-inner {
+    max-width: 100%;
 }
 .home-wrap[data-home-shell="minimal"] .home-hero-mark {
     font-size: clamp(4rem, 16vw, 8rem);
@@ -758,9 +771,12 @@ pub const HOME_SHELL_CSS: &str = r#"
     display: none;
 }
 
-/* Manifesto: editorial ethos weight */
+/* Manifesto: editorial, but wide enough for big hero type on desktops */
 .home-wrap[data-home-shell="manifesto"] .home {
-    max-width: 720px;
+    max-width: min(80rem, 100%);
+}
+.home-wrap[data-home-shell="manifesto"] .home-hero-inner {
+    max-width: min(56rem, 100%);
 }
 .home-wrap[data-home-shell="manifesto"] .home-block .rules li {
     padding: 0.85rem 0;
@@ -768,6 +784,7 @@ pub const HOME_SHELL_CSS: &str = r#"
 .home-wrap[data-home-shell="manifesto"] .home-body {
     font-size: 1.05rem;
     line-height: 1.65;
+    max-width: min(48rem, 100%);
 }
 .home-wrap[data-home-shell="manifesto"] .never-box {
     border-style: solid;
