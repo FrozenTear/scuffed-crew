@@ -57,24 +57,57 @@ if ! podman pull "${SITE_SERVER_IMAGE}"; then
     exit 1
 fi
 
-# Avoid --force-recreate: with Podman + external docker-compose it often starts a
-# new site-server before the old one releases 127.0.0.1:HOST_PORT (conmon still
-# listening → "address already in use"). Stop + remove, wait for free port, then up.
-echo "Stopping site-server..."
-"${COMPOSE[@]}" --env-file "$SECRETS" stop site-server 2>/dev/null || true
-echo "Removing site-server container..."
-"${COMPOSE[@]}" --env-file "$SECRETS" rm -f site-server 2>/dev/null || true
+port_in_use() {
+    local port="$1"
+    ss -tln 2>/dev/null | grep -qE "[:.]${port}[[:space:]]"
+}
 
-# Best-effort: drop any leftover project site-server by name
-podman rm -f scuffed-crew-site-server-1 2>/dev/null || true
+# Free HOST_PORT: compose stop/rm, any container publishing the port, orphan conmon.
+free_host_port() {
+    local port="$1"
+
+    echo "Stopping site-server..."
+    "${COMPOSE[@]}" --env-file "$SECRETS" stop site-server 2>/dev/null || true
+    echo "Removing site-server container..."
+    "${COMPOSE[@]}" --env-file "$SECRETS" rm -f site-server 2>/dev/null || true
+
+    # Named leftovers (compose project prefixes vary)
+    podman rm -f scuffed-crew-site-server-1 2>/dev/null || true
+    podman ps -aq --filter "name=site-server" 2>/dev/null | while read -r cid; do
+        [[ -n "${cid}" ]] || continue
+        echo "Removing leftover container ${cid}..."
+        podman rm -f "${cid}" 2>/dev/null || true
+    done
+
+    # Containers that still publish this host port
+    podman ps -aq --filter "publish=${port}" 2>/dev/null | while read -r cid; do
+        [[ -n "${cid}" ]] || continue
+        echo "Removing container publishing :${port} (${cid})..."
+        podman rm -f "${cid}" 2>/dev/null || true
+    done
+
+    # Orphan conmon can hold the bind after the container is gone (Podman + docker-compose).
+    if port_in_use "${port}" && command -v ss >/dev/null 2>&1; then
+        local pids pid comm
+        pids="$(ss -tlnp 2>/dev/null | grep -E "[:.]${port}[[:space:]]" | grep -oE 'pid=[0-9]+' | cut -d= -f2 | sort -u || true)"
+        for pid in ${pids}; do
+            comm="$(ps -p "${pid}" -o comm= 2>/dev/null || true)"
+            if [[ "${comm}" == "conmon" ]]; then
+                echo "Killing orphan conmon pid=${pid} still bound to :${port}..."
+                kill "${pid}" 2>/dev/null || true
+                sleep 0.3
+                kill -9 "${pid}" 2>/dev/null || true
+            fi
+        done
+    fi
+}
 
 wait_port_free() {
     local port="$1"
     local tries="${2:-40}"
     local i
     for ((i = 1; i <= tries; i++)); do
-        # Match 127.0.0.1:PORT or *:PORT listen lines
-        if ! ss -tln 2>/dev/null | grep -qE "[:.]${port}\\s"; then
+        if ! port_in_use "${port}"; then
             return 0
         fi
         sleep 0.5
@@ -82,12 +115,21 @@ wait_port_free() {
     return 1
 }
 
+# Avoid --force-recreate: Podman often leaves conmon on HOST_PORT → bind race.
+free_host_port "${HOST_PORT}"
+
 echo "Waiting for port ${HOST_PORT} to free..."
 if ! wait_port_free "${HOST_PORT}" 40; then
-    echo "error: 127.0.0.1:${HOST_PORT} still in use after stopping site-server" >&2
-    echo "  Run: ss -tlnp | grep ${HOST_PORT}" >&2
-    echo "  Then: podman ps -a  # remove any leftover site-server container" >&2
-    exit 1
+    # One more aggressive pass
+    free_host_port "${HOST_PORT}"
+    if ! wait_port_free "${HOST_PORT}" 20; then
+        echo "error: 127.0.0.1:${HOST_PORT} still in use after cleanup" >&2
+        echo "  ss -tlnp | grep ${HOST_PORT}" >&2
+        ss -tlnp 2>/dev/null | grep -E "[:.]${HOST_PORT}[[:space:]]" >&2 || true
+        echo "  podman ps -a" >&2
+        podman ps -a >&2 || true
+        exit 1
+    fi
 fi
 
 echo "Starting site-server (Surreal left running)..."
