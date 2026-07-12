@@ -2,7 +2,7 @@ use dioxus::prelude::*;
 use scuffed_api_client::ApiClient;
 use scuffed_types::{
     MeResponse, OkResponse, OrgRole, SetupRequest, SetupStatusResponse, UserInfo,
-    homepage_presets,
+    homepage_preset_by_id, homepage_presets,
 };
 
 use crate::routes::Route;
@@ -77,6 +77,13 @@ const CSS: &str = r#"
 .setup-card button[type="submit"] {
     width: 100%;
     margin-top: 0.5rem;
+}
+.setup-pack-meta {
+    font-family: var(--font-mono);
+    font-size: 0.72rem;
+    color: var(--text-2);
+    margin: 0.35rem 0 0;
+    letter-spacing: 0.02em;
 }
 "#;
 
@@ -199,7 +206,7 @@ pub fn Setup() -> Element {
                         }
                     }
                     div { class: "setup-field",
-                        label { r#for: "setup-preset", "Homepage template" }
+                        label { r#for: "setup-preset", "Homepage identity pack" }
                         select {
                             id: "setup-preset",
                             value: "{homepage_preset}",
@@ -208,8 +215,31 @@ pub fn Setup() -> Element {
                                 option { value: "{p.id}", "{p.name}" }
                             }
                         }
+                        {
+                            let meta = homepage_preset_by_id(&homepage_preset()).map(|p| {
+                                (
+                                    p.description.to_string(),
+                                    p.suggested_shell.as_str(),
+                                    p.suggested_skin.as_str(),
+                                )
+                            });
+                            if let Some((desc, shell, skin)) = meta {
+                                rsx! {
+                                    p { class: "setup-hint", "{desc}" }
+                                    p { class: "setup-pack-meta",
+                                        "shell={shell} · skin={skin}"
+                                    }
+                                }
+                            } else {
+                                rsx! {
+                                    p { class: "setup-hint",
+                                        "You can change everything later in Admin → Settings."
+                                    }
+                                }
+                            }
+                        }
                         p { class: "setup-hint",
-                            "You can change copy, sections, and brand later in Admin → Settings."
+                            "Packs set homepage layout and starter copy. Edit anytime in Admin → Settings."
                         }
                     }
                     div { class: "setup-field",

@@ -33,9 +33,8 @@ pub fn AdminSettings() -> Element {
     let mut page_bg_image_url = use_signal(String::new);
     let mut brand_accent_dark = use_signal(String::new);
     let mut brand_accent_light = use_signal(String::new);
-    // Selected homepage template id for “Apply template”.
+    // Selected identity pack id for “Apply pack”.
     let mut homepage_preset_id = use_signal(|| "neutral".to_string());
-    let mut apply_suggested_layout = use_signal(|| true);
     let mut apply_suggested_brand = use_signal(|| true);
 
     let _settings = use_resource(move || {
@@ -85,6 +84,8 @@ pub fn AdminSettings() -> Element {
         hp.content_align = content_align();
         let mut n = nav();
         n.normalize();
+        // Dual-write layout from shell (no separate layout control).
+        let shell = home_shell();
         let body = UpdateSettingsRequest {
             org_name: Some(org_name().trim().to_string()),
             site_description: Some(site_description().trim().to_string()),
@@ -93,9 +94,9 @@ pub fn AdminSettings() -> Element {
             min_age: Some(age),
             forum_backend: Some(forum_backend()),
             extra_relay_urls: Some(extra_relay_urls().trim().to_string()),
-            home_shell: Some(home_shell()),
+            home_shell: Some(shell),
             home_skin: Some(home_skin()),
-            public_layout: Some(public_layout()),
+            public_layout: Some(shell.to_public_layout()),
             homepage: Some(hp.clone()),
             nav: Some(n),
             page_bg_color: Some(page_bg_color().trim().to_string()),
@@ -132,14 +133,35 @@ pub fn AdminSettings() -> Element {
         });
     };
 
+    let shell_blurb = match home_shell() {
+        HomeShell::OpsHub => "Dense command board — schedule, roster table, ops-first.",
+        HomeShell::RecruitLanding => "Marketing layout — recruit early, team cards, more space.",
+        HomeShell::Minimal => "Lean front door — hero + apply, optional teams strip.",
+        HomeShell::Manifesto => "Principles first — ethos-heavy, comps quieter.",
+    };
+    let skin_blurb = match home_skin() {
+        HomeSkin::Clean => "Calmer product look (default for most packs).",
+        HomeSkin::Esports => "Clipped badges, denser competitive DNA.",
+    };
+
     rsx! {
         div { class: "admin-toolbar",
             h1 { "Settings" }
-            button {
-                class: "btn-add",
-                disabled: saving() || !loaded(),
-                onclick: on_save,
-                if saving() { "Saving..." } else { "Save Settings" }
+            div { style: "display:flex;gap:0.5rem;flex-wrap:wrap;align-items:center;",
+                a {
+                    class: "btn-add",
+                    href: "/",
+                    target: "_blank",
+                    rel: "noopener",
+                    style: "background:transparent;border:1px solid var(--border);text-decoration:none;",
+                    "View homepage"
+                }
+                button {
+                    class: "btn-add",
+                    disabled: saving() || !loaded(),
+                    onclick: on_save,
+                    if saving() { "Saving..." } else { "Save Settings" }
+                }
             }
         }
 
@@ -168,6 +190,9 @@ pub fn AdminSettings() -> Element {
                         value: "{org_name}",
                         oninput: move |e| org_name.set(e.value()),
                     }
+                    p { style: "color:var(--text-3);font-size:0.8rem;margin:0.35rem 0 0;",
+                        "Used in the nav mark and hero watermark initials."
+                    }
                 }
                 div { class: "form-field",
                     label { class: "form-label", "Site Description" }
@@ -175,6 +200,180 @@ pub fn AdminSettings() -> Element {
                         class: "form-textarea",
                         value: "{site_description}",
                         oninput: move |e| site_description.set(e.value()),
+                    }
+                }
+            }
+
+            // —— Identity pack (primary homepage product surface) ——
+            div { class: "form-section",
+                h2 { "Homepage identity" }
+                p { style: "color:var(--text-3);font-size:0.85rem;margin-bottom:0.85rem;",
+                    "Packs set starter copy, shell, and skin. Officers can still tweak everything below after applying. Changes need Save."
+                }
+
+                // Pack picker
+                div {
+                    style: "margin-bottom:1.1rem;padding:0.9rem;border:1px solid var(--border);border-radius:8px;background:var(--surface-2, transparent);",
+                    div { style: "display:flex;flex-wrap:wrap;align-items:flex-end;gap:0.75rem;",
+                        div { class: "form-field", style: "margin:0;min-width:14rem;flex:1;",
+                            label { class: "form-label", "Identity pack" }
+                            select {
+                                class: "form-input",
+                                value: "{homepage_preset_id}",
+                                onchange: move |e| homepage_preset_id.set(e.value()),
+                                for p in homepage_presets() {
+                                    option { value: "{p.id}", "{p.name}" }
+                                }
+                            }
+                        }
+                        div { class: "form-checkbox-row", style: "margin:0 0 0.2rem;",
+                            input {
+                                r#type: "checkbox",
+                                checked: apply_suggested_brand(),
+                                onchange: move |e| apply_suggested_brand.set(e.checked()),
+                            }
+                            label { class: "form-label", style: "margin:0;", "Also set brand accents" }
+                        }
+                        button {
+                            class: "btn-add",
+                            r#type: "button",
+                            onclick: move |_| {
+                                let id = homepage_preset_id();
+                                if let Some(preset) = homepage_preset_by_id(&id) {
+                                    content_align.set(preset.content.content_align);
+                                    homepage.set(preset.content);
+                                    home_shell.set(preset.suggested_shell);
+                                    home_skin.set(preset.suggested_skin);
+                                    public_layout.set(preset.suggested_shell.to_public_layout());
+                                    if apply_suggested_brand()
+                                        && !preset.suggested_brand.accent_dark.is_empty()
+                                    {
+                                        brand_accent_dark
+                                            .set(preset.suggested_brand.accent_dark.into());
+                                        brand_accent_light
+                                            .set(preset.suggested_brand.accent_light.into());
+                                    }
+                                    toast.show(Toast::success(format!(
+                                        "Applied “{}” ({}/{}) — click Save to persist.",
+                                        preset.name,
+                                        preset.suggested_shell.as_str(),
+                                        preset.suggested_skin.as_str(),
+                                    )));
+                                } else {
+                                    toast.show(Toast::error("Unknown pack."));
+                                }
+                            },
+                            "Apply pack"
+                        }
+                    }
+                    {
+                        let pack_meta = homepage_preset_by_id(&homepage_preset_id()).map(|p| {
+                            (
+                                p.description.to_string(),
+                                p.suggested_shell.as_str(),
+                                p.suggested_skin.as_str(),
+                            )
+                        });
+                        if let Some((desc, sh, sk)) = pack_meta {
+                            rsx! {
+                                p { style: "color:var(--text-3);font-size:0.8rem;margin:0.55rem 0 0;",
+                                    "{desc}"
+                                }
+                                p { style: "color:var(--text-2);font-size:0.75rem;margin:0.25rem 0 0;font-family:var(--font-mono);",
+                                    "Applies shell={sh} · skin={sk} · all homepage text & sections"
+                                }
+                            }
+                        } else {
+                            rsx! {}
+                        }
+                    }
+                }
+
+                div { style: "display:grid;grid-template-columns:repeat(auto-fill,minmax(14rem,1fr));gap:0.85rem;margin-bottom:0.85rem;",
+                    div { class: "form-field", style: "margin:0;",
+                        label { class: "form-label", "Shell" }
+                        select {
+                            class: "form-input",
+                            value: "{home_shell().as_str()}",
+                            onchange: move |e| {
+                                let shell = HomeShell::from_str_lossy(&e.value());
+                                home_shell.set(shell);
+                                public_layout.set(shell.to_public_layout());
+                            },
+                            option { value: "ops_hub", "Ops hub" }
+                            option { value: "recruit_landing", "Recruit landing" }
+                            option { value: "minimal", "Minimal" }
+                            option { value: "manifesto", "Manifesto" }
+                        }
+                        p { style: "color:var(--text-3);font-size:0.78rem;margin:0.35rem 0 0;", "{shell_blurb}" }
+                    }
+                    div { class: "form-field", style: "margin:0;",
+                        label { class: "form-label", "Skin" }
+                        select {
+                            class: "form-input",
+                            value: "{home_skin().as_str()}",
+                            onchange: move |e| home_skin.set(HomeSkin::from_str_lossy(&e.value())),
+                            option { value: "clean", "Clean" }
+                            option { value: "esports", "Esports" }
+                        }
+                        p { style: "color:var(--text-3);font-size:0.78rem;margin:0.35rem 0 0;", "{skin_blurb}" }
+                    }
+                    div { class: "form-field", style: "margin:0;",
+                        label { class: "form-label", "Hero text alignment" }
+                        select {
+                            class: "form-input",
+                            value: "{content_align().as_str()}",
+                            onchange: move |e| {
+                                content_align.set(ContentAlign::from_str_lossy(&e.value()));
+                            },
+                            option { value: "left", "Left" }
+                            option { value: "center", "Center" }
+                        }
+                        p { style: "color:var(--text-3);font-size:0.78rem;margin:0.35rem 0 0;",
+                            "Hero only. Body sections stay left."
+                        }
+                    }
+                }
+
+                Fieldset { title: "Visible sections",
+                    p { style: "color:var(--text-3);font-size:0.8rem;margin:0 0 0.65rem;",
+                        "Hero is always shown. Uncheck to hide a block. Empty data may still hide some blocks depending on shell."
+                    }
+                    {
+                        let sections = [
+                            ("ethos", "About / ethos", homepage().sections.ethos),
+                            ("schedule", "Schedule", homepage().sections.schedule),
+                            ("tournaments", "Tournaments", homepage().sections.tournaments),
+                            ("teams", "Teams", homepage().sections.teams),
+                            ("news", "Announcements", homepage().sections.news),
+                            ("recruit", "Recruiting", homepage().sections.recruit),
+                        ];
+                        rsx! {
+                            div { style: "display:grid;grid-template-columns:repeat(auto-fill,minmax(10rem,1fr));gap:0.5rem;",
+                                for (key, label, checked) in sections {
+                                    div { class: "form-checkbox-row", style: "margin:0;",
+                                        input {
+                                            r#type: "checkbox",
+                                            checked: checked,
+                                            onchange: move |e| {
+                                                let on = e.checked();
+                                                let mut hp = homepage.write();
+                                                match key {
+                                                    "ethos" => hp.sections.ethos = on,
+                                                    "schedule" => hp.sections.schedule = on,
+                                                    "tournaments" => hp.sections.tournaments = on,
+                                                    "teams" => hp.sections.teams = on,
+                                                    "news" => hp.sections.news = on,
+                                                    "recruit" => hp.sections.recruit = on,
+                                                    _ => {}
+                                                }
+                                            },
+                                        }
+                                        label { class: "form-label", style: "margin:0;", "{label}" }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -196,7 +395,7 @@ pub fn AdminSettings() -> Element {
                     }
                 }
                 p { style: "color:var(--text-3);font-size:0.85rem;margin-bottom:0.85rem;",
-                    "Pick which pages show in the top bar, the More menu, or stay hidden. Hidden pages still work via direct URL. Logo, Apply, and account stay fixed."
+                    "Pick which pages show in the top bar, the More menu, or stay hidden. Hidden pages still work via direct URL."
                 }
                 NavColumn {
                     title: "Primary bar",
@@ -215,68 +414,6 @@ pub fn AdminSettings() -> Element {
                     hint: "Not in the nav — promote when you need them.",
                     placement: NavPlacement::Hidden,
                     nav: nav,
-                }
-            }
-
-            div { class: "form-section",
-                h2 { "Public homepage layout" }
-                p { style: "color:var(--text-3);font-size:0.85rem;margin-bottom:0.75rem;",
-                    "Shell = composition (section order / empty policy). Skin = visual personality. Layout mode is dual-written from shell for compatibility."
-                }
-                div { class: "form-field", style: "margin-bottom:0.85rem;",
-                    label { class: "form-label", "Shell" }
-                    select {
-                        class: "form-input",
-                        value: "{home_shell().as_str()}",
-                        onchange: move |e| {
-                            let shell = HomeShell::from_str_lossy(&e.value());
-                            home_shell.set(shell);
-                            public_layout.set(shell.to_public_layout());
-                        },
-                        option { value: "ops_hub", "Ops hub (dense)" }
-                        option { value: "recruit_landing", "Recruit landing" }
-                        option { value: "minimal", "Minimal" }
-                        option { value: "manifesto", "Manifesto" }
-                    }
-                }
-                div { class: "form-field", style: "margin-bottom:0.85rem;",
-                    label { class: "form-label", "Skin" }
-                    select {
-                        class: "form-input",
-                        value: "{home_skin().as_str()}",
-                        onchange: move |e| home_skin.set(HomeSkin::from_str_lossy(&e.value())),
-                        option { value: "clean", "Clean (product default)" }
-                        option { value: "esports", "Esports" }
-                    }
-                }
-                div { class: "form-field", style: "margin-bottom:0.85rem;",
-                    label { class: "form-label", "Layout mode (mirror)" }
-                    select {
-                        class: "form-input",
-                        value: "{public_layout().as_str()}",
-                        onchange: move |e| {
-                            let layout = PublicLayout::from_str_lossy(&e.value());
-                            public_layout.set(layout);
-                            home_shell.set(HomeShell::from_public_layout(layout));
-                        },
-                        option { value: "hub", "Hub (ops/minimal)" }
-                        option { value: "landing", "Landing (recruit/manifesto)" }
-                    }
-                }
-                div { class: "form-field",
-                    label { class: "form-label", "Text alignment" }
-                    p { style: "color:var(--text-3);font-size:0.8rem;margin:0 0 0.4rem;",
-                        "Center only affects the hero. Body sections stay left so headers and lists match."
-                    }
-                    select {
-                        class: "form-input",
-                        value: "{content_align().as_str()}",
-                        onchange: move |e| {
-                            content_align.set(ContentAlign::from_str_lossy(&e.value()));
-                        },
-                        option { value: "left", "Left" }
-                        option { value: "center", "Center" }
-                    }
                 }
             }
 
@@ -431,123 +568,8 @@ pub fn AdminSettings() -> Element {
 
             div { class: "form-section",
                 h2 { style: "margin:0 0 0.5rem;", "Homepage text" }
-                p { style: "color:var(--text-3);font-size:0.85rem;margin-bottom:0.75rem;",
-                    "Edit public homepage copy without touching code. List fields: one item per line. Apply a template to replace all fields with a starter pack (then Save)."
-                }
-                div {
-                    style: "display:flex;flex-wrap:wrap;align-items:flex-end;gap:0.75rem;margin-bottom:1rem;padding:0.85rem;border:1px solid var(--border);border-radius:8px;background:var(--surface-2, transparent);",
-                    div { class: "form-field", style: "margin:0;min-width:12rem;flex:1;",
-                        label { class: "form-label", "Template" }
-                        select {
-                            class: "form-input",
-                            value: "{homepage_preset_id}",
-                            onchange: move |e| homepage_preset_id.set(e.value()),
-                            for p in homepage_presets() {
-                                option { value: "{p.id}", "{p.name}" }
-                            }
-                        }
-                        {
-                            let desc = homepage_preset_by_id(&homepage_preset_id())
-                                .map(|p| p.description.to_string())
-                                .unwrap_or_default();
-                            rsx! {
-                                p { style: "color:var(--text-3);font-size:0.8rem;margin:0.35rem 0 0;",
-                                    "{desc}"
-                                }
-                            }
-                        }
-                    }
-                    div { style: "display:flex;flex-direction:column;gap:0.35rem;margin:0 0 0.15rem;",
-                        div { class: "form-checkbox-row", style: "margin:0;",
-                            input {
-                                r#type: "checkbox",
-                                checked: apply_suggested_layout(),
-                                onchange: move |e| apply_suggested_layout.set(e.checked()),
-                            }
-                            label { class: "form-label", style: "margin:0;", "Also set layout (Hub/Landing)" }
-                        }
-                        div { class: "form-checkbox-row", style: "margin:0;",
-                            input {
-                                r#type: "checkbox",
-                                checked: apply_suggested_brand(),
-                                onchange: move |e| apply_suggested_brand.set(e.checked()),
-                            }
-                            label { class: "form-label", style: "margin:0;", "Also set brand accents" }
-                        }
-                    }
-                    button {
-                        class: "btn-add",
-                        r#type: "button",
-                        onclick: move |_| {
-                            let id = homepage_preset_id();
-                            if let Some(preset) = homepage_preset_by_id(&id) {
-                                content_align.set(preset.content.content_align);
-                                homepage.set(preset.content);
-                                home_shell.set(preset.suggested_shell);
-                                home_skin.set(preset.suggested_skin);
-                                if apply_suggested_layout() {
-                                    public_layout.set(preset.suggested_layout);
-                                }
-                                if apply_suggested_brand()
-                                    && !preset.suggested_brand.accent_dark.is_empty()
-                                {
-                                    brand_accent_dark
-                                        .set(preset.suggested_brand.accent_dark.into());
-                                    brand_accent_light
-                                        .set(preset.suggested_brand.accent_light.into());
-                                }
-                                toast.show(Toast::success(format!(
-                                    "Applied “{}” — click Save to persist.",
-                                    preset.name
-                                )));
-                            } else {
-                                toast.show(Toast::error("Unknown template."));
-                            }
-                        },
-                        "Apply template"
-                    }
-                }
-
-                Fieldset { title: "Visible sections",
-                    p { style: "color:var(--text-3);font-size:0.8rem;margin:0 0 0.65rem;",
-                        "Hero is always shown. Uncheck to hide a block on the public homepage."
-                    }
-                    {
-                        let sections = [
-                            ("ethos", "About / ethos", homepage().sections.ethos),
-                            ("schedule", "Schedule", homepage().sections.schedule),
-                            ("tournaments", "Tournaments", homepage().sections.tournaments),
-                            ("teams", "Teams", homepage().sections.teams),
-                            ("news", "Announcements", homepage().sections.news),
-                            ("recruit", "Recruiting", homepage().sections.recruit),
-                        ];
-                        rsx! {
-                            div { style: "display:grid;grid-template-columns:repeat(auto-fill,minmax(10rem,1fr));gap:0.5rem;",
-                                for (key, label, checked) in sections {
-                                    div { class: "form-checkbox-row", style: "margin:0;",
-                                        input {
-                                            r#type: "checkbox",
-                                            checked: checked,
-                                            onchange: move |e| {
-                                                let on = e.checked();
-                                                let mut hp = homepage.write();
-                                                match key {
-                                                    "ethos" => hp.sections.ethos = on,
-                                                    "schedule" => hp.sections.schedule = on,
-                                                    "tournaments" => hp.sections.tournaments = on,
-                                                    "teams" => hp.sections.teams = on,
-                                                    "news" => hp.sections.news = on,
-                                                    "recruit" => hp.sections.recruit = on,
-                                                    _ => {}
-                                                }
-                                            },
-                                        }
-                                        label { class: "form-label", style: "margin:0;", "{label}" }
-                                    }
-                                }
-                            }
-                        }
-                    }
+                p { style: "color:var(--text-3);font-size:0.85rem;margin-bottom:1rem;",
+                    "Fine-tune copy after applying a pack. List fields: one item per line."
                 }
 
                 Fieldset { title: "Hero",
