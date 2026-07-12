@@ -140,7 +140,7 @@ pub fn AdminSettings() -> Element {
     };
 
     rsx! {
-        div { class: "admin-toolbar",
+        div { class: "admin-toolbar sticky-actions",
             h1 { "Settings" }
             div { style: "display:flex;gap:0.5rem;flex-wrap:wrap;align-items:center;",
                 a {
@@ -175,6 +175,7 @@ pub fn AdminSettings() -> Element {
         } else if !loaded() {
             p { style: "color: var(--text-3);", "Loading settings…" }
         } else {
+            div { class: "settings-page",
             div { class: "form-section",
                 h2 { "Organization" }
                 p { class: "form-section-lead",
@@ -409,53 +410,16 @@ pub fn AdminSettings() -> Element {
             }
 
             div { class: "form-section",
-                div { style: "display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:0.75rem;margin-bottom:0.35rem;",
-                    h2 { style: "margin:0;", "Navigation" }
-                    button {
-                        class: "btn-ghost",
-                        r#type: "button",
-                        onclick: move |_| {
-                            nav.set(NavConfig::default());
-                            toast.show(Toast::success(
-                                "Nav reset to lean defaults — click Save to persist.",
-                            ));
-                        },
-                        "Reset defaults"
-                    }
-                }
+                h2 { "Appearance" }
                 p { class: "form-section-lead",
-                    "Primary bar, More menu, or hidden. Hidden routes still work via direct URL."
-                }
-                NavColumn {
-                    title: "Primary bar",
-                    hint: "Shown across the top next to the logo.",
-                    placement: NavPlacement::Primary,
-                    nav: nav,
-                }
-                NavColumn {
-                    title: "More menu",
-                    hint: "Overflow dropdown. Hidden entirely if empty.",
-                    placement: NavPlacement::More,
-                    nav: nav,
-                }
-                NavColumn {
-                    title: "Hidden",
-                    hint: "Not in the nav — promote when you need them.",
-                    placement: NavPlacement::Hidden,
-                    nav: nav,
-                }
-            }
-
-            div { class: "form-section",
-                h2 { "Brand accents" }
-                p { class: "form-section-lead",
-                    "Primary accent for buttons and highlights. Empty = product default purple."
+                    "Brand accents and page background. Empty accent = product default purple."
                 }
                 div { class: "form-section-card",
-                    div { style: "display:flex;flex-wrap:wrap;gap:1rem;align-items:flex-end;",
-                        div { class: "form-field", style: "margin:0;min-width:10rem;flex:1;",
+                    div { class: "settings-subhead", "Brand accents" }
+                    div { class: "color-row",
+                        div { class: "color-field",
                             label { class: "form-label", "Dark theme" }
-                            div { style: "display:flex;align-items:center;gap:0.5rem;",
+                            div { class: "swatch-row",
                                 input {
                                     r#type: "color",
                                     value: {
@@ -463,20 +427,18 @@ pub fn AdminSettings() -> Element {
                                         if c.len() == 7 && c.starts_with('#') { c } else { "#8f73ff".into() }
                                     },
                                     oninput: move |e| brand_accent_dark.set(e.value()),
-                                    style: "width:3rem;height:2.25rem;padding:0;border:1px solid var(--border);border-radius:6px;background:transparent;cursor:pointer;",
                                 }
                                 input {
                                     class: "form-input",
-                                    style: "flex:1;min-width:6rem;",
                                     placeholder: "#8f73ff",
                                     value: "{brand_accent_dark}",
                                     oninput: move |e| brand_accent_dark.set(e.value()),
                                 }
                             }
                         }
-                        div { class: "form-field", style: "margin:0;min-width:10rem;flex:1;",
+                        div { class: "color-field",
                             label { class: "form-label", "Light theme" }
-                            div { style: "display:flex;align-items:center;gap:0.5rem;",
+                            div { class: "swatch-row",
                                 input {
                                     r#type: "color",
                                     value: {
@@ -484,11 +446,9 @@ pub fn AdminSettings() -> Element {
                                         if c.len() == 7 && c.starts_with('#') { c } else { "#6d4aff".into() }
                                     },
                                     oninput: move |e| brand_accent_light.set(e.value()),
-                                    style: "width:3rem;height:2.25rem;padding:0;border:1px solid var(--border);border-radius:6px;background:transparent;cursor:pointer;",
                                 }
                                 input {
                                     class: "form-input",
-                                    style: "flex:1;min-width:6rem;",
                                     placeholder: "#6d4aff",
                                     value: "{brand_accent_light}",
                                     oninput: move |e| brand_accent_light.set(e.value()),
@@ -502,54 +462,47 @@ pub fn AdminSettings() -> Element {
                                 brand_accent_dark.set(String::new());
                                 brand_accent_light.set(String::new());
                             },
-                            "Clear"
+                            "Clear accents"
                         }
                     }
-                }
-            }
-
-            div { class: "form-section",
-                h2 { "Page background" }
-                p { class: "form-section-lead",
-                    "Solid color and optional image. Empty color = theme default. Image is cover-fitted behind content."
-                }
-                div { class: "form-section-card",
-                    div { class: "form-field", style: "margin-bottom:0.85rem;",
-                        label { class: "form-label", "Background color" }
-                        div { style: "display:flex;align-items:center;gap:0.65rem;flex-wrap:wrap;",
-                            input {
-                                r#type: "color",
-                                value: {
-                                    let c = page_bg_color();
-                                    if c.len() == 7 && c.starts_with('#') { c } else { "#17171d".into() }
-                                },
-                                oninput: move |e| page_bg_color.set(e.value()),
-                                style: "width:3rem;height:2.25rem;padding:0;border:1px solid var(--border);border-radius:6px;background:transparent;cursor:pointer;",
+                    div { class: "settings-divider" }
+                    div { class: "settings-subhead", "Page background" }
+                    div { class: "color-row", style: "margin-bottom:0.85rem;",
+                        div { class: "color-field", style: "max-width:18rem;flex:1 1 14rem;",
+                            label { class: "form-label", "Background color" }
+                            div { class: "swatch-row",
+                                input {
+                                    r#type: "color",
+                                    value: {
+                                        let c = page_bg_color();
+                                        if c.len() == 7 && c.starts_with('#') { c } else { "#17171d".into() }
+                                    },
+                                    oninput: move |e| page_bg_color.set(e.value()),
+                                }
+                                input {
+                                    class: "form-input",
+                                    placeholder: "empty = theme default",
+                                    value: "{page_bg_color}",
+                                    oninput: move |e| page_bg_color.set(e.value()),
+                                }
                             }
-                            input {
-                                class: "form-input",
-                                style: "flex:1;min-width:8rem;",
-                                placeholder: "#17171d (empty = theme default)",
-                                value: "{page_bg_color}",
-                                oninput: move |e| page_bg_color.set(e.value()),
-                            }
-                            button {
-                                class: "btn-ghost",
-                                r#type: "button",
-                                onclick: move |_| page_bg_color.set(String::new()),
-                                "Clear"
-                            }
+                        }
+                        button {
+                            class: "btn-ghost",
+                            r#type: "button",
+                            onclick: move |_| page_bg_color.set(String::new()),
+                            "Clear color"
                         }
                     }
                     div { class: "form-field",
                         label { class: "form-label", "Background image URL" }
                         p { class: "settings-hint", style: "margin-bottom:0.4rem;",
-                            "https://… or /uploads/bg.jpg. Leave empty for none."
+                            "https://… or /uploads/bg.jpg"
                         }
                         div { style: "display:flex;align-items:center;gap:0.65rem;flex-wrap:wrap;",
                             input {
                                 class: "form-input",
-                                style: "flex:1;min-width:12rem;",
+                                style: "flex:1;min-width:12rem;max-width:28rem;",
                                 placeholder: "https://… or /uploads/…",
                                 value: "{page_bg_image_url}",
                                 oninput: move |e| page_bg_image_url.set(e.value()),
@@ -718,6 +671,44 @@ pub fn AdminSettings() -> Element {
             }
 
             div { class: "form-section",
+                div { style: "display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:0.75rem;margin-bottom:0.35rem;",
+                    h2 { style: "margin:0;", "Navigation" }
+                    button {
+                        class: "btn-ghost",
+                        r#type: "button",
+                        onclick: move |_| {
+                            nav.set(NavConfig::default());
+                            toast.show(Toast::success(
+                                "Nav reset to lean defaults — click Save to persist.",
+                            ));
+                        },
+                        "Reset defaults"
+                    }
+                }
+                p { class: "form-section-lead",
+                    "Primary bar, More menu, or hidden. Hidden routes still work via direct URL."
+                }
+                NavColumn {
+                    title: "Primary bar",
+                    hint: "Shown across the top next to the logo.",
+                    placement: NavPlacement::Primary,
+                    nav: nav,
+                }
+                NavColumn {
+                    title: "More menu",
+                    hint: "Overflow dropdown. Hidden entirely if empty.",
+                    placement: NavPlacement::More,
+                    nav: nav,
+                }
+                NavColumn {
+                    title: "Hidden",
+                    hint: "Not in the nav — promote when you need them.",
+                    placement: NavPlacement::Hidden,
+                    nav: nav,
+                }
+            }
+
+            div { class: "form-section",
                 h2 { "Forum" }
                 p { class: "form-section-lead", "Where forum threads live and optional extra Nostr relays." }
                 div { class: "form-section-card",
@@ -748,6 +739,7 @@ pub fn AdminSettings() -> Element {
                     }
                 }
             }
+            }
         }
     }
 }
@@ -773,25 +765,20 @@ fn NavColumn(
     };
 
     rsx! {
-        div { style: "margin-bottom:1rem;padding:0.85rem;border:1px solid var(--border);border-radius:8px;background:var(--surface);",
-            h3 {
-                style: "font-family:var(--font-mono);font-size:0.7rem;letter-spacing:0.1em;text-transform:uppercase;color:var(--text-3);margin:0 0 0.25rem;",
-                "{title}"
-            }
-            p { style: "color:var(--text-3);font-size:0.78rem;margin:0 0 0.65rem;", "{hint}" }
+        div { class: "nav-column",
+            h3 { "{title}" }
+            p { class: "nav-hint", "{hint}" }
             if items.is_empty() {
                 p { style: "color:var(--text-3);font-size:0.85rem;margin:0;", "None" }
             } else {
-                ul { style: "list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:0.4rem;",
+                ul { style: "list-style:none;margin:0;padding:0;display:flex;flex-direction:column;",
                     for (id, label) in items {
                         li {
                             key: "{id}",
-                            style: "display:flex;align-items:center;gap:0.5rem;flex-wrap:wrap;padding:0.4rem 0.55rem;border:1px solid var(--border);border-radius:6px;background:var(--surface-2);",
-                            span { style: "flex:1;min-width:6rem;font-weight:500;", "{label}" }
-                            span { style: "font-family:var(--font-mono);font-size:0.65rem;color:var(--text-3);", "{id}" }
+                            class: "nav-row",
+                            span { class: "nav-row-label", title: "{id}", "{label}" }
                             select {
                                 class: "form-input",
-                                style: "width:auto;min-width:7rem;padding:0.25rem 0.4rem;font-size:0.8rem;",
                                 value: "{placement.as_str()}",
                                 onchange: {
                                     let id = id.clone();
@@ -860,7 +847,7 @@ fn CopyPanel(
                     open_copy.set(set);
                 },
                 span { class: "copy-panel-title", "{title}" }
-                span { class: "copy-panel-chevron", "▸" }
+                span { class: "copy-panel-chevron", if is_open { "▼" } else { "▶" } }
             }
             if is_open {
                 div { class: "copy-panel-body", {children} }

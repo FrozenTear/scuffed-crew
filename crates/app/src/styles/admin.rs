@@ -259,10 +259,9 @@ pub const CSS: &str = r#"
         text-transform: uppercase; letter-spacing: 0.06em;
     }
     .copy-panel-chevron {
-        font-family: var(--font-mono); font-size: 0.75rem; color: var(--text-3);
-        transition: transform 0.15s;
+        font-size: 0.65rem; color: var(--text-3); line-height: 1;
+        width: 1.25rem; text-align: center; flex-shrink: 0;
     }
-    .copy-panel.is-open .copy-panel-chevron { transform: rotate(90deg); }
     .copy-panel-body {
         padding: 0 1rem 1rem;
         border-top: 1px solid var(--border);
@@ -280,4 +279,70 @@ pub const CSS: &str = r#"
     .settings-hint {
         font-size: 0.78rem; color: var(--text-3); margin: 0.3rem 0 0; line-height: 1.4;
     }
+
+    /* Settings page: readable width + sticky actions */
+    .settings-page {
+        max-width: 52rem;
+        padding-bottom: 5rem;
+    }
+    .admin-toolbar.sticky-actions {
+        position: sticky; top: 0; z-index: 20;
+        margin: -0.5rem -0.5rem 1.25rem;
+        padding: 0.75rem 0.5rem;
+        background: color-mix(in srgb, var(--bg) 92%, transparent);
+        backdrop-filter: blur(10px);
+        border-bottom: 1px solid color-mix(in srgb, var(--border) 80%, transparent);
+    }
+    .settings-subhead {
+        font-family: var(--font-head); font-size: 0.72rem; font-weight: 700;
+        text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-3);
+        margin: 0 0 0.55rem;
+    }
+    .settings-divider {
+        height: 1px; background: var(--border); margin: 1.1rem 0;
+    }
+    .color-row {
+        display: flex; flex-wrap: wrap; gap: 1rem; align-items: flex-end;
+    }
+    .color-field {
+        display: flex; flex-direction: column; gap: 0.3rem;
+        min-width: 11rem; max-width: 16rem; flex: 0 1 16rem;
+    }
+    .color-field .swatch-row {
+        display: flex; align-items: center; gap: 0.5rem;
+    }
+    .color-field input[type="color"] {
+        width: 2.5rem; height: 2.5rem; padding: 0;
+        border: 1px solid var(--border); border-radius: 8px;
+        background: transparent; cursor: pointer; flex-shrink: 0;
+    }
+    .color-field .form-input { flex: 1; min-width: 0; font-family: var(--font-mono); font-size: 0.8rem; }
+
+    /* Compact nav editor */
+    .nav-column {
+        margin-bottom: 0.75rem; padding: 0.75rem 0.85rem;
+        border: 1px solid var(--border); border-radius: 10px; background: var(--surface);
+    }
+    .nav-column h3 {
+        font-family: var(--font-mono); font-size: 0.68rem; letter-spacing: 0.1em;
+        text-transform: uppercase; color: var(--text-3); margin: 0 0 0.2rem;
+    }
+    .nav-column .nav-hint {
+        color: var(--text-3); font-size: 0.75rem; margin: 0 0 0.55rem; line-height: 1.35;
+    }
+    .nav-row {
+        display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;
+        padding: 0.45rem 0.55rem; border-radius: 7px;
+        border: 1px solid transparent;
+    }
+    .nav-row:hover { background: var(--surface-2); border-color: var(--border); }
+    .nav-row-label { flex: 1; min-width: 5rem; font-weight: 500; font-size: 0.88rem; }
+    .nav-row-id {
+        font-family: var(--font-mono); font-size: 0.62rem; color: var(--text-3);
+        opacity: 0.85;
+    }
+    .nav-row .form-input {
+        width: auto; min-width: 6.5rem; padding: 0.28rem 0.45rem; font-size: 0.78rem;
+    }
+    .nav-row .row-btn { padding: 0.22rem 0.45rem; min-width: 1.75rem; }
 "#;
