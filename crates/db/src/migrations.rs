@@ -237,6 +237,10 @@ pub async fn run_migrations(client: &Surreal<Any>) -> DbResult<()> {
         DEFINE FIELD OVERWRITE forum_backend ON site_settings TYPE string DEFAULT 'local'
             ASSERT $value IN ['local', 'nostr'];
         DEFINE FIELD OVERWRITE extra_relay_urls ON site_settings TYPE string DEFAULT '';
+        DEFINE FIELD OVERWRITE home_shell ON site_settings TYPE string DEFAULT 'ops_hub'
+            ASSERT $value IN ['ops_hub', 'recruit_landing', 'minimal', 'manifesto', ''];
+        DEFINE FIELD OVERWRITE home_skin ON site_settings TYPE string DEFAULT 'clean'
+            ASSERT $value IN ['clean', 'esports', ''];
         DEFINE FIELD OVERWRITE public_layout ON site_settings TYPE string DEFAULT 'hub'
             ASSERT $value IN ['hub', 'landing'];
         DEFINE FIELD OVERWRITE homepage_json ON site_settings TYPE string DEFAULT '';

@@ -775,7 +775,13 @@ pub struct SiteSettings {
     pub min_age: u32,
     pub forum_backend: String,
     pub extra_relay_urls: String,
-    /// "hub" | "landing"
+    /// Canonical homepage shell: ops_hub | recruit_landing | minimal | manifesto
+    #[serde(default)]
+    pub home_shell: String,
+    /// Canonical homepage skin: clean | esports
+    #[serde(default)]
+    pub home_skin: String,
+    /// "hub" | "landing" — dual-write mirror of shell for one release
     #[serde(default = "default_public_layout")]
     pub public_layout: String,
     /// JSON blob of homepage copy (parsed to HomepageContent on the app side).

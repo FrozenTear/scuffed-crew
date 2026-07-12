@@ -182,9 +182,13 @@ pub async fn seed_dev_data(
             None,
             Some(scuffed.suggested_brand.accent_dark),
             Some(scuffed.suggested_brand.accent_light),
+            Some(scuffed.suggested_shell.as_str()),
+            Some(scuffed.suggested_skin.as_str()),
         )
         .await?;
-        tracing::info!("Dev site settings: Scuffed Crew homepage + brand applied");
+        tracing::info!(
+            "Dev site settings: Scuffed Crew homepage + brand + shell/skin applied"
+        );
     }
 
     Ok(())

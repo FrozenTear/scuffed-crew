@@ -4,8 +4,8 @@ use crate::components::{Toast, use_toast};
 use scuffed_api_client::ApiClient;
 use scuffed_types::api::UpdateSettingsRequest;
 use scuffed_types::{
-    ContentAlign, HomepageContent, NavConfig, NavPlacement, PublicLayout, SiteSettings,
-    homepage_preset_by_id, homepage_presets,
+    ContentAlign, HomeShell, HomeSkin, HomepageContent, NavConfig, NavPlacement, PublicLayout,
+    SiteSettings, homepage_preset_by_id, homepage_presets,
 };
 
 #[component]
@@ -24,6 +24,8 @@ pub fn AdminSettings() -> Element {
     let mut forum_backend = use_signal(|| "local".to_string());
     let mut extra_relay_urls = use_signal(String::new);
     let mut public_layout = use_signal(|| PublicLayout::Hub);
+    let mut home_shell = use_signal(|| HomeShell::OpsHub);
+    let mut home_skin = use_signal(|| HomeSkin::Clean);
     let mut content_align = use_signal(|| ContentAlign::Left);
     let mut homepage = use_signal(HomepageContent::default);
     let mut nav = use_signal(NavConfig::default);
@@ -53,6 +55,8 @@ pub fn AdminSettings() -> Element {
                     forum_backend.set(s.forum_backend);
                     extra_relay_urls.set(s.extra_relay_urls);
                     public_layout.set(s.public_layout);
+                    home_shell.set(s.home_shell);
+                    home_skin.set(s.home_skin);
                     content_align.set(s.homepage.content_align);
                     homepage.set(s.homepage);
                     let mut n = s.nav;
@@ -89,6 +93,8 @@ pub fn AdminSettings() -> Element {
             min_age: Some(age),
             forum_backend: Some(forum_backend()),
             extra_relay_urls: Some(extra_relay_urls().trim().to_string()),
+            home_shell: Some(home_shell()),
+            home_skin: Some(home_skin()),
             public_layout: Some(public_layout()),
             homepage: Some(hp.clone()),
             nav: Some(n),
@@ -107,6 +113,8 @@ pub fn AdminSettings() -> Element {
                 Ok(s) => {
                     // Keep UI in sync with what the server actually stored.
                     public_layout.set(s.public_layout);
+                    home_shell.set(s.home_shell);
+                    home_skin.set(s.home_skin);
                     content_align.set(s.homepage.content_align);
                     homepage.set(s.homepage);
                     let mut n = s.nav;
@@ -213,16 +221,46 @@ pub fn AdminSettings() -> Element {
             div { class: "form-section",
                 h2 { "Public homepage layout" }
                 p { style: "color:var(--text-3);font-size:0.85rem;margin-bottom:0.75rem;",
-                    "Hub hides empty marketing sections. Landing keeps them visible with empty-state copy."
+                    "Shell = composition (section order / empty policy). Skin = visual personality. Layout mode is dual-written from shell for compatibility."
                 }
                 div { class: "form-field", style: "margin-bottom:0.85rem;",
-                    label { class: "form-label", "Layout mode" }
+                    label { class: "form-label", "Shell" }
+                    select {
+                        class: "form-input",
+                        value: "{home_shell().as_str()}",
+                        onchange: move |e| {
+                            let shell = HomeShell::from_str_lossy(&e.value());
+                            home_shell.set(shell);
+                            public_layout.set(shell.to_public_layout());
+                        },
+                        option { value: "ops_hub", "Ops hub (dense)" }
+                        option { value: "recruit_landing", "Recruit landing" }
+                        option { value: "minimal", "Minimal" }
+                        option { value: "manifesto", "Manifesto" }
+                    }
+                }
+                div { class: "form-field", style: "margin-bottom:0.85rem;",
+                    label { class: "form-label", "Skin" }
+                    select {
+                        class: "form-input",
+                        value: "{home_skin().as_str()}",
+                        onchange: move |e| home_skin.set(HomeSkin::from_str_lossy(&e.value())),
+                        option { value: "clean", "Clean (product default)" }
+                        option { value: "esports", "Esports" }
+                    }
+                }
+                div { class: "form-field", style: "margin-bottom:0.85rem;",
+                    label { class: "form-label", "Layout mode (mirror)" }
                     select {
                         class: "form-input",
                         value: "{public_layout().as_str()}",
-                        onchange: move |e| public_layout.set(PublicLayout::from_str_lossy(&e.value())),
-                        option { value: "hub", "Hub (recommended)" }
-                        option { value: "landing", "Landing" }
+                        onchange: move |e| {
+                            let layout = PublicLayout::from_str_lossy(&e.value());
+                            public_layout.set(layout);
+                            home_shell.set(HomeShell::from_public_layout(layout));
+                        },
+                        option { value: "hub", "Hub (ops/minimal)" }
+                        option { value: "landing", "Landing (recruit/manifesto)" }
                     }
                 }
                 div { class: "form-field",
@@ -445,6 +483,8 @@ pub fn AdminSettings() -> Element {
                             if let Some(preset) = homepage_preset_by_id(&id) {
                                 content_align.set(preset.content.content_align);
                                 homepage.set(preset.content);
+                                home_shell.set(preset.suggested_shell);
+                                home_skin.set(preset.suggested_skin);
                                 if apply_suggested_layout() {
                                     public_layout.set(preset.suggested_layout);
                                 }

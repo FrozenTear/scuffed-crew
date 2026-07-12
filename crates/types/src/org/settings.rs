@@ -1,7 +1,9 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use super::{HomepageContent, NavConfig, PublicLayout};
+use super::{
+    HomeShell, HomeSkin, HomepageContent, NavConfig, PublicLayout,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SiteSettings {
@@ -13,7 +15,13 @@ pub struct SiteSettings {
     pub min_age: u32,
     pub forum_backend: String,
     pub extra_relay_urls: String,
-    /// Public homepage layout: "hub" | "landing"
+    /// Homepage composition shell (canonical).
+    #[serde(default)]
+    pub home_shell: HomeShell,
+    /// Homepage visual skin (canonical).
+    #[serde(default)]
+    pub home_skin: HomeSkin,
+    /// Dual-write mirror of shell for one-release Hub/Landing compatibility.
     #[serde(default)]
     pub public_layout: PublicLayout,
     /// Editable homepage copy (with defaults applied server-side).

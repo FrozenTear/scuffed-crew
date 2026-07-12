@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::org::{HomepageContent, NavConfig, PublicLayout};
+use crate::org::{HomeShell, HomeSkin, HomepageContent, NavConfig, PublicLayout};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UpdateSettingsRequest {
@@ -18,6 +18,13 @@ pub struct UpdateSettingsRequest {
     pub forum_backend: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub extra_relay_urls: Option<String>,
+    /// Preferred: homepage composition shell.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub home_shell: Option<HomeShell>,
+    /// Preferred: homepage visual skin.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub home_skin: Option<HomeSkin>,
+    /// Deprecated dual-write mirror; if only this is sent, maps Hub→ops_hub, Landing→recruit_landing.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub public_layout: Option<PublicLayout>,
     #[serde(skip_serializing_if = "Option::is_none")]

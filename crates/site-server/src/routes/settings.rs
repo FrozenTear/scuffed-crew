@@ -2,7 +2,9 @@ use axum::{Json, extract::State, http::StatusCode};
 use scuffed_auth::server::session::ErrorResponse;
 use scuffed_db::{AuditAction, AuditTargetType};
 use scuffed_types::api::UpdateSettingsRequest;
-use scuffed_types::{HomepageContent, NavConfig, PublicLayout, SiteSettings};
+use scuffed_types::{
+    HomeShell, HomeSkin, HomepageContent, NavConfig, PublicLayout, SiteSettings,
+};
 
 use crate::extractors::AdminUser;
 use crate::routes::audit_log::audit;
@@ -74,6 +76,8 @@ fn to_api_settings(db: scuffed_db::SiteSettings) -> SiteSettings {
         min_age: db.min_age,
         forum_backend: db.forum_backend,
         extra_relay_urls: db.extra_relay_urls,
+        home_shell: HomeShell::from_str_lossy(&db.home_shell),
+        home_skin: HomeSkin::from_str_lossy(&db.home_skin),
         public_layout: PublicLayout::from_str_lossy(&db.public_layout),
         homepage: HomepageContent::from_json(&db.homepage_json),
         nav,
@@ -93,7 +97,14 @@ pub async fn get_settings(
         .db
         .get_settings()
         .await
-        .map(|s| Json(to_api_settings(s)))
+        .map(|s| {
+            tracing::debug!(
+                home_shell = %s.home_shell,
+                home_skin = %s.home_skin,
+                "GET /api/settings"
+            );
+            Json(to_api_settings(s))
+        })
         .map_err(|e| {
             tracing::error!(error = %e, "GET /api/settings failed");
             (
@@ -117,6 +128,14 @@ pub async fn update_settings(
         n.normalize();
         n.to_json()
     });
+
+    // Prefer home_shell; fall back to public_layout for legacy clients.
+    let shell_str = body
+        .home_shell
+        .map(|s| s.as_str().to_string())
+        .or_else(|| body.public_layout.map(|l| HomeShell::from_public_layout(l).as_str().into()));
+    let skin_str = body.home_skin.map(|s| s.as_str().to_string());
+    // Still pass public_layout for dual-write path when only layout is sent (shell_str derived above).
     let layout = body.public_layout.map(|l| l.as_str().to_string());
 
     let page_bg_color = match body.page_bg_color.as_deref() {
@@ -166,6 +185,8 @@ pub async fn update_settings(
             body.min_age,
             body.forum_backend.as_deref(),
             body.extra_relay_urls.as_deref(),
+            // When shell is provided, layout dual-write is derived in DB layer.
+            // When only layout is provided, shell_str is already set above so layout param is unused for mapping.
             layout.as_deref(),
             homepage_json.as_deref(),
             nav_json.as_deref(),
@@ -173,6 +194,8 @@ pub async fn update_settings(
             page_bg_image_url.as_deref(),
             brand_accent_dark.as_deref(),
             brand_accent_light.as_deref(),
+            shell_str.as_deref(),
+            skin_str.as_deref(),
         )
         .await
         .map_err(|e| {
@@ -184,13 +207,24 @@ pub async fn update_settings(
             )
         })?;
 
+    tracing::info!(
+        home_shell = %settings.home_shell,
+        home_skin = %settings.home_skin,
+        member = %admin.member.id,
+        "Updated site settings"
+    );
+
+    let details = Some(format!(
+        "home_shell={} home_skin={}",
+        settings.home_shell, settings.home_skin
+    ));
     audit(
         &state.db,
         &admin.member.id,
         AuditAction::UpdatedSettings,
         AuditTargetType::Settings,
         &settings.id,
-        None,
+        details.as_deref(),
     )
     .await;
 

@@ -438,24 +438,27 @@ pub async fn setup(
             .and_then(|id| homepage_preset_by_id(id));
 
         if org.is_some() || preset.is_some() {
-            let (layout, homepage_json, brand_dark, brand_light) = if let Some(p) = preset.as_ref() {
-                (
-                    Some(p.suggested_layout.as_str().to_string()),
-                    Some(p.content.to_json()),
-                    if p.suggested_brand.accent_dark.is_empty() {
-                        None
-                    } else {
-                        Some(p.suggested_brand.accent_dark.to_string())
-                    },
-                    if p.suggested_brand.accent_light.is_empty() {
-                        None
-                    } else {
-                        Some(p.suggested_brand.accent_light.to_string())
-                    },
-                )
-            } else {
-                (None::<String>, None, None, None)
-            };
+            let (layout, homepage_json, brand_dark, brand_light, shell, skin) =
+                if let Some(p) = preset.as_ref() {
+                    (
+                        Some(p.suggested_layout.as_str().to_string()),
+                        Some(p.content.to_json()),
+                        if p.suggested_brand.accent_dark.is_empty() {
+                            None
+                        } else {
+                            Some(p.suggested_brand.accent_dark.to_string())
+                        },
+                        if p.suggested_brand.accent_light.is_empty() {
+                            None
+                        } else {
+                            Some(p.suggested_brand.accent_light.to_string())
+                        },
+                        Some(p.suggested_shell.as_str().to_string()),
+                        Some(p.suggested_skin.as_str().to_string()),
+                    )
+                } else {
+                    (None::<String>, None, None, None, None, None)
+                };
             if let Err(e) = state
                 .db
                 .update_settings(
@@ -473,6 +476,8 @@ pub async fn setup(
                     None,
                     brand_dark.as_deref(),
                     brand_light.as_deref(),
+                    shell.as_deref(),
+                    skin.as_deref(),
                 )
                 .await
             {

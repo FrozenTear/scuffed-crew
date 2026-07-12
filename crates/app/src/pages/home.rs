@@ -5,10 +5,7 @@ use std::collections::HashMap;
 use crate::hooks::CursorPage;
 use crate::routes::Route;
 use scuffed_api_client::ApiClient;
-use scuffed_types::{
-    HomeShell, HomeSkin, PublicLayout, SiteSettings, infer_home_shell_from_public_layout,
-    infer_home_skin, org_initials,
-};
+use scuffed_types::{HomeShell, HomeSkin, PublicLayout, SiteSettings, org_initials};
 
 // --- Data types ---
 
@@ -805,24 +802,17 @@ pub fn Home() -> Element {
         .and_then(|s| s.as_ref())
         .map(|s| s.public_layout)
         .unwrap_or(PublicLayout::Hub);
-    // Until PR2 persists home_shell/home_skin, derive from layout + content/brand.
     let home_shell: HomeShell = settings
         .read()
         .as_ref()
         .and_then(|s| s.as_ref())
-        .map(|s| infer_home_shell_from_public_layout(s.public_layout.as_str()))
+        .map(|s| s.home_shell)
         .unwrap_or(HomeShell::OpsHub);
     let home_skin: HomeSkin = settings
         .read()
         .as_ref()
         .and_then(|s| s.as_ref())
-        .map(|s| {
-            infer_home_skin(
-                &s.brand_accent_dark,
-                &s.brand_accent_light,
-                &s.homepage,
-            )
-        })
+        .map(|s| s.home_skin)
         .unwrap_or(HomeSkin::Clean);
     let org_name = settings
         .read()
