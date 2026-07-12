@@ -28,5 +28,11 @@ pub struct SiteSettings {
     /// Optional full-page background image URL (https or site-relative `/…`). Empty = none.
     #[serde(default)]
     pub page_bg_image_url: String,
+    /// Brand accent (dark theme), `#rrggbb`. Empty = product default.
+    #[serde(default)]
+    pub brand_accent_dark: String,
+    /// Brand accent (light theme). Empty = same as dark or product default.
+    #[serde(default)]
+    pub brand_accent_light: String,
     pub updated_at: DateTime<Utc>,
 }

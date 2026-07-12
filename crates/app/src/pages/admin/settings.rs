@@ -5,6 +5,7 @@ use scuffed_api_client::ApiClient;
 use scuffed_types::api::UpdateSettingsRequest;
 use scuffed_types::{
     ContentAlign, HomepageContent, NavConfig, NavPlacement, PublicLayout, SiteSettings,
+    homepage_preset_by_id, homepage_presets,
 };
 
 #[component]
@@ -28,6 +29,12 @@ pub fn AdminSettings() -> Element {
     let mut nav = use_signal(NavConfig::default);
     let mut page_bg_color = use_signal(String::new);
     let mut page_bg_image_url = use_signal(String::new);
+    let mut brand_accent_dark = use_signal(String::new);
+    let mut brand_accent_light = use_signal(String::new);
+    // Selected homepage template id for “Apply template”.
+    let mut homepage_preset_id = use_signal(|| "neutral".to_string());
+    let mut apply_suggested_layout = use_signal(|| true);
+    let mut apply_suggested_brand = use_signal(|| true);
 
     let _settings = use_resource(move || {
         let _tick = reload_tick();
@@ -53,6 +60,8 @@ pub fn AdminSettings() -> Element {
                     nav.set(n);
                     page_bg_color.set(s.page_bg_color);
                     page_bg_image_url.set(s.page_bg_image_url);
+                    brand_accent_dark.set(s.brand_accent_dark);
+                    brand_accent_light.set(s.brand_accent_light);
                     loaded.set(true);
                     Some(true)
                 }
@@ -85,6 +94,8 @@ pub fn AdminSettings() -> Element {
             nav: Some(n),
             page_bg_color: Some(page_bg_color().trim().to_string()),
             page_bg_image_url: Some(page_bg_image_url().trim().to_string()),
+            brand_accent_dark: Some(brand_accent_dark().trim().to_string()),
+            brand_accent_light: Some(brand_accent_light().trim().to_string()),
         };
 
         saving.set(true);
@@ -103,6 +114,8 @@ pub fn AdminSettings() -> Element {
                     nav.set(n);
                     page_bg_color.set(s.page_bg_color);
                     page_bg_image_url.set(s.page_bg_image_url);
+                    brand_accent_dark.set(s.brand_accent_dark);
+                    brand_accent_light.set(s.brand_accent_light);
                     toast.show(Toast::success("Settings saved."));
                 }
                 Err(e) => toast.show(Toast::error(format!("Failed to save settings: {e}"))),
@@ -230,6 +243,67 @@ pub fn AdminSettings() -> Element {
             }
 
             div { class: "form-section",
+                h2 { "Brand accents" }
+                p { style: "color:var(--text-3);font-size:0.85rem;margin-bottom:0.75rem;",
+                    "Primary accent for buttons and highlights. Empty = product default purple. Templates can set these when “Also set brand accents” is checked."
+                }
+                div { style: "display:flex;flex-wrap:wrap;gap:1rem;",
+                    div { class: "form-field", style: "margin:0;min-width:10rem;",
+                        label { class: "form-label", "Dark theme accent" }
+                        div { style: "display:flex;align-items:center;gap:0.5rem;",
+                            input {
+                                r#type: "color",
+                                value: {
+                                    let c = brand_accent_dark();
+                                    if c.len() == 7 && c.starts_with('#') { c } else { "#8f73ff".into() }
+                                },
+                                oninput: move |e| brand_accent_dark.set(e.value()),
+                                style: "width:3rem;height:2.25rem;padding:0;border:1px solid var(--border);border-radius:6px;background:transparent;cursor:pointer;",
+                            }
+                            input {
+                                class: "form-input",
+                                style: "flex:1;min-width:6rem;",
+                                placeholder: "#8f73ff",
+                                value: "{brand_accent_dark}",
+                                oninput: move |e| brand_accent_dark.set(e.value()),
+                            }
+                        }
+                    }
+                    div { class: "form-field", style: "margin:0;min-width:10rem;",
+                        label { class: "form-label", "Light theme accent" }
+                        div { style: "display:flex;align-items:center;gap:0.5rem;",
+                            input {
+                                r#type: "color",
+                                value: {
+                                    let c = brand_accent_light();
+                                    if c.len() == 7 && c.starts_with('#') { c } else { "#6d4aff".into() }
+                                },
+                                oninput: move |e| brand_accent_light.set(e.value()),
+                                style: "width:3rem;height:2.25rem;padding:0;border:1px solid var(--border);border-radius:6px;background:transparent;cursor:pointer;",
+                            }
+                            input {
+                                class: "form-input",
+                                style: "flex:1;min-width:6rem;",
+                                placeholder: "#6d4aff",
+                                value: "{brand_accent_light}",
+                                oninput: move |e| brand_accent_light.set(e.value()),
+                            }
+                        }
+                    }
+                    button {
+                        class: "btn-add",
+                        r#type: "button",
+                        style: "background:transparent;border:1px solid var(--border);align-self:flex-end;",
+                        onclick: move |_| {
+                            brand_accent_dark.set(String::new());
+                            brand_accent_light.set(String::new());
+                        },
+                        "Clear (default)"
+                    }
+                }
+            }
+
+            div { class: "form-section",
                 h2 { "Page background" }
                 p { style: "color:var(--text-3);font-size:0.85rem;margin-bottom:0.75rem;",
                     "Solid color and optional image for the public site. Leave color empty to use the theme default (dark/light). Image sits behind content, cover-fitted."
@@ -318,22 +392,122 @@ pub fn AdminSettings() -> Element {
             }
 
             div { class: "form-section",
-                div { style: "display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:0.75rem;margin-bottom:0.75rem;",
-                    h2 { style: "margin:0;", "Homepage text" }
+                h2 { style: "margin:0 0 0.5rem;", "Homepage text" }
+                p { style: "color:var(--text-3);font-size:0.85rem;margin-bottom:0.75rem;",
+                    "Edit public homepage copy without touching code. List fields: one item per line. Apply a template to replace all fields with a starter pack (then Save)."
+                }
+                div {
+                    style: "display:flex;flex-wrap:wrap;align-items:flex-end;gap:0.75rem;margin-bottom:1rem;padding:0.85rem;border:1px solid var(--border);border-radius:8px;background:var(--surface-2, transparent);",
+                    div { class: "form-field", style: "margin:0;min-width:12rem;flex:1;",
+                        label { class: "form-label", "Template" }
+                        select {
+                            class: "form-input",
+                            value: "{homepage_preset_id}",
+                            onchange: move |e| homepage_preset_id.set(e.value()),
+                            for p in homepage_presets() {
+                                option { value: "{p.id}", "{p.name}" }
+                            }
+                        }
+                        {
+                            let desc = homepage_preset_by_id(&homepage_preset_id())
+                                .map(|p| p.description.to_string())
+                                .unwrap_or_default();
+                            rsx! {
+                                p { style: "color:var(--text-3);font-size:0.8rem;margin:0.35rem 0 0;",
+                                    "{desc}"
+                                }
+                            }
+                        }
+                    }
+                    div { style: "display:flex;flex-direction:column;gap:0.35rem;margin:0 0 0.15rem;",
+                        div { class: "form-checkbox-row", style: "margin:0;",
+                            input {
+                                r#type: "checkbox",
+                                checked: apply_suggested_layout(),
+                                onchange: move |e| apply_suggested_layout.set(e.checked()),
+                            }
+                            label { class: "form-label", style: "margin:0;", "Also set layout (Hub/Landing)" }
+                        }
+                        div { class: "form-checkbox-row", style: "margin:0;",
+                            input {
+                                r#type: "checkbox",
+                                checked: apply_suggested_brand(),
+                                onchange: move |e| apply_suggested_brand.set(e.checked()),
+                            }
+                            label { class: "form-label", style: "margin:0;", "Also set brand accents" }
+                        }
+                    }
                     button {
                         class: "btn-add",
-                        style: "background:transparent;border:1px solid var(--border);",
+                        r#type: "button",
                         onclick: move |_| {
-                            let d = HomepageContent::default();
-                            content_align.set(d.content_align);
-                            homepage.set(d);
-                            toast.show(Toast::success("Reset to defaults — click Save to persist."));
+                            let id = homepage_preset_id();
+                            if let Some(preset) = homepage_preset_by_id(&id) {
+                                content_align.set(preset.content.content_align);
+                                homepage.set(preset.content);
+                                if apply_suggested_layout() {
+                                    public_layout.set(preset.suggested_layout);
+                                }
+                                if apply_suggested_brand()
+                                    && !preset.suggested_brand.accent_dark.is_empty()
+                                {
+                                    brand_accent_dark
+                                        .set(preset.suggested_brand.accent_dark.into());
+                                    brand_accent_light
+                                        .set(preset.suggested_brand.accent_light.into());
+                                }
+                                toast.show(Toast::success(format!(
+                                    "Applied “{}” — click Save to persist.",
+                                    preset.name
+                                )));
+                            } else {
+                                toast.show(Toast::error("Unknown template."));
+                            }
                         },
-                        "Reset defaults"
+                        "Apply template"
                     }
                 }
-                p { style: "color:var(--text-3);font-size:0.85rem;margin-bottom:1rem;",
-                    "Edit public homepage copy without touching code. List fields: one item per line."
+
+                Fieldset { title: "Visible sections",
+                    p { style: "color:var(--text-3);font-size:0.8rem;margin:0 0 0.65rem;",
+                        "Hero is always shown. Uncheck to hide a block on the public homepage."
+                    }
+                    {
+                        let sections = [
+                            ("ethos", "About / ethos", homepage().sections.ethos),
+                            ("schedule", "Schedule", homepage().sections.schedule),
+                            ("tournaments", "Tournaments", homepage().sections.tournaments),
+                            ("teams", "Teams", homepage().sections.teams),
+                            ("news", "Announcements", homepage().sections.news),
+                            ("recruit", "Recruiting", homepage().sections.recruit),
+                        ];
+                        rsx! {
+                            div { style: "display:grid;grid-template-columns:repeat(auto-fill,minmax(10rem,1fr));gap:0.5rem;",
+                                for (key, label, checked) in sections {
+                                    div { class: "form-checkbox-row", style: "margin:0;",
+                                        input {
+                                            r#type: "checkbox",
+                                            checked: checked,
+                                            onchange: move |e| {
+                                                let on = e.checked();
+                                                let mut hp = homepage.write();
+                                                match key {
+                                                    "ethos" => hp.sections.ethos = on,
+                                                    "schedule" => hp.sections.schedule = on,
+                                                    "tournaments" => hp.sections.tournaments = on,
+                                                    "teams" => hp.sections.teams = on,
+                                                    "news" => hp.sections.news = on,
+                                                    "recruit" => hp.sections.recruit = on,
+                                                    _ => {}
+                                                }
+                                            },
+                                        }
+                                        label { class: "form-label", style: "margin:0;", "{label}" }
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
 
                 Fieldset { title: "Hero",

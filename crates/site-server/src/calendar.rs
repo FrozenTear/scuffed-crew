@@ -74,7 +74,7 @@ pub fn generate_ical(events: &[Event], host: &str, calendar_name: &str) -> Strin
     let mut ical = String::new();
     ical.push_str("BEGIN:VCALENDAR\r\n");
     ical.push_str("VERSION:2.0\r\n");
-    ical.push_str("PRODID:-//The Scuffed Crew//scuffed-site-server//EN\r\n");
+    ical.push_str("PRODID:-//Clan Platform//site-server//EN\r\n");
     ical.push_str(&format!("X-WR-CALNAME:{}\r\n", escape_ical(calendar_name)));
     ical.push_str("CALSCALE:GREGORIAN\r\n");
     ical.push_str("METHOD:PUBLISH\r\n");

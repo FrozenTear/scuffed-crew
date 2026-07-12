@@ -251,7 +251,7 @@ async fn main() {
         .and_then(|p| p.parse().ok())
         .unwrap_or(3000);
     let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port));
-    tracing::info!("Unified Scuffed Crew server listening on {addr}");
+    tracing::info!("Clan platform server listening on {addr}");
 
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
     // ConnectInfo is required by the auth rate limiter's peer-IP fallback.

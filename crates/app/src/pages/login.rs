@@ -180,7 +180,7 @@ pub fn Login() -> Element {
         div { class: "login-page",
             div { class: "login-card",
                 h1 { "Sign in" }
-                p { class: "lead", "Sign in to Scuffed Crew." }
+                p { class: "lead", "Sign in to continue." }
                 if let Some(err) = error() {
                     p { class: "login-error", "{err}" }
                 }

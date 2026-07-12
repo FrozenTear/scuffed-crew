@@ -37,6 +37,12 @@ struct DbSiteSettings {
     #[surreal(default)]
     #[serde(default)]
     page_bg_image_url: String,
+    #[surreal(default)]
+    #[serde(default)]
+    brand_accent_dark: String,
+    #[surreal(default)]
+    #[serde(default)]
+    brand_accent_light: String,
     updated_at: SurrealDatetime,
 }
 
@@ -68,6 +74,8 @@ fn db_to_settings(db: DbSiteSettings) -> SiteSettings {
         nav_json: db.nav_json,
         page_bg_color: db.page_bg_color,
         page_bg_image_url: db.page_bg_image_url,
+        brand_accent_dark: db.brand_accent_dark,
+        brand_accent_light: db.brand_accent_light,
         updated_at: db.updated_at.into(),
     }
 }
@@ -88,10 +96,10 @@ impl Database {
 
             let defaults = DbSiteSettings {
                 id: None,
-                org_name: "The Scuffed Crew".to_string(),
-                site_description: "EMEA Gaming Organization".to_string(),
+                org_name: "My Clan".to_string(),
+                site_description: "Gaming clan".to_string(),
                 recruitment_open: true,
-                recruitment_message: "We are currently recruiting! Apply now to join the crew."
+                recruitment_message: "Recruitment is closed right now. Check back later."
                     .to_string(),
                 min_age: 16,
                 forum_backend: "local".to_string(),
@@ -101,6 +109,8 @@ impl Database {
                 nav_json: String::new(),
                 page_bg_color: String::new(),
                 page_bg_image_url: String::new(),
+                brand_accent_dark: String::new(),
+                brand_accent_light: String::new(),
                 updated_at: SurrealDatetime::from(Utc::now()),
             };
             let created: Option<DbSiteSettings> = self
@@ -130,6 +140,8 @@ impl Database {
         nav_json: Option<&str>,
         page_bg_color: Option<&str>,
         page_bg_image_url: Option<&str>,
+        brand_accent_dark: Option<&str>,
+        brand_accent_light: Option<&str>,
     ) -> DbResult<SiteSettings> {
         with_timeout(async {
             let current = self.get_settings().await?;
@@ -179,6 +191,12 @@ impl Database {
             }
             if let Some(url) = page_bg_image_url {
                 db.page_bg_image_url = url.to_string();
+            }
+            if let Some(c) = brand_accent_dark {
+                db.brand_accent_dark = c.to_string();
+            }
+            if let Some(c) = brand_accent_light {
+                db.brand_accent_light = c.to_string();
             }
             db.updated_at = SurrealDatetime::from(Utc::now());
 

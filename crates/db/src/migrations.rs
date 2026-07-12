@@ -229,10 +229,10 @@ pub async fn run_migrations(client: &Surreal<Any>) -> DbResult<()> {
         -- Site Settings (single-document, admin-configurable)
         -- ================================================
         DEFINE TABLE IF NOT EXISTS site_settings SCHEMAFULL;
-        DEFINE FIELD OVERWRITE org_name ON site_settings TYPE string DEFAULT 'The Scuffed Crew';
-        DEFINE FIELD OVERWRITE site_description ON site_settings TYPE string DEFAULT 'EMEA Gaming Organization';
+        DEFINE FIELD OVERWRITE org_name ON site_settings TYPE string DEFAULT 'My Clan';
+        DEFINE FIELD OVERWRITE site_description ON site_settings TYPE string DEFAULT 'Gaming clan';
         DEFINE FIELD OVERWRITE recruitment_open ON site_settings TYPE bool DEFAULT true;
-        DEFINE FIELD OVERWRITE recruitment_message ON site_settings TYPE string DEFAULT 'We are currently recruiting! Apply now to join the crew.';
+        DEFINE FIELD OVERWRITE recruitment_message ON site_settings TYPE string DEFAULT 'Recruitment is closed right now. Check back later.';
         DEFINE FIELD OVERWRITE min_age ON site_settings TYPE int DEFAULT 16;
         DEFINE FIELD OVERWRITE forum_backend ON site_settings TYPE string DEFAULT 'local'
             ASSERT $value IN ['local', 'nostr'];
@@ -243,6 +243,8 @@ pub async fn run_migrations(client: &Surreal<Any>) -> DbResult<()> {
         DEFINE FIELD OVERWRITE nav_json ON site_settings TYPE string DEFAULT '';
         DEFINE FIELD OVERWRITE page_bg_color ON site_settings TYPE string DEFAULT '';
         DEFINE FIELD OVERWRITE page_bg_image_url ON site_settings TYPE string DEFAULT '';
+        DEFINE FIELD OVERWRITE brand_accent_dark ON site_settings TYPE string DEFAULT '';
+        DEFINE FIELD OVERWRITE brand_accent_light ON site_settings TYPE string DEFAULT '';
         DEFINE FIELD OVERWRITE updated_at ON site_settings TYPE datetime DEFAULT time::now();
 
         -- ================================================

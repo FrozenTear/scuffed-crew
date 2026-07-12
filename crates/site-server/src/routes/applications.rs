@@ -150,10 +150,13 @@ pub async fn update_application(
                     );
                     // Notify general room about new member
                     if let Some(ref notifier) = state.notifier {
-                        notifier.notify_general(format!(
-                            "Welcome {} to The Scuffed Crew!",
-                            display_name
-                        ));
+                        let org = state
+                            .db
+                            .get_settings()
+                            .await
+                            .map(|s| s.org_name)
+                            .unwrap_or_else(|_| "the clan".into());
+                        notifier.notify_general(format!("Welcome {display_name} to {org}!"));
                     }
                 }
                 Err(e) => {

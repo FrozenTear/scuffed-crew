@@ -1,10 +1,12 @@
 use dioxus::prelude::*;
 use scuffed_api_client::ApiClient;
-use scuffed_types::{OkResponse, SetupRequest, SetupStatusResponse};
+use scuffed_types::{
+    MeResponse, OkResponse, OrgRole, SetupRequest, SetupStatusResponse, UserInfo,
+    homepage_presets,
+};
 
 use crate::routes::Route;
 use crate::state::auth::{AuthState, use_auth};
-use scuffed_types::{MeResponse, OrgRole, UserInfo};
 
 const CSS: &str = r#"
 .setup-page {
@@ -17,11 +19,24 @@ const CSS: &str = r#"
 }
 .setup-card {
     width: 100%;
-    max-width: 420px;
+    max-width: 480px;
     background: var(--surface);
     border: 1px solid var(--border);
     border-radius: 8px;
     padding: 2rem;
+}
+.setup-field select {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 0.6rem 0.75rem;
+    border-radius: 6px;
+    font-size: 1rem;
+}
+.setup-hint {
+    color: var(--text-3);
+    font-size: 0.8rem;
+    margin: 0.25rem 0 0;
 }
 .setup-card h1 {
     font-family: var(--font-head);
@@ -90,6 +105,8 @@ pub fn Setup() -> Element {
     let mut username = use_signal(String::new);
     let mut password = use_signal(String::new);
     let mut confirm = use_signal(String::new);
+    let mut org_name = use_signal(|| "My Clan".to_string());
+    let mut homepage_preset = use_signal(|| "neutral".to_string());
     let mut error = use_signal(|| Option::<String>::None);
     let mut submitting = use_signal(|| false);
     let mut auth = use_auth();
@@ -129,11 +146,15 @@ pub fn Setup() -> Element {
             return;
         }
         submitting.set(true);
+        let org = org_name().trim().to_string();
+        let preset = homepage_preset();
         spawn(async move {
             let client = ApiClient::web();
             let body = SetupRequest {
                 username: user,
                 password: pass,
+                org_name: if org.is_empty() { None } else { Some(org) },
+                homepage_preset: Some(preset),
             };
             match client
                 .post_json::<_, OkResponse>("/api/auth/setup", &body)
@@ -162,12 +183,35 @@ pub fn Setup() -> Element {
             div { class: "setup-card",
                 h1 { "Create admin account" }
                 p { class: "lead",
-                    "This is the first-time setup for Scuffed Crew. Choose a username and a strong password — you will use these to sign in."
+                    "First-time setup for your clan platform. Create the admin account, name the org, and pick a homepage starter."
                 }
                 if let Some(err) = error() {
                     p { class: "setup-error", "{err}" }
                 }
                 form { onsubmit: on_submit,
+                    div { class: "setup-field",
+                        label { r#for: "setup-org", "Clan / org name" }
+                        input {
+                            id: "setup-org",
+                            r#type: "text",
+                            value: "{org_name}",
+                            oninput: move |e| org_name.set(e.value()),
+                        }
+                    }
+                    div { class: "setup-field",
+                        label { r#for: "setup-preset", "Homepage template" }
+                        select {
+                            id: "setup-preset",
+                            value: "{homepage_preset}",
+                            onchange: move |e| homepage_preset.set(e.value()),
+                            for p in homepage_presets() {
+                                option { value: "{p.id}", "{p.name}" }
+                            }
+                        }
+                        p { class: "setup-hint",
+                            "You can change copy, sections, and brand later in Admin → Settings."
+                        }
+                    }
                     div { class: "setup-field",
                         label { r#for: "setup-user", "Username" }
                         input {

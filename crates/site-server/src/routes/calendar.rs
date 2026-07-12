@@ -29,7 +29,13 @@ pub async fn all_events_ics(
         .replace("https://", "")
         .replace("http://", "");
 
-    let ical = generate_ical(&events, &host, "The Scuffed Crew - All Events");
+    let org_name = state
+        .db
+        .get_settings()
+        .await
+        .map(|s| s.org_name)
+        .unwrap_or_else(|_| "Clan".into());
+    let ical = generate_ical(&events, &host, &format!("{org_name} - All Events"));
 
     Ok((
         [
@@ -65,10 +71,16 @@ pub async fn team_events_ics(
         .replace("https://", "")
         .replace("http://", "");
 
+    let org_name = state
+        .db
+        .get_settings()
+        .await
+        .map(|s| s.org_name)
+        .unwrap_or_else(|_| "Clan".into());
     let ical = generate_ical(
         &team_events,
         &host,
-        &format!("The Scuffed Crew - Team {}", team_id),
+        &format!("{org_name} - Team {team_id}"),
     );
 
     Ok((

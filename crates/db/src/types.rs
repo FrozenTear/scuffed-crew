@@ -790,6 +790,10 @@ pub struct SiteSettings {
     /// Optional full-page background image URL. Empty = none.
     #[serde(default)]
     pub page_bg_image_url: String,
+    #[serde(default)]
+    pub brand_accent_dark: String,
+    #[serde(default)]
+    pub brand_accent_light: String,
     pub updated_at: DateTime<Utc>,
 }
 

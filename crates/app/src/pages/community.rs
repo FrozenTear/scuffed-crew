@@ -243,7 +243,7 @@ pub fn Community() -> Element {
         .as_ref()
         .and_then(|o| o.as_ref())
         .map(|s| s.org_name.clone())
-        .unwrap_or_else(|| "The Scuffed Crew".into());
+        .unwrap_or_else(|| "My Clan".into());
     let banner_label = org_name.to_uppercase();
 
     rsx! {

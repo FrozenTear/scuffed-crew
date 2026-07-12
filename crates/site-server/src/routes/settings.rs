@@ -26,6 +26,26 @@ fn sanitize_bg_color(raw: &str) -> Result<String, String> {
     }
 }
 
+/// Brand accents: empty or `#rgb` / `#rrggbb` only (no alpha).
+fn sanitize_brand_accent(raw: &str) -> Result<String, String> {
+    let s = raw.trim();
+    if s.is_empty() {
+        return Ok(String::new());
+    }
+    let hex = s.strip_prefix('#').unwrap_or(s);
+    let ok = matches!(hex.len(), 3 | 6) && hex.chars().all(|c| c.is_ascii_hexdigit());
+    if ok {
+        let full = if hex.len() == 3 {
+            hex.chars().flat_map(|c| [c, c]).collect::<String>()
+        } else {
+            hex.to_string()
+        };
+        Ok(format!("#{}", full.to_ascii_lowercase()))
+    } else {
+        Err("Brand accent must be a hex color like #8f73ff (or empty for default)".into())
+    }
+}
+
 /// Accept https URLs, site-relative paths, or empty. Reject quotes / CSS injection.
 fn sanitize_bg_image_url(raw: &str) -> Result<String, String> {
     let s = raw.trim();
@@ -59,6 +79,8 @@ fn to_api_settings(db: scuffed_db::SiteSettings) -> SiteSettings {
         nav,
         page_bg_color: db.page_bg_color,
         page_bg_image_url: db.page_bg_image_url,
+        brand_accent_dark: db.brand_accent_dark,
+        brand_accent_light: db.brand_accent_light,
         updated_at: db.updated_at,
     }
 }
@@ -115,6 +137,24 @@ pub async fn update_settings(
         })?),
         None => None,
     };
+    let brand_accent_dark = match body.brand_accent_dark.as_deref() {
+        Some(c) => Some(sanitize_brand_accent(c).map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse { error: e }),
+            )
+        })?),
+        None => None,
+    };
+    let brand_accent_light = match body.brand_accent_light.as_deref() {
+        Some(c) => Some(sanitize_brand_accent(c).map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse { error: e }),
+            )
+        })?),
+        None => None,
+    };
 
     let settings = state
         .db
@@ -131,6 +171,8 @@ pub async fn update_settings(
             nav_json.as_deref(),
             page_bg_color.as_deref(),
             page_bg_image_url.as_deref(),
+            brand_accent_dark.as_deref(),
+            brand_accent_light.as_deref(),
         )
         .await
         .map_err(|e| {

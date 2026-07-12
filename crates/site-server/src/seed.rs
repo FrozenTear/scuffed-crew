@@ -163,6 +163,30 @@ pub async fn seed_dev_data(
 
     seed_personal_matches(db, "devmember").await?;
 
+    // Flagship identity for local/dev — product defaults stay neutral without this.
+    {
+        use scuffed_types::HomepagePreset;
+        let scuffed = HomepagePreset::scuffed();
+        db.update_settings(
+            Some("The Scuffed Crew"),
+            Some("EMEA Gaming Organization"),
+            Some(true),
+            Some("We are currently recruiting! Apply now to join the crew."),
+            Some(16),
+            None,
+            None,
+            Some(scuffed.suggested_layout.as_str()),
+            Some(&scuffed.content.to_json()),
+            None,
+            None,
+            None,
+            Some(scuffed.suggested_brand.accent_dark),
+            Some(scuffed.suggested_brand.accent_light),
+        )
+        .await?;
+        tracing::info!("Dev site settings: Scuffed Crew homepage + brand applied");
+    }
+
     Ok(())
 }
 

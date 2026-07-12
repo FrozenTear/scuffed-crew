@@ -69,6 +69,12 @@ pub struct AuthProvidersResponse {
 pub struct SetupRequest {
     pub username: String,
     pub password: String,
+    /// Optional org display name for first-boot settings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub org_name: Option<String>,
+    /// Homepage preset id (`neutral`, `competitive`, …). Applied once on setup.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub homepage_preset: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

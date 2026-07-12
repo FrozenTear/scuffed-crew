@@ -52,10 +52,10 @@ html, body {{
 
 [data-accent="strategy"] {{ --accent: #ff7a1a; --accent-soft: rgba(255,122,26,.16); }}
 "#,
-        accent_d = brand.accent_dark,
-        accent_l = brand.accent_light,
-        soft_d = brand.accent_soft_dark,
-        soft_l = brand.accent_soft_light,
+        accent_d = brand.accent_dark.as_str(),
+        accent_l = brand.accent_light.as_str(),
+        soft_d = brand.accent_soft_dark.as_str(),
+        soft_l = brand.accent_soft_light.as_str(),
     )
 }
 
@@ -86,12 +86,12 @@ mod tests {
 
     #[test]
     fn emits_both_theme_scopes_and_uses_brand_accent() {
-        let brand = BrandConfig::SCUFFED;
+        let brand = BrandConfig::product_default();
         let css = theme_css(&brand);
         assert!(css.contains("[data-theme=\"dark\"]"));
         assert!(css.contains("[data-theme=\"light\"]"));
-        assert!(css.contains(brand.accent_dark));
-        assert!(css.contains(brand.accent_light));
+        assert!(css.contains(brand.accent_dark.as_str()));
+        assert!(css.contains(brand.accent_light.as_str()));
         assert!(css.contains("--bg:"));
         assert!(css.contains("--text-2:"));
         assert!(css.contains("--space-1:"));

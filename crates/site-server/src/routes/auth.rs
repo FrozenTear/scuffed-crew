@@ -420,6 +420,67 @@ pub async fn setup(
             .into_response();
     }
 
+    // Optional first-boot branding / homepage template.
+    {
+        use scuffed_types::homepage_preset_by_id;
+
+        let org = body
+            .org_name
+            .as_ref()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string());
+        let preset = body
+            .homepage_preset
+            .as_ref()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .and_then(|id| homepage_preset_by_id(id));
+
+        if org.is_some() || preset.is_some() {
+            let (layout, homepage_json, brand_dark, brand_light) = if let Some(p) = preset.as_ref() {
+                (
+                    Some(p.suggested_layout.as_str().to_string()),
+                    Some(p.content.to_json()),
+                    if p.suggested_brand.accent_dark.is_empty() {
+                        None
+                    } else {
+                        Some(p.suggested_brand.accent_dark.to_string())
+                    },
+                    if p.suggested_brand.accent_light.is_empty() {
+                        None
+                    } else {
+                        Some(p.suggested_brand.accent_light.to_string())
+                    },
+                )
+            } else {
+                (None::<String>, None, None, None)
+            };
+            if let Err(e) = state
+                .db
+                .update_settings(
+                    org.as_deref(),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    layout.as_deref(),
+                    homepage_json.as_deref(),
+                    None,
+                    None,
+                    None,
+                    brand_dark.as_deref(),
+                    brand_light.as_deref(),
+                )
+                .await
+            {
+                tracing::warn!("setup: failed to apply org/template settings: {e}");
+            }
+        }
+    }
+
     tracing::info!("First-boot admin created: {}", user.username);
     let session_cookie = build_session_cookie(&state.session_config, session_token);
     (

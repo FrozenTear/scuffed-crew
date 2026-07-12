@@ -402,7 +402,7 @@ pub fn PublicLayout() -> Element {
         .as_ref()
         .and_then(|o| o.as_ref())
         .map(|s| s.org_name.clone())
-        .unwrap_or_else(|| "The Scuffed Crew".into());
+        .unwrap_or_else(|| "My Clan".into());
     let site_description = site_settings
         .read()
         .as_ref()
@@ -414,6 +414,7 @@ pub fn PublicLayout() -> Element {
         None => format!("© {org_name}"),
     };
     let mark_label = org_name.clone();
+    let nav_initials = scuffed_types::org_initials(&org_name);
 
     let more_class = if more_open() {
         "nav-drop open"
@@ -450,7 +451,11 @@ pub fn PublicLayout() -> Element {
                     more_open.set(false);
                     account_open.set(false);
                 },
-                div { class: "nav-icon", "SC" }
+                div {
+                    class: "nav-icon",
+                    aria_hidden: "true",
+                    "{nav_initials}"
+                }
                 span { class: "nav-mark-text", "{mark_label}" }
             }
 

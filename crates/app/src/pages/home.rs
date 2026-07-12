@@ -5,7 +5,10 @@ use std::collections::HashMap;
 use crate::hooks::CursorPage;
 use crate::routes::Route;
 use scuffed_api_client::ApiClient;
-use scuffed_types::{PublicLayout, SiteSettings};
+use scuffed_types::{
+    HomeShell, HomeSkin, PublicLayout, SiteSettings, infer_home_shell_from_public_layout,
+    infer_home_skin, org_initials,
+};
 
 // --- Data types ---
 
@@ -110,8 +113,8 @@ const HOME_CSS: &str = r#"
         transform: skewX(-12deg);
         pointer-events: none;
     }
-    .home-hero::after {
-        content: 'SC';
+    /* Decorative org initials (was hardcoded SC). Filled from org_name via DOM. */
+    .home-hero-mark {
         position: absolute;
         right: 4%;
         bottom: -0.15em;
@@ -123,6 +126,7 @@ const HOME_CSS: &str = r#"
         -webkit-text-stroke: 1px color-mix(in srgb, var(--text) 7%, transparent);
         pointer-events: none;
         user-select: none;
+        z-index: 1;
     }
     .home-hero-inner { position: relative; z-index: 2; max-width: 40rem; }
     .home-badge {
@@ -801,6 +805,32 @@ pub fn Home() -> Element {
         .and_then(|s| s.as_ref())
         .map(|s| s.public_layout)
         .unwrap_or(PublicLayout::Hub);
+    // Until PR2 persists home_shell/home_skin, derive from layout + content/brand.
+    let home_shell: HomeShell = settings
+        .read()
+        .as_ref()
+        .and_then(|s| s.as_ref())
+        .map(|s| infer_home_shell_from_public_layout(s.public_layout.as_str()))
+        .unwrap_or(HomeShell::OpsHub);
+    let home_skin: HomeSkin = settings
+        .read()
+        .as_ref()
+        .and_then(|s| s.as_ref())
+        .map(|s| {
+            infer_home_skin(
+                &s.brand_accent_dark,
+                &s.brand_accent_light,
+                &s.homepage,
+            )
+        })
+        .unwrap_or(HomeSkin::Clean);
+    let org_name = settings
+        .read()
+        .as_ref()
+        .and_then(|s| s.as_ref())
+        .map(|s| s.org_name.clone())
+        .unwrap_or_else(|| "My Clan".into());
+    let initials = org_initials(&org_name);
     let recruitment_open = settings
         .read()
         .as_ref()
@@ -832,12 +862,23 @@ pub fn Home() -> Element {
         metric_squads.is_some() || metric_members.is_some() || metric_games.is_some();
     let home_class = format!("home {}", content.content_align.css_class());
 
+    let shell_attr = home_shell.as_str();
+    let skin_attr = home_skin.as_str();
+
     rsx! {
         style { {HOME_CSS} }
-        div { class: "home-wrap",
+        div {
+            class: "home-wrap",
+            "data-home-shell": "{shell_attr}",
+            "data-home-skin": "{skin_attr}",
         div { class: "{home_class}",
             // —— Hero ——
             header { class: "home-hero",
+                div {
+                    class: "home-hero-mark",
+                    aria_hidden: "true",
+                    "{initials}"
+                }
                 div { class: "home-hero-inner",
                     div { class: "home-badge", "{content.hero_badge}" }
                     h1 { class: "home-title",
@@ -851,7 +892,9 @@ pub fn Home() -> Element {
                         if recruitment_open {
                             Link { to: Route::Apply {}, class: "btn btn-primary", "{content.cta_primary}" }
                         }
-                        a { href: "#squads", class: "btn btn-outline", "{content.cta_secondary}" }
+                        if content.sections.teams {
+                            a { href: "#squads", class: "btn btn-outline", "{content.cta_secondary}" }
+                        }
                     }
                     if show_metrics {
                         div { class: "home-metrics",
@@ -879,18 +922,20 @@ pub fn Home() -> Element {
             }
 
             // —— Ethos (numbered rules) ——
-            section { class: "home-block",
-                div { class: "home-kicker", "{content.ethos_kicker}" }
-                h2 { class: "home-heading", "{content.ethos_title}" }
-                p { class: "home-body", "{content.ethos_body}" }
-                ul { class: "rules",
-                    for (i, rule) in content.ethos_rules.iter().enumerate() {
-                        {
-                            let n = format!("{:02}", i + 1);
-                            rsx! {
-                                li {
-                                    span { class: "rn", "{n}" }
-                                    span { "{rule}" }
+            if content.sections.ethos {
+                section { class: "home-block",
+                    div { class: "home-kicker", "{content.ethos_kicker}" }
+                    h2 { class: "home-heading", "{content.ethos_title}" }
+                    p { class: "home-body", "{content.ethos_body}" }
+                    ul { class: "rules",
+                        for (i, rule) in content.ethos_rules.iter().enumerate() {
+                            {
+                                let n = format!("{:02}", i + 1);
+                                rsx! {
+                                    li {
+                                        span { class: "rn", "{n}" }
+                                        span { "{rule}" }
+                                    }
                                 }
                             }
                         }
@@ -900,6 +945,7 @@ pub fn Home() -> Element {
 
             // —— What's on (schedule + tournaments) ——
             // Hub: only show panels that have data (no empty twin). Landing: show both.
+            // Section flags can force-hide a panel even when data exists.
             {
                 let event_list = events.read().as_ref().and_then(|e| e.as_ref()).cloned().unwrap_or_default();
                 let tourney_list = tournaments_res.read().as_ref().and_then(|t| t.as_ref()).cloned().unwrap_or_default();
@@ -912,8 +958,8 @@ pub fn Home() -> Element {
                 let has_events = !event_list.is_empty();
                 let has_tourneys = !live.is_empty();
                 let is_landing = layout == PublicLayout::Landing;
-                let show_schedule = has_events || is_landing;
-                let show_tourneys = has_tourneys || is_landing;
+                let show_schedule = content.sections.schedule && (has_events || is_landing);
+                let show_tourneys = content.sections.tournaments && (has_tourneys || is_landing);
                 let show_live = show_schedule || show_tourneys;
                 let both = show_schedule && show_tourneys;
                 let grid_class = if both { "live-grid" } else { "live-grid single" };
@@ -986,34 +1032,36 @@ pub fn Home() -> Element {
             }
 
             // —— Squads ——
-            section { id: "squads", class: "home-block",
-                div { class: "home-kicker", "{content.teams_kicker}" }
-                h2 { class: "home-heading", "{content.teams_title}" }
-                {
-                    match overview.read().as_ref().and_then(|o| o.as_ref()) {
-                        Some(data) if !data.teams.is_empty() => {
-                            let game_map: HashMap<String, String> = data
-                                .games
-                                .iter()
-                                .map(|g| (g.id.clone(), g.name.clone()))
-                                .collect();
-                            rsx! {
-                                div { class: "team-rows",
-                                    div { class: "team-head",
-                                        span { "Squad" }
-                                        span { "Game" }
-                                        span { "Roster" }
-                                        span { "Division" }
-                                        span { "W–L" }
-                                    }
-                                    for team in data.teams.iter() {
-                                        { render_team_row(team, &game_map) }
+            if content.sections.teams {
+                section { id: "squads", class: "home-block",
+                    div { class: "home-kicker", "{content.teams_kicker}" }
+                    h2 { class: "home-heading", "{content.teams_title}" }
+                    {
+                        match overview.read().as_ref().and_then(|o| o.as_ref()) {
+                            Some(data) if !data.teams.is_empty() => {
+                                let game_map: HashMap<String, String> = data
+                                    .games
+                                    .iter()
+                                    .map(|g| (g.id.clone(), g.name.clone()))
+                                    .collect();
+                                rsx! {
+                                    div { class: "team-rows",
+                                        div { class: "team-head",
+                                            span { "Squad" }
+                                            span { "Game" }
+                                            span { "Roster" }
+                                            span { "Division" }
+                                            span { "W–L" }
+                                        }
+                                        for team in data.teams.iter() {
+                                            { render_team_row(team, &game_map) }
+                                        }
                                     }
                                 }
                             }
+                            Some(_) => rsx! { p { class: "muted", "{content.teams_empty}" } },
+                            None => rsx! { p { class: "muted", "Loading squads…" } },
                         }
-                        Some(_) => rsx! { p { class: "muted", "{content.teams_empty}" } },
-                        None => rsx! { p { class: "muted", "Loading squads…" } },
                     }
                 }
             }
@@ -1026,7 +1074,8 @@ pub fn Home() -> Element {
                     .and_then(|a| a.as_ref())
                     .cloned()
                     .unwrap_or_default();
-                let show = !list.is_empty() || layout == PublicLayout::Landing;
+                let show = content.sections.news
+                    && (!list.is_empty() || layout == PublicLayout::Landing);
                 if show {
                     rsx! {
                         section { class: "home-block",
@@ -1050,7 +1099,7 @@ pub fn Home() -> Element {
             }
 
             // —— Recruit ——
-            if recruitment_open {
+            if content.sections.recruit && recruitment_open {
                 section { class: "home-block",
                     div { class: "home-kicker", "{content.recruit_kicker}" }
                     h2 { class: "home-heading", "{content.recruit_title}" }

@@ -30,4 +30,10 @@ pub struct UpdateSettingsRequest {
     /// Background image URL. Empty string clears.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub page_bg_image_url: Option<String>,
+    /// Brand accent dark (`#rrggbb`). Empty string = product default.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub brand_accent_dark: Option<String>,
+    /// Brand accent light. Empty string = product default / match dark.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub brand_accent_light: Option<String>,
 }

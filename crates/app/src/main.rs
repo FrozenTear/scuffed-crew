@@ -54,6 +54,45 @@ fn App() -> Element {
         }
     });
 
+    // Document title / meta from site settings (product-neutral until loaded).
+    let site_meta = use_resource(|| async {
+        use scuffed_api_client::ApiClient;
+        use scuffed_types::SiteSettings;
+        ApiClient::web()
+            .fetch::<SiteSettings>("/api/settings")
+            .await
+            .ok()
+    });
+    let page_title = site_meta
+        .read()
+        .as_ref()
+        .and_then(|o| o.as_ref())
+        .map(|s| s.org_name.clone())
+        .unwrap_or_else(|| "My Clan".into());
+    let page_description = site_meta
+        .read()
+        .as_ref()
+        .and_then(|o| o.as_ref())
+        .map(|s| {
+            let d = s.site_description.trim();
+            if d.is_empty() {
+                format!("{} — gaming clan", s.org_name)
+            } else {
+                d.to_string()
+            }
+        })
+        .unwrap_or_else(|| "Gaming clan platform".into());
+    let brand_theme_css = {
+        use theme::brand::BrandConfig;
+        let (dark, light) = site_meta
+            .read()
+            .as_ref()
+            .and_then(|o| o.as_ref())
+            .map(|s| (s.brand_accent_dark.clone(), s.brand_accent_light.clone()))
+            .unwrap_or_default();
+        theme::theme_css(&BrandConfig::from_settings(&dark, &light))
+    };
+
     #[cfg(feature = "desktop")]
     {
         use_hook(|| {
@@ -62,19 +101,19 @@ fn App() -> Element {
     }
 
     rsx! {
-        // Runtime head — reinforces shell title/meta after WASM boot
-        document::Title { "The Scuffed Crew" }
+        // Runtime head — org name from settings once loaded
+        document::Title { "{page_title}" }
         document::Meta {
             name: "description",
-            content: "The Scuffed Crew — multi-game EMEA gaming org. Small teams, real structure, scheduled play nights.",
+            content: "{page_description}",
         }
         document::Meta {
             property: "og:title",
-            content: "The Scuffed Crew",
+            content: "{page_title}",
         }
         document::Meta {
             property: "og:description",
-            content: "Multi-game EMEA gaming org. Small teams, real structure, scheduled play nights.",
+            content: "{page_description}",
         }
         document::Meta {
             name: "theme-color",
@@ -101,7 +140,7 @@ fn App() -> Element {
             rel: "stylesheet",
             href: "https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&family=JetBrains+Mono:wght@500&display=swap",
         }
-        style { {theme::theme_css_current()} }
+        style { "{brand_theme_css}" }
         style { {styles::common::CSS} }
         style { {components::ui::ui_css()} }
         theme::ThemeProvider {
