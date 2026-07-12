@@ -20,10 +20,11 @@ use crate::state::AppState;
 type ApiResult<T> = Result<T, (StatusCode, Json<ErrorResponse>)>;
 
 fn internal_err(e: impl std::fmt::Display) -> (StatusCode, Json<ErrorResponse>) {
+    tracing::error!(error = %e, "internal error");
     (
         StatusCode::INTERNAL_SERVER_ERROR,
         Json(ErrorResponse {
-            error: e.to_string(),
+            error: "Internal server error".into(),
         }),
     )
 }
@@ -283,6 +284,11 @@ pub async fn transition_status(
         }
         (TournamentStatus::InProgress, TournamentStatus::Completed) => {}
         (TournamentStatus::Completed, TournamentStatus::Archived) => {}
+        // Cancel / soft-delete before or after a run
+        (
+            TournamentStatus::Draft | TournamentStatus::Registration | TournamentStatus::InProgress,
+            TournamentStatus::Archived,
+        ) => {}
         _ => {
             return Err(bad_request(&format!(
                 "Invalid transition: {} → {}",

@@ -51,23 +51,22 @@ pub fn AdminMatches() -> Element {
     let mut f_notes = use_signal(String::new);
 
     /// Server expects RFC3339 `DateTime<Utc>`; date input is YYYY-MM-DD.
-    fn played_at_to_rfc3339(date: &str) -> String {
+    fn played_at_to_rfc3339(date: &str) -> Option<String> {
         let d = date.trim();
         if d.is_empty() {
-            // Fallback: today UTC so empty date still validates
-            return "1970-01-01T00:00:00Z".into();
+            return None;
         }
         if d.contains('T') {
             if d.ends_with('Z') || d.contains('+') {
-                return d.to_string();
+                return Some(d.to_string());
             }
             if d.len() == 16 {
                 // YYYY-MM-DDTHH:MM
-                return format!("{d}:00Z");
+                return Some(format!("{d}:00Z"));
             }
-            return format!("{d}Z");
+            return Some(format!("{d}Z"));
         }
-        format!("{d}T00:00:00Z")
+        Some(format!("{d}T00:00:00Z"))
     }
 
     let open_create = move |_| {
@@ -103,7 +102,10 @@ pub fn AdminMatches() -> Element {
         let score_them: u32 = f_score_them().parse().unwrap_or(0);
         let map_name_val = f_map_name().clone();
         let match_type_val = f_match_type().clone();
-        let played_at_val = played_at_to_rfc3339(&f_played_at());
+        let Some(played_at_val) = played_at_to_rfc3339(&f_played_at()) else {
+            toast.show(Toast::error("Played-at date is required."));
+            return;
+        };
         let notes_val = f_notes().clone();
 
         modal.start_submit();

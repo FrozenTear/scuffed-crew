@@ -76,13 +76,14 @@ struct Member {
 }
 
 const FORMATS: [&str; 4] = ["single_elim", "double_elim", "round_robin", "swiss"];
+/// Must match server `TournamentStatus` (no "active" — use `in_progress`).
 const STATUS_FILTERS: [&str; 6] = [
     "all",
     "draft",
     "registration",
-    "active",
-    "completed",
     "in_progress",
+    "completed",
+    "archived",
 ];
 
 #[component]
@@ -166,7 +167,8 @@ pub fn AdminTournaments() -> Element {
     let mut open_edit = move |t: Tournament| {
         form_name.set(t.name);
         form_format.set(t.format);
-        form_game_id.set(t.game_name.map(|_| String::new()));
+        // Preserve real game id (was wrongly mapping game_name → empty string)
+        form_game_id.set(t.game_id.clone());
         form_max.set(
             t.max_participants
                 .map(|n| n.to_string())
@@ -251,22 +253,27 @@ pub fn AdminTournaments() -> Element {
         delete_modal.show(t);
     };
 
+    // Server has no DELETE route — archive via status transition.
     let on_delete_confirm = move |_| {
         if let Some(t) = delete_modal.get_target() {
             let id = t.id.clone();
             delete_modal.close();
+            let body = StatusChangeRequest {
+                status: "archived".into(),
+            };
             spawn(async move {
                 match ApiClient::web()
-                    .delete(&format!("/api/tournaments/{id}"))
+                    .patch_json_empty(&format!("/api/tournaments/{id}/status"), &body)
                     .await
                 {
                     Ok(_) => {
-                        toast.show(Toast::success("Tournament deleted."));
+                        toast.show(Toast::success("Tournament archived."));
                         tournaments.refresh += 1;
                         games.refresh += 1;
                         members.refresh += 1;
+                        detail_id.set(None);
                     }
-                    Err(e) => toast.show(Toast::error(format!("Delete failed: {e}"))),
+                    Err(e) => toast.show(Toast::error(format!("Archive failed: {e}"))),
                 }
             });
         }
@@ -282,7 +289,7 @@ pub fn AdminTournaments() -> Element {
         };
         spawn(async move {
             let result = ApiClient::web()
-                .patch_json_empty(&format!("/api/tournaments/{id}"), &body)
+                .patch_json_empty(&format!("/api/tournaments/{id}/status"), &body)
                 .await;
             match result {
                 Ok(_) => {
@@ -377,7 +384,7 @@ pub fn AdminTournaments() -> Element {
         if let Some(tid) = detail_id() {
             spawn(async move {
                 match ApiClient::web()
-                    .post_json_empty(&format!("/api/tournaments/{tid}/bracket/generate"), &())
+                    .post_json_empty(&format!("/api/tournaments/{tid}/generate-bracket"), &())
                     .await
                 {
                     Ok(_) => {
@@ -394,7 +401,7 @@ pub fn AdminTournaments() -> Element {
         if let Some(tid) = detail_id() {
             spawn(async move {
                 match ApiClient::web()
-                    .post_json_empty(&format!("/api/tournaments/{tid}/bracket/next-round"), &())
+                    .post_json_empty(&format!("/api/tournaments/{tid}/next-round"), &())
                     .await
                 {
                     Ok(_) => {
@@ -424,36 +431,42 @@ pub fn AdminTournaments() -> Element {
             && let Some(tid) = detail_id()
         {
             let mid = m.id.clone();
-            let sa = match_score_a().trim().to_string();
-            let sb = match_score_b().trim().to_string();
+            let sa = match_score_a().trim().parse::<u32>();
+            let sb = match_score_b().trim().parse::<u32>();
             let winner_raw = match_winner().trim().to_string();
             let replays_raw = match_replays().trim().to_string();
+            let (Ok(score_a), Ok(score_b)) = (sa, sb) else {
+                toast.show(Toast::error("Scores must be numbers."));
+                return;
+            };
+            if winner_raw.is_empty() {
+                toast.show(Toast::error("Select a winner."));
+                return;
+            }
             let body = MatchReportRequest {
-                score_a: if sa.is_empty() {
-                    None
-                } else {
-                    sa.parse::<u32>().ok()
-                },
-                score_b: if sb.is_empty() {
-                    None
-                } else {
-                    sb.parse::<u32>().ok()
-                },
-                winner_id: if winner_raw.is_empty() {
-                    None
-                } else {
-                    Some(winner_raw)
-                },
+                score_a,
+                score_b,
+                winner_id: winner_raw,
+                notes: None,
                 replay_codes: if replays_raw.is_empty() {
                     None
                 } else {
-                    Some(replays_raw)
+                    Some(
+                        replays_raw
+                            .split(|c: char| c == ',' || c == '\n')
+                            .map(|s| s.trim().to_string())
+                            .filter(|s| !s.is_empty())
+                            .collect(),
+                    )
                 },
             };
             match_modal.start_submit();
             spawn(async move {
                 let result = ApiClient::web()
-                    .put_json_empty(&format!("/api/tournaments/{tid}/matches/{mid}"), &body)
+                    .patch_json_empty(
+                        &format!("/api/tournaments/{tid}/matches/{mid}/report"),
+                        &body,
+                    )
                     .await;
                 match_modal.end_submit();
                 match result {
@@ -491,7 +504,8 @@ pub fn AdminTournaments() -> Element {
                     let t_id = tournament.id.clone();
                     let t_id2 = tournament.id.clone();
                     let is_swiss = tournament.format == "swiss";
-                    let is_active = tournament.status == "active";
+                    let is_in_progress = tournament.status == "in_progress";
+                    let is_registration = tournament.status == "registration";
 
                     rsx! {
                         div { class: "admin-toolbar",
@@ -505,7 +519,7 @@ pub fn AdminTournaments() -> Element {
                                 StatusPill { status: tournament.status.clone() }
                             }
                             div { style: "display:flex;gap:0.5rem;flex-wrap:wrap;",
-                                // Status transitions
+                                // Status transitions (server: draft→registration→in_progress→completed→archived)
                                 if tournament.status == "draft" {
                                     button {
                                         class: "row-btn primary",
@@ -513,14 +527,14 @@ pub fn AdminTournaments() -> Element {
                                         "Open Registration"
                                     }
                                 }
-                                if tournament.status == "registration" {
+                                if is_registration {
                                     button {
                                         class: "row-btn primary",
-                                        onclick: move |_| change_status((t_id2.clone(), "active".to_string())),
+                                        onclick: move |_| change_status((t_id2.clone(), "in_progress".to_string())),
                                         "Start Tournament"
                                     }
                                 }
-                                if is_active {
+                                if is_in_progress {
                                     {
                                         let tid_complete = tournament.id.clone();
                                         rsx! {
@@ -532,12 +546,27 @@ pub fn AdminTournaments() -> Element {
                                         }
                                     }
                                 }
-                                button {
-                                    class: "btn-add",
-                                    onclick: generate_bracket,
-                                    "Generate Bracket"
+                                if tournament.status == "completed" {
+                                    {
+                                        let tid_arch = tournament.id.clone();
+                                        rsx! {
+                                            button {
+                                                class: "row-btn",
+                                                onclick: move |_| change_status((tid_arch.clone(), "archived".to_string())),
+                                                "Archive"
+                                            }
+                                        }
+                                    }
                                 }
-                                if is_swiss && is_active {
+                                // Bracket only before/at registration (server requires bracket before start)
+                                if tournament.status == "draft" || is_registration {
+                                    button {
+                                        class: "btn-add",
+                                        onclick: generate_bracket,
+                                        "Generate Bracket"
+                                    }
+                                }
+                                if is_swiss && is_in_progress {
                                     button {
                                         class: "btn-add",
                                         onclick: next_swiss_round,
@@ -748,10 +777,12 @@ pub fn AdminTournaments() -> Element {
                                                                 onclick: move |_| view_detail(t_view_id.clone()),
                                                                 "View"
                                                             }
-                                                            button {
-                                                                class: "row-btn danger",
-                                                                onclick: move |_| open_delete(t_del.clone()),
-                                                                "Delete"
+                                                            if t_status != "archived" {
+                                                                button {
+                                                                    class: "row-btn danger",
+                                                                    onclick: move |_| open_delete(t_del.clone()),
+                                                                    "Archive"
+                                                                }
                                                             }
                                                             if t_status == "draft" {
                                                                 button {
@@ -763,11 +794,11 @@ pub fn AdminTournaments() -> Element {
                                                             if t_status == "registration" {
                                                                 button {
                                                                     class: "row-btn",
-                                                                    onclick: move |_| change_status((tid_active.clone(), "active".to_string())),
-                                                                    "\u{2192} Active"
+                                                                    onclick: move |_| change_status((tid_active.clone(), "in_progress".to_string())),
+                                                                    "\u{2192} In Progress"
                                                                 }
                                                             }
-                                                            if t_status == "active" {
+                                                            if t_status == "in_progress" {
                                                                 button {
                                                                     class: "row-btn",
                                                                     onclick: move |_| change_status((tid_complete.clone(), "completed".to_string())),
@@ -873,11 +904,11 @@ pub fn AdminTournaments() -> Element {
             }
         }
 
-        // Delete confirm
+        // Archive confirm (no hard-delete API)
         ConfirmDialog {
-            title: "Delete Tournament".to_string(),
+            title: "Archive Tournament".to_string(),
             message: format!(
-                "Are you sure you want to delete \"{}\"? All bracket data will be lost.",
+                "Archive tournament \"{}\"? It will no longer appear as active.",
                 delete_modal.get_target().map(|t| t.name).unwrap_or_default()
             ),
             open: delete_modal.is_open(),

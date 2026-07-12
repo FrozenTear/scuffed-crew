@@ -24,14 +24,14 @@ pub struct AddParticipantRequest {
     pub member_id: String,
 }
 
+/// Mirrors site-server `ReportMatchRequest` (PATCH .../matches/{mid}/report).
 #[derive(Debug, Clone, Serialize)]
 pub struct MatchReportRequest {
+    pub score_a: u32,
+    pub score_b: u32,
+    pub winner_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub score_a: Option<u32>,
+    pub notes: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub score_b: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub winner_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub replay_codes: Option<String>,
+    pub replay_codes: Option<Vec<String>>,
 }

@@ -1,6 +1,7 @@
 use dioxus::prelude::*;
 use serde::Deserialize;
 
+use crate::components::{use_toast, Toast};
 use crate::routes::Route;
 use crate::state::auth::use_auth;
 use scuffed_api_client::ApiClient;
@@ -211,9 +212,12 @@ const PAGE_CSS: &str = r#"
 #[component]
 pub fn WikiPage(topic: String) -> Element {
     let auth = use_auth();
+    let mut toast = use_toast();
+    let mut page_refresh = use_signal(|| 0u64);
     let topic_clone = topic.clone();
     let page_resource = use_resource(move || {
         let t = topic_clone.clone();
+        let _ = page_refresh();
         async move {
             ApiClient::web()
                 .fetch::<WikiPageData>(&format!("/api/wiki/{t}"))
@@ -224,9 +228,11 @@ pub fn WikiPage(topic: String) -> Element {
 
     let topic_for_revisions = topic.clone();
     let mut show_revisions = use_signal(|| false);
+    let mut rev_refresh = use_signal(|| 0u64);
     let revisions = use_resource(move || {
         let t = topic_for_revisions.clone();
         let show = show_revisions();
+        let _ = rev_refresh();
         async move {
             if !show {
                 return None;
@@ -340,8 +346,9 @@ pub fn WikiPage(topic: String) -> Element {
                                                             Ok(_) => {
                                                                 editing.set(false);
                                                                 save_error.set(None);
-                                                                // Refresh by navigating
-                                                                navigator().push(Route::WikiPage { topic: pt });
+                                                                page_refresh += 1;
+                                                                rev_refresh += 1;
+                                                                toast.show(Toast::success("Page saved."));
                                                             }
                                                             Err(e) => {
                                                                 save_error.set(Some(format!("{e}")));

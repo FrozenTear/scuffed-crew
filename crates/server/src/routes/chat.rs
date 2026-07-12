@@ -276,7 +276,8 @@ pub async fn send_encrypted(
             )
         })?;
 
-    // Collect pubkeys of all team members who have Nostr keys
+    // Collect pubkeys of officer-channel-eligible members only (admin/officer).
+    // Recruits/members must not receive gift-wraps for officer traffic.
     let mut recipient_pubkeys = Vec::new();
     for entry in &roster {
         let m = state.db.get_member(&entry.member_id).await.map_err(|e| {
@@ -289,6 +290,7 @@ pub async fn send_encrypted(
             )
         })?;
         if let Some(m) = m
+            && m.org_role.can_access_officer_channel()
             && let Some(pubkey) = &m.nostr_pubkey
         {
             recipient_pubkeys.push(pubkey.clone());
@@ -329,15 +331,17 @@ pub async fn send_encrypted(
 
     let recipients_count = gift_wraps.len();
 
-    // Publish each gift wrap to the relay
+    // Publish each gift wrap to the relay and require success
     // TODO(Phase 2c): Use the RelayClient from shared state instead of creating per-request
     let relay_url = &channel.relay_url;
     let relay_client = scuffed_chat::RelayClient::new(relay_url);
     match relay_client.connect().await {
         Ok(_rx) => {
+            let mut failed = 0usize;
             for gw in &gift_wraps {
                 let relay_event = scuffed_chat::EventBuilder::to_relay_event(&gw.event);
                 if let Err(e) = relay_client.publish_event(relay_event).await {
+                    failed += 1;
                     tracing::warn!(
                         recipient = %gw.recipient_pubkey,
                         "Failed to publish gift wrap: {e}"
@@ -345,6 +349,16 @@ pub async fn send_encrypted(
                 }
             }
             relay_client.disconnect().await;
+            if failed > 0 {
+                return Err((
+                    StatusCode::BAD_GATEWAY,
+                    Json(ErrorResponse {
+                        error: format!(
+                            "Relay rejected {failed}/{recipients_count} gift wrap(s); message not fully delivered"
+                        ),
+                    }),
+                ));
+            }
         }
         Err(e) => {
             tracing::error!("Failed to connect to relay {relay_url}: {e}");

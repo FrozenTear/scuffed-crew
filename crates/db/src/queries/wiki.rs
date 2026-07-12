@@ -103,13 +103,13 @@ impl Database {
     ) -> DbResult<Vec<WikiPage>> {
         with_timeout(async {
             let pages: Vec<DbWikiPage> = if let Some(q) = search {
-                let pattern = format!("%{}%", q);
+                // CONTAINS is substring match — do not wrap with SQL LIKE wildcards
                 let mut result = self
                     .client
                     .query(
                         "SELECT * FROM wiki_page WHERE is_active = true AND (string::lowercase(title) CONTAINS string::lowercase($q) OR string::lowercase(topic) CONTAINS string::lowercase($q)) ORDER BY updated_at DESC LIMIT $lim START $off",
                     )
-                    .bind(("q", pattern))
+                    .bind(("q", q.to_string()))
                     .bind(("lim", limit))
                     .bind(("off", offset))
                     .await?;

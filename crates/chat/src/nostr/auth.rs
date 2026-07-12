@@ -79,12 +79,15 @@ impl NostrAuthService {
     pub fn generate_keypair(&self) -> Result<(String, EncryptedBlob), AuthError> {
         let keys = EventBuilder::generate_keys();
         let pubkey_hex = keys.public_key().to_hex();
-        let secret_hex = keys.secret_key().to_secret_hex();
+        let mut secret_hex = keys.secret_key().to_secret_hex();
 
         let encrypted = self
             .crypto
             .encrypt(&secret_hex)
             .map_err(|e| AuthError::EncryptionFailed(e.to_string()))?;
+
+        use zeroize::Zeroize;
+        secret_hex.zeroize();
 
         Ok((pubkey_hex, encrypted))
     }
@@ -100,7 +103,7 @@ impl NostrAuthService {
         challenge: &str,
     ) -> Result<AuthTokenResponse, AuthError> {
         // Decrypt the secret key
-        let secret_hex = self
+        let mut secret_hex = self
             .crypto
             .decrypt(encrypted_secret_key)
             .map_err(|e| AuthError::DecryptionFailed(e.to_string()))?;
@@ -109,14 +112,14 @@ impl NostrAuthService {
         let keys =
             EventBuilder::keys_from_hex(&secret_hex).map_err(|_| AuthError::InvalidKeyData)?;
 
+        use zeroize::Zeroize;
+        secret_hex.zeroize();
+
         let pubkey_hex = keys.public_key().to_hex();
 
         // Build the AUTH event
         let event = EventBuilder::build_auth_event(&keys, relay_url, challenge)?;
         let relay_event = EventBuilder::to_relay_event(&event);
-
-        // secret_hex is dropped here (String dealloc)
-        // For extra safety, the nostr crate's Keys type uses zeroize on drop
 
         Ok(AuthTokenResponse {
             auth_event: relay_event,
@@ -135,13 +138,16 @@ impl NostrAuthService {
         content: &str,
         tags: Vec<Vec<String>>,
     ) -> Result<NostrEvent, AuthError> {
-        let secret_hex = self
+        let mut secret_hex = self
             .crypto
             .decrypt(encrypted_secret_key)
             .map_err(|e| AuthError::DecryptionFailed(e.to_string()))?;
 
         let keys =
             EventBuilder::keys_from_hex(&secret_hex).map_err(|_| AuthError::InvalidKeyData)?;
+
+        use zeroize::Zeroize;
+        secret_hex.zeroize();
 
         let mut builder = nostr::EventBuilder::new(nostr::Kind::Custom(kind as u16), content);
 

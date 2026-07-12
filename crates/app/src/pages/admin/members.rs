@@ -458,7 +458,22 @@ pub fn AdminMembers() -> Element {
             let data = members.data.read();
             let data = data.as_ref().and_then(|d| d.as_ref());
             match data {
-                None => rsx! { p { class: "admin-loading", "Loading..." } },
+                None => {
+                    if let Some(err) = members.error.read().as_ref().cloned() {
+                        rsx! {
+                            p { class: "admin-loading", style: "color: var(--danger);",
+                                "Failed to load members: {err}"
+                            }
+                            button {
+                                class: "row-btn",
+                                onclick: move |_| members.refresh += 1,
+                                "Retry"
+                            }
+                        }
+                    } else {
+                        rsx! { p { class: "admin-loading", "Loading..." } }
+                    }
+                },
                 Some(list) if list.is_empty() => rsx! {
                     p { class: "empty-state", "No members yet." }
                 },

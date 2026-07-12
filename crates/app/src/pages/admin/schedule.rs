@@ -190,7 +190,17 @@ pub fn AdminSchedule() -> Element {
     // --- Attendance handlers ---
 
     let mut open_attendance = move |evt: Event| {
-        let today = "2026-03-03".to_string();
+        // Local calendar date YYYY-MM-DD (was hardcoded 2026-03-03)
+        let today = {
+            use js_sys::Date;
+            let d = Date::new_0();
+            format!(
+                "{:04}-{:02}-{:02}",
+                d.get_full_year() as i32,
+                d.get_month() as u32 + 1,
+                d.get_date() as u32
+            )
+        };
         att_date.set(today);
         // Initialize entries from members
         let mems = members.data.read();

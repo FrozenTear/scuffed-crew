@@ -9,6 +9,7 @@ pub mod uploads;
 
 use axum::{
     Router,
+    extract::DefaultBodyLimit,
     http::{HeaderValue, Method, header},
     routing::{delete, get, patch, post, put},
 };
@@ -448,6 +449,8 @@ pub fn create_router(state: AppState) -> Router {
         .nest_service("/uploads", ServeDir::new(state.upload_dir.clone()))
         // Static files from dist/, falling back to index.html for SPA routing (Dioxus handles all routes)
         .fallback_service(ServeDir::new("dist").fallback(ServeFile::new("dist/index.html")))
+        // Allow up to 6 MB so officer image uploads (5 MB cap) fit under Axum's default 2 MB limit
+        .layer(DefaultBodyLimit::max(6 * 1024 * 1024))
         .layer(TraceLayer::new_for_http())
         .layer(cors)
         .with_state(state)

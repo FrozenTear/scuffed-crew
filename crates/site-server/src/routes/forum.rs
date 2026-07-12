@@ -14,9 +14,63 @@ use scuffed_db::{
 use scuffed_chat::nostr::events::EventBuilder;
 use scuffed_chat::nostr::relay::publish_event_oneshot;
 
-use crate::extractors::{OfficerUser, OrgMember};
+use scuffed_db::OrgRole;
+
+use crate::extractors::{OfficerUser, OptionalOrgMember, OrgMember};
 use crate::routes::audit_log::audit;
 use crate::state::AppState;
+
+/// Whether `role` meets board `min_role` (`admin`/`officer`/`member`/`recruit`).
+/// Empty/unknown min_role → unrestricted.
+fn role_meets_min(role: OrgRole, min_role: Option<&str>) -> bool {
+    let Some(min) = min_role.map(str::trim).filter(|s| !s.is_empty()) else {
+        return true;
+    };
+    let required = match min.to_ascii_lowercase().as_str() {
+        "admin" => OrgRole::Admin,
+        "officer" => OrgRole::Officer,
+        "member" => OrgRole::Member,
+        "recruit" => OrgRole::Recruit,
+        _ => return true,
+    };
+    role.is_at_least(required)
+}
+
+fn err_forbidden_role() -> (StatusCode, Json<ErrorResponse>) {
+    (
+        StatusCode::FORBIDDEN,
+        Json(ErrorResponse {
+            error: "Insufficient role for this board".into(),
+        }),
+    )
+}
+
+fn err_login_required() -> (StatusCode, Json<ErrorResponse>) {
+    (
+        StatusCode::UNAUTHORIZED,
+        Json(ErrorResponse {
+            error: "Login required for this board".into(),
+        }),
+    )
+}
+
+/// Enforce min_role for a board. Anonymous only allowed when min_role is unset.
+/// Applies to both read and write (judgment default: lock both).
+fn enforce_board_access(
+    board: &ForumBoard,
+    caller_role: Option<OrgRole>,
+) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
+    let min = board.min_role.as_deref();
+    let restricted = min.map(str::trim).filter(|s| !s.is_empty()).is_some();
+    if !restricted {
+        return Ok(());
+    }
+    match caller_role {
+        None => Err(err_login_required()),
+        Some(role) if role_meets_min(role, min) => Ok(()),
+        Some(_) => Err(err_forbidden_role()),
+    }
+}
 
 // ─── Request/Response types ─────────────────────────────────
 
@@ -142,10 +196,11 @@ fn default_reply_limit() -> u32 {
 // ─── Handlers ───────────────────────────────────────────────
 
 fn err_500(e: impl ToString) -> (StatusCode, Json<ErrorResponse>) {
+    tracing::error!(error = %e.to_string(), "forum internal error");
     (
         StatusCode::INTERNAL_SERVER_ERROR,
         Json(ErrorResponse {
-            error: e.to_string(),
+            error: "Internal server error".into(),
         }),
     )
 }
@@ -169,29 +224,41 @@ fn err_404(msg: impl Into<String>) -> (StatusCode, Json<ErrorResponse>) {
 }
 
 /// GET /api/forum/tree — category → boards → sub-boards
+/// Restricted boards (min_role set) are hidden unless the caller meets the role.
 pub async fn forum_tree(
     State(state): State<AppState>,
+    OptionalOrgMember(caller): OptionalOrgMember,
 ) -> Result<Json<Vec<ForumCategoryNode>>, (StatusCode, Json<ErrorResponse>)> {
-    state
-        .db
-        .list_forum_tree()
-        .await
-        .map(Json)
-        .map_err(err_500)
+    let mut tree = state.db.list_forum_tree().await.map_err(err_500)?;
+    let role = caller.as_ref().map(|m| m.org_role);
+    for cat in &mut tree {
+        cat.boards.retain(|node| {
+            enforce_board_access(&node.board, role).is_ok()
+        });
+        for node in &mut cat.boards {
+            node.sub_boards
+                .retain(|sub| enforce_board_access(sub, role).is_ok());
+        }
+    }
+    // Drop empty categories after filtering
+    tree.retain(|c| !c.boards.is_empty());
+    Ok(Json(tree))
 }
 
 /// GET /api/forum/boards/:slug — board meta
 pub async fn get_board(
     State(state): State<AppState>,
+    OptionalOrgMember(caller): OptionalOrgMember,
     Path(slug): Path<String>,
 ) -> Result<Json<ForumBoard>, (StatusCode, Json<ErrorResponse>)> {
-    state
+    let board = state
         .db
         .get_forum_board_by_slug(&slug)
         .await
         .map_err(err_500)?
-        .map(Json)
-        .ok_or_else(|| err_404("Board not found"))
+        .ok_or_else(|| err_404("Board not found"))?;
+    enforce_board_access(&board, caller.as_ref().map(|m| m.org_role))?;
+    Ok(Json(board))
 }
 
 /// POST /api/forum/categories — officer+
@@ -295,11 +362,13 @@ pub async fn update_board(
         .map_err(err_500)
 }
 
-/// GET /api/forum/threads -- list threads (public)
+/// GET /api/forum/threads -- list threads (public unless board min_role)
 pub async fn list_threads(
     State(state): State<AppState>,
+    OptionalOrgMember(caller): OptionalOrgMember,
     Query(query): Query<ListThreadsQuery>,
 ) -> Result<Json<ThreadListResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let role = caller.as_ref().map(|m| m.org_role);
     let mut board_meta = None;
     let board_id = if let Some(slug) = query.board.as_deref() {
         let b = state
@@ -308,6 +377,7 @@ pub async fn list_threads(
             .await
             .map_err(err_500)?
             .ok_or_else(|| err_404("Board not found"))?;
+        enforce_board_access(&b, role)?;
         let id = b.id.clone();
         board_meta = Some(b);
         Some(id)
@@ -346,6 +416,7 @@ pub async fn list_threads(
 /// GET /api/forum/threads/:id -- get thread + replies
 pub async fn get_thread(
     State(state): State<AppState>,
+    OptionalOrgMember(caller): OptionalOrgMember,
     Path(id): Path<String>,
     Query(query): Query<ListRepliesQuery>,
 ) -> Result<Json<ThreadDetailResponse>, (StatusCode, Json<ErrorResponse>)> {
@@ -358,19 +429,12 @@ pub async fn get_thread(
         )
     })?;
 
-    let replies = state
-        .db
-        .list_forum_replies(&id, query.limit.min(100), query.offset)
-        .await
-        .map_err(err_500)?;
-
-    let reply_count = state.db.count_forum_replies(&id).await.unwrap_or(0);
-
     let mut board = None;
     let mut parent_board = None;
     let mut category = None;
     if let Some(bid) = thread.board_id.as_deref() {
         if let Ok(Some(b)) = state.db.get_forum_board(bid).await {
+            enforce_board_access(&b, caller.as_ref().map(|m| m.org_role))?;
             if let Some(pid) = b.parent_board_id.as_deref() {
                 parent_board = state.db.get_forum_board(pid).await.ok().flatten();
             }
@@ -378,6 +442,14 @@ pub async fn get_thread(
             board = Some(b);
         }
     }
+
+    let replies = state
+        .db
+        .list_forum_replies(&id, query.limit.min(100), query.offset)
+        .await
+        .map_err(err_500)?;
+
+    let reply_count = state.db.count_forum_replies(&id).await.unwrap_or(0);
 
     Ok(Json(ThreadDetailResponse {
         thread,
@@ -400,12 +472,11 @@ pub async fn create_thread(
     }
 
     // Resolve board_id from board_id, board slug, or legacy category slug
-    let board_id = if let Some(id) = body.board_id.as_deref().filter(|s| !s.is_empty()) {
-        // id or slug
+    let board = if let Some(id) = body.board_id.as_deref().filter(|s| !s.is_empty()) {
         if let Ok(Some(b)) = state.db.get_forum_board(id).await {
-            b.id
+            b
         } else if let Ok(Some(b)) = state.db.get_forum_board_by_slug(id).await {
-            b.id
+            b
         } else {
             return Err(err_404("Board not found"));
         }
@@ -416,9 +487,7 @@ pub async fn create_thread(
             .await
             .map_err(err_500)?
             .ok_or_else(|| err_404("Board not found"))?
-            .id
     } else if let Some(cat) = body.category.as_deref() {
-        // legacy: map category string to board slug
         let slug = match cat {
             "general" => "general",
             "game" => "overwatch",
@@ -432,10 +501,12 @@ pub async fn create_thread(
             .await
             .map_err(err_500)?
             .ok_or_else(|| err_404("Board not found for category"))?
-            .id
     } else {
         return Err(err_400("board or board_id is required"));
     };
+
+    enforce_board_access(&board, Some(member.member.org_role))?;
+    let board_id = board.id.clone();
 
     let thread = state
         .db
@@ -506,6 +577,12 @@ pub async fn create_reply(
                 error: "Thread not found".into(),
             }),
         ));
+    }
+
+    if let Some(bid) = thread.board_id.as_deref()
+        && let Ok(Some(b)) = state.db.get_forum_board(bid).await
+    {
+        enforce_board_access(&b, Some(member.member.org_role))?;
     }
 
     let reply = state

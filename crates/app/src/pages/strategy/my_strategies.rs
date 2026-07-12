@@ -244,7 +244,7 @@ pub fn StrategyMy() -> Element {
                 div { class: "my-strategies-login",
                     h2 { "Log in to view your strategies" }
                     p { "You need to be signed in to manage your personal strategy library." }
-                    a { href: "/api/auth/login", class: "login-link", "Log In" }
+                    Link { to: Route::Login {}, class: "login-link", "Log In" }
                 }
             }
         };

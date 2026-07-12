@@ -57,9 +57,15 @@ async fn get_user_from_cookie(app: &AppState, jar: &CookieJar) -> Option<CollabU
     }
 }
 
+/// Drop idle strategy connections after this many seconds without a message.
+const WS_IDLE_TIMEOUT_SECS: u64 = 120;
+
 /// Handle WebSocket connection
 async fn handle_socket(socket: WebSocket, state: WsState, user: Option<CollabUserInfo>) {
     let (mut ws_sender, mut ws_receiver) = socket.split();
+
+    // Unique per socket so multi-tab does not clobber the same user id slot
+    let connection_id = uuid::Uuid::new_v4().to_string();
 
     // Create channel for sending messages to this client
     let (tx, mut rx) = mpsc::channel::<WsResponse>(32);
@@ -89,41 +95,52 @@ async fn handle_socket(socket: WebSocket, state: WsState, user: Option<CollabUse
 
     // Track current room
     let mut current_room: Option<StrategyId> = None;
-    let user_id = user.as_ref().map(|u| u.id.clone());
+    let idle = tokio::time::Duration::from_secs(WS_IDLE_TIMEOUT_SECS);
 
-    // Handle incoming messages
-    while let Some(Ok(msg)) = ws_receiver.next().await {
+    // Handle incoming messages with idle timeout (drop dead peers)
+    loop {
+        let msg = tokio::time::timeout(idle, ws_receiver.next()).await;
         match msg {
-            Message::Text(text) => {
-                if let Ok(request) = serde_json::from_str::<WsRequest>(&text) {
-                    let response = handle_message(
-                        &state,
-                        request.message,
-                        &user,
-                        &mut current_room,
-                        tx.clone(),
-                    )
-                    .await;
+            Ok(Some(Ok(msg))) => match msg {
+                Message::Text(text) => {
+                    if let Ok(request) = serde_json::from_str::<WsRequest>(&text) {
+                        let response = handle_message(
+                            &state,
+                            request.message,
+                            &user,
+                            &connection_id,
+                            &mut current_room,
+                            tx.clone(),
+                        )
+                        .await;
 
-                    if let Some(msg) = response {
-                        let response = WsResponse::from(msg).with_request_id(request.request_id);
-                        let _ = tx.send(response).await;
+                        if let Some(msg) = response {
+                            let response =
+                                WsResponse::from(msg).with_request_id(request.request_id);
+                            let _ = tx.send(response).await;
+                        }
                     }
                 }
+                Message::Ping(_data) => {
+                    let _ = tx.send(WsResponse::from(ServerMessage::Pong)).await;
+                }
+                Message::Close(_) => break,
+                _ => {}
+            },
+            Ok(Some(Err(_))) | Ok(None) => break,
+            Err(_) => {
+                tracing::debug!(
+                    connection_id = %connection_id,
+                    "strategy WS idle timeout ({WS_IDLE_TIMEOUT_SECS}s)"
+                );
+                break;
             }
-            Message::Ping(_data) => {
-                let _ = tx.send(WsResponse::from(ServerMessage::Pong)).await;
-            }
-            Message::Close(_) => break,
-            _ => {}
         }
     }
 
-    // Leave room on disconnect
-    if let Some(room_id) = current_room
-        && let Some(ref uid) = user_id
-    {
-        state.rooms.leave_room(&room_id, uid);
+    // Leave room on disconnect (connection-scoped)
+    if let Some(room_id) = current_room {
+        state.rooms.leave_room(&room_id, &connection_id);
     }
 
     send_task.abort();
@@ -138,6 +155,7 @@ async fn handle_message(
     state: &WsState,
     message: ClientMessage,
     user: &Option<CollabUserInfo>,
+    connection_id: &str,
     current_room: &mut Option<StrategyId>,
     tx: mpsc::Sender<WsResponse>,
 ) -> Option<ServerMessage> {
@@ -174,14 +192,19 @@ async fn handle_message(
                 }
             };
 
-            // Leave current room if any
-            if let (Some(old_room), Some(u)) = (current_room.take(), user.as_ref()) {
-                state.rooms.leave_room(&old_room, &u.id);
+            // Leave current room if any (this connection only)
+            if let Some(old_room) = current_room.take() {
+                state.rooms.leave_room(&old_room, connection_id);
             }
 
             // Join new room
             if let Some(u) = user.as_ref() {
-                state.rooms.join_room(&strategy_id, u.clone(), tx.clone());
+                state.rooms.join_room(
+                    &strategy_id,
+                    connection_id.to_string(),
+                    u.clone(),
+                    tx.clone(),
+                );
             }
 
             *current_room = Some(strategy_id.clone());
@@ -193,8 +216,8 @@ async fn handle_message(
         }
 
         ClientMessage::LeaveRoom => {
-            if let (Some(room_id), Some(u)) = (current_room.take(), user.as_ref()) {
-                state.rooms.leave_room(&room_id, &u.id);
+            if let Some(room_id) = current_room.take() {
+                state.rooms.leave_room(&room_id, connection_id);
             }
             None
         }
@@ -237,7 +260,7 @@ async fn handle_message(
 
             state.rooms.broadcast(
                 room_id,
-                &u.id,
+                connection_id,
                 ServerMessage::ElementAdded {
                     by: u.id.clone(),
                     element,
@@ -289,7 +312,7 @@ async fn handle_message(
 
             state.rooms.broadcast(
                 room_id,
-                &u.id,
+                connection_id,
                 ServerMessage::ElementUpdated {
                     by: u.id.clone(),
                     id,
@@ -335,7 +358,7 @@ async fn handle_message(
 
             state.rooms.broadcast(
                 room_id,
-                &u.id,
+                connection_id,
                 ServerMessage::ElementDeleted {
                     by: u.id.clone(),
                     id,
@@ -381,7 +404,7 @@ async fn handle_message(
 
             state.rooms.broadcast(
                 room_id,
-                &u.id,
+                connection_id,
                 ServerMessage::PhaseAdded {
                     by: u.id.clone(),
                     phase,
@@ -432,7 +455,7 @@ async fn handle_message(
 
             state.rooms.broadcast(
                 room_id,
-                &u.id,
+                connection_id,
                 ServerMessage::PhaseUpdated {
                     by: u.id.clone(),
                     id,
@@ -478,7 +501,7 @@ async fn handle_message(
 
             state.rooms.broadcast(
                 room_id,
-                &u.id,
+                connection_id,
                 ServerMessage::PhaseDeleted {
                     by: u.id.clone(),
                     id,
@@ -491,7 +514,7 @@ async fn handle_message(
             if let (Some(room_id), Some(u)) = (current_room.as_ref(), user.as_ref()) {
                 state.rooms.broadcast(
                     room_id,
-                    &u.id,
+                    connection_id,
                     ServerMessage::CursorMoved {
                         user_id: u.id.clone(),
                         position,

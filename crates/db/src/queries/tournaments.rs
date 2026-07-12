@@ -1055,6 +1055,13 @@ impl Database {
         Ok(())
     }
 
+    /// Double-elimination bracket (power-of-2 padded with byes).
+    ///
+    /// Structure (8-team example):
+    /// - Winners: WR1(4) → WR2(2) → WF(1)
+    /// - Losers:  LR1(2) ← WR1 losers; LR2(2) ← LR1 winners + WR2 losers;
+    ///            LR3(1) ← LR2; LR4(1) ← LR3 + WF loser
+    /// - Grand final: WF winner (slot a) vs LR final winner (slot b)
     pub async fn generate_double_elim_bracket(&self, tournament_id: &str) -> DbResult<()> {
         let participants = self.list_tournament_participants(tournament_id).await?;
         let n = participants.len();
@@ -1068,8 +1075,14 @@ impl Database {
 
         let size = n.next_power_of_two();
         let w_rounds = (size as f64).log2() as u32;
+        // 2 teams (w_rounds=1): no intermediate LB — WR loser drops straight to GF slot b.
+        // Larger: classic 2*(w_rounds-1) losers rounds.
+        let l_round_count = if w_rounds <= 1 {
+            0
+        } else {
+            2 * (w_rounds - 1)
+        };
 
-        // Winners bracket rounds
         let mut w_round_ids = Vec::new();
         for r in 1..=w_rounds {
             let round = self
@@ -1078,8 +1091,6 @@ impl Database {
             w_round_ids.push(round.id);
         }
 
-        // Losers bracket: for N winners rounds, there are 2*(w_rounds-1) losers rounds
-        let l_round_count = if w_rounds > 1 { 2 * (w_rounds - 1) } else { 0 };
         let mut l_round_ids = Vec::new();
         for r in 1..=l_round_count {
             let round = self
@@ -1088,12 +1099,10 @@ impl Database {
             l_round_ids.push(round.id);
         }
 
-        // Grand final
         let gf_round = self
             .create_tournament_round(tournament_id, 1, BracketStage::GrandFinal)
             .await?;
 
-        // Seed participants
         let mut seeded: Vec<Option<String>> =
             participants.iter().map(|p| Some(p.id.clone())).collect();
         while seeded.len() < size {
@@ -1107,9 +1116,8 @@ impl Database {
             }
         }
 
-        // Create winners bracket matches
-        let mut w_match_ids: Vec<Vec<String>> = vec![Vec::new(); w_rounds as usize];
         let first_round_matches = size / 2;
+        let mut w_match_ids: Vec<Vec<String>> = vec![Vec::new(); w_rounds as usize];
 
         for i in 0..first_round_matches {
             let a = ordered[i * 2].as_deref();
@@ -1159,43 +1167,34 @@ impl Database {
             }
         }
 
-        // Create losers bracket matches
+        // LB match counts: start at WR1_matches/2, keep on even LB rounds, halve after odd
         let mut l_match_ids: Vec<Vec<String>> = Vec::new();
-        if l_round_count > 0 {
-            // Losers bracket sizing: round 1 has first_round_matches/2 matches,
-            // then alternates between same count and halved count
-            let mut l_count = first_round_matches / 2;
-            // `r` is both an index into l_round_ids and a parity check below,
-            // so the range loop is clearer than enumerate here.
-            #[allow(clippy::needless_range_loop)]
-            for r in 0..l_round_count as usize {
-                let mut round_matches = Vec::new();
-                for i in 0..l_count {
-                    let m = self
-                        .create_tournament_match(
-                            tournament_id,
-                            &l_round_ids[r],
-                            i as u32,
-                            None,
-                            None,
-                            TournamentMatchStatus::Pending,
-                            None,
-                            None,
-                            None,
-                            None,
-                        )
-                        .await?;
-                    round_matches.push(m.id);
-                }
-                l_match_ids.push(round_matches);
-                // Even rounds keep same count, odd rounds halve
-                if r % 2 == 1 {
-                    l_count = l_count.div_ceil(2);
-                }
+        let mut l_count = (first_round_matches / 2).max(1);
+        for r in 0..l_round_count as usize {
+            let mut round_matches = Vec::new();
+            for i in 0..l_count {
+                let m = self
+                    .create_tournament_match(
+                        tournament_id,
+                        &l_round_ids[r],
+                        i as u32,
+                        None,
+                        None,
+                        TournamentMatchStatus::Pending,
+                        None,
+                        None,
+                        None,
+                        None,
+                    )
+                    .await?;
+                round_matches.push(m.id);
+            }
+            l_match_ids.push(round_matches);
+            if r % 2 == 1 {
+                l_count = l_count.div_ceil(2).max(1);
             }
         }
 
-        // Grand final match
         let gf = self
             .create_tournament_match(
                 tournament_id,
@@ -1211,43 +1210,64 @@ impl Database {
             )
             .await?;
 
-        // Wire winners bracket next_match_id
-        for r in 0..w_rounds as usize - 1 {
-            for (i, mid) in w_match_ids[r].iter().enumerate() {
-                let next_idx = i / 2;
-                let slot = if i % 2 == 0 { "a" } else { "b" };
-                if next_idx < w_match_ids[r + 1].len() {
-                    self.update_match_next(mid, &w_match_ids[r + 1][next_idx], slot)
-                        .await?;
-                }
-                // Losers bracket drop: losers from winners round r go to losers round (r*2 - 1) for r>=1, or round 0 for r=0
-                if !l_match_ids.is_empty() {
-                    let loser_round = if r == 0 { 0 } else { r * 2 - 1 };
-                    if loser_round < l_match_ids.len() {
-                        let loser_idx = i / 2;
-                        let loser_slot = if i % 2 == 0 { "a" } else { "b" };
-                        if loser_idx < l_match_ids[loser_round].len() {
-                            self.update_match_loser_next(
-                                mid,
-                                &l_match_ids[loser_round][loser_idx],
-                                loser_slot,
-                            )
+        // Winners advancement: WR[r] → WR[r+1]
+        if w_rounds > 1 {
+            for r in 0..w_rounds as usize - 1 {
+                for (i, mid) in w_match_ids[r].iter().enumerate() {
+                    let next_idx = i / 2;
+                    let slot = if i % 2 == 0 { "a" } else { "b" };
+                    if next_idx < w_match_ids[r + 1].len() {
+                        self.update_match_next(mid, &w_match_ids[r + 1][next_idx], slot)
                             .await?;
-                        }
                     }
                 }
             }
         }
 
-        // Wire losers bracket next_match_id
+        // Loser drops from every winners round (including winners final)
+        if l_match_ids.is_empty() {
+            // 2-team: single WR match — loser goes to grand final slot b
+            if let Some(mid) = w_match_ids.first().and_then(|v| v.first()) {
+                self.update_match_loser_next(mid, &gf.id, "b").await?;
+            }
+        } else {
+            for r in 0..w_rounds as usize {
+                for (i, mid) in w_match_ids[r].iter().enumerate() {
+                    // WR1 → LR0 (pair into half matches); later WR → odd LB rounds (drop-in)
+                    // Winners final → last LB match slot a
+                    let (loser_round, loser_idx, loser_slot) = if r == 0 {
+                        (0usize, i / 2, if i % 2 == 0 { "a" } else { "b" })
+                    } else if r + 1 == w_rounds as usize {
+                        let last = l_match_ids.len() - 1;
+                        (last, 0, "a")
+                    } else {
+                        // WR2 → LR1, WR3 → LR3, … (drop-in rounds at odd indices)
+                        let lr = 2 * r - 1;
+                        (lr, i, "a")
+                    };
+                    if loser_round < l_match_ids.len() && loser_idx < l_match_ids[loser_round].len()
+                    {
+                        self.update_match_loser_next(
+                            mid,
+                            &l_match_ids[loser_round][loser_idx],
+                            loser_slot,
+                        )
+                        .await?;
+                    }
+                }
+            }
+        }
+
+        // Losers bracket advancement
+        // Even LR index (0,2,…): winners go to next round same index as slot "b"
+        //   (slot "a" is reserved for drop-ins from winners)
+        // Odd LR index: winners pair into next (halving) round
         for r in 0..l_match_ids.len().saturating_sub(1) {
             for (i, mid) in l_match_ids[r].iter().enumerate() {
                 let next_round = r + 1;
                 let (next_idx, slot) = if r % 2 == 0 {
-                    // Same number of matches in next round
                     (i, "b")
                 } else {
-                    // Halving round
                     (i / 2, if i % 2 == 0 { "a" } else { "b" })
                 };
                 if next_round < l_match_ids.len() && next_idx < l_match_ids[next_round].len() {
@@ -1257,17 +1277,15 @@ impl Database {
             }
         }
 
-        // Winners final → Grand final slot a
+        // Winners final → Grand final slot a; losers final → Grand final slot b
         if let Some(last_w) = w_match_ids.last().and_then(|v| v.first()) {
             self.update_match_next(last_w, &gf.id, "a").await?;
         }
-
-        // Losers final → Grand final slot b
         if let Some(last_l) = l_match_ids.last().and_then(|v| v.first()) {
             self.update_match_next(last_l, &gf.id, "b").await?;
         }
 
-        // Auto-advance byes
+        // Auto-advance first-round byes in winners (no loser to drop)
         for mid in &w_match_ids[0] {
             let m = self.get_tournament_match(mid).await?.unwrap();
             if m.status == TournamentMatchStatus::Bye {

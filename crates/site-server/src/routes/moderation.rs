@@ -27,6 +27,55 @@ pub async fn create_moderation_action(
     officer: OfficerUser,
     Json(body): Json<CreateModerationRequest>,
 ) -> Result<(StatusCode, Json<ModerationAction>), (StatusCode, Json<ErrorResponse>)> {
+    // Officers may only moderate strictly lower ranks; admins may moderate anyone
+    // except they cannot ban themselves into a lockout via this path either.
+    let target = state
+        .db
+        .get_member(&body.member_id)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: e.to_string(),
+                }),
+            )
+        })?
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse {
+                    error: "Target member not found".into(),
+                }),
+            )
+        })?;
+
+    if target.id == officer.member.id {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "Cannot moderate yourself".into(),
+            }),
+        ));
+    }
+
+    let actor_is_admin = matches!(officer.member.org_role, scuffed_db::OrgRole::Admin);
+    if !actor_is_admin {
+        // Officer: target must be strictly below Officer (member/recruit only)
+        let target_ok = matches!(
+            target.org_role,
+            scuffed_db::OrgRole::Member | scuffed_db::OrgRole::Recruit
+        );
+        if !target_ok {
+            return Err((
+                StatusCode::FORBIDDEN,
+                Json(ErrorResponse {
+                    error: "Officers cannot moderate admins or other officers".into(),
+                }),
+            ));
+        }
+    }
+
     let action = state
         .db
         .create_moderation_action(

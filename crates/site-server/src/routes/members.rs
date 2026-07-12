@@ -77,11 +77,6 @@ pub struct UpdateMemberRequest {
     pub is_active: Option<bool>,
 }
 
-/// Validate a Nostr pubkey: must be a 64-character lowercase hex string.
-fn validate_nostr_pubkey(pubkey: &str) -> bool {
-    pubkey.len() == 64 && pubkey.chars().all(|c| c.is_ascii_hexdigit())
-}
-
 /// PUT /api/members/:id — update member profile (self or officer+)
 pub async fn update_member(
     State(state): State<AppState>,
@@ -95,10 +90,11 @@ pub async fn update_member(
         .get_member(&id)
         .await
         .map_err(|e| {
+            tracing::error!(error = %e, "get_member failed");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
-                    error: e.to_string(),
+                    error: "Internal server error".into(),
                 }),
             )
         })?
@@ -123,14 +119,14 @@ pub async fn update_member(
         ));
     }
 
-    // Validate nostr_pubkey if provided
-    if let Some(Some(ref pubkey)) = body.nostr_pubkey
-        && !validate_nostr_pubkey(pubkey)
-    {
+    // nostr_pubkey must go through /api/nostr/challenge + /api/nostr/verify
+    // (signature proof). Reject arbitrary sets/clears here to prevent NIP-05
+    // impersonation bypass. Field ignored if client still sends it.
+    if body.nostr_pubkey.is_some() {
         return Err((
             StatusCode::BAD_REQUEST,
             Json(ErrorResponse {
-                error: "Invalid Nostr pubkey: must be a 64-character hex string".into(),
+                error: "Nostr pubkey can only be set via the challenge/verify flow".into(),
             }),
         ));
     }
@@ -145,15 +141,16 @@ pub async fn update_member(
             body.timezone.as_ref().map(|t| t.as_deref()),
             body.pronouns.as_ref().map(|p| p.as_deref()),
             body.availability_status.as_ref().map(|a| a.as_deref()),
-            body.nostr_pubkey.as_ref().map(|n| n.as_deref()),
+            None, // never set pubkey from this route
             body.is_active,
         )
         .await
         .map_err(|e| {
+            tracing::error!(error = %e, "update_member failed");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
-                    error: e.to_string(),
+                    error: "Internal server error".into(),
                 }),
             )
         })?;

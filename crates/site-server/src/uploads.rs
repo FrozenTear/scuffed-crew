@@ -45,7 +45,28 @@ fn extension_for(content_type: &str) -> Option<&'static str> {
         .map(|(_, ext)| *ext)
 }
 
+/// Detect image type from magic bytes (not client Content-Type).
+fn sniff_image_ext(data: &[u8]) -> Option<&'static str> {
+    if data.len() >= 3 && data[0] == 0xff && data[1] == 0xd8 && data[2] == 0xff {
+        return Some("jpg");
+    }
+    if data.len() >= 8 && data[..8] == [0x89, b'P', b'N', b'G', b'\r', b'\n', 0x1a, b'\n'] {
+        return Some("png");
+    }
+    if data.len() >= 6 && (data[..6] == *b"GIF87a" || data[..6] == *b"GIF89a") {
+        return Some("gif");
+    }
+    // RIFF....WEBP
+    if data.len() >= 12 && data[..4] == *b"RIFF" && data[8..12] == *b"WEBP" {
+        return Some("webp");
+    }
+    None
+}
+
 /// Save an uploaded file to disk. Returns the relative URL path.
+///
+/// Extension is chosen from **magic bytes**, not the client-declared content-type.
+/// Declared type is only used as a soft check when present.
 pub async fn save_upload(
     upload_dir: &Path,
     category: &str,
@@ -53,10 +74,17 @@ pub async fn save_upload(
     content_type: &str,
     max_bytes: usize,
 ) -> Result<String, UploadError> {
-    let ext = extension_for(content_type).ok_or(UploadError::InvalidContentType)?;
-
     if data.len() > max_bytes {
         return Err(UploadError::FileTooLarge { max_bytes });
+    }
+
+    let ext = sniff_image_ext(data).ok_or(UploadError::InvalidContentType)?;
+
+    // If client declared a type, it must match the sniffed type (when recognized).
+    if let Some(declared) = extension_for(content_type)
+        && declared != ext
+    {
+        return Err(UploadError::InvalidContentType);
     }
 
     let dir = upload_dir.join(category);

@@ -17,6 +17,9 @@ pub struct OrgMember {
     pub member: Member,
 }
 
+/// Extractor: optional org member (anonymous → `None`, does not fail the request).
+pub struct OptionalOrgMember(pub Option<Member>);
+
 /// Extractor: officer or admin.
 pub struct OfficerUser {
     pub user: User,
@@ -85,6 +88,20 @@ impl FromRequestParts<AppState> for OrgMember {
         }
 
         Ok(OrgMember { user, member })
+    }
+}
+
+impl FromRequestParts<AppState> for OptionalOrgMember {
+    type Rejection = std::convert::Infallible;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
+        match OrgMember::from_request_parts(parts, state).await {
+            Ok(m) => Ok(OptionalOrgMember(Some(m.member))),
+            Err(_) => Ok(OptionalOrgMember(None)),
+        }
     }
 }
 

@@ -5,10 +5,11 @@ use tokio::sync::mpsc;
 
 /// A collaboration room for a strategy
 pub struct Room {
-    pub users: HashMap<String, RoomUser>,
+    /// Keyed by **connection id** (not user id) so multi-tab works.
+    pub connections: HashMap<String, RoomUser>,
 }
 
-/// A user in a room
+/// A single WebSocket connection in a room
 pub struct RoomUser {
     pub info: CollabUserInfo,
     pub tx: mpsc::Sender<WsResponse>,
@@ -17,59 +18,83 @@ pub struct RoomUser {
 impl Room {
     pub fn new() -> Self {
         Self {
-            users: HashMap::new(),
+            connections: HashMap::new(),
         }
     }
 
-    pub fn add_user(&mut self, user: CollabUserInfo, tx: mpsc::Sender<WsResponse>) {
-        self.users
-            .insert(user.id.clone(), RoomUser { info: user, tx });
+    pub fn add_connection(
+        &mut self,
+        connection_id: String,
+        user: CollabUserInfo,
+        tx: mpsc::Sender<WsResponse>,
+    ) {
+        self.connections.insert(
+            connection_id,
+            RoomUser {
+                info: user,
+                tx,
+            },
+        );
     }
 
-    pub fn remove_user(&mut self, user_id: &str) -> Option<CollabUserInfo> {
-        self.users.remove(user_id).map(|u| u.info)
+    /// Remove one connection. Returns the user info and whether any other
+    /// connections for that **user id** remain.
+    pub fn remove_connection(&mut self, connection_id: &str) -> Option<(CollabUserInfo, bool)> {
+        let removed = self.connections.remove(connection_id)?;
+        let user_id = removed.info.id.clone();
+        let still_present = self
+            .connections
+            .values()
+            .any(|c| c.info.id == user_id);
+        Some((removed.info, still_present))
     }
 
+    /// Deduplicated user list for RoomJoined UI (one entry per user id).
     pub fn get_users(&self) -> Vec<CollabUserInfo> {
-        self.users.values().map(|u| u.info.clone()).collect()
+        let mut seen = std::collections::HashSet::new();
+        let mut out = Vec::new();
+        for c in self.connections.values() {
+            if seen.insert(c.info.id.clone()) {
+                out.push(c.info.clone());
+            }
+        }
+        out
     }
 
     pub fn is_empty(&self) -> bool {
-        self.users.is_empty()
+        self.connections.is_empty()
     }
 
-    /// Broadcast a message to all users except the sender, using try_send
-    /// to avoid blocking on slow clients. Dead clients are removed.
-    pub fn broadcast(&mut self, sender_id: &str, message: ServerMessage) {
+    /// Broadcast to all connections except `sender_connection_id`.
+    pub fn broadcast(&mut self, sender_connection_id: &str, message: ServerMessage) {
         let response = WsResponse::from(message);
-        let mut dead_clients = Vec::new();
+        let mut dead = Vec::new();
 
-        for (user_id, user) in &self.users {
-            if user_id != sender_id && user.tx.try_send(response.clone()).is_err() {
-                dead_clients.push(user_id.clone());
+        for (cid, user) in &self.connections {
+            if cid != sender_connection_id && user.tx.try_send(response.clone()).is_err() {
+                dead.push(cid.clone());
             }
         }
 
-        for id in dead_clients {
-            tracing::warn!("Removing dead client {} from room", id);
-            self.users.remove(&id);
+        for id in dead {
+            tracing::warn!("Removing dead connection {} from room", id);
+            self.connections.remove(&id);
         }
     }
 
-    /// Send a message to all users, using try_send
     pub fn broadcast_all(&mut self, message: ServerMessage) {
         let response = WsResponse::from(message);
-        let mut dead_clients = Vec::new();
+        let mut dead = Vec::new();
 
-        for (user_id, user) in &self.users {
+        for (cid, user) in &self.connections {
             if user.tx.try_send(response.clone()).is_err() {
-                dead_clients.push(user_id.clone());
+                dead.push(cid.clone());
             }
         }
 
-        for id in dead_clients {
-            tracing::warn!("Removing dead client {} from room", id);
-            self.users.remove(&id);
+        for id in dead {
+            tracing::warn!("Removing dead connection {} from room", id);
+            self.connections.remove(&id);
         }
     }
 }
@@ -92,30 +117,43 @@ impl RoomManager {
         }
     }
 
-    /// Join a room (creates it if it doesn't exist)
+    /// Join a room (creates it if it doesn't exist).
+    /// `connection_id` must be unique per WebSocket.
     pub fn join_room(
         &self,
         strategy_id: &StrategyId,
+        connection_id: String,
         user: CollabUserInfo,
         tx: mpsc::Sender<WsResponse>,
     ) {
         let mut room = self.rooms.entry(strategy_id.clone()).or_default();
 
-        // Notify existing users
-        room.broadcast_all(ServerMessage::UserJoined { user: user.clone() });
+        // Only announce UserJoined if this is the user's first connection in the room
+        let first_for_user = !room
+            .connections
+            .values()
+            .any(|c| c.info.id == user.id);
 
-        room.add_user(user, tx);
+        if first_for_user {
+            room.broadcast_all(ServerMessage::UserJoined {
+                user: user.clone(),
+            });
+        }
+
+        room.add_connection(connection_id, user, tx);
     }
 
-    /// Leave a room (removes it if empty)
-    pub fn leave_room(&self, strategy_id: &StrategyId, user_id: &str) {
+    /// Leave a room for one connection. Broadcasts UserLeft only when the
+    /// user has no remaining connections in the room.
+    pub fn leave_room(&self, strategy_id: &StrategyId, connection_id: &str) {
         let should_remove = {
             if let Some(mut room) = self.rooms.get_mut(strategy_id) {
-                if let Some(_user) = room.remove_user(user_id) {
-                    // Notify remaining users
-                    room.broadcast_all(ServerMessage::UserLeft {
-                        user_id: user_id.to_string(),
-                    });
+                if let Some((info, still_present)) = room.remove_connection(connection_id) {
+                    if !still_present {
+                        room.broadcast_all(ServerMessage::UserLeft {
+                            user_id: info.id,
+                        });
+                    }
                 }
                 room.is_empty()
             } else {
@@ -128,28 +166,29 @@ impl RoomManager {
         }
     }
 
-    /// Get users in a room
     pub fn get_room_users(&self, strategy_id: &StrategyId) -> Option<Vec<CollabUserInfo>> {
         self.rooms.get(strategy_id).map(|r| r.get_users())
     }
 
-    /// Broadcast to a room (excludes sender, removes dead clients)
-    pub fn broadcast(&self, strategy_id: &StrategyId, sender_id: &str, message: ServerMessage) {
+    pub fn broadcast(
+        &self,
+        strategy_id: &StrategyId,
+        sender_connection_id: &str,
+        message: ServerMessage,
+    ) {
         if let Some(mut room) = self.rooms.get_mut(strategy_id) {
-            room.broadcast(sender_id, message);
+            room.broadcast(sender_connection_id, message);
         }
     }
 
-    /// Get number of rooms (observability helper; not yet wired to a metrics endpoint)
     #[allow(dead_code)]
     pub fn room_count(&self) -> usize {
         self.rooms.len()
     }
 
-    /// Get total users across all rooms (observability helper; not yet wired up)
     #[allow(dead_code)]
     pub fn total_users(&self) -> usize {
-        self.rooms.iter().map(|r| r.users.len()).sum()
+        self.rooms.iter().map(|r| r.connections.len()).sum()
     }
 }
 
