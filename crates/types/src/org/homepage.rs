@@ -137,7 +137,7 @@ impl HomepageSections {
 }
 
 /// Editable homepage copy. Stored as JSON on site_settings; missing keys use defaults.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HomepageContent {
     /// How primary homepage text and blocks are aligned.
     #[serde(default)]
