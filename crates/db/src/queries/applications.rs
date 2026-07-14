@@ -127,9 +127,14 @@ impl Database {
         .await
     }
 
+    /// Update application status with compare-and-swap on the current status.
+    ///
+    /// `expected_status` must match the row at write time; otherwise returns
+    /// [`crate::DbError::Conflict`] so concurrent officer updates cannot both apply.
     pub async fn update_application_status(
         &self,
         id: &str,
+        expected_status: ApplicationStatus,
         status: ApplicationStatus,
         reviewed_by: &str,
         review_notes: Option<&str>,
@@ -138,6 +143,13 @@ impl Database {
             let existing: Option<DbApplication> = self.client.select(("application", id)).await?;
             let mut db = existing
                 .ok_or_else(|| crate::DbError::NotFound(format!("Application {id} not found")))?;
+
+            let current = parse_status(&db.status);
+            if current != expected_status {
+                return Err(crate::DbError::Conflict(format!(
+                    "Application status changed concurrently (expected {expected_status}, found {current})"
+                )));
+            }
 
             db.status = status.to_string();
             db.reviewed_by = Some(reviewed_by.to_string());

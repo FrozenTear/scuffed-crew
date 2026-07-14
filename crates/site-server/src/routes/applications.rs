@@ -166,22 +166,15 @@ pub async fn update_application(
         )));
     }
 
-    let app = state
-        .db
-        .update_application_status(
-            &id,
-            body.status,
-            &officer.member.id,
-            body.review_notes.as_deref(),
-        )
-        .await
-        .map_err(|e| internal_err(e, "update_application_status"))?;
-
-    // Ensure / promote / deactivate member according to pipeline outcome
+    // Side effects run *before* the CAS status write when they must not leave a
+    // terminal application without matching membership state:
+    // - trial/accepted: provision first so we never accept without a member
+    // - reject/withdraw: deactivate recruit first so reject never leaves an
+    //   active trial recruit if deactivate would fail after status write
     if application_status_ensures_member(body.status) {
         ensure_member_for_application(
             &state,
-            &app.user_id,
+            &existing.user_id,
             existing.status,
             body.status,
             &id,
@@ -190,13 +183,13 @@ pub async fn update_application(
     } else if application_status_deactivates_member(body.status) {
         if let Some(member) = state
             .db
-            .get_member_by_user(&app.user_id)
+            .get_member_by_user(&existing.user_id)
             .await
             .map_err(|e| internal_err(e, "get_member_by_user on reject"))?
         {
             // Only auto-deactivate recruits (trial pipeline); leave higher roles alone
             if member.is_active && member.org_role == OrgRole::Recruit {
-                let _ = state
+                state
                     .db
                     .update_member(
                         &member.id,
@@ -211,7 +204,13 @@ pub async fn update_application(
                     )
                     .await
                     .map_err(|e| internal_err(e, "deactivate recruit on reject"))?;
-                let _ = state.db.delete_sessions_for_user(&app.user_id).await;
+                if let Err(e) = state.db.delete_sessions_for_user(&existing.user_id).await {
+                    tracing::error!(
+                        error = %e,
+                        user_id = %existing.user_id,
+                        "failed to revoke sessions after application reject/withdraw"
+                    );
+                }
                 audit(
                     &state.db,
                     &officer.member.id,
@@ -225,11 +224,26 @@ pub async fn update_application(
         }
     }
 
+    let app = state
+        .db
+        .update_application_status(
+            &id,
+            existing.status,
+            body.status,
+            &officer.member.id,
+            body.review_notes.as_deref(),
+        )
+        .await
+        .map_err(|e| match e {
+            scuffed_db::DbError::Conflict(msg) => conflict(&msg),
+            other => internal_err(other, "update_application_status"),
+        })?;
+
     let action = match body.status {
         ApplicationStatus::Accepted => AuditAction::AcceptedApplication,
         ApplicationStatus::Rejected => AuditAction::RejectedApplication,
         ApplicationStatus::Trial => AuditAction::StartedTrialApplication,
-        ApplicationStatus::Withdrawn => AuditAction::RejectedApplication,
+        ApplicationStatus::Withdrawn => AuditAction::WithdrawnApplication,
         ApplicationStatus::Pending => AuditAction::AcceptedApplication, // unreachable via transitions
     };
 

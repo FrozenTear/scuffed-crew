@@ -72,12 +72,20 @@ impl FromRequestParts<AppState> for OrgMember {
             ));
         }
 
-        // Check for active suspension or ban
+        // Check for active suspension or ban (fail closed on DB errors)
         let suspended = state
             .db
             .is_member_suspended_or_banned(&member.id)
             .await
-            .unwrap_or(false);
+            .map_err(|e| {
+                tracing::error!(error = %e, member_id = %member.id, "suspension check failed");
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse {
+                        error: "Internal error".into(),
+                    }),
+                )
+            })?;
         if suspended {
             return Err((
                 StatusCode::FORBIDDEN,

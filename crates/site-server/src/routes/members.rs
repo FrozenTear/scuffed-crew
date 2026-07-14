@@ -137,8 +137,8 @@ pub async fn update_member(
         if new_active == target.is_active {
             is_active = None; // no-op
         } else {
-            let admin_count = state.db.count_active_admins().await.map_err(|e| {
-                tracing::error!(error = %e, "count_active_admins failed");
+            let admin_count = state.db.count_actionable_admins().await.map_err(|e| {
+                tracing::error!(error = %e, "count_actionable_admins failed");
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     Json(ErrorResponse {
@@ -146,6 +146,22 @@ pub async fn update_member(
                     }),
                 )
             })?;
+            let target_suspended = state
+                .db
+                .is_member_suspended_or_banned(&target.id)
+                .await
+                .map_err(|e| {
+                    tracing::error!(error = %e, "suspension check for is_active");
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(ErrorResponse {
+                            error: "Internal server error".into(),
+                        }),
+                    )
+                })?;
+            let target_is_actionable_admin = target.is_active
+                && target.org_role == OrgRole::Admin
+                && !target_suspended;
             if let Err(msg) = crate::membership_policy::can_set_is_active(
                 &caller.member.id,
                 caller.member.org_role,
@@ -154,6 +170,7 @@ pub async fn update_member(
                 target.is_active,
                 new_active,
                 admin_count,
+                target_is_actionable_admin,
             ) {
                 return Err((
                     StatusCode::FORBIDDEN,
@@ -331,8 +348,8 @@ pub async fn change_role(
             )
         })?;
 
-    let admin_count = state.db.count_active_admins().await.map_err(|e| {
-        tracing::error!(error = %e, "count_active_admins");
+    let admin_count = state.db.count_actionable_admins().await.map_err(|e| {
+        tracing::error!(error = %e, "count_actionable_admins");
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse {
@@ -340,6 +357,21 @@ pub async fn change_role(
             }),
         )
     })?;
+    let target_suspended = state
+        .db
+        .is_member_suspended_or_banned(&target.id)
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, "suspension check for change_role");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: "Internal server error".into(),
+                }),
+            )
+        })?;
+    let target_is_actionable_admin =
+        target.is_active && target.org_role == OrgRole::Admin && !target_suspended;
 
     if let Err(msg) = crate::membership_policy::can_change_role(
         &admin.member.id,
@@ -348,6 +380,7 @@ pub async fn change_role(
         target.is_active,
         body.role,
         admin_count,
+        target_is_actionable_admin,
     ) {
         return Err((
             StatusCode::BAD_REQUEST,
@@ -471,15 +504,19 @@ pub async fn delete_game_account(
 
     state
         .db
-        .delete_game_account(&account_id)
+        .delete_game_account(&member_id, &account_id)
         .await
-        .map_err(|e| {
-            (
+        .map_err(|e| match e {
+            scuffed_db::DbError::NotFound(msg) => (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse { error: msg }),
+            ),
+            other => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
-                    error: e.to_string(),
+                    error: other.to_string(),
                 }),
-            )
+            ),
         })?;
 
     Ok(StatusCode::OK)

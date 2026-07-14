@@ -20,6 +20,8 @@ pub enum DbError {
     Surreal(#[from] surrealdb::Error),
     #[error("Not found: {0}")]
     NotFound(String),
+    #[error("Conflict: {0}")]
+    Conflict(String),
     #[error("Configuration error: {0}")]
     Config(String),
     #[error("Operation timed out")]

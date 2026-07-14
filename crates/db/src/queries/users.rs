@@ -187,23 +187,12 @@ impl Database {
         Ok(user.clone())
     }
 
-    /// True if any active member has org_role admin.
+    /// True if any **actionable** admin exists (active, role=admin, not suspended/banned).
+    ///
+    /// Used for first-boot setup gating. If every admin is suspended, this is
+    /// false so setup can recover the org from lockout.
     pub async fn has_admin_member(&self) -> DbResult<bool> {
-        with_timeout(async {
-            #[derive(Deserialize, SurrealValue)]
-            struct Cnt {
-                count: u32,
-            }
-            let mut result = self
-                .client
-                .query(
-                    "SELECT count() FROM member WHERE org_role = 'admin' AND is_active = true GROUP ALL",
-                )
-                .await?;
-            let rows: Vec<Cnt> = result.take(0)?;
-            Ok(rows.first().map(|c| c.count > 0).unwrap_or(false))
-        })
-        .await
+        Ok(self.count_actionable_admins().await? > 0)
     }
 
     /// True if any local user has a password hash (local login available).

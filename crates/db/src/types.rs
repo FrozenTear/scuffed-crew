@@ -561,6 +561,7 @@ pub enum AuditAction {
     DeletedEvent,
     AcceptedApplication,
     RejectedApplication,
+    WithdrawnApplication,
     StartedTrialApplication,
     ChangedRole,
     UpdatedMember,

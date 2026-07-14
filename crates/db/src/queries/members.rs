@@ -310,6 +310,9 @@ impl Database {
     }
 
     /// Count currently active admin members (is_active = true, org_role = admin).
+    ///
+    /// Includes suspended admins (suspension keeps `is_active`). Prefer
+    /// [`Self::count_actionable_admins`] for last-admin policy guards.
     pub async fn count_active_admins(&self) -> DbResult<u64> {
         with_timeout(async {
             #[derive(Deserialize, SurrealValue)]
@@ -324,6 +327,49 @@ impl Database {
                 .await?;
             let counts: Vec<CountResult> = result.take(0)?;
             Ok(counts.first().map(|c| c.count).unwrap_or(0))
+        })
+        .await
+    }
+
+    /// Count admins who can still use admin tools: active, role=admin, and not
+    /// currently suspended or banned.
+    ///
+    /// Use this for last-admin demote/deactivate/suspend/ban guards and setup
+    /// recovery (`has_admin_member`). Suspended admins keep `is_active = true`
+    /// but must not inflate the count or the org can lock itself out.
+    pub async fn count_actionable_admins(&self) -> DbResult<u64> {
+        with_timeout(async {
+            let mut admins_result = self
+                .client
+                .query(
+                    "SELECT * FROM member WHERE is_active = true AND org_role = 'admin'",
+                )
+                .await?;
+            let admins: Vec<DbMember> = admins_result.take(0)?;
+            if admins.is_empty() {
+                return Ok(0);
+            }
+
+            #[derive(Deserialize, SurrealValue)]
+            struct BlockedMid {
+                member_id: String,
+            }
+            let mut blocked_result = self
+                .client
+                .query(
+                    "SELECT member_id FROM moderation_action WHERE is_active = true AND action_type IN ['suspension', 'ban'] AND (expires_at IS NONE OR expires_at > time::now())",
+                )
+                .await?;
+            let blocked: Vec<BlockedMid> = blocked_result.take(0)?;
+            let blocked_ids: std::collections::HashSet<String> =
+                blocked.into_iter().map(|b| b.member_id).collect();
+
+            let count = admins
+                .into_iter()
+                .map(db_to_member)
+                .filter(|m| !blocked_ids.contains(&m.id))
+                .count() as u64;
+            Ok(count)
         })
         .await
     }

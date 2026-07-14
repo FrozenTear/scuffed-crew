@@ -93,23 +93,29 @@ pub fn moderation_revokes_sessions(action: ModerationActionType) -> bool {
 
 /// Rules for changing a member's org role (admin-only path, pre-checked).
 ///
-/// `active_admin_count` includes the target if they are currently an active admin.
+/// `actionable_admin_count` is active admins who are **not** suspended/banned,
+/// and includes the target if they are currently an actionable admin.
+///
+/// `target_is_actionable_admin` is true when the target is currently in that
+/// count (active admin, not suspended/banned). Demoting an already-suspended
+/// admin does not reduce the actionable count and is allowed.
 pub fn can_change_role(
     actor_id: &str,
     target_id: &str,
     target_role: OrgRole,
     target_is_active: bool,
     new_role: OrgRole,
-    active_admin_count: u64,
+    actionable_admin_count: u64,
+    target_is_actionable_admin: bool,
 ) -> Result<(), &'static str> {
     if target_role == new_role {
         return Err("Member already has this role");
     }
 
-    // Demoting/removing the last active admin locks the org out of admin tools.
-    let target_is_active_admin = target_is_active && target_role == OrgRole::Admin;
-    let demoting_admin = target_is_active_admin && new_role != OrgRole::Admin;
-    if demoting_admin && active_admin_count <= 1 {
+    // Demoting the last actionable admin locks the org out of admin tools.
+    let demoting_actionable_admin =
+        target_is_actionable_admin && target_is_active && target_role == OrgRole::Admin && new_role != OrgRole::Admin;
+    if demoting_actionable_admin && actionable_admin_count <= 1 {
         return Err("Cannot demote the last active admin");
     }
 
@@ -127,7 +133,8 @@ pub fn can_set_is_active(
     target_role: OrgRole,
     target_is_active: bool,
     new_active: bool,
-    active_admin_count: u64,
+    actionable_admin_count: u64,
+    target_is_actionable_admin: bool,
 ) -> Result<(), &'static str> {
     // Never let someone flip their own active flag (lockout / self-reactivate bypass).
     if actor_id == target_id {
@@ -143,11 +150,12 @@ pub fn can_set_is_active(
         return Err("Officers cannot deactivate admins or other officers");
     }
 
-    // Deactivating the last active admin
-    if target_is_active
+    // Deactivating the last actionable admin
+    if target_is_actionable_admin
+        && target_is_active
         && !new_active
         && target_role == OrgRole::Admin
-        && active_admin_count <= 1
+        && actionable_admin_count <= 1
     {
         return Err("Cannot deactivate the last active admin");
     }
@@ -160,17 +168,26 @@ pub fn deactivation_revokes_sessions(was_active: bool, new_active: bool) -> bool
     was_active && !new_active
 }
 
-/// Ban/suspend of last active admin is forbidden.
+/// Ban/suspend of last actionable admin is forbidden.
+///
+/// `actionable_admin_count` must exclude already-suspended/banned admins so
+/// suspending the penultimate admin cannot leave zero usable admins.
+/// Already-suspended admins may still be banned (they do not count).
 pub fn can_suspend_or_ban_admin(
     target_role: OrgRole,
     target_is_active: bool,
     action: ModerationActionType,
-    active_admin_count: u64,
+    actionable_admin_count: u64,
+    target_is_actionable_admin: bool,
 ) -> Result<(), &'static str> {
     if !moderation_revokes_sessions(action) {
         return Ok(());
     }
-    if target_is_active && target_role == OrgRole::Admin && active_admin_count <= 1 {
+    if target_is_actionable_admin
+        && target_is_active
+        && target_role == OrgRole::Admin
+        && actionable_admin_count <= 1
+    {
         return Err("Cannot suspend or ban the last active admin");
     }
     Ok(())
@@ -210,9 +227,11 @@ mod tests {
 
     #[test]
     fn last_admin_demote_blocked() {
-        let err = can_change_role("a1", "a1", OrgRole::Admin, true, OrgRole::Officer, 1);
+        let err = can_change_role("a1", "a1", OrgRole::Admin, true, OrgRole::Officer, 1, true);
         assert!(err.is_err());
-        assert!(can_change_role("a1", "a2", OrgRole::Admin, true, OrgRole::Officer, 2).is_ok());
+        assert!(can_change_role("a1", "a2", OrgRole::Admin, true, OrgRole::Officer, 2, true).is_ok());
+        // Suspended (non-actionable) admin may be demoted even if count is 1
+        assert!(can_change_role("a1", "a2", OrgRole::Admin, true, OrgRole::Officer, 1, false).is_ok());
     }
 
     #[test]
@@ -232,7 +251,8 @@ mod tests {
             OrgRole::Admin,
             true,
             false,
-            1
+            1,
+            true
         )
         .is_err());
         assert!(can_set_is_active(
@@ -242,7 +262,8 @@ mod tests {
             OrgRole::Admin,
             true,
             false,
-            2
+            2,
+            true
         )
         .is_ok());
         assert!(can_set_is_active(
@@ -252,7 +273,8 @@ mod tests {
             OrgRole::Member,
             true,
             false,
-            1
+            1,
+            false
         )
         .is_err());
         assert!(can_set_is_active(
@@ -262,7 +284,8 @@ mod tests {
             OrgRole::Admin,
             true,
             false,
-            2
+            2,
+            true
         )
         .is_err());
     }
@@ -285,21 +308,33 @@ mod tests {
             OrgRole::Admin,
             true,
             ModerationActionType::Ban,
-            1
+            1,
+            true
         )
         .is_err());
         assert!(can_suspend_or_ban_admin(
             OrgRole::Admin,
             true,
             ModerationActionType::Ban,
-            2
+            2,
+            true
         )
         .is_ok());
         assert!(can_suspend_or_ban_admin(
             OrgRole::Member,
             true,
             ModerationActionType::Ban,
-            1
+            1,
+            false
+        )
+        .is_ok());
+        // Already-suspended admin may be banned (does not count as actionable)
+        assert!(can_suspend_or_ban_admin(
+            OrgRole::Admin,
+            true,
+            ModerationActionType::Ban,
+            1,
+            false
         )
         .is_ok());
     }

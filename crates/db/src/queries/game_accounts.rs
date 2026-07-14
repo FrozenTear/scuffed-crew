@@ -98,9 +98,22 @@ impl Database {
         .await
     }
 
-    /// Delete a game account.
-    pub async fn delete_game_account(&self, id: &str) -> DbResult<()> {
+    /// Delete a game account if it belongs to `member_id`.
+    ///
+    /// Returns [`crate::DbError::NotFound`] when the id is missing **or** owned
+    /// by a different member (no existence leak across members).
+    pub async fn delete_game_account(&self, member_id: &str, id: &str) -> DbResult<()> {
         with_timeout(async {
+            let existing: Option<DbGameAccount> =
+                self.client.select(("game_account", id)).await?;
+            let existing = existing.ok_or_else(|| {
+                crate::DbError::NotFound(format!("Game account {id} not found"))
+            })?;
+            if existing.member_id != member_id {
+                return Err(crate::DbError::NotFound(format!(
+                    "Game account {id} not found"
+                )));
+            }
             let _: Option<DbGameAccount> = self.client.delete(("game_account", id)).await?;
             Ok(())
         })

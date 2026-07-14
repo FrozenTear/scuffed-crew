@@ -7,7 +7,7 @@ use chrono::{DateTime, Utc};
 use serde::Deserialize;
 
 use scuffed_auth::server::session::ErrorResponse;
-use scuffed_db::{AuditAction, AuditTargetType, ModerationAction, ModerationActionType};
+use scuffed_db::{AuditAction, AuditTargetType, ModerationAction, ModerationActionType, OrgRole};
 
 use crate::extractors::{AdminUser, OfficerUser};
 use crate::membership_policy::{
@@ -84,15 +84,24 @@ pub async fn create_moderation_action(
 
     let admin_count = state
         .db
-        .count_active_admins()
+        .count_actionable_admins()
         .await
-        .map_err(|e| internal_err(e, "count_active_admins for moderation"))?;
+        .map_err(|e| internal_err(e, "count_actionable_admins for moderation"))?;
+
+    let target_suspended = state
+        .db
+        .is_member_suspended_or_banned(&target.id)
+        .await
+        .map_err(|e| internal_err(e, "suspension check for moderation"))?;
+    let target_is_actionable_admin =
+        target.is_active && target.org_role == OrgRole::Admin && !target_suspended;
 
     if let Err(msg) = can_suspend_or_ban_admin(
         target.org_role,
         target.is_active,
         body.action_type,
         admin_count,
+        target_is_actionable_admin,
     ) {
         return Err((
             StatusCode::BAD_REQUEST,
@@ -100,6 +109,36 @@ pub async fn create_moderation_action(
                 error: msg.into(),
             }),
         ));
+    }
+
+    // Permanent ban deactivates membership before creating the action so we never
+    // return success with an active banned member. Fail hard if deactivate fails.
+    // Suspension keeps is_active so lift restores access without a second toggle.
+    if body.action_type == ModerationActionType::Ban && target.is_active {
+        state
+            .db
+            .update_member(
+                &target.id,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(false),
+            )
+            .await
+            .map_err(|e| internal_err(e, "deactivate member on ban"))?;
+        audit(
+            &state.db,
+            &officer.member.id,
+            AuditAction::DeactivatedMember,
+            AuditTargetType::Member,
+            &target.id,
+            Some("Deactivated by ban"),
+        )
+        .await;
     }
 
     let action = state
@@ -122,41 +161,6 @@ pub async fn create_moderation_action(
                 user_id = %target.user_id,
                 "failed to revoke sessions after moderation"
             );
-        }
-    }
-
-    // Permanent ban also deactivates membership (last-admin count uses is_active).
-    // Suspension keeps is_active so lift restores access without a second toggle.
-    if body.action_type == ModerationActionType::Ban && target.is_active {
-        match state
-            .db
-            .update_member(
-                &target.id,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                Some(false),
-            )
-            .await
-        {
-            Ok(_) => {
-                audit(
-                    &state.db,
-                    &officer.member.id,
-                    AuditAction::DeactivatedMember,
-                    AuditTargetType::Member,
-                    &target.id,
-                    Some("Deactivated by ban"),
-                )
-                .await;
-            }
-            Err(e) => {
-                tracing::error!(error = %e, member_id = %target.id, "failed to deactivate on ban");
-            }
         }
     }
 
