@@ -242,6 +242,36 @@ pub fn columns_with_offset(offset: f64) -> StatColumns {
 /// 6 stat columns by their characteristic spacing pattern (3 narrow E/A/D, then
 /// 3 wider DMG/H/MIT). Returns the offset from the fallback E position.
 pub fn detect_column_offset(scoreboard: &DynamicImage) -> f64 {
+    let w = scoreboard.width();
+    let groups = header_label_groups(scoreboard);
+    if groups.is_empty() {
+        return 0.0;
+    }
+
+    // We expect 6 groups for E, A, D, DMG, H, MIT.
+    // The first group should be the "E" label.
+    let first_center = (groups[0].0 + groups[0].1) as f64 / 2.0 / w as f64;
+    let fallback_e_center =
+        STAT_COL_BOUNDARIES_FALLBACK[0].0 + STAT_COL_BOUNDARIES_FALLBACK[0].1 / 2.0;
+    let offset = first_center - fallback_e_center;
+
+    tracing::debug!(
+        groups = groups.len(),
+        first_center_ratio = first_center,
+        offset,
+        "header dark-text column offset"
+    );
+
+    offset
+}
+
+/// Dark-text label groups found in the scoreboard header strip, as (start, end)
+/// pixel columns. A real scoreboard yields one group per stat label (E, A, D,
+/// DMG, H, MIT — six, sometimes merged/split by a step or two). Shared by
+/// column calibration and the pre-OCR scoreboard preflight: brightness-based,
+/// so it still fires on the desaturated endorse-phase board where the
+/// saturation row-dip scan goes blind.
+pub fn header_label_groups(scoreboard: &DynamicImage) -> Vec<(u32, u32)> {
     let (w, h) = (scoreboard.width(), scoreboard.height());
 
     let scan_start = (h as f64 * 0.005) as u32;
@@ -293,7 +323,7 @@ pub fn detect_column_offset(scoreboard: &DynamicImage) -> f64 {
         .collect();
 
     if filtered.is_empty() {
-        return 0.0;
+        return Vec::new();
     }
 
     // Merge nearby clusters into logical groups (individual letter clusters → labels)
@@ -310,22 +340,7 @@ pub fn detect_column_offset(scoreboard: &DynamicImage) -> f64 {
         }
     }
     groups.push((g_start, g_end));
-
-    // We expect 6 groups for E, A, D, DMG, H, MIT.
-    // The first group should be the "E" label.
-    let first_center = (groups[0].0 + groups[0].1) as f64 / 2.0 / w as f64;
-    let fallback_e_center =
-        STAT_COL_BOUNDARIES_FALLBACK[0].0 + STAT_COL_BOUNDARIES_FALLBACK[0].1 / 2.0;
-    let offset = first_center - fallback_e_center;
-
-    tracing::debug!(
-        groups = groups.len(),
-        first_center_ratio = first_center,
-        offset,
-        "header dark-text column offset"
-    );
-
-    offset
+    groups
 }
 
 // --- Scoreboard geometry ---

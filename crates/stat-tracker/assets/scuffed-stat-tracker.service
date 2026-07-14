@@ -10,6 +10,12 @@ Restart=on-failure
 RestartSec=10
 StandardOutput=journal
 StandardError=journal
+# Yield CPU and disk to the game: OCR bursts run niced and in a
+# low-weight cgroup so Overwatch keeps frame-pacing priority (H2).
+Nice=10
+CPUWeight=30
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
 
 [Install]
 WantedBy=graphical-session.target

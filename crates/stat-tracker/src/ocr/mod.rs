@@ -143,6 +143,18 @@ fn encode_png(img: &image::GrayImage) -> Result<Vec<u8>, Box<dyn std::error::Err
 /// Number of stat columns per scoreboard row: E, A, D, DMG, HLG, MIT.
 const STATS_PER_ROW: usize = 6;
 
+/// Minimum ink (black) pixels a prepared cell must contain to be worth OCRing.
+/// The smallest real glyph — a thin "1" at 720p after the 2x upscale — measures
+/// ~40 ink pixels; a blank cell after the HSV white-mask carries at most a few
+/// specks. Skipping Tesseract on empty cells kills both the wasted CPU and the
+/// empty-page diagnostics it floods the journal with.
+const MIN_CELL_INK_PIXELS: usize = 20;
+
+/// Count ink pixels in a prepared (binarized, black-on-white) cell image.
+fn prepared_ink_pixels(img: &image::GrayImage) -> usize {
+    img.pixels().filter(|p| p.0[0] < 128).count()
+}
+
 #[derive(Debug)]
 pub struct OcrResult {
     pub raw_text: String,
@@ -230,6 +242,12 @@ fn recognize_cell_with_whitelist(
     whitelist: &str,
 ) -> Result<CellOcrResult, Box<dyn std::error::Error + Send + Sync>> {
     let prepared = preprocess::prepare_cell(img);
+    if prepared_ink_pixels(&prepared) < MIN_CELL_INK_PIXELS {
+        return Ok(CellOcrResult {
+            value: String::new(),
+            confidence: 0,
+        });
+    }
     let png_buf = encode_png(&prepared)?;
     let (text, confidence) = ocr_with("eng", "7", Some(whitelist), &png_buf)?;
 
@@ -244,6 +262,12 @@ pub fn recognize_name(
     img: &DynamicImage,
 ) -> Result<CellOcrResult, Box<dyn std::error::Error + Send + Sync>> {
     let prepared = preprocess::prepare_name_cell(img);
+    if prepared_ink_pixels(&prepared) < MIN_CELL_INK_PIXELS {
+        return Ok(CellOcrResult {
+            value: String::new(),
+            confidence: 0,
+        });
+    }
     let png_buf = encode_png(&prepared)?;
     let (text, confidence) = ocr_with(tessdata_lang(), "7", None, &png_buf)?;
 

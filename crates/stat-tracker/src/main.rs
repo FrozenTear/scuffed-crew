@@ -528,6 +528,19 @@ struct FrameAnalysis {
     frame: image::DynamicImage,
 }
 
+/// Result of the blocking vision pass: a full analysis, or a cheap rejection
+/// by the pre-OCR preflight before any Tesseract/portrait work ran.
+enum FrameAnalysisOutcome {
+    Analyzed(Box<FrameAnalysis>),
+    /// The frame lacks scoreboard row structure (menu, transition, black
+    /// frame) — carried back with the frame so it lands in debug/rejected.
+    NotAScoreboard {
+        outcome: detect::MatchOutcome,
+        frame: image::DynamicImage,
+        dip_count: usize,
+    },
+}
+
 /// What a Tab capture actually did, reported back to the session state machine.
 struct CaptureReport {
     /// A snapshot row was written (and the session row created if this was the
@@ -785,6 +798,15 @@ async fn run_loop(ctx: Arc<DaemonCtx>) -> anyhow::Result<()> {
                 }
             }
             _ = poll_timer.tick(), if auto_detect.enabled => {
+                // A Tab capture is already saturating the OCR pool — a
+                // full-frame screenshot plus pixel scans now would contend
+                // with it at the worst possible moment (H3). Skip this tick;
+                // the interval fires again shortly and any outcome the frame
+                // carried is recovered by the capture itself.
+                if capture_task.as_ref().is_some_and(|t| !t.is_finished()) {
+                    tracing::debug!("poll tick skipped — Tab capture in flight");
+                    continue;
+                }
                 if !game_gate.is_running() {
                     word_outcome_streak = None;
                     continue;
@@ -1081,7 +1103,27 @@ async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<
         };
 
         let scoreboard = ocr::preprocess::crop_scoreboard(&img);
-        let team_size = detect::hero_portrait::detect_team_size(&scoreboard);
+        // Pre-OCR preflight (H1): a few milliseconds of pixel work that
+        // rejects menus/transitions/gameplay/black frames before the
+        // expensive portrait-match + calibration + row-OCR pipeline runs.
+        // Two independent signals, either accepts: the saturation row-dip
+        // scan (fails on the desaturated endorse-phase board) or the
+        // brightness-based header stat labels (fail on some vivid boards).
+        // Validated on 38 captured frames: all real boards pass, 29/33
+        // garbage frames rejected. The OCR-based looks_like_scoreboard gate
+        // downstream stays as the final arbiter for frames that pass.
+        let row_scan = detect::hero_portrait::scan_rows(&scoreboard);
+        if !row_scan.looks_like_scoreboard()
+            && !(3..=10)
+                .contains(&ocr::preprocess::header_label_groups(&scoreboard).len())
+        {
+            return FrameAnalysisOutcome::NotAScoreboard {
+                outcome,
+                frame: img,
+                dip_count: row_scan.dip_count,
+            };
+        }
+        let team_size = row_scan.team_size();
         // Pass team_size into portrait match + cell OCR so neither re-detects
         // size or re-crops the full scoreboard (P7).
         let player_match = matcher.match_player_hero_with_team_size(&scoreboard, team_size);
@@ -1112,13 +1154,17 @@ async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<
 
         // Full-board OCR exists only to supply raw text for hero/map name
         // lookup and the name-in-raw-text stats fallback. On the happy path —
-        // player row found and parseable, hero from the career panel, map
-        // already known — it is pure redundancy (adaptive preprocessing plus
-        // up to three threshold sweeps), so run it lazily.
+        // player row found and parseable, hero identified (career panel or
+        // portrait match), map already known — it is pure redundancy
+        // (adaptive preprocessing plus up to three threshold sweeps), so run
+        // it lazily. A portrait match alone satisfies the hero requirement:
+        // replay/post-match layouts have no career panel, and the raw-text
+        // hero guess loses to the portrait in the priority order anyway (H6).
         let cells_parse =
             parse::parse_scoreboard_cells(&rows, row_idx, "", "unknown", None).is_some();
+        let hero_identified = career_hero.is_some() || portrait_match.is_some();
         let need_full_ocr = !cells_parse
-            || career_hero.is_none()
+            || !hero_identified
             || (!session_map_known && map_from_panel.is_none());
         let ocr = if need_full_ocr {
             ocr::recognize(&img)
@@ -1130,7 +1176,7 @@ async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<
             })
         };
 
-        FrameAnalysis {
+        FrameAnalysisOutcome::Analyzed(Box::new(FrameAnalysis {
             outcome,
             ocr,
             rows,
@@ -1141,9 +1187,28 @@ async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<
             player_row_idx: row_idx,
             team_size,
             frame: img,
-        }
+        }))
     })
     .await?;
+    let analysis = match analysis {
+        FrameAnalysisOutcome::Analyzed(a) => *a,
+        FrameAnalysisOutcome::NotAScoreboard {
+            outcome,
+            frame,
+            dip_count,
+        } => {
+            tracing::warn!(
+                dip_count,
+                "capture rejected by pre-OCR preflight — no scoreboard row structure (saved to debug/rejected)"
+            );
+            save_rejected_frame(data_dir, frame, "preflight");
+            return Ok(CaptureReport {
+                recorded: false,
+                outcome,
+                map: None,
+            });
+        }
+    };
     let FrameAnalysis {
         outcome,
         ocr,

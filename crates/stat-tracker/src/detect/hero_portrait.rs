@@ -304,6 +304,43 @@ fn extract_portrait_crops_inner(scoreboard: &DynamicImage, team_size: usize) -> 
     crops
 }
 
+/// Row-structure signal measured from the team-1 name strip: saturation dips
+/// mark row centers regardless of occupancy or team colors. Computed once per
+/// capture and shared by team-size detection and the pre-OCR scoreboard
+/// preflight.
+#[derive(Debug, Clone, Copy)]
+pub struct RowScan {
+    /// Number of row-center saturation dips found in the team-1 band.
+    pub dip_count: usize,
+    /// Median dip-to-dip pitch as a fraction of crop height (None with <2 dips).
+    pub median_pitch: Option<f64>,
+}
+
+impl RowScan {
+    /// Cheap non-OCR scoreboard preflight: a real scoreboard always renders
+    /// 5-6 rows of white text in the team-1 band at a known pitch (~7.4%
+    /// for 6v6, ~8.3% for 5v5), so at least three dips at a plausible pitch
+    /// must be present. Menus, transitions, black frames, and gameplay
+    /// scenes lack this periodic structure and are rejected before any
+    /// Tesseract or portrait-template work runs.
+    pub fn looks_like_scoreboard(&self) -> bool {
+        self.dip_count >= 3
+            && self
+                .median_pitch
+                .is_some_and(|p| (0.05..=0.12).contains(&p))
+    }
+
+    /// 5v5 or 6v6 from the row pitch; defaults to 5 when no pitch was
+    /// measurable. Threshold sits between the measured 5v5 (~8.3%) and
+    /// 6v6 (~7.4%) pitches.
+    pub fn team_size(&self) -> usize {
+        match self.median_pitch {
+            Some(p) if p < 0.079 => 6,
+            _ => 5,
+        }
+    }
+}
+
 /// Detect whether the scoreboard shows 5v5 or 6v6 via the team-1 row pitch.
 ///
 /// Counting hero portraits fails when rows are empty ("WAITING FOR PLAYER") or
@@ -313,10 +350,20 @@ fn extract_portrait_crops_inner(scoreboard: &DynamicImage, team_size: usize) -> 
 /// so the dip-to-dip pitch reveals the row count regardless of empty slots or
 /// team colors. 6v6 rows are tighter (~7.4% of crop height) than 5v5 (~8.3%).
 pub fn detect_team_size(scoreboard: &DynamicImage) -> usize {
+    scan_rows(scoreboard).team_size()
+}
+
+/// Measure the team-1 row-dip structure (see [`detect_team_size`] for the
+/// method). Callers that need both the preflight verdict and the team size
+/// should call this once and derive both from the returned [`RowScan`].
+pub fn scan_rows(scoreboard: &DynamicImage) -> RowScan {
     let rgb = scoreboard.to_rgb8();
     let (w, h) = rgb.dimensions();
     if w == 0 || h == 0 {
-        return 5;
+        return RowScan {
+            dip_count: 0,
+            median_pitch: None,
+        };
     }
 
     // Name strip: right of the portrait column, left of the stat columns and the
@@ -365,21 +412,20 @@ pub fn detect_team_size(scoreboard: &DynamicImage) -> usize {
 
     let mut pitches: Vec<f64> = dips.windows(2).map(|p| (p[1] - p[0]) as f64).collect();
     if pitches.is_empty() {
-        tracing::debug!("team size: no row dips found, defaulting to 5");
-        return 5;
+        tracing::debug!(dip_count = dips.len(), "row scan: no row pitch measurable");
+        return RowScan {
+            dip_count: dips.len(),
+            median_pitch: None,
+        };
     }
     pitches.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     let median_pitch = pitches[pitches.len() / 2] / h as f64;
 
-    // Threshold sits between the measured 5v5 (~8.3%) and 6v6 (~7.4%) pitches.
-    let team_size = if median_pitch < 0.079 { 6 } else { 5 };
-    tracing::debug!(
-        median_pitch,
-        dip_count = dips.len(),
-        team_size,
-        "team size via row pitch"
-    );
-    team_size
+    tracing::debug!(median_pitch, dip_count = dips.len(), "row scan via saturation dips");
+    RowScan {
+        dip_count: dips.len(),
+        median_pitch: Some(median_pitch),
+    }
 }
 
 fn mean_absolute_difference(a: &RgbImage, b: &RgbImage) -> f64 {
