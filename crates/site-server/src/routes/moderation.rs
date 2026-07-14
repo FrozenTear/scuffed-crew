@@ -63,21 +63,16 @@ pub async fn create_moderation_action(
             )
         })?;
 
-    if let Err(msg) = can_moderate(
+    if let Err(denial) = can_moderate(
         officer.member.org_role,
         target.org_role,
         &officer.member.id,
         &target.id,
     ) {
-        let status = if msg.starts_with("Cannot moderate yourself") {
-            StatusCode::BAD_REQUEST
-        } else {
-            StatusCode::FORBIDDEN
-        };
         return Err((
-            status,
+            denial.status(),
             Json(ErrorResponse {
-                error: msg.into(),
+                error: denial.message().into(),
             }),
         ));
     }
@@ -96,7 +91,7 @@ pub async fn create_moderation_action(
     let target_is_actionable_admin =
         target.is_active && target.org_role == OrgRole::Admin && !target_suspended;
 
-    if let Err(msg) = can_suspend_or_ban_admin(
+    if let Err(denial) = can_suspend_or_ban_admin(
         target.org_role,
         target.is_active,
         body.action_type,
@@ -104,9 +99,9 @@ pub async fn create_moderation_action(
         target_is_actionable_admin,
     ) {
         return Err((
-            StatusCode::BAD_REQUEST,
+            denial.status(),
             Json(ErrorResponse {
-                error: msg.into(),
+                error: denial.message().into(),
             }),
         ));
     }
@@ -154,14 +149,14 @@ pub async fn create_moderation_action(
         .map_err(|e| internal_err(e, "create_moderation_action"))?;
 
     // Ban / suspension: kill sessions immediately so extractor blocks next request
-    if moderation_revokes_sessions(body.action_type) {
-        if let Err(e) = state.db.delete_sessions_for_user(&target.user_id).await {
-            tracing::error!(
-                error = %e,
-                user_id = %target.user_id,
-                "failed to revoke sessions after moderation"
-            );
-        }
+    if moderation_revokes_sessions(body.action_type)
+        && let Err(e) = state.db.delete_sessions_for_user(&target.user_id).await
+    {
+        tracing::error!(
+            error = %e,
+            user_id = %target.user_id,
+            "failed to revoke sessions after moderation"
+        );
     }
 
     audit(

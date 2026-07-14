@@ -127,11 +127,10 @@ pub fn Setup() -> Element {
     });
 
     use_effect(move || {
-        if let Some(Some(s)) = status.value()() {
-            if !s.needs_setup {
+        if let Some(Some(s)) = status.value()()
+            && !s.needs_setup {
                 nav.replace(Route::Login {});
             }
-        }
     });
 
     let on_submit = move |evt: Event<FormData>| {

@@ -175,6 +175,10 @@ pub fn create_router(state: AppState) -> Router {
             get(routes::applications::my_application),
         )
         .route(
+            "/api/applications/mine/withdraw",
+            post(routes::applications::withdraw_my_application),
+        )
+        .route(
             "/api/applications/expiring",
             get(routes::applications::expiring_trials),
         )

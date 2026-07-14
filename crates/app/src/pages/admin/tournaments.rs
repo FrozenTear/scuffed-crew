@@ -453,7 +453,7 @@ pub fn AdminTournaments() -> Element {
                 } else {
                     Some(
                         replays_raw
-                            .split(|c: char| c == ',' || c == '\n')
+                            .split([',', '\n'])
                             .map(|s| s.trim().to_string())
                             .filter(|s| !s.is_empty())
                             .collect(),

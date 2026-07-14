@@ -293,14 +293,11 @@ async fn migrate_legacy_thread_categories(client: &Surreal<Any>) -> DbResult<()>
             "game" => "overwatch",
             "strategy" => "ow-strategy",
             "offtopic" => "offtopic-general",
-            other if !other.is_empty() => {
+            other if !other.is_empty()
                 // try exact slug match
-                if slug_to_id.contains_key(other) {
+                && slug_to_id.contains_key(other) => {
                     other
-                } else {
-                    "general"
                 }
-            }
             _ => "general",
         };
         slug_to_id.get(slug).cloned()

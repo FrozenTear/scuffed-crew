@@ -197,8 +197,8 @@ pub fn AdminSchedule() -> Element {
             format!(
                 "{:04}-{:02}-{:02}",
                 d.get_full_year() as i32,
-                d.get_month() as u32 + 1,
-                d.get_date() as u32
+                d.get_month() + 1,
+                { d.get_date() }
             )
         };
         att_date.set(today);

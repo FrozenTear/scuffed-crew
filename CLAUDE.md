@@ -54,6 +54,15 @@ Production = `scuffed-server` serving `dist/` (built by `dx build` from crates/a
 - Toast feedback for all user-facing mutations: `use_toast().show(Toast::success(...))`
 - Audit log: fire-and-forget after successful mutations, log error but don't fail the request
 
+### Membership policy
+
+- Pure rules in `crates/site-server/src/membership_policy.rs`
+- **Actionable admin** = active admin not suspended/banned (use for last-admin + setup)
+- Policy denials: **403** authz, **400** invalid state, **409** CAS conflict
+- Application transitions: membership side effects **before** CAS status write
+- Applicants self-withdraw via `POST /api/applications/mine/withdraw` (pending/trial only)
+- Ban deactivates; lift does **not** re-activate (see `docs/notes/moderation.md`)
+
 ## Research Strategy: Wave-Based Multi-Agent
 
 For complex research tasks, use a wave-based approach:

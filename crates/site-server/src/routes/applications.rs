@@ -11,8 +11,9 @@ use scuffed_db::{Application, ApplicationStatus, AuditAction, AuditTargetType, M
 
 use crate::extractors::OfficerUser;
 use crate::membership_policy::{
-    application_blocks_resubmit, application_status_deactivates_member,
-    application_status_ensures_member, is_valid_application_transition, role_on_application_accept,
+    applicant_may_self_withdraw, application_blocks_resubmit,
+    application_status_deactivates_member, application_status_ensures_member,
+    is_valid_application_transition, role_on_application_accept,
 };
 use crate::routes::audit_log::audit;
 use crate::state::AppState;
@@ -64,10 +65,9 @@ pub async fn submit_application(
         .get_member_by_user(&user.id)
         .await
         .map_err(|e| internal_err(e, "get_member_by_user on submit"))?
+        && m.is_active
     {
-        if m.is_active {
-            return Err(conflict("Already an active org member"));
-        }
+        return Err(conflict("Already an active org member"));
     }
 
     // Open pipeline (pending/trial) blocks a second application
@@ -76,13 +76,12 @@ pub async fn submit_application(
         .get_application_by_user(&user.id)
         .await
         .map_err(|e| internal_err(e, "get_application_by_user on submit"))?
+        && application_blocks_resubmit(existing.status)
     {
-        if application_blocks_resubmit(existing.status) {
-            return Err(conflict(&format!(
-                "You already have an open application ({})",
-                existing.status
-            )));
-        }
+        return Err(conflict(&format!(
+            "You already have an open application ({})",
+            existing.status
+        )));
     }
 
     let app = state
@@ -132,6 +131,53 @@ pub async fn my_application(
         .map_err(|e| internal_err(e, "my_application"))
 }
 
+/// POST /api/applications/mine/withdraw — applicant self-withdraw (pending/trial only)
+pub async fn withdraw_my_application(
+    State(state): State<AppState>,
+    user: AuthUser<AppState>,
+) -> Result<Json<Application>, (StatusCode, Json<ErrorResponse>)> {
+    let existing = state
+        .db
+        .get_application_by_user(&user.id)
+        .await
+        .map_err(|e| internal_err(e, "get_application_by_user withdraw"))?
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse {
+                    error: "No application found".into(),
+                }),
+            )
+        })?;
+
+    if !applicant_may_self_withdraw(existing.status) {
+        return Err(bad_request(&format!(
+            "Cannot withdraw application in status {}",
+            existing.status
+        )));
+    }
+
+    // Audit actor: member id when provisioned (trial), else user id.
+    let actor_id = state
+        .db
+        .get_member_by_user(&user.id)
+        .await
+        .map_err(|e| internal_err(e, "get_member_by_user withdraw actor"))?
+        .map(|m| m.id)
+        .unwrap_or_else(|| user.id.clone());
+
+    let app = apply_application_transition(
+        &state,
+        &existing,
+        ApplicationStatus::Withdrawn,
+        &actor_id,
+        Some("Self-withdrawn by applicant"),
+    )
+    .await?;
+
+    Ok(Json(app))
+}
+
 #[derive(Deserialize)]
 pub struct UpdateApplicationRequest {
     pub status: ApplicationStatus,
@@ -166,72 +212,91 @@ pub async fn update_application(
         )));
     }
 
+    let app = apply_application_transition(
+        &state,
+        &existing,
+        body.status,
+        &officer.member.id,
+        body.review_notes.as_deref(),
+    )
+    .await?;
+
+    Ok(Json(app))
+}
+
+/// Shared transition path: side effects before CAS status write, then audit.
+async fn apply_application_transition(
+    state: &AppState,
+    existing: &Application,
+    to: ApplicationStatus,
+    actor_id: &str,
+    review_notes: Option<&str>,
+) -> Result<Application, (StatusCode, Json<ErrorResponse>)> {
     // Side effects run *before* the CAS status write when they must not leave a
     // terminal application without matching membership state:
     // - trial/accepted: provision first so we never accept without a member
     // - reject/withdraw: deactivate recruit first so reject never leaves an
     //   active trial recruit if deactivate would fail after status write
-    if application_status_ensures_member(body.status) {
+    if application_status_ensures_member(to) {
         ensure_member_for_application(
-            &state,
+            state,
             &existing.user_id,
             existing.status,
-            body.status,
-            &id,
+            to,
+            &existing.id,
         )
         .await?;
-    } else if application_status_deactivates_member(body.status) {
-        if let Some(member) = state
+    } else if application_status_deactivates_member(to)
+        && let Some(member) = state
             .db
             .get_member_by_user(&existing.user_id)
             .await
             .map_err(|e| internal_err(e, "get_member_by_user on reject"))?
-        {
-            // Only auto-deactivate recruits (trial pipeline); leave higher roles alone
-            if member.is_active && member.org_role == OrgRole::Recruit {
-                state
-                    .db
-                    .update_member(
-                        &member.id,
-                        None,
-                        None,
-                        None,
-                        None,
-                        None,
-                        None,
-                        None,
-                        Some(false),
-                    )
-                    .await
-                    .map_err(|e| internal_err(e, "deactivate recruit on reject"))?;
-                if let Err(e) = state.db.delete_sessions_for_user(&existing.user_id).await {
-                    tracing::error!(
-                        error = %e,
-                        user_id = %existing.user_id,
-                        "failed to revoke sessions after application reject/withdraw"
-                    );
-                }
-                audit(
-                    &state.db,
-                    &officer.member.id,
-                    AuditAction::DeactivatedMember,
-                    AuditTargetType::Member,
-                    &member.id,
-                    Some("Deactivated after application rejected/withdrawn"),
-                )
-                .await;
-            }
+        // Only auto-deactivate recruits (trial pipeline); leave higher roles alone
+        && member.is_active
+        && member.org_role == OrgRole::Recruit
+    {
+        state
+            .db
+            .update_member(
+                &member.id,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(false),
+            )
+            .await
+            .map_err(|e| internal_err(e, "deactivate recruit on reject"))?;
+        if let Err(e) = state.db.delete_sessions_for_user(&existing.user_id).await {
+            tracing::error!(
+                error = %e,
+                user_id = %existing.user_id,
+                "failed to revoke sessions after application reject/withdraw"
+            );
         }
+        audit(
+            &state.db,
+            actor_id,
+            AuditAction::DeactivatedMember,
+            AuditTargetType::Member,
+            &member.id,
+            Some("Deactivated after application rejected/withdrawn"),
+        )
+        .await;
     }
 
     let app = state
         .db
         .update_application_status(
-            &id,
+            &existing.id,
             existing.status,
-            body.status,
-            &officer.member.id,
-            body.review_notes.as_deref(),
+            to,
+            actor_id,
+            review_notes,
         )
         .await
         .map_err(|e| match e {
@@ -239,7 +304,7 @@ pub async fn update_application(
             other => internal_err(other, "update_application_status"),
         })?;
 
-    let action = match body.status {
+    let action = match to {
         ApplicationStatus::Accepted => AuditAction::AcceptedApplication,
         ApplicationStatus::Rejected => AuditAction::RejectedApplication,
         ApplicationStatus::Trial => AuditAction::StartedTrialApplication,
@@ -249,15 +314,15 @@ pub async fn update_application(
 
     audit(
         &state.db,
-        &officer.member.id,
+        actor_id,
         action,
         AuditTargetType::Application,
-        &id,
-        Some(&format!("{} → {}", existing.status, body.status)),
+        &existing.id,
+        Some(&format!("{} → {}", existing.status, to)),
     )
     .await;
 
-    Ok(Json(app))
+    Ok(app)
 }
 
 /// Create or update member when application moves to trial/accepted.
@@ -346,16 +411,16 @@ async fn ensure_member_for_application(
         "Provisioned member from application"
     );
 
-    if to == ApplicationStatus::Accepted {
-        if let Some(ref notifier) = state.notifier {
-            let org = state
-                .db
-                .get_settings()
-                .await
-                .map(|s| s.org_name)
-                .unwrap_or_else(|_| "the clan".into());
-            notifier.notify_general(format!("Welcome {display_name} to {org}!"));
-        }
+    if to == ApplicationStatus::Accepted
+        && let Some(ref notifier) = state.notifier
+    {
+        let org = state
+            .db
+            .get_settings()
+            .await
+            .map(|s| s.org_name)
+            .unwrap_or_else(|_| "the clan".into());
+        notifier.notify_general(format!("Welcome {display_name} to {org}!"));
     }
 
     Ok(member)

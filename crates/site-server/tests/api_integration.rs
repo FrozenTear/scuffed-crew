@@ -1834,7 +1834,7 @@ async fn cannot_demote_last_active_admin() {
         ))
         .await
         .unwrap();
-    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
     let body = body_json(resp).await;
     assert!(
         body["error"]
@@ -2016,7 +2016,7 @@ async fn ban_deactivates_and_self_ban_blocked() {
         ))
         .await
         .unwrap();
-    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
 
     // Ban peer admin OK → deactivates them
     let app = create_router(state.clone());
@@ -2132,7 +2132,7 @@ async fn cannot_suspend_last_actionable_admin() {
         ))
         .await
         .unwrap();
-    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
 
     // Demote last actionable while peer is suspended → blocked
     // (old bug: count_active_admins==2 would have allowed this lockout)
@@ -2146,7 +2146,7 @@ async fn cannot_suspend_last_actionable_admin() {
         ))
         .await
         .unwrap();
-    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
     let body = body_json(resp).await;
     assert!(
         body["error"]
@@ -2383,6 +2383,111 @@ async fn delete_game_account_requires_ownership() {
         .await
         .unwrap();
     assert_eq!(remaining.len(), 1);
+}
+
+#[tokio::test]
+async fn applicant_self_withdraw_pending() {
+    let state = test_state().await;
+    seed_all_roles(&state.db).await;
+    seed_applicant(&state.db, "selfwd", "SelfWd", APPLICANT_TOKEN).await;
+
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(authed_json_request(
+            Method::POST,
+            "/api/applications",
+            APPLICANT_TOKEN,
+            json!({ "preferred_games": ["ow2"], "preferred_roles": [] }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(authed_json_request(
+            Method::POST,
+            "/api/applications/mine/withdraw",
+            APPLICANT_TOKEN,
+            json!({}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_json(resp).await;
+    assert_eq!(body["status"], "withdrawn");
+
+    // Cannot withdraw again
+    let app = create_router(state);
+    let resp = app
+        .oneshot(authed_json_request(
+            Method::POST,
+            "/api/applications/mine/withdraw",
+            APPLICANT_TOKEN,
+            json!({}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn applicant_self_withdraw_trial_deactivates_recruit() {
+    let state = test_state().await;
+    seed_all_roles(&state.db).await;
+    seed_applicant(&state.db, "selftrial", "SelfTrial", APPLICANT_TOKEN).await;
+
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(authed_json_request(
+            Method::POST,
+            "/api/applications",
+            APPLICANT_TOKEN,
+            json!({ "preferred_games": [], "preferred_roles": [] }),
+        ))
+        .await
+        .unwrap();
+    let app_id = body_json(resp).await["id"].as_str().unwrap().to_string();
+
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(authed_json_request(
+            Method::PATCH,
+            &format!("/api/applications/{app_id}"),
+            OFFICER_TOKEN,
+            json!({ "status": "trial" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert!(
+        state
+            .db
+            .get_member_by_user("selftrial")
+            .await
+            .unwrap()
+            .unwrap()
+            .is_active
+    );
+
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(authed_json_request(
+            Method::POST,
+            "/api/applications/mine/withdraw",
+            APPLICANT_TOKEN,
+            json!({}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let member = state
+        .db
+        .get_member_by_user("selftrial")
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!member.is_active);
 }
 
 #[tokio::test]

@@ -42,8 +42,7 @@ fn App() -> Element {
         if let Ok(status) = ApiClient::web()
             .fetch::<SetupStatusResponse>("/api/auth/setup-status")
             .await
-        {
-            if status.needs_setup {
+            && status.needs_setup {
                 let path = web_sys::window()
                     .and_then(|w| w.location().pathname().ok())
                     .unwrap_or_default();
@@ -51,7 +50,6 @@ fn App() -> Element {
                     let _ = web_sys::window().and_then(|w| w.location().set_href("/setup").ok());
                 }
             }
-        }
     });
 
     // Document title / meta from site settings (product-neutral until loaded).

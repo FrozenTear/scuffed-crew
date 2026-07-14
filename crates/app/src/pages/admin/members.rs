@@ -840,7 +840,7 @@ pub fn AdminMembers() -> Element {
                                     Some(f) => format!(
                                         "{} ({:.1} KB)",
                                         f.name(),
-                                        f.size() as f64 / 1024.0
+                                        f.size() / 1024.0
                                     ),
                                     None => "No file selected yet — click here".to_string(),
                                 };

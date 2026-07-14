@@ -131,8 +131,11 @@ pub fn Apply() -> Element {
                             "trial" => "You're in your trial period. Show up, have fun, and be yourself.".to_string(),
                             "accepted" => format!("Welcome aboard! You're a member of {org_name}."),
                             "rejected" => "Unfortunately your application was not accepted at this time.".to_string(),
+                            "withdrawn" => "You withdrew this application. You can re-apply later if recruitment is open.".to_string(),
                             _ => String::new(),
                         };
+                        let can_withdraw =
+                            app.status == "pending" || app.status == "trial";
 
                         rsx! {
                             Card {
@@ -141,6 +144,47 @@ pub fn Apply() -> Element {
                                     Pill { tone: status_tone, "{status_label}" }
                                 }
                                 p { class: "apply-card-desc", "{desc}" }
+                                if can_withdraw {
+                                    div { class: "apply-actions",
+                                        Button {
+                                            variant: BtnVariant::Ghost,
+                                            disabled: submitting(),
+                                            onclick: move |_| {
+                                                #[cfg(target_arch = "wasm32")]
+                                                let confirmed = web_sys::window()
+                                                    .and_then(|w| w.confirm_with_message("Withdraw your application?").ok())
+                                                    .unwrap_or(false);
+                                                #[cfg(not(target_arch = "wasm32"))]
+                                                let confirmed = true;
+                                                if !confirmed {
+                                                    return;
+                                                }
+                                                submitting.set(true);
+                                                spawn(async move {
+                                                    match ApiClient::web()
+                                                        .post_json_empty(
+                                                            "/api/applications/mine/withdraw",
+                                                            &serde_json::json!({}),
+                                                        )
+                                                        .await
+                                                    {
+                                                        Ok(_) => {
+                                                            let mut toast = use_toast();
+                                                            toast.show(Toast::success("Application withdrawn"));
+                                                            my_app.refresh += 1;
+                                                        }
+                                                        Err(e) => {
+                                                            let mut toast = use_toast();
+                                                            toast.show(Toast::error(format!("Failed: {e}")));
+                                                        }
+                                                    }
+                                                    submitting.set(false);
+                                                });
+                                            },
+                                            if submitting() { "Withdrawing..." } else { "Withdraw application" }
+                                        }
+                                    }
+                                }
                             }
                         }
                     } else {

@@ -162,7 +162,7 @@ pub async fn update_member(
             let target_is_actionable_admin = target.is_active
                 && target.org_role == OrgRole::Admin
                 && !target_suspended;
-            if let Err(msg) = crate::membership_policy::can_set_is_active(
+            if let Err(denial) = crate::membership_policy::can_set_is_active(
                 &caller.member.id,
                 caller.member.org_role,
                 &target.id,
@@ -173,9 +173,9 @@ pub async fn update_member(
                 target_is_actionable_admin,
             ) {
                 return Err((
-                    StatusCode::FORBIDDEN,
+                    denial.status(),
                     Json(ErrorResponse {
-                        error: msg.into(),
+                        error: denial.message().into(),
                     }),
                 ));
             }
@@ -373,7 +373,7 @@ pub async fn change_role(
     let target_is_actionable_admin =
         target.is_active && target.org_role == OrgRole::Admin && !target_suspended;
 
-    if let Err(msg) = crate::membership_policy::can_change_role(
+    if let Err(denial) = crate::membership_policy::can_change_role(
         &admin.member.id,
         &target.id,
         target.org_role,
@@ -383,9 +383,9 @@ pub async fn change_role(
         target_is_actionable_admin,
     ) {
         return Err((
-            StatusCode::BAD_REQUEST,
+            denial.status(),
             Json(ErrorResponse {
-                error: msg.into(),
+                error: denial.message().into(),
             }),
         ));
     }

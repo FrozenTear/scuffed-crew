@@ -1059,8 +1059,8 @@ impl Database {
     ///
     /// Structure (8-team example):
     /// - Winners: WR1(4) → WR2(2) → WF(1)
-    /// - Losers:  LR1(2) ← WR1 losers; LR2(2) ← LR1 winners + WR2 losers;
-    ///            LR3(1) ← LR2; LR4(1) ← LR3 + WF loser
+    /// - Losers: LR1(2) ← WR1 losers; LR2(2) ← LR1 winners + WR2 losers;
+    ///   LR3(1) ← LR2; LR4(1) ← LR3 + WF loser
     /// - Grand final: WF winner (slot a) vs LR final winner (slot b)
     pub async fn generate_double_elim_bracket(&self, tournament_id: &str) -> DbResult<()> {
         let participants = self.list_tournament_participants(tournament_id).await?;
@@ -1170,6 +1170,8 @@ impl Database {
         // LB match counts: start at WR1_matches/2, keep on even LB rounds, halve after odd
         let mut l_match_ids: Vec<Vec<String>> = Vec::new();
         let mut l_count = (first_round_matches / 2).max(1);
+        // Index loop: mutates l_count mid-pass and indexes parallel id vectors.
+        #[allow(clippy::needless_range_loop)]
         for r in 0..l_round_count as usize {
             let mut round_matches = Vec::new();
             for i in 0..l_count {
@@ -1231,6 +1233,8 @@ impl Database {
                 self.update_match_loser_next(mid, &gf.id, "b").await?;
             }
         } else {
+            // Index loop: indexes w_match_ids by winners-round while mapping into l_match_ids.
+            #[allow(clippy::needless_range_loop)]
             for r in 0..w_rounds as usize {
                 for (i, mid) in w_match_ids[r].iter().enumerate() {
                     // WR1 → LR0 (pair into half matches); later WR → odd LB rounds (drop-in)
