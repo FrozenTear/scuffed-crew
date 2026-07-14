@@ -373,4 +373,18 @@ impl Database {
         })
         .await
     }
+
+    /// Fail with [`crate::DbError::Conflict`] if no actionable admin remains.
+    ///
+    /// Call after demote / deactivate / suspend / ban of an actionable admin to
+    /// catch concurrent last-admin races; callers should compensate then surface 409.
+    pub async fn assert_has_actionable_admin(&self) -> DbResult<()> {
+        let n = self.count_actionable_admins().await?;
+        if n == 0 {
+            return Err(crate::DbError::Conflict(
+                "Would leave org without an actionable admin".into(),
+            ));
+        }
+        Ok(())
+    }
 }

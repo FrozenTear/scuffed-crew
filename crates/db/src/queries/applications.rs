@@ -93,6 +93,35 @@ impl Database {
         .await
     }
 
+    /// Count applications still in the open pipeline (pending or trial).
+    pub async fn count_open_applications(&self, user_id: &str) -> DbResult<u64> {
+        with_timeout(async {
+            #[derive(Deserialize, SurrealValue)]
+            struct CountResult {
+                count: u64,
+            }
+            let mut result = self
+                .client
+                .query(
+                    "SELECT count() FROM application WHERE user_id = $uid AND status IN ['pending', 'trial'] GROUP ALL",
+                )
+                .bind(("uid", user_id.to_string()))
+                .await?;
+            let counts: Vec<CountResult> = result.take(0)?;
+            Ok(counts.first().map(|c| c.count).unwrap_or(0))
+        })
+        .await
+    }
+
+    /// Delete an application by id (used to roll back concurrent double-submit).
+    pub async fn delete_application(&self, id: &str) -> DbResult<()> {
+        with_timeout(async {
+            let _: Option<DbApplication> = self.client.delete(("application", id)).await?;
+            Ok(())
+        })
+        .await
+    }
+
     pub async fn list_applications(&self) -> DbResult<Vec<Application>> {
         with_timeout(async {
             let mut result = self

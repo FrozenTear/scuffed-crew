@@ -58,8 +58,10 @@ Production = `scuffed-server` serving `dist/` (built by `dx build` from crates/a
 
 - Pure rules in `crates/site-server/src/membership_policy.rs`
 - **Actionable admin** = active admin not suspended/banned (use for last-admin + setup)
-- Policy denials: **403** authz, **400** invalid state, **409** CAS conflict
+- Policy denials: **403** authz, **400** invalid state, **409** CAS / last-admin race / dup apply
+- After demote/deactivate/suspend/ban of an actionable admin: `assert_has_actionable_admin` + compensate
 - Application transitions: membership side effects **before** CAS status write
+- Submit: if `count_open_applications > 1` after insert, delete the new row and 409
 - Applicants self-withdraw via `POST /api/applications/mine/withdraw` (pending/trial only)
 - Ban deactivates; lift does **not** re-activate (see `docs/notes/moderation.md`)
 

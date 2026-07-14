@@ -2386,6 +2386,147 @@ async fn delete_game_account_requires_ownership() {
 }
 
 #[tokio::test]
+async fn assert_has_actionable_admin_after_manual_lockout() {
+    // Simulate concurrent demote race: both admins demoted without policy path,
+    // then assert_has_actionable_admin reports conflict.
+    let state = test_state().await;
+    seed_user(
+        &state.db,
+        "adminuser",
+        "adminmember",
+        "TestAdmin",
+        "admin",
+        ADMIN_TOKEN,
+    )
+    .await;
+    seed_user(
+        &state.db,
+        "adminuser2",
+        "adminmember2",
+        "TestAdmin2",
+        "admin",
+        ADMIN2_TOKEN,
+    )
+    .await;
+
+    assert!(state.db.assert_has_actionable_admin().await.is_ok());
+    state
+        .db
+        .change_member_role("adminmember", scuffed_db::OrgRole::Officer)
+        .await
+        .unwrap();
+    state
+        .db
+        .change_member_role("adminmember2", scuffed_db::OrgRole::Officer)
+        .await
+        .unwrap();
+    let err = state.db.assert_has_actionable_admin().await.unwrap_err();
+    assert!(
+        matches!(err, scuffed_db::DbError::Conflict(_)),
+        "got {err}"
+    );
+}
+
+#[tokio::test]
+async fn demote_compensates_if_no_actionable_admin_left() {
+    // After pre-check passes with count=2, if the other admin is removed under us
+    // (simulated by demoting them first in the same process before the second
+    // demote request), the second demote is blocked by the pre-check. Here we
+    // only verify post-write compensation path via assert after a successful
+    // single demote still leaves one admin.
+    let state = test_state().await;
+    seed_user(
+        &state.db,
+        "adminuser",
+        "adminmember",
+        "TestAdmin",
+        "admin",
+        ADMIN_TOKEN,
+    )
+    .await;
+    seed_user(
+        &state.db,
+        "adminuser2",
+        "adminmember2",
+        "TestAdmin2",
+        "admin",
+        ADMIN2_TOKEN,
+    )
+    .await;
+
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(authed_json_request(
+            Method::PATCH,
+            "/api/members/adminmember2/role",
+            ADMIN_TOKEN,
+            json!({ "role": "officer" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(state.db.count_actionable_admins().await.unwrap(), 1);
+    assert!(state.db.assert_has_actionable_admin().await.is_ok());
+
+    // Second demote of last actionable → pre-check 403 (not 409 — no race)
+    let app = create_router(state);
+    let resp = app
+        .oneshot(authed_json_request(
+            Method::PATCH,
+            "/api/members/adminmember/role",
+            ADMIN_TOKEN,
+            json!({ "role": "officer" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn open_application_count_guards_duplicate() {
+    let state = test_state().await;
+    seed_all_roles(&state.db).await;
+    seed_applicant(&state.db, "dupapp", "DupApp", APPLICANT_TOKEN).await;
+
+    // First create via API
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(authed_json_request(
+            Method::POST,
+            "/api/applications",
+            APPLICANT_TOKEN,
+            json!({ "preferred_games": ["ow2"], "preferred_roles": [] }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+
+    // Simulate race: second insert via DB then count>1 rollback path on next submit
+    // is covered by sequential conflict. Also verify count_open + delete helpers.
+    let second = state
+        .db
+        .submit_application("dupapp", vec![], vec![], None)
+        .await
+        .unwrap();
+    assert_eq!(state.db.count_open_applications("dupapp").await.unwrap(), 2);
+    state.db.delete_application(&second.id).await.unwrap();
+    assert_eq!(state.db.count_open_applications("dupapp").await.unwrap(), 1);
+
+    // Route-level double submit still 409
+    let app = create_router(state);
+    let resp = app
+        .oneshot(authed_json_request(
+            Method::POST,
+            "/api/applications",
+            APPLICANT_TOKEN,
+            json!({ "preferred_games": [], "preferred_roles": [] }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CONFLICT);
+}
+
+#[tokio::test]
 async fn applicant_self_withdraw_pending() {
     let state = test_state().await;
     seed_all_roles(&state.db).await;

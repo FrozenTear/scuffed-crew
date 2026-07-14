@@ -95,6 +95,19 @@ pub async fn submit_application(
         .await
         .map_err(|e| internal_err(e, "submit_application"))?;
 
+    // Concurrent double-submit: two POSTs can both pass the pre-check. Keep one open app.
+    let open = state
+        .db
+        .count_open_applications(&user.id)
+        .await
+        .map_err(|e| internal_err(e, "count_open_applications"))?;
+    if open > 1 {
+        if let Err(e) = state.db.delete_application(&app.id).await {
+            tracing::error!(error = %e, app_id = %app.id, "failed to roll back duplicate application");
+        }
+        return Err(conflict("You already have an open application"));
+    }
+
     if let Some(ref notifier) = state.notifier {
         notifier.notify_officers(format!(
             "New application received from user {}",
