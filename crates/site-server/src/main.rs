@@ -2,8 +2,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use scuffed_auth::SessionConfig;
-use scuffed_db::migrations::run_migrations;
 use scuffed_db::Database;
+use scuffed_db::migrations::run_migrations;
 use scuffed_site_server::{
     create_router,
     notifications::MatrixNotifier,

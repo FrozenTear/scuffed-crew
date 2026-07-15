@@ -224,8 +224,6 @@ fn otsu_threshold(img: &GrayImage) -> u8 {
 /// Column boundaries as (left_edge_fraction, width_fraction) for each of the 6 stat columns.
 pub type StatColumns = [(f64, f64); STAT_COLUMNS];
 
-
-
 /// Apply a horizontal offset to the fallback column boundaries.
 pub fn columns_with_offset(offset: f64) -> StatColumns {
     let mut columns = STAT_COL_BOUNDARIES_FALLBACK;

@@ -421,7 +421,11 @@ pub fn scan_rows(scoreboard: &DynamicImage) -> RowScan {
     pitches.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     let median_pitch = pitches[pitches.len() / 2] / h as f64;
 
-    tracing::debug!(median_pitch, dip_count = dips.len(), "row scan via saturation dips");
+    tracing::debug!(
+        median_pitch,
+        dip_count = dips.len(),
+        "row scan via saturation dips"
+    );
     RowScan {
         dip_count: dips.len(),
         median_pitch: Some(median_pitch),
@@ -518,7 +522,10 @@ mod portrait_rect_tests {
         let dims = (1000u32, 1000u32);
         let five = portrait_rect(dims, 1, 5).unwrap().y - portrait_rect(dims, 0, 5).unwrap().y;
         let six = portrait_rect(dims, 1, 6).unwrap().y - portrait_rect(dims, 0, 6).unwrap().y;
-        assert!(six < five, "6v6 rows should be tighter than 5v5 ({six} vs {five})");
+        assert!(
+            six < five,
+            "6v6 rows should be tighter than 5v5 ({six} vs {five})"
+        );
         // Last row of team 2 exists for 6v6
         assert!(portrait_rect(dims, 11, 6).is_some());
         assert!(portrait_rect(dims, 12, 6).is_none());

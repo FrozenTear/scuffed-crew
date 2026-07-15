@@ -70,7 +70,7 @@ const CSS: &str = r#"
     font-size: 1rem;
 }
 .setup-error {
-    color: var(--danger, #d63031);
+    color: var(--danger);
     font-size: 0.85rem;
     margin-bottom: 1rem;
 }
@@ -128,9 +128,10 @@ pub fn Setup() -> Element {
 
     use_effect(move || {
         if let Some(Some(s)) = status.value()()
-            && !s.needs_setup {
-                nav.replace(Route::Login {});
-            }
+            && !s.needs_setup
+        {
+            nav.replace(Route::Login {});
+        }
     });
 
     let on_submit = move |evt: Event<FormData>| {

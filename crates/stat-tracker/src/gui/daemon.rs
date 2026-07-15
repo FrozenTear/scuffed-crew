@@ -104,7 +104,10 @@ async fn start_daemon_checked(data_dir: &std::path::Path) -> Result<u32, String>
     match child.try_wait() {
         // Exited already — try_wait reaps it (no zombie) and we report why.
         Ok(Some(status)) => Err(last_log_error(data_dir).unwrap_or_else(|| {
-            format!("daemon exited immediately ({status}) — see {}", daemon_log_path(data_dir).display())
+            format!(
+                "daemon exited immediately ({status}) — see {}",
+                daemon_log_path(data_dir).display()
+            )
         })),
         // Still alive — detach so it survives GUI exit (reparented to init)
         // rather than becoming a zombie when the Child drops.

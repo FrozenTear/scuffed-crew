@@ -7,8 +7,8 @@
 //! 4. Frontend receives the auth event and presents it on WebSocket AUTH challenge
 
 use scuffed_auth::crypto::{aad, CryptoService, EncryptedBlob};
-use zeroize::{Zeroize, Zeroizing};
 use serde::{Deserialize, Serialize};
+use zeroize::{Zeroize, Zeroizing};
 
 use super::events::{EventBuilder, EventError};
 use scuffed_types::nostr::NostrEvent;
@@ -225,7 +225,12 @@ mod tests {
 
         let (pubkey, encrypted) = service.generate_keypair().unwrap();
         let response = service
-            .provision_auth_event(&encrypted, &pubkey, "wss://relay.example.com", "challenge123")
+            .provision_auth_event(
+                &encrypted,
+                &pubkey,
+                "wss://relay.example.com",
+                "challenge123",
+            )
             .unwrap();
 
         assert_eq!(response.pubkey, pubkey);
@@ -272,8 +277,12 @@ mod tests {
         let (_pubkey, encrypted) = service1.generate_keypair().unwrap();
 
         // Trying to decrypt with a different key should fail
-        let result =
-            service2.provision_auth_event(&encrypted, &_pubkey, "wss://relay.example.com", "challenge");
+        let result = service2.provision_auth_event(
+            &encrypted,
+            &_pubkey,
+            "wss://relay.example.com",
+            "challenge",
+        );
         assert!(result.is_err());
     }
 
@@ -294,13 +303,15 @@ mod tests {
         let real_keys = EventBuilder::generate_keys();
         let mut secret_bytes = real_keys.secret_key().to_secret_bytes();
         let aad = aad::nostr_secret_key(&claimed_owner);
-        let mismatched = crypto
-            .encrypt_bytes(&secret_bytes, aad.as_bytes())
-            .unwrap();
+        let mismatched = crypto.encrypt_bytes(&secret_bytes, aad.as_bytes()).unwrap();
         secret_bytes.zeroize();
 
-        let result =
-            service.provision_auth_event(&mismatched, &claimed_owner, "wss://relay.example.com", "c");
+        let result = service.provision_auth_event(
+            &mismatched,
+            &claimed_owner,
+            "wss://relay.example.com",
+            "c",
+        );
         assert!(matches!(result, Err(AuthError::PubkeyMismatch)));
     }
 
@@ -313,18 +324,10 @@ mod tests {
         let real_keys = EventBuilder::generate_keys();
         let mut secret_bytes = real_keys.secret_key().to_secret_bytes();
         let aad = aad::nostr_secret_key(&claimed_owner);
-        let mismatched = crypto
-            .encrypt_bytes(&secret_bytes, aad.as_bytes())
-            .unwrap();
+        let mismatched = crypto.encrypt_bytes(&secret_bytes, aad.as_bytes()).unwrap();
         secret_bytes.zeroize();
 
-        let result = service.sign_event_for_member(
-            &mismatched,
-            &claimed_owner,
-            1,
-            "hi",
-            vec![],
-        );
+        let result = service.sign_event_for_member(&mismatched, &claimed_owner, 1, "hi", vec![]);
         assert!(matches!(result, Err(AuthError::PubkeyMismatch)));
     }
 }

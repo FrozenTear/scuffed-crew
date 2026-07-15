@@ -207,12 +207,11 @@ impl CryptoService {
             }
         }
 
-        let previous_refs: Vec<(u32, &str)> = previous
-            .iter()
-            .map(|(v, k)| (*v, k.as_str()))
-            .collect();
+        let previous_refs: Vec<(u32, &str)> =
+            previous.iter().map(|(v, k)| (*v, k.as_str())).collect();
 
-        let allow_legacy_empty_aad = std::env::var("CRYPTO_STRICT_AAD").ok().as_deref() != Some("1")
+        let allow_legacy_empty_aad = std::env::var("CRYPTO_STRICT_AAD").ok().as_deref()
+            != Some("1")
             && !is_strict_production_crypto();
 
         Ok(Some(Self::from_keyring(
@@ -237,7 +236,11 @@ impl CryptoService {
     }
 
     /// Encrypt raw bytes with domain-separated AAD.
-    pub fn encrypt_bytes(&self, plaintext: &[u8], aad: &[u8]) -> Result<EncryptedBlob, CryptoError> {
+    pub fn encrypt_bytes(
+        &self,
+        plaintext: &[u8],
+        aad: &[u8],
+    ) -> Result<EncryptedBlob, CryptoError> {
         let entry = self
             .inner
             .keys

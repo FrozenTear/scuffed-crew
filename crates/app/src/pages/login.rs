@@ -55,7 +55,7 @@ const CSS: &str = r#"
     font-size: 1rem;
 }
 .login-error {
-    color: var(--danger, #d63031);
+    color: var(--danger);
     font-size: 0.85rem;
     margin-bottom: 1rem;
 }
@@ -127,9 +127,10 @@ pub fn Login() -> Element {
 
     use_effect(move || {
         if let Some(Some(s)) = setup.value()()
-            && s.needs_setup {
-                nav.replace(Route::Setup {});
-            }
+            && s.needs_setup
+        {
+            nav.replace(Route::Setup {});
+        }
     });
 
     let on_submit = move |evt: Event<FormData>| {

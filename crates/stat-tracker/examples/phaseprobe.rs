@@ -20,7 +20,11 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         // select dark≥0.50+var≥2000 (each then needs OCR confirmation).
         println!(
             "{name} phase={phase:?} outcome={signal:?} | navy={:.3} ban_red={:.3} ban_dark={:.3} sel_dark={:.3} sel_var={:.0}",
-            m.navy_ratio, m.ban_red_ratio, m.ban_dark_ratio, m.select_dark_header_ratio, m.select_grid_variance,
+            m.navy_ratio,
+            m.ban_red_ratio,
+            m.ban_dark_ratio,
+            m.select_dark_header_ratio,
+            m.select_grid_variance,
         );
     }
     Ok(())

@@ -199,11 +199,7 @@ fn tessdata_lang() -> &'static str {
                     .exists()
             })
             .unwrap_or(false);
-        if has_koverwatch {
-            "koverwatch"
-        } else {
-            "eng"
-        }
+        if has_koverwatch { "koverwatch" } else { "eng" }
     })
 }
 
@@ -644,8 +640,6 @@ fn save_debug_images(cropped: &DynamicImage, _preprocessed: &image::GrayImage, p
     let _ = std::fs::write(dir.join("preprocessed.png"), png_buf);
     tracing::debug!(path = %dir.display(), "saved debug images");
 }
-
-
 
 fn run_ocr(
     lang: &'static str,

@@ -77,11 +77,7 @@ pub async fn team_events_ics(
         .await
         .map(|s| s.org_name)
         .unwrap_or_else(|_| "Clan".into());
-    let ical = generate_ical(
-        &team_events,
-        &host,
-        &format!("{org_name} - Team {team_id}"),
-    );
+    let ical = generate_ical(&team_events, &host, &format!("{org_name} - Team {team_id}"));
 
     Ok((
         [

@@ -5,8 +5,8 @@ use axum::extract::DefaultBodyLimit;
 use axum::http::HeaderValue;
 use axum::routing::get;
 use scuffed_auth::SessionConfig;
-use scuffed_db::migrations::run_migrations;
 use scuffed_db::Database;
+use scuffed_db::migrations::run_migrations;
 use scuffed_site_server::{
     create_router,
     notifications::MatrixNotifier,
@@ -116,8 +116,8 @@ async fn main() {
         && let Ok(new_password) = std::env::var("BOOTSTRAP_ADMIN_PASSWORD")
         && !new_password.is_empty()
     {
-        let username = std::env::var("BOOTSTRAP_ADMIN_USERNAME")
-            .unwrap_or_else(|_| "admin".to_string());
+        let username =
+            std::env::var("BOOTSTRAP_ADMIN_USERNAME").unwrap_or_else(|_| "admin".to_string());
         match scuffed_auth::password::hash_password(&new_password) {
             Ok(hash) => match db.get_local_user_by_username(&username).await {
                 Ok(Some((user, _))) => {

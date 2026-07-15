@@ -369,10 +369,7 @@ pub fn create_router(state: AppState) -> Router {
         )
         // Forum routes
         .route("/api/forum/tree", get(routes::forum::forum_tree))
-        .route(
-            "/api/forum/boards/{slug}",
-            get(routes::forum::get_board),
-        )
+        .route("/api/forum/boards/{slug}", get(routes::forum::get_board))
         .route(
             "/api/forum/categories",
             post(routes::forum::create_category),

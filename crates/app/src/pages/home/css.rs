@@ -51,8 +51,8 @@ pub const HOME_SHARED_CSS: &str = r#"
         transform: skewX(-10deg);
         pointer-events: none;
         opacity: 0.9;
-        mask-image: linear-gradient(90deg, transparent 0%, #000 35%);
-        -webkit-mask-image: linear-gradient(90deg, transparent 0%, #000 35%);
+        mask-image: linear-gradient(90deg, transparent 0%, black 35%);
+        -webkit-mask-image: linear-gradient(90deg, transparent 0%, black 35%);
     }
     .home-hero::after {
         content: '';
@@ -902,7 +902,11 @@ pub const HOME_SHELL_CSS: &str = r#"
 
 pub fn home_css_layers() -> String {
     let mut s = String::with_capacity(
-        HOME_SHARED_CSS.len() + HOME_SHELL_CSS.len() + HOME_SKIN_CLEAN_CSS.len() + HOME_SKIN_ESPORTS_CSS.len() + 8,
+        HOME_SHARED_CSS.len()
+            + HOME_SHELL_CSS.len()
+            + HOME_SKIN_CLEAN_CSS.len()
+            + HOME_SKIN_ESPORTS_CSS.len()
+            + 8,
     );
     s.push_str(HOME_SHARED_CSS);
     s.push_str(HOME_SHELL_CSS);

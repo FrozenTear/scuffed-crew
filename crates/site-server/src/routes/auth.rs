@@ -294,7 +294,13 @@ pub async fn setup_status(State(state): State<AppState>) -> impl IntoResponse {
 
 /// GET /api/auth/providers — which login methods the UI should offer.
 pub async fn auth_providers(State(state): State<AppState>) -> impl IntoResponse {
-    let needs_setup = state.db.has_admin_member().await.ok().map(|h| !h).unwrap_or(false);
+    let needs_setup = state
+        .db
+        .has_admin_member()
+        .await
+        .ok()
+        .map(|h| !h)
+        .unwrap_or(false);
     let local_login = state.db.has_local_login().await.unwrap_or(false);
     let config = &state.oauth_config;
     Json(AuthProvidersResponse {
@@ -339,9 +345,7 @@ pub async fn setup(
         Err(msg) => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(ErrorResponse {
-                    error: msg.into(),
-                }),
+                Json(ErrorResponse { error: msg.into() }),
             )
                 .into_response();
         }
@@ -435,7 +439,7 @@ pub async fn setup(
             .as_ref()
             .map(|s| s.trim())
             .filter(|s| !s.is_empty())
-            .and_then(|id| homepage_preset_by_id(id));
+            .and_then(homepage_preset_by_id);
 
         if org.is_some() || preset.is_some() {
             let (layout, homepage_json, brand_dark, brand_light, shell, skin) =
@@ -488,11 +492,7 @@ pub async fn setup(
 
     tracing::info!("First-boot admin created: {}", user.username);
     let session_cookie = build_session_cookie(&state.session_config, session_token);
-    (
-        jar.add(session_cookie),
-        Json(OkResponse { ok: true }),
-    )
-        .into_response()
+    (jar.add(session_cookie), Json(OkResponse { ok: true })).into_response()
 }
 
 /// POST /api/auth/local/login — username/password login for local accounts.
@@ -558,9 +558,5 @@ pub async fn local_login(
 
     tracing::info!("User {} logged in via local", user.username);
     let session_cookie = build_session_cookie(&state.session_config, session_token);
-    (
-        jar.add(session_cookie),
-        Json(OkResponse { ok: true }),
-    )
-        .into_response()
+    (jar.add(session_cookie), Json(OkResponse { ok: true })).into_response()
 }

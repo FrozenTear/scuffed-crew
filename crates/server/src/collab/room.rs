@@ -28,13 +28,8 @@ impl Room {
         user: CollabUserInfo,
         tx: mpsc::Sender<WsResponse>,
     ) {
-        self.connections.insert(
-            connection_id,
-            RoomUser {
-                info: user,
-                tx,
-            },
-        );
+        self.connections
+            .insert(connection_id, RoomUser { info: user, tx });
     }
 
     /// Remove one connection. Returns the user info and whether any other
@@ -42,10 +37,7 @@ impl Room {
     pub fn remove_connection(&mut self, connection_id: &str) -> Option<(CollabUserInfo, bool)> {
         let removed = self.connections.remove(connection_id)?;
         let user_id = removed.info.id.clone();
-        let still_present = self
-            .connections
-            .values()
-            .any(|c| c.info.id == user_id);
+        let still_present = self.connections.values().any(|c| c.info.id == user_id);
         Some((removed.info, still_present))
     }
 
@@ -129,15 +121,10 @@ impl RoomManager {
         let mut room = self.rooms.entry(strategy_id.clone()).or_default();
 
         // Only announce UserJoined if this is the user's first connection in the room
-        let first_for_user = !room
-            .connections
-            .values()
-            .any(|c| c.info.id == user.id);
+        let first_for_user = !room.connections.values().any(|c| c.info.id == user.id);
 
         if first_for_user {
-            room.broadcast_all(ServerMessage::UserJoined {
-                user: user.clone(),
-            });
+            room.broadcast_all(ServerMessage::UserJoined { user: user.clone() });
         }
 
         room.add_connection(connection_id, user, tx);
@@ -148,12 +135,10 @@ impl RoomManager {
     pub fn leave_room(&self, strategy_id: &StrategyId, connection_id: &str) {
         let should_remove = {
             if let Some(mut room) = self.rooms.get_mut(strategy_id) {
-                if let Some((info, still_present)) = room.remove_connection(connection_id) {
-                    if !still_present {
-                        room.broadcast_all(ServerMessage::UserLeft {
-                            user_id: info.id,
-                        });
-                    }
+                if let Some((info, still_present)) = room.remove_connection(connection_id)
+                    && !still_present
+                {
+                    room.broadcast_all(ServerMessage::UserLeft { user_id: info.id });
                 }
                 room.is_empty()
             } else {

@@ -272,14 +272,16 @@ mod tests {
             .map(|i| i.id.as_str())
             .collect();
         assert_eq!(primary, ["members", "tournaments", "news", "forum"]);
-        assert!(cfg
-            .items
-            .iter()
-            .any(|i| i.id == "strategy" && i.placement == NavPlacement::Hidden));
-        assert!(cfg
-            .items
-            .iter()
-            .any(|i| i.id == "scrims" && i.placement == NavPlacement::Hidden));
+        assert!(
+            cfg.items
+                .iter()
+                .any(|i| i.id == "strategy" && i.placement == NavPlacement::Hidden)
+        );
+        assert!(
+            cfg.items
+                .iter()
+                .any(|i| i.id == "scrims" && i.placement == NavPlacement::Hidden)
+        );
     }
 
     #[test]

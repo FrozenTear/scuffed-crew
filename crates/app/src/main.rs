@@ -42,14 +42,15 @@ fn App() -> Element {
         if let Ok(status) = ApiClient::web()
             .fetch::<SetupStatusResponse>("/api/auth/setup-status")
             .await
-            && status.needs_setup {
-                let path = web_sys::window()
-                    .and_then(|w| w.location().pathname().ok())
-                    .unwrap_or_default();
-                if path != "/setup" {
-                    let _ = web_sys::window().and_then(|w| w.location().set_href("/setup").ok());
-                }
+            && status.needs_setup
+        {
+            let path = web_sys::window()
+                .and_then(|w| w.location().pathname().ok())
+                .unwrap_or_default();
+            if path != "/setup" {
+                let _ = web_sys::window().and_then(|w| w.location().set_href("/setup").ok());
             }
+        }
     });
 
     // Document title / meta from site settings (product-neutral until loaded).
@@ -115,7 +116,7 @@ fn App() -> Element {
         }
         document::Meta {
             name: "theme-color",
-            content: "#17171d",
+            content: "{theme::tokens::THEME_COLOR}",
         }
         document::Link {
             rel: "icon",

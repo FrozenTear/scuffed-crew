@@ -8,8 +8,8 @@ use serde::Deserialize;
 use scuffed_auth::server::session::ErrorResponse;
 use scuffed_chat::{EventBuilder, publish_event_oneshot};
 use scuffed_db::{AuditAction, AuditTargetType, GameAccount, Member, NostrKeyMode, OrgRole};
-use zeroize::Zeroize;
 use scuffed_types::api::{CursorResponse, PaginationParams};
+use zeroize::Zeroize;
 
 use crate::extractors::{AdminUser, OrgMember};
 use crate::routes::audit_log::audit;
@@ -162,9 +162,8 @@ pub async fn update_member(
                         }),
                     )
                 })?;
-            let target_is_actionable_admin = target.is_active
-                && target.org_role == OrgRole::Admin
-                && !target_suspended;
+            let target_is_actionable_admin =
+                target.is_active && target.org_role == OrgRole::Admin && !target_suspended;
             if let Err(denial) = crate::membership_policy::can_set_is_active(
                 &caller.member.id,
                 caller.member.org_role,
@@ -210,42 +209,29 @@ pub async fn update_member(
             )
         })?;
 
-    if deactivating_actionable_admin {
-        if let Err(e) = state.db.assert_has_actionable_admin().await {
-            // Compensate: restore active flag
-            if let Err(re) = state
-                .db
-                .update_member(
-                    &id,
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    Some(true),
-                )
-                .await
-            {
-                tracing::error!(error = %re, member_id = %id, "failed to compensate admin deactivation");
-            }
-            return Err(match e {
-                scuffed_db::DbError::Conflict(msg) => (
-                    StatusCode::CONFLICT,
-                    Json(ErrorResponse { error: msg }),
-                ),
-                other => {
-                    tracing::error!(error = %other, "assert_has_actionable_admin after deactivate");
-                    (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(ErrorResponse {
-                            error: "Internal server error".into(),
-                        }),
-                    )
-                }
-            });
+    if deactivating_actionable_admin && let Err(e) = state.db.assert_has_actionable_admin().await {
+        // Compensate: restore active flag
+        if let Err(re) = state
+            .db
+            .update_member(&id, None, None, None, None, None, None, None, Some(true))
+            .await
+        {
+            tracing::error!(error = %re, member_id = %id, "failed to compensate admin deactivation");
         }
+        return Err(match e {
+            scuffed_db::DbError::Conflict(msg) => {
+                (StatusCode::CONFLICT, Json(ErrorResponse { error: msg }))
+            }
+            other => {
+                tracing::error!(error = %other, "assert_has_actionable_admin after deactivate");
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse {
+                        error: "Internal server error".into(),
+                    }),
+                )
+            }
+        });
     }
 
     if crate::membership_policy::deactivation_revokes_sessions(target.is_active, updated.is_active)
@@ -433,8 +419,7 @@ pub async fn change_role(
         ));
     }
 
-    let demoting_actionable_admin =
-        target_is_actionable_admin && body.role != OrgRole::Admin;
+    let demoting_actionable_admin = target_is_actionable_admin && body.role != OrgRole::Admin;
 
     let member = state
         .db
@@ -450,28 +435,25 @@ pub async fn change_role(
             )
         })?;
 
-    if demoting_actionable_admin {
-        if let Err(e) = state.db.assert_has_actionable_admin().await {
-            // Compensate: restore previous role
-            if let Err(re) = state.db.change_member_role(&id, target.org_role).await {
-                tracing::error!(error = %re, member_id = %id, "failed to compensate admin demotion");
-            }
-            return Err(match e {
-                scuffed_db::DbError::Conflict(msg) => (
-                    StatusCode::CONFLICT,
-                    Json(ErrorResponse { error: msg }),
-                ),
-                other => {
-                    tracing::error!(error = %other, "assert_has_actionable_admin after demote");
-                    (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(ErrorResponse {
-                            error: "Internal server error".into(),
-                        }),
-                    )
-                }
-            });
+    if demoting_actionable_admin && let Err(e) = state.db.assert_has_actionable_admin().await {
+        // Compensate: restore previous role
+        if let Err(re) = state.db.change_member_role(&id, target.org_role).await {
+            tracing::error!(error = %re, member_id = %id, "failed to compensate admin demotion");
         }
+        return Err(match e {
+            scuffed_db::DbError::Conflict(msg) => {
+                (StatusCode::CONFLICT, Json(ErrorResponse { error: msg }))
+            }
+            other => {
+                tracing::error!(error = %other, "assert_has_actionable_admin after demote");
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse {
+                        error: "Internal server error".into(),
+                    }),
+                )
+            }
+        });
     }
 
     audit(
@@ -577,10 +559,9 @@ pub async fn delete_game_account(
         .delete_game_account(&member_id, &account_id)
         .await
         .map_err(|e| match e {
-            scuffed_db::DbError::NotFound(msg) => (
-                StatusCode::NOT_FOUND,
-                Json(ErrorResponse { error: msg }),
-            ),
+            scuffed_db::DbError::NotFound(msg) => {
+                (StatusCode::NOT_FOUND, Json(ErrorResponse { error: msg }))
+            }
             other => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {

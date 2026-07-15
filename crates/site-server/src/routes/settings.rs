@@ -2,9 +2,7 @@ use axum::{Json, extract::State, http::StatusCode};
 use scuffed_auth::server::session::ErrorResponse;
 use scuffed_db::{AuditAction, AuditTargetType};
 use scuffed_types::api::UpdateSettingsRequest;
-use scuffed_types::{
-    HomeShell, HomeSkin, HomepageContent, NavConfig, PublicLayout, SiteSettings,
-};
+use scuffed_types::{HomeShell, HomeSkin, HomepageContent, NavConfig, PublicLayout, SiteSettings};
 
 use crate::extractors::AdminUser;
 use crate::routes::audit_log::audit;
@@ -130,48 +128,40 @@ pub async fn update_settings(
     });
 
     // Prefer home_shell; fall back to public_layout for legacy clients.
-    let shell_str = body
-        .home_shell
-        .map(|s| s.as_str().to_string())
-        .or_else(|| body.public_layout.map(|l| HomeShell::from_public_layout(l).as_str().into()));
+    let shell_str = body.home_shell.map(|s| s.as_str().to_string()).or_else(|| {
+        body.public_layout
+            .map(|l| HomeShell::from_public_layout(l).as_str().into())
+    });
     let skin_str = body.home_skin.map(|s| s.as_str().to_string());
     // Still pass public_layout for dual-write path when only layout is sent (shell_str derived above).
     let layout = body.public_layout.map(|l| l.as_str().to_string());
 
     let page_bg_color = match body.page_bg_color.as_deref() {
-        Some(c) => Some(sanitize_bg_color(c).map_err(|e| {
-            (
-                StatusCode::BAD_REQUEST,
-                Json(ErrorResponse { error: e }),
-            )
-        })?),
+        Some(c) => Some(
+            sanitize_bg_color(c)
+                .map_err(|e| (StatusCode::BAD_REQUEST, Json(ErrorResponse { error: e })))?,
+        ),
         None => None,
     };
     let page_bg_image_url = match body.page_bg_image_url.as_deref() {
-        Some(u) => Some(sanitize_bg_image_url(u).map_err(|e| {
-            (
-                StatusCode::BAD_REQUEST,
-                Json(ErrorResponse { error: e }),
-            )
-        })?),
+        Some(u) => Some(
+            sanitize_bg_image_url(u)
+                .map_err(|e| (StatusCode::BAD_REQUEST, Json(ErrorResponse { error: e })))?,
+        ),
         None => None,
     };
     let brand_accent_dark = match body.brand_accent_dark.as_deref() {
-        Some(c) => Some(sanitize_brand_accent(c).map_err(|e| {
-            (
-                StatusCode::BAD_REQUEST,
-                Json(ErrorResponse { error: e }),
-            )
-        })?),
+        Some(c) => Some(
+            sanitize_brand_accent(c)
+                .map_err(|e| (StatusCode::BAD_REQUEST, Json(ErrorResponse { error: e })))?,
+        ),
         None => None,
     };
     let brand_accent_light = match body.brand_accent_light.as_deref() {
-        Some(c) => Some(sanitize_brand_accent(c).map_err(|e| {
-            (
-                StatusCode::BAD_REQUEST,
-                Json(ErrorResponse { error: e }),
-            )
-        })?),
+        Some(c) => Some(
+            sanitize_brand_accent(c)
+                .map_err(|e| (StatusCode::BAD_REQUEST, Json(ErrorResponse { error: e })))?,
+        ),
         None => None,
     };
 

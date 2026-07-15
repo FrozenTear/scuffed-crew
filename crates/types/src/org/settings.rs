@@ -1,9 +1,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use super::{
-    HomeShell, HomeSkin, HomepageContent, NavConfig, PublicLayout,
-};
+use super::{HomeShell, HomeSkin, HomepageContent, NavConfig, PublicLayout};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SiteSettings {

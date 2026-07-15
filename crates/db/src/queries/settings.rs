@@ -60,7 +60,7 @@ fn default_layout() -> String {
 /// Empty stored values are inferred from public_layout / homepage / brand.
 fn resolve_shell_skin(db: &DbSiteSettings) -> (String, String, String) {
     use scuffed_types::{
-        HomepageContent, infer_home_shell_from_public_layout, infer_home_skin, HomeShell, HomeSkin,
+        infer_home_shell_from_public_layout, infer_home_skin, HomeShell, HomeSkin, HomepageContent,
     };
 
     let shell = if db.home_shell.trim().is_empty() {
@@ -113,7 +113,7 @@ fn db_to_settings(db: DbSiteSettings) -> SiteSettings {
 /// Apply dual-write: shell drives public_layout; fill empty shell/skin on write.
 fn apply_shell_skin_dual_write(db: &mut DbSiteSettings) {
     use scuffed_types::{
-        HomepageContent, infer_home_shell_from_public_layout, infer_home_skin, HomeShell, HomeSkin,
+        infer_home_shell_from_public_layout, infer_home_skin, HomeShell, HomeSkin, HomepageContent,
     };
 
     if db.home_shell.trim().is_empty() {

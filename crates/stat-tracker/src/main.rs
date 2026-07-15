@@ -478,9 +478,7 @@ fn should_start_fresh_session(game: Option<&ActiveGame>, now: Instant) -> bool {
         None => true,
         // Mid-game capture — unless the session has been idle so long it
         // can't plausibly be the same game.
-        Some(g) if !g.finished() => {
-            now.duration_since(g.last_activity) > UNFINISHED_SESSION_IDLE
-        }
+        Some(g) if !g.finished() => now.duration_since(g.last_activity) > UNFINISHED_SESSION_IDLE,
         // Finished: reuse within the grace window (post-match scoreboard of the
         // same match), start fresh after it. An unstamped outcome is treated as
         // stale so a finished result can never leak forward.
@@ -1245,8 +1243,7 @@ async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<
         // downstream stays as the final arbiter for frames that pass.
         let row_scan = detect::hero_portrait::scan_rows(&scoreboard);
         if !row_scan.looks_like_scoreboard()
-            && !(3..=10)
-                .contains(&ocr::preprocess::header_label_groups(&scoreboard).len())
+            && !(3..=10).contains(&ocr::preprocess::header_label_groups(&scoreboard).len())
         {
             return FrameAnalysisOutcome::NotAScoreboard {
                 outcome,
@@ -1294,9 +1291,8 @@ async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<
         let cells_parse =
             parse::parse_scoreboard_cells(&rows, row_idx, "", "unknown", None).is_some();
         let hero_identified = career_hero.is_some() || portrait_match.is_some();
-        let need_full_ocr = !cells_parse
-            || !hero_identified
-            || (!session_map_known && map_from_panel.is_none());
+        let need_full_ocr =
+            !cells_parse || !hero_identified || (!session_map_known && map_from_panel.is_none());
         let ocr = if need_full_ocr {
             ocr::recognize(&img)
         } else {
@@ -1444,11 +1440,9 @@ async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<
             // here used to mis-crop 6v6/team-2 references into the template
             // library.
             let dims = (scoreboard_img.width(), scoreboard_img.height());
-            if let Some(r) = detect::hero_portrait::portrait_rect(
-                dims,
-                player_row_idx.unwrap_or(0),
-                team_size,
-            ) {
+            if let Some(r) =
+                detect::hero_portrait::portrait_rect(dims, player_row_idx.unwrap_or(0), team_size)
+            {
                 let crop = scoreboard_img.crop_imm(r.x, r.y, r.w, r.h);
                 if let Err(e) = detect::hero_portrait::save_portrait_reference(
                     &portraits_path,
@@ -1529,7 +1523,10 @@ async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<
                 .map_err(anyhow::Error::from_boxed)
                 .context("session create failed")?;
             tracing::info!(session_id = %target_session, "started new match session");
-        } else if let Err(e) = store.append_capture(&target_session, now, &outcome_label).await {
+        } else if let Err(e) = store
+            .append_capture(&target_session, now, &outcome_label)
+            .await
+        {
             tracing::warn!(error = %e, "failed to append capture to session");
         }
 
@@ -1693,7 +1690,10 @@ async fn refresh_snapshot_force(store: &storage::LocalStore, data_dir: &std::pat
 async fn flush_snapshot_if_due(store: &storage::LocalStore, data_dir: &std::path::Path) {
     let due = {
         let state = SNAPSHOT_STATE.lock().unwrap_or_else(|e| e.into_inner());
-        state.0 && state.1.is_none_or(|last| last.elapsed() >= SNAPSHOT_DEBOUNCE)
+        state.0
+            && state
+                .1
+                .is_none_or(|last| last.elapsed() >= SNAPSHOT_DEBOUNCE)
     };
     if due {
         refresh_snapshot_inner(store, data_dir, true).await;
@@ -1886,10 +1886,11 @@ mod tests {
     #[test]
     fn active_game_persists_and_recovers() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let mut g = ActiveGame::open_now("abc123".into(), detect::MatchOutcome::Unknown, vec![
-            "Oasis".into(),
-            "Busan".into(),
-        ]);
+        let mut g = ActiveGame::open_now(
+            "abc123".into(),
+            detect::MatchOutcome::Unknown,
+            vec!["Oasis".into(), "Busan".into()],
+        );
         g.session_created = true;
         g.map = Some("Oasis".into());
         g.last_stats = Some((12, 3, 5400));
@@ -1900,7 +1901,10 @@ mod tests {
         assert_eq!(r.session_id, "abc123");
         assert_eq!(r.outcome, detect::MatchOutcome::Unknown);
         assert_eq!(r.map.as_deref(), Some("Oasis"));
-        assert_eq!(r.map_candidates, vec!["Oasis".to_string(), "Busan".to_string()]);
+        assert_eq!(
+            r.map_candidates,
+            vec!["Oasis".to_string(), "Busan".to_string()]
+        );
         assert!(r.session_created);
         assert_eq!(
             r.last_stats,
@@ -1950,13 +1954,19 @@ mod tests {
         assert_eq!(resolve_map(None, None, "", &candidates), "");
 
         // Session's confirmed map always wins.
-        assert_eq!(resolve_map(Some("Busan"), Some("Oasis"), "Ilios", &candidates), "Busan");
+        assert_eq!(
+            resolve_map(Some("Busan"), Some("Oasis"), "Ilios", &candidates),
+            "Busan"
+        );
 
         // Panel read accepted when it is a candidate...
         assert_eq!(resolve_map(None, Some("Busan"), "", &candidates), "Busan");
         // ...vetoed when it isn't (misread), falling back to a plausible
         // text read, or to nothing.
-        assert_eq!(resolve_map(None, Some("Ilios"), "Oasis", &candidates), "Oasis");
+        assert_eq!(
+            resolve_map(None, Some("Ilios"), "Oasis", &candidates),
+            "Oasis"
+        );
         assert_eq!(resolve_map(None, Some("Ilios"), "Nepal", &candidates), "");
 
         // Without candidates, panel > text (unchanged behavior).

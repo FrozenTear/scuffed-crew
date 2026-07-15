@@ -1543,11 +1543,7 @@ fn double_elim_shape(n: usize) -> DoubleElimShape {
     let w_rounds = (size as f64).log2() as u32;
     // 2 teams (w_rounds=1): no intermediate LB — WR loser drops straight to GF slot b.
     // Larger: classic 2*(w_rounds-1) losers rounds.
-    let l_round_count = if w_rounds <= 1 {
-        0
-    } else {
-        2 * (w_rounds - 1)
-    };
+    let l_round_count = if w_rounds <= 1 { 0 } else { 2 * (w_rounds - 1) };
     DoubleElimShape {
         size,
         w_rounds,

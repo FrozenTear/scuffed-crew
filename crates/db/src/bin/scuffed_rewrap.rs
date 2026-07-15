@@ -36,9 +36,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     if db.crypto.is_none() {
-        return Err(
-            "ENCRYPTION_KEY is not set — cannot rewrap without a CryptoService".into(),
-        );
+        return Err("ENCRYPTION_KEY is not set — cannot rewrap without a CryptoService".into());
     }
 
     let version = db.crypto.as_ref().unwrap().key_version();

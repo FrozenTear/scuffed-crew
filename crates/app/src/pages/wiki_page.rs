@@ -1,7 +1,7 @@
 use dioxus::prelude::*;
 use serde::Deserialize;
 
-use crate::components::{use_toast, Toast};
+use crate::components::{Toast, use_toast};
 use crate::routes::Route;
 use crate::state::auth::use_auth;
 use scuffed_api_client::ApiClient;

@@ -132,9 +132,7 @@ impl Database {
             let fetch = limit + 1;
             let mut result = self
                 .client
-                .query(
-                    "SELECT * FROM application ORDER BY created_at DESC LIMIT $lim START $off",
-                )
+                .query("SELECT * FROM application ORDER BY created_at DESC LIMIT $lim START $off")
                 .bind(("lim", fetch as i64))
                 .bind(("off", offset as i64))
                 .await?;

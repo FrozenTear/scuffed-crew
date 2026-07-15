@@ -253,14 +253,18 @@ pub async fn public_member_profile(
     }
 
     // Get game accounts
-    let game_accounts = state.db.list_member_game_accounts(&id).await.map_err(|_e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: "Internal error".into(),
-            }),
-        )
-    })?;
+    let game_accounts = state
+        .db
+        .list_member_game_accounts(&id)
+        .await
+        .map_err(|_e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: "Internal error".into(),
+                }),
+            )
+        })?;
 
     Ok(Json(PublicMemberProfile {
         member: member_to_public(member),
@@ -337,7 +341,12 @@ pub async fn public_team_detail(
     let mut roster = Vec::new();
     for entry in roster_entries {
         if entry.is_active {
-            let member = state.db.get_member_safe(&entry.member_id).await.ok().flatten();
+            let member = state
+                .db
+                .get_member_safe(&entry.member_id)
+                .await
+                .ok()
+                .flatten();
             roster.push(TeamRosterMember {
                 member_id: entry.member_id,
                 display_name: member

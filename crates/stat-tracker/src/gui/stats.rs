@@ -1,7 +1,7 @@
 use dioxus::prelude::*;
 
 use stat_tracker::config::Config;
-use stat_tracker::stats::{compute_stats, HeroMapBreakdown};
+use stat_tracker::stats::{HeroMapBreakdown, compute_stats};
 
 use super::live_data;
 

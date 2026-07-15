@@ -1,5 +1,5 @@
-pub mod types;
 pub mod env_flags;
+pub mod types;
 
 pub use env_flags::is_production_env;
 

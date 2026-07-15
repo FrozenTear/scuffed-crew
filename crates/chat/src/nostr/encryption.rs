@@ -519,7 +519,9 @@ mod tests {
             .unwrap();
         secret_bytes.zeroize();
 
-        let err = svc.decrypt_member_keys(&encrypted, &claimed_owner).unwrap_err();
+        let err = svc
+            .decrypt_member_keys(&encrypted, &claimed_owner)
+            .unwrap_err();
         assert!(
             matches!(err, EncryptionError::InvalidKey(_)),
             "unexpected error: {err}"

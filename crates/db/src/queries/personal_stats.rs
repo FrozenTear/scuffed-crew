@@ -60,12 +60,7 @@ fn db_to_personal_match(db: DbPersonalMatch) -> PersonalMatch {
 /// provided, without its wedge-the-queue failure mode.
 fn legacy_session_id(member_id: &str, m: &crate::types::PersonalMatch) -> String {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    for part in [
-        member_id,
-        &m.hero,
-        &m.map_name,
-        &m.played_at.to_rfc3339(),
-    ] {
+    for part in [member_id, &m.hero, &m.map_name, &m.played_at.to_rfc3339()] {
         for b in part.as_bytes() {
             h ^= u64::from(*b);
             h = h.wrapping_mul(0x0000_0100_0000_01b3);
@@ -460,7 +455,10 @@ mod tests {
         assert_eq!(m1_rows.len(), 1);
         assert_eq!(m1_rows[0].session_id, "s2");
         // Another member's identically-named session is untouched.
-        assert_eq!(db.list_personal_matches("m2", 10, 0).await.unwrap().len(), 1);
+        assert_eq!(
+            db.list_personal_matches("m2", 10, 0).await.unwrap().len(),
+            1
+        );
         // Empty tombstone list is a no-op.
         assert_eq!(
             db.delete_personal_matches_by_sessions("m1", &[])
@@ -499,8 +497,14 @@ mod tests {
         m2.member_id = "m2".into();
         db.upsert_personal_matches("m2", &[m2]).await.unwrap();
 
-        assert_eq!(db.list_personal_matches("m1", 10, 0).await.unwrap().len(), 1);
-        assert_eq!(db.list_personal_matches("m2", 10, 0).await.unwrap().len(), 1);
+        assert_eq!(
+            db.list_personal_matches("m1", 10, 0).await.unwrap().len(),
+            1
+        );
+        assert_eq!(
+            db.list_personal_matches("m2", 10, 0).await.unwrap().len(),
+            1
+        );
         assert_eq!(
             db.list_personal_matches("m1", 10, 0).await.unwrap()[0].outcome,
             "victory",

@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use dioxus::prelude::*;
 use scuffed_types::{HomeSectionId, HomepageContent, TeamsPresentation};
 
-use super::data::{day_name, Announcement, Event, HomeTournament, Overview, OverviewTeam};
+use super::data::{Announcement, Event, HomeTournament, Overview, OverviewTeam, day_name};
 use crate::routes::Route;
 
 // ---------------------------------------------------------------------------
@@ -434,11 +434,7 @@ pub fn RecruitBlock(content: HomepageContent) -> Element {
 }
 
 /// Whether the Teams block will render (for secondary CTA targeting).
-pub fn teams_will_render(
-    sections_teams: bool,
-    teams_empty: bool,
-    show_when_empty: bool,
-) -> bool {
+pub fn teams_will_render(sections_teams: bool, teams_empty: bool, show_when_empty: bool) -> bool {
     if !sections_teams {
         return false;
     }

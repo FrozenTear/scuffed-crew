@@ -145,8 +145,6 @@ impl LocalStore {
         Ok(matches)
     }
 
-    
-
     /// Create the session row, idempotently: if a row with this `session_id`
     /// already exists (a previous capture created it but its snapshot insert
     /// failed, so the caller retries "creation"), it is overwritten rather
@@ -173,8 +171,6 @@ impl LocalStore {
         Ok(())
     }
 
-    
-
     /// Append a capture to an existing session: bump the capture count and time,
     /// and refresh the final outcome (the active game owns the authoritative value).
     pub async fn append_capture(
@@ -196,7 +192,10 @@ impl LocalStore {
     /// junk/misdetected game). Records a tombstone so the next sync deletes
     /// the game server-side too, and drops the session from `matches.jsonl`
     /// so the GUI's log fallback stops showing it.
-    pub async fn delete_session(&self, session_id: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    pub async fn delete_session(
+        &self,
+        session_id: &str,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         self.db
             .query("DELETE match_session WHERE session_id = $sid; DELETE personal_match WHERE session_id = $sid; CREATE deleted_session SET session_id = $sid, deleted_at = time::now()")
             .bind(("sid", session_id.to_string()))
@@ -278,9 +277,13 @@ impl LocalStore {
             .bind(("sid", session_id.to_string()))
             .await?;
         let map = map.to_string();
-        rewrite_match_log_session(&self.data_dir, session_id, Some(&|m| {
-            m.map_name = map.clone();
-        }));
+        rewrite_match_log_session(
+            &self.data_dir,
+            session_id,
+            Some(&|m| {
+                m.map_name = map.clone();
+            }),
+        );
         Ok(())
     }
 
@@ -299,9 +302,13 @@ impl LocalStore {
             .bind(("sid", session_id.to_string()))
             .await?;
         let outcome = outcome.to_string();
-        rewrite_match_log_session(&self.data_dir, session_id, Some(&|m| {
-            m.outcome = outcome.clone();
-        }));
+        rewrite_match_log_session(
+            &self.data_dir,
+            session_id,
+            Some(&|m| {
+                m.outcome = outcome.clone();
+            }),
+        );
         Ok(())
     }
 
@@ -341,8 +348,6 @@ impl LocalStore {
         let matches: Vec<PersonalMatch> = result.take(0)?;
         Ok(matches)
     }
-
-    
 
     /// Rewrite all live rows into a brand-new store and swap it in, leaving
     /// the old directory as `stats.surrealkv.pre-vacuum-<stamp>`.

@@ -4,8 +4,6 @@ use chrono::Utc;
 use strsim::normalized_levenshtein;
 use surrealdb_types::Datetime as SurrealDatetime;
 
-
-
 /// Build a match from the column-calibrated per-cell OCR rows.
 ///
 /// This is the preferred path: stats come from individually-cropped, per-column
@@ -170,10 +168,6 @@ fn extract_row_stats(line: &str) -> Option<PlayerStats> {
     stats_from_numbers(&numbers)
 }
 
-
-
-
-
 // OW2 scoreboard stat columns: E, A, D, DMG, HLG, MIT
 fn stats_from_numbers(numbers: &[u32]) -> Option<PlayerStats> {
     if numbers.len() < 6 {
@@ -263,7 +257,10 @@ const HEROES: &[&str] = &[
 fn word_boundary_count(text: &str, needle: &str) -> usize {
     text.match_indices(needle)
         .filter(|(i, _)| {
-            let before_ok = text[..*i].chars().next_back().is_none_or(|c| !c.is_alphabetic());
+            let before_ok = text[..*i]
+                .chars()
+                .next_back()
+                .is_none_or(|c| !c.is_alphabetic());
             let after_ok = text[i + needle.len()..]
                 .chars()
                 .next()
@@ -750,10 +747,19 @@ mod hero_map_name_tests {
 
     #[test]
     fn map_vote_names_canonicalize_to_display_names() {
-        assert_eq!(canonical_map("SHAMBALI").as_deref(), Some("Shambali Monastery"));
-        assert_eq!(canonical_map("WATCHPOINT").as_deref(), Some("Watchpoint: Gibraltar"));
+        assert_eq!(
+            canonical_map("SHAMBALI").as_deref(),
+            Some("Shambali Monastery")
+        );
+        assert_eq!(
+            canonical_map("WATCHPOINT").as_deref(),
+            Some("Watchpoint: Gibraltar")
+        );
         assert_eq!(canonical_map("ROUTE 66").as_deref(), Some("Route 66"));
-        assert_eq!(canonical_map("NEON JUNCTION").as_deref(), Some("Neon Junction"));
+        assert_eq!(
+            canonical_map("NEON JUNCTION").as_deref(),
+            Some("Neon Junction")
+        );
         assert_eq!(canonical_map("garbage read"), None);
     }
 }

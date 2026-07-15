@@ -209,18 +209,14 @@ fn err_500(e: impl ToString) -> (StatusCode, Json<ErrorResponse>) {
 fn err_400(msg: impl Into<String>) -> (StatusCode, Json<ErrorResponse>) {
     (
         StatusCode::BAD_REQUEST,
-        Json(ErrorResponse {
-            error: msg.into(),
-        }),
+        Json(ErrorResponse { error: msg.into() }),
     )
 }
 
 fn err_404(msg: impl Into<String>) -> (StatusCode, Json<ErrorResponse>) {
     (
         StatusCode::NOT_FOUND,
-        Json(ErrorResponse {
-            error: msg.into(),
-        }),
+        Json(ErrorResponse { error: msg.into() }),
     )
 }
 
@@ -233,9 +229,8 @@ pub async fn forum_tree(
     let mut tree = state.db.list_forum_tree().await.map_err(err_500)?;
     let role = caller.as_ref().map(|m| m.org_role);
     for cat in &mut tree {
-        cat.boards.retain(|node| {
-            enforce_board_access(&node.board, role).is_ok()
-        });
+        cat.boards
+            .retain(|node| enforce_board_access(&node.board, role).is_ok());
         for node in &mut cat.boards {
             node.sub_boards
                 .retain(|sub| enforce_board_access(sub, role).is_ok());
@@ -292,10 +287,7 @@ pub async fn update_category(
     Path(id): Path<String>,
     Json(body): Json<UpdateCategoryRequest>,
 ) -> Result<Json<ForumCategory>, (StatusCode, Json<ErrorResponse>)> {
-    let desc = body
-        .description
-        .as_ref()
-        .map(|o| o.as_deref());
+    let desc = body.description.as_ref().map(|o| o.as_deref());
     state
         .db
         .update_forum_category(
@@ -320,10 +312,10 @@ pub async fn create_board(
         return Err(err_400("name and slug required"));
     }
     let mut category_id = body.category_id.clone();
-    if let Some(pid) = body.parent_board_id.as_deref() {
-        if let Ok(Some(parent)) = state.db.get_forum_board(pid).await {
-            category_id = parent.category_id;
-        }
+    if let Some(pid) = body.parent_board_id.as_deref()
+        && let Ok(Some(parent)) = state.db.get_forum_board(pid).await
+    {
+        category_id = parent.category_id;
     }
     let board = state
         .db
@@ -433,15 +425,20 @@ pub async fn get_thread(
     let mut board = None;
     let mut parent_board = None;
     let mut category = None;
-    if let Some(bid) = thread.board_id.as_deref() {
-        if let Ok(Some(b)) = state.db.get_forum_board(bid).await {
-            enforce_board_access(&b, caller.as_ref().map(|m| m.org_role))?;
-            if let Some(pid) = b.parent_board_id.as_deref() {
-                parent_board = state.db.get_forum_board(pid).await.ok().flatten();
-            }
-            category = state.db.get_forum_category(&b.category_id).await.ok().flatten();
-            board = Some(b);
+    if let Some(bid) = thread.board_id.as_deref()
+        && let Ok(Some(b)) = state.db.get_forum_board(bid).await
+    {
+        enforce_board_access(&b, caller.as_ref().map(|m| m.org_role))?;
+        if let Some(pid) = b.parent_board_id.as_deref() {
+            parent_board = state.db.get_forum_board(pid).await.ok().flatten();
         }
+        category = state
+            .db
+            .get_forum_category(&b.category_id)
+            .await
+            .ok()
+            .flatten();
+        board = Some(b);
     }
 
     let replies = state
@@ -511,20 +508,12 @@ pub async fn create_thread(
 
     let thread = state
         .db
-        .create_forum_thread(
-            &body.title,
-            &board_id,
-            &member.member.id,
-            &body.content,
-        )
+        .create_forum_thread(&body.title, &board_id, &member.member.id, &body.content)
         .await
         .map_err(|e| {
             let msg = e.to_string();
             if msg.contains("locked") {
-                (
-                    StatusCode::FORBIDDEN,
-                    Json(ErrorResponse { error: msg }),
-                )
+                (StatusCode::FORBIDDEN, Json(ErrorResponse { error: msg }))
             } else {
                 err_500(e)
             }

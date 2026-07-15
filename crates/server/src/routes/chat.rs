@@ -171,18 +171,14 @@ pub struct DecryptMessageResponse {
 fn require_crypto(
     state: &AppState,
 ) -> Result<scuffed_auth::crypto::CryptoService, (StatusCode, Json<ErrorResponse>)> {
-    state
-        .crypto
-        .as_ref()
-        .map(|c| (**c).clone())
-        .ok_or_else(|| {
-            (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(ErrorResponse {
-                    error: "Encryption not configured (ENCRYPTION_KEY required)".into(),
-                }),
-            )
-        })
+    state.crypto.as_ref().map(|c| (**c).clone()).ok_or_else(|| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(ErrorResponse {
+                error: "Encryption not configured (ENCRYPTION_KEY required)".into(),
+            }),
+        )
+    })
 }
 
 /// POST /api/chat/send-encrypted — encrypt and publish a message to an officer channel.
@@ -204,7 +200,9 @@ pub async fn send_encrypted(
 
     // Verify sender has server-managed keys (secret loaded via full member fetch).
     let full = match caller.member.nostr_key_mode {
-        Some(NostrKeyMode::ServerManaged) => load_member_with_secret(&state, &caller.member.id).await?,
+        Some(NostrKeyMode::ServerManaged) => {
+            load_member_with_secret(&state, &caller.member.id).await?
+        }
         Some(NostrKeyMode::External) => {
             return Err((
                 StatusCode::BAD_REQUEST,
@@ -399,7 +397,9 @@ pub async fn decrypt_message(
     let crypto = require_crypto(&state)?;
 
     let full = match caller.member.nostr_key_mode {
-        Some(NostrKeyMode::ServerManaged) => load_member_with_secret(&state, &caller.member.id).await?,
+        Some(NostrKeyMode::ServerManaged) => {
+            load_member_with_secret(&state, &caller.member.id).await?
+        }
         Some(NostrKeyMode::External) => {
             return Err((
                 StatusCode::BAD_REQUEST,

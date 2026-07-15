@@ -56,10 +56,7 @@ pub fn is_valid_application_transition(from: ApplicationStatus, to: ApplicationS
 
 /// Applicant may self-withdraw only from open pipeline states.
 pub fn applicant_may_self_withdraw(from: ApplicationStatus) -> bool {
-    matches!(
-        from,
-        ApplicationStatus::Pending | ApplicationStatus::Trial
-    )
+    matches!(from, ApplicationStatus::Pending | ApplicationStatus::Trial)
 }
 
 /// Statuses that block a second application while open.
@@ -291,9 +288,13 @@ mod tests {
     fn last_admin_demote_blocked() {
         let err = can_change_role("a1", "a1", OrgRole::Admin, true, OrgRole::Officer, 1, true);
         assert!(matches!(err, Err(PolicyDenial::Forbidden(_))));
-        assert!(can_change_role("a1", "a2", OrgRole::Admin, true, OrgRole::Officer, 2, true).is_ok());
+        assert!(
+            can_change_role("a1", "a2", OrgRole::Admin, true, OrgRole::Officer, 2, true).is_ok()
+        );
         // Suspended (non-actionable) admin may be demoted even if count is 1
-        assert!(can_change_role("a1", "a2", OrgRole::Admin, true, OrgRole::Officer, 1, false).is_ok());
+        assert!(
+            can_change_role("a1", "a2", OrgRole::Admin, true, OrgRole::Officer, 1, false).is_ok()
+        );
         let already = can_change_role("a1", "a2", OrgRole::Admin, true, OrgRole::Admin, 2, true);
         assert!(matches!(already, Err(PolicyDenial::BadRequest(_))));
     }
@@ -327,17 +328,19 @@ mod tests {
             ),
             Err(PolicyDenial::Forbidden(_))
         ));
-        assert!(can_set_is_active(
-            "a1",
-            OrgRole::Admin,
-            "a2",
-            OrgRole::Admin,
-            true,
-            false,
-            2,
-            true
-        )
-        .is_ok());
+        assert!(
+            can_set_is_active(
+                "a1",
+                OrgRole::Admin,
+                "a2",
+                OrgRole::Admin,
+                true,
+                false,
+                2,
+                true
+            )
+            .is_ok()
+        );
         assert!(matches!(
             can_set_is_active(
                 "m1",
@@ -381,40 +384,22 @@ mod tests {
     #[test]
     fn ban_last_admin_blocked() {
         assert!(matches!(
-            can_suspend_or_ban_admin(
-                OrgRole::Admin,
-                true,
-                ModerationActionType::Ban,
-                1,
-                true
-            ),
+            can_suspend_or_ban_admin(OrgRole::Admin, true, ModerationActionType::Ban, 1, true),
             Err(PolicyDenial::Forbidden(_))
         ));
-        assert!(can_suspend_or_ban_admin(
-            OrgRole::Admin,
-            true,
-            ModerationActionType::Ban,
-            2,
-            true
-        )
-        .is_ok());
-        assert!(can_suspend_or_ban_admin(
-            OrgRole::Member,
-            true,
-            ModerationActionType::Ban,
-            1,
-            false
-        )
-        .is_ok());
+        assert!(
+            can_suspend_or_ban_admin(OrgRole::Admin, true, ModerationActionType::Ban, 2, true)
+                .is_ok()
+        );
+        assert!(
+            can_suspend_or_ban_admin(OrgRole::Member, true, ModerationActionType::Ban, 1, false)
+                .is_ok()
+        );
         // Already-suspended admin may be banned (does not count as actionable)
-        assert!(can_suspend_or_ban_admin(
-            OrgRole::Admin,
-            true,
-            ModerationActionType::Ban,
-            1,
-            false
-        )
-        .is_ok());
+        assert!(
+            can_suspend_or_ban_admin(OrgRole::Admin, true, ModerationActionType::Ban, 1, false)
+                .is_ok()
+        );
     }
 
     #[test]

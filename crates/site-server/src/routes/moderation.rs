@@ -127,33 +127,30 @@ pub async fn create_moderation_action(
             .map_err(|e| internal_err(e, "deactivate member on ban"))?;
 
         // Concurrent race: another admin may have been removed in parallel.
-        if target_is_actionable_admin {
-            if let Err(e) = state.db.assert_has_actionable_admin().await {
-                if let Err(re) = state
-                    .db
-                    .update_member(
-                        &target.id,
-                        None,
-                        None,
-                        None,
-                        None,
-                        None,
-                        None,
-                        None,
-                        Some(true),
-                    )
-                    .await
-                {
-                    tracing::error!(error = %re, "failed to compensate ban deactivation");
-                }
-                return Err(match e {
-                    scuffed_db::DbError::Conflict(msg) => (
-                        StatusCode::CONFLICT,
-                        Json(ErrorResponse { error: msg }),
-                    ),
-                    other => internal_err(other, "assert_has_actionable_admin after ban"),
-                });
+        if target_is_actionable_admin && let Err(e) = state.db.assert_has_actionable_admin().await {
+            if let Err(re) = state
+                .db
+                .update_member(
+                    &target.id,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    Some(true),
+                )
+                .await
+            {
+                tracing::error!(error = %re, "failed to compensate ban deactivation");
             }
+            return Err(match e {
+                scuffed_db::DbError::Conflict(msg) => {
+                    (StatusCode::CONFLICT, Json(ErrorResponse { error: msg }))
+                }
+                other => internal_err(other, "assert_has_actionable_admin after ban"),
+            });
         }
 
         audit(
@@ -180,19 +177,19 @@ pub async fn create_moderation_action(
         .map_err(|e| internal_err(e, "create_moderation_action"))?;
 
     // Suspension of actionable admin: re-check after the moderation row exists.
-    if body.action_type == ModerationActionType::Suspension && target_is_actionable_admin {
-        if let Err(e) = state.db.assert_has_actionable_admin().await {
-            if let Err(re) = state.db.lift_moderation_action(&action.id).await {
-                tracing::error!(error = %re, "failed to compensate suspension of last admin");
-            }
-            return Err(match e {
-                scuffed_db::DbError::Conflict(msg) => (
-                    StatusCode::CONFLICT,
-                    Json(ErrorResponse { error: msg }),
-                ),
-                other => internal_err(other, "assert_has_actionable_admin after suspend"),
-            });
+    if body.action_type == ModerationActionType::Suspension
+        && target_is_actionable_admin
+        && let Err(e) = state.db.assert_has_actionable_admin().await
+    {
+        if let Err(re) = state.db.lift_moderation_action(&action.id).await {
+            tracing::error!(error = %re, "failed to compensate suspension of last admin");
         }
+        return Err(match e {
+            scuffed_db::DbError::Conflict(msg) => {
+                (StatusCode::CONFLICT, Json(ErrorResponse { error: msg }))
+            }
+            other => internal_err(other, "assert_has_actionable_admin after suspend"),
+        });
     }
 
     // Ban / suspension: kill sessions immediately so extractor blocks next request

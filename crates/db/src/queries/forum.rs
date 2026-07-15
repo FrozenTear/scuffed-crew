@@ -213,7 +213,8 @@ async fn seed_default_tree(client: &Surreal<Any>) -> DbResult<()> {
     .await?;
 
     // Off-topic
-    let off = create_category_raw(client, "Off-topic", "offtopic", Some("Anything else"), 2).await?;
+    let off =
+        create_category_raw(client, "Off-topic", "offtopic", Some("Anything else"), 2).await?;
     create_board_raw(
         client,
         &off,
@@ -293,11 +294,13 @@ async fn migrate_legacy_thread_categories(client: &Surreal<Any>) -> DbResult<()>
             "game" => "overwatch",
             "strategy" => "ow-strategy",
             "offtopic" => "offtopic-general",
-            other if !other.is_empty()
+            other
+                if !other.is_empty()
                 // try exact slug match
-                && slug_to_id.contains_key(other) => {
-                    other
-                }
+                && slug_to_id.contains_key(other) =>
+            {
+                other
+            }
             _ => "general",
         };
         slug_to_id.get(slug).cloned()
@@ -415,9 +418,7 @@ impl Database {
         with_timeout(async {
             let mut result = self
                 .client
-                .query(
-                    "SELECT * FROM forum_board WHERE is_active = true AND slug = $slug LIMIT 1",
-                )
+                .query("SELECT * FROM forum_board WHERE is_active = true AND slug = $slug LIMIT 1")
                 .bind(("slug", slug.to_string()))
                 .await?;
             let rows: Vec<DbForumBoard> = result.take(0)?;
@@ -516,8 +517,7 @@ impl Database {
     ) -> DbResult<ForumBoard> {
         with_timeout(async {
             if let Some(pid) = parent_board_id {
-                let parent: Option<DbForumBoard> =
-                    self.client.select(("forum_board", pid)).await?;
+                let parent: Option<DbForumBoard> = self.client.select(("forum_board", pid)).await?;
                 let parent = parent.ok_or_else(|| DbError::NotFound("parent board".into()))?;
                 if parent.parent_board_id.is_some() {
                     return Err(DbError::Config(
@@ -594,8 +594,7 @@ impl Database {
         content: &str,
     ) -> DbResult<ForumThread> {
         with_timeout(async {
-            let board: Option<DbForumBoard> =
-                self.client.select(("forum_board", board_id)).await?;
+            let board: Option<DbForumBoard> = self.client.select(("forum_board", board_id)).await?;
             let board =
                 board.ok_or_else(|| DbError::NotFound(format!("board {board_id} not found")))?;
             if board.is_locked {

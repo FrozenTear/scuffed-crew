@@ -49,7 +49,6 @@ async fn test_state() -> AppState {
     }
 }
 
-
 /// Seed a user + member + session into the database.
 /// Each seed call runs three separate queries to avoid silent batch failures.
 async fn seed_user(
@@ -1753,7 +1752,12 @@ async fn application_trial_then_accept_promotes_to_member() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
 
-    let member = state.db.get_member_by_user("trialuser").await.unwrap().unwrap();
+    let member = state
+        .db
+        .get_member_by_user("trialuser")
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(member.org_role.to_string(), "member");
 }
 
@@ -2421,10 +2425,7 @@ async fn assert_has_actionable_admin_after_manual_lockout() {
         .await
         .unwrap();
     let err = state.db.assert_has_actionable_admin().await.unwrap_err();
-    assert!(
-        matches!(err, scuffed_db::DbError::Conflict(_)),
-        "got {err}"
-    );
+    assert!(matches!(err, scuffed_db::DbError::Conflict(_)), "got {err}");
 }
 
 #[tokio::test]
@@ -2681,7 +2682,12 @@ async fn trial_reject_deactivates_recruit_and_withdraw_audits_distinct() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    let after = state.db.get_member_by_user("trialrej").await.unwrap().unwrap();
+    let after = state
+        .db
+        .get_member_by_user("trialrej")
+        .await
+        .unwrap()
+        .unwrap();
     assert!(!after.is_active, "reject should deactivate trial recruit");
 
     // Fresh application → withdraw uses dedicated audit action
@@ -2773,4 +2779,3 @@ async fn suspended_admins_do_not_count_for_setup() {
     // Setup recovery path opens
     assert!(!state.db.has_admin_member().await.unwrap());
 }
-

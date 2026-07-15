@@ -104,11 +104,9 @@ impl Database {
     /// by a different member (no existence leak across members).
     pub async fn delete_game_account(&self, member_id: &str, id: &str) -> DbResult<()> {
         with_timeout(async {
-            let existing: Option<DbGameAccount> =
-                self.client.select(("game_account", id)).await?;
-            let existing = existing.ok_or_else(|| {
-                crate::DbError::NotFound(format!("Game account {id} not found"))
-            })?;
+            let existing: Option<DbGameAccount> = self.client.select(("game_account", id)).await?;
+            let existing = existing
+                .ok_or_else(|| crate::DbError::NotFound(format!("Game account {id} not found")))?;
             if existing.member_id != member_id {
                 return Err(crate::DbError::NotFound(format!(
                     "Game account {id} not found"

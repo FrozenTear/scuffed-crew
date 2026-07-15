@@ -56,9 +56,7 @@ fn parse_key_mode(s: &str) -> DbResult<Option<NostrKeyMode>> {
     }
 }
 
-fn parse_encrypted_secret(
-    v: Option<serde_json::Value>,
-) -> DbResult<Option<EncryptedBlob>> {
+fn parse_encrypted_secret(v: Option<serde_json::Value>) -> DbResult<Option<EncryptedBlob>> {
     match v {
         None => Ok(None),
         Some(val) if val.is_null() => Ok(None),
@@ -137,9 +135,10 @@ impl Database {
                 is_active: true,
             };
             let created: Option<DbMember> = self.client.create("member").content(db_member).await?;
-            db_to_member(created.ok_or_else(|| {
-                crate::DbError::NotFound("Failed to create member".into())
-            })?)
+            db_to_member(
+                created
+                    .ok_or_else(|| crate::DbError::NotFound("Failed to create member".into()))?,
+            )
         })
         .await
     }
@@ -183,7 +182,10 @@ impl Database {
                 .bind(("off", offset))
                 .await?;
             let members: Vec<DbMember> = result.take(0)?;
-            members.into_iter().map(db_to_member).collect::<DbResult<Vec<_>>>()
+            members
+                .into_iter()
+                .map(db_to_member)
+                .collect::<DbResult<Vec<_>>>()
         })
         .await
     }
@@ -221,9 +223,7 @@ impl Database {
     /// Public/profile path: never loads `nostr_secret_key_encrypted`.
     pub async fn get_member_safe(&self, id: &str) -> DbResult<Option<Member>> {
         with_timeout(async {
-            let q = format!(
-                "SELECT {MEMBER_SAFE_COLS} FROM $rid LIMIT 1"
-            );
+            let q = format!("SELECT {MEMBER_SAFE_COLS} FROM $rid LIMIT 1");
             let mut result = self
                 .client
                 .query(&q)
@@ -240,14 +240,9 @@ impl Database {
 
     /// Auth extractor path: safe projection (no encrypted Nostr secret) + suspension check
     /// under a **single** query timeout.
-    pub async fn get_member_auth_by_user(
-        &self,
-        user_id: &str,
-    ) -> DbResult<Option<(Member, bool)>> {
+    pub async fn get_member_auth_by_user(&self, user_id: &str) -> DbResult<Option<(Member, bool)>> {
         with_timeout(async {
-            let q = format!(
-                "SELECT {MEMBER_SAFE_COLS} FROM member WHERE user_id = $uid LIMIT 1"
-            );
+            let q = format!("SELECT {MEMBER_SAFE_COLS} FROM member WHERE user_id = $uid LIMIT 1");
             let mut result = self
                 .client
                 .query(&q)
@@ -429,7 +424,10 @@ impl Database {
             );
             let mut result = self.client.query(&q).await?;
             let members: Vec<DbMember> = result.take(0)?;
-            members.into_iter().map(db_to_member).collect::<DbResult<Vec<_>>>()
+            members
+                .into_iter()
+                .map(db_to_member)
+                .collect::<DbResult<Vec<_>>>()
         })
         .await
     }
@@ -500,9 +498,10 @@ impl Database {
                 .bind(("role", new_role.to_string()))
                 .await?;
             let updated: Option<DbMember> = result.take(0)?;
-            db_to_member(updated.ok_or_else(|| {
-                crate::DbError::NotFound(format!("Member {id} not found"))
-            })?)
+            db_to_member(
+                updated
+                    .ok_or_else(|| crate::DbError::NotFound(format!("Member {id} not found")))?,
+            )
         })
         .await
     }
@@ -538,9 +537,7 @@ impl Database {
             }
             let mut admins_result = self
                 .client
-                .query(
-                    "SELECT id FROM member WHERE is_active = true AND org_role = 'admin'",
-                )
+                .query("SELECT id FROM member WHERE is_active = true AND org_role = 'admin'")
                 .await?;
             let admins: Vec<IdOnly> = admins_result.take(0)?;
             if admins.is_empty() {

@@ -1,6 +1,7 @@
 use dioxus::prelude::*;
 
 use crate::components::{Toast, use_toast};
+use crate::theme::tokens::{BG_DARK, BRAND_ACCENT_DARK, BRAND_ACCENT_LIGHT};
 use scuffed_api_client::ApiClient;
 use scuffed_types::api::UpdateSettingsRequest;
 use scuffed_types::{
@@ -424,13 +425,17 @@ pub fn AdminSettings() -> Element {
                                     r#type: "color",
                                     value: {
                                         let c = brand_accent_dark();
-                                        if c.len() == 7 && c.starts_with('#') { c } else { "#8f73ff".into() }
+                                        if c.len() == 7 && c.starts_with('#') {
+                                            c
+                                        } else {
+                                            BRAND_ACCENT_DARK.into()
+                                        }
                                     },
                                     oninput: move |e| brand_accent_dark.set(e.value()),
                                 }
                                 input {
                                     class: "form-input",
-                                    placeholder: "#8f73ff",
+                                    placeholder: "{BRAND_ACCENT_DARK}",
                                     value: "{brand_accent_dark}",
                                     oninput: move |e| brand_accent_dark.set(e.value()),
                                 }
@@ -443,13 +448,17 @@ pub fn AdminSettings() -> Element {
                                     r#type: "color",
                                     value: {
                                         let c = brand_accent_light();
-                                        if c.len() == 7 && c.starts_with('#') { c } else { "#6d4aff".into() }
+                                        if c.len() == 7 && c.starts_with('#') {
+                                            c
+                                        } else {
+                                            BRAND_ACCENT_LIGHT.into()
+                                        }
                                     },
                                     oninput: move |e| brand_accent_light.set(e.value()),
                                 }
                                 input {
                                     class: "form-input",
-                                    placeholder: "#6d4aff",
+                                    placeholder: "{BRAND_ACCENT_LIGHT}",
                                     value: "{brand_accent_light}",
                                     oninput: move |e| brand_accent_light.set(e.value()),
                                 }
@@ -475,7 +484,11 @@ pub fn AdminSettings() -> Element {
                                     r#type: "color",
                                     value: {
                                         let c = page_bg_color();
-                                        if c.len() == 7 && c.starts_with('#') { c } else { "#17171d".into() }
+                                        if c.len() == 7 && c.starts_with('#') {
+                                            c
+                                        } else {
+                                            BG_DARK.into()
+                                        }
                                     },
                                     oninput: move |e| page_bg_color.set(e.value()),
                                 }

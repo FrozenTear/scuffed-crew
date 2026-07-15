@@ -429,8 +429,8 @@ impl HomepagePreset {
                 cta_secondary: "Meet the teams".into(),
                 ethos_kicker: "Vibe".into(),
                 ethos_title: "Come as you are.".into(),
-                ethos_body: "We organize nights so you don’t have to LFG alone. Good company first."
-                    .into(),
+                ethos_body:
+                    "We organize nights so you don’t have to LFG alone. Good company first.".into(),
                 ethos_rules: vec![
                     "Be kind — new players welcome.".into(),
                     "No pressure to sweat every night.".into(),

@@ -414,9 +414,15 @@ mod tests {
 
     #[test]
     fn shell_skin_strict_parse() {
-        assert_eq!(HomeShell::from_str_strict("ops_hub"), Some(HomeShell::OpsHub));
+        assert_eq!(
+            HomeShell::from_str_strict("ops_hub"),
+            Some(HomeShell::OpsHub)
+        );
         assert_eq!(HomeShell::from_str_strict("nope"), None);
-        assert_eq!(HomeSkin::from_str_strict("esports"), Some(HomeSkin::Esports));
+        assert_eq!(
+            HomeSkin::from_str_strict("esports"),
+            Some(HomeSkin::Esports)
+        );
         assert_eq!(HomeSkin::from_str_strict("neon"), None);
     }
 }

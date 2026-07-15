@@ -88,9 +88,8 @@ fn open_dm_content(
                 .into(),
         ));
     };
-    let blob: EncryptedBlob = serde_json::from_str(rest).map_err(|e| {
-        crate::DbError::Config(format!("DM ciphertext JSON invalid: {e}"))
-    })?;
+    let blob: EncryptedBlob = serde_json::from_str(rest)
+        .map_err(|e| crate::DbError::Config(format!("DM ciphertext JSON invalid: {e}")))?;
     let aad_s = aad::dm_content(gift_wrap_id, conv_key);
     crypto
         .decrypt(&blob, &aad_s)

@@ -31,18 +31,14 @@ fn internal_err(e: impl std::fmt::Display, ctx: &str) -> (StatusCode, Json<Error
 fn bad_request(msg: &str) -> (StatusCode, Json<ErrorResponse>) {
     (
         StatusCode::BAD_REQUEST,
-        Json(ErrorResponse {
-            error: msg.into(),
-        }),
+        Json(ErrorResponse { error: msg.into() }),
     )
 }
 
 fn conflict(msg: &str) -> (StatusCode, Json<ErrorResponse>) {
     (
         StatusCode::CONFLICT,
-        Json(ErrorResponse {
-            error: msg.into(),
-        }),
+        Json(ErrorResponse { error: msg.into() }),
     )
 }
 
@@ -256,14 +252,8 @@ async fn apply_application_transition(
     // - reject/withdraw: deactivate recruit first so reject never leaves an
     //   active trial recruit if deactivate would fail after status write
     if application_status_ensures_member(to) {
-        ensure_member_for_application(
-            state,
-            &existing.user_id,
-            existing.status,
-            to,
-            &existing.id,
-        )
-        .await?;
+        ensure_member_for_application(state, &existing.user_id, existing.status, to, &existing.id)
+            .await?;
     } else if application_status_deactivates_member(to)
         && let Some(member) = state
             .db
@@ -309,13 +299,7 @@ async fn apply_application_transition(
 
     let app = state
         .db
-        .update_application_status(
-            &existing.id,
-            existing.status,
-            to,
-            actor_id,
-            review_notes,
-        )
+        .update_application_status(&existing.id, existing.status, to, actor_id, review_notes)
         .await
         .map_err(|e| match e {
             scuffed_db::DbError::Conflict(msg) => conflict(&msg),

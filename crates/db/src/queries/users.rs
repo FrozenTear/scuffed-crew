@@ -117,7 +117,10 @@ impl Database {
             ));
         }
         if std::env::var("SURREALDB_URL").is_ok()
-            && std::env::var("ALLOW_PLAINTEXT_PROVIDER_IDS").ok().as_deref() != Some("1")
+            && std::env::var("ALLOW_PLAINTEXT_PROVIDER_IDS")
+                .ok()
+                .as_deref()
+                != Some("1")
         {
             return Err(DbError::Config(
                 "ENCRYPTION_KEY is required for OAuth users on remote SurrealDB \
@@ -182,9 +185,8 @@ impl Database {
             let id_hash = hash_provider_id(&provider_str, &user.provider_id);
             let aad_s = aad::oauth_provider_id(&user.id, &provider_str);
             let id_encrypted = crypto.encrypt(&user.provider_id, &aad_s)?;
-            let enc = serde_json::to_value(id_encrypted).map_err(|e| {
-                DbError::Config(format!("Failed to serialize encrypted blob: {e}"))
-            })?;
+            let enc = serde_json::to_value(id_encrypted)
+                .map_err(|e| DbError::Config(format!("Failed to serialize encrypted blob: {e}")))?;
             self.client
                 .query(
                     "UPDATE $rid SET                         provider = $provider,                         username = $username,                         avatar_url = $avatar,                         provider_id = NONE,                         provider_id_hash = $hash,                         provider_id_encrypted = $enc",
@@ -245,11 +247,7 @@ impl Database {
     }
 
     /// Create a local (username/password) user. `provider_id` is the normalized username.
-    pub async fn create_local_user(
-        &self,
-        username: &str,
-        password_hash: &str,
-    ) -> DbResult<User> {
+    pub async fn create_local_user(&self, username: &str, password_hash: &str) -> DbResult<User> {
         let username = Self::normalize_local_username(username);
         if username.is_empty() {
             return Err(DbError::Config("username required".into()));

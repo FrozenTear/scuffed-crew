@@ -94,11 +94,7 @@ async fn rewrap_users(db: &Database, current: u32, stats: &mut RewrapStats) -> D
 
         let user_id = match row.id {
             Some(r) => record_id_key_to_string(r.key),
-            None => {
-                return Err(DbError::Config(
-                    "user row missing id during rewrap".into(),
-                ))
-            }
+            None => return Err(DbError::Config("user row missing id during rewrap".into())),
         };
 
         let blob: EncryptedBlob = serde_json::from_value(enc_val).map_err(|e| {
@@ -387,8 +383,7 @@ mod tests {
             .unwrap();
 
         // Swap to dual-key keyring: current v2, previous v1.
-        let dual =
-            CryptoService::from_keyring(&key_v2, 2, &[(1, key_v1.as_str())], false).unwrap();
+        let dual = CryptoService::from_keyring(&key_v2, 2, &[(1, key_v1.as_str())], false).unwrap();
         db.crypto = Some(Arc::new(dual));
 
         let stats = rewrap_all_encrypted_fields(&db).await.unwrap();

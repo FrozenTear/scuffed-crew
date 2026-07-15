@@ -6,14 +6,12 @@ mod data;
 
 use dioxus::prelude::*;
 use scuffed_api_client::ApiClient;
-use scuffed_types::{
-    HomeSectionId, HomeShell, HomeSkin, SiteSettings, org_initials,
-};
+use scuffed_types::{HomeSectionId, HomeShell, HomeSkin, SiteSettings, org_initials};
 
 use crate::hooks::CursorPage;
 use blocks::{
-    live_panel_flags, teams_will_render, EthosBlock, HeroBlock, LiveBlock, NewsBlock, RecruitBlock,
-    TeamsBlock,
+    EthosBlock, HeroBlock, LiveBlock, NewsBlock, RecruitBlock, TeamsBlock, live_panel_flags,
+    teams_will_render,
 };
 use css::home_css_layers;
 use data::{Announcement, Event, HomeTournament, Overview};

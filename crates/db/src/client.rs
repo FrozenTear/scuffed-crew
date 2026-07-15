@@ -76,11 +76,7 @@ fn check_credentials(username: &str, password: &str) -> DbResult<()> {
 }
 
 fn assert_safe_sql_ident(name: &str, what: &str) -> DbResult<()> {
-    if name.is_empty()
-        || !name
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '_')
-    {
+    if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
         return Err(DbError::Config(format!(
             "Invalid {what}: use only ASCII alphanumeric and underscore"
         )));
@@ -295,15 +291,15 @@ impl Database {
     ) -> DbResult<()> {
         assert_safe_sql_ident(username, "app database username")?;
         if password.is_empty() {
-            return Err(DbError::Config("App database password must not be empty".into()));
+            return Err(DbError::Config(
+                "App database password must not be empty".into(),
+            ));
         }
         let pass = escape_surreal_string(password);
         // DEFINE USER does not accept bound password parameters reliably; username
         // is restricted to [A-Za-z0-9_], password is escaped.
         // Re-DEFINE updates password/roles if the user already exists.
-        let q = format!(
-            "DEFINE USER {username} ON DATABASE PASSWORD '{pass}' ROLES EDITOR"
-        );
+        let q = format!("DEFINE USER {username} ON DATABASE PASSWORD '{pass}' ROLES EDITOR");
         client.query(q).await?.check()?;
         tracing::info!(
             username,
