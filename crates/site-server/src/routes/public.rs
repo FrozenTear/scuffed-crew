@@ -35,30 +35,30 @@ pub struct PublicOverview {
 pub async fn overview(
     State(state): State<AppState>,
 ) -> Result<Json<PublicOverview>, (StatusCode, Json<ErrorResponse>)> {
-    let teams = state.db.list_teams().await.map_err(|e| {
+    let teams = state.db.list_teams().await.map_err(|_e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse {
-                error: e.to_string(),
+                error: "Internal error".into(),
             }),
         )
     })?;
 
     let mut team_overviews = Vec::with_capacity(teams.len());
     for team in teams {
-        let roster = state.db.get_team_roster(&team.id).await.map_err(|e| {
+        let roster = state.db.get_team_roster(&team.id).await.map_err(|_e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
-                    error: e.to_string(),
+                    error: "Internal error".into(),
                 }),
             )
         })?;
-        let record = state.db.get_team_record(&team.id).await.map_err(|e| {
+        let record = state.db.get_team_record(&team.id).await.map_err(|_e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
-                    error: e.to_string(),
+                    error: "Internal error".into(),
                 }),
             )
         })?;
@@ -69,47 +69,47 @@ pub async fn overview(
         });
     }
 
-    let events = state.db.list_events().await.map_err(|e| {
+    let events = state.db.list_events().await.map_err(|_e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse {
-                error: e.to_string(),
+                error: "Internal error".into(),
             }),
         )
     })?;
 
-    let announcements = state.db.list_announcements().await.map_err(|e| {
+    let announcements = state.db.list_announcements().await.map_err(|_e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse {
-                error: e.to_string(),
+                error: "Internal error".into(),
             }),
         )
     })?;
 
-    let settings = state.db.get_settings().await.map_err(|e| {
+    let settings = state.db.get_settings().await.map_err(|_e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse {
-                error: e.to_string(),
+                error: "Internal error".into(),
             }),
         )
     })?;
 
-    let member_count = state.db.count_active_members().await.map_err(|e| {
+    let member_count = state.db.count_active_members().await.map_err(|_e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse {
-                error: e.to_string(),
+                error: "Internal error".into(),
             }),
         )
     })?;
 
-    let games = state.db.list_games().await.map_err(|e| {
+    let games = state.db.list_games().await.map_err(|_e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse {
-                error: e.to_string(),
+                error: "Internal error".into(),
             }),
         )
     })?;
@@ -164,11 +164,11 @@ pub async fn public_members(
         .db
         .list_members_paginated(limit, offset)
         .await
-        .map_err(|e| {
+        .map_err(|_e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
-                    error: e.to_string(),
+                    error: "Internal error".into(),
                 }),
             )
         })?;
@@ -200,13 +200,14 @@ pub async fn public_member_profile(
 ) -> Result<Json<PublicMemberProfile>, (StatusCode, Json<ErrorResponse>)> {
     let member = state
         .db
-        .get_member(&id)
+        .get_member_safe(&id)
         .await
         .map_err(|e| {
+            tracing::error!(error = %e, "public get_member_safe failed");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
-                    error: e.to_string(),
+                    error: "Internal error".into(),
                 }),
             )
         })?
@@ -220,11 +221,11 @@ pub async fn public_member_profile(
         })?;
 
     // Get all teams to resolve names
-    let teams = state.db.list_teams().await.map_err(|e| {
+    let teams = state.db.list_teams().await.map_err(|_e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse {
-                error: e.to_string(),
+                error: "Internal error".into(),
             }),
         )
     })?;
@@ -232,11 +233,11 @@ pub async fn public_member_profile(
     // Find roster entries for this member across all teams
     let mut member_teams = Vec::new();
     for team in &teams {
-        let roster = state.db.get_team_roster(&team.id).await.map_err(|e| {
+        let roster = state.db.get_team_roster(&team.id).await.map_err(|_e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
-                    error: e.to_string(),
+                    error: "Internal error".into(),
                 }),
             )
         })?;
@@ -252,11 +253,11 @@ pub async fn public_member_profile(
     }
 
     // Get game accounts
-    let game_accounts = state.db.list_member_game_accounts(&id).await.map_err(|e| {
+    let game_accounts = state.db.list_member_game_accounts(&id).await.map_err(|_e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse {
-                error: e.to_string(),
+                error: "Internal error".into(),
             }),
         )
     })?;
@@ -297,11 +298,11 @@ pub async fn public_team_detail(
         .db
         .get_team(&id)
         .await
-        .map_err(|e| {
+        .map_err(|_e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
-                    error: e.to_string(),
+                    error: "Internal error".into(),
                 }),
             )
         })?
@@ -324,11 +325,11 @@ pub async fn public_team_detail(
         .map(|g| g.name);
 
     // Get roster with member names
-    let roster_entries = state.db.get_team_roster(&id).await.map_err(|e| {
+    let roster_entries = state.db.get_team_roster(&id).await.map_err(|_e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse {
-                error: e.to_string(),
+                error: "Internal error".into(),
             }),
         )
     })?;
@@ -336,7 +337,7 @@ pub async fn public_team_detail(
     let mut roster = Vec::new();
     for entry in roster_entries {
         if entry.is_active {
-            let member = state.db.get_member(&entry.member_id).await.ok().flatten();
+            let member = state.db.get_member_safe(&entry.member_id).await.ok().flatten();
             roster.push(TeamRosterMember {
                 member_id: entry.member_id,
                 display_name: member
@@ -349,20 +350,20 @@ pub async fn public_team_detail(
         }
     }
 
-    let record = state.db.get_team_record(&id).await.map_err(|e| {
+    let record = state.db.get_team_record(&id).await.map_err(|_e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse {
-                error: e.to_string(),
+                error: "Internal error".into(),
             }),
         )
     })?;
 
-    let recent_matches = state.db.list_team_matches(&id).await.map_err(|e| {
+    let recent_matches = state.db.list_team_matches(&id).await.map_err(|_e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse {
-                error: e.to_string(),
+                error: "Internal error".into(),
             }),
         )
     })?;
@@ -370,11 +371,11 @@ pub async fn public_team_detail(
     let recent_matches: Vec<_> = recent_matches.into_iter().take(10).collect();
 
     // Get events for this team
-    let all_events = state.db.list_events().await.map_err(|e| {
+    let all_events = state.db.list_events().await.map_err(|_e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse {
-                error: e.to_string(),
+                error: "Internal error".into(),
             }),
         )
     })?;

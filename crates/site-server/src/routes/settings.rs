@@ -110,7 +110,7 @@ pub async fn get_settings(
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
-                    error: e.to_string(),
+                    error: "Internal error".into(),
                 }),
             )
         })
@@ -198,11 +198,11 @@ pub async fn update_settings(
             skin_str.as_deref(),
         )
         .await
-        .map_err(|e| {
+        .map_err(|_e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
-                    error: e.to_string(),
+                    error: "Internal error".into(),
                 }),
             )
         })?;

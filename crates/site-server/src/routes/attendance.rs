@@ -44,11 +44,11 @@ pub async fn batch_mark_attendance(
                 &officer.member.id,
             )
             .await
-            .map_err(|e| {
+            .map_err(|_e| {
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     Json(ErrorResponse {
-                        error: e.to_string(),
+                        error: "Internal error".into(),
                     }),
                 )
             })?;
@@ -75,11 +75,11 @@ pub async fn get_event_attendance(
         .list_event_attendance(&event_id, query.occurrence_date)
         .await
         .map(Json)
-        .map_err(|e| {
+        .map_err(|_e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
-                    error: e.to_string(),
+                    error: "Internal error".into(),
                 }),
             )
         })
@@ -111,11 +111,11 @@ pub async fn member_attendance(
         .list_member_attendance(&member_id)
         .await
         .map(Json)
-        .map_err(|e| {
+        .map_err(|_e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
-                    error: e.to_string(),
+                    error: "Internal error".into(),
                 }),
             )
         })
@@ -147,11 +147,11 @@ pub async fn member_attendance_stats(
         .get_member_attendance_stats(&member_id)
         .await
         .map(Json)
-        .map_err(|e| {
+        .map_err(|_e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
-                    error: e.to_string(),
+                    error: "Internal error".into(),
                 }),
             )
         })

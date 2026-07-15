@@ -37,11 +37,11 @@ pub async fn list_scrims(
             offset,
         )
         .await
-        .map_err(|e| {
+        .map_err(|_e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
-                    error: e.to_string(),
+                    error: "Internal error".into(),
                 }),
             )
         })?;
@@ -79,11 +79,11 @@ pub async fn create_scrim(
             body.notes.as_deref(),
         )
         .await
-        .map_err(|e| {
+        .map_err(|_e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
-                    error: e.to_string(),
+                    error: "Internal error".into(),
                 }),
             )
         })?;
@@ -132,11 +132,11 @@ pub async fn update_scrim_status(
         .db
         .update_scrim_status(&id, &body.status, body.opponent_name.as_deref())
         .await
-        .map_err(|e| {
+        .map_err(|_e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
-                    error: e.to_string(),
+                    error: "Internal error".into(),
                 }),
             )
         })?;

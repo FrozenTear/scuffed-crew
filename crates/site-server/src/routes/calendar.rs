@@ -14,11 +14,11 @@ use crate::state::AppState;
 pub async fn all_events_ics(
     State(state): State<AppState>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
-    let events = state.db.list_events().await.map_err(|e| {
+    let events = state.db.list_events().await.map_err(|_e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse {
-                error: e.to_string(),
+                error: "Internal error".into(),
             }),
         )
     })?;
@@ -51,11 +51,11 @@ pub async fn team_events_ics(
     State(state): State<AppState>,
     Path(team_id): Path<String>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
-    let all_events = state.db.list_events().await.map_err(|e| {
+    let all_events = state.db.list_events().await.map_err(|_e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse {
-                error: e.to_string(),
+                error: "Internal error".into(),
             }),
         )
     })?;

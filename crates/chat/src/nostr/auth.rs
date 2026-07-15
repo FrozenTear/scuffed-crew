@@ -6,11 +6,28 @@
 //! 3. Server builds a pre-signed NIP-42 AUTH event for the relay
 //! 4. Frontend receives the auth event and presents it on WebSocket AUTH challenge
 
-use scuffed_auth::crypto::{CryptoService, EncryptedBlob};
+use scuffed_auth::crypto::{aad, CryptoService, EncryptedBlob};
+use zeroize::{Zeroize, Zeroizing};
 use serde::{Deserialize, Serialize};
 
 use super::events::{EventBuilder, EventError};
 use scuffed_types::nostr::NostrEvent;
+
+/// Build `nostr::Keys` from decrypted secret material.
+///
+/// Accepts raw 32-byte secrets (preferred) or legacy 64-char hex UTF-8.
+fn keys_from_secret_plaintext(pt: &Zeroizing<Vec<u8>>) -> Result<nostr::Keys, AuthError> {
+    use nostr::key::{Keys, SecretKey};
+
+    if pt.len() == 32 {
+        let sk = SecretKey::from_slice(pt.as_slice()).map_err(|_| AuthError::InvalidKeyData)?;
+        return Ok(Keys::new(sk));
+    }
+    // Legacy: UTF-8 hex string
+    let hex_str = std::str::from_utf8(pt.as_slice()).map_err(|_| AuthError::InvalidKeyData)?;
+    let sk = SecretKey::from_hex(hex_str).map_err(|_| AuthError::InvalidKeyData)?;
+    Ok(Keys::new(sk))
+}
 
 /// Errors from the auth service.
 #[derive(Debug, thiserror::Error)]
@@ -25,6 +42,8 @@ pub enum AuthError {
     SigningFailed(#[from] EventError),
     #[error("invalid key data")]
     InvalidKeyData,
+    #[error("decrypted Nostr secret does not match owner pubkey")]
+    PubkeyMismatch,
 }
 
 /// Request for a NIP-42 auth token.
@@ -79,15 +98,15 @@ impl NostrAuthService {
     pub fn generate_keypair(&self) -> Result<(String, EncryptedBlob), AuthError> {
         let keys = EventBuilder::generate_keys();
         let pubkey_hex = keys.public_key().to_hex();
-        let mut secret_hex = keys.secret_key().to_secret_hex();
+        let mut secret_bytes = keys.secret_key().to_secret_bytes();
+        let aad = aad::nostr_secret_key(&pubkey_hex);
 
         let encrypted = self
             .crypto
-            .encrypt(&secret_hex)
+            .encrypt_bytes(&secret_bytes, aad.as_bytes())
             .map_err(|e| AuthError::EncryptionFailed(e.to_string()))?;
 
-        use zeroize::Zeroize;
-        secret_hex.zeroize();
+        secret_bytes.zeroize();
 
         Ok((pubkey_hex, encrypted))
     }
@@ -99,23 +118,21 @@ impl NostrAuthService {
     pub fn provision_auth_event(
         &self,
         encrypted_secret_key: &EncryptedBlob,
+        owner_pubkey_hex: &str,
         relay_url: &str,
         challenge: &str,
     ) -> Result<AuthTokenResponse, AuthError> {
-        // Decrypt the secret key
-        let mut secret_hex = self
+        let aad = aad::nostr_secret_key(owner_pubkey_hex);
+        let pt = self
             .crypto
-            .decrypt(encrypted_secret_key)
+            .decrypt_bytes(encrypted_secret_key, aad.as_bytes())
             .map_err(|e| AuthError::DecryptionFailed(e.to_string()))?;
 
-        // Parse into nostr Keys
-        let keys =
-            EventBuilder::keys_from_hex(&secret_hex).map_err(|_| AuthError::InvalidKeyData)?;
-
-        use zeroize::Zeroize;
-        secret_hex.zeroize();
-
+        let keys = keys_from_secret_plaintext(&pt)?;
         let pubkey_hex = keys.public_key().to_hex();
+        if !pubkey_hex.eq_ignore_ascii_case(owner_pubkey_hex) {
+            return Err(AuthError::PubkeyMismatch);
+        }
 
         // Build the AUTH event
         let event = EventBuilder::build_auth_event(&keys, relay_url, challenge)?;
@@ -134,20 +151,25 @@ impl NostrAuthService {
     pub fn sign_event_for_member(
         &self,
         encrypted_secret_key: &EncryptedBlob,
+        owner_pubkey_hex: &str,
         kind: u32,
         content: &str,
         tags: Vec<Vec<String>>,
     ) -> Result<NostrEvent, AuthError> {
-        let mut secret_hex = self
+        let aad = aad::nostr_secret_key(owner_pubkey_hex);
+        let pt = self
             .crypto
-            .decrypt(encrypted_secret_key)
+            .decrypt_bytes(encrypted_secret_key, aad.as_bytes())
             .map_err(|e| AuthError::DecryptionFailed(e.to_string()))?;
 
-        let keys =
-            EventBuilder::keys_from_hex(&secret_hex).map_err(|_| AuthError::InvalidKeyData)?;
-
-        use zeroize::Zeroize;
-        secret_hex.zeroize();
+        let keys = keys_from_secret_plaintext(&pt)?;
+        if !keys
+            .public_key()
+            .to_hex()
+            .eq_ignore_ascii_case(owner_pubkey_hex)
+        {
+            return Err(AuthError::PubkeyMismatch);
+        }
 
         let mut builder = nostr::EventBuilder::new(nostr::Kind::Custom(kind as u16), content);
 
@@ -203,7 +225,7 @@ mod tests {
 
         let (pubkey, encrypted) = service.generate_keypair().unwrap();
         let response = service
-            .provision_auth_event(&encrypted, "wss://relay.example.com", "challenge123")
+            .provision_auth_event(&encrypted, &pubkey, "wss://relay.example.com", "challenge123")
             .unwrap();
 
         assert_eq!(response.pubkey, pubkey);
@@ -224,10 +246,11 @@ mod tests {
         let crypto = test_crypto();
         let service = NostrAuthService::new(crypto);
 
-        let (_pubkey, encrypted) = service.generate_keypair().unwrap();
+        let (pubkey, encrypted) = service.generate_keypair().unwrap();
         let event = service
             .sign_event_for_member(
                 &encrypted,
+                &pubkey,
                 9, // NIP-29 group message
                 "Hello team!",
                 vec![vec!["h".into(), "team-alpha".into()]],
@@ -250,7 +273,7 @@ mod tests {
 
         // Trying to decrypt with a different key should fail
         let result =
-            service2.provision_auth_event(&encrypted, "wss://relay.example.com", "challenge");
+            service2.provision_auth_event(&encrypted, &_pubkey, "wss://relay.example.com", "challenge");
         assert!(result.is_err());
     }
 
@@ -258,5 +281,50 @@ mod tests {
     fn key_mode_display() {
         assert_eq!(KeyMode::ServerManaged.to_string(), "server_managed");
         assert_eq!(KeyMode::External.to_string(), "external");
+    }
+
+    #[test]
+    fn provision_auth_event_pubkey_mismatch() {
+        let crypto = test_crypto();
+        let service = NostrAuthService::new(crypto.clone());
+
+        // Encrypt a real secret under AAD of a different claimed owner so decrypt
+        // succeeds but the derived pubkey does not match.
+        let claimed_owner = "aa".repeat(32);
+        let real_keys = EventBuilder::generate_keys();
+        let mut secret_bytes = real_keys.secret_key().to_secret_bytes();
+        let aad = aad::nostr_secret_key(&claimed_owner);
+        let mismatched = crypto
+            .encrypt_bytes(&secret_bytes, aad.as_bytes())
+            .unwrap();
+        secret_bytes.zeroize();
+
+        let result =
+            service.provision_auth_event(&mismatched, &claimed_owner, "wss://relay.example.com", "c");
+        assert!(matches!(result, Err(AuthError::PubkeyMismatch)));
+    }
+
+    #[test]
+    fn sign_event_for_member_pubkey_mismatch() {
+        let crypto = test_crypto();
+        let service = NostrAuthService::new(crypto.clone());
+
+        let claimed_owner = "bb".repeat(32);
+        let real_keys = EventBuilder::generate_keys();
+        let mut secret_bytes = real_keys.secret_key().to_secret_bytes();
+        let aad = aad::nostr_secret_key(&claimed_owner);
+        let mismatched = crypto
+            .encrypt_bytes(&secret_bytes, aad.as_bytes())
+            .unwrap();
+        secret_bytes.zeroize();
+
+        let result = service.sign_event_for_member(
+            &mismatched,
+            &claimed_owner,
+            1,
+            "hi",
+            vec![],
+        );
+        assert!(matches!(result, Err(AuthError::PubkeyMismatch)));
     }
 }

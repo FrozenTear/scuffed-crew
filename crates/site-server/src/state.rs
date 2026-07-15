@@ -19,9 +19,9 @@ pub struct AppState {
     pub notifier: Option<MatrixNotifier>,
     /// 32-byte key for HMAC-signing Nostr challenge tokens.
     pub nostr_challenge_key: [u8; 32],
-    /// Pre-initialized encryption service for Nostr key management.
+    /// Shared encryption service (same `Arc` as `db.crypto`).
     /// `None` when `ENCRYPTION_KEY` is not configured.
-    pub crypto: Option<CryptoService>,
+    pub crypto: Option<Arc<CryptoService>>,
     /// WebSocket URL for the Nostr relay (e.g., `ws://strfry:7777`).
     /// Used for publishing kind 0 profile metadata and NIP-05 relay hints.
     /// `None` when `NOSTR_RELAY_URL` is not set.

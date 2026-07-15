@@ -39,11 +39,11 @@ pub async fn list_wiki_pages(
         .db
         .list_wiki_pages(query.q.as_deref(), query.limit.min(100), query.offset)
         .await
-        .map_err(|e| {
+        .map_err(|_e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
-                    error: e.to_string(),
+                    error: "Internal error".into(),
                 }),
             )
         })?;
@@ -69,7 +69,7 @@ pub async fn get_wiki_page(
             (
                 status,
                 Json(ErrorResponse {
-                    error: e.to_string(),
+                    error: "Internal error".into(),
                 }),
             )
         })
@@ -97,11 +97,11 @@ pub async fn create_wiki_page(
             &member.member.id,
         )
         .await
-        .map_err(|e| {
+        .map_err(|_e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
-                    error: e.to_string(),
+                    error: "Internal error".into(),
                 }),
             )
         })?;
@@ -149,7 +149,7 @@ pub async fn update_wiki_page(
             (
                 status,
                 Json(ErrorResponse {
-                    error: e.to_string(),
+                    error: "Internal error".into(),
                 }),
             )
         })?;
@@ -194,7 +194,7 @@ pub async fn list_wiki_revisions(
         (
             status,
             Json(ErrorResponse {
-                error: e.to_string(),
+                error: "Internal error".into(),
             }),
         )
     })?;
@@ -203,11 +203,11 @@ pub async fn list_wiki_revisions(
         .db
         .list_wiki_revisions(&page.id, 50, 0)
         .await
-        .map_err(|e| {
+        .map_err(|_e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
-                    error: e.to_string(),
+                    error: "Internal error".into(),
                 }),
             )
         })?;
@@ -230,16 +230,16 @@ pub async fn delete_wiki_page(
         (
             status,
             Json(ErrorResponse {
-                error: e.to_string(),
+                error: "Internal error".into(),
             }),
         )
     })?;
 
-    state.db.deactivate_wiki_page(&topic).await.map_err(|e| {
+    state.db.deactivate_wiki_page(&topic).await.map_err(|_e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse {
-                error: e.to_string(),
+                error: "Internal error".into(),
             }),
         )
     })?;

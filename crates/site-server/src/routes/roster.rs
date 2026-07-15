@@ -22,11 +22,11 @@ pub async fn get_team_roster(
         .get_team_roster(&team_id)
         .await
         .map(Json)
-        .map_err(|e| {
+        .map_err(|_e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
-                    error: e.to_string(),
+                    error: "Internal error".into(),
                 }),
             )
         })
@@ -49,11 +49,11 @@ pub async fn add_to_roster(
         .db
         .add_to_roster(&body.member_id, &team_id, body.team_role)
         .await
-        .map_err(|e| {
+        .map_err(|_e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
-                    error: e.to_string(),
+                    error: "Internal error".into(),
                 }),
             )
         })?;
@@ -89,11 +89,11 @@ pub async fn update_roster_role(
         .db
         .update_roster_role(&member_id, &team_id, body.team_role)
         .await
-        .map_err(|e| {
+        .map_err(|_e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
-                    error: e.to_string(),
+                    error: "Internal error".into(),
                 }),
             )
         })?;
@@ -121,11 +121,11 @@ pub async fn remove_from_roster(
         .db
         .remove_from_roster(&member_id, &team_id)
         .await
-        .map_err(|e| {
+        .map_err(|_e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
-                    error: e.to_string(),
+                    error: "Internal error".into(),
                 }),
             )
         })?;

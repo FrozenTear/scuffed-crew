@@ -118,17 +118,22 @@ pub async fn submit_application(
     Ok((StatusCode::CREATED, Json(app)))
 }
 
-/// GET /api/applications — list applications (officer+). Hard-capped in the DB layer.
+/// GET /api/applications — list applications (officer+), cursor-paginated.
 pub async fn list_applications(
     State(state): State<AppState>,
     _officer: OfficerUser,
-) -> Result<Json<Vec<Application>>, (StatusCode, Json<ErrorResponse>)> {
-    state
+    axum::extract::Query(pagination): axum::extract::Query<scuffed_types::api::PaginationParams>,
+) -> Result<Json<scuffed_types::api::CursorResponse<Application>>, (StatusCode, Json<ErrorResponse>)>
+{
+    let (limit, offset) = pagination.resolve();
+    let items = state
         .db
-        .list_applications()
+        .list_applications_paginated(limit, offset)
         .await
-        .map(Json)
-        .map_err(|e| internal_err(e, "list_applications"))
+        .map_err(|e| internal_err(e, "list_applications"))?;
+    Ok(Json(scuffed_types::api::CursorResponse::from_oversized(
+        items, limit, offset,
+    )))
 }
 
 /// GET /api/applications/mine — own application status (any logged-in)

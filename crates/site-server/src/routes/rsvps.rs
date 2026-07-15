@@ -27,11 +27,11 @@ pub async fn rsvp_event(
         .db
         .upsert_rsvp(&event_id, &member.member.id, body.status)
         .await
-        .map_err(|e| {
+        .map_err(|_e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
-                    error: e.to_string(),
+                    error: "Internal error".into(),
                 }),
             )
         })?;
@@ -49,11 +49,11 @@ pub async fn get_event_rsvps(
         .get_event_rsvps(&event_id)
         .await
         .map(Json)
-        .map_err(|e| {
+        .map_err(|_e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
-                    error: e.to_string(),
+                    error: "Internal error".into(),
                 }),
             )
         })
@@ -69,11 +69,11 @@ pub async fn get_rsvp_summary(
         .get_rsvp_summary(&event_id)
         .await
         .map(Json)
-        .map_err(|e| {
+        .map_err(|_e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
-                    error: e.to_string(),
+                    error: "Internal error".into(),
                 }),
             )
         })

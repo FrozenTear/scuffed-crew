@@ -13,12 +13,29 @@ This is the supported path for a **single VPS** with Podman Compose. You do **no
 
 | Env | Purpose |
 |-----|---------|
-| `SURREALDB_PASSWORD` | **Required** strong password (install generates one) |
-| `ENCRYPTION_KEY` | **Required** when `PRODUCTION=1` — OAuth provider IDs, Nostr server keys, DM content at rest |
-| `SURREALDB_AUTH_MODE` | `root` (default, single-tenant) or `scoped` (least-privilege DB user) |
-| `PRODUCTION=1` | Refuses default `root`/`root` credentials; requires `ENCRYPTION_KEY` |
+| `SURREALDB_PASSWORD` | Strong **root** password for bootstrap only (install generates) |
+| `SURREALDB_APP_USER` / `SURREALDB_APP_PASSWORD` | Runtime DB user (default `scuffed_app`) — **EDITOR**, not root. **Must differ from root password** when `PRODUCTION=1` |
+| `SURREALDB_AUTH_MODE` | `scoped` (default in prod) — root bootstrap (migrate + ensure user), then app reconnects as EDITOR |
+| `SURREALDB_BOOTSTRAP` | Default: bootstrap on start (single-container). Set `SURREALDB_BOOTSTRAP=0` for **app-only** containers that must never use root |
+| `SURREALDB_MIGRATE_ONLY=1` | Server runs root bootstrap (`Database::bootstrap_from_env`) then **exits** — for init/migrate jobs |
+| `ENCRYPTION_KEY` | **Required** for remote DB — OAuth IDs, Nostr keys, DM at rest (AES-256-GCM + AAD) |
+| `ENCRYPTION_KEY_VERSION` | Current key version (default `1`) |
+| `ENCRYPTION_KEY_PREVIOUS` | Optional `ver:base64,ver:base64` for rotation reads |
+| `CRYPTO_STRICT_AAD=1` | Disable empty-AAD legacy decrypt (on by default when `PRODUCTION=1`) |
+| `PRODUCTION=1` | **Required** for remote SurrealDB; secure cookies; no plaintext DMs |
 
-Never ship with `SURREALDB_USER=root` / `SURREALDB_PASSWORD=root` outside local dev.
+`scripts/install.sh` writes `PRODUCTION=1`, `SURREALDB_AUTH_MODE=scoped`, and **distinct** root + app passwords.  
+Remote boot **refuses** if `PRODUCTION` or `ENCRYPTION_KEY` is missing.  
+In production scoped mode, missing or root-equal `SURREALDB_APP_PASSWORD` is a hard error (no silent fallback).
+
+Never ship with `root`/`root`. Migrations run as root during bootstrap only; the long-lived app uses a database-scoped **EDITOR** user.
+
+### Split migrator vs app (optional multi-container)
+
+Single-container install keeps default bootstrap on every start (root session is short-lived, then EDITOR). For a stricter split:
+
+1. **Init job:** `SURREALDB_MIGRATE_ONLY=1` (needs root + app passwords) — migrate, ensure app user, exit.
+2. **App:** `SURREALDB_BOOTSTRAP=0` + app credentials only — never signs in as root.
 
 Kubernetes is out of scope. **Quadlet** (systemd-native containers) is an optional later migration if you want boot integration without Compose — no Quadlet units ship yet.
 

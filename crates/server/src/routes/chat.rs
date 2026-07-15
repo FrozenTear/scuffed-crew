@@ -23,20 +23,12 @@ pub async fn provision_auth_token(
     caller: OrgMember,
     Json(body): Json<AuthTokenRequest>,
 ) -> Result<Json<AuthTokenResponse>, (StatusCode, Json<ErrorResponse>)> {
-    let crypto = state.crypto.clone().ok_or_else(|| {
-        (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(ErrorResponse {
-                error: "Encryption not configured (ENCRYPTION_KEY required)".into(),
-            }),
-        )
-    })?;
-
+    let crypto = require_crypto(&state)?;
     let auth_service = NostrAuthService::new(crypto);
-    let member = &caller.member;
+    let member_id = caller.member.id.clone();
 
-    // Check key mode
-    match member.nostr_key_mode {
+    // Check key mode (auth extractor omits secrets — load full row when signing)
+    match caller.member.nostr_key_mode {
         Some(NostrKeyMode::External) => Err((
             StatusCode::BAD_REQUEST,
             Json(ErrorResponse {
@@ -44,8 +36,8 @@ pub async fn provision_auth_token(
             }),
         )),
         Some(NostrKeyMode::ServerManaged) => {
-            // Use existing encrypted key
-            let encrypted = member.nostr_secret_key_encrypted.as_ref().ok_or_else(|| {
+            let full = load_member_with_secret(&state, &member_id).await?;
+            let encrypted = full.nostr_secret_key_encrypted.as_ref().ok_or_else(|| {
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     Json(ErrorResponse {
@@ -53,10 +45,18 @@ pub async fn provision_auth_token(
                     }),
                 )
             })?;
+            let pubkey = full.nostr_pubkey.as_deref().ok_or_else(|| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse {
+                        error: "Server-managed key missing public key".into(),
+                    }),
+                )
+            })?;
 
             let challenge = body.challenge.as_deref().unwrap_or("");
             let response = auth_service
-                .provision_auth_event(encrypted, &body.relay_url, challenge)
+                .provision_auth_event(encrypted, pubkey, &body.relay_url, challenge)
                 .map_err(|e| {
                     tracing::error!("Auth event provisioning failed: {e}");
                     (
@@ -85,7 +85,7 @@ pub async fn provision_auth_token(
             state
                 .db
                 .update_member_nostr_keys(
-                    &member.id,
+                    &member_id,
                     Some(&pubkey),
                     Some("server_managed"),
                     Some(&encrypted),
@@ -101,12 +101,12 @@ pub async fn provision_auth_token(
                     )
                 })?;
 
-            tracing::info!(member_id = %member.id, "Generated server-managed Nostr keypair");
+            tracing::info!(member_id = %member_id, "Generated server-managed Nostr keypair");
 
             // Now provision the auth event with the newly created key
             let challenge = body.challenge.as_deref().unwrap_or("");
             let response = auth_service
-                .provision_auth_event(&encrypted, &body.relay_url, challenge)
+                .provision_auth_event(&encrypted, &pubkey, &body.relay_url, challenge)
                 .map_err(|e| {
                     (
                         StatusCode::INTERNAL_SERVER_ERROR,
@@ -171,14 +171,18 @@ pub struct DecryptMessageResponse {
 fn require_crypto(
     state: &AppState,
 ) -> Result<scuffed_auth::crypto::CryptoService, (StatusCode, Json<ErrorResponse>)> {
-    state.crypto.clone().ok_or_else(|| {
-        (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(ErrorResponse {
-                error: "Encryption not configured (ENCRYPTION_KEY required)".into(),
-            }),
-        )
-    })
+    state
+        .crypto
+        .as_ref()
+        .map(|c| (**c).clone())
+        .ok_or_else(|| {
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(ErrorResponse {
+                    error: "Encryption not configured (ENCRYPTION_KEY required)".into(),
+                }),
+            )
+        })
 }
 
 /// POST /api/chat/send-encrypted — encrypt and publish a message to an officer channel.
@@ -197,20 +201,10 @@ pub async fn send_encrypted(
     Json(body): Json<SendEncryptedRequest>,
 ) -> Result<Json<SendEncryptedResponse>, (StatusCode, Json<ErrorResponse>)> {
     let crypto = require_crypto(&state)?;
-    let member = &caller.member;
 
-    // Verify sender has server-managed keys
-    let sender_encrypted_key = match member.nostr_key_mode {
-        Some(NostrKeyMode::ServerManaged) => {
-            member.nostr_secret_key_encrypted.as_ref().ok_or_else(|| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(ErrorResponse {
-                        error: "Server-managed key missing encrypted secret".into(),
-                    }),
-                )
-            })?
-        }
+    // Verify sender has server-managed keys (secret loaded via full member fetch).
+    let full = match caller.member.nostr_key_mode {
+        Some(NostrKeyMode::ServerManaged) => load_member_with_secret(&state, &caller.member.id).await?,
         Some(NostrKeyMode::External) => {
             return Err((
                 StatusCode::BAD_REQUEST,
@@ -228,6 +222,14 @@ pub async fn send_encrypted(
             ));
         }
     };
+    let sender_encrypted_key = full.nostr_secret_key_encrypted.as_ref().ok_or_else(|| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: "Server-managed key missing encrypted secret".into(),
+            }),
+        )
+    })?;
 
     // Look up the channel and verify it's an officer channel
     let channel = state
@@ -306,13 +308,14 @@ pub async fn send_encrypted(
         ));
     }
 
-    let sender_pubkey = member.nostr_pubkey.clone().unwrap_or_default();
+    let sender_pubkey = full.nostr_pubkey.clone().unwrap_or_default();
 
     // Build gift wraps
     let enc_service = EncryptionService::new(crypto);
     let gift_wraps = enc_service
         .build_gift_wraps(
             sender_encrypted_key,
+            &sender_pubkey,
             &recipient_pubkeys,
             &body.content,
             &body.group_id,
@@ -372,7 +375,7 @@ pub async fn send_encrypted(
     }
 
     tracing::info!(
-        member_id = %member.id,
+        member_id = %full.id,
         group_id = %body.group_id,
         recipients = recipients_count,
         "Published encrypted message to officer channel"
@@ -394,19 +397,9 @@ pub async fn decrypt_message(
     Json(body): Json<DecryptMessageRequest>,
 ) -> Result<Json<DecryptMessageResponse>, (StatusCode, Json<ErrorResponse>)> {
     let crypto = require_crypto(&state)?;
-    let member = &caller.member;
 
-    let encrypted_key = match member.nostr_key_mode {
-        Some(NostrKeyMode::ServerManaged) => {
-            member.nostr_secret_key_encrypted.as_ref().ok_or_else(|| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(ErrorResponse {
-                        error: "Server-managed key missing encrypted secret".into(),
-                    }),
-                )
-            })?
-        }
+    let full = match caller.member.nostr_key_mode {
+        Some(NostrKeyMode::ServerManaged) => load_member_with_secret(&state, &caller.member.id).await?,
         Some(NostrKeyMode::External) => {
             return Err((
                 StatusCode::BAD_REQUEST,
@@ -424,10 +417,27 @@ pub async fn decrypt_message(
             ));
         }
     };
+    let encrypted_key = full.nostr_secret_key_encrypted.as_ref().ok_or_else(|| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: "Server-managed key missing encrypted secret".into(),
+            }),
+        )
+    })?;
+
+    let recipient_pubkey = full.nostr_pubkey.as_deref().ok_or_else(|| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: "Server-managed key missing public key".into(),
+            }),
+        )
+    })?;
 
     let enc_service = EncryptionService::new(crypto);
     let msg = enc_service
-        .unwrap_gift_wrap_json(encrypted_key, &body.event_json)
+        .unwrap_gift_wrap_json(encrypted_key, recipient_pubkey, &body.event_json)
         .await
         .map_err(|e| {
             tracing::error!("Gift wrap decryption failed: {e}");
@@ -446,4 +456,32 @@ pub async fn decrypt_message(
         tags: msg.tags,
         created_at: msg.created_at,
     }))
+}
+
+/// Auth extractors omit secrets — load full member only when signing/decrypting.
+async fn load_member_with_secret(
+    state: &AppState,
+    member_id: &str,
+) -> Result<scuffed_db::Member, (StatusCode, Json<ErrorResponse>)> {
+    state
+        .db
+        .get_member(member_id)
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, "get_member for secret failed");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: "Internal error".into(),
+                }),
+            )
+        })?
+        .ok_or_else(|| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: "Member not found".into(),
+                }),
+            )
+        })
 }

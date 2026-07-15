@@ -2,7 +2,7 @@
 //!
 //! Server-managed encryption flow:
 //! 1. Member sends plaintext via Dioxus widget → Axum API (TLS required)
-//! 2. Server decrypts member's `nostr_secret_key_encrypted` via `CryptoService`
+//! 2. Server decrypts member's `nostr_secret_key_encrypted` via `CryptoService` + AAD
 //! 3. NIP-44 v2 encrypt (ChaCha20-Poly1305 + HKDF) for each recipient
 //! 4. Wrap in NIP-59 gift wrap (rumor → seal → gift wrap per recipient)
 //! 5. Decrypted key material zeroized immediately
@@ -12,9 +12,9 @@
 use nostr::key::Keys;
 use nostr::nips::nip44;
 use nostr::{Event, EventBuilder as NostrEventBuilder, Kind, PublicKey, SecretKey};
-use zeroize::Zeroize;
+use zeroize::Zeroizing;
 
-use scuffed_auth::crypto::{CryptoService, EncryptedBlob};
+use scuffed_auth::crypto::{aad, CryptoService, EncryptedBlob};
 
 /// Errors from encryption operations.
 #[derive(Debug, thiserror::Error)]
@@ -79,23 +79,30 @@ impl EncryptionService {
 
     /// Decrypt a member's stored secret key into `nostr::Keys`.
     ///
-    /// The returned Keys type implements zeroize on drop via the nostr crate.
+    /// AAD is bound to `owner_pubkey_hex`. Supports raw 32-byte secrets and
+    /// legacy UTF-8 hex strings. Material is zeroized on drop via `Zeroizing`.
     fn decrypt_member_keys(
         &self,
         encrypted_secret_key: &EncryptedBlob,
+        owner_pubkey_hex: &str,
     ) -> Result<Keys, EncryptionError> {
-        let mut secret_hex = self
+        let aad_s = aad::nostr_secret_key(owner_pubkey_hex);
+        let pt = self
             .crypto
-            .decrypt(encrypted_secret_key)
+            .decrypt_bytes(encrypted_secret_key, aad_s.as_bytes())
             .map_err(|e| EncryptionError::KeyDecryptionFailed(e.to_string()))?;
 
-        let sk = SecretKey::from_hex(&secret_hex)
-            .map_err(|e| EncryptionError::InvalidKey(e.to_string()));
-
-        // Zeroize the hex string immediately
-        secret_hex.zeroize();
-
-        Ok(Keys::new(sk?))
+        let keys = keys_from_secret_plaintext(&pt)?;
+        if !keys
+            .public_key()
+            .to_hex()
+            .eq_ignore_ascii_case(owner_pubkey_hex)
+        {
+            return Err(EncryptionError::InvalidKey(
+                "decrypted Nostr secret does not match owner pubkey".into(),
+            ));
+        }
+        Ok(keys)
     }
 
     /// Parse a hex public key string.
@@ -114,10 +121,11 @@ impl EncryptionService {
     pub fn encrypt_nip44(
         &self,
         sender_encrypted_key: &EncryptedBlob,
+        sender_pubkey_hex: &str,
         recipient_pubkey_hex: &str,
         plaintext: &str,
     ) -> Result<String, EncryptionError> {
-        let sender_keys = self.decrypt_member_keys(sender_encrypted_key)?;
+        let sender_keys = self.decrypt_member_keys(sender_encrypted_key, sender_pubkey_hex)?;
         let recipient_pk = Self::parse_pubkey(recipient_pubkey_hex)?;
 
         nip44::encrypt(
@@ -135,10 +143,12 @@ impl EncryptionService {
     pub fn decrypt_nip44(
         &self,
         recipient_encrypted_key: &EncryptedBlob,
+        recipient_pubkey_hex: &str,
         sender_pubkey_hex: &str,
         ciphertext: &str,
     ) -> Result<String, EncryptionError> {
-        let recipient_keys = self.decrypt_member_keys(recipient_encrypted_key)?;
+        let recipient_keys =
+            self.decrypt_member_keys(recipient_encrypted_key, recipient_pubkey_hex)?;
         let sender_pk = Self::parse_pubkey(sender_pubkey_hex)?;
 
         nip44::decrypt(recipient_keys.secret_key(), &sender_pk, ciphertext)
@@ -161,6 +171,7 @@ impl EncryptionService {
     pub async fn build_gift_wraps(
         &self,
         sender_encrypted_key: &EncryptedBlob,
+        sender_pubkey_hex: &str,
         recipient_pubkeys_hex: &[String],
         plaintext: &str,
         group_id: &str,
@@ -170,7 +181,7 @@ impl EncryptionService {
             return Err(EncryptionError::NoRecipients);
         }
 
-        let sender_keys = self.decrypt_member_keys(sender_encrypted_key)?;
+        let sender_keys = self.decrypt_member_keys(sender_encrypted_key, sender_pubkey_hex)?;
 
         // Build the unsigned rumor (kind 14 = private direct message per NIP-17)
         let mut rumor_builder = NostrEventBuilder::new(Kind::Custom(14), plaintext);
@@ -226,13 +237,15 @@ impl EncryptionService {
     pub async fn unwrap_gift_wrap(
         &self,
         recipient_encrypted_key: &EncryptedBlob,
+        recipient_pubkey_hex: &str,
         gift_wrap_event: &Event,
     ) -> Result<UnwrappedMessage, EncryptionError> {
         if gift_wrap_event.kind != Kind::GiftWrap {
             return Err(EncryptionError::NotGiftWrap);
         }
 
-        let recipient_keys = self.decrypt_member_keys(recipient_encrypted_key)?;
+        let recipient_keys =
+            self.decrypt_member_keys(recipient_encrypted_key, recipient_pubkey_hex)?;
 
         let unwrapped = nostr::nips::nip59::extract_rumor(&recipient_keys, gift_wrap_event)
             .await
@@ -258,21 +271,35 @@ impl EncryptionService {
     pub async fn unwrap_gift_wrap_json(
         &self,
         recipient_encrypted_key: &EncryptedBlob,
+        recipient_pubkey_hex: &str,
         event_json: &str,
     ) -> Result<UnwrappedMessage, EncryptionError> {
         let event: Event = serde_json::from_str(event_json)
             .map_err(|e| EncryptionError::UnwrapFailed(format!("invalid event JSON: {e}")))?;
 
-        self.unwrap_gift_wrap(recipient_encrypted_key, &event).await
+        self.unwrap_gift_wrap(recipient_encrypted_key, recipient_pubkey_hex, &event)
+            .await
     }
+}
+
+fn keys_from_secret_plaintext(pt: &Zeroizing<Vec<u8>>) -> Result<Keys, EncryptionError> {
+    if pt.len() == 32 {
+        let sk = SecretKey::from_slice(pt.as_slice())
+            .map_err(|e| EncryptionError::InvalidKey(e.to_string()))?;
+        return Ok(Keys::new(sk));
+    }
+    let hex_str = std::str::from_utf8(pt.as_slice())
+        .map_err(|e| EncryptionError::InvalidKey(e.to_string()))?;
+    let sk =
+        SecretKey::from_hex(hex_str).map_err(|e| EncryptionError::InvalidKey(e.to_string()))?;
+    Ok(Keys::new(sk))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use zeroize::Zeroize;
 
-    /// Returns (key_string, CryptoService) so we can create additional
-    /// CryptoService instances from the same key (CryptoService is not Clone).
     fn test_crypto_key() -> String {
         CryptoService::generate_key()
     }
@@ -281,11 +308,17 @@ mod tests {
         CryptoService::new(key, 1).unwrap()
     }
 
+    /// Encrypt raw 32-byte secret with AAD bound to pubkey (production format).
     fn make_encrypted_keys(key: &str) -> (Keys, EncryptedBlob) {
         let crypto = crypto_from_key(key);
         let keys = Keys::generate();
-        let secret_hex = keys.secret_key().to_secret_hex();
-        let encrypted = crypto.encrypt(&secret_hex).unwrap();
+        let pubkey = keys.public_key().to_hex();
+        let mut secret_bytes = keys.secret_key().to_secret_bytes();
+        let aad_s = aad::nostr_secret_key(&pubkey);
+        let encrypted = crypto
+            .encrypt_bytes(&secret_bytes, aad_s.as_bytes())
+            .unwrap();
+        secret_bytes.zeroize();
         (keys, encrypted)
     }
 
@@ -296,25 +329,18 @@ mod tests {
 
         let (sender_keys, sender_enc) = make_encrypted_keys(&key);
         let (recipient_keys, recipient_enc) = make_encrypted_keys(&key);
+        let sender_pk = sender_keys.public_key().to_hex();
+        let recipient_pk = recipient_keys.public_key().to_hex();
 
         let plaintext = "Hello officer channel!";
         let ciphertext = svc
-            .encrypt_nip44(
-                &sender_enc,
-                &recipient_keys.public_key().to_hex(),
-                plaintext,
-            )
+            .encrypt_nip44(&sender_enc, &sender_pk, &recipient_pk, plaintext)
             .unwrap();
 
-        // Ciphertext should be base64, not plaintext
         assert_ne!(ciphertext, plaintext);
 
         let decrypted = svc
-            .decrypt_nip44(
-                &recipient_enc,
-                &sender_keys.public_key().to_hex(),
-                &ciphertext,
-            )
+            .decrypt_nip44(&recipient_enc, &recipient_pk, &sender_pk, &ciphertext)
             .unwrap();
 
         assert_eq!(decrypted, plaintext);
@@ -327,22 +353,16 @@ mod tests {
 
         let (_sender_keys, sender_enc) = make_encrypted_keys(&key);
         let (recipient_keys, _recipient_enc) = make_encrypted_keys(&key);
-        let (_wrong_keys, wrong_enc) = make_encrypted_keys(&key);
+        let (wrong_keys, wrong_enc) = make_encrypted_keys(&key);
+        let sender_pk = _sender_keys.public_key().to_hex();
+        let recipient_pk = recipient_keys.public_key().to_hex();
+        let wrong_pk = wrong_keys.public_key().to_hex();
 
         let ciphertext = svc
-            .encrypt_nip44(
-                &sender_enc,
-                &recipient_keys.public_key().to_hex(),
-                "secret message",
-            )
+            .encrypt_nip44(&sender_enc, &sender_pk, &recipient_pk, "secret message")
             .unwrap();
 
-        // Decrypting with wrong key should fail
-        let result = svc.decrypt_nip44(
-            &wrong_enc,
-            &recipient_keys.public_key().to_hex(),
-            &ciphertext,
-        );
+        let result = svc.decrypt_nip44(&wrong_enc, &wrong_pk, &sender_pk, &ciphertext);
         assert!(result.is_err());
     }
 
@@ -354,37 +374,40 @@ mod tests {
         let (sender_keys, sender_enc) = make_encrypted_keys(&key);
         let (_r1_keys, r1_enc) = make_encrypted_keys(&key);
         let (r2_keys, _r2_enc) = make_encrypted_keys(&key);
+        let sender_pk = sender_keys.public_key().to_hex();
+        let r1_pk = _r1_keys.public_key().to_hex();
+        let r2_pk = r2_keys.public_key().to_hex();
 
-        let recipients = vec![
-            _r1_keys.public_key().to_hex(),
-            r2_keys.public_key().to_hex(),
-        ];
+        let recipients = vec![r1_pk.clone(), r2_pk];
 
         let plaintext = "Officer briefing: mission start at 0600";
         let wrapped = svc
-            .build_gift_wraps(&sender_enc, &recipients, plaintext, "officers-alpha", None)
+            .build_gift_wraps(
+                &sender_enc,
+                &sender_pk,
+                &recipients,
+                plaintext,
+                "officers-alpha",
+                None,
+            )
             .await
             .unwrap();
 
-        // Should produce one gift wrap per recipient
         assert_eq!(wrapped.len(), 2);
 
-        // Each should be kind 1059
         for gw in &wrapped {
             assert_eq!(gw.event.kind, Kind::GiftWrap);
         }
 
-        // Recipient 1 can unwrap their copy
         let msg = svc
-            .unwrap_gift_wrap(&r1_enc, &wrapped[0].event)
+            .unwrap_gift_wrap(&r1_enc, &r1_pk, &wrapped[0].event)
             .await
             .unwrap();
 
         assert_eq!(msg.content, plaintext);
-        assert_eq!(msg.sender_pubkey, sender_keys.public_key().to_hex());
-        assert_eq!(msg.kind, 14); // NIP-17 private direct message
+        assert_eq!(msg.sender_pubkey, sender_pk);
+        assert_eq!(msg.kind, 14);
 
-        // Check group tag is present
         let h_tag = msg
             .tags
             .iter()
@@ -400,13 +423,16 @@ mod tests {
         let key = test_crypto_key();
         let svc = EncryptionService::new(crypto_from_key(&key));
 
-        let (_sender_keys, sender_enc) = make_encrypted_keys(&key);
+        let (sender_keys, sender_enc) = make_encrypted_keys(&key);
         let (r1_keys, r1_enc) = make_encrypted_keys(&key);
+        let sender_pk = sender_keys.public_key().to_hex();
+        let r1_pk = r1_keys.public_key().to_hex();
 
-        let recipients = vec![r1_keys.public_key().to_hex()];
+        let recipients = vec![r1_pk.clone()];
         let wrapped = svc
             .build_gift_wraps(
                 &sender_enc,
+                &sender_pk,
                 &recipients,
                 "Reply to previous",
                 "officers-alpha",
@@ -416,7 +442,7 @@ mod tests {
             .unwrap();
 
         let msg = svc
-            .unwrap_gift_wrap(&r1_enc, &wrapped[0].event)
+            .unwrap_gift_wrap(&r1_enc, &r1_pk, &wrapped[0].event)
             .await
             .unwrap();
 
@@ -435,10 +461,11 @@ mod tests {
         let key = test_crypto_key();
         let svc = EncryptionService::new(crypto_from_key(&key));
 
-        let (_sender_keys, sender_enc) = make_encrypted_keys(&key);
+        let (sender_keys, sender_enc) = make_encrypted_keys(&key);
+        let sender_pk = sender_keys.public_key().to_hex();
 
         let result = svc
-            .build_gift_wraps(&sender_enc, &[], "message", "group1", None)
+            .build_gift_wraps(&sender_enc, &sender_pk, &[], "message", "group1", None)
             .await;
 
         assert!(matches!(result, Err(EncryptionError::NoRecipients)));
@@ -449,15 +476,15 @@ mod tests {
         let key = test_crypto_key();
         let svc = EncryptionService::new(crypto_from_key(&key));
 
-        let (_keys, enc) = make_encrypted_keys(&key);
+        let (keys, enc) = make_encrypted_keys(&key);
+        let pk = keys.public_key().to_hex();
 
-        // Build a regular event (not a gift wrap)
-        let keys = Keys::generate();
+        let keys2 = Keys::generate();
         let event = NostrEventBuilder::new(Kind::Custom(1), "not a gift wrap")
-            .sign_with_keys(&keys)
+            .sign_with_keys(&keys2)
             .unwrap();
 
-        let result = svc.unwrap_gift_wrap(&enc, &event).await;
+        let result = svc.unwrap_gift_wrap(&enc, &pk, &event).await;
         assert!(matches!(result, Err(EncryptionError::NotGiftWrap)));
     }
 
@@ -467,12 +494,39 @@ mod tests {
         let svc = EncryptionService::new(crypto_from_key(&key));
 
         let (original_keys, encrypted) = make_encrypted_keys(&key);
+        let pk = original_keys.public_key().to_hex();
 
-        // Should successfully decrypt
-        let keys = svc.decrypt_member_keys(&encrypted).unwrap();
+        let keys = svc.decrypt_member_keys(&encrypted, &pk).unwrap();
         assert_eq!(
             keys.public_key().to_hex(),
             original_keys.public_key().to_hex()
+        );
+    }
+
+    #[test]
+    fn decrypt_member_keys_pubkey_mismatch() {
+        let key = test_crypto_key();
+        let crypto = crypto_from_key(&key);
+        let svc = EncryptionService::new(crypto_from_key(&key));
+
+        // Secret of real_keys encrypted under AAD of a different claimed owner.
+        let claimed_owner = "cc".repeat(32);
+        let real_keys = Keys::generate();
+        let mut secret_bytes = real_keys.secret_key().to_secret_bytes();
+        let aad_s = aad::nostr_secret_key(&claimed_owner);
+        let encrypted = crypto
+            .encrypt_bytes(&secret_bytes, aad_s.as_bytes())
+            .unwrap();
+        secret_bytes.zeroize();
+
+        let err = svc.decrypt_member_keys(&encrypted, &claimed_owner).unwrap_err();
+        assert!(
+            matches!(err, EncryptionError::InvalidKey(_)),
+            "unexpected error: {err}"
+        );
+        assert!(
+            err.to_string().contains("does not match owner pubkey"),
+            "unexpected error: {err}"
         );
     }
 

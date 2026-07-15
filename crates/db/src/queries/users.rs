@@ -3,7 +3,7 @@ use surrealdb::types::Datetime as SurrealDatetime;
 use surrealdb_types::RecordId;
 use surrealdb_types::SurrealValue;
 
-use scuffed_auth::crypto::{hash_provider_id, EncryptedBlob};
+use scuffed_auth::crypto::{aad, hash_provider_id, EncryptedBlob};
 use scuffed_auth::{AuthProvider, User};
 
 use crate::{with_timeout, Database, DbError, DbResult};
@@ -51,14 +51,16 @@ impl Database {
 
     /// Get a user by their internal ID.
     pub async fn get_user(&self, id: &str) -> DbResult<Option<User>> {
-        with_timeout(async {
-            let db_user: Option<DbUser> = self.client.select(("user", id)).await?;
-            match db_user {
-                Some(db) => Ok(Some(self.db_user_to_user(db)?)),
-                None => Ok(None),
-            }
-        })
-        .await
+        with_timeout(self.get_user_without_timeout(id)).await
+    }
+
+    /// User select without the outer timeout — for composition under a parent budget.
+    pub(crate) async fn get_user_without_timeout(&self, id: &str) -> DbResult<Option<User>> {
+        let db_user: Option<DbUser> = self.client.select(("user", id)).await?;
+        match db_user {
+            Some(db) => Ok(Some(self.db_user_to_user(db)?)),
+            None => Ok(None),
+        }
     }
 
     /// Look up a user by their OAuth provider and provider-specific ID.
@@ -109,7 +111,7 @@ impl Database {
         }
         // Cleartext OAuth provider IDs only allowed for local in-memory/dev when
         // not production and ALLOW_PLAINTEXT_PROVIDER_IDS=1 or no remote URL.
-        if crate::client::is_production_env() {
+        if scuffed_auth::is_production_env() {
             return Err(DbError::Config(
                 "ENCRYPTION_KEY is required for OAuth users when PRODUCTION is set".into(),
             ));
@@ -132,7 +134,8 @@ impl Database {
 
         let db_user = if let Some(ref crypto) = self.crypto {
             let id_hash = hash_provider_id(&provider_str, &user.provider_id);
-            let id_encrypted = crypto.encrypt(&user.provider_id)?;
+            let aad_s = aad::oauth_provider_id(&user.id, &provider_str);
+            let id_encrypted = crypto.encrypt(&user.provider_id, &aad_s)?;
             DbUser {
                 id: None,
                 provider: provider_str,
@@ -169,45 +172,42 @@ impl Database {
         Ok(user.clone())
     }
 
+    /// Field-level profile update — never clobbers `password_hash`.
     async fn update_user(&self, user: &User) -> DbResult<User> {
         let provider_str = user.provider.to_string();
         self.require_oauth_encryption(user.provider)?;
+        let rid = RecordId::new("user", user.id.as_str());
 
-        let db_user = if let Some(ref crypto) = self.crypto {
+        if let Some(ref crypto) = self.crypto {
             let id_hash = hash_provider_id(&provider_str, &user.provider_id);
-            let id_encrypted = crypto.encrypt(&user.provider_id)?;
-            DbUser {
-                id: None,
-                provider: provider_str,
-                username: user.username.clone(),
-                avatar_url: user.avatar_url.clone(),
-                provider_id: None,
-                provider_id_hash: Some(id_hash),
-                provider_id_encrypted: Some(serde_json::to_value(id_encrypted).map_err(|e| {
-                    DbError::Config(format!("Failed to serialize encrypted blob: {e}"))
-                })?),
-                password_hash: None,
-                created_at: SurrealDatetime::from(user.created_at),
-            }
+            let aad_s = aad::oauth_provider_id(&user.id, &provider_str);
+            let id_encrypted = crypto.encrypt(&user.provider_id, &aad_s)?;
+            let enc = serde_json::to_value(id_encrypted).map_err(|e| {
+                DbError::Config(format!("Failed to serialize encrypted blob: {e}"))
+            })?;
+            self.client
+                .query(
+                    "UPDATE $rid SET                         provider = $provider,                         username = $username,                         avatar_url = $avatar,                         provider_id = NONE,                         provider_id_hash = $hash,                         provider_id_encrypted = $enc",
+                )
+                .bind(("rid", rid))
+                .bind(("provider", provider_str))
+                .bind(("username", user.username.clone()))
+                .bind(("avatar", user.avatar_url.clone()))
+                .bind(("hash", id_hash))
+                .bind(("enc", enc))
+                .await?;
         } else {
-            DbUser {
-                id: None,
-                provider: provider_str,
-                username: user.username.clone(),
-                avatar_url: user.avatar_url.clone(),
-                provider_id: Some(user.provider_id.clone()),
-                provider_id_hash: None,
-                provider_id_encrypted: None,
-                password_hash: None,
-                created_at: SurrealDatetime::from(user.created_at),
-            }
-        };
-
-        let _: Option<DbUser> = self
-            .client
-            .update(("user", user.id.as_str()))
-            .content(db_user)
-            .await?;
+            self.client
+                .query(
+                    "UPDATE $rid SET                         provider = $provider,                         username = $username,                         avatar_url = $avatar,                         provider_id = $pid,                         provider_id_hash = NONE,                         provider_id_encrypted = NONE",
+                )
+                .bind(("rid", rid))
+                .bind(("provider", provider_str))
+                .bind(("username", user.username.clone()))
+                .bind(("avatar", user.avatar_url.clone()))
+                .bind(("pid", user.provider_id.clone()))
+                .await?;
+        }
 
         Ok(user.clone())
     }
@@ -344,13 +344,19 @@ impl Database {
             other => return Err(DbError::Config(format!("Unknown provider: {other}"))),
         };
 
+        let id = db
+            .id
+            .map(|r| crate::record_id_key_to_string(r.key))
+            .unwrap_or_else(|| "unknown".to_string());
+
         let provider_id = if let Some(ref encrypted_json) = db.provider_id_encrypted {
             let encrypted: EncryptedBlob =
                 serde_json::from_value(encrypted_json.clone()).map_err(|e| {
                     DbError::Config(format!("Failed to deserialize encrypted blob: {e}"))
                 })?;
             if let Some(ref crypto) = self.crypto {
-                crypto.decrypt(&encrypted)?
+                let aad_s = aad::oauth_provider_id(&id, &db.provider);
+                crypto.decrypt(&encrypted, &aad_s)?
             } else {
                 return Err(DbError::Config(
                     "Encrypted data present but no crypto service configured".into(),
@@ -363,11 +369,6 @@ impl Database {
                 "No provider_id found on user record".into(),
             ));
         };
-
-        let id = db
-            .id
-            .map(|r| crate::record_id_key_to_string(r.key))
-            .unwrap_or_else(|| "unknown".to_string());
 
         Ok(User {
             id,

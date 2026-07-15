@@ -21,7 +21,7 @@ use tokio::sync::broadcast;
 use scuffed_auth::crypto::{CryptoService, EncryptedBlob};
 use scuffed_chat::EncryptionService;
 use scuffed_chat::nostr::relay::RelayClient;
-use scuffed_db::{Database, NostrKeyMode};
+use scuffed_db::Database;
 use scuffed_types::nostr::{NostrFilter, RelayMessage};
 
 /// Broadcast payload for newly stored DMs. SSE/WebSocket handlers fan this out
@@ -60,7 +60,7 @@ const DM_EVENT_BUFFER: usize = 256;
 /// poll `/api/nostr/dm/sync`.
 pub fn start(
     db: Arc<Database>,
-    crypto: Option<CryptoService>,
+    crypto: Option<Arc<CryptoService>>,
     relay_url: Option<String>,
 ) -> Option<DmEventBus> {
     let relay_url = relay_url?;
@@ -78,11 +78,11 @@ pub fn start(
 
 async fn run_subscriber_loop(
     db: Arc<Database>,
-    crypto: CryptoService,
+    crypto: Arc<CryptoService>,
     relay_url: String,
     tx: broadcast::Sender<DmEvent>,
 ) {
-    let encryption = EncryptionService::new(crypto);
+    let encryption = EncryptionService::new((*crypto).clone());
     let mut backoff = Duration::from_secs(1);
 
     loop {
@@ -182,22 +182,10 @@ async fn run_subscription_session(
 async fn build_recipient_index(
     db: &Arc<Database>,
 ) -> scuffed_db::DbResult<HashMap<String, EncryptedBlob>> {
-    let members = db.list_members().await?;
-    let mut index = HashMap::new();
-    for m in members {
-        if !m.is_active {
-            continue;
-        }
-        let (Some(NostrKeyMode::ServerManaged), Some(pk), Some(blob)) = (
-            m.nostr_key_mode,
-            m.nostr_pubkey,
-            m.nostr_secret_key_encrypted,
-        ) else {
-            continue;
-        };
-        index.insert(pk, blob);
-    }
-    Ok(index)
+    // Dedicated query loads only the secret material needed for unwrap —
+    // not via list_members (which intentionally omits secrets).
+    let pairs = db.list_server_managed_nostr_secrets().await?;
+    Ok(pairs.into_iter().collect())
 }
 
 fn member_set_changed(
@@ -245,7 +233,10 @@ async fn handle_gift_wrap(
         }
     };
 
-    let unwrapped = match encryption.unwrap_gift_wrap_json(blob, &event_json).await {
+    let unwrapped = match encryption
+        .unwrap_gift_wrap_json(blob, &recipient_pubkey, &event_json)
+        .await
+    {
         Ok(u) => u,
         Err(e) => {
             tracing::debug!("Skipping unwrap failure for {}: {e}", event.id);

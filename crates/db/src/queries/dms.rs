@@ -4,7 +4,7 @@ use surrealdb::types::Datetime as SurrealDatetime;
 use surrealdb_types::RecordId;
 use surrealdb_types::SurrealValue;
 
-use scuffed_auth::crypto::EncryptedBlob;
+use scuffed_auth::crypto::{aad, EncryptedBlob};
 
 use crate::types::{conversation_key, DmConversation, DmMessage, DmReadMarker};
 use crate::{record_id_key_to_string, with_timeout, Database, DbResult};
@@ -37,55 +37,82 @@ struct DbDmReadMarker {
 }
 
 /// Encrypt DM plaintext for at-rest storage when CryptoService is configured.
-fn seal_dm_content(db: &Database, plaintext: &str) -> DbResult<String> {
+///
+/// AAD binds ciphertext to gift-wrap id + conversation key.
+/// When `PRODUCTION` is set, plaintext storage is refused (must have ENCRYPTION_KEY).
+fn seal_dm_content(
+    db: &Database,
+    plaintext: &str,
+    gift_wrap_id: &str,
+    conv_key: &str,
+) -> DbResult<String> {
     match &db.crypto {
         Some(crypto) => {
-            let blob = crypto.encrypt(plaintext)?;
+            let aad_s = aad::dm_content(gift_wrap_id, conv_key);
+            let blob = crypto.encrypt(plaintext, &aad_s)?;
             let json = serde_json::to_string(&blob).map_err(|e| {
                 crate::DbError::Config(format!("Failed to serialize DM ciphertext: {e}"))
             })?;
             Ok(format!("{DM_ENC_PREFIX}{json}"))
         }
+        None if scuffed_auth::is_production_env() => Err(crate::DbError::Config(
+            "Refusing plaintext DM storage when PRODUCTION is set (require ENCRYPTION_KEY)".into(),
+        )),
         None => Ok(plaintext.to_string()),
     }
 }
 
-/// Decrypt DM content if sealed; pass through legacy plaintext rows.
-fn open_dm_content(db: &Database, stored: &str) -> String {
+/// Decrypt DM content if sealed.
+///
+/// Production: plaintext rows are rejected (must be encrypted at rest).
+/// Dev: legacy plaintext rows pass through for migration convenience.
+/// Fail-closed: ciphertext that cannot be opened returns an error (never empty string).
+fn open_dm_content(
+    db: &Database,
+    stored: &str,
+    gift_wrap_id: &str,
+    conv_key: &str,
+) -> DbResult<String> {
     let Some(rest) = stored.strip_prefix(DM_ENC_PREFIX) else {
-        return stored.to_string();
+        if scuffed_auth::is_production_env() {
+            return Err(crate::DbError::Config(
+                "Refusing plaintext DM content when PRODUCTION is set (data must be encrypted)"
+                    .into(),
+            ));
+        }
+        return Ok(stored.to_string());
     };
     let Some(crypto) = db.crypto.as_ref() else {
-        tracing::error!("DM content is encrypted but CryptoService is not configured");
-        return String::new();
+        return Err(crate::DbError::Config(
+            "DM content is encrypted but CryptoService is not configured (set ENCRYPTION_KEY)"
+                .into(),
+        ));
     };
-    match serde_json::from_str::<EncryptedBlob>(rest) {
-        Ok(blob) => crypto.decrypt(&blob).unwrap_or_else(|e| {
-            tracing::error!("DM decrypt failed: {e}");
-            String::new()
-        }),
-        Err(e) => {
-            tracing::error!("DM ciphertext JSON invalid: {e}");
-            String::new()
-        }
-    }
+    let blob: EncryptedBlob = serde_json::from_str(rest).map_err(|e| {
+        crate::DbError::Config(format!("DM ciphertext JSON invalid: {e}"))
+    })?;
+    let aad_s = aad::dm_content(gift_wrap_id, conv_key);
+    crypto
+        .decrypt(&blob, &aad_s)
+        .map_err(crate::DbError::Crypto)
 }
 
-fn db_to_dm(db: &Database, row: DbDmMessage) -> DmMessage {
+fn db_to_dm(db: &Database, row: DbDmMessage) -> DbResult<DmMessage> {
     let id = row
         .id
         .map(|r| record_id_key_to_string(r.key))
         .unwrap_or_else(|| "unknown".to_string());
-    DmMessage {
+    let content = open_dm_content(db, &row.content, &row.gift_wrap_id, &row.conversation_key)?;
+    Ok(DmMessage {
         id,
         gift_wrap_id: row.gift_wrap_id,
         sender_pubkey: row.sender_pubkey,
         recipient_pubkey: row.recipient_pubkey,
         conversation_key: row.conversation_key,
-        content: open_dm_content(db, &row.content),
+        content,
         reply_to_event_id: row.reply_to_event_id,
         created_at: row.created_at.into(),
-    }
+    })
 }
 
 impl Database {
@@ -104,9 +131,9 @@ impl Database {
         let gid = gift_wrap_id.to_string();
         let sender = sender_pubkey.to_string();
         let recipient = recipient_pubkey.to_string();
-        let body = seal_dm_content(self, content)?;
-        let reply = reply_to_event_id.map(|s| s.to_string());
         let conv = conversation_key(sender_pubkey, recipient_pubkey);
+        let body = seal_dm_content(self, content, gift_wrap_id, &conv)?;
+        let reply = reply_to_event_id.map(|s| s.to_string());
         let ts = SurrealDatetime::from(created_at);
 
         with_timeout(async {
@@ -119,7 +146,7 @@ impl Database {
                 .await?;
             let rows: Vec<DbDmMessage> = existing.take(0)?;
             if let Some(found) = rows.into_iter().next() {
-                return Ok((db_to_dm(self, found), false));
+                return Ok((db_to_dm(self, found)?, false));
             }
 
             let row = DbDmMessage {
@@ -136,7 +163,7 @@ impl Database {
                 self.client.create("dm_message").content(row).await?;
             let inserted = created
                 .ok_or_else(|| crate::DbError::NotFound("Failed to insert dm_message".into()))?;
-            Ok((db_to_dm(self, inserted), true))
+            Ok((db_to_dm(self, inserted)?, true))
         })
         .await
     }
@@ -174,7 +201,9 @@ impl Database {
                     .await?
             };
             let rows: Vec<DbDmMessage> = result.take(0)?;
-            Ok(rows.into_iter().map(|r| db_to_dm(self, r)).collect())
+            rows.into_iter()
+                .map(|r| db_to_dm(self, r))
+                .collect::<DbResult<Vec<_>>>()
         })
         .await
     }
@@ -213,7 +242,9 @@ impl Database {
                     .await?
             };
             let rows: Vec<DbDmMessage> = result.take(0)?;
-            Ok(rows.into_iter().map(|r| db_to_dm(self, r)).collect())
+            rows.into_iter()
+                .map(|r| db_to_dm(self, r))
+                .collect::<DbResult<Vec<_>>>()
         })
         .await
     }
@@ -416,6 +447,47 @@ mod tests {
         // Only one row stored.
         let thread = db.list_dm_thread(&alice, &bob, 50, None).await.unwrap();
         assert_eq!(thread.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn seal_and_open_roundtrip_with_crypto() {
+        let db = test_db().await;
+        let sealed = seal_dm_content(&db, "secret message", "gw1", "ck1").unwrap();
+        assert!(sealed.starts_with(DM_ENC_PREFIX));
+        assert_ne!(sealed, "secret message");
+        let opened = open_dm_content(&db, &sealed, "gw1", "ck1").unwrap();
+        assert_eq!(opened, "secret message");
+    }
+
+    #[tokio::test]
+    async fn plaintext_passthrough_without_crypto() {
+        let mut db = Database::connect_memory().await.unwrap();
+        db.crypto = None;
+        run_migrations(&db.client).await.unwrap();
+        let sealed = seal_dm_content(&db, "plain", "gw", "ck").unwrap();
+        assert_eq!(sealed, "plain");
+        assert_eq!(open_dm_content(&db, "plain", "gw", "ck").unwrap(), "plain");
+    }
+
+    #[tokio::test]
+    async fn open_encrypted_without_crypto_fails() {
+        let db_with = test_db().await;
+        let sealed = seal_dm_content(&db_with, "hidden", "gw1", "ck1").unwrap();
+
+        let mut db_none = Database::connect_memory().await.unwrap();
+        db_none.crypto = None;
+        let err = open_dm_content(&db_none, &sealed, "gw1", "ck1").unwrap_err();
+        assert!(
+            matches!(err, crate::DbError::Config(_)),
+            "expected Config error, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn open_corrupt_ciphertext_fails() {
+        let db = test_db().await;
+        let err = open_dm_content(&db, "enc1:{not-json", "gw", "ck").unwrap_err();
+        assert!(matches!(err, crate::DbError::Config(_)));
     }
 
     #[tokio::test]

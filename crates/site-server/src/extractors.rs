@@ -181,11 +181,11 @@ impl FromRequestParts<AppState> for DaemonUser {
             .db
             .validate_daemon_token(auth_header)
             .await
-            .map_err(|e| {
+            .map_err(|_e| {
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     Json(ErrorResponse {
-                        error: e.to_string(),
+                        error: "Internal error".into(),
                     }),
                 )
             })?
@@ -202,11 +202,11 @@ impl FromRequestParts<AppState> for DaemonUser {
             .db
             .get_member(&member_id)
             .await
-            .map_err(|e| {
+            .map_err(|_e| {
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     Json(ErrorResponse {
-                        error: e.to_string(),
+                        error: "Internal error".into(),
                     }),
                 )
             })?
@@ -232,11 +232,11 @@ impl FromRequestParts<AppState> for DaemonUser {
             .db
             .is_member_suspended_or_banned(&member.id)
             .await
-            .map_err(|e| {
+            .map_err(|_e| {
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     Json(ErrorResponse {
-                        error: e.to_string(),
+                        error: "Internal error".into(),
                     }),
                 )
             })?;

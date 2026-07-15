@@ -16,11 +16,11 @@ use crate::state::AppState;
 pub async fn list_games(
     State(state): State<AppState>,
 ) -> Result<Json<Vec<Game>>, (StatusCode, Json<ErrorResponse>)> {
-    state.db.list_games().await.map(Json).map_err(|e| {
+    state.db.list_games().await.map(Json).map_err(|_e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse {
-                error: e.to_string(),
+                error: "Internal error".into(),
             }),
         )
     })
@@ -35,11 +35,11 @@ pub async fn get_game(
         .db
         .get_game(&id)
         .await
-        .map_err(|e| {
+        .map_err(|_e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
-                    error: e.to_string(),
+                    error: "Internal error".into(),
                 }),
             )
         })?
@@ -70,11 +70,11 @@ pub async fn create_game(
         .db
         .create_game(&body.name, body.abbreviation.as_deref())
         .await
-        .map_err(|e| {
+        .map_err(|_e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
-                    error: e.to_string(),
+                    error: "Internal error".into(),
                 }),
             )
         })?;
@@ -113,11 +113,11 @@ pub async fn update_game(
             body.abbreviation.as_ref().map(|a| a.as_deref()),
         )
         .await
-        .map_err(|e| {
+        .map_err(|_e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
-                    error: e.to_string(),
+                    error: "Internal error".into(),
                 }),
             )
         })?;

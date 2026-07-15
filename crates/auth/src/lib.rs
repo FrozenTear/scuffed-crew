@@ -1,4 +1,7 @@
 pub mod types;
+pub mod env_flags;
+
+pub use env_flags::is_production_env;
 
 #[cfg(feature = "crypto")]
 pub mod crypto;

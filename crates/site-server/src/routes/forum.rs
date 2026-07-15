@@ -10,6 +10,7 @@ use scuffed_db::{
     AuditAction, AuditTargetType, ForumBoard, ForumCategory, ForumCategoryNode, ForumReply,
     ForumThread, NostrKeyMode,
 };
+use zeroize::Zeroize;
 
 use scuffed_chat::nostr::events::EventBuilder;
 use scuffed_chat::nostr::relay::publish_event_oneshot;
@@ -420,11 +421,11 @@ pub async fn get_thread(
     Path(id): Path<String>,
     Query(query): Query<ListRepliesQuery>,
 ) -> Result<Json<ThreadDetailResponse>, (StatusCode, Json<ErrorResponse>)> {
-    let thread = state.db.get_forum_thread(&id).await.map_err(|e| {
+    let thread = state.db.get_forum_thread(&id).await.map_err(|_e| {
         (
             StatusCode::NOT_FOUND,
             Json(ErrorResponse {
-                error: e.to_string(),
+                error: "Internal error".into(),
             }),
         )
     })?;
@@ -552,11 +553,11 @@ pub async fn create_reply(
     }
 
     // Verify thread exists and is not locked
-    let thread = state.db.get_forum_thread(&id).await.map_err(|e| {
+    let thread = state.db.get_forum_thread(&id).await.map_err(|_e| {
         (
             StatusCode::NOT_FOUND,
             Json(ErrorResponse {
-                error: e.to_string(),
+                error: "Internal error".into(),
             }),
         )
     })?;
@@ -589,11 +590,11 @@ pub async fn create_reply(
         .db
         .create_forum_reply(&id, &member.member.id, &body.content)
         .await
-        .map_err(|e| {
+        .map_err(|_e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
-                    error: e.to_string(),
+                    error: "Internal error".into(),
                 }),
             )
         })?;
@@ -620,11 +621,11 @@ pub async fn pin_thread(
         .db
         .pin_forum_thread(&id, body.pinned)
         .await
-        .map_err(|e| {
+        .map_err(|_e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
-                    error: e.to_string(),
+                    error: "Internal error".into(),
                 }),
             )
         })?;
@@ -654,11 +655,11 @@ pub async fn lock_thread(
         .db
         .lock_forum_thread(&id, body.locked)
         .await
-        .map_err(|e| {
+        .map_err(|_e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
-                    error: e.to_string(),
+                    error: "Internal error".into(),
                 }),
             )
         })?;
@@ -720,7 +721,7 @@ async fn maybe_publish_thread_to_relay(
     if member.nostr_key_mode != Some(NostrKeyMode::ServerManaged) {
         return;
     }
-    let secret_hex = match state.db.get_nostr_secret_key(&member.id).await {
+    let mut secret_hex = match state.db.get_nostr_secret_key(&member.id).await {
         Ok(Some(key)) => key,
         _ => return,
     };
@@ -728,6 +729,7 @@ async fn maybe_publish_thread_to_relay(
         Ok(k) => k,
         Err(_) => return,
     };
+    secret_hex.zeroize();
 
     let content = format!("{}\n\n{}", thread.title, thread.content);
     let hashtags = vec![format!("forum-{category}")];
@@ -779,7 +781,7 @@ async fn maybe_publish_reply_to_relay(
     if member.nostr_key_mode != Some(NostrKeyMode::ServerManaged) {
         return;
     }
-    let secret_hex = match state.db.get_nostr_secret_key(&member.id).await {
+    let mut secret_hex = match state.db.get_nostr_secret_key(&member.id).await {
         Ok(Some(key)) => key,
         _ => return,
     };
@@ -787,6 +789,7 @@ async fn maybe_publish_reply_to_relay(
         Ok(k) => k,
         Err(_) => return,
     };
+    secret_hex.zeroize();
 
     let event = match EventBuilder::build_community_post(
         &keys,

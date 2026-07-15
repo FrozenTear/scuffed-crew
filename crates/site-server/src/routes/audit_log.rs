@@ -35,20 +35,20 @@ pub async fn list_audit_log(
         .db
         .list_audit_log(query.limit.min(100), query.offset)
         .await
-        .map_err(|e| {
+        .map_err(|_e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
-                    error: e.to_string(),
+                    error: "Internal error".into(),
                 }),
             )
         })?;
 
-    let total = state.db.count_audit_log().await.map_err(|e| {
+    let total = state.db.count_audit_log().await.map_err(|_e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse {
-                error: e.to_string(),
+                error: "Internal error".into(),
             }),
         )
     })?;

@@ -29,7 +29,9 @@ struct DbMember {
     availability_status: Option<String>,
     nostr_pubkey: Option<String>,
     nostr_key_mode: Option<String>,
+    /// May be omitted from SELECT projections — both serde and SurrealValue defaults required.
     #[serde(default)]
+    #[surreal(default)]
     nostr_secret_key_encrypted: Option<serde_json::Value>,
     joined_at: SurrealDatetime,
     is_active: bool,
@@ -44,19 +46,38 @@ fn parse_role(s: &str) -> OrgRole {
     }
 }
 
-fn parse_key_mode(s: &str) -> NostrKeyMode {
+fn parse_key_mode(s: &str) -> DbResult<Option<NostrKeyMode>> {
     match s {
-        "external" => NostrKeyMode::External,
-        _ => NostrKeyMode::ServerManaged,
+        "external" => Ok(Some(NostrKeyMode::External)),
+        "server_managed" => Ok(Some(NostrKeyMode::ServerManaged)),
+        other => Err(crate::DbError::Config(format!(
+            "Unknown nostr_key_mode: {other}"
+        ))),
     }
 }
 
-fn db_to_member(db: DbMember) -> Member {
+fn parse_encrypted_secret(
+    v: Option<serde_json::Value>,
+) -> DbResult<Option<EncryptedBlob>> {
+    match v {
+        None => Ok(None),
+        Some(val) if val.is_null() => Ok(None),
+        Some(val) => serde_json::from_value(val).map(Some).map_err(|e| {
+            crate::DbError::Config(format!("Corrupt nostr_secret_key_encrypted: {e}"))
+        }),
+    }
+}
+
+fn db_to_member(db: DbMember) -> DbResult<Member> {
     let id = db
         .id
         .map(|r| crate::record_id_key_to_string(r.key))
         .unwrap_or_else(|| "unknown".to_string());
-    Member {
+    let nostr_key_mode = match db.nostr_key_mode.as_deref() {
+        None => None,
+        Some(s) => parse_key_mode(s)?,
+    };
+    Ok(Member {
         id,
         user_id: db.user_id,
         org_role: parse_role(&db.org_role),
@@ -67,13 +88,11 @@ fn db_to_member(db: DbMember) -> Member {
         pronouns: db.pronouns,
         availability_status: db.availability_status,
         nostr_pubkey: db.nostr_pubkey,
-        nostr_key_mode: db.nostr_key_mode.as_deref().map(parse_key_mode),
-        nostr_secret_key_encrypted: db
-            .nostr_secret_key_encrypted
-            .and_then(|v| serde_json::from_value(v).ok()),
+        nostr_key_mode,
+        nostr_secret_key_encrypted: parse_encrypted_secret(db.nostr_secret_key_encrypted)?,
         joined_at: db.joined_at.into(),
         is_active: db.is_active,
-    }
+    })
 }
 
 impl Database {
@@ -118,9 +137,9 @@ impl Database {
                 is_active: true,
             };
             let created: Option<DbMember> = self.client.create("member").content(db_member).await?;
-            Ok(db_to_member(created.ok_or_else(|| {
+            db_to_member(created.ok_or_else(|| {
                 crate::DbError::NotFound("Failed to create member".into())
-            })?))
+            })?)
         })
         .await
     }
@@ -164,7 +183,7 @@ impl Database {
                 .bind(("off", offset))
                 .await?;
             let members: Vec<DbMember> = result.take(0)?;
-            Ok(members.into_iter().map(db_to_member).collect())
+            members.into_iter().map(db_to_member).collect::<DbResult<Vec<_>>>()
         })
         .await
     }
@@ -178,31 +197,123 @@ impl Database {
                 .bind(("uid", user_id.to_string()))
                 .await?;
             let members: Vec<DbMember> = result.take(0)?;
-            Ok(members.into_iter().next().map(db_to_member))
+            match members.into_iter().next() {
+                Some(m) => Ok(Some(db_to_member(m)?)),
+                None => Ok(None),
+            }
         })
         .await
     }
 
     /// Get a member by their record ID (full row — secrets included for server-side ops).
+    /// Prefer [`Self::get_member_safe`] for HTTP responses.
     pub async fn get_member(&self, id: &str) -> DbResult<Option<Member>> {
         with_timeout(async {
             let db_member: Option<DbMember> = self.client.select(("member", id)).await?;
-            Ok(db_member.map(db_to_member))
+            match db_member {
+                Some(m) => Ok(Some(db_to_member(m)?)),
+                None => Ok(None),
+            }
         })
         .await
     }
 
-    /// Member + suspension flag for auth extractors (two sequential indexed lookups).
+    /// Public/profile path: never loads `nostr_secret_key_encrypted`.
+    pub async fn get_member_safe(&self, id: &str) -> DbResult<Option<Member>> {
+        with_timeout(async {
+            let q = format!(
+                "SELECT {MEMBER_SAFE_COLS} FROM $rid LIMIT 1"
+            );
+            let mut result = self
+                .client
+                .query(&q)
+                .bind(("rid", RecordId::new("member", id)))
+                .await?;
+            let members: Vec<DbMember> = result.take(0)?;
+            match members.into_iter().next() {
+                Some(m) => Ok(Some(db_to_member(m)?)),
+                None => Ok(None),
+            }
+        })
+        .await
+    }
+
+    /// Auth extractor path: safe projection (no encrypted Nostr secret) + suspension check
+    /// under a **single** query timeout.
     pub async fn get_member_auth_by_user(
         &self,
         user_id: &str,
     ) -> DbResult<Option<(Member, bool)>> {
-        let member = match self.get_member_by_user(user_id).await? {
-            Some(m) => m,
-            None => return Ok(None),
-        };
-        let suspended = self.is_member_suspended_or_banned(&member.id).await?;
-        Ok(Some((member, suspended)))
+        with_timeout(async {
+            let q = format!(
+                "SELECT {MEMBER_SAFE_COLS} FROM member WHERE user_id = $uid LIMIT 1"
+            );
+            let mut result = self
+                .client
+                .query(&q)
+                .bind(("uid", user_id.to_string()))
+                .await?;
+            let members: Vec<DbMember> = result.take(0)?;
+            let Some(raw) = members.into_iter().next() else {
+                return Ok(None);
+            };
+            let member = db_to_member(raw)?;
+
+            #[derive(Deserialize, SurrealValue)]
+            struct CountResult {
+                count: u64,
+            }
+            let mut sus = self
+                .client
+                .query(
+                    "SELECT count() FROM moderation_action WHERE member_id = $mid \
+                     AND is_active = true AND action_type IN ['suspension', 'ban'] \
+                     AND (expires_at IS NONE OR expires_at > time::now()) GROUP ALL",
+                )
+                .bind(("mid", member.id.clone()))
+                .await?;
+            let counts: Vec<CountResult> = sus.take(0)?;
+            let suspended = counts.first().map(|c| c.count > 0).unwrap_or(false);
+            Ok(Some((member, suspended)))
+        })
+        .await
+    }
+
+    /// Load server-managed Nostr encrypted secrets for the DM subscriber index.
+    /// Only returns rows that have both a pubkey and an encrypted secret.
+    pub async fn list_server_managed_nostr_secrets(
+        &self,
+    ) -> DbResult<Vec<(String, EncryptedBlob)>> {
+        with_timeout(async {
+            #[derive(Debug, Deserialize, SurrealValue)]
+            struct Row {
+                nostr_pubkey: Option<String>,
+                #[serde(default)]
+                #[surreal(default)]
+                nostr_secret_key_encrypted: Option<serde_json::Value>,
+            }
+            let mut result = self
+                .client
+                .query(
+                    "SELECT nostr_pubkey, nostr_secret_key_encrypted FROM member \
+                     WHERE is_active = true AND nostr_key_mode = 'server_managed' \
+                     AND nostr_pubkey != NONE AND nostr_secret_key_encrypted != NONE",
+                )
+                .await?;
+            let rows: Vec<Row> = result.take(0)?;
+            let mut out = Vec::new();
+            for row in rows {
+                let (Some(pk), Some(val)) = (row.nostr_pubkey, row.nostr_secret_key_encrypted)
+                else {
+                    continue;
+                };
+                if let Ok(blob) = serde_json::from_value::<EncryptedBlob>(val) {
+                    out.push((pk, blob));
+                }
+            }
+            Ok(out)
+        })
+        .await
     }
 
     /// Update a member's profile fields via field-level SET (no full-document RMW).
@@ -302,9 +413,9 @@ impl Database {
 
             let mut result = q.await?;
             let updated: Option<DbMember> = result.take(0)?;
-            Ok(db_to_member(updated.ok_or_else(|| {
+            db_to_member(updated.ok_or_else(|| {
                 crate::DbError::NotFound(format!("Member {id} not found after update"))
-            })?))
+            })?)
         })
         .await
     }
@@ -318,7 +429,7 @@ impl Database {
             );
             let mut result = self.client.query(&q).await?;
             let members: Vec<DbMember> = result.take(0)?;
-            Ok(members.into_iter().map(db_to_member).collect())
+            members.into_iter().map(db_to_member).collect::<DbResult<Vec<_>>>()
         })
         .await
     }
@@ -354,9 +465,9 @@ impl Database {
                 .bind(("enc", enc))
                 .await?;
             let updated: Option<DbMember> = result.take(0)?;
-            Ok(db_to_member(updated.ok_or_else(|| {
+            db_to_member(updated.ok_or_else(|| {
                 crate::DbError::NotFound(format!("Member {id} not found after update"))
-            })?))
+            })?)
         })
         .await
     }
@@ -370,7 +481,10 @@ impl Database {
                 .bind(("pk", pubkey.to_string()))
                 .await?;
             let members: Vec<DbMember> = result.take(0)?;
-            Ok(members.into_iter().next().map(db_to_member))
+            match members.into_iter().next() {
+                Some(m) => Ok(Some(db_to_member(m)?)),
+                None => Ok(None),
+            }
         })
         .await
     }
@@ -386,9 +500,9 @@ impl Database {
                 .bind(("role", new_role.to_string()))
                 .await?;
             let updated: Option<DbMember> = result.take(0)?;
-            Ok(db_to_member(updated.ok_or_else(|| {
+            db_to_member(updated.ok_or_else(|| {
                 crate::DbError::NotFound(format!("Member {id} not found"))
-            })?))
+            })?)
         })
         .await
     }
@@ -468,5 +582,56 @@ impl Database {
             ));
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::migrations::run_migrations;
+    use scuffed_auth::crypto::CryptoService;
+    use std::sync::Arc;
+
+    async fn test_db_with_crypto() -> Database {
+        let key = CryptoService::generate_key();
+        let crypto = CryptoService::new(&key, 1).unwrap();
+        let mut db = Database::connect_memory().await.unwrap();
+        db.crypto = Some(Arc::new(crypto));
+        run_migrations(&db.client).await.unwrap();
+        db
+    }
+
+    #[tokio::test]
+    async fn list_paginated_decodes_members_with_server_managed_secrets() {
+        let db = test_db_with_crypto().await;
+        let m = db
+            .create_member("user-1", "Alice", OrgRole::Member)
+            .await
+            .unwrap();
+        assert!(m.nostr_secret_key_encrypted.is_some());
+        assert!(m.nostr_pubkey.is_some());
+
+        // Projection omits the secret column — must still decode with #[surreal(default)].
+        let listed = db.list_members_paginated(10, 0).await.unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].display_name, "Alice");
+        assert!(listed[0].nostr_pubkey.is_some());
+        assert!(
+            listed[0].nostr_secret_key_encrypted.is_none(),
+            "list path must not load secrets"
+        );
+
+        // Auth path also omits secrets.
+        let (auth_m, sus) = db
+            .get_member_auth_by_user("user-1")
+            .await
+            .unwrap()
+            .expect("member");
+        assert!(!sus);
+        assert!(auth_m.nostr_secret_key_encrypted.is_none());
+
+        // Full get still has the secret for signing.
+        let full = db.get_member(&m.id).await.unwrap().unwrap();
+        assert!(full.nostr_secret_key_encrypted.is_some());
     }
 }

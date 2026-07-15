@@ -26,26 +26,37 @@ async fn main() {
 
     let oauth_config = OAuthConfig::from_env();
 
+    // Init-only: root migrations + ensure EDITOR app user, then exit.
+    // Use for separate migrate jobs; set SURREALDB_BOOTSTRAP=0 on long-lived app containers.
+    if std::env::var("SURREALDB_MIGRATE_ONLY").ok().as_deref() == Some("1") {
+        if std::env::var("SURREALDB_URL").is_err() {
+            panic!("SURREALDB_MIGRATE_ONLY=1 requires SURREALDB_URL (remote DB)");
+        }
+        Database::bootstrap_from_env()
+            .await
+            .expect("SURREALDB_MIGRATE_ONLY: bootstrap failed");
+        tracing::info!("SURREALDB_MIGRATE_ONLY complete — exiting");
+        return;
+    }
+
     // Connect to SurrealDB (remote or in-memory fallback).
     // Prefer SURREALDB_AUTH_MODE=scoped + non-root user in production.
-    let db = match std::env::var("SURREALDB_URL") {
-        Ok(_) => Database::connect_from_env()
-            .await
-            .expect("Failed to connect to SurrealDB"),
-        Err(_) => {
-            tracing::info!("No SURREALDB_URL set, using in-memory database");
-            Database::connect_memory()
-                .await
-                .expect("Failed to create in-memory database")
-        }
-    };
-
-    run_migrations(&db.client)
-        .await
-        .expect("Failed to run database migrations");
-
-    // Seed dev data when using in-memory database
+    // Remote scoped: optional root bootstrap (unless SURREALDB_BOOTSTRAP=0), then EDITOR app user.
     let is_dev = std::env::var("SURREALDB_URL").is_err();
+    let db = if is_dev {
+        tracing::info!("No SURREALDB_URL set, using in-memory database");
+        let db = Database::connect_memory()
+            .await
+            .expect("Failed to create in-memory database");
+        run_migrations(&db.client)
+            .await
+            .expect("Failed to run database migrations");
+        db
+    } else {
+        Database::connect_from_env()
+            .await
+            .expect("Failed to connect to SurrealDB")
+    };
     if is_dev {
         use scuffed_auth::crypto::hash_session_token;
         let token_hash = hash_session_token(DEV_SESSION_TOKEN);
@@ -478,19 +489,11 @@ async fn main() {
         }
     };
 
-    // Initialize CryptoService once from env (None if ENCRYPTION_KEY not set)
-    let crypto = match scuffed_auth::crypto::CryptoService::from_env() {
-        Ok(c) => {
-            if c.is_none() {
-                tracing::info!("ENCRYPTION_KEY not set — Nostr key encryption disabled");
-            }
-            c
-        }
-        Err(e) => {
-            tracing::error!("CryptoService init failed: {e} — running without encryption");
-            None
-        }
-    };
+    // Single shared CryptoService from Database (no second from_env() load).
+    let crypto = db.crypto.clone();
+    if crypto.is_none() {
+        tracing::info!("ENCRYPTION_KEY not set — Nostr key encryption disabled");
+    }
 
     let relay_url = std::env::var("NOSTR_RELAY_URL").ok();
     if let Some(ref url) = relay_url {

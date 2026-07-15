@@ -34,11 +34,11 @@ pub async fn list_articles(
         .list_published_articles(query.limit.min(100), query.offset)
         .await
         .map(Json)
-        .map_err(|e| {
+        .map_err(|_e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
-                    error: e.to_string(),
+                    error: "Internal error".into(),
                 }),
             )
         })
@@ -55,11 +55,11 @@ pub async fn list_all_articles(
         .list_all_articles(query.limit.min(100), query.offset)
         .await
         .map(Json)
-        .map_err(|e| {
+        .map_err(|_e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
-                    error: e.to_string(),
+                    error: "Internal error".into(),
                 }),
             )
         })
@@ -79,13 +79,13 @@ pub async fn get_article(
             scuffed_db::DbError::NotFound(_) => (
                 StatusCode::NOT_FOUND,
                 Json(ErrorResponse {
-                    error: e.to_string(),
+                    error: "Internal error".into(),
                 }),
             ),
             _ => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
-                    error: e.to_string(),
+                    error: "Internal error".into(),
                 }),
             ),
         })
@@ -117,11 +117,11 @@ pub async fn create_article(
             &officer.member.id,
         )
         .await
-        .map_err(|e| {
+        .map_err(|_e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
-                    error: e.to_string(),
+                    error: "Internal error".into(),
                 }),
             )
         })?;
@@ -163,13 +163,13 @@ pub async fn update_article(
             scuffed_db::DbError::NotFound(_) => (
                 StatusCode::NOT_FOUND,
                 Json(ErrorResponse {
-                    error: e.to_string(),
+                    error: "Internal error".into(),
                 }),
             ),
             _ => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
-                    error: e.to_string(),
+                    error: "Internal error".into(),
                 }),
             ),
         })?;
@@ -184,11 +184,11 @@ pub async fn update_article(
             body.cover_image_url.as_ref().map(|s| s.as_deref()),
         )
         .await
-        .map_err(|e| {
+        .map_err(|_e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
-                    error: e.to_string(),
+                    error: "Internal error".into(),
                 }),
             )
         })?;
@@ -220,22 +220,22 @@ pub async fn publish_article(
             scuffed_db::DbError::NotFound(_) => (
                 StatusCode::NOT_FOUND,
                 Json(ErrorResponse {
-                    error: e.to_string(),
+                    error: "Internal error".into(),
                 }),
             ),
             _ => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
-                    error: e.to_string(),
+                    error: "Internal error".into(),
                 }),
             ),
         })?;
 
-    state.db.publish_article(&existing.id).await.map_err(|e| {
+    state.db.publish_article(&existing.id).await.map_err(|_e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse {
-                error: e.to_string(),
+                error: "Internal error".into(),
             }),
         )
     })?;
@@ -267,13 +267,13 @@ pub async fn unpublish_article(
             scuffed_db::DbError::NotFound(_) => (
                 StatusCode::NOT_FOUND,
                 Json(ErrorResponse {
-                    error: e.to_string(),
+                    error: "Internal error".into(),
                 }),
             ),
             _ => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
-                    error: e.to_string(),
+                    error: "Internal error".into(),
                 }),
             ),
         })?;
@@ -282,11 +282,11 @@ pub async fn unpublish_article(
         .db
         .unpublish_article(&existing.id)
         .await
-        .map_err(|e| {
+        .map_err(|_e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
-                    error: e.to_string(),
+                    error: "Internal error".into(),
                 }),
             )
         })?;
@@ -318,22 +318,22 @@ pub async fn delete_article(
             scuffed_db::DbError::NotFound(_) => (
                 StatusCode::NOT_FOUND,
                 Json(ErrorResponse {
-                    error: e.to_string(),
+                    error: "Internal error".into(),
                 }),
             ),
             _ => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
-                    error: e.to_string(),
+                    error: "Internal error".into(),
                 }),
             ),
         })?;
 
-    state.db.delete_article(&existing.id).await.map_err(|e| {
+    state.db.delete_article(&existing.id).await.map_err(|_e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse {
-                error: e.to_string(),
+                error: "Internal error".into(),
             }),
         )
     })?;

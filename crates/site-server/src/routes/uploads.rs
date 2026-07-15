@@ -67,11 +67,11 @@ pub async fn upload_avatar(
         AVATAR_MAX_BYTES,
     )
     .await
-    .map_err(|e| {
+    .map_err(|_e| {
         (
             StatusCode::BAD_REQUEST,
             Json(ErrorResponse {
-                error: e.to_string(),
+                error: "Internal error".into(),
             }),
         )
     })?;
@@ -127,11 +127,11 @@ pub async fn upload_image(
         IMAGE_MAX_BYTES,
     )
     .await
-    .map_err(|e| {
+    .map_err(|_e| {
         (
             StatusCode::BAD_REQUEST,
             Json(ErrorResponse {
-                error: e.to_string(),
+                error: "Internal error".into(),
             }),
         )
     })?;

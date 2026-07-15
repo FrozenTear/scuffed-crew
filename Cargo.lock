@@ -9712,6 +9712,7 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
+ "zeroize",
 ]
 
 [[package]]
@@ -9809,6 +9810,7 @@ dependencies = [
  "tracing-subscriber",
  "urlencoding",
  "uuid",
+ "zeroize",
 ]
 
 [[package]]

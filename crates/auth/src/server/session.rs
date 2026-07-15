@@ -14,7 +14,7 @@ pub struct ErrorResponse {
 /// Build a secure session cookie with proper security attributes.
 pub fn build_session_cookie(config: &SessionConfig, session_token: String) -> Cookie<'static> {
     let is_secure = std::env::var("SECURE_COOKIES").is_ok()
-        || std::env::var("PRODUCTION").is_ok()
+        || crate::is_production_env()
         || !cfg!(debug_assertions);
 
     Cookie::build((config.cookie_name.clone(), session_token))
@@ -29,7 +29,7 @@ pub fn build_session_cookie(config: &SessionConfig, session_token: String) -> Co
 /// Build a short-lived CSRF cookie for OAuth state validation.
 pub fn build_csrf_cookie(config: &SessionConfig, csrf_token: String) -> Cookie<'static> {
     let is_secure = std::env::var("SECURE_COOKIES").is_ok()
-        || std::env::var("PRODUCTION").is_ok()
+        || crate::is_production_env()
         || !cfg!(debug_assertions);
 
     Cookie::build((config.csrf_cookie_name.clone(), csrf_token))
@@ -85,9 +85,10 @@ pub fn validate_csrf_state(
 
 /// Generate a secure random session token (32 bytes, URL-safe base64).
 pub fn generate_session_token() -> String {
-    use rand::Rng;
-    let mut rng = rand::thread_rng();
-    let bytes: [u8; 32] = rng.r#gen();
+    use rand::rngs::OsRng;
+    use rand::RngCore;
+    let mut bytes = [0u8; 32];
+    OsRng.fill_bytes(&mut bytes);
     base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, bytes)
 }
 

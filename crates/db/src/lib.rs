@@ -6,9 +6,12 @@
 mod client;
 pub mod migrations;
 pub mod queries;
+pub mod rewrap;
 pub mod types;
 
-pub use client::{is_production_env, Database, DbConfig, SurrealAuthMode};
+pub use client::{Database, DbConfig, SurrealAuthMode};
+pub use rewrap::{rewrap_all_encrypted_fields, RewrapStats};
+pub use scuffed_auth::is_production_env;
 pub use types::*;
 
 use std::time::Duration;

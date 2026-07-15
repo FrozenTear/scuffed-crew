@@ -17,11 +17,11 @@ pub async fn list_polls(
     State(state): State<AppState>,
     member: OrgMember,
 ) -> Result<Json<Vec<PollResults>>, (StatusCode, Json<ErrorResponse>)> {
-    let polls = state.db.list_polls().await.map_err(|e| {
+    let polls = state.db.list_polls().await.map_err(|_e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse {
-                error: e.to_string(),
+                error: "Internal error".into(),
             }),
         )
     })?;
@@ -31,11 +31,11 @@ pub async fn list_polls(
             .db
             .get_poll_results(&poll.id, Some(&member.member.id))
             .await
-            .map_err(|e| {
+            .map_err(|_e| {
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     Json(ErrorResponse {
-                        error: e.to_string(),
+                        error: "Internal error".into(),
                     }),
                 )
             })?;
@@ -54,11 +54,11 @@ pub async fn get_poll(
         .db
         .get_poll_results(&id, Some(&member.member.id))
         .await
-        .map_err(|e| {
+        .map_err(|_e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
-                    error: e.to_string(),
+                    error: "Internal error".into(),
                 }),
             )
         })?;
@@ -101,11 +101,11 @@ pub async fn create_poll(
             &officer.member.id,
         )
         .await
-        .map_err(|e| {
+        .map_err(|_e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
-                    error: e.to_string(),
+                    error: "Internal error".into(),
                 }),
             )
         })?;
@@ -135,11 +135,11 @@ pub async fn vote_poll(
     Path(id): Path<String>,
     Json(body): Json<VoteRequest>,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
-    let poll = state.db.get_poll(&id).await.map_err(|e| {
+    let poll = state.db.get_poll(&id).await.map_err(|_e| {
         (
             StatusCode::NOT_FOUND,
             Json(ErrorResponse {
-                error: e.to_string(),
+                error: "Internal error".into(),
             }),
         )
     })?;
@@ -157,11 +157,11 @@ pub async fn vote_poll(
         .db
         .vote_poll(&id, &member.member.id, body.option_index)
         .await
-        .map_err(|e| {
+        .map_err(|_e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
-                    error: e.to_string(),
+                    error: "Internal error".into(),
                 }),
             )
         })?;
@@ -179,11 +179,11 @@ pub async fn unvote_poll(
         .db
         .unvote_poll(&id, &member.member.id, option_index)
         .await
-        .map_err(|e| {
+        .map_err(|_e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
-                    error: e.to_string(),
+                    error: "Internal error".into(),
                 }),
             )
         })?;
@@ -196,11 +196,11 @@ pub async fn deactivate_poll(
     officer: OfficerUser,
     Path(id): Path<String>,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
-    state.db.deactivate_poll(&id).await.map_err(|e| {
+    state.db.deactivate_poll(&id).await.map_err(|_e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse {
-                error: e.to_string(),
+                error: "Internal error".into(),
             }),
         )
     })?;

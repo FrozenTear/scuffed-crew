@@ -1,5 +1,6 @@
-use scuffed_auth::crypto::EncryptedBlob;
+use scuffed_auth::crypto::{aad, EncryptedBlob};
 use secp256k1::{rand::rngs::OsRng, Secp256k1};
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::types::NostrKeyMode;
 use crate::{Database, DbError, DbResult};
@@ -17,6 +18,8 @@ pub struct NostrKeypair {
 ///
 /// Uses secp256k1 directly — a Nostr keypair is just a secp256k1 keypair
 /// with the public key in x-only (Schnorr) format.
+///
+/// Stores **raw 32-byte** secret material (not hex) under AAD bound to the pubkey.
 pub fn generate_encrypted_keypair(db: &Database) -> DbResult<NostrKeypair> {
     let crypto = db.crypto.as_ref().ok_or_else(|| {
         DbError::Config("CryptoService not configured — set ENCRYPTION_KEY".into())
@@ -29,13 +32,12 @@ pub fn generate_encrypted_keypair(db: &Database) -> DbResult<NostrKeypair> {
     let (xonly, _parity) = public_key.x_only_public_key();
     let pubkey_hex = hex::encode(xonly.serialize());
 
-    // Encrypt the 32-byte secret key
-    let secret_hex = hex::encode(secret_key.secret_bytes());
-    let secret_key_encrypted = crypto.encrypt(&secret_hex).map_err(DbError::Crypto)?;
-
-    // secret_hex is on the stack and will be dropped — for additional safety
-    // the actual secret_key bytes are in secp256k1's SecretKey which implements
-    // zeroize via Drop (when the `std` feature is active on secp256k1)
+    let mut secret_bytes = secret_key.secret_bytes();
+    let aad_s = aad::nostr_secret_key(&pubkey_hex);
+    let secret_key_encrypted = crypto
+        .encrypt_bytes(&secret_bytes, aad_s.as_bytes())
+        .map_err(DbError::Crypto)?;
+    secret_bytes.zeroize();
 
     Ok(NostrKeypair {
         pubkey: pubkey_hex,
@@ -45,14 +47,68 @@ pub fn generate_encrypted_keypair(db: &Database) -> DbResult<NostrKeypair> {
 
 /// Decrypt a member's stored Nostr secret key, returning the hex-encoded secret.
 ///
+/// Accepts raw 32-byte ciphertext payloads (preferred) and legacy UTF-8 hex strings.
+/// Verifies that the secret derives `pubkey_hex` (secp256k1 x-only, case-insensitive).
 /// The caller MUST use the result immediately and not hold it in long-lived state.
-pub fn decrypt_nostr_secret_key(db: &Database, blob: &EncryptedBlob) -> DbResult<String> {
+/// The returned buffer is zeroized on drop.
+pub fn decrypt_nostr_secret_key(
+    db: &Database,
+    blob: &EncryptedBlob,
+    pubkey_hex: &str,
+) -> DbResult<Zeroizing<String>> {
     let crypto = db
         .crypto
         .as_ref()
         .ok_or_else(|| DbError::Config("CryptoService not configured".into()))?;
 
-    crypto.decrypt(blob).map_err(DbError::Crypto)
+    let aad_s = aad::nostr_secret_key(pubkey_hex);
+    let pt: Zeroizing<Vec<u8>> = crypto
+        .decrypt_bytes(blob, aad_s.as_bytes())
+        .map_err(DbError::Crypto)?;
+
+    let secret_hex: Zeroizing<String> = if pt.len() == 32 {
+        Zeroizing::new(hex::encode(pt.as_slice()))
+    } else {
+        // Legacy: UTF-8 hex string inside the blob
+        let hex_str = String::from_utf8(pt.to_vec()).map_err(|_| {
+            DbError::Config(
+                "Invalid Nostr secret key encoding (expected 32 raw bytes or hex)".into(),
+            )
+        })?;
+        if hex_str.len() != 64 || !hex_str.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Err(DbError::Config(
+                "Invalid Nostr secret key encoding (expected 64-char hex)".into(),
+            ));
+        }
+        Zeroizing::new(hex_str)
+    };
+
+    verify_secret_derives_pubkey(&secret_hex, pubkey_hex)?;
+    Ok(secret_hex)
+}
+
+/// Verify a hex-encoded secret derives the given Nostr pubkey (x-only secp256k1).
+fn verify_secret_derives_pubkey(secret_hex: &str, pubkey_hex: &str) -> DbResult<()> {
+    let mut secret_bytes = hex::decode(secret_hex).map_err(|_| {
+        DbError::Config("Invalid Nostr secret key encoding (hex decode failed)".into())
+    })?;
+    let result = (|| {
+        let secp = Secp256k1::new();
+        let sk = secp256k1::SecretKey::from_slice(&secret_bytes).map_err(|_| {
+            DbError::Config("Invalid Nostr secret key (not a valid secp256k1 scalar)".into())
+        })?;
+        let pk = sk.public_key(&secp);
+        let (xonly, _) = pk.x_only_public_key();
+        let derived = hex::encode(xonly.serialize());
+        if !derived.eq_ignore_ascii_case(pubkey_hex) {
+            return Err(DbError::Config(
+                "Nostr secret key does not match owner pubkey".into(),
+            ));
+        }
+        Ok(())
+    })();
+    secret_bytes.zeroize();
+    result
 }
 
 impl Database {
@@ -82,15 +138,23 @@ impl Database {
     ///
     /// Returns `None` if the member has no server-managed key.
     /// The caller MUST use the result immediately — do not hold in long-lived state.
-    pub async fn get_nostr_secret_key(&self, member_id: &str) -> DbResult<Option<String>> {
+    /// The returned buffer is zeroized on drop.
+    pub async fn get_nostr_secret_key(
+        &self,
+        member_id: &str,
+    ) -> DbResult<Option<Zeroizing<String>>> {
         let member = self
             .get_member(member_id)
             .await?
             .ok_or_else(|| DbError::NotFound(format!("Member {member_id} not found")))?;
 
-        match (member.nostr_key_mode, member.nostr_secret_key_encrypted) {
-            (Some(NostrKeyMode::ServerManaged), Some(ref blob)) => {
-                let secret_hex = decrypt_nostr_secret_key(self, blob)?;
+        match (
+            member.nostr_key_mode,
+            member.nostr_secret_key_encrypted,
+            member.nostr_pubkey,
+        ) {
+            (Some(NostrKeyMode::ServerManaged), Some(ref blob), Some(ref pubkey)) => {
+                let secret_hex = decrypt_nostr_secret_key(self, blob, pubkey)?;
                 Ok(Some(secret_hex))
             }
             _ => Ok(None),
@@ -143,19 +207,43 @@ mod tests {
     async fn test_encrypt_decrypt_roundtrip() {
         let db = test_db().await;
         let keypair = generate_encrypted_keypair(&db).unwrap();
-        let decrypted = decrypt_nostr_secret_key(&db, &keypair.secret_key_encrypted).unwrap();
+        let decrypted =
+            decrypt_nostr_secret_key(&db, &keypair.secret_key_encrypted, &keypair.pubkey).unwrap();
 
         // Decrypted secret should be 64-char hex (32 bytes)
         assert_eq!(decrypted.len(), 64);
         assert!(decrypted.chars().all(|c| c.is_ascii_hexdigit()));
 
         // Verify the secret key corresponds to the public key
-        let secret_bytes = hex::decode(&decrypted).unwrap();
+        let secret_bytes = hex::decode(decrypted.as_str()).unwrap();
         let secp = Secp256k1::new();
         let sk = secp256k1::SecretKey::from_slice(&secret_bytes).unwrap();
         let pk = sk.public_key(&secp);
         let (xonly, _) = pk.x_only_public_key();
         assert_eq!(hex::encode(xonly.serialize()), keypair.pubkey);
+    }
+
+    #[tokio::test]
+    async fn test_decrypt_rejects_pubkey_mismatch() {
+        let db = test_db().await;
+        let crypto = db.crypto.as_ref().unwrap();
+
+        // Secret for kp1, encrypted under AAD of a different claimed owner pubkey.
+        let kp1 = generate_encrypted_keypair(&db).unwrap();
+        let secret = decrypt_nostr_secret_key(&db, &kp1.secret_key_encrypted, &kp1.pubkey).unwrap();
+        let mut secret_bytes = hex::decode(secret.as_str()).unwrap();
+        let claimed_owner = "dd".repeat(32);
+        let aad_s = aad::nostr_secret_key(&claimed_owner);
+        let mismatched = crypto
+            .encrypt_bytes(&secret_bytes, aad_s.as_bytes())
+            .unwrap();
+        secret_bytes.zeroize();
+
+        let err = decrypt_nostr_secret_key(&db, &mismatched, &claimed_owner).unwrap_err();
+        assert!(
+            err.to_string().contains("does not match owner pubkey"),
+            "unexpected error: {err}"
+        );
     }
 
     #[tokio::test]
@@ -211,8 +299,7 @@ mod tests {
             .unwrap();
         assert!(member.nostr_pubkey.is_none());
 
-        // Now provision with a crypto-enabled db (different in-memory instance,
-        // so we test provision_nostr_keypair on the first db)
+        // Now provision with a crypto-enabled db
         let member = db
             .create_member("test-user-3", "LateKeypair", crate::types::OrgRole::Member)
             .await

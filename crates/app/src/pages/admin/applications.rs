@@ -2,7 +2,7 @@ use dioxus::prelude::*;
 use serde::Deserialize;
 
 use crate::components::{ConfirmDialog, DataTable, StatusPill, Toast, use_toast};
-use crate::hooks::{ModalController, use_api};
+use crate::hooks::{ModalController, use_api_list};
 use scuffed_api_client::ApiClient;
 use scuffed_types::api::PatchApplicationRequest;
 
@@ -19,7 +19,8 @@ struct Application {
 
 #[component]
 pub fn AdminApplications() -> Element {
-    let mut applications = use_api::<Vec<Application>>("/api/applications");
+    // Cursor-paginated list (auto-follows pages via use_api_list).
+    let mut applications = use_api_list::<Application>("/api/applications");
     let mut toast = use_toast();
 
     // Reject dialog state

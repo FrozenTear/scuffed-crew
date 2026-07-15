@@ -15,6 +15,7 @@ use scuffed_auth::server::session::ErrorResponse;
 
 use nostr::key::Keys;
 use nostr::{FromBech32, SecretKey};
+use zeroize::{Zeroize, Zeroizing};
 
 use scuffed_db::NostrKeyMode;
 
@@ -196,11 +197,11 @@ pub async fn nostr_challenge(
     caller: OrgMember,
     Json(body): Json<ChallengeRequest>,
 ) -> Result<Json<ChallengeResponse>, (StatusCode, Json<ErrorResponse>)> {
-    let pubkey_hex = resolve_pubkey_hex(&body.pubkey).map_err(|e| {
+    let pubkey_hex = resolve_pubkey_hex(&body.pubkey).map_err(|_e| {
         (
             StatusCode::BAD_REQUEST,
             Json(ErrorResponse {
-                error: e.to_string(),
+                error: "Internal error".into(),
             }),
         )
     })?;
@@ -214,9 +215,9 @@ pub async fn nostr_challenge(
         )
     })?;
 
-    // Generate random challenge
+    // Generate random challenge (OsRng — not thread_rng)
     let mut challenge_bytes = [0u8; 32];
-    rand::thread_rng().fill_bytes(&mut challenge_bytes);
+    rand::rngs::OsRng.fill_bytes(&mut challenge_bytes);
     let challenge_hex: String = challenge_bytes.iter().map(|b| format!("{b:02x}")).collect();
     let challenge = format!("scuffedclan-verify:{challenge_hex}");
 
@@ -315,11 +316,11 @@ pub async fn nostr_verify(
             None,
         )
         .await
-        .map_err(|e| {
+        .map_err(|_e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
-                    error: e.to_string(),
+                    error: "Internal error".into(),
                 }),
             )
         })?;
@@ -356,11 +357,11 @@ pub async fn nostr_unlink(
             None,
         )
         .await
-        .map_err(|e| {
+        .map_err(|_e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
-                    error: e.to_string(),
+                    error: "Internal error".into(),
                 }),
             )
         })?;
@@ -414,15 +415,15 @@ pub async fn nostr_export_backup(
         ));
     }
 
-    let secret_hex = state
+    let mut secret_hex = state
         .db
         .get_nostr_secret_key(&caller.member.id)
         .await
-        .map_err(|e| {
+        .map_err(|_e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
-                    error: e.to_string(),
+                    error: "Internal error".into(),
                 }),
             )
         })?
@@ -443,6 +444,7 @@ pub async fn nostr_export_backup(
             }),
         )
     })?;
+    secret_hex.zeroize();
 
     crate::routes::audit_log::audit(
         &state.db,
@@ -469,7 +471,7 @@ pub async fn nostr_import_key(
     caller: OrgMember,
     Json(body): Json<ImportKeyRequest>,
 ) -> Result<Json<scuffed_db::Member>, (StatusCode, Json<ErrorResponse>)> {
-    let secret_hex =
+    let mut secret_hex = Zeroizing::new(
         scuffed_auth::nip49::decrypt(&body.ncryptsec, &body.password).map_err(|e| {
             (
                 StatusCode::BAD_REQUEST,
@@ -477,7 +479,8 @@ pub async fn nostr_import_key(
                     error: format!("Failed to decrypt: {e}"),
                 }),
             )
-        })?;
+        })?,
+    );
 
     // Derive pubkey from the decrypted secret
     let keys = Keys::new(SecretKey::from_hex(&secret_hex).map_err(|e| {
@@ -488,6 +491,7 @@ pub async fn nostr_import_key(
             }),
         )
     })?);
+    secret_hex.zeroize();
     let pubkey_hex = keys.public_key().to_hex();
 
     // Update member to external mode with this key
@@ -495,11 +499,11 @@ pub async fn nostr_import_key(
         .db
         .set_external_nostr_key(&caller.member.id, &pubkey_hex)
         .await
-        .map_err(|e| {
+        .map_err(|_e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
-                    error: e.to_string(),
+                    error: "Internal error".into(),
                 }),
             )
         })?;
@@ -508,11 +512,11 @@ pub async fn nostr_import_key(
         .db
         .get_member(&caller.member.id)
         .await
-        .map_err(|e| {
+        .map_err(|_e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
-                    error: e.to_string(),
+                    error: "Internal error".into(),
                 }),
             )
         })?
@@ -581,15 +585,15 @@ pub async fn nostr_community(
         ));
     }
 
-    let secret_hex = state
+    let mut secret_hex = state
         .db
         .get_nostr_secret_key(&caller.member.id)
         .await
-        .map_err(|e| {
+        .map_err(|_e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
-                    error: e.to_string(),
+                    error: "Internal error".into(),
                 }),
             )
         })?
@@ -610,12 +614,13 @@ pub async fn nostr_community(
             }),
         )
     })?;
+    secret_hex.zeroize();
 
-    let members = state.db.list_nostr_identities().await.map_err(|e| {
+    let members = state.db.list_nostr_identities().await.map_err(|_e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse {
-                error: e.to_string(),
+                error: "Internal error".into(),
             }),
         )
     })?;
@@ -726,15 +731,15 @@ pub async fn nostr_react(
         ));
     }
 
-    let secret_hex = state
+    let mut secret_hex = state
         .db
         .get_nostr_secret_key(&caller.member.id)
         .await
-        .map_err(|e| {
+        .map_err(|_e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
-                    error: e.to_string(),
+                    error: "Internal error".into(),
                 }),
             )
         })?
@@ -755,6 +760,7 @@ pub async fn nostr_react(
             }),
         )
     })?;
+    secret_hex.zeroize();
 
     let event = EventBuilder::build_reaction(
         &keys,
@@ -986,15 +992,15 @@ pub async fn nostr_post(
         ));
     }
 
-    let secret_hex = state
+    let mut secret_hex = state
         .db
         .get_nostr_secret_key(&caller.member.id)
         .await
-        .map_err(|e| {
+        .map_err(|_e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
-                    error: e.to_string(),
+                    error: "Internal error".into(),
                 }),
             )
         })?
@@ -1015,6 +1021,7 @@ pub async fn nostr_post(
             }),
         )
     })?;
+    secret_hex.zeroize();
 
     let event = EventBuilder::build_community_post(
         &keys,
@@ -1258,7 +1265,9 @@ pub struct DmMarkReadRequest {
 
 /// Resolve the caller's server-managed Nostr identity, or return the right
 /// HTTP error for an external-key / unconfigured-relay caller.
-fn require_server_managed_dm_caller(
+///
+/// Loads the encrypted secret via full member fetch (auth extractors omit secrets).
+async fn require_server_managed_dm_caller(
     state: &AppState,
     caller: &OrgMember,
 ) -> Result<(String, String, scuffed_auth::crypto::EncryptedBlob), (StatusCode, Json<ErrorResponse>)>
@@ -1288,18 +1297,35 @@ fn require_server_managed_dm_caller(
             }),
         )
     })?;
-    let blob = caller
-        .member
-        .nostr_secret_key_encrypted
-        .clone()
+    let full = state
+        .db
+        .get_member(&caller.member.id)
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, "get_member for DM secret failed");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: "Internal error".into(),
+                }),
+            )
+        })?
         .ok_or_else(|| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
-                    error: "Member has no encrypted secret key".into(),
+                    error: "Member not found".into(),
                 }),
             )
         })?;
+    let blob = full.nostr_secret_key_encrypted.ok_or_else(|| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: "Member has no encrypted secret key".into(),
+            }),
+        )
+    })?;
     Ok((relay_url, pubkey, blob))
 }
 
@@ -1314,7 +1340,7 @@ fn require_encryption_service(
             }),
         )
     })?;
-    Ok(scuffed_chat::EncryptionService::new(crypto))
+    Ok(scuffed_chat::EncryptionService::new((*crypto).clone()))
 }
 
 fn parse_rfc3339(
@@ -1358,7 +1384,7 @@ pub async fn dm_send(
     }
 
     let (relay_url, sender_pubkey, sender_blob) =
-        require_server_managed_dm_caller(&state, &caller)?;
+        require_server_managed_dm_caller(&state, &caller).await?;
     let encryption = require_encryption_service(&state)?;
 
     if recipient == sender_pubkey {
@@ -1378,6 +1404,7 @@ pub async fn dm_send(
     let wraps = encryption
         .build_gift_wraps(
             &sender_blob,
+            &sender_pubkey,
             std::slice::from_ref(&recipient),
             content,
             &context_id,
@@ -1460,7 +1487,7 @@ pub async fn dm_sync(
     State(state): State<AppState>,
     caller: OrgMember,
 ) -> Result<Json<DmSyncResponse>, (StatusCode, Json<ErrorResponse>)> {
-    let (relay_url, my_pubkey, my_blob) = require_server_managed_dm_caller(&state, &caller)?;
+    let (relay_url, my_pubkey, my_blob) = require_server_managed_dm_caller(&state, &caller).await?;
     let encryption = require_encryption_service(&state)?;
 
     // Use the inbox high-water mark as the relay `since` filter so we don't
@@ -1517,7 +1544,7 @@ pub async fn dm_sync(
             }
         };
         let unwrapped = match encryption
-            .unwrap_gift_wrap_json(&my_blob, &event_json)
+            .unwrap_gift_wrap_json(&my_blob, &my_pubkey, &event_json)
             .await
         {
             Ok(u) => u,
@@ -1593,7 +1620,7 @@ pub async fn dm_inbox(
     caller: OrgMember,
     Query(query): Query<DmInboxQuery>,
 ) -> Result<Json<Vec<DmMessageResponse>>, (StatusCode, Json<ErrorResponse>)> {
-    let (_, my_pubkey, _) = require_server_managed_dm_caller(&state, &caller)?;
+    let (_, my_pubkey, _) = require_server_managed_dm_caller(&state, &caller).await?;
     let limit = query.limit.unwrap_or(100).min(500);
     let since = query.since_ts.as_deref().map(parse_rfc3339).transpose()?;
 
@@ -1617,7 +1644,7 @@ pub async fn dm_conversations(
     State(state): State<AppState>,
     caller: OrgMember,
 ) -> Result<Json<Vec<DmConversationResponse>>, (StatusCode, Json<ErrorResponse>)> {
-    let (_, my_pubkey, _) = require_server_managed_dm_caller(&state, &caller)?;
+    let (_, my_pubkey, _) = require_server_managed_dm_caller(&state, &caller).await?;
     let convs = state
         .db
         .list_dm_conversations(&caller.member.id, &my_pubkey)
@@ -1652,7 +1679,7 @@ pub async fn dm_thread(
     caller: OrgMember,
     Query(query): Query<DmThreadPeerQuery>,
 ) -> Result<Json<Vec<DmMessageResponse>>, (StatusCode, Json<ErrorResponse>)> {
-    let (_, my_pubkey, _) = require_server_managed_dm_caller(&state, &caller)?;
+    let (_, my_pubkey, _) = require_server_managed_dm_caller(&state, &caller).await?;
     let peer = query.peer_pubkey.trim().to_lowercase();
     validate_pubkey_hex(&peer).map_err(|e| {
         (
@@ -1696,7 +1723,7 @@ pub async fn dm_stream(
     Sse<impl tokio_stream::Stream<Item = Result<Event, Infallible>>>,
     (StatusCode, Json<ErrorResponse>),
 > {
-    let (_, my_pubkey, _) = require_server_managed_dm_caller(&state, &caller)?;
+    let (_, my_pubkey, _) = require_server_managed_dm_caller(&state, &caller).await?;
     let bus = state.dm_events.clone().ok_or_else(|| {
         (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -1751,7 +1778,7 @@ pub async fn dm_mark_read(
     caller: OrgMember,
     Json(body): Json<DmMarkReadRequest>,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
-    let (_, _, _) = require_server_managed_dm_caller(&state, &caller)?;
+    let (_, _, _) = require_server_managed_dm_caller(&state, &caller).await?;
     let peer = body.peer_pubkey.trim().to_lowercase();
     validate_pubkey_hex(&peer).map_err(|e| {
         (

@@ -65,7 +65,10 @@ services:
       SURREALDB_NS: ${SURREALDB_NS:-scuffed_crew}
       SURREALDB_DB: ${SURREALDB_DB:-main}
       # Prefer scoped DB user in production (root still works for single-tenant VPS).
-      SURREALDB_AUTH_MODE: ${SURREALDB_AUTH_MODE:-root}
+      # Production default: scoped app user (root only used at bootstrap to DEFINE USER).
+      SURREALDB_AUTH_MODE: ${SURREALDB_AUTH_MODE:-scoped}
+      SURREALDB_APP_USER: ${SURREALDB_APP_USER:-scuffed_app}
+      SURREALDB_APP_PASSWORD: ${SURREALDB_APP_PASSWORD:-${SURREALDB_PASSWORD}}
       DISCORD_CLIENT_ID: ${DISCORD_CLIENT_ID:-}
       DISCORD_CLIENT_SECRET: ${DISCORD_CLIENT_SECRET:-}
       GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}

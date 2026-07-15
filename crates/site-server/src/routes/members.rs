@@ -8,6 +8,7 @@ use serde::Deserialize;
 use scuffed_auth::server::session::ErrorResponse;
 use scuffed_chat::{EventBuilder, publish_event_oneshot};
 use scuffed_db::{AuditAction, AuditTargetType, GameAccount, Member, NostrKeyMode, OrgRole};
+use zeroize::Zeroize;
 use scuffed_types::api::{CursorResponse, PaginationParams};
 
 use crate::extractors::{AdminUser, OrgMember};
@@ -25,18 +26,18 @@ pub async fn list_members(
         .db
         .list_members_paginated(limit, offset)
         .await
-        .map_err(|e| {
+        .map_err(|_e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
-                    error: e.to_string(),
+                    error: "Internal error".into(),
                 }),
             )
         })?;
     Ok(Json(CursorResponse::from_oversized(items, limit, offset)))
 }
 
-/// GET /api/members/:id — get member profile
+/// GET /api/members/:id — get member profile (never loads Nostr secrets).
 pub async fn get_member(
     State(state): State<AppState>,
     _member: OrgMember,
@@ -44,13 +45,14 @@ pub async fn get_member(
 ) -> Result<Json<Member>, (StatusCode, Json<ErrorResponse>)> {
     state
         .db
-        .get_member(&id)
+        .get_member_safe(&id)
         .await
         .map_err(|e| {
+            tracing::error!(error = %e, "get_member_safe failed");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
-                    error: e.to_string(),
+                    error: "Internal error".into(),
                 }),
             )
         })?
@@ -87,10 +89,10 @@ pub async fn update_member(
     // Members can edit themselves; officers+ can edit anyone
     let target = state
         .db
-        .get_member(&id)
+        .get_member_safe(&id)
         .await
         .map_err(|e| {
-            tracing::error!(error = %e, "get_member failed");
+            tracing::error!(error = %e, "get_member_safe failed");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
@@ -298,7 +300,7 @@ fn publish_profile_metadata(state: &AppState, member: &Member) {
     let avatar_url = member.avatar_url.clone();
 
     tokio::spawn(async move {
-        let secret_hex = match db.get_nostr_secret_key(&member_id).await {
+        let mut secret_hex = match db.get_nostr_secret_key(&member_id).await {
             Ok(Some(s)) => s,
             Ok(None) => {
                 tracing::debug!("No server-managed secret key for member {member_id}");
@@ -317,6 +319,7 @@ fn publish_profile_metadata(state: &AppState, member: &Member) {
                 return;
             }
         };
+        secret_hex.zeroize();
 
         // Build NIP-05 identifier from display name
         let nip05_name: String = display_name
@@ -368,10 +371,10 @@ pub async fn change_role(
 ) -> Result<Json<Member>, (StatusCode, Json<ErrorResponse>)> {
     let target = state
         .db
-        .get_member(&id)
+        .get_member_safe(&id)
         .await
         .map_err(|e| {
-            tracing::error!(error = %e, "get_member for change_role");
+            tracing::error!(error = %e, "get_member_safe for change_role");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
@@ -495,11 +498,11 @@ pub async fn list_game_accounts(
         .list_member_game_accounts(&member_id)
         .await
         .map(Json)
-        .map_err(|e| {
+        .map_err(|_e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
-                    error: e.to_string(),
+                    error: "Internal error".into(),
                 }),
             )
         })
@@ -541,11 +544,11 @@ pub async fn upsert_game_account(
         )
         .await
         .map(Json)
-        .map_err(|e| {
+        .map_err(|_e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
-                    error: e.to_string(),
+                    error: "Internal error".into(),
                 }),
             )
         })

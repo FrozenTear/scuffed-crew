@@ -74,11 +74,11 @@ pub async fn upload_stats(
         .db
         .upsert_personal_matches(&daemon.member.id, &stub_matches)
         .await
-        .map_err(|e| {
+        .map_err(|_e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
-                    error: e.to_string(),
+                    error: "Internal error".into(),
                 }),
             )
         })?;
@@ -89,11 +89,11 @@ pub async fn upload_stats(
         .db
         .delete_personal_matches_by_sessions(&daemon.member.id, &body.deleted_sessions)
         .await
-        .map_err(|e| {
+        .map_err(|_e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
-                    error: e.to_string(),
+                    error: "Internal error".into(),
                 }),
             )
         })?;
@@ -125,11 +125,11 @@ pub async fn my_stats(
         .get_personal_stats(&member.member.id)
         .await
         .map(Json)
-        .map_err(|e| {
+        .map_err(|_e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
-                    error: e.to_string(),
+                    error: "Internal error".into(),
                 }),
             )
         })
@@ -146,11 +146,11 @@ pub async fn my_matches(
         .db
         .list_personal_matches(&member.member.id, limit, offset)
         .await
-        .map_err(|e| {
+        .map_err(|_e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
-                    error: e.to_string(),
+                    error: "Internal error".into(),
                 }),
             )
         })?;
@@ -167,11 +167,11 @@ pub async fn my_hero_stats(
         .get_hero_stats(&member.member.id)
         .await
         .map(Json)
-        .map_err(|e| {
+        .map_err(|_e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
-                    error: e.to_string(),
+                    error: "Internal error".into(),
                 }),
             )
         })
@@ -187,11 +187,11 @@ pub async fn my_map_stats(
         .get_map_stats(&member.member.id)
         .await
         .map(Json)
-        .map_err(|e| {
+        .map_err(|_e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
-                    error: e.to_string(),
+                    error: "Internal error".into(),
                 }),
             )
         })
@@ -208,11 +208,11 @@ pub async fn member_stats(
         .get_personal_stats(&member_id)
         .await
         .map(Json)
-        .map_err(|e| {
+        .map_err(|_e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
-                    error: e.to_string(),
+                    error: "Internal error".into(),
                 }),
             )
         })
@@ -229,11 +229,11 @@ pub async fn member_hero_stats(
         .get_hero_stats(&member_id)
         .await
         .map(Json)
-        .map_err(|e| {
+        .map_err(|_e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
-                    error: e.to_string(),
+                    error: "Internal error".into(),
                 }),
             )
         })
@@ -250,11 +250,11 @@ pub async fn member_map_stats(
         .get_map_stats(&member_id)
         .await
         .map(Json)
-        .map_err(|e| {
+        .map_err(|_e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
-                    error: e.to_string(),
+                    error: "Internal error".into(),
                 }),
             )
         })
@@ -272,11 +272,11 @@ pub async fn create_daemon_token(
         .db
         .create_daemon_token(&member.member.id, &raw_token, &body.label)
         .await
-        .map_err(|e| {
+        .map_err(|_e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
-                    error: e.to_string(),
+                    error: "Internal error".into(),
                 }),
             )
         })?;
@@ -311,11 +311,11 @@ pub async fn list_daemon_tokens(
         .list_daemon_tokens(&member.member.id)
         .await
         .map(Json)
-        .map_err(|e| {
+        .map_err(|_e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
-                    error: e.to_string(),
+                    error: "Internal error".into(),
                 }),
             )
         })
@@ -331,11 +331,11 @@ pub async fn revoke_daemon_token(
         .db
         .revoke_daemon_token(&token_id, &member.member.id)
         .await
-        .map_err(|e| {
+        .map_err(|_e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
-                    error: e.to_string(),
+                    error: "Internal error".into(),
                 }),
             )
         })?;
@@ -362,11 +362,11 @@ pub async fn get_member_settings(
         .db
         .get_member_settings(&member.member.id)
         .await
-        .map_err(|e| {
+        .map_err(|_e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
-                    error: e.to_string(),
+                    error: "Internal error".into(),
                 }),
             )
         })?;
@@ -392,11 +392,11 @@ pub async fn update_member_settings(
         .db
         .upsert_member_settings(&member.member.id, player_name)
         .await
-        .map_err(|e| {
+        .map_err(|_e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
-                    error: e.to_string(),
+                    error: "Internal error".into(),
                 }),
             )
         })?;
@@ -414,11 +414,11 @@ pub async fn daemon_config(
         .db
         .get_member_settings(&daemon.member.id)
         .await
-        .map_err(|e| {
+        .map_err(|_e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
-                    error: e.to_string(),
+                    error: "Internal error".into(),
                 }),
             )
         })?;
@@ -428,9 +428,10 @@ pub async fn daemon_config(
 }
 
 fn generate_token() -> String {
-    use rand::Rng;
+    use rand::RngCore;
     use std::fmt::Write;
-    let bytes: [u8; 32] = rand::thread_rng().r#gen();
+    let mut bytes = [0u8; 32];
+    rand::rngs::OsRng.fill_bytes(&mut bytes);
     let mut s = String::with_capacity(64);
     for b in bytes {
         write!(s, "{b:02x}").unwrap();
