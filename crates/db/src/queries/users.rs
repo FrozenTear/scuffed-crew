@@ -103,8 +103,32 @@ impl Database {
         .await
     }
 
+    fn require_oauth_encryption(&self, provider: AuthProvider) -> DbResult<()> {
+        if matches!(provider, AuthProvider::Local) || self.crypto.is_some() {
+            return Ok(());
+        }
+        // Cleartext OAuth provider IDs only allowed for local in-memory/dev when
+        // not production and ALLOW_PLAINTEXT_PROVIDER_IDS=1 or no remote URL.
+        if crate::client::is_production_env() {
+            return Err(DbError::Config(
+                "ENCRYPTION_KEY is required for OAuth users when PRODUCTION is set".into(),
+            ));
+        }
+        if std::env::var("SURREALDB_URL").is_ok()
+            && std::env::var("ALLOW_PLAINTEXT_PROVIDER_IDS").ok().as_deref() != Some("1")
+        {
+            return Err(DbError::Config(
+                "ENCRYPTION_KEY is required for OAuth users on remote SurrealDB \
+                 (or set ALLOW_PLAINTEXT_PROVIDER_IDS=1 for non-production only)"
+                    .into(),
+            ));
+        }
+        Ok(())
+    }
+
     async fn create_user(&self, user: &User) -> DbResult<User> {
         let provider_str = user.provider.to_string();
+        self.require_oauth_encryption(user.provider)?;
 
         let db_user = if let Some(ref crypto) = self.crypto {
             let id_hash = hash_provider_id(&provider_str, &user.provider_id);
@@ -147,6 +171,7 @@ impl Database {
 
     async fn update_user(&self, user: &User) -> DbResult<User> {
         let provider_str = user.provider.to_string();
+        self.require_oauth_encryption(user.provider)?;
 
         let db_user = if let Some(ref crypto) = self.crypto {
             let id_hash = hash_provider_id(&provider_str, &user.provider_id);

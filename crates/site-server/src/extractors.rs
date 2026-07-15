@@ -42,11 +42,13 @@ impl FromRequestParts<AppState> for OrgMember {
         let auth_user = AuthUser::<AppState>::from_request_parts(parts, state).await?;
         let user = auth_user.into_inner();
 
-        let member = state
+        // Single helper: member lookup + suspension check (fail closed on DB errors).
+        let (member, suspended) = state
             .db
-            .get_member_by_user(&user.id)
+            .get_member_auth_by_user(&user.id)
             .await
-            .map_err(|_| {
+            .map_err(|e| {
+                tracing::error!(error = %e, user_id = %user.id, "member auth lookup failed");
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     Json(ErrorResponse {
@@ -72,20 +74,6 @@ impl FromRequestParts<AppState> for OrgMember {
             ));
         }
 
-        // Check for active suspension or ban (fail closed on DB errors)
-        let suspended = state
-            .db
-            .is_member_suspended_or_banned(&member.id)
-            .await
-            .map_err(|e| {
-                tracing::error!(error = %e, member_id = %member.id, "suspension check failed");
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(ErrorResponse {
-                        error: "Internal error".into(),
-                    }),
-                )
-            })?;
         if suspended {
             return Err((
                 StatusCode::FORBIDDEN,

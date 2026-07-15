@@ -96,7 +96,7 @@ pub async fn overview(
         )
     })?;
 
-    let members = state.db.list_members().await.map_err(|e| {
+    let member_count = state.db.count_active_members().await.map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse {
@@ -120,7 +120,7 @@ pub async fn overview(
         events,
         announcements,
         settings,
-        member_count: members.len(),
+        member_count: member_count as usize,
     }))
 }
 

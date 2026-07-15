@@ -6,7 +6,7 @@ use axum::http::HeaderValue;
 use axum::routing::get;
 use scuffed_auth::SessionConfig;
 use scuffed_db::migrations::run_migrations;
-use scuffed_db::{Database, DbConfig};
+use scuffed_db::Database;
 use scuffed_site_server::{
     create_router,
     notifications::MatrixNotifier,
@@ -74,20 +74,12 @@ async fn main() {
 
     let oauth_config = OAuthConfig::from_env();
 
-    // Connect to SurrealDB (remote or in-memory fallback)
+    // Connect to SurrealDB (remote or in-memory fallback).
+    // Prefer SURREALDB_AUTH_MODE=scoped + non-root user in production.
     let db = match std::env::var("SURREALDB_URL") {
-        Ok(url) => {
-            let user = std::env::var("SURREALDB_USER").unwrap_or_else(|_| "root".to_string());
-            let pass = std::env::var("SURREALDB_PASSWORD").unwrap_or_else(|_| "root".to_string());
-            let config = DbConfig {
-                namespace: std::env::var("SURREALDB_NS")
-                    .unwrap_or_else(|_| "scuffed_crew".to_string()),
-                database: std::env::var("SURREALDB_DB").unwrap_or_else(|_| "main".to_string()),
-            };
-            Database::connect(&url, &user, &pass, config)
-                .await
-                .expect("Failed to connect to SurrealDB")
-        }
+        Ok(_) => Database::connect_from_env()
+            .await
+            .expect("Failed to connect to SurrealDB"),
         Err(_) => {
             tracing::info!("No SURREALDB_URL set, using in-memory database");
             Database::connect_memory()

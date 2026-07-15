@@ -87,7 +87,8 @@ impl Database {
             let mut result = self
                 .client
                 .query(
-                    "SELECT * FROM moderation_action WHERE member_id = $mid ORDER BY created_at DESC",
+                    "SELECT * FROM moderation_action WHERE member_id = $mid \
+                     ORDER BY created_at DESC LIMIT 200",
                 )
                 .bind(("mid", member_id.to_string()))
                 .await?;

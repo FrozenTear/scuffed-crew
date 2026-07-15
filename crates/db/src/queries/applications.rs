@@ -122,16 +122,32 @@ impl Database {
         .await
     }
 
-    pub async fn list_applications(&self) -> DbResult<Vec<Application>> {
+    /// List applications newest-first with pagination (`limit + 1` for next-page detection).
+    pub async fn list_applications_paginated(
+        &self,
+        limit: u32,
+        offset: u32,
+    ) -> DbResult<Vec<Application>> {
         with_timeout(async {
+            let fetch = limit + 1;
             let mut result = self
                 .client
-                .query("SELECT * FROM application ORDER BY created_at DESC")
+                .query(
+                    "SELECT * FROM application ORDER BY created_at DESC LIMIT $lim START $off",
+                )
+                .bind(("lim", fetch as i64))
+                .bind(("off", offset as i64))
                 .await?;
             let apps: Vec<DbApplication> = result.take(0)?;
             Ok(apps.into_iter().map(db_to_application).collect())
         })
         .await
+    }
+
+    /// List all applications (hard-capped). Prefer [`Self::list_applications_paginated`].
+    pub async fn list_applications(&self) -> DbResult<Vec<Application>> {
+        // Cap unbounded admin list to avoid full-table dumps under load.
+        self.list_applications_paginated(500, 0).await
     }
 
     pub async fn get_application_by_user(&self, user_id: &str) -> DbResult<Option<Application>> {
@@ -156,10 +172,11 @@ impl Database {
         .await
     }
 
-    /// Update application status with compare-and-swap on the current status.
+    /// Update application status with **atomic** compare-and-swap on the current status.
     ///
-    /// `expected_status` must match the row at write time; otherwise returns
-    /// [`crate::DbError::Conflict`] so concurrent officer updates cannot both apply.
+    /// Uses a single `UPDATE … WHERE status = $expected` so concurrent officer
+    /// updates cannot both succeed. Returns [`crate::DbError::Conflict`] if the
+    /// expected status does not match at write time.
     pub async fn update_application_status(
         &self,
         id: &str,
@@ -169,34 +186,82 @@ impl Database {
         review_notes: Option<&str>,
     ) -> DbResult<Application> {
         with_timeout(async {
-            let existing: Option<DbApplication> = self.client.select(("application", id)).await?;
-            let mut db = existing
-                .ok_or_else(|| crate::DbError::NotFound(format!("Application {id} not found")))?;
+            let now = Utc::now();
+            let rid = RecordId::new("application", id);
 
-            let current = parse_status(&db.status);
-            if current != expected_status {
-                return Err(crate::DbError::Conflict(format!(
-                    "Application status changed concurrently (expected {expected_status}, found {current})"
-                )));
+            let (trial_started, trial_ends) = if status == ApplicationStatus::Trial {
+                (
+                    Some(SurrealDatetime::from(now)),
+                    Some(SurrealDatetime::from(now + Duration::days(14))),
+                )
+            } else {
+                (None, None)
+            };
+
+            // Atomic CAS: only update if status still matches expected.
+            // When not transitioning to trial, leave trial_* columns unchanged
+            // (omit them from SET). When transitioning to trial, set dates.
+            let mut result = if status == ApplicationStatus::Trial {
+                self.client
+                    .query(
+                        "UPDATE $rid SET \
+                            status = $new_status, \
+                            reviewed_by = $reviewed_by, \
+                            review_notes = $notes, \
+                            updated_at = $now, \
+                            trial_started_at = $trial_start, \
+                            trial_ends_at = $trial_end \
+                         WHERE status = $expected \
+                         RETURN AFTER",
+                    )
+                    .bind(("rid", rid))
+                    .bind(("new_status", status.to_string()))
+                    .bind(("reviewed_by", reviewed_by.to_string()))
+                    .bind(("notes", review_notes.map(|s| s.to_string())))
+                    .bind(("now", SurrealDatetime::from(now)))
+                    .bind(("trial_start", trial_started))
+                    .bind(("trial_end", trial_ends))
+                    .bind(("expected", expected_status.to_string()))
+                    .await?
+            } else {
+                self.client
+                    .query(
+                        "UPDATE $rid SET \
+                            status = $new_status, \
+                            reviewed_by = $reviewed_by, \
+                            review_notes = $notes, \
+                            updated_at = $now \
+                         WHERE status = $expected \
+                         RETURN AFTER",
+                    )
+                    .bind(("rid", rid))
+                    .bind(("new_status", status.to_string()))
+                    .bind(("reviewed_by", reviewed_by.to_string()))
+                    .bind(("notes", review_notes.map(|s| s.to_string())))
+                    .bind(("now", SurrealDatetime::from(now)))
+                    .bind(("expected", expected_status.to_string()))
+                    .await?
+            };
+
+            let updated: Option<DbApplication> = result.take(0)?;
+            if let Some(row) = updated {
+                return Ok(db_to_application(row));
             }
 
-            db.status = status.to_string();
-            db.reviewed_by = Some(reviewed_by.to_string());
-            db.review_notes = review_notes.map(|s| s.to_string());
-            db.updated_at = SurrealDatetime::from(Utc::now());
-
-            // Auto-set trial dates when transitioning to trial status
-            if status == ApplicationStatus::Trial {
-                let now = Utc::now();
-                db.trial_started_at = Some(SurrealDatetime::from(now));
-                db.trial_ends_at = Some(SurrealDatetime::from(now + Duration::days(14)));
+            // Distinguish missing vs concurrent conflict.
+            let existing: Option<DbApplication> =
+                self.client.select(("application", id)).await?;
+            match existing {
+                None => Err(crate::DbError::NotFound(format!(
+                    "Application {id} not found"
+                ))),
+                Some(row) => {
+                    let current = parse_status(&row.status);
+                    Err(crate::DbError::Conflict(format!(
+                        "Application status changed concurrently (expected {expected_status}, found {current})"
+                    )))
+                }
             }
-
-            let updated: Option<DbApplication> =
-                self.client.update(("application", id)).content(db).await?;
-            Ok(db_to_application(updated.ok_or_else(|| {
-                crate::DbError::NotFound(format!("Application {id} not found after update"))
-            })?))
         })
         .await
     }
@@ -208,7 +273,7 @@ impl Database {
             let mut result = self
                 .client
                 .query(
-                    "SELECT * FROM application WHERE status = 'trial' AND trial_ends_at != NONE AND trial_ends_at <= $deadline ORDER BY trial_ends_at ASC"
+                    "SELECT * FROM application WHERE status = 'trial' AND trial_ends_at != NONE AND trial_ends_at <= $deadline ORDER BY trial_ends_at ASC LIMIT 200"
                 )
                 .bind(("deadline", deadline))
                 .await?;

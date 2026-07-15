@@ -4,8 +4,13 @@ use surrealdb::types::Datetime as SurrealDatetime;
 use surrealdb_types::RecordId;
 use surrealdb_types::SurrealValue;
 
+use scuffed_auth::crypto::EncryptedBlob;
+
 use crate::types::{conversation_key, DmConversation, DmMessage, DmReadMarker};
 use crate::{record_id_key_to_string, with_timeout, Database, DbResult};
+
+/// Prefix for AES-GCM encrypted DM content stored in `dm_message.content`.
+const DM_ENC_PREFIX: &str = "enc1:";
 
 #[derive(Debug, Clone, Serialize, Deserialize, SurrealValue)]
 struct DbDmMessage {
@@ -31,20 +36,55 @@ struct DbDmReadMarker {
     last_read_at: SurrealDatetime,
 }
 
-fn db_to_dm(db: DbDmMessage) -> DmMessage {
-    let id = db
+/// Encrypt DM plaintext for at-rest storage when CryptoService is configured.
+fn seal_dm_content(db: &Database, plaintext: &str) -> DbResult<String> {
+    match &db.crypto {
+        Some(crypto) => {
+            let blob = crypto.encrypt(plaintext)?;
+            let json = serde_json::to_string(&blob).map_err(|e| {
+                crate::DbError::Config(format!("Failed to serialize DM ciphertext: {e}"))
+            })?;
+            Ok(format!("{DM_ENC_PREFIX}{json}"))
+        }
+        None => Ok(plaintext.to_string()),
+    }
+}
+
+/// Decrypt DM content if sealed; pass through legacy plaintext rows.
+fn open_dm_content(db: &Database, stored: &str) -> String {
+    let Some(rest) = stored.strip_prefix(DM_ENC_PREFIX) else {
+        return stored.to_string();
+    };
+    let Some(crypto) = db.crypto.as_ref() else {
+        tracing::error!("DM content is encrypted but CryptoService is not configured");
+        return String::new();
+    };
+    match serde_json::from_str::<EncryptedBlob>(rest) {
+        Ok(blob) => crypto.decrypt(&blob).unwrap_or_else(|e| {
+            tracing::error!("DM decrypt failed: {e}");
+            String::new()
+        }),
+        Err(e) => {
+            tracing::error!("DM ciphertext JSON invalid: {e}");
+            String::new()
+        }
+    }
+}
+
+fn db_to_dm(db: &Database, row: DbDmMessage) -> DmMessage {
+    let id = row
         .id
         .map(|r| record_id_key_to_string(r.key))
         .unwrap_or_else(|| "unknown".to_string());
     DmMessage {
         id,
-        gift_wrap_id: db.gift_wrap_id,
-        sender_pubkey: db.sender_pubkey,
-        recipient_pubkey: db.recipient_pubkey,
-        conversation_key: db.conversation_key,
-        content: db.content,
-        reply_to_event_id: db.reply_to_event_id,
-        created_at: db.created_at.into(),
+        gift_wrap_id: row.gift_wrap_id,
+        sender_pubkey: row.sender_pubkey,
+        recipient_pubkey: row.recipient_pubkey,
+        conversation_key: row.conversation_key,
+        content: open_dm_content(db, &row.content),
+        reply_to_event_id: row.reply_to_event_id,
+        created_at: row.created_at.into(),
     }
 }
 
@@ -64,7 +104,7 @@ impl Database {
         let gid = gift_wrap_id.to_string();
         let sender = sender_pubkey.to_string();
         let recipient = recipient_pubkey.to_string();
-        let body = content.to_string();
+        let body = seal_dm_content(self, content)?;
         let reply = reply_to_event_id.map(|s| s.to_string());
         let conv = conversation_key(sender_pubkey, recipient_pubkey);
         let ts = SurrealDatetime::from(created_at);
@@ -79,7 +119,7 @@ impl Database {
                 .await?;
             let rows: Vec<DbDmMessage> = existing.take(0)?;
             if let Some(found) = rows.into_iter().next() {
-                return Ok((db_to_dm(found), false));
+                return Ok((db_to_dm(self, found), false));
             }
 
             let row = DbDmMessage {
@@ -96,7 +136,7 @@ impl Database {
                 self.client.create("dm_message").content(row).await?;
             let inserted = created
                 .ok_or_else(|| crate::DbError::NotFound("Failed to insert dm_message".into()))?;
-            Ok((db_to_dm(inserted), true))
+            Ok((db_to_dm(self, inserted), true))
         })
         .await
     }
@@ -134,7 +174,7 @@ impl Database {
                     .await?
             };
             let rows: Vec<DbDmMessage> = result.take(0)?;
-            Ok(rows.into_iter().map(db_to_dm).collect())
+            Ok(rows.into_iter().map(|r| db_to_dm(self, r)).collect())
         })
         .await
     }
@@ -173,7 +213,7 @@ impl Database {
                     .await?
             };
             let rows: Vec<DbDmMessage> = result.take(0)?;
-            Ok(rows.into_iter().map(db_to_dm).collect())
+            Ok(rows.into_iter().map(|r| db_to_dm(self, r)).collect())
         })
         .await
     }

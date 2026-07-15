@@ -266,7 +266,7 @@ impl Database {
                 .query(
                     "SELECT *, array::len(elements) as element_count \
                      FROM strategy WHERE owner_id = $owner \
-                     ORDER BY updated_at DESC",
+                     ORDER BY updated_at DESC LIMIT 200",
                 )
                 .bind(("owner", owner_id.to_string()))
                 .await?;

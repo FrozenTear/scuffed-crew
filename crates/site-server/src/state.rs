@@ -81,20 +81,9 @@ impl HasAuth for AppState {
     }
 
     async fn get_session_user(&self, token: &str) -> Result<Option<User>, AuthError> {
-        let user_id = self.db.get_session(token).await.map_err(|e| {
-            tracing::error!("Session lookup failed: {e}");
+        self.db.get_session_user(token).await.map_err(|e| {
+            tracing::error!("Session user lookup failed: {e}");
             AuthError::Database(e.to_string())
-        })?;
-
-        match user_id {
-            Some(uid) => {
-                tracing::debug!("Session resolved to user_id={uid}");
-                self.db.get_user(&uid).await.map_err(|e| {
-                    tracing::error!("User lookup failed for uid={uid}: {e}");
-                    AuthError::Database(e.to_string())
-                })
-            }
-            None => Ok(None),
-        }
+        })
     }
 }

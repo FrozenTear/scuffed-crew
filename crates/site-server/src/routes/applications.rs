@@ -118,7 +118,7 @@ pub async fn submit_application(
     Ok((StatusCode::CREATED, Json(app)))
 }
 
-/// GET /api/applications — list all applications (officer+)
+/// GET /api/applications — list applications (officer+). Hard-capped in the DB layer.
 pub async fn list_applications(
     State(state): State<AppState>,
     _officer: OfficerUser,

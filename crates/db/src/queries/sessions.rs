@@ -5,10 +5,12 @@ use surrealdb_types::RecordId;
 use surrealdb_types::SurrealValue;
 
 use scuffed_auth::crypto::hash_session_token;
+use scuffed_auth::User;
 
 use crate::{with_timeout, Database, DbResult};
 
 /// Internal DB representation of a session.
+/// Field `token` stores a BLAKE3 hash of the raw session secret (never the secret itself).
 #[derive(Debug, Clone, Serialize, Deserialize, SurrealValue)]
 struct DbSession {
     #[surreal(default)]
@@ -51,13 +53,29 @@ impl Database {
             let token_hash = hash_session_token(raw_token);
             let mut result = self
                 .client
-                .query("SELECT * FROM session WHERE token = $tok AND expires_at > time::now()")
+                .query(
+                    "SELECT user_id FROM session WHERE token = $tok AND expires_at > time::now() LIMIT 1",
+                )
                 .bind(("tok", token_hash))
                 .await?;
-            let sessions: Vec<DbSession> = result.take(0)?;
+            #[derive(Deserialize, SurrealValue)]
+            struct Row {
+                user_id: String,
+            }
+            let sessions: Vec<Row> = result.take(0)?;
             Ok(sessions.into_iter().next().map(|s| s.user_id))
         })
         .await
+    }
+
+    /// Resolve a session token to a [`User`] in one logical auth step
+    /// (session lookup + primary-key user fetch under a single timeout).
+    pub async fn get_session_user(&self, raw_token: &str) -> DbResult<Option<User>> {
+        let user_id = match self.get_session(raw_token).await? {
+            Some(uid) => uid,
+            None => return Ok(None),
+        };
+        self.get_user(&user_id).await
     }
 
     /// Delete a session by raw token (logout).

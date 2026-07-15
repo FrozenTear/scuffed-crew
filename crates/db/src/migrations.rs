@@ -41,6 +41,8 @@ pub async fn run_migrations(client: &Surreal<Any>) -> DbResult<()> {
         DEFINE FIELD OVERWRITE created_at ON session TYPE datetime DEFAULT time::now();
 
         DEFINE INDEX IF NOT EXISTS session_token_idx ON session COLUMNS token UNIQUE;
+        DEFINE INDEX IF NOT EXISTS session_user_idx ON session COLUMNS user_id;
+        DEFINE INDEX IF NOT EXISTS session_expires_idx ON session COLUMNS expires_at;
 
         -- ================================================
         -- Members (org membership, extends user)
@@ -64,6 +66,8 @@ pub async fn run_migrations(client: &Surreal<Any>) -> DbResult<()> {
 
         DEFINE INDEX IF NOT EXISTS member_user_idx ON member COLUMNS user_id UNIQUE;
         DEFINE INDEX IF NOT EXISTS member_nostr_pubkey_idx ON member COLUMNS nostr_pubkey UNIQUE;
+        DEFINE INDEX IF NOT EXISTS member_active_name_idx ON member COLUMNS is_active, display_name;
+        DEFINE INDEX IF NOT EXISTS member_active_role_idx ON member COLUMNS is_active, org_role;
 
         -- ================================================
         -- Games (titles that teams can play)
@@ -134,6 +138,9 @@ pub async fn run_migrations(client: &Surreal<Any>) -> DbResult<()> {
         DEFINE FIELD OVERWRITE mentor_id ON application TYPE option<string>;
         DEFINE FIELD OVERWRITE created_at ON application TYPE datetime DEFAULT time::now();
         DEFINE FIELD OVERWRITE updated_at ON application TYPE datetime DEFAULT time::now();
+        DEFINE INDEX IF NOT EXISTS application_user_idx ON application COLUMNS user_id, status;
+        DEFINE INDEX IF NOT EXISTS application_status_idx ON application COLUMNS status, created_at;
+        DEFINE INDEX IF NOT EXISTS application_trial_ends_idx ON application COLUMNS status, trial_ends_at;
 
         -- ================================================
         -- Match results
@@ -443,7 +450,8 @@ pub async fn run_migrations(client: &Surreal<Any>) -> DbResult<()> {
         DEFINE FIELD OVERWRITE opponent_name ON scrim TYPE option<string>;
         DEFINE FIELD OVERWRITE scheduled_at ON scrim TYPE datetime;
         DEFINE FIELD OVERWRITE duration_minutes ON scrim TYPE int DEFAULT 90;
-        DEFINE FIELD OVERWRITE status ON scrim TYPE string DEFAULT 'open';
+        DEFINE FIELD OVERWRITE status ON scrim TYPE string DEFAULT 'open'
+            ASSERT $value IN ['open', 'confirmed', 'completed', 'cancelled'];
         DEFINE FIELD OVERWRITE notes ON scrim TYPE option<string>;
         DEFINE FIELD OVERWRITE created_at ON scrim TYPE datetime DEFAULT time::now();
         DEFINE FIELD OVERWRITE updated_at ON scrim TYPE datetime DEFAULT time::now();
@@ -584,7 +592,8 @@ pub async fn run_migrations(client: &Surreal<Any>) -> DbResult<()> {
         -- Direct Messages (NIP-44 + NIP-59 gift wrap, Phase 5)
         -- ================================================
         -- One row per delivered gift wrap; dedup on `gift_wrap_id`.
-        -- Stored content is the decrypted plaintext (server-managed mode only).
+        -- Content is AES-GCM sealed at rest when ENCRYPTION_KEY is set
+        -- (prefix "enc1:" + EncryptedBlob JSON); legacy plaintext still loads.
         -- `conversation_key` is the sorted "lo,hi" pubkey pair for fast peer
         -- queries regardless of who sent which message.
         DEFINE TABLE IF NOT EXISTS dm_message SCHEMAFULL;

@@ -8,7 +8,7 @@ pub mod migrations;
 pub mod queries;
 pub mod types;
 
-pub use client::{Database, DbConfig};
+pub use client::{is_production_env, Database, DbConfig, SurrealAuthMode};
 pub use types::*;
 
 use std::time::Duration;

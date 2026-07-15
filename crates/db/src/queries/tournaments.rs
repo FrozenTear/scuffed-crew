@@ -1073,15 +1073,12 @@ impl Database {
 
         self.delete_tournament_bracket(tournament_id).await?;
 
-        let size = n.next_power_of_two();
-        let w_rounds = (size as f64).log2() as u32;
-        // 2 teams (w_rounds=1): no intermediate LB — WR loser drops straight to GF slot b.
-        // Larger: classic 2*(w_rounds-1) losers rounds.
-        let l_round_count = if w_rounds <= 1 {
-            0
-        } else {
-            2 * (w_rounds - 1)
-        };
+        let DoubleElimShape {
+            size,
+            w_rounds,
+            l_round_count,
+            first_round_matches,
+        } = double_elim_shape(n);
 
         let mut w_round_ids = Vec::new();
         for r in 1..=w_rounds {
@@ -1103,20 +1100,8 @@ impl Database {
             .create_tournament_round(tournament_id, 1, BracketStage::GrandFinal)
             .await?;
 
-        let mut seeded: Vec<Option<String>> =
-            participants.iter().map(|p| Some(p.id.clone())).collect();
-        while seeded.len() < size {
-            seeded.push(None);
-        }
-        let seed_order = standard_seed_order(size);
-        let mut ordered: Vec<Option<String>> = vec![None; size];
-        for (i, &pos) in seed_order.iter().enumerate() {
-            if i < seeded.len() {
-                ordered[pos] = seeded[i].clone();
-            }
-        }
-
-        let first_round_matches = size / 2;
+        let participant_ids: Vec<String> = participants.iter().map(|p| p.id.clone()).collect();
+        let ordered = double_elim_seeded_slots(&participant_ids, size);
         let mut w_match_ids: Vec<Vec<String>> = vec![Vec::new(); w_rounds as usize];
 
         for i in 0..first_round_matches {
@@ -1544,6 +1529,49 @@ impl Database {
 
 // ─── Seeding Helpers ───
 
+/// Pure shape of a double-elim bracket for `n` participants (power-of-two pad).
+#[derive(Debug, Clone, Copy)]
+struct DoubleElimShape {
+    size: usize,
+    w_rounds: u32,
+    l_round_count: u32,
+    first_round_matches: usize,
+}
+
+fn double_elim_shape(n: usize) -> DoubleElimShape {
+    let size = n.next_power_of_two();
+    let w_rounds = (size as f64).log2() as u32;
+    // 2 teams (w_rounds=1): no intermediate LB — WR loser drops straight to GF slot b.
+    // Larger: classic 2*(w_rounds-1) losers rounds.
+    let l_round_count = if w_rounds <= 1 {
+        0
+    } else {
+        2 * (w_rounds - 1)
+    };
+    DoubleElimShape {
+        size,
+        w_rounds,
+        l_round_count,
+        first_round_matches: size / 2,
+    }
+}
+
+/// Place participant ids into bracket slots using standard seeding; pads with byes (`None`).
+fn double_elim_seeded_slots(participant_ids: &[String], size: usize) -> Vec<Option<String>> {
+    let mut seeded: Vec<Option<String>> = participant_ids.iter().cloned().map(Some).collect();
+    while seeded.len() < size {
+        seeded.push(None);
+    }
+    let seed_order = standard_seed_order(size);
+    let mut ordered: Vec<Option<String>> = vec![None; size];
+    for (i, &pos) in seed_order.iter().enumerate() {
+        if i < seeded.len() {
+            ordered[pos] = seeded[i].clone();
+        }
+    }
+    ordered
+}
+
 /// Generate standard tournament seeding order for a bracket of given size.
 /// e.g., for 8: [0, 7, 3, 4, 1, 6, 2, 5] — ensures top seeds are spread out.
 fn standard_seed_order(size: usize) -> Vec<usize> {
@@ -1583,5 +1611,31 @@ mod tests {
         assert_eq!(order.len(), 8);
         // Seed 1 (idx 0) at pos 0, seed 2 (idx 1) at different half
         assert_eq!(order[0], 0);
+    }
+
+    #[test]
+    fn test_double_elim_shape_2() {
+        let s = double_elim_shape(2);
+        assert_eq!(s.size, 2);
+        assert_eq!(s.w_rounds, 1);
+        assert_eq!(s.l_round_count, 0);
+        assert_eq!(s.first_round_matches, 1);
+    }
+
+    #[test]
+    fn test_double_elim_shape_5() {
+        let s = double_elim_shape(5);
+        assert_eq!(s.size, 8);
+        assert_eq!(s.w_rounds, 3);
+        assert_eq!(s.l_round_count, 4);
+    }
+
+    #[test]
+    fn test_double_elim_seeded_slots_pads_byes() {
+        let ids = vec!["a".into(), "b".into(), "c".into()];
+        let slots = double_elim_seeded_slots(&ids, 4);
+        assert_eq!(slots.len(), 4);
+        assert_eq!(slots.iter().filter(|s| s.is_some()).count(), 3);
+        assert_eq!(slots.iter().filter(|s| s.is_none()).count(), 1);
     }
 }

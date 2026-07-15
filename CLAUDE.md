@@ -31,6 +31,10 @@ Production = `scuffed-server` serving `dist/` (built by `dx build` from crates/a
   - Optional: `db.field.map(|d| d.into())`
 - **Raw SurrealQL datetimes work fine:** `time::now()`, `time::now() + 365d`, etc.
 - **We use SurrealDB v3 only (never v2).** `type::thing()` does NOT work. Use `RecordId` bindings instead: `.bind(("rid", surrealdb::RecordId::from(("table", id))))` and `$rid` in the query. For `RELATE`: `RELATE $member_rid -> edge -> $team_rid`.
+- **Connect via `Database::connect_from_env()`** in production binaries. Prefer `SURREALDB_AUTH_MODE=scoped`. `PRODUCTION=1` refuses default `root`/`root` and requires `ENCRYPTION_KEY`.
+- **Never interpolate user input into SurrealQL.** Bind params only. Dynamic WHERE clauses may add fixed fragments + `$bind` placeholders (see `get_public_strategies`, `list_scrims`).
+- **Application status updates** use atomic `UPDATE … WHERE status = $expected` (CAS), not read-modify-write.
+- **Member list projections** omit `nostr_secret_key_encrypted` (`MEMBER_SAFE_COLS`). Load full rows only when server-side signing needs the secret.
 
 ## Dev Mode
 

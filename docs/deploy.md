@@ -9,6 +9,17 @@ This is the supported path for a **single VPS** with Podman Compose. You do **no
 - Optional for public HTTPS: Caddy (or nginx) on the host
 - DNS only if you use a public hostname
 
+## Database security (production)
+
+| Env | Purpose |
+|-----|---------|
+| `SURREALDB_PASSWORD` | **Required** strong password (install generates one) |
+| `ENCRYPTION_KEY` | **Required** when `PRODUCTION=1` — OAuth provider IDs, Nostr server keys, DM content at rest |
+| `SURREALDB_AUTH_MODE` | `root` (default, single-tenant) or `scoped` (least-privilege DB user) |
+| `PRODUCTION=1` | Refuses default `root`/`root` credentials; requires `ENCRYPTION_KEY` |
+
+Never ship with `SURREALDB_USER=root` / `SURREALDB_PASSWORD=root` outside local dev.
+
 Kubernetes is out of scope. **Quadlet** (systemd-native containers) is an optional later migration if you want boot integration without Compose — no Quadlet units ship yet.
 
 ## Prebuilt images (recommended)
