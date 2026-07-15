@@ -16,7 +16,7 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let signal = detect::match_end::detect_outcome_signal_with_rgb(&img, &rgb);
         let m = detect::match_start::gate_metrics(&rgb);
         let name = path.rsplit('/').next().unwrap_or(path);
-        // Gate thresholds: vote navy≥0.40, ban red≥0.05+dark≥0.30,
+        // Gate thresholds: vote navy≥0.40, ban red≥0.003+dark≥0.30,
         // select dark≥0.50+var≥2000 (each then needs OCR confirmation).
         println!(
             "{name} phase={phase:?} outcome={signal:?} | navy={:.3} ban_red={:.3} ban_dark={:.3} sel_dark={:.3} sel_var={:.0}",

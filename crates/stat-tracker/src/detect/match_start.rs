@@ -36,7 +36,8 @@ const SCAN_STRIDE: u32 = 2;
 pub struct GateMetrics {
     /// Dark-navy ratio in the top quarter (map-vote gate, needs ≥0.40).
     pub navy_ratio: f32,
-    /// Red-accent ratio in the top sixth (hero-ban gate, needs ≥0.05).
+    /// Red-accent ratio in the top sixth (hero-ban gate, needs ≥0.003 — only
+    /// the "TEAM BAN SCORE" text is bright red on the 2026-07 screen).
     pub ban_red_ratio: f32,
     /// Dark ratio in the top sixth (hero-ban gate, needs ≥0.30).
     pub ban_dark_ratio: f32,
@@ -71,7 +72,10 @@ fn navy_ratio(rgb: &RgbImage) -> f32 {
             let pixel = rgb.get_pixel(x, y);
             let [r, g, b] = pixel.0;
             total += 1;
-            if r < 70 && g < 70 && b > 70 && (b as i32 - r as i32) > 30 {
+            // The 2026-07 vote screen background sits around (16,25,41)-(16,25,58):
+            // far darker than the pre-patch navy (b never reaches 70). Blue only
+            // needs to dominate red, not be bright.
+            if r < 50 && g < 50 && b > 30 && (b as i32 - r as i32) > 12 {
                 navy_count += 1;
             }
         }
@@ -88,19 +92,20 @@ fn detect_map_vote(img: &DynamicImage, rgb: &RgbImage) -> Option<GamePhase> {
 
     // Map vote screen in OW2 has a dark blue/navy background with slight gradient.
     // The center third of the screen contains 3 map preview cards.
-    // Top area often shows "MAP VOTE" or timer text.
-    // Characteristic: dark navy pixels (R<60, G<60, B>80) dominate the background.
+    // Characteristic: dark navy pixels dominate the background.
     let navy_ratio = navy_ratio(rgb);
     if navy_ratio < 0.40 {
         return None;
     }
 
-    // Confirm with OCR on the top portion looking for "VOTE" or "MAP"
-    let top_region = img.crop_imm(w / 4, 0, w / 2, h / 6);
-    match crate::ocr::recognize_region(&top_region) {
+    // Confirm with OCR on the top portion. The "VOTE FOR A MAP" header bottoms
+    // out around 0.17h, so crop h/4 to include it whole; require BOTH words —
+    // the crop can also catch chat/scoreboard text where one alone may appear.
+    let top_region = img.crop_imm(w / 4, 0, w / 2, h / 4);
+    match crate::ocr::recognize_sparse_region(&top_region) {
         Ok(text) => {
             let upper = text.to_uppercase();
-            if upper.contains("VOTE") || upper.contains("MAP") {
+            if upper.contains("VOTE") && upper.contains("MAP") {
                 let maps = extract_map_names(&upper);
                 tracing::info!(navy_ratio, maps = ?maps, "map vote screen detected");
                 Some(GamePhase::MapVote { maps })
@@ -151,22 +156,23 @@ fn ban_ratios(rgb: &RgbImage) -> (f32, f32) {
 fn detect_hero_ban(img: &DynamicImage, rgb: &RgbImage) -> bool {
     let (w, h) = rgb.dimensions();
 
-    // Hero ban screen has a distinctive red/orange tint in the header area
-    // and shows "BAN" text. The background is darker than normal gameplay.
-    let header_h = h / 6;
+    // Hero ban screen shows red "TEAM BAN SCORE" text and a "BAN HEROES n"
+    // header over a dark background. The bright-red pixels are ONLY that text
+    // (~0.5% of the top sixth on the 2026-07 screen), so the red gate is a
+    // low bar — the OCR phrase check is what carries specificity.
     let (red_ratio, dark_ratio) = ban_ratios(rgb);
-
-    // Need significant red accent (ban UI) combined with dark background
-    if red_ratio < 0.05 || dark_ratio < 0.30 {
+    if red_ratio < 0.003 || dark_ratio < 0.30 {
         return false;
     }
 
-    // Confirm with OCR
-    let top_region = img.crop_imm(w / 4, 0, w / 2, header_h);
-    match crate::ocr::recognize_region(&top_region) {
+    // Confirm with OCR. Crop h/4: "TEAM BAN SCORE" sits near the top edge and
+    // "BAN HEROES n" bottoms out around 0.20h. Require a phrase, not bare
+    // "BAN" — the crop can catch scoreboard player names and chat.
+    let top_region = img.crop_imm(w / 4, 0, w / 2, h / 4);
+    match crate::ocr::recognize_sparse_region(&top_region) {
         Ok(text) => {
             let upper = text.to_uppercase();
-            if upper.contains("BAN") {
+            if upper.contains("BAN HERO") || upper.contains("TEAM BAN SCORE") {
                 tracing::info!(red_ratio, "hero ban screen detected");
                 true
             } else {
@@ -251,12 +257,12 @@ fn detect_hero_select(img: &DynamicImage, rgb: &RgbImage) -> bool {
     let (w, h) = rgb.dimensions();
 
     // Hero select screen characteristics:
-    // - Top portion shows "CHOOSE YOUR HERO" or "ASSEMBLE YOUR TEAM"
+    // - Header shows "SELECT A PREFERRED HERO" (2026-07 ban patch), previously
+    //   "CHOOSE YOUR HERO" / "ASSEMBLE YOUR TEAM"
     // - Has a bright, colorful hero grid in the lower 2/3
     // - Top banner area is relatively dark with text
     // - Bottom area has high color variance from hero portraits
 
-    let header_h = h / 8;
     let dark_ratio = select_header_dark_ratio(rgb);
     if dark_ratio < 0.50 {
         return false;
@@ -267,13 +273,18 @@ fn detect_hero_select(img: &DynamicImage, rgb: &RgbImage) -> bool {
         return false;
     }
 
-    // Confirm with OCR on header
-    let top_region = img.crop_imm(w / 4, 0, w / 2, header_h);
-    match crate::ocr::recognize_region(&top_region) {
+    // Confirm with OCR. The title bottoms out around 0.20h — well below the
+    // h/8 dark-header band — so crop h/4. Scoreboard frames pass both pixel
+    // gates and their top rows land in this crop, so bare "HERO" would match
+    // player names/titles ("Unrelenting Hero"); require phrases instead.
+    let top_region = img.crop_imm(w / 4, 0, w / 2, h / 4);
+    match crate::ocr::recognize_sparse_region(&top_region) {
         Ok(text) => {
             let upper = text.to_uppercase();
-            let is_hero_select =
-                upper.contains("CHOOSE") || upper.contains("HERO") || upper.contains("ASSEMBLE");
+            let is_hero_select = upper.contains("CHOOSE")
+                || upper.contains("ASSEMBLE")
+                || upper.contains("PREFERRED HERO")
+                || (upper.contains("SELECT") && upper.contains("HERO"));
             if is_hero_select {
                 tracing::info!(variance, "hero select screen detected");
             } else {

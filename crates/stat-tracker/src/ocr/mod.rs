@@ -211,6 +211,19 @@ pub fn recognize_region(
     Ok(text)
 }
 
+/// OCR a multi-line screen region (phase headers like "BAN HEROES 13" or
+/// "VOTE FOR A MAP") as sparse text. Feeds Tesseract the plain grayscale crop:
+/// the scoreboard-tuned `prepare()` white-mask erases stylized/red UI text
+/// (measured on the 2026-07 ban-patch screens), and PSM 7 assumes a single
+/// line. PSM 11 finds the scattered header + subtitle lines instead.
+pub fn recognize_sparse_region(
+    img: &DynamicImage,
+) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    let png_buf = encode_png(&img.to_luma8())?;
+    let (text, _conf) = ocr_with(tessdata_lang(), "11", None, &png_buf)?;
+    Ok(text)
+}
+
 /// OCR an already-preprocessed grayscale image, skipping the scoreboard-tuned
 /// `prepare()` step. Used for regions (like the VICTORY/DEFEAT title) that need
 /// their own binarization. `whitelist` of `None` disables character restriction.
