@@ -60,6 +60,18 @@ struct CaptureRequest {
     session_map: Option<String>,
     map_candidates: Vec<String>,
     allow_banner_recovery: bool,
+    /// Player stats of the session's last accepted capture, for
+    /// regression-based game-boundary detection (see [`stats_regressed`]).
+    prev_stats: Option<PrevStats>,
+}
+
+/// The active session's last accepted player stats, as seen by a new capture.
+struct PrevStats {
+    elims: u32,
+    deaths: u32,
+    damage: u32,
+    /// How long ago that capture was accepted.
+    age: std::time::Duration,
 }
 
 #[tokio::main]
@@ -275,6 +287,13 @@ struct ActiveGame {
     /// outcome/map recorded). Bounds how long an unfinished session can
     /// absorb captures — see [`UNFINISHED_SESSION_IDLE`].
     last_activity: Instant,
+    /// (elims, deaths, damage) of the last accepted capture. Scoreboard stats
+    /// are cumulative within a match, so a later capture reading strictly
+    /// lower values means a NEW game — the detector-independent boundary
+    /// signal (see [`stats_regressed`]).
+    last_stats: Option<(u32, u32, u32)>,
+    /// When `last_stats` was accepted.
+    last_stats_at: Option<Instant>,
 }
 
 impl ActiveGame {
@@ -293,6 +312,8 @@ impl ActiveGame {
             session_created: false,
             opened_at: now,
             last_activity: now,
+            last_stats: None,
+            last_stats_at: None,
         }
     }
 
@@ -327,6 +348,10 @@ struct PersistedGame {
     opened_at: chrono::DateTime<Utc>,
     last_activity: chrono::DateTime<Utc>,
     outcome_recorded_at: Option<chrono::DateTime<Utc>>,
+    #[serde(default)]
+    last_stats: Option<(u32, u32, u32)>,
+    #[serde(default)]
+    last_stats_at: Option<chrono::DateTime<Utc>>,
 }
 
 fn active_game_path(data_dir: &std::path::Path) -> std::path::PathBuf {
@@ -355,6 +380,8 @@ fn persist_active_game(data_dir: &std::path::Path, game: Option<&ActiveGame>) {
         opened_at: to_wall(g.opened_at),
         last_activity: to_wall(g.last_activity),
         outcome_recorded_at: g.outcome_recorded_at.map(to_wall),
+        last_stats: g.last_stats,
+        last_stats_at: g.last_stats_at.map(to_wall),
     };
     let write = || -> std::io::Result<()> {
         let tmp = path.with_extension("json.tmp");
@@ -390,6 +417,8 @@ fn recover_active_game(data_dir: &std::path::Path) -> Option<ActiveGame> {
         // An unrecoverable timestamp behaves as "unstamped", which the grace
         // logic already treats as stale — the outcome can't leak forward.
         outcome_recorded_at: p.outcome_recorded_at.and_then(to_instant),
+        last_stats_at: p.last_stats_at.and_then(to_instant),
+        last_stats: p.last_stats,
     })
 }
 
@@ -441,6 +470,25 @@ fn should_start_fresh_session(game: Option<&ActiveGame>, now: Instant) -> bool {
             .outcome_recorded_at
             .is_none_or(|t| now.duration_since(t) > POST_MATCH_GRACE),
     }
+}
+
+/// Minimum time since the session's last accepted capture before a stat
+/// regression is allowed to split off a new session. Real between-game gaps
+/// (result screens + queue + load) measured ≥3 min; consecutive captures of
+/// the same board are seconds apart. The gap guard prevents a garbage OCR row
+/// followed by a correct one from faking a regression (observed 2026-07-14:
+/// a misread E9/D11/DMG61029 row would otherwise split on the next capture).
+const STAT_SPLIT_MIN_GAP: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// Whether a capture's player stats regressed versus the session's previous
+/// accepted capture. Elims, deaths, and damage are cumulative within one
+/// match (hero swaps included) — they never decrease. Requiring at least two
+/// of the three to drop keeps a single misread column (e.g. an inflated
+/// elims read) from faking a boundary, while a real new game — all counters
+/// restarting near zero — trips it reliably.
+fn stats_regressed(prev: (u32, u32, u32), cur: (u32, u32, u32)) -> bool {
+    let drops = [cur.0 < prev.0, cur.1 < prev.1, cur.2 < prev.2];
+    drops.iter().filter(|&&d| d).count() >= 2
 }
 
 /// How long an outcome seen with no game open stays applicable to the next
@@ -553,6 +601,16 @@ struct CaptureReport {
     /// Map stored on the snapshot, if one was read — the caller adopts the
     /// first discovery onto the active game so the whole session shares it.
     map: Option<String>,
+    /// The session the snapshot was actually written to. Differs from the
+    /// requested session when a stat regression split off a new game.
+    session_id: String,
+    /// The capture's stats regressed versus the session's previous accepted
+    /// capture — a new game was detected and written to a fresh session; the
+    /// caller must replace its active game to match.
+    split: bool,
+    /// (elims, deaths, damage) written on the snapshot, for the next
+    /// capture's regression check.
+    stats: Option<(u32, u32, u32)>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -684,7 +742,7 @@ async fn run_loop(ctx: Arc<DaemonCtx>) -> anyhow::Result<()> {
                             persist_active_game(data_dir, active_game.as_ref());
                         }
 
-                        let (sid, create, outcome, session_map, candidates, banner_ok) = {
+                        let (sid, create, outcome, session_map, candidates, banner_ok, prev_stats) = {
                             let g = active_game.as_ref().expect("active_game set above");
                             // A banner-color outcome off a Tab frame is only
                             // plausible when the daemon just joined mid/post
@@ -694,7 +752,16 @@ async fn run_loop(ctx: Arc<DaemonCtx>) -> anyhow::Result<()> {
                             // split the real game.
                             let banner_ok = opened_by_this_tab
                                 || g.opened_at.elapsed() >= MIN_BANNER_SESSION_AGE;
-                            (g.session_id.clone(), !g.session_created, g.outcome, g.map.clone(), g.map_candidates.clone(), banner_ok)
+                            let prev_stats = match (g.last_stats, g.last_stats_at) {
+                                (Some((elims, deaths, damage)), Some(at)) => Some(PrevStats {
+                                    elims,
+                                    deaths,
+                                    damage,
+                                    age: at.elapsed(),
+                                }),
+                                _ => None,
+                            };
+                            (g.session_id.clone(), !g.session_created, g.outcome, g.map.clone(), g.map_candidates.clone(), banner_ok, prev_stats)
                         };
 
                         let tx = capture_tx.clone();
@@ -706,6 +773,7 @@ async fn run_loop(ctx: Arc<DaemonCtx>) -> anyhow::Result<()> {
                             session_map,
                             map_candidates: candidates,
                             allow_banner_recovery: banner_ok,
+                            prev_stats,
                         };
                         capture_task = Some(tokio::spawn(async move {
                             // Wait for the game to render the scoreboard
@@ -743,6 +811,47 @@ async fn run_loop(ctx: Arc<DaemonCtx>) -> anyhow::Result<()> {
                     // Rejected by a trust gate — nothing was recorded, so
                     // the session must not be marked as created.
                     Ok(report) if !report.recorded => {}
+                    Ok(report) if report.split => {
+                        // The capture detected a stat regression and wrote a
+                        // fresh session — the game this Tab was requested for
+                        // ended without the poller ever seeing its end/start
+                        // screens. Replace the stale active game, but only if
+                        // it is still the one the capture was taken for.
+                        if active_game.as_ref().is_some_and(|g| g.session_id == sid) {
+                            let mut g = ActiveGame::open_now(
+                                report.session_id.clone(),
+                                report.outcome,
+                                Vec::new(),
+                            );
+                            g.session_created = true;
+                            g.map = report.map.clone();
+                            g.last_stats = report.stats;
+                            g.last_stats_at = Some(Instant::now());
+                            tracing::info!(
+                                old_session = %sid,
+                                session_id = %g.session_id,
+                                "active game replaced after stat-regression split"
+                            );
+                            active_game = Some(g);
+                            last_game_open = Some(Instant::now());
+                            // Result-word reads about the previous game must
+                            // not confirm into this one.
+                            word_outcome_streak = None;
+                            persist_active_game(data_dir, active_game.as_ref());
+                        }
+                        capture_count += 1;
+                        if let Some(client) = sync_client
+                            && capture_count.is_multiple_of(SYNC_EVERY_N_CAPTURES)
+                            && sync_task.as_ref().is_none_or(|t| t.is_finished()) {
+                                let store = store.clone();
+                                let client = client.clone();
+                                let data_dir = data_dir.to_path_buf();
+                                sync_task = Some(tokio::spawn(async move {
+                                    try_sync(&store, &client, &data_dir).await;
+                                }));
+                            }
+                        refresh_snapshot(store, data_dir).await;
+                    }
                     Ok(report) => {
                         // Mutate the in-memory game only if it is still the
                         // game this capture was taken for — a start screen may
@@ -752,6 +861,10 @@ async fn run_loop(ctx: Arc<DaemonCtx>) -> anyhow::Result<()> {
                         if let Some(g) = active_game.as_mut().filter(|g| g.session_id == sid) {
                             g.session_created = true;
                             g.touch();
+                            if let Some(stats) = report.stats {
+                                g.last_stats = Some(stats);
+                                g.last_stats_at = Some(Instant::now());
+                            }
                             // First trusted map discovery propagates
                             // to the whole session (one game, one map).
                             if g.map.is_none()
@@ -1206,6 +1319,9 @@ async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<
                 recorded: false,
                 outcome,
                 map: None,
+                session_id: session_id.to_string(),
+                split: false,
+                stats: None,
             });
         }
     };
@@ -1263,6 +1379,9 @@ async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<
             recorded: false,
             outcome,
             map: None,
+            session_id: session_id.to_string(),
+            split: false,
+            stats: None,
         });
     }
 
@@ -1325,20 +1444,55 @@ async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<
 
         let now = SurrealDatetime::from(Utc::now());
 
-        parsed.map_name = resolve_map(
-            session_map,
-            map_from_panel.as_deref(),
-            &parsed.map_name,
-            map_candidates,
-        );
+        // Stat-regression boundary (detector-independent): scoreboard stats
+        // are cumulative within a match, so if this capture's counters sit
+        // below the session's previous accepted capture, the poller missed
+        // the game boundary (end screens + start screens) and this board
+        // belongs to a NEW game. Split it into a fresh session instead of
+        // appending — 2026-07-14 three games merged into one session this way.
+        let split = !create_session
+            && req.prev_stats.as_ref().is_some_and(|p| {
+                p.age >= STAT_SPLIT_MIN_GAP
+                    && stats_regressed(
+                        (p.elims, p.deaths, p.damage),
+                        (parsed.elims, parsed.deaths, parsed.damage),
+                    )
+            });
+        let (target_session, target_create) = if split {
+            let fresh = format!("{:016x}", rand_id());
+            tracing::info!(
+                old_session = %session_id,
+                new_session = %fresh,
+                elims = parsed.elims,
+                deaths = parsed.deaths,
+                damage = parsed.damage,
+                "player stats regressed — previous game never closed; splitting into a new session"
+            );
+            (fresh, true)
+        } else {
+            (session_id.to_string(), create_session)
+        };
+
+        parsed.map_name = if split {
+            // The old session's confirmed map and vote candidates belong to
+            // the previous game — resolve this frame's reads on their own.
+            resolve_map(None, map_from_panel.as_deref(), &parsed.map_name, &[])
+        } else {
+            resolve_map(
+                session_map,
+                map_from_panel.as_deref(),
+                &parsed.map_name,
+                map_candidates,
+            )
+        };
 
         // The session is owned by the active game (map-vote → accolade). The
         // first capture creates the session row; later captures (including hero
         // swaps and the post-match scoreboard) append to the same session.
-        parsed.session_id = session_id.to_string();
-        if create_session {
+        parsed.session_id = target_session.clone();
+        if target_create {
             let session = storage::MatchSession {
-                session_id: session_id.to_string(),
+                session_id: target_session.clone(),
                 hero: parsed.hero.clone(),
                 map_name: parsed.map_name.clone(),
                 role: parsed.role.clone(),
@@ -1356,8 +1510,8 @@ async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<
                 .await
                 .map_err(anyhow::Error::from_boxed)
                 .context("session create failed")?;
-            tracing::info!(session_id = %session_id, "started new match session");
-        } else if let Err(e) = store.append_capture(session_id, now, &outcome_label).await {
+            tracing::info!(session_id = %target_session, "started new match session");
+        } else if let Err(e) = store.append_capture(&target_session, now, &outcome_label).await {
             tracing::warn!(error = %e, "failed to append capture to session");
         }
 
@@ -1369,6 +1523,7 @@ async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<
             "parsed scoreboard"
         );
         let recorded_map = (!parsed.map_name.is_empty()).then(|| parsed.map_name.clone());
+        let recorded_stats = (parsed.elims, parsed.deaths, parsed.damage);
         storage::append_match_log(data_dir, &parsed);
         store
             .insert_match(parsed)
@@ -1380,12 +1535,12 @@ async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<
         // a single capture can mislabel (career panel shows the spectated hero
         // while dead; portrait matching can misfire), and the label otherwise
         // froze on whatever the first capture read.
-        if !create_session
-            && let Ok(snaps) = store.get_session_snapshots(session_id).await
+        if !target_create
+            && let Ok(snaps) = store.get_session_snapshots(&target_session).await
             && let Some(hero) = storage::majority_hero(&snaps)
         {
             let role = parse::guess_role_public(&hero);
-            if let Err(e) = store.set_session_hero(session_id, &hero, &role).await {
+            if let Err(e) = store.set_session_hero(&target_session, &hero, &role).await {
                 tracing::debug!(error = %e, "failed to refresh session hero");
             }
         }
@@ -1393,6 +1548,9 @@ async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<
             recorded: true,
             outcome,
             map: recorded_map,
+            session_id: target_session,
+            split,
+            stats: Some(recorded_stats),
         })
     } else {
         // Scoreboard-shaped frame, but the player's row couldn't be positively
@@ -1407,6 +1565,9 @@ async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<
             recorded: false,
             outcome,
             map: None,
+            session_id: session_id.to_string(),
+            split: false,
+            stats: None,
         })
     }
 }
@@ -1635,6 +1796,8 @@ mod tests {
             outcome_recorded_at: recorded_secs_ago.map(|s| now - Duration::from_secs(s)),
             opened_at: now - Duration::from_secs(300),
             last_activity: now - Duration::from_secs(30),
+            last_stats: None,
+            last_stats_at: None,
         }
     }
 
@@ -1692,6 +1855,8 @@ mod tests {
         ]);
         g.session_created = true;
         g.map = Some("Oasis".into());
+        g.last_stats = Some((12, 3, 5400));
+        g.last_stats_at = Some(Instant::now());
         persist_active_game(dir.path(), Some(&g));
 
         let r = recover_active_game(dir.path()).expect("recent game recovers");
@@ -1700,6 +1865,12 @@ mod tests {
         assert_eq!(r.map.as_deref(), Some("Oasis"));
         assert_eq!(r.map_candidates, vec!["Oasis".to_string(), "Busan".to_string()]);
         assert!(r.session_created);
+        assert_eq!(
+            r.last_stats,
+            Some((12, 3, 5400)),
+            "regression baseline must survive a daemon restart"
+        );
+        assert!(r.last_stats_at.is_some());
 
         // Clearing removes the file — nothing to recover.
         persist_active_game(dir.path(), None);
@@ -1718,6 +1889,8 @@ mod tests {
             opened_at: Utc::now() - chrono::Duration::hours(9),
             last_activity: Utc::now() - chrono::Duration::hours(8),
             outcome_recorded_at: None,
+            last_stats: None,
+            last_stats_at: None,
         };
         std::fs::write(
             active_game_path(dir.path()),
@@ -1752,6 +1925,41 @@ mod tests {
         // Without candidates, panel > text (unchanged behavior).
         assert_eq!(resolve_map(None, Some("Ilios"), "Nepal", &[]), "Ilios");
         assert_eq!(resolve_map(None, None, "Nepal", &[]), "Nepal");
+    }
+
+    // Transitions below are real (elims, deaths, damage) sequences from the
+    // 2026-07-14 session-merge incident (matches.jsonl), where three games
+    // were appended to one session because the poller missed every boundary.
+    #[test]
+    fn stat_regression_detects_real_game_boundaries() {
+        // Colosseo end -> Neon Junction first capture (E11->0, DMG 2740->0;
+        // deaths 0->0 is NOT strictly lower — two drops still suffice).
+        assert!(stats_regressed((11, 0, 2740), (0, 0, 0)));
+        // Neon Junction end -> Dorado first capture: all three drop.
+        assert!(stats_regressed((34, 10, 11742), (1, 0, 254)));
+    }
+
+    #[test]
+    fn stat_regression_ignores_single_field_misreads() {
+        // Garbage OCR row mid-game (E29->9 misread, deaths/damage rose):
+        // one drop must not split the session.
+        assert!(!stats_regressed((29, 5, 9242), (9, 11, 61029)));
+        // Inflated elims read (E91) settling back next capture, deaths and
+        // damage unchanged: still only one drop.
+        assert!(!stats_regressed((91, 3, 9072), (15, 3, 9072)));
+        // Normal mid-game progression never regresses.
+        assert!(!stats_regressed((5, 1, 1271), (8, 2, 5966)));
+        // Identical re-capture of the same board (post-match Tab spam).
+        assert!(!stats_regressed((30, 5, 10352), (30, 5, 10352)));
+    }
+
+    #[test]
+    fn stat_regression_after_garbage_row_needs_the_gap_guard() {
+        // A garbage row (E9 D11 DMG61029) followed by the next real capture
+        // DOES look like a regression — the STAT_SPLIT_MIN_GAP guard is what
+        // prevents this from splitting (captures were 86s apart, gap is 120s).
+        assert!(stats_regressed((9, 11, 61029), (3, 5, 10865)));
+        assert!(STAT_SPLIT_MIN_GAP > Duration::from_secs(86));
     }
 
     #[test]
