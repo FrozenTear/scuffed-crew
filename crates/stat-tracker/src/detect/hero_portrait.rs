@@ -314,6 +314,13 @@ pub struct RowScan {
     pub dip_count: usize,
     /// Median dip-to-dip pitch as a fraction of crop height (None with <2 dips).
     pub median_pitch: Option<f64>,
+    /// Row pitch from the saturation profile's DFT peak, as a fraction of
+    /// crop height. More robust than dip spacing on sparse boards (a 0:00
+    /// all-zero scoreboard renders too little white text for every row to
+    /// produce its own dip, but the phase-coherent periodicity survives —
+    /// plain autocorrelation does NOT, the broad valley swamps it). None when
+    /// the spectrum has no interior peak strong enough to trust.
+    pub spectral_pitch: Option<f64>,
 }
 
 impl RowScan {
@@ -332,9 +339,11 @@ impl RowScan {
 
     /// 5v5 or 6v6 from the row pitch; defaults to 5 when no pitch was
     /// measurable. Threshold sits between the measured 5v5 (~8.3%) and
-    /// 6v6 (~7.4%) pitches.
+    /// 6v6 (~7.4%) pitches. Prefers the spectral pitch — dip spacing
+    /// overshoots when a sparse row fails to produce its own dip (measured
+    /// 0.101 on a 0:00 all-zero 6v6 board, misread as 5v5).
     pub fn team_size(&self) -> usize {
-        match self.median_pitch {
+        match self.spectral_pitch.or(self.median_pitch) {
             Some(p) if p < 0.079 => 6,
             _ => 5,
         }
@@ -363,6 +372,7 @@ pub fn scan_rows(scoreboard: &DynamicImage) -> RowScan {
         return RowScan {
             dip_count: 0,
             median_pitch: None,
+            spectral_pitch: None,
         };
     }
 
@@ -410,12 +420,15 @@ pub fn scan_rows(scoreboard: &DynamicImage) -> RowScan {
         }
     }
 
+    let spectral_pitch = spectral_pitch(&smooth[y_lo..=y_hi], h);
+
     let mut pitches: Vec<f64> = dips.windows(2).map(|p| (p[1] - p[0]) as f64).collect();
     if pitches.is_empty() {
         tracing::debug!(dip_count = dips.len(), "row scan: no row pitch measurable");
         return RowScan {
             dip_count: dips.len(),
             median_pitch: None,
+            spectral_pitch,
         };
     }
     pitches.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
@@ -423,13 +436,72 @@ pub fn scan_rows(scoreboard: &DynamicImage) -> RowScan {
 
     tracing::debug!(
         median_pitch,
+        spectral_pitch,
         dip_count = dips.len(),
         "row scan via saturation dips"
     );
     RowScan {
         dip_count: dips.len(),
         median_pitch: Some(median_pitch),
+        spectral_pitch,
     }
+}
+
+/// Minimum DFT peak magnitude relative to the band's standard deviation. A
+/// pure sine scores ~0.35 on this scale; the sparse 0:00 all-zero board
+/// measured 0.21, well-populated boards higher still.
+const SPECTRAL_MIN_STRENGTH: f64 = 0.12;
+
+/// Row pitch (fraction of crop height) from the strongest DFT component of
+/// the smoothed team-1 saturation profile, scanning periods that span the
+/// 6v6 (~7.4%) to 5v5 (~8.3%) row pitches with margin. The peak must be
+/// interior — a maximum at the range edge means the spectrum is just decaying
+/// (no row periodicity) — and strong enough relative to band variance.
+fn spectral_pitch(band: &[f64], crop_h: u32) -> Option<f64> {
+    let n = band.len();
+    let p_lo = ((crop_h as f64 * 0.055) as usize).max(4);
+    let p_hi = ((crop_h as f64 * 0.11) as usize).min(n / 2);
+    if p_hi <= p_lo + 2 {
+        return None;
+    }
+
+    let mean = band.iter().sum::<f64>() / n as f64;
+    let centered: Vec<f64> = band.iter().map(|v| v - mean).collect();
+    let variance = centered.iter().map(|v| v * v).sum::<f64>() / n as f64;
+    if variance < 1e-9 {
+        return None;
+    }
+
+    let mags: Vec<f64> = (p_lo..=p_hi)
+        .map(|period| {
+            let omega = std::f64::consts::TAU / period as f64;
+            let (mut re, mut im) = (0.0f64, 0.0f64);
+            for (i, v) in centered.iter().enumerate() {
+                re += v * (omega * i as f64).cos();
+                im += v * (omega * i as f64).sin();
+            }
+            (re * re + im * im).sqrt() / n as f64
+        })
+        .collect();
+
+    let (best_idx, best_mag) = mags
+        .iter()
+        .copied()
+        .enumerate()
+        .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))?;
+
+    let strength = best_mag / variance.sqrt();
+    // Edge maximum = monotone spectrum, not a row-pitch peak.
+    if best_idx == 0 || best_idx == mags.len() - 1 || strength < SPECTRAL_MIN_STRENGTH {
+        tracing::debug!(
+            period = p_lo + best_idx,
+            strength,
+            edge = best_idx == 0 || best_idx == mags.len() - 1,
+            "spectral pitch rejected"
+        );
+        return None;
+    }
+    Some((p_lo + best_idx) as f64 / crop_h as f64)
 }
 
 fn mean_absolute_difference(a: &RgbImage, b: &RgbImage) -> f64 {
