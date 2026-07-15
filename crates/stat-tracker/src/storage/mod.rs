@@ -305,6 +305,19 @@ impl LocalStore {
         Ok(())
     }
 
+    /// Re-create a tombstone row (vacuum copies pending ones into the fresh
+    /// store so un-acked server-side deletes still propagate).
+    async fn insert_tombstone(
+        &self,
+        session_id: &str,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        self.db
+            .query("CREATE deleted_session SET session_id = $sid, deleted_at = time::now()")
+            .bind(("sid", session_id.to_string()))
+            .await?;
+        Ok(())
+    }
+
     pub async fn get_all_sessions(
         &self,
     ) -> Result<Vec<MatchSession>, Box<dyn std::error::Error + Send + Sync>> {
@@ -330,6 +343,72 @@ impl LocalStore {
     }
 
     
+
+    /// Rewrite all live rows into a brand-new store and swap it in, leaving
+    /// the old directory as `stats.surrealkv.pre-vacuum-<stamp>`.
+    ///
+    /// SurrealKV keeps every historical version of every record; the tracker
+    /// only ever needs latest state, so weeks of captures leave the store
+    /// ~99% dead versions (observed 87 MB for ~1 MB of live rows). SurrealDB's
+    /// periodic embedded housekeeping range-scans then spend entire cores
+    /// skipping those versions — two threads at 100% around the clock on an
+    /// idle daemon (2026-07-15). The daemon must NOT be running (single-
+    /// process lock; the caller checks the pid file).
+    ///
+    /// Returns (matches, sessions, tombstones) copied.
+    pub async fn vacuum(
+        data_dir: &Path,
+    ) -> Result<(usize, usize, usize), Box<dyn std::error::Error + Send + Sync>> {
+        let live_path = data_dir.join("stats.surrealkv");
+        let fresh_dir = data_dir.join("vacuum.tmp");
+        if fresh_dir.exists() {
+            std::fs::remove_dir_all(&fresh_dir)?;
+        }
+
+        let (matches, sessions, tombstones) = {
+            let old = LocalStore::open(data_dir).await?;
+            (
+                old.get_all_matches().await?,
+                old.get_all_sessions().await?,
+                old.get_pending_tombstones().await?,
+            )
+        };
+
+        let fresh = LocalStore::open(&fresh_dir).await?;
+        for mut m in matches.iter().cloned() {
+            // Record ids belong to the old store; fresh inserts mint new ones.
+            m.id = None;
+            fresh.insert_match(m).await?;
+        }
+        for s in &sessions {
+            fresh.create_session(s).await?;
+        }
+        for t in &tombstones {
+            fresh.insert_tombstone(t).await?;
+        }
+        drop(fresh);
+        // Dropping the handle only SIGNALS engine shutdown — the memtable
+        // flush runs detached (engine/local/native.rs router loop), and there
+        // is no awaitable close in the SDK. Renaming the directory mid-flush
+        // makes the flush ENOENT. Every commit is WAL-synced so nothing can
+        // be lost either way, but give the flush time to land at the stable
+        // path so the store swaps in fully compacted and error-free.
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+        let stamp = chrono::Utc::now().format("%Y%m%d_%H%M%S");
+        let backup = data_dir.join(format!("stats.surrealkv.pre-vacuum-{stamp}"));
+        std::fs::rename(&live_path, &backup)?;
+        std::fs::rename(fresh_dir.join("stats.surrealkv"), &live_path)?;
+        let _ = std::fs::remove_dir_all(&fresh_dir);
+        tracing::info!(
+            matches = matches.len(),
+            sessions = sessions.len(),
+            tombstones = tombstones.len(),
+            backup = %backup.display(),
+            "store vacuumed"
+        );
+        Ok((matches.len(), sessions.len(), tombstones.len()))
+    }
 
     pub async fn clear_all_data(&self) -> Result<(), Box<dyn std::error::Error>> {
         // Local reset only — deliberately does NOT tombstone: clearing a

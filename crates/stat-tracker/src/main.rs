@@ -165,6 +165,24 @@ async fn main() -> anyhow::Result<()> {
 
     let _pid_guard = PidGuard(pid_path);
 
+    // Maintenance mode: compact the store and exit (see LocalStore::vacuum).
+    // Holds the pid file above so a daemon can't start mid-vacuum.
+    if std::env::args().any(|a| a == "--vacuum") {
+        let before = dir_size(&config.data_dir.join("stats.surrealkv"));
+        let (matches, sessions, tombstones) = storage::LocalStore::vacuum(&config.data_dir)
+            .await
+            .map_err(anyhow::Error::from_boxed)
+            .context("vacuum failed")?;
+        let after = dir_size(&config.data_dir.join("stats.surrealkv"));
+        println!(
+            "vacuum complete: {matches} matches, {sessions} sessions, {tombstones} tombstones; \
+             store {:.1} MB -> {:.1} MB (old store kept as stats.surrealkv.pre-vacuum-*)",
+            before as f64 / 1e6,
+            after as f64 / 1e6,
+        );
+        return Ok(());
+    }
+
     // Tessdata generation is triggered manually via --generate-tessdata or the GUI button.
     // Don't run it at daemon startup — it can take minutes and blocks Tab capture.
 
@@ -1610,6 +1628,25 @@ fn save_rejected_frame(data_dir: &std::path::Path, img: image::DynamicImage, rea
     tokio::task::spawn_blocking(move || {
         save_frame_ring(&dir, &format!("rejected_{reason}"), &img, REJECTED_KEEP);
     });
+}
+
+/// Total size in bytes of a directory tree (best-effort; used for the
+/// before/after report of `--vacuum`).
+fn dir_size(dir: &std::path::Path) -> u64 {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return std::fs::metadata(dir).map(|m| m.len()).unwrap_or(0);
+    };
+    entries
+        .flatten()
+        .map(|e| {
+            let p = e.path();
+            if p.is_dir() {
+                dir_size(&p)
+            } else {
+                e.metadata().map(|m| m.len()).unwrap_or(0)
+            }
+        })
+        .sum()
 }
 
 fn rand_id() -> u64 {
