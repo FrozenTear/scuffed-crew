@@ -4,6 +4,9 @@
 #
 # Multi-pod hosts: only stop/remove containers from *this* compose project.
 # Never kill arbitrary processes or remove other stacks that share the host.
+#
+# Also hardens data/secrets.env (idempotent appends) so older installs pick up
+# new production env contracts after image upgrades without a crash-loop.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -13,6 +16,42 @@ cd "$ROOT"
 if [[ ! -f "$SECRETS" ]]; then
     echo "error: missing $SECRETS — run scripts/install.sh first" >&2
     exit 1
+fi
+
+# --- git pull first, then re-exec if this script changed (so new harden logic runs) ---
+if [[ -d .git ]]; then
+    script_path="$(readlink -f "$0" 2>/dev/null || realpath "$0" 2>/dev/null || echo "$0")"
+    before_mtime="$(stat -c %Y "$script_path" 2>/dev/null || stat -f %m "$script_path" 2>/dev/null || echo 0)"
+    echo "Git pull..."
+    git pull --ff-only
+    after_mtime="$(stat -c %Y "$script_path" 2>/dev/null || stat -f %m "$script_path" 2>/dev/null || echo 0)"
+    if [[ "$before_mtime" != "$after_mtime" && "${SCUFFED_UPDATE_REEXEC:-}" != "1" ]]; then
+        echo "update.sh changed on pull — re-executing with the new script..."
+        export SCUFFED_UPDATE_REEXEC=1
+        exec bash "$script_path" "$@"
+    fi
+fi
+
+# Idempotent appends — same contract as scripts/install.sh for existing secrets.
+# Never overwrites keys; never regenerates ENCRYPTION_KEY (would brick sealed data).
+ensure_secret_key() {
+    local key="$1" val="$2"
+    if ! grep -q "^${key}=" "$SECRETS" 2>/dev/null; then
+        echo "${key}=${val}" >> "$SECRETS"
+        echo "Appended ${key} to secrets.env"
+    fi
+}
+
+ensure_secret_key PRODUCTION 1
+ensure_secret_key SURREALDB_AUTH_MODE scoped
+ensure_secret_key SURREALDB_APP_USER scuffed_app
+if ! grep -q '^SURREALDB_APP_PASSWORD=' "$SECRETS" 2>/dev/null; then
+    # Must be distinct from root password in production (do not reuse SURREALDB_PASSWORD).
+    if ! command -v openssl >/dev/null 2>&1; then
+        echo "error: openssl required to generate SURREALDB_APP_PASSWORD" >&2
+        exit 1
+    fi
+    ensure_secret_key SURREALDB_APP_PASSWORD "$(openssl rand -base64 32 | tr -d '\n')"
 fi
 
 # shellcheck disable=SC1090
@@ -43,9 +82,13 @@ else
     exit 1
 fi
 
-if [[ -d .git ]]; then
-    echo "Git pull..."
-    git pull --ff-only
+# ENCRYPTION_KEY cannot be invented here — sealed OAuth/Nostr/DM data depends on it.
+if ! grep -q '^ENCRYPTION_KEY=' "$SECRETS" 2>/dev/null \
+    || [[ -z "${ENCRYPTION_KEY:-}" ]]; then
+    echo "error: ENCRYPTION_KEY is missing or empty in $SECRETS" >&2
+    echo "  Remote production requires a stable ENCRYPTION_KEY (install.sh generates it)." >&2
+    echo "  Do not invent a new key if the DB already has encrypted rows — restore from backup." >&2
+    exit 1
 fi
 
 # Persist image pin if missing so compose and restarts stay consistent.

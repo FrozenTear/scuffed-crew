@@ -62,8 +62,10 @@ GitHub Actions builds the `site-server` image on every push to `main` and publis
 ```bash
 cd /path/to/scuffed-crew
 ./scripts/update.sh
-# = git pull --ff-only + podman pull + recreate site-server
+# = git pull --ff-only + harden secrets.env (if needed) + podman pull + recreate site-server
 ```
+
+`update.sh` **appends** missing production keys to an existing `data/secrets.env` (same as re-running `install.sh`): `PRODUCTION`, `SURREALDB_AUTH_MODE`, `SURREALDB_APP_USER`, `SURREALDB_APP_PASSWORD`. It never overwrites existing values and never regenerates `ENCRYPTION_KEY`. If the update script itself changes on pull, it re-execs once so the new logic runs immediately.
 
 Override image pin in `data/secrets.env` if needed:
 
