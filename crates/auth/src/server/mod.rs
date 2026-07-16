@@ -8,5 +8,6 @@ pub mod session;
 pub use extractor::{AuthUser, HasAuth};
 pub use oauth::{OAuthProvider, ProviderConfig, ProviderRegistry};
 pub use session::{
-    build_csrf_cookie, build_session_cookie, generate_session_token, validate_csrf_state,
+    build_csrf_cookie, build_session_cookie, clear_csrf_cookie, clear_session_cookie,
+    generate_session_token, validate_csrf_state,
 };

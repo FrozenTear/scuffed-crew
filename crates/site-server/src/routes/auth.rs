@@ -13,8 +13,8 @@ use scuffed_auth::server::OAuthProvider;
 use scuffed_auth::server::discord::DiscordProvider;
 use scuffed_auth::server::google::GoogleProvider;
 use scuffed_auth::server::session::{
-    ErrorResponse, build_csrf_cookie, build_session_cookie, clear_session_cookie,
-    generate_session_token, validate_csrf_state,
+    ErrorResponse, build_csrf_cookie, build_session_cookie, clear_csrf_cookie,
+    clear_session_cookie, generate_session_token, validate_csrf_state,
 };
 use scuffed_auth::{AuthProvider, UserInfo};
 use scuffed_db::{Member, OrgRole};
@@ -208,10 +208,12 @@ pub async fn callback(
     tracing::info!("User {} logged in via {}", user.username, auth_provider);
 
     let session_cookie = build_session_cookie(&state.session_config, session_token);
-    let csrf_clear = clear_session_cookie(&state.session_config);
+    // Clear OAuth CSRF state only — never remove the session cookie we just set.
+    // cookie 0.18: add+remove *same name* cancels a fresh session Set-Cookie.
+    let csrf_clear = clear_csrf_cookie(&state.session_config);
 
     (
-        jar.add(session_cookie).remove(csrf_clear),
+        jar.add(session_cookie).add(csrf_clear),
         Redirect::temporary("/"),
     )
         .into_response()
