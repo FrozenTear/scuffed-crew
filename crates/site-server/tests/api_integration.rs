@@ -3526,3 +3526,118 @@ async fn match_media_validation_rejects_bad_vod_and_replay() {
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }
 
+
+// ─── #2 home-live: overview upcoming + recent ───────────────────────────────
+
+#[tokio::test]
+async fn public_overview_includes_upcoming_and_recent_matches() {
+    let state = test_state().await;
+    seed_all_roles(&state.db).await;
+    seed_game(&state.db, "ow2", "Overwatch 2").await;
+    seed_team(&state.db, "teamalpha", "Alpha Squad", "ow2").await;
+
+    // Scheduled public fixture
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(authed_json_request(
+            Method::POST,
+            "/api/matches",
+            OFFICER_TOKEN,
+            json!({
+                "team_id": "teamalpha",
+                "opponent": "Future Opp",
+                "match_type": "official",
+                "scheduled_at": "2026-09-01T18:00:00Z",
+                "is_public": true
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+
+    // Played public result
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(authed_json_request(
+            Method::POST,
+            "/api/matches",
+            OFFICER_TOKEN,
+            json!({
+                "team_id": "teamalpha",
+                "opponent": "Past Opp",
+                "match_type": "official",
+                "score_us": 3,
+                "score_them": 1,
+                "played_at": "2026-06-01T18:00:00Z",
+                "is_public": true
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+
+    // Private played — must not appear
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(authed_json_request(
+            Method::POST,
+            "/api/matches",
+            OFFICER_TOKEN,
+            json!({
+                "team_id": "teamalpha",
+                "opponent": "Hidden Opp",
+                "match_type": "official",
+                "score_us": 1,
+                "score_them": 0,
+                "played_at": "2026-06-02T18:00:00Z",
+                "is_public": false
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+
+    // Scrim public — never on public overview
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(authed_json_request(
+            Method::POST,
+            "/api/matches",
+            OFFICER_TOKEN,
+            json!({
+                "team_id": "teamalpha",
+                "opponent": "Scrim Opp",
+                "match_type": "scrim",
+                "score_us": 2,
+                "score_them": 2,
+                "played_at": "2026-06-03T18:00:00Z",
+                "is_public": true
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+
+    let app = create_router(state);
+    let resp = app
+        .oneshot(unauthed_request(Method::GET, "/api/public/overview"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+
+    let upcoming = json["upcoming_matches"].as_array().unwrap();
+    assert_eq!(upcoming.len(), 1, "only public scheduled: {upcoming:?}");
+    assert_eq!(upcoming[0]["opponent"], "Future Opp");
+    assert_eq!(upcoming[0]["team_name"], "Alpha Squad");
+    assert_eq!(upcoming[0]["game_name"], "Overwatch 2");
+    assert!(upcoming[0]["scheduled_at"].as_str().unwrap().contains("2026-09-01"));
+
+    let recent = json["recent_results"].as_array().unwrap();
+    assert_eq!(recent.len(), 1, "only public played non-scrim: {recent:?}");
+    assert_eq!(recent[0]["opponent"], "Past Opp");
+    assert_eq!(recent[0]["score_us"], 3);
+    assert_eq!(recent[0]["score_them"], 1);
+    assert_eq!(recent[0]["outcome"], "win");
+    assert_eq!(recent[0]["team_name"], "Alpha Squad");
+}

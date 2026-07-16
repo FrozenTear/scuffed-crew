@@ -5,7 +5,10 @@ use std::collections::HashMap;
 use dioxus::prelude::*;
 use scuffed_types::{HomeSectionId, HomepageContent, TeamsPresentation};
 
-use super::data::{Announcement, Event, HomeTournament, Overview, OverviewTeam, day_name};
+use super::data::{
+    Announcement, Event, HomeTournament, Overview, OverviewTeam, RecentResult, UpcomingMatch,
+    day_name,
+};
 use crate::routes::Route;
 
 // ---------------------------------------------------------------------------
@@ -108,7 +111,7 @@ pub fn EthosBlock(content: HomepageContent) -> Element {
 }
 
 // ---------------------------------------------------------------------------
-// Live (schedule + tournaments)
+// Live (schedule + tournaments + next match + results ticker)
 // ---------------------------------------------------------------------------
 
 #[component]
@@ -116,24 +119,44 @@ pub fn LiveBlock(
     content: HomepageContent,
     events: Vec<Event>,
     live_tournaments: Vec<HomeTournament>,
+    upcoming_matches: Vec<UpcomingMatch>,
+    recent_results: Vec<RecentResult>,
     show_schedule: bool,
     show_tourneys: bool,
+    show_next_match: bool,
+    show_results: bool,
 ) -> Element {
-    if !show_schedule && !show_tourneys {
+    if !show_schedule && !show_tourneys && !show_next_match && !show_results {
         return rsx! {};
     }
-    let both = show_schedule && show_tourneys;
-    let grid_class = if both {
-        "live-grid"
-    } else {
+    let panel_count = [
+        show_schedule,
+        show_tourneys,
+        show_next_match,
+        show_results,
+    ]
+    .iter()
+    .filter(|b| **b)
+    .count();
+    let grid_class = if panel_count <= 1 {
         "live-grid single"
+    } else {
+        "live-grid"
     };
     let has_events = !events.is_empty();
     let has_tourneys = !live_tournaments.is_empty();
+    let next = upcoming_matches.first().cloned();
+    let has_results = !recent_results.is_empty();
 
     rsx! {
         section { class: "home-block",
+            if show_results && has_results {
+                ResultsTicker { results: recent_results.clone() }
+            }
             div { class: "{grid_class}",
+                if show_next_match {
+                    NextMatchPanel { upcoming: next }
+                }
                 if show_schedule {
                     div { class: "live-panel",
                         div { class: "home-kicker", "{content.schedule_kicker}" }
@@ -186,6 +209,68 @@ pub fn LiveBlock(
                             }
                         } else {
                             p { class: "muted", "{content.tournaments_empty}" }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn NextMatchPanel(upcoming: Option<UpcomingMatch>) -> Element {
+    rsx! {
+        div { class: "live-panel next-match",
+            div { class: "home-kicker", "Next match" }
+            h2 { class: "home-heading", "Coming up" }
+            if let Some(m) = upcoming {
+                {
+                    let when: String = m.scheduled_at.chars().take(16).collect::<String>().replace('T', " ");
+                    let game = m.game_name.clone().unwrap_or_default();
+                    let meta = if game.is_empty() {
+                        format!("{} · {}", m.team_name, m.match_type)
+                    } else {
+                        format!("{} · {} · {}", m.team_name, game, m.match_type)
+                    };
+                    rsx! {
+                        div { class: "next-match-card",
+                            p { class: "next-match-vs",
+                                span { class: "next-match-team", "{m.team_name}" }
+                                span { class: "next-match-sep", " vs " }
+                                span { class: "next-match-opp", "{m.opponent}" }
+                            }
+                            p { class: "next-match-when", "{when} UTC" }
+                            p { class: "live-meta", "{meta}" }
+                        }
+                    }
+                }
+            } else {
+                p { class: "muted", "No public fixtures scheduled." }
+            }
+        }
+    }
+}
+
+#[component]
+fn ResultsTicker(results: Vec<RecentResult>) -> Element {
+    rsx! {
+        div { class: "results-ticker", "aria-label": "Recent results",
+            span { class: "results-ticker-label", "Results" }
+            div { class: "results-ticker-track",
+                for r in results.iter() {
+                    {
+                        let score = match (r.score_us, r.score_them) {
+                            (Some(u), Some(t)) => format!("{u}–{t}"),
+                            _ => "—".into(),
+                        };
+                        let outcome_class = format!("ticker-chip {}", r.outcome);
+                        let date: String = r.played_at.chars().take(10).collect();
+                        rsx! {
+                            span { class: "{outcome_class}",
+                                span { class: "ticker-teams", "{r.team_name} vs {r.opponent}" }
+                                span { class: "ticker-score", "{score}" }
+                                span { class: "ticker-date", "{date}" }
+                            }
                         }
                     }
                 }

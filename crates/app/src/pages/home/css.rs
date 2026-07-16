@@ -368,6 +368,91 @@ pub const HOME_SHARED_CSS: &str = r#"
         border-bottom-color: var(--warn);
     }
 
+    /* #2 — next match card + results ticker */
+    .live-panel.next-match::before {
+        background: linear-gradient(90deg, var(--accent), transparent 75%);
+    }
+    .next-match-card {
+        margin-top: 0.85rem;
+    }
+    .next-match-vs {
+        margin: 0;
+        font-family: var(--font-head);
+        font-weight: 700;
+        font-size: 1.15rem;
+        color: var(--text);
+        line-height: 1.3;
+    }
+    .next-match-sep {
+        color: var(--text-3);
+        font-weight: 500;
+        font-size: 0.9rem;
+    }
+    .next-match-opp {
+        color: var(--accent);
+    }
+    .next-match-when {
+        margin: 0.45rem 0 0.2rem;
+        font-family: var(--font-mono);
+        font-size: 0.78rem;
+        color: var(--text-2);
+        letter-spacing: 0.04em;
+    }
+    .results-ticker {
+        display: flex;
+        align-items: center;
+        gap: 0.75rem;
+        margin: 0 0 1rem;
+        padding: 0.55rem 0.75rem;
+        background: color-mix(in srgb, var(--surface-2) 90%, var(--bg));
+        border: 1px solid var(--border);
+        overflow: hidden;
+    }
+    .results-ticker-label {
+        font-family: var(--font-mono);
+        font-size: 0.62rem;
+        letter-spacing: 0.14em;
+        text-transform: uppercase;
+        color: var(--text-3);
+        flex-shrink: 0;
+    }
+    .results-ticker-track {
+        display: flex;
+        gap: 0.5rem;
+        overflow-x: auto;
+        flex: 1;
+        scrollbar-width: thin;
+        padding-bottom: 0.1rem;
+    }
+    .ticker-chip {
+        display: inline-flex;
+        align-items: baseline;
+        gap: 0.45rem;
+        flex-shrink: 0;
+        padding: 0.3rem 0.55rem;
+        border: 1px solid var(--border);
+        background: var(--surface);
+        font-size: 0.78rem;
+        white-space: nowrap;
+    }
+    .ticker-chip .ticker-teams {
+        color: var(--text);
+        font-weight: 600;
+    }
+    .ticker-chip .ticker-score {
+        font-family: var(--font-mono);
+        font-weight: 700;
+        color: var(--text-2);
+    }
+    .ticker-chip .ticker-date {
+        font-family: var(--font-mono);
+        font-size: 0.65rem;
+        color: var(--text-3);
+    }
+    .ticker-chip.win .ticker-score { color: var(--success, #22c55e); }
+    .ticker-chip.loss .ticker-score { color: var(--danger); }
+    .ticker-chip.draw .ticker-score { color: var(--warn); }
+
     /* Team rows — shared fixed tracks so every column lines up across rows */
     .team-rows {
         margin-top: 1.1rem;

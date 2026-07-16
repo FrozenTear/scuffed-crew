@@ -111,8 +111,19 @@ pub fn Home() -> Element {
         .unwrap_or_default();
     let overview_data = overview.read().as_ref().and_then(|o| o.as_ref()).cloned();
 
+    let upcoming_matches = overview_data
+        .as_ref()
+        .map(|o| o.upcoming_matches.clone())
+        .unwrap_or_default();
+    let recent_results = overview_data
+        .as_ref()
+        .map(|o| o.recent_results.clone())
+        .unwrap_or_default();
+
     let has_events = !event_list.is_empty();
     let has_tourneys = !live_tournaments.is_empty();
+    let has_upcoming = !upcoming_matches.is_empty();
+    let has_results = !recent_results.is_empty();
     let teams_empty = overview_data
         .as_ref()
         .map(|o| o.teams.is_empty())
@@ -125,6 +136,10 @@ pub fn Home() -> Element {
         has_events,
         has_tourneys,
     );
+    // Match widgets show when we have data (or shell keeps empty Live sections).
+    let live_keep_empty = home_shell.show_when_empty(HomeSectionId::Live);
+    let show_next_match = has_upcoming || (live_keep_empty && content.sections.schedule);
+    let show_results = has_results;
 
     let show_teams = teams_will_render(
         content.sections.teams,
@@ -192,13 +207,21 @@ pub fn Home() -> Element {
                             HomeSectionId::Ethos if content.sections.ethos => rsx! {
                                 EthosBlock { content: content.clone() }
                             },
-                            HomeSectionId::Live if show_schedule || show_tourneys => rsx! {
-                                LiveBlock {
-                                    content: content.clone(),
-                                    events: event_list.clone(),
-                                    live_tournaments: live_tournaments.clone(),
-                                    show_schedule,
-                                    show_tourneys,
+                            HomeSectionId::Live
+                                if show_schedule || show_tourneys || show_next_match || show_results =>
+                            {
+                                rsx! {
+                                    LiveBlock {
+                                        content: content.clone(),
+                                        events: event_list.clone(),
+                                        live_tournaments: live_tournaments.clone(),
+                                        upcoming_matches: upcoming_matches.clone(),
+                                        recent_results: recent_results.clone(),
+                                        show_schedule,
+                                        show_tourneys,
+                                        show_next_match,
+                                        show_results,
+                                    }
                                 }
                             },
                             HomeSectionId::Teams if show_teams => rsx! {

@@ -91,3 +91,41 @@ impl PublicMatch {
             || (self.score_us.is_some() && self.score_them.is_some())
     }
 }
+
+/// Home "next match" card — public scheduled fixture with display names.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpcomingMatch {
+    pub id: String,
+    pub team_id: String,
+    pub team_name: String,
+    pub game_name: Option<String>,
+    pub opponent: String,
+    pub match_type: MatchType,
+    pub scheduled_at: DateTime<Utc>,
+}
+
+/// Home results ticker row — public completed match with outcome.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecentResult {
+    pub id: String,
+    pub team_id: String,
+    pub team_name: String,
+    pub opponent: String,
+    pub score_us: Option<u32>,
+    pub score_them: Option<u32>,
+    /// "win" | "loss" | "draw" | "unknown"
+    pub outcome: String,
+    pub match_type: MatchType,
+    pub played_at: DateTime<Utc>,
+}
+
+impl RecentResult {
+    pub fn outcome_from_scores(score_us: Option<u32>, score_them: Option<u32>) -> &'static str {
+        match (score_us, score_them) {
+            (Some(u), Some(t)) if u > t => "win",
+            (Some(u), Some(t)) if u < t => "loss",
+            (Some(u), Some(t)) if u == t => "draw",
+            _ => "unknown",
+        }
+    }
+}

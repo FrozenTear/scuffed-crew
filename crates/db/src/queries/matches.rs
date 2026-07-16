@@ -249,6 +249,50 @@ impl Database {
         .await
     }
 
+    /// Public scheduled fixtures (not yet played), soonest first.
+    /// Fixed SQL only — is_public + non-scrim + scheduled_at set + played_at empty.
+    pub async fn list_public_upcoming_matches(
+        &self,
+        limit: u32,
+    ) -> DbResult<Vec<MatchResult>> {
+        with_timeout(async {
+            let mut result = self
+                .client
+                .query(
+                    "SELECT * FROM match_result WHERE is_public = true \
+                     AND match_type != 'scrim' AND scheduled_at != NONE \
+                     AND played_at = NONE \
+                     ORDER BY scheduled_at ASC LIMIT $lim",
+                )
+                .bind(("lim", limit))
+                .await?;
+            let matches: Vec<DbMatchResult> = result.take(0)?;
+            Ok(matches.into_iter().map(db_to_match).collect())
+        })
+        .await
+    }
+
+    /// Public completed results, newest first.
+    pub async fn list_public_recent_matches(
+        &self,
+        limit: u32,
+    ) -> DbResult<Vec<MatchResult>> {
+        with_timeout(async {
+            let mut result = self
+                .client
+                .query(
+                    "SELECT * FROM match_result WHERE is_public = true \
+                     AND match_type != 'scrim' AND played_at != NONE \
+                     ORDER BY played_at DESC LIMIT $lim",
+                )
+                .bind(("lim", limit))
+                .await?;
+            let matches: Vec<DbMatchResult> = result.take(0)?;
+            Ok(matches.into_iter().map(db_to_match).collect())
+        })
+        .await
+    }
+
     pub async fn get_team_record(&self, team_id: &str) -> DbResult<TeamRecord> {
         with_timeout(async {
             #[derive(Deserialize, SurrealValue)]

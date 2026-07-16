@@ -11,7 +11,10 @@ use scuffed_db::{
     TeamRecord,
 };
 use scuffed_types::api::{CursorResponse, PaginationParams};
-use scuffed_types::{MatchResult as TypesMatchResult, MatchType as TypesMatchType, PublicMatch};
+use scuffed_types::{
+    MatchResult as TypesMatchResult, MatchType as TypesMatchType, PublicMatch, RecentResult,
+    UpcomingMatch,
+};
 
 use crate::state::AppState;
 
@@ -31,6 +34,12 @@ pub struct PublicOverview {
     pub announcements: Vec<Announcement>,
     pub settings: SiteSettings,
     pub member_count: usize,
+    /// Next public fixtures (scheduled, not yet played) — home next-match widget.
+    #[serde(default)]
+    pub upcoming_matches: Vec<UpcomingMatch>,
+    /// Recent public results — home results ticker.
+    #[serde(default)]
+    pub recent_results: Vec<RecentResult>,
 }
 
 /// GET /api/public/overview — aggregated public data for the site
@@ -117,6 +126,95 @@ pub async fn overview(
         )
     })?;
 
+    // Team/game name maps for home live widgets (#2).
+    let team_name: std::collections::HashMap<String, String> = team_overviews
+        .iter()
+        .map(|t| (t.team.id.clone(), t.team.name.clone()))
+        .collect();
+    let game_by_team: std::collections::HashMap<String, String> = team_overviews
+        .iter()
+        .map(|t| (t.team.id.clone(), t.team.game_id.clone()))
+        .collect();
+    let game_name: std::collections::HashMap<String, String> = games
+        .iter()
+        .map(|g| (g.id.clone(), g.name.clone()))
+        .collect();
+
+    let upcoming_raw = state
+        .db
+        .list_public_upcoming_matches(5)
+        .await
+        .map_err(|_e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: "Internal error".into(),
+                }),
+            )
+        })?;
+    let upcoming_matches: Vec<UpcomingMatch> = upcoming_raw
+        .into_iter()
+        .filter_map(|m| {
+            let scheduled_at = m.scheduled_at?;
+            let team_id = m.team_id.clone();
+            let tname = team_name.get(&team_id).cloned().unwrap_or_else(|| "Team".into());
+            let gname = game_by_team
+                .get(&team_id)
+                .and_then(|gid| game_name.get(gid).cloned());
+            let match_type = match m.match_type {
+                MatchType::Official => TypesMatchType::Official,
+                MatchType::Tournament => TypesMatchType::Tournament,
+                MatchType::Scrim => return None,
+            };
+            Some(UpcomingMatch {
+                id: m.id,
+                team_id,
+                team_name: tname,
+                game_name: gname,
+                opponent: m.opponent,
+                match_type,
+                scheduled_at,
+            })
+        })
+        .collect();
+
+    let recent_raw = state
+        .db
+        .list_public_recent_matches(8)
+        .await
+        .map_err(|_e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: "Internal error".into(),
+                }),
+            )
+        })?;
+    let recent_results: Vec<RecentResult> = recent_raw
+        .into_iter()
+        .filter_map(|m| {
+            let played_at = m.played_at?;
+            let team_id = m.team_id.clone();
+            let tname = team_name.get(&team_id).cloned().unwrap_or_else(|| "Team".into());
+            let match_type = match m.match_type {
+                MatchType::Official => TypesMatchType::Official,
+                MatchType::Tournament => TypesMatchType::Tournament,
+                MatchType::Scrim => return None,
+            };
+            Some(RecentResult {
+                id: m.id,
+                team_id,
+                team_name: tname,
+                opponent: m.opponent,
+                score_us: m.score_us,
+                score_them: m.score_them,
+                outcome: RecentResult::outcome_from_scores(m.score_us, m.score_them).into(),
+                match_type,
+                played_at,
+            })
+        })
+        .collect();
+
     Ok(Json(PublicOverview {
         teams: team_overviews,
         games,
@@ -124,6 +222,8 @@ pub async fn overview(
         announcements,
         settings,
         member_count: member_count as usize,
+        upcoming_matches,
+        recent_results,
     }))
 }
 

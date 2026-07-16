@@ -7,6 +7,39 @@ pub struct Overview {
     pub teams: Vec<OverviewTeam>,
     pub games: Vec<OverviewGame>,
     pub member_count: usize,
+    #[serde(default)]
+    pub upcoming_matches: Vec<UpcomingMatch>,
+    #[serde(default)]
+    pub recent_results: Vec<RecentResult>,
+}
+
+/// Next public fixture for the home next-match widget.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct UpcomingMatch {
+    pub id: String,
+    #[allow(dead_code)]
+    pub team_id: String,
+    pub team_name: String,
+    pub game_name: Option<String>,
+    pub opponent: String,
+    pub match_type: String,
+    pub scheduled_at: String,
+}
+
+/// Recent public result for the home ticker.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct RecentResult {
+    pub id: String,
+    #[allow(dead_code)]
+    pub team_id: String,
+    pub team_name: String,
+    pub opponent: String,
+    pub score_us: Option<u32>,
+    pub score_them: Option<u32>,
+    /// "win" | "loss" | "draw" | "unknown"
+    pub outcome: String,
+    pub match_type: String,
+    pub played_at: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
