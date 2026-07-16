@@ -21,9 +21,10 @@ pub async fn list_events(
     axum::extract::Query(pagination): axum::extract::Query<PaginationParams>,
 ) -> Result<Json<CursorResponse<Event>>, (StatusCode, Json<ErrorResponse>)> {
     let (limit, offset) = pagination.resolve();
+    let only_public = member.is_none();
     let items = state
         .db
-        .list_events_paginated(limit, offset)
+        .list_events_paginated(limit, offset, only_public)
         .await
         .map_err(|_e| {
             (
@@ -33,11 +34,6 @@ pub async fn list_events(
                 }),
             )
         })?;
-    let items = if member.is_some() {
-        items
-    } else {
-        items.into_iter().filter(|e| e.is_public).collect()
-    };
     Ok(Json(CursorResponse::from_oversized(items, limit, offset)))
 }
 

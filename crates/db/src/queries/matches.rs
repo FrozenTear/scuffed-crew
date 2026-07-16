@@ -68,6 +68,7 @@ impl Database {
         played_at: DateTime<Utc>,
         recorded_by: &str,
         notes: Option<&str>,
+        is_public: bool,
     ) -> DbResult<MatchResult> {
         with_timeout(async {
             let db_match = DbMatchResult {
@@ -82,8 +83,7 @@ impl Database {
                 played_at: SurrealDatetime::from(played_at),
                 recorded_by: recorded_by.to_string(),
                 notes: notes.map(|s| s.to_string()),
-                // Private by default; officers publish via update.
-                is_public: false,
+                is_public,
             };
             let created: Option<DbMatchResult> =
                 self.client.create("match_result").content(db_match).await?;
@@ -108,19 +108,28 @@ impl Database {
     }
 
     /// List team matches with cursor-based pagination.
+    ///
+    /// When `only_public` is true, filters to public non-scrim rows in SQL so
+    /// LIMIT/START count only publishable matches.
     pub async fn list_team_matches_paginated(
         &self,
         team_id: &str,
         limit: u32,
         offset: u32,
+        only_public: bool,
     ) -> DbResult<Vec<MatchResult>> {
         with_timeout(async {
             let fetch = limit + 1;
+            let sql = if only_public {
+                "SELECT * FROM match_result WHERE team_id = $tid AND is_public = true \
+                 AND match_type != 'scrim' ORDER BY played_at DESC LIMIT $lim START $off"
+            } else {
+                "SELECT * FROM match_result WHERE team_id = $tid \
+                 ORDER BY played_at DESC LIMIT $lim START $off"
+            };
             let mut result = self
                 .client
-                .query(
-                    "SELECT * FROM match_result WHERE team_id = $tid ORDER BY played_at DESC LIMIT $lim START $off",
-                )
+                .query(sql)
                 .bind(("tid", team_id.to_string()))
                 .bind(("lim", fetch))
                 .bind(("off", offset))

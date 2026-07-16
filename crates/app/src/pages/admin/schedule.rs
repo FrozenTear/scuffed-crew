@@ -19,6 +19,8 @@ struct Event {
     is_recurring: bool,
     team_id: Option<String>,
     team_name: Option<String>,
+    #[serde(default)]
+    is_public: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -87,6 +89,7 @@ pub fn AdminSchedule() -> Element {
     let mut form_time = use_signal(|| "19:00".to_string());
     let mut form_tz = use_signal(|| "UTC".to_string());
     let mut form_recurring = use_signal(|| true);
+    let mut form_public = use_signal(|| false);
     let mut form_team_id: Signal<Option<String>> = use_signal(|| None);
 
     // Delete confirm state
@@ -105,6 +108,7 @@ pub fn AdminSchedule() -> Element {
         form_time.set("19:00".to_string());
         form_tz.set("UTC".to_string());
         form_recurring.set(true);
+        form_public.set(false);
         form_team_id.set(None);
         modal.show_empty();
     };
@@ -115,6 +119,7 @@ pub fn AdminSchedule() -> Element {
         form_time.set(evt.time);
         form_tz.set(evt.timezone);
         form_recurring.set(evt.is_recurring);
+        form_public.set(evt.is_public);
         form_team_id.set(evt.team_id);
         modal.show(evt.id);
     };
@@ -133,8 +138,7 @@ pub fn AdminSchedule() -> Element {
             timezone: form_tz(),
             is_recurring: form_recurring(),
             team_id: form_team_id(),
-            // Admin schedule is internal by default; toggle can land later.
-            is_public: false,
+            is_public: form_public(),
         };
         let edit_id = modal.get_target();
         modal.start_submit();
@@ -269,7 +273,7 @@ pub fn AdminSchedule() -> Element {
                     p { class: "empty-state", "No events scheduled yet." }
                 },
                 Some(list) => rsx! {
-                    DataTable { headers: vec!["Title", "Day", "Time", "Timezone", "Recurring", "Team", "RSVP", "Actions"],
+                    DataTable { headers: vec!["Title", "Day", "Time", "Timezone", "Recurring", "Public", "Team", "RSVP", "Actions"],
                         for evt in list.iter() {
                             {
                                 let e_edit = evt.clone();
@@ -278,6 +282,7 @@ pub fn AdminSchedule() -> Element {
                                 let rsvp_id = evt.id.clone();
                                 let day_label = DAYS.get(evt.day_of_week as usize).unwrap_or(&"?");
                                 let recurring_label = if evt.is_recurring { "Yes" } else { "No" };
+                                let public_label = if evt.is_public { "Yes" } else { "No" };
                                 let team_label = evt.team_name.clone().unwrap_or_else(|| "\u{2014}".into());
                                 rsx! {
                                     tr { key: "{evt.id}",
@@ -286,6 +291,7 @@ pub fn AdminSchedule() -> Element {
                                         td { "{evt.time}" }
                                         td { "{evt.timezone}" }
                                         td { "{recurring_label}" }
+                                        td { "{public_label}" }
                                         td { "{team_label}" }
                                         td { RsvpCell { event_id: rsvp_id } }
                                         td {
@@ -376,6 +382,16 @@ pub fn AdminSchedule() -> Element {
                         onchange: move |e| form_recurring.set(e.checked()),
                     }
                     label { class: "form-label", "Recurring" }
+                }
+            }
+            div { class: "form-field",
+                div { class: "form-checkbox-row",
+                    input {
+                        r#type: "checkbox",
+                        checked: form_public(),
+                        onchange: move |e| form_public.set(e.checked()),
+                    }
+                    label { class: "form-label", "Public (show on site / ICS)" }
                 }
             }
             div { class: "form-field",

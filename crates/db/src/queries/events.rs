@@ -93,12 +93,27 @@ impl Database {
     }
 
     /// List active events with cursor-based pagination.
-    pub async fn list_events_paginated(&self, limit: u32, offset: u32) -> DbResult<Vec<Event>> {
+    ///
+    /// When `only_public` is true, the `is_public` predicate is applied in SQL
+    /// so LIMIT/START count only public rows (anon pagination-safe).
+    pub async fn list_events_paginated(
+        &self,
+        limit: u32,
+        offset: u32,
+        only_public: bool,
+    ) -> DbResult<Vec<Event>> {
         with_timeout(async {
             let fetch = limit + 1;
+            let sql = if only_public {
+                "SELECT * FROM event WHERE is_active = true AND is_public = true \
+                 ORDER BY day_of_week ASC, time ASC LIMIT $lim START $off"
+            } else {
+                "SELECT * FROM event WHERE is_active = true \
+                 ORDER BY day_of_week ASC, time ASC LIMIT $lim START $off"
+            };
             let mut result = self
                 .client
-                .query("SELECT * FROM event WHERE is_active = true ORDER BY day_of_week ASC, time ASC LIMIT $lim START $off")
+                .query(sql)
                 .bind(("lim", fetch))
                 .bind(("off", offset))
                 .await?;

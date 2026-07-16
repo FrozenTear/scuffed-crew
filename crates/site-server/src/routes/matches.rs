@@ -24,9 +24,10 @@ pub async fn list_team_matches(
     axum::extract::Query(pagination): axum::extract::Query<PaginationParams>,
 ) -> Result<Json<CursorResponse<MatchResult>>, (StatusCode, Json<ErrorResponse>)> {
     let (limit, offset) = pagination.resolve();
+    let only_public = member.is_none();
     let items = state
         .db
-        .list_team_matches_paginated(&team_id, limit, offset)
+        .list_team_matches_paginated(&team_id, limit, offset, only_public)
         .await
         .map_err(|_e| {
             (
@@ -36,20 +37,18 @@ pub async fn list_team_matches(
                 }),
             )
         })?;
-    let items = if member.is_some() {
-        items
-    } else {
+    // Public path already filtered in SQL; still strip internal fields.
+    let items = if only_public {
         items
             .into_iter()
-            .filter_map(|mut m| {
-                if !m.is_public || matches!(m.match_type, MatchType::Scrim) {
-                    return None;
-                }
+            .map(|mut m| {
                 m.notes = None;
                 m.recorded_by = String::new();
-                Some(m)
+                m
             })
             .collect()
+    } else {
+        items
     };
     Ok(Json(CursorResponse::from_oversized(items, limit, offset)))
 }
@@ -66,6 +65,8 @@ pub struct RecordMatchRequest {
     pub match_type: MatchType,
     pub played_at: DateTime<Utc>,
     pub notes: Option<String>,
+    #[serde(default)]
+    pub is_public: bool,
 }
 
 /// POST /api/matches — record match result (officer+)
@@ -87,6 +88,7 @@ pub async fn record_match(
             body.played_at,
             &officer.member.id,
             body.notes.as_deref(),
+            body.is_public,
         )
         .await
         .map_err(|_e| {

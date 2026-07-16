@@ -11,7 +11,9 @@ use scuffed_db::{
     TeamRecord,
 };
 use scuffed_types::api::{CursorResponse, PaginationParams};
-use scuffed_types::{MatchType as TypesMatchType, PublicMatch};
+use scuffed_types::{
+    MatchResult as TypesMatchResult, MatchType as TypesMatchType, PublicMatch,
+};
 
 use crate::state::AppState;
 
@@ -291,10 +293,7 @@ pub struct PublicTeamDetail {
 }
 
 fn match_to_public(m: MatchResult) -> Option<PublicMatch> {
-    if !m.is_public || matches!(m.match_type, MatchType::Scrim) {
-        return None;
-    }
-    Some(PublicMatch {
+    let typed = TypesMatchResult {
         id: m.id,
         team_id: m.team_id,
         opponent: m.opponent,
@@ -308,7 +307,11 @@ fn match_to_public(m: MatchResult) -> Option<PublicMatch> {
             MatchType::Scrim => TypesMatchType::Scrim,
         },
         played_at: m.played_at,
-    })
+        recorded_by: m.recorded_by,
+        notes: m.notes,
+        is_public: m.is_public,
+    };
+    PublicMatch::try_from_match(&typed)
 }
 
 #[derive(Serialize)]

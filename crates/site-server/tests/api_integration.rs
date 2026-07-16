@@ -2779,3 +2779,360 @@ async fn suspended_admins_do_not_count_for_setup() {
     // Setup recovery path opens
     assert!(!state.db.has_admin_member().await.unwrap());
 }
+
+// ─── Public surfaces (is_public gating) ─────────────────────────────────────
+
+#[tokio::test]
+async fn private_events_hidden_from_anon_visible_to_member() {
+    let state = test_state().await;
+    seed_all_roles(&state.db).await;
+
+    // Create private (default) and public events as officer
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(authed_json_request(
+            Method::POST,
+            "/api/events",
+            OFFICER_TOKEN,
+            json!({
+                "title": "Internal Practice",
+                "day_of_week": 1,
+                "time": "19:00",
+                "timezone": "UTC",
+                "is_recurring": true,
+                "is_public": false
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(authed_json_request(
+            Method::POST,
+            "/api/events",
+            OFFICER_TOKEN,
+            json!({
+                "title": "Public Scrim Night",
+                "day_of_week": 3,
+                "time": "20:00",
+                "timezone": "UTC",
+                "is_recurring": true,
+                "is_public": true
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+
+    // Anon: only public
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(unauthed_request(Method::GET, "/api/events"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    let titles: Vec<&str> = json["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["title"].as_str().unwrap())
+        .collect();
+    assert!(titles.contains(&"Public Scrim Night"));
+    assert!(!titles.contains(&"Internal Practice"));
+
+    // Member: both
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(authed_request(Method::GET, "/api/events", MEMBER_TOKEN))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    let titles: Vec<&str> = json["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["title"].as_str().unwrap())
+        .collect();
+    assert!(titles.contains(&"Public Scrim Night"));
+    assert!(titles.contains(&"Internal Practice"));
+
+    // Public overview filters private events
+    let app = create_router(state);
+    let resp = app
+        .oneshot(unauthed_request(Method::GET, "/api/public/overview"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    let titles: Vec<&str> = json["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["title"].as_str().unwrap())
+        .collect();
+    assert!(titles.contains(&"Public Scrim Night"));
+    assert!(!titles.contains(&"Internal Practice"));
+}
+
+#[tokio::test]
+async fn match_is_public_gates_team_list_and_strips_notes() {
+    let state = test_state().await;
+    seed_all_roles(&state.db).await;
+    seed_game(&state.db, "ow2", "Overwatch 2").await;
+    seed_team(&state.db, "teamalpha", "Alpha Squad", "ow2").await;
+
+    // Private official (default)
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(authed_json_request(
+            Method::POST,
+            "/api/matches",
+            OFFICER_TOKEN,
+            json!({
+                "team_id": "teamalpha",
+                "opponent": "Hidden FC",
+                "score_us": 2,
+                "score_them": 1,
+                "match_type": "official",
+                "played_at": "2026-06-01T18:00:00Z",
+                "notes": "internal review notes",
+                "is_public": false
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+
+    // Public official with notes
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(authed_json_request(
+            Method::POST,
+            "/api/matches",
+            OFFICER_TOKEN,
+            json!({
+                "team_id": "teamalpha",
+                "opponent": "Public FC",
+                "score_us": 3,
+                "score_them": 0,
+                "match_type": "official",
+                "played_at": "2026-06-02T18:00:00Z",
+                "notes": "should be stripped for anon",
+                "is_public": true
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let public_match = body_json(resp).await;
+    assert_eq!(public_match["is_public"], true);
+
+    // Public scrim (is_public true but scrims never list publicly)
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(authed_json_request(
+            Method::POST,
+            "/api/matches",
+            OFFICER_TOKEN,
+            json!({
+                "team_id": "teamalpha",
+                "opponent": "Scrim Opp",
+                "score_us": 1,
+                "score_them": 1,
+                "match_type": "scrim",
+                "played_at": "2026-06-03T18:00:00Z",
+                "is_public": true
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+
+    // Anon team matches: only Public FC; notes stripped
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(unauthed_request(
+            Method::GET,
+            "/api/teams/teamalpha/matches",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    let data = json["data"].as_array().unwrap();
+    assert_eq!(data.len(), 1, "anon should see only public non-scrim: {data:?}");
+    assert_eq!(data[0]["opponent"], "Public FC");
+    assert!(data[0]["notes"].is_null());
+    assert_eq!(data[0]["recorded_by"], "");
+
+    // Member sees all three with notes intact on private row
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(authed_request(
+            Method::GET,
+            "/api/teams/teamalpha/matches",
+            MEMBER_TOKEN,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    let data = json["data"].as_array().unwrap();
+    assert_eq!(data.len(), 3, "member should see all matches: {data:?}");
+
+    // Public team detail recent_matches
+    let app = create_router(state);
+    let resp = app
+        .oneshot(unauthed_request(
+            Method::GET,
+            "/api/public/teams/teamalpha",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    let recent = json["recent_matches"].as_array().unwrap();
+    assert_eq!(recent.len(), 1);
+    assert_eq!(recent[0]["opponent"], "Public FC");
+    assert!(
+        recent[0].get("notes").is_none() || recent[0]["notes"].is_null(),
+        "PublicMatch must not expose notes"
+    );
+    assert!(
+        recent[0].get("recorded_by").is_none(),
+        "PublicMatch must not expose recorded_by"
+    );
+    assert_eq!(recent[0]["team_id"], "teamalpha");
+}
+
+#[tokio::test]
+async fn unpublish_match_hides_from_anon() {
+    let state = test_state().await;
+    seed_all_roles(&state.db).await;
+    seed_game(&state.db, "ow2", "Overwatch 2").await;
+    seed_team(&state.db, "teamalpha", "Alpha Squad", "ow2").await;
+
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(authed_json_request(
+            Method::POST,
+            "/api/matches",
+            OFFICER_TOKEN,
+            json!({
+                "team_id": "teamalpha",
+                "opponent": "Toggle FC",
+                "score_us": 2,
+                "score_them": 2,
+                "match_type": "official",
+                "played_at": "2026-06-10T18:00:00Z",
+                "is_public": true
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let id = body_json(resp).await["id"].as_str().unwrap().to_string();
+
+    // Visible while public
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(unauthed_request(
+            Method::GET,
+            "/api/teams/teamalpha/matches",
+        ))
+        .await
+        .unwrap();
+    let data = body_json(resp).await;
+    assert_eq!(data["data"].as_array().unwrap().len(), 1);
+
+    // Unpublish
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(authed_json_request(
+            Method::PUT,
+            &format!("/api/matches/{id}"),
+            OFFICER_TOKEN,
+            json!({ "is_public": false }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(body_json(resp).await["is_public"], false);
+
+    let app = create_router(state);
+    let resp = app
+        .oneshot(unauthed_request(
+            Method::GET,
+            "/api/teams/teamalpha/matches",
+        ))
+        .await
+        .unwrap();
+    let data = body_json(resp).await;
+    assert_eq!(
+        data["data"].as_array().unwrap().len(),
+        0,
+        "unpublished match must vanish from anon list"
+    );
+}
+
+#[tokio::test]
+async fn calendar_ics_excludes_private_events() {
+    let state = test_state().await;
+    seed_all_roles(&state.db).await;
+
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(authed_json_request(
+            Method::POST,
+            "/api/events",
+            OFFICER_TOKEN,
+            json!({
+                "title": "Secret Practice",
+                "day_of_week": 2,
+                "time": "18:00",
+                "timezone": "UTC",
+                "is_recurring": true,
+                "is_public": false
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(authed_json_request(
+            Method::POST,
+            "/api/events",
+            OFFICER_TOKEN,
+            json!({
+                "title": "Open Night",
+                "day_of_week": 5,
+                "time": "21:00",
+                "timezone": "UTC",
+                "is_recurring": true,
+                "is_public": true
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+
+    let app = create_router(state);
+    let resp = app
+        .oneshot(unauthed_request(Method::GET, "/api/calendar/all.ics"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let ics = String::from_utf8_lossy(&bytes);
+    assert!(ics.contains("Open Night"), "public event in ICS");
+    assert!(
+        !ics.contains("Secret Practice"),
+        "private event must not appear in ICS"
+    );
+}

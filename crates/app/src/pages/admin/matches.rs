@@ -23,6 +23,8 @@ struct MatchResult {
     match_type: String,
     played_at: String,
     notes: Option<String>,
+    #[serde(default)]
+    is_public: bool,
 }
 
 #[component]
@@ -49,6 +51,7 @@ pub fn AdminMatches() -> Element {
     let mut f_match_type = use_signal(|| "scrim".to_string());
     let mut f_played_at = use_signal(String::new);
     let mut f_notes = use_signal(String::new);
+    let mut f_public = use_signal(|| false);
 
     /// Server expects RFC3339 `DateTime<Utc>`; date input is YYYY-MM-DD.
     fn played_at_to_rfc3339(date: &str) -> Option<String> {
@@ -77,6 +80,7 @@ pub fn AdminMatches() -> Element {
         f_match_type.set("scrim".to_string());
         f_played_at.set(String::new());
         f_notes.set(String::new());
+        f_public.set(false);
         modal.show_empty();
     };
 
@@ -88,6 +92,7 @@ pub fn AdminMatches() -> Element {
         f_match_type.set(m.match_type);
         f_played_at.set(m.played_at.chars().take(10).collect::<String>());
         f_notes.set(m.notes.unwrap_or_default());
+        f_public.set(m.is_public);
         modal.show(m.id);
     };
 
@@ -107,6 +112,7 @@ pub fn AdminMatches() -> Element {
             return;
         };
         let notes_val = f_notes().clone();
+        let is_public = f_public();
 
         modal.start_submit();
         spawn(async move {
@@ -127,6 +133,7 @@ pub fn AdminMatches() -> Element {
                 } else {
                     Some(notes_val)
                 },
+                is_public,
             };
 
             let result = match edit_id {
@@ -203,19 +210,21 @@ pub fn AdminMatches() -> Element {
                         p { class: "empty-state", "No matches recorded for this team." }
                     },
                     Some(list) => rsx! {
-                        DataTable { headers: vec!["Opponent", "Score", "Map", "Type", "Date", "Actions"],
+                        DataTable { headers: vec!["Opponent", "Score", "Map", "Type", "Public", "Date", "Actions"],
                             for m in list.iter() {
                                 {
                                     let mc = m.clone();
                                     let score = format!("{}-{}", m.score_us, m.score_them);
                                     let map = m.map_name.clone().unwrap_or("-".to_string());
                                     let date: String = m.played_at.chars().take(10).collect();
+                                    let public_label = if m.is_public { "Yes" } else { "No" };
                                     rsx! {
                                         tr { key: "{m.id}",
                                             td { "{m.opponent}" }
                                             td { "{score}" }
                                             td { "{map}" }
                                             td { "{m.match_type}" }
+                                            td { "{public_label}" }
                                             td { "{date}" }
                                             td {
                                                 div { class: "row-actions",
@@ -308,6 +317,16 @@ pub fn AdminMatches() -> Element {
                     class: "form-textarea",
                     value: "{f_notes}",
                     oninput: move |e| f_notes.set(e.value()),
+                }
+            }
+            div { class: "form-field",
+                div { class: "form-checkbox-row",
+                    input {
+                        r#type: "checkbox",
+                        checked: f_public(),
+                        onchange: move |e| f_public.set(e.checked()),
+                    }
+                    label { class: "form-label", "Public (show on team page)" }
                 }
             }
         }
