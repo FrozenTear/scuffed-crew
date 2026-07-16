@@ -7,7 +7,7 @@ use scuffed_auth::{AuthError, SessionConfig, User};
 use scuffed_db::Database;
 
 use crate::dm_subscriber::DmEventBus;
-use crate::notifications::MatrixNotifier;
+use crate::notifications::Notifier;
 
 /// Application state shared across handlers.
 #[derive(Clone)]
@@ -16,7 +16,8 @@ pub struct AppState {
     pub session_config: SessionConfig,
     pub oauth_config: OAuthConfig,
     pub upload_dir: PathBuf,
-    pub notifier: Option<MatrixNotifier>,
+    /// Fan-out Matrix + Discord notifications. `None` when neither is configured.
+    pub notifier: Option<Notifier>,
     /// 32-byte key for HMAC-signing Nostr challenge tokens.
     pub nostr_challenge_key: [u8; 32],
     /// Shared encryption service (same `Arc` as `db.crypto`).

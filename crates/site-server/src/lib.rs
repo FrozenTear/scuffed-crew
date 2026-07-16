@@ -439,6 +439,11 @@ pub fn create_router(state: AppState) -> Router {
             "/api/settings",
             get(routes::settings::get_settings).put(routes::settings::update_settings),
         )
+        // Admin integrations
+        .route(
+            "/api/admin/integrations/discord/test",
+            post(routes::integrations::test_discord_webhook),
+        )
         // Public aggregate
         .route("/api/public/overview", get(routes::public::overview))
         .route("/api/public/members", get(routes::public::public_members))

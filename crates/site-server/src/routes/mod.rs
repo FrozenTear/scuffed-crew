@@ -10,6 +10,7 @@ pub mod events;
 pub mod forum;
 pub mod games;
 pub mod health;
+pub mod integrations;
 pub mod matches;
 pub mod members;
 pub mod moderation;

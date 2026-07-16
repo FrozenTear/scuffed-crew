@@ -9,7 +9,7 @@ use scuffed_db::Database;
 use scuffed_db::migrations::run_migrations;
 use scuffed_site_server::{
     create_router,
-    notifications::MatrixNotifier,
+    notifications::Notifier,
     state::{AppState, OAuthConfig},
     uploads,
 };
@@ -146,9 +146,9 @@ async fn main() {
         .await
         .expect("Failed to create upload directory");
 
-    let notifier = MatrixNotifier::from_env();
+    let notifier = Notifier::from_env();
     if notifier.is_none() {
-        tracing::info!("Matrix notifications not configured — running without");
+        tracing::info!("Notifications not configured (Matrix/Discord) — running without");
     }
 
     // Nostr challenge signing key: from env or deterministic dev fallback
