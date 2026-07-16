@@ -243,20 +243,39 @@ pub async fn record_match(
     Ok((StatusCode::CREATED, Json(result)))
 }
 
+/// Distinguish JSON omit vs null for `Option<Option<T>>` fields.
+/// Without this, `null` deserializes as outer `None` (leave) instead of clear.
+fn double_option<'de, T, D>(de: D) -> Result<Option<Option<T>>, D::Error>
+where
+    T: serde::Deserialize<'de>,
+    D: serde::Deserializer<'de>,
+{
+    serde::Deserialize::deserialize(de).map(Some)
+}
+
 #[derive(Deserialize)]
 pub struct UpdateMatchRequest {
     pub opponent: Option<String>,
     /// Double-option: omit=leave, null=clear, value=set.
+    #[serde(default, deserialize_with = "double_option")]
     pub score_us: Option<Option<u32>>,
+    #[serde(default, deserialize_with = "double_option")]
     pub score_them: Option<Option<u32>>,
+    #[serde(default, deserialize_with = "double_option")]
     pub map_name: Option<Option<String>>,
+    #[serde(default, deserialize_with = "double_option")]
     pub game_mode: Option<Option<String>>,
     pub match_type: Option<MatchType>,
+    #[serde(default, deserialize_with = "double_option")]
     pub notes: Option<Option<String>>,
     pub is_public: Option<bool>,
+    #[serde(default, deserialize_with = "double_option")]
     pub played_at: Option<Option<DateTime<Utc>>>,
+    #[serde(default, deserialize_with = "double_option")]
     pub scheduled_at: Option<Option<DateTime<Utc>>>,
+    #[serde(default, deserialize_with = "double_option")]
     pub vod_url: Option<Option<String>>,
+    #[serde(default, deserialize_with = "double_option")]
     pub replay_code: Option<Option<String>>,
 }
 

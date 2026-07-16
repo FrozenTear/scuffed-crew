@@ -3323,6 +3323,77 @@ async fn match_lifecycle_scheduled_then_report_scores() {
 }
 
 #[tokio::test]
+async fn update_match_null_clears_omit_preserves() {
+    let state = test_state().await;
+    seed_all_roles(&state.db).await;
+    seed_game(&state.db, "ow2", "Overwatch 2").await;
+    seed_team(&state.db, "teamalpha", "Alpha Squad", "ow2").await;
+
+    // Create with scores + vod + notes
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(authed_json_request(
+            Method::POST,
+            "/api/matches",
+            OFFICER_TOKEN,
+            json!({
+                "team_id": "teamalpha",
+                "opponent": "Clearable FC",
+                "match_type": "official",
+                "score_us": 2,
+                "score_them": 1,
+                "played_at": "2026-06-15T18:00:00Z",
+                "notes": "keep me",
+                "vod_url": "https://www.twitch.tv/videos/123",
+                "is_public": false
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let id = body_json(resp).await["id"].as_str().unwrap().to_string();
+
+    // null clears scores + vod; omit notes → preserve
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(authed_json_request(
+            Method::PUT,
+            &format!("/api/matches/{id}"),
+            OFFICER_TOKEN,
+            json!({
+                "score_us": null,
+                "score_them": null,
+                "vod_url": null
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    assert!(
+        json["score_us"].is_null(),
+        "null must clear score_us, got {:?}",
+        json["score_us"]
+    );
+    assert!(
+        json["score_them"].is_null(),
+        "null must clear score_them, got {:?}",
+        json["score_them"]
+    );
+    assert!(
+        json["vod_url"].is_null(),
+        "null must clear vod_url, got {:?}",
+        json["vod_url"]
+    );
+    assert_eq!(
+        json["notes"], "keep me",
+        "omitted notes must be preserved"
+    );
+    assert_eq!(json["opponent"], "Clearable FC");
+    assert_eq!(json["played_at"], "2026-06-15T18:00:00Z");
+}
+
+#[tokio::test]
 async fn match_media_validation_rejects_bad_vod_and_replay() {
     let state = test_state().await;
     seed_all_roles(&state.db).await;
