@@ -11,9 +11,7 @@ use scuffed_db::{
     TeamRecord,
 };
 use scuffed_types::api::{CursorResponse, PaginationParams};
-use scuffed_types::{
-    MatchResult as TypesMatchResult, MatchType as TypesMatchType, PublicMatch,
-};
+use scuffed_types::{MatchResult as TypesMatchResult, MatchType as TypesMatchType, PublicMatch};
 
 use crate::state::AppState;
 
@@ -142,6 +140,15 @@ pub struct PublicMember {
     pub availability_status: Option<String>,
     pub nostr_pubkey: Option<String>,
     pub joined_at: String,
+    /// Preferred competitive role (public-but-minimal).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub main_role: Option<String>,
+    /// Twitch handle (not URL).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub twitch: Option<String>,
+    /// X/Twitter handle (not URL).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub twitter: Option<String>,
 }
 
 fn member_to_public(m: Member) -> PublicMember {
@@ -156,6 +163,9 @@ fn member_to_public(m: Member) -> PublicMember {
         availability_status: m.availability_status,
         nostr_pubkey: m.nostr_pubkey,
         joined_at: m.joined_at.to_rfc3339(),
+        main_role: m.main_role,
+        twitch: m.twitch,
+        twitter: m.twitter,
     }
 }
 

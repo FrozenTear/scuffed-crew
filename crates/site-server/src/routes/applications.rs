@@ -276,6 +276,9 @@ async fn apply_application_transition(
                 None,
                 None,
                 Some(false),
+                None,
+                None,
+                None,
             )
             .await
             .map_err(|e| internal_err(e, "deactivate recruit on reject"))?;
@@ -363,6 +366,9 @@ async fn ensure_member_for_application(
                     None,
                     None,
                     Some(true),
+                    None,
+                    None,
+                    None,
                 )
                 .await
                 .map_err(|e| internal_err(e, "reactivate member"))?;

@@ -12,7 +12,8 @@ use crate::{with_timeout, Database, DbResult};
 /// Columns safe to load for list/API paths — omits `nostr_secret_key_encrypted`
 /// so encrypted secrets never enter process memory on bulk reads.
 const MEMBER_SAFE_COLS: &str = "id, user_id, org_role, display_name, bio, avatar_url, timezone, \
-    pronouns, availability_status, nostr_pubkey, nostr_key_mode, joined_at, is_active";
+    pronouns, availability_status, nostr_pubkey, nostr_key_mode, joined_at, is_active, \
+    main_role, twitch, twitter";
 
 #[derive(Debug, Clone, Serialize, Deserialize, SurrealValue)]
 struct DbMember {
@@ -35,6 +36,15 @@ struct DbMember {
     nostr_secret_key_encrypted: Option<serde_json::Value>,
     joined_at: SurrealDatetime,
     is_active: bool,
+    #[serde(default)]
+    #[surreal(default)]
+    main_role: Option<String>,
+    #[serde(default)]
+    #[surreal(default)]
+    twitch: Option<String>,
+    #[serde(default)]
+    #[surreal(default)]
+    twitter: Option<String>,
 }
 
 fn parse_role(s: &str) -> OrgRole {
@@ -90,6 +100,9 @@ fn db_to_member(db: DbMember) -> DbResult<Member> {
         nostr_secret_key_encrypted: parse_encrypted_secret(db.nostr_secret_key_encrypted)?,
         joined_at: db.joined_at.into(),
         is_active: db.is_active,
+        main_role: db.main_role,
+        twitch: db.twitch,
+        twitter: db.twitter,
     })
 }
 
@@ -133,6 +146,9 @@ impl Database {
                 nostr_secret_key_encrypted,
                 joined_at: SurrealDatetime::from(Utc::now()),
                 is_active: true,
+                main_role: None,
+                twitch: None,
+                twitter: None,
             };
             let created: Option<DbMember> = self.client.create("member").content(db_member).await?;
             db_to_member(
@@ -323,6 +339,9 @@ impl Database {
         availability_status: Option<Option<&str>>,
         nostr_pubkey: Option<Option<&str>>,
         is_active: Option<bool>,
+        main_role: Option<Option<&str>>,
+        twitch: Option<Option<&str>>,
+        twitter: Option<Option<&str>>,
     ) -> DbResult<Member> {
         with_timeout(async {
             // Ensure row exists first for clear NotFound errors.
@@ -353,6 +372,15 @@ impl Database {
             }
             if is_active.is_some() {
                 sets.push("is_active = $is_active");
+            }
+            if main_role.is_some() {
+                sets.push("main_role = $main_role");
+            }
+            if twitch.is_some() {
+                sets.push("twitch = $twitch");
+            }
+            if twitter.is_some() {
+                sets.push("twitter = $twitter");
             }
             if let Some(new_nostr) = nostr_pubkey {
                 match new_nostr {
@@ -399,6 +427,15 @@ impl Database {
             }
             if let Some(active) = is_active {
                 q = q.bind(("is_active", active));
+            }
+            if let Some(new_role) = main_role {
+                q = q.bind(("main_role", new_role.map(|s| s.to_string())));
+            }
+            if let Some(new_twitch) = twitch {
+                q = q.bind(("twitch", new_twitch.map(|s| s.to_string())));
+            }
+            if let Some(new_twitter) = twitter {
+                q = q.bind(("twitter", new_twitter.map(|s| s.to_string())));
             }
             if let Some(Some(pubkey)) = nostr_pubkey {
                 q = q

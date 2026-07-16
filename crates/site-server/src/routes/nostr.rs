@@ -314,6 +314,9 @@ pub async fn nostr_verify(
             None,
             Some(Some(pubkey_hex.as_str())),
             None,
+            None,
+            None,
+            None,
         )
         .await
         .map_err(|_e| {
@@ -354,6 +357,9 @@ pub async fn nostr_unlink(
             None,
             None,
             Some(None),
+            None,
+            None,
+            None,
             None,
         )
         .await

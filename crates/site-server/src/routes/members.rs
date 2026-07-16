@@ -77,6 +77,51 @@ pub struct UpdateMemberRequest {
     pub availability_status: Option<Option<String>>,
     pub nostr_pubkey: Option<Option<String>>,
     pub is_active: Option<bool>,
+    /// Preferred competitive role (tank / dps / support / flex, free text).
+    pub main_role: Option<Option<String>>,
+    /// Twitch handle (not URL). `null` clears.
+    pub twitch: Option<Option<String>>,
+    /// X/Twitter handle (not URL). `null` clears.
+    pub twitter: Option<Option<String>>,
+}
+
+/// Normalize a social handle: strip leading `@`, reject URLs, allow [A-Za-z0-9_.] ≤ 32.
+fn normalize_social_handle(raw: &str) -> Result<Option<String>, &'static str> {
+    let s = raw.trim();
+    if s.is_empty() {
+        return Ok(None);
+    }
+    let s = s.strip_prefix('@').unwrap_or(s);
+    let lower = s.to_ascii_lowercase();
+    if lower.contains("://") || s.contains('/') || s.contains('?') || s.contains(' ') {
+        return Err("social handle must not be a URL");
+    }
+    if s.len() > 32 {
+        return Err("social handle too long (max 32)");
+    }
+    if !s
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.')
+    {
+        return Err("social handle has invalid characters");
+    }
+    Ok(Some(s.to_string()))
+}
+
+fn normalize_optional_handle(
+    value: &Option<Option<String>>,
+) -> Result<Option<Option<String>>, (StatusCode, Json<ErrorResponse>)> {
+    match value {
+        None => Ok(None),
+        Some(None) => Ok(Some(None)),
+        Some(Some(raw)) => match normalize_social_handle(raw) {
+            Ok(v) => Ok(Some(v)),
+            Err(msg) => Err((
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse { error: msg.into() }),
+            )),
+        },
+    }
 }
 
 /// PUT /api/members/:id — update member profile (self or officer+)
@@ -185,6 +230,30 @@ pub async fn update_member(
         }
     }
 
+    let twitch = normalize_optional_handle(&body.twitch)?;
+    let twitter = normalize_optional_handle(&body.twitter)?;
+
+    // main_role: trim; empty → clear
+    let main_role = match &body.main_role {
+        None => None,
+        Some(None) => Some(None),
+        Some(Some(r)) => {
+            let t = r.trim();
+            if t.is_empty() {
+                Some(None)
+            } else if t.len() > 32 {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    Json(ErrorResponse {
+                        error: "main_role too long (max 32)".into(),
+                    }),
+                ));
+            } else {
+                Some(Some(t.to_string()))
+            }
+        }
+    };
+
     let updated = state
         .db
         .update_member(
@@ -197,6 +266,9 @@ pub async fn update_member(
             body.availability_status.as_ref().map(|a| a.as_deref()),
             None, // never set pubkey from this route
             is_active,
+            main_role.as_ref().map(|r| r.as_deref()),
+            twitch.as_ref().map(|t| t.as_deref()),
+            twitter.as_ref().map(|t| t.as_deref()),
         )
         .await
         .map_err(|e| {
@@ -213,7 +285,20 @@ pub async fn update_member(
         // Compensate: restore active flag
         if let Err(re) = state
             .db
-            .update_member(&id, None, None, None, None, None, None, None, Some(true))
+            .update_member(
+                &id,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(true),
+                None,
+                None,
+                None,
+            )
             .await
         {
             tracing::error!(error = %re, member_id = %id, "failed to compensate admin deactivation");
@@ -495,6 +580,12 @@ pub struct UpsertGameAccountRequest {
     pub game_id: String,
     pub account_name: String,
     pub account_id: Option<String>,
+    /// Competitive rank label. Omit to leave unchanged; `null` clears.
+    pub rank: Option<Option<String>>,
+    /// Skill rating. Omit to leave unchanged; `null` clears.
+    pub sr: Option<Option<u32>>,
+    /// Role focus (tank / dps / support). Omit to leave unchanged; `null` clears.
+    pub role: Option<Option<String>>,
 }
 
 /// PUT /api/members/:id/game-accounts — upsert game account (self or officer+)
@@ -516,6 +607,45 @@ pub async fn upsert_game_account(
         ));
     }
 
+    let rank = match &body.rank {
+        None => None,
+        Some(None) => Some(None),
+        Some(Some(r)) => {
+            let t = r.trim();
+            if t.is_empty() {
+                Some(None)
+            } else if t.len() > 64 {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    Json(ErrorResponse {
+                        error: "rank too long (max 64)".into(),
+                    }),
+                ));
+            } else {
+                Some(Some(t.to_string()))
+            }
+        }
+    };
+    let role = match &body.role {
+        None => None,
+        Some(None) => Some(None),
+        Some(Some(r)) => {
+            let t = r.trim();
+            if t.is_empty() {
+                Some(None)
+            } else if t.len() > 32 {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    Json(ErrorResponse {
+                        error: "role too long (max 32)".into(),
+                    }),
+                ));
+            } else {
+                Some(Some(t.to_string()))
+            }
+        }
+    };
+
     state
         .db
         .upsert_game_account(
@@ -523,6 +653,9 @@ pub async fn upsert_game_account(
             &body.game_id,
             &body.account_name,
             body.account_id.as_deref(),
+            rank.as_ref().map(|r| r.as_deref()),
+            body.sr,
+            role.as_ref().map(|r| r.as_deref()),
         )
         .await
         .map(Json)

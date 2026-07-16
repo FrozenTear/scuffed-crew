@@ -122,6 +122,9 @@ pub async fn create_moderation_action(
                 None,
                 None,
                 Some(false),
+                None,
+                None,
+                None,
             )
             .await
             .map_err(|e| internal_err(e, "deactivate member on ban"))?;
@@ -140,6 +143,9 @@ pub async fn create_moderation_action(
                     None,
                     None,
                     Some(true),
+                    None,
+                    None,
+                    None,
                 )
                 .await
             {

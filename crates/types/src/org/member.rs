@@ -49,6 +49,15 @@ pub struct Member {
     pub availability_status: Option<String>,
     pub joined_at: DateTime<Utc>,
     pub is_active: bool,
+    /// Preferred competitive role (e.g. tank / dps / support / flex).
+    #[serde(default)]
+    pub main_role: Option<String>,
+    /// Twitch handle (not URL).
+    #[serde(default)]
+    pub twitch: Option<String>,
+    /// X/Twitter handle (not URL).
+    #[serde(default)]
+    pub twitter: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -59,4 +68,13 @@ pub struct GameAccount {
     pub account_name: String,
     pub account_id: Option<String>,
     pub created_at: DateTime<Utc>,
+    /// Competitive rank label (e.g. "Diamond 2"). Public-but-minimal.
+    #[serde(default)]
+    pub rank: Option<String>,
+    /// Skill rating when applicable. Public-but-minimal.
+    #[serde(default)]
+    pub sr: Option<u32>,
+    /// Account role focus (e.g. tank / dps / support).
+    #[serde(default)]
+    pub role: Option<String>,
 }

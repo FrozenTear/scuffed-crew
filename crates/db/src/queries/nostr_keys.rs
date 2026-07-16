@@ -339,6 +339,9 @@ mod tests {
                 None,
                 Some(Some(&external_pubkey)),
                 None,
+                None,
+                None,
+                None,
             )
             .await
             .unwrap();

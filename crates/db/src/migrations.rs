@@ -651,6 +651,18 @@ pub async fn run_migrations(client: &Surreal<Any>) -> DbResult<()> {
         -- ================================================
         DEFINE FIELD OVERWRITE is_public ON event TYPE bool DEFAULT false;
         DEFINE FIELD OVERWRITE is_public ON match_result TYPE bool DEFAULT false;
+
+        -- ================================================
+        -- #10 member profile fields (feat/member-profile-fields)
+        -- Socials: store validated handles (not URLs).
+        -- GameAccount rank/sr/role: public-but-minimal competitive info.
+        -- ================================================
+        DEFINE FIELD OVERWRITE main_role ON member TYPE option<string> DEFAULT NONE;
+        DEFINE FIELD OVERWRITE twitch ON member TYPE option<string> DEFAULT NONE;
+        DEFINE FIELD OVERWRITE twitter ON member TYPE option<string> DEFAULT NONE;
+        DEFINE FIELD OVERWRITE rank ON game_account TYPE option<string> DEFAULT NONE;
+        DEFINE FIELD OVERWRITE sr ON game_account TYPE option<int> DEFAULT NONE;
+        DEFINE FIELD OVERWRITE role ON game_account TYPE option<string> DEFAULT NONE;
     "#,
         )
         .await?

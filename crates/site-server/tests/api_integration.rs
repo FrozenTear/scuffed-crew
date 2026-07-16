@@ -344,6 +344,89 @@ async fn update_own_member_profile() {
 }
 
 #[tokio::test]
+async fn update_member_profile_fields_and_game_account_meta() {
+    let state = test_state().await;
+    seed_all_roles(&state.db).await;
+    seed_game(&state.db, "ow2", "Overwatch 2").await;
+
+    // Social URL rejected
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(authed_json_request(
+            Method::PUT,
+            "/api/members/membermember",
+            MEMBER_TOKEN,
+            json!({ "twitch": "https://twitch.tv/nogo" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+    // Handles accepted (leading @ stripped)
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(authed_json_request(
+            Method::PUT,
+            "/api/members/membermember",
+            MEMBER_TOKEN,
+            json!({
+                "main_role": "support",
+                "twitch": "@scuffedowl",
+                "twitter": "scuffed_x"
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    assert_eq!(json["main_role"], "support");
+    assert_eq!(json["twitch"], "scuffedowl");
+    assert_eq!(json["twitter"], "scuffed_x");
+
+    // Game account rank/sr/role
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(authed_json_request(
+            Method::PUT,
+            "/api/members/membermember/game-accounts",
+            MEMBER_TOKEN,
+            json!({
+                "game_id": "ow2",
+                "account_name": "Owl#1234",
+                "rank": "Diamond 2",
+                "sr": 3200,
+                "role": "support"
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let ga = body_json(resp).await;
+    assert_eq!(ga["rank"], "Diamond 2");
+    assert_eq!(ga["sr"], 3200);
+    assert_eq!(ga["role"], "support");
+
+    // Public profile surfaces the fields
+    let app = create_router(state);
+    let resp = app
+        .oneshot(unauthed_request(
+            Method::GET,
+            "/api/public/members/membermember",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    assert_eq!(json["main_role"], "support");
+    assert_eq!(json["twitch"], "scuffedowl");
+    assert_eq!(json["twitter"], "scuffed_x");
+    let accounts = json["game_accounts"].as_array().unwrap();
+    assert_eq!(accounts.len(), 1);
+    assert_eq!(accounts[0]["rank"], "Diamond 2");
+    assert_eq!(accounts[0]["sr"], 3200);
+}
+
+#[tokio::test]
 async fn member_cannot_update_other_member() {
     let state = test_state().await;
     seed_all_roles(&state.db).await;
@@ -2347,12 +2430,12 @@ async fn delete_game_account_requires_ownership() {
 
     let a = state
         .db
-        .upsert_game_account("membermember", "ow2", "MemberTag", None)
+        .upsert_game_account("membermember", "ow2", "MemberTag", None, None, None, None)
         .await
         .unwrap();
     let b = state
         .db
-        .upsert_game_account("recruitmember", "ow2", "RecruitTag", None)
+        .upsert_game_account("recruitmember", "ow2", "RecruitTag", None, None, None, None)
         .await
         .unwrap();
 
@@ -2964,7 +3047,11 @@ async fn match_is_public_gates_team_list_and_strips_notes() {
     assert_eq!(resp.status(), StatusCode::OK);
     let json = body_json(resp).await;
     let data = json["data"].as_array().unwrap();
-    assert_eq!(data.len(), 1, "anon should see only public non-scrim: {data:?}");
+    assert_eq!(
+        data.len(),
+        1,
+        "anon should see only public non-scrim: {data:?}"
+    );
     assert_eq!(data[0]["opponent"], "Public FC");
     assert!(data[0]["notes"].is_null());
     assert_eq!(data[0]["recorded_by"], "");
@@ -2987,10 +3074,7 @@ async fn match_is_public_gates_team_list_and_strips_notes() {
     // Public team detail recent_matches
     let app = create_router(state);
     let resp = app
-        .oneshot(unauthed_request(
-            Method::GET,
-            "/api/public/teams/teamalpha",
-        ))
+        .oneshot(unauthed_request(Method::GET, "/api/public/teams/teamalpha"))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);

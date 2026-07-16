@@ -77,6 +77,15 @@ pub struct Member {
     pub nostr_secret_key_encrypted: Option<EncryptedBlob>,
     pub joined_at: DateTime<Utc>,
     pub is_active: bool,
+    /// Preferred competitive role (e.g. tank / dps / support / flex).
+    #[serde(default)]
+    pub main_role: Option<String>,
+    /// Twitch handle (not URL).
+    #[serde(default)]
+    pub twitch: Option<String>,
+    /// X/Twitter handle (not URL).
+    #[serde(default)]
+    pub twitter: Option<String>,
 }
 
 /// A game/title that teams can play.
@@ -837,6 +846,15 @@ pub struct GameAccount {
     pub account_name: String,
     pub account_id: Option<String>,
     pub created_at: DateTime<Utc>,
+    /// Competitive rank label (e.g. "Diamond 2"). Public-but-minimal.
+    #[serde(default)]
+    pub rank: Option<String>,
+    /// Skill rating when applicable. Public-but-minimal.
+    #[serde(default)]
+    pub sr: Option<u32>,
+    /// Account role focus (e.g. tank / dps / support).
+    #[serde(default)]
+    pub role: Option<String>,
 }
 
 /// RSVP status for an event.
