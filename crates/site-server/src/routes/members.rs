@@ -67,21 +67,41 @@ pub async fn get_member(
         })
 }
 
+/// Deserializer for "omit = leave unchanged, null = clear" fields. A plain
+/// `Option<Option<T>>` maps JSON `null` to the OUTER `None` (indistinguishable
+/// from omitted), so explicit clears were silently dropped without this.
+fn double_option<'de, T, D>(de: D) -> Result<Option<Option<T>>, D::Error>
+where
+    T: serde::Deserialize<'de>,
+    D: serde::Deserializer<'de>,
+{
+    serde::Deserialize::deserialize(de).map(Some)
+}
+
 #[derive(Deserialize)]
 pub struct UpdateMemberRequest {
     pub display_name: Option<String>,
+    #[serde(default, deserialize_with = "double_option")]
     pub bio: Option<Option<String>>,
+    #[serde(default, deserialize_with = "double_option")]
     pub avatar_url: Option<Option<String>>,
+    #[serde(default, deserialize_with = "double_option")]
     pub timezone: Option<Option<String>>,
+    #[serde(default, deserialize_with = "double_option")]
     pub pronouns: Option<Option<String>>,
+    #[serde(default, deserialize_with = "double_option")]
     pub availability_status: Option<Option<String>>,
+    #[serde(default, deserialize_with = "double_option")]
     pub nostr_pubkey: Option<Option<String>>,
     pub is_active: Option<bool>,
     /// Preferred competitive role (tank / dps / support / flex, free text).
+    #[serde(default, deserialize_with = "double_option")]
     pub main_role: Option<Option<String>>,
     /// Twitch handle (not URL). `null` clears.
+    #[serde(default, deserialize_with = "double_option")]
     pub twitch: Option<Option<String>>,
     /// X/Twitter handle (not URL). `null` clears.
+    #[serde(default, deserialize_with = "double_option")]
     pub twitter: Option<Option<String>>,
 }
 
@@ -581,10 +601,13 @@ pub struct UpsertGameAccountRequest {
     pub account_name: String,
     pub account_id: Option<String>,
     /// Competitive rank label. Omit to leave unchanged; `null` clears.
+    #[serde(default, deserialize_with = "double_option")]
     pub rank: Option<Option<String>>,
     /// Skill rating. Omit to leave unchanged; `null` clears.
+    #[serde(default, deserialize_with = "double_option")]
     pub sr: Option<Option<u32>>,
     /// Role focus (tank / dps / support). Omit to leave unchanged; `null` clears.
+    #[serde(default, deserialize_with = "double_option")]
     pub role: Option<Option<String>>,
 }
 

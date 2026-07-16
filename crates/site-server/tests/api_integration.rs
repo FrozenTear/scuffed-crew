@@ -343,6 +343,49 @@ async fn update_own_member_profile() {
     assert_eq!(json["bio"], "Hello world");
 }
 
+/// JSON `null` must clear a double-Option field; omitting it must leave it
+/// unchanged. Regression test: plain `Option<Option<T>>` deserializes null to
+/// the outer None, silently dropping explicit clears.
+#[tokio::test]
+async fn update_member_null_clears_omit_preserves() {
+    let state = test_state().await;
+    seed_all_roles(&state.db).await;
+
+    // Set bio + main_role + twitch
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(authed_json_request(
+            Method::PUT,
+            "/api/members/membermember",
+            MEMBER_TOKEN,
+            json!({ "bio": "hi", "main_role": "tank", "twitch": "soot_tv" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // Omit bio/twitch, clear main_role with null
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(authed_json_request(
+            Method::PUT,
+            "/api/members/membermember",
+            MEMBER_TOKEN,
+            json!({ "main_role": null }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    assert_eq!(json["bio"], "hi", "omitted field must be preserved");
+    assert_eq!(json["twitch"], "soot_tv", "omitted field must be preserved");
+    assert!(
+        json["main_role"].is_null(),
+        "null must clear main_role, got {:?}",
+        json["main_role"]
+    );
+}
+
 #[tokio::test]
 async fn update_member_profile_fields_and_game_account_meta() {
     let state = test_state().await;
