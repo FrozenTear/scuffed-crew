@@ -230,6 +230,14 @@ const PAGE_CSS: &str = r#"
     .team-match-rows {
         border-top: 1px solid var(--border);
     }
+    a.team-match-row {
+        text-decoration: none;
+        color: inherit;
+        cursor: pointer;
+    }
+    a.team-match-row:hover {
+        background: color-mix(in srgb, var(--accent) 6%, transparent);
+    }
     .team-match-row {
         display: grid;
         grid-template-columns: 4.5rem 3.5rem minmax(0, 1fr) auto;
@@ -516,8 +524,11 @@ fn render_match_row(m: &TeamMatch) -> Element {
     meta_parts.push(m.match_type.clone());
     let meta = meta_parts.join(" · ");
 
+    let mid = m.id.clone();
     rsx! {
-        div { class: "team-match-row",
+        Link {
+            to: Route::MatchDetail { id: mid },
+            class: "team-match-row",
             span { class: "team-match-date", "{date}" }
             span { class: "team-match-score {outcome_class}", "{score}" }
             span { class: "team-match-opponent", "vs {m.opponent}" }

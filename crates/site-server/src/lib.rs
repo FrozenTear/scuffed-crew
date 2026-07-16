@@ -192,7 +192,10 @@ pub fn create_router(state: AppState) -> Router {
             get(routes::matches::list_team_matches),
         )
         .route("/api/matches", post(routes::matches::record_match))
-        .route("/api/matches/{id}", put(routes::matches::update_match))
+        .route(
+            "/api/matches/{id}",
+            get(routes::matches::get_match).put(routes::matches::update_match),
+        )
         // Personal stats routes
         .route("/api/stats/upload", post(routes::stats::upload_stats))
         .route("/api/stats/me", get(routes::stats::my_stats))
@@ -446,6 +449,10 @@ pub fn create_router(state: AppState) -> Router {
         .route(
             "/api/public/teams/{id}",
             get(routes::public::public_team_detail),
+        )
+        .route(
+            "/api/public/matches/{id}",
+            get(routes::public::public_match_detail),
         )
         // Serve uploaded files
         .nest_service("/uploads", ServeDir::new(state.upload_dir.clone()))

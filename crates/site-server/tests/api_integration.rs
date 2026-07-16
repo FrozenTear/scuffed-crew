@@ -3641,3 +3641,106 @@ async fn public_overview_includes_upcoming_and_recent_matches() {
     assert_eq!(recent[0]["outcome"], "win");
     assert_eq!(recent[0]["team_name"], "Alpha Squad");
 }
+
+// ─── #4 match detail ────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn public_match_detail_gates_and_exposes_media() {
+    let state = test_state().await;
+    seed_all_roles(&state.db).await;
+    seed_game(&state.db, "ow2", "Overwatch 2").await;
+    seed_team(&state.db, "teamalpha", "Alpha Squad", "ow2").await;
+
+    // Public official with media
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(authed_json_request(
+            Method::POST,
+            "/api/matches",
+            OFFICER_TOKEN,
+            json!({
+                "team_id": "teamalpha",
+                "opponent": "Detail Opp",
+                "match_type": "official",
+                "score_us": 2,
+                "score_them": 1,
+                "played_at": "2026-06-20T18:00:00Z",
+                "notes": "secret",
+                "vod_url": "https://www.youtube.com/watch?v=abc",
+                "replay_code": "REPLAY01",
+                "is_public": true
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let id = body_json(resp).await["id"].as_str().unwrap().to_string();
+
+    // Private match
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(authed_json_request(
+            Method::POST,
+            "/api/matches",
+            OFFICER_TOKEN,
+            json!({
+                "team_id": "teamalpha",
+                "opponent": "Private Opp",
+                "match_type": "official",
+                "score_us": 1,
+                "score_them": 0,
+                "played_at": "2026-06-21T18:00:00Z",
+                "is_public": false
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let private_id = body_json(resp).await["id"].as_str().unwrap().to_string();
+
+    // Public detail
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(unauthed_request(
+            Method::GET,
+            &format!("/api/public/matches/{id}"),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    assert_eq!(json["opponent"], "Detail Opp");
+    assert_eq!(json["team_name"], "Alpha Squad");
+    assert_eq!(json["game_name"], "Overwatch 2");
+    assert_eq!(json["vod_url"], "https://www.youtube.com/watch?v=abc");
+    assert_eq!(json["replay_code"], "REPLAY01");
+    assert!(
+        json.get("notes").is_none() || json["notes"].is_null(),
+        "notes must not leak: {json}"
+    );
+
+    // Private → 404
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(unauthed_request(
+            Method::GET,
+            &format!("/api/public/matches/{private_id}"),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+    // Member GET full row includes notes
+    let app = create_router(state);
+    let resp = app
+        .oneshot(authed_request(
+            Method::GET,
+            &format!("/api/matches/{id}"),
+            MEMBER_TOKEN,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    assert_eq!(json["notes"], "secret");
+}

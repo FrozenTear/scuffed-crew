@@ -427,6 +427,74 @@ fn match_to_public(m: MatchResult) -> Option<PublicMatch> {
     PublicMatch::try_from_match(&typed)
 }
 
+/// Public match detail with team/game display names for the match page.
+#[derive(Serialize)]
+pub struct PublicMatchDetail {
+    #[serde(flatten)]
+    pub match_row: PublicMatch,
+    pub team_name: String,
+    pub game_name: Option<String>,
+}
+
+/// GET /api/public/matches/:id — public non-scrim match detail (404 if private).
+pub async fn public_match_detail(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<PublicMatchDetail>, (StatusCode, Json<ErrorResponse>)> {
+    let m = state.db.get_match(&id).await.map_err(|_e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: "Internal error".into(),
+            }),
+        )
+    })?;
+    let m = m.ok_or_else(|| {
+        (
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: "Match not found".into(),
+            }),
+        )
+    })?;
+    let pub_m = match_to_public(m).ok_or_else(|| {
+        (
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: "Match not found".into(),
+            }),
+        )
+    })?;
+
+    let team = state
+        .db
+        .get_team(&pub_m.team_id)
+        .await
+        .ok()
+        .flatten();
+    let team_name = team
+        .as_ref()
+        .map(|t| t.name.clone())
+        .unwrap_or_else(|| "Team".into());
+    let game_name = if let Some(t) = team.as_ref() {
+        state
+            .db
+            .get_game(&t.game_id)
+            .await
+            .ok()
+            .flatten()
+            .map(|g| g.name)
+    } else {
+        None
+    };
+
+    Ok(Json(PublicMatchDetail {
+        match_row: pub_m,
+        team_name,
+        game_name,
+    }))
+}
+
 #[derive(Serialize)]
 pub struct TeamRosterMember {
     pub member_id: String,

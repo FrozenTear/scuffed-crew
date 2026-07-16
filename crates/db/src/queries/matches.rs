@@ -249,6 +249,14 @@ impl Database {
         .await
     }
 
+    pub async fn get_match(&self, id: &str) -> DbResult<Option<MatchResult>> {
+        with_timeout(async {
+            let row: Option<DbMatchResult> = self.client.select(("match_result", id)).await?;
+            Ok(row.map(db_to_match))
+        })
+        .await
+    }
+
     /// Public scheduled fixtures (not yet played), soonest first.
     /// Fixed SQL only — is_public + non-scrim + scheduled_at set + played_at empty.
     pub async fn list_public_upcoming_matches(

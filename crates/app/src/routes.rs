@@ -20,6 +20,8 @@ pub enum Route {
         MemberProfile { id: String },
         #[route("/teams/:id")]
         TeamPage { id: String },
+        #[route("/matches/:id")]
+        MatchDetail { id: String },
         #[route("/news")]
         News {},
         #[route("/apply")]

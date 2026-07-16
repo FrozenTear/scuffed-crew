@@ -10,7 +10,7 @@ use scuffed_auth::server::session::ErrorResponse;
 use scuffed_db::{AuditAction, AuditTargetType, MatchResult, MatchType};
 use scuffed_types::api::{CursorResponse, PaginationParams};
 
-use crate::extractors::{OfficerUser, OptionalOrgMember};
+use crate::extractors::{OfficerUser, OptionalOrgMember, OrgMember};
 use crate::routes::audit_log::audit;
 use crate::state::AppState;
 
@@ -90,6 +90,31 @@ fn map_media_opt(
             Err(msg) => Err(bad_request(msg)),
         },
     }
+}
+
+/// GET /api/matches/:id — full match row for org members (includes notes).
+pub async fn get_match(
+    State(state): State<AppState>,
+    _member: OrgMember,
+    Path(id): Path<String>,
+) -> Result<Json<MatchResult>, (StatusCode, Json<ErrorResponse>)> {
+    let m = state.db.get_match(&id).await.map_err(|_e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: "Internal error".into(),
+            }),
+        )
+    })?;
+    let m = m.ok_or_else(|| {
+        (
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: "Match not found".into(),
+            }),
+        )
+    })?;
+    Ok(Json(m))
 }
 
 /// GET /api/teams/:id/matches — team match history (cursor-paginated).
