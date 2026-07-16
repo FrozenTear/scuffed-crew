@@ -3,7 +3,8 @@ use serde::Deserialize;
 
 use crate::components::ui::{Card, Pill, PillTone};
 use crate::routes::Route;
-use scuffed_api_client::ApiClient;
+
+use super::public_fetch::{PublicFetch, fetch_public};
 
 #[derive(Debug, Clone, Deserialize)]
 struct MemberTeamInfo {
@@ -182,12 +183,9 @@ pub fn MemberProfile(id: String) -> Element {
         let id = id_clone.clone();
         async move {
             if id.is_empty() {
-                return None;
+                return PublicFetch::NotFound;
             }
-            ApiClient::web()
-                .fetch::<MemberProfileData>(&format!("/api/public/members/{id}"))
-                .await
-                .ok()
+            fetch_public::<MemberProfileData>(&format!("/api/public/members/{id}")).await
         }
     });
 
@@ -197,10 +195,13 @@ pub fn MemberProfile(id: String) -> Element {
         main { class: "profile-page",
             {
                 let data = profile.read();
-                let data = data.as_ref().and_then(|d| d.as_ref());
-                match data {
+                match data.as_ref() {
                     None => rsx! { p { class: "profile-loading", "Loading..." } },
-                    Some(m) => {
+                    Some(PublicFetch::NotFound) => rsx! { p { class: "profile-loading", "Member not found" } },
+                    Some(PublicFetch::Failed) => rsx! {
+                        p { class: "profile-loading", "Couldn't load this profile. Check your connection and try again." }
+                    },
+                    Some(PublicFetch::Found(m)) => {
                         let initials: String = m.display_name
                             .split_whitespace()
                             .filter_map(|w| w.chars().next())

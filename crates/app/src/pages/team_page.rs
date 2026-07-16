@@ -3,7 +3,8 @@ use serde::Deserialize;
 
 use crate::components::ui::{Card, Pill, PillTone};
 use crate::routes::Route;
-use scuffed_api_client::ApiClient;
+
+use super::public_fetch::{PublicFetch, fetch_public};
 
 #[derive(Debug, Clone, Deserialize)]
 struct RosterMember {
@@ -324,12 +325,9 @@ pub fn TeamPage(id: String) -> Element {
         let id = id_clone.clone();
         async move {
             if id.is_empty() {
-                return None;
+                return PublicFetch::NotFound;
             }
-            ApiClient::web()
-                .fetch::<TeamDetailData>(&format!("/api/public/teams/{id}"))
-                .await
-                .ok()
+            fetch_public::<TeamDetailData>(&format!("/api/public/teams/{id}")).await
         }
     });
 
@@ -341,8 +339,11 @@ pub fn TeamPage(id: String) -> Element {
                 let data = team.read();
                 match data.as_ref() {
                     None => rsx! { p { class: "team-page-loading", "Loading..." } },
-                    Some(None) => rsx! { p { class: "team-page-missing", "Team not found" } },
-                    Some(Some(t)) => rsx! {
+                    Some(PublicFetch::NotFound) => rsx! { p { class: "team-page-missing", "Team not found" } },
+                    Some(PublicFetch::Failed) => rsx! {
+                        p { class: "team-page-missing", "Couldn't load this team. Check your connection and try again." }
+                    },
+                    Some(PublicFetch::Found(t)) => rsx! {
                         {render_header(t)}
 
                         if !t.roster.is_empty() {

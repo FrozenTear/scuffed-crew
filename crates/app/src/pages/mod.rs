@@ -15,6 +15,7 @@ mod members;
 mod news;
 mod not_found;
 mod polls;
+mod public_fetch;
 mod scrims;
 mod setup;
 mod stats;
