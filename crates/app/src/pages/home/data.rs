@@ -17,6 +17,7 @@ pub struct OverviewGame {
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct OverviewTeam {
+    pub id: String,
     pub name: String,
     pub game_id: String,
     pub division: Option<String>,

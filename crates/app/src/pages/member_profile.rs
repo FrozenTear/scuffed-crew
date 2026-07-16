@@ -7,7 +7,6 @@ use scuffed_api_client::ApiClient;
 
 #[derive(Debug, Clone, Deserialize)]
 struct MemberTeamInfo {
-    #[allow(dead_code)]
     team_id: String,
     team_name: String,
     team_role: String,
@@ -118,6 +117,15 @@ const PAGE_CSS: &str = r#"
         display: grid;
         grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
         gap: 0.75rem;
+    }
+    .profile-team-link {
+        display: block;
+        color: inherit;
+        text-decoration: none;
+        min-width: 0;
+    }
+    .profile-team-link:hover .profile-team-name {
+        color: var(--accent);
     }
     .profile-team-name {
         font-family: var(--font-head);
@@ -235,10 +243,14 @@ pub fn MemberProfile(id: String) -> Element {
                                     h2 { "Teams" }
                                     div { class: "profile-teams",
                                         for t in m.teams.iter() {
-                                            Card {
-                                                div { class: "profile-card-row",
-                                                    span { class: "profile-team-name", "{t.team_name}" }
-                                                    span { class: "profile-team-role", "{t.team_role}" }
+                                            Link {
+                                                to: Route::TeamPage { id: t.team_id.clone() },
+                                                class: "profile-team-link",
+                                                Card {
+                                                    div { class: "profile-card-row",
+                                                        span { class: "profile-team-name", "{t.team_name}" }
+                                                        span { class: "profile-team-role", "{t.team_role}" }
+                                                    }
                                                 }
                                             }
                                         }

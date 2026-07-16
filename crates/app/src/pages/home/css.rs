@@ -424,6 +424,14 @@ pub const HOME_SHARED_CSS: &str = r#"
         letter-spacing: 0.02em;
         min-width: 0;
     }
+    .team-row .tm-name-link {
+        color: inherit;
+        text-decoration: none;
+    }
+    .team-row .tm-name-link:hover {
+        color: var(--accent);
+        text-decoration: underline;
+    }
     .team-row .tm-game {
         font-family: var(--font-mono);
         font-size: 0.65rem;
@@ -847,6 +855,15 @@ pub const HOME_SHELL_CSS: &str = r#"
     grid-template-columns: repeat(auto-fill, minmax(14rem, 1fr));
     gap: 0.75rem;
     margin-top: 0.85rem;
+}
+.home-wrap a.team-card {
+    display: block;
+    color: inherit;
+    text-decoration: none;
+}
+.home-wrap a.team-chip {
+    display: inline-block;
+    text-decoration: none;
 }
 .home-wrap .team-card {
     border: 1px solid var(--border);

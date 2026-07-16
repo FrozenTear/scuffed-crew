@@ -288,7 +288,11 @@ fn render_team_row(team: &OverviewTeam, game_map: &HashMap<String, String>) -> E
     rsx! {
         div { class: "{row_class}",
             div { class: "tm-name",
-                "{team.name}"
+                Link {
+                    to: Route::TeamPage { id: team.id.clone() },
+                    class: "tm-name-link",
+                    "{team.name}"
+                }
                 if forming {
                     span { class: "tm-forming", "Forming" }
                 }
@@ -326,7 +330,7 @@ fn render_team_card(team: &OverviewTeam, game_map: &HashMap<String, String>) -> 
         format!(" · {}–{}", team.record.wins, team.record.losses)
     };
     rsx! {
-        div { class: "{card_class}",
+        Link { to: Route::TeamPage { id: team.id.clone() }, class: "{card_class}",
             div { class: "tc-name", "{team.name}" }
             div { class: "tc-meta", "{game_name} · {roster}{wl}" }
         }
@@ -345,7 +349,9 @@ fn render_team_chip(team: &OverviewTeam, game_map: &HashMap<String, String>) -> 
         "team-chip"
     };
     rsx! {
-        span { class: "{chip_class}", "{team.name} · {game_name}" }
+        Link { to: Route::TeamPage { id: team.id.clone() }, class: "{chip_class}",
+            "{team.name} · {game_name}"
+        }
     }
 }
 
