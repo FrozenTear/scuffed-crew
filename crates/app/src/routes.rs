@@ -30,6 +30,8 @@ pub enum Route {
         Tournament { id: String },
         #[route("/identity")]
         IdentitySettings {},
+        #[route("/profile/edit")]
+        ProfileSettings {},
         #[route("/dm")]
         DmInbox {},
         #[route("/dm/:peer_pubkey")]

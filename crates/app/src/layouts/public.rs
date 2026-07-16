@@ -516,6 +516,11 @@ pub fn PublicLayout() -> Element {
                                 }
                             }
                             Link {
+                                to: Route::ProfileSettings {},
+                                onclick: move |_| account_open.set(false),
+                                "Edit Profile"
+                            }
+                            Link {
                                 to: Route::IdentitySettings {},
                                 onclick: move |_| account_open.set(false),
                                 "Settings"
@@ -616,6 +621,11 @@ pub fn PublicLayout() -> Element {
                         onclick: move |_| mobile_open.set(false),
                         "Admin"
                     }
+                }
+                Link {
+                    to: Route::ProfileSettings {},
+                    onclick: move |_| mobile_open.set(false),
+                    "Edit Profile"
                 }
                 Link {
                     to: Route::IdentitySettings {},

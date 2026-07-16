@@ -3,6 +3,7 @@ use serde::Deserialize;
 
 use crate::components::ui::{Card, Pill, PillTone};
 use crate::routes::Route;
+use scuffed_api_client::ApiClient;
 
 use super::public_fetch::{PublicFetch, fetch_public};
 
@@ -23,6 +24,21 @@ struct GameAccount {
     game_id: String,
     account_name: String,
     account_id: Option<String>,
+    #[serde(default)]
+    rank: Option<String>,
+    #[serde(default)]
+    sr: Option<u32>,
+    #[serde(default)]
+    role: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct HeroStats {
+    hero: String,
+    matches: u32,
+    wins: u32,
+    losses: u32,
+    draws: u32,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -37,6 +53,12 @@ struct MemberProfileData {
     teams: Vec<MemberTeamInfo>,
     #[serde(default)]
     game_accounts: Vec<GameAccount>,
+    #[serde(default)]
+    main_role: Option<String>,
+    #[serde(default)]
+    twitch: Option<String>,
+    #[serde(default)]
+    twitter: Option<String>,
 }
 
 const PAGE_CSS: &str = r#"
@@ -168,10 +190,58 @@ const PAGE_CSS: &str = r#"
     .profile-back a:hover {
         text-decoration: underline;
     }
+    .profile-pills {
+        display: flex;
+        gap: 0.4rem;
+        flex-wrap: wrap;
+        align-items: center;
+    }
+    .profile-socials {
+        display: flex;
+        gap: 0.9rem;
+        margin-top: 0.2rem;
+    }
+    .profile-socials a {
+        color: var(--accent);
+        text-decoration: none;
+        font-size: 0.8rem;
+        font-weight: 600;
+    }
+    .profile-socials a:hover {
+        text-decoration: underline;
+    }
+    .profile-account-meta {
+        display: flex;
+        gap: 0.5rem;
+        margin-top: 0.4rem;
+        font-size: 0.72rem;
+        color: var(--text-3);
+        text-transform: uppercase;
+        letter-spacing: 0.03em;
+    }
+    .profile-heroes {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+        gap: 0.75rem;
+    }
+    .profile-hero-name {
+        font-family: var(--font-head);
+        font-weight: 700;
+        color: var(--text);
+        text-transform: capitalize;
+    }
+    .profile-hero-meta {
+        font-size: 0.75rem;
+        color: var(--text-3);
+        margin-top: 0.25rem;
+    }
     @media (max-width: 600px) {
         .profile-header {
             flex-direction: column;
             text-align: center;
+        }
+        .profile-pills, .profile-socials {
+            justify-content: center;
         }
     }
 "#;
@@ -186,6 +256,22 @@ pub fn MemberProfile(id: String) -> Element {
                 return PublicFetch::NotFound;
             }
             fetch_public::<MemberProfileData>(&format!("/api/public/members/{id}")).await
+        }
+    });
+
+    // Hero showcase is member-gated until #6 ships a public endpoint: anon
+    // (or any failure) collapses to empty and the section stays hidden.
+    let hero_id = id.clone();
+    let heroes = use_resource(move || {
+        let id = hero_id.clone();
+        async move {
+            if id.is_empty() {
+                return Vec::new();
+            }
+            ApiClient::web()
+                .fetch::<Vec<HeroStats>>(&format!("/api/stats/member/{id}/heroes"))
+                .await
+                .unwrap_or_default()
         }
     });
 
@@ -227,7 +313,32 @@ pub fn MemberProfile(id: String) -> Element {
                                 }
                                 div { class: "profile-info",
                                     h1 { class: "profile-name", "{m.display_name}" }
-                                    Pill { tone: role_tone, "{m.org_role}" }
+                                    div { class: "profile-pills",
+                                        Pill { tone: role_tone, "{m.org_role}" }
+                                        if let Some(role) = &m.main_role {
+                                            Pill { tone: PillTone::Accent, "{role}" }
+                                        }
+                                    }
+                                    if m.twitch.is_some() || m.twitter.is_some() {
+                                        div { class: "profile-socials",
+                                            if let Some(h) = &m.twitch {
+                                                a {
+                                                    href: "https://twitch.tv/{h}",
+                                                    target: "_blank",
+                                                    rel: "noopener noreferrer",
+                                                    "Twitch"
+                                                }
+                                            }
+                                            if let Some(h) = &m.twitter {
+                                                a {
+                                                    href: "https://x.com/{h}",
+                                                    target: "_blank",
+                                                    rel: "noopener noreferrer",
+                                                    "Twitter / X"
+                                                }
+                                            }
+                                        }
+                                    }
                                     p { class: "profile-joined", "Joined {joined}" }
                                 }
                             }
@@ -270,6 +381,22 @@ pub fn MemberProfile(id: String) -> Element {
                                 }
                             }
 
+                            {
+                                let hero_list = heroes.read().clone().unwrap_or_default();
+                                rsx! {
+                                    if !hero_list.is_empty() {
+                                        div { class: "profile-section",
+                                            h2 { "Top Heroes" }
+                                            div { class: "profile-heroes",
+                                                for h in hero_list.iter().take(3) {
+                                                    {render_hero_card(h)}
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
                             div { class: "profile-back",
                                 Link { to: Route::Members {}, "Back to all members" }
                             }
@@ -283,6 +410,10 @@ pub fn MemberProfile(id: String) -> Element {
 
 fn render_account_card(a: &GameAccount) -> Element {
     let id_display = a.account_id.clone().unwrap_or_default();
+    let rank = a.rank.clone().unwrap_or_default();
+    let sr = a.sr.map(|v| v.to_string()).unwrap_or_default();
+    let role = a.role.clone().unwrap_or_default();
+    let has_meta = !rank.is_empty() || !sr.is_empty() || !role.is_empty();
     rsx! {
         Card {
             div { class: "profile-card-row",
@@ -290,6 +421,35 @@ fn render_account_card(a: &GameAccount) -> Element {
                 if !id_display.is_empty() {
                     span { class: "profile-account-id", "{id_display}" }
                 }
+            }
+            if has_meta {
+                div { class: "profile-account-meta",
+                    if !rank.is_empty() {
+                        span { "{rank}" }
+                    }
+                    if !sr.is_empty() {
+                        span { "{sr} SR" }
+                    }
+                    if !role.is_empty() {
+                        span { "{role}" }
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn render_hero_card(h: &HeroStats) -> Element {
+    let winrate = if h.matches > 0 {
+        format!("{:.0}%", (h.wins as f64 / h.matches as f64) * 100.0)
+    } else {
+        "—".to_string()
+    };
+    rsx! {
+        Card {
+            div { class: "profile-hero-name", "{h.hero}" }
+            div { class: "profile-hero-meta",
+                "{h.matches} games · {winrate} WR · {h.wins}-{h.losses}-{h.draws}"
             }
         }
     }
