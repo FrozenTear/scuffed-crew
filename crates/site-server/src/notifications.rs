@@ -157,9 +157,26 @@ pub struct DiscordNotifier {
     general_webhook: Option<String>,
 }
 
+/// Empty `parse` disables @everyone / @here / role / user auto-mentions so
+/// user-controlled strings (display names, titles) cannot mass-ping a guild.
+#[derive(Serialize)]
+struct DiscordAllowedMentions {
+    parse: Vec<String>,
+}
+
 #[derive(Serialize)]
 struct DiscordWebhookBody {
     content: String,
+    allowed_mentions: DiscordAllowedMentions,
+}
+
+impl DiscordWebhookBody {
+    fn new(content: impl Into<String>) -> Self {
+        Self {
+            content: truncate_chars(&content.into(), DISCORD_CONTENT_LIMIT),
+            allowed_mentions: DiscordAllowedMentions { parse: vec![] },
+        }
+    }
 }
 
 impl DiscordNotifier {
@@ -214,9 +231,7 @@ impl DiscordNotifier {
     }
 
     async fn post_webhook(&self, url: &str, content: &str) -> Result<(), String> {
-        let body = DiscordWebhookBody {
-            content: truncate_chars(content, DISCORD_CONTENT_LIMIT),
-        };
+        let body = DiscordWebhookBody::new(content);
 
         let response = self
             .client
@@ -433,5 +448,32 @@ mod tests {
             MatrixNotifier::from_env().is_none() || MatrixNotifier::from_env().is_some(),
             "from_env is total"
         );
+    }
+
+    /// User-controlled text (display names, titles) must never enable mention parsing.
+    #[test]
+    fn discord_webhook_body_disables_mention_parse() {
+        let body = DiscordWebhookBody::new("New app from @everyone / @here");
+        let v = serde_json::to_value(&body).expect("serialize");
+        assert_eq!(v["content"], "New app from @everyone / @here");
+        let parse = v["allowed_mentions"]["parse"]
+            .as_array()
+            .expect("allowed_mentions.parse must be an array");
+        assert!(
+            parse.is_empty(),
+            "parse must be empty to block mass pings, got {parse:?}"
+        );
+    }
+
+    #[test]
+    fn discord_webhook_body_truncates_and_keeps_allowed_mentions() {
+        let long: String = "x".repeat(DISCORD_CONTENT_LIMIT + 10);
+        let body = DiscordWebhookBody::new(long);
+        let v = serde_json::to_value(&body).expect("serialize");
+        assert_eq!(
+            v["content"].as_str().unwrap().chars().count(),
+            DISCORD_CONTENT_LIMIT
+        );
+        assert_eq!(v["allowed_mentions"]["parse"], serde_json::json!([]));
     }
 }
