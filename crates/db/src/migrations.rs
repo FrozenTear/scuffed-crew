@@ -148,15 +148,19 @@ pub async fn run_migrations(client: &Surreal<Any>) -> DbResult<()> {
         DEFINE TABLE IF NOT EXISTS match_result SCHEMAFULL;
         DEFINE FIELD OVERWRITE team_id ON match_result TYPE string;
         DEFINE FIELD OVERWRITE opponent ON match_result TYPE string;
-        DEFINE FIELD OVERWRITE score_us ON match_result TYPE int;
-        DEFINE FIELD OVERWRITE score_them ON match_result TYPE int;
+        -- Scores optional: None = scheduled / not yet played (PR2 match lifecycle).
+        DEFINE FIELD OVERWRITE score_us ON match_result TYPE option<int> DEFAULT NONE;
+        DEFINE FIELD OVERWRITE score_them ON match_result TYPE option<int> DEFAULT NONE;
         DEFINE FIELD OVERWRITE map_name ON match_result TYPE option<string>;
         DEFINE FIELD OVERWRITE game_mode ON match_result TYPE option<string>;
-        DEFINE FIELD OVERWRITE played_at ON match_result TYPE datetime;
+        DEFINE FIELD OVERWRITE played_at ON match_result TYPE option<datetime> DEFAULT NONE;
+        DEFINE FIELD OVERWRITE scheduled_at ON match_result TYPE option<datetime> DEFAULT NONE;
         DEFINE FIELD OVERWRITE match_type ON match_result TYPE string DEFAULT 'scrim'
             ASSERT $value IN ['scrim', 'official', 'tournament'];
-        DEFINE FIELD OVERWRITE recorded_by ON match_result TYPE string;
+        DEFINE FIELD OVERWRITE recorded_by ON match_result TYPE option<string> DEFAULT NONE;
         DEFINE FIELD OVERWRITE notes ON match_result TYPE option<string>;
+        DEFINE FIELD OVERWRITE vod_url ON match_result TYPE option<string> DEFAULT NONE;
+        DEFINE FIELD OVERWRITE replay_code ON match_result TYPE option<string> DEFAULT NONE;
 
         -- ================================================
         -- Announcements (news posts)
@@ -651,6 +655,19 @@ pub async fn run_migrations(client: &Surreal<Any>) -> DbResult<()> {
         -- ================================================
         DEFINE FIELD OVERWRITE is_public ON event TYPE bool DEFAULT false;
         DEFINE FIELD OVERWRITE is_public ON match_result TYPE bool DEFAULT false;
+
+        -- ================================================
+        -- PR2 match lifecycle (fix/match-lifecycle)
+        -- Extend match_result: optional scores/dates + media.
+        -- Re-DECLARE fields so older DBs that only had the PR1 block upgrade.
+        -- ================================================
+        DEFINE FIELD OVERWRITE score_us ON match_result TYPE option<int> DEFAULT NONE;
+        DEFINE FIELD OVERWRITE score_them ON match_result TYPE option<int> DEFAULT NONE;
+        DEFINE FIELD OVERWRITE played_at ON match_result TYPE option<datetime> DEFAULT NONE;
+        DEFINE FIELD OVERWRITE scheduled_at ON match_result TYPE option<datetime> DEFAULT NONE;
+        DEFINE FIELD OVERWRITE recorded_by ON match_result TYPE option<string> DEFAULT NONE;
+        DEFINE FIELD OVERWRITE vod_url ON match_result TYPE option<string> DEFAULT NONE;
+        DEFINE FIELD OVERWRITE replay_code ON match_result TYPE option<string> DEFAULT NONE;
 
         -- ================================================
         -- #10 member profile fields (feat/member-profile-fields)

@@ -17,14 +17,23 @@ struct Team {
 struct MatchResult {
     id: String,
     opponent: String,
-    score_us: u32,
-    score_them: u32,
+    #[serde(default)]
+    score_us: Option<u32>,
+    #[serde(default)]
+    score_them: Option<u32>,
     map_name: Option<String>,
     match_type: String,
-    played_at: String,
+    #[serde(default)]
+    played_at: Option<String>,
+    #[serde(default)]
+    scheduled_at: Option<String>,
     notes: Option<String>,
     #[serde(default)]
     is_public: bool,
+    #[serde(default)]
+    vod_url: Option<String>,
+    #[serde(default)]
+    replay_code: Option<String>,
 }
 
 #[component]
@@ -45,16 +54,19 @@ pub fn AdminMatches() -> Element {
 
     // Form fields
     let mut f_opponent = use_signal(String::new);
-    let mut f_score_us = use_signal(|| "0".to_string());
-    let mut f_score_them = use_signal(|| "0".to_string());
+    let mut f_score_us = use_signal(String::new);
+    let mut f_score_them = use_signal(String::new);
     let mut f_map_name = use_signal(String::new);
     let mut f_match_type = use_signal(|| "scrim".to_string());
     let mut f_played_at = use_signal(String::new);
+    let mut f_scheduled_at = use_signal(String::new);
     let mut f_notes = use_signal(String::new);
     let mut f_public = use_signal(|| false);
+    let mut f_vod_url = use_signal(String::new);
+    let mut f_replay_code = use_signal(String::new);
 
     /// Server expects RFC3339 `DateTime<Utc>`; date input is YYYY-MM-DD.
-    fn played_at_to_rfc3339(date: &str) -> Option<String> {
+    fn date_to_rfc3339(date: &str) -> Option<String> {
         let d = date.trim();
         if d.is_empty() {
             return None;
@@ -74,25 +86,47 @@ pub fn AdminMatches() -> Element {
 
     let open_create = move |_| {
         f_opponent.set(String::new());
-        f_score_us.set("0".to_string());
-        f_score_them.set("0".to_string());
+        f_score_us.set(String::new());
+        f_score_them.set(String::new());
         f_map_name.set(String::new());
         f_match_type.set("scrim".to_string());
         f_played_at.set(String::new());
+        f_scheduled_at.set(String::new());
         f_notes.set(String::new());
         f_public.set(false);
+        f_vod_url.set(String::new());
+        f_replay_code.set(String::new());
         modal.show_empty();
     };
 
     let mut open_edit = move |m: MatchResult| {
         f_opponent.set(m.opponent);
-        f_score_us.set(m.score_us.to_string());
-        f_score_them.set(m.score_them.to_string());
+        f_score_us.set(
+            m.score_us
+                .map(|s| s.to_string())
+                .unwrap_or_default(),
+        );
+        f_score_them.set(
+            m.score_them
+                .map(|s| s.to_string())
+                .unwrap_or_default(),
+        );
         f_map_name.set(m.map_name.unwrap_or_default());
         f_match_type.set(m.match_type);
-        f_played_at.set(m.played_at.chars().take(10).collect::<String>());
+        f_played_at.set(
+            m.played_at
+                .map(|s| s.chars().take(10).collect::<String>())
+                .unwrap_or_default(),
+        );
+        f_scheduled_at.set(
+            m.scheduled_at
+                .map(|s| s.chars().take(10).collect::<String>())
+                .unwrap_or_default(),
+        );
         f_notes.set(m.notes.unwrap_or_default());
         f_public.set(m.is_public);
+        f_vod_url.set(m.vod_url.unwrap_or_default());
+        f_replay_code.set(m.replay_code.unwrap_or_default());
         modal.show(m.id);
     };
 
@@ -103,16 +137,41 @@ pub fn AdminMatches() -> Element {
         };
         let edit_id = modal.get_target();
         let opponent = f_opponent().clone();
-        let score_us: u32 = f_score_us().parse().unwrap_or(0);
-        let score_them: u32 = f_score_them().parse().unwrap_or(0);
+        let score_us: Option<u32> = {
+            let s = f_score_us();
+            if s.trim().is_empty() {
+                None
+            } else {
+                Some(s.parse().unwrap_or(0))
+            }
+        };
+        let score_them: Option<u32> = {
+            let s = f_score_them();
+            if s.trim().is_empty() {
+                None
+            } else {
+                Some(s.parse().unwrap_or(0))
+            }
+        };
         let map_name_val = f_map_name().clone();
         let match_type_val = f_match_type().clone();
-        let Some(played_at_val) = played_at_to_rfc3339(&f_played_at()) else {
-            toast.show(Toast::error("Played-at date is required."));
-            return;
-        };
+        let played_at_val = date_to_rfc3339(&f_played_at());
+        let scheduled_at_val = date_to_rfc3339(&f_scheduled_at());
         let notes_val = f_notes().clone();
         let is_public = f_public();
+        let vod_url_val = f_vod_url().clone();
+        let replay_code_val = f_replay_code().clone();
+
+        if played_at_val.is_none()
+            && scheduled_at_val.is_none()
+            && score_us.is_none()
+            && score_them.is_none()
+        {
+            toast.show(Toast::error(
+                "Provide played-at, scheduled-at, or scores.",
+            ));
+            return;
+        }
 
         modal.start_submit();
         spawn(async move {
@@ -126,14 +185,26 @@ pub fn AdminMatches() -> Element {
                 } else {
                     Some(map_name_val)
                 },
+                game_mode: None,
                 match_type: match_type_val,
                 played_at: played_at_val,
+                scheduled_at: scheduled_at_val,
                 notes: if notes_val.is_empty() {
                     None
                 } else {
                     Some(notes_val)
                 },
                 is_public,
+                vod_url: if vod_url_val.is_empty() {
+                    None
+                } else {
+                    Some(vod_url_val)
+                },
+                replay_code: if replay_code_val.is_empty() {
+                    None
+                } else {
+                    Some(replay_code_val)
+                },
             };
 
             let result = match edit_id {
@@ -214,9 +285,17 @@ pub fn AdminMatches() -> Element {
                             for m in list.iter() {
                                 {
                                     let mc = m.clone();
-                                    let score = format!("{}-{}", m.score_us, m.score_them);
+                                    let score = match (m.score_us, m.score_them) {
+                                        (Some(u), Some(t)) => format!("{u}-{t}"),
+                                        _ => "—".to_string(),
+                                    };
                                     let map = m.map_name.clone().unwrap_or("-".to_string());
-                                    let date: String = m.played_at.chars().take(10).collect();
+                                    let date: String = m
+                                        .played_at
+                                        .as_deref()
+                                        .or(m.scheduled_at.as_deref())
+                                        .map(|s| s.chars().take(10).collect())
+                                        .unwrap_or_else(|| "TBD".into());
                                     let public_label = if m.is_public { "Yes" } else { "No" };
                                     rsx! {
                                         tr { key: "{m.id}",
@@ -263,7 +342,7 @@ pub fn AdminMatches() -> Element {
             }
             div { style: "display:flex; gap:1rem;",
                 div { class: "form-field", style: "flex:1;",
-                    label { class: "form-label", "Our Score" }
+                    label { class: "form-label", "Our Score (empty = scheduled)" }
                     input {
                         class: "form-input",
                         r#type: "number",
@@ -302,13 +381,44 @@ pub fn AdminMatches() -> Element {
                     option { value: "tournament", "Tournament" }
                 }
             }
+            div { style: "display:flex; gap:1rem;",
+                div { class: "form-field", style: "flex:1;",
+                    label { class: "form-label", "Played At" }
+                    input {
+                        class: "form-input",
+                        r#type: "date",
+                        value: "{f_played_at}",
+                        oninput: move |e| f_played_at.set(e.value()),
+                    }
+                }
+                div { class: "form-field", style: "flex:1;",
+                    label { class: "form-label", "Scheduled At" }
+                    input {
+                        class: "form-input",
+                        r#type: "date",
+                        value: "{f_scheduled_at}",
+                        oninput: move |e| f_scheduled_at.set(e.value()),
+                    }
+                }
+            }
             div { class: "form-field",
-                label { class: "form-label", "Played At" }
+                label { class: "form-label", "VOD URL (https YouTube/Twitch)" }
                 input {
                     class: "form-input",
-                    r#type: "date",
-                    value: "{f_played_at}",
-                    oninput: move |e| f_played_at.set(e.value()),
+                    r#type: "url",
+                    value: "{f_vod_url}",
+                    oninput: move |e| f_vod_url.set(e.value()),
+                    placeholder: "https://www.youtube.com/watch?v=…",
+                }
+            }
+            div { class: "form-field",
+                label { class: "form-label", "Replay code (≤16 alnum)" }
+                input {
+                    class: "form-input",
+                    r#type: "text",
+                    value: "{f_replay_code}",
+                    oninput: move |e| f_replay_code.set(e.value()),
+                    maxlength: "16",
                 }
             }
             div { class: "form-field",

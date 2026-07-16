@@ -14,16 +14,26 @@ struct DbMatchResult {
     id: Option<RecordId>,
     team_id: String,
     opponent: String,
-    score_us: u32,
-    score_them: u32,
+    #[surreal(default)]
+    score_us: Option<i64>,
+    #[surreal(default)]
+    score_them: Option<i64>,
     map_name: Option<String>,
     game_mode: Option<String>,
     match_type: String,
-    played_at: SurrealDatetime,
-    recorded_by: String,
+    #[surreal(default)]
+    played_at: Option<SurrealDatetime>,
+    #[surreal(default)]
+    scheduled_at: Option<SurrealDatetime>,
+    #[surreal(default)]
+    recorded_by: Option<String>,
     notes: Option<String>,
     #[surreal(default)]
     is_public: bool,
+    #[surreal(default)]
+    vod_url: Option<String>,
+    #[surreal(default)]
+    replay_code: Option<String>,
 }
 
 fn parse_match_type(s: &str) -> MatchType {
@@ -32,6 +42,10 @@ fn parse_match_type(s: &str) -> MatchType {
         "tournament" => MatchType::Tournament,
         _ => MatchType::Scrim,
     }
+}
+
+fn opt_i64_to_u32(v: Option<i64>) -> Option<u32> {
+    v.and_then(|n| u32::try_from(n).ok())
 }
 
 fn db_to_match(db: DbMatchResult) -> MatchResult {
@@ -43,15 +57,18 @@ fn db_to_match(db: DbMatchResult) -> MatchResult {
         id,
         team_id: db.team_id,
         opponent: db.opponent,
-        score_us: db.score_us,
-        score_them: db.score_them,
+        score_us: opt_i64_to_u32(db.score_us),
+        score_them: opt_i64_to_u32(db.score_them),
         map_name: db.map_name,
         game_mode: db.game_mode,
         match_type: parse_match_type(&db.match_type),
-        played_at: db.played_at.into(),
+        played_at: db.played_at.map(|d| d.into()),
+        scheduled_at: db.scheduled_at.map(|d| d.into()),
         recorded_by: db.recorded_by,
         notes: db.notes,
         is_public: db.is_public,
+        vod_url: db.vod_url,
+        replay_code: db.replay_code,
     }
 }
 
@@ -60,30 +77,36 @@ impl Database {
         &self,
         team_id: &str,
         opponent: &str,
-        score_us: u32,
-        score_them: u32,
+        score_us: Option<u32>,
+        score_them: Option<u32>,
         map_name: Option<&str>,
         game_mode: Option<&str>,
         match_type: MatchType,
-        played_at: DateTime<Utc>,
+        played_at: Option<DateTime<Utc>>,
+        scheduled_at: Option<DateTime<Utc>>,
         recorded_by: &str,
         notes: Option<&str>,
         is_public: bool,
+        vod_url: Option<&str>,
+        replay_code: Option<&str>,
     ) -> DbResult<MatchResult> {
         with_timeout(async {
             let db_match = DbMatchResult {
                 id: None,
                 team_id: team_id.to_string(),
                 opponent: opponent.to_string(),
-                score_us,
-                score_them,
+                score_us: score_us.map(|s| s as i64),
+                score_them: score_them.map(|s| s as i64),
                 map_name: map_name.map(|s| s.to_string()),
                 game_mode: game_mode.map(|s| s.to_string()),
                 match_type: match_type.to_string(),
-                played_at: SurrealDatetime::from(played_at),
-                recorded_by: recorded_by.to_string(),
+                played_at: played_at.map(SurrealDatetime::from),
+                scheduled_at: scheduled_at.map(SurrealDatetime::from),
+                recorded_by: Some(recorded_by.to_string()),
                 notes: notes.map(|s| s.to_string()),
                 is_public,
+                vod_url: vod_url.map(|s| s.to_string()),
+                replay_code: replay_code.map(|s| s.to_string()),
             };
             let created: Option<DbMatchResult> =
                 self.client.create("match_result").content(db_match).await?;
@@ -98,7 +121,10 @@ impl Database {
         with_timeout(async {
             let mut result = self
                 .client
-                .query("SELECT * FROM match_result WHERE team_id = $tid ORDER BY played_at DESC")
+                .query(
+                    "SELECT * FROM match_result WHERE team_id = $tid \
+                     ORDER BY played_at DESC, scheduled_at DESC",
+                )
                 .bind(("tid", team_id.to_string()))
                 .await?;
             let matches: Vec<DbMatchResult> = result.take(0)?;
@@ -111,21 +137,37 @@ impl Database {
     ///
     /// When `only_public` is true, filters to public non-scrim rows in SQL so
     /// LIMIT/START count only publishable matches.
+    /// When `only_played` is true, requires `played_at` to be set (recent results).
     pub async fn list_team_matches_paginated(
         &self,
         team_id: &str,
         limit: u32,
         offset: u32,
         only_public: bool,
+        only_played: bool,
     ) -> DbResult<Vec<MatchResult>> {
         with_timeout(async {
             let fetch = limit + 1;
-            let sql = if only_public {
-                "SELECT * FROM match_result WHERE team_id = $tid AND is_public = true \
-                 AND match_type != 'scrim' ORDER BY played_at DESC LIMIT $lim START $off"
-            } else {
-                "SELECT * FROM match_result WHERE team_id = $tid \
-                 ORDER BY played_at DESC LIMIT $lim START $off"
+            // Fixed SQL fragments only — no user input interpolated.
+            let sql = match (only_public, only_played) {
+                (true, true) => {
+                    "SELECT * FROM match_result WHERE team_id = $tid AND is_public = true \
+                     AND match_type != 'scrim' AND played_at != NONE \
+                     ORDER BY played_at DESC LIMIT $lim START $off"
+                }
+                (true, false) => {
+                    "SELECT * FROM match_result WHERE team_id = $tid AND is_public = true \
+                     AND match_type != 'scrim' \
+                     ORDER BY played_at DESC, scheduled_at DESC LIMIT $lim START $off"
+                }
+                (false, true) => {
+                    "SELECT * FROM match_result WHERE team_id = $tid AND played_at != NONE \
+                     ORDER BY played_at DESC LIMIT $lim START $off"
+                }
+                (false, false) => {
+                    "SELECT * FROM match_result WHERE team_id = $tid \
+                     ORDER BY played_at DESC, scheduled_at DESC LIMIT $lim START $off"
+                }
             };
             let mut result = self
                 .client
@@ -144,13 +186,17 @@ impl Database {
         &self,
         id: &str,
         opponent: Option<&str>,
-        score_us: Option<u32>,
-        score_them: Option<u32>,
+        score_us: Option<Option<u32>>,
+        score_them: Option<Option<u32>>,
         map_name: Option<Option<&str>>,
         game_mode: Option<Option<&str>>,
         match_type: Option<MatchType>,
         notes: Option<Option<&str>>,
         is_public: Option<bool>,
+        played_at: Option<Option<DateTime<Utc>>>,
+        scheduled_at: Option<Option<DateTime<Utc>>>,
+        vod_url: Option<Option<&str>>,
+        replay_code: Option<Option<&str>>,
     ) -> DbResult<MatchResult> {
         with_timeout(async {
             let existing: Option<DbMatchResult> = self.client.select(("match_result", id)).await?;
@@ -161,10 +207,10 @@ impl Database {
                 db.opponent = o.to_string();
             }
             if let Some(s) = score_us {
-                db.score_us = s;
+                db.score_us = s.map(|v| v as i64);
             }
             if let Some(s) = score_them {
-                db.score_them = s;
+                db.score_them = s.map(|v| v as i64);
             }
             if let Some(m) = map_name {
                 db.map_name = m.map(|s| s.to_string());
@@ -180,6 +226,18 @@ impl Database {
             }
             if let Some(p) = is_public {
                 db.is_public = p;
+            }
+            if let Some(pa) = played_at {
+                db.played_at = pa.map(SurrealDatetime::from);
+            }
+            if let Some(sa) = scheduled_at {
+                db.scheduled_at = sa.map(SurrealDatetime::from);
+            }
+            if let Some(v) = vod_url {
+                db.vod_url = v.map(|s| s.to_string());
+            }
+            if let Some(r) = replay_code {
+                db.replay_code = r.map(|s| s.to_string());
             }
 
             let updated: Option<DbMatchResult> =
@@ -198,10 +256,13 @@ impl Database {
                 count: u32,
             }
 
+            // Only count completed matches (both scores present).
             let mut wins_result = self
                 .client
                 .query(
-                    "SELECT count() FROM match_result WHERE team_id = $tid AND score_us > score_them GROUP ALL",
+                    "SELECT count() FROM match_result WHERE team_id = $tid \
+                     AND score_us != NONE AND score_them != NONE \
+                     AND score_us > score_them GROUP ALL",
                 )
                 .bind(("tid", team_id.to_string()))
                 .await?;
@@ -210,7 +271,9 @@ impl Database {
             let mut losses_result = self
                 .client
                 .query(
-                    "SELECT count() FROM match_result WHERE team_id = $tid AND score_us < score_them GROUP ALL",
+                    "SELECT count() FROM match_result WHERE team_id = $tid \
+                     AND score_us != NONE AND score_them != NONE \
+                     AND score_us < score_them GROUP ALL",
                 )
                 .bind(("tid", team_id.to_string()))
                 .await?;
@@ -219,7 +282,9 @@ impl Database {
             let mut draws_result = self
                 .client
                 .query(
-                    "SELECT count() FROM match_result WHERE team_id = $tid AND score_us = score_them GROUP ALL",
+                    "SELECT count() FROM match_result WHERE team_id = $tid \
+                     AND score_us != NONE AND score_them != NONE \
+                     AND score_us = score_them GROUP ALL",
                 )
                 .bind(("tid", team_id.to_string()))
                 .await?;
@@ -250,7 +315,9 @@ impl Database {
             let mut wins_result = self
                 .client
                 .query(
-                    "SELECT count() FROM match_result WHERE team_id = $tid AND match_type = $mt AND score_us > score_them GROUP ALL",
+                    "SELECT count() FROM match_result WHERE team_id = $tid AND match_type = $mt \
+                     AND score_us != NONE AND score_them != NONE \
+                     AND score_us > score_them GROUP ALL",
                 )
                 .bind(("tid", team_id.to_string()))
                 .bind(("mt", mt.clone()))
@@ -260,7 +327,9 @@ impl Database {
             let mut losses_result = self
                 .client
                 .query(
-                    "SELECT count() FROM match_result WHERE team_id = $tid AND match_type = $mt AND score_us < score_them GROUP ALL",
+                    "SELECT count() FROM match_result WHERE team_id = $tid AND match_type = $mt \
+                     AND score_us != NONE AND score_them != NONE \
+                     AND score_us < score_them GROUP ALL",
                 )
                 .bind(("tid", team_id.to_string()))
                 .bind(("mt", mt.clone()))
@@ -270,7 +339,9 @@ impl Database {
             let mut draws_result = self
                 .client
                 .query(
-                    "SELECT count() FROM match_result WHERE team_id = $tid AND match_type = $mt AND score_us = score_them GROUP ALL",
+                    "SELECT count() FROM match_result WHERE team_id = $tid AND match_type = $mt \
+                     AND score_us != NONE AND score_them != NONE \
+                     AND score_us = score_them GROUP ALL",
                 )
                 .bind(("tid", team_id.to_string()))
                 .bind(("mt", mt))

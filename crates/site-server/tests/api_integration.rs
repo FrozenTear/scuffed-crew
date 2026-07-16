@@ -3054,7 +3054,11 @@ async fn match_is_public_gates_team_list_and_strips_notes() {
     );
     assert_eq!(data[0]["opponent"], "Public FC");
     assert!(data[0]["notes"].is_null());
-    assert_eq!(data[0]["recorded_by"], "");
+    assert!(
+        data[0]["recorded_by"].is_null(),
+        "public list must strip recorded_by to null, got {:?}",
+        data[0]["recorded_by"]
+    );
 
     // Member sees all three with notes intact on private row
     let app = create_router(state.clone());
@@ -3220,3 +3224,191 @@ async fn calendar_ics_excludes_private_events() {
         "private event must not appear in ICS"
     );
 }
+
+// ─── PR2 match lifecycle ────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn match_lifecycle_scheduled_then_report_scores() {
+    let state = test_state().await;
+    seed_all_roles(&state.db).await;
+    seed_game(&state.db, "ow2", "Overwatch 2").await;
+    seed_team(&state.db, "teamalpha", "Alpha Squad", "ow2").await;
+
+    // Create scheduled fixture (no scores, no played_at)
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(authed_json_request(
+            Method::POST,
+            "/api/matches",
+            OFFICER_TOKEN,
+            json!({
+                "team_id": "teamalpha",
+                "opponent": "Future FC",
+                "match_type": "official",
+                "scheduled_at": "2026-08-01T18:00:00Z",
+                "is_public": true
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let created = body_json(resp).await;
+    assert!(created["score_us"].is_null());
+    assert!(created["score_them"].is_null());
+    assert!(created["played_at"].is_null());
+    assert_eq!(created["scheduled_at"], "2026-08-01T18:00:00Z");
+    let id = created["id"].as_str().unwrap().to_string();
+
+    // Scheduled public fixture must NOT appear in recent_matches (played-only)
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(unauthed_request(Method::GET, "/api/public/teams/teamalpha"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let recent = body_json(resp).await["recent_matches"]
+        .as_array()
+        .unwrap()
+        .clone();
+    assert!(
+        recent.iter().all(|m| m["opponent"] != "Future FC"),
+        "scheduled match must not be in recent_matches: {recent:?}"
+    );
+
+    // Report scores + played_at
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(authed_json_request(
+            Method::PUT,
+            &format!("/api/matches/{id}"),
+            OFFICER_TOKEN,
+            json!({
+                "score_us": 3,
+                "score_them": 1,
+                "played_at": "2026-08-01T20:00:00Z",
+                "vod_url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+                "replay_code": "ABCD1234"
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let updated = body_json(resp).await;
+    assert_eq!(updated["score_us"], 3);
+    assert_eq!(updated["score_them"], 1);
+    assert_eq!(updated["played_at"], "2026-08-01T20:00:00Z");
+    assert_eq!(updated["vod_url"], "https://www.youtube.com/watch?v=dQw4w9WgXcQ");
+    assert_eq!(updated["replay_code"], "ABCD1234");
+    // scheduled_at retained
+    assert_eq!(updated["scheduled_at"], "2026-08-01T18:00:00Z");
+
+    // Now in recent_matches
+    let app = create_router(state);
+    let resp = app
+        .oneshot(unauthed_request(Method::GET, "/api/public/teams/teamalpha"))
+        .await
+        .unwrap();
+    let recent = body_json(resp).await["recent_matches"]
+        .as_array()
+        .unwrap()
+        .clone();
+    assert_eq!(recent.len(), 1);
+    assert_eq!(recent[0]["opponent"], "Future FC");
+    assert_eq!(recent[0]["score_us"], 3);
+    assert_eq!(recent[0]["vod_url"], "https://www.youtube.com/watch?v=dQw4w9WgXcQ");
+    assert!(
+        recent[0].get("notes").is_none() || recent[0]["notes"].is_null(),
+        "public projection strips notes"
+    );
+}
+
+#[tokio::test]
+async fn match_media_validation_rejects_bad_vod_and_replay() {
+    let state = test_state().await;
+    seed_all_roles(&state.db).await;
+    seed_game(&state.db, "ow2", "Overwatch 2").await;
+    seed_team(&state.db, "teamalpha", "Alpha Squad", "ow2").await;
+
+    // http not https
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(authed_json_request(
+            Method::POST,
+            "/api/matches",
+            OFFICER_TOKEN,
+            json!({
+                "team_id": "teamalpha",
+                "opponent": "Bad VOD",
+                "match_type": "official",
+                "played_at": "2026-06-01T18:00:00Z",
+                "score_us": 1,
+                "score_them": 0,
+                "vod_url": "http://www.youtube.com/watch?v=x"
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+    // unknown host
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(authed_json_request(
+            Method::POST,
+            "/api/matches",
+            OFFICER_TOKEN,
+            json!({
+                "team_id": "teamalpha",
+                "opponent": "Bad Host",
+                "match_type": "official",
+                "played_at": "2026-06-01T18:00:00Z",
+                "score_us": 1,
+                "score_them": 0,
+                "vod_url": "https://vimeo.com/123"
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+    // replay too long
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(authed_json_request(
+            Method::POST,
+            "/api/matches",
+            OFFICER_TOKEN,
+            json!({
+                "team_id": "teamalpha",
+                "opponent": "Bad Replay",
+                "match_type": "official",
+                "played_at": "2026-06-01T18:00:00Z",
+                "score_us": 1,
+                "score_them": 0,
+                "replay_code": "ABCDEFGHIJKLMNOPQ"
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+    // partial scores rejected
+    let app = create_router(state);
+    let resp = app
+        .oneshot(authed_json_request(
+            Method::POST,
+            "/api/matches",
+            OFFICER_TOKEN,
+            json!({
+                "team_id": "teamalpha",
+                "opponent": "Partial",
+                "match_type": "official",
+                "played_at": "2026-06-01T18:00:00Z",
+                "score_us": 1
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+

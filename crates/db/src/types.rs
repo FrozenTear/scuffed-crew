@@ -223,22 +223,30 @@ impl std::fmt::Display for MatchType {
     }
 }
 
-/// A match result record.
+/// A match result record (supports scheduled fixtures and played results).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MatchResult {
     pub id: String,
     pub team_id: String,
     pub opponent: String,
-    pub score_us: u32,
-    pub score_them: u32,
+    /// None when scheduled / not yet played.
+    pub score_us: Option<u32>,
+    pub score_them: Option<u32>,
     pub map_name: Option<String>,
     pub game_mode: Option<String>,
     pub match_type: MatchType,
-    pub played_at: DateTime<Utc>,
-    pub recorded_by: String,
+    /// Set when the match has been played.
+    pub played_at: Option<DateTime<Utc>>,
+    /// Future fixture time (kept after play for history).
+    pub scheduled_at: Option<DateTime<Utc>>,
+    pub recorded_by: Option<String>,
     pub notes: Option<String>,
     #[serde(default)]
     pub is_public: bool,
+    /// Twitch/YouTube VOD URL (https + host allowlist at the API layer).
+    pub vod_url: Option<String>,
+    /// Overwatch 2 replay code (≤16 alphanumeric; validated at the API layer).
+    pub replay_code: Option<String>,
 }
 
 /// Win-loss record for a team.

@@ -317,9 +317,12 @@ fn match_to_public(m: MatchResult) -> Option<PublicMatch> {
             MatchType::Scrim => TypesMatchType::Scrim,
         },
         played_at: m.played_at,
+        scheduled_at: m.scheduled_at,
         recorded_by: m.recorded_by,
         notes: m.notes,
         is_public: m.is_public,
+        vod_url: m.vod_url,
+        replay_code: m.replay_code,
     };
     PublicMatch::try_from_match(&typed)
 }
@@ -407,14 +410,20 @@ pub async fn public_team_detail(
         )
     })?;
 
-    let recent_matches = state.db.list_team_matches(&id).await.map_err(|_e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: "Internal error".into(),
-            }),
-        )
-    })?;
+    // Cap + filter in SQL: public non-scrim played matches only (PR2 nit).
+    // Avoids loading full history and keeps scheduled fixtures out of recent results.
+    let recent_matches = state
+        .db
+        .list_team_matches_paginated(&id, 10, 0, true, true)
+        .await
+        .map_err(|_e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: "Internal error".into(),
+                }),
+            )
+        })?;
     let recent_matches: Vec<_> = recent_matches
         .into_iter()
         .filter_map(match_to_public)

@@ -25,17 +25,25 @@ pub struct MatchResult {
     pub id: String,
     pub team_id: String,
     pub opponent: String,
-    pub score_us: u32,
-    pub score_them: u32,
+    /// None when scheduled / not yet played.
+    pub score_us: Option<u32>,
+    pub score_them: Option<u32>,
     pub map_name: Option<String>,
     pub game_mode: Option<String>,
     pub match_type: MatchType,
-    pub played_at: DateTime<Utc>,
-    pub recorded_by: String,
+    /// Set when the match has been played.
+    pub played_at: Option<DateTime<Utc>>,
+    /// Future fixture time (kept after play for history).
+    pub scheduled_at: Option<DateTime<Utc>>,
+    pub recorded_by: Option<String>,
     pub notes: Option<String>,
     /// When false, omitted from public team pages and public match lists.
     #[serde(default)]
     pub is_public: bool,
+    /// Twitch/YouTube VOD URL (https + host allowlist).
+    pub vod_url: Option<String>,
+    /// Overwatch 2 replay code (≤16 alphanumeric).
+    pub replay_code: Option<String>,
 }
 
 /// Public-safe match projection — no notes, no recorded_by.
@@ -44,12 +52,15 @@ pub struct PublicMatch {
     pub id: String,
     pub team_id: String,
     pub opponent: String,
-    pub score_us: u32,
-    pub score_them: u32,
+    pub score_us: Option<u32>,
+    pub score_them: Option<u32>,
     pub map_name: Option<String>,
     pub game_mode: Option<String>,
     pub match_type: MatchType,
-    pub played_at: DateTime<Utc>,
+    pub played_at: Option<DateTime<Utc>>,
+    pub scheduled_at: Option<DateTime<Utc>>,
+    pub vod_url: Option<String>,
+    pub replay_code: Option<String>,
 }
 
 impl PublicMatch {
@@ -68,6 +79,15 @@ impl PublicMatch {
             game_mode: m.game_mode.clone(),
             match_type: m.match_type,
             played_at: m.played_at,
+            scheduled_at: m.scheduled_at,
+            vod_url: m.vod_url.clone(),
+            replay_code: m.replay_code.clone(),
         })
+    }
+
+    /// True when this row represents a completed result (for recent-results lists).
+    pub fn is_played(&self) -> bool {
+        self.played_at.is_some()
+            || (self.score_us.is_some() && self.score_them.is_some())
     }
 }

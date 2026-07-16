@@ -34,7 +34,11 @@ struct TeamMatch {
     map_name: Option<String>,
     game_mode: Option<String>,
     match_type: String,
-    played_at: String,
+    /// RFC3339 when played; server recent_matches only returns played rows.
+    #[serde(default)]
+    played_at: Option<String>,
+    #[serde(default)]
+    scheduled_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -481,7 +485,12 @@ fn render_roster_card(m: &RosterMember) -> Element {
 }
 
 fn render_match_row(m: &TeamMatch) -> Element {
-    let date: String = m.played_at.chars().take(10).collect();
+    let date: String = m
+        .played_at
+        .as_deref()
+        .or(m.scheduled_at.as_deref())
+        .map(|s| s.chars().take(10).collect())
+        .unwrap_or_else(|| "TBD".into());
     let (score, outcome_class) = match (m.score_us, m.score_them) {
         (Some(us), Some(them)) => {
             let class = match us.cmp(&them) {
