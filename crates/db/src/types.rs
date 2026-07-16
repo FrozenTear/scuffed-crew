@@ -148,6 +148,9 @@ pub struct Event {
     pub team_id: Option<String>,
     pub created_by: String,
     pub is_active: bool,
+    /// Hidden from public surfaces when false.
+    #[serde(default)]
+    pub is_public: bool,
 }
 
 /// Application status in the recruitment pipeline.
@@ -225,6 +228,8 @@ pub struct MatchResult {
     pub played_at: DateTime<Utc>,
     pub recorded_by: String,
     pub notes: Option<String>,
+    #[serde(default)]
+    pub is_public: bool,
 }
 
 /// Win-loss record for a team.

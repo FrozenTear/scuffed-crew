@@ -22,6 +22,8 @@ struct DbMatchResult {
     played_at: SurrealDatetime,
     recorded_by: String,
     notes: Option<String>,
+    #[surreal(default)]
+    is_public: bool,
 }
 
 fn parse_match_type(s: &str) -> MatchType {
@@ -49,6 +51,7 @@ fn db_to_match(db: DbMatchResult) -> MatchResult {
         played_at: db.played_at.into(),
         recorded_by: db.recorded_by,
         notes: db.notes,
+        is_public: db.is_public,
     }
 }
 
@@ -79,6 +82,8 @@ impl Database {
                 played_at: SurrealDatetime::from(played_at),
                 recorded_by: recorded_by.to_string(),
                 notes: notes.map(|s| s.to_string()),
+                // Private by default; officers publish via update.
+                is_public: false,
             };
             let created: Option<DbMatchResult> =
                 self.client.create("match_result").content(db_match).await?;
@@ -136,6 +141,7 @@ impl Database {
         game_mode: Option<Option<&str>>,
         match_type: Option<MatchType>,
         notes: Option<Option<&str>>,
+        is_public: Option<bool>,
     ) -> DbResult<MatchResult> {
         with_timeout(async {
             let existing: Option<DbMatchResult> = self.client.select(("match_result", id)).await?;
@@ -162,6 +168,9 @@ impl Database {
             }
             if let Some(n) = notes {
                 db.notes = n.map(|s| s.to_string());
+            }
+            if let Some(p) = is_public {
+                db.is_public = p;
             }
 
             let updated: Option<DbMatchResult> =

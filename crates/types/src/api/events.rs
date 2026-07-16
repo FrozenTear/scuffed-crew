@@ -9,6 +9,9 @@ pub struct CreateEventRequest {
     pub is_recurring: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub team_id: Option<String>,
+    /// When true, event appears on public surfaces. Default false if omitted (client old).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub is_public: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]

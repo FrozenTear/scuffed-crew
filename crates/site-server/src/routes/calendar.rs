@@ -22,6 +22,8 @@ pub async fn all_events_ics(
             }),
         )
     })?;
+    // Public ICS never includes private practice slots.
+    let events: Vec<_> = events.into_iter().filter(|e| e.is_public).collect();
 
     let host = state
         .oauth_config
@@ -62,7 +64,7 @@ pub async fn team_events_ics(
 
     let team_events: Vec<_> = all_events
         .into_iter()
-        .filter(|e| e.team_id.as_deref() == Some(&team_id))
+        .filter(|e| e.is_public && e.team_id.as_deref() == Some(&team_id))
         .collect();
 
     let host = state

@@ -10,13 +10,16 @@ use scuffed_auth::server::session::ErrorResponse;
 use scuffed_db::{AuditAction, AuditTargetType, MatchResult, MatchType};
 use scuffed_types::api::{CursorResponse, PaginationParams};
 
-use crate::extractors::OfficerUser;
+use crate::extractors::{OfficerUser, OptionalOrgMember};
 use crate::routes::audit_log::audit;
 use crate::state::AppState;
 
-/// GET /api/teams/:id/matches — team match history (cursor-paginated, public)
+/// GET /api/teams/:id/matches — team match history (cursor-paginated).
+/// Anonymous: public non-scrim only (notes/recorded_by stripped).
+/// Org members: full rows.
 pub async fn list_team_matches(
     State(state): State<AppState>,
+    OptionalOrgMember(member): OptionalOrgMember,
     Path(team_id): Path<String>,
     axum::extract::Query(pagination): axum::extract::Query<PaginationParams>,
 ) -> Result<Json<CursorResponse<MatchResult>>, (StatusCode, Json<ErrorResponse>)> {
@@ -33,6 +36,21 @@ pub async fn list_team_matches(
                 }),
             )
         })?;
+    let items = if member.is_some() {
+        items
+    } else {
+        items
+            .into_iter()
+            .filter_map(|mut m| {
+                if !m.is_public || matches!(m.match_type, MatchType::Scrim) {
+                    return None;
+                }
+                m.notes = None;
+                m.recorded_by = String::new();
+                Some(m)
+            })
+            .collect()
+    };
     Ok(Json(CursorResponse::from_oversized(items, limit, offset)))
 }
 
@@ -104,6 +122,7 @@ pub struct UpdateMatchRequest {
     pub game_mode: Option<Option<String>>,
     pub match_type: Option<MatchType>,
     pub notes: Option<Option<String>>,
+    pub is_public: Option<bool>,
 }
 
 /// PUT /api/matches/:id — update match (officer+)
@@ -124,6 +143,7 @@ pub async fn update_match(
             body.game_mode.as_ref().map(|g| g.as_deref()),
             body.match_type,
             body.notes.as_ref().map(|n| n.as_deref()),
+            body.is_public,
         )
         .await
         .map_err(|_e| {

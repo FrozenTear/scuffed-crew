@@ -13,6 +13,9 @@ pub struct Event {
     pub team_id: Option<String>,
     pub created_by: String,
     pub is_active: bool,
+    /// When false, hidden from public overview, team pages, and public ICS.
+    #[serde(default)]
+    pub is_public: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

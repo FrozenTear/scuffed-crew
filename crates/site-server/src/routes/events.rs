@@ -9,13 +9,15 @@ use scuffed_auth::server::session::ErrorResponse;
 use scuffed_db::{AuditAction, AuditTargetType, Event};
 use scuffed_types::api::{CursorResponse, PaginationParams};
 
-use crate::extractors::OfficerUser;
+use crate::extractors::{OfficerUser, OptionalOrgMember};
 use crate::routes::audit_log::audit;
 use crate::state::AppState;
 
-/// GET /api/events — list active events (cursor-paginated, public)
+/// GET /api/events — list active events (cursor-paginated).
+/// Anonymous: `is_public` only. Org members: all active events.
 pub async fn list_events(
     State(state): State<AppState>,
+    OptionalOrgMember(member): OptionalOrgMember,
     axum::extract::Query(pagination): axum::extract::Query<PaginationParams>,
 ) -> Result<Json<CursorResponse<Event>>, (StatusCode, Json<ErrorResponse>)> {
     let (limit, offset) = pagination.resolve();
@@ -31,6 +33,11 @@ pub async fn list_events(
                 }),
             )
         })?;
+    let items = if member.is_some() {
+        items
+    } else {
+        items.into_iter().filter(|e| e.is_public).collect()
+    };
     Ok(Json(CursorResponse::from_oversized(items, limit, offset)))
 }
 
@@ -46,6 +53,9 @@ pub struct CreateEventRequest {
     #[serde(default = "default_true")]
     pub is_recurring: bool,
     pub team_id: Option<String>,
+    /// Default false — practice slots stay private until published.
+    #[serde(default)]
+    pub is_public: bool,
 }
 
 fn default_timezone() -> String {
@@ -75,6 +85,7 @@ pub async fn create_event(
             body.is_recurring,
             body.team_id.as_deref(),
             &officer.member.id,
+            body.is_public,
         )
         .await
         .map_err(|_e| {
@@ -107,6 +118,7 @@ pub struct UpdateEventRequest {
     pub duration_minutes: Option<u32>,
     pub is_recurring: Option<bool>,
     pub team_id: Option<Option<String>>,
+    pub is_public: Option<bool>,
 }
 
 /// PUT /api/events/:id — update event (officer+)
@@ -127,6 +139,7 @@ pub async fn update_event(
             body.duration_minutes,
             body.is_recurring,
             body.team_id.as_ref().map(|t| t.as_deref()),
+            body.is_public,
         )
         .await
         .map_err(|_e| {

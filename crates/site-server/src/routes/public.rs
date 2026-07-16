@@ -7,9 +7,11 @@ use serde::Serialize;
 
 use scuffed_auth::server::session::ErrorResponse;
 use scuffed_db::{
-    Announcement, Event, Game, GameAccount, MatchResult, Member, SiteSettings, Team, TeamRecord,
+    Announcement, Event, Game, GameAccount, MatchResult, MatchType, Member, SiteSettings, Team,
+    TeamRecord,
 };
 use scuffed_types::api::{CursorResponse, PaginationParams};
+use scuffed_types::{MatchType as TypesMatchType, PublicMatch};
 
 use crate::state::AppState;
 
@@ -77,6 +79,7 @@ pub async fn overview(
             }),
         )
     })?;
+    let events: Vec<_> = events.into_iter().filter(|e| e.is_public).collect();
 
     let announcements = state.db.list_announcements().await.map_err(|_e| {
         (
@@ -281,8 +284,31 @@ pub struct PublicTeamDetail {
     pub game_name: Option<String>,
     pub roster: Vec<TeamRosterMember>,
     pub record: TeamRecord,
-    pub recent_matches: Vec<MatchResult>,
+    /// Public-safe matches only (no notes/scrims).
+    pub recent_matches: Vec<PublicMatch>,
+    /// Public events only.
     pub upcoming_events: Vec<Event>,
+}
+
+fn match_to_public(m: MatchResult) -> Option<PublicMatch> {
+    if !m.is_public || matches!(m.match_type, MatchType::Scrim) {
+        return None;
+    }
+    Some(PublicMatch {
+        id: m.id,
+        team_id: m.team_id,
+        opponent: m.opponent,
+        score_us: m.score_us,
+        score_them: m.score_them,
+        map_name: m.map_name,
+        game_mode: m.game_mode,
+        match_type: match m.match_type {
+            MatchType::Official => TypesMatchType::Official,
+            MatchType::Tournament => TypesMatchType::Tournament,
+            MatchType::Scrim => TypesMatchType::Scrim,
+        },
+        played_at: m.played_at,
+    })
 }
 
 #[derive(Serialize)]
@@ -376,10 +402,12 @@ pub async fn public_team_detail(
             }),
         )
     })?;
-    // Limit to 10 most recent
-    let recent_matches: Vec<_> = recent_matches.into_iter().take(10).collect();
+    let recent_matches: Vec<_> = recent_matches
+        .into_iter()
+        .filter_map(match_to_public)
+        .take(10)
+        .collect();
 
-    // Get events for this team
     let all_events = state.db.list_events().await.map_err(|_e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -390,7 +418,7 @@ pub async fn public_team_detail(
     })?;
     let upcoming_events: Vec<_> = all_events
         .into_iter()
-        .filter(|e| e.team_id.as_deref() == Some(&id))
+        .filter(|e| e.is_public && e.team_id.as_deref() == Some(&id))
         .collect();
 
     Ok(Json(PublicTeamDetail {

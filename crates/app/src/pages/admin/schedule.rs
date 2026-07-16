@@ -133,6 +133,8 @@ pub fn AdminSchedule() -> Element {
             timezone: form_tz(),
             is_recurring: form_recurring(),
             team_id: form_team_id(),
+            // Admin schedule is internal by default; toggle can land later.
+            is_public: false,
         };
         let edit_id = modal.get_target();
         modal.start_submit();

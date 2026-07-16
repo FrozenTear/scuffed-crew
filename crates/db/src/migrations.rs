@@ -644,6 +644,13 @@ pub async fn run_migrations(client: &Surreal<Any>) -> DbResult<()> {
         DEFINE FIELD OVERWRITE player_name ON member_settings TYPE option<string>;
 
         DEFINE INDEX IF NOT EXISTS ms_member_idx ON member_settings COLUMNS member_id UNIQUE;
+
+        -- ================================================
+        -- Public surfaces (PR1 fix/public-surfaces)
+        -- Default false: existing rows stay private until published.
+        -- ================================================
+        DEFINE FIELD OVERWRITE is_public ON event TYPE bool DEFAULT false;
+        DEFINE FIELD OVERWRITE is_public ON match_result TYPE bool DEFAULT false;
     "#,
         )
         .await?

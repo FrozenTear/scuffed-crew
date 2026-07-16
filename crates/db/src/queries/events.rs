@@ -19,6 +19,8 @@ struct DbEvent {
     team_id: Option<String>,
     created_by: String,
     is_active: bool,
+    #[surreal(default)]
+    is_public: bool,
 }
 
 fn db_to_event(db: DbEvent) -> Event {
@@ -37,6 +39,7 @@ fn db_to_event(db: DbEvent) -> Event {
         team_id: db.team_id,
         created_by: db.created_by,
         is_active: db.is_active,
+        is_public: db.is_public,
     }
 }
 
@@ -51,6 +54,7 @@ impl Database {
         is_recurring: bool,
         team_id: Option<&str>,
         created_by: &str,
+        is_public: bool,
     ) -> DbResult<Event> {
         with_timeout(async {
             let db_event = DbEvent {
@@ -64,6 +68,7 @@ impl Database {
                 team_id: team_id.map(|s| s.to_string()),
                 created_by: created_by.to_string(),
                 is_active: true,
+                is_public,
             };
             let created: Option<DbEvent> = self.client.create("event").content(db_event).await?;
             Ok(db_to_event(created.ok_or_else(|| {
@@ -113,6 +118,7 @@ impl Database {
         duration_minutes: Option<u32>,
         is_recurring: Option<bool>,
         team_id: Option<Option<&str>>,
+        is_public: Option<bool>,
     ) -> DbResult<Event> {
         with_timeout(async {
             let existing: Option<DbEvent> = self.client.select(("event", id)).await?;
@@ -139,6 +145,9 @@ impl Database {
             }
             if let Some(tid) = team_id {
                 db.team_id = tid.map(|s| s.to_string());
+            }
+            if let Some(p) = is_public {
+                db.is_public = p;
             }
 
             let updated: Option<DbEvent> = self.client.update(("event", id)).content(db).await?;
