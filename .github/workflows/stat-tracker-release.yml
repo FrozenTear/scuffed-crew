@@ -60,39 +60,12 @@ jobs:
           set -euo pipefail
           mkdir -p out/bin out/lib
           cp target/release/scuffed-stat-tracker out/bin/
-
-          # Host-provided libs (never bundle): glibc family, loader, toolchain
-          # runtimes, ubiquitous compression, and session/graphics stack.
-          DENY='^(ld-linux|libc\.|libm\.|libdl\.|libpthread\.|librt\.|libresolv\.|libnsl\.|libutil\.|libgcc_s|libstdc\+\+|libz\.|libsystemd|libselinux|libwayland|libxkbcommon|libudev|libevdev|libEGL|libGL|libgbm|libdrm)'
-
-          # BFS the dependency closure starting from the binary; bundle
-          # everything not denied. This pulls tesseract, leptonica, image
-          # codecs, and their transitive deps with consistent versions.
-          queue="out/bin/scuffed-stat-tracker"
-          seen=""
-          while [ -n "${queue}" ]; do
-            next=""
-            for f in ${queue}; do
-              for dep in $(ldd "$f" 2>/dev/null | awk '/=>/ {print $3}' | grep -v '^$'); do
-                base="$(basename "$dep")"
-                echo "${seen}" | grep -qF " ${base} " && continue
-                seen="${seen} ${base} "
-                if echo "${base}" | grep -qE "${DENY}"; then
-                  continue
-                fi
-                cp -n "$dep" out/lib/
-                next="${next} $dep"
-              done
-            done
-            queue="${next}"
-          done
-
+          # Seed the closure from the binary: pulls tesseract, leptonica, image
+          # codecs, and their transitive deps with consistent versions. Shared
+          # script also bundles/stamps for the GUI job (libxdo).
+          bash crates/stat-tracker/dist/bundle-native-libs.sh \
+            out/bin/scuffed-stat-tracker out/lib
           patchelf --set-rpath '$ORIGIN/../lib' out/bin/scuffed-stat-tracker
-          for lib in out/lib/*; do
-            patchelf --set-rpath '$ORIGIN' "$lib" || true
-          done
-          echo "Bundled $(ls out/lib | wc -l) libraries:"
-          ls out/lib
 
       - name: Clean-room smoke test (no system OCR libs)
         run: |
@@ -127,7 +100,7 @@ jobs:
             libevdev-dev libudev-dev \
             libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev \
             libxdo-dev \
-            pkg-config
+            pkg-config patchelf
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -139,10 +112,54 @@ jobs:
         working-directory: crates/stat-tracker
         run: cargo build --release --features gui --bin stat-tracker-gui
 
+      - name: Bundle libxdo + set RPATH
+        run: |
+          set -euo pipefail
+          mkdir -p out/bin out/lib
+          cp target/release/stat-tracker-gui out/bin/
+          # The GUI gets webkit2gtk-4.1, GTK, and the X11 client libs from the
+          # host (release notes require a modern distro), so we bundle ONLY the
+          # soname-fragmented lib the GUI can't get on Arch: libxdo (Ubuntu
+          # ships libxdo.so.3, Arch libxdo.so.4). Its transitive deps are the
+          # ABI-stable X11/xcb libs — denied so they stay host-provided.
+          #
+          # The shipped v0.1.0 GUI also had NO RPATH at all (only the daemon got
+          # $ORIGIN/../lib), so it couldn't see bundled libs even if present;
+          # the patchelf below fixes that.
+          xdo="$(ldd out/bin/stat-tracker-gui | awk '/libxdo/ {print $3}')"
+          [ -n "${xdo}" ] || { echo "libxdo not found in GUI deps" >&2; exit 1; }
+          cp -n "${xdo}" out/lib/
+          bash crates/stat-tracker/dist/bundle-native-libs.sh \
+            "out/lib/$(basename "${xdo}")" out/lib '^libX|^libxcb'
+          patchelf --set-rpath '$ORIGIN/../lib' out/bin/stat-tracker-gui
+
+      - name: Clean-room ldd check (bundled libxdo, no system libxdo)
+        run: |
+          set -euo pipefail
+          # Remove host libxdo so the RPATH must resolve it from the bundle.
+          sudo apt-get remove -y 'libxdo*' libxdo-dev xdotool || true
+          sudo apt-get autoremove -y || true
+          echo "GUI ldd from extracted layout:"
+          ldd ./out/bin/stat-tracker-gui || true
+          if ldd ./out/bin/stat-tracker-gui | grep -i 'not found'; then
+            echo "GUI has unresolved libraries after bundling" >&2
+            exit 1
+          fi
+          xdo_line="$(ldd ./out/bin/stat-tracker-gui | awk '/libxdo/ {print $3}')"
+          echo "libxdo resolves to: ${xdo_line}"
+          case "${xdo_line}" in
+            */out/lib/*) echo "libxdo resolves to the bundled copy — OK" ;;
+            *) echo "libxdo did NOT resolve to the bundled copy (${xdo_line:-missing})" >&2; exit 1 ;;
+          esac
+          # No headless launch probe: the Dioxus/webkit2gtk GUI has no --smoke
+          # or --version flag (only the SST_VIEW env for view routing) and would
+          # open a real window with no self-exit — a flaky gate, deliberately
+          # omitted. The ldd assertion above is the ship gate for this class.
+
       - uses: actions/upload-artifact@v4
         with:
           name: gui
-          path: target/release/stat-tracker-gui
+          path: out/
           if-no-files-found: error
 
   package-release:
@@ -170,7 +187,8 @@ jobs:
           mkdir -p "${STAGE}/bin" "${STAGE}/lib"
           cp daemon/bin/scuffed-stat-tracker "${STAGE}/bin/"
           cp daemon/lib/* "${STAGE}/lib/" 2>/dev/null || true
-          cp gui/stat-tracker-gui "${STAGE}/bin/"
+          cp gui/bin/stat-tracker-gui "${STAGE}/bin/"
+          cp gui/lib/* "${STAGE}/lib/" 2>/dev/null || true
           cp -r crates/stat-tracker/assets "${STAGE}/assets"
           cp crates/stat-tracker/dist/install.sh "${STAGE}/install.sh"
           chmod +x "${STAGE}/install.sh" "${STAGE}"/bin/*
