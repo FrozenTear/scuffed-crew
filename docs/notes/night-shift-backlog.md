@@ -201,7 +201,29 @@ the control point % (93%/99% pre-overtime) — bleed-through confirmed
 recurring, multiple spikes per game. Delta-gate priority raised: a spike on
 the final capture is no longer a tail risk.
 
-## 10. Retracted / non-items
+## 10. LIVE-3: hero attribution from final capture — majority vote instead  [MED, field-observed 07-18]
+
+**Problem.** Lijiang game 07-18 ~00:22: recorded hero=Tracer role=Damage; USER
+played Mizuki 89% / Juno 11% (career screen). Per-capture reads were 22×
+Mizuki, 5× Tracer, 1× Domina — detection is fine; the aggregation takes the
+FINAL capture's hero (latest_per_game), and the last reads were wrong.
+Hypothesis for the bad reads: captures during killcam/spectate read the
+killer's hero panel (USER died 8×; a Tracer was likely on the killfeed).
+Role is derived from hero, so it corrupts together.
+
+**Fix sketch.** Majority vote (mode) across the session's captures for
+categorical fields — hero at minimum; consider map too (it's also
+categorical). Playtime-weighted mode matches the game's own "most played
+hero" semantics if hero swaps matter. Latest-wins stays correct ONLY for
+cumulative counters. Optionally: skip/flag captures whose scoreboard row
+highlight is not the player's own row (killcam detection) — but the vote fix
+alone resolves the observed corruption.
+
+**Done when.** Replaying the 07-18 Lijiang captures yields Mizuki/Support; a
+fixture test pins mode-vs-last behavior; hero flapping mid-game (real swaps,
+e.g. Roadhog→Tracer→Orisa on Ilios) still resolves to most-played.
+
+## 11. Retracted / non-items
 
 - roster.rs "(public)" comment: **correct as written** (GET has no auth extractor
   by design; data already public via team pages). Claude flagged it wrongly on
