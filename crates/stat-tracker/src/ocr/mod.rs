@@ -267,15 +267,33 @@ pub fn recognize_name(
     img: &DynamicImage,
 ) -> Result<CellOcrResult, Box<dyn std::error::Error + Send + Sync>> {
     let prepared = preprocess::prepare_name_cell(img);
-    if prepared_ink_pixels(&prepared) < MIN_CELL_INK_PIXELS {
-        return Ok(CellOcrResult {
+    let first = if prepared_ink_pixels(&prepared) < MIN_CELL_INK_PIXELS {
+        CellOcrResult {
             value: String::new(),
             confidence: 0,
-        });
+        }
+    } else {
+        let png_buf = encode_png(&prepared)?;
+        let (text, confidence) = ocr_with(tessdata_lang(), "7", None, &png_buf)?;
+        CellOcrResult {
+            value: text.trim().to_string(),
+            confidence,
+        }
+    };
+    if !first.value.is_empty() {
+        return Ok(first);
     }
-    let png_buf = encode_png(&prepared)?;
-    let (text, confidence) = ocr_with(tessdata_lang(), "7", None, &png_buf)?;
 
+    // Fallback for cosmetic nameplates: gradient plates defeat the HSV white
+    // mask (tinted italic text → zero ink). A hard high-threshold grayscale
+    // binarization keeps the bright glyphs; fixture 2026-07-16 row 0 reads
+    // "S Froze" this way — plenty for the fuzzy row matcher.
+    let hard = preprocess::prepare_name_cell_hard_threshold(img);
+    if prepared_ink_pixels(&hard) < MIN_CELL_INK_PIXELS {
+        return Ok(first);
+    }
+    let png_buf = encode_png(&hard)?;
+    let (text, confidence) = ocr_with(tessdata_lang(), "7", None, &png_buf)?;
     Ok(CellOcrResult {
         value: text.trim().to_string(),
         confidence,
@@ -283,9 +301,13 @@ pub fn recognize_name(
 }
 
 /// Per-row OCR: extract name + all stat cells from a single player row.
-pub fn recognize_row(row_img: &DynamicImage, columns: &preprocess::StatColumns) -> RowOcrResult {
+pub fn recognize_row(
+    row_img: &DynamicImage,
+    columns: &preprocess::StatColumns,
+    team_size: usize,
+) -> RowOcrResult {
     let name = {
-        let name_crop = preprocess::crop_name_cell(row_img);
+        let name_crop = preprocess::crop_name_cell(row_img, team_size);
         recognize_name(&name_crop).ok()
     };
 
@@ -376,7 +398,7 @@ pub fn recognize_scoreboard_cells_pre_cropped(
     let mut results: Vec<(usize, RowOcrResult)> = ocr_pool().install(|| {
         row_images
             .par_iter()
-            .map(|(idx, row_img)| (*idx, recognize_row(row_img, &columns)))
+            .map(|(idx, row_img)| (*idx, recognize_row(row_img, &columns, team_size)))
             .collect()
     });
 
