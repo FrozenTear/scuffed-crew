@@ -3,6 +3,7 @@ use axum::{
         State,
         ws::{Message, WebSocket, WebSocketUpgrade},
     },
+    http::{HeaderMap, StatusCode, header},
     response::IntoResponse,
 };
 use axum_extra::extract::cookie::CookieJar;
@@ -10,7 +11,7 @@ use futures::{SinkExt, StreamExt};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
-use crate::collab::RoomManager;
+use crate::collab::{JoinError, RoomManager};
 use scuffed_auth::server::HasAuth;
 use scuffed_site_server::state::AppState;
 use scuffed_types::strategy::{
@@ -33,13 +34,43 @@ pub async fn websocket_handler(
     ws: WebSocketUpgrade,
     State(state): State<WsState>,
     jar: CookieJar,
+    headers: HeaderMap,
 ) -> impl IntoResponse {
+    if !ws_origin_allowed(&state, &headers) {
+        tracing::warn!("strategy WS rejected: Origin not allowed");
+        return StatusCode::FORBIDDEN.into_response();
+    }
+
+    // Hard cap before upgrade so we do not accept sockets we cannot place in a room.
+    if state.rooms.global_connection_count() >= crate::collab::room::MAX_GLOBAL_CONNECTIONS {
+        tracing::warn!("strategy WS rejected: global connection limit");
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    }
+
     // Try to get user from session cookie
     let user = get_user_from_cookie(&state.app, &jar).await;
 
     ws.max_frame_size(MAX_WS_FRAME_SIZE)
         .max_message_size(MAX_WS_MESSAGE_SIZE)
         .on_upgrade(move |socket| handle_socket(socket, state, user))
+        .into_response()
+}
+
+/// Browser WS requests include Origin; must match ALLOWED_ORIGINS.
+/// Missing Origin is allowed only outside PRODUCTION (native / test clients).
+fn ws_origin_allowed(state: &WsState, headers: &HeaderMap) -> bool {
+    let allowed = &state.app.oauth_config.allowed_origins;
+    match headers.get(header::ORIGIN).and_then(|v| v.to_str().ok()) {
+        Some(origin) => allowed.iter().any(|o| o == origin),
+        None => !is_production(),
+    }
+}
+
+fn is_production() -> bool {
+    matches!(
+        std::env::var("PRODUCTION").ok().as_deref(),
+        Some("1") | Some("true") | Some("TRUE") | Some("yes") | Some("YES")
+    )
 }
 
 /// Extract user info from session cookie
@@ -150,6 +181,12 @@ async fn handle_socket(socket: WebSocket, state: WsState, user: Option<CollabUse
 // Message dispatch
 // =============================================================================
 
+fn busy_error() -> ServerMessage {
+    ServerMessage::Error {
+        message: "Server busy, retry shortly".into(),
+    }
+}
+
 /// Handle a single client message
 async fn handle_message(
     state: &WsState,
@@ -197,14 +234,20 @@ async fn handle_message(
                 state.rooms.leave_room(&old_room, connection_id);
             }
 
-            // Join new room
+            // Join new room (bounded)
             if let Some(u) = user.as_ref() {
-                state.rooms.join_room(
+                if let Err(err) = state.rooms.join_room(
                     &strategy_id,
                     connection_id.to_string(),
                     u.clone(),
                     tx.clone(),
-                );
+                ) {
+                    let message = match err {
+                        JoinError::GlobalLimit => "Too many active strategy sessions".into(),
+                        JoinError::RoomLimit => "Room is full".into(),
+                    };
+                    return Some(ServerMessage::Error { message });
+                }
             }
 
             *current_room = Some(strategy_id.clone());
@@ -235,7 +278,6 @@ async fn handle_message(
                 });
             };
 
-            // Permission check via DB
             if !state
                 .app
                 .db
@@ -248,15 +290,16 @@ async fn handle_message(
                 });
             }
 
-            // Fire-and-forget DB persistence
             let db = state.app.db.clone();
             let rid = room_id.clone();
             let elem = element.clone();
-            tokio::spawn(async move {
+            if !state.rooms.try_spawn_persist(room_id, move || async move {
                 if let Err(e) = db.add_strategy_element(&rid, &elem).await {
                     tracing::error!("Failed to persist element add for strategy {rid}: {e}");
                 }
-            });
+            }) {
+                return Some(busy_error());
+            }
 
             state.rooms.broadcast(
                 room_id,
@@ -294,12 +337,11 @@ async fn handle_message(
                 });
             }
 
-            // Fire-and-forget: apply patch and persist
+            // Load → patch → save under per-strategy lock (via try_spawn_persist)
             let db = state.app.db.clone();
             let rid = room_id.clone();
             let patch = changes.clone();
-            tokio::spawn(async move {
-                // Read-modify-write: load current element, apply patch, save
+            if !state.rooms.try_spawn_persist(room_id, move || async move {
                 if let Ok(Some(strategy)) = db.get_strategy(&rid).await
                     && let Some(mut elem) = strategy.elements.into_iter().find(|e| e.id == id)
                 {
@@ -308,7 +350,9 @@ async fn handle_message(
                         tracing::error!("Failed to persist element update for strategy {rid}: {e}");
                     }
                 }
-            });
+            }) {
+                return Some(busy_error());
+            }
 
             state.rooms.broadcast(
                 room_id,
@@ -347,14 +391,15 @@ async fn handle_message(
                 });
             }
 
-            // Fire-and-forget DB persistence
             let db = state.app.db.clone();
             let rid = room_id.clone();
-            tokio::spawn(async move {
+            if !state.rooms.try_spawn_persist(room_id, move || async move {
                 if let Err(e) = db.delete_strategy_element(&rid, id).await {
                     tracing::error!("Failed to persist element delete for strategy {rid}: {e}");
                 }
-            });
+            }) {
+                return Some(busy_error());
+            }
 
             state.rooms.broadcast(
                 room_id,
@@ -392,15 +437,16 @@ async fn handle_message(
                 });
             }
 
-            // Fire-and-forget DB persistence
             let db = state.app.db.clone();
             let rid = room_id.clone();
             let p = phase.clone();
-            tokio::spawn(async move {
+            if !state.rooms.try_spawn_persist(room_id, move || async move {
                 if let Err(e) = db.add_strategy_phase(&rid, &p).await {
                     tracing::error!("Failed to persist phase add for strategy {rid}: {e}");
                 }
-            });
+            }) {
+                return Some(busy_error());
+            }
 
             state.rooms.broadcast(
                 room_id,
@@ -438,11 +484,10 @@ async fn handle_message(
                 });
             }
 
-            // Fire-and-forget: apply patch and persist
             let db = state.app.db.clone();
             let rid = room_id.clone();
             let patch = changes.clone();
-            tokio::spawn(async move {
+            if !state.rooms.try_spawn_persist(room_id, move || async move {
                 if let Ok(Some(strategy)) = db.get_strategy(&rid).await
                     && let Some(mut phase) = strategy.phases.into_iter().find(|p| p.id == id)
                 {
@@ -451,7 +496,9 @@ async fn handle_message(
                         tracing::error!("Failed to persist phase update for strategy {rid}: {e}");
                     }
                 }
-            });
+            }) {
+                return Some(busy_error());
+            }
 
             state.rooms.broadcast(
                 room_id,
@@ -490,14 +537,15 @@ async fn handle_message(
                 });
             }
 
-            // Fire-and-forget DB persistence
             let db = state.app.db.clone();
             let rid = room_id.clone();
-            tokio::spawn(async move {
+            if !state.rooms.try_spawn_persist(room_id, move || async move {
                 if let Err(e) = db.delete_strategy_phase(&rid, id).await {
                     tracing::error!("Failed to persist phase delete for strategy {rid}: {e}");
                 }
-            });
+            }) {
+                return Some(busy_error());
+            }
 
             state.rooms.broadcast(
                 room_id,

@@ -6,7 +6,7 @@ use axum::{
 use serde::Deserialize;
 
 use scuffed_auth::server::session::ErrorResponse;
-use scuffed_db::{AuditAction, AuditTargetType, Scrim};
+use scuffed_db::{AuditAction, AuditTargetType, Member, OrgRole, Scrim};
 use scuffed_types::api::{CursorResponse, PaginationParams};
 
 use crate::extractors::OrgMember;
@@ -62,12 +62,49 @@ fn default_duration() -> u32 {
     90
 }
 
-/// POST /api/scrims — create scrim request (member)
+/// Require caller on team roster **or** Officer+ (authz for scrim mutations).
+async fn authorize_scrim_team(
+    state: &AppState,
+    member: &Member,
+    team_id: &str,
+) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
+    if member.org_role.is_at_least(OrgRole::Officer) {
+        return Ok(());
+    }
+
+    let on_roster = state
+        .db
+        .is_on_team_roster(&member.id, team_id)
+        .await
+        .map_err(|_e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: "Internal error".into(),
+                }),
+            )
+        })?;
+
+    if on_roster {
+        return Ok(());
+    }
+
+    Err((
+        StatusCode::FORBIDDEN,
+        Json(ErrorResponse {
+            error: "Must be on the team roster or an officer".into(),
+        }),
+    ))
+}
+
+/// POST /api/scrims — create scrim request (roster member or officer+)
 pub async fn create_scrim(
     State(state): State<AppState>,
     member: OrgMember,
     Json(body): Json<CreateScrimRequest>,
 ) -> Result<(StatusCode, Json<Scrim>), (StatusCode, Json<ErrorResponse>)> {
+    authorize_scrim_team(&state, &member.member, &body.team_id).await?;
+
     let scrim = state
         .db
         .create_scrim(
@@ -107,7 +144,8 @@ pub struct UpdateScrimStatusRequest {
     pub opponent_name: Option<String>,
 }
 
-/// PATCH /api/scrims/:id — update scrim status (confirm, cancel, complete) (member)
+/// PATCH /api/scrims/:id — update scrim status (confirm, cancel, complete)
+/// (roster member of the scrim's team or officer+)
 pub async fn update_scrim_status(
     State(state): State<AppState>,
     member: OrgMember,
@@ -127,6 +165,27 @@ pub async fn update_scrim_status(
             }),
         ));
     }
+
+    let existing = state.db.get_scrim(&id).await.map_err(|e| {
+        let not_found = matches!(e, scuffed_db::DbError::NotFound(_));
+        if not_found {
+            (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse {
+                    error: "Scrim not found".into(),
+                }),
+            )
+        } else {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: "Internal error".into(),
+                }),
+            )
+        }
+    })?;
+
+    authorize_scrim_team(&state, &member.member, &existing.team_id).await?;
 
     let scrim = state
         .db

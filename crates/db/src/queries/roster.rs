@@ -136,6 +136,29 @@ impl Database {
         .await
     }
 
+    /// True if `member_id` is an active roster entry on `team_id`.
+    pub async fn is_on_team_roster(&self, member_id: &str, team_id: &str) -> DbResult<bool> {
+        with_timeout(async {
+            #[derive(Debug, Deserialize, SurrealValue)]
+            struct CountResult {
+                count: i64,
+            }
+            let mut result = self
+                .client
+                .query(
+                    r#"SELECT count() FROM plays_on
+                       WHERE in = $member_rid AND out = $team_rid AND is_active = true
+                       GROUP ALL"#,
+                )
+                .bind(("member_rid", member_rid(member_id)))
+                .bind(("team_rid", team_rid(team_id)))
+                .await?;
+            let rows: Vec<CountResult> = result.take(0)?;
+            Ok(rows.first().map(|r| r.count > 0).unwrap_or(false))
+        })
+        .await
+    }
+
     /// Update a member's role on a team.
     pub async fn update_roster_role(
         &self,

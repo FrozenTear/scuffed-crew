@@ -301,7 +301,30 @@ pub async fn nostr_verify(
 
     let pubkey_hex = body.signed_event.pubkey.to_hex();
 
-    // 6. Update member's nostr_pubkey
+    // 6. Reject if pubkey already linked to a different active member (DB also has UNIQUE index).
+    if let Some(existing) = state
+        .db
+        .get_member_by_nostr_pubkey(&pubkey_hex)
+        .await
+        .map_err(|_e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: "Internal error".into(),
+                }),
+            )
+        })?
+        && existing.id != caller.member.id
+    {
+        return Err((
+            StatusCode::CONFLICT,
+            Json(ErrorResponse {
+                error: "Nostr pubkey is already linked to another member".into(),
+            }),
+        ));
+    }
+
+    // 7. Update member's nostr_pubkey
     let updated = state
         .db
         .update_member(
@@ -1437,9 +1460,21 @@ pub async fn dm_send(
     let gift_wrap_id = wrap.event.id.to_hex();
     let relay_event = EventBuilder::to_relay_event(&wrap.event);
 
-    // Store the sender's own copy synchronously so the UI can render it
-    // immediately. Receiver-side dedup against the relay's later resync is
-    // handled by the unique index on `gift_wrap_id`.
+    // Publish to the relay first — never report success if the peer cannot receive.
+    if let Err(e) = publish_event_oneshot(&relay_url, relay_event).await {
+        tracing::error!("Failed to publish DM gift wrap: {e}");
+        return Err((
+            StatusCode::BAD_GATEWAY,
+            Json(ErrorResponse {
+                error: "Relay rejected or failed to accept the message".into(),
+            }),
+        ));
+    }
+    tracing::info!("Published DM gift wrap {gift_wrap_id}");
+
+    // Store the sender's own copy so the UI can render it immediately.
+    // Receiver-side dedup against the relay's later resync is handled by the
+    // unique index on `gift_wrap_id`.
     let now = chrono::Utc::now();
     let _ = state
         .db
@@ -1461,25 +1496,15 @@ pub async fn dm_send(
             )
         })?;
 
-    let db = state.db.clone();
-    let log_event_id = gift_wrap_id.clone();
-    let member_id = caller.member.id.clone();
-    tokio::spawn(async move {
-        if let Err(e) = publish_event_oneshot(&relay_url, relay_event).await {
-            tracing::error!("Failed to publish DM gift wrap: {e}");
-        } else {
-            tracing::info!("Published DM gift wrap {log_event_id}");
-        }
-        crate::routes::audit_log::audit(
-            &db,
-            &member_id,
-            scuffed_db::AuditAction::SentDirectMessage,
-            scuffed_db::AuditTargetType::DirectMessage,
-            &log_event_id,
-            Some("Sent encrypted direct message"),
-        )
-        .await;
-    });
+    crate::routes::audit_log::audit(
+        &state.db,
+        &caller.member.id,
+        scuffed_db::AuditAction::SentDirectMessage,
+        scuffed_db::AuditTargetType::DirectMessage,
+        &gift_wrap_id,
+        Some("Sent encrypted direct message"),
+    )
+    .await;
 
     Ok(Json(DmSendResponse { gift_wrap_id }))
 }

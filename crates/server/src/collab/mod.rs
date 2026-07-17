@@ -1,2 +1,2 @@
 pub mod room;
-pub use room::RoomManager;
+pub use room::{JoinError, RoomManager};

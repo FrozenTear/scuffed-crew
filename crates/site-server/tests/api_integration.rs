@@ -3744,3 +3744,139 @@ async fn public_match_detail_gates_and_exposes_media() {
     let json = body_json(resp).await;
     assert_eq!(json["notes"], "secret");
 }
+
+// ─── Scrim team authz (security train) ──────────────────────────────────────
+
+#[tokio::test]
+async fn create_scrim_requires_roster_or_officer() {
+    let state = test_state().await;
+    seed_all_roles(&state.db).await;
+    seed_game(&state.db, "ow2", "Overwatch 2").await;
+    seed_team(&state.db, "teamalpha", "Alpha Squad", "ow2").await;
+
+    let scheduled = chrono::Utc::now() + chrono::Duration::hours(2);
+    let body = json!({
+        "team_id": "teamalpha",
+        "game_id": "ow2",
+        "scheduled_at": scheduled.to_rfc3339(),
+        "duration_minutes": 90,
+        "notes": "tryout scrim"
+    });
+
+    // Regular member not on roster → 403
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(authed_json_request(
+            Method::POST,
+            "/api/scrims",
+            MEMBER_TOKEN,
+            body.clone(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "member not on roster must not create scrim"
+    );
+
+    // Officer can create without being on roster
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(authed_json_request(
+            Method::POST,
+            "/api/scrims",
+            OFFICER_TOKEN,
+            body.clone(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let json = body_json(resp).await;
+    assert_eq!(json["team_id"], "teamalpha");
+    assert_eq!(json["status"], "open");
+
+    // Put member on roster → can create
+    state
+        .db
+        .add_to_roster(
+            "membermember",
+            "teamalpha",
+            scuffed_db::TeamRole::Player,
+        )
+        .await
+        .expect("add to roster");
+
+    let app = create_router(state);
+    let resp = app
+        .oneshot(authed_json_request(
+            Method::POST,
+            "/api/scrims",
+            MEMBER_TOKEN,
+            body,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::CREATED,
+        "roster member can create scrim"
+    );
+}
+
+#[tokio::test]
+async fn update_scrim_requires_roster_or_officer() {
+    let state = test_state().await;
+    seed_all_roles(&state.db).await;
+    seed_game(&state.db, "ow2", "Overwatch 2").await;
+    seed_team(&state.db, "teamalpha", "Alpha Squad", "ow2").await;
+
+    // Officer creates a scrim
+    let scheduled = chrono::Utc::now() + chrono::Duration::hours(3);
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(authed_json_request(
+            Method::POST,
+            "/api/scrims",
+            OFFICER_TOKEN,
+            json!({
+                "team_id": "teamalpha",
+                "game_id": "ow2",
+                "scheduled_at": scheduled.to_rfc3339(),
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let scrim = body_json(resp).await;
+    let scrim_id = scrim["id"].as_str().unwrap().to_string();
+
+    // Non-roster member cannot update
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(authed_json_request(
+            Method::PATCH,
+            &format!("/api/scrims/{scrim_id}"),
+            MEMBER_TOKEN,
+            json!({ "status": "confirmed", "opponent_name": "Rivals" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+    // Officer can update
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(authed_json_request(
+            Method::PATCH,
+            &format!("/api/scrims/{scrim_id}"),
+            OFFICER_TOKEN,
+            json!({ "status": "confirmed", "opponent_name": "Rivals" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    assert_eq!(json["status"], "confirmed");
+    assert_eq!(json["opponent_name"], "Rivals");
+}
