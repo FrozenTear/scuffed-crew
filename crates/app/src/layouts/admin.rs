@@ -14,6 +14,7 @@ const ADMIN_CSS: &str = r#"
     }
     .admin-sidebar {
         width: 220px;
+        flex-shrink: 0;
         background: var(--surface);
         border-right: 1px solid var(--border);
         padding: 1.5rem 0;
@@ -22,6 +23,8 @@ const ADMIN_CSS: &str = r#"
         position: sticky;
         top: 0;
         height: 100vh;
+        z-index: 40;
+        overflow-y: auto;
     }
     .admin-sidebar .brand {
         padding: 0 1.25rem 1.25rem;
@@ -78,8 +81,30 @@ const ADMIN_CSS: &str = r#"
         color: var(--text-3);
         text-transform: uppercase;
     }
+    .admin-sidebar-close {
+        display: none;
+        margin-left: auto;
+        background: transparent;
+        border: 1px solid var(--border);
+        color: var(--text-2);
+        border-radius: 6px;
+        width: 2.25rem;
+        height: 2.25rem;
+        cursor: pointer;
+        font-size: 1.1rem;
+        line-height: 1;
+        flex-shrink: 0;
+    }
+    .admin-sidebar-close:hover { color: var(--text); border-color: var(--accent-soft); }
+    .admin-mobile-bar {
+        display: none;
+    }
+    .admin-nav-overlay {
+        display: none;
+    }
     .admin-main {
         flex: 1;
+        min-width: 0;
         padding: 2rem 2.5rem;
         overflow-y: auto;
     }
@@ -91,11 +116,79 @@ const ADMIN_CSS: &str = r#"
         text-transform: uppercase;
         letter-spacing: 0.04em;
     }
+    @media (max-width: 768px) {
+        .admin-layout { flex-direction: column; }
+        .admin-mobile-bar {
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+            position: sticky;
+            top: 0;
+            z-index: 30;
+            padding: 0.65rem 0.85rem;
+            background: color-mix(in srgb, var(--surface) 94%, transparent);
+            backdrop-filter: blur(10px);
+            border-bottom: 1px solid var(--border);
+        }
+        .admin-mobile-bar .menu-btn {
+            background: var(--surface-2);
+            border: 1px solid var(--border);
+            color: var(--text);
+            border-radius: 6px;
+            min-width: 2.75rem;
+            min-height: 2.75rem;
+            font-size: 1.15rem;
+            cursor: pointer;
+            line-height: 1;
+        }
+        .admin-mobile-bar .menu-btn:hover { border-color: var(--accent-soft); }
+        .admin-mobile-bar .title {
+            font-family: var(--font-head);
+            font-size: 0.95rem;
+            font-weight: 700;
+            color: var(--accent);
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+        }
+        .admin-sidebar {
+            position: fixed;
+            left: 0;
+            top: 0;
+            bottom: 0;
+            height: 100vh;
+            width: min(18rem, 86vw);
+            transform: translateX(-105%);
+            transition: transform 0.2s ease-out;
+            box-shadow: none;
+            border-right: 1px solid var(--border);
+        }
+        .admin-sidebar.is-open {
+            transform: translateX(0);
+            box-shadow: 8px 0 24px var(--overlay, color-mix(in srgb, var(--bg) 40%, transparent));
+        }
+        .admin-sidebar-close { display: inline-flex; align-items: center; justify-content: center; }
+        .admin-nav-overlay {
+            display: block;
+            position: fixed;
+            inset: 0;
+            z-index: 35;
+            background: var(--overlay);
+            border: none;
+            padding: 0;
+            cursor: pointer;
+        }
+        .admin-main {
+            padding: 1rem;
+            width: 100%;
+        }
+        .admin-main h1 { font-size: 1.35rem; margin-bottom: 1rem; }
+    }
 "#;
 
 #[component]
 pub fn AdminLayout() -> Element {
     let auth = use_auth();
+    let mut nav_open = use_signal(|| false);
 
     let is_admin = auth().is_admin();
     let username = auth()
@@ -144,35 +237,70 @@ pub fn AdminLayout() -> Element {
         };
     }
 
+    let sidebar_class = if nav_open() {
+        "admin-sidebar is-open"
+    } else {
+        "admin-sidebar"
+    };
+
+    // Close drawer after navigation (mobile); desktop ignores open state via CSS.
+    let close_nav = move |_| nav_open.set(false);
+
     rsx! {
         style { {ADMIN_CSS} }
         style { {crate::styles::admin::CSS} }
         div { class: "admin-layout",
-            aside { class: "admin-sidebar",
+            div { class: "admin-mobile-bar",
+                button {
+                    class: "menu-btn",
+                    r#type: "button",
+                    "aria-label": "Open admin menu",
+                    "aria-expanded": if nav_open() { "true" } else { "false" },
+                    onclick: move |_| nav_open.set(true),
+                    "☰"
+                }
+                span { class: "title", "Admin" }
+            }
+            if nav_open() {
+                button {
+                    class: "admin-nav-overlay",
+                    r#type: "button",
+                    "aria-label": "Close admin menu",
+                    onclick: move |_| nav_open.set(false),
+                }
+            }
+            aside { class: "{sidebar_class}",
                 div { class: "brand",
                     div { class: "brand-text",
                         h2 { "Scuffed Crew" }
                         span { "Admin Panel" }
                     }
                     ThemeToggle {}
+                    button {
+                        class: "admin-sidebar-close",
+                        r#type: "button",
+                        "aria-label": "Close admin menu",
+                        onclick: move |_| nav_open.set(false),
+                        "×"
+                    }
                 }
                 nav {
-                    Link { to: Route::AdminDashboard {}, "Dashboard" }
-                    Link { to: Route::AdminMembers {}, "Members" }
-                    Link { to: Route::AdminGames {}, "Games" }
-                    Link { to: Route::AdminTeams {}, "Teams" }
-                    Link { to: Route::AdminSchedule {}, "Schedule" }
-                    Link { to: Route::AdminApplications {}, "Applications" }
-                    Link { to: Route::AdminMatches {}, "Matches" }
-                    Link { to: Route::AdminTournaments {}, "Tournaments" }
-                    Link { to: Route::AdminAnnouncements {}, "Announcements" }
-                    Link { to: Route::AdminArticles {}, "Articles" }
-                    Link { to: Route::AdminForum {}, "Forum" }
+                    Link { to: Route::AdminDashboard {}, onclick: close_nav, "Dashboard" }
+                    Link { to: Route::AdminMembers {}, onclick: close_nav, "Members" }
+                    Link { to: Route::AdminGames {}, onclick: close_nav, "Games" }
+                    Link { to: Route::AdminTeams {}, onclick: close_nav, "Teams" }
+                    Link { to: Route::AdminSchedule {}, onclick: close_nav, "Schedule" }
+                    Link { to: Route::AdminApplications {}, onclick: close_nav, "Applications" }
+                    Link { to: Route::AdminMatches {}, onclick: close_nav, "Matches" }
+                    Link { to: Route::AdminTournaments {}, onclick: close_nav, "Tournaments" }
+                    Link { to: Route::AdminAnnouncements {}, onclick: close_nav, "Announcements" }
+                    Link { to: Route::AdminArticles {}, onclick: close_nav, "Articles" }
+                    Link { to: Route::AdminForum {}, onclick: close_nav, "Forum" }
                     if is_admin {
-                        Link { to: Route::AdminModeration {}, "Moderation" }
-                        Link { to: Route::AdminRelay {}, "Relay" }
-                        Link { to: Route::AdminAuditLog {}, "Audit Log" }
-                        Link { to: Route::AdminSettings {}, "Settings" }
+                        Link { to: Route::AdminModeration {}, onclick: close_nav, "Moderation" }
+                        Link { to: Route::AdminRelay {}, onclick: close_nav, "Relay" }
+                        Link { to: Route::AdminAuditLog {}, onclick: close_nav, "Audit Log" }
+                        Link { to: Route::AdminSettings {}, onclick: close_nav, "Settings" }
                     }
                 }
                 div { class: "user-info",

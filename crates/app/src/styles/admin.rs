@@ -1,8 +1,15 @@
 /// Styles specific to admin pages: data tables, row actions, toolbar,
 /// form modals, form fields, pagination, summary cards, etc.
 pub const CSS: &str = r#"
-    /* Data Table */
-    .data-table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+    /* Data Table — scroll wrapper keeps layout width while columns stay readable */
+    .data-table-scroll {
+        width: 100%;
+        overflow-x: auto;
+        -webkit-overflow-scrolling: touch;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+    }
+    .data-table { width: 100%; min-width: 36rem; border-collapse: collapse; font-size: 0.85rem; }
     .data-table th {
         text-align: left; padding: 0.6rem 0.75rem; font-family: var(--font-head);
         font-weight: 700; font-size: 0.75rem; text-transform: uppercase;
@@ -17,6 +24,13 @@ pub const CSS: &str = r#"
         padding: 0.2rem 0.55rem; border-radius: 4px; border: 1px solid var(--border);
         background: var(--surface); color: var(--text-2); font-size: 0.7rem;
         cursor: pointer; transition: all 0.15s; white-space: nowrap;
+    }
+    @media (max-width: 768px) {
+        .row-btn {
+            padding: 0.45rem 0.75rem;
+            font-size: 0.8rem;
+            min-height: 2.5rem;
+        }
     }
     .row-btn:hover { border-color: var(--accent-soft); color: var(--text); }
     .row-btn.danger:hover { border-color: var(--danger); color: var(--danger); }

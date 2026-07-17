@@ -3,15 +3,19 @@ use dioxus::prelude::*;
 #[component]
 pub fn DataTable(headers: Vec<&'static str>, children: Element) -> Element {
     rsx! {
-        table { class: "data-table",
-            thead {
-                tr {
-                    for h in headers.iter() {
-                        th { "{h}" }
+        // Horizontal scroll containment so wide admin tables don't blow out
+        // the layout on narrow viewports (see research-admin-mobile-grok.md).
+        div { class: "data-table-scroll",
+            table { class: "data-table",
+                thead {
+                    tr {
+                        for h in headers.iter() {
+                            th { "{h}" }
+                        }
                     }
                 }
+                tbody { {children} }
             }
-            tbody { {children} }
         }
     }
 }
