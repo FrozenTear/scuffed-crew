@@ -120,7 +120,25 @@ minimum ldd-clean assertion in release validation) passes; release notes list
 host deps. Consider adding a `--smoke` GUI headless probe to the release
 workflow so the NOT-CHECKED gap from 1.3 closes permanently.
 
-## 8. LIVE-1: transient OCR digit misread — delta-plausibility gate  [LOW, field-observed 07-17]
+## 8. LIVE-1: OCR elims misreads — TWO modes, corrupted a real game  [**HIGH**, escalated 07-18]
+
+**Escalation 07-18 ~00:01.** Route 66 game: real final E=11 (screenshot), captures
+read E 7→5→**1**; capture 13 was the FINAL capture => `latest_per_game` locked
+E=1 into the registered stats (D/A/DMG/HLG/MIT all exact). "Benign" verdict
+retracted — final-capture corruption happened in the field on night one.
+Second mode identified: two-digit "11" collapses to "1" (thin-glyph digit
+drop; Escort map, so not %-bleed). Modes: (a) inflation — Control point-%
+bleed-through (93/99 tracking real point %); (b) deflation — dropped digit on
+2-digit values.
+
+**Fix (revised).** Per-cell monotonic hold: within a game, counters never
+decrease; a SINGLE-counter decrease cannot be a new game (split requires 2/3
+by design) => treat as misread, keep the previous value for that cell, flag
+the capture. Plus a rate-cap for mode (a) (elims jump beyond plausible rate =>
+hold until corroborated). Neither can recover a truth OCR never read (E stays
+7 in the 07-18 case) — consider a GUI stat-edit affordance for manual repair.
+
+Original notes (07-17), kept for context:
 
 **Problem.** Live session 07-17 ~23:40: one capture read E=93 where the real
 scoreboard showed E=3 (all other cells exact; screenshot cross-checked).
@@ -152,8 +170,13 @@ Two readers failed independently:
   `FUZZY_MAP_THRESHOLD=0.85` is too strict for a mangled 5-char word — empty
   ALL frames while hero names read fine. Oasis (round glyphs) read clean on
   both paths same night.
-- Accolade reader (3rd chance, fires at match end) worked for Oasis; verify
-  whether it caught Ilios post-game.
+- Accolade reader (3rd chance, fires at match end) worked for Oasis but never
+  fired a map read at the Ilios game's end — Ilios is permanently mapless; all
+  three readers missed.
+- 07-18 update: vote reader went 0-for-2 — `maps=[]` ×4 even on "ROUTE 66"
+  (which the scoreboard reader then caught on the FIRST parse). The vote path
+  is effectively dead as-is; prioritize scoreboard fuzzy + accolade robustness,
+  treat vote candidates as a bonus.
 
 **Fix sketch.** (a) Glyph-normalization pass before both matchers: `1→i`,
 `|→i`, `l→i` (uppercase context), `0→o`; (b) reuse `fuzzy_match_map` in the
