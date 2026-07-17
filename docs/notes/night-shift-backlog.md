@@ -10,6 +10,40 @@ Ordered by value. Items 1–2 are one branch.
 
 ---
 
+## KICKOFF — read first (session closed 07-18 ~01:00)
+
+**Orchestration ruling (USER, 2026-07-18, binding):** if Fable is available as
+a model, claude runs it as **orchestrator and main planner**. grok reviews
+every plan and **posts dissent on the fleet log if it disagrees** — plan-level
+objection is expected input, not obstruction; unresolved disagreement
+escalates to USER. Implementation goes to Opus subagents under Fable's plan.
+Dual-agree on merges is unchanged. Also recorded in
+`docs/fleet-protocol.md` Appendix A.
+
+**Suggested execution order:**
+1. **Step 0** (item 8): inspect tonight's dumped/rejected frames — confirm or
+   kill the column-window-drift theory before building anything.
+2. **Item 8** — capture gate (HIGH; realized corruption in real data,
+   ~1 game in 3 affected tonight).
+3. **Item 10** — parked branch `fix/tracker-hero-writethrough` @ 4499f36:
+   start at grok review, dual-agree, merge. Ready-made.
+4. **Item 9** — map matching (Ilios class).
+5. **Item 7** — GUI libxdo bundle + RUNPATH.
+6. **Items 1–4** — roster join + install.sh pair.
+7. **Item 5** needs USER; **item 6** partially satisfied by tonight's session
+   (live data collected; magenta-palette + reject-rate review still open).
+
+**Manual repairs queued (need stat-edit affordance or direct store edit):**
+- Havana Victory `b1b263e994d1f7f8`: D=5→6, HLG=234→2341
+- Lijiang Defeat (07-18 00:22): hero Tracer→Mizuki, role Damage→Support
+
+**Fixture treasure from tonight:** the local store holds full capture series
+for Route 66 (35 caps, ~40% collapsed), Havana ×2 (incl. the locked-bad one),
+Lijiang (hero flapping), Ilios (mapless + 9X series) — real-data test
+material for every fix above. Do not clear the store before extracting.
+
+---
+
 ## 1. Roster N+1 → db-level join (both call sites)  [MEDIUM value, SMALL effort]
 
 **Problem.** Two handlers fetch a team roster then loop `get_member_safe` per

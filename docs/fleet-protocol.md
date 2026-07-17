@@ -176,6 +176,7 @@ from git/gh and matching is itself a correctness check.
 | Release gate | tag `stat-tracker-v*` builds fresh from tagged ref; verify the *published* one-liner from raw main, not a branch tree |
 | Protected paths | `crates/stat-tracker/test-data/` (copyrighted frames — never commit, see its .gitignore) |
 | Known agents | `claude` (Fable orchestrator, Opus subagents), `grok` (grok-build) |
+| Model policy (USER ruling 2026-07-18) | When Fable is available, claude runs it as orchestrator + main planner. grok reviews every plan and posts dissent on the fleet log when it disagrees — plan objection is expected input, not obstruction; unresolved disagreement escalates to USER. Implementation via Opus subagents under Fable's plan. Dual-agree on merges unchanged. |
 | Backlog | `docs/notes/night-shift-backlog.md` |
 
 ## Appendix B — Provenance
