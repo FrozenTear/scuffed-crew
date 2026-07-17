@@ -32,6 +32,12 @@ const NAME_COL_W: f64 = 0.12;
 const NAME_COL_X_6V6: f64 = 0.15;
 const NAME_COL_W_6V6: f64 = 0.10;
 
+/// Luma floor for the hard-threshold nameplate fallback. Cosmetic plates put
+/// mid-grey gradients behind the glyphs; 200 keeps the brightest glyph pixels
+/// and drops the plate. Measured on the 2026-07-16 fixtures — lowering it
+/// re-admits the plate as ink and the name goes back to empty.
+const NAME_GLYPH_LUMA_MIN: u8 = 200;
+
 /// Row layout: header takes ~2.5% of scoreboard height.
 /// Team 1 starts immediately after header. Team 2 starts at ~56.5% (measured from
 /// real screenshots — the VS divider gap is larger than initially estimated).
@@ -479,8 +485,8 @@ pub fn crop_stat_cell(
 
 /// Hard-threshold fallback preparation for name cells whose cosmetic
 /// nameplates defeat the HSV white mask (gradient plates, tinted glyphs).
-/// Grayscale > 200 keeps only the brightest glyph pixels; output is
-/// black-text-on-white for Tesseract, upscaled like the primary path.
+/// Keeps only the brightest glyph pixels (see [`NAME_GLYPH_LUMA_MIN`]); output
+/// is black-text-on-white for Tesseract, upscaled like the primary path.
 pub fn prepare_name_cell_hard_threshold(img: &DynamicImage) -> GrayImage {
     let gray = img.to_luma8();
     // Smooth-upscale BEFORE thresholding: at native row height (~77px) the
@@ -489,7 +495,7 @@ pub fn prepare_name_cell_hard_threshold(img: &DynamicImage) -> GrayImage {
     let up = image::imageops::resize(&gray, w * 4, h * 4, image::imageops::FilterType::CatmullRom);
     let mut bin = up;
     for p in bin.pixels_mut() {
-        p.0[0] = if p.0[0] > 200 { 0 } else { 255 };
+        p.0[0] = if p.0[0] > NAME_GLYPH_LUMA_MIN { 0 } else { 255 };
     }
     bin
 }
