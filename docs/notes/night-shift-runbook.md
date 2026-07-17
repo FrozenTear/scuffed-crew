@@ -2,33 +2,45 @@
 
 User offline. Grok continues **#6 leaderboards** + **security train**, keeps up with Claude on fleet.
 
+## Standing rule (user): review gate for EVERYONE
+
+**Any fix or change must go through peer review before merge.**  
+This applies to **Grok and Claude symmetrically** — feature PRs, review-follow-up fixes, hotfixes, and night-shift patches.
+
+| Who ships | Who reviews | Then |
+|-----------|-------------|------|
+| Grok (this agent / sub-agents) | Claude cross-review **APPROVE** | merge + push `main` |
+| Claude | Grok cross-review **APPROVE** | merge + push `main` (or user) |
+
+- Do **not** merge your own branch after only a self-check.
+- Do **not** skip re-review after addressing CHANGES REQUESTED — re-ping peer and wait for a **new** APPROVE.
+- **Code never** lands without peer APPROVE. Pure night-shift status notes (this file / state JSON) may update without review.
+
 ## Watcher
 
 Scheduled every ~5–10 minutes. Each tick:
 
 1. Read `fleet::channel` (Memtrace `fleet_ydoc_read`).
 2. Load `docs/notes/night-shift-state.json`; process **new** entries after `last_fleet_entry_id`.
-3. Act on Claude messages:
+3. Act on peer messages:
 
-| Claude says | Grok does |
-|-------------|-----------|
-| `#5A` **APPROVE** | `checkout main`, `merge --ff-only feat/discord-webhooks`, `push origin main`, fleet: `#5A MERGED` |
-| `#5A` **CHANGES REQUESTED** | Fix on branch, push, fleet re-ping |
-| `#6` **APPROVE** | Same merge/push pattern for `feat/leaderboards` |
-| `#6` **CHANGES** | Fix, re-ping |
-| Security **APPROVE** | Merge `feat/security-train` |
-| Security **CHANGES** | Fix, re-ping |
+| Peer says | Action |
+|-----------|--------|
+| **APPROVE** on *our* branch | ff-merge that branch → `main`, push, fleet short `MERGED` |
+| **CHANGES REQUESTED** on *our* branch | Fix on branch, push, fleet re-ping for **re-review** (no merge until new APPROVE) |
+| Claude ships / requests review | Grok reviews; post APPROVE or CHANGES; **do not merge Claude’s branch without Grok APPROVE** |
+| We APPROVE Claude’s branch | May ff-merge if night autonomy + clean history |
 
 4. Continue implementation if no blocking review.
 5. Update `last_fleet_entry_id` + queue status in state JSON.
-6. Fleet messages stay **short structured** (Claude protocol).
+6. Fleet messages stay **short structured**.
 
 ## Priority order tonight
 
-1. Land **#5A** when Claude re-approves (already fixed `allowed_mentions`).
-2. Build **#6** (`feat/leaderboards`) → request Claude review → merge on approve.
-3. Build **security train** (`feat/security-train`) for remaining HIGH/MED items → review → merge.
-4. Optional: match-publish Discord hook after #5A on main (small follow-up).
+1. **#5A** — done / merged when Claude APPROVE lands (and only then).
+2. **#6** (`feat/leaderboards`) → Claude review → merge only on APPROVE (re-review after any fix).
+3. **Security train** (`feat/security-train`) → Claude review → merge only on APPROVE.
+4. Optional: match-publish Discord hook as a **separate** branch + review.
 
 ## File partitions
 
@@ -39,11 +51,12 @@ Scheduled every ~5–10 minutes. Each tick:
 
 ## Stop conditions
 
-- All three queue items `merged` or `blocked` with reason written to state.
-- Or 12h elapsed — leave status summary in state + fleet.
+- All queue items `merged` or `blocked` with reason in state.
+- Or ~12h elapsed — leave status summary in state + fleet.
 
 ## Do not
 
 - Force-push `main`
-- Merge without Claude **APPROVE** (or explicit user pre-auth — user said finish without them, so APPROVE = go)
+- Merge without **peer APPROVE** (self-check ≠ review)
+- Merge after a fix without a **fresh** APPROVE
 - Long fleet prose

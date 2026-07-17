@@ -29,9 +29,11 @@
     }
   },
   "protocol": {
-    "on_claude_approve": "merge ff to main, push origin/main, fleet ydoc short ACK",
-    "on_claude_changes": "fix, push branch, fleet re-ping short",
-    "never": ["force-push main", "skip tests on merge", "merge without APPROVE"],
+    "review_gate": "ALL code changes (Grok or Claude) require peer APPROVE before merge; re-review required after any fix",
+    "on_peer_approve": "merge ff to main, push origin/main, fleet ydoc short ACK",
+    "on_peer_changes": "fix, push branch, fleet re-ping for re-review (no merge until new APPROVE)",
+    "on_claude_ships": "Grok must review Claude branches; do not merge without Grok APPROVE",
+    "never": ["force-push main", "skip tests on merge", "merge without peer APPROVE", "merge after fix without re-APPROVE"],
     "fleet_channel": "fleet::channel",
     "short_msgs_only": true
   }
