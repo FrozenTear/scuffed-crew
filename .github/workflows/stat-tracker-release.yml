@@ -49,8 +49,8 @@ jobs:
           [ "${GITHUB_REF_NAME}" = "${VERSION}" ] && VERSION="dev-${GITHUB_SHA::8}"
           STAGE="scuffed-stat-tracker-linux-x86_64"
           mkdir -p "${STAGE}/bin"
-          cp crates/stat-tracker/target/release/scuffed-stat-tracker "${STAGE}/bin/"
-          cp crates/stat-tracker/target/release/stat-tracker-gui "${STAGE}/bin/"
+          cp target/release/scuffed-stat-tracker "${STAGE}/bin/"
+          cp target/release/stat-tracker-gui "${STAGE}/bin/"
           cp -r crates/stat-tracker/assets "${STAGE}/assets"
           # Standalone no-cargo installer (contract: lives at tar root)
           cp crates/stat-tracker/dist/install.sh "${STAGE}/install.sh"
