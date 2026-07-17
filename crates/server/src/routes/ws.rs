@@ -235,19 +235,19 @@ async fn handle_message(
             }
 
             // Join new room (bounded)
-            if let Some(u) = user.as_ref() {
-                if let Err(err) = state.rooms.join_room(
+            if let Some(u) = user.as_ref()
+                && let Err(err) = state.rooms.join_room(
                     &strategy_id,
                     connection_id.to_string(),
                     u.clone(),
                     tx.clone(),
-                ) {
-                    let message = match err {
-                        JoinError::GlobalLimit => "Too many active strategy sessions".into(),
-                        JoinError::RoomLimit => "Room is full".into(),
-                    };
-                    return Some(ServerMessage::Error { message });
-                }
+                )
+            {
+                let message = match err {
+                    JoinError::GlobalLimit => "Too many active strategy sessions".into(),
+                    JoinError::RoomLimit => "Room is full".into(),
+                };
+                return Some(ServerMessage::Error { message });
             }
 
             *current_room = Some(strategy_id.clone());
