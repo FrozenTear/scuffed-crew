@@ -211,17 +211,26 @@ Hypothesis for the bad reads: captures during killcam/spectate read the
 killer's hero panel (USER died 8×; a Tracer was likely on the killfeed).
 Role is derived from hero, so it corrupts together.
 
-**Fix sketch.** Majority vote (mode) across the session's captures for
-categorical fields — hero at minimum; consider map too (it's also
-categorical). Playtime-weighted mode matches the game's own "most played
-hero" semantics if hero swaps matter. Latest-wins stays correct ONLY for
-cumulative counters. Optionally: skip/flag captures whose scoreboard row
-highlight is not the player's own row (killcam detection) — but the vote fix
-alone resolves the observed corruption.
+**ROOT CAUSE (completed 07-18, deeper than the sketch):** majority vote
+ALREADY EXISTS — `storage::majority_hero` runs on every capture
+(main.rs:1580) and voted correctly (22× Mizuki). The bug is downstream:
+`set_session_hero` (storage/mod.rs:258) updates only `match_session`, while
+the GUI history and the sync path read `personal_match` — unlike its siblings
+`set_session_map` (:275) and the outcome repair (:300), which both write
+through to `personal_match` + `synced=false`. Repair ran; nothing read it.
+The bad reads themselves: USER browsing enemy rows post-match — the
+panel-keyword disambiguation follows the SELECTED row's details panel by
+design (all 6 bad reads timestamped after game end).
 
-**Done when.** Replaying the 07-18 Lijiang captures yields Mizuki/Support; a
-fixture test pins mode-vs-last behavior; hero flapping mid-game (real swaps,
-e.g. Roadhog→Tracer→Orisa on Ilios) still resolves to most-played.
+**FIX READY — parked branch `fix/tracker-hero-writethrough` @ 4499f36 (on
+origin, UNMERGED per USER's diagnose-only directive):** mirrors the :275
+write-through, guard on (hero OR role) mismatch to avoid churn; includes a
+tokio test modeling the field case (majority-correct + synced straggler →
+flip everywhere, exactly one row re-queued for sync). Tests 8/8, fmt/clippy
+clean. Night shift: start at REVIEW (grok), dual-agree, merge. Note: already-
+closed sessions (the Tracer game itself) only heal if they receive another
+capture — they won't; either accept, hand-repair, or add a one-off backfill
+in review if grok agrees it's in scope.
 
 ## 11. Retracted / non-items
 
