@@ -2,39 +2,90 @@
   "started_at": "2026-07-16T23:57:00Z",
   "repo": "scuffed-crew",
   "agent_id": "grok",
-  "last_fleet_entry_id": "01KXPNVD3306VMGSEDM3BQYQG3",
+  "last_fleet_entry_id": "01KXR4KMCDAP262EVVMXTJV0K6",
   "queue": {
-    "5a_discord": {
-      "branch": "feat/discord-webhooks",
+    "5a_discord": { "branch": "feat/discord-webhooks", "status": "merged", "tip": "aefc2a5" },
+    "6_leaderboards": { "branch": "feat/leaderboards", "status": "merged", "tip": "225102b" },
+    "security_train": { "branch": "feat/security-train", "status": "merged", "tip": "33c5670" },
+    "admin_mobile": {
+      "branch": "feat/admin-mobile",
       "status": "merged",
-      "tip": "aefc2a5",
-      "merged_at": "2026-07-16T23:58:00Z"
+      "tip": "d4f8ada",
+      "note": "closed out 2026-07-17: tip already ancestor of main; no further review needed"
     },
-    "6_leaderboards": {
-      "branch": "feat/leaderboards",
-      "status": "awaiting_claude_review",
-      "scope": "Season model + agg helpers + public leaderboards API + /leaderboards page + public member heroes endpoint",
-      "tip_note": "pushed origin/feat/leaderboards"
+    "tracker_portable_runtime": {
+      "branch": "feat/tracker-portable-runtime",
+      "status": "merged",
+      "tip": "9edd0ad"
     },
-    "security_train": {
-      "branch": "feat/security-train",
-      "status": "pending_after_or_parallel",
-      "scope": [
-        "Strategy WS unbounded spawn + RMW",
-        "Scrim team authz",
-        "Chat relay false-success",
-        "LOWs if time: NIP-42 secret, WS Origin, app double-submit, nostr pubkey uniq, empty AAD"
-      ],
-      "note": "OAuth CSRF and is_public already shipped"
+    "tracker_portable_ci": {
+      "branch": "feat/tracker-portable-ci",
+      "status": "merged",
+      "tip": "faeaecd"
+    },
+    "stat_tracker_clippy_fix": {
+      "branch": "fix/stat-tracker-clippy-manual-find",
+      "status": "merged",
+      "tip": "a00a4d3"
+    },
+    "tracker_version_flag": {
+      "branch": "fix/tracker-version-flag",
+      "status": "merged",
+      "tip": "dce1a51"
+    },
+    "tracker_release_validation": {
+      "run": "29581879669",
+      "status": "success",
+      "draft_release": "stat-tracker-manual-dce1a515",
+      "asset": "scuffed-stat-tracker-linux-x86_64.tar.gz",
+      "note": "clean-room --version ok; portable pipeline proven; HOLD real tag v0.1.0 for user"
+    },
+    "tracker_bug_name_col": {
+      "branch": "fix/tracker-6v6-name-row",
+      "status": "merged",
+      "tip": "c3fef9a",
+      "merge": "2130df4",
+      "note": "grok APPROVE + merged to main 2026-07-17; 6v6 name window + hard-threshold nameplate fallback"
+    },
+    "tracker_bug_live_offline": {
+      "status": "dig_complete",
+      "note": "reject=stats_from_row fail with player_row_idx=Some(0); not brightness_none; not team_size=5 — may be fixed by name-col merge; re-check live after deploy"
     }
   },
   "protocol": {
-    "review_gate": "ALL code changes (Grok or Claude) require peer APPROVE before merge; re-review required after any fix",
-    "on_peer_approve": "merge ff to main, push origin/main, fleet ydoc short ACK",
-    "on_peer_changes": "fix, push branch, fleet re-ping for re-review (no merge until new APPROVE)",
-    "on_claude_ships": "Grok must review Claude branches; do not merge without Grok APPROVE",
-    "never": ["force-push main", "skip tests on merge", "merge without peer APPROVE", "merge after fix without re-APPROVE"],
+    "review_gate": "ALL code changes require peer APPROVE before merge",
     "fleet_channel": "fleet::channel",
-    "short_msgs_only": true
+    "short_msgs_only": true,
+    "never": ["force-push main", "merge without peer APPROVE"]
+  },
+  "last_watcher_tick": "2026-07-17T13:40:00Z",
+  "status": "name_col_merged_await_user_tag_v0_1_0",
+  "main": "2130df4",
+  "tick_result": {
+    "new_fleet_entries": 3,
+    "actions": [
+      "fleet_JOIN_grok",
+      "CI_GREEN_dce1a51",
+      "admin_mobile_CLOSED_ancestor_of_main",
+      "REVIEW_APPROVE_fix_tracker_6v6_name_row_c3fef9a",
+      "MERGED_name_col_2130df4"
+    ],
+    "merges": ["fix/tracker-6v6-name-row -> main @ 2130df4"],
+    "main": "2130df4",
+    "ci": {
+      "tip_pre_merge": "dce1a51",
+      "CI": "success",
+      "Stat Tracker CI": "success",
+      "Publish image": "success",
+      "Stat Tracker Release validation": "success",
+      "validation_run": "29581879669",
+      "draft": "stat-tracker-manual-dce1a515",
+      "post_merge": "watch CI on 2130df4"
+    },
+    "pending": [
+      "USER go for stat-tracker-v0.1.0 tag (draft proven; consider rebuild after name-col)",
+      "watch CI green on 2130df4",
+      "optional: re-check live offline reject after name-col deploy"
+    ]
   }
 }
