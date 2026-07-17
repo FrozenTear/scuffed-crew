@@ -12,9 +12,19 @@ YLW='\033[1;33m'
 GRN='\033[0;32m'
 NC='\033[0m'
 
-info()  { echo -e "${GRN}[install]${NC} $*"; }
-warn()  { echo -e "${YLW}[ warn ]${NC} $*"; }
+# All logging goes to stderr; stdout is reserved for any machine-parseable
+# output. Mirrors the bootstrap.sh fix (3cd2c0c): a log line on stdout there
+# shifted a mapfile parse and broke the release fetch. error() was already on
+# stderr — info()/warn() now match it.
+info()  { echo -e "${GRN}[install]${NC} $*" >&2; }
+warn()  { echo -e "${YLW}[ warn ]${NC} $*" >&2; }
 error() { echo -e "${RED}[error ]${NC} $*" >&2; }
+
+# SKIP_INTEGRATION=<non-empty> installs binaries/libs only and skips the
+# desktop entry + systemd user unit — so throwaway-PREFIX installs (clean-room
+# tests, bootstrap smoke) don't pollute the real $HOME. Unset/empty = full
+# install (default, unchanged).
+SKIP_INTEGRATION="${SKIP_INTEGRATION:-}"
 
 # ── Prerequisites ─────────────────────────────────────────────────────────────
 
@@ -30,7 +40,7 @@ if ! groups | grep -qw input; then
     warn "Add yourself and re-login:"
     warn "    sudo usermod -aG input \$USER"
     warn "Continuing anyway — you can fix this later."
-    echo
+    echo >&2
 fi
 
 # ── OCR dependencies ──────────────────────────────────────────────────────────
@@ -38,7 +48,7 @@ fi
 if ! command -v tesseract &>/dev/null; then
     warn "tesseract not found — OCR will not work for source builds that link system OCR."
     warn "Install:  sudo pacman -S tesseract tesseract-data-eng"
-    echo
+    echo >&2
 elif ! { ls /usr/share/tessdata/eng.traineddata \
              /usr/local/share/tessdata/eng.traineddata \
              /usr/share/tesseract/tessdata/eng.traineddata \
@@ -47,7 +57,7 @@ elif ! { ls /usr/share/tessdata/eng.traineddata \
              "${TESSDATA_PREFIX:-}/tessdata/eng.traineddata" 2>/dev/null | grep -q .; }; then
     warn "eng.traineddata not found — install your distro's eng tessdata package."
     warn "  Arch: tesseract-data-eng · Debian: tesseract-ocr-eng · Fedora: tesseract-langpack-eng"
-    echo
+    echo >&2
 fi
 
 # ── Build ─────────────────────────────────────────────────────────────────────
@@ -83,40 +93,46 @@ if [[ ":$PATH:" != *":$BIN_DIR:"* ]]; then
     warn "    export PATH=\"\$HOME/.local/bin:\$PATH\""
 fi
 
-# ── Desktop entry ─────────────────────────────────────────────────────────────
+if [[ -n "$SKIP_INTEGRATION" ]]; then
+    info "SKIP_INTEGRATION set — skipping desktop entry and systemd unit (binaries only)"
+else
+    # ── Desktop entry ─────────────────────────────────────────────────────────
+    mkdir -p "$DESKTOP_DIR"
+    install -m644 "$ASSETS/scuffed-stat-tracker.desktop" \
+        "$DESKTOP_DIR/scuffed-stat-tracker.desktop"
 
-mkdir -p "$DESKTOP_DIR"
-install -m644 "$ASSETS/scuffed-stat-tracker.desktop" \
-    "$DESKTOP_DIR/scuffed-stat-tracker.desktop"
+    # Refresh the desktop database so the launcher picks it up immediately
+    if command -v update-desktop-database &>/dev/null; then
+        update-desktop-database "$DESKTOP_DIR" 2>/dev/null || true
+    fi
+    info "Installed desktop entry → $DESKTOP_DIR"
 
-# Refresh the desktop database so the launcher picks it up immediately
-if command -v update-desktop-database &>/dev/null; then
-    update-desktop-database "$DESKTOP_DIR" 2>/dev/null || true
+    # ── systemd user service (installed, NOT enabled) ─────────────────────────
+    mkdir -p "$SYSTEMD_DIR"
+    install -m644 "$ASSETS/scuffed-stat-tracker.service" \
+        "$SYSTEMD_DIR/scuffed-stat-tracker.service"
+
+    if command -v systemctl &>/dev/null; then
+        systemctl --user daemon-reload 2>/dev/null || true
+    fi
+    info "Installed systemd service → $SYSTEMD_DIR (not enabled)"
 fi
-info "Installed desktop entry → $DESKTOP_DIR"
-
-# ── systemd user service (installed, NOT enabled) ─────────────────────────────
-
-mkdir -p "$SYSTEMD_DIR"
-install -m644 "$ASSETS/scuffed-stat-tracker.service" \
-    "$SYSTEMD_DIR/scuffed-stat-tracker.service"
-
-if command -v systemctl &>/dev/null; then
-    systemctl --user daemon-reload 2>/dev/null || true
-fi
-info "Installed systemd service → $SYSTEMD_DIR (not enabled)"
 
 # ── Done ──────────────────────────────────────────────────────────────────────
+# Human-facing summary to stderr too — stdout stays reserved for machine output
+# (there is none), so an output-parsing caller never sees install chatter.
 
-echo
-echo -e "${GRN}Installation complete.${NC}"
-echo
-echo "  Launch the app:   stat-tracker-gui"
-echo "  Or find it in your application launcher: Scuffed Stat Tracker"
-echo
-echo "  The GUI's Status page has Start / Stop and Enable Autostart buttons."
-echo "  Autostart (systemd) starts the daemon automatically on login."
-echo
-echo "  First run: open the GUI, go to Settings, paste your server URL"
-echo "  and daemon token (from the web UI under My Stats → Daemon Tokens)."
-echo
+{
+    echo
+    echo -e "${GRN}Installation complete.${NC}"
+    echo
+    echo "  Launch the app:   stat-tracker-gui"
+    echo "  Or find it in your application launcher: Scuffed Stat Tracker"
+    echo
+    echo "  The GUI's Status page has Start / Stop and Enable Autostart buttons."
+    echo "  Autostart (systemd) starts the daemon automatically on login."
+    echo
+    echo "  First run: open the GUI, go to Settings, paste your server URL"
+    echo "  and daemon token (from the web UI under My Stats → Daemon Tokens)."
+    echo
+} >&2
