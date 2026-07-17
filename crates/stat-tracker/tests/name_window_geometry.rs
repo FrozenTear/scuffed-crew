@@ -20,6 +20,11 @@ use stat_tracker::ocr::preprocess::{crop_name_cell, prepare_name_cell_hard_thres
 
 /// Measured on the 2026-07-16 6v6 board (12 rows, dumped row_00.png): the name
 /// plate spans ~0.155–0.24 of row width.
+///
+/// The crate's window is deliberately wider than the plate, so these tests
+/// catch a window that leaves the plate — not small drift within it. The
+/// incident-sized regression (the 5v5 window on a 6v6 board) is caught; a few
+/// percent of drift is not.
 const NAME_SPAN_6V6: (f64, f64) = (0.155, 0.24);
 /// 5v5 layout: name text at 26–38% of row width. In a 6v6 row this window lands
 /// on the E/A/D digits — exactly what OCR read during the incident.
