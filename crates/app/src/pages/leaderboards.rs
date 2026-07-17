@@ -53,7 +53,7 @@ const PAGE_CSS: &str = r#"
     .lb-tab.active {
         background: var(--accent);
         border-color: var(--accent);
-        color: #fff;
+        color: var(--accent-fg);
     }
     .lb-status {
         color: var(--text-3);

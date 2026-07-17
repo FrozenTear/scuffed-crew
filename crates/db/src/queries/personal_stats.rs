@@ -295,11 +295,7 @@ impl Database {
     }
 
     /// Top heroes for a member, ranked by games then winrate.
-    pub async fn top_heroes(
-        &self,
-        member_id: &str,
-        limit: u32,
-    ) -> DbResult<Vec<HeroStats>> {
+    pub async fn top_heroes(&self, member_id: &str, limit: u32) -> DbResult<Vec<HeroStats>> {
         let mut all = self.get_hero_stats(member_id).await?;
         all.truncate(limit as usize);
         Ok(all)
@@ -388,8 +384,7 @@ impl Database {
 
             match metric {
                 "kd" => out.sort_by(|a, b| {
-                    b.kd
-                        .partial_cmp(&a.kd)
+                    b.kd.partial_cmp(&a.kd)
                         .unwrap_or(std::cmp::Ordering::Equal)
                         .then_with(|| b.games.cmp(&a.games))
                 }),

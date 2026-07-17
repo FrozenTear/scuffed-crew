@@ -259,10 +259,7 @@ impl Database {
 
     /// Public scheduled fixtures (not yet played), soonest first.
     /// Fixed SQL only — is_public + non-scrim + scheduled_at set + played_at empty.
-    pub async fn list_public_upcoming_matches(
-        &self,
-        limit: u32,
-    ) -> DbResult<Vec<MatchResult>> {
+    pub async fn list_public_upcoming_matches(&self, limit: u32) -> DbResult<Vec<MatchResult>> {
         with_timeout(async {
             let mut result = self
                 .client
@@ -281,10 +278,7 @@ impl Database {
     }
 
     /// Public completed results, newest first.
-    pub async fn list_public_recent_matches(
-        &self,
-        limit: u32,
-    ) -> DbResult<Vec<MatchResult>> {
+    pub async fn list_public_recent_matches(&self, limit: u32) -> DbResult<Vec<MatchResult>> {
         with_timeout(async {
             let mut result = self
                 .client

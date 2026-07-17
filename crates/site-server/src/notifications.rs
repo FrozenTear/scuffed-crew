@@ -378,7 +378,10 @@ mod tests {
     #[test]
     fn truncate_exact_limit_unchanged() {
         let s: String = "a".repeat(DISCORD_CONTENT_LIMIT);
-        assert_eq!(truncate_chars(&s, DISCORD_CONTENT_LIMIT).len(), DISCORD_CONTENT_LIMIT);
+        assert_eq!(
+            truncate_chars(&s, DISCORD_CONTENT_LIMIT).len(),
+            DISCORD_CONTENT_LIMIT
+        );
     }
 
     #[test]

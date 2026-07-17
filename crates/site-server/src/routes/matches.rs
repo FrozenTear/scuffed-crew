@@ -32,13 +32,9 @@ fn normalize_vod_url(raw: &str) -> Result<Option<String>, &'static str> {
     if s.is_empty() {
         return Ok(None);
     }
-    let rest = s
-        .strip_prefix("https://")
-        .ok_or("vod_url must use https")?;
+    let rest = s.strip_prefix("https://").ok_or("vod_url must use https")?;
     // host is up to first '/' or '?' or end; reject userinfo/ports oddities simply.
-    let host_end = rest
-        .find(['/', '?', '#'])
-        .unwrap_or(rest.len());
+    let host_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
     let host = &rest[..host_end];
     if host.is_empty() || host.contains('@') || host.contains(' ') {
         return Err("vod_url must be a valid URL");
@@ -72,9 +68,7 @@ fn normalize_replay_code(raw: &str) -> Result<Option<String>, &'static str> {
 fn bad_request(msg: &str) -> (StatusCode, Json<ErrorResponse>) {
     (
         StatusCode::BAD_REQUEST,
-        Json(ErrorResponse {
-            error: msg.into(),
-        }),
+        Json(ErrorResponse { error: msg.into() }),
     )
 }
 
@@ -200,7 +194,9 @@ pub async fn record_match(
     // Partial scores are invalid.
     match (body.score_us, body.score_them) {
         (Some(_), None) | (None, Some(_)) => {
-            return Err(bad_request("score_us and score_them must both be set or both omitted"));
+            return Err(bad_request(
+                "score_us and score_them must both be set or both omitted",
+            ));
         }
         _ => {}
     }
@@ -392,7 +388,9 @@ mod media_validation_tests {
     #[test]
     fn replay_accepts_alnum_16() {
         assert_eq!(
-            normalize_replay_code("Ab12Cd34Ef56Gh78").unwrap().as_deref(),
+            normalize_replay_code("Ab12Cd34Ef56Gh78")
+                .unwrap()
+                .as_deref(),
             Some("Ab12Cd34Ef56Gh78")
         );
     }

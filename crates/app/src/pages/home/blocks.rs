@@ -129,15 +129,10 @@ pub fn LiveBlock(
     if !show_schedule && !show_tourneys && !show_next_match && !show_results {
         return rsx! {};
     }
-    let panel_count = [
-        show_schedule,
-        show_tourneys,
-        show_next_match,
-        show_results,
-    ]
-    .iter()
-    .filter(|b| **b)
-    .count();
+    let panel_count = [show_schedule, show_tourneys, show_next_match, show_results]
+        .iter()
+        .filter(|b| **b)
+        .count();
     let grid_class = if panel_count <= 1 {
         "live-grid single"
     } else {

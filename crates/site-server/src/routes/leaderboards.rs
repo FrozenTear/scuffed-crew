@@ -209,7 +209,12 @@ pub async fn admin_create_season(
     }
     let s = state
         .db
-        .create_season(body.name.trim(), body.starts_at, body.ends_at, body.is_current)
+        .create_season(
+            body.name.trim(),
+            body.starts_at,
+            body.ends_at,
+            body.is_current,
+        )
         .await
         .map_err(|_e| {
             (

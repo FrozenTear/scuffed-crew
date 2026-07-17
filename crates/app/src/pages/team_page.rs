@@ -259,8 +259,8 @@ const PAGE_CSS: &str = r#"
         font-variant-numeric: tabular-nums;
         white-space: nowrap;
     }
-    .team-match-score.win { color: var(--ok, #22c55e); }
-    .team-match-score.loss { color: var(--danger, #ef4444); }
+    .team-match-score.win { color: var(--ok); }
+    .team-match-score.loss { color: var(--danger); }
     .team-match-score.draw { color: var(--text-2); }
     .team-match-opponent {
         color: var(--text);

@@ -77,7 +77,7 @@ const PAGE_CSS: &str = r#"
         letter-spacing: 0.04em;
         margin: 0.5rem 0 0;
     }
-    .match-score.win { color: var(--success, #22c55e); }
+    .match-score.win { color: var(--ok); }
     .match-score.loss { color: var(--danger); }
     .match-score.draw { color: var(--warn); }
     .match-score.pending { color: var(--text-3); font-size: 1.4rem; }

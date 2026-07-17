@@ -87,8 +87,7 @@ impl PublicMatch {
 
     /// True when this row represents a completed result (for recent-results lists).
     pub fn is_played(&self) -> bool {
-        self.played_at.is_some()
-            || (self.score_us.is_some() && self.score_them.is_some())
+        self.played_at.is_some() || (self.score_us.is_some() && self.score_them.is_some())
     }
 }
 

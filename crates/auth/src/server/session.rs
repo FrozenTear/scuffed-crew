@@ -93,9 +93,7 @@ pub fn generate_session_token() -> String {
 }
 
 fn cookie_is_secure() -> bool {
-    std::env::var("SECURE_COOKIES").is_ok()
-        || crate::is_production_env()
-        || !cfg!(debug_assertions)
+    std::env::var("SECURE_COOKIES").is_ok() || crate::is_production_env() || !cfg!(debug_assertions)
 }
 
 fn clear_named_cookie(name: String) -> Cookie<'static> {

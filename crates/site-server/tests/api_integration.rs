@@ -3340,7 +3340,10 @@ async fn match_lifecycle_scheduled_then_report_scores() {
     assert_eq!(updated["score_us"], 3);
     assert_eq!(updated["score_them"], 1);
     assert_eq!(updated["played_at"], "2026-08-01T20:00:00Z");
-    assert_eq!(updated["vod_url"], "https://www.youtube.com/watch?v=dQw4w9WgXcQ");
+    assert_eq!(
+        updated["vod_url"],
+        "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+    );
     assert_eq!(updated["replay_code"], "ABCD1234");
     // scheduled_at retained
     assert_eq!(updated["scheduled_at"], "2026-08-01T18:00:00Z");
@@ -3358,7 +3361,10 @@ async fn match_lifecycle_scheduled_then_report_scores() {
     assert_eq!(recent.len(), 1);
     assert_eq!(recent[0]["opponent"], "Future FC");
     assert_eq!(recent[0]["score_us"], 3);
-    assert_eq!(recent[0]["vod_url"], "https://www.youtube.com/watch?v=dQw4w9WgXcQ");
+    assert_eq!(
+        recent[0]["vod_url"],
+        "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+    );
     assert!(
         recent[0].get("notes").is_none() || recent[0]["notes"].is_null(),
         "public projection strips notes"
@@ -3428,10 +3434,7 @@ async fn update_match_null_clears_omit_preserves() {
         "null must clear vod_url, got {:?}",
         json["vod_url"]
     );
-    assert_eq!(
-        json["notes"], "keep me",
-        "omitted notes must be preserved"
-    );
+    assert_eq!(json["notes"], "keep me", "omitted notes must be preserved");
     assert_eq!(json["opponent"], "Clearable FC");
     assert_eq!(json["played_at"], "2026-06-15T18:00:00Z");
 }
@@ -3525,7 +3528,6 @@ async fn match_media_validation_rejects_bad_vod_and_replay() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }
-
 
 // ─── #2 home-live: overview upcoming + recent ───────────────────────────────
 
@@ -3631,7 +3633,12 @@ async fn public_overview_includes_upcoming_and_recent_matches() {
     assert_eq!(upcoming[0]["opponent"], "Future Opp");
     assert_eq!(upcoming[0]["team_name"], "Alpha Squad");
     assert_eq!(upcoming[0]["game_name"], "Overwatch 2");
-    assert!(upcoming[0]["scheduled_at"].as_str().unwrap().contains("2026-09-01"));
+    assert!(
+        upcoming[0]["scheduled_at"]
+            .as_str()
+            .unwrap()
+            .contains("2026-09-01")
+    );
 
     let recent = json["recent_results"].as_array().unwrap();
     assert_eq!(recent.len(), 1, "only public played non-scrim: {recent:?}");
@@ -3799,11 +3806,7 @@ async fn create_scrim_requires_roster_or_officer() {
     // Put member on roster → can create
     state
         .db
-        .add_to_roster(
-            "membermember",
-            "teamalpha",
-            scuffed_db::TeamRole::Player,
-        )
+        .add_to_roster("membermember", "teamalpha", scuffed_db::TeamRole::Player)
         .await
         .expect("add to roster");
 

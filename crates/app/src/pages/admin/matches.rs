@@ -101,16 +101,8 @@ pub fn AdminMatches() -> Element {
 
     let mut open_edit = move |m: MatchResult| {
         f_opponent.set(m.opponent);
-        f_score_us.set(
-            m.score_us
-                .map(|s| s.to_string())
-                .unwrap_or_default(),
-        );
-        f_score_them.set(
-            m.score_them
-                .map(|s| s.to_string())
-                .unwrap_or_default(),
-        );
+        f_score_us.set(m.score_us.map(|s| s.to_string()).unwrap_or_default());
+        f_score_them.set(m.score_them.map(|s| s.to_string()).unwrap_or_default());
         f_map_name.set(m.map_name.unwrap_or_default());
         f_match_type.set(m.match_type);
         f_played_at.set(
@@ -167,9 +159,7 @@ pub fn AdminMatches() -> Element {
             && score_us.is_none()
             && score_them.is_none()
         {
-            toast.show(Toast::error(
-                "Provide played-at, scheduled-at, or scores.",
-            ));
+            toast.show(Toast::error("Provide played-at, scheduled-at, or scores."));
             return;
         }
 

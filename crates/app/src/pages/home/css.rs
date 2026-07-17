@@ -449,7 +449,7 @@ pub const HOME_SHARED_CSS: &str = r#"
         font-size: 0.65rem;
         color: var(--text-3);
     }
-    .ticker-chip.win .ticker-score { color: var(--success, #22c55e); }
+    .ticker-chip.win .ticker-score { color: var(--ok); }
     .ticker-chip.loss .ticker-score { color: var(--danger); }
     .ticker-chip.draw .ticker-score { color: var(--warn); }
 

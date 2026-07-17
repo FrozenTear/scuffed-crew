@@ -157,7 +157,10 @@ pub async fn overview(
         .filter_map(|m| {
             let scheduled_at = m.scheduled_at?;
             let team_id = m.team_id.clone();
-            let tname = team_name.get(&team_id).cloned().unwrap_or_else(|| "Team".into());
+            let tname = team_name
+                .get(&team_id)
+                .cloned()
+                .unwrap_or_else(|| "Team".into());
             let gname = game_by_team
                 .get(&team_id)
                 .and_then(|gid| game_name.get(gid).cloned());
@@ -178,24 +181,23 @@ pub async fn overview(
         })
         .collect();
 
-    let recent_raw = state
-        .db
-        .list_public_recent_matches(8)
-        .await
-        .map_err(|_e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: "Internal error".into(),
-                }),
-            )
-        })?;
+    let recent_raw = state.db.list_public_recent_matches(8).await.map_err(|_e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: "Internal error".into(),
+            }),
+        )
+    })?;
     let recent_results: Vec<RecentResult> = recent_raw
         .into_iter()
         .filter_map(|m| {
             let played_at = m.played_at?;
             let team_id = m.team_id.clone();
-            let tname = team_name.get(&team_id).cloned().unwrap_or_else(|| "Team".into());
+            let tname = team_name
+                .get(&team_id)
+                .cloned()
+                .unwrap_or_else(|| "Team".into());
             let match_type = match m.match_type {
                 MatchType::Official => TypesMatchType::Official,
                 MatchType::Tournament => TypesMatchType::Tournament,
@@ -466,12 +468,7 @@ pub async fn public_match_detail(
         )
     })?;
 
-    let team = state
-        .db
-        .get_team(&pub_m.team_id)
-        .await
-        .ok()
-        .flatten();
+    let team = state.db.get_team(&pub_m.team_id).await.ok().flatten();
     let team_name = team
         .as_ref()
         .map(|t| t.name.clone())

@@ -303,13 +303,8 @@ mod tests {
         for i in 0..MAX_ROOM_CONNECTIONS {
             let (tx, rx) = dummy_conn();
             keep_alive.push(rx);
-            mgr.join_room(
-                &sid,
-                format!("c{i}"),
-                dummy_user(&format!("u{i}")),
-                tx,
-            )
-            .expect("join within limit");
+            mgr.join_room(&sid, format!("c{i}"), dummy_user(&format!("u{i}")), tx)
+                .expect("join within limit");
         }
         let (tx, rx) = dummy_conn();
         keep_alive.push(rx);

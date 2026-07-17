@@ -69,7 +69,11 @@ const ROLE_OPTIONS: [&str; 5] = ["", "tank", "dps", "support", "flex"];
 
 fn none_if_empty(s: String) -> Option<String> {
     let t = s.trim();
-    if t.is_empty() { None } else { Some(t.to_string()) }
+    if t.is_empty() {
+        None
+    } else {
+        Some(t.to_string())
+    }
 }
 
 const PAGE_CSS: &str = r#"
@@ -130,7 +134,7 @@ const PAGE_CSS: &str = r#"
     }
     .profile-edit-btn {
         background: var(--accent);
-        color: #fff;
+        color: var(--accent-fg);
         border: none;
         border-radius: 6px;
         font-weight: 700;
