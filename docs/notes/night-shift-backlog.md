@@ -29,12 +29,16 @@ verbatim in the log and the commit body. Tags/releases, force-push, data
 deletion, protected paths, policy overrides stay human-only no matter what.
 
 **Suggested execution order:**
-1. **Step 0** (item 8): inspect tonight's dumped/rejected frames — confirm or
+1. **Item 10 — hero recognition — USER'S EXPLICIT PRIORITY (last words of
+   the 07-18 close-out: "only the hero recognition that needs to be
+   fixed").** Parked branch `fix/tracker-hero-writethrough` @ 4499f36:
+   start at grok review, dual-agree, merge. Cheapest item on the list —
+   do it first. Include the Lijiang manual repair (Tracer→Mizuki) while
+   in there if in scope per review.
+2. **Step 0** (item 8): inspect tonight's dumped/rejected frames — confirm or
    kill the column-window-drift theory before building anything.
-2. **Item 8** — capture gate (HIGH; realized corruption in real data,
+3. **Item 8** — capture gate (HIGH; realized corruption in real data,
    ~1 game in 3 affected tonight).
-3. **Item 10** — parked branch `fix/tracker-hero-writethrough` @ 4499f36:
-   start at grok review, dual-agree, merge. Ready-made.
 4. **Item 9** — map matching (Ilios class).
 5. **Item 7** — GUI libxdo bundle + RUNPATH.
 6. **Items 1–4** — roster join + install.sh pair.
