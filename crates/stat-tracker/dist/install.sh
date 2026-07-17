@@ -159,10 +159,10 @@ info "Installed systemd service → $SYSTEMD_DIR (not enabled)"
 
 # ── Smoke check ───────────────────────────────────────────────────────────────
 
-if ! "$BIN_DIR/scuffed-stat-tracker" --help >/dev/null 2>&1; then
-    warn "daemon --help failed. Missing host libs (wayland/evdev) or bundled lib/ not installed beside bin?"
+if ! "$BIN_DIR/scuffed-stat-tracker" --version >/dev/null 2>&1; then
+    warn "daemon --version failed. Missing host libs (wayland/evdev) or bundled lib/ not installed beside bin?"
 else
-    info "daemon binary runs (--help ok)"
+    info "daemon binary runs ($("$BIN_DIR/scuffed-stat-tracker" --version))"
 fi
 
 # ── Done ──────────────────────────────────────────────────────────────────────
