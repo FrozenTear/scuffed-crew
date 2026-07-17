@@ -2,11 +2,23 @@
   "started_at": "2026-07-16T23:57:00Z",
   "repo": "scuffed-crew",
   "agent_id": "grok",
-  "last_fleet_entry_id": "01KXR4KMCDAP262EVVMXTJV0K6",
+  "last_fleet_entry_id": "01KXR56FJ9JK8NDSV7KD6T1W5T",
   "queue": {
-    "5a_discord": { "branch": "feat/discord-webhooks", "status": "merged", "tip": "aefc2a5" },
-    "6_leaderboards": { "branch": "feat/leaderboards", "status": "merged", "tip": "225102b" },
-    "security_train": { "branch": "feat/security-train", "status": "merged", "tip": "33c5670" },
+    "5a_discord": {
+      "branch": "feat/discord-webhooks",
+      "status": "merged",
+      "tip": "aefc2a5"
+    },
+    "6_leaderboards": {
+      "branch": "feat/leaderboards",
+      "status": "merged",
+      "tip": "225102b"
+    },
+    "security_train": {
+      "branch": "feat/security-train",
+      "status": "merged",
+      "tip": "33c5670"
+    },
     "admin_mobile": {
       "branch": "feat/admin-mobile",
       "status": "merged",
@@ -49,18 +61,32 @@
     },
     "tracker_bug_live_offline": {
       "status": "dig_complete",
-      "note": "reject=stats_from_row fail with player_row_idx=Some(0); not brightness_none; not team_size=5 — may be fixed by name-col merge; re-check live after deploy"
+      "note": "reject=stats_from_row fail with player_row_idx=Some(0); not brightness_none; not team_size=5 \u2014 may be fixed by name-col merge; re-check live after deploy"
     }
   },
   "protocol": {
-    "review_gate": "ALL code changes require peer APPROVE before merge",
+    "review_gate": "DUAL agreement: both agents APPROVE/ACK on fleet before merge",
     "fleet_channel": "fleet::channel",
+    "fleet_is_team_log": true,
+    "post_on_fleet": [
+      "review verdicts",
+      "all findings including nits",
+      "test evidence (ran/skipped+why)",
+      "file scope actually read",
+      "merge/CI status",
+      "answers to peer QUERYs"
+    ],
+    "never_chat_only_findings": true,
     "short_msgs_only": true,
-    "never": ["force-push main", "merge without peer APPROVE"]
+    "never": [
+      "force-push main",
+      "merge without dual fleet agreement",
+      "keep review nits only in user chat"
+    ]
   },
-  "last_watcher_tick": "2026-07-17T13:40:00Z",
+  "last_watcher_tick": "2026-07-17T13:45:41Z",
   "status": "name_col_merged_await_user_tag_v0_1_0",
-  "main": "2130df4",
+  "main": "071304a",
   "tick_result": {
     "new_fleet_entries": 3,
     "actions": [
@@ -70,7 +96,9 @@
       "REVIEW_APPROVE_fix_tracker_6v6_name_row_c3fef9a",
       "MERGED_name_col_2130df4"
     ],
-    "merges": ["fix/tracker-6v6-name-row -> main @ 2130df4"],
+    "merges": [
+      "fix/tracker-6v6-name-row -> main @ 2130df4"
+    ],
     "main": "2130df4",
     "ci": {
       "tip_pre_merge": "dce1a51",
@@ -86,6 +114,7 @@
       "USER go for stat-tracker-v0.1.0 tag (draft proven; consider rebuild after name-col)",
       "watch CI green on 2130df4",
       "optional: re-check live offline reject after name-col deploy"
-    ]
+    ],
+    "last_action": "answered_claude_query_01KXR4WFGT"
   }
 }
