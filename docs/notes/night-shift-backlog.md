@@ -129,10 +129,19 @@ screenshot-verified) — `latest_per_game` healed as designed, but only because
 the match didn't end during a bad stretch; the 00:06 E=1 run would have locked
 in. Severity stays HIGH on frequency, not on a realized corruption (earlier
 "locked in" claim was premature — game was still running). Modes:
-(a) inflation — Control point-% bleed-through (93/99 tracking real point %);
-(b) deflation — two-digit values collapse to "1" (thin-glyph digit drop,
-~40% of captures on this game); (c) SUSPECT, unconfirmed — captures 27–29
-read 9/13/19 vs real ~E19/A13/D9: possible column rotation; keep eyes open.
+(a) inflation — spurious leading "9": every inflated read all night was
+9+leading-digit-of-truth (93/real 3, 99/real ~9, 91/real 13, 92) on BOTH
+Control and Escort (Havana E=91 disproved the earlier point-%-bleed
+hypothesis — corrected 07-18 ~00:43);
+(b) deflation — two-digit values collapse to "1" (13→"1" observed 14s after
+the 91 read, same game; ~40% of Route 66 captures);
+(a)+(b) unification candidate: one column-edge artifact — boundary pixels
+binarize into a ghost "9" (inflation) or clip digits (collapse). Diagnose
+from dumped/rejected frames before designing beyond the gate.
+(c) SUSPECT, unconfirmed — captures 27–29 read 9/13/19 vs real ~E19/A13/D9:
+possible column rotation; keep eyes open.
+DESIGN NOTE: monotonic-hold alone does NOT catch 9X inflation (values
+increase) — the rate-cap half of the fix is load-bearing, not optional.
 
 **Fix pre-validated on real data:** per-cell monotonic hold applied to the
 07-18 series yields 7,11,12,15,22,28 — every collapse rejected, every real
