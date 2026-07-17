@@ -3,6 +3,18 @@ name: Stat Tracker Release
 # Prebuilt Linux binaries for the stat tracker, published as a GitHub Release.
 # Trigger: push a tag like `stat-tracker-v0.1.0`, or run manually (dispatch
 # builds from the chosen ref and publishes a draft release for inspection).
+#
+# Portability strategy (release must run on most Linux distros):
+# - Daemon builds on ubuntu-22.04 → glibc floor 2.35 (covers Ubuntu 22.04+,
+#   Debian 12+, Fedora, Arch, openSUSE, RHEL 9+).
+# - tesseract/leptonica sonames are fragmented across distros (Ubuntu ships
+#   liblept.so.5, Arch libleptonica.so.6), so the OCR library closure is
+#   BUNDLED into the tarball's lib/ and binaries get RPATH $ORIGIN/../lib.
+#   glibc-family / toolchain / compositor-stack libs stay host-provided.
+# - The GUI needs webkit2gtk-4.1 (not packaged on 22.04) → separate job on
+#   ubuntu-24.04; GUI therefore needs a modern distro, daemon does not.
+# - Clean-room proof: the daemon job uninstalls the OCR packages after the
+#   build and runs the staged binary purely from the bundled libs.
 
 on:
   push:
@@ -13,10 +25,93 @@ on:
 permissions:
   contents: write
 
+env:
+  STAGE: scuffed-stat-tracker-linux-x86_64
+
 jobs:
-  build-release:
-    name: Build & Package (linux-x86_64)
-    runs-on: ubuntu-latest
+  build-daemon:
+    name: Daemon (ubuntu-22.04, glibc 2.35 floor)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwayland-dev libxkbcommon-dev \
+            libegl-dev libgbm-dev \
+            tesseract-ocr libtesseract-dev libleptonica-dev \
+            libevdev-dev libudev-dev \
+            pkg-config patchelf
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: daemon-2204
+
+      - name: Build daemon (release)
+        working-directory: crates/stat-tracker
+        run: cargo build --release --bin scuffed-stat-tracker
+
+      - name: Bundle OCR library closure + set RPATH
+        run: |
+          set -euo pipefail
+          mkdir -p out/bin out/lib
+          cp target/release/scuffed-stat-tracker out/bin/
+
+          # Host-provided libs (never bundle): glibc family, loader, toolchain
+          # runtimes, ubiquitous compression, and session/graphics stack.
+          DENY='^(ld-linux|libc\.|libm\.|libdl\.|libpthread\.|librt\.|libresolv\.|libnsl\.|libutil\.|libgcc_s|libstdc\+\+|libz\.|libsystemd|libselinux|libwayland|libxkbcommon|libudev|libevdev|libEGL|libGL|libgbm|libdrm)'
+
+          # BFS the dependency closure starting from the binary; bundle
+          # everything not denied. This pulls tesseract, leptonica, image
+          # codecs, and their transitive deps with consistent versions.
+          queue="out/bin/scuffed-stat-tracker"
+          seen=""
+          while [ -n "${queue}" ]; do
+            next=""
+            for f in ${queue}; do
+              for dep in $(ldd "$f" 2>/dev/null | awk '/=>/ {print $3}' | grep -v '^$'); do
+                base="$(basename "$dep")"
+                echo "${seen}" | grep -qF " ${base} " && continue
+                seen="${seen} ${base} "
+                if echo "${base}" | grep -qE "${DENY}"; then
+                  continue
+                fi
+                cp -n "$dep" out/lib/
+                next="${next} $dep"
+              done
+            done
+            queue="${next}"
+          done
+
+          patchelf --set-rpath '$ORIGIN/../lib' out/bin/scuffed-stat-tracker
+          for lib in out/lib/*; do
+            patchelf --set-rpath '$ORIGIN' "$lib" || true
+          done
+          echo "Bundled $(ls out/lib | wc -l) libraries:"
+          ls out/lib
+
+      - name: Clean-room smoke test (no system OCR libs)
+        run: |
+          set -euo pipefail
+          sudo apt-get remove -y libtesseract-dev 'libtesseract*' libleptonica-dev 'liblept*' tesseract-ocr || true
+          sudo apt-get autoremove -y || true
+          ./out/bin/scuffed-stat-tracker --help >/dev/null
+          echo "daemon runs with bundled OCR libs only"
+          ldd ./out/bin/scuffed-stat-tracker | grep -iE 'tesseract|lept' || true
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: daemon
+          path: out/
+          if-no-files-found: error
+
+  build-gui:
+    name: GUI (ubuntu-24.04, needs webkit2gtk-4.1)
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 
@@ -36,35 +131,50 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: crates/stat-tracker
+          key: gui-2404
 
-      - name: Build release binaries
+      - name: Build GUI (release)
         working-directory: crates/stat-tracker
-        run: cargo build --release --features gui --bins
+        run: cargo build --release --features gui --bin stat-tracker-gui
 
-      - name: Package tarball
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gui
+          path: target/release/stat-tracker-gui
+          if-no-files-found: error
+
+  package-release:
+    name: Package & Release
+    needs: [build-daemon, build-gui]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: daemon
+          path: daemon
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: gui
+          path: gui
+
+      - name: Assemble tarball
         run: |
           set -euo pipefail
           VERSION="${GITHUB_REF_NAME#stat-tracker-v}"
           [ "${GITHUB_REF_NAME}" = "${VERSION}" ] && VERSION="dev-${GITHUB_SHA::8}"
-          STAGE="scuffed-stat-tracker-linux-x86_64"
-          mkdir -p "${STAGE}/bin"
-          cp target/release/scuffed-stat-tracker "${STAGE}/bin/"
-          cp target/release/stat-tracker-gui "${STAGE}/bin/"
+          mkdir -p "${STAGE}/bin" "${STAGE}/lib"
+          cp daemon/bin/scuffed-stat-tracker "${STAGE}/bin/"
+          cp daemon/lib/* "${STAGE}/lib/" 2>/dev/null || true
+          cp gui/stat-tracker-gui "${STAGE}/bin/"
           cp -r crates/stat-tracker/assets "${STAGE}/assets"
-          # Standalone no-cargo installer (contract: lives at tar root)
           cp crates/stat-tracker/dist/install.sh "${STAGE}/install.sh"
           chmod +x "${STAGE}/install.sh" "${STAGE}"/bin/*
           echo "${VERSION}" > "${STAGE}/VERSION"
           tar czf "${STAGE}.tar.gz" "${STAGE}"
           sha256sum "${STAGE}.tar.gz" > "${STAGE}.tar.gz.sha256"
-          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
-        id: pkg
-
-      - name: Smoke test binary
-        run: |
-          ./scuffed-stat-tracker-linux-x86_64/bin/scuffed-stat-tracker --help >/dev/null
-          echo "daemon binary runs"
 
       - name: Create GitHub Release
         env:
@@ -82,12 +192,16 @@ jobs:
           {
             echo "Prebuilt Linux x86_64 build of the Overwatch 2 stat tracker (daemon + GUI)."
             echo
-            echo "**Requirements:** Linux + Wayland (wlr-screencopy compositor or XDG portal), \`tesseract\` + \`leptonica\` runtime libraries, membership in the \`input\` group."
+            echo "**Daemon:** runs on any current systemd distro (glibc ≥ 2.35); OCR libraries are bundled."
             echo
-            echo "**Install:** download and extract the tarball, then run \`./install.sh\` inside it — no Rust toolchain needed. See crates/stat-tracker/README.md for details."
+            echo "**GUI:** needs a modern distro with \`webkit2gtk-4.1\` and glibc ≥ 2.39 (Ubuntu 24.04+, Debian 13, Arch, Fedora)."
+            echo
+            echo "**Also required:** Linux + Wayland (wlr-screencopy compositor or XDG portal), membership in the \`input\` group, distro \`eng.traineddata\` for OCR tuning."
+            echo
+            echo "**Install:** extract the tarball and run \`./install.sh\` inside it — no Rust toolchain needed."
           } > release-notes.md
           gh release create "${TAG}" ${EXTRA_FLAGS} \
             --title "Stat Tracker ${TAG#stat-tracker-}" \
             --notes-file release-notes.md \
-            scuffed-stat-tracker-linux-x86_64.tar.gz \
-            scuffed-stat-tracker-linux-x86_64.tar.gz.sha256
+            "${STAGE}.tar.gz" \
+            "${STAGE}.tar.gz.sha256"
