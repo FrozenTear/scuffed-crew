@@ -193,5 +193,35 @@ else
     "${COMPOSE[@]}" --env-file "$SECRETS" up -d site-server
 fi
 
+# Verify the new container actually serves before declaring success — a
+# crash-looping boot (bad env contract, failed DB bootstrap) otherwise looks
+# identical to a good deploy from this script's output.
+our_container_name() {
+    podman ps -a --format '{{.Names}}' 2>/dev/null \
+        | grep -E "^${PROJECT_NAME}[-_]site-server([-_][0-9]+)?$" | head -n1
+}
+
+echo "Waiting for site-server health on 127.0.0.1:${HOST_PORT} (up to 60s)..."
+healthy=0
+for _ in $(seq 1 30); do
+    if curl -sf --max-time 2 "http://127.0.0.1:${HOST_PORT}/api/health" >/dev/null 2>&1; then
+        healthy=1
+        break
+    fi
+    sleep 2
+done
+
+if [[ "${healthy}" != "1" ]]; then
+    cname="$(our_container_name)"
+    echo "error: site-server is not healthy after 60s — deploy FAILED." >&2
+    echo "Container status:" >&2
+    podman ps -a --filter "name=${PROJECT_NAME}" --format 'table {{.Names}}\t{{.Status}}' >&2 || true
+    if [[ -n "${cname}" ]]; then
+        echo "--- last 40 log lines (${cname}) ---" >&2
+        podman logs --tail 40 "${cname}" >&2 2>&1 || true
+    fi
+    exit 1
+fi
+
 echo
-echo "Updated. Health: curl -sS http://127.0.0.1:${HOST_PORT}/api/health"
+echo "Updated & healthy: http://127.0.0.1:${HOST_PORT}/api/health OK"

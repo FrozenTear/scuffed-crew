@@ -298,8 +298,11 @@ impl Database {
         let pass = escape_surreal_string(password);
         // DEFINE USER does not accept bound password parameters reliably; username
         // is restricted to [A-Za-z0-9_], password is escaped.
-        // Re-DEFINE updates password/roles if the user already exists.
-        let q = format!("DEFINE USER {username} ON DATABASE PASSWORD '{pass}' ROLES EDITOR");
+        // OVERWRITE required: SurrealDB v3 plain DEFINE USER is create-only and
+        // errors when the user exists (crash-looped prod on redeploy). OVERWRITE
+        // also re-aligns the password to the env value on every boot.
+        let q =
+            format!("DEFINE USER OVERWRITE {username} ON DATABASE PASSWORD '{pass}' ROLES EDITOR");
         client.query(q).await?.check()?;
         tracing::info!(
             username,
@@ -410,5 +413,24 @@ impl Database {
             .map(Arc::new);
 
         Ok(Self { client, crypto })
+    }
+}
+
+#[cfg(test)]
+mod app_user_tests {
+    use super::*;
+
+    /// Redeploys hit an existing user: DEFINE USER must be idempotent
+    /// (SurrealDB v3 requires OVERWRITE — plain DEFINE errors "already exists"
+    /// and crash-looped production).
+    #[tokio::test]
+    async fn ensure_app_user_is_idempotent() {
+        let db = Database::connect_memory().await.expect("mem db");
+        Database::ensure_database_app_user(&db.client, "scuffed_app", "test-pass-1")
+            .await
+            .expect("first define");
+        Database::ensure_database_app_user(&db.client, "scuffed_app", "test-pass-2")
+            .await
+            .expect("re-define with new password must not error");
     }
 }
