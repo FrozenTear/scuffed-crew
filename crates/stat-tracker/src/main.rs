@@ -76,6 +76,31 @@ struct PrevStats {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // Handle --version/--help before ANY init: smoke tests (CI clean-room,
+    // installer) and humans probe these; unknown flags used to fall through
+    // to full daemon startup, which blocks forever on headless machines.
+    if std::env::args().any(|a| a == "--version" || a == "-V") {
+        println!("scuffed-stat-tracker {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
+    if std::env::args().any(|a| a == "--help" || a == "-h") {
+        println!(
+            "scuffed-stat-tracker {} — Overwatch 2 scoreboard OCR daemon\n\n\
+             USAGE: scuffed-stat-tracker [FLAGS]\n\n\
+             FLAGS:\n\
+             \x20 --version, -V         print version and exit\n\
+             \x20 --help, -h            this help\n\
+             \x20 --list-outputs        list Wayland outputs and exit\n\
+             \x20 --generate-tessdata   build the game-font tessdata model and exit\n\
+             \x20 --vacuum              compact the local stats DB and exit\n\
+             \x20 --collect-portraits   dev: save hero portrait crops while running\n\
+             \x20 --dump-poll-frames    dev: save every polled frame while running\n\n\
+             With no flags, runs the capture daemon (see README).",
+            env!("CARGO_PKG_VERSION")
+        );
+        return Ok(());
+    }
+
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| {
             EnvFilter::new("scuffed_stat_tracker=info,stat_tracker=info,surrealdb=warn")

@@ -99,7 +99,9 @@ jobs:
           set -euo pipefail
           sudo apt-get remove -y libtesseract-dev 'libtesseract*' libleptonica-dev 'liblept*' tesseract-ocr || true
           sudo apt-get autoremove -y || true
-          ./out/bin/scuffed-stat-tracker --help >/dev/null
+          out="$(./out/bin/scuffed-stat-tracker --version)"
+          echo "smoke: ${out}"
+          echo "${out}" | grep -q '^scuffed-stat-tracker ' || { echo "unexpected --version output" >&2; exit 1; }
           echo "daemon runs with bundled OCR libs only"
           ldd ./out/bin/scuffed-stat-tracker | grep -iE 'tesseract|lept' || true
 
