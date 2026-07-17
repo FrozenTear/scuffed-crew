@@ -122,14 +122,21 @@ workflow so the NOT-CHECKED gap from 1.3 closes permanently.
 
 ## 8. LIVE-1: OCR elims misreads — TWO modes, corrupted a real game  [**HIGH**, escalated 07-18]
 
-**Escalation 07-18 ~00:01.** Route 66 game: real final E=11 (screenshot), captures
-read E 7→5→**1**; capture 13 was the FINAL capture => `latest_per_game` locked
-E=1 into the registered stats (D/A/DMG/HLG/MIT all exact). "Benign" verdict
-retracted — final-capture corruption happened in the field on night one.
-Second mode identified: two-digit "11" collapses to "1" (thin-glyph digit
-drop; Escort map, so not %-bleed). Modes: (a) inflation — Control point-%
-bleed-through (93/99 tracking real point %); (b) deflation — dropped digit on
-2-digit values.
+**Field data 07-18 (corrected).** Route 66 game, 35 captures: ~40% had
+two-digit E collapsed to "1" (series 7,5,1,11,1×4,12×3,15,1×4,9×3,22×4,28×2).
+Final captures read clean => registered stats CORRECT (E28 D10 A17, POTG
+screenshot-verified) — `latest_per_game` healed as designed, but only because
+the match didn't end during a bad stretch; the 00:06 E=1 run would have locked
+in. Severity stays HIGH on frequency, not on a realized corruption (earlier
+"locked in" claim was premature — game was still running). Modes:
+(a) inflation — Control point-% bleed-through (93/99 tracking real point %);
+(b) deflation — two-digit values collapse to "1" (thin-glyph digit drop,
+~40% of captures on this game); (c) SUSPECT, unconfirmed — captures 27–29
+read 9/13/19 vs real ~E19/A13/D9: possible column rotation; keep eyes open.
+
+**Fix pre-validated on real data:** per-cell monotonic hold applied to the
+07-18 series yields 7,11,12,15,22,28 — every collapse rejected, every real
+progression kept. Use this session's captures as the regression fixture.
 
 **Fix (revised).** Per-cell monotonic hold: within a game, counters never
 decrease; a SINGLE-counter decrease cannot be a new game (split requires 2/3
