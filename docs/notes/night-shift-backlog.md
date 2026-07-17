@@ -93,7 +93,29 @@ offline/reject rates vs the 07-14 session, `stats_from_row` reject dig follow-up
 Agents' part: pull daemon logs + rejected frames after the session, compare
 against `debug/rejected` expectations, post findings with IDs.
 
-## 7. Retracted / non-items
+## 7. GUI-1: stat-tracker-gui crashes on Arch — libxdo.so.3 missing  [MEDIUM, field-confirmed 07-17]
+
+**Problem.** Release v0.1.0 GUI fails on Arch/CachyOS: `error while loading
+shared libraries: libxdo.so.3`. Ubuntu 24.04 CI runner ships libxdo; Arch does
+not. It fell between the release's two lib strategies — not in the bundled
+closure, not documented as host-provided, not checked by install.sh. Daemon
+unaffected. Workaround applied on USER box: `pacman -S xdotool`.
+
+**Fix sketch (pick one, lean bundle):**
+- Bundle: add libxdo to the GUI job's lib/ closure in
+  `.github/workflows/stat-tracker-release.yml` (same RPATH $ORIGIN/../lib
+  mechanism as the OCR libs) — zero user action, consistent with the portable
+  strategy; OR
+- Document + check: install.sh probes `ldd stat-tracker-gui | grep 'not found'`
+  after extract and prints per-distro install hints (xdotool / libxdo3).
+  Cheaper, but every Arch/Fedora user still hits a manual step.
+
+**Done when.** Clean-room GUI launch check on a non-Ubuntu container (or at
+minimum ldd-clean assertion in release validation) passes; release notes list
+host deps. Consider adding a `--smoke` GUI headless probe to the release
+workflow so the NOT-CHECKED gap from 1.3 closes permanently.
+
+## 8. Retracted / non-items
 
 - roster.rs "(public)" comment: **correct as written** (GET has no auth extractor
   by design; data already public via team pages). Claude flagged it wrongly on
