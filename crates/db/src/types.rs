@@ -542,6 +542,27 @@ pub struct HeroStats {
     pub avg_healing: f64,
 }
 
+/// Competitive season (re-export shape used by queries).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Season {
+    pub id: String,
+    pub name: String,
+    pub starts_at: DateTime<Utc>,
+    pub ends_at: DateTime<Utc>,
+    #[serde(default)]
+    pub is_current: bool,
+}
+
+/// Public leaderboard member row.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemberLeaderboardRow {
+    pub member_id: String,
+    pub display_name: String,
+    pub games: u32,
+    pub winrate: f32,
+    pub kd: f64,
+}
+
 /// Aggregated stats per map.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MapStats {

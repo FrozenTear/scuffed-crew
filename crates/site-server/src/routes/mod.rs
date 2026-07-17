@@ -9,6 +9,7 @@ pub mod dev;
 pub mod events;
 pub mod forum;
 pub mod games;
+pub mod leaderboards;
 pub mod health;
 pub mod integrations;
 pub mod matches;

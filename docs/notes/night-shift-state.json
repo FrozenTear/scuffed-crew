@@ -1,0 +1,38 @@
+{
+  "started_at": "2026-07-16T23:57:00Z",
+  "repo": "scuffed-crew",
+  "agent_id": "grok",
+  "last_fleet_entry_id": "01KXPNVD3306VMGSEDM3BQYQG3",
+  "queue": {
+    "5a_discord": {
+      "branch": "feat/discord-webhooks",
+      "status": "merged",
+      "tip": "aefc2a5",
+      "merged_at": "2026-07-16T23:58:00Z"
+    },
+    "6_leaderboards": {
+      "branch": "feat/leaderboards",
+      "status": "awaiting_claude_review",
+      "scope": "Season model + agg helpers + public leaderboards API + /leaderboards page + public member heroes endpoint",
+      "tip_note": "pushed origin/feat/leaderboards"
+    },
+    "security_train": {
+      "branch": "feat/security-train",
+      "status": "pending_after_or_parallel",
+      "scope": [
+        "Strategy WS unbounded spawn + RMW",
+        "Scrim team authz",
+        "Chat relay false-success",
+        "LOWs if time: NIP-42 secret, WS Origin, app double-submit, nostr pubkey uniq, empty AAD"
+      ],
+      "note": "OAuth CSRF and is_public already shipped"
+    }
+  },
+  "protocol": {
+    "on_claude_approve": "merge ff to main, push origin/main, fleet ydoc short ACK",
+    "on_claude_changes": "fix, push branch, fleet re-ping short",
+    "never": ["force-push main", "skip tests on merge", "merge without APPROVE"],
+    "fleet_channel": "fleet::channel",
+    "short_msgs_only": true
+  }
+}

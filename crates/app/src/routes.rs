@@ -62,6 +62,8 @@ pub enum Route {
         ForumBoardPage { slug: String },
         #[route("/forum/t/:id")]
         ForumThread { id: String },
+        #[route("/leaderboards")]
+        Leaderboards {},
         #[route("/stats")]
         Stats {},
         #[route("/stats/tokens")]

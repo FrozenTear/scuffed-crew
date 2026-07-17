@@ -459,6 +459,23 @@ pub fn create_router(state: AppState) -> Router {
             "/api/public/matches/{id}",
             get(routes::public::public_match_detail),
         )
+        .route(
+            "/api/public/members/{id}/heroes",
+            get(routes::leaderboards::public_member_heroes),
+        )
+        .route(
+            "/api/public/leaderboards",
+            get(routes::leaderboards::public_leaderboards),
+        )
+        .route(
+            "/api/public/seasons",
+            get(routes::leaderboards::public_list_seasons),
+        )
+        .route(
+            "/api/admin/seasons",
+            get(routes::leaderboards::admin_list_seasons)
+                .post(routes::leaderboards::admin_create_season),
+        )
         // Serve uploaded files
         .nest_service("/uploads", ServeDir::new(state.upload_dir.clone()))
         // Static files from dist/, falling back to index.html for SPA routing (Dioxus handles all routes)

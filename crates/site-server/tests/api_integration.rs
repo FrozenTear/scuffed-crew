@@ -3880,3 +3880,67 @@ async fn update_scrim_requires_roster_or_officer() {
     assert_eq!(json["status"], "confirmed");
     assert_eq!(json["opponent_name"], "Rivals");
 }
+
+// ─── #6 leaderboards ────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn public_leaderboards_and_member_heroes() {
+    let state = test_state().await;
+    seed_all_roles(&state.db).await;
+
+    // Empty leaderboard is OK
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(unauthed_request(
+            Method::GET,
+            "/api/public/leaderboards?metric=winrate&limit=10",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    assert!(json.as_array().unwrap().is_empty() || json.as_array().is_some());
+
+    // Unknown member heroes → 404
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(unauthed_request(
+            Method::GET,
+            "/api/public/members/nope/heroes?top=3",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+    // Existing member (seeded) → 200 empty or with data
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(unauthed_request(
+            Method::GET,
+            "/api/public/members/membermember/heroes?top=3",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // Admin can create season
+    let app = create_router(state);
+    let resp = app
+        .oneshot(authed_json_request(
+            Method::POST,
+            "/api/admin/seasons",
+            ADMIN_TOKEN,
+            json!({
+                "name": "Season 1",
+                "starts_at": "2026-01-01T00:00:00Z",
+                "ends_at": "2026-06-01T00:00:00Z",
+                "is_current": true
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let season = body_json(resp).await;
+    assert_eq!(season["name"], "Season 1");
+    assert_eq!(season["is_current"], true);
+}

@@ -20,6 +20,7 @@ pub mod polls;
 pub mod roster;
 pub mod rsvps;
 pub mod scrims;
+pub mod seasons;
 pub mod sessions;
 pub mod settings;
 pub mod strategies;

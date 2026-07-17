@@ -680,6 +680,16 @@ pub async fn run_migrations(client: &Surreal<Any>) -> DbResult<()> {
         DEFINE FIELD OVERWRITE rank ON game_account TYPE option<string> DEFAULT NONE;
         DEFINE FIELD OVERWRITE sr ON game_account TYPE option<int> DEFAULT NONE;
         DEFINE FIELD OVERWRITE role ON game_account TYPE option<string> DEFAULT NONE;
+
+        -- ================================================
+        -- #6 seasons (feat/leaderboards)
+        -- ================================================
+        DEFINE TABLE IF NOT EXISTS season SCHEMAFULL;
+        DEFINE FIELD OVERWRITE name ON season TYPE string;
+        DEFINE FIELD OVERWRITE starts_at ON season TYPE datetime;
+        DEFINE FIELD OVERWRITE ends_at ON season TYPE datetime;
+        DEFINE FIELD OVERWRITE is_current ON season TYPE bool DEFAULT false;
+        DEFINE INDEX IF NOT EXISTS season_current_idx ON season COLUMNS is_current;
     "#,
         )
         .await?

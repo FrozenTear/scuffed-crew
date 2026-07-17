@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use surrealdb::types::Datetime as SurrealDatetime;
 use surrealdb_types::{RecordId, SurrealValue};
 
-use crate::types::{HeroStats, MapStats, PersonalMatch, PersonalStats};
+use crate::types::{HeroStats, MapStats, MemberLeaderboardRow, PersonalMatch, PersonalStats};
 use crate::{with_timeout, Database, DbResult};
 
 #[derive(Debug, Clone, Serialize, Deserialize, SurrealValue)]
@@ -286,6 +286,102 @@ impl Database {
             }
 
             Ok(hero_stats)
+        })
+        .await
+    }
+
+    /// Top heroes for a member, ranked by games then winrate.
+    pub async fn top_heroes(
+        &self,
+        member_id: &str,
+        limit: u32,
+    ) -> DbResult<Vec<HeroStats>> {
+        let mut all = self.get_hero_stats(member_id).await?;
+        all.truncate(limit as usize);
+        Ok(all)
+    }
+
+    /// Public member leaderboard from personal_match aggregates.
+    /// metric: "winrate" | "kd" | "games"
+    pub async fn member_leaderboard(
+        &self,
+        metric: &str,
+        limit: u32,
+    ) -> DbResult<Vec<MemberLeaderboardRow>> {
+        with_timeout(async {
+            #[derive(Deserialize, SurrealValue)]
+            struct AggRow {
+                member_id: String,
+                games: u32,
+                wins: u32,
+                elims: u32,
+                deaths: u32,
+            }
+
+            let mut result = self
+                .client
+                .query(
+                    r#"
+                    SELECT
+                        member_id,
+                        count() AS games,
+                        math::sum(IF outcome = 'victory' THEN 1 ELSE 0 END) AS wins,
+                        math::sum(elims) AS elims,
+                        math::sum(deaths) AS deaths
+                    FROM personal_match
+                    WHERE outcome IN ['victory', 'defeat', 'draw']
+                    GROUP BY member_id
+                    "#,
+                )
+                .await?;
+            let rows: Vec<AggRow> = result.take(0)?;
+
+            let mut out = Vec::with_capacity(rows.len());
+            for row in rows {
+                if row.games == 0 {
+                    continue;
+                }
+                let display_name = self
+                    .get_member_safe(&row.member_id)
+                    .await
+                    .ok()
+                    .flatten()
+                    .map(|m| m.display_name)
+                    .unwrap_or_else(|| "Unknown".into());
+                let winrate = row.wins as f32 / row.games as f32;
+                let kd = row.elims as f64 / (row.deaths.max(1) as f64);
+                out.push(MemberLeaderboardRow {
+                    member_id: row.member_id,
+                    display_name,
+                    games: row.games,
+                    winrate,
+                    kd,
+                });
+            }
+
+            match metric {
+                "kd" => out.sort_by(|a, b| {
+                    b.kd
+                        .partial_cmp(&a.kd)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                        .then_with(|| b.games.cmp(&a.games))
+                }),
+                "games" => out.sort_by(|a, b| {
+                    b.games.cmp(&a.games).then_with(|| {
+                        b.winrate
+                            .partial_cmp(&a.winrate)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    })
+                }),
+                _ => out.sort_by(|a, b| {
+                    b.winrate
+                        .partial_cmp(&a.winrate)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                        .then_with(|| b.games.cmp(&a.games))
+                }),
+            }
+            out.truncate(limit as usize);
+            Ok(out)
         })
         .await
     }
