@@ -1,4 +1,5 @@
 pub mod capture;
+pub mod capture_gate;
 pub mod config;
 pub mod detect;
 pub mod ocr;
