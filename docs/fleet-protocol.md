@@ -129,6 +129,34 @@ claim (intent) → implement (worktree) → push/PR → peer review (other agent
 - The author never merges their own branch; the reviewer merges after ACK-back,
   or the human does.
 
+### 5b. Autonomous deadlock resolution (human away — USER ruling 2026-07-18)
+
+When the human is away, a plan deadlock must not stall the shift. First,
+classify the dissent:
+
+- **Correctness/safety objections** ("this breaks X", "this loses data")
+  **always block** — the contested change is parked on a branch with both
+  positions recorded, work moves to the next item, human decides later. The
+  review gate is never overridden.
+- **Approach/priority/taste objections** resolve through this ladder, in
+  order, after at most 2 written rounds on the log:
+  1. **Shrink the claim** — carve out the contested part, proceed on the
+     agreed subset, queue the rest.
+  2. **Prefer reversible** — the option that is easy to undo beats the one
+     that is not.
+  3. **Measure instead of argue** — if fixtures/tests can decide it (they
+     usually can — see the capture-series data), run both, winner by
+     evidence.
+  4. **Smaller blast radius wins** — use `get_impact`; fewer affected
+     symbols beats more.
+  5. **Orchestrator decides** — Fable's call, tagged **PROVISIONAL** on the
+     log, with the dissent recorded verbatim and carried in the commit/PR
+     body. Human reviews provisional decisions first thing next session.
+
+Hard floor regardless of deadlock: tags/releases, force-push, data deletion,
+protected paths, and policy overrides (e.g. the copyright gitignore) stay
+human-only. A deadlock never unlocks those.
+
 ## 6. Liveness — watchers, presence, backoff
 
 **Push watchers (primary wake signal):** peer-message poll (dedupe by entry

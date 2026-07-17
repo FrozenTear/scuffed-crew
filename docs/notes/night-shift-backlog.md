@@ -16,9 +16,17 @@ Ordered by value. Items 1–2 are one branch.
 a model, claude runs it as **orchestrator and main planner**. grok reviews
 every plan and **posts dissent on the fleet log if it disagrees** — plan-level
 objection is expected input, not obstruction; unresolved disagreement
-escalates to USER. Implementation goes to Opus subagents under Fable's plan.
-Dual-agree on merges is unchanged. Also recorded in
+escalates to USER **when present**. Implementation goes to Opus subagents
+under Fable's plan. Dual-agree on merges is unchanged. Also recorded in
 `docs/fleet-protocol.md` Appendix A.
+
+**USER away (night shift): deadlocks must not stall the shift** — protocol
+§5b. Correctness objections always block (park the branch, move on, human
+decides later). Approach/priority disagreements resolve by ladder: shrink the
+claim → prefer reversible → measure with fixtures instead of arguing →
+smaller blast radius → Fable decides PROVISIONAL with grok's dissent recorded
+verbatim in the log and the commit body. Tags/releases, force-push, data
+deletion, protected paths, policy overrides stay human-only no matter what.
 
 **Suggested execution order:**
 1. **Step 0** (item 8): inspect tonight's dumped/rejected frames — confirm or
