@@ -143,6 +143,28 @@ possible column rotation; keep eyes open.
 DESIGN NOTE: monotonic-hold alone does NOT catch 9X inflation (values
 increase) — the rate-cap half of the fix is load-bearing, not optional.
 
+**REALIZED CORRUPTION (07-18 ~00:53, session b1b263e994d1f7f8):** Havana
+Victory registered with D=5 (real 6) and HLG=234 (real 2,341) — bad reads
+persisted through the victory screen, so latest-wins locked them. First
+confirmed-final corruption. New evidence, refining the mechanism:
+- Tail-clip hits 4-digit columns too (2341→"234"), not just 2-digit E.
+- D drifted with it => whole-ROW column-window drift, occurring in STRETCHES
+  (14 consecutive collapsed E reads, captures 12–25, then recovery) — the
+  dynamic stat-column boundary detection latching wrong is the prime suspect
+  (fallback constants STAT_COL_BOUNDARIES_FALLBACK vs dynamic path in
+  preprocess.rs).
+- Ghost-"9" source candidate: circular ability icons immediately left of the
+  E column (round glyphs OCR as 9/0/8). Unified mechanism: leftward window
+  drift — small drift = rightmost digit clipped; larger = icon enters as
+  ghost digit + clip.
+- Night shift step 0: inspect dumped/rejected frames from tonight for a
+  drifted-stretch capture; one look at the actual cell crops confirms or
+  kills the drift theory before any gate is built.
+- Gate must cover ALL cumulative counters (healing + mitigation included);
+  `stats_regressed` only reads (elims, deaths, damage) today.
+- Manual repair candidates so far: Havana session b1b263e994d1f7f8 (D, HLG);
+  Lijiang session (hero=Tracer, item 10).
+
 **Fix pre-validated on real data:** per-cell monotonic hold applied to the
 07-18 series yields 7,11,12,15,22,28 — every collapse rejected, every real
 progression kept. Use this session's captures as the regression fixture.
