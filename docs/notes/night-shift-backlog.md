@@ -120,7 +120,27 @@ minimum ldd-clean assertion in release validation) passes; release notes list
 host deps. Consider adding a `--smoke` GUI headless probe to the release
 workflow so the NOT-CHECKED gap from 1.3 closes permanently.
 
-## 8. Retracted / non-items
+## 8. LIVE-1: transient OCR digit misread — delta-plausibility gate  [LOW, field-observed 07-17]
+
+**Problem.** Live session 07-17 ~23:40: one capture read E=93 where the real
+scoreboard showed E=3 (all other cells exact; screenshot cross-checked).
+Hypothesis: Control point-% digits bleeding through the translucent scoreboard
+into the elims crop. Benign today — `latest_per_game` keeps the final snapshot
+and `stats_regressed` needs 2/3 counters dropping (both defenses held; no false
+split, final stats correct). Residual exposure: a misread on the game's FINAL
+capture locks in the bad value.
+
+**Fix sketch.** Delta-plausibility gate at capture accept: counter jump beyond a
+sane rate vs `last_stats`/elapsed (e.g. elims > ~1/5s sustained) => hold the
+capture (don't advance `last_stats`) until a following capture corroborates,
+else drop it. Keep it one-sided (only inflated jumps) so real stomps never get
+rejected. Test with the 07-17 session data (E 3→93→3 must be swallowed; real
+progressions must pass).
+
+**Done when.** Replaying the 07-17 captures yields no 93; synthetic
+impossible-jump fixture test in CI; real-frame local test untouched.
+
+## 9. Retracted / non-items
 
 - roster.rs "(public)" comment: **correct as written** (GET has no auth extractor
   by design; data already public via team pages). Claude flagged it wrongly on
