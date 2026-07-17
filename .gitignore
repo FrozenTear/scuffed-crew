@@ -7,6 +7,9 @@ data/secrets.env
 # Runtime uploads (host volume / local dev)
 data/uploads/
 dist/
+# Exception: prebuilt-release installer sources (not app SPA output)
+!crates/stat-tracker/dist/
+!crates/stat-tracker/dist/**
 .dioxus/
 dist.old/
 .worktrees/

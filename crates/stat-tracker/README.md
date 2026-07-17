@@ -20,6 +20,39 @@ stats, and daemon controls.
   `koverwatch.traineddata` under `~/.local/share/scuffed-stat-tracker/tessdata/`
   (picked up automatically on next start).
 
+## Install (prebuilt Linux x86_64)
+
+No Rust toolchain required. GitHub Releases publish
+`scuffed-stat-tracker-linux-x86_64.tar.gz` (daemon + GUI + assets +
+`install.sh`) on tags `stat-tracker-v*`.
+
+**One-liner** (downloads latest matching release and installs into
+`~/.local`):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/FrozenTear/scuffed-crew/main/crates/stat-tracker/dist/bootstrap.sh | bash
+```
+
+Pin a tag or change the install prefix:
+
+```sh
+STAT_TRACKER_TAG=stat-tracker-v0.1.0 \
+STAT_TRACKER_PREFIX=$HOME/.local \
+  bash -c 'curl -fsSL https://raw.githubusercontent.com/FrozenTear/scuffed-crew/main/crates/stat-tracker/dist/bootstrap.sh | bash'
+```
+
+**Manual:** download the tarball (+ optional `.sha256`) from the release page,
+extract, then:
+
+```sh
+cd scuffed-stat-tracker-linux-x86_64
+./install.sh          # copies bins to ~/.local/bin, desktop entry, user systemd unit
+```
+
+The in-tarball installer lives at `dist/install.sh` in this crate (copied to
+the tarball root by the release workflow). Source checkouts still use
+`crates/stat-tracker/install.sh`, which **builds with cargo**.
+
 ## Running
 
 ```sh
