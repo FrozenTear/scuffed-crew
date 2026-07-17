@@ -339,6 +339,7 @@ impl Database {
             "google" => AuthProvider::Google,
             "matrix" => AuthProvider::Matrix,
             "local" => AuthProvider::Local,
+            "nostr" => AuthProvider::Nostr,
             other => return Err(DbError::Config(format!("Unknown provider: {other}"))),
         };
 

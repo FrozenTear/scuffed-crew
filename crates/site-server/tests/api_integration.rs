@@ -4242,3 +4242,181 @@ async fn admin_resets_local_password_member_logs_in() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }
+
+// ─── Nostr NIP-07 login ──────────────────────────────────────────────────────
+
+async fn nostr_challenge(state: &scuffed_site_server::state::AppState) -> (String, String) {
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(
+            rate_limit_ip(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/auth/nostr/challenge"),
+            )
+            .body(Body::empty())
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    (
+        json["challenge"].as_str().unwrap().to_string(),
+        json["token"].as_str().unwrap().to_string(),
+    )
+}
+
+fn signed_login_event(keys: &nostr::Keys, content: &str) -> serde_json::Value {
+    let event = nostr::EventBuilder::new(nostr::Kind::Custom(22242), content)
+        .sign_with_keys(keys)
+        .expect("sign event");
+    serde_json::to_value(event).unwrap()
+}
+
+async fn nostr_verify_resp(
+    state: &scuffed_site_server::state::AppState,
+    token: &str,
+    event: serde_json::Value,
+) -> axum::response::Response {
+    let app = create_router(state.clone());
+    app.oneshot(anon_json_request(
+        Method::POST,
+        "/api/auth/nostr/verify",
+        json!({ "token": token, "signed_event": event }),
+    ))
+    .await
+    .unwrap()
+}
+
+fn cookie_of(resp: &axum::response::Response) -> String {
+    resp.headers()
+        .get(header::SET_COOKIE)
+        .expect("session cookie")
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_string()
+}
+
+async fn me_with_cookie(state: &scuffed_site_server::state::AppState, cookie: &str) -> Value {
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/auth/me")
+                .header(header::COOKIE, cookie.to_string())
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    body_json(resp).await
+}
+
+#[tokio::test]
+async fn nostr_login_registers_then_reuses_user() {
+    let state = test_state().await;
+    seed_all_roles(&state.db).await;
+    let keys = nostr::Keys::generate();
+
+    // First login: creates a bare nostr-provider user
+    let (challenge, token) = nostr_challenge(&state).await;
+    let resp = nostr_verify_resp(&state, &token, signed_login_event(&keys, &challenge)).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let cookie = cookie_of(&resp);
+    let me = me_with_cookie(&state, &cookie).await;
+    assert!(
+        me["member"].is_null(),
+        "nostr signup must not create a member"
+    );
+    let first_user_id = me["user"]["id"].as_str().unwrap().to_string();
+
+    // Second login with the same key: same user, no duplicate
+    let (challenge2, token2) = nostr_challenge(&state).await;
+    let resp = nostr_verify_resp(&state, &token2, signed_login_event(&keys, &challenge2)).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let me2 = me_with_cookie(&state, &cookie_of(&resp)).await;
+    assert_eq!(me2["user"]["id"].as_str().unwrap(), first_user_id);
+}
+
+#[tokio::test]
+async fn nostr_login_rejects_bad_and_closed() {
+    let state = test_state().await;
+    seed_all_roles(&state.db).await;
+    let keys = nostr::Keys::generate();
+
+    // Content mismatch → 400
+    let (_challenge, token) = nostr_challenge(&state).await;
+    let resp = nostr_verify_resp(
+        &state,
+        &token,
+        signed_login_event(&keys, "scuffedclan-login:forged"),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+    // Tampered token → 400
+    let (challenge, token) = nostr_challenge(&state).await;
+    let mut bad_token = token.clone();
+    bad_token.push('0');
+    let resp = nostr_verify_resp(&state, &bad_token, signed_login_event(&keys, &challenge)).await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+    // Recruitment closed → unknown pubkey cannot register (403)
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(authed_json_request(
+            Method::PUT,
+            "/api/settings",
+            ADMIN_TOKEN,
+            json!({ "recruitment_open": false }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let (challenge, token) = nostr_challenge(&state).await;
+    let resp = nostr_verify_resp(&state, &token, signed_login_event(&keys, &challenge)).await;
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn nostr_login_member_linked_pubkey_logs_into_member() {
+    let state = test_state().await;
+    seed_all_roles(&state.db).await;
+    let keys = nostr::Keys::generate();
+    let pubkey_hex = keys.public_key().to_hex();
+
+    // Link the pubkey to the seeded member directly
+    state
+        .db
+        .update_member(
+            "membermember",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(Some(&pubkey_hex)),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    let (challenge, token) = nostr_challenge(&state).await;
+    let resp = nostr_verify_resp(&state, &token, signed_login_event(&keys, &challenge)).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let me = me_with_cookie(&state, &cookie_of(&resp)).await;
+    assert!(
+        me["member"].is_object(),
+        "member-linked pubkey must log into the member account: {me:?}"
+    );
+    assert_eq!(me["member"]["id"], "membermember");
+}

@@ -65,6 +65,14 @@ pub fn create_router(state: AppState) -> Router {
             "/api/auth/local/register",
             post(routes::auth::local_register),
         )
+        .route(
+            "/api/auth/nostr/challenge",
+            get(routes::auth::nostr_login_challenge),
+        )
+        .route(
+            "/api/auth/nostr/verify",
+            post(routes::auth::nostr_login_verify),
+        )
         .layer(GovernorLayer::new(governor_config));
 
     // Dev mode mirrors main.rs: in-memory DB when SURREALDB_URL is unset.

@@ -10,6 +10,8 @@ pub enum AuthProvider {
     Google,
     Matrix,
     Local,
+    /// Self-sovereign Nostr key (NIP-07 challenge login). provider_id = pubkey hex.
+    Nostr,
 }
 
 impl std::fmt::Display for AuthProvider {
@@ -19,6 +21,7 @@ impl std::fmt::Display for AuthProvider {
             AuthProvider::Google => write!(f, "google"),
             AuthProvider::Matrix => write!(f, "matrix"),
             AuthProvider::Local => write!(f, "local"),
+            AuthProvider::Nostr => write!(f, "nostr"),
         }
     }
 }

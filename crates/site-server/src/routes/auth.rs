@@ -318,6 +318,7 @@ pub async fn auth_providers(State(state): State<AppState>) -> impl IntoResponse 
         google: !config.google_client_id.is_empty() && !config.google_client_secret.is_empty(),
         register,
         min_age,
+        nostr: true,
     })
     .into_response()
 }
@@ -695,6 +696,191 @@ pub async fn local_login(
     }
 
     tracing::info!("User {} logged in via local", user.username);
+    let session_cookie = build_session_cookie(&state.session_config, session_token);
+    (jar.add(session_cookie), Json(OkResponse { ok: true })).into_response()
+}
+
+// ─── Nostr NIP-07 login (privacy-first signup path #2) ──────────────────────
+
+/// Subject marker for anonymous login challenge tokens — member ids are
+/// record-id strings, so this can never collide with a link-flow token.
+const NOSTR_LOGIN_SUBJECT: &str = "@login";
+
+#[derive(serde::Serialize)]
+pub struct NostrLoginChallengeResponse {
+    pub challenge: String,
+    pub token: String,
+    pub expires_in_secs: u64,
+}
+
+/// GET /api/auth/nostr/challenge — anonymous challenge for NIP-07 login.
+pub async fn nostr_login_challenge(State(state): State<AppState>) -> impl IntoResponse {
+    use rand::RngCore;
+    let mut challenge_bytes = [0u8; 32];
+    rand::rngs::OsRng.fill_bytes(&mut challenge_bytes);
+    let challenge_hex: String = challenge_bytes.iter().map(|b| format!("{b:02x}")).collect();
+    let challenge = format!("scuffedclan-login:{challenge_hex}");
+
+    let expires_ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        + crate::routes::nostr::CHALLENGE_TTL_SECS;
+
+    let token = crate::routes::nostr::sign_challenge_token(
+        &state.nostr_challenge_key,
+        &challenge,
+        NOSTR_LOGIN_SUBJECT,
+        expires_ts,
+    );
+
+    Json(NostrLoginChallengeResponse {
+        challenge,
+        token,
+        expires_in_secs: crate::routes::nostr::CHALLENGE_TTL_SECS,
+    })
+    .into_response()
+}
+
+#[derive(Deserialize)]
+pub struct NostrLoginVerifyRequest {
+    pub token: String,
+    pub signed_event: nostr::Event,
+}
+
+/// POST /api/auth/nostr/verify — verify a NIP-07-signed challenge and sign in.
+///
+/// Known pubkeys log into their account (member-linked first, then
+/// nostr-provider users). Unknown pubkeys register a bare user — gated on
+/// `recruitment_open`, same as local registration.
+pub async fn nostr_login_verify(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Json(body): Json<NostrLoginVerifyRequest>,
+) -> impl IntoResponse {
+    let bad =
+        |msg: String| (StatusCode::BAD_REQUEST, Json(ErrorResponse { error: msg })).into_response();
+
+    let (challenge, subject) =
+        match crate::routes::nostr::verify_challenge_token(&state.nostr_challenge_key, &body.token)
+        {
+            Ok(v) => v,
+            Err(e) => return bad(format!("Token verification failed: {e}")),
+        };
+    if subject != NOSTR_LOGIN_SUBJECT {
+        return bad("Token was not issued for login".into());
+    }
+    if body.signed_event.kind != nostr::Kind::Custom(22242) {
+        return bad("Event must use ephemeral kind 22242".into());
+    }
+    if body.signed_event.content != challenge {
+        return bad("Event content does not match the challenge".into());
+    }
+    if let Err(e) = body.signed_event.verify() {
+        return bad(format!("Event verification failed: {e}"));
+    }
+    let pubkey_hex = body.signed_event.pubkey.to_hex();
+
+    // 1. Member-linked pubkey → that member's user.
+    let user_id = match state.db.get_member_by_nostr_pubkey(&pubkey_hex).await {
+        Ok(Some(member)) => Some(member.user_id),
+        Ok(None) => None,
+        Err(e) => {
+            tracing::error!("nostr login member lookup: {e}");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: "database error".into(),
+                }),
+            )
+                .into_response();
+        }
+    };
+
+    // 2. Existing nostr-provider user, else 3. register a bare user (gated).
+    let user_id = match user_id {
+        Some(id) => id,
+        None => {
+            match state
+                .db
+                .get_user_by_provider(scuffed_auth::AuthProvider::Nostr, &pubkey_hex)
+                .await
+            {
+                Ok(Some(u)) => u.id,
+                Ok(None) => {
+                    let open = state
+                        .db
+                        .get_settings()
+                        .await
+                        .map(|s| s.recruitment_open)
+                        .unwrap_or(false);
+                    if !open {
+                        return (
+                            StatusCode::FORBIDDEN,
+                            Json(ErrorResponse {
+                                error: "registration is currently closed".into(),
+                            }),
+                        )
+                            .into_response();
+                    }
+                    let username = format!("nostr-{}", &pubkey_hex[..12]);
+                    match state
+                        .db
+                        .upsert_user_from_oauth(
+                            scuffed_auth::AuthProvider::Nostr,
+                            pubkey_hex.clone(),
+                            username,
+                            None,
+                        )
+                        .await
+                    {
+                        Ok(u) => u.id,
+                        Err(e) => {
+                            tracing::error!("nostr login create user: {e}");
+                            return (
+                                StatusCode::INTERNAL_SERVER_ERROR,
+                                Json(ErrorResponse {
+                                    error: "failed to create account".into(),
+                                }),
+                            )
+                                .into_response();
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::error!("nostr login user lookup: {e}");
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(ErrorResponse {
+                            error: "database error".into(),
+                        }),
+                    )
+                        .into_response();
+                }
+            }
+        }
+    };
+
+    let session_token = generate_session_token();
+    if let Err(e) = state
+        .db
+        .create_session(
+            &user_id,
+            &session_token,
+            state.session_config.duration_hours,
+        )
+        .await
+    {
+        tracing::error!("nostr login create_session: {e}");
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: "session creation failed".into(),
+            }),
+        )
+            .into_response();
+    }
+
     let session_cookie = build_session_cookie(&state.session_config, session_token);
     (jar.add(session_cookie), Json(OkResponse { ok: true })).into_response()
 }

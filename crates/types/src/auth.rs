@@ -66,6 +66,10 @@ pub struct AuthProvidersResponse {
     /// Local self-registration is open (recruitment_open in site settings).
     #[serde(default)]
     pub register: bool,
+    /// Nostr NIP-07 challenge login is available (always on server-side;
+    /// the client shows it only when a NIP-07 extension is present).
+    #[serde(default)]
+    pub nostr: bool,
     /// Minimum age the registrant must confirm (site settings, default 16).
     #[serde(default = "default_min_age")]
     pub min_age: u32,

@@ -15,7 +15,7 @@ pub async fn run_migrations(client: &Surreal<Any>) -> DbResult<()> {
         -- ================================================
         DEFINE TABLE IF NOT EXISTS user SCHEMAFULL;
         DEFINE FIELD OVERWRITE provider ON user TYPE string
-            ASSERT $value IN ['discord', 'google', 'matrix', 'local'];
+            ASSERT $value IN ['discord', 'google', 'matrix', 'local', 'nostr'];
         DEFINE FIELD OVERWRITE username ON user TYPE string;
         DEFINE FIELD OVERWRITE avatar_url ON user TYPE option<string>;
         DEFINE FIELD OVERWRITE provider_id ON user TYPE option<string>;

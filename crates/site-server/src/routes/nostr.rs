@@ -96,7 +96,7 @@ pub async fn nostr_json(
 
 // ─── Phase 1.5: Challenge-response Nostr identity verification ───
 
-const CHALLENGE_TTL_SECS: u64 = 300; // 5 minutes
+pub(crate) const CHALLENGE_TTL_SECS: u64 = 300; // 5 minutes
 
 #[derive(Deserialize)]
 pub struct ChallengeRequest {
@@ -137,7 +137,7 @@ fn resolve_pubkey_hex(input: &str) -> Result<String, &'static str> {
 ///
 /// Token format: `{challenge}|{member_id}|{expires_ts}|{hmac_hex}` (pipe-delimited,
 /// because the challenge contains colons). HMAC covers all three fields.
-fn sign_challenge_token(
+pub(crate) fn sign_challenge_token(
     key: &[u8; 32],
     challenge: &str,
     member_id: &str,
@@ -152,7 +152,10 @@ fn sign_challenge_token(
 }
 
 /// Parse and verify a challenge token. Returns (challenge, member_id).
-fn verify_challenge_token(key: &[u8; 32], token: &str) -> Result<(String, String), &'static str> {
+pub(crate) fn verify_challenge_token(
+    key: &[u8; 32],
+    token: &str,
+) -> Result<(String, String), &'static str> {
     use base64::Engine;
     let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .decode(token)

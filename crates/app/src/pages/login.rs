@@ -61,6 +61,29 @@ const CSS: &str = r#"
     font-size: 0.85rem;
     margin-bottom: 1rem;
 }
+.login-nostr-btn {
+    width: 100%;
+    padding: 0.6rem 1rem;
+    border-radius: 6px;
+    border: 1px solid var(--accent-soft);
+    background: var(--surface);
+    color: var(--accent);
+    font-size: 0.9rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.15s;
+}
+.login-nostr-btn:hover:not(:disabled) {
+    border-color: var(--accent);
+    background: var(--accent-soft);
+}
+.login-nostr-btn:disabled { opacity: 0.6; cursor: default; }
+.login-nostr-hint {
+    font-size: 0.72rem;
+    color: var(--text-3);
+    margin: 0.4rem 0 0;
+    text-align: center;
+}
 .login-agecheck {
     display: flex;
     align-items: center;
@@ -265,11 +288,46 @@ pub fn Login() -> Element {
         });
     };
 
+    let on_nostr_login = move |_| {
+        error.set(None);
+        submitting.set(true);
+        spawn(async move {
+            match nostr_login_flow().await {
+                Ok(()) => {
+                    let client = ApiClient::web();
+                    match client.get_me().await {
+                        Ok(me) => {
+                            let is_member = me.member.is_some();
+                            auth.set(AuthState {
+                                user: Some(me_to_user_info(&me)),
+                                loading: false,
+                            });
+                            // New/bare users go straight to the application funnel.
+                            if is_member {
+                                nav.replace(Route::Home {});
+                            } else {
+                                nav.replace(Route::Apply {});
+                            }
+                        }
+                        Err(_) => {
+                            nav.replace(Route::Home {});
+                        }
+                    }
+                }
+                Err(msg) => {
+                    error.set(Some(msg));
+                    submitting.set(false);
+                }
+            }
+        });
+    };
+
     let p = providers.value()().flatten();
     let show_local = p.as_ref().map(|x| x.local).unwrap_or(true);
     let show_discord = p.as_ref().map(|x| x.discord).unwrap_or(false);
     let show_google = p.as_ref().map(|x| x.google).unwrap_or(false);
     let show_register = p.as_ref().map(|x| x.register).unwrap_or(false);
+    let show_nostr = p.as_ref().map(|x| x.nostr).unwrap_or(false) && has_nip07_extension();
     let min_age = p.as_ref().map(|x| x.min_age).unwrap_or(16);
 
     rsx! {
@@ -383,6 +441,19 @@ pub fn Login() -> Element {
                         }
                     }
                 }
+                if show_nostr && !registering() {
+                    div { class: "login-oauth",
+                        button {
+                            class: "login-nostr-btn",
+                            disabled: submitting(),
+                            onclick: on_nostr_login,
+                            "Sign in with Nostr"
+                        }
+                        p { class: "login-nostr-hint",
+                            "Uses your NIP-07 browser extension — no account details shared."
+                        }
+                    }
+                }
                 if show_discord || show_google {
                     div { class: "login-oauth",
                         if show_discord {
@@ -406,4 +477,100 @@ pub fn Login() -> Element {
             }
         }
     }
+}
+
+// ─── Nostr NIP-07 login ──────────────────────────────────────────────────────
+
+fn has_nip07_extension() -> bool {
+    web_sys::window()
+        .and_then(|w| js_sys::Reflect::get(&w, &wasm_bindgen::JsValue::from_str("nostr")).ok())
+        .map(|v| !v.is_undefined() && !v.is_null())
+        .unwrap_or(false)
+}
+
+#[derive(serde::Deserialize)]
+struct NostrLoginChallenge {
+    challenge: String,
+    token: String,
+}
+
+#[derive(serde::Serialize)]
+struct NostrLoginVerifyBody {
+    token: String,
+    signed_event: serde_json::Value,
+}
+
+/// Full NIP-07 login dance: challenge → extension signs → verify → session.
+async fn nostr_login_flow() -> Result<(), String> {
+    use wasm_bindgen::{JsCast, JsValue};
+
+    let client = ApiClient::web();
+    let ch = client
+        .fetch::<NostrLoginChallenge>("/api/auth/nostr/challenge")
+        .await
+        .map_err(|e| format!("Challenge request failed: {e}"))?;
+
+    let window = web_sys::window().ok_or("No window")?;
+    let nostr = js_sys::Reflect::get(&window, &JsValue::from_str("nostr"))
+        .map_err(|_| "NIP-07 extension not found")?;
+
+    let event_obj = js_sys::Object::new();
+    js_sys::Reflect::set(
+        &event_obj,
+        &JsValue::from_str("kind"),
+        &JsValue::from_f64(22242.0),
+    )
+    .map_err(|_| "Failed to set kind")?;
+    js_sys::Reflect::set(
+        &event_obj,
+        &JsValue::from_str("content"),
+        &JsValue::from_str(&ch.challenge),
+    )
+    .map_err(|_| "Failed to set content")?;
+    js_sys::Reflect::set(
+        &event_obj,
+        &JsValue::from_str("created_at"),
+        &JsValue::from_f64(chrono::Utc::now().timestamp() as f64),
+    )
+    .map_err(|_| "Failed to set created_at")?;
+    js_sys::Reflect::set(
+        &event_obj,
+        &JsValue::from_str("tags"),
+        &js_sys::Array::new(),
+    )
+    .map_err(|_| "Failed to set tags")?;
+
+    let sign_fn = js_sys::Reflect::get(&nostr, &JsValue::from_str("signEvent"))
+        .map_err(|_| "signEvent not found")?;
+    let sign_fn: js_sys::Function = sign_fn
+        .dyn_into()
+        .map_err(|_| "signEvent is not a function")?;
+    let promise = sign_fn
+        .call1(&nostr, &event_obj)
+        .map_err(|e| format!("signEvent call failed: {e:?}"))?;
+    let promise: js_sys::Promise = promise
+        .dyn_into()
+        .map_err(|_| "signEvent did not return a promise")?;
+    let signed_event = wasm_bindgen_futures::JsFuture::from(promise)
+        .await
+        .map_err(|e| format!("signEvent rejected: {e:?}"))?;
+    let signed_json: serde_json::Value =
+        serde_wasm_bindgen::from_value(signed_event).map_err(|e| format!("Parse error: {e}"))?;
+
+    client
+        .post_json::<_, OkResponse>(
+            "/api/auth/nostr/verify",
+            &NostrLoginVerifyBody {
+                token: ch.token,
+                signed_event: signed_json,
+            },
+        )
+        .await
+        .map_err(|e| match e {
+            scuffed_api_client::ClientError::Http { status: 403, .. } => {
+                "Registration is currently closed".to_string()
+            }
+            other => format!("Verification failed: {other}"),
+        })?;
+    Ok(())
 }
