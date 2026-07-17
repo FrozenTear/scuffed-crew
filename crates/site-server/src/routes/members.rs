@@ -728,3 +728,119 @@ pub async fn delete_game_account(
 
     Ok(StatusCode::OK)
 }
+
+#[derive(Deserialize)]
+pub struct AdminResetPasswordRequest {
+    pub new_password: String,
+}
+
+/// POST /api/members/:id/reset-password — admin sets a temporary local password.
+///
+/// This is the recovery path for local accounts (privacy-first: no email on
+/// file, so self-serve reset is deliberately absent). Local-provider users only.
+pub async fn admin_reset_local_password(
+    State(state): State<AppState>,
+    admin: AdminUser,
+    Path(id): Path<String>,
+    Json(body): Json<AdminResetPasswordRequest>,
+) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
+    use scuffed_auth::password::{MIN_PASSWORD_LEN, hash_password};
+
+    if body.new_password.len() < MIN_PASSWORD_LEN {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: format!("password must be at least {MIN_PASSWORD_LEN} characters"),
+            }),
+        ));
+    }
+
+    let member = state
+        .db
+        .get_member(&id)
+        .await
+        .map_err(|e| {
+            tracing::error!("reset-password get_member: {e}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: "Internal error".into(),
+                }),
+            )
+        })?
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse {
+                    error: "Member not found".into(),
+                }),
+            )
+        })?;
+
+    let user = state
+        .db
+        .get_user(&member.user_id)
+        .await
+        .map_err(|e| {
+            tracing::error!("reset-password get_user: {e}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: "Internal error".into(),
+                }),
+            )
+        })?
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse {
+                    error: "User not found".into(),
+                }),
+            )
+        })?;
+
+    if user.provider != scuffed_auth::AuthProvider::Local {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "Password reset only applies to local accounts".into(),
+            }),
+        ));
+    }
+
+    let hash = hash_password(&body.new_password).map_err(|e| {
+        tracing::error!("reset-password hash: {e}");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: "password hashing failed".into(),
+            }),
+        )
+    })?;
+
+    state
+        .db
+        .set_local_password_hash(&member.user_id, &hash)
+        .await
+        .map_err(|e| {
+            tracing::error!("reset-password set hash: {e}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: "Internal error".into(),
+                }),
+            )
+        })?;
+
+    audit(
+        &state.db,
+        &admin.member.id,
+        AuditAction::UpdatedMember,
+        AuditTargetType::Member,
+        &member.id,
+        Some("Reset local account password (admin)"),
+    )
+    .await;
+
+    Ok(StatusCode::OK)
+}

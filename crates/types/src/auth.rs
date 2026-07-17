@@ -63,6 +63,26 @@ pub struct AuthProvidersResponse {
     pub local: bool,
     pub discord: bool,
     pub google: bool,
+    /// Local self-registration is open (recruitment_open in site settings).
+    #[serde(default)]
+    pub register: bool,
+    /// Minimum age the registrant must confirm (site settings, default 16).
+    #[serde(default = "default_min_age")]
+    pub min_age: u32,
+}
+
+fn default_min_age() -> u32 {
+    16
+}
+
+/// POST /api/auth/local/register — privacy-first: no email collected.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RegisterRequest {
+    pub username: String,
+    pub password: String,
+    /// Must be true: registrant confirms they meet the org's minimum age.
+    #[serde(default)]
+    pub confirm_min_age: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

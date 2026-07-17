@@ -61,6 +61,10 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/auth/{provider}/callback", get(routes::auth::callback))
         .route("/api/auth/setup", post(routes::auth::setup))
         .route("/api/auth/local/login", post(routes::auth::local_login))
+        .route(
+            "/api/auth/local/register",
+            post(routes::auth::local_register),
+        )
         .layer(GovernorLayer::new(governor_config));
 
     // Dev mode mirrors main.rs: in-memory DB when SURREALDB_URL is unset.
@@ -89,6 +93,10 @@ pub fn create_router(state: AppState) -> Router {
         .route(
             "/api/members/{id}",
             get(routes::members::get_member).put(routes::members::update_member),
+        )
+        .route(
+            "/api/members/{id}/reset-password",
+            post(routes::members::admin_reset_local_password),
         )
         .route(
             "/api/members/{id}/role",

@@ -19,7 +19,8 @@ use scuffed_auth::server::session::{
 use scuffed_auth::{AuthProvider, UserInfo};
 use scuffed_db::{Member, OrgRole};
 use scuffed_types::{
-    AuthProvidersResponse, LocalLoginRequest, OkResponse, SetupRequest, SetupStatusResponse,
+    AuthProvidersResponse, LocalLoginRequest, OkResponse, RegisterRequest, SetupRequest,
+    SetupStatusResponse,
 };
 
 use crate::state::AppState;
@@ -304,13 +305,148 @@ pub async fn auth_providers(State(state): State<AppState>) -> impl IntoResponse 
         .map(|h| !h)
         .unwrap_or(false);
     let local_login = state.db.has_local_login().await.unwrap_or(false);
+    // Self-registration piggybacks the recruitment toggle: recruitment closed
+    // means no new accounts (accounts exist only to apply / become members).
+    let (register, min_age) = match state.db.get_settings().await {
+        Ok(s) => (s.recruitment_open && !needs_setup, s.min_age),
+        Err(_) => (false, 16),
+    };
     let config = &state.oauth_config;
     Json(AuthProvidersResponse {
         local: local_login || needs_setup,
         discord: !config.discord_client_id.is_empty() && !config.discord_client_secret.is_empty(),
         google: !config.google_client_id.is_empty() && !config.google_client_secret.is_empty(),
+        register,
+        min_age,
     })
     .into_response()
+}
+
+/// POST /api/auth/local/register — self-serve local account (privacy-first: no email).
+///
+/// Creates a bare user only — membership still goes through the application flow.
+/// Gated on `recruitment_open` (admin-togglable kill switch, no deploy needed).
+pub async fn local_register(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Json(body): Json<RegisterRequest>,
+) -> impl IntoResponse {
+    let (open, min_age) = match state.db.get_settings().await {
+        Ok(s) => (s.recruitment_open, s.min_age),
+        Err(e) => {
+            tracing::error!("register get_settings: {e}");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: "database error".into(),
+                }),
+            )
+                .into_response();
+        }
+    };
+    if !open {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(ErrorResponse {
+                error: "registration is currently closed".into(),
+            }),
+        )
+            .into_response();
+    }
+    if !body.confirm_min_age {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: format!("you must confirm you are {min_age} or older"),
+            }),
+        )
+            .into_response();
+    }
+
+    let username = match validate_local_username(&body.username) {
+        Ok(u) => u,
+        Err(msg) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse { error: msg.into() }),
+            )
+                .into_response();
+        }
+    };
+    if body.password.len() < MIN_PASSWORD_LEN {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: format!("password must be at least {MIN_PASSWORD_LEN} characters"),
+            }),
+        )
+            .into_response();
+    }
+    let password_hash = match hash_password(&body.password) {
+        Ok(h) => h,
+        Err(e) => {
+            tracing::error!("register hash_password: {e}");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: "password hashing failed".into(),
+                }),
+            )
+                .into_response();
+        }
+    };
+
+    // create_local_user re-checks uniqueness; surface it as a clean 409.
+    let user = match state.db.create_local_user(&username, &password_hash).await {
+        Ok(u) => u,
+        Err(e) if e.to_string().contains("already taken") => {
+            return (
+                StatusCode::CONFLICT,
+                Json(ErrorResponse {
+                    error: "username already taken".into(),
+                }),
+            )
+                .into_response();
+        }
+        Err(e) => {
+            tracing::error!("register create_local_user: {e}");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: "failed to create account".into(),
+                }),
+            )
+                .into_response();
+        }
+    };
+
+    let session_token = generate_session_token();
+    if let Err(e) = state
+        .db
+        .create_session(
+            &user.id,
+            &session_token,
+            state.session_config.duration_hours,
+        )
+        .await
+    {
+        tracing::error!("register create_session: {e}");
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: "session creation failed".into(),
+            }),
+        )
+            .into_response();
+    }
+
+    tracing::info!("Local account registered: {}", user.username);
+    let session_cookie = build_session_cookie(&state.session_config, session_token);
+    (
+        StatusCode::CREATED,
+        (jar.add(session_cookie), Json(OkResponse { ok: true })),
+    )
+        .into_response()
 }
 
 /// POST /api/auth/setup — one-time first admin account (local username/password).

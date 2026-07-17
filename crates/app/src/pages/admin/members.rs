@@ -104,6 +104,10 @@ pub fn AdminMembers() -> Element {
     // Delete game account confirm
     let mut del_acct_modal = ModalController::<GameAccount>::new();
 
+    // Local password reset modal (admin recovery path — local accounts have no email)
+    let mut pw_modal = ModalController::<Member>::new();
+    let mut pw_new = use_signal(String::new);
+
     // Avatar upload modal
     let mut avatar_modal = ModalController::<Member>::new();
     let mut avatar_file: Signal<Option<web_sys::File>> = use_signal(|| None);
@@ -134,6 +138,42 @@ pub fn AdminMembers() -> Element {
 
     let on_role_close = move |_| {
         role_modal.close();
+    };
+
+    let on_pw_close = move |_| {
+        pw_new.set(String::new());
+        pw_modal.close();
+    };
+
+    let on_pw_submit = move |_| {
+        if let Some(member) = pw_modal.get_target() {
+            let id = member.id.clone();
+            let new_password = pw_new();
+            if new_password.len() < 12 {
+                toast.show(Toast::error("Password must be at least 12 characters."));
+                return;
+            }
+            pw_modal.start_submit();
+            spawn(async move {
+                let result = ApiClient::web()
+                    .post_json_empty(
+                        &format!("/api/members/{id}/reset-password"),
+                        &serde_json::json!({ "new_password": new_password }),
+                    )
+                    .await;
+                pw_modal.end_submit();
+                match result {
+                    Ok(_) => {
+                        toast.show(Toast::success(
+                            "Password reset. Share it with the member securely.",
+                        ));
+                        pw_new.set(String::new());
+                        pw_modal.close();
+                    }
+                    Err(e) => toast.show(Toast::error(format!("Reset failed: {e}"))),
+                }
+            });
+        }
     };
 
     let on_role_submit = move |_| {
@@ -487,6 +527,7 @@ pub fn AdminMembers() -> Element {
                                 let m_stats = member.clone();
                                 let m_accts = member.clone();
                                 let m_avatar = member.clone();
+                                let m_pw = member.clone();
                                 let status_str = if member.is_active { "active" } else { "inactive" };
                                 let toggle_label = if member.is_active { "Deactivate" } else { "Activate" };
                                 rsx! {
@@ -506,6 +547,11 @@ pub fn AdminMembers() -> Element {
                                                     class: "row-btn danger",
                                                     onclick: move |_| open_toggle(m_toggle.clone()),
                                                     "{toggle_label}"
+                                                }
+                                                button {
+                                                    class: "row-btn",
+                                                    onclick: move |_| { pw_new.set(String::new()); pw_modal.show(m_pw.clone()); },
+                                                    "PW"
                                                 }
                                                 button {
                                                     class: "row-btn",
@@ -559,6 +605,30 @@ pub fn AdminMembers() -> Element {
                         option { value: "{role}", "{role}" }
                     }
                 }
+            }
+        }
+
+        // Local password reset modal
+        FormModal {
+            title: format!(
+                "Reset Password: {}",
+                pw_modal.get_target().map(|m| m.display_name).unwrap_or_default()
+            ),
+            open: pw_modal.is_open(),
+            submitting: pw_modal.is_submitting(),
+            on_close: on_pw_close,
+            on_submit: on_pw_submit,
+
+            div { class: "form-field",
+                label { class: "form-label", "New temporary password" }
+                input {
+                    class: "form-input",
+                    r#type: "text",
+                    value: "{pw_new}",
+                    placeholder: "min 12 characters — member should change it after login",
+                    oninput: move |e| pw_new.set(e.value()),
+                }
+                p { class: "form-hint", "Only works for local (username/password) accounts." }
             }
         }
 

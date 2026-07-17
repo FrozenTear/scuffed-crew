@@ -102,6 +102,7 @@ pub const CSS: &str = r#"
         color-scheme: dark;
     }
     .form-input:focus, .form-select:focus, .form-textarea:focus { outline: none; border-color: var(--accent); }
+    .form-hint { font-size: 0.72rem; color: var(--text-3); margin: 0.35rem 0 0; }
     .form-input[type="date"], .form-input[type="time"] { position: relative; }
     .form-input[type="date"]::-webkit-calendar-picker-indicator,
     .form-input[type="time"]::-webkit-calendar-picker-indicator {

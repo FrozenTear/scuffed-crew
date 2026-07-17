@@ -3970,3 +3970,246 @@ async fn public_leaderboards_and_member_heroes() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
+
+// ─── Local self-registration (privacy-first signup) ─────────────────────────
+
+fn anon_json_request(method: Method, uri: &str, body: Value) -> Request<Body> {
+    // Rate-limited auth routes need a client IP for SmartIpKeyExtractor.
+    rate_limit_ip(
+        Request::builder()
+            .method(method)
+            .uri(uri)
+            .header(header::CONTENT_TYPE, "application/json"),
+    )
+    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+    .unwrap()
+}
+
+#[tokio::test]
+async fn register_creates_bare_user_with_session() {
+    let state = test_state().await;
+    seed_all_roles(&state.db).await;
+
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(anon_json_request(
+            Method::POST,
+            "/api/auth/local/register",
+            json!({ "username": "NewPlayer", "password": "hunter2234567", "confirm_min_age": true }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let cookie = resp
+        .headers()
+        .get(header::SET_COOKIE)
+        .expect("session cookie on register")
+        .to_str()
+        .unwrap()
+        .to_string();
+
+    // Session works and no member row exists (bare user; application is the gate)
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/auth/me")
+                .header(header::COOKIE, cookie.split(';').next().unwrap())
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let me = body_json(resp).await;
+    assert_eq!(
+        me["user"]["username"], "newplayer",
+        "usernames normalize to lowercase"
+    );
+    assert!(me["member"].is_null(), "register must not create a member");
+}
+
+#[tokio::test]
+async fn register_validation_and_conflicts() {
+    let state = test_state().await;
+    seed_all_roles(&state.db).await;
+
+    // Missing age confirmation
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(anon_json_request(
+            Method::POST,
+            "/api/auth/local/register",
+            json!({ "username": "kid", "password": "hunter2234567" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+    // Weak password
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(anon_json_request(
+            Method::POST,
+            "/api/auth/local/register",
+            json!({ "username": "weakpw", "password": "short", "confirm_min_age": true }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+    // Duplicate username → 409
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(anon_json_request(
+            Method::POST,
+            "/api/auth/local/register",
+            json!({ "username": "dupuser", "password": "hunter2234567", "confirm_min_age": true }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(anon_json_request(
+            Method::POST,
+            "/api/auth/local/register",
+            json!({ "username": "DupUser", "password": "hunter2234567", "confirm_min_age": true }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::CONFLICT,
+        "case-insensitive dup must 409"
+    );
+
+    // Close recruitment → registration 403 and providers.register=false
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(authed_json_request(
+            Method::PUT,
+            "/api/settings",
+            ADMIN_TOKEN,
+            json!({ "recruitment_open": false }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(anon_json_request(
+            Method::POST,
+            "/api/auth/local/register",
+            json!({ "username": "latecomer", "password": "hunter2234567", "confirm_min_age": true }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(unauthed_request(Method::GET, "/api/auth/providers"))
+        .await
+        .unwrap();
+    let providers = body_json(resp).await;
+    assert_eq!(providers["register"], false);
+}
+
+#[tokio::test]
+async fn admin_resets_local_password_member_logs_in() {
+    let state = test_state().await;
+    seed_all_roles(&state.db).await;
+
+    // Register a local account, then make it a member so it appears in admin flows
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(anon_json_request(
+            Method::POST,
+            "/api/auth/local/register",
+            json!({ "username": "forgetful", "password": "originalpw123", "confirm_min_age": true }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let (user, _) = state
+        .db
+        .get_local_user_by_username("forgetful")
+        .await
+        .unwrap()
+        .expect("registered user");
+    state
+        .db
+        .create_member(&user.id, "Forgetful", scuffed_db::OrgRole::Member)
+        .await
+        .unwrap();
+    let member = state
+        .db
+        .get_member_by_user(&user.id)
+        .await
+        .unwrap()
+        .expect("member");
+
+    // Non-admin cannot reset
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(authed_json_request(
+            Method::POST,
+            &format!("/api/members/{}/reset-password", member.id),
+            MEMBER_TOKEN,
+            json!({ "new_password": "adminset12345" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+    // Admin resets
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(authed_json_request(
+            Method::POST,
+            &format!("/api/members/{}/reset-password", member.id),
+            ADMIN_TOKEN,
+            json!({ "new_password": "adminset12345" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // Old password dead, new password works
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(anon_json_request(
+            Method::POST,
+            "/api/auth/local/login",
+            json!({ "username": "forgetful", "password": "originalpw123" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(anon_json_request(
+            Method::POST,
+            "/api/auth/local/login",
+            json!({ "username": "forgetful", "password": "adminset12345" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // OAuth-provider member → 400
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(authed_json_request(
+            Method::POST,
+            "/api/members/membermember/reset-password",
+            ADMIN_TOKEN,
+            json!({ "new_password": "adminset12345" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
