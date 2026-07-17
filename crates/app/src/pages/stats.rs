@@ -511,6 +511,80 @@ const STATS_CSS: &str = r#"
         color: var(--text-3);
         margin-top: 0.5rem;
     }
+
+    /* Tracker download / install panel */
+    .tracker-download {
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 1.25rem;
+        margin-bottom: 1.5rem;
+    }
+    .tracker-download-head {
+        display: flex;
+        align-items: center;
+        gap: 0.75rem;
+        flex-wrap: wrap;
+        margin-bottom: 0.75rem;
+    }
+    .tracker-download-head h3 {
+        font-family: var(--font-head);
+        font-size: 0.85rem;
+        color: var(--text-3);
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+        margin: 0;
+    }
+    .tracker-badge {
+        display: inline-block;
+        padding: 0.15rem 0.55rem;
+        border-radius: 4px;
+        background: var(--surface-2);
+        border: 1px solid var(--warn);
+        color: var(--warn);
+        font-size: 0.7rem;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+    }
+    .tracker-download p {
+        font-size: 0.85rem;
+        color: var(--text-2);
+        margin: 0 0 0.75rem;
+        line-height: 1.5;
+    }
+    .tracker-download code.tracker-install {
+        display: block;
+        background: var(--bg);
+        border: 1px solid var(--border);
+        border-radius: 4px;
+        padding: 0.6rem 0.75rem;
+        font-family: var(--font-mono);
+        font-size: 0.8rem;
+        color: var(--accent);
+        word-break: break-all;
+        margin: 0 0 0.75rem;
+        user-select: all;
+    }
+    .tracker-download-links {
+        display: flex;
+        gap: 0.5rem;
+        flex-wrap: wrap;
+    }
+    .tracker-download-links a {
+        padding: 0.4rem 1rem;
+        border-radius: 6px;
+        border: 1px solid var(--border);
+        background: var(--bg);
+        color: var(--text-2);
+        font-size: 0.8rem;
+        text-decoration: none;
+        transition: all 0.15s;
+    }
+    .tracker-download-links a:hover {
+        color: var(--text);
+        border-color: var(--accent-soft);
+    }
 "#;
 
 fn winrate_pct(wins: u32, total: u32) -> f64 {
@@ -656,6 +730,34 @@ pub fn Stats() -> Element {
                 }
                 p { class: "daemon-settings-hint",
                     "The daemon uses this name to find your row on replay and post-match scoreboards."
+                }
+            }
+
+            // Tracker download / install
+            div { class: "tracker-download",
+                div { class: "tracker-download-head",
+                    h3 { "Get the Stat Tracker" }
+                    span { class: "tracker-badge", "Linux only" }
+                }
+                p {
+                    "The tracker auto-captures your Overwatch scoreboards via OCR and uploads your stats here. "
+                    "It runs on Linux / Wayland only — there is no Windows or macOS build."
+                }
+                code { class: "tracker-install",
+                    "curl -fsSL https://raw.githubusercontent.com/FrozenTear/scuffed-crew/main/crates/stat-tracker/dist/bootstrap.sh | bash"
+                }
+                p {
+                    "After installing, start the GUI, then paste this server's URL and a "
+                    Link { to: Route::StatsTokens {}, "daemon token" }
+                    " to begin uploading."
+                }
+                div { class: "tracker-download-links",
+                    a {
+                        href: "https://github.com/FrozenTear/scuffed-crew/releases/latest",
+                        target: "_blank",
+                        rel: "noopener noreferrer",
+                        "Latest release"
+                    }
                 }
             }
 
