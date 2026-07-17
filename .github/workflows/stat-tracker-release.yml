@@ -1,0 +1,93 @@
+name: Stat Tracker Release
+
+# Prebuilt Linux binaries for the stat tracker, published as a GitHub Release.
+# Trigger: push a tag like `stat-tracker-v0.1.0`, or run manually (dispatch
+# builds from the chosen ref and publishes a draft release for inspection).
+
+on:
+  push:
+    tags:
+      - "stat-tracker-v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-release:
+    name: Build & Package (linux-x86_64)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwayland-dev libxkbcommon-dev \
+            libegl-dev libgbm-dev \
+            tesseract-ocr libtesseract-dev libleptonica-dev \
+            libevdev-dev libudev-dev \
+            libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev \
+            libxdo-dev \
+            pkg-config
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: crates/stat-tracker
+
+      - name: Build release binaries
+        working-directory: crates/stat-tracker
+        run: cargo build --release --features gui --bins
+
+      - name: Package tarball
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#stat-tracker-v}"
+          [ "${GITHUB_REF_NAME}" = "${VERSION}" ] && VERSION="dev-${GITHUB_SHA::8}"
+          STAGE="scuffed-stat-tracker-linux-x86_64"
+          mkdir -p "${STAGE}/bin"
+          cp crates/stat-tracker/target/release/scuffed-stat-tracker "${STAGE}/bin/"
+          cp crates/stat-tracker/target/release/stat-tracker-gui "${STAGE}/bin/"
+          cp -r crates/stat-tracker/assets "${STAGE}/assets"
+          # Standalone no-cargo installer (contract: lives at tar root)
+          cp crates/stat-tracker/dist/install.sh "${STAGE}/install.sh"
+          chmod +x "${STAGE}/install.sh" "${STAGE}"/bin/*
+          echo "${VERSION}" > "${STAGE}/VERSION"
+          tar czf "${STAGE}.tar.gz" "${STAGE}"
+          sha256sum "${STAGE}.tar.gz" > "${STAGE}.tar.gz.sha256"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+        id: pkg
+
+      - name: Smoke test binary
+        run: |
+          ./scuffed-stat-tracker-linux-x86_64/bin/scuffed-stat-tracker --help >/dev/null
+          echo "daemon binary runs"
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_EVENT_NAME}" = "push" ]; then
+            TAG="${GITHUB_REF_NAME}"
+            EXTRA_FLAGS=""
+          else
+            # Manual runs publish a draft; --target lets gh mint the tag itself.
+            TAG="stat-tracker-manual-${GITHUB_SHA::8}"
+            EXTRA_FLAGS="--draft --target ${GITHUB_SHA}"
+          fi
+          {
+            echo "Prebuilt Linux x86_64 build of the Overwatch 2 stat tracker (daemon + GUI)."
+            echo
+            echo "**Requirements:** Linux + Wayland (wlr-screencopy compositor or XDG portal), \`tesseract\` + \`leptonica\` runtime libraries, membership in the \`input\` group."
+            echo
+            echo "**Install:** download and extract the tarball, then run \`./install.sh\` inside it — no Rust toolchain needed. See crates/stat-tracker/README.md for details."
+          } > release-notes.md
+          gh release create "${TAG}" ${EXTRA_FLAGS} \
+            --title "Stat Tracker ${TAG#stat-tracker-}" \
+            --notes-file release-notes.md \
+            scuffed-stat-tracker-linux-x86_64.tar.gz \
+            scuffed-stat-tracker-linux-x86_64.tar.gz.sha256
