@@ -26,8 +26,11 @@ RED='\033[0;31m'
 YLW='\033[1;33m'
 GRN='\033[0;32m'
 NC='\033[0m'
-info()  { echo -e "${GRN}[bootstrap]${NC} $*"; }
-warn()  { echo -e "${YLW}[ warn ]${NC} $*"; }
+# All logging goes to stderr: resolve_release's stdout is machine-parsed
+# (mapfile below), so a single echo to stdout shifts tag/url/sha by one line
+# and the tag ends up passed to curl as a hostname.
+info()  { echo -e "${GRN}[bootstrap]${NC} $*" >&2; }
+warn()  { echo -e "${YLW}[ warn ]${NC} $*" >&2; }
 error() { echo -e "${RED}[error ]${NC} $*" >&2; }
 
 need() {
