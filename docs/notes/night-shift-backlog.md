@@ -140,7 +140,38 @@ progressions must pass).
 **Done when.** Replaying the 07-17 captures yields no 93; synthetic
 impossible-jump fixture test in CI; real-frame local test untouched.
 
-## 9. Retracted / non-items
+## 9. LIVE-2: Ilios map never registered — map matching too brittle  [MED, field-observed 07-17]
+
+**Problem.** Live Ilios game 07-17 ~23:35+: map empty in every capture.
+Two readers failed independently:
+- Vote screen (`detect/match_start.rs:344` `extract_map_names`): **exact
+  `contains()` only, no fuzzy** — gate passed (navy_ratio 0.95, VOTE+MAP seen)
+  but `maps=[]`. ILIOS = three capital I's, the most OCR-mangled name in the
+  pool (`1LIOS`/`IL10S`/`|LIOS` all miss exact match).
+- Scoreboard header (`parse.rs::find_map`): has fuzzy pass but
+  `FUZZY_MAP_THRESHOLD=0.85` is too strict for a mangled 5-char word — empty
+  ALL frames while hero names read fine. Oasis (round glyphs) read clean on
+  both paths same night.
+- Accolade reader (3rd chance, fires at match end) worked for Oasis; verify
+  whether it caught Ilios post-game.
+
+**Fix sketch.** (a) Glyph-normalization pass before both matchers: `1→i`,
+`|→i`, `l→i` (uppercase context), `0→o`; (b) reuse `fuzzy_match_map` in the
+vote path instead of exact contains; (c) consider per-length threshold (short
+names need more slack) but keep the King's Row false-positive guard;
+(d) debug-dump the map region after N consecutive empty reads so the next
+failure is diagnosable from raw pixels.
+
+**Done when.** Synthetic mangled-name fixtures (`1LIOS`, `IL10S`, `0ASIS`,
+`BUSVN`…) resolve correctly in a CI test; no false positives on player-name
+fixtures; next live Ilios/Control session registers the map.
+
+**Also feeds LIVE-1 (item 8):** same session showed E spikes 93→99 tracking
+the control point % (93%/99% pre-overtime) — bleed-through confirmed
+recurring, multiple spikes per game. Delta-gate priority raised: a spike on
+the final capture is no longer a tail risk.
+
+## 10. Retracted / non-items
 
 - roster.rs "(public)" comment: **correct as written** (GET has no auth extractor
   by design; data already public via team pages). Claude flagged it wrongly on
