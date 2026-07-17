@@ -254,8 +254,17 @@ impl LocalStore {
         hero: &str,
         role: &str,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        // Write through to the capture rows like set_session_map/outcome do:
+        // the GUI and the sync path read personal_match, not match_session, so
+        // a session-only update is invisible to both (the 07-18 "Tracer" game).
+        // The `hero != $hero` guard keeps re-sync churn out of the every-capture
+        // refresh path.
         self.db
-            .query("UPDATE match_session SET hero = $hero, role = $role WHERE session_id = $sid")
+            .query(
+                "UPDATE match_session SET hero = $hero, role = $role WHERE session_id = $sid; \
+                 UPDATE personal_match SET hero = $hero, role = $role, synced = false \
+                 WHERE session_id = $sid AND (hero != $hero OR role != $role)",
+            )
             .bind(("hero", hero.to_string()))
             .bind(("role", role.to_string()))
             .bind(("sid", session_id.to_string()))
@@ -820,6 +829,49 @@ mod tests {
         // Clearing all data never leaks tombstones either.
         store.clear_all_data().await.unwrap();
         assert!(store.get_pending_tombstones().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn set_session_hero_writes_through_to_capture_rows() {
+        // The 07-18 field case: majority-correct captures with wrong-hero
+        // stragglers from post-match row browsing. The repair must reach the
+        // personal_match rows (what the GUI and sync read), not just the
+        // session row, and must flip only mismatched rows to synced=false.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = LocalStore::open(dir.path()).await.expect("open store");
+        for i in 0..3 {
+            let mut m = snap("s1", i);
+            if i < 2 {
+                m.hero = "Mizuki".into();
+                m.role = "Support".into();
+            } else {
+                m.hero = "Tracer".into();
+                m.role = "Damage".into();
+            }
+            store.insert_match(m).await.unwrap();
+        }
+        // Everything already synced, as after a normal upload cycle.
+        let ids: Vec<_> = store
+            .get_all_matches()
+            .await
+            .unwrap()
+            .into_iter()
+            .filter_map(|m| m.id)
+            .collect();
+        store.mark_synced(ids).await.unwrap();
+
+        store
+            .set_session_hero("s1", "Mizuki", "Support")
+            .await
+            .unwrap();
+
+        let rows = store.get_all_matches().await.unwrap();
+        assert!(
+            rows.iter()
+                .all(|m| m.hero == "Mizuki" && m.role == "Support")
+        );
+        // Only the repaired (previously Tracer) row is queued for re-sync.
+        assert_eq!(rows.iter().filter(|m| !m.synced).count(), 1);
     }
 
     #[test]
