@@ -186,12 +186,9 @@ pub fn system_tessdata_candidates() -> Vec<PathBuf> {
 /// Return the directory containing `{lang}.traineddata` on the system, if any.
 pub fn find_system_traineddata(lang: &str) -> Option<PathBuf> {
     let file = format!("{lang}.traineddata");
-    for dir in system_tessdata_candidates() {
-        if dir.join(&file).is_file() {
-            return Some(dir);
-        }
-    }
-    None
+    system_tessdata_candidates()
+        .into_iter()
+        .find(|dir| dir.join(&file).is_file())
 }
 
 pub fn ensure_koverwatch_tessdata() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
