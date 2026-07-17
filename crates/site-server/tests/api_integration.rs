@@ -4134,6 +4134,16 @@ async fn admin_resets_local_password_member_logs_in() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::CREATED);
+    let pre_reset_cookie = resp
+        .headers()
+        .get(header::SET_COOKIE)
+        .expect("register session cookie")
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_string();
     let (user, _) = state
         .db
         .get_local_user_by_username("forgetful")
@@ -4177,6 +4187,25 @@ async fn admin_resets_local_password_member_logs_in() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
+
+    // Reset revokes live sessions — the pre-reset cookie must be dead
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/auth/me")
+                .header(header::COOKIE, pre_reset_cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::UNAUTHORIZED,
+        "old session must be revoked by password reset"
+    );
 
     // Old password dead, new password works
     let app = create_router(state.clone());

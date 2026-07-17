@@ -832,6 +832,18 @@ pub async fn admin_reset_local_password(
             )
         })?;
 
+    // Revoke every live session — a reset must lock out whoever held the old
+    // credentials (same rule as deactivate/ban).
+    if let Err(e) = state.db.delete_sessions_for_user(&member.user_id).await {
+        tracing::error!("reset-password revoke sessions: {e}");
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: "Internal error".into(),
+            }),
+        ));
+    }
+
     audit(
         &state.db,
         &admin.member.id,

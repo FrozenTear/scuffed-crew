@@ -18,3 +18,7 @@ cachyos-repo.tar.xz
 # Local agent / editor state
 .serena/
 .claude/
+
+# Local agent runtime (memtrace) — never commit
+.memdb/
+.memtrace/
