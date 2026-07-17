@@ -25,6 +25,12 @@ const STAT_COL_BOUNDARIES_FALLBACK: [(f64, f64); STAT_COLUMNS] = [
 /// Upper bound set to ~38% to exclude the circular hero-ability icons that OCR reads as "Q"/"O".
 const NAME_COL_X: f64 = 0.26;
 const NAME_COL_W: f64 = 0.12;
+/// 6v6 squeezes the table horizontally: the name plate sits further left.
+/// Measured on the 2026-07-16 fixture (12-row board, dumped row_00.png):
+/// name text spans ~0.155–0.24 of row width; 0.26+ lands on the E/A/D digits,
+/// which is exactly what OCR read before this constant existed.
+const NAME_COL_X_6V6: f64 = 0.15;
+const NAME_COL_W_6V6: f64 = 0.10;
 
 /// Row layout: header takes ~2.5% of scoreboard height.
 /// Team 1 starts immediately after header. Team 2 starts at ~56.5% (measured from
@@ -471,11 +477,34 @@ pub fn crop_stat_cell(
     Some(row.crop_imm(x, pad_y, cell_w, cell_h))
 }
 
-/// Extract the player name cell from a row.
-pub fn crop_name_cell(row: &DynamicImage) -> DynamicImage {
+/// Hard-threshold fallback preparation for name cells whose cosmetic
+/// nameplates defeat the HSV white mask (gradient plates, tinted glyphs).
+/// Grayscale > 200 keeps only the brightest glyph pixels; output is
+/// black-text-on-white for Tesseract, upscaled like the primary path.
+pub fn prepare_name_cell_hard_threshold(img: &DynamicImage) -> GrayImage {
+    let gray = img.to_luma8();
+    // Smooth-upscale BEFORE thresholding: at native row height (~77px) the
+    // glyphs are too thin to survive a hard binarization.
+    let (w, h) = gray.dimensions();
+    let up = image::imageops::resize(&gray, w * 4, h * 4, image::imageops::FilterType::CatmullRom);
+    let mut bin = up;
+    for p in bin.pixels_mut() {
+        p.0[0] = if p.0[0] > 200 { 0 } else { 255 };
+    }
+    bin
+}
+
+/// Extract the player name cell from a row. The window depends on the match
+/// layout: 6v6 renders a narrower table than 5v5.
+pub fn crop_name_cell(row: &DynamicImage, team_size: usize) -> DynamicImage {
+    let (name_x, name_w) = if team_size >= 6 {
+        (NAME_COL_X_6V6, NAME_COL_W_6V6)
+    } else {
+        (NAME_COL_X, NAME_COL_W)
+    };
     let (w, h) = (row.width(), row.height());
-    let x = (w as f64 * NAME_COL_X) as u32;
-    let cell_w = (w as f64 * NAME_COL_W) as u32;
+    let x = (w as f64 * name_x) as u32;
+    let cell_w = (w as f64 * name_w) as u32;
     let pad_y = (h as f64 * 0.15) as u32;
     let cell_h = h - (pad_y * 2);
 

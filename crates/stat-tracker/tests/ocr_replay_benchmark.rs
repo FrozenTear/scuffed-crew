@@ -587,7 +587,7 @@ fn debug_save_cell_crops() {
             if let Some(row) = preprocess::crop_player_row(&cropped, row_idx, ts) {
                 let _ = row.save(debug_dir.join(format!("row_{row_idx:02}.png")));
 
-                let name = preprocess::crop_name_cell(&row);
+                let name = preprocess::crop_name_cell(&row, ts);
                 let _ = name.save(debug_dir.join(format!("row_{row_idx:02}_name.png")));
                 let name_pp = preprocess::prepare_name_cell(&name);
                 let _ = DynamicImage::ImageLuma8(name_pp)
