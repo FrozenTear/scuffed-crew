@@ -27,6 +27,15 @@ const POLL_DUMP_KEEP: usize = 150;
 /// diagnosing why ("it didn't record my game" is undebuggable otherwise).
 const REJECTED_KEEP: usize = 30;
 
+/// After this many consecutive scoreboard captures that parsed but resolved no
+/// map, dump the map-label region to `debug/mapmiss/` so the miss is
+/// diagnosable from raw pixels. The 07-17 Ilios game read no map on any frame
+/// and left no pixel evidence of why (mangled OCR text is not enough).
+const EMPTY_MAP_DUMP_THRESHOLD: usize = 5;
+
+/// Ring size for the `debug/mapmiss/` map-region dumps.
+const MAPMISS_KEEP: usize = 10;
+
 struct PidGuard(std::path::PathBuf);
 
 impl Drop for PidGuard {
@@ -50,6 +59,9 @@ struct DaemonCtx {
     collect_portraits: bool,
     dump_poll_frames: bool,
     data_dir: std::path::PathBuf,
+    /// Consecutive scoreboard captures that parsed but resolved no map. Drives
+    /// the `debug/mapmiss/` region dump (see `EMPTY_MAP_DUMP_THRESHOLD`).
+    empty_map_reads: std::sync::atomic::AtomicUsize,
 }
 
 /// Per-capture parameters decided by the session state machine at Tab time.
@@ -298,6 +310,7 @@ async fn main() -> anyhow::Result<()> {
         collect_portraits,
         dump_poll_frames,
         data_dir,
+        empty_map_reads: std::sync::atomic::AtomicUsize::new(0),
     });
     run_loop(ctx).await
 }
@@ -1584,6 +1597,28 @@ async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<
                 tracing::debug!(error = %e, "failed to refresh session hero");
             }
         }
+        // Diagnostics: after N consecutive scoreboard captures that parsed but
+        // resolved no map, dump the map-label region so the next failure is
+        // debuggable from raw pixels (the 07-17 Ilios game left none).
+        use std::sync::atomic::Ordering;
+        if recorded_map.is_none() {
+            let n = ctx.empty_map_reads.fetch_add(1, Ordering::Relaxed) + 1;
+            if n >= EMPTY_MAP_DUMP_THRESHOLD {
+                ctx.empty_map_reads.store(0, Ordering::Relaxed);
+                let region = ocr::preprocess::crop_map_name(&frame_img);
+                let dir = data_dir.join("debug").join("mapmiss");
+                tracing::warn!(
+                    consecutive = n,
+                    "N consecutive scoreboard captures resolved no map — dumping map region to debug/mapmiss"
+                );
+                tokio::task::spawn_blocking(move || {
+                    save_frame_ring(&dir, "mapmiss", &region, MAPMISS_KEEP);
+                });
+            }
+        } else {
+            ctx.empty_map_reads.store(0, Ordering::Relaxed);
+        }
+
         Ok(CaptureReport {
             recorded: true,
             outcome,

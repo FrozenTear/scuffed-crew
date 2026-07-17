@@ -341,12 +341,73 @@ const MAP_NAMES: &[&str] = &[
     "AATLIS",
 ];
 
+/// Pull map names off the vote screen's OCR text. `text` is the uppercased OCR
+/// dump. Exact `contains` alone went 0-for-2 in the field (07-18) — even a clean
+/// "ROUTE 66" missed — so this glyph-normalizes both sides (`1`/`|`/`l`→`i`,
+/// `0`→`o`; shared with the scoreboard reader) and falls back to a per-length
+/// fuzzy match. Returns the raw MAP_NAMES entries; the caller canonicalizes them
+/// through the MAPS table (`parse::canonical_map`).
 fn extract_map_names(text: &str) -> Vec<String> {
+    let norm = crate::parse::normalize_ocr_glyphs(&text.to_lowercase());
+    let words: Vec<&str> = norm.split_whitespace().collect();
+
     let mut found = Vec::new();
     for &name in MAP_NAMES {
-        if text.contains(name) {
+        let name_norm = crate::parse::normalize_ocr_glyphs(&name.to_lowercase());
+
+        // Exact (normalized) substring first.
+        if norm.contains(&name_norm) {
+            found.push(name.to_string());
+            continue;
+        }
+
+        // Fuzzy per word / window, looser threshold for short names.
+        let parts: Vec<&str> = name_norm.split_whitespace().collect();
+        let threshold = crate::parse::map_fuzzy_threshold(
+            name_norm.chars().filter(|c| !c.is_whitespace()).count(),
+        );
+        let matched = if parts.len() == 1 {
+            words
+                .iter()
+                .any(|w| strsim::normalized_levenshtein(w, &name_norm) >= threshold)
+        } else {
+            words
+                .windows(parts.len())
+                .any(|win| strsim::normalized_levenshtein(&win.join(" "), &name_norm) >= threshold)
+        };
+        if matched {
             found.push(name.to_string());
         }
     }
     found
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn vote_reader_recovers_mangled_names() {
+        // The vote screen OCR text is uppercased before extract_map_names.
+        // Glyph-mangled ILIOS variants and a clean ROUTE 66 must all resolve.
+        // (Mutation check: revert extract_map_names to `text.contains(name)`
+        // and every ILIOS assertion here fails — plus the field-observed clean
+        // "ROUTE 66" that the old exact path also missed.)
+        assert!(extract_map_names("1LIOS").contains(&"ILIOS".to_string()));
+        assert!(extract_map_names("IL10S").contains(&"ILIOS".to_string()));
+        assert!(extract_map_names("|LIOS").contains(&"ILIOS".to_string()));
+        assert!(extract_map_names("ROUTE 66").contains(&"ROUTE 66".to_string()));
+        // A realistic multi-option vote line.
+        let maps = extract_map_names("VOTE FOR A MAP  1LIOS   NEPAL   0ASIS");
+        assert!(maps.contains(&"ILIOS".to_string()));
+        assert!(maps.contains(&"NEPAL".to_string()));
+        assert!(maps.contains(&"OASIS".to_string()));
+    }
+
+    #[test]
+    fn vote_reader_ignores_non_map_text() {
+        // Header words and hero names on the vote screen must not read as maps.
+        let maps = extract_map_names("VOTE FOR A MAP  REAPER  SOMBRA");
+        assert!(maps.is_empty(), "unexpected maps: {maps:?}");
+    }
 }
