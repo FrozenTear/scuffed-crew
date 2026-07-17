@@ -512,7 +512,11 @@ impl Database {
         with_timeout(async {
             let mut result = self
                 .client
-                .query("SELECT * FROM member WHERE nostr_pubkey = $pk AND is_active = true LIMIT 1")
+                // WITH NOINDEX: the unique index on nostr_pubkey returns zero
+                // rows for equality + LIMIT lookups on SurrealDB v3 (verified
+                // via probe: count() scan finds the row, index path does not).
+                // Member table is org-scale; a scan is fine.
+                .query("SELECT * FROM member WITH NOINDEX WHERE nostr_pubkey = $pk AND is_active = true LIMIT 1")
                 .bind(("pk", pubkey.to_string()))
                 .await?;
             let members: Vec<DbMember> = result.take(0)?;
