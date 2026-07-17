@@ -95,20 +95,25 @@ against `debug/rejected` expectations, post findings with IDs.
 
 ## 7. GUI-1: stat-tracker-gui crashes on Arch — libxdo.so.3 missing  [MEDIUM, field-confirmed 07-17]
 
-**Problem.** Release v0.1.0 GUI fails on Arch/CachyOS: `error while loading
-shared libraries: libxdo.so.3`. Ubuntu 24.04 CI runner ships libxdo; Arch does
-not. It fell between the release's two lib strategies — not in the bundled
-closure, not documented as host-provided, not checked by install.sh. Daemon
-unaffected. Workaround applied on USER box: `pacman -S xdotool`.
+**Problem (root cause confirmed 07-17).** Release v0.1.0 GUI fails on
+Arch/CachyOS: `libxdo.so.3` not found. NOT a missing package — a soname skew:
+Arch's xdotool 4.20260303 ships `libxdo.so.4`; the 24.04-built GUI wants
+`.so.3`, which Arch can no longer provide. Same fragmentation class as the
+leptonica problem the daemon already solves by bundling. Compounding it: the
+GUI binary shipped with **no RUNPATH at all** (only the daemon got
+`$ORIGIN/../lib`), so it can't see bundled libs even if present. Daemon
+unaffected. ABI is compatible: `.so.4` symlinked as `.so.3` works.
 
-**Fix sketch (pick one, lean bundle):**
-- Bundle: add libxdo to the GUI job's lib/ closure in
-  `.github/workflows/stat-tracker-release.yml` (same RPATH $ORIGIN/../lib
-  mechanism as the OCR libs) — zero user action, consistent with the portable
-  strategy; OR
-- Document + check: install.sh probes `ldd stat-tracker-gui | grep 'not found'`
-  after extract and prints per-distro install hints (xdotool / libxdo3).
-  Cheaper, but every Arch/Fedora user still hits a manual step.
+**Workaround live on USER box (remove after real fix):** compat symlink
+`~/.local/lib/compat/libxdo.so.3 -> /usr/lib/libxdo.so.4` + patchelf RUNPATH
+stamp on the installed GUI binary. Verified: clean launch, no env vars.
+
+**Fix (bundle — documenting can't fix a soname the distro no longer has):**
+- `.github/workflows/stat-tracker-release.yml` GUI job: add libxdo to the
+  bundled lib/ closure AND apply the same RPATH `$ORIGIN/../lib` treatment the
+  daemon gets (currently missing on the GUI binary entirely).
+- Add to release validation: `ldd`-clean assertion + headless GUI launch probe
+  so this class can't ship unchecked again.
 
 **Done when.** Clean-room GUI launch check on a non-Ubuntu container (or at
 minimum ldd-clean assertion in release validation) passes; release notes list
