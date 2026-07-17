@@ -3924,7 +3924,7 @@ async fn public_leaderboards_and_member_heroes() {
     assert_eq!(resp.status(), StatusCode::OK);
 
     // Admin can create season
-    let app = create_router(state);
+    let app = create_router(state.clone());
     let resp = app
         .oneshot(authed_json_request(
             Method::POST,
@@ -3943,4 +3943,27 @@ async fn public_leaderboards_and_member_heroes() {
     let season = body_json(resp).await;
     assert_eq!(season["name"], "Season 1");
     assert_eq!(season["is_current"], true);
+    let season_id = season["id"].as_str().unwrap();
+
+    // Seasonal board filter accepts known season id
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(unauthed_request(
+            Method::GET,
+            &format!("/api/public/leaderboards?metric=winrate&limit=10&season={season_id}"),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // Unknown season → 404
+    let app = create_router(state);
+    let resp = app
+        .oneshot(unauthed_request(
+            Method::GET,
+            "/api/public/leaderboards?metric=winrate&season=nope",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }

@@ -1,9 +1,13 @@
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use surrealdb::types::Datetime as SurrealDatetime;
 use surrealdb_types::{RecordId, SurrealValue};
 
 use crate::types::{HeroStats, MapStats, MemberLeaderboardRow, PersonalMatch, PersonalStats};
 use crate::{with_timeout, Database, DbResult};
+
+/// Minimum games required for rate metrics (winrate / kd) on public boards.
+const LEADERBOARD_MIN_GAMES: u32 = 5;
 
 #[derive(Debug, Clone, Serialize, Deserialize, SurrealValue)]
 struct DbPersonalMatch {
@@ -302,11 +306,17 @@ impl Database {
     }
 
     /// Public member leaderboard from personal_match aggregates.
-    /// metric: "winrate" | "kd" | "games"
+    ///
+    /// - `metric`: `"winrate"` | `"kd"` | `"games"`
+    /// - optional `season_window` `(starts_at, ends_at)` filters via
+    ///   `played_at >= starts AND played_at < ends` (bound params only)
+    /// - inactive / missing members are omitted (banned stay off public boards)
+    /// - winrate/kd require ≥ [`LEADERBOARD_MIN_GAMES`] matches
     pub async fn member_leaderboard(
         &self,
         metric: &str,
         limit: u32,
+        season_window: Option<(DateTime<Utc>, DateTime<Utc>)>,
     ) -> DbResult<Vec<MemberLeaderboardRow>> {
         with_timeout(async {
             #[derive(Deserialize, SurrealValue)]
@@ -318,10 +328,13 @@ impl Database {
                 deaths: u32,
             }
 
-            let mut result = self
-                .client
-                .query(
-                    r#"
+            let season_filter = if season_window.is_some() {
+                " AND played_at >= $season_start AND played_at < $season_end"
+            } else {
+                ""
+            };
+            let sql = format!(
+                r#"
                     SELECT
                         member_id,
                         count() AS games,
@@ -329,30 +342,44 @@ impl Database {
                         math::sum(elims) AS elims,
                         math::sum(deaths) AS deaths
                     FROM personal_match
-                    WHERE outcome IN ['victory', 'defeat', 'draw']
+                    WHERE outcome IN ['victory', 'defeat', 'draw']{season_filter}
                     GROUP BY member_id
-                    "#,
-                )
-                .await?;
+                    "#
+            );
+
+            let mut q = self.client.query(sql);
+            if let Some((start, end)) = season_window {
+                q = q
+                    .bind(("season_start", SurrealDatetime::from(start)))
+                    .bind(("season_end", SurrealDatetime::from(end)));
+            }
+            let mut result = q.await?;
             let rows: Vec<AggRow> = result.take(0)?;
 
+            let rate_metric = matches!(metric, "winrate" | "kd");
             let mut out = Vec::with_capacity(rows.len());
             for row in rows {
                 if row.games == 0 {
                     continue;
                 }
-                let display_name = self
+                if rate_metric && row.games < LEADERBOARD_MIN_GAMES {
+                    continue;
+                }
+                // Skip missing or inactive members (ban/deactivate = off public LB).
+                let Some(member) = self
                     .get_member_safe(&row.member_id)
                     .await
                     .ok()
                     .flatten()
-                    .map(|m| m.display_name)
-                    .unwrap_or_else(|| "Unknown".into());
+                    .filter(|m| m.is_active)
+                else {
+                    continue;
+                };
                 let winrate = row.wins as f32 / row.games as f32;
                 let kd = row.elims as f64 / (row.deaths.max(1) as f64);
                 out.push(MemberLeaderboardRow {
                     member_id: row.member_id,
-                    display_name,
+                    display_name: member.display_name,
                     games: row.games,
                     winrate,
                     kd,

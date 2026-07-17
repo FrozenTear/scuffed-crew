@@ -97,6 +97,8 @@ pub struct LeaderboardQuery {
     pub metric: String,
     #[serde(default = "default_limit")]
     pub limit: u32,
+    /// Optional season id — filters aggregates to `played_at` in [starts_at, ends_at).
+    pub season: Option<String>,
 }
 
 fn default_metric() -> String {
@@ -107,7 +109,7 @@ fn default_limit() -> u32 {
     25
 }
 
-/// GET /api/public/leaderboards?metric=winrate|kd|games&limit=25
+/// GET /api/public/leaderboards?metric=winrate|kd|games&limit=25&season=<id>
 pub async fn public_leaderboards(
     State(state): State<AppState>,
     Query(q): Query<LeaderboardQuery>,
@@ -117,9 +119,37 @@ pub async fn public_leaderboards(
         _ => "winrate",
     };
     let limit = q.limit.clamp(1, 100);
+
+    let season_window = if let Some(ref sid) = q.season {
+        let sid = sid.trim();
+        if sid.is_empty() {
+            None
+        } else {
+            let season = state.db.get_season(sid).await.map_err(|_e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse {
+                        error: "Internal error".into(),
+                    }),
+                )
+            })?;
+            let Some(season) = season else {
+                return Err((
+                    StatusCode::NOT_FOUND,
+                    Json(ErrorResponse {
+                        error: "Season not found".into(),
+                    }),
+                ));
+            };
+            Some((season.starts_at, season.ends_at))
+        }
+    } else {
+        None
+    };
+
     let rows = state
         .db
-        .member_leaderboard(metric, limit)
+        .member_leaderboard(metric, limit, season_window)
         .await
         .map_err(|_e| {
             (
