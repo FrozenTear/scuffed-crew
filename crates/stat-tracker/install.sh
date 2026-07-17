@@ -36,14 +36,17 @@ fi
 # ── OCR dependencies ──────────────────────────────────────────────────────────
 
 if ! command -v tesseract &>/dev/null; then
-    warn "tesseract not found — OCR will not work."
+    warn "tesseract not found — OCR will not work for source builds that link system OCR."
     warn "Install:  sudo pacman -S tesseract tesseract-data-eng"
     echo
 elif ! { ls /usr/share/tessdata/eng.traineddata \
              /usr/local/share/tessdata/eng.traineddata \
-             "${TESSDATA_PREFIX:-}/eng.traineddata" 2>/dev/null | grep -q .; }; then
-    warn "eng.traineddata not found — install tesseract-data-eng for OCR to work."
-    warn "Install:  sudo pacman -S tesseract-data-eng"
+             /usr/share/tesseract/tessdata/eng.traineddata \
+             /usr/share/tesseract-ocr/*/tessdata/eng.traineddata \
+             "${TESSDATA_PREFIX:-}/eng.traineddata" \
+             "${TESSDATA_PREFIX:-}/tessdata/eng.traineddata" 2>/dev/null | grep -q .; }; then
+    warn "eng.traineddata not found — install your distro's eng tessdata package."
+    warn "  Arch: tesseract-data-eng · Debian: tesseract-ocr-eng · Fedora: tesseract-langpack-eng"
     echo
 fi
 

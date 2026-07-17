@@ -147,6 +147,53 @@ pub fn tessdata_dir() -> PathBuf {
         .join("tessdata")
 }
 
+/// Candidate system directories that may contain `{lang}.traineddata`.
+///
+/// Distros disagree on layout:
+/// - Arch / many: `/usr/share/tessdata`
+/// - Debian/Ubuntu packages: `/usr/share/tesseract-ocr/<ver>/tessdata`
+/// - Fedora: `/usr/share/tesseract/tessdata`
+/// - overrides: `TESSDATA_PREFIX` (file dir or parent of `tessdata/`)
+pub fn system_tessdata_candidates() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+
+    if let Ok(prefix) = std::env::var("TESSDATA_PREFIX") {
+        let p = PathBuf::from(prefix);
+        // Tesseract accepts either the tessdata directory itself or its parent.
+        dirs.push(p.clone());
+        if p.file_name().and_then(|n| n.to_str()) != Some("tessdata") {
+            dirs.push(p.join("tessdata"));
+        }
+    }
+
+    dirs.push(PathBuf::from("/usr/share/tessdata"));
+    dirs.push(PathBuf::from("/usr/local/share/tessdata"));
+    dirs.push(PathBuf::from("/usr/share/tesseract/tessdata")); // Fedora
+
+    // Debian/Ubuntu versioned layouts: /usr/share/tesseract-ocr/*/tessdata
+    if let Ok(entries) = std::fs::read_dir("/usr/share/tesseract-ocr") {
+        for entry in entries.flatten() {
+            let candidate = entry.path().join("tessdata");
+            if candidate.is_dir() {
+                dirs.push(candidate);
+            }
+        }
+    }
+
+    dirs
+}
+
+/// Return the directory containing `{lang}.traineddata` on the system, if any.
+pub fn find_system_traineddata(lang: &str) -> Option<PathBuf> {
+    let file = format!("{lang}.traineddata");
+    for dir in system_tessdata_candidates() {
+        if dir.join(&file).is_file() {
+            return Some(dir);
+        }
+    }
+    None
+}
+
 pub fn ensure_koverwatch_tessdata() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let tessdata = tessdata_dir();
     let traineddata = tessdata.join("koverwatch.traineddata");
@@ -236,24 +283,10 @@ fn install_font(dir: &Path) -> Result<(), Box<dyn std::error::Error + Send + Syn
     Ok(())
 }
 
-fn find_system_traineddata() -> Option<PathBuf> {
-    let candidates = [
-        PathBuf::from("/usr/share/tessdata/eng.traineddata"),
-        PathBuf::from("/usr/local/share/tessdata/eng.traineddata"),
-    ];
-
-    if let Ok(prefix) = std::env::var("TESSDATA_PREFIX") {
-        let custom = PathBuf::from(prefix).join("eng.traineddata");
-        if custom.exists() {
-            return Some(custom);
-        }
-    }
-
-    candidates.into_iter().find(|p| p.exists())
-}
-
 fn generate_tessdata_lstm(dir: &Path) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let eng_traineddata = find_system_traineddata()
+    let eng_traineddata = find_system_traineddata("eng")
+        .map(|d| d.join("eng.traineddata"))
+        .filter(|p| p.is_file())
         .ok_or("eng.traineddata not found — install tesseract-data-eng for LSTM training")?;
 
     tracing::info!(

@@ -13,17 +13,28 @@ stats, and daemon controls.
   Sway, Hyprland, etc.) with an XDG Desktop Portal fallback.
 - **Keyboard access via evdev.** Tab detection reads `/dev/input` — the user
   must be in the `input` group (`sudo usermod -aG input $USER`, re-login).
-- **Tesseract + Leptonica** (`leptess` links them) and a tessdata directory.
-  `eng.traineddata` from `/usr/share/tessdata` works out of the box; a
-  game-font-tuned model improves accuracy:
+- **Tessdata (`eng.traineddata`).** Looked up in (first hit wins):
+  user `~/.local/share/scuffed-stat-tracker/tessdata/`, `TESSDATA_PREFIX`,
+  `/usr/share/tessdata`, `/usr/share/tesseract-ocr/*/tessdata` (Debian/Ubuntu),
+  `/usr/share/tesseract/tessdata` (Fedora), `/usr/local/share/tessdata`.
+  A game-font-tuned model improves accuracy:
   `scuffed-stat-tracker --generate-tessdata` writes
-  `koverwatch.traineddata` under `~/.local/share/scuffed-stat-tracker/tessdata/`
-  (picked up automatically on next start).
+  `koverwatch.traineddata` under the user tessdata dir (picked up on next start).
+
+### Distro matrix (prebuilt release)
+
+| Component | Minimum | Notes |
+|-----------|---------|--------|
+| **Daemon** | glibc ≥ 2.35 (Ubuntu 22.04+, Debian 12+, Fedora, Arch, openSUSE, RHEL 9+) | OCR `.so` closure is **bundled** in `lib/` (soname splits across distros). Installer copies `lib/` → `$PREFIX/lib` so RPATH `$ORIGIN/../lib` works. |
+| **GUI** | modern distro with **webkit2gtk-4.1** + glibc ≥ 2.39 (Ubuntu 24.04+, Debian 13, Arch, recent Fedora) | Not portable to older LTS; use daemon-only on older boxes if needed. |
+| **Host still needed** | Wayland + `input` group + `eng.traineddata` | Capture/compositor and keyboard access stay host-provided. |
+
+HOLD `stat-tracker-v0.1.0` until portable CI + this runtime lane land.
 
 ## Install (prebuilt Linux x86_64)
 
 No Rust toolchain required. GitHub Releases publish
-`scuffed-stat-tracker-linux-x86_64.tar.gz` (daemon + GUI + assets +
+`scuffed-stat-tracker-linux-x86_64.tar.gz` (`bin/`, optional `lib/`, assets,
 `install.sh`) on tags `stat-tracker-v*`.
 
 **One-liner** (downloads latest matching release and installs into
@@ -46,7 +57,7 @@ extract, then:
 
 ```sh
 cd scuffed-stat-tracker-linux-x86_64
-./install.sh          # copies bins to ~/.local/bin, desktop entry, user systemd unit
+./install.sh          # bins → $PREFIX/bin, bundled lib/ → $PREFIX/lib, desktop + systemd unit
 ```
 
 The in-tarball installer lives at `dist/install.sh` in this crate (copied to

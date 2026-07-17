@@ -4,6 +4,7 @@
 # Expected layout (release asset root after extract):
 #   bin/scuffed-stat-tracker
 #   bin/stat-tracker-gui
+#   lib/*          (optional — bundled OCR libs; RPATH $ORIGIN/../lib)
 #   assets/scuffed-stat-tracker.desktop
 #   assets/scuffed-stat-tracker.service
 #   install.sh   (this file)
@@ -17,6 +18,7 @@ set -euo pipefail
 PKG_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PREFIX="${PREFIX:-$HOME/.local}"
 BIN_DIR="${BIN_DIR:-$PREFIX/bin}"
+LIB_DIR="${LIB_DIR:-$PREFIX/lib}"
 DESKTOP_DIR="${DESKTOP_DIR:-$HOME/.local/share/applications}"
 SYSTEMD_DIR="${SYSTEMD_DIR:-$HOME/.config/systemd/user}"
 ASSETS_DIR="$PKG_ROOT/assets"
@@ -82,15 +84,33 @@ if ! groups 2>/dev/null | grep -qw input; then
     echo
 fi
 
-if ! command -v tesseract &>/dev/null; then
-    warn "tesseract not found — OCR will not work until it is installed."
-    warn "  Arch:   sudo pacman -S tesseract tesseract-data-eng"
-    warn "  Debian: sudo apt install tesseract-ocr tesseract-ocr-eng"
-    echo
-elif ! { ls /usr/share/tessdata/eng.traineddata \
-             /usr/local/share/tessdata/eng.traineddata \
-             "${TESSDATA_PREFIX:-}/eng.traineddata" 2>/dev/null | grep -q .; }; then
+# eng.traineddata locations across distros (daemon probes these at runtime too).
+find_eng_traineddata() {
+    local candidates=(
+        "${TESSDATA_PREFIX:-}/eng.traineddata"
+        "${TESSDATA_PREFIX:-}/tessdata/eng.traineddata"
+        /usr/share/tessdata/eng.traineddata
+        /usr/local/share/tessdata/eng.traineddata
+        /usr/share/tesseract/tessdata/eng.traineddata
+    )
+    local d
+    for d in /usr/share/tesseract-ocr/*/tessdata; do
+        candidates+=("${d}/eng.traineddata")
+    done
+    local f
+    for f in "${candidates[@]}"; do
+        [[ -n "$f" && -f "$f" ]] && return 0
+    done
+    return 1
+}
+
+if ! find_eng_traineddata; then
     warn "eng.traineddata not found — install your distro's eng tessdata package."
+    warn "  Arch:    sudo pacman -S tesseract-data-eng"
+    warn "  Debian:  sudo apt install tesseract-ocr-eng"
+    warn "  Fedora:  sudo dnf install tesseract-langpack-eng"
+    warn "  Paths:   /usr/share/tessdata, /usr/share/tesseract-ocr/*/tessdata,"
+    warn "           /usr/share/tesseract/tessdata, or TESSDATA_PREFIX"
     echo
 fi
 
@@ -100,6 +120,18 @@ mkdir -p "$BIN_DIR"
 install -m755 "$DAEMON_BIN" "$BIN_DIR/scuffed-stat-tracker"
 install -m755 "$GUI_BIN"     "$BIN_DIR/stat-tracker-gui"
 info "Installed binaries → $BIN_DIR"
+
+# Bundled OCR library closure (portable releases). Daemon RPATH is
+# $ORIGIN/../lib so libs must land next to bin under PREFIX.
+if [[ -d "$PKG_ROOT/lib" ]] && compgen -G "$PKG_ROOT/lib/*" >/dev/null; then
+    mkdir -p "$LIB_DIR"
+    count=0
+    for f in "$PKG_ROOT/lib"/*; do
+        install -m755 "$f" "$LIB_DIR/$(basename "$f")"
+        count=$((count + 1))
+    done
+    info "Installed $count bundled OCR libs → $LIB_DIR (RPATH \$ORIGIN/../lib)"
+fi
 
 if [[ ":$PATH:" != *":$BIN_DIR:"* ]]; then
     warn "$BIN_DIR is not in your PATH."
@@ -128,7 +160,7 @@ info "Installed systemd service → $SYSTEMD_DIR (not enabled)"
 # ── Smoke check ───────────────────────────────────────────────────────────────
 
 if ! "$BIN_DIR/scuffed-stat-tracker" --help >/dev/null 2>&1; then
-    warn "daemon --help failed. You may be missing runtime libs (wayland, tesseract/leptonica, webkit/gtk for GUI)."
+    warn "daemon --help failed. Missing host libs (wayland/evdev) or bundled lib/ not installed beside bin?"
 else
     info "daemon binary runs (--help ok)"
 fi

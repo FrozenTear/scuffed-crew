@@ -181,11 +181,7 @@ fn tessdata_path_for_lang(lang: &str) -> Option<PathBuf> {
     {
         return Some(custom_dir.clone());
     }
-    let system = PathBuf::from("/usr/share/tessdata");
-    if system.join(format!("{lang}.traineddata")).exists() {
-        return Some(system);
-    }
-    None
+    crate::setup::find_system_traineddata(lang)
 }
 
 fn tessdata_lang() -> &'static str {
