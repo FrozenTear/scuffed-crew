@@ -224,6 +224,9 @@ mod tests {
     fn http_error_falls_back_without_message() {
         assert_eq!(format_http_error(400, ""), "HTTP error: 400");
         assert_eq!(format_http_error(500, "not json"), "HTTP error: 500");
-        assert_eq!(format_http_error(404, r#"{"detail":"x"}"#), "HTTP error: 404");
+        assert_eq!(
+            format_http_error(404, r#"{"detail":"x"}"#),
+            "HTTP error: 404"
+        );
     }
 }
