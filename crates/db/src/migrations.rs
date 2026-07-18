@@ -583,6 +583,12 @@ pub async fn run_migrations(client: &Surreal<Any>) -> DbResult<()> {
         -- collapse to one row, and outcome/map corrections update in place.
         -- Legacy rows (uploaded before session ids) keep ''.
         DEFINE FIELD OVERWRITE session_id ON personal_match TYPE string DEFAULT '';
+        -- Set when the uploaded values include a manual correction made in the
+        -- tracker. The stored numeric/label fields already hold the effective
+        -- (corrected-if-present) values, so aggregates count corrected numbers;
+        -- this flag only drives the site's "edited" badge. Legacy rows default
+        -- false.
+        DEFINE FIELD OVERWRITE edited ON personal_match TYPE bool DEFAULT false;
 
         DEFINE INDEX IF NOT EXISTS pm_member_idx ON personal_match COLUMNS member_id, played_at;
         DEFINE INDEX IF NOT EXISTS pm_session_idx ON personal_match COLUMNS member_id, session_id;

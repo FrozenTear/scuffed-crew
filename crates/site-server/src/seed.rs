@@ -489,6 +489,7 @@ async fn seed_personal_matches(
                 mitigation: r.10,
                 played_at,
                 uploaded_at: now,
+                edited: false,
             }
         })
         .collect();

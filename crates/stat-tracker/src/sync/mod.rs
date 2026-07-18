@@ -52,20 +52,25 @@ impl SyncClient {
     ) -> Result<StatsUploadResponse, Box<dyn std::error::Error + Send + Sync>> {
         let entries: Vec<StatsUploadEntry> = matches
             .iter()
+            // Upload the effective (corrected-if-present, else OCR) values so
+            // server aggregates and the leaderboard reflect manual fixes, and
+            // flag edited rows for the site badge. The immutable OCR reads stay
+            // local — the transparency detail lives in the tracker GUI.
             .map(|m| StatsUploadEntry {
                 session_id: m.session_id.clone(),
-                hero: m.hero.clone(),
-                map_name: m.map_name.clone(),
+                hero: m.display_hero().to_string(),
+                map_name: m.display_map_name().to_string(),
                 game_mode: m.game_mode.clone(),
-                role: m.role.clone(),
-                outcome: m.outcome.clone(),
-                elims: m.elims,
-                deaths: m.deaths,
-                assists: m.assists,
-                damage: m.damage,
-                healing: m.healing,
-                mitigation: m.mitigation,
+                role: m.display_role().to_string(),
+                outcome: m.display_outcome().to_string(),
+                elims: m.display_elims(),
+                deaths: m.display_deaths(),
+                assists: m.display_assists(),
+                damage: m.display_damage(),
+                healing: m.display_healing(),
+                mitigation: m.display_mitigation(),
                 played_at: chrono::DateTime::<chrono::Utc>::from(m.played_at),
+                edited: m.is_edited(),
             })
             .collect();
 

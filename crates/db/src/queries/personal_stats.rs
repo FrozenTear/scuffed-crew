@@ -30,6 +30,8 @@ struct DbPersonalMatch {
     mitigation: u32,
     played_at: SurrealDatetime,
     uploaded_at: SurrealDatetime,
+    #[surreal(default)]
+    edited: bool,
 }
 
 fn db_to_personal_match(db: DbPersonalMatch) -> PersonalMatch {
@@ -54,6 +56,7 @@ fn db_to_personal_match(db: DbPersonalMatch) -> PersonalMatch {
         mitigation: db.mitigation,
         played_at: db.played_at.into(),
         uploaded_at: db.uploaded_at.into(),
+        edited: db.edited,
     }
 }
 
@@ -106,6 +109,7 @@ impl Database {
                                role = $role, outcome = $outcome,
                                elims = $elims, deaths = $deaths, assists = $assists,
                                damage = $damage, healing = $healing, mitigation = $mit,
+                               edited = $edited,
                                played_at = $played, uploaded_at = time::now()
                            WHERE member_id = $mid AND session_id = $sid"#,
                     )
@@ -122,6 +126,7 @@ impl Database {
                     .bind(("damage", m.damage))
                     .bind(("healing", m.healing))
                     .bind(("mit", m.mitigation))
+                    .bind(("edited", m.edited))
                     .bind(("played", SurrealDatetime::from(m.played_at)))
                     .await?
                     .check()?;
@@ -494,6 +499,7 @@ mod tests {
             mitigation: 0,
             played_at: Utc.with_ymd_and_hms(2026, 7, 1, 20, 0, 0).unwrap(),
             uploaded_at: Utc::now(),
+            edited: false,
         }
     }
 
@@ -536,6 +542,31 @@ mod tests {
         assert_eq!(rows[0].map_name, "Circuit Royal");
         let stats = db.get_personal_stats("m1").await.unwrap();
         assert_eq!((stats.wins, stats.losses), (0, 1));
+    }
+
+    #[tokio::test]
+    async fn edited_flag_persists_and_corrected_values_count() {
+        let db = test_db().await;
+        // An OCR'd row, then a manual correction: the effective (corrected)
+        // values are uploaded with edited=true and must survive the round-trip
+        // and feed aggregates (leaderboard policy v1).
+        let mut m = entry("s1", "victory", 12);
+        m.edited = true;
+        m.elims = 30; // effective value the daemon uploaded
+        db.upsert_personal_matches("m1", &[m]).await.unwrap();
+
+        let rows = db.list_personal_matches("m1", 10, 0).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].edited, "edited flag must persist for the badge");
+        assert_eq!(rows[0].elims, 30, "corrected value stored");
+
+        // A plain upload defaults edited=false.
+        db.upsert_personal_matches("m1", &[entry("s2", "defeat", 4)])
+            .await
+            .unwrap();
+        let s2 = db.list_personal_matches("m1", 10, 0).await.unwrap();
+        let s2 = s2.iter().find(|r| r.session_id == "s2").unwrap();
+        assert!(!s2.edited);
     }
 
     #[tokio::test]

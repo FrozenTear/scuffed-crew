@@ -59,6 +59,7 @@ pub async fn upload_stats(
             mitigation: e.mitigation,
             played_at: e.played_at,
             uploaded_at: chrono::Utc::now(),
+            edited: e.edited,
         })
         .collect();
     let dropped = total - stub_matches.len() as u32;
