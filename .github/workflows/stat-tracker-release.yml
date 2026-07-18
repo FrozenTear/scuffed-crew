@@ -51,6 +51,17 @@ jobs:
         with:
           key: daemon-2204
 
+      - name: Set release version env
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_REF_NAME}" == stat-tracker-v* ]]; then
+            V="${GITHUB_REF_NAME#stat-tracker-v}"
+          else
+            V="dev-${GITHUB_SHA::8}"
+          fi
+          echo "SST_RELEASE_VERSION=${V}"
+          echo "SST_RELEASE_VERSION=${V}" >> "$GITHUB_ENV"
+
       - name: Build daemon (release)
         working-directory: crates/stat-tracker
         run: cargo build --release --bin scuffed-stat-tracker
@@ -74,7 +85,8 @@ jobs:
           sudo apt-get autoremove -y || true
           out="$(./out/bin/scuffed-stat-tracker --version)"
           echo "smoke: ${out}"
-          echo "${out}" | grep -q '^scuffed-stat-tracker ' || { echo "unexpected --version output" >&2; exit 1; }
+          echo "${out}" | grep -qx "scuffed-stat-tracker ${SST_RELEASE_VERSION}" \
+            || { echo "version mismatch: got '${out}', want scuffed-stat-tracker ${SST_RELEASE_VERSION}" >&2; exit 1; }
           echo "daemon runs with bundled OCR libs only"
           ldd ./out/bin/scuffed-stat-tracker | grep -iE 'tesseract|lept' || true
 
@@ -107,6 +119,17 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: gui-2404
+
+      - name: Set release version env
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_REF_NAME}" == stat-tracker-v* ]]; then
+            V="${GITHUB_REF_NAME#stat-tracker-v}"
+          else
+            V="dev-${GITHUB_SHA::8}"
+          fi
+          echo "SST_RELEASE_VERSION=${V}"
+          echo "SST_RELEASE_VERSION=${V}" >> "$GITHUB_ENV"
 
       - name: Build GUI (release)
         working-directory: crates/stat-tracker
