@@ -4,12 +4,24 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum ClientError {
-    #[error("HTTP error: {status}")]
+    #[error("{}", format_http_error(*status, body))]
     Http { status: u16, body: String },
     #[error("Network error: {0}")]
     Network(String),
     #[error("Deserialization error: {0}")]
     Deserialize(String),
+}
+
+/// Servers reply with `{"error": "..."}` bodies; surface that message so user-facing
+/// toasts explain the failure instead of only showing the status code.
+fn format_http_error(status: u16, body: &str) -> String {
+    let message = serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|v| v.get("error")?.as_str().map(str::to_owned));
+    match message {
+        Some(msg) => format!("HTTP error {status}: {msg}"),
+        None => format!("HTTP error: {status}"),
+    }
 }
 
 /// Base URL for API requests.
@@ -193,5 +205,25 @@ impl ApiClient {
     #[cfg(feature = "native")]
     async fn do_delete(&self, path: &str) -> Result<(), ClientError> {
         native_impl::delete(&self.base_url, path, self.token.as_deref()).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::format_http_error;
+
+    #[test]
+    fn http_error_includes_server_message() {
+        assert_eq!(
+            format_http_error(400, r#"{"error":"Member already has this role"}"#),
+            "HTTP error 400: Member already has this role"
+        );
+    }
+
+    #[test]
+    fn http_error_falls_back_without_message() {
+        assert_eq!(format_http_error(400, ""), "HTTP error: 400");
+        assert_eq!(format_http_error(500, "not json"), "HTTP error: 500");
+        assert_eq!(format_http_error(404, r#"{"detail":"x"}"#), "HTTP error: 404");
     }
 }
