@@ -178,6 +178,11 @@ pub fn AdminMembers() -> Element {
 
     let on_role_submit = move |_| {
         if let Some(member) = role_modal.get_target() {
+            // Selection unchanged — nothing to do (the server rejects same-role changes).
+            if role_value() == member.org_role {
+                role_modal.close();
+                return;
+            }
             let id = member.id.clone();
             let body = ChangeRoleRequest { role: role_value() };
             role_modal.start_submit();

@@ -96,13 +96,10 @@ pub async fn post_empty(base_url: &str, path: &str) -> Result<(), ClientError> {
     let request = Request::new_with_str_and_init(&url, &opts)
         .map_err(|e| ClientError::Network(format!("{e:?}")))?;
 
-    let (status, _) = do_fetch(&request).await?;
+    let (status, text) = do_fetch(&request).await?;
 
     if status >= 400 {
-        return Err(ClientError::Http {
-            status,
-            body: String::new(),
-        });
+        return Err(ClientError::Http { status, body: text });
     }
 
     Ok(())

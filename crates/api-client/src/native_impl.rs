@@ -87,11 +87,10 @@ pub async fn post_empty(
         .await
         .map_err(|e| ClientError::Network(e.to_string()))?;
 
-    if resp.status().as_u16() >= 400 {
-        return Err(ClientError::Http {
-            status: resp.status().as_u16(),
-            body: String::new(),
-        });
+    let status = resp.status().as_u16();
+    if status >= 400 {
+        let body = resp.text().await.unwrap_or_default();
+        return Err(ClientError::Http { status, body });
     }
 
     Ok(())
