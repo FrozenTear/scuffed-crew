@@ -147,9 +147,13 @@ jobs:
           fi
           xdo_line="$(ldd ./out/bin/stat-tracker-gui | awk '/libxdo/ {print $3}')"
           echo "libxdo resolves to: ${xdo_line}"
-          case "${xdo_line}" in
-            */out/lib/*) echo "libxdo resolves to the bundled copy — OK" ;;
-            *) echo "libxdo did NOT resolve to the bundled copy (${xdo_line:-missing})" >&2; exit 1 ;;
+          # The loader reports the RUNPATH path unnormalized (out/bin/../lib/…),
+          # so realpath both sides before comparing.
+          xdo_real="$(realpath "${xdo_line:-/nonexistent}" 2>/dev/null || true)"
+          bundle_dir="$(realpath ./out/lib)"
+          case "${xdo_real}" in
+            "${bundle_dir}"/*) echo "libxdo resolves to the bundled copy — OK" ;;
+            *) echo "libxdo did NOT resolve to the bundled copy (got: ${xdo_real:-missing}, want prefix: ${bundle_dir}/)" >&2; exit 1 ;;
           esac
           # No headless launch probe: the Dioxus/webkit2gtk GUI has no --smoke
           # or --version flag (only the SST_VIEW env for view routing) and would
