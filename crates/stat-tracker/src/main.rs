@@ -1,3 +1,4 @@
+use stat_tracker::capture_gate::{self, Counters, GateState};
 use stat_tracker::{capture, config, detect, ocr, parse, setup, storage, sync};
 
 use std::sync::Arc;
@@ -26,6 +27,12 @@ const POLL_DUMP_KEEP: usize = 150;
 /// A rejected capture records nothing, so the frame is the only evidence for
 /// diagnosing why ("it didn't record my game" is undebuggable otherwise).
 const REJECTED_KEEP: usize = 30;
+
+/// How many ACCEPTED scoreboard crops are kept in `<data_dir>/debug/accepted/`.
+/// A silently-corrupt accepted board (OCR drift that still passed every trust
+/// gate) is otherwise unrecoverable for calibration retuning. Bounded so the
+/// always-on ring never grows without limit.
+const ACCEPTED_KEEP: usize = 20;
 
 struct PidGuard(std::path::PathBuf);
 
@@ -60,18 +67,11 @@ struct CaptureRequest {
     session_map: Option<String>,
     map_candidates: Vec<String>,
     allow_banner_recovery: bool,
-    /// Player stats of the session's last accepted capture, for
-    /// regression-based game-boundary detection (see [`stats_regressed`]).
-    prev_stats: Option<PrevStats>,
-}
-
-/// The active session's last accepted player stats, as seen by a new capture.
-struct PrevStats {
-    elims: u32,
-    deaths: u32,
-    damage: u32,
-    /// How long ago that capture was accepted.
-    age: std::time::Duration,
+    /// The session's per-cell capture-gate state (last accepted + last raw
+    /// counters) and how long ago that capture was accepted. Feeds both the
+    /// whole-row game-split signal ([`stats_regressed`]) and the per-cell
+    /// monotonic-hold + rate-cap gate ([`capture_gate::apply_gate`]).
+    prev_gate: Option<(GateState, std::time::Duration)>,
 }
 
 #[tokio::main]
@@ -330,12 +330,13 @@ struct ActiveGame {
     /// outcome/map recorded). Bounds how long an unfinished session can
     /// absorb captures — see [`UNFINISHED_SESSION_IDLE`].
     last_activity: Instant,
-    /// (elims, deaths, damage) of the last accepted capture. Scoreboard stats
-    /// are cumulative within a match, so a later capture reading strictly
-    /// lower values means a NEW game — the detector-independent boundary
-    /// signal (see [`stats_regressed`]).
-    last_stats: Option<(u32, u32, u32)>,
-    /// When `last_stats` was accepted.
+    /// Per-cell capture-gate state (last accepted + last raw counters) from the
+    /// most recent accepted capture. Scoreboard stats are cumulative within a
+    /// match, so this drives both the detector-independent game-split signal
+    /// (see [`stats_regressed`]) and the per-cell hold gate
+    /// ([`capture_gate::apply_gate`]).
+    gate: Option<GateState>,
+    /// When `gate` was last updated (an accepted capture).
     last_stats_at: Option<Instant>,
 }
 
@@ -355,7 +356,7 @@ impl ActiveGame {
             session_created: false,
             opened_at: now,
             last_activity: now,
-            last_stats: None,
+            gate: None,
             last_stats_at: None,
         }
     }
@@ -391,8 +392,11 @@ struct PersistedGame {
     opened_at: chrono::DateTime<Utc>,
     last_activity: chrono::DateTime<Utc>,
     outcome_recorded_at: Option<chrono::DateTime<Utc>>,
+    // Renamed from `last_stats: (u32,u32,u32)`; an old on-disk skeleton simply
+    // defaults this to None (one game's cross-restart gate memory lost — the
+    // file is best-effort recovery, never the capture itself).
     #[serde(default)]
-    last_stats: Option<(u32, u32, u32)>,
+    gate: Option<GateState>,
     #[serde(default)]
     last_stats_at: Option<chrono::DateTime<Utc>>,
 }
@@ -423,7 +427,7 @@ fn persist_active_game(data_dir: &std::path::Path, game: Option<&ActiveGame>) {
         opened_at: to_wall(g.opened_at),
         last_activity: to_wall(g.last_activity),
         outcome_recorded_at: g.outcome_recorded_at.map(to_wall),
-        last_stats: g.last_stats,
+        gate: g.gate,
         last_stats_at: g.last_stats_at.map(to_wall),
     };
     let write = || -> std::io::Result<()> {
@@ -461,7 +465,7 @@ fn recover_active_game(data_dir: &std::path::Path) -> Option<ActiveGame> {
         // logic already treats as stale — the outcome can't leak forward.
         outcome_recorded_at: p.outcome_recorded_at.and_then(to_instant),
         last_stats_at: p.last_stats_at.and_then(to_instant),
-        last_stats: p.last_stats,
+        gate: p.gate,
     })
 }
 
@@ -649,9 +653,11 @@ struct CaptureReport {
     /// capture — a new game was detected and written to a fresh session; the
     /// caller must replace its active game to match.
     split: bool,
-    /// (elims, deaths, damage) written on the snapshot, for the next
-    /// capture's regression check.
-    stats: Option<(u32, u32, u32)>,
+    /// The per-cell capture-gate state after this capture (accepted + raw
+    /// counters), carried into the next capture's monotonic-hold + rate-cap
+    /// checks and the whole-row regression check. `None` when nothing was
+    /// recorded.
+    gate_state: Option<GateState>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -783,7 +789,7 @@ async fn run_loop(ctx: Arc<DaemonCtx>) -> anyhow::Result<()> {
                             persist_active_game(data_dir, active_game.as_ref());
                         }
 
-                        let (sid, create, outcome, session_map, candidates, banner_ok, prev_stats) = {
+                        let (sid, create, outcome, session_map, candidates, banner_ok, prev_gate) = {
                             let g = active_game.as_ref().expect("active_game set above");
                             // A banner-color outcome off a Tab frame is only
                             // plausible when the daemon just joined mid/post
@@ -793,16 +799,11 @@ async fn run_loop(ctx: Arc<DaemonCtx>) -> anyhow::Result<()> {
                             // split the real game.
                             let banner_ok = opened_by_this_tab
                                 || g.opened_at.elapsed() >= MIN_BANNER_SESSION_AGE;
-                            let prev_stats = match (g.last_stats, g.last_stats_at) {
-                                (Some((elims, deaths, damage)), Some(at)) => Some(PrevStats {
-                                    elims,
-                                    deaths,
-                                    damage,
-                                    age: at.elapsed(),
-                                }),
+                            let prev_gate = match (g.gate, g.last_stats_at) {
+                                (Some(state), Some(at)) => Some((state, at.elapsed())),
                                 _ => None,
                             };
-                            (g.session_id.clone(), !g.session_created, g.outcome, g.map.clone(), g.map_candidates.clone(), banner_ok, prev_stats)
+                            (g.session_id.clone(), !g.session_created, g.outcome, g.map.clone(), g.map_candidates.clone(), banner_ok, prev_gate)
                         };
 
                         let tx = capture_tx.clone();
@@ -814,7 +815,7 @@ async fn run_loop(ctx: Arc<DaemonCtx>) -> anyhow::Result<()> {
                             session_map,
                             map_candidates: candidates,
                             allow_banner_recovery: banner_ok,
-                            prev_stats,
+                            prev_gate,
                         };
                         capture_task = Some(tokio::spawn(async move {
                             // Wait for the game to render the scoreboard
@@ -866,7 +867,7 @@ async fn run_loop(ctx: Arc<DaemonCtx>) -> anyhow::Result<()> {
                             );
                             g.session_created = true;
                             g.map = report.map.clone();
-                            g.last_stats = report.stats;
+                            g.gate = report.gate_state;
                             g.last_stats_at = Some(Instant::now());
                             tracing::info!(
                                 old_session = %sid,
@@ -902,8 +903,8 @@ async fn run_loop(ctx: Arc<DaemonCtx>) -> anyhow::Result<()> {
                         if let Some(g) = active_game.as_mut().filter(|g| g.session_id == sid) {
                             g.session_created = true;
                             g.touch();
-                            if let Some(stats) = report.stats {
-                                g.last_stats = Some(stats);
+                            if let Some(gate_state) = report.gate_state {
+                                g.gate = Some(gate_state);
                                 g.last_stats_at = Some(Instant::now());
                             }
                             // First trusted map discovery propagates
@@ -1360,7 +1361,7 @@ async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<
                 map: None,
                 session_id: session_id.to_string(),
                 split: false,
-                stats: None,
+                gate_state: None,
             });
         }
     };
@@ -1420,7 +1421,7 @@ async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<
             map: None,
             session_id: session_id.to_string(),
             split: false,
-            stats: None,
+            gate_state: None,
         });
     }
 
@@ -1488,10 +1489,10 @@ async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<
         // belongs to a NEW game. Split it into a fresh session instead of
         // appending — 2026-07-14 three games merged into one session this way.
         let split = !create_session
-            && req.prev_stats.as_ref().is_some_and(|p| {
-                p.age >= STAT_SPLIT_MIN_GAP
+            && req.prev_gate.is_some_and(|(state, age)| {
+                age >= STAT_SPLIT_MIN_GAP
                     && stats_regressed(
-                        (p.elims, p.deaths, p.damage),
+                        state.accepted.edd(),
                         (parsed.elims, parsed.deaths, parsed.damage),
                     )
             });
@@ -1509,6 +1510,38 @@ async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<
         } else {
             (session_id.to_string(), create_session)
         };
+
+        // Per-cell capture gate: within a game, cumulative counters never
+        // decrease and never jump beyond a plausible rate. Hold a single cell
+        // that violates that (misread collapse, or ghost-9 inflation) to its
+        // last accepted value while keeping every genuinely-advancing cell.
+        // Skipped on a split — a real new game legitimately resets every
+        // counter, so the raw read seeds the fresh session's gate state.
+        let raw_counters = Counters {
+            elims: parsed.elims,
+            assists: parsed.assists,
+            deaths: parsed.deaths,
+            damage: parsed.damage,
+            healing: parsed.healing,
+            mitigation: parsed.mitigation,
+        };
+        let gate = capture_gate::apply_gate(req.prev_gate, raw_counters, split);
+        for h in &gate.holds {
+            tracing::warn!(
+                session_id = %target_session,
+                col = h.col,
+                kind = ?h.kind,
+                raw = h.raw,
+                held = h.held,
+                "capture gate held a cell (suspected OCR misread)"
+            );
+        }
+        parsed.elims = gate.accepted.elims;
+        parsed.assists = gate.accepted.assists;
+        parsed.deaths = gate.accepted.deaths;
+        parsed.damage = gate.accepted.damage;
+        parsed.healing = gate.accepted.healing;
+        parsed.mitigation = gate.accepted.mitigation;
 
         parsed.map_name = if split {
             // The old session's confirmed map and vote candidates belong to
@@ -1563,13 +1596,17 @@ async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<
             "parsed scoreboard"
         );
         let recorded_map = (!parsed.map_name.is_empty()).then(|| parsed.map_name.clone());
-        let recorded_stats = (parsed.elims, parsed.deaths, parsed.damage);
         storage::append_match_log(data_dir, &parsed);
         store
             .insert_match(parsed)
             .await
             .map_err(anyhow::Error::from_boxed)
             .context("store insert failed")?;
+
+        // Dump the accepted scoreboard crop to a bounded ring so a corrupt
+        // ACCEPTED board is diagnosable after the fact — tonight's corruption
+        // was undiagnosable because only rejected frames were ever saved.
+        save_accepted_frame(data_dir, scoreboard_img);
 
         // Keep the session label on the majority hero across its snapshots —
         // a single capture can mislabel (career panel shows the spectated hero
@@ -1590,7 +1627,7 @@ async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<
             map: recorded_map,
             session_id: target_session,
             split,
-            stats: Some(recorded_stats),
+            gate_state: Some(gate.state),
         })
     } else {
         // Scoreboard-shaped frame, but the player's row couldn't be positively
@@ -1607,7 +1644,7 @@ async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<
             map: None,
             session_id: session_id.to_string(),
             split: false,
-            stats: None,
+            gate_state: None,
         })
     }
 }
@@ -1649,6 +1686,17 @@ fn save_rejected_frame(data_dir: &std::path::Path, img: image::DynamicImage, rea
     let dir = data_dir.join("debug").join("rejected");
     tokio::task::spawn_blocking(move || {
         save_frame_ring(&dir, &format!("rejected_{reason}"), &img, REJECTED_KEEP);
+    });
+}
+
+/// Archive the scoreboard crop of an ACCEPTED capture into a bounded ring, so a
+/// board that OCR'd wrong but still passed every trust gate can be inspected
+/// after the fact (the capture gate holds bad cells, but the underlying crop is
+/// the only way to retune calibration). Fire-and-forget; encode off-runtime.
+fn save_accepted_frame(data_dir: &std::path::Path, board: image::DynamicImage) {
+    let dir = data_dir.join("debug").join("accepted");
+    tokio::task::spawn_blocking(move || {
+        save_frame_ring(&dir, "accepted", &board, ACCEPTED_KEEP);
     });
 }
 
@@ -1858,7 +1906,7 @@ mod tests {
             outcome_recorded_at: recorded_secs_ago.map(|s| now - Duration::from_secs(s)),
             opened_at: now - Duration::from_secs(300),
             last_activity: now - Duration::from_secs(30),
-            last_stats: None,
+            gate: None,
             last_stats_at: None,
         }
     }
@@ -1918,7 +1966,25 @@ mod tests {
         );
         g.session_created = true;
         g.map = Some("Oasis".into());
-        g.last_stats = Some((12, 3, 5400));
+        let gate_state = GateState {
+            accepted: Counters {
+                elims: 12,
+                assists: 4,
+                deaths: 3,
+                damage: 5400,
+                healing: 900,
+                mitigation: 1200,
+            },
+            last_raw: Counters {
+                elims: 12,
+                assists: 4,
+                deaths: 3,
+                damage: 5400,
+                healing: 900,
+                mitigation: 1200,
+            },
+        };
+        g.gate = Some(gate_state);
         g.last_stats_at = Some(Instant::now());
         persist_active_game(dir.path(), Some(&g));
 
@@ -1932,9 +1998,14 @@ mod tests {
         );
         assert!(r.session_created);
         assert_eq!(
-            r.last_stats,
+            r.gate.map(|s| s.accepted.edd()),
             Some((12, 3, 5400)),
             "regression baseline must survive a daemon restart"
+        );
+        assert_eq!(
+            r.gate.map(|s| s.accepted.elims),
+            Some(12),
+            "gate state (all six counters) survives a daemon restart"
         );
         assert!(r.last_stats_at.is_some());
 
@@ -1955,7 +2026,7 @@ mod tests {
             opened_at: Utc::now() - chrono::Duration::hours(9),
             last_activity: Utc::now() - chrono::Duration::hours(8),
             outcome_recorded_at: None,
-            last_stats: None,
+            gate: None,
             last_stats_at: None,
         };
         std::fs::write(

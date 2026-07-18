@@ -444,6 +444,12 @@ fn calibrate_columns(scoreboard: &DynamicImage, team_size: usize) -> preprocess:
         probe_rows.iter().map(|r| count_valid_cells(r, &cols)).sum()
     };
 
+    // Anchor for tie-breaking: the last known-good offset for this geometry, if
+    // any. On an equal score we prefer the candidate closest to it rather than a
+    // blanket leftward bias (which latched onto the hard-left header mis-seed —
+    // see the step-0 drift analysis).
+    let mut anchor: Option<f64> = None;
+
     // Reuse last good offset when the board geometry matches and validity has
     // not degraded (threshold: ≥75% of max probe cells still clean).
     if let Ok(guard) = COLUMN_OFFSET_CACHE.lock()
@@ -452,6 +458,7 @@ fn calibrate_columns(scoreboard: &DynamicImage, team_size: usize) -> preprocess:
         && cached.height == board_h
         && cached.team_size == team_size
     {
+        anchor = Some(cached.offset);
         let cached_score = score(cached.offset);
         let reuse_floor = (max_score * 3 / 4).max(1);
         if cached_score >= reuse_floor {
@@ -474,18 +481,7 @@ fn calibrate_columns(scoreboard: &DynamicImage, team_size: usize) -> preprocess:
             offsets
                 .into_par_iter()
                 .map(|o| (o, score(o)))
-                // Prefer more valid cells; tie-break toward the smaller offset
-                // to keep results deterministic across runs.
-                .reduce(
-                    || (0.0f64, -1i32),
-                    |a, b| {
-                        if b.1 > a.1 || (b.1 == a.1 && b.0 < a.0) {
-                            b
-                        } else {
-                            a
-                        }
-                    },
-                )
+                .reduce(|| (0.0f64, -1i32), |a, b| better_offset(a, b, anchor))
         })
     };
 
@@ -547,6 +543,34 @@ fn calibrate_columns(scoreboard: &DynamicImage, team_size: usize) -> preprocess:
     preprocess::columns_with_offset(best_offset)
 }
 
+/// Tie-break between two `(offset, score)` calibration candidates.
+///
+/// A higher valid-cell score always wins. On an EQUAL score, prefer the offset
+/// closest to `anchor` (the last known-good calibration), falling back to the
+/// smaller absolute offset — never a blanket leftward (more-negative) bias.
+/// The old `b.0 < a.0` tie-break systematically walked the calibration left
+/// onto the header mis-seed, clipping the narrow E/A/D columns (step-0 drift
+/// analysis, ocr/mod.rs:482). The ordering key `(distance-to-anchor, offset)`
+/// is a strict total order, so this stays associative for a parallel reduce.
+fn better_offset(a: (f64, i32), b: (f64, i32), anchor: Option<f64>) -> (f64, i32) {
+    use std::cmp::Ordering;
+    match b.1.cmp(&a.1) {
+        Ordering::Greater => b,
+        Ordering::Less => a,
+        Ordering::Equal => {
+            let rank = |o: f64| match anchor {
+                Some(anc) => ((o - anc).abs(), o),
+                None => (o.abs(), o),
+            };
+            let (ra, rb) = (rank(a.0), rank(b.0));
+            match rb.0.total_cmp(&ra.0).then(rb.1.total_cmp(&ra.1)) {
+                Ordering::Less => b,
+                _ => a,
+            }
+        }
+    }
+}
+
 fn count_valid_cells(row: &DynamicImage, cols: &preprocess::StatColumns) -> i32 {
     let mut valid = 0i32;
     for col_idx in 0..6 {
@@ -554,12 +578,40 @@ fn count_valid_cells(row: &DynamicImage, cols: &preprocess::StatColumns) -> i32 
             && let Ok(result) = recognize_cell(&cell)
         {
             let text = result.value.trim();
-            if is_clean_stat(text) {
+            if is_valid_stat_for_column(text, col_idx) {
                 valid += 1;
             }
         }
     }
     valid
+}
+
+/// Whether a cell's OCR text is structurally valid *for its column*, used to
+/// score a candidate column offset. The narrow kill columns (E/A/D, indices
+/// 0–2) hold small 1–2 digit integers; a 3+ digit read or an embedded comma
+/// there means a wider neighbour bled into the window (calibration drift), so it
+/// must NOT count toward the offset's score. The wide accumulator columns keep
+/// the permissive digits-and-commas check.
+///
+/// A right-edge whitespace-margin check (the clean discriminator between a
+/// centered "13" and a clipped "1") was considered but deferred: there are no
+/// real-pixel fixtures on this machine to calibrate a margin threshold against
+/// (the analyst could not even dump a corrupt board — step-0 deviations), so an
+/// unvalidated pixel heuristic in the calibration hot path is the riskier,
+/// irreversible choice. Digit-count structure plus the anchored tie-break is the
+/// reversible half here; the per-cell capture gate (monotonic hold + rate cap)
+/// is the validated safety net that actually catches the clipped/ghost reads.
+pub(crate) fn is_valid_stat_for_column(text: &str, col_idx: usize) -> bool {
+    let text = text.trim();
+    if !is_clean_stat(text) {
+        return false;
+    }
+    if col_idx < 3 {
+        let digits = text.chars().filter(|c| c.is_ascii_digit()).count();
+        !text.contains(',') && (1..=2).contains(&digits)
+    } else {
+        true
+    }
 }
 
 /// Whether a cell's OCR text looks like a real stat value: at least one digit,
@@ -684,4 +736,51 @@ fn run_ocr(
         raw_text: text,
         confidence,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn kill_columns_reject_wide_and_multidigit_reads() {
+        // E/A/D expect 1–2 digits, no comma.
+        assert!(is_valid_stat_for_column("13", 0));
+        assert!(is_valid_stat_for_column("7", 2));
+        assert!(is_valid_stat_for_column("0", 1));
+        // A wide number bleeding into a narrow window must not score.
+        assert!(!is_valid_stat_for_column("5175", 0));
+        assert!(!is_valid_stat_for_column("311", 0));
+        assert!(!is_valid_stat_for_column("4,119", 2));
+        assert!(!is_valid_stat_for_column("", 0));
+    }
+
+    #[test]
+    fn wide_columns_keep_permissive_check() {
+        assert!(is_valid_stat_for_column("4,119", 3));
+        assert!(is_valid_stat_for_column("10009", 3));
+        assert!(is_valid_stat_for_column("899", 5));
+        assert!(!is_valid_stat_for_column("x", 4));
+    }
+
+    #[test]
+    fn better_offset_prefers_higher_score() {
+        assert_eq!(better_offset((-0.1, 3), (-0.05, 5), None), (-0.05, 5));
+        assert_eq!(better_offset((-0.1, 6), (-0.05, 5), None), (-0.1, 6));
+    }
+
+    #[test]
+    fn better_offset_tie_breaks_toward_anchor_not_leftward() {
+        // Equal score, two candidates straddling the known-good anchor -0.17.
+        // The OLD rule (smaller offset wins) would pick -0.20 (further left);
+        // the anchored rule picks -0.16 (closer to the good calibration).
+        let anchor = Some(-0.17);
+        assert_eq!(better_offset((-0.20, 4), (-0.16, 4), anchor), (-0.16, 4));
+        assert_eq!(better_offset((-0.16, 4), (-0.20, 4), anchor), (-0.16, 4));
+    }
+
+    #[test]
+    fn better_offset_tie_without_anchor_prefers_smaller_magnitude() {
+        assert_eq!(better_offset((-0.20, 4), (-0.05, 4), None), (-0.05, 4));
+    }
 }
