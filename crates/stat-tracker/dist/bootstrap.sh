@@ -11,6 +11,8 @@
 #   STAT_TRACKER_TAG    optional release tag (default: latest with matching asset)
 #   STAT_TRACKER_PREFIX install prefix passed as PREFIX to install.sh (default ~/.local)
 #   STAT_TRACKER_DIR    extract directory (default: mktemp -d, removed after install)
+#   SKIP_INTEGRATION    non-empty ⇒ install binaries/libs only (no desktop entry
+#                       or systemd unit); use for throwaway-PREFIX smoke tests
 set -euo pipefail
 
 REPO="${STAT_TRACKER_REPO:-FrozenTear/scuffed-crew}"
@@ -144,6 +146,8 @@ fi
 
 chmod +x "$STAGE/install.sh" "$STAGE"/bin/* 2>/dev/null || true
 info "Running in-tarball installer (PREFIX=$PREFIX)…"
-PREFIX="$PREFIX" bash "$STAGE/install.sh"
+# Pass SKIP_INTEGRATION through so a throwaway-PREFIX smoke test can install
+# binaries only without polluting the real $HOME (desktop entry + systemd unit).
+PREFIX="$PREFIX" SKIP_INTEGRATION="${SKIP_INTEGRATION:-}" bash "$STAGE/install.sh"
 
 info "Done. Launch with: stat-tracker-gui"
