@@ -35,6 +35,17 @@ Everything material to the other agent must be posted on Memtrace `fleet::channe
 
 User chat may mirror status for the human; it is **not** a substitute for the fleet log. If you formed a nit in review and only told the user, that is a process failure — post it on fleet.
 
+## Memtrace / fleet ops
+
+Host topology, MCP vs HTTP truth stack, episode advisory rules, durable
+`memtrace start`, Hermes watcher crons, and restart recovery:
+
+→ **`docs/notes/memtrace-ops.md`** (binding for this machine; pairs with
+`docs/fleet-protocol.md`).
+
+Live watcher cursor is **not** `night-shift-state.json` — see
+`~/.hermes/state/fleet-watcher/` and skill `memtrace-fleet-watcher`.
+
 ## Watcher
 
 Scheduled every ~5–10 minutes. Each tick:

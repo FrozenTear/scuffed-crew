@@ -22,3 +22,5 @@ Non-negotiables (full detail in the protocol):
 
 Project conventions (build, dev-mode, DB rules): see `CLAUDE.md`.
 Queued work for fleet sessions: `docs/notes/night-shift-backlog.md`.
+Memtrace/fleet host ops (start, MCP attach, truth stack, watcher, recovery):
+`docs/notes/memtrace-ops.md` — load on every fleet join alongside the protocol.
