@@ -4384,6 +4384,37 @@ async fn nostr_login_rejects_bad_and_closed() {
     assert_eq!(resp.status(), StatusCode::FORBIDDEN);
 }
 
+/// A well-formed kind-22242 event with the correct content and a valid token,
+/// but an invalid schnorr signature, must be rejected by the explicit
+/// `signed_event.verify()` check — 400 and no session cookie. Every other
+/// failure path (`nostr_login_rejects_bad_and_closed`) trips a *pre-verify*
+/// check (kind, content, token), so only a well-formed event with a bad
+/// signature exercises `.verify()`; without this test the `.verify()` call
+/// could be deleted and the suite would still pass.
+#[tokio::test]
+async fn nostr_login_rejects_forged_signature() {
+    let state = test_state().await;
+    seed_all_roles(&state.db).await;
+    let keys = nostr::Keys::generate();
+
+    let (challenge, token) = nostr_challenge(&state).await;
+    // Sign correctly (valid id, pubkey, matching content), then corrupt one
+    // hex byte of the signature so the event stays structurally well-formed
+    // and passes every pre-verify check, failing only the schnorr verify.
+    let mut event = signed_login_event(&keys, &challenge);
+    let sig = event["sig"].as_str().expect("event has a sig field");
+    let mut chars: Vec<char> = sig.chars().collect();
+    chars[0] = if chars[0] == 'a' { 'b' } else { 'a' };
+    event["sig"] = serde_json::Value::String(chars.into_iter().collect());
+
+    let resp = nostr_verify_resp(&state, &token, event).await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    assert!(
+        resp.headers().get(header::SET_COOKIE).is_none(),
+        "forged-signature login must not set a session cookie"
+    );
+}
+
 #[tokio::test]
 async fn nostr_login_member_linked_pubkey_logs_into_member() {
     let state = test_state().await;
