@@ -1,120 +1,120 @@
 {
-  "started_at": "2026-07-16T23:57:00Z",
+  "updated_at": "2026-07-18T22:04:33Z",
   "repo": "scuffed-crew",
-  "agent_id": "grok",
-  "last_fleet_entry_id": "01KXR56FJ9JK8NDSV7KD6T1W5T",
-  "queue": {
-    "5a_discord": {
-      "branch": "feat/discord-webhooks",
-      "status": "merged",
-      "tip": "aefc2a5"
-    },
-    "6_leaderboards": {
-      "branch": "feat/leaderboards",
-      "status": "merged",
-      "tip": "225102b"
-    },
-    "security_train": {
-      "branch": "feat/security-train",
-      "status": "merged",
-      "tip": "33c5670"
-    },
-    "admin_mobile": {
-      "branch": "feat/admin-mobile",
-      "status": "merged",
-      "tip": "d4f8ada",
-      "note": "closed out 2026-07-17: tip already ancestor of main; no further review needed"
-    },
-    "tracker_portable_runtime": {
-      "branch": "feat/tracker-portable-runtime",
-      "status": "merged",
-      "tip": "9edd0ad"
-    },
-    "tracker_portable_ci": {
-      "branch": "feat/tracker-portable-ci",
-      "status": "merged",
-      "tip": "faeaecd"
-    },
-    "stat_tracker_clippy_fix": {
-      "branch": "fix/stat-tracker-clippy-manual-find",
-      "status": "merged",
-      "tip": "a00a4d3"
-    },
-    "tracker_version_flag": {
-      "branch": "fix/tracker-version-flag",
-      "status": "merged",
-      "tip": "dce1a51"
-    },
-    "tracker_release_validation": {
-      "run": "29581879669",
-      "status": "success",
-      "draft_release": "stat-tracker-manual-dce1a515",
-      "asset": "scuffed-stat-tracker-linux-x86_64.tar.gz",
-      "note": "clean-room --version ok; portable pipeline proven; HOLD real tag v0.1.0 for user"
-    },
-    "tracker_bug_name_col": {
-      "branch": "fix/tracker-6v6-name-row",
-      "status": "merged",
-      "tip": "c3fef9a",
-      "merge": "2130df4",
-      "note": "grok APPROVE + merged to main 2026-07-17; 6v6 name window + hard-threshold nameplate fallback"
-    },
-    "tracker_bug_live_offline": {
-      "status": "dig_complete",
-      "note": "reject=stats_from_row fail with player_row_idx=Some(0); not brightness_none; not team_size=5 \u2014 may be fixed by name-col merge; re-check live after deploy"
-    }
-  },
+  "agent_id": "fleet",
+  "main": "7420451",
+  "reseed_ulid": "01KXVBY7ATP4MY1E7DEX3D27Y2",
+  "status": "active",
   "protocol": {
-    "review_gate": "DUAL agreement: both agents APPROVE/ACK on fleet before merge",
-    "fleet_channel": "fleet::channel",
-    "fleet_is_team_log": true,
-    "post_on_fleet": [
-      "review verdicts",
-      "all findings including nits",
-      "test evidence (ran/skipped+why)",
-      "file scope actually read",
-      "merge/CI status",
-      "answers to peer QUERYs"
-    ],
-    "never_chat_only_findings": true,
-    "short_msgs_only": true,
+    "review_gate": "dual-agree",
+    "fleet_channel": "fleet::chat",
+    "agent_worktrees_only": true,
     "never": [
       "force-push main",
       "merge without dual fleet agreement",
-      "keep review nits only in user chat"
+      "commit crates/stat-tracker/test-data/"
     ]
   },
-  "last_watcher_tick": "2026-07-17T13:45:41Z",
-  "status": "name_col_merged_await_user_tag_v0_1_0",
-  "main": "071304a",
-  "tick_result": {
-    "new_fleet_entries": 3,
-    "actions": [
-      "fleet_JOIN_grok",
-      "CI_GREEN_dce1a51",
-      "admin_mobile_CLOSED_ancestor_of_main",
-      "REVIEW_APPROVE_fix_tracker_6v6_name_row_c3fef9a",
-      "MERGED_name_col_2130df4"
-    ],
-    "merges": [
-      "fix/tracker-6v6-name-row -> main @ 2130df4"
-    ],
-    "main": "2130df4",
-    "ci": {
-      "tip_pre_merge": "dce1a51",
-      "CI": "success",
-      "Stat Tracker CI": "success",
-      "Publish image": "success",
-      "Stat Tracker Release validation": "success",
-      "validation_run": "29581879669",
-      "draft": "stat-tracker-manual-dce1a515",
-      "post_merge": "watch CI on 2130df4"
+  "orchestration": {
+    "orchestrator": "Fable",
+    "implementers": "Opus",
+    "grok": "review+dissent+watcher"
+  },
+  "symmetry": {
+    "ruling": "USER 2026-07-18: both agents implement AND review; author never sole-merges own work; dual-agree unchanged",
+    "note": "Appendix A binding; same standard for claude and grok"
+  },
+  "watcher": {
+    "note": "Live cursor NOT here — see ~/.hermes/state/fleet-watcher/scuffed-crew.json (not this file)",
+    "skill": "memtrace-fleet-watcher",
+    "crons": [
+      "scuffed-fleet-ydoc-delta",
+      "scuffed-fleet-heartbeat"
+    ]
+  },
+  "tags": {
+    "stat-tracker-v0.1.0": "76b1422",
+    "stat-tracker-v0.1.1": "e6785ad",
+    "stat-tracker-v0.1.2": "c9b1b3e"
+  },
+  "queue": {
+    "HW-1": {
+      "status": "merged",
+      "tip": "4499f36",
+      "merge": "281df05",
+      "note": "hero/window work; tip+merge ancestors of main@7420451"
     },
-    "pending": [
-      "USER go for stat-tracker-v0.1.0 tag (draft proven; consider rebuild after name-col)",
-      "watch CI green on 2130df4",
-      "optional: re-check live offline reject after name-col deploy"
+    "GL-1": {
+      "status": "merged",
+      "tip": "ef48e70",
+      "merge": "727ad41"
+    },
+    "CG-1": {
+      "status": "merged",
+      "tip": "f9b5a7f",
+      "merge": "23a5bc9",
+      "note": "CG-1a OOS"
+    },
+    "MM-1": {
+      "status": "merged",
+      "tip": "626d1f9",
+      "merge": "7dfd537"
+    },
+    "RJ-1": {
+      "status": "merged",
+      "tip": "ec44788",
+      "merge": "9f155a9"
+    },
+    "IP-1": {
+      "status": "merged",
+      "tip": "7404bc5",
+      "merge": "e6785ad",
+      "note": "install.sh SKIP_INTEGRATION + stderr logging; tag v0.1.1 @ e6785ad"
+    },
+    "LD-1": {
+      "status": "merged",
+      "tip": "801d7ee",
+      "merge": "c9b1b3e",
+      "note": "tag v0.1.2 @ c9b1b3e"
+    },
+    "NT-1": {
+      "status": "merged",
+      "tip": "e5dac71",
+      "merge": "fea5185",
+      "note": "forged-signature mutant killed for nostr login"
+    },
+    "SE-1": {
+      "status": "merged",
+      "tip": "a3b3997",
+      "merge": "7420451",
+      "note": "manual stat edits with transparency badge; main tip through SE-1"
+    },
+    "local_reg": {
+      "status": "merged",
+      "tip": "09494e0",
+      "note": "Ph1 local-reg; ancestor of main@7420451"
+    },
+    "nostr": {
+      "status": "merged",
+      "tip": "8fa99fb",
+      "note": "Ph2 nostr; ancestor of main@7420451"
+    },
+    "phase1_ship": {
+      "status": "merged",
+      "note": "complete @ stat-tracker-v0.1.0 (76b1422); prior portable/runtime/ci/discord/leaderboards/security train summarized"
+    }
+  },
+  "open": {
+    "g1_version_integrity": "open — Cargo 0.1.0 vs tag 0.1.2",
+    "doc_plan_1": "this branch",
+    "ph0_defects": [
+      "hero last-wins→majority",
+      "cell window drift",
+      "outcome backfill"
     ],
-    "last_action": "answered_claude_query_01KXR4WFGT"
+    "user_repairs": [
+      "Havana D/HLG",
+      "Lijiang/Nepal via stat-edit GUI"
+    ]
   }
 }
