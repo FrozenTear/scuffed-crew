@@ -532,6 +532,12 @@ pub struct PersonalMatch {
     pub mitigation: u32,
     pub played_at: DateTime<Utc>,
     pub uploaded_at: DateTime<Utc>,
+    /// True when the uploaded values include at least one manual correction
+    /// made in the tracker (the numeric/label fields already hold the effective
+    /// values). Exposed so the site can render an "edited" badge. Defaulted for
+    /// rows uploaded before edit support.
+    #[serde(default)]
+    pub edited: bool,
 }
 
 /// Aggregated personal stats for a member.

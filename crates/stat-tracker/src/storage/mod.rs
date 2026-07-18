@@ -31,6 +31,96 @@ pub struct PersonalMatch {
     pub synced: bool,
     #[serde(default)]
     pub session_id: String,
+
+    // --- Manual edit overlay (transparency) ---------------------------------
+    // The OCR-captured values above are IMMUTABLE. A manual correction records
+    // the fixed value in the matching `corrected_*` field and appends the field
+    // name to `edited_fields`; the effective (displayed) value is `corrected_*`
+    // if present, else the OCR read. This keeps "OCR read X → corrected Y"
+    // recoverable for the badge/tooltip and never destroys the original read.
+    // All fields are additive Options / empty-by-default, so rows written before
+    // this feature deserialize unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[surreal(default)]
+    pub corrected_hero: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[surreal(default)]
+    pub corrected_role: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[surreal(default)]
+    pub corrected_map_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[surreal(default)]
+    pub corrected_outcome: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[surreal(default)]
+    pub corrected_elims: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[surreal(default)]
+    pub corrected_deaths: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[surreal(default)]
+    pub corrected_assists: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[surreal(default)]
+    pub corrected_damage: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[surreal(default)]
+    pub corrected_healing: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[surreal(default)]
+    pub corrected_mitigation: Option<u32>,
+    /// Names of fields carrying a manual correction (e.g. `["elims", "hero"]`).
+    /// Non-empty ⇒ the row is edited (drives the badge).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[surreal(default)]
+    pub edited_fields: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[surreal(default)]
+    pub edited_at: Option<SurrealDatetime>,
+}
+
+impl PersonalMatch {
+    /// True when at least one field carries a manual correction.
+    pub fn is_edited(&self) -> bool {
+        !self.edited_fields.is_empty()
+    }
+
+    /// True when `field` (storage name, e.g. `"map_name"`) was manually edited.
+    pub fn field_edited(&self, field: &str) -> bool {
+        self.edited_fields.iter().any(|f| f == field)
+    }
+
+    pub fn display_hero(&self) -> &str {
+        self.corrected_hero.as_deref().unwrap_or(&self.hero)
+    }
+    pub fn display_role(&self) -> &str {
+        self.corrected_role.as_deref().unwrap_or(&self.role)
+    }
+    pub fn display_map_name(&self) -> &str {
+        self.corrected_map_name.as_deref().unwrap_or(&self.map_name)
+    }
+    pub fn display_outcome(&self) -> &str {
+        self.corrected_outcome.as_deref().unwrap_or(&self.outcome)
+    }
+    pub fn display_elims(&self) -> u32 {
+        self.corrected_elims.unwrap_or(self.elims)
+    }
+    pub fn display_deaths(&self) -> u32 {
+        self.corrected_deaths.unwrap_or(self.deaths)
+    }
+    pub fn display_assists(&self) -> u32 {
+        self.corrected_assists.unwrap_or(self.assists)
+    }
+    pub fn display_damage(&self) -> u32 {
+        self.corrected_damage.unwrap_or(self.damage)
+    }
+    pub fn display_healing(&self) -> u32 {
+        self.corrected_healing.unwrap_or(self.healing)
+    }
+    pub fn display_mitigation(&self) -> u32 {
+        self.corrected_mitigation.unwrap_or(self.mitigation)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, SurrealValue)]
@@ -242,6 +332,7 @@ impl LocalStore {
                 outcome,
             } => self.set_session_outcome(session_id, outcome).await,
             StoreCommand::DeleteSession { session_id } => self.delete_session(session_id).await,
+            StoreCommand::EditMatch { session_id, edit } => self.edit_match(session_id, edit).await,
         }
     }
 
@@ -269,6 +360,19 @@ impl LocalStore {
             .bind(("role", role.to_string()))
             .bind(("sid", session_id.to_string()))
             .await?;
+        // Keep the append-only log in step too (HW-1a jsonl parity): the GUI's
+        // last-resort fallback reads matches.jsonl, so a hero repair that never
+        // reached it left the fallback showing the stale hero forever, exactly
+        // like the outcome/map back-fills before rewrite_match_log_session.
+        let (hero, role) = (hero.to_string(), role.to_string());
+        rewrite_match_log_session(
+            &self.data_dir,
+            session_id,
+            Some(&|m| {
+                m.hero = hero.clone();
+                m.role = role.clone();
+            }),
+        );
         Ok(())
     }
 
@@ -316,6 +420,61 @@ impl LocalStore {
             session_id,
             Some(&|m| {
                 m.outcome = outcome.clone();
+            }),
+        );
+        Ok(())
+    }
+
+    /// Apply a manual stat correction to a game. Writes the fixed values into
+    /// the `corrected_*` overlay on EVERY snapshot of the session (leaving the
+    /// immutable OCR fields untouched), records which fields were edited, and
+    /// re-queues the rows for sync. Editing all snapshots — not just the final
+    /// one — means whichever snapshot the server-side per-session upsert lands
+    /// last still carries the correction, and mirrors the write-through the
+    /// outcome/map/hero back-fills already use. The `matches.jsonl` fallback is
+    /// rewritten with the same overlay so the GUI's last-resort view agrees.
+    pub async fn edit_match(
+        &self,
+        session_id: &str,
+        edit: &MatchEdit,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let now = SurrealDatetime::from(chrono::Utc::now());
+        let snaps = self.get_session_snapshots(session_id).await?;
+        for mut m in snaps {
+            let Some(id) = m.id.clone() else { continue };
+            if !apply_match_edit(&mut m, edit, now) {
+                continue; // empty edit — nothing to persist
+            }
+            self.db
+                .query(
+                    "UPDATE $id SET corrected_hero = $ch, corrected_role = $cr, \
+                     corrected_map_name = $cmap, corrected_outcome = $co, \
+                     corrected_elims = $ce, corrected_deaths = $cd, corrected_assists = $ca, \
+                     corrected_damage = $cdmg, corrected_healing = $chl, \
+                     corrected_mitigation = $cmit, edited_fields = $ef, edited_at = $ea, \
+                     synced = false",
+                )
+                .bind(("id", id))
+                .bind(("ch", m.corrected_hero.clone()))
+                .bind(("cr", m.corrected_role.clone()))
+                .bind(("cmap", m.corrected_map_name.clone()))
+                .bind(("co", m.corrected_outcome.clone()))
+                .bind(("ce", m.corrected_elims))
+                .bind(("cd", m.corrected_deaths))
+                .bind(("ca", m.corrected_assists))
+                .bind(("cdmg", m.corrected_damage))
+                .bind(("chl", m.corrected_healing))
+                .bind(("cmit", m.corrected_mitigation))
+                .bind(("ef", m.edited_fields.clone()))
+                .bind(("ea", m.edited_at))
+                .await?;
+        }
+        let edit = edit.clone();
+        rewrite_match_log_session(
+            &self.data_dir,
+            session_id,
+            Some(&move |m| {
+                apply_match_edit(m, &edit, now);
             }),
         );
         Ok(())
@@ -595,6 +754,102 @@ pub enum StoreCommand {
     SetOutcome { session_id: String, outcome: String },
     /// Remove a session and all its snapshots.
     DeleteSession { session_id: String },
+    /// Apply a manual stat correction to a game (see [`MatchEdit`]). The
+    /// corrected values overlay the immutable OCR reads and re-queue the game
+    /// for sync.
+    EditMatch { session_id: String, edit: MatchEdit },
+}
+
+/// A manual correction to a game's stats. Only `Some(_)` fields are applied;
+/// each corresponds to an OCR-captured field that stays untouched underneath.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct MatchEdit {
+    pub hero: Option<String>,
+    pub role: Option<String>,
+    pub map_name: Option<String>,
+    pub outcome: Option<String>,
+    pub elims: Option<u32>,
+    pub deaths: Option<u32>,
+    pub assists: Option<u32>,
+    pub damage: Option<u32>,
+    pub healing: Option<u32>,
+    pub mitigation: Option<u32>,
+}
+
+impl MatchEdit {
+    /// True when no field is set — an empty edit is a no-op.
+    pub fn is_empty(&self) -> bool {
+        *self == MatchEdit::default()
+    }
+}
+
+fn mark_edited(fields: &mut Vec<String>, name: &str) {
+    if !fields.iter().any(|f| f == name) {
+        fields.push(name.to_string());
+    }
+}
+
+/// Overlay a [`MatchEdit`] onto a row: for every `Some(_)` field, set the
+/// matching `corrected_*` value (OCR fields untouched) and record the field
+/// name. Re-editing accumulates the union of edited fields and overwrites
+/// earlier corrections for the same field. Returns whether anything changed;
+/// stamps `edited_at` only then.
+fn apply_match_edit(m: &mut PersonalMatch, edit: &MatchEdit, now: SurrealDatetime) -> bool {
+    let mut changed = false;
+    if let Some(v) = &edit.hero {
+        m.corrected_hero = Some(v.clone());
+        mark_edited(&mut m.edited_fields, "hero");
+        changed = true;
+    }
+    if let Some(v) = &edit.role {
+        m.corrected_role = Some(v.clone());
+        mark_edited(&mut m.edited_fields, "role");
+        changed = true;
+    }
+    if let Some(v) = &edit.map_name {
+        m.corrected_map_name = Some(v.clone());
+        mark_edited(&mut m.edited_fields, "map_name");
+        changed = true;
+    }
+    if let Some(v) = &edit.outcome {
+        m.corrected_outcome = Some(v.clone());
+        mark_edited(&mut m.edited_fields, "outcome");
+        changed = true;
+    }
+    if let Some(v) = edit.elims {
+        m.corrected_elims = Some(v);
+        mark_edited(&mut m.edited_fields, "elims");
+        changed = true;
+    }
+    if let Some(v) = edit.deaths {
+        m.corrected_deaths = Some(v);
+        mark_edited(&mut m.edited_fields, "deaths");
+        changed = true;
+    }
+    if let Some(v) = edit.assists {
+        m.corrected_assists = Some(v);
+        mark_edited(&mut m.edited_fields, "assists");
+        changed = true;
+    }
+    if let Some(v) = edit.damage {
+        m.corrected_damage = Some(v);
+        mark_edited(&mut m.edited_fields, "damage");
+        changed = true;
+    }
+    if let Some(v) = edit.healing {
+        m.corrected_healing = Some(v);
+        mark_edited(&mut m.edited_fields, "healing");
+        changed = true;
+    }
+    if let Some(v) = edit.mitigation {
+        m.corrected_mitigation = Some(v);
+        mark_edited(&mut m.edited_fields, "mitigation");
+        changed = true;
+    }
+    if changed {
+        m.edited_at = Some(now);
+    }
+    changed
 }
 
 fn commands_dir(data_dir: &Path) -> PathBuf {
@@ -763,6 +1018,18 @@ mod tests {
             played_at: SurrealDatetime::from(Utc::now()),
             synced: false,
             session_id: session_id.into(),
+            corrected_hero: None,
+            corrected_role: None,
+            corrected_map_name: None,
+            corrected_outcome: None,
+            corrected_elims: None,
+            corrected_deaths: None,
+            corrected_assists: None,
+            corrected_damage: None,
+            corrected_healing: None,
+            corrected_mitigation: None,
+            edited_fields: Vec::new(),
+            edited_at: None,
         }
     }
 
@@ -872,6 +1139,114 @@ mod tests {
         );
         // Only the repaired (previously Tracer) row is queued for re-sync.
         assert_eq!(rows.iter().filter(|m| !m.synced).count(), 1);
+    }
+
+    #[tokio::test]
+    async fn edit_match_overlays_corrections_and_preserves_ocr() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = LocalStore::open(dir.path()).await.expect("open store");
+        // Two snapshots of one game, both already synced (post-upload state).
+        for i in 0..2 {
+            let mut m = snap("s1", 5 + i); // ocr elims 5, 6
+            append_match_log(dir.path(), &m);
+            m.map_name = "Ilios".into();
+            store.insert_match(m).await.unwrap();
+        }
+        let ids: Vec<_> = store
+            .get_all_matches()
+            .await
+            .unwrap()
+            .into_iter()
+            .filter_map(|m| m.id)
+            .collect();
+        store.mark_synced(ids).await.unwrap();
+
+        let edit = MatchEdit {
+            elims: Some(30),
+            hero: Some("Ana".into()),
+            map_name: Some("Nepal".into()),
+            ..Default::default()
+        };
+        store.edit_match("s1", &edit).await.unwrap();
+
+        let rows = store.get_all_matches().await.unwrap();
+        assert_eq!(rows.len(), 2);
+        for m in &rows {
+            // Corrected values overlay; OCR reads stay immutable underneath.
+            assert_eq!(m.corrected_elims, Some(30));
+            assert_eq!(m.display_elims(), 30);
+            assert!(m.elims == 5 || m.elims == 6, "OCR elims preserved");
+            assert_eq!(m.display_hero(), "Ana");
+            assert_eq!(m.hero, "Test", "OCR hero preserved");
+            assert_eq!(m.display_map_name(), "Nepal");
+            assert!(m.is_edited());
+            assert!(
+                m.field_edited("elims") && m.field_edited("hero") && m.field_edited("map_name")
+            );
+            assert!(m.edited_at.is_some());
+            // Re-queued for sync.
+            assert!(!m.synced);
+        }
+
+        // jsonl fallback carries the same overlay (rewrite parity).
+        let logged = read_match_log(dir.path());
+        assert_eq!(logged.len(), 2);
+        assert!(logged.iter().all(|m| m.display_elims() == 30
+            && m.display_hero() == "Ana"
+            && m.elims != 30
+            && m.is_edited()));
+    }
+
+    #[test]
+    fn old_rows_without_edit_fields_deserialize_unchanged() {
+        // A pre-feature jsonl line has none of the corrected_*/edited_* keys.
+        let line = r#"{"hero":"Genji","map_name":"Hanamura","game_mode":"assault","role":"Damage","outcome":"victory","elims":20,"deaths":4,"assists":6,"damage":8000,"healing":0,"mitigation":0,"played_at":"2026-01-01T00:00:00Z","synced":true,"session_id":"legacy1"}"#;
+        let m: PersonalMatch = serde_json::from_str(line).expect("legacy row parses");
+        assert!(!m.is_edited());
+        assert!(m.edited_fields.is_empty());
+        assert_eq!(m.edited_at, None);
+        // Display falls back to the OCR value when no correction exists.
+        assert_eq!(m.display_elims(), 20);
+        assert_eq!(m.display_hero(), "Genji");
+        assert_eq!(m.corrected_elims, None);
+    }
+
+    #[tokio::test]
+    async fn set_session_hero_rewrites_match_log() {
+        // HW-1a: the hero write-through must also reach matches.jsonl, exactly
+        // like the outcome/map back-fills. Without the rewrite the fallback log
+        // keeps the stale hero forever — this test fails.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = LocalStore::open(dir.path()).await.expect("open store");
+        for i in 0..3 {
+            let mut m = snap("s1", i);
+            m.hero = if i < 2 {
+                "Mizuki".into()
+            } else {
+                "Tracer".into()
+            };
+            m.role = if i < 2 {
+                "Support".into()
+            } else {
+                "Damage".into()
+            };
+            append_match_log(dir.path(), &m);
+            store.insert_match(m).await.unwrap();
+        }
+
+        store
+            .set_session_hero("s1", "Mizuki", "Support")
+            .await
+            .unwrap();
+
+        let logged = read_match_log(dir.path());
+        assert_eq!(logged.len(), 3);
+        assert!(
+            logged
+                .iter()
+                .all(|m| m.hero == "Mizuki" && m.role == "Support"),
+            "hero repair must reach the jsonl fallback (HW-1a)"
+        );
     }
 
     #[test]

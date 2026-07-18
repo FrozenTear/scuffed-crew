@@ -1182,6 +1182,18 @@ async fn run_loop(ctx: Arc<DaemonCtx>) -> anyhow::Result<()> {
                                     persist_active_game(data_dir, None);
                                 }
                             }
+                            storage::StoreCommand::EditMatch { session_id, edit } => {
+                                // If the edit corrects the outcome of the still-active
+                                // game, keep the in-memory copy consistent so the poller
+                                // can't overwrite it (mirrors SetOutcome). Numeric/label
+                                // edits target finished games and need no in-memory sync.
+                                if let Some(g) = active_game.as_mut()
+                                    && g.session_id == *session_id
+                                    && let Some(outcome) = &edit.outcome {
+                                        g.record_outcome(outcome.parse().unwrap_or(detect::MatchOutcome::Unknown));
+                                        persist_active_game(data_dir, Some(g));
+                                    }
+                            }
                         }
                         // Two-phase: the file is only removed after a
                         // successful apply, so a crash or store error here

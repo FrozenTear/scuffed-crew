@@ -341,6 +341,18 @@ mod tests {
             outcome: outcome.into(),
             played_at: SurrealDatetime::from(Utc::now()),
             synced: false,
+            corrected_hero: None,
+            corrected_role: None,
+            corrected_map_name: None,
+            corrected_outcome: None,
+            corrected_elims: None,
+            corrected_deaths: None,
+            corrected_assists: None,
+            corrected_damage: None,
+            corrected_healing: None,
+            corrected_mitigation: None,
+            edited_fields: Vec::new(),
+            edited_at: None,
         }
     }
 

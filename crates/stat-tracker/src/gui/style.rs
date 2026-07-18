@@ -719,4 +719,85 @@ a.btn { text-decoration: none; display: inline-block; }
 
 /* Let all overview blocks share one row regardless of count. */
 .stats-grid { grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); }
+
+/* Manual-edit badge + transparency + correction form (Matches view) */
+.col-hero { display: flex; align-items: center; gap: 0.3rem; overflow: hidden; }
+.col-hero .hero-name-text {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.edit-badge {
+    flex: none;
+    font-size: 0.6rem;
+    line-height: 1.4;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    color: var(--accent);
+    background: rgba(124, 58, 237, 0.15);
+    border: 1px solid var(--accent);
+    border-radius: 4px;
+    padding: 0 0.3rem;
+    cursor: help;
+}
+
+.corrections {
+    margin-bottom: 0.8rem;
+    padding: 0.6rem 0.7rem;
+    background: var(--bg-input);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+}
+
+.correction-row {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-size: 0.8rem;
+    font-family: var(--font-mono);
+    padding: 0.15rem 0;
+}
+.correction-field { min-width: 5rem; color: var(--text-dim); }
+.correction-ocr { color: var(--text-dim); text-decoration: line-through; }
+.correction-arrow { color: var(--accent); }
+.correction-fixed { color: var(--text); font-weight: 600; }
+
+.edit-form {
+    margin-bottom: 0.8rem;
+    padding: 0.7rem;
+    background: var(--bg-input);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+}
+
+.edit-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 0.5rem 0.7rem;
+    margin: 0.5rem 0 0.7rem;
+}
+
+.edit-field { display: flex; flex-direction: column; gap: 0.2rem; }
+.edit-field span {
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    color: var(--text-dim);
+}
+.edit-field input, .edit-field select {
+    padding: 0.35rem 0.5rem;
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--text);
+    font-size: 0.85rem;
+    font-family: var(--font-mono);
+}
+.edit-field input:focus, .edit-field select:focus {
+    outline: none;
+    border-color: var(--accent);
+}
+
+.edit-form-actions { display: flex; justify-content: flex-end; }
 "#;

@@ -2,13 +2,110 @@ use dioxus::prelude::*;
 
 use stat_tracker::config::Config;
 use stat_tracker::detect::MatchOutcome;
-use stat_tracker::storage::{self, LocalStore, PersonalMatch, StoreCommand};
+use stat_tracker::storage::{self, LocalStore, MatchEdit, PersonalMatch, StoreCommand};
 
 use super::live_data;
 
+/// Editable text state for the manual-correction form. One `String` per field
+/// (parsed on save), prefilled from the game's effective (displayed) values.
+#[derive(Clone, PartialEq, Default)]
+struct EditForm {
+    hero: String,
+    role: String,
+    map_name: String,
+    elims: String,
+    deaths: String,
+    assists: String,
+    damage: String,
+    healing: String,
+    mitigation: String,
+}
+
+impl EditForm {
+    fn from_game(g: &PersonalMatch) -> Self {
+        Self {
+            hero: g.display_hero().to_string(),
+            role: g.display_role().to_string(),
+            map_name: g.display_map_name().to_string(),
+            elims: g.display_elims().to_string(),
+            deaths: g.display_deaths().to_string(),
+            assists: g.display_assists().to_string(),
+            damage: g.display_damage().to_string(),
+            healing: g.display_healing().to_string(),
+            mitigation: g.display_mitigation().to_string(),
+        }
+    }
+
+    /// Build a [`MatchEdit`] holding only the fields that differ from the game's
+    /// current effective values — an unchanged field is left as its OCR read.
+    fn diff(&self, g: &PersonalMatch) -> MatchEdit {
+        let mut e = MatchEdit::default();
+        let txt = |cur: &str, disp: &str| {
+            let t = cur.trim();
+            (!t.is_empty() && t != disp).then(|| t.to_string())
+        };
+        e.hero = txt(&self.hero, g.display_hero());
+        e.role = txt(&self.role, g.display_role());
+        e.map_name = txt(&self.map_name, g.display_map_name());
+        let num = |cur: &str, disp: u32| cur.trim().parse::<u32>().ok().filter(|v| *v != disp);
+        e.elims = num(&self.elims, g.display_elims());
+        e.deaths = num(&self.deaths, g.display_deaths());
+        e.assists = num(&self.assists, g.display_assists());
+        e.damage = num(&self.damage, g.display_damage());
+        e.healing = num(&self.healing, g.display_healing());
+        e.mitigation = num(&self.mitigation, g.display_mitigation());
+        e
+    }
+}
+
+/// Human labels + "OCR read → corrected" pairs for a game's edited fields,
+/// for the transparency detail. Reads directly off the `corrected_*` overlay
+/// so it stays in sync with what was actually stored.
+fn corrections(g: &PersonalMatch) -> Vec<(&'static str, String, String)> {
+    let mut out: Vec<(&'static str, String, String)> = Vec::new();
+    if let Some(v) = &g.corrected_hero {
+        out.push(("Hero", g.hero.clone(), v.clone()));
+    }
+    if let Some(v) = &g.corrected_role {
+        out.push(("Role", g.role.clone(), v.clone()));
+    }
+    if let Some(v) = &g.corrected_map_name {
+        let ocr = if g.map_name.is_empty() {
+            "—".into()
+        } else {
+            g.map_name.clone()
+        };
+        out.push(("Map", ocr, v.clone()));
+    }
+    if let Some(v) = &g.corrected_outcome {
+        out.push(("Result", g.outcome.clone(), v.clone()));
+    }
+    if let Some(v) = g.corrected_elims {
+        out.push(("Elims", g.elims.to_string(), v.to_string()));
+    }
+    if let Some(v) = g.corrected_deaths {
+        out.push(("Deaths", g.deaths.to_string(), v.to_string()));
+    }
+    if let Some(v) = g.corrected_assists {
+        out.push(("Assists", g.assists.to_string(), v.to_string()));
+    }
+    if let Some(v) = g.corrected_damage {
+        out.push(("Damage", g.damage.to_string(), v.to_string()));
+    }
+    if let Some(v) = g.corrected_healing {
+        out.push(("Healing", g.healing.to_string(), v.to_string()));
+    }
+    if let Some(v) = g.corrected_mitigation {
+        out.push(("Mitigation", g.mitigation.to_string(), v.to_string()));
+    }
+    out
+}
+
 /// One row per game, grouped by day, with an expandable detail view: the
-/// session's capture timeline plus manual outcome editing / deletion (applied
-/// directly when the store is free, queued to the daemon otherwise).
+/// session's capture timeline, manual outcome editing / deletion, and a manual
+/// stat-correction form. Edited games keep an "edited" badge and expose the
+/// original OCR reads. Mutations apply directly when the store is free, else
+/// queue to the daemon.
 #[component]
 pub fn MatchesPanel() -> Element {
     let config = use_signal(|| Config::load().unwrap_or_default());
@@ -16,6 +113,8 @@ pub fn MatchesPanel() -> Element {
     let mut db_locked = use_signal(|| false);
     let mut selected: Signal<Option<String>> = use_signal(|| None);
     let mut confirm_delete: Signal<Option<String>> = use_signal(|| None);
+    let mut editing: Signal<bool> = use_signal(|| false);
+    let mut form: Signal<EditForm> = use_signal(EditForm::default);
     let mut toast: Signal<Option<(String, bool)>> = use_signal(|| None);
 
     let rows = use_resource(move || {
@@ -132,7 +231,7 @@ pub fn MatchesPanel() -> Element {
                         {
                             let sid = g.session_id.clone();
                             let is_selected = !sid.is_empty() && selected_sid.as_deref() == Some(sid.as_str());
-                            let outcome = MatchOutcome::parse_lenient(&g.outcome);
+                            let outcome = MatchOutcome::parse_lenient(g.display_outcome());
                             let outcome_class = outcome.row_class();
                             let outcome_text_class = outcome.text_class();
                             let dt: chrono::DateTime<chrono::Utc> = g.played_at.into();
@@ -144,7 +243,18 @@ pub fn MatchesPanel() -> Element {
                             let sid_w = sid.clone();
                             let sid_del = sid.clone();
                             let sid_del2 = sid.clone();
+                            let sid_save = sid.clone();
                             let delete_pending = confirm_delete().as_deref() == Some(sid.as_str()) && !sid.is_empty();
+                            let is_edited = g.is_edited();
+                            let badge_title = if is_edited {
+                                format!("Manually edited: {}", corrections(&g)
+                                    .iter().map(|(l, _, _)| *l).collect::<Vec<_>>().join(", "))
+                            } else {
+                                String::new()
+                            };
+                            let corr = corrections(&g);
+                            let g_open = g.clone();
+                            let g_save = g.clone();
                             rsx! {
                                 div {
                                     class: if is_selected { "match-row {outcome_class} selected" } else { "match-row {outcome_class}" },
@@ -156,17 +266,23 @@ pub fn MatchesPanel() -> Element {
                                             selected.set(Some(row_sid.clone()));
                                         }
                                         confirm_delete.set(None);
+                                        editing.set(false);
                                     },
-                                    span { class: "col-outcome {outcome_text_class}", "{g.outcome.to_uppercase()}" }
-                                    span { class: "col-hero", "{g.hero}" }
-                                    span { class: "col-role role-{g.role.to_lowercase()}", "{g.role}" }
-                                    span { class: "col-map", if g.map_name.is_empty() { "—" } else { "{g.map_name}" } }
-                                    span { class: "col-stat", "{g.elims}" }
-                                    span { class: "col-stat", "{g.deaths}" }
-                                    span { class: "col-stat", "{g.assists}" }
-                                    span { class: "col-stat", "{g.damage}" }
-                                    span { class: "col-stat", "{g.healing}" }
-                                    span { class: "col-stat", "{g.mitigation}" }
+                                    span { class: "col-outcome {outcome_text_class}", "{g.display_outcome().to_uppercase()}" }
+                                    span { class: "col-hero",
+                                        span { class: "hero-name-text", "{g.display_hero()}" }
+                                        if is_edited {
+                                            span { class: "edit-badge", title: "{badge_title}", "edited" }
+                                        }
+                                    }
+                                    span { class: "col-role role-{g.display_role().to_lowercase()}", "{g.display_role()}" }
+                                    span { class: "col-map", if g.display_map_name().is_empty() { "—" } else { "{g.display_map_name()}" } }
+                                    span { class: "col-stat", "{g.display_elims()}" }
+                                    span { class: "col-stat", "{g.display_deaths()}" }
+                                    span { class: "col-stat", "{g.display_assists()}" }
+                                    span { class: "col-stat", "{g.display_damage()}" }
+                                    span { class: "col-stat", "{g.display_healing()}" }
+                                    span { class: "col-stat", "{g.display_mitigation()}" }
                                     span { class: "col-time", "{time_str}" }
                                 }
                                 if is_selected && editable {
@@ -199,6 +315,19 @@ pub fn MatchesPanel() -> Element {
                                             }
                                             span { class: "detail-spacer" }
                                             button {
+                                                class: if editing() { "btn btn-sm btn-outline current" } else { "btn btn-sm btn-outline" },
+                                                onclick: move |e| {
+                                                    e.stop_propagation();
+                                                    if editing() {
+                                                        editing.set(false);
+                                                    } else {
+                                                        form.set(EditForm::from_game(&g_open));
+                                                        editing.set(true);
+                                                    }
+                                                },
+                                                if editing() { "Cancel edit" } else { "Edit stats" }
+                                            }
+                                            button {
                                                 class: "btn btn-sm btn-danger",
                                                 onclick: move |e| {
                                                     e.stop_propagation();
@@ -213,6 +342,95 @@ pub fn MatchesPanel() -> Element {
                                                 if delete_pending { "Click again to confirm" } else { "Delete game" }
                                             }
                                         }
+
+                                        if !corr.is_empty() {
+                                            div { class: "corrections",
+                                                span { class: "detail-label", "Corrections" }
+                                                for (label, ocr, fixed) in corr.iter() {
+                                                    div { class: "correction-row",
+                                                        span { class: "correction-field", "{label}" }
+                                                        span { class: "correction-ocr", "OCR read {ocr}" }
+                                                        span { class: "correction-arrow", "→" }
+                                                        span { class: "correction-fixed", "{fixed}" }
+                                                    }
+                                                }
+                                            }
+                                        }
+
+                                        if editing() {
+                                            div { class: "edit-form",
+                                                span { class: "detail-label", "Correct stats (blank / unchanged fields keep the OCR read)" }
+                                                div { class: "edit-grid",
+                                                    label { class: "edit-field",
+                                                        span { "Hero" }
+                                                        input { r#type: "text", value: "{form().hero}",
+                                                            oninput: move |e| form.with_mut(|f| f.hero = e.value()) }
+                                                    }
+                                                    label { class: "edit-field",
+                                                        span { "Role" }
+                                                        select {
+                                                            value: "{form().role}",
+                                                            onchange: move |e| form.with_mut(|f| f.role = e.value()),
+                                                            option { value: "Tank", "Tank" }
+                                                            option { value: "Damage", "Damage" }
+                                                            option { value: "Support", "Support" }
+                                                        }
+                                                    }
+                                                    label { class: "edit-field",
+                                                        span { "Map" }
+                                                        input { r#type: "text", value: "{form().map_name}",
+                                                            oninput: move |e| form.with_mut(|f| f.map_name = e.value()) }
+                                                    }
+                                                    label { class: "edit-field",
+                                                        span { "Elims" }
+                                                        input { r#type: "number", min: "0", value: "{form().elims}",
+                                                            oninput: move |e| form.with_mut(|f| f.elims = e.value()) }
+                                                    }
+                                                    label { class: "edit-field",
+                                                        span { "Deaths" }
+                                                        input { r#type: "number", min: "0", value: "{form().deaths}",
+                                                            oninput: move |e| form.with_mut(|f| f.deaths = e.value()) }
+                                                    }
+                                                    label { class: "edit-field",
+                                                        span { "Assists" }
+                                                        input { r#type: "number", min: "0", value: "{form().assists}",
+                                                            oninput: move |e| form.with_mut(|f| f.assists = e.value()) }
+                                                    }
+                                                    label { class: "edit-field",
+                                                        span { "Damage" }
+                                                        input { r#type: "number", min: "0", value: "{form().damage}",
+                                                            oninput: move |e| form.with_mut(|f| f.damage = e.value()) }
+                                                    }
+                                                    label { class: "edit-field",
+                                                        span { "Healing" }
+                                                        input { r#type: "number", min: "0", value: "{form().healing}",
+                                                            oninput: move |e| form.with_mut(|f| f.healing = e.value()) }
+                                                    }
+                                                    label { class: "edit-field",
+                                                        span { "Mitigation" }
+                                                        input { r#type: "number", min: "0", value: "{form().mitigation}",
+                                                            oninput: move |e| form.with_mut(|f| f.mitigation = e.value()) }
+                                                    }
+                                                }
+                                                div { class: "edit-form-actions",
+                                                    button {
+                                                        class: "btn btn-sm btn-primary",
+                                                        onclick: move |e| {
+                                                            e.stop_propagation();
+                                                            let edit = form().diff(&g_save);
+                                                            if edit.is_empty() {
+                                                                toast.set(Some(("No changes to save".to_string(), false)));
+                                                            } else {
+                                                                send_command(StoreCommand::EditMatch { session_id: sid_save.clone(), edit }, "Stats corrected");
+                                                            }
+                                                            editing.set(false);
+                                                        },
+                                                        "Save corrections"
+                                                    }
+                                                }
+                                            }
+                                        }
+
                                         div { class: "timeline-table",
                                             div { class: "timeline-header",
                                                 span { class: "col-capture", "#" }

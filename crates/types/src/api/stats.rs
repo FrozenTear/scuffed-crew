@@ -27,6 +27,13 @@ pub struct StatsUploadEntry {
     #[serde(default)]
     pub mitigation: u32,
     pub played_at: DateTime<Utc>,
+    /// True when the uploaded values include at least one manual correction
+    /// (see the tracker's edit overlay). The numeric/label fields above already
+    /// carry the effective (corrected-if-present, else OCR) values, so server
+    /// aggregates count the corrected numbers; this flag drives the "edited"
+    /// badge on the site. Defaulted so older daemons keep uploading.
+    #[serde(default)]
+    pub edited: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
