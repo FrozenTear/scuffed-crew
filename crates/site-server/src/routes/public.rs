@@ -7,8 +7,8 @@ use serde::Serialize;
 
 use scuffed_auth::server::session::ErrorResponse;
 use scuffed_db::{
-    Announcement, Event, Game, GameAccount, MatchResult, MatchType, Member, SiteSettings, Team,
-    TeamRecord,
+    Announcement, Event, Game, GameAccount, MatchResult, MatchType, Member, NamedRosterEntry,
+    SiteSettings, Team, TeamRecord,
 };
 use scuffed_types::api::{CursorResponse, PaginationParams};
 use scuffed_types::{
@@ -535,8 +535,8 @@ pub async fn public_team_detail(
         .flatten()
         .map(|g| g.name);
 
-    // Get roster with member names
-    let roster_entries = state.db.get_team_roster(&id).await.map_err(|_e| {
+    // Get roster with member names — single db-level join (no per-member N+1).
+    let roster_entries = state.db.get_team_roster_named(&id).await.map_err(|_e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse {
@@ -545,26 +545,32 @@ pub async fn public_team_detail(
         )
     })?;
 
-    let mut roster = Vec::new();
-    for entry in roster_entries {
-        if entry.is_active {
-            let member = state
-                .db
-                .get_member_safe(&entry.member_id)
-                .await
-                .ok()
-                .flatten();
-            roster.push(TeamRosterMember {
-                member_id: entry.member_id,
-                display_name: member
-                    .as_ref()
-                    .map(|m| m.display_name.clone())
-                    .unwrap_or_else(|| "Unknown".to_string()),
-                avatar_url: member.and_then(|m| m.avatar_url),
-                team_role: entry.team_role.to_string(),
+    let roster: Vec<TeamRosterMember> = roster_entries
+        .into_iter()
+        .map(|entry| {
+            let NamedRosterEntry {
+                member_id,
+                member_name,
+                avatar_url,
+                team_role,
+                ..
+            } = entry;
+            let display_name = member_name.unwrap_or_else(|| {
+                tracing::warn!(
+                    member_id = %member_id,
+                    team_id = %id,
+                    "roster references a member with no row (dangling plays_on edge)"
+                );
+                "Unknown".to_string()
             });
-        }
-    }
+            TeamRosterMember {
+                member_id,
+                display_name,
+                avatar_url,
+                team_role: team_role.to_string(),
+            }
+        })
+        .collect();
 
     let record = state.db.get_team_record(&id).await.map_err(|_e| {
         (
