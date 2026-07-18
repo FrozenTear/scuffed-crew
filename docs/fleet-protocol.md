@@ -179,6 +179,25 @@ intents and HTTP views do not. On restart: rejoin (§1), verify via MCP, reseed
 from git/gh, reset cadence, re-arm watchers. Both agents independently reseeding
 from git/gh and matching is itself a correctness check.
 
+**Truth stack (after restart / disagreement):**
+
+```
+git/gh  >  MCP ydoc  >  HTTP :3030 ydoc  >  episodes  >  agent memory
+```
+
+- Prefer MCP `fleet_ydoc_*` for the blackboard. HTTP may truncate, paginate, or
+  lag after owner restart — never treat HTTP `count=0` alone as a wipe.
+- **Episodes are ADVISORY-ONLY** until a single-bridge/product fix. Observed
+  failure modes (2026-07-18, `01KXVCNT2C`): (1) long read/append crash loop on
+  one MCP bridge; (2) silent memdb rollback / ydoc loss despite write ACKs;
+  (3) cross-bridge episode-view divergence (ydoc shared, episodes not). Use
+  RESEED+git as the record; `fleet_audit` when available for durable trail.
+- Intent TTL ~120s: `fleet_status` showing **0 active agents** during a long
+  build is expected, not an outage — re-publish presence each tick.
+
+Host-specific start/attach/watcher/Hermes approval steps:
+`docs/notes/memtrace-ops.md` (scuffed-crew).
+
 ## 7. Delegation inside one agent (orchestrator + subagents)
 
 - Subagent briefs are self-contained: repo, worktree setup, the IRON LAW
@@ -199,13 +218,19 @@ from git/gh and matching is itself a correctness check.
 | Worktree root | `.claude/worktrees/<agent>-<topic>` |
 | Ydoc threads | legacy monolith `fleet::channel` (history); NEW work: `fleet::chat` + `fleet::<initiative>` |
 | SSE `/api/fleet/events` | **known-dead** (HTTP 200, zero bytes) — poll ydoc via MCP |
-| Ydoc durability | memdb survived 2/2 daemon restarts 07-17; the 13:32Z 07-17 wipe remains undiagnosed — reseed from git/gh regardless |
+| Ydoc durability | memdb survived 2/2 daemon restarts 07-17; later undiagnosed wipe/loss modes — reseed from git/gh regardless; see `docs/notes/memtrace-ops.md` |
+| Episodes | **ADVISORY-ONLY** across multi-MCP bridges; RESEED+git is the record (`01KXVCNT2C`) |
+| Memtrace ops (join/start/watcher/Hermes) | `docs/notes/memtrace-ops.md` |
+| Memtrace owner | Exactly one `memtrace start --headless` (prefer durable user service, not terminal cgroup); many `memtrace mcp` attach |
+| Watcher (Hermes) | skill `memtrace-fleet-watcher`; live cursor `~/.hermes/state/fleet-watcher/` (not dirty `night-shift-state.json`) |
+| SYMMETRY (USER ruling 2026-07-18) | **Both agents implement and review.** Author never sole-merges own work; dual-agree + human gate unchanged. Applies equally to claude and grok. |
 | Review gate = CI exactly | `cargo fmt --check` + `bash scripts/check-design-tokens.sh` + workspace clippy (excl. app/tracker) + `cargo clippy --target wasm32-unknown-unknown -p scuffed-app -- -D warnings` + `cargo test` |
 | Release gate | tag `stat-tracker-v*` builds fresh from tagged ref; verify the *published* one-liner from raw main, not a branch tree |
 | Protected paths | `crates/stat-tracker/test-data/` (copyrighted frames — never commit, see its .gitignore) |
-| Known agents | `claude` (Fable orchestrator, Opus subagents), `grok` (grok-build) |
+| Known agents | `claude` (Fable orchestrator, Opus subagents), `grok` (hermes/grok-4.5 — review, dissent, watcher) |
 | Model policy (USER ruling 2026-07-18) | When Fable is available, claude runs it as orchestrator + main planner. grok reviews every plan and posts dissent on the fleet log when it disagrees — plan objection is expected input, not obstruction; unresolved disagreement escalates to USER. Implementation via Opus subagents under Fable's plan. Dual-agree on merges unchanged. |
 | Backlog | `docs/notes/night-shift-backlog.md` |
+| Night-shift state (scoreboard) | `docs/notes/night-shift-state.json` — git-derived; not the Hermes watcher cursor |
 
 ## Appendix B — Provenance
 
