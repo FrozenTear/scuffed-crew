@@ -3,7 +3,7 @@ use surrealdb::types::Datetime as SurrealDatetime;
 use surrealdb_types::RecordId;
 use surrealdb_types::SurrealValue;
 
-use crate::types::{RosterEntry, TeamRole};
+use crate::types::{NamedRosterEntry, RosterEntry, TeamRole};
 use crate::{with_timeout, Database, DbResult};
 
 /// Raw DB result from a RELATE / graph query on plays_on.
@@ -35,6 +35,27 @@ fn extract_record_id(thing_str: &str) -> String {
         .split_once(':')
         .map(|(_, id)| id.to_string())
         .unwrap_or_else(|| thing_str.to_string())
+}
+
+/// Raw DB result from the roster-with-names join on plays_on.
+/// `member_id` arrives as the full record-string (`member:abc`) via `<string>in`.
+#[derive(Debug, Clone, Serialize, Deserialize, SurrealValue)]
+struct DbNamedRosterEntry {
+    member_id: String,
+    team_role: String,
+    joined_at: SurrealDatetime,
+    member_name: Option<String>,
+    avatar_url: Option<String>,
+}
+
+fn db_to_named_roster_entry(db: DbNamedRosterEntry) -> NamedRosterEntry {
+    NamedRosterEntry {
+        member_id: extract_record_id(&db.member_id),
+        member_name: db.member_name,
+        avatar_url: db.avatar_url,
+        team_role: parse_team_role(&db.team_role),
+        joined_at: db.joined_at.into(),
+    }
 }
 
 fn db_to_roster_entry(db: DbRosterEntry) -> RosterEntry {
@@ -114,6 +135,32 @@ impl Database {
                 .await?;
             let entries: Vec<DbRosterEntry> = result.take(0)?;
             Ok(entries.into_iter().map(db_to_roster_entry).collect())
+        })
+        .await
+    }
+
+    /// Get a team's active roster with each member's display name and avatar
+    /// joined in from the linked `member` row — one query, no per-member N+1.
+    ///
+    /// Traverses the `plays_on` edge: `in` is the member record, so `in.display_name`
+    /// / `in.avatar_url` dereference the link inline. Only `display_name` and
+    /// `avatar_url` are projected — the encrypted nostr secret never loads here.
+    /// A dangling edge (member row gone) yields `None` for both, which callers
+    /// surface as "Unknown" plus a warning.
+    pub async fn get_team_roster_named(&self, team_id: &str) -> DbResult<Vec<NamedRosterEntry>> {
+        with_timeout(async {
+            let mut result = self
+                .client
+                .query(
+                    r#"SELECT <string>in AS member_id, team_role, joined_at,
+                       in.display_name AS member_name, in.avatar_url AS avatar_url
+                       FROM plays_on
+                       WHERE out = $team_rid AND is_active = true"#,
+                )
+                .bind(("team_rid", team_rid(team_id)))
+                .await?;
+            let entries: Vec<DbNamedRosterEntry> = result.take(0)?;
+            Ok(entries.into_iter().map(db_to_named_roster_entry).collect())
         })
         .await
     }
@@ -198,5 +245,90 @@ impl Database {
             Ok(())
         })
         .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::migrations::run_migrations;
+    use crate::Database;
+
+    async fn seeded_db() -> Database {
+        let db = Database::connect_memory().await.expect("mem db");
+        run_migrations(&db.client).await.expect("migrations");
+        db.client
+            .query(
+                r#"CREATE member:alice SET user_id = 'ua', org_role = 'member',
+                       display_name = 'Alice', avatar_url = 'https://cdn/a.png';
+                   CREATE member:bob SET user_id = 'ub', org_role = 'member',
+                       display_name = 'Bob';
+                   CREATE team:t1 SET name = 'T1', game_id = 'g1';"#,
+            )
+            .await
+            .expect("seed rows");
+        db
+    }
+
+    #[tokio::test]
+    async fn named_roster_joins_member_fields() {
+        let db = seeded_db().await;
+        db.add_to_roster("alice", "t1", TeamRole::Captain)
+            .await
+            .expect("add alice");
+        db.add_to_roster("bob", "t1", TeamRole::Player)
+            .await
+            .expect("add bob");
+
+        let mut roster = db.get_team_roster_named("t1").await.expect("join");
+        roster.sort_by(|a, b| a.member_id.cmp(&b.member_id));
+        assert_eq!(roster.len(), 2);
+
+        let alice = &roster[0];
+        assert_eq!(alice.member_id, "alice");
+        assert_eq!(alice.member_name.as_deref(), Some("Alice"));
+        assert_eq!(alice.avatar_url.as_deref(), Some("https://cdn/a.png"));
+        assert_eq!(alice.team_role, TeamRole::Captain);
+
+        let bob = &roster[1];
+        assert_eq!(bob.member_id, "bob");
+        assert_eq!(bob.member_name.as_deref(), Some("Bob"));
+        assert_eq!(bob.avatar_url, None);
+    }
+
+    #[tokio::test]
+    async fn named_roster_excludes_inactive_edges() {
+        let db = seeded_db().await;
+        db.add_to_roster("alice", "t1", TeamRole::Player)
+            .await
+            .expect("add alice");
+        db.add_to_roster("bob", "t1", TeamRole::Player)
+            .await
+            .expect("add bob");
+        // Soft-delete bob's edge — the is_active = true filter must drop it.
+        db.remove_from_roster("bob", "t1")
+            .await
+            .expect("remove bob");
+
+        let roster = db.get_team_roster_named("t1").await.expect("join");
+        assert_eq!(roster.len(), 1);
+        assert_eq!(roster[0].member_id, "alice");
+    }
+
+    #[tokio::test]
+    async fn named_roster_dangling_edge_yields_none() {
+        let db = seeded_db().await;
+        // An edge whose `in` points at a member id with no backing row. (Deleting
+        // an existing member cascades the edge away in SurrealDB v3, so a dangling
+        // edge can only arise from an edge referencing a never-present member.)
+        db.add_to_roster("ghost", "t1", TeamRole::Player)
+            .await
+            .expect("relate ghost edge");
+
+        let roster = db.get_team_roster_named("t1").await.expect("join");
+        assert_eq!(roster.len(), 1);
+        assert_eq!(roster[0].member_id, "ghost");
+        assert_eq!(roster[0].member_name, None, "dangling edge => no name");
+        assert_eq!(roster[0].avatar_url, None);
     }
 }

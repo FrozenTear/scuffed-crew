@@ -144,6 +144,22 @@ pub struct RosterEntry {
     pub is_active: bool,
 }
 
+/// A roster entry with the member's display name and avatar joined in from the
+/// linked `member` row — produced by a single `plays_on` graph query so callers
+/// don't fan out an N+1 `get_member_safe` lookup per entry.
+///
+/// `member_name` / `avatar_url` are `None` only when the edge is dangling (the
+/// member row was removed out from under an active edge); handlers treat that as
+/// "Unknown" and log it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NamedRosterEntry {
+    pub member_id: String,
+    pub member_name: Option<String>,
+    pub avatar_url: Option<String>,
+    pub team_role: TeamRole,
+    pub joined_at: DateTime<Utc>,
+}
+
 /// A scheduled event.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Event {

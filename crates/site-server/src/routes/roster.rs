@@ -6,7 +6,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 
 use scuffed_auth::server::session::ErrorResponse;
-use scuffed_db::{AuditAction, AuditTargetType, RosterEntry, TeamRole};
+use scuffed_db::{AuditAction, AuditTargetType, NamedRosterEntry, RosterEntry, TeamRole};
 
 use crate::extractors::OfficerUser;
 use crate::routes::audit_log::audit;
@@ -20,16 +20,49 @@ pub struct RosterMemberResponse {
     pub team_role: String,
 }
 
-/// Enrich a raw roster entry with the member's display name.
+/// Build the admin response from a joined roster entry, warning on a dangling edge.
+fn to_response(entry: NamedRosterEntry) -> RosterMemberResponse {
+    let NamedRosterEntry {
+        member_id,
+        member_name,
+        team_role,
+        ..
+    } = entry;
+    let member_name = member_name.unwrap_or_else(|| {
+        tracing::warn!(
+            member_id = %member_id,
+            "roster references a member with no row (dangling plays_on edge)"
+        );
+        "Unknown".to_string()
+    });
+    RosterMemberResponse {
+        member_id,
+        member_name,
+        team_role: team_role.to_string(),
+    }
+}
+
+/// Enrich the single entry returned by an add (POST) via one member lookup.
+/// The bulk GET path uses the db-level join instead of this per-entry lookup.
 async fn enrich(state: &AppState, entry: RosterEntry) -> RosterMemberResponse {
-    let member_name = state
-        .db
-        .get_member_safe(&entry.member_id)
-        .await
-        .ok()
-        .flatten()
-        .map(|m| m.display_name)
-        .unwrap_or_else(|| "Unknown".to_string());
+    let member_name = match state.db.get_member_safe(&entry.member_id).await {
+        Ok(Some(m)) => m.display_name,
+        Ok(None) => {
+            tracing::warn!(
+                member_id = %entry.member_id,
+                "roster member row not found after add"
+            );
+            "Unknown".to_string()
+        }
+        Err(e) => {
+            tracing::warn!(
+                member_id = %entry.member_id,
+                error = %e,
+                "failed to load member for roster add"
+            );
+            "Unknown".to_string()
+        }
+    };
     RosterMemberResponse {
         member_id: entry.member_id,
         member_name,
@@ -42,18 +75,19 @@ pub async fn get_team_roster(
     State(state): State<AppState>,
     Path(team_id): Path<String>,
 ) -> Result<Json<Vec<RosterMemberResponse>>, (StatusCode, Json<ErrorResponse>)> {
-    let entries = state.db.get_team_roster(&team_id).await.map_err(|_e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: "Internal error".into(),
-            }),
-        )
-    })?;
-    let mut roster = Vec::with_capacity(entries.len());
-    for entry in entries {
-        roster.push(enrich(&state, entry).await);
-    }
+    let entries = state
+        .db
+        .get_team_roster_named(&team_id)
+        .await
+        .map_err(|_e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: "Internal error".into(),
+                }),
+            )
+        })?;
+    let roster: Vec<RosterMemberResponse> = entries.into_iter().map(to_response).collect();
     Ok(Json(roster))
 }
 
