@@ -86,13 +86,22 @@ struct CaptureRequest {
     prev_gate: Option<(GateState, std::time::Duration)>,
 }
 
+/// Package version shown by `--version` / `--help`.
+///
+/// Release CI sets `SST_RELEASE_VERSION` from the git tag so the binary
+/// reports the tagged release version; local/dev builds fall back to
+/// `CARGO_PKG_VERSION`.
+fn package_version() -> &'static str {
+    option_env!("SST_RELEASE_VERSION").unwrap_or(env!("CARGO_PKG_VERSION"))
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // Handle --version/--help before ANY init: smoke tests (CI clean-room,
     // installer) and humans probe these; unknown flags used to fall through
     // to full daemon startup, which blocks forever on headless machines.
     if std::env::args().any(|a| a == "--version" || a == "-V") {
-        println!("scuffed-stat-tracker {}", env!("CARGO_PKG_VERSION"));
+        println!("scuffed-stat-tracker {}", package_version());
         return Ok(());
     }
     if std::env::args().any(|a| a == "--help" || a == "-h") {
@@ -108,7 +117,7 @@ async fn main() -> anyhow::Result<()> {
              \x20 --collect-portraits   dev: save hero portrait crops while running\n\
              \x20 --dump-poll-frames    dev: save every polled frame while running\n\n\
              With no flags, runs the capture daemon (see README).",
-            env!("CARGO_PKG_VERSION")
+            package_version()
         );
         return Ok(());
     }
