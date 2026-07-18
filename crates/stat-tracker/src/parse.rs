@@ -530,12 +530,42 @@ const MAPS: &[(&str, &str)] = &[
     ("Throne of Anubis", "anubis"),
 ];
 
-fn find_map(lines: &[&str]) -> Option<String> {
-    let text = lines.join(" ").to_lowercase();
+/// Fold OCR-ambiguous glyphs to one canonical letter each so a mangled map
+/// name still matches. `1`, `|`, `l` all collapse to `i`; `0` collapses to `o`.
+/// Operates on already-lowercased text.
+///
+/// Applied to BOTH the OCR candidate text and the map patterns (see `find_map`,
+/// `fuzzy_match_map`, and the vote reader in `detect::match_start`). The fold is
+/// deliberately symmetric — normalizing both sides means it can never corrupt a
+/// legit name into a non-match (e.g. `ilios`→`iiios` on both sides still matches,
+/// `hollywood`→`hoiiywood` on both sides still matches). Named for the class of
+/// misread it fixes: ILIOS (three capital I's) reads as `1LIOS`/`IL10S`/`|LIOS`.
+pub(crate) fn normalize_ocr_glyphs(s: &str) -> String {
+    s.chars()
+        .map(|c| match c {
+            '1' | '|' | 'l' => 'i',
+            '0' => 'o',
+            other => other,
+        })
+        .collect()
+}
 
-    // Pass 1: exact substring match
+/// Fuzzy threshold for a map name of `len` non-space chars. Short names get a
+/// touch more slack: a single wrong glyph in a 5-char name (BUSAN→BUSVN) is a
+/// 0.80 score, which the strict long-name bar would reject. Kept close to the
+/// long-name bar so player names / stat fragments still don't cross it — the
+/// King's-Row false-positive that justified the strict bar is a substring trap
+/// (guarded by dropping bare "king" from MAPS), not a fuzzy near-miss.
+pub(crate) fn map_fuzzy_threshold(len: usize) -> f64 {
+    if len <= 6 { 0.80 } else { 0.85 }
+}
+
+fn find_map(lines: &[&str]) -> Option<String> {
+    let text = normalize_ocr_glyphs(&lines.join(" ").to_lowercase());
+
+    // Pass 1: exact substring match (patterns glyph-normalized to match).
     for &(display_name, pattern) in MAPS {
-        if text.contains(pattern) {
+        if text.contains(&normalize_ocr_glyphs(pattern)) {
             return Some(display_name.to_string());
         }
     }
@@ -544,24 +574,23 @@ fn find_map(lines: &[&str]) -> Option<String> {
     fuzzy_match_map(&text)
 }
 
-// Higher than the hero threshold: the map label is only OCR'd from a dedicated
-// region, and a loose threshold here was false-matching player names / stat
-// fragments to maps (e.g. "King's Row").
-const FUZZY_MAP_THRESHOLD: f64 = 0.85;
-
 fn fuzzy_match_map(text: &str) -> Option<String> {
+    // `text` is expected to already be glyph-normalized by the caller.
+    let text = normalize_ocr_glyphs(text);
     let words: Vec<&str> = text.split_whitespace().collect();
 
     let mut best_map: Option<&str> = None;
     let mut best_score: f64 = 0.0;
 
     for &(display_name, pattern) in MAPS {
+        let pattern = normalize_ocr_glyphs(pattern);
         let pattern_parts: Vec<&str> = pattern.split_whitespace().collect();
+        let threshold = map_fuzzy_threshold(pattern.chars().filter(|c| !c.is_whitespace()).count());
 
         if pattern_parts.len() == 1 {
             for &word in &words {
-                let score = normalized_levenshtein(word, pattern);
-                if score > best_score && score >= FUZZY_MAP_THRESHOLD {
+                let score = normalized_levenshtein(word, &pattern);
+                if score > best_score && score >= threshold {
                     best_score = score;
                     best_map = Some(display_name);
                 }
@@ -569,8 +598,8 @@ fn fuzzy_match_map(text: &str) -> Option<String> {
         } else {
             for window in words.windows(pattern_parts.len()) {
                 let candidate = window.join(" ");
-                let score = normalized_levenshtein(&candidate, pattern);
-                if score > best_score && score >= FUZZY_MAP_THRESHOLD {
+                let score = normalized_levenshtein(&candidate, &pattern);
+                if score > best_score && score >= threshold {
                     best_score = score;
                     best_map = Some(display_name);
                 }
@@ -761,5 +790,56 @@ mod hero_map_name_tests {
             Some("Neon Junction")
         );
         assert_eq!(canonical_map("garbage read"), None);
+    }
+
+    #[test]
+    fn glyph_mangled_map_names_resolve() {
+        // ILIOS is three capital I's — the most OCR-mangled name in the pool.
+        // Field 07-17: an Ilios game registered no map on any reader. Each of
+        // these fed the old exact `contains` path an empty result.
+        // (Mutation check: with FUZZY_MAP_THRESHOLD reverted to 0.85 AND the
+        // glyph fold removed, every assertion in this test fails.)
+        assert_eq!(match_map_in_text("1LIOS").as_deref(), Some("Ilios"));
+        assert_eq!(match_map_in_text("IL10S").as_deref(), Some("Ilios"));
+        assert_eq!(match_map_in_text("|LIOS").as_deref(), Some("Ilios"));
+        // Oasis with a zero-for-O; Route 66 with a zero-for-O.
+        assert_eq!(match_map_in_text("0ASIS").as_deref(), Some("Oasis"));
+        assert_eq!(match_map_in_text("R0UTE 66").as_deref(), Some("Route 66"));
+        // Busan with a V-for-A (not a glyph fold — needs the looser short-name
+        // fuzzy threshold: BUSVN↔BUSAN scores 0.80).
+        assert_eq!(match_map_in_text("BUSVN").as_deref(), Some("Busan"));
+    }
+
+    #[test]
+    fn player_names_and_hero_names_do_not_false_positive_as_maps() {
+        // The map matcher runs over full-board OCR text too, so hero names,
+        // gamer tags and stat fragments must not resolve to a map even with the
+        // looser short-name threshold.
+        assert_eq!(match_map_in_text("REAPER"), None);
+        assert_eq!(match_map_in_text("SOMBRA"), None);
+        assert_eq!(match_map_in_text("WIDOWMAKER"), None);
+        assert_eq!(match_map_in_text("xXGamerTagXx"), None);
+        assert_eq!(match_map_in_text("FR0ZEN"), None);
+        assert_eq!(match_map_in_text("31% WEAPON ACCURACY"), None);
+    }
+
+    #[test]
+    fn wrecking_ball_guard_survives_glyph_fold() {
+        // The King's-Row false positive that justified the strict threshold:
+        // "wrecKING ball" must still NOT read as King's Row after the glyph
+        // fold (which turns "ball"→"baii" but leaves the guard intact).
+        assert_eq!(
+            match_map_in_text("WRECKING BALL\n31% WEAPON ACCURACY"),
+            None
+        );
+        // And the genuine map still resolves, apostrophe dropped or not.
+        assert_eq!(
+            match_map_in_text("KING'S ROW").as_deref(),
+            Some("King's Row")
+        );
+        assert_eq!(
+            match_map_in_text("KINGS ROW").as_deref(),
+            Some("King's Row")
+        );
     }
 }
