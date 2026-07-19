@@ -157,13 +157,25 @@ pub async fn vote_poll(
         .db
         .vote_poll(&id, &member.member.id, body.option_index)
         .await
-        .map_err(|_e| {
-            (
+        .map_err(|e| match e {
+            // Poll vanished between the load above and the write.
+            scuffed_db::DbError::NotFound(_) => (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse {
+                    error: "Poll not found".into(),
+                }),
+            ),
+            // Closed poll, duplicate same-option vote, or single-choice replace
+            // race — all surface as a 409 with a caller-safe message.
+            scuffed_db::DbError::Conflict(msg) => {
+                (StatusCode::CONFLICT, Json(ErrorResponse { error: msg }))
+            }
+            _ => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
                     error: "Internal error".into(),
                 }),
-            )
+            ),
         })?;
 
     Ok(StatusCode::OK)
