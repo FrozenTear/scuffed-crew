@@ -53,12 +53,15 @@ fn default_top() -> u32 {
 }
 
 /// GET /api/public/members/:id/heroes?top=3 — public top heroes (no auth).
+///
+/// `top=0` returns **all** heroes (hero-stats W2 B4). Default remains 3.
+/// Non-zero values are clamped to 1..=50.
 pub async fn public_member_heroes(
     State(state): State<AppState>,
     Path(id): Path<String>,
     Query(q): Query<HeroesQuery>,
 ) -> Result<Json<Vec<HeroAgg>>, (StatusCode, Json<ErrorResponse>)> {
-    let top = q.top.clamp(1, 20);
+    let top = if q.top == 0 { 0 } else { q.top.clamp(1, 50) };
     // Ensure member exists (safe projection).
     let exists = state
         .db
@@ -148,9 +151,10 @@ pub async fn public_leaderboards(
         None
     };
 
+    // W2 B1: DB accepts hero filter; HTTP wire-up + HEROES validation is W3 B2.
     let rows = state
         .db
-        .member_leaderboard(metric, limit, season_window)
+        .member_leaderboard(metric, limit, season_window, None)
         .await
         .map_err(|_e| {
             (
