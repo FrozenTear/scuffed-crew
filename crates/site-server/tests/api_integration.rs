@@ -4495,6 +4495,59 @@ async fn public_leaderboards_and_member_heroes() {
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }
 
+/// W3 B3: `GET /api/public/members?hero=` attaches optional `hero_scoped`.
+#[tokio::test]
+async fn public_members_hero_scoped_query() {
+    let state = test_state().await;
+    seed_all_roles(&state.db).await;
+
+    // No filter: OK, no hero_scoped on rows
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(unauthed_request(
+            Method::GET,
+            "/api/public/members?limit=10",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    let data = json["data"].as_array().expect("data array");
+    if let Some(first) = data.first() {
+        assert!(
+            first.get("hero_scoped").is_none()
+                || first
+                    .get("hero_scoped")
+                    .map(|v| v.is_null())
+                    .unwrap_or(false),
+            "unfiltered list must omit hero_scoped"
+        );
+    }
+
+    // Known hero (case-insensitive): 200 (empty scoped OK with no personal matches)
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(unauthed_request(
+            Method::GET,
+            "/api/public/members?limit=10&hero=ana",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let _ = body_json(resp).await;
+
+    // Unknown hero → 400
+    let app = create_router(state);
+    let resp = app
+        .oneshot(unauthed_request(
+            Method::GET,
+            "/api/public/members?hero=NotAHero",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
 // ─── Local self-registration (privacy-first signup) ─────────────────────────
 
 fn anon_json_request(method: Method, uri: &str, body: Value) -> Request<Body> {
