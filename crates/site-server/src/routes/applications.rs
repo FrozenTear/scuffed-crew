@@ -238,7 +238,8 @@ pub async fn update_application(
     Ok(Json(app))
 }
 
-/// Shared transition path: side effects before CAS status write, then audit.
+/// Shared transition path: the atomic CAS status write gates the side effects,
+/// then audit.
 async fn apply_application_transition(
     state: &AppState,
     existing: &Application,
@@ -246,15 +247,32 @@ async fn apply_application_transition(
     actor_id: &str,
     review_notes: Option<&str>,
 ) -> Result<Application, (StatusCode, Json<ErrorResponse>)> {
-    // Side effects run *before* the CAS status write when they must not leave a
-    // terminal application without matching membership state:
-    // - trial/accepted: provision first so we never accept without a member
-    // - reject/withdraw: deactivate recruit first so reject never leaves an
-    //   active trial recruit if deactivate would fail after status write
+    // Provision membership *before* the CAS for trial/accepted so we never move an
+    // application into a member-bearing state without a matching member row, and so a
+    // provisioning failure aborts before the status changes. This branch is idempotent
+    // under a lost CAS race — the member is left active, which is correct for whichever
+    // accept won.
     if application_status_ensures_member(to) {
         ensure_member_for_application(state, &existing.user_id, existing.status, to, &existing.id)
             .await?;
-    } else if application_status_deactivates_member(to)
+    }
+
+    // The CAS is the atomic gate: run it FIRST for reject/withdraw so a lost race
+    // returns Conflict (409) having touched NO membership state. Deactivating + revoking
+    // sessions only *after* the CAS commits means an Accept racing a self-Withdraw can
+    // never leave an accepted member deactivated with sessions revoked (DR1-ACCT-001
+    // lockout): on Conflict we short-circuit here before any side effect runs.
+    let app = state
+        .db
+        .update_application_status(&existing.id, existing.status, to, actor_id, review_notes)
+        .await
+        .map_err(|e| match e {
+            scuffed_db::DbError::Conflict(msg) => conflict(&msg),
+            other => internal_err(other, "update_application_status"),
+        })?;
+
+    // Deactivate the failed trial recruit only after the reject/withdraw CAS committed.
+    if application_status_deactivates_member(to)
         && let Some(member) = state
             .db
             .get_member_by_user(&existing.user_id)
@@ -299,15 +317,6 @@ async fn apply_application_transition(
         )
         .await;
     }
-
-    let app = state
-        .db
-        .update_application_status(&existing.id, existing.status, to, actor_id, review_notes)
-        .await
-        .map_err(|e| match e {
-            scuffed_db::DbError::Conflict(msg) => conflict(&msg),
-            other => internal_err(other, "update_application_status"),
-        })?;
 
     let action = match to {
         ApplicationStatus::Accepted => AuditAction::AcceptedApplication,
@@ -456,4 +465,260 @@ pub async fn expiring_trials(
         .await
         .map(Json)
         .map_err(|e| internal_err(e, "list_expiring_trials"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+    use std::sync::Arc;
+
+    use scuffed_auth::SessionConfig;
+    use scuffed_db::migrations::run_migrations;
+    use scuffed_db::{Database, OrgRole};
+
+    use crate::state::{AppState, OAuthConfig};
+
+    async fn test_state() -> AppState {
+        let db = Database::connect_memory()
+            .await
+            .expect("in-memory DB connect");
+        run_migrations(&db.client).await.expect("migrations");
+        AppState {
+            db: Arc::new(db),
+            session_config: SessionConfig::default(),
+            oauth_config: OAuthConfig {
+                discord_client_id: String::new(),
+                discord_client_secret: String::new(),
+                google_client_id: String::new(),
+                google_client_secret: String::new(),
+                redirect_base_url: "http://localhost:3000".into(),
+                allowed_origins: vec!["http://localhost:3000".into()],
+            },
+            upload_dir: PathBuf::from("/tmp/scuffed-test-uploads"),
+            notifier: None,
+            nostr_challenge_key: [0u8; 32],
+            consumed_challenges: crate::challenge_store::ConsumedChallengeStore::new(),
+            crypto: None,
+            relay_url: None,
+            dm_events: None,
+        }
+    }
+
+    async fn session_count(state: &AppState, user_id: &str) -> usize {
+        let mut r = state
+            .db
+            .client
+            .query("SELECT VALUE user_id FROM session WHERE user_id = $uid")
+            .bind(("uid", user_id.to_string()))
+            .await
+            .expect("count sessions");
+        let rows: Vec<String> = r.take(0).expect("take sessions");
+        rows.len()
+    }
+
+    /// DR1-ACCT-001 regression: an Accept racing a self-Withdraw must not leave the
+    /// just-accepted member deactivated with sessions revoked.
+    ///
+    /// We reproduce the exact interleave deterministically: the self-withdraw handler
+    /// captured a *stale* `Pending` snapshot of the application, but by the time its
+    /// transition runs the concurrent direct-accept has already provisioned the member
+    /// (active recruit) AND won the CAS (row is now `Accepted`). The withdraw transition
+    /// must Conflict on the CAS and touch NO membership state.
+    ///
+    /// Under the old side-effect-before-CAS ordering this test fails: the deactivate +
+    /// session-revoke ran before the (then-conflicting) CAS, locking the member out.
+    #[tokio::test]
+    async fn cas_conflict_in_deactivate_branch_does_not_lock_out_member() {
+        let state = test_state().await;
+        let user_id = "raceuser";
+
+        // User row (needed for member/application foreign keys).
+        state
+            .db
+            .client
+            .query(
+                r#"CREATE user:raceuser SET
+                    provider = 'discord',
+                    username = 'Racer',
+                    avatar_url = NONE,
+                    provider_id = 'raceuser-pid',
+                    provider_id_hash = 'raceuser-pidh',
+                    provider_id_encrypted = NONE,
+                    created_at = time::now()"#,
+            )
+            .await
+            .expect("seed user");
+
+        // The member the concurrent direct-accept just provisioned: active recruit.
+        let member = state
+            .db
+            .create_member(user_id, "Racer", OrgRole::Recruit)
+            .await
+            .expect("provision recruit");
+        assert!(member.is_active);
+
+        // A live session for that member.
+        state
+            .db
+            .client
+            .query(
+                r#"CREATE session:sess_raceuser SET
+                    user_id = 'raceuser',
+                    token = 'live-token-hash',
+                    expires_at = time::now() + 365d,
+                    created_at = time::now()"#,
+            )
+            .await
+            .expect("seed session");
+        assert_eq!(session_count(&state, user_id).await, 1);
+
+        // The applicant's own (now stale) view of the application: still Pending.
+        let stale = state
+            .db
+            .submit_application(user_id, vec![], vec![], None)
+            .await
+            .expect("submit application");
+        assert_eq!(stale.status, ApplicationStatus::Pending);
+
+        // The concurrent direct-accept WON the CAS: advance the row Pending -> Accepted.
+        state
+            .db
+            .update_application_status(
+                &stale.id,
+                ApplicationStatus::Pending,
+                ApplicationStatus::Accepted,
+                "officer",
+                None,
+            )
+            .await
+            .expect("concurrent accept wins CAS");
+
+        // Self-withdraw fires the transition with the stale Pending snapshot.
+        let result = apply_application_transition(
+            &state,
+            &stale,
+            ApplicationStatus::Withdrawn,
+            member.id.as_str(),
+            Some("Self-withdrawn by applicant"),
+        )
+        .await;
+
+        // CAS-first: expected Pending vs actual Accepted -> Conflict (409).
+        let (status, _) = result.expect_err("stale withdraw must conflict");
+        assert_eq!(status, StatusCode::CONFLICT);
+
+        // No collateral lockout: the accepted member stays active with its session intact.
+        let after = state
+            .db
+            .get_member_by_user(user_id)
+            .await
+            .expect("reload member")
+            .expect("member still exists");
+        assert!(
+            after.is_active,
+            "CAS conflict must not deactivate the accepted member"
+        );
+        assert_eq!(
+            session_count(&state, user_id).await,
+            1,
+            "CAS conflict must not revoke the member's sessions"
+        );
+        // The application row is unchanged by the losing transition: still Accepted.
+        let app_now = state
+            .db
+            .get_application_by_user(user_id)
+            .await
+            .expect("reload application")
+            .expect("application exists");
+        assert_eq!(app_now.status, ApplicationStatus::Accepted);
+    }
+
+    /// A normal reject of an active trial recruit still deactivates it and revokes
+    /// sessions — the side effect must still run once the CAS succeeds.
+    #[tokio::test]
+    async fn normal_reject_still_deactivates_recruit_after_cas() {
+        let state = test_state().await;
+        let user_id = "rejuser";
+
+        state
+            .db
+            .client
+            .query(
+                r#"CREATE user:rejuser SET
+                    provider = 'discord',
+                    username = 'Rej',
+                    avatar_url = NONE,
+                    provider_id = 'rejuser-pid',
+                    provider_id_hash = 'rejuser-pidh',
+                    provider_id_encrypted = NONE,
+                    created_at = time::now()"#,
+            )
+            .await
+            .expect("seed user");
+
+        let member = state
+            .db
+            .create_member(user_id, "Rej", OrgRole::Recruit)
+            .await
+            .expect("provision recruit");
+        assert!(member.is_active);
+
+        state
+            .db
+            .client
+            .query(
+                r#"CREATE session:sess_rejuser SET
+                    user_id = 'rejuser',
+                    token = 'rej-token-hash',
+                    expires_at = time::now() + 365d,
+                    created_at = time::now()"#,
+            )
+            .await
+            .expect("seed session");
+
+        // Application sits in Trial; fresh snapshot matches the DB row (no race).
+        let submitted = state
+            .db
+            .submit_application(user_id, vec![], vec![], None)
+            .await
+            .expect("submit application");
+        let trial = state
+            .db
+            .update_application_status(
+                &submitted.id,
+                ApplicationStatus::Pending,
+                ApplicationStatus::Trial,
+                "officer",
+                None,
+            )
+            .await
+            .expect("move to trial");
+
+        let result = apply_application_transition(
+            &state,
+            &trial,
+            ApplicationStatus::Rejected,
+            "officer",
+            Some("not a fit"),
+        )
+        .await;
+        assert!(result.is_ok(), "normal reject should succeed");
+
+        let after = state
+            .db
+            .get_member_by_user(user_id)
+            .await
+            .expect("reload member")
+            .expect("member exists");
+        assert!(
+            !after.is_active,
+            "reject should deactivate the trial recruit"
+        );
+        assert_eq!(
+            session_count(&state, user_id).await,
+            0,
+            "reject should revoke the recruit's sessions"
+        );
+    }
 }
