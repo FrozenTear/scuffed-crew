@@ -64,7 +64,7 @@ Production = `scuffed-server` serving `dist/` (built by `dx build` from crates/a
 - **Actionable admin** = active admin not suspended/banned (use for last-admin + setup)
 - Policy denials: **403** authz, **400** invalid state, **409** CAS / last-admin race / dup apply
 - After demote/deactivate/suspend/ban of an actionable admin: `assert_has_actionable_admin` + compensate
-- Application transitions: membership side effects **before** CAS status write
+- Application transitions (`apply_application_transition`): the CAS status write is the atomic gate. **Destructive** side effects (deactivate recruit + revoke sessions on reject/withdraw) run **only after** the CAS commits, so a lost race returns 409 having touched no membership state (DR1-ACCT-001 lockout fix — do NOT move them before the CAS). Member **provisioning** for trial/accepted runs before the CAS and is idempotent (a lost race leaves the member active, correct for whichever accept won). Compensate/audit after the effect.
 - Submit: if `count_open_applications > 1` after insert, delete the new row and 409
 - Applicants self-withdraw via `POST /api/applications/mine/withdraw` (pending/trial only)
 - Ban deactivates; lift does **not** re-activate (see `docs/notes/moderation.md`)

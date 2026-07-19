@@ -101,6 +101,14 @@ podman compose --env-file data/secrets.env up -d
 
 DB is fine; an old healthcheck probe was wrong. Current `compose.yml` does **not** healthcheck Surreal and uses `depends_on: service_started`. Pull latest and `up -d` again.
 
+### Locked out of admin (no actionable admin left)
+
+Break-glass root-level DB recovery when the last admin is deactivated, demoted, suspended/banned, or lost: `docs/notes/last-admin-recovery.md`.
+
+### Pruning `audit_log` (GDPR / right-to-erasure)
+
+`audit_log` is append-only; a targeted prune needs a root-level drop/re-add of the guard event — procedure in `docs/notes/audit-log-ops.md`.
+
 ## Happy path (novice)
 
 ```bash
