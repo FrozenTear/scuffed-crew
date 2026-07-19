@@ -1,7 +1,7 @@
 use dioxus::prelude::*;
 use serde::Deserialize;
 
-use crate::components::{ConfirmDialog, DataTable, FormModal, Toast, use_toast};
+use crate::components::{ConfirmDialog, DataTable, FormModal, Toast, admin_pending, use_toast};
 use crate::hooks::{ModalController, use_api};
 use scuffed_api_client::ApiClient;
 
@@ -201,7 +201,7 @@ pub fn AdminArticles() -> Element {
             let data = articles.data.read();
             let data = data.as_ref().and_then(|d| d.as_ref());
             match data {
-                None => rsx! { p { class: "admin-loading", "Loading..." } },
+                None => admin_pending(&articles, "articles"),
                 Some(list) if list.is_empty() => rsx! {
                     p { class: "empty-state", "No articles yet." }
                 },

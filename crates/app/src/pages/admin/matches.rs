@@ -1,7 +1,7 @@
 use dioxus::prelude::*;
 use serde::Deserialize;
 
-use crate::components::{DataTable, FormModal, Toast, use_toast};
+use crate::components::{DataTable, FormModal, Toast, admin_pending, use_toast};
 use crate::hooks::{ModalController, use_api_list, use_api_list_with};
 use scuffed_api_client::ApiClient;
 use scuffed_types::api::MatchPayload;
@@ -266,7 +266,7 @@ pub fn AdminMatches() -> Element {
                 let data = matches.data.read();
                 let data = data.as_ref().and_then(|d| d.as_ref());
                 match data {
-                    None => rsx! { p { class: "admin-loading", "Loading..." } },
+                    None => admin_pending(&matches, "matches"),
                     Some(list) if list.is_empty() => rsx! {
                         p { class: "empty-state", "No matches recorded for this team." }
                     },

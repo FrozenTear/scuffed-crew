@@ -2,7 +2,9 @@ use dioxus::prelude::*;
 use serde::Deserialize;
 use std::collections::HashMap;
 
-use crate::components::{ConfirmDialog, DataTable, FormModal, StatusPill, Toast, use_toast};
+use crate::components::{
+    ConfirmDialog, DataTable, FormModal, StatusPill, Toast, admin_pending, use_toast,
+};
 use crate::hooks::{ModalController, use_api, use_api_list};
 use scuffed_api_client::ApiClient;
 use scuffed_types::api::{
@@ -734,7 +736,7 @@ pub fn AdminTournaments() -> Element {
                 let data = data.as_ref().and_then(|d| d.as_ref());
                 let filter = status_filter();
                 match data {
-                    None => rsx! { p { class: "admin-loading", "Loading..." } },
+                    None => admin_pending(&tournaments, "tournaments"),
                     Some(list) => {
                         let filtered: Vec<&Tournament> = list
                             .iter()
