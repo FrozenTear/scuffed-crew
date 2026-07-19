@@ -26,12 +26,23 @@ ruling 2026-07-19, extends orchestration ruling in fleet-protocol Appendix A).
 
 ## Lanes
 
-Each lane produces structured findings: `severity(CRIT/HIGH/MED/LOW/NIT) +
-file:line + claim + concrete failure scenario`. Thread: `fleet::dr1-<lane>`.
+Each lane produces structured findings: `DR1-<LANE>-NNN + severity(CRIT/HIGH/
+MED/LOW/NIT) + file:line + claim + concrete failure scenario` (IDs mandatory —
+grok A1; P2 verdicts reference them as CONFIRM/REFUTE). Thread:
+`fleet::dr1-<lane>`.
+
+File partition (grok A2 — prevents double-hits like role-change spanning three
+lanes): AUTH = `crates/auth` only. ACCT = db membership_policy + applications +
+members queries, site-server applications/members role/ban routes. ADMIN = all
+other site-server admin REST. NOSTR = `crates/chat`, `crates/relay-policy`,
+site-server nostr surface, db nostr_keys/dms, `crates/server` chat wiring.
+DB = remainder of `crates/db`. FRONT = `crates/app` + `crates/api-client`.
+QUAL = metrics-only until P4. Stat-tracker and map-* crates are EXCLUDED from
+P1 security waves (grok A3) — QUAL metrics scan only.
 
 | Lane  | Scope |
 |-------|-------|
-| AUTH  | `crates/auth`: OAuth flows, session lifecycle, cookie flags, CSRF, crypto primitives, `ENCRYPTION_KEY` handling, dev-login gating, extractor chain (`OrgMember`→`OfficerUser`→`AdminUser`) |
+| AUTH  | `crates/auth`: OAuth flows, session lifecycle, cookie flags, CSRF, crypto primitives, `ENCRYPTION_KEY` handling, dev-login gating, extractor chain (`OrgMember`→`OfficerUser`→`AdminUser`); + grok checklist adds: rate-limit/brute-force posture, session revocation on password reset, secret-material-in-logs sweep |
 | ACCT  | User accounts: local registration, application lifecycle + CAS transitions, `membership_policy.rs` invariants (last-admin, actionable-admin), ban/suspend/lift, role changes, profile fields |
 | ADMIN | `crates/site-server` admin REST surface: per-route authz audit, 403/400/409 semantics vs policy doc, input validation, uploads, audit-log coverage, tournament/member/team mutations |
 | NOSTR | `crates/chat` + `crates/relay-policy`: NIP-44/59 correctness, signature verification, key storage/encryption at rest, `MEMBER_SAFE_COLS` leak surface, NIP-42/29 policy, server-side signing paths |
@@ -42,14 +53,19 @@ file:line + claim + concrete failure scenario`. Thread: `fleet::dr1-<lane>`.
 ## Phases
 
 - **P0 Recon** (~30 min) — memtrace mapping: communities, central symbols,
-  complexity/hotspot inventory, API topology. Output: per-lane target lists
-  posted to lane threads. No findings yet, just aim.
-- **P1 Review waves** — parallel Opus subagents per lane (wave-based; AUTH,
-  ACCT, ADMIN, NOSTR first as the priority core, DB/QUAL/FRONT second wave).
-  Findings posted per lane thread.
+  complexity/hotspot inventory, API topology. Output: **owned file:line target
+  lists posted per lane thread before any wave dispatches** (grok A7). No
+  findings yet, just aim.
+- **P1 Review waves** — parallel subagents per lane (wave-based; AUTH, ACCT,
+  ADMIN, NOSTR first as the priority core, DB/QUAL/FRONT second wave).
+  Lane ownership (grok claim, agreed): grok reviews NOSTR + DB with its own
+  subagents; claude runs AUTH/ACCT/ADMIN/FRONT/QUAL via Opus. Findings posted
+  per lane thread with DR1-<LANE>-NNN IDs.
 - **P2 Adversarial verification** — every CRIT/HIGH re-derived or refuted by
-  an independent agent that did not author it; grok cross-checks the surviving
-  set and posts dissent per finding. Unverified findings are demoted, not
+  an independent agent that did not author it, verdicts recorded as
+  CONFIRM/REFUTE against finding IDs; MEDs that smell CRIT are sampled into
+  verification too (grok A6). grok cross-checks ALL survivors (both sides'
+  lanes) and posts dissent per finding. Unverified findings are demoted, not
   silently dropped.
 - **P3 Consolidated report** — `docs/notes/deep-review-2026-07-19.md`:
   severity-ranked, deduplicated, each fix mapped to a branch plan. USER-facing
@@ -60,7 +76,9 @@ file:line + claim + concrete failure scenario`. Thread: `fleet::dr1-<lane>`.
   Opus implements, gates = CI-exact (fmt, clippy -D warnings, workspace
   tests). Every branch dual-agree; reviewer merges. Refactors must be
   behavior-preserving; any behavior change is called out in the review
-  request.
+  request. **Overnight scope limit (grok A4): only CRIT/HIGH security and
+  correctness-MED fixes land overnight; multi-file god-function refactors
+  wait for USER morning unless blast radius is tiny (get_impact-verified).**
 - **P5 Close-out** — full CI green on final main, `get_evolution` regression
   sweep, report finalized, memory + backlog updated, USER morning summary.
 
@@ -74,13 +92,18 @@ file:line + claim + concrete failure scenario`. Thread: `fleet::dr1-<lane>`.
   dissent recorded → USER reviews provisionals first.
 - CRIT security findings: escalate to USER immediately on discovery, do not
   batch to P3.
-- Push auth is currently broken on this box (gh token invalid). Until USER
-  re-auths, branches stay local + all coordination goes through the fleet
-  log with explicit "local-only" markers. No merge happens from a cached
-  remote view.
+- Push-outage fallback (grok A5, kept as standing rule): if push breaks again,
+  dual-agree proceeds on local SHAs + a LAND QUEUE is kept on the fleet log;
+  no origin merge until push works. (Push restored 00:35Z 07-19 — USER
+  re-authed gh; b0c2118 + plan commits on origin.)
+
+## Plan agreement
+
+grok verdict 01KXVW8GCF: APPROVE w/ amendments A1–A7, all folded above.
+Lane claims settled: grok = NOSTR + DB; claude = AUTH/ACCT/ADMIN/FRONT/QUAL.
 
 ## Ask to USER (at plan sign-off)
 
-1. Pre-authorize P4 merges under dual-agree overnight (same as 07-17 kickoff),
-   tags/releases still human-only?
-2. Re-auth `gh` so branches/report can reach origin.
+1. Pre-authorize P4 merges under dual-agree overnight (same as 07-17 kickoff)?
+   Scope per A4: security/correctness only; big refactors parked for morning;
+   tags/releases still human-only.
