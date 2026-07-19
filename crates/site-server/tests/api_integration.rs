@@ -4965,3 +4965,237 @@ async fn nostr_login_rejects_replayed_challenge() {
         "expected replay rejection, got {body:?}"
     );
 }
+
+// ─── Uploads (DR1-ADMIN-001 / ADMIN-003 hardening) ───────────────────────────
+
+/// Standard CRC-32 (IEEE) for crafting valid PNG chunks in tests.
+fn upl_crc32(bytes: &[u8]) -> u32 {
+    let mut crc: u32 = 0xFFFF_FFFF;
+    for &b in bytes {
+        crc ^= b as u32;
+        for _ in 0..8 {
+            let mask = (crc & 1).wrapping_neg();
+            crc = (crc >> 1) ^ (0xEDB8_8320 & mask);
+        }
+    }
+    !crc
+}
+
+/// Minimal structurally-valid PNG (signature + IHDR + IDAT + IEND) declaring
+/// `w`x`h`. The tiny IDAT is required for a header-only dimension read but is
+/// never inflated, so gigapixel dimensions can be declared cheaply.
+fn upl_png(w: u32, h: u32) -> Vec<u8> {
+    let mut out = vec![0x89, b'P', b'N', b'G', b'\r', b'\n', 0x1a, b'\n'];
+    let mut ihdr = Vec::new();
+    ihdr.extend_from_slice(b"IHDR");
+    ihdr.extend_from_slice(&w.to_be_bytes());
+    ihdr.extend_from_slice(&h.to_be_bytes());
+    ihdr.extend_from_slice(&[8, 2, 0, 0, 0]);
+    out.extend_from_slice(&(13u32).to_be_bytes());
+    out.extend_from_slice(&ihdr);
+    out.extend_from_slice(&upl_crc32(&ihdr).to_be_bytes());
+    let mut idat = Vec::new();
+    idat.extend_from_slice(b"IDAT");
+    idat.extend_from_slice(&[0x78, 0x9c, 0x63, 0x00, 0x00, 0x00, 0x01, 0x00, 0x01]);
+    out.extend_from_slice(&((idat.len() - 4) as u32).to_be_bytes());
+    out.extend_from_slice(&idat);
+    out.extend_from_slice(&upl_crc32(&idat).to_be_bytes());
+    out.extend_from_slice(&(0u32).to_be_bytes());
+    out.extend_from_slice(b"IEND");
+    out.extend_from_slice(&upl_crc32(b"IEND").to_be_bytes());
+    out
+}
+
+/// Build an authenticated multipart/form-data upload request.
+fn upload_request(
+    uri: &str,
+    token: &str,
+    filename: &str,
+    ctype: &str,
+    data: &[u8],
+) -> Request<Body> {
+    let boundary = "scuffedtestboundary";
+    let mut body: Vec<u8> = Vec::new();
+    body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+    body.extend_from_slice(
+        format!("Content-Disposition: form-data; name=\"file\"; filename=\"{filename}\"\r\n")
+            .as_bytes(),
+    );
+    body.extend_from_slice(format!("Content-Type: {ctype}\r\n\r\n").as_bytes());
+    body.extend_from_slice(data);
+    body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+
+    Request::builder()
+        .method(Method::POST)
+        .uri(uri)
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .header(
+            header::CONTENT_TYPE,
+            format!("multipart/form-data; boundary={boundary}"),
+        )
+        .body(Body::from(body))
+        .unwrap()
+}
+
+fn unique_upload_dir(tag: &str) -> PathBuf {
+    let n = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    std::env::temp_dir().join(format!("scuffed-upl-it-{tag}-{n}"))
+}
+
+#[tokio::test]
+async fn upload_avatar_normal_succeeds() {
+    let mut state = test_state().await;
+    state.upload_dir = unique_upload_dir("normal");
+    seed_all_roles(&state.db).await;
+    let dir = state.upload_dir.clone();
+    let app = create_router(state);
+
+    let resp = app
+        .oneshot(upload_request(
+            "/api/upload/avatar",
+            MEMBER_TOKEN,
+            "a.png",
+            "image/png",
+            &upl_png(64, 64),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    let url = json["url"].as_str().expect("url in response");
+    assert!(url.starts_with("/uploads/avatars/"), "got {url}");
+    // File actually landed under the member's scoped dir.
+    let rel = url.strip_prefix("/uploads/").unwrap();
+    assert!(dir.join(rel).exists(), "uploaded file should exist on disk");
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[tokio::test]
+async fn upload_avatar_oversized_dimensions_rejected() {
+    let mut state = test_state().await;
+    state.upload_dir = unique_upload_dir("bomb");
+    seed_all_roles(&state.db).await;
+    let dir = state.upload_dir.clone();
+    let app = create_router(state);
+
+    // ~500 byte file that declares a 50000x50000 (2.5 gigapixel) canvas.
+    let resp = app
+        .oneshot(upload_request(
+            "/api/upload/avatar",
+            MEMBER_TOKEN,
+            "bomb.png",
+            "image/png",
+            &upl_png(50_000, 50_000),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    // Nothing persisted.
+    assert!(
+        !dir.join("avatars").exists()
+            || std::fs::read_dir(dir.join("avatars"))
+                .map(|mut d| d.next().is_none())
+                .unwrap_or(true),
+        "no file should be written for a rejected bomb"
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[tokio::test]
+async fn upload_avatar_deletes_previous_local_avatar() {
+    let mut state = test_state().await;
+    state.upload_dir = unique_upload_dir("replace");
+    seed_all_roles(&state.db).await;
+    let dir = state.upload_dir.clone();
+
+    // Point the member at an existing local avatar and put that file on disk.
+    let old_rel = "avatars/old-avatar.png";
+    let old_url = format!("/uploads/{old_rel}");
+    state
+        .db
+        .client
+        .query("UPDATE member:membermember SET avatar_url = $u")
+        .bind(("u", old_url.clone()))
+        .await
+        .expect("set old avatar_url");
+    std::fs::create_dir_all(dir.join("avatars")).unwrap();
+    std::fs::write(dir.join(old_rel), b"old-bytes").unwrap();
+    assert!(dir.join(old_rel).exists());
+
+    let app = create_router(state);
+    let resp = app
+        .oneshot(upload_request(
+            "/api/upload/avatar",
+            MEMBER_TOKEN,
+            "new.png",
+            "image/png",
+            &upl_png(32, 32),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    // Old avatar was deleted on replace.
+    assert!(
+        !dir.join(old_rel).exists(),
+        "previous avatar should be deleted on replace"
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[tokio::test]
+async fn upload_avatar_quota_exceeded_rejected() {
+    let mut state = test_state().await;
+    state.upload_dir = unique_upload_dir("quota");
+    seed_all_roles(&state.db).await;
+    let dir = state.upload_dir.clone();
+    let app = create_router(state);
+
+    // First upload succeeds and tells us the member's scoped dir.
+    let resp = app
+        .clone()
+        .oneshot(upload_request(
+            "/api/upload/avatar",
+            MEMBER_TOKEN,
+            "a.png",
+            "image/png",
+            &upl_png(16, 16),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let url = body_json(resp).await["url"].as_str().unwrap().to_string();
+    // /uploads/avatars/{key}/{uuid}.png → scoped dir = upload_dir/avatars/{key}
+    let scoped = dir.join(
+        std::path::Path::new(url.strip_prefix("/uploads/").unwrap())
+            .parent()
+            .unwrap(),
+    );
+
+    // Pre-fill that dir with a sparse file at the byte cap so the next upload
+    // pushes the member over quota.
+    let f = std::fs::File::create(scoped.join("filler.bin")).unwrap();
+    f.set_len(25 * 1024 * 1024).unwrap(); // MEMBER_MAX_UPLOAD_BYTES
+
+    let resp = app
+        .oneshot(upload_request(
+            "/api/upload/avatar",
+            MEMBER_TOKEN,
+            "b.png",
+            "image/png",
+            &upl_png(16, 16),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+
+    std::fs::remove_dir_all(&dir).ok();
+}
