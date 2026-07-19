@@ -1,8 +1,11 @@
 use dioxus::prelude::*;
 use serde::Deserialize;
 
-use crate::components::{ConfirmDialog, DataTable, FormModal, StatusPill, Toast, use_toast};
+use crate::components::{
+    AccessDenied, ConfirmDialog, DataTable, FormModal, StatusPill, Toast, admin_pending, use_toast,
+};
 use crate::hooks::{ModalController, use_api, use_api_list};
+use crate::state::use_auth;
 use scuffed_api_client::ApiClient;
 use scuffed_types::api::CreateModerationRequest;
 
@@ -62,6 +65,7 @@ struct Member {
 
 #[component]
 pub fn AdminModeration() -> Element {
+    let auth = use_auth();
     let mut actions = use_api::<ModerationResponse>("/api/moderation?limit=50&offset=0");
     let members = use_api_list::<Member>("/api/members");
     let mut toast = use_toast();
@@ -142,6 +146,12 @@ pub fn AdminModeration() -> Element {
         });
     };
 
+    if !auth().is_officer_or_above() {
+        return rsx! {
+            AccessDenied { message: "You need officer permissions to view moderation.".to_string() }
+        };
+    }
+
     rsx! {
 
         div { class: "admin-toolbar",
@@ -153,7 +163,7 @@ pub fn AdminModeration() -> Element {
             let data = actions.data.read();
             let data = data.as_ref().and_then(|d| d.as_ref());
             match data {
-                None => rsx! { p { class: "admin-loading", "Loading..." } },
+                None => admin_pending(&actions, "moderation actions"),
                 Some(resp) if resp.entries.is_empty() => rsx! {
                     p { class: "empty-state", "No moderation actions." }
                 },

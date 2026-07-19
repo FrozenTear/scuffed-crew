@@ -1,6 +1,6 @@
 use dioxus::prelude::*;
 
-use crate::components::{DataTable, FormModal, Toast, use_toast};
+use crate::components::{DataTable, FormModal, Toast, admin_pending, use_toast};
 use crate::hooks::{ModalController, use_api};
 use scuffed_api_client::ApiClient;
 use scuffed_types::{
@@ -91,7 +91,7 @@ pub fn AdminGames() -> Element {
             let data = games.data.read();
             let data = data.as_ref().and_then(|d| d.as_ref());
             match data {
-                None => rsx! { p { class: "admin-loading", "Loading..." } },
+                None => admin_pending(&games, "games"),
                 Some(list) if list.is_empty() => rsx! {
                     p { class: "empty-state", "No games configured yet." }
                 },

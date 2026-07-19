@@ -1,8 +1,9 @@
 use dioxus::prelude::*;
 use serde::Deserialize;
 
-use crate::components::DataTable;
+use crate::components::{AccessDenied, DataTable, admin_pending};
 use crate::hooks::use_api_with;
+use crate::state::use_auth;
 
 #[derive(Debug, Clone, Deserialize)]
 struct AuditLogEntry {
@@ -28,6 +29,7 @@ const PAGE_SIZE: u64 = 50;
 
 #[component]
 pub fn AdminAuditLog() -> Element {
+    let auth = use_auth();
     let mut page = use_signal(|| 0u64);
 
     let log_data = use_api_with::<AuditLogResponse>(move || {
@@ -54,6 +56,12 @@ pub fn AdminAuditLog() -> Element {
         }
     };
 
+    if !auth().is_admin() {
+        return rsx! {
+            AccessDenied { message: "You need admin permissions to view the audit log.".to_string() }
+        };
+    }
+
     rsx! {
 
         div { class: "admin-toolbar",
@@ -64,7 +72,7 @@ pub fn AdminAuditLog() -> Element {
             let data = log_data.data.read();
             let data = data.as_ref().and_then(|d| d.as_ref());
             match data {
-                None => rsx! { p { class: "admin-loading", "Loading..." } },
+                None => admin_pending(&log_data, "the audit log"),
                 Some(resp) if resp.entries.is_empty() => rsx! {
                     p { class: "empty-state", "No audit log entries." }
                 },

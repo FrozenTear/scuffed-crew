@@ -1,6 +1,7 @@
 use dioxus::prelude::*;
 
-use crate::components::{Toast, use_toast};
+use crate::components::{AccessDenied, Toast, use_toast};
+use crate::state::use_auth;
 use crate::theme::tokens::{BG_DARK, BRAND_ACCENT_DARK, BRAND_ACCENT_LIGHT};
 use scuffed_api_client::ApiClient;
 use scuffed_types::api::UpdateSettingsRequest;
@@ -11,6 +12,7 @@ use scuffed_types::{
 
 #[component]
 pub fn AdminSettings() -> Element {
+    let auth = use_auth();
     let mut toast = use_toast();
     let mut saving = use_signal(|| false);
     let mut loaded = use_signal(|| false);
@@ -139,6 +141,12 @@ pub fn AdminSettings() -> Element {
             saving.set(false);
         });
     };
+
+    if !auth().is_admin() {
+        return rsx! {
+            AccessDenied { message: "You need admin permissions to view settings.".to_string() }
+        };
+    }
 
     rsx! {
         div { class: "admin-toolbar sticky-actions",

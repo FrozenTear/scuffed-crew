@@ -1,8 +1,9 @@
 use dioxus::prelude::*;
 use serde::Deserialize;
 
-use crate::components::{StatusPill, SummaryCard};
+use crate::components::{AccessDenied, StatusPill, SummaryCard, admin_pending};
 use crate::hooks::use_api;
+use crate::state::use_auth;
 
 #[derive(Debug, Clone, Deserialize)]
 struct RelayHealth {
@@ -16,6 +17,7 @@ struct RelayHealth {
 
 #[component]
 pub fn AdminRelay() -> Element {
+    let auth = use_auth();
     let mut health = use_api::<RelayHealth>("/api/nostr/health");
 
     let relay_count = {
@@ -29,6 +31,12 @@ pub fn AdminRelay() -> Element {
             None => 0,
         }
     };
+
+    if !auth().is_admin() {
+        return rsx! {
+            AccessDenied { message: "You need admin permissions to view relay status.".to_string() }
+        };
+    }
 
     rsx! {
         div { class: "admin-toolbar",
@@ -44,7 +52,7 @@ pub fn AdminRelay() -> Element {
             let data = health.data.read();
             let data = data.as_ref().and_then(|d| d.as_ref());
             match data {
-                None => rsx! { p { class: "admin-loading", "Loading..." } },
+                None => admin_pending(&health, "relay status"),
                 Some(h) => rsx! {
                     div { class: "summary-cards",
                         SummaryCard {

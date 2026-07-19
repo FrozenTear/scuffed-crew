@@ -3,7 +3,8 @@ use serde::{Deserialize, Serialize};
 use wasm_bindgen::JsCast;
 
 use crate::components::{
-    ConfirmDialog, DataTable, FormModal, RolePill, StatusPill, SummaryCard, Toast, use_toast,
+    ConfirmDialog, DataTable, FormModal, RolePill, StatusPill, SummaryCard, Toast, admin_pending,
+    use_toast,
 };
 use crate::hooks::{ModalController, use_api, use_api_list};
 use scuffed_api_client::ApiClient;
@@ -83,17 +84,23 @@ pub fn AdminMembers() -> Element {
     let mut mod_modal = ModalController::<Member>::new();
     let mut mod_data: Signal<Vec<ModerationAction>> = use_signal(Vec::new);
     let mut mod_loading = use_signal(|| false);
+    // Distinguish a failed fetch from a genuinely-empty record (FRONT-003):
+    // an unsurfaced error would render a clean moderation history for a member
+    // who actually has one.
+    let mut mod_error: Signal<Option<String>> = use_signal(|| None);
 
     // Attendance stats modal
     let mut stats_modal = ModalController::<Member>::new();
     let mut stats_data: Signal<Option<AttendanceStats>> = use_signal(|| None);
     let mut stats_loading = use_signal(|| false);
+    let mut stats_error: Signal<Option<String>> = use_signal(|| None);
 
     // Game accounts modal
     let mut accts_modal = ModalController::<Member>::new();
     let mut accts_data: Signal<Vec<GameAccount>> = use_signal(Vec::new);
     let mut accts_refresh = use_signal(|| 0u64);
     let mut accts_loading = use_signal(|| false);
+    let mut accts_error: Signal<Option<String>> = use_signal(|| None);
 
     // Add game account form
     let mut add_acct_game_id = use_signal(String::new);
@@ -119,11 +126,13 @@ pub fn AdminMembers() -> Element {
         let _ = accts_refresh();
         if let Some(member) = accts_modal.get_target() {
             accts_loading.set(true);
-            if let Ok(list) = ApiClient::web()
+            accts_error.set(None);
+            match ApiClient::web()
                 .fetch::<Vec<GameAccount>>(&format!("/api/members/{}/game-accounts", member.id))
                 .await
             {
-                accts_data.set(list);
+                Ok(list) => accts_data.set(list),
+                Err(e) => accts_error.set(Some(e.to_string())),
             }
             accts_loading.set(false);
         }
@@ -247,15 +256,17 @@ pub fn AdminMembers() -> Element {
 
     let mut open_mod_history = move |member: Member| {
         mod_data.set(Vec::new());
+        mod_error.set(None);
         mod_loading.set(true);
         let mid = member.id.clone();
         mod_modal.show(member);
         spawn(async move {
-            if let Ok(list) = ApiClient::web()
+            match ApiClient::web()
                 .fetch::<Vec<ModerationAction>>(&format!("/api/members/{mid}/moderation"))
                 .await
             {
-                mod_data.set(list);
+                Ok(list) => mod_data.set(list),
+                Err(e) => mod_error.set(Some(e.to_string())),
             }
             mod_loading.set(false);
         });
@@ -269,15 +280,17 @@ pub fn AdminMembers() -> Element {
 
     let mut open_stats = move |member: Member| {
         stats_data.set(None);
+        stats_error.set(None);
         stats_loading.set(true);
         let mid = member.id.clone();
         stats_modal.show(member);
         spawn(async move {
-            if let Ok(data) = ApiClient::web()
+            match ApiClient::web()
                 .fetch::<AttendanceStats>(&format!("/api/members/{mid}/attendance/stats"))
                 .await
             {
-                stats_data.set(Some(data));
+                Ok(data) => stats_data.set(Some(data)),
+                Err(e) => stats_error.set(Some(e.to_string())),
             }
             stats_loading.set(false);
         });
@@ -503,22 +516,7 @@ pub fn AdminMembers() -> Element {
             let data = members.data.read();
             let data = data.as_ref().and_then(|d| d.as_ref());
             match data {
-                None => {
-                    if let Some(err) = members.error.read().as_ref().cloned() {
-                        rsx! {
-                            p { class: "admin-loading", style: "color: var(--danger);",
-                                "Failed to load members: {err}"
-                            }
-                            button {
-                                class: "row-btn",
-                                onclick: move |_| members.refresh += 1,
-                                "Retry"
-                            }
-                        }
-                    } else {
-                        rsx! { p { class: "admin-loading", "Loading..." } }
-                    }
-                },
+                None => admin_pending(&members, "members"),
                 Some(list) if list.is_empty() => rsx! {
                     p { class: "empty-state", "No members yet." }
                 },
@@ -670,6 +668,10 @@ pub fn AdminMembers() -> Element {
                     div { class: "form-modal-body",
                         if mod_loading() {
                             p { class: "admin-loading", "Loading..." }
+                        } else if let Some(err) = mod_error() {
+                            p { class: "empty-state", style: "color: var(--danger);",
+                                "Failed to load moderation history: {err}"
+                            }
                         } else if mod_data.read().is_empty() {
                             p { class: "empty-state", "No moderation history." }
                         } else {
@@ -726,6 +728,10 @@ pub fn AdminMembers() -> Element {
                     div { class: "form-modal-body",
                         if stats_loading() {
                             p { class: "admin-loading", "Loading..." }
+                        } else if let Some(err) = stats_error() {
+                            p { class: "empty-state", style: "color: var(--danger);",
+                                "Failed to load attendance stats: {err}"
+                            }
                         } else if let Some(stats) = stats_data() {
                             div { class: "summary-cards",
                                 SummaryCard { value: stats.total_events.to_string(), label: "Total Events" }
@@ -774,6 +780,10 @@ pub fn AdminMembers() -> Element {
                     div { class: "form-modal-body",
                         if accts_loading() {
                             p { class: "admin-loading", "Loading..." }
+                        } else if let Some(err) = accts_error() {
+                            p { class: "empty-state", style: "color: var(--danger);",
+                                "Failed to load game accounts: {err}"
+                            }
                         } else if accts_data.read().is_empty() {
                             p { class: "empty-state", "No game accounts linked." }
                         } else {
