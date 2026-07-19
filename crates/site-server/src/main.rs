@@ -472,18 +472,24 @@ async fn main() {
         tracing::info!("Notifications not configured (Matrix/Discord) — running without");
     }
 
-    // Nostr challenge signing key: from env or deterministic dev fallback
+    // Nostr challenge signing key: from env, or a deterministic dev-only fallback.
+    // Fail closed outside dev: refuse to boot rather than sign challenge tokens with
+    // the publicly-known dev MAC key (mirrors the ENCRYPTION_KEY/PRODUCTION policy).
     let nostr_challenge_key: [u8; 32] = match std::env::var("NOSTR_CHALLENGE_SECRET") {
         Ok(secret) if !secret.is_empty() => {
             let hash = blake3::hash(secret.as_bytes());
             *hash.as_bytes()
         }
         _ => {
-            if is_dev {
-                tracing::warn!(
-                    "Using deterministic dev key for Nostr challenges — NOT for production"
+            if !is_dev {
+                panic!(
+                    "NOSTR_CHALLENGE_SECRET is required when not in dev mode \
+                     (Nostr challenge-token MAC key). Set a random 32+ byte value \
+                     — install.sh/update.sh generate one — refusing to boot with the \
+                     public dev fallback key."
                 );
             }
+            tracing::warn!("Using deterministic dev key for Nostr challenges — NOT for production");
             let hash = blake3::hash(b"scuffed-crew-dev-nostr-challenge-key");
             *hash.as_bytes()
         }

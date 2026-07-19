@@ -78,6 +78,8 @@ services:
       ENCRYPTION_KEY: ${ENCRYPTION_KEY:-}
       ENCRYPTION_KEY_VERSION: ${ENCRYPTION_KEY_VERSION:-1}
       NOSTR_RELAY_URL: ${NOSTR_RELAY_URL:-}
+      # Required outside dev — server refuses to boot without it (no public dev-key
+      # fallback). install.sh/update.sh generate it into data/secrets.env.
       NOSTR_CHALLENGE_SECRET: ${NOSTR_CHALLENGE_SECRET:-}
       UPLOAD_DIR: /app/data/uploads
       PRODUCTION: ${PRODUCTION:-}
