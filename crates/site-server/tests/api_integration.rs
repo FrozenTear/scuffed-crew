@@ -43,6 +43,7 @@ async fn test_state() -> AppState {
         upload_dir: PathBuf::from("/tmp/scuffed-test-uploads"),
         notifier: None,
         nostr_challenge_key: *blake3::hash(b"test-nostr-challenge-key").as_bytes(),
+        consumed_challenges: scuffed_site_server::challenge_store::ConsumedChallengeStore::new(),
         crypto: None,
         relay_url: None,
         dm_events: None,
@@ -4274,6 +4275,27 @@ fn signed_login_event(keys: &nostr::Keys, content: &str) -> serde_json::Value {
     serde_json::to_value(event).unwrap()
 }
 
+/// Like [`signed_login_event`], but stamps a specific `created_at` (unix secs)
+/// so tests can exercise the freshness window (DR1 replay-closer).
+fn signed_login_event_at(
+    keys: &nostr::Keys,
+    content: &str,
+    created_at_secs: u64,
+) -> serde_json::Value {
+    let event = nostr::EventBuilder::new(nostr::Kind::Custom(22242), content)
+        .custom_created_at(nostr::Timestamp::from_secs(created_at_secs))
+        .sign_with_keys(keys)
+        .expect("sign event");
+    serde_json::to_value(event).unwrap()
+}
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+}
+
 async fn nostr_verify_resp(
     state: &scuffed_site_server::state::AppState,
     token: &str,
@@ -4450,4 +4472,71 @@ async fn nostr_login_member_linked_pubkey_logs_into_member() {
         "member-linked pubkey must log into the member account: {me:?}"
     );
     assert_eq!(me["member"]["id"], "membermember");
+}
+
+/// DR1 replay-closer: `Event::verify()` does not bound `created_at`, so the
+/// handler must reject events whose signing time is outside the freshness
+/// window. Both a too-old event (beyond `EVENT_MAX_AGE_SECS` = 300s) and a
+/// far-future event (beyond `EVENT_FUTURE_SKEW_SECS` = 60s) must 400 and mint
+/// no session cookie — otherwise a captured event would be replayable forever.
+#[tokio::test]
+async fn nostr_login_rejects_out_of_window_created_at() {
+    let state = test_state().await;
+    seed_all_roles(&state.db).await;
+    let keys = nostr::Keys::generate();
+
+    // Too old: 420s in the past (> 300s max age).
+    let (challenge, token) = nostr_challenge(&state).await;
+    let stale = signed_login_event_at(&keys, &challenge, now_secs() - 420);
+    let resp = nostr_verify_resp(&state, &token, stale).await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    assert!(resp.headers().get(header::SET_COOKIE).is_none());
+    let body = body_json(resp).await;
+    assert!(
+        body["error"].as_str().unwrap_or_default().contains("old")
+            || body["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("window"),
+        "expected freshness rejection, got {body:?}"
+    );
+
+    // Far future: 3600s ahead (> 60s skew tolerance).
+    let (challenge2, token2) = nostr_challenge(&state).await;
+    let future = signed_login_event_at(&keys, &challenge2, now_secs() + 3600);
+    let resp = nostr_verify_resp(&state, &token2, future).await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    assert!(resp.headers().get(header::SET_COOKIE).is_none());
+}
+
+/// DR1 one-time-challenge store: a captured, still-fresh signed event must not
+/// be replayable within the TTL window. The first submission succeeds; a second
+/// submission of the *same* challenge is rejected 400 ("challenge already
+/// used"). Without the consumed-challenge store the replay would succeed again.
+#[tokio::test]
+async fn nostr_login_rejects_replayed_challenge() {
+    let state = test_state().await;
+    seed_all_roles(&state.db).await;
+    let keys = nostr::Keys::generate();
+
+    let (challenge, token) = nostr_challenge(&state).await;
+    let event = signed_login_event(&keys, &challenge);
+
+    // First submission: fresh challenge → logs in.
+    let resp = nostr_verify_resp(&state, &token, event.clone()).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert!(resp.headers().get(header::SET_COOKIE).is_some());
+
+    // Replay the identical token + signed event → rejected as already consumed.
+    let resp = nostr_verify_resp(&state, &token, event).await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    assert!(resp.headers().get(header::SET_COOKIE).is_none());
+    let body = body_json(resp).await;
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("already used"),
+        "expected replay rejection, got {body:?}"
+    );
 }
