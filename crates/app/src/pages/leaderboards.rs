@@ -101,6 +101,22 @@ const PAGE_CSS: &str = r#"
     }
 "#;
 
+/// Percent-encode a query-parameter value so hero names with spaces or
+/// non-ASCII (e.g. "Soldier: 76", "Lúcio") survive the URL. Keeps the RFC 3986
+/// unreserved set literal; everything else becomes %XX over UTF-8 bytes.
+fn encode_query(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for b in value.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
 #[component]
 pub fn Leaderboards() -> Element {
     let mut metric = use_signal(|| "winrate".to_string());
@@ -111,7 +127,7 @@ pub fn Leaderboards() -> Element {
         async move {
             let mut url = format!("/api/public/leaderboards?metric={m}&limit=50");
             if let Some(h) = h {
-                url.push_str(&format!("&hero={h}"));
+                url.push_str(&format!("&hero={}", encode_query(&h)));
             }
             ApiClient::web()
                 .fetch::<Vec<LeaderboardRow>>(&url)
