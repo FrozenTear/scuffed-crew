@@ -1,9 +1,9 @@
 use std::collections::HashMap;
 
 use axum::{
+    Json,
     extract::{Path, Query, State},
     http::StatusCode,
-    Json,
 };
 use serde::{Deserialize, Serialize};
 
@@ -14,8 +14,8 @@ use scuffed_db::{
 };
 use scuffed_types::api::{CursorResponse, PaginationParams};
 use scuffed_types::{
-    MatchResult as TypesMatchResult, MatchType as TypesMatchType, PublicMatch, RecentResult,
-    UpcomingMatch, HEROES,
+    HEROES, MatchResult as TypesMatchResult, MatchType as TypesMatchType, PublicMatch,
+    RecentResult, UpcomingMatch,
 };
 
 use crate::state::AppState;
@@ -288,10 +288,17 @@ fn member_to_public(m: Member) -> PublicMember {
 }
 
 /// Query for `GET /api/public/members` — pagination + optional hero filter (W3 B3).
+///
+/// Fields are inlined (not `#[serde(flatten)]` of `PaginationParams`) because
+/// axum's `Query` uses `serde_urlencoded`, which does not support `flatten` —
+/// a flattened struct fails to deserialize once a sibling field like `hero` is
+/// present, yielding a spurious 400.
 #[derive(Debug, Deserialize)]
 pub struct PublicMembersQuery {
-    #[serde(flatten)]
-    pub pagination: PaginationParams,
+    /// Opaque pagination cursor (see [`PaginationParams`]).
+    pub cursor: Option<String>,
+    /// Items per page; falls back to the `PaginationParams` default (25) when omitted.
+    pub limit: Option<u32>,
     /// Optional hero filter. Empty/omitted = no `hero_scoped`. Unknown → 400.
     /// Case-insensitive match against canonical [`HEROES`] names.
     pub hero: Option<String>,
@@ -323,7 +330,11 @@ pub async fn public_members(
     State(state): State<AppState>,
     Query(q): Query<PublicMembersQuery>,
 ) -> Result<Json<CursorResponse<PublicMember>>, (StatusCode, Json<ErrorResponse>)> {
-    let (limit, offset) = q.pagination.resolve();
+    let pagination = PaginationParams {
+        cursor: q.cursor.clone(),
+        limit: q.limit.unwrap_or(25),
+    };
+    let (limit, offset) = pagination.resolve();
     let hero = match resolve_members_hero(q.hero.as_deref()) {
         Ok(h) => h,
         Err(()) => {

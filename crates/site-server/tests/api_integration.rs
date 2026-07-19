@@ -7,15 +7,15 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use axum::body::Body;
-use axum::http::{header, Method, Request, StatusCode};
+use axum::http::{Method, Request, StatusCode, header};
 use http_body_util::BodyExt;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tower::ServiceExt;
 
-use scuffed_auth::crypto::hash_session_token;
 use scuffed_auth::SessionConfig;
-use scuffed_db::migrations::run_migrations;
+use scuffed_auth::crypto::hash_session_token;
 use scuffed_db::Database;
+use scuffed_db::migrations::run_migrations;
 use scuffed_site_server::create_router;
 use scuffed_site_server::state::{AppState, OAuthConfig};
 
@@ -1593,10 +1593,12 @@ async fn nostr_challenge_accepts_valid_hex_pubkey() {
 
     assert_eq!(resp.status(), StatusCode::OK);
     let json = body_json(resp).await;
-    assert!(json["challenge"]
-        .as_str()
-        .unwrap()
-        .starts_with("scuffedclan-verify:"));
+    assert!(
+        json["challenge"]
+            .as_str()
+            .unwrap()
+            .starts_with("scuffedclan-verify:")
+    );
     assert!(!json["token"].as_str().unwrap().is_empty());
     assert_eq!(json["pubkey_hex"].as_str().unwrap(), pubkey_hex);
     assert_eq!(json["expires_in_secs"], 300);
@@ -4132,10 +4134,12 @@ async fn public_overview_includes_upcoming_and_recent_matches() {
     assert_eq!(upcoming[0]["opponent"], "Future Opp");
     assert_eq!(upcoming[0]["team_name"], "Alpha Squad");
     assert_eq!(upcoming[0]["game_name"], "Overwatch 2");
-    assert!(upcoming[0]["scheduled_at"]
-        .as_str()
-        .unwrap()
-        .contains("2026-09-01"));
+    assert!(
+        upcoming[0]["scheduled_at"]
+            .as_str()
+            .unwrap()
+            .contains("2026-09-01")
+    );
 
     let recent = json["recent_results"].as_array().unwrap();
     assert_eq!(recent.len(), 1, "only public played non-scrim: {recent:?}");
