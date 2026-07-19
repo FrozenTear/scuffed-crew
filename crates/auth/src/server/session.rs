@@ -52,7 +52,14 @@ pub fn validate_csrf_state(
         .map(|c| c.value().to_string());
 
     match (stored_state, state_param) {
-        (Some(stored), Some(received)) if stored == *received => Ok(()),
+        // Constant-time compare: the CSRF state cookie is a secret bearer value,
+        // so equality must not leak a per-byte timing oracle. Falls through to the
+        // "state mismatch" arm on inequality — same accept/reject outcomes as `==`.
+        (Some(stored), Some(received))
+            if crate::crypto::constant_time_eq(stored.as_bytes(), received.as_bytes()) =>
+        {
+            Ok(())
+        }
         (None, _) => {
             tracing::warn!("CSRF validation failed: no state cookie found");
             Err((
