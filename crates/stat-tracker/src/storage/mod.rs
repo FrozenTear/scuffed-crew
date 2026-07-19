@@ -78,6 +78,67 @@ pub struct PersonalMatch {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[surreal(default)]
     pub edited_at: Option<SurrealDatetime>,
+
+    // --- Hero timeline (HS-1) -----------------------------------------------
+    /// Consecutive-run hero segments derived from the session's RAW snapshots
+    /// (see [`derive_hero_segments`]). The daemon stamps this after each
+    /// capture; legacy rows (empty) are derived on the fly in
+    /// [`latest_per_game`]. Per-snapshot `hero`/`role` stay raw — this field
+    /// carries the swap history, and the primary hero/role for the game is the
+    /// snapshot-count majority over these segments ([`primary_hero_role`]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[surreal(default)]
+    pub heroes_played: Vec<HeroSegment>,
+    /// Manual confirm/dismiss decisions for hero segments, by segment index.
+    /// Source of truth for the flags inside `heroes_played`, which are
+    /// recomputed from these on every re-derivation.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[surreal(default)]
+    pub segment_resolutions: Vec<SegmentResolution>,
+}
+
+/// Count an unconfirmed hero segment toward the majority (it was a real swap).
+pub const SEGMENT_CONFIRM: &str = "confirm";
+/// Mark a hero segment as a misread: excluded from display and from the
+/// majority vote. The raw snapshots stay untouched.
+pub const SEGMENT_DISMISS: &str = "dismiss";
+
+/// One consecutive run of the same hero across a session's snapshots, in
+/// capture-time order.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, SurrealValue)]
+pub struct HeroSegment {
+    pub hero: String,
+    pub role: String,
+    pub first_seen: SurrealDatetime,
+    pub last_seen: SurrealDatetime,
+    /// Number of captures in the run.
+    pub snapshots: u32,
+    /// ≥2 snapshots, or manually confirmed. A 1-snapshot segment is recorded
+    /// but unconfirmed — a lone minority read is indistinguishable from a
+    /// misread (the 07-18 Lijiang "Wuyang" flap), so it needs a human call.
+    pub confirmed: bool,
+    /// Manual resolution ([`SEGMENT_CONFIRM`] / [`SEGMENT_DISMISS`]), applied
+    /// from the match's `segment_resolutions` during derivation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[surreal(default)]
+    pub resolution: Option<String>,
+}
+
+impl HeroSegment {
+    /// Manually dismissed as a misread — excluded from display and majority.
+    pub fn is_dismissed(&self) -> bool {
+        self.resolution.as_deref() == Some(SEGMENT_DISMISS)
+    }
+}
+
+/// A manual decision about one derived hero segment, keyed by index into the
+/// derived segment list (stable: snapshots only ever append, so existing
+/// segments never change position).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, SurrealValue)]
+pub struct SegmentResolution {
+    pub segment: u32,
+    /// [`SEGMENT_CONFIRM`] or [`SEGMENT_DISMISS`].
+    pub action: String,
 }
 
 impl PersonalMatch {
@@ -91,11 +152,24 @@ impl PersonalMatch {
         self.edited_fields.iter().any(|f| f == field)
     }
 
+    /// Effective hero: a manual correction wins, else the majority-derived
+    /// primary from the hero timeline, else the raw OCR read.
     pub fn display_hero(&self) -> &str {
-        self.corrected_hero.as_deref().unwrap_or(&self.hero)
+        if let Some(h) = self.corrected_hero.as_deref() {
+            return h;
+        }
+        primary_hero_role(&self.heroes_played)
+            .map(|(h, _)| h)
+            .unwrap_or(&self.hero)
     }
+    /// Effective role, resolved like [`Self::display_hero`].
     pub fn display_role(&self) -> &str {
-        self.corrected_role.as_deref().unwrap_or(&self.role)
+        if let Some(r) = self.corrected_role.as_deref() {
+            return r;
+        }
+        primary_hero_role(&self.heroes_played)
+            .map(|(_, r)| r)
+            .unwrap_or(&self.role)
     }
     pub fn display_map_name(&self) -> &str {
         self.corrected_map_name.as_deref().unwrap_or(&self.map_name)
@@ -336,9 +410,13 @@ impl LocalStore {
         }
     }
 
-    /// Set a session's displayed hero (and role), used to keep the label on
-    /// the majority hero across its snapshots rather than whatever the first
-    /// capture happened to read.
+    /// MANUAL repair helper: stamp a hero/role onto a session and ALL its
+    /// snapshots. Destroys the per-snapshot raw reads by design — explicit
+    /// human intent overrides the captured values, exactly like
+    /// `set_session_map`. The automatic detection path must NOT use this (it
+    /// used to, which recorded a 97%-Ana game as Rein when a late swap won
+    /// last-write; it now derives a hero timeline instead — see
+    /// [`Self::refresh_session_hero_timeline`]).
     pub async fn set_session_hero(
         &self,
         session_id: &str,
@@ -911,6 +989,102 @@ pub fn remove_command_file(path: &Path) {
     let _ = std::fs::remove_file(path);
 }
 
+/// Aggregate a session's snapshots into consecutive same-hero runs (sorted by
+/// capture time here, so any input order works). "Unknown"/empty hero reads
+/// neither open nor split a run. A run of ≥2 snapshots is confirmed; a
+/// 1-snapshot run is recorded but unconfirmed. Manual `resolutions` (by
+/// segment index) are then applied: confirm forces `confirmed`, dismiss marks
+/// the segment a misread.
+pub fn derive_hero_segments(
+    snapshots: &[PersonalMatch],
+    resolutions: &[SegmentResolution],
+) -> Vec<HeroSegment> {
+    let mut ordered: Vec<&PersonalMatch> = snapshots.iter().collect();
+    ordered.sort_by_key(|m| {
+        let dt: chrono::DateTime<chrono::Utc> = m.played_at.into();
+        dt
+    });
+    let mut segments: Vec<HeroSegment> = Vec::new();
+    for m in ordered {
+        if m.hero.is_empty() || m.hero == "Unknown" {
+            continue;
+        }
+        match segments.last_mut() {
+            Some(seg) if seg.hero == m.hero => {
+                seg.last_seen = m.played_at;
+                seg.snapshots += 1;
+            }
+            _ => segments.push(HeroSegment {
+                hero: m.hero.clone(),
+                role: m.role.clone(),
+                first_seen: m.played_at,
+                last_seen: m.played_at,
+                snapshots: 1,
+                confirmed: false,
+                resolution: None,
+            }),
+        }
+    }
+    for seg in &mut segments {
+        seg.confirmed = seg.snapshots >= 2;
+    }
+    for r in resolutions {
+        if let Some(seg) = segments.get_mut(r.segment as usize) {
+            seg.resolution = Some(r.action.clone());
+            match r.action.as_str() {
+                SEGMENT_CONFIRM => seg.confirmed = true,
+                SEGMENT_DISMISS => seg.confirmed = false,
+                _ => {}
+            }
+        }
+    }
+    segments
+}
+
+/// The primary hero/role for a game: snapshot-count majority across its hero
+/// segments. Dismissed segments never vote; unconfirmed segments vote only
+/// when every non-dismissed segment is unconfirmed (a lone flap must not
+/// outvote 25 solid captures, but an all-unconfirmed game still needs a
+/// label). Ties break to the hero seen latest, then alphabetically for
+/// determinism. `None` when nothing can vote (no segments, or all dismissed)
+/// — callers fall back to the raw read.
+pub fn primary_hero_role(segments: &[HeroSegment]) -> Option<(&str, &str)> {
+    let live: Vec<&HeroSegment> = segments.iter().filter(|s| !s.is_dismissed()).collect();
+    let voters: Vec<&HeroSegment> = if live.iter().any(|s| s.confirmed) {
+        live.iter().copied().filter(|s| s.confirmed).collect()
+    } else {
+        live
+    };
+    struct Vote<'a> {
+        count: u32,
+        latest: chrono::DateTime<chrono::Utc>,
+        role: &'a str,
+    }
+    let mut votes: std::collections::HashMap<&str, Vote> = std::collections::HashMap::new();
+    for s in voters {
+        let seen: chrono::DateTime<chrono::Utc> = s.last_seen.into();
+        let v = votes.entry(s.hero.as_str()).or_insert(Vote {
+            count: 0,
+            latest: seen,
+            role: &s.role,
+        });
+        v.count += s.snapshots;
+        if seen >= v.latest {
+            v.latest = seen;
+            v.role = &s.role;
+        }
+    }
+    votes
+        .into_iter()
+        .max_by(|a, b| {
+            a.1.count
+                .cmp(&b.1.count)
+                .then(a.1.latest.cmp(&b.1.latest))
+                .then(b.0.cmp(a.0))
+        })
+        .map(|(hero, v)| (hero, v.role))
+}
+
 /// The majority hero across a session's snapshots. Individual captures can
 /// mislabel — the career panel shows the SPECTATED hero while the player is
 /// dead, and portrait matching can misfire — but across 20+ captures the
@@ -950,12 +1124,35 @@ pub fn majority_map(snapshots: &[PersonalMatch]) -> Option<String> {
 /// newest snapshot carries the final scoreboard — so with newest-first input
 /// (the order of `get_all_matches`, the live snapshot, and `read_match_log`)
 /// the first row seen per session wins. Rows without a session_id (legacy
-/// data) pass through individually.
+/// data) pass through individually. Games whose rows predate the hero
+/// timeline (empty `heroes_played`) get their segments derived on the fly
+/// from the session snapshots present in the input, so legacy data shows the
+/// same swap history and majority primary as fresh captures.
 pub fn latest_per_game(matches: Vec<PersonalMatch>) -> Vec<PersonalMatch> {
     let mut seen = std::collections::HashSet::new();
-    let mut out = matches;
-    out.retain(|m| m.session_id.is_empty() || seen.insert(m.session_id.clone()));
-    out
+    let mut legacy: std::collections::HashMap<String, Vec<PersonalMatch>> =
+        std::collections::HashMap::new();
+    let mut games: Vec<PersonalMatch> = Vec::new();
+    for m in matches {
+        if m.session_id.is_empty() {
+            games.push(m);
+            continue;
+        }
+        if seen.insert(m.session_id.clone()) {
+            if m.heroes_played.is_empty() {
+                legacy.insert(m.session_id.clone(), vec![m.clone()]);
+            }
+            games.push(m);
+        } else if let Some(snaps) = legacy.get_mut(&m.session_id) {
+            snaps.push(m);
+        }
+    }
+    for g in &mut games {
+        if let Some(snaps) = legacy.remove(&g.session_id) {
+            g.heroes_played = derive_hero_segments(&snaps, &g.segment_resolutions);
+        }
+    }
+    games
 }
 
 /// Remove the on-disk exports (append-only log + live snapshot). Called by
