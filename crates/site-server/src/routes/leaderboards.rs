@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use scuffed_auth::server::session::ErrorResponse;
 use scuffed_db::{AuditAction, AuditTargetType, HeroStats, MemberLeaderboardRow, Season};
-use scuffed_types::{HeroAgg, MemberLeaderboardRow as TypesMemberRow};
+use scuffed_types::{HEROES, HeroAgg, MemberLeaderboardRow as TypesMemberRow};
 
 use crate::extractors::AdminUser;
 use crate::routes::audit_log::audit;
@@ -103,6 +103,9 @@ pub struct LeaderboardQuery {
     pub limit: u32,
     /// Optional season id — filters aggregates to `played_at` in [starts_at, ends_at).
     pub season: Option<String>,
+    /// Optional hero filter (hero-stats W3 B2). Empty/omitted = all heroes.
+    /// Must match a canonical [`HEROES`] entry (case-insensitive); unknown → 400.
+    pub hero: Option<String>,
 }
 
 fn default_metric() -> String {
@@ -113,7 +116,26 @@ fn default_limit() -> u32 {
     25
 }
 
-/// GET /api/public/leaderboards?metric=winrate|kd|games&limit=25&season=<id>
+/// Resolve query `hero=` to a canonical HEROES display name.
+/// Empty / whitespace-only → no filter. Unknown name → None (caller returns 400).
+fn resolve_leaderboard_hero(raw: Option<&str>) -> Result<Option<&'static str>, ()> {
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    let lower = trimmed.to_lowercase();
+    for &hero in HEROES {
+        if hero.to_lowercase() == lower {
+            return Ok(Some(hero));
+        }
+    }
+    Err(())
+}
+
+/// GET /api/public/leaderboards?metric=winrate|kd|games&limit=25&season=<id>&hero=<name>
 pub async fn public_leaderboards(
     State(state): State<AppState>,
     Query(q): Query<LeaderboardQuery>,
@@ -151,10 +173,22 @@ pub async fn public_leaderboards(
         None
     };
 
-    // W2 B1: DB accepts hero filter; HTTP wire-up + HEROES validation is W3 B2.
+    // W3 B2: optional ?hero= → canonical HEROES name, then DB bound filter.
+    let hero = match resolve_leaderboard_hero(q.hero.as_deref()) {
+        Ok(h) => h,
+        Err(()) => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: "Unknown hero".into(),
+                }),
+            ));
+        }
+    };
+
     let rows = state
         .db
-        .member_leaderboard(metric, limit, season_window, None)
+        .member_leaderboard(metric, limit, season_window, hero)
         .await
         .map_err(|_e| {
             (
@@ -165,6 +199,33 @@ pub async fn public_leaderboards(
             )
         })?;
     Ok(Json(rows.into_iter().map(map_lb_row).collect()))
+}
+
+#[cfg(test)]
+mod resolve_hero_tests {
+    use super::resolve_leaderboard_hero;
+
+    #[test]
+    fn empty_or_missing_is_no_filter() {
+        assert_eq!(resolve_leaderboard_hero(None), Ok(None));
+        assert_eq!(resolve_leaderboard_hero(Some("")), Ok(None));
+        assert_eq!(resolve_leaderboard_hero(Some("   ")), Ok(None));
+    }
+
+    #[test]
+    fn case_insensitive_canonical() {
+        assert_eq!(resolve_leaderboard_hero(Some("ana")), Ok(Some("Ana")));
+        assert_eq!(
+            resolve_leaderboard_hero(Some("Wrecking Ball")),
+            Ok(Some("Wrecking Ball"))
+        );
+        assert_eq!(resolve_leaderboard_hero(Some("d.va")), Ok(Some("D.Va")));
+    }
+
+    #[test]
+    fn unknown_is_err() {
+        assert!(resolve_leaderboard_hero(Some("NotAHero")).is_err());
+    }
 }
 
 /// GET /api/public/seasons — list seasons (public).
