@@ -82,6 +82,12 @@ services:
       # fallback). install.sh/update.sh generate it into data/secrets.env.
       NOSTR_CHALLENGE_SECRET: ${NOSTR_CHALLENGE_SECRET:-}
       UPLOAD_DIR: /app/data/uploads
+      # Rate-limiter trusted proxies (comma-separated IPs/CIDRs). Forwarded
+      # headers (X-Forwarded-For / X-Real-IP) are only honored when the request
+      # arrives from one of these; loopback + private ranges are trusted by
+      # default, which fits the host-Caddy → 127.0.0.1:HOST_PORT deploy. Set
+      # this only to narrow the trust set (see docs/deploy.md).
+      TRUSTED_PROXIES: ${TRUSTED_PROXIES:-}
       PRODUCTION: ${PRODUCTION:-}
       SECURE_COOKIES: ${SECURE_COOKIES:-}
       BOOTSTRAP_ADMIN_RESET: ${BOOTSTRAP_ADMIN_RESET:-}

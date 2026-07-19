@@ -7,7 +7,7 @@ use axum::{
 use axum_extra::extract::cookie::CookieJar;
 use serde::Deserialize;
 
-use scuffed_auth::password::{MIN_PASSWORD_LEN, hash_password, verify_password};
+use scuffed_auth::password::{MIN_PASSWORD_LEN, hash_password, verify_dummy, verify_password};
 use scuffed_auth::server::AuthUser;
 use scuffed_auth::server::OAuthProvider;
 use scuffed_auth::server::discord::DiscordProvider;
@@ -677,7 +677,15 @@ pub async fn local_login(
 
     let (user, hash) = match state.db.get_local_user_by_username(&username).await {
         Ok(Some(pair)) => pair,
-        Ok(None) => return invalid(),
+        Ok(None) => {
+            // No such user: still spend Argon2 verify time against a fixed dummy
+            // hash so this path costs roughly the same as a real verify. Without
+            // it, a missing username returns in sub-ms while an existing one pays
+            // the Argon2 cost, leaking username existence via timing
+            // (DR1-AUTH-002).
+            verify_dummy(&body.password);
+            return invalid();
+        }
         Err(e) => {
             tracing::error!("local_login lookup: {e}");
             return (

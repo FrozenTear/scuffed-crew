@@ -118,23 +118,21 @@ async fn main() {
     {
         let username =
             std::env::var("BOOTSTRAP_ADMIN_USERNAME").unwrap_or_else(|_| "admin".to_string());
-        match scuffed_auth::password::hash_password(&new_password) {
-            Ok(hash) => match db.get_local_user_by_username(&username).await {
-                Ok(Some((user, _))) => {
-                    if let Err(e) = db.set_local_password_hash(&user.id, &hash).await {
-                        tracing::error!("BOOTSTRAP_ADMIN_RESET failed to update hash: {e}");
-                    } else {
-                        tracing::warn!(
-                            "BOOTSTRAP_ADMIN_RESET applied for local user '{username}' — remove BOOTSTRAP_ADMIN_RESET from env"
-                        );
-                    }
-                }
-                Ok(None) => tracing::error!(
-                    "BOOTSTRAP_ADMIN_RESET: no local user '{username}' — create via first-boot setup first"
-                ),
-                Err(e) => tracing::error!("BOOTSTRAP_ADMIN_RESET lookup failed: {e}"),
-            },
-            Err(e) => tracing::error!("BOOTSTRAP_ADMIN_RESET hash failed: {e}"),
+        // Rewrites the password hash AND revokes all existing sessions for the
+        // user, so a live attacker session cannot survive the reset
+        // (DR1-AUTH-003).
+        match scuffed_site_server::bootstrap_admin_reset(&db, &username, &new_password).await {
+            Ok(scuffed_site_server::BootstrapResetOutcome::Applied { sessions_revoked }) => {
+                tracing::warn!(
+                    "BOOTSTRAP_ADMIN_RESET applied for local user '{username}' \
+                     ({sessions_revoked} existing session(s) revoked) — remove \
+                     BOOTSTRAP_ADMIN_RESET from env"
+                );
+            }
+            Ok(scuffed_site_server::BootstrapResetOutcome::NoSuchUser) => tracing::error!(
+                "BOOTSTRAP_ADMIN_RESET: no local user '{username}' — create via first-boot setup first"
+            ),
+            Err(e) => tracing::error!("BOOTSTRAP_ADMIN_RESET failed: {e}"),
         }
     }
 
