@@ -73,9 +73,20 @@ impl Database {
     }
 
     /// User select without the outer timeout — for composition under a parent budget.
+    ///
+    /// Uses the least-privilege `USER_SAFE_COLS` projection (DR1-DB-006): a bare
+    /// `select(("user", id))` loads the FULL record including `password_hash` and
+    /// the encrypted provider blob, which `db_user_to_user` never needs for a plain
+    /// id lookup. Projecting keeps the secret out of process memory / debug dumps.
     pub(crate) async fn get_user_without_timeout(&self, id: &str) -> DbResult<Option<User>> {
-        let db_user: Option<DbUser> = self.client.select(("user", id)).await?;
-        match db_user {
+        let rid = RecordId::new("user", id);
+        let mut result = self
+            .client
+            .query(format!("SELECT {USER_SAFE_COLS} FROM $rid"))
+            .bind(("rid", rid))
+            .await?;
+        let users: Vec<DbUser> = result.take(0)?;
+        match users.into_iter().next() {
             Some(db) => Ok(Some(self.db_user_to_user(db)?)),
             None => Ok(None),
         }
@@ -401,5 +412,77 @@ impl Database {
             avatar_url: db.avatar_url,
             created_at: db.created_at.into(),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Database, DbUser, RecordId, USER_SAFE_COLS};
+    use crate::migrations::run_migrations;
+    use scuffed_auth::AuthProvider;
+
+    async fn test_db() -> Database {
+        let db = Database::connect_memory().await.unwrap();
+        run_migrations(&db.client).await.unwrap();
+        db
+    }
+
+    /// DB-006: `get_user` returns the fields callers need while the underlying
+    /// projection omits `password_hash`; the verify-password path still reads it.
+    #[tokio::test]
+    async fn get_user_projects_needed_fields_without_secret() {
+        let db = test_db().await;
+        let created = db.create_local_user("Alice", "hash-abc").await.unwrap();
+
+        // Projection path returns the user with every field db_user_to_user needs.
+        let fetched = db
+            .get_user(&created.id)
+            .await
+            .unwrap()
+            .expect("user exists");
+        assert_eq!(fetched.username, "alice");
+        assert_eq!(fetched.provider, AuthProvider::Local);
+        assert_eq!(fetched.provider_id, "alice");
+
+        // Verify-password path (separate projection) still surfaces the hash.
+        let (vuser, hash) = db
+            .get_local_user_by_username("alice")
+            .await
+            .unwrap()
+            .expect("local user");
+        assert_eq!(vuser.id, created.id);
+        assert_eq!(hash, "hash-abc");
+
+        // Prove the projection genuinely omits the secret: a `SELECT *` row loads
+        // the hash, while the same row under `USER_SAFE_COLS` comes back with
+        // `password_hash` absent (None) even though the column is populated.
+        let mut full = db
+            .client
+            .query("SELECT * FROM $rid")
+            .bind(("rid", RecordId::new("user", created.id.as_str())))
+            .await
+            .unwrap();
+        let full_rows: Vec<DbUser> = full.take(0).unwrap();
+        assert_eq!(
+            full_rows[0].password_hash.as_deref(),
+            Some("hash-abc"),
+            "SELECT * must load the stored hash (baseline)"
+        );
+
+        let mut projected = db
+            .client
+            .query(format!("SELECT {USER_SAFE_COLS} FROM $rid"))
+            .bind(("rid", RecordId::new("user", created.id.as_str())))
+            .await
+            .unwrap();
+        let proj_rows: Vec<DbUser> = projected.take(0).unwrap();
+        assert!(
+            proj_rows[0].password_hash.is_none(),
+            "USER_SAFE_COLS projection must not load password_hash"
+        );
+        assert_eq!(
+            proj_rows[0].username, "alice",
+            "projection keeps the username"
+        );
     }
 }
