@@ -6,8 +6,10 @@ use axum::{
 use serde::Serialize;
 
 use scuffed_auth::server::session::ErrorResponse;
+use scuffed_db::{AuditAction, AuditTargetType};
 
 use crate::extractors::{OfficerUser, OrgMember};
+use crate::routes::audit_log::audit;
 use crate::state::AppState;
 use crate::uploads::save_upload;
 
@@ -22,7 +24,7 @@ pub struct UploadResponse {
 /// POST /api/upload/avatar — upload member avatar (org member)
 pub async fn upload_avatar(
     State(state): State<AppState>,
-    _member: OrgMember,
+    member: OrgMember,
     mut multipart: Multipart,
 ) -> Result<Json<UploadResponse>, (StatusCode, Json<ErrorResponse>)> {
     let field = multipart
@@ -76,13 +78,23 @@ pub async fn upload_avatar(
         )
     })?;
 
+    audit(
+        &state.db,
+        &member.member.id,
+        AuditAction::UploadedAvatar,
+        AuditTargetType::Upload,
+        &url,
+        None,
+    )
+    .await;
+
     Ok(Json(UploadResponse { url }))
 }
 
 /// POST /api/upload/image — upload general image (officer+)
 pub async fn upload_image(
     State(state): State<AppState>,
-    _officer: OfficerUser,
+    officer: OfficerUser,
     mut multipart: Multipart,
 ) -> Result<Json<UploadResponse>, (StatusCode, Json<ErrorResponse>)> {
     let field = multipart
@@ -135,6 +147,16 @@ pub async fn upload_image(
             }),
         )
     })?;
+
+    audit(
+        &state.db,
+        &officer.member.id,
+        AuditAction::UploadedImage,
+        AuditTargetType::Upload,
+        &url,
+        None,
+    )
+    .await;
 
     Ok(Json(UploadResponse { url }))
 }

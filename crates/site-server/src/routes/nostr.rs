@@ -357,7 +357,7 @@ pub async fn nostr_verify(
     crate::routes::audit_log::audit(
         &state.db,
         &caller.member.id,
-        scuffed_db::AuditAction::UpdatedMember,
+        scuffed_db::AuditAction::NostrKeyLinked,
         scuffed_db::AuditTargetType::Member,
         &caller.member.id,
         Some("Linked verified Nostr identity"),
@@ -401,7 +401,7 @@ pub async fn nostr_unlink(
     crate::routes::audit_log::audit(
         &state.db,
         &caller.member.id,
-        scuffed_db::AuditAction::UpdatedMember,
+        scuffed_db::AuditAction::NostrKeyUnlinked,
         scuffed_db::AuditTargetType::Member,
         &caller.member.id,
         Some("Unlinked Nostr identity"),
@@ -481,7 +481,7 @@ pub async fn nostr_export_backup(
     crate::routes::audit_log::audit(
         &state.db,
         &caller.member.id,
-        scuffed_db::AuditAction::UpdatedMember,
+        scuffed_db::AuditAction::NostrKeyExported,
         scuffed_db::AuditTargetType::Member,
         &caller.member.id,
         Some("Exported Nostr key backup (ncryptsec)"),
@@ -564,7 +564,7 @@ pub async fn nostr_import_key(
     crate::routes::audit_log::audit(
         &state.db,
         &caller.member.id,
-        scuffed_db::AuditAction::UpdatedMember,
+        scuffed_db::AuditAction::NostrKeyImported,
         scuffed_db::AuditTargetType::Member,
         &caller.member.id,
         Some("Imported Nostr key from ncryptsec backup"),

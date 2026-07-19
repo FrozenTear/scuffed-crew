@@ -276,19 +276,29 @@ pub async fn create_category(
         )
         .await
         .map_err(err_500)?;
-    let _ = officer;
+
+    audit(
+        &state.db,
+        &officer.member.id,
+        AuditAction::CreatedForumCategory,
+        AuditTargetType::ForumCategory,
+        &cat.id,
+        Some(cat.name.as_str()),
+    )
+    .await;
+
     Ok((StatusCode::CREATED, Json(cat)))
 }
 
 /// PATCH /api/forum/categories/:id — officer+
 pub async fn update_category(
     State(state): State<AppState>,
-    _officer: OfficerUser,
+    officer: OfficerUser,
     Path(id): Path<String>,
     Json(body): Json<UpdateCategoryRequest>,
 ) -> Result<Json<ForumCategory>, (StatusCode, Json<ErrorResponse>)> {
     let desc = body.description.as_ref().map(|o| o.as_deref());
-    state
+    let cat = state
         .db
         .update_forum_category(
             &id,
@@ -298,14 +308,25 @@ pub async fn update_category(
             body.is_active,
         )
         .await
-        .map(Json)
-        .map_err(err_500)
+        .map_err(err_500)?;
+
+    audit(
+        &state.db,
+        &officer.member.id,
+        AuditAction::UpdatedForumCategory,
+        AuditTargetType::ForumCategory,
+        &cat.id,
+        Some(cat.name.as_str()),
+    )
+    .await;
+
+    Ok(Json(cat))
 }
 
 /// POST /api/forum/boards — officer+
 pub async fn create_board(
     State(state): State<AppState>,
-    _officer: OfficerUser,
+    officer: OfficerUser,
     Json(body): Json<CreateBoardRequest>,
 ) -> Result<(StatusCode, Json<ForumBoard>), (StatusCode, Json<ErrorResponse>)> {
     if body.name.trim().is_empty() || body.slug.trim().is_empty() {
@@ -329,18 +350,29 @@ pub async fn create_board(
         )
         .await
         .map_err(err_500)?;
+
+    audit(
+        &state.db,
+        &officer.member.id,
+        AuditAction::CreatedForumBoard,
+        AuditTargetType::ForumBoard,
+        &board.id,
+        Some(board.name.as_str()),
+    )
+    .await;
+
     Ok((StatusCode::CREATED, Json(board)))
 }
 
 /// PATCH /api/forum/boards/:id — officer+
 pub async fn update_board(
     State(state): State<AppState>,
-    _officer: OfficerUser,
+    officer: OfficerUser,
     Path(id): Path<String>,
     Json(body): Json<UpdateBoardRequest>,
 ) -> Result<Json<ForumBoard>, (StatusCode, Json<ErrorResponse>)> {
     let desc = body.description.as_ref().map(|o| o.as_deref());
-    state
+    let board = state
         .db
         .update_forum_board(
             &id,
@@ -351,8 +383,19 @@ pub async fn update_board(
             body.is_active,
         )
         .await
-        .map(Json)
-        .map_err(err_500)
+        .map_err(err_500)?;
+
+    audit(
+        &state.db,
+        &officer.member.id,
+        AuditAction::UpdatedForumBoard,
+        AuditTargetType::ForumBoard,
+        &board.id,
+        Some(board.name.as_str()),
+    )
+    .await;
+
+    Ok(Json(board))
 }
 
 /// GET /api/forum/threads -- list threads (public unless board min_role)

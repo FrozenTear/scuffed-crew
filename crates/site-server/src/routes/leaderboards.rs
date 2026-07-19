@@ -7,10 +7,11 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use scuffed_auth::server::session::ErrorResponse;
-use scuffed_db::{HeroStats, MemberLeaderboardRow, Season};
+use scuffed_db::{AuditAction, AuditTargetType, HeroStats, MemberLeaderboardRow, Season};
 use scuffed_types::{HeroAgg, MemberLeaderboardRow as TypesMemberRow};
 
 use crate::extractors::AdminUser;
+use crate::routes::audit_log::audit;
 use crate::state::AppState;
 
 fn hero_stats_to_agg(h: HeroStats) -> HeroAgg {
@@ -188,7 +189,7 @@ pub struct CreateSeasonRequest {
 /// POST /api/admin/seasons — create season (admin).
 pub async fn admin_create_season(
     State(state): State<AppState>,
-    _admin: AdminUser,
+    admin: AdminUser,
     Json(body): Json<CreateSeasonRequest>,
 ) -> Result<(StatusCode, Json<Season>), (StatusCode, Json<ErrorResponse>)> {
     if body.name.trim().is_empty() {
@@ -224,6 +225,17 @@ pub async fn admin_create_season(
                 }),
             )
         })?;
+
+    audit(
+        &state.db,
+        &admin.member.id,
+        AuditAction::CreatedSeason,
+        AuditTargetType::Season,
+        &s.id,
+        Some(s.name.as_str()),
+    )
+    .await;
+
     Ok((StatusCode::CREATED, Json(s)))
 }
 

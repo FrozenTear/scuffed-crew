@@ -2,9 +2,11 @@
 
 use axum::{Json, extract::State, http::StatusCode};
 use scuffed_auth::server::session::ErrorResponse;
+use scuffed_db::{AuditAction, AuditTargetType};
 use serde::Serialize;
 
 use crate::extractors::AdminUser;
+use crate::routes::audit_log::audit;
 use crate::state::AppState;
 
 #[derive(Serialize)]
@@ -18,7 +20,7 @@ pub struct DiscordTestResponse {
 /// Returns 503 if Discord officers webhook is not configured.
 pub async fn test_discord_webhook(
     State(state): State<AppState>,
-    _admin: AdminUser,
+    admin: AdminUser,
 ) -> Result<Json<DiscordTestResponse>, (StatusCode, Json<ErrorResponse>)> {
     let Some(ref notifier) = state.notifier else {
         return Err((
@@ -50,6 +52,16 @@ pub async fn test_discord_webhook(
     discord.notify_officers(
         "🔔 Scuffed Crew test ping — Discord officers webhook is working.".to_string(),
     );
+
+    audit(
+        &state.db,
+        &admin.member.id,
+        AuditAction::TestedDiscordWebhook,
+        AuditTargetType::Integration,
+        "discord_officers",
+        None,
+    )
+    .await;
 
     Ok(Json(DiscordTestResponse {
         ok: true,
