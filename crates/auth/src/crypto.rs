@@ -176,7 +176,9 @@ impl CryptoService {
     /// - `ENCRYPTION_KEY_PREVIOUS` — optional `ver:base64,ver:base64` for older versions
     /// - `CRYPTO_STRICT_AAD=1` — disable empty-AAD legacy decrypt fallback
     ///
-    /// Production (`PRODUCTION` truthy) also disables empty-AAD fallback.
+    /// Any deploy where encryption is required also disables the empty-AAD
+    /// fallback (see [`encryption_required`]): `PRODUCTION` truthy, or a remote
+    /// SurrealDB without `ALLOW_PLAINTEXT_PROVIDER_IDS=1`.
     /// A previous entry whose version equals the current version is rejected
     /// (`KeyringConfig`) so it cannot overwrite the current key.
     pub fn from_env() -> Result<Option<Self>, CryptoError> {
@@ -215,7 +217,7 @@ impl CryptoService {
 
         let allow_legacy_empty_aad = std::env::var("CRYPTO_STRICT_AAD").ok().as_deref()
             != Some("1")
-            && !is_strict_production_crypto();
+            && !encryption_required();
 
         Ok(Some(Self::from_keyring(
             &key,
@@ -346,18 +348,37 @@ impl CryptoService {
     }
 }
 
-fn is_strict_production_crypto() -> bool {
-    match std::env::var("PRODUCTION") {
-        Ok(v) => {
-            let t = v.trim();
-            !t.is_empty()
-                && !matches!(
-                    t.to_ascii_lowercase().as_str(),
-                    "0" | "false" | "no" | "off"
-                )
-        }
-        Err(_) => false,
+/// True when the deployment mandates encryption of secrets at rest.
+///
+/// Mirrors `scuffed_db`'s `require_oauth_encryption` gate so the strict-AAD
+/// decision uses the *same* condition (DR1-AUTH-004): encryption is required
+/// when `PRODUCTION` is truthy, **or** a remote SurrealDB is configured and the
+/// operator has not explicitly opted into plaintext provider IDs
+/// (`ALLOW_PLAINTEXT_PROVIDER_IDS=1`). Previously the strict-AAD gate keyed only
+/// off `PRODUCTION`, leaving the empty-AAD legacy-decrypt fallback silently
+/// enabled on a remote-DB deploy that merely omits `PRODUCTION=1` — weaker than
+/// the encryption requirement it was meant to back.
+fn encryption_required() -> bool {
+    encryption_required_from(
+        crate::is_production_env(),
+        std::env::var("SURREALDB_URL").ok().as_deref(),
+        std::env::var("ALLOW_PLAINTEXT_PROVIDER_IDS")
+            .ok()
+            .as_deref(),
+    )
+}
+
+/// Pure classifier behind [`encryption_required`] (env reads factored out so it
+/// is testable without process-global env mutation).
+fn encryption_required_from(
+    is_production: bool,
+    surrealdb_url: Option<&str>,
+    allow_plaintext_provider_ids: Option<&str>,
+) -> bool {
+    if is_production {
+        return true;
     }
+    surrealdb_url.is_some() && allow_plaintext_provider_ids != Some("1")
 }
 
 fn parse_aes_key(key_base64: &str) -> Result<Aes256Gcm, CryptoError> {
@@ -552,6 +573,32 @@ mod encryption_tests {
             hash_provider_id("discord", "123456"),
             hash_provider_id("google", "123456")
         );
+    }
+
+    #[test]
+    fn test_encryption_required_gate() {
+        // Production always requires encryption (⇒ strict AAD), regardless of DB.
+        assert!(encryption_required_from(true, None, None));
+        assert!(encryption_required_from(
+            true,
+            Some("ws://db:8000"),
+            Some("1")
+        ));
+
+        // Non-production, no remote DB (dev in-memory): fallback allowed.
+        assert!(!encryption_required_from(false, None, None));
+
+        // The DR1-AUTH-004 case: remote DB but PRODUCTION omitted — MUST still
+        // require encryption (mirrors require_oauth_encryption) so the empty-AAD
+        // fallback is not silently left on.
+        assert!(encryption_required_from(false, Some("ws://db:8000"), None));
+
+        // Explicit plaintext opt-out (non-production) relaxes the remote-DB case.
+        assert!(!encryption_required_from(
+            false,
+            Some("ws://db:8000"),
+            Some("1")
+        ));
     }
 
     #[test]

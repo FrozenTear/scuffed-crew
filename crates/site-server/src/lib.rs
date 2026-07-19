@@ -4,6 +4,7 @@ pub mod dm_subscriber;
 pub mod extractors;
 pub mod membership_policy;
 pub mod notifications;
+pub mod rate_limit;
 pub mod routes;
 pub mod seed;
 pub mod state;
@@ -15,9 +16,9 @@ use axum::{
     http::{HeaderValue, Method, header},
     routing::{delete, get, patch, post, put},
 };
-use tower_governor::{
-    GovernorLayer, governor::GovernorConfigBuilder, key_extractor::SmartIpKeyExtractor,
-};
+use tower_governor::{GovernorLayer, governor::GovernorConfigBuilder};
+
+use rate_limit::TrustedProxyIpKeyExtractor;
 use tower_http::cors::CorsLayer;
 use tower_http::services::{ServeDir, ServeFile};
 use tower_http::trace::TraceLayer;
@@ -46,12 +47,15 @@ pub fn create_router(state: AppState) -> Router {
         .allow_headers([header::CONTENT_TYPE, header::AUTHORIZATION, header::COOKIE])
         .allow_credentials(true);
 
+    // Rate-limit key extractor: keys off the peer socket and only honors
+    // forwarded headers from configured trusted proxies (see `rate_limit`), so a
+    // client rotating X-Forwarded-For can't spray fresh buckets (DR1-AUTH-001).
+    let key_extractor = TrustedProxyIpKeyExtractor::from_env();
+
     // Per-IP rate limit for the OAuth endpoints: 5-burst, then 1 every 2s.
-    // SmartIpKeyExtractor reads forwarded headers (reverse proxy) before
-    // falling back to the peer address (requires ConnectInfo, see main.rs).
     let governor_config = std::sync::Arc::new(
         GovernorConfigBuilder::default()
-            .key_extractor(SmartIpKeyExtractor)
+            .key_extractor(key_extractor.clone())
             .per_second(2)
             .burst_size(5)
             .finish()
@@ -76,6 +80,24 @@ pub fn create_router(state: AppState) -> Router {
         )
         .layer(GovernorLayer::new(governor_config));
 
+    // Per-IP rate limit for the write-heavy upload endpoints: 8-burst, then 1
+    // every 10s (≈6/min sustained). Uploads were previously unthrottled, letting
+    // any authenticated member hammer 2–5 MB writes to fill the disk
+    // (DR1-ADMIN-001). Storage quota / cleanup are owned by the upload-hardening
+    // work; this layer bounds request *rate* per source IP.
+    let upload_governor_config = std::sync::Arc::new(
+        GovernorConfigBuilder::default()
+            .key_extractor(key_extractor.clone())
+            .per_second(10)
+            .burst_size(8)
+            .finish()
+            .expect("valid upload governor config"),
+    );
+    let upload_routes = Router::new()
+        .route("/api/upload/avatar", post(routes::uploads::upload_avatar))
+        .route("/api/upload/image", post(routes::uploads::upload_image))
+        .layer(GovernorLayer::new(upload_governor_config));
+
     // Dev mode mirrors main.rs: in-memory DB when SURREALDB_URL is unset.
     let dev_mode = std::env::var("SURREALDB_URL").is_err();
 
@@ -93,6 +115,8 @@ pub fn create_router(state: AppState) -> Router {
     router
         // Auth routes (login/callback/setup/local are rate-limited)
         .merge(auth_routes)
+        // Upload routes carry their own (dedicated) rate limiter
+        .merge(upload_routes)
         .route("/api/auth/setup-status", get(routes::auth::setup_status))
         .route("/api/auth/providers", get(routes::auth::auth_providers))
         .route("/api/auth/me", get(routes::auth::me))
@@ -448,9 +472,8 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/nostr/dm/thread", get(routes::nostr::dm_thread))
         .route("/api/nostr/dm/mark-read", post(routes::nostr::dm_mark_read))
         .route("/api/nostr/dm/stream", get(routes::nostr::dm_stream))
-        // Upload routes
-        .route("/api/upload/avatar", post(routes::uploads::upload_avatar))
-        .route("/api/upload/image", post(routes::uploads::upload_image))
+        // Upload routes are registered above with a dedicated rate limiter
+        // (see `upload_routes`).
         // Settings routes
         .route(
             "/api/settings",
@@ -502,4 +525,113 @@ pub fn create_router(state: AppState) -> Router {
         .layer(TraceLayer::new_for_http())
         .layer(cors)
         .with_state(state)
+}
+
+/// Outcome of an emergency bootstrap admin password reset.
+#[derive(Debug, PartialEq, Eq)]
+pub enum BootstrapResetOutcome {
+    /// Reset applied; the password hash was rewritten and `sessions_revoked`
+    /// pre-existing sessions were deleted.
+    Applied { sessions_revoked: u64 },
+    /// No local user with the given username exists.
+    NoSuchUser,
+}
+
+/// Reset a local admin's password **and revoke all of that user's sessions**.
+///
+/// The `BOOTSTRAP_ADMIN_RESET` path previously only rewrote the password hash,
+/// never revoking existing sessions — unlike every other credential mutation
+/// (admin reset route, ban, deactivate), which all call
+/// `delete_sessions_for_user`. Emergency reset is exactly the "attacker holds a
+/// live session" scenario: sessions persist across restart, so without
+/// revocation the attacker keeps admin access despite the password change
+/// (DR1-AUTH-003). This helper enforces the same revoke-on-credential-change
+/// invariant and is unit-tested.
+pub async fn bootstrap_admin_reset(
+    db: &scuffed_db::Database,
+    username: &str,
+    new_password: &str,
+) -> Result<BootstrapResetOutcome, String> {
+    let hash = scuffed_auth::password::hash_password(new_password)
+        .map_err(|e| format!("password hashing failed: {e}"))?;
+
+    let user = match db
+        .get_local_user_by_username(username)
+        .await
+        .map_err(|e| format!("user lookup failed: {e}"))?
+    {
+        Some((user, _)) => user,
+        None => return Ok(BootstrapResetOutcome::NoSuchUser),
+    };
+
+    db.set_local_password_hash(&user.id, &hash)
+        .await
+        .map_err(|e| format!("password hash update failed: {e}"))?;
+
+    let sessions_revoked = db
+        .delete_sessions_for_user(&user.id)
+        .await
+        .map_err(|e| format!("session revocation failed: {e}"))?;
+
+    Ok(BootstrapResetOutcome::Applied { sessions_revoked })
+}
+
+#[cfg(test)]
+mod bootstrap_reset_tests {
+    use super::*;
+    use scuffed_auth::password::verify_password;
+    use scuffed_db::Database;
+    use scuffed_db::migrations::run_migrations;
+
+    async fn mem_db() -> Database {
+        let db = Database::connect_memory()
+            .await
+            .expect("in-memory DB connect");
+        run_migrations(&db.client).await.expect("migrations");
+        db
+    }
+
+    #[tokio::test]
+    async fn reset_updates_hash_and_revokes_sessions() {
+        let db = mem_db().await;
+        let old = scuffed_auth::password::hash_password("old-password-123").unwrap();
+        let user = db.create_local_user("admin", &old).await.unwrap();
+
+        // Two live sessions for the admin.
+        db.create_session(&user.id, "tok-a", 168).await.unwrap();
+        db.create_session(&user.id, "tok-b", 168).await.unwrap();
+        assert!(db.get_session("tok-a").await.unwrap().is_some());
+
+        let outcome = bootstrap_admin_reset(&db, "admin", "brand-new-password-456")
+            .await
+            .unwrap();
+        assert_eq!(
+            outcome,
+            BootstrapResetOutcome::Applied {
+                sessions_revoked: 2
+            }
+        );
+
+        // Password rotated.
+        let (_, hash) = db
+            .get_local_user_by_username("admin")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(verify_password("brand-new-password-456", &hash).unwrap());
+        assert!(!verify_password("old-password-123", &hash).unwrap());
+
+        // Both pre-existing sessions gone (attacker's live session killed).
+        assert!(db.get_session("tok-a").await.unwrap().is_none());
+        assert!(db.get_session("tok-b").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn reset_no_such_user_is_reported() {
+        let db = mem_db().await;
+        let outcome = bootstrap_admin_reset(&db, "ghost", "whatever-password-789")
+            .await
+            .unwrap();
+        assert_eq!(outcome, BootstrapResetOutcome::NoSuchUser);
+    }
 }

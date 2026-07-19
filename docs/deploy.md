@@ -182,6 +182,21 @@ systemctl reload caddy
 
 Template also lives in repo: `deploy/Caddyfile`.
 
+> **Rate limiting & `X-Forwarded-For`.** The auth and upload rate limiters key
+> off the client IP. To stop an attacker from spraying fresh buckets by rotating
+> `X-Forwarded-For`, forwarded headers are only trusted when the request arrives
+> from a **trusted proxy**. The default trust set is loopback + private ranges,
+> which already covers this deploy (the container sees requests coming from the
+> Podman network gateway, a private address, after host Caddy forwards them), so
+> **no configuration is needed** for the blessed setup. If you front the stack
+> with an additional public proxy/CDN, list every hop's egress IP/CIDR in
+> `TRUSTED_PROXIES` (comma-separated) in `data/secrets.env` so its forwarded
+> client IP is honored; otherwise all traffic through that proxy shares one
+> bucket. Keep the container bound to `127.0.0.1:HOST_PORT` — publishing it on a
+> public interface would let clients connect directly and, because a public peer
+> is untrusted, they'd each be limited by their real socket IP (safe, but the
+> proxy is what terminates TLS).
+
 **3. App public URL** (required for cookies / redirects):
 
 ```bash

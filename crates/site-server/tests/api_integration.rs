@@ -1820,7 +1820,17 @@ async fn nostr_import_key_success() {
 // ─── First-boot setup + local login ─────────────────────────────────────────
 
 fn rate_limit_ip(builder: axum::http::request::Builder) -> axum::http::request::Builder {
-    builder.header("x-forwarded-for", "127.0.0.1")
+    // The rate limiter keys off the peer socket (TrustedProxyIpKeyExtractor) and
+    // only honors forwarded headers from a trusted peer. The real server injects
+    // ConnectInfo via `into_make_service_with_connect_info`; `oneshot` does not,
+    // so inject a loopback peer here to mirror production. Loopback is a trusted
+    // proxy, so the forwarded header is still honored (key = 127.0.0.1).
+    builder
+        .header("x-forwarded-for", "127.0.0.1")
+        .extension(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+            [127, 0, 0, 1],
+            40000,
+        ))))
 }
 
 #[tokio::test]
