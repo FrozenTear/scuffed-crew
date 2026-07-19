@@ -2,6 +2,7 @@ pub mod button;
 pub mod card;
 pub mod feedback;
 pub mod field;
+pub mod hero_select;
 pub mod label;
 pub mod pill;
 pub mod shell;
@@ -15,6 +16,8 @@ pub use feedback::Spinner;
 pub use field::Textarea;
 #[allow(unused_imports)]
 pub use field::{Input, Select};
+#[allow(unused_imports)]
+pub use hero_select::HeroSelect;
 #[allow(unused_imports)]
 pub use label::Label;
 pub use pill::{Pill, PillTone};
@@ -30,6 +33,7 @@ pub fn ui_css() -> String {
         label::LABEL_CSS,
         shell::SHELL_CSS,
         field::FIELD_CSS,
+        hero_select::HERO_SELECT_CSS,
         feedback::FEEDBACK_CSS,
     ]
     .concat()
