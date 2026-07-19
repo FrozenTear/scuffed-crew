@@ -47,6 +47,15 @@ fn not_found(msg: &str) -> (StatusCode, Json<ErrorResponse>) {
     )
 }
 
+fn conflict(msg: &str) -> (StatusCode, Json<ErrorResponse>) {
+    (
+        StatusCode::CONFLICT,
+        Json(ErrorResponse {
+            error: msg.to_string(),
+        }),
+    )
+}
+
 // ─── List & Detail (Public) ───
 
 #[derive(Deserialize)]
@@ -579,25 +588,54 @@ pub async fn report_match(
     Path((id, mid)): Path<(String, String)>,
     Json(body): Json<ReportMatchRequest>,
 ) -> ApiResult<Json<TournamentMatch>> {
-    // Report the match result
+    let winner: &str = body.winner_id.trim();
+
+    // DR1-DB-002 + DB-001: pre-validate against the loaded match so the common
+    // bad-input cases return a clean 400/404 (the DB layer re-checks all of
+    // these and does the CAS, so it stays the authoritative fail-closed guard).
+    let existing = state
+        .db
+        .get_tournament_match(&mid)
+        .await
+        .map_err(internal_err)?
+        .ok_or_else(|| not_found("Match not found"))?;
+    if existing.tournament_id != id {
+        return Err(not_found("Match not found in this tournament"));
+    }
+    if winner.is_empty()
+        || (existing.participant_a_id.as_deref() != Some(winner)
+            && existing.participant_b_id.as_deref() != Some(winner))
+    {
+        return Err(bad_request(
+            "winner_id must be one of the match participants",
+        ));
+    }
+
+    // Report the match result. The DB does an atomic CAS `WHERE status =
+    // 'pending'`, so a re-report or a concurrent double-report yields Conflict
+    // (409) and the advancement below runs at most once per match.
     let reported = state
         .db
         .report_tournament_match(
             &mid,
             body.score_a,
             body.score_b,
-            &body.winner_id,
+            winner,
             body.notes.as_deref(),
             body.replay_codes.unwrap_or_default(),
         )
         .await
-        .map_err(internal_err)?;
+        .map_err(|e| match e {
+            scuffed_db::DbError::NotFound(msg) => not_found(&msg),
+            scuffed_db::DbError::Conflict(msg) => conflict(&msg),
+            other => internal_err(other),
+        })?;
 
     // Auto-advance winner to next match
     if let (Some(next_id), Some(next_slot)) = (&reported.next_match_id, &reported.next_match_slot) {
         state
             .db
-            .set_match_participant(next_id, next_slot, &body.winner_id)
+            .set_match_participant(next_id, next_slot, winner)
             .await
             .map_err(internal_err)?;
     }
@@ -607,7 +645,7 @@ pub async fn report_match(
         &reported.loser_next_match_id,
         &reported.loser_next_match_slot,
     ) {
-        let loser_id = if reported.participant_a_id.as_deref() == Some(&body.winner_id) {
+        let loser_id = if reported.participant_a_id.as_deref() == Some(winner) {
             &reported.participant_b_id
         } else {
             &reported.participant_a_id
@@ -623,7 +661,7 @@ pub async fn report_match(
 
     // Mark loser as eliminated (single elim only, when no loser bracket)
     if reported.loser_next_match_id.is_none() {
-        let loser_id = if reported.participant_a_id.as_deref() == Some(&body.winner_id) {
+        let loser_id = if reported.participant_a_id.as_deref() == Some(winner) {
             &reported.participant_b_id
         } else {
             &reported.participant_a_id

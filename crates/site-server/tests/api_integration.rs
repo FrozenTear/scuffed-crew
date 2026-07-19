@@ -907,6 +907,266 @@ async fn tournament_invalid_status_transition() {
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }
 
+// ─── Match-report integrity (DR1-DB-001/002/004/009) ─────────────────────────
+
+/// Create a 4-team single-elim tournament, generate its bracket, and move it to
+/// `in_progress`. Returns the tournament id. Team/participant keys are suffixed
+/// with `tag` so multiple brackets can coexist in one test DB.
+async fn setup_single_elim_4(state: &AppState, tag: &str) -> String {
+    seed_game(&state.db, "ow2", "Overwatch 2").await;
+
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(authed_json_request(
+            Method::POST,
+            "/api/tournaments",
+            OFFICER_TOKEN,
+            json!({ "name": format!("Bracket {tag}"), "format": "single_elim", "best_of": 1 }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let tid = body_json(resp).await["id"].as_str().unwrap().to_string();
+
+    let app = create_router(state.clone());
+    app.oneshot(authed_json_request(
+        Method::PATCH,
+        &format!("/api/tournaments/{tid}/status"),
+        OFFICER_TOKEN,
+        json!({ "status": "registration" }),
+    ))
+    .await
+    .unwrap();
+
+    for i in 1..=4 {
+        let key = format!("{tag}t{i}");
+        seed_team(&state.db, &key, &format!("Team {tag}{i}"), "ow2").await;
+        let app = create_router(state.clone());
+        let resp = app
+            .oneshot(authed_json_request(
+                Method::POST,
+                &format!("/api/tournaments/{tid}/participants"),
+                OFFICER_TOKEN,
+                json!({ "team_id": key }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+    }
+
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(authed_request(
+            Method::POST,
+            &format!("/api/tournaments/{tid}/generate-bracket"),
+            OFFICER_TOKEN,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let app = create_router(state.clone());
+    app.oneshot(authed_json_request(
+        Method::PATCH,
+        &format!("/api/tournaments/{tid}/status"),
+        OFFICER_TOKEN,
+        json!({ "status": "in_progress" }),
+    ))
+    .await
+    .unwrap();
+
+    tid
+}
+
+async fn fetch_matches(state: &AppState, tid: &str) -> Vec<Value> {
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(unauthed_request(
+            Method::GET,
+            &format!("/api/tournaments/{tid}/matches"),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    body_json(resp).await.as_array().unwrap().clone()
+}
+
+/// The two round-1 (semifinal) matches: both participants present and a
+/// `next_match_id` pointer set. Returns them as (this, other) is left to caller.
+fn semifinals(matches: &[Value]) -> Vec<&Value> {
+    matches
+        .iter()
+        .filter(|m| {
+            m["next_match_id"].is_string()
+                && m["participant_a_id"].is_string()
+                && m["participant_b_id"].is_string()
+        })
+        .collect()
+}
+
+/// DB-001 (route 400) + no next-round poison: a winner that is not one of the
+/// match participants is rejected, and the downstream slot stays empty.
+#[tokio::test]
+async fn report_foreign_winner_rejected_and_next_slot_not_poisoned() {
+    let state = test_state().await;
+    seed_all_roles(&state.db).await;
+    let tid = setup_single_elim_4(&state, "a").await;
+
+    let matches = fetch_matches(&state, &tid).await;
+    let semis = semifinals(&matches);
+    assert_eq!(semis.len(), 2, "4-player single elim has two semifinals");
+    let m = semis[0];
+    let other = semis[1];
+    let mid = m["id"].as_str().unwrap();
+    let next_id = m["next_match_id"].as_str().unwrap().to_string();
+    let next_slot = m["next_match_slot"].as_str().unwrap().to_string();
+    // A participant from the *other* semifinal — a valid id, but foreign here.
+    let foreign = other["participant_a_id"].as_str().unwrap();
+
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(authed_json_request(
+            Method::PATCH,
+            &format!("/api/tournaments/{tid}/matches/{mid}/report"),
+            OFFICER_TOKEN,
+            json!({ "score_a": 1, "score_b": 0, "winner_id": foreign }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+    // The next-round slot must not have been filled with the foreign id.
+    let after = fetch_matches(&state, &tid).await;
+    let next = after.iter().find(|x| x["id"] == next_id).unwrap();
+    assert!(
+        next[format!("participant_{next_slot}_id")].is_null(),
+        "next-round slot {next_slot} was poisoned: {next:?}"
+    );
+    // And the reported match is still pending.
+    let same = after.iter().find(|x| x["id"] == mid).unwrap();
+    assert_eq!(same["status"], "pending");
+}
+
+/// DB-004 (route 409) + no double-advance: a second report of an already
+/// completed match is rejected and the next-round slot is not overwritten.
+#[tokio::test]
+async fn double_report_rejected_and_does_not_double_advance() {
+    let state = test_state().await;
+    seed_all_roles(&state.db).await;
+    let tid = setup_single_elim_4(&state, "b").await;
+
+    let matches = fetch_matches(&state, &tid).await;
+    let semis = semifinals(&matches);
+    let m = semis[0];
+    let mid = m["id"].as_str().unwrap();
+    let next_id = m["next_match_id"].as_str().unwrap().to_string();
+    let next_slot = m["next_match_slot"].as_str().unwrap().to_string();
+    let winner = m["participant_a_id"].as_str().unwrap().to_string();
+    let loser = m["participant_b_id"].as_str().unwrap().to_string();
+
+    // First report succeeds and advances `winner`.
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(authed_json_request(
+            Method::PATCH,
+            &format!("/api/tournaments/{tid}/matches/{mid}/report"),
+            OFFICER_TOKEN,
+            json!({ "score_a": 1, "score_b": 0, "winner_id": winner }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let after1 = fetch_matches(&state, &tid).await;
+    let next1 = after1.iter().find(|x| x["id"] == next_id).unwrap();
+    assert_eq!(next1[format!("participant_{next_slot}_id")], json!(winner));
+
+    // Second report (flipping the winner to the loser) must be rejected …
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(authed_json_request(
+            Method::PATCH,
+            &format!("/api/tournaments/{tid}/matches/{mid}/report"),
+            OFFICER_TOKEN,
+            json!({ "score_a": 0, "score_b": 1, "winner_id": loser }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CONFLICT);
+
+    // … and the next-round slot must still hold the original winner.
+    let after2 = fetch_matches(&state, &tid).await;
+    let next2 = after2.iter().find(|x| x["id"] == next_id).unwrap();
+    assert_eq!(next2[format!("participant_{next_slot}_id")], json!(winner));
+}
+
+/// DB-002: reporting a match under the wrong tournament path is rejected (404),
+/// even though the match id is globally valid.
+#[tokio::test]
+async fn report_under_wrong_tournament_path_rejected() {
+    let state = test_state().await;
+    seed_all_roles(&state.db).await;
+    let tid1 = setup_single_elim_4(&state, "c").await;
+    let tid2 = setup_single_elim_4(&state, "d").await;
+
+    let matches = fetch_matches(&state, &tid1).await;
+    let m = semifinals(&matches)[0];
+    let mid = m["id"].as_str().unwrap();
+    let winner = m["participant_a_id"].as_str().unwrap();
+
+    // Correct match + winner, but reported under tid2's path.
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(authed_json_request(
+            Method::PATCH,
+            &format!("/api/tournaments/{tid2}/matches/{mid}/report"),
+            OFFICER_TOKEN,
+            json!({ "score_a": 1, "score_b": 0, "winner_id": winner }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+    // The match in tid1 must remain untouched (still pending).
+    let after = fetch_matches(&state, &tid1).await;
+    let same = after.iter().find(|x| x["id"] == mid).unwrap();
+    assert_eq!(same["status"], "pending");
+}
+
+/// Regression: a normal, valid report still succeeds and advances the winner.
+#[tokio::test]
+async fn valid_report_advances_winner() {
+    let state = test_state().await;
+    seed_all_roles(&state.db).await;
+    let tid = setup_single_elim_4(&state, "e").await;
+
+    let matches = fetch_matches(&state, &tid).await;
+    let m = semifinals(&matches)[0];
+    let mid = m["id"].as_str().unwrap();
+    let next_id = m["next_match_id"].as_str().unwrap().to_string();
+    let next_slot = m["next_match_slot"].as_str().unwrap().to_string();
+    let winner = m["participant_a_id"].as_str().unwrap().to_string();
+
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(authed_json_request(
+            Method::PATCH,
+            &format!("/api/tournaments/{tid}/matches/{mid}/report"),
+            OFFICER_TOKEN,
+            json!({ "score_a": 1, "score_b": 0, "winner_id": winner, "replay_codes": ["R1"] }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let reported = body_json(resp).await;
+    assert_eq!(reported["status"], "completed");
+    assert_eq!(reported["winner_id"], json!(winner));
+
+    let after = fetch_matches(&state, &tid).await;
+    let next = after.iter().find(|x| x["id"] == next_id).unwrap();
+    assert_eq!(next[format!("participant_{next_slot}_id")], json!(winner));
+}
+
 // ─── Auth Extractor Hierarchy ───────────────────────────────────────────────
 
 #[tokio::test]
