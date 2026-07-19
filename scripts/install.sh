@@ -52,6 +52,7 @@ if [[ ! -f "$SECRETS" ]]; then
     echo "Generating $SECRETS ..."
     SURREALDB_PASSWORD="$(openssl rand -base64 32 | tr -d '\n')"
     ENCRYPTION_KEY="$(openssl rand -base64 32 | tr -d '\n')"
+    NOSTR_CHALLENGE_SECRET="$(openssl rand -base64 32 | tr -d '\n')"
     SURREALDB_APP_PASSWORD="$(openssl rand -base64 32 | tr -d '\n')"
     HOST_PORT="$(pick_host_port)"
     echo "Selected free host port: ${HOST_PORT} (bound to 127.0.0.1 only)"
@@ -77,6 +78,9 @@ SURREALDB_APP_PASSWORD=${SURREALDB_APP_PASSWORD}
 ENCRYPTION_KEY=${ENCRYPTION_KEY}
 ENCRYPTION_KEY_VERSION=1
 # Optional rotation: ENCRYPTION_KEY_PREVIOUS=1:oldbase64key
+# Required outside dev: MAC key for Nostr login challenge tokens.
+# Server refuses to boot without it (no public dev-key fallback in production).
+NOSTR_CHALLENGE_SECRET=${NOSTR_CHALLENGE_SECRET}
 # Required for remote DB: fail-closed crypto + secure cookies.
 PRODUCTION=1
 HOST_PORT=${HOST_PORT}
@@ -118,6 +122,10 @@ if [[ -f "$SECRETS" ]]; then
     if ! grep -q '^SURREALDB_APP_PASSWORD=' "$SECRETS" 2>/dev/null; then
         # Must be distinct from root password in production (do not reuse SURREALDB_PASSWORD).
         ensure_secret_key SURREALDB_APP_PASSWORD "$(openssl rand -base64 32 | tr -d '\n')"
+    fi
+    if ! grep -q '^NOSTR_CHALLENGE_SECRET=' "$SECRETS" 2>/dev/null; then
+        # MAC key for Nostr login challenge tokens; server refuses to boot without it.
+        ensure_secret_key NOSTR_CHALLENGE_SECRET "$(openssl rand -base64 32 | tr -d '\n')"
     fi
 fi
 

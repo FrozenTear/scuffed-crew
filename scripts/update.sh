@@ -53,6 +53,16 @@ if ! grep -q '^SURREALDB_APP_PASSWORD=' "$SECRETS" 2>/dev/null; then
     fi
     ensure_secret_key SURREALDB_APP_PASSWORD "$(openssl rand -base64 32 | tr -d '\n')"
 fi
+# MAC key for Nostr login challenge tokens. Server refuses to boot without it
+# (no public dev-key fallback in production). Safe to generate on older installs:
+# a fresh value only invalidates in-flight, short-TTL challenge tokens.
+if ! grep -q '^NOSTR_CHALLENGE_SECRET=' "$SECRETS" 2>/dev/null; then
+    if ! command -v openssl >/dev/null 2>&1; then
+        echo "error: openssl required to generate NOSTR_CHALLENGE_SECRET" >&2
+        exit 1
+    fi
+    ensure_secret_key NOSTR_CHALLENGE_SECRET "$(openssl rand -base64 32 | tr -d '\n')"
+fi
 
 # shellcheck disable=SC1090
 set -a
