@@ -2611,6 +2611,88 @@ async fn demote_compensates_if_no_actionable_admin_left() {
 }
 
 #[tokio::test]
+async fn change_role_route_uses_cas() {
+    // DR1-ACCT-004: the PATCH /role route must go through change_member_role_cas.
+    // Two facets:
+    //   (1) happy path still succeeds through the CAS (no false conflict when the
+    //       role has not moved), and
+    //   (2) the CAS the route calls rejects a stale expected-role with Conflict —
+    //       which the route maps to HTTP 409.
+    let state = test_state().await;
+    seed_user(
+        &state.db,
+        "adminuser",
+        "adminmember",
+        "TestAdmin",
+        "admin",
+        ADMIN_TOKEN,
+    )
+    .await;
+    // Second admin so the last-admin guard never blocks the target's edits.
+    seed_user(
+        &state.db,
+        "adminuser2",
+        "adminmember2",
+        "TestAdmin2",
+        "admin",
+        ADMIN2_TOKEN,
+    )
+    .await;
+    seed_user(
+        &state.db,
+        "targetuser",
+        "targetmember",
+        "TargetMember",
+        "member",
+        MEMBER_TOKEN,
+    )
+    .await;
+
+    // (1) Happy path through the CAS: member → officer succeeds (200) and the
+    // role actually changes in the DB.
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(authed_json_request(
+            Method::PATCH,
+            "/api/members/targetmember/role",
+            ADMIN_TOKEN,
+            json!({ "role": "officer" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        state
+            .db
+            .get_member_safe("targetmember")
+            .await
+            .unwrap()
+            .unwrap()
+            .org_role,
+        scuffed_db::OrgRole::Officer
+    );
+
+    // (2) The CAS the route relies on: with a stale expected-role (the target has
+    // since moved to admin), change_member_role_cas returns Conflict. This is the
+    // exact error the route translates into a 409 for a concurrent role change.
+    state
+        .db
+        .change_member_role("targetmember", scuffed_db::OrgRole::Admin)
+        .await
+        .unwrap();
+    let err = state
+        .db
+        .change_member_role_cas(
+            "targetmember",
+            scuffed_db::OrgRole::Officer, // stale expected
+            scuffed_db::OrgRole::Member,
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(err, scuffed_db::DbError::Conflict(_)), "got {err}");
+}
+
+#[tokio::test]
 async fn open_application_count_guards_duplicate() {
     let state = test_state().await;
     seed_all_roles(&state.db).await;
@@ -2903,8 +2985,91 @@ async fn suspended_admins_do_not_count_for_setup() {
 
     assert_eq!(state.db.count_actionable_admins().await.unwrap(), 0);
     assert_eq!(state.db.count_active_admins().await.unwrap(), 2);
-    // Setup recovery path opens
+    // has_admin_member still reflects the live actionable count (0 → false); it
+    // is used for UI/recruitment display. NOTE (DR1-ACCT-003): the unauthenticated
+    // /api/auth/setup gate no longer keys off this value — see
+    // setup_rejected_when_all_admins_suspended for the hardened behaviour.
     assert!(!state.db.has_admin_member().await.unwrap());
+    // Bootstrap signal stays closed: members exist, so setup cannot reopen.
+    assert!(state.db.has_any_member().await.unwrap());
+}
+
+/// DR1-ACCT-003: a transient zero-actionable-admin state (every admin
+/// suspended) must NOT reopen the unauthenticated first-boot setup endpoint,
+/// because member rows exist. Setup only bootstraps a genuinely empty instance.
+#[tokio::test]
+async fn setup_rejected_when_all_admins_suspended() {
+    let state = test_state().await;
+    seed_user(
+        &state.db,
+        "adminuser",
+        "adminmember",
+        "TestAdmin",
+        "admin",
+        ADMIN_TOKEN,
+    )
+    .await;
+    seed_user(
+        &state.db,
+        "adminuser2",
+        "adminmember2",
+        "TestAdmin2",
+        "admin",
+        ADMIN2_TOKEN,
+    )
+    .await;
+
+    // Suspend both admins (transient lockout) → zero actionable admins.
+    state
+        .db
+        .create_moderation_action(
+            "adminmember",
+            scuffed_db::ModerationActionType::Suspension,
+            "lockout-sim",
+            "adminmember2",
+            None,
+        )
+        .await
+        .unwrap();
+    state
+        .db
+        .create_moderation_action(
+            "adminmember2",
+            scuffed_db::ModerationActionType::Suspension,
+            "lockout-sim",
+            "adminmember",
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(state.db.count_actionable_admins().await.unwrap(), 0);
+
+    // The unauthenticated setup POST must still be refused (members exist).
+    let app = create_router(state);
+    let res = app
+        .oneshot(
+            rate_limit_ip(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/auth/setup")
+                    .header(header::CONTENT_TYPE, "application/json"),
+            )
+            .body(Body::from(
+                serde_json::to_vec(&json!({
+                    "username": "attacker",
+                    "password": "a-strong-password"
+                }))
+                .unwrap(),
+            ))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        res.status(),
+        StatusCode::FORBIDDEN,
+        "setup must stay closed once any member exists"
+    );
 }
 
 // ─── Public surfaces (is_public gating) ─────────────────────────────────────

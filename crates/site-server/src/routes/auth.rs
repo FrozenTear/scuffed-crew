@@ -262,10 +262,15 @@ pub async fn logout(State(state): State<AppState>, jar: CookieJar) -> impl IntoR
 
 /// GET /api/auth/setup-status — whether first-boot admin creation is required.
 pub async fn setup_status(State(state): State<AppState>) -> impl IntoResponse {
-    let needs_setup = match state.db.has_admin_member().await {
+    // Match the actual setup gate (POST /api/auth/setup gates on `has_any_member`,
+    // DR1-ACCT-003). Using the live actionable-admin count here instead would show
+    // "needs setup" while every admin is merely suspended, even though the gated
+    // endpoint 403s — a display-vs-gate mismatch. Members are never hard-deleted,
+    // so `has_any_member` is the monotonic first-boot signal the gate uses.
+    let needs_setup = match state.db.has_any_member().await {
         Ok(has) => !has,
         Err(e) => {
-            tracing::error!("setup_status has_admin_member: {e}");
+            tracing::error!("setup_status has_any_member: {e}");
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
@@ -297,9 +302,12 @@ pub async fn setup_status(State(state): State<AppState>) -> impl IntoResponse {
 
 /// GET /api/auth/providers — which login methods the UI should offer.
 pub async fn auth_providers(State(state): State<AppState>) -> impl IntoResponse {
+    // Match the actual setup gate (`has_any_member`, DR1-ACCT-003) rather than the
+    // live actionable-admin count, so this display signal cannot claim setup is
+    // available while POST /api/auth/setup 403s (all-admins-suspended state).
     let needs_setup = state
         .db
-        .has_admin_member()
+        .has_any_member()
         .await
         .ok()
         .map(|h| !h)
@@ -451,12 +459,28 @@ pub async fn local_register(
 }
 
 /// POST /api/auth/setup — one-time first admin account (local username/password).
+///
+/// Gate (DR1-ACCT-003): this unauthenticated endpoint proceeds **only when no
+/// member row exists at all** (`has_any_member() == false`), a monotonic
+/// first-boot signal. It deliberately does NOT gate on the live
+/// actionable-admin count: that count drops to zero whenever every admin is
+/// merely suspended (a *transient / recoverable* state), which previously
+/// reopened this endpoint to any unauthenticated caller — a momentary
+/// privilege-escalation window. Members are only ever deactivated, never
+/// deleted, so once the first admin is created this endpoint stays closed
+/// permanently.
+///
+/// Lockout recovery for an already-provisioned org (all admins
+/// suspended/banned) is intentionally NOT this endpoint: recovery is an
+/// operator action (lift the suspension / reactivate an admin directly against
+/// the database), never an unauthenticated web request. A future dedicated,
+/// explicitly-authenticated recovery path can replace that manual step.
 pub async fn setup(
     State(state): State<AppState>,
     jar: CookieJar,
     Json(body): Json<SetupRequest>,
 ) -> impl IntoResponse {
-    match state.db.has_admin_member().await {
+    match state.db.has_any_member().await {
         Ok(true) => {
             return (
                 StatusCode::FORBIDDEN,
@@ -468,7 +492,7 @@ pub async fn setup(
         }
         Ok(false) => {}
         Err(e) => {
-            tracing::error!("setup has_admin: {e}");
+            tracing::error!("setup has_any_member: {e}");
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {

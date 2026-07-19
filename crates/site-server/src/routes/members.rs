@@ -526,23 +526,40 @@ pub async fn change_role(
 
     let demoting_actionable_admin = target_is_actionable_admin && body.role != OrgRole::Admin;
 
+    // CAS on the role we read at handler start (DR1-ACCT-004): a concurrent role
+    // change on this member since `target` was loaded must not be silently lost
+    // or reported as success against a role that no longer holds. Conflict → 409.
     let member = state
         .db
-        .change_member_role(&id, body.role)
+        .change_member_role_cas(&id, target.org_role, body.role)
         .await
-        .map_err(|e| {
-            tracing::error!(error = %e, "change_member_role");
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: "Internal server error".into(),
-                }),
-            )
+        .map_err(|e| match e {
+            scuffed_db::DbError::Conflict(msg) => {
+                (StatusCode::CONFLICT, Json(ErrorResponse { error: msg }))
+            }
+            scuffed_db::DbError::NotFound(msg) => {
+                (StatusCode::NOT_FOUND, Json(ErrorResponse { error: msg }))
+            }
+            other => {
+                tracing::error!(error = %other, "change_member_role_cas");
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse {
+                        error: "Internal server error".into(),
+                    }),
+                )
+            }
         })?;
 
     if demoting_actionable_admin && let Err(e) = state.db.assert_has_actionable_admin().await {
-        // Compensate: restore previous role
-        if let Err(re) = state.db.change_member_role(&id, target.org_role).await {
+        // Compensate: restore previous role. CAS-consistent — only revert if the
+        // role is still the one we just wrote (`body.role`), so a concurrent edit
+        // landing in the compensation window is not clobbered.
+        if let Err(re) = state
+            .db
+            .change_member_role_cas(&id, body.role, target.org_role)
+            .await
+        {
             tracing::error!(error = %re, member_id = %id, "failed to compensate admin demotion");
         }
         return Err(match e {
