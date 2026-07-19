@@ -353,6 +353,8 @@ mod tests {
             corrected_mitigation: None,
             edited_fields: Vec::new(),
             edited_at: None,
+            heroes_played: Vec::new(),
+            segment_resolutions: Vec::new(),
         }
     }
 

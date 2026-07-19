@@ -407,6 +407,14 @@ impl LocalStore {
             } => self.set_session_outcome(session_id, outcome).await,
             StoreCommand::DeleteSession { session_id } => self.delete_session(session_id).await,
             StoreCommand::EditMatch { session_id, edit } => self.edit_match(session_id, edit).await,
+            StoreCommand::ResolveSegment {
+                session_id,
+                segment,
+                action,
+            } => {
+                self.resolve_hero_segment(session_id, *segment, action)
+                    .await
+            }
         }
     }
 
@@ -452,6 +460,136 @@ impl LocalStore {
             }),
         );
         Ok(())
+    }
+
+    /// AUTOMATIC hero path (HS-1). Re-derive the session's hero timeline from
+    /// its RAW snapshots and stamp the result (`heroes_played`) onto every
+    /// snapshot row — WITHOUT touching the per-snapshot `hero`/`role` reads,
+    /// unlike [`Self::set_session_hero`]. The derived primary (majority over
+    /// the segments) then drives `display_hero`/`display_role`, so a late hero
+    /// swap is recorded as its own segment instead of a last-write that
+    /// mislabels the whole game (the 97%-Ana-recorded-as-Rein bug).
+    ///
+    /// Runs after every capture, so it mirrors the churn-avoidance of the
+    /// other back-fills: it writes a row only when its timeline actually
+    /// changed, and re-queues it for sync (`synced = false`) only when the
+    /// row's EFFECTIVE (uploaded) hero/role would change — a stable-hero game
+    /// is a no-op after its first snapshot. Persists across the same layers as
+    /// `set_session_*`: the SurrealKV `personal_match` rows and the
+    /// `matches.jsonl` fallback. (`match_session` carries no timeline field,
+    /// and the GUI's `live_snapshot.json` is re-exported by the daemon after
+    /// the capture completes.)
+    pub async fn refresh_session_hero_timeline(
+        &self,
+        session_id: &str,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let snaps = self.get_session_snapshots(session_id).await?;
+        if snaps.is_empty() {
+            return Ok(());
+        }
+        // Resolutions are stamped uniformly across a session's rows; gather the
+        // union so a partially-written row can't drop a decision.
+        let resolutions = collect_segment_resolutions(&snaps);
+        let segments = derive_hero_segments(&snaps, &resolutions);
+
+        for m in &snaps {
+            let Some(id) = m.id.clone() else { continue };
+            if m.heroes_played == segments {
+                continue; // already current — no write, no sync churn
+            }
+            // Re-queue for sync only when the value the upload sends
+            // (`display_hero`/`display_role`) actually changes. Compare via the
+            // real display methods so this stays lock-step with the sync path
+            // (a `corrected_hero` pins the effective value regardless of the
+            // timeline, so such rows never re-queue).
+            let old_hero = m.display_hero().to_string();
+            let old_role = m.display_role().to_string();
+            let mut probe = m.clone();
+            probe.heroes_played = segments.clone();
+            let requeue = old_hero.as_str() != probe.display_hero()
+                || old_role.as_str() != probe.display_role();
+
+            if requeue {
+                self.db
+                    .query("UPDATE $id SET heroes_played = $hp, synced = false")
+                    .bind(("id", id))
+                    .bind(("hp", segments.clone()))
+                    .await?;
+            } else {
+                self.db
+                    .query("UPDATE $id SET heroes_played = $hp")
+                    .bind(("id", id))
+                    .bind(("hp", segments.clone()))
+                    .await?;
+            }
+        }
+        // jsonl parity: the GUI's last-resort fallback reads matches.jsonl, so
+        // stamp the derived timeline there too (raw hero/role untouched).
+        let segments_for_log = segments.clone();
+        rewrite_match_log_session(
+            &self.data_dir,
+            session_id,
+            Some(&move |m| {
+                m.heroes_played = segments_for_log.clone();
+            }),
+        );
+        Ok(())
+    }
+
+    /// MANUAL confirm/dismiss of one derived hero segment (HS-1). Records the
+    /// decision in `segment_resolutions` (keyed by segment index; a repeat on
+    /// the same index replaces it, and an unrecognized action clears it) on
+    /// EVERY snapshot row — uniform, like `heroes_played` — then re-derives the
+    /// timeline via [`Self::refresh_session_hero_timeline`] so the flags and
+    /// the effective primary update (and any resulting hero change re-queues
+    /// for sync). Handles the 1-snapshot flap (e.g. Lijiang "Wuyang"/"Mizuki"):
+    /// confirm keeps it as a real swap, dismiss drops it from display+majority.
+    pub async fn resolve_hero_segment(
+        &self,
+        session_id: &str,
+        segment: u32,
+        action: &str,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let snaps = self.get_session_snapshots(session_id).await?;
+        if snaps.is_empty() {
+            return Ok(());
+        }
+        let mut resolutions = collect_segment_resolutions(&snaps);
+        resolutions.retain(|r| r.segment != segment);
+        if action == SEGMENT_CONFIRM || action == SEGMENT_DISMISS {
+            resolutions.push(SegmentResolution {
+                segment,
+                action: action.to_string(),
+            });
+        }
+        resolutions.sort_by_key(|r| r.segment);
+
+        // Persist the resolution set on all rows. This field is never uploaded
+        // (only its effect via the derived primary is), so it does NOT flip
+        // `synced` here — the re-derive below re-queues exactly the rows whose
+        // effective hero changed.
+        for m in &snaps {
+            let Some(id) = m.id.clone() else { continue };
+            if m.segment_resolutions == resolutions {
+                continue;
+            }
+            self.db
+                .query("UPDATE $id SET segment_resolutions = $sr")
+                .bind(("id", id))
+                .bind(("sr", resolutions.clone()))
+                .await?;
+        }
+        let res_for_log = resolutions.clone();
+        rewrite_match_log_session(
+            &self.data_dir,
+            session_id,
+            Some(&move |m| {
+                m.segment_resolutions = res_for_log.clone();
+            }),
+        );
+
+        // Re-derive with the updated resolutions and re-stamp heroes_played.
+        self.refresh_session_hero_timeline(session_id).await
     }
 
     /// Set a session's map and stamp it onto ALL its snapshots, re-queuing
@@ -836,6 +974,20 @@ pub enum StoreCommand {
     /// corrected values overlay the immutable OCR reads and re-queue the game
     /// for sync.
     EditMatch { session_id: String, edit: MatchEdit },
+    /// Confirm or dismiss a derived hero segment of a game (HS-1), keyed by
+    /// segment index. `action` is [`SEGMENT_CONFIRM`] or [`SEGMENT_DISMISS`].
+    /// Persists the decision and re-derives the hero timeline.
+    ///
+    // HS-1 follow-up: the daemon-side command path (queue -> apply ->
+    // resolve_hero_segment) is wired and tested, but the tracker GUI does not
+    // yet render the per-segment confirm/dismiss buttons that would emit this
+    // command. Until then a resolution can only be driven by dropping a
+    // `resolve_segment` command file into <data_dir>/commands/.
+    ResolveSegment {
+        session_id: String,
+        segment: u32,
+        action: String,
+    },
 }
 
 /// A manual correction to a game's stats. Only `Some(_)` fields are applied;
@@ -987,6 +1139,23 @@ pub fn read_commands(data_dir: &Path) -> Vec<(PathBuf, StoreCommand)> {
 /// been successfully applied.
 pub fn remove_command_file(path: &Path) {
     let _ = std::fs::remove_file(path);
+}
+
+/// Gather the union of `segment_resolutions` across a session's snapshots,
+/// deduped by segment index (last row wins) and sorted. The daemon stamps
+/// resolutions uniformly onto every row, so in practice all rows agree — this
+/// merge just tolerates a row that missed a write.
+pub fn collect_segment_resolutions(snapshots: &[PersonalMatch]) -> Vec<SegmentResolution> {
+    let mut by_index: std::collections::BTreeMap<u32, String> = std::collections::BTreeMap::new();
+    for m in snapshots {
+        for r in &m.segment_resolutions {
+            by_index.insert(r.segment, r.action.clone());
+        }
+    }
+    by_index
+        .into_iter()
+        .map(|(segment, action)| SegmentResolution { segment, action })
+        .collect()
 }
 
 /// Aggregate a session's snapshots into consecutive same-hero runs (sorted by
@@ -1227,6 +1396,8 @@ mod tests {
             corrected_mitigation: None,
             edited_fields: Vec::new(),
             edited_at: None,
+            heroes_played: Vec::new(),
+            segment_resolutions: Vec::new(),
         }
     }
 
@@ -1500,5 +1671,428 @@ mod tests {
     fn latest_per_game_passes_legacy_rows_through() {
         let rows = vec![snap("", 1), snap("", 2), snap("a", 3), snap("a", 4)];
         assert_eq!(latest_per_game(rows).len(), 3);
+    }
+
+    // --- HS-1 hero timeline --------------------------------------------------
+
+    /// A snapshot with an explicit hero/role and a distinct capture time
+    /// (`secs` offset), for exercising ordering and segment derivation.
+    fn snap_h(session_id: &str, hero: &str, role: &str, secs: i64) -> PersonalMatch {
+        let mut m = snap(session_id, 0);
+        m.hero = hero.into();
+        m.role = role.into();
+        m.played_at = SurrealDatetime::from(Utc::now() + chrono::Duration::seconds(secs));
+        m
+    }
+
+    /// A derived hero segment, for exercising `primary_hero_role` directly.
+    fn seg(hero: &str, role: &str, snapshots: u32, confirmed: bool, secs: i64) -> HeroSegment {
+        let t = SurrealDatetime::from(Utc::now() + chrono::Duration::seconds(secs));
+        HeroSegment {
+            hero: hero.into(),
+            role: role.into(),
+            first_seen: t,
+            last_seen: t,
+            snapshots,
+            confirmed,
+            resolution: None,
+        }
+    }
+
+    #[test]
+    fn derive_orders_by_capture_time_regardless_of_input() {
+        // Shuffled input; derivation sorts by played_at → Ana, Reinhardt, Cassidy.
+        let snaps = vec![
+            snap_h("s", "Cassidy", "Damage", 30),
+            snap_h("s", "Ana", "Support", 10),
+            snap_h("s", "Reinhardt", "Tank", 20),
+        ];
+        let segs = derive_hero_segments(&snaps, &[]);
+        let order: Vec<&str> = segs.iter().map(|s| s.hero.as_str()).collect();
+        assert_eq!(order, ["Ana", "Reinhardt", "Cassidy"]);
+        assert!(segs.iter().all(|s| s.snapshots == 1 && !s.confirmed));
+    }
+
+    #[test]
+    fn derive_skips_unknown_and_empty_without_splitting_runs() {
+        // Ana, Unknown, "", Ana → one Ana run of 2; the junk reads neither open
+        // a segment nor split the surrounding run.
+        let snaps = vec![
+            snap_h("s", "Ana", "Support", 10),
+            snap_h("s", "Unknown", "Support", 20),
+            snap_h("s", "", "", 30),
+            snap_h("s", "Ana", "Support", 40),
+        ];
+        let segs = derive_hero_segments(&snaps, &[]);
+        assert_eq!(segs.len(), 1);
+        assert_eq!(segs[0].hero, "Ana");
+        assert_eq!(segs[0].snapshots, 2);
+        assert!(segs[0].confirmed);
+    }
+
+    #[test]
+    fn derive_coalesces_consecutive_same_hero() {
+        let snaps: Vec<PersonalMatch> = (0..25i64)
+            .map(|i| snap_h("s", "Ana", "Support", i))
+            .collect();
+        let segs = derive_hero_segments(&snaps, &[]);
+        assert_eq!(segs.len(), 1);
+        assert_eq!(segs[0].snapshots, 25);
+        assert!(segs[0].confirmed);
+    }
+
+    #[test]
+    fn derive_swap_back_makes_three_segments() {
+        // A -> B -> A is three distinct runs, not two.
+        let mut snaps: Vec<PersonalMatch> = (0..3i64)
+            .map(|i| snap_h("s", "Ana", "Support", i))
+            .collect();
+        snaps.push(snap_h("s", "Genji", "Damage", 3));
+        snaps.extend((4..7i64).map(|i| snap_h("s", "Ana", "Support", i)));
+        let segs = derive_hero_segments(&snaps, &[]);
+        assert_eq!(segs.len(), 3);
+        assert_eq!(segs[0].hero, "Ana");
+        assert_eq!(segs[1].hero, "Genji");
+        assert_eq!(segs[2].hero, "Ana");
+        assert_eq!(segs[1].snapshots, 1);
+        assert!(!segs[1].confirmed, "a lone swap stays unconfirmed");
+        assert!(segs[0].confirmed && segs[2].confirmed);
+    }
+
+    #[test]
+    fn derive_applies_confirm_and_dismiss_resolutions() {
+        // Ana x3 (confirmed by count), Genji x1 (unconfirmed flap).
+        let mut snaps: Vec<PersonalMatch> = (0..3i64)
+            .map(|i| snap_h("s", "Ana", "Support", i))
+            .collect();
+        snaps.push(snap_h("s", "Genji", "Damage", 3));
+        let res = vec![
+            SegmentResolution {
+                segment: 1,
+                action: SEGMENT_CONFIRM.into(),
+            },
+            SegmentResolution {
+                segment: 0,
+                action: SEGMENT_DISMISS.into(),
+            },
+        ];
+        let segs = derive_hero_segments(&snaps, &res);
+        assert_eq!(segs.len(), 2);
+        assert!(
+            segs[1].confirmed,
+            "confirm forces a 1-snapshot segment confirmed"
+        );
+        assert_eq!(segs[1].resolution.as_deref(), Some(SEGMENT_CONFIRM));
+        assert!(!segs[0].confirmed, "dismiss clears confirmed");
+        assert!(segs[0].is_dismissed());
+    }
+
+    #[test]
+    fn primary_picks_snapshot_count_majority() {
+        let segs = vec![
+            seg("Ana", "Support", 25, true, 0),
+            seg("Genji", "Damage", 3, true, 10),
+        ];
+        assert_eq!(primary_hero_role(&segs), Some(("Ana", "Support")));
+    }
+
+    #[test]
+    fn primary_dismissed_segments_never_vote() {
+        let mut segs = vec![
+            seg("Ana", "Support", 25, true, 0),
+            seg("Genji", "Damage", 3, true, 10),
+        ];
+        // Dismiss the majority hero → the remaining segment wins.
+        segs[0].resolution = Some(SEGMENT_DISMISS.into());
+        assert_eq!(primary_hero_role(&segs), Some(("Genji", "Damage")));
+    }
+
+    #[test]
+    fn primary_unconfirmed_votes_only_when_all_unconfirmed() {
+        // Mixed: a confirmed Ana(2) and an unconfirmed Genji(5). Despite more
+        // Genji snapshots, only the confirmed segment votes.
+        let mixed = vec![
+            seg("Ana", "Support", 2, true, 0),
+            seg("Genji", "Damage", 5, false, 10),
+        ];
+        assert_eq!(primary_hero_role(&mixed), Some(("Ana", "Support")));
+
+        // All-unconfirmed game: the unconfirmed segments DO vote (a label is
+        // still needed), so the larger count wins.
+        let all_unconfirmed = vec![
+            seg("Ana", "Support", 1, false, 0),
+            seg("Genji", "Damage", 3, false, 10),
+        ];
+        assert_eq!(
+            primary_hero_role(&all_unconfirmed),
+            Some(("Genji", "Damage"))
+        );
+    }
+
+    #[test]
+    fn primary_lone_flap_never_outvotes_solid_run() {
+        // The core HS-1 case: 25 confirmed Ana vs a single unconfirmed flap.
+        let segs = vec![
+            seg("Ana", "Support", 25, true, 0),
+            seg("Wuyang", "Support", 1, false, 10),
+        ];
+        assert_eq!(primary_hero_role(&segs), Some(("Ana", "Support")));
+    }
+
+    #[test]
+    fn primary_tie_breaks_latest_then_alpha() {
+        // Equal counts, distinct last_seen → the later segment wins.
+        let segs = vec![
+            seg("Ana", "Support", 3, true, 0),
+            seg("Zenyatta", "Support", 3, true, 50),
+        ];
+        assert_eq!(primary_hero_role(&segs), Some(("Zenyatta", "Support")));
+
+        // Equal counts AND equal last_seen → alphabetical (deterministic).
+        let t = SurrealDatetime::from(Utc::now());
+        let mk = |hero: &str| HeroSegment {
+            hero: hero.into(),
+            role: "Support".into(),
+            first_seen: t,
+            last_seen: t,
+            snapshots: 3,
+            confirmed: true,
+            resolution: None,
+        };
+        assert_eq!(
+            primary_hero_role(&[mk("Ana"), mk("Zenyatta")]),
+            Some(("Ana", "Support"))
+        );
+    }
+
+    #[test]
+    fn primary_none_when_empty_or_all_dismissed() {
+        assert_eq!(primary_hero_role(&[]), None);
+        let mut segs = vec![seg("Ana", "Support", 3, true, 0)];
+        segs[0].resolution = Some(SEGMENT_DISMISS.into());
+        assert_eq!(primary_hero_role(&segs), None);
+    }
+
+    #[tokio::test]
+    async fn refresh_hero_timeline_stamps_segments_and_preserves_raw() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = LocalStore::open(dir.path()).await.expect("open store");
+        // 3x Ana then a Genji swap, all already synced (post-upload state).
+        let seq = [
+            ("Ana", "Support"),
+            ("Ana", "Support"),
+            ("Ana", "Support"),
+            ("Genji", "Damage"),
+        ];
+        for (i, (hero, role)) in seq.into_iter().enumerate() {
+            let m = snap_h("s1", hero, role, i as i64);
+            append_match_log(dir.path(), &m);
+            store.insert_match(m).await.unwrap();
+        }
+        let ids: Vec<_> = store
+            .get_all_matches()
+            .await
+            .unwrap()
+            .into_iter()
+            .filter_map(|m| m.id)
+            .collect();
+        store.mark_synced(ids).await.unwrap();
+
+        store.refresh_session_hero_timeline("s1").await.unwrap();
+
+        let rows = store.get_session_snapshots("s1").await.unwrap();
+        assert_eq!(rows.len(), 4);
+        for m in &rows {
+            // Every row round-trips the same derived timeline...
+            assert_eq!(m.heroes_played.len(), 2);
+            assert_eq!(m.heroes_played[0].hero, "Ana");
+            assert_eq!(m.heroes_played[1].hero, "Genji");
+            // ...while the RAW per-snapshot read is preserved, not overwritten.
+            assert!(m.hero == "Ana" || m.hero == "Genji");
+            // Primary = majority (Ana 3 vs Genji 1) drives display.
+            assert_eq!(m.display_hero(), "Ana");
+            assert_eq!(m.display_role(), "Support");
+        }
+        assert!(
+            rows.iter().any(|m| m.hero == "Genji"),
+            "raw Genji read survived"
+        );
+
+        // jsonl fallback carries the timeline too, raw hero preserved.
+        let logged = read_match_log(dir.path());
+        assert_eq!(logged.len(), 4);
+        assert!(
+            logged
+                .iter()
+                .all(|m| m.heroes_played.len() == 2 && m.display_hero() == "Ana")
+        );
+        assert!(logged.iter().any(|m| m.hero == "Genji"));
+    }
+
+    #[tokio::test]
+    async fn refresh_hero_timeline_stable_hero_unchanged_no_churn() {
+        // A single stable hero must behave exactly like the raw read, and the
+        // every-capture refresh must not re-queue already-synced rows.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = LocalStore::open(dir.path()).await.expect("open store");
+        for i in 0..5i64 {
+            store
+                .insert_match(snap_h("s1", "Ana", "Support", i))
+                .await
+                .unwrap();
+        }
+        let ids: Vec<_> = store
+            .get_all_matches()
+            .await
+            .unwrap()
+            .into_iter()
+            .filter_map(|m| m.id)
+            .collect();
+        store.mark_synced(ids).await.unwrap();
+
+        store.refresh_session_hero_timeline("s1").await.unwrap();
+        let rows = store.get_session_snapshots("s1").await.unwrap();
+        assert!(rows.iter().all(|m| m.display_hero() == "Ana"));
+        // display hero == raw hero → no effective change → nothing re-queued.
+        assert!(
+            rows.iter().all(|m| m.synced),
+            "stable hero must not churn sync"
+        );
+
+        // Idempotent: a second refresh is a no-op (timeline already current).
+        store.refresh_session_hero_timeline("s1").await.unwrap();
+        let rows2 = store.get_session_snapshots("s1").await.unwrap();
+        assert!(rows2.iter().all(|m| m.synced));
+    }
+
+    #[tokio::test]
+    async fn resolve_hero_segment_confirm_then_dismiss() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = LocalStore::open(dir.path()).await.expect("open store");
+        // 25 Ana then a lone Wuyang flap.
+        for i in 0..25i64 {
+            store
+                .insert_match(snap_h("s1", "Ana", "Support", i))
+                .await
+                .unwrap();
+        }
+        store
+            .insert_match(snap_h("s1", "Wuyang", "Support", 25))
+            .await
+            .unwrap();
+        store.refresh_session_hero_timeline("s1").await.unwrap();
+        let ids: Vec<_> = store
+            .get_all_matches()
+            .await
+            .unwrap()
+            .into_iter()
+            .filter_map(|m| m.id)
+            .collect();
+        store.mark_synced(ids).await.unwrap();
+
+        // Flap is unconfirmed → Ana is primary.
+        let rows = store.get_session_snapshots("s1").await.unwrap();
+        assert!(rows.iter().all(|m| m.display_hero() == "Ana"));
+
+        // Confirm the flap (segment 1): now a real swap, but Ana still majority.
+        store
+            .resolve_hero_segment("s1", 1, SEGMENT_CONFIRM)
+            .await
+            .unwrap();
+        let rows = store.get_session_snapshots("s1").await.unwrap();
+        assert!(rows.iter().all(|m| m.display_hero() == "Ana"));
+        assert!(rows.iter().all(|m| m.heroes_played[1].confirmed));
+        // Primary unchanged → no re-queue.
+        assert!(
+            rows.iter().all(|m| m.synced),
+            "confirm w/o primary change must not churn"
+        );
+
+        // Dismiss segment 0 (the Ana run) → Wuyang is the only voter.
+        store
+            .resolve_hero_segment("s1", 0, SEGMENT_DISMISS)
+            .await
+            .unwrap();
+        let rows = store.get_session_snapshots("s1").await.unwrap();
+        assert!(rows.iter().all(|m| m.display_hero() == "Wuyang"));
+        assert!(rows.iter().all(|m| m.heroes_played[0].is_dismissed()));
+        // Effective hero changed → rows re-queued for sync.
+        assert!(rows.iter().all(|m| !m.synced));
+        // Resolution persisted uniformly on every row.
+        assert!(
+            rows.iter()
+                .all(|m| m.segment_resolutions.iter().any(|r| r.segment == 0))
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_command_resolves_hero_segment() {
+        // The queued-command path (GUI → daemon) dispatches to resolve.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = LocalStore::open(dir.path()).await.expect("open store");
+        for i in 0..3i64 {
+            store
+                .insert_match(snap_h("s1", "Ana", "Support", i))
+                .await
+                .unwrap();
+        }
+        store
+            .insert_match(snap_h("s1", "Genji", "Damage", 3))
+            .await
+            .unwrap();
+        store.refresh_session_hero_timeline("s1").await.unwrap();
+
+        let cmd = StoreCommand::ResolveSegment {
+            session_id: "s1".into(),
+            segment: 1,
+            action: SEGMENT_DISMISS.into(),
+        };
+        store.apply_command(&cmd).await.unwrap();
+
+        let rows = store.get_session_snapshots("s1").await.unwrap();
+        assert!(rows.iter().all(|m| m.display_hero() == "Ana"));
+        assert!(rows.iter().all(|m| m.heroes_played[1].is_dismissed()));
+    }
+
+    #[test]
+    fn resolve_segment_command_json_roundtrips() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cmd = StoreCommand::ResolveSegment {
+            session_id: "s1".into(),
+            segment: 2,
+            action: SEGMENT_CONFIRM.into(),
+        };
+        queue_command(dir.path(), &cmd).unwrap();
+        let cmds = read_commands(dir.path());
+        assert_eq!(cmds.len(), 1);
+        assert!(matches!(
+            &cmds[0].1,
+            StoreCommand::ResolveSegment { session_id, segment, action }
+            if session_id == "s1" && *segment == 2 && action == SEGMENT_CONFIRM
+        ));
+    }
+
+    #[test]
+    fn latest_per_game_derives_timeline_for_legacy_rows() {
+        // Legacy session rows: heroes_played empty. Newest-first input (the
+        // contract of latest_per_game). Ana(final) / Genji / Ana.
+        let rows = vec![
+            snap_h("s", "Ana", "Support", 30),
+            snap_h("s", "Genji", "Damage", 20),
+            snap_h("s", "Ana", "Support", 10),
+        ];
+        let games = latest_per_game(rows);
+        assert_eq!(games.len(), 1);
+        let segs = &games[0].heroes_played;
+        let order: Vec<&str> = segs.iter().map(|s| s.hero.as_str()).collect();
+        assert_eq!(
+            order,
+            ["Ana", "Genji", "Ana"],
+            "legacy swap history derived on the fly"
+        );
+        // Kept row is the final (newest) snapshot; display uses the derived
+        // primary (Ana appears in two 1-snapshot segments → 2 votes vs Genji 1).
+        assert_eq!(games[0].hero, "Ana");
+        assert_eq!(games[0].display_hero(), "Ana");
     }
 }
