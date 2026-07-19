@@ -718,6 +718,23 @@ impl Database {
         .await
     }
 
+    /// Report a completed match result and mark it `completed`.
+    ///
+    /// Integrity guards (DR1-DB-001/004/009), all enforced here so the DB is the
+    /// authoritative fail-closed choke point even if a route forgets:
+    /// - **DB-001:** `winner_id` (trimmed) must equal `participant_a_id` or
+    ///   `participant_b_id`; a foreign / empty winner is rejected (Conflict) so
+    ///   it can never poison the next-round slot.
+    /// - **DB-009:** the winner's score must be strictly greater than the
+    ///   loser's (elimination brackets have no ties) → rejected on violation.
+    /// - **DB-004:** the write is an atomic CAS `WHERE status = 'pending'`. A
+    ///   re-report of an already-`completed` match, a `bye`, or the loser of a
+    ///   concurrent double-report matches 0 rows → Conflict, so the bracket is
+    ///   never advanced twice.
+    ///
+    /// The cross-tournament / path-vs-match check (DB-002) is enforced by the
+    /// route before this call (see `report_match`), since the tournament path is
+    /// a route/URL concern.
     pub async fn report_tournament_match(
         &self,
         id: &str,
@@ -730,27 +747,65 @@ impl Database {
         with_timeout(async {
             let existing: Option<DbTournamentMatch> =
                 self.client.select(("tournament_match", id)).await?;
-            let mut db = existing
+            let db = existing
                 .ok_or_else(|| crate::DbError::NotFound(format!("Match {id} not found")))?;
 
-            db.score_a = Some(score_a);
-            db.score_b = Some(score_b);
-            db.winner_id = Some(winner_id.to_string());
-            db.status = "completed".to_string();
-            db.completed_at = Some(SurrealDatetime::from(Utc::now()));
-            db.replay_codes = replay_codes;
-            if let Some(n) = notes {
-                db.notes = Some(n.to_string());
+            // DB-001: winner must be one of the two participants (normalize
+            // empty/whitespace/bye slots to absent first).
+            let winner = winner_id.trim();
+            let participant_a = db.participant_a_id.as_deref().map(str::trim);
+            let participant_b = db.participant_b_id.as_deref().map(str::trim);
+            if winner.is_empty() || (Some(winner) != participant_a && Some(winner) != participant_b)
+            {
+                return Err(crate::DbError::Conflict(format!(
+                    "winner_id {winner:?} is not a participant of match {id}"
+                )));
             }
 
-            let updated: Option<DbTournamentMatch> = self
+            // DB-009: winner's score must be strictly greater than the loser's.
+            let winner_is_a = Some(winner) == participant_a;
+            let (winner_score, loser_score) = if winner_is_a {
+                (score_a, score_b)
+            } else {
+                (score_b, score_a)
+            };
+            if winner_score <= loser_score {
+                return Err(crate::DbError::Conflict(format!(
+                    "winner score ({winner_score}) must exceed loser score ({loser_score})"
+                )));
+            }
+
+            // DB-004: atomic CAS — only a still-`pending` match transitions to
+            // `completed`. Preserve existing notes when none supplied (`??`).
+            let mut result = self
                 .client
-                .update(("tournament_match", id))
-                .content(db)
+                .query(
+                    "UPDATE $rid SET \
+                        score_a = $score_a, \
+                        score_b = $score_b, \
+                        winner_id = $winner_id, \
+                        status = 'completed', \
+                        completed_at = time::now(), \
+                        replay_codes = $replay_codes, \
+                        notes = $notes ?? notes \
+                     WHERE status = 'pending' \
+                     RETURN AFTER",
+                )
+                .bind(("rid", RecordId::new("tournament_match", id)))
+                .bind(("score_a", score_a))
+                .bind(("score_b", score_b))
+                .bind(("winner_id", winner.to_string()))
+                .bind(("replay_codes", replay_codes))
+                .bind(("notes", notes.map(|n| n.to_string())))
                 .await?;
-            Ok(db_to_match(updated.ok_or_else(|| {
-                crate::DbError::NotFound(format!("Match {id} not found after update"))
-            })?))
+            let updated: Vec<DbTournamentMatch> = result.take(0)?;
+
+            let row = updated.into_iter().next().ok_or_else(|| {
+                crate::DbError::Conflict(format!(
+                    "Match {id} is not pending (already reported or not reportable)"
+                ))
+            })?;
+            Ok(db_to_match(row))
         })
         .await
     }
@@ -1633,5 +1688,159 @@ mod tests {
         assert_eq!(slots.len(), 4);
         assert_eq!(slots.iter().filter(|s| s.is_some()).count(), 3);
         assert_eq!(slots.iter().filter(|s| s.is_none()).count(), 1);
+    }
+
+    // ─── report_tournament_match integrity (DR1-DB-001/004/009) ──────────────
+    //
+    // These exercise the DB choke point directly. The route-level guards
+    // (DB-002 path mismatch, bracket advancement / no double-advance end to
+    // end) are covered by the HTTP integration tests in
+    // `crates/site-server/tests/api_integration.rs`.
+
+    use crate::migrations::run_migrations;
+
+    async fn integrity_db() -> Database {
+        let db = Database::connect_memory().await.expect("mem db");
+        run_migrations(&db.client).await.expect("migrations");
+        db
+    }
+
+    /// Seed a pending match with two participants; returns its record id.
+    async fn seed_pending_match(
+        db: &Database,
+        tournament_id: &str,
+        a: Option<&str>,
+        b: Option<&str>,
+    ) -> String {
+        db.create_tournament_match(
+            tournament_id,
+            "round-1",
+            0,
+            a,
+            b,
+            TournamentMatchStatus::Pending,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("create match")
+        .id
+    }
+
+    /// DB-001: a winner that is neither participant is rejected and the match
+    /// stays pending with no winner recorded (so nothing downstream can be
+    /// advanced from a poisoned row).
+    #[tokio::test]
+    async fn report_rejects_foreign_winner() {
+        let db = integrity_db().await;
+        let mid = seed_pending_match(&db, "t1", Some("alice"), Some("bob")).await;
+
+        let err = db
+            .report_tournament_match(&mid, 2, 0, "mallory", None, vec![])
+            .await
+            .expect_err("foreign winner must be rejected");
+        assert!(
+            matches!(err, crate::DbError::Conflict(_)),
+            "expected Conflict, got {err:?}"
+        );
+
+        let after = db.get_tournament_match(&mid).await.unwrap().unwrap();
+        assert_eq!(after.status, TournamentMatchStatus::Pending);
+        assert!(after.winner_id.is_none());
+        assert!(after.score_a.is_none() && after.score_b.is_none());
+    }
+
+    /// DB-001: an empty / whitespace winner is rejected too (bye normalization).
+    #[tokio::test]
+    async fn report_rejects_empty_winner() {
+        let db = integrity_db().await;
+        let mid = seed_pending_match(&db, "t1", Some("alice"), Some("bob")).await;
+
+        let err = db
+            .report_tournament_match(&mid, 2, 0, "   ", None, vec![])
+            .await
+            .expect_err("empty winner must be rejected");
+        assert!(matches!(err, crate::DbError::Conflict(_)), "got {err:?}");
+        let after = db.get_tournament_match(&mid).await.unwrap().unwrap();
+        assert_eq!(after.status, TournamentMatchStatus::Pending);
+    }
+
+    /// DB-009: winner's score must strictly exceed the loser's.
+    #[tokio::test]
+    async fn report_rejects_score_inconsistent_with_winner() {
+        let db = integrity_db().await;
+        let mid = seed_pending_match(&db, "t1", Some("alice"), Some("bob")).await;
+
+        // Declare alice the winner but give her fewer points than bob.
+        let err = db
+            .report_tournament_match(&mid, 0, 2, "alice", None, vec![])
+            .await
+            .expect_err("winner with lower score must be rejected");
+        assert!(matches!(err, crate::DbError::Conflict(_)), "got {err:?}");
+
+        // A tie with a declared winner is also rejected (no ties in brackets).
+        let tie = db
+            .report_tournament_match(&mid, 1, 1, "alice", None, vec![])
+            .await
+            .expect_err("tie must be rejected");
+        assert!(matches!(tie, crate::DbError::Conflict(_)), "got {tie:?}");
+
+        let after = db.get_tournament_match(&mid).await.unwrap().unwrap();
+        assert_eq!(after.status, TournamentMatchStatus::Pending);
+    }
+
+    /// DB-004: a valid report completes the match; a second report is rejected
+    /// by the CAS (status is no longer `pending`).
+    #[tokio::test]
+    async fn report_is_idempotent_via_cas() {
+        let db = integrity_db().await;
+        let mid = seed_pending_match(&db, "t1", Some("alice"), Some("bob")).await;
+
+        let first = db
+            .report_tournament_match(&mid, 2, 1, "alice", None, vec!["R1".into()])
+            .await
+            .expect("first report succeeds");
+        assert_eq!(first.status, TournamentMatchStatus::Completed);
+        assert_eq!(first.winner_id.as_deref(), Some("alice"));
+        assert_eq!(first.score_a, Some(2));
+
+        // Re-report (even flipping the winner) must be rejected, not applied.
+        let err = db
+            .report_tournament_match(&mid, 0, 2, "bob", None, vec![])
+            .await
+            .expect_err("re-report of completed match must be rejected");
+        assert!(matches!(err, crate::DbError::Conflict(_)), "got {err:?}");
+
+        // Original result is untouched.
+        let after = db.get_tournament_match(&mid).await.unwrap().unwrap();
+        assert_eq!(after.winner_id.as_deref(), Some("alice"));
+        assert_eq!(after.score_a, Some(2));
+        assert_eq!(after.score_b, Some(1));
+    }
+
+    /// DB-004: two concurrent reports of the same match — exactly one wins, the
+    /// other hits the CAS and is rejected, so the bracket cannot advance twice.
+    #[tokio::test]
+    async fn concurrent_double_report_only_one_wins() {
+        let db = integrity_db().await;
+        let mid = seed_pending_match(&db, "t1", Some("alice"), Some("bob")).await;
+
+        let (r1, r2) = tokio::join!(
+            db.report_tournament_match(&mid, 2, 0, "alice", None, vec![]),
+            db.report_tournament_match(&mid, 0, 2, "bob", None, vec![]),
+        );
+
+        let oks = [&r1, &r2].iter().filter(|r| r.is_ok()).count();
+        let confs = [&r1, &r2]
+            .iter()
+            .filter(|r| matches!(r, Err(crate::DbError::Conflict(_))))
+            .count();
+        assert_eq!(oks, 1, "exactly one report must win: {r1:?} / {r2:?}");
+        assert_eq!(confs, 1, "the loser must get a Conflict: {r1:?} / {r2:?}");
+
+        let after = db.get_tournament_match(&mid).await.unwrap().unwrap();
+        assert_eq!(after.status, TournamentMatchStatus::Completed);
     }
 }
