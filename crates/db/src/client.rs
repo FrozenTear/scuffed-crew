@@ -284,6 +284,23 @@ impl Database {
     ///
     /// Uses **EDITOR** role (CRUD only). Schema migrations run as root before
     /// the app reconnects as this user — the app never holds OWNER/root for DEFINE.
+    ///
+    /// **Boot behavior (DR1-DB-005):** by default we only run `DEFINE USER` when
+    /// the app user is **missing**, so a normal boot does NOT reset the app-user
+    /// password. This avoids multi-instance password thrash (replicas that briefly
+    /// disagree on `SURREALDB_APP_PASSWORD` no longer fight over the stored
+    /// password on every restart). Set `FORCE_APP_PASSWORD_SYNC=1` to force the
+    /// old behavior — re-align the stored password to the env value on this boot
+    /// — for an intentional credential rotation.
+    ///
+    /// **Password is SQL-string-interpolated** (SurrealDB `DEFINE USER` does not
+    /// accept a bound password parameter reliably). `escape_surreal_string` only
+    /// escapes backslash (`\`) and single-quote (`'`). Therefore the app password
+    /// (`SURREALDB_APP_PASSWORD`) MUST NOT contain raw control characters
+    /// (NUL, newline, carriage return, tab, etc.) or other bytes the SurrealQL
+    /// string lexer may reject/misparse — restrict it to printable ASCII (or a
+    /// documented safe subset). Username is separately constrained to
+    /// `[A-Za-z0-9_]` by `assert_safe_sql_ident`.
     pub async fn ensure_database_app_user(
         client: &Surreal<Any>,
         username: &str,
@@ -295,20 +312,64 @@ impl Database {
                 "App database password must not be empty".into(),
             ));
         }
+
+        let force_sync = std::env::var("FORCE_APP_PASSWORD_SYNC").ok().as_deref() == Some("1");
+
+        // Default: define only when the user is missing (no password thrash).
+        // Any error determining existence fails safe toward defining, so a
+        // genuinely missing user is never skipped (app signin would otherwise
+        // fail loudly on the next connect).
+        if !force_sync {
+            let exists = match Self::app_user_exists(client, username).await {
+                Ok(e) => e,
+                Err(e) => {
+                    tracing::warn!(
+                        username,
+                        error = %e,
+                        "Could not determine whether app user exists; will (re)define"
+                    );
+                    false
+                }
+            };
+            if exists {
+                tracing::info!(
+                    username,
+                    "Database-scoped app user already exists; leaving password untouched \
+                     (set FORCE_APP_PASSWORD_SYNC=1 to rotate)"
+                );
+                return Ok(());
+            }
+        }
+
         let pass = escape_surreal_string(password);
-        // DEFINE USER does not accept bound password parameters reliably; username
-        // is restricted to [A-Za-z0-9_], password is escaped.
-        // OVERWRITE required: SurrealDB v3 plain DEFINE USER is create-only and
-        // errors when the user exists (crash-looped prod on redeploy). OVERWRITE
-        // also re-aligns the password to the env value on every boot.
+        // `OVERWRITE` keeps this idempotent: SurrealDB v3 plain `DEFINE USER` is
+        // create-only and errors if the user exists (this crash-looped prod on
+        // redeploy). Reaching here means either the user is missing, or
+        // FORCE_APP_PASSWORD_SYNC=1 requested an intentional rotation.
         let q =
             format!("DEFINE USER OVERWRITE {username} ON DATABASE PASSWORD '{pass}' ROLES EDITOR");
         client.query(q).await?.check()?;
         tracing::info!(
             username,
-            "Ensured database-scoped SurrealDB app user (EDITOR)"
+            force_sync,
+            "Defined database-scoped SurrealDB app user (EDITOR)"
         );
         Ok(())
+    }
+
+    /// True if a database-scoped user named `username` is already defined.
+    ///
+    /// Reads `INFO FOR DB` (v3 returns an object whose `users` map is keyed by
+    /// user name) as a `serde_json::Value` so we avoid depending on the exact
+    /// info-struct shape.
+    async fn app_user_exists(client: &Surreal<Any>, username: &str) -> DbResult<bool> {
+        let mut res = client.query("INFO FOR DB").await?.check()?;
+        let info: Option<serde_json::Value> = res.take(0)?;
+        Ok(info
+            .as_ref()
+            .and_then(|v| v.get("users"))
+            .and_then(|users| users.get(username))
+            .is_some())
     }
 
     /// Bootstrap remote DB as root: run schema migrations and ensure the EDITOR app user.
