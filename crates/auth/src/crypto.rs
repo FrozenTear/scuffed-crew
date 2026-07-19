@@ -31,15 +31,18 @@ pub fn verify_session_token(token: &str, stored_hash: &str) -> bool {
     constant_time_eq(computed.as_bytes(), stored_hash.as_bytes())
 }
 
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+/// Constant-time byte-slice equality for secret/token/MAC comparisons.
+///
+/// Unequal lengths short-circuit to `false` (a length difference is not itself
+/// secret for our fixed-width hex hashes and tokens); equal-length slices are
+/// compared in constant time via [`subtle::ConstantTimeEq`], so no early-out
+/// timing oracle leaks how many leading bytes matched.
+pub(crate) fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    use subtle::ConstantTimeEq;
     if a.len() != b.len() {
         return false;
     }
-    let mut result = 0u8;
-    for (x, y) in a.iter().zip(b.iter()) {
-        result |= x ^ y;
-    }
-    result == 0
+    a.ct_eq(b).into()
 }
 
 /// Encrypted blob with metadata for key rotation support.
