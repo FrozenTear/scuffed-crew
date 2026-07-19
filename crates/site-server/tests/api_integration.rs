@@ -5035,16 +5035,18 @@ fn upload_request(
     body.extend_from_slice(data);
     body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
 
-    Request::builder()
+    // Upload routes are rate-limited with TrustedProxyIpKeyExtractor, which needs
+    // a peer socket (ConnectInfo). `oneshot` doesn't inject one, so mirror the
+    // auth rate-limit tests / production wiring via the shared helper.
+    let builder = Request::builder()
         .method(Method::POST)
         .uri(uri)
         .header(header::AUTHORIZATION, format!("Bearer {token}"))
         .header(
             header::CONTENT_TYPE,
             format!("multipart/form-data; boundary={boundary}"),
-        )
-        .body(Body::from(body))
-        .unwrap()
+        );
+    rate_limit_ip(builder).body(Body::from(body)).unwrap()
 }
 
 fn unique_upload_dir(tag: &str) -> PathBuf {
