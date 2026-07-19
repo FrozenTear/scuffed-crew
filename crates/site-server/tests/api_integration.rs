@@ -7,15 +7,15 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use axum::body::Body;
-use axum::http::{Method, Request, StatusCode, header};
+use axum::http::{header, Method, Request, StatusCode};
 use http_body_util::BodyExt;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use tower::ServiceExt;
 
-use scuffed_auth::SessionConfig;
 use scuffed_auth::crypto::hash_session_token;
-use scuffed_db::Database;
+use scuffed_auth::SessionConfig;
 use scuffed_db::migrations::run_migrations;
+use scuffed_db::Database;
 use scuffed_site_server::create_router;
 use scuffed_site_server::state::{AppState, OAuthConfig};
 
@@ -1593,12 +1593,10 @@ async fn nostr_challenge_accepts_valid_hex_pubkey() {
 
     assert_eq!(resp.status(), StatusCode::OK);
     let json = body_json(resp).await;
-    assert!(
-        json["challenge"]
-            .as_str()
-            .unwrap()
-            .starts_with("scuffedclan-verify:")
-    );
+    assert!(json["challenge"]
+        .as_str()
+        .unwrap()
+        .starts_with("scuffedclan-verify:"));
     assert!(!json["token"].as_str().unwrap().is_empty());
     assert_eq!(json["pubkey_hex"].as_str().unwrap(), pubkey_hex);
     assert_eq!(json["expires_in_secs"], 300);
@@ -4134,12 +4132,10 @@ async fn public_overview_includes_upcoming_and_recent_matches() {
     assert_eq!(upcoming[0]["opponent"], "Future Opp");
     assert_eq!(upcoming[0]["team_name"], "Alpha Squad");
     assert_eq!(upcoming[0]["game_name"], "Overwatch 2");
-    assert!(
-        upcoming[0]["scheduled_at"]
-            .as_str()
-            .unwrap()
-            .contains("2026-09-01")
-    );
+    assert!(upcoming[0]["scheduled_at"]
+        .as_str()
+        .unwrap()
+        .contains("2026-09-01"));
 
     let recent = json["recent_results"].as_array().unwrap();
     assert_eq!(recent.len(), 1, "only public played non-scrim: {recent:?}");
@@ -4470,6 +4466,59 @@ async fn public_leaderboards_and_member_heroes() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+/// W3 B3: `GET /api/public/members?hero=` attaches optional `hero_scoped`.
+#[tokio::test]
+async fn public_members_hero_scoped_query() {
+    let state = test_state().await;
+    seed_all_roles(&state.db).await;
+
+    // No filter: OK, no hero_scoped on rows
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(unauthed_request(
+            Method::GET,
+            "/api/public/members?limit=10",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    let data = json["data"].as_array().expect("data array");
+    if let Some(first) = data.first() {
+        assert!(
+            first.get("hero_scoped").is_none()
+                || first
+                    .get("hero_scoped")
+                    .map(|v| v.is_null())
+                    .unwrap_or(false),
+            "unfiltered list must omit hero_scoped"
+        );
+    }
+
+    // Known hero (case-insensitive): 200 (empty scoped OK with no personal matches)
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(unauthed_request(
+            Method::GET,
+            "/api/public/members?limit=10&hero=ana",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let _ = body_json(resp).await;
+
+    // Unknown hero → 400
+    let app = create_router(state);
+    let resp = app
+        .oneshot(unauthed_request(
+            Method::GET,
+            "/api/public/members?hero=NotAHero",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }
 
 // ─── Local self-registration (privacy-first signup) ─────────────────────────

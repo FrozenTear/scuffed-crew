@@ -1,9 +1,11 @@
+use std::collections::HashMap;
+
 use axum::{
-    Json,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
+    Json,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use scuffed_auth::server::session::ErrorResponse;
 use scuffed_db::{
@@ -13,7 +15,7 @@ use scuffed_db::{
 use scuffed_types::api::{CursorResponse, PaginationParams};
 use scuffed_types::{
     MatchResult as TypesMatchResult, MatchType as TypesMatchType, PublicMatch, RecentResult,
-    UpcomingMatch,
+    UpcomingMatch, HEROES,
 };
 
 use crate::state::AppState;
@@ -229,6 +231,15 @@ pub async fn overview(
     }))
 }
 
+/// Nested per-hero stats when the roster is fetched with `?hero=` (hero-stats W3 B3 / Q2).
+/// `winrate` is a 0.0–1.0 fraction. Absent when no hero filter or the member has
+/// no matches on that hero.
+#[derive(Debug, Clone, Serialize)]
+pub struct HeroScoped {
+    pub games: u32,
+    pub winrate: f32,
+}
+
 /// Public member info (no user_id exposed).
 #[derive(Serialize)]
 pub struct PublicMember {
@@ -251,6 +262,10 @@ pub struct PublicMember {
     /// X/Twitter handle (not URL).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub twitter: Option<String>,
+    /// Present only when list was requested with a valid `?hero=` filter and
+    /// this member has ≥1 game on that hero (hero-stats W3 B3).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hero_scoped: Option<HeroScoped>,
 }
 
 fn member_to_public(m: Member) -> PublicMember {
@@ -268,15 +283,59 @@ fn member_to_public(m: Member) -> PublicMember {
         main_role: m.main_role,
         twitch: m.twitch,
         twitter: m.twitter,
+        hero_scoped: None,
     }
 }
 
-/// GET /api/public/members — public member list (cursor-paginated)
+/// Query for `GET /api/public/members` — pagination + optional hero filter (W3 B3).
+#[derive(Debug, Deserialize)]
+pub struct PublicMembersQuery {
+    #[serde(flatten)]
+    pub pagination: PaginationParams,
+    /// Optional hero filter. Empty/omitted = no `hero_scoped`. Unknown → 400.
+    /// Case-insensitive match against canonical [`HEROES`] names.
+    pub hero: Option<String>,
+}
+
+/// Resolve query `hero=` to a canonical HEROES display name (same contract as W3 B2).
+fn resolve_members_hero(raw: Option<&str>) -> Result<Option<&'static str>, ()> {
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    let lower = trimmed.to_lowercase();
+    for &hero in HEROES {
+        if hero.to_lowercase() == lower {
+            return Ok(Some(hero));
+        }
+    }
+    Err(())
+}
+
+/// GET /api/public/members — public member list (cursor-paginated).
+///
+/// Optional `?hero=<name>` (hero-stats W3 B3): attaches `hero_scoped{games,winrate}`
+/// for members who have played that hero. Unknown hero → 400.
 pub async fn public_members(
     State(state): State<AppState>,
-    axum::extract::Query(pagination): axum::extract::Query<PaginationParams>,
+    Query(q): Query<PublicMembersQuery>,
 ) -> Result<Json<CursorResponse<PublicMember>>, (StatusCode, Json<ErrorResponse>)> {
-    let (limit, offset) = pagination.resolve();
+    let (limit, offset) = q.pagination.resolve();
+    let hero = match resolve_members_hero(q.hero.as_deref()) {
+        Ok(h) => h,
+        Err(()) => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: "Unknown hero".into(),
+                }),
+            ));
+        }
+    };
+
     let members = state
         .db
         .list_members_paginated(limit, offset)
@@ -290,7 +349,46 @@ pub async fn public_members(
             )
         })?;
 
-    let public: Vec<PublicMember> = members.into_iter().map(member_to_public).collect();
+    // When filtering by hero, pull per-member games/winrate via the existing
+    // leaderboard aggregate (bound `AND hero = $hero`) rather than N+1 get_hero_stats.
+    let scoped: HashMap<String, HeroScoped> = if let Some(hero_name) = hero {
+        let rows = state
+            .db
+            .member_leaderboard("games", 500, None, Some(hero_name))
+            .await
+            .map_err(|_e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse {
+                        error: "Internal error".into(),
+                    }),
+                )
+            })?;
+        rows.into_iter()
+            .map(|r| {
+                (
+                    r.member_id,
+                    HeroScoped {
+                        games: r.games,
+                        winrate: r.winrate,
+                    },
+                )
+            })
+            .collect()
+    } else {
+        HashMap::new()
+    };
+
+    let public: Vec<PublicMember> = members
+        .into_iter()
+        .map(|m| {
+            let mut p = member_to_public(m);
+            if hero.is_some() {
+                p.hero_scoped = scoped.get(&p.id).cloned();
+            }
+            p
+        })
+        .collect();
     Ok(Json(CursorResponse::from_oversized(public, limit, offset)))
 }
 
@@ -622,4 +720,30 @@ pub async fn public_team_detail(
         recent_matches,
         upcoming_events,
     }))
+}
+
+#[cfg(test)]
+mod resolve_members_hero_tests {
+    use super::resolve_members_hero;
+
+    #[test]
+    fn empty_is_no_filter() {
+        assert_eq!(resolve_members_hero(None), Ok(None));
+        assert_eq!(resolve_members_hero(Some("")), Ok(None));
+        assert_eq!(resolve_members_hero(Some("   ")), Ok(None));
+    }
+
+    #[test]
+    fn case_insensitive_canonical() {
+        assert_eq!(resolve_members_hero(Some("ana")), Ok(Some("Ana")));
+        assert_eq!(
+            resolve_members_hero(Some("Wrecking Ball")),
+            Ok(Some("Wrecking Ball"))
+        );
+    }
+
+    #[test]
+    fn unknown_errors() {
+        assert!(resolve_members_hero(Some("NotAHero")).is_err());
+    }
 }
