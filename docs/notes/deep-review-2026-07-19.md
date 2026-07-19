@@ -43,7 +43,10 @@ writeup + operator mitigation: `docs/notes/DR1-CRIT-NOSTR-001-ESCALATION.md`.
 ## Fix backlog → branch plan
 
 ### Overnight (A4: HIGH-security + correctness, dual-agree, reviewer merges)
-- **NOSTR-001** → `fix/dr1-nostr-challenge-secret` (fail-closed + provision secret). IN PREP.
+- **NOSTR-001** → `fix/dr1-nostr-challenge-secret` (fail-closed + provision secret).
+  **LANDED main@af363a8** (merge of e559413; grok APPROVE 01KXW00M7S, claude landed
+  via Hermes-fallback). CI verified on merged head. Follow-up NS-1a (`.trim()`
+  whitespace hardening) parked to morning below.
 
 ### Morning (USER review — larger blast radius or needs fixtures)
 - **Tournament cluster** DB-001 + DB-004 (+ DB-002 path check, DB-009 score check)
@@ -62,6 +65,14 @@ writeup + operator mitigation: `docs/notes/DR1-CRIT-NOSTR-001-ESCALATION.md`.
   + FRONT-002 (admin-page self-guards) + FRONT-003 (stop swallowing loader errors).
 - **NOSTR polish** NOSTR-003 (import-flow copy + confirm), 005 (backup pw min), 006
   (per-member rate limit on secret routes), 007 (canonical conversation_key), 011 (step-up).
+- **NS-1a** (grok NS-1 follow-up): tighten the challenge-secret guard to
+  `.trim().is_empty()` so a whitespace-only secret can't boot as a weak key
+  (matches the ENCRYPTION_KEY check). One-line, needs a re-review since it
+  touches the boot path.
+- **NOSTR-001 defense-in-depth** (verifier bonus, grok-agreed follow-up): add an
+  event `created_at` freshness window + one-time-challenge store — closes the
+  login-replay path even if the MAC key ever leaks. The secret fix is necessary
+  but not sufficient long-term.
 - **DB hygiene** DB-005 (app-user password sync footgun), DB-006 (password_hash projection),
   DB-007 (audit-log immutability), DB-008 (wiki CAS).
 
