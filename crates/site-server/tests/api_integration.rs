@@ -2611,6 +2611,88 @@ async fn demote_compensates_if_no_actionable_admin_left() {
 }
 
 #[tokio::test]
+async fn change_role_route_uses_cas() {
+    // DR1-ACCT-004: the PATCH /role route must go through change_member_role_cas.
+    // Two facets:
+    //   (1) happy path still succeeds through the CAS (no false conflict when the
+    //       role has not moved), and
+    //   (2) the CAS the route calls rejects a stale expected-role with Conflict —
+    //       which the route maps to HTTP 409.
+    let state = test_state().await;
+    seed_user(
+        &state.db,
+        "adminuser",
+        "adminmember",
+        "TestAdmin",
+        "admin",
+        ADMIN_TOKEN,
+    )
+    .await;
+    // Second admin so the last-admin guard never blocks the target's edits.
+    seed_user(
+        &state.db,
+        "adminuser2",
+        "adminmember2",
+        "TestAdmin2",
+        "admin",
+        ADMIN2_TOKEN,
+    )
+    .await;
+    seed_user(
+        &state.db,
+        "targetuser",
+        "targetmember",
+        "TargetMember",
+        "member",
+        MEMBER_TOKEN,
+    )
+    .await;
+
+    // (1) Happy path through the CAS: member → officer succeeds (200) and the
+    // role actually changes in the DB.
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(authed_json_request(
+            Method::PATCH,
+            "/api/members/targetmember/role",
+            ADMIN_TOKEN,
+            json!({ "role": "officer" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        state
+            .db
+            .get_member_safe("targetmember")
+            .await
+            .unwrap()
+            .unwrap()
+            .org_role,
+        scuffed_db::OrgRole::Officer
+    );
+
+    // (2) The CAS the route relies on: with a stale expected-role (the target has
+    // since moved to admin), change_member_role_cas returns Conflict. This is the
+    // exact error the route translates into a 409 for a concurrent role change.
+    state
+        .db
+        .change_member_role("targetmember", scuffed_db::OrgRole::Admin)
+        .await
+        .unwrap();
+    let err = state
+        .db
+        .change_member_role_cas(
+            "targetmember",
+            scuffed_db::OrgRole::Officer, // stale expected
+            scuffed_db::OrgRole::Member,
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(err, scuffed_db::DbError::Conflict(_)), "got {err}");
+}
+
+#[tokio::test]
 async fn open_application_count_guards_duplicate() {
     let state = test_state().await;
     seed_all_roles(&state.db).await;
