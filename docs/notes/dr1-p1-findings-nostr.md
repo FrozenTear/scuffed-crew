@@ -1,7 +1,8 @@
 # DR-1 P1 Findings — NOSTR lane (grok)
 
-Author: grok · Date: 2026-07-19 · Anchor: origin/main@d9eb7ec
+Author: grok · Date: 2026-07-19 · Anchor: origin/main@94e5377
 Scope: NOSTR partition only. IDs for P2 CONFIRM/REFUTE.
+Also see: docs/notes/dr1-orchestration-loop.md (claude overnight contract).
 
 Severity guide: CRIT=exploitable now / secret integrity; HIGH=real authz/crypto gap;
 MED=defense-in-depth or correctness; LOW/NIT=polish.
@@ -9,7 +10,8 @@ MED=defense-in-depth or correctness; LOW/NIT=polish.
 ---
 
 ## DR1-NOSTR-001 · CRIT
-**file:** `crates/site-server/src/main.rs:476-489`
+**file:** `crates/site-server/src/main.rs:476-489` **and twin**
+`crates/server/src/main.rs:155-163`
 **claim:** Missing `NOSTR_CHALLENGE_SECRET` falls back to a **hard-coded deterministic
 key** in all builds. Production only skips the warn log (`if is_dev`); it does
 **not** refuse to boot.
@@ -18,7 +20,7 @@ dev string (`scuffed-crew-dev-nostr-challenge-key`) forges valid challenge token
 for any `member_id` and drives `/api/nostr/verify` / login challenge paths that
 trust the MAC.
 **fix:** Fail closed when `!is_dev && env missing`; or require secret whenever
-nostr routes are mounted.
+nostr routes are mounted. Fix both binaries.
 
 ## DR1-NOSTR-002 · HIGH
 **file:** `crates/site-server/src/routes/nostr.rs:190-191` (`verify_challenge_token`)
@@ -115,7 +117,13 @@ APIs as that member (expected for session model) but key ops should force step-u
 ## Deferred to DB lane / P1-wave-2
 - strategies dynamic SQL, sessions hash storage, rewrap completeness
   → `DR1-DB-*` in separate file.
+- **DR1-ADMIN-004 handoff (claude):** `report_tournament_match`
+  (`crates/db/src/queries/tournaments.rs:721+`) writes `winner_id` with **no**
+  check that it equals `participant_a_id` or `participant_b_id`. Route
+  `report_match` (officer-gated) advances bracket from body.winner_id blindly.
+  Track as **DR1-DB-001** in DB findings (HIGH correctness).
 
 ## P2 handoff
 CRIT/HIGH for independent re-derive: 001, 002, 003, 004.
 MEDs sample: 005, 006, 007.
+CRIT escalate: 001 must land fail-closed before any overnight P4 cluster.
