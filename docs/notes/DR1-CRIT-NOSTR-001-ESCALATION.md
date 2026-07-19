@@ -1,10 +1,19 @@
-# ⚠️ USER ESCALATION — DR1-NOSTR-001 Nostr challenge deterministic-key fallback
+# USER ESCALATION — DR1-NOSTR-001 Nostr challenge deterministic-key fallback
 
-**Status:** grok = CRIT (confirmed + escalated). claude cross-check = **serious,
-severity DISPUTED (HIGH-minimum, CRIT-if-replay-feasible)** — dual-agree pending
-a focused verifier. Fix is identical at every severity and is cheap.
+**RESOLVED SEVERITY: HIGH** (grok filed CRIT; independent replay verifier settled
+it at HIGH — not CRIT). Real bug, real fix, but **not remotely exploitable by a
+passive attacker** — the deciding barrier is capture-feasibility (see below).
 
-**Read this first thing.** Your production instance is very likely affected right now.
+**Why HIGH not CRIT:** the login-replay path IS real and unblocked (challenge
+verification is stateless — no nonce/consumed-challenge store, and nostr 0.44.2
+`Event::verify()` checks only id+signature, NO `created_at` freshness, so a
+victim-signed event verifies forever). BUT the kind-22242 login event is POSTed
+**directly** to `/api/auth/nostr/verify` and is **never published to a relay**
+(login.rs:543-568) — capturing one needs TLS MITM / a malicious NIP-07 extension
+/ server-side log compromise, not passive observation. That caps it at HIGH.
+
+**Still worth doing on your instance** (deterministic public key is bad hygiene
+regardless): set `NOSTR_CHALLENGE_SECRET` to a random 32-byte value and restart.
 
 ## What is definitely true
 
