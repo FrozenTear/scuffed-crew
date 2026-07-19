@@ -1203,6 +1203,11 @@ async fn run_loop(ctx: Arc<DaemonCtx>) -> anyhow::Result<()> {
                                         persist_active_game(data_dir, Some(g));
                                     }
                             }
+                            storage::StoreCommand::ResolveSegment { .. } => {
+                                // Hero-segment confirm/dismiss only relabels a
+                                // finished game's derived timeline; the active
+                                // game holds no timeline, so nothing to sync.
+                            }
                         }
                         // Two-phase: the file is only removed after a
                         // successful apply, so a crash or store error here
@@ -1642,18 +1647,17 @@ async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<
         // was undiagnosable because only rejected frames were ever saved.
         save_accepted_frame(data_dir, scoreboard_img);
 
-        // Keep the session label on the majority hero across its snapshots —
-        // a single capture can mislabel (career panel shows the spectated hero
-        // while dead; portrait matching can misfire), and the label otherwise
-        // froze on whatever the first capture read.
-        if !target_create
-            && let Ok(snaps) = store.get_session_snapshots(&target_session).await
-            && let Some(hero) = storage::majority_hero(&snaps)
+        // Re-derive the session's hero timeline from its RAW snapshots after
+        // every capture (HS-1). A single capture can mislabel (career panel
+        // shows the spectated hero while dead; portrait matching can misfire),
+        // and a late hero swap must be recorded as its own segment rather than
+        // stamped across the whole game (the old set_session_hero last-write
+        // recorded a 97%-Ana game as Rein). set_session_hero is now a MANUAL
+        // repair helper only. Per-snapshot reads stay raw; the derived primary
+        // drives the displayed/uploaded hero.
+        if !target_create && let Err(e) = store.refresh_session_hero_timeline(&target_session).await
         {
-            let role = parse::guess_role_public(&hero);
-            if let Err(e) = store.set_session_hero(&target_session, &hero, &role).await {
-                tracing::debug!(error = %e, "failed to refresh session hero");
-            }
+            tracing::debug!(error = %e, "failed to refresh session hero timeline");
         }
         // Diagnostics: after N consecutive scoreboard captures that parsed but
         // resolved no map, dump the map-label region so the next failure is
