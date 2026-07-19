@@ -242,7 +242,7 @@ handoff, wrong truth-stack assumption — not a one-off typo):
 | Binding | Value |
 |---|---|
 | Memtrace repo_id | `scuffed-crew` |
-| Shared checkout (READ-ONLY for agents; human-driven agent exception §3) | `/home/soot/github/scuffed-crew` |
+| Shared checkout (READ-ONLY for agents; human-driven agent exception §3) | **Repo root** — resolve with `git rev-parse --show-toplevel` (never hard-code a home path in this file) |
 | Worktree root | `.claude/worktrees/<agent>-<topic>` |
 | Ydoc threads | legacy monolith `fleet::channel` (history); NEW work: `fleet::chat` + `fleet::<initiative>` |
 | Dual-channel reviews | Poll **chat + initiatives** every tick; dual-write review/ACK (detail + chat pointer). USER 2026-07-19 |
