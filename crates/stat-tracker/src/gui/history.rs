@@ -2,7 +2,9 @@ use dioxus::prelude::*;
 
 use stat_tracker::config::Config;
 use stat_tracker::detect::MatchOutcome;
-use stat_tracker::storage::{self, LocalStore, MatchEdit, PersonalMatch, StoreCommand};
+use stat_tracker::storage::{
+    self, LocalStore, MatchEdit, PersonalMatch, SEGMENT_CONFIRM, SEGMENT_DISMISS, StoreCommand,
+};
 
 use super::live_data;
 
@@ -253,6 +255,17 @@ pub fn MatchesPanel() -> Element {
                                 String::new()
                             };
                             let corr = corrections(&g);
+                            // Hero timeline (HS-1a): the game's derived hero
+                            // segments. Only surfaced when there is something to
+                            // resolve — a swap (>1 segment) or an unconfirmed /
+                            // already-resolved run — so a single solid hero stays
+                            // clutter-free. The index into this list is the stable
+                            // segment key the ResolveSegment command expects.
+                            let segments = g.heroes_played.clone();
+                            let show_timeline = !sid.is_empty()
+                                && (segments.len() > 1
+                                    || segments.iter().any(|s| !s.confirmed || s.resolution.is_some()));
+                            let seg_sid = sid.clone();
                             let g_open = g.clone();
                             let g_save = g.clone();
                             rsx! {
@@ -352,6 +365,71 @@ pub fn MatchesPanel() -> Element {
                                                         span { class: "correction-ocr", "OCR read {ocr}" }
                                                         span { class: "correction-arrow", "→" }
                                                         span { class: "correction-fixed", "{fixed}" }
+                                                    }
+                                                }
+                                            }
+                                        }
+
+                                        if show_timeline {
+                                            div { class: "hero-timeline",
+                                                span { class: "detail-label", "Hero timeline · confirm real swaps, dismiss misreads" }
+                                                for (i, seg) in segments.iter().enumerate() {
+                                                    {
+                                                        let idx = i as u32;
+                                                        let sid_confirm = seg_sid.clone();
+                                                        let sid_dismiss = seg_sid.clone();
+                                                        let is_dismissed = seg.is_dismissed();
+                                                        let confirm_current = seg.confirmed && !is_dismissed;
+                                                        let status = if is_dismissed {
+                                                            "dismissed"
+                                                        } else if seg.confirmed {
+                                                            "confirmed"
+                                                        } else {
+                                                            "unconfirmed"
+                                                        };
+                                                        let hero = seg.hero.clone();
+                                                        let role = seg.role.clone();
+                                                        let role_lc = role.to_lowercase();
+                                                        let snaps = seg.snapshots;
+                                                        rsx! {
+                                                            div { class: "segment-row",
+                                                                span { class: "segment-hero role-{role_lc}", "{hero}" }
+                                                                span { class: "segment-role", "{role}" }
+                                                                span { class: "segment-count", "{snaps} caps" }
+                                                                span { class: "segment-status status-{status}", "{status}" }
+                                                                span { class: "detail-spacer" }
+                                                                button {
+                                                                    class: if confirm_current { "btn btn-sm btn-outcome current" } else { "btn btn-sm btn-outcome" },
+                                                                    onclick: move |e| {
+                                                                        e.stop_propagation();
+                                                                        send_command(
+                                                                            StoreCommand::ResolveSegment {
+                                                                                session_id: sid_confirm.clone(),
+                                                                                segment: idx,
+                                                                                action: SEGMENT_CONFIRM.to_string(),
+                                                                            },
+                                                                            "Hero swap confirmed",
+                                                                        );
+                                                                    },
+                                                                    "Confirm"
+                                                                }
+                                                                button {
+                                                                    class: if is_dismissed { "btn btn-sm btn-danger current" } else { "btn btn-sm btn-danger" },
+                                                                    onclick: move |e| {
+                                                                        e.stop_propagation();
+                                                                        send_command(
+                                                                            StoreCommand::ResolveSegment {
+                                                                                session_id: sid_dismiss.clone(),
+                                                                                segment: idx,
+                                                                                action: SEGMENT_DISMISS.to_string(),
+                                                                            },
+                                                                            "Hero segment dismissed",
+                                                                        );
+                                                                    },
+                                                                    "Dismiss"
+                                                                }
+                                                            }
+                                                        }
                                                     }
                                                 }
                                             }

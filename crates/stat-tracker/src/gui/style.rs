@@ -763,6 +763,40 @@ a.btn { text-decoration: none; display: inline-block; }
 .correction-arrow { color: var(--accent); }
 .correction-fixed { color: var(--text); font-weight: 600; }
 
+/* Hero timeline: per-segment confirm/dismiss (HS-1a) */
+.hero-timeline {
+    margin-bottom: 0.8rem;
+    padding: 0.6rem 0.7rem;
+    background: var(--bg-input);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+}
+
+.segment-row {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-size: 0.8rem;
+    padding: 0.3rem 0;
+}
+.segment-row + .segment-row { border-top: 1px solid var(--border); }
+
+.segment-hero { font-weight: 600; min-width: 7rem; }
+.segment-role { color: var(--text-dim); min-width: 4rem; }
+.segment-count { color: var(--text-dim); font-family: var(--font-mono); }
+
+.segment-status {
+    font-size: 0.62rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    border-radius: 4px;
+    padding: 0.05rem 0.35rem;
+    border: 1px solid var(--border);
+}
+.status-confirmed { color: #64c878; border-color: #64c878; }
+.status-unconfirmed { color: #f5b43c; border-color: #f5b43c; }
+.status-dismissed { color: var(--text-dim); text-decoration: line-through; }
+
 .edit-form {
     margin-bottom: 0.8rem;
     padding: 0.7rem;
