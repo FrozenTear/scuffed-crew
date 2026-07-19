@@ -100,9 +100,97 @@ async fn main() -> anyhow::Result<()> {
     // Handle --version/--help before ANY init: smoke tests (CI clean-room,
     // installer) and humans probe these; unknown flags used to fall through
     // to full daemon startup, which blocks forever on headless machines.
+    if handle_preinit_flags() {
+        return Ok(());
+    }
+
+    tracing_subscriber::fmt()
+        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+            EnvFilter::new("scuffed_stat_tracker=info,stat_tracker=info,surrealdb=warn")
+        }))
+        .init();
+
+    let collect_portraits = std::env::args().any(|a| a == "--collect-portraits");
+    let dump_poll_frames = std::env::args().any(|a| a == "--dump-poll-frames");
+
+    // Informational flags that need tracing initialized but exit before the
+    // daemon starts (tessdata generation, output listing).
+    if handle_info_flags() {
+        return Ok(());
+    }
+
+    let mut config = config::Config::load()
+        .map_err(anyhow::Error::from_boxed)
+        .context("failed to load config")?;
+    tracing::info!("Scuffed Stat Tracker starting");
+    tracing::info!(data_dir = %config.data_dir.display(), "using data directory");
+
+    fetch_player_name_if_needed(&mut config).await;
+
+    std::fs::create_dir_all(&config.data_dir)?;
+
+    // Single wiring point for OCR debug dumps — the lib reads this switch
+    // instead of re-loading config on first use; dumps land under data_dir.
+    ocr::set_debug_ocr(config.debug_ocr_enabled());
+    ocr::set_debug_dir(config.data_dir.join("debug"));
+
+    // Refuse to start alongside a live daemon; the guard removes the pid file
+    // on drop. Held across --vacuum so no daemon can start mid-compaction.
+    let _pid_guard = acquire_pid_guard(&config.data_dir)?;
+
+    // Maintenance mode: compact the store and exit (see LocalStore::vacuum).
+    if maybe_vacuum(&config.data_dir).await? {
+        return Ok(());
+    }
+
+    // Tessdata generation is triggered manually via --generate-tessdata or the GUI button.
+    // Don't run it at daemon startup — it can take minutes and blocks Tab capture.
+
+    let backend = capture::detect_backend().await;
+    tracing::info!(?backend, "capture backend selected");
+
+    log_selected_output(&config);
+
+    let store = open_store(&config.data_dir).await?;
+
+    let portraits_path = detect::hero_portrait::portraits_dir(&config.data_dir);
+    let portrait_matcher = Arc::new(detect::hero_portrait::PortraitMatcher::load(
+        &portraits_path,
+    ));
+
+    let data_dir = config.data_dir.clone();
+
+    let sync_client = config
+        .sync
+        .as_ref()
+        .map(|s| sync::SyncClient::new(s.clone()));
+
+    log_startup_readiness(&config, dump_poll_frames, collect_portraits);
+
+    let ctx = Arc::new(DaemonCtx {
+        backend,
+        store,
+        sync_client,
+        player_name: config.player_name.clone(),
+        capture_output: config.capture_output.clone(),
+        auto_detect: config.auto_detect,
+        game_process_names: config.game_process_names.clone(),
+        portrait_matcher,
+        collect_portraits,
+        dump_poll_frames,
+        data_dir,
+        empty_map_reads: std::sync::atomic::AtomicUsize::new(0),
+    });
+    run_loop(ctx).await
+}
+
+/// Handle flags that must run before ANY initialization (version/help probes
+/// used by smoke tests and humans). Returns true if a flag was handled and
+/// `main` should exit successfully.
+fn handle_preinit_flags() -> bool {
     if std::env::args().any(|a| a == "--version" || a == "-V") {
         println!("scuffed-stat-tracker {}", package_version());
-        return Ok(());
+        return true;
     }
     if std::env::args().any(|a| a == "--help" || a == "-h") {
         println!(
@@ -119,23 +207,19 @@ async fn main() -> anyhow::Result<()> {
              With no flags, runs the capture daemon (see README).",
             package_version()
         );
-        return Ok(());
+        return true;
     }
+    false
+}
 
-    tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-            EnvFilter::new("scuffed_stat_tracker=info,stat_tracker=info,surrealdb=warn")
-        }))
-        .init();
-
-    let collect_portraits = std::env::args().any(|a| a == "--collect-portraits");
-    let dump_poll_frames = std::env::args().any(|a| a == "--dump-poll-frames");
-
+/// Informational flags that need tracing initialized but exit before the daemon
+/// starts (tessdata generation, output listing). Returns true if handled.
+fn handle_info_flags() -> bool {
     if std::env::args().any(|a| a == "--generate-tessdata") {
         match setup::ensure_koverwatch_tessdata() {
             Ok(()) => {
                 println!("koverwatch.traineddata generated successfully.");
-                return Ok(());
+                return true;
             }
             Err(e) => {
                 eprintln!("tessdata generation failed: {e}");
@@ -155,18 +239,16 @@ async fn main() -> anyhow::Result<()> {
             }
             Err(e) => eprintln!("Failed to list outputs: {e}"),
         }
-        return Ok(());
+        return true;
     }
 
-    let mut config = config::Config::load()
-        .map_err(anyhow::Error::from_boxed)
-        .context("failed to load config")?;
-    tracing::info!("Scuffed Stat Tracker starting");
-    tracing::info!(data_dir = %config.data_dir.display(), "using data directory");
+    false
+}
 
-    // If player_name is not set locally, try fetching it from the server.
-    // This is the "first run via GUI" path: user set their name in the web UI
-    // and launched the daemon with just a token — no manual config editing needed.
+/// When `player_name` isn't set locally, fetch it from the server. This is the
+/// "first run via GUI" path: the user set their name in the web UI and launched
+/// the daemon with just a token — no manual config editing needed.
+async fn fetch_player_name_if_needed(config: &mut config::Config) {
     if config.player_name.is_none()
         && let Some(sync_cfg) = &config.sync
     {
@@ -189,15 +271,12 @@ async fn main() -> anyhow::Result<()> {
             }
         }
     }
+}
 
-    std::fs::create_dir_all(&config.data_dir)?;
-
-    // Single wiring point for OCR debug dumps — the lib reads this switch
-    // instead of re-loading config on first use; dumps land under data_dir.
-    ocr::set_debug_ocr(config.debug_ocr_enabled());
-    ocr::set_debug_dir(config.data_dir.join("debug"));
-
-    let pid_path = config.data_dir.join("daemon.pid");
+/// Write the pid file (refusing to start if another live daemon already holds
+/// it) and return a guard that removes it on drop.
+fn acquire_pid_guard(data_dir: &std::path::Path) -> anyhow::Result<PidGuard> {
+    let pid_path = data_dir.join("daemon.pid");
     if let Ok(existing_pid) = std::fs::read_to_string(&pid_path) {
         if let Ok(pid) = existing_pid.trim().parse::<u32>()
             && std::fs::metadata(format!("/proc/{pid}")).is_ok()
@@ -208,33 +287,33 @@ async fn main() -> anyhow::Result<()> {
         let _ = std::fs::remove_file(&pid_path);
     }
     std::fs::write(&pid_path, std::process::id().to_string())?;
+    Ok(PidGuard(pid_path))
+}
 
-    let _pid_guard = PidGuard(pid_path);
-
-    // Maintenance mode: compact the store and exit (see LocalStore::vacuum).
-    // Holds the pid file above so a daemon can't start mid-vacuum.
-    if std::env::args().any(|a| a == "--vacuum") {
-        let before = dir_size(&config.data_dir.join("stats.surrealkv"));
-        let (matches, sessions, tombstones) = storage::LocalStore::vacuum(&config.data_dir)
-            .await
-            .map_err(anyhow::Error::from_boxed)
-            .context("vacuum failed")?;
-        let after = dir_size(&config.data_dir.join("stats.surrealkv"));
-        println!(
-            "vacuum complete: {matches} matches, {sessions} sessions, {tombstones} tombstones; \
-             store {:.1} MB -> {:.1} MB (old store kept as stats.surrealkv.pre-vacuum-*)",
-            before as f64 / 1e6,
-            after as f64 / 1e6,
-        );
-        return Ok(());
+/// `--vacuum` maintenance mode: compact the store and report before/after
+/// sizes. Returns true if the flag was present and `main` should exit. Runs
+/// while the pid guard is held so no daemon starts mid-compaction.
+async fn maybe_vacuum(data_dir: &std::path::Path) -> anyhow::Result<bool> {
+    if !std::env::args().any(|a| a == "--vacuum") {
+        return Ok(false);
     }
+    let before = dir_size(&data_dir.join("stats.surrealkv"));
+    let (matches, sessions, tombstones) = storage::LocalStore::vacuum(data_dir)
+        .await
+        .map_err(anyhow::Error::from_boxed)
+        .context("vacuum failed")?;
+    let after = dir_size(&data_dir.join("stats.surrealkv"));
+    println!(
+        "vacuum complete: {matches} matches, {sessions} sessions, {tombstones} tombstones; \
+         store {:.1} MB -> {:.1} MB (old store kept as stats.surrealkv.pre-vacuum-*)",
+        before as f64 / 1e6,
+        after as f64 / 1e6,
+    );
+    Ok(true)
+}
 
-    // Tessdata generation is triggered manually via --generate-tessdata or the GUI button.
-    // Don't run it at daemon startup — it can take minutes and blocks Tab capture.
-
-    let backend = capture::detect_backend().await;
-    tracing::info!(?backend, "capture backend selected");
-
+/// Log the available Wayland outputs and which one captures will use.
+fn log_selected_output(config: &config::Config) {
     if let Ok(outputs) = capture::wayshot::list_outputs() {
         // `.first()`, not `[0]`: zero outputs (headless / compositor hiccup)
         // must not panic the daemon at startup.
@@ -249,8 +328,12 @@ async fn main() -> anyhow::Result<()> {
             "wayland outputs"
         );
     }
+}
 
-    let store = storage::LocalStore::open(&config.data_dir)
+/// Open the local store, log its match count, and write the initial live
+/// snapshot so the GUI has current data the moment the daemon takes the lock.
+async fn open_store(data_dir: &std::path::Path) -> anyhow::Result<storage::LocalStore> {
+    let store = storage::LocalStore::open(data_dir)
         .await
         .map_err(anyhow::Error::from_boxed)
         .context("failed to open local store (is another daemon running?)")?;
@@ -262,22 +345,15 @@ async fn main() -> anyhow::Result<()> {
 
     // Initial snapshot so the GUI has current data from the moment the daemon
     // takes the store lock (refreshed after every mutation from here on).
-    if let Err(e) = store.export_snapshot(&config.data_dir).await {
+    if let Err(e) = store.export_snapshot(data_dir).await {
         tracing::warn!(error = %e, "failed to write initial live snapshot");
     }
+    Ok(store)
+}
 
-    let portraits_path = detect::hero_portrait::portraits_dir(&config.data_dir);
-    let portrait_matcher = Arc::new(detect::hero_portrait::PortraitMatcher::load(
-        &portraits_path,
-    ));
-
-    let data_dir = config.data_dir.clone();
-
-    let sync_client = config
-        .sync
-        .as_ref()
-        .map(|s| sync::SyncClient::new(s.clone()));
-
+/// One-time startup log lines: auto-detect config, the game-process gate,
+/// dev-mode dumps, and the "ready" banner.
+fn log_startup_readiness(config: &config::Config, dump_poll_frames: bool, collect_portraits: bool) {
     if config.auto_detect.enabled {
         tracing::info!(
             poll_secs = config.auto_detect.poll_interval_secs,
@@ -306,22 +382,6 @@ async fn main() -> anyhow::Result<()> {
             "portrait collection mode enabled — will save portrait references when OCR identifies heroes"
         );
     }
-
-    let ctx = Arc::new(DaemonCtx {
-        backend,
-        store,
-        sync_client,
-        player_name: config.player_name.clone(),
-        capture_output: config.capture_output.clone(),
-        auto_detect: config.auto_detect,
-        game_process_names: config.game_process_names.clone(),
-        portrait_matcher,
-        collect_portraits,
-        dump_poll_frames,
-        data_dir,
-        empty_map_reads: std::sync::atomic::AtomicUsize::new(0),
-    });
-    run_loop(ctx).await
 }
 
 /// The game currently in progress. Opened when the poller sees a game-start
@@ -682,6 +742,41 @@ struct CaptureReport {
     gate_state: Option<GateState>,
 }
 
+/// Volatile session-tracking state owned by [`run_loop`]. Bundles the mutable
+/// locals that the `select!` arms read and write so they travel as one value
+/// instead of a fistful of parallel `let mut`s (QUAL-004). Purely
+/// organizational — every field keeps the exact meaning it had as a standalone
+/// local; no behavior depends on the grouping.
+struct SessionState {
+    /// Accepted-capture counter driving the periodic sync cadence
+    /// (`SYNC_EVERY_N_CAPTURES`).
+    capture_count: u32,
+    /// When the current game was last (re)opened — debounces poller-driven
+    /// new-game detection against `new_game_debounce`.
+    last_game_open: Option<Instant>,
+    /// Last accepted Tab capture — powers the Tab debounce.
+    last_tab_capture: Option<Instant>,
+    /// The game currently in progress — opened at the map-vote / hero-select
+    /// screen, reused for every capture until the next game starts. Recovered
+    /// from the previous run when the daemon restarted mid-game (crash, upgrade,
+    /// systemd restart), so the restart neither splits the game into two
+    /// sessions nor loses its outcome/map context.
+    active_game: Option<ActiveGame>,
+    /// Outcome detected by the poller while no game was open — applied to the
+    /// next session that opens, if still fresh (`PENDING_OUTCOME_TTL`).
+    pending_outcome: Option<(detect::MatchOutcome, Instant)>,
+    /// Last result-word OCR read, for confirmation: a word outcome is only
+    /// trusted once two reads agree within `OUTCOME_CONFIRM_WINDOW`, so a single
+    /// hallucinated OCR read can't finish the open game with a wrong outcome.
+    /// The reads may come from different screens (accolade → rank screen) and
+    /// need not be consecutive ticks; garbage/transition frames don't reset it.
+    word_outcome_streak: Option<(detect::MatchOutcome, Instant)>,
+    /// Reference (monotonic, wall) pair for suspend detection
+    /// (`SUSPEND_RESET_GAP`): refreshed each cmd tick; wall time advancing much
+    /// further than the monotonic clock between ticks means the machine slept.
+    suspend_probe: (Instant, chrono::DateTime<Utc>),
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_loop(ctx: Arc<DaemonCtx>) -> anyhow::Result<()> {
     // Ergonomic locals over the shared context; spawned tasks clone the Arc.
@@ -707,42 +802,30 @@ async fn run_loop(ctx: Arc<DaemonCtx>) -> anyhow::Result<()> {
         }
     };
 
-    let mut capture_count: u32 = 0;
     let poll_interval = tokio::time::Duration::from_secs(auto_detect.poll_interval_secs);
     let new_game_debounce = std::time::Duration::from_secs(auto_detect.cooldown_secs);
-    let mut last_game_open: Option<Instant> = None;
-    let mut last_tab_capture: Option<Instant> = None;
     let tab_debounce = std::time::Duration::from_secs(3);
 
-    // The game currently in progress — opened at the map-vote / hero-select
-    // screen, reused for every capture until the next game starts. Recovered
-    // from the previous run when the daemon restarted mid-game (crash,
-    // upgrade, systemd restart), so the restart neither splits the game into
-    // two sessions nor loses its outcome/map context.
-    let mut active_game: Option<ActiveGame> = recover_active_game(data_dir);
-    if let Some(g) = &active_game {
+    // Volatile session-tracking state, bundled so the select! arms share one
+    // value instead of a fistful of parallel `let mut`s (QUAL-004). Field
+    // meanings/rationale are documented on `SessionState`. `active_game` is
+    // recovered from the previous run when the daemon restarted mid-game.
+    let mut st = SessionState {
+        capture_count: 0,
+        last_game_open: None,
+        last_tab_capture: None,
+        active_game: recover_active_game(data_dir),
+        pending_outcome: None,
+        word_outcome_streak: None,
+        suspend_probe: (Instant::now(), Utc::now()),
+    };
+    if let Some(g) = &st.active_game {
         tracing::info!(
             session_id = %g.session_id,
             outcome = %g.outcome,
             "recovered open game from previous run"
         );
     }
-    // Outcome detected by the poller while no game was open — applied to the
-    // next session that opens, if still fresh (PENDING_OUTCOME_TTL).
-    let mut pending_outcome: Option<(detect::MatchOutcome, Instant)> = None;
-    // Last result-word OCR read, for confirmation: a word outcome is only
-    // trusted once two reads agree within OUTCOME_CONFIRM_WINDOW, so a single
-    // hallucinated OCR read can't finish the open game with a wrong outcome.
-    // The reads may come from different screens (accolade → rank screen) and
-    // need not be consecutive ticks: heavy Tab-capture OCR starves the poller
-    // (a measured session had 45-70s tick gaps), so the accolade screen may get
-    // only one tick. Garbage/transition frames between reads don't reset it.
-    let mut word_outcome_streak: Option<(detect::MatchOutcome, Instant)> = None;
-
-    // Reference pair for suspend detection (SUSPEND_RESET_GAP): refreshed each
-    // cmd tick; wall time advancing much further than the monotonic clock
-    // between ticks means the machine slept.
-    let mut suspend_probe: (Instant, chrono::DateTime<Utc>) = (Instant::now(), Utc::now());
 
     // Periodic sync runs as a spawned task so a slow or hung server can't
     // stall Tab capture, polling, or shutdown. Single-flight: while one sync
@@ -778,7 +861,7 @@ async fn run_loop(ctx: Arc<DaemonCtx>) -> anyhow::Result<()> {
                             continue;
                         }
 
-                        if let Some(last) = last_tab_capture
+                        if let Some(last) = st.last_tab_capture
                             && last.elapsed() < tab_debounce {
                                 tracing::debug!("Tab debounced — ignoring rapid press");
                                 continue;
@@ -790,29 +873,29 @@ async fn run_loop(ctx: Arc<DaemonCtx>) -> anyhow::Result<()> {
                             tracing::debug!("Tab ignored — a capture is already in progress");
                             continue;
                         }
-                        last_tab_capture = Some(Instant::now());
+                        st.last_tab_capture = Some(Instant::now());
 
                         // Session choice: reuse the active game (mid-game, or
                         // post-match scoreboard within the grace window), or
                         // open a fresh one, inheriting a still-fresh outcome
                         // the poller saw before any game was open.
-                        let opened_by_this_tab = should_start_fresh_session(active_game.as_ref(), Instant::now());
+                        let opened_by_this_tab = should_start_fresh_session(st.active_game.as_ref(), Instant::now());
                         if opened_by_this_tab {
-                            let inherited = take_fresh_pending(&mut pending_outcome, Instant::now());
-                            active_game = Some(ActiveGame::open_now(
+                            let inherited = take_fresh_pending(&mut st.pending_outcome, Instant::now());
+                            st.active_game = Some(ActiveGame::open_now(
                                 format!("{:016x}", rand_id()),
                                 inherited.unwrap_or(detect::MatchOutcome::Unknown),
                                 Vec::new(),
                             ));
-                            last_game_open = Some(Instant::now());
+                            st.last_game_open = Some(Instant::now());
                             // Word reads about the previous match must not
                             // confirm into this one.
-                            word_outcome_streak = None;
-                            persist_active_game(data_dir, active_game.as_ref());
+                            st.word_outcome_streak = None;
+                            persist_active_game(data_dir, st.active_game.as_ref());
                         }
 
                         let (sid, create, outcome, session_map, candidates, banner_ok, prev_gate) = {
-                            let g = active_game.as_ref().expect("active_game set above");
+                            let g = st.active_game.as_ref().expect("active_game set above");
                             // A banner-color outcome off a Tab frame is only
                             // plausible when the daemon just joined mid/post
                             // match (fresh Tab session) or the game is old
@@ -881,7 +964,7 @@ async fn run_loop(ctx: Arc<DaemonCtx>) -> anyhow::Result<()> {
                         // ended without the poller ever seeing its end/start
                         // screens. Replace the stale active game, but only if
                         // it is still the one the capture was taken for.
-                        if active_game.as_ref().is_some_and(|g| g.session_id == sid) {
+                        if st.active_game.as_ref().is_some_and(|g| g.session_id == sid) {
                             let mut g = ActiveGame::open_now(
                                 report.session_id.clone(),
                                 report.outcome,
@@ -896,16 +979,16 @@ async fn run_loop(ctx: Arc<DaemonCtx>) -> anyhow::Result<()> {
                                 session_id = %g.session_id,
                                 "active game replaced after stat-regression split"
                             );
-                            active_game = Some(g);
-                            last_game_open = Some(Instant::now());
+                            st.active_game = Some(g);
+                            st.last_game_open = Some(Instant::now());
                             // Result-word reads about the previous game must
                             // not confirm into this one.
-                            word_outcome_streak = None;
-                            persist_active_game(data_dir, active_game.as_ref());
+                            st.word_outcome_streak = None;
+                            persist_active_game(data_dir, st.active_game.as_ref());
                         }
-                        capture_count += 1;
+                        st.capture_count += 1;
                         if let Some(client) = sync_client
-                            && capture_count.is_multiple_of(SYNC_EVERY_N_CAPTURES)
+                            && st.capture_count.is_multiple_of(SYNC_EVERY_N_CAPTURES)
                             && sync_task.as_ref().is_none_or(|t| t.is_finished()) {
                                 let store = store.clone();
                                 let client = client.clone();
@@ -922,7 +1005,7 @@ async fn run_loop(ctx: Arc<DaemonCtx>) -> anyhow::Result<()> {
                         // have opened a new one while OCR was running. The
                         // store writes (keyed by session id) already happened
                         // inside the capture task and remain correct.
-                        if let Some(g) = active_game.as_mut().filter(|g| g.session_id == sid) {
+                        if let Some(g) = st.active_game.as_mut().filter(|g| g.session_id == sid) {
                             g.session_created = true;
                             g.touch();
                             if let Some(gate_state) = report.gate_state {
@@ -959,9 +1042,9 @@ async fn run_loop(ctx: Arc<DaemonCtx>) -> anyhow::Result<()> {
                             }
                             persist_active_game(data_dir, Some(g));
                         }
-                        capture_count += 1;
+                        st.capture_count += 1;
                         if let Some(client) = sync_client
-                            && capture_count.is_multiple_of(SYNC_EVERY_N_CAPTURES)
+                            && st.capture_count.is_multiple_of(SYNC_EVERY_N_CAPTURES)
                             && sync_task.as_ref().is_none_or(|t| t.is_finished()) {
                                 let store = store.clone();
                                 let client = client.clone();
@@ -985,7 +1068,7 @@ async fn run_loop(ctx: Arc<DaemonCtx>) -> anyhow::Result<()> {
                     continue;
                 }
                 if !game_gate.is_running() {
-                    word_outcome_streak = None;
+                    st.word_outcome_streak = None;
                     continue;
                 }
 
@@ -1024,10 +1107,10 @@ async fn run_loop(ctx: Arc<DaemonCtx>) -> anyhow::Result<()> {
                                 Some(outcome)
                             }
                             Some((outcome, source)) => {
-                                let agreed = word_outcome_streak
+                                let agreed = st.word_outcome_streak
                                     .as_ref()
                                     .is_some_and(|(prev, t)| *prev == outcome && t.elapsed() <= OUTCOME_CONFIRM_WINDOW);
-                                word_outcome_streak = Some((outcome, Instant::now()));
+                                st.word_outcome_streak = Some((outcome, Instant::now()));
                                 if agreed {
                                     Some(outcome)
                                 } else {
@@ -1045,7 +1128,7 @@ async fn run_loop(ctx: Arc<DaemonCtx>) -> anyhow::Result<()> {
                         // ticks) but only the first, while the outcome is still
                         // Unknown, writes it.
                         if let Some(outcome) = confirmed {
-                            match active_game.as_mut() {
+                            match st.active_game.as_mut() {
                                 Some(g) if !g.finished() => {
                                     g.record_outcome(outcome);
                                     tracing::info!(?outcome, session_id = %g.session_id, "auto-detect: outcome confirmed from post-match screens");
@@ -1061,13 +1144,13 @@ async fn run_loop(ctx: Arc<DaemonCtx>) -> anyhow::Result<()> {
                                 None => {
                                     // No game open yet — applies to the next
                                     // session if one opens within the TTL.
-                                    pending_outcome = Some((outcome, Instant::now()));
+                                    st.pending_outcome = Some((outcome, Instant::now()));
                                 }
                             }
                         }
 
                         if let Some(map) = accolade_map
-                            && let Some(g) = active_game.as_mut()
+                            && let Some(g) = st.active_game.as_mut()
                             && g.map.is_none()
                         {
                             // The accolade read is a dedicated-region OCR and
@@ -1097,12 +1180,12 @@ async fn run_loop(ctx: Arc<DaemonCtx>) -> anyhow::Result<()> {
                         // A game whose outcome has already been recorded is
                         // finished; the next start screen must begin a fresh game
                         // so the previous result can't carry over to it.
-                        let game_finished = active_game.as_ref().is_some_and(ActiveGame::finished);
+                        let game_finished = st.active_game.as_ref().is_some_and(ActiveGame::finished);
                         match phase {
                             detect::GamePhase::MapVote { maps } => {
-                                let can_open = active_game.is_none()
+                                let can_open = st.active_game.is_none()
                                     || game_finished
-                                    || last_game_open.is_none_or(|t| t.elapsed() >= new_game_debounce);
+                                    || st.last_game_open.is_none_or(|t| t.elapsed() >= new_game_debounce);
                                 if can_open {
                                     let sid = format!("{:016x}", rand_id());
                                     // Vote names are screen-text constants
@@ -1114,27 +1197,27 @@ async fn run_loop(ctx: Arc<DaemonCtx>) -> anyhow::Result<()> {
                                         .filter_map(|m| parse::canonical_map(m))
                                         .collect();
                                     tracing::info!(?candidates, session_id = %sid, "auto-detect: map vote — new game");
-                                    active_game = Some(ActiveGame::open_now(sid, detect::MatchOutcome::Unknown, candidates));
-                                    last_game_open = Some(Instant::now());
+                                    st.active_game = Some(ActiveGame::open_now(sid, detect::MatchOutcome::Unknown, candidates));
+                                    st.last_game_open = Some(Instant::now());
                                     // Evidence about the previous match must not
                                     // confirm into this one — and a pending
                                     // outcome from before any game was open
                                     // can't be this new game's result either.
-                                    word_outcome_streak = None;
-                                    pending_outcome = None;
-                                    persist_active_game(data_dir, active_game.as_ref());
+                                    st.word_outcome_streak = None;
+                                    st.pending_outcome = None;
+                                    persist_active_game(data_dir, st.active_game.as_ref());
                                 }
                             }
                             detect::GamePhase::HeroBan | detect::GamePhase::HeroSelect
-                                if active_game.is_none() || game_finished =>
+                                if st.active_game.is_none() || game_finished =>
                             {
                                 let sid = format!("{:016x}", rand_id());
                                 tracing::info!(session_id = %sid, "auto-detect: hero select/ban — new game (map vote missed)");
-                                active_game = Some(ActiveGame::open_now(sid, detect::MatchOutcome::Unknown, Vec::new()));
-                                last_game_open = Some(Instant::now());
-                                word_outcome_streak = None;
-                                pending_outcome = None;
-                                persist_active_game(data_dir, active_game.as_ref());
+                                st.active_game = Some(ActiveGame::open_now(sid, detect::MatchOutcome::Unknown, Vec::new()));
+                                st.last_game_open = Some(Instant::now());
+                                st.word_outcome_streak = None;
+                                st.pending_outcome = None;
+                                persist_active_game(data_dir, st.active_game.as_ref());
                             }
                             _ => {}
                         }
@@ -1150,23 +1233,23 @@ async fn run_loop(ctx: Arc<DaemonCtx>) -> anyhow::Result<()> {
                 // restart — drop the volatile windows and re-admit the active
                 // game only through the wall-clock recovery bound (the on-disk
                 // skeleton was persisted with correct wall times pre-suspend).
-                let mono = suspend_probe.0.elapsed();
-                let wall = (Utc::now() - suspend_probe.1).to_std().unwrap_or(mono);
+                let mono = st.suspend_probe.0.elapsed();
+                let wall = (Utc::now() - st.suspend_probe.1).to_std().unwrap_or(mono);
                 if wall > mono + SUSPEND_RESET_GAP {
                     tracing::info!(
                         gap_secs = (wall - mono).as_secs(),
                         "suspend/clock-jump detected — resetting session windows"
                     );
-                    pending_outcome = None;
-                    word_outcome_streak = None;
-                    last_game_open = None;
-                    last_tab_capture = None;
-                    active_game = recover_active_game(data_dir);
-                    if active_game.is_none() {
+                    st.pending_outcome = None;
+                    st.word_outcome_streak = None;
+                    st.last_game_open = None;
+                    st.last_tab_capture = None;
+                    st.active_game = recover_active_game(data_dir);
+                    if st.active_game.is_none() {
                         persist_active_game(data_dir, None);
                     }
                 }
-                suspend_probe = (Instant::now(), Utc::now());
+                st.suspend_probe = (Instant::now(), Utc::now());
 
                 let cmds = storage::read_commands(data_dir);
                 if !cmds.is_empty() {
@@ -1179,15 +1262,15 @@ async fn run_loop(ctx: Arc<DaemonCtx>) -> anyhow::Result<()> {
                         // fails and the command retries next tick.)
                         match cmd {
                             storage::StoreCommand::SetOutcome { session_id, outcome } => {
-                                if let Some(g) = active_game.as_mut()
+                                if let Some(g) = st.active_game.as_mut()
                                     && g.session_id == *session_id {
                                         g.record_outcome(outcome.parse().unwrap_or(detect::MatchOutcome::Unknown));
                                         persist_active_game(data_dir, Some(g));
                                     }
                             }
                             storage::StoreCommand::DeleteSession { session_id } => {
-                                if active_game.as_ref().is_some_and(|g| g.session_id == *session_id) {
-                                    active_game = None;
+                                if st.active_game.as_ref().is_some_and(|g| g.session_id == *session_id) {
+                                    st.active_game = None;
                                     persist_active_game(data_dir, None);
                                 }
                             }
@@ -1196,7 +1279,7 @@ async fn run_loop(ctx: Arc<DaemonCtx>) -> anyhow::Result<()> {
                                 // game, keep the in-memory copy consistent so the poller
                                 // can't overwrite it (mirrors SetOutcome). Numeric/label
                                 // edits target finished games and need no in-memory sync.
-                                if let Some(g) = active_game.as_mut()
+                                if let Some(g) = st.active_game.as_mut()
                                     && g.session_id == *session_id
                                     && let Some(outcome) = &edit.outcome {
                                         g.record_outcome(outcome.parse().unwrap_or(detect::MatchOutcome::Unknown));
@@ -1249,7 +1332,128 @@ async fn run_loop(ctx: Arc<DaemonCtx>) -> anyhow::Result<()> {
     }
 }
 
+/// The blocking vision/OCR pass over one Tab frame, extracted from
+/// `handle_capture` so the async orchestration reads as a straight line
+/// (QUAL-001). Pure function of its inputs: decides the outcome, runs the
+/// pre-OCR preflight, and (when the frame is a scoreboard) the portrait match,
+/// per-cell OCR, career/map reads, and lazy full-board OCR. Returns everything
+/// the caller needs, or a cheap rejection when the frame has no scoreboard rows.
+fn analyze_frame(
+    img: image::DynamicImage,
+    matcher: Arc<detect::hero_portrait::PortraitMatcher>,
+    player_name_owned: Option<String>,
+    game_outcome: detect::MatchOutcome,
+    allow_banner_recovery: bool,
+    session_map_known: bool,
+) -> FrameAnalysisOutcome {
+    // Outcome: prefer the open game's result (read off the accolade
+    // screen by the poller); else color-flood detection (only when the
+    // caller deems a banner plausible — see MIN_BANNER_SESSION_AGE); else
+    // read the VICTORY/DEFEAT header text off this frame. The last step
+    // recovers the case where the poller missed the screens and we're
+    // sitting on a post-match scoreboard that prints the result header.
+    let outcome = if matches!(game_outcome, detect::MatchOutcome::Unknown) {
+        let o = if allow_banner_recovery {
+            detect::match_end::detect_outcome(&img)
+        } else {
+            detect::MatchOutcome::Unknown
+        };
+        if matches!(o, detect::MatchOutcome::Unknown) {
+            detect::match_end::detect_outcome_text(&img)
+        } else {
+            o
+        }
+    } else {
+        game_outcome
+    };
+
+    let scoreboard = ocr::preprocess::crop_scoreboard(&img);
+    // Pre-OCR preflight (H1): a few milliseconds of pixel work that
+    // rejects menus/transitions/gameplay/black frames before the
+    // expensive portrait-match + calibration + row-OCR pipeline runs.
+    // Two independent signals, either accepts: the saturation row-dip
+    // scan (fails on the desaturated endorse-phase board) or the
+    // brightness-based header stat labels (fail on some vivid boards).
+    // Validated on 38 captured frames: all real boards pass, 29/33
+    // garbage frames rejected. The OCR-based looks_like_scoreboard gate
+    // downstream stays as the final arbiter for frames that pass.
+    let row_scan = detect::hero_portrait::scan_rows(&scoreboard);
+    if !row_scan.looks_like_scoreboard()
+        && !(3..=10).contains(&ocr::preprocess::header_label_groups(&scoreboard).len())
+    {
+        return FrameAnalysisOutcome::NotAScoreboard {
+            outcome,
+            frame: img,
+            dip_count: row_scan.dip_count,
+        };
+    }
+    let team_size = row_scan.team_size();
+    // Pass team_size into portrait match + cell OCR so neither re-detects
+    // size or re-crops the full scoreboard (P7).
+    let player_match = matcher.match_player_hero_with_team_size(&scoreboard, team_size);
+    let portrait_match = player_match
+        .as_ref()
+        .map(|(name, conf, _)| (name.clone(), *conf));
+    let brightness_row_idx = player_match.map(|(_, _, idx)| idx);
+
+    let rows = ocr::recognize_scoreboard_cells_pre_cropped(&scoreboard, team_size);
+
+    // Player row: if a player name is configured, scan ALL rows (both teams)
+    // for a name match — this handles replays and post-match screens where the
+    // player may be on team 2. Fall back to brightness-detected row otherwise.
+    let row_idx = player_name_owned
+        .as_deref()
+        .and_then(|name| parse::find_player_row_by_name(&rows, name))
+        .or(brightness_row_idx);
+
+    // Career-panel hero title. Guard against garbage OCR (happens when there
+    // is no career panel — replay, post-match — by requiring the result to
+    // actually match a known hero name, which match_hero_in_text already does).
+    let career_hero = ocr::recognize_region(&ocr::preprocess::crop_career_hero(&img))
+        .ok()
+        .and_then(|t| parse::match_hero_in_text(&t));
+    let map_from_panel = ocr::recognize_region(&ocr::preprocess::crop_map_name(&img))
+        .ok()
+        .and_then(|t| parse::match_map_in_text(&t));
+
+    // Full-board OCR exists only to supply raw text for hero/map name
+    // lookup and the name-in-raw-text stats fallback. On the happy path —
+    // player row found and parseable, hero identified (career panel or
+    // portrait match), map already known — it is pure redundancy
+    // (adaptive preprocessing plus up to three threshold sweeps), so run
+    // it lazily. A portrait match alone satisfies the hero requirement:
+    // replay/post-match layouts have no career panel, and the raw-text
+    // hero guess loses to the portrait in the priority order anyway (H6).
+    let cells_parse = parse::parse_scoreboard_cells(&rows, row_idx, "", "unknown", None).is_some();
+    let hero_identified = career_hero.is_some() || portrait_match.is_some();
+    let need_full_ocr =
+        !cells_parse || !hero_identified || (!session_map_known && map_from_panel.is_none());
+    let ocr = if need_full_ocr {
+        ocr::recognize(&img)
+    } else {
+        tracing::debug!("skipping full-board OCR — cell path supplied everything");
+        Ok(ocr::OcrResult {
+            raw_text: String::new(),
+            confidence: 0,
+        })
+    };
+
+    FrameAnalysisOutcome::Analyzed(Box::new(FrameAnalysis {
+        outcome,
+        ocr,
+        rows,
+        portrait_hero: portrait_match,
+        career_hero,
+        map_from_panel,
+        scoreboard,
+        player_row_idx: row_idx,
+        team_size,
+        frame: img,
+    }))
+}
+
 async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<CaptureReport> {
+    // QUAL-002 follow-up (multi-file seam split — parked for USER per DR-1 A4)
     // Ergonomic locals over the context/request (the body predates A1).
     let backend = &ctx.backend;
     let store = &ctx.store;
@@ -1275,111 +1479,14 @@ async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<
     let player_name_owned = player_name.map(|s| s.to_string());
     let session_map_known = session_map.is_some();
     let analysis = tokio::task::spawn_blocking(move || {
-        // Outcome: prefer the open game's result (read off the accolade
-        // screen by the poller); else color-flood detection (only when the
-        // caller deems a banner plausible — see MIN_BANNER_SESSION_AGE); else
-        // read the VICTORY/DEFEAT header text off this frame. The last step
-        // recovers the case where the poller missed the screens and we're
-        // sitting on a post-match scoreboard that prints the result header.
-        let outcome = if matches!(game_outcome, detect::MatchOutcome::Unknown) {
-            let o = if allow_banner_recovery {
-                detect::match_end::detect_outcome(&img)
-            } else {
-                detect::MatchOutcome::Unknown
-            };
-            if matches!(o, detect::MatchOutcome::Unknown) {
-                detect::match_end::detect_outcome_text(&img)
-            } else {
-                o
-            }
-        } else {
-            game_outcome
-        };
-
-        let scoreboard = ocr::preprocess::crop_scoreboard(&img);
-        // Pre-OCR preflight (H1): a few milliseconds of pixel work that
-        // rejects menus/transitions/gameplay/black frames before the
-        // expensive portrait-match + calibration + row-OCR pipeline runs.
-        // Two independent signals, either accepts: the saturation row-dip
-        // scan (fails on the desaturated endorse-phase board) or the
-        // brightness-based header stat labels (fail on some vivid boards).
-        // Validated on 38 captured frames: all real boards pass, 29/33
-        // garbage frames rejected. The OCR-based looks_like_scoreboard gate
-        // downstream stays as the final arbiter for frames that pass.
-        let row_scan = detect::hero_portrait::scan_rows(&scoreboard);
-        if !row_scan.looks_like_scoreboard()
-            && !(3..=10).contains(&ocr::preprocess::header_label_groups(&scoreboard).len())
-        {
-            return FrameAnalysisOutcome::NotAScoreboard {
-                outcome,
-                frame: img,
-                dip_count: row_scan.dip_count,
-            };
-        }
-        let team_size = row_scan.team_size();
-        // Pass team_size into portrait match + cell OCR so neither re-detects
-        // size or re-crops the full scoreboard (P7).
-        let player_match = matcher.match_player_hero_with_team_size(&scoreboard, team_size);
-        let portrait_match = player_match
-            .as_ref()
-            .map(|(name, conf, _)| (name.clone(), *conf));
-        let brightness_row_idx = player_match.map(|(_, _, idx)| idx);
-
-        let rows = ocr::recognize_scoreboard_cells_pre_cropped(&scoreboard, team_size);
-
-        // Player row: if a player name is configured, scan ALL rows (both teams)
-        // for a name match — this handles replays and post-match screens where the
-        // player may be on team 2. Fall back to brightness-detected row otherwise.
-        let row_idx = player_name_owned
-            .as_deref()
-            .and_then(|name| parse::find_player_row_by_name(&rows, name))
-            .or(brightness_row_idx);
-
-        // Career-panel hero title. Guard against garbage OCR (happens when there
-        // is no career panel — replay, post-match — by requiring the result to
-        // actually match a known hero name, which match_hero_in_text already does).
-        let career_hero = ocr::recognize_region(&ocr::preprocess::crop_career_hero(&img))
-            .ok()
-            .and_then(|t| parse::match_hero_in_text(&t));
-        let map_from_panel = ocr::recognize_region(&ocr::preprocess::crop_map_name(&img))
-            .ok()
-            .and_then(|t| parse::match_map_in_text(&t));
-
-        // Full-board OCR exists only to supply raw text for hero/map name
-        // lookup and the name-in-raw-text stats fallback. On the happy path —
-        // player row found and parseable, hero identified (career panel or
-        // portrait match), map already known — it is pure redundancy
-        // (adaptive preprocessing plus up to three threshold sweeps), so run
-        // it lazily. A portrait match alone satisfies the hero requirement:
-        // replay/post-match layouts have no career panel, and the raw-text
-        // hero guess loses to the portrait in the priority order anyway (H6).
-        let cells_parse =
-            parse::parse_scoreboard_cells(&rows, row_idx, "", "unknown", None).is_some();
-        let hero_identified = career_hero.is_some() || portrait_match.is_some();
-        let need_full_ocr =
-            !cells_parse || !hero_identified || (!session_map_known && map_from_panel.is_none());
-        let ocr = if need_full_ocr {
-            ocr::recognize(&img)
-        } else {
-            tracing::debug!("skipping full-board OCR — cell path supplied everything");
-            Ok(ocr::OcrResult {
-                raw_text: String::new(),
-                confidence: 0,
-            })
-        };
-
-        FrameAnalysisOutcome::Analyzed(Box::new(FrameAnalysis {
-            outcome,
-            ocr,
-            rows,
-            portrait_hero: portrait_match,
-            career_hero,
-            map_from_panel,
-            scoreboard,
-            player_row_idx: row_idx,
-            team_size,
-            frame: img,
-        }))
+        analyze_frame(
+            img,
+            matcher,
+            player_name_owned,
+            game_outcome,
+            allow_banner_recovery,
+            session_map_known,
+        )
     })
     .await?;
     let analysis = match analysis {
