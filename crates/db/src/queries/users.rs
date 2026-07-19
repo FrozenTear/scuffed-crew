@@ -8,6 +8,13 @@ use scuffed_auth::{AuthProvider, User};
 
 use crate::{with_timeout, Database, DbError, DbResult};
 
+/// Least-privilege projection for user lookups. Omits `password_hash` (secret,
+/// selected only on the verify-password path) and `provider_id_hash` (a WHERE-only
+/// lookup key that `db_user_to_user` never reads). Same least-privilege pattern
+/// as `MEMBER_SAFE_COLS` in `members.rs`.
+const USER_SAFE_COLS: &str =
+    "id, provider, username, avatar_url, provider_id, provider_id_encrypted, created_at";
+
 /// Internal DB representation of a user (handles encryption fields).
 #[derive(Debug, Clone, Serialize, Deserialize, SurrealValue)]
 struct DbUser {
@@ -16,10 +23,21 @@ struct DbUser {
     provider: String,
     username: String,
     avatar_url: Option<String>,
-    provider_id: Option<String>,
-    provider_id_hash: Option<String>,
-    provider_id_encrypted: Option<serde_json::Value>,
     #[serde(default)]
+    #[surreal(default)]
+    provider_id: Option<String>,
+    /// WHERE-only lookup key; omitted from `USER_SAFE_COLS` projections.
+    #[serde(default)]
+    #[surreal(default)]
+    provider_id_hash: Option<String>,
+    #[serde(default)]
+    #[surreal(default)]
+    provider_id_encrypted: Option<serde_json::Value>,
+    /// Secret. Omitted from projections — selected ONLY on the verify-password
+    /// path (`get_local_user_by_username`). Both serde and SurrealValue defaults
+    /// required so `USER_SAFE_COLS` rows deserialize with this absent.
+    #[serde(default)]
+    #[surreal(default)]
     password_hash: Option<String>,
     created_at: SurrealDatetime,
 }
@@ -76,9 +94,10 @@ impl Database {
                 let id_hash = hash_provider_id(&provider_str, provider_id);
                 let mut result = self
                     .client
-                    .query(
-                        "SELECT * FROM user WHERE provider = $provider AND provider_id_hash = $hash",
-                    )
+                    .query(format!(
+                        "SELECT {USER_SAFE_COLS} FROM user \
+                         WHERE provider = $provider AND provider_id_hash = $hash",
+                    ))
                     .bind(("provider", provider_str.clone()))
                     .bind(("hash", id_hash))
                     .await?;
@@ -87,9 +106,10 @@ impl Database {
             } else {
                 let mut result = self
                     .client
-                    .query(
-                        "SELECT * FROM user WHERE provider = $provider AND provider_id = $pid",
-                    )
+                    .query(format!(
+                        "SELECT {USER_SAFE_COLS} FROM user \
+                         WHERE provider = $provider AND provider_id = $pid",
+                    ))
                     .bind(("provider", provider_str.clone()))
                     .bind(("pid", provider_id.to_string()))
                     .await?;
@@ -293,11 +313,15 @@ impl Database {
     ) -> DbResult<Option<(User, String)>> {
         let username = Self::normalize_local_username(username);
         with_timeout(async {
+            // Verify-password path: this is the ONLY lookup that needs
+            // `password_hash`, so it is the ONLY projection that selects it
+            // (on top of the least-privilege `USER_SAFE_COLS`).
             let mut result = self
                 .client
-                .query(
-                    "SELECT * FROM user WHERE provider = 'local' AND username = $username LIMIT 1",
-                )
+                .query(format!(
+                    "SELECT {USER_SAFE_COLS}, password_hash FROM user \
+                     WHERE provider = 'local' AND username = $username LIMIT 1",
+                ))
                 .bind(("username", username))
                 .await?;
             let users: Vec<DbUser> = result.take(0)?;
