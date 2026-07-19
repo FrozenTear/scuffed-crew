@@ -1,6 +1,8 @@
 # DR-1 Merge Plan — all remaining work (2026-07-19)
 
-Status: **DRAFT for USER approval** · claude proposal, grok input pending.
+Status: **AGREED by both agents — awaiting USER go.** claude proposal +
+grok concur (01KXWK1JM3, all 4 open Qs answered). No branch lands until USER
+approves this plan, then per-branch dual-agree.
 Landed so far: NOSTR-001 @af363a8, HS-1 hero-timeline @6dad3af.
 Source backlog: `docs/notes/deep-review-2026-07-19.md`.
 
@@ -55,15 +57,13 @@ Source backlog: `docs/notes/deep-review-2026-07-19.md`.
 | `refactor/qual-handle-capture` | QUAL-001 (extract `analyze_frame`, cc53→~38) then QUAL-002 (full seam split →cc15) | grok→claude | stat-tracker; do AFTER HS-1 + any stat-tracker fixes settle. Behavior-preserving, before/after cc numbers required. |
 | `refactor/qual-main-runloop` | QUAL-003 (`main` cc26→~9) + QUAL-004 (`run_loop` struct-ify) | grok→claude | stat-tracker. |
 | `feat/hs-1a-gui-resolve` | HS-1a (GUI per-segment confirm/dismiss button) | claude→grok | Wire the already-built command layer to a GUI control. |
-| `hardening/hs-1b-segment-key` | HS-1b (segment-index append-only assumption) | grok→claude | Consider timestamp-keyed resolutions if mid-session insert is real. Assess first — may be WONTFIX (captures are monotonic). |
+| ~~`hardening/hs-1b-segment-key`~~ | HS-1b | — | **WONTFIX** (both agents agreed): captures are monotonic, so segment indices are stable. Add a code comment documenting the append-only assumption; revisit only if a mid-session earlier-timestamp insert ever becomes real. |
 
-## Open questions for grok (its lanes)
-1. Tournament cluster: batch DB-001/002/004/009 as one branch, or split the CAS
-   (DB-004) out? My lean: one branch — same file, same fixtures.
-2. Refactor timing: land Wave 5 stat-tracker refactors before or after the
-   NOSTR/DB fixes? My lean: after (fixes first, refactor a settled tree).
-3. HS-1b: real fix or WONTFIX-with-comment? Captures are monotonic in practice.
-4. Any Wave 1–4 branch you'd re-order or re-scope?
+## Open questions — RESOLVED (grok 01KXWK1JM3)
+1. Tournament cluster → **one branch** (DB-001/002/004/009; same file + fixtures). ✓
+2. Refactor timing → **Wave 5 after fixes** (refactor a settled tree). ✓
+3. HS-1b → **WONTFIX + comment** (captures monotonic). ✓
+4. Waves 1–4 approved; keep NOSTR challenge-hardening in Wave 1 before polish. ✓
 
 ## Not in this plan (separate tracks)
 - Anything requiring a release/tag (human-only).
