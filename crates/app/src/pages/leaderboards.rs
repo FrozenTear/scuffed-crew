@@ -5,7 +5,7 @@ use serde::Deserialize;
 
 use scuffed_api_client::ApiClient;
 
-use crate::components::ui::{Card, Pill, PillTone};
+use crate::components::ui::{Card, HeroSelect, Pill, PillTone};
 use crate::routes::Route;
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -95,18 +95,42 @@ const PAGE_CSS: &str = r#"
         font-family: var(--font-mono);
         font-variant-numeric: tabular-nums;
     }
+    .lb-hero {
+        max-width: 280px;
+        margin-bottom: 1.25rem;
+    }
 "#;
+
+/// Percent-encode a query-parameter value so hero names with spaces or
+/// non-ASCII (e.g. "Soldier: 76", "Lúcio") survive the URL. Keeps the RFC 3986
+/// unreserved set literal; everything else becomes %XX over UTF-8 bytes.
+fn encode_query(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for b in value.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
 
 #[component]
 pub fn Leaderboards() -> Element {
     let mut metric = use_signal(|| "winrate".to_string());
+    let mut hero = use_signal(|| None::<String>);
     let rows = use_resource(move || {
         let m = metric();
+        let h = hero();
         async move {
+            let mut url = format!("/api/public/leaderboards?metric={m}&limit=50");
+            if let Some(h) = h {
+                url.push_str(&format!("&hero={}", encode_query(&h)));
+            }
             ApiClient::web()
-                .fetch::<Vec<LeaderboardRow>>(&format!(
-                    "/api/public/leaderboards?metric={m}&limit=50"
-                ))
+                .fetch::<Vec<LeaderboardRow>>(&url)
                 .await
                 .ok()
         }
@@ -136,11 +160,22 @@ pub fn Leaderboards() -> Element {
                 }
             }
 
+            div { class: "lb-hero",
+                HeroSelect {
+                    label: "Hero".to_string(),
+                    value: hero(),
+                    onchange: move |h| hero.set(h),
+                }
+            }
+
             Card {
                 {
                     match rows.read().as_ref() {
                         None => rsx! { p { class: "lb-status", "Loading..." } },
                         Some(None) => rsx! { p { class: "lb-status", "Couldn't load leaderboards." } },
+                        Some(Some(list)) if list.is_empty() && hero().is_some() => rsx! {
+                            p { class: "lb-status", "No ranked matches on this hero yet." }
+                        },
                         Some(Some(list)) if list.is_empty() => rsx! {
                             p { class: "lb-status", "No ranked matches yet. Upload stats from the tracker." }
                         },

@@ -4457,7 +4457,7 @@ async fn public_leaderboards_and_member_heroes() {
     assert_eq!(resp.status(), StatusCode::OK);
 
     // Unknown season → 404
-    let app = create_router(state);
+    let app = create_router(state.clone());
     let resp = app
         .oneshot(unauthed_request(
             Method::GET,
@@ -4466,6 +4466,29 @@ async fn public_leaderboards_and_member_heroes() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+    // W3 B2: known hero filter accepted (case-insensitive); empty board OK
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(unauthed_request(
+            Method::GET,
+            "/api/public/leaderboards?metric=games&limit=10&hero=ana",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let _ = body_json(resp).await;
+
+    // W3 B2: unknown hero → 400
+    let app = create_router(state);
+    let resp = app
+        .oneshot(unauthed_request(
+            Method::GET,
+            "/api/public/leaderboards?metric=games&hero=NotAHero",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }
 
 /// W3 B3: `GET /api/public/members?hero=` attaches optional `hero_scoped`.
