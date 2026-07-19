@@ -97,6 +97,15 @@ human's direction, announcing any branch switch on the log FIRST.
   thread per initiative (`fleet::<initiative>`). `kind`: `intent` for
   claims/charters, `edit` for findings/status, `resolution` for locked
   decisions.
+- **Dual-channel law (USER 2026-07-19):** REVIEW REQUEST / APPROVE / ACK-back /
+  MERGED may appear on **chat**, on the **initiative**, or both. Watchers and
+  peer loops **must poll both surfaces every tick**. Never conclude "no
+  verdict" because one channel is quiet — that produced false "late approve"
+  lag when a peer only scanned initiatives. When **posting** a review or
+  dual-agree close: put detail on the initiative (when one exists) **and** a
+  short pointer on `fleet::chat` the same turn (branch@sha + verdict + tip ULID).
+  Chat-only closes are allowed only if no initiative thread exists yet; then
+  open one for follow-ups.
 - **Bodies ≤ ~400 chars / ~6 lines.** Long content goes in files, PRs, or
   commits — the log entry carries the pointer (SHA, PR #, path). A log message
   is a *checkpoint with a pointer to the artifact*, not the artifact.
@@ -168,6 +177,9 @@ the watcher's data source is healthy (a wedged endpoint makes a push watcher
 silently blind — the 07-17 SSE endpoint returned HTTP 200 and zero bytes for 40
 minutes), process missed items, act.
 
+- **Dual-channel poll each tick:** ULID-diff `fleet::chat` **and** every
+  watched initiative (`fleet::<initiative>` / plan threads). Same dual-channel
+  law as §4 — do not single-surface the inbox.
 - **Backoff ladder:** base 3 min → 3 quiet ticks → 5 min → 5 more → 10 min.
   ANY activity resets to base. Add jitter (±20–30 s). Pin to base while any
   watcher is blind.
@@ -207,6 +219,22 @@ Host-specific start/attach/watcher/Hermes approval steps:
 - Verify subagent claims that matter before relaying them to the fleet as fact.
 - Evaluate by end state, but require deviations to be REPORTED.
 
+## 8. Protocol self-learn (USER 2026-07-19)
+
+When a session discovers a **durable process gap** (missed channel, bad land
+handoff, wrong truth-stack assumption — not a one-off typo):
+
+1. **Unblock now** with harness-local notes if needed (agent skill, cron
+   prompt, private state). That may ship without git.
+2. **Draft the portable fix** in a worktree against `docs/fleet-protocol.md`
+   and/or host ops (`docs/notes/memtrace-ops.md` when present). IRON LAW still
+   applies — no shared-checkout protocol edits for fleet work.
+3. **Peer dual-agree before the push is binding.** Post DOC-PLAN / REVIEW
+   REQUEST on the log; the other agent APPROVE/ACK (or fold amendments). The
+   author never sole-merges protocol/ops. Skill-only patches are **not** a
+   substitute for the git protocol other vendors load from the repo.
+4. Land via reviewer or human after dual-agree; quote SHAs on the log.
+
 ---
 
 ## Appendix A — Project bindings (scuffed-crew)
@@ -217,6 +245,8 @@ Host-specific start/attach/watcher/Hermes approval steps:
 | Shared checkout (READ-ONLY for agents; human-driven agent exception §3) | `/home/soot/github/scuffed-crew` |
 | Worktree root | `.claude/worktrees/<agent>-<topic>` |
 | Ydoc threads | legacy monolith `fleet::channel` (history); NEW work: `fleet::chat` + `fleet::<initiative>` |
+| Dual-channel reviews | Poll **chat + initiatives** every tick; dual-write review/ACK (detail + chat pointer). USER 2026-07-19 |
+| Protocol self-learn | Process discoveries → worktree draft → peer dual-agree before binding push (§8) |
 | SSE `/api/fleet/events` | **known-dead** (HTTP 200, zero bytes) — poll ydoc via MCP |
 | Ydoc durability | memdb survived 2/2 daemon restarts 07-17; later undiagnosed wipe/loss modes — reseed from git/gh regardless; see `docs/notes/memtrace-ops.md` |
 | Episodes | **ADVISORY-ONLY** across multi-MCP bridges; RESEED+git is the record (`01KXVCNT2C`) |
