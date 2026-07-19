@@ -738,11 +738,7 @@ mod tests {
             .member_leaderboard("games", 50, None, Some("Ana"))
             .await
             .unwrap();
-        assert_eq!(
-            ana_lb.len(),
-            1,
-            "hero=Ana must drop Tracer-only members"
-        );
+        assert_eq!(ana_lb.len(), 1, "hero=Ana must drop Tracer-only members");
         assert_eq!(ana_lb[0].member_id, ana_main.id);
         assert_eq!(
             ana_lb[0].games, 2,
