@@ -155,7 +155,9 @@ async fn main() {
     // Fail closed outside dev: refuse to boot rather than sign challenge tokens with
     // the publicly-known dev MAC key (mirrors the ENCRYPTION_KEY/PRODUCTION policy).
     let nostr_challenge_key: [u8; 32] = match std::env::var("NOSTR_CHALLENGE_SECRET") {
-        Ok(secret) if !secret.is_empty() => *blake3::hash(secret.as_bytes()).as_bytes(),
+        // Reject whitespace-only secrets too: a `" "` value must fail closed in
+        // production rather than boot with a weak, effectively-empty key.
+        Ok(secret) if !secret.trim().is_empty() => *blake3::hash(secret.as_bytes()).as_bytes(),
         _ => {
             if !is_dev {
                 panic!(
@@ -197,6 +199,7 @@ async fn main() {
         upload_dir,
         notifier,
         nostr_challenge_key,
+        consumed_challenges: scuffed_site_server::challenge_store::ConsumedChallengeStore::new(),
         crypto,
         relay_url,
         dm_events,

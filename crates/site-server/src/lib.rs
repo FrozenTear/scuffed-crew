@@ -1,4 +1,5 @@
 pub mod calendar;
+pub mod challenge_store;
 pub mod dm_subscriber;
 pub mod extractors;
 pub mod membership_policy;

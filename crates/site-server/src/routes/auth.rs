@@ -779,6 +779,22 @@ pub async fn nostr_login_verify(
     if let Err(e) = body.signed_event.verify() {
         return bad(format!("Event verification failed: {e}"));
     }
+    // Reject stale events: `Event::verify()` does not bound `created_at`, so a
+    // captured victim-signed event would otherwise be replayable forever. This
+    // freshness window is the primary replay-closer.
+    if let Err(e) =
+        crate::routes::nostr::check_event_freshness(body.signed_event.created_at.as_secs())
+    {
+        return bad(e.to_string());
+    }
+    // One-time-use: block replay of this exact challenge within its TTL window
+    // (defense-in-depth alongside the freshness check above).
+    if !state
+        .consumed_challenges
+        .consume(&challenge, crate::routes::nostr::CONSUMED_CHALLENGE_TTL)
+    {
+        return bad("challenge already used".into());
+    }
     let pubkey_hex = body.signed_event.pubkey.to_hex();
 
     // 1. Member-linked pubkey → that member's user.

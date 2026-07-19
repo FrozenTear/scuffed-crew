@@ -182,16 +182,64 @@ pub(crate) fn verify_challenge_token(
         return Err("Challenge expired");
     }
 
-    // Verify HMAC (data uses colon separator — only the token wire format uses pipes)
+    // Verify HMAC (data uses colon separator — only the token wire format uses pipes).
+    //
+    // Compare the raw 32-byte MACs in constant time, NOT the hex strings: a
+    // variable-time `&str` compare (`!=`) short-circuits on the first differing
+    // byte and leaks, via timing, how many leading bytes an attacker guessed —
+    // a MAC-forgery oracle. `blake3::Hash`'s `PartialEq` is documented
+    // constant-time, so parsing the provided hex into a `Hash` and comparing
+    // `Hash == Hash` closes that oracle. A malformed (non-hex / wrong-length)
+    // provided MAC simply fails to parse and is rejected.
     let hmac_data = format!("{challenge}:{member_id}:{expires_ts}");
     let expected = blake3::keyed_hash(key, hmac_data.as_bytes());
-    let expected_hex = expected.to_hex();
+    let provided = blake3::Hash::from_hex(provided_hmac).map_err(|_| "Invalid token signature")?;
 
-    if expected_hex.as_str() != provided_hmac {
+    if expected != provided {
         return Err("Invalid token signature");
     }
 
     Ok((challenge.to_string(), member_id.to_string()))
+}
+
+/// Max age (seconds) of a signed NIP-42 kind-22242 event, measured from the
+/// event's `created_at` to now. nostr 0.44's `Event::verify()` checks only the
+/// event id + Schnorr signature and does **not** bound `created_at`, so a
+/// victim-signed event otherwise verifies forever. Bounding freshness to the
+/// challenge TTL means a legitimate flow (fetch challenge → sign → submit, all
+/// within `CHALLENGE_TTL_SECS`) always passes, while a replayed *old* captured
+/// event is rejected.
+pub(crate) const EVENT_MAX_AGE_SECS: u64 = CHALLENGE_TTL_SECS;
+
+/// Tolerance (seconds) for a client clock running ahead of the server. Matches
+/// the 60s relay-drift overlap already used by DM sync. Events dated more than
+/// this into the future are rejected as clock-skew / forgery.
+pub(crate) const EVENT_FUTURE_SKEW_SECS: u64 = 60;
+
+/// Retention for a consumed-challenge entry in [`crate::challenge_store`]. Must
+/// be at least as wide as the largest window in which a token/event could still
+/// verify (`EVENT_MAX_AGE_SECS` past + `EVENT_FUTURE_SKEW_SECS` future) so a
+/// replay attempt can never outlive its consumed marker.
+pub(crate) const CONSUMED_CHALLENGE_TTL: std::time::Duration =
+    std::time::Duration::from_secs(EVENT_MAX_AGE_SECS + EVENT_FUTURE_SKEW_SECS);
+
+/// Reject a signed event whose `created_at` is outside the freshness window
+/// `[now - EVENT_MAX_AGE_SECS, now + EVENT_FUTURE_SKEW_SECS]`. This is the
+/// replay-closer: `Event::verify()` never inspects `created_at`, so without
+/// this a single captured event is a permanently-replayable credential.
+pub(crate) fn check_event_freshness(event_created_at_secs: u64) -> Result<(), &'static str> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+
+    if event_created_at_secs > now.saturating_add(EVENT_FUTURE_SKEW_SECS) {
+        return Err("event timestamp is in the future (outside window)");
+    }
+    if now.saturating_sub(event_created_at_secs) > EVENT_MAX_AGE_SECS {
+        return Err("event too old / timestamp outside window");
+    }
+    Ok(())
 }
 
 /// POST /api/nostr/challenge — generate a challenge for the member to sign.
@@ -301,6 +349,30 @@ pub async fn nostr_verify(
             }),
         )
     })?;
+
+    // 5b. Reject stale events. `Event::verify()` does not bound `created_at`, so
+    // a captured event would otherwise verify forever — enforce a freshness window.
+    check_event_freshness(body.signed_event.created_at.as_secs()).map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: e.to_string(),
+            }),
+        )
+    })?;
+
+    // 5c. One-time-use: block replay of this challenge within the TTL window.
+    if !state
+        .consumed_challenges
+        .consume(&challenge, CONSUMED_CHALLENGE_TTL)
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "challenge already used".into(),
+            }),
+        ));
+    }
 
     let pubkey_hex = body.signed_event.pubkey.to_hex();
 
@@ -1836,4 +1908,62 @@ pub async fn dm_mark_read(
             )
         })?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+#[cfg(test)]
+mod hardening_tests {
+    use super::*;
+
+    fn now() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+    }
+
+    #[test]
+    fn freshness_accepts_recent_and_small_skew() {
+        assert!(check_event_freshness(now()).is_ok());
+        // Within the past window and within the future skew tolerance.
+        assert!(check_event_freshness(now() - (EVENT_MAX_AGE_SECS - 1)).is_ok());
+        assert!(check_event_freshness(now() + (EVENT_FUTURE_SKEW_SECS - 1)).is_ok());
+    }
+
+    #[test]
+    fn freshness_rejects_too_old_and_far_future() {
+        let old = check_event_freshness(now() - EVENT_MAX_AGE_SECS - 5);
+        assert_eq!(old, Err("event too old / timestamp outside window"));
+
+        let future = check_event_freshness(now() + EVENT_FUTURE_SKEW_SECS + 5);
+        assert!(future.is_err());
+    }
+
+    #[test]
+    fn challenge_token_roundtrip_and_tamper_rejected() {
+        let key = [7u8; 32];
+        let expires = now() + CHALLENGE_TTL_SECS;
+        let token = sign_challenge_token(&key, "scuffedclan-login:abc", "@login", expires);
+
+        // Valid token verifies (constant-time MAC compare path).
+        let (challenge, subject) = verify_challenge_token(&key, &token).expect("valid token");
+        assert_eq!(challenge, "scuffedclan-login:abc");
+        assert_eq!(subject, "@login");
+
+        // Wrong key → MAC mismatch rejected.
+        let wrong_key = [8u8; 32];
+        assert!(verify_challenge_token(&wrong_key, &token).is_err());
+
+        // Non-hex / malformed MAC in the token is rejected by the from_hex parse.
+        use base64::Engine;
+        let raw = String::from_utf8(
+            base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .decode(&token)
+                .unwrap(),
+        )
+        .unwrap();
+        let mut parts: Vec<&str> = raw.splitn(4, '|').collect();
+        parts[3] = "not-hex";
+        let mangled = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(parts.join("|"));
+        assert!(verify_challenge_token(&key, &mangled).is_err());
+    }
 }

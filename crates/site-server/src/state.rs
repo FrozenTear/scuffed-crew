@@ -20,6 +20,9 @@ pub struct AppState {
     pub notifier: Option<Notifier>,
     /// 32-byte key for HMAC-signing Nostr challenge tokens.
     pub nostr_challenge_key: [u8; 32],
+    /// One-time store of consumed Nostr login/link challenges (replay guard).
+    /// Per-process; see [`crate::challenge_store`] for the multi-instance caveat.
+    pub consumed_challenges: crate::challenge_store::ConsumedChallengeStore,
     /// Shared encryption service (same `Arc` as `db.crypto`).
     /// `None` when `ENCRYPTION_KEY` is not configured.
     pub crypto: Option<Arc<CryptoService>>,
