@@ -198,6 +198,7 @@ async fn main() {
         notifier,
         nostr_challenge_key,
         consumed_challenges: scuffed_site_server::challenge_store::ConsumedChallengeStore::new(),
+        nostr_rate_limiter: scuffed_site_server::nostr_rate_limit::NostrRateLimiter::new(),
         crypto,
         relay_url,
         dm_events,

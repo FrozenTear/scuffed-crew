@@ -1229,3 +1229,30 @@ pub fn conversation_key(pubkey_a: &str, pubkey_b: &str) -> String {
         format!("{pubkey_b},{pubkey_a}")
     }
 }
+
+#[cfg(test)]
+mod conversation_key_tests {
+    use super::conversation_key;
+
+    #[test]
+    fn is_order_independent() {
+        // The gift-wrap DM `h`-tag context reuses this canonical key
+        // (DR1-NOSTR-007), so both directions of a thread must agree.
+        let a = "aaaa1111";
+        let b = "ffff9999";
+        assert_eq!(conversation_key(a, b), conversation_key(b, a));
+    }
+
+    #[test]
+    fn sorts_lexicographically_with_comma() {
+        assert_eq!(conversation_key("bbb", "aaa"), "aaa,bbb");
+        assert_eq!(conversation_key("aaa", "bbb"), "aaa,bbb");
+    }
+
+    #[test]
+    fn distinct_pairs_do_not_collide() {
+        let ab = conversation_key("aaa", "bbb");
+        let ac = conversation_key("aaa", "ccc");
+        assert_ne!(ab, ac);
+    }
+}

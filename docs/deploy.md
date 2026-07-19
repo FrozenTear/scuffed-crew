@@ -196,6 +196,19 @@ Template also lives in repo: `deploy/Caddyfile`.
 > public interface would let clients connect directly and, because a public peer
 > is untrusted, they'd each be limited by their real socket IP (safe, but the
 > proxy is what terminates TLS).
+>
+> **Non-loopback / LAN bind — set `TRUSTED_PROXIES` explicitly.** The default
+> trust set includes the **whole private range** (`10/8`, `172.16/12`,
+> `192.168/16`, link-local). That is safe only because the blessed stack binds
+> `127.0.0.1` and the *sole* private-range peer it ever sees is its own proxy
+> hop. If you bind the server to a **non-loopback** interface (direct public or
+> LAN exposure, or a reverse proxy that is not on a loopback-bound hop), any peer
+> inside those default private ranges — e.g. another host on the same LAN — is
+> trusted and can rotate `X-Forwarded-For` to spray fresh rate-limit buckets,
+> degrading the auth/upload/Nostr limiters. In that case you **must** set
+> `TRUSTED_PROXIES` to the **exact** proxy IP(s)/CIDR(s) so only the real proxy's
+> forwarded headers are honored; every other peer is then keyed by its true
+> socket address.
 
 **3. App public URL** (required for cookies / redirects):
 
