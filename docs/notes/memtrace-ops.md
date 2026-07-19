@@ -59,10 +59,10 @@ Rules:
 | Binding | Value |
 |---------|--------|
 | `repo_id` | `scuffed-crew` |
-| Shared checkout (agent READ-ONLY) | `/home/soot/github/scuffed-crew` |
+| Shared checkout (agent READ-ONLY) | **Repo root** — `git rev-parse --show-toplevel` (or `$SC_ROOT` if set). Do not commit a personal home path here. |
 | Worktrees | `.claude/worktrees/<agent>-<topic>` under shared checkout |
 | Preferred memdb data dir | `MEMTRACE_MEMDB_DATA_DIR=~/.memdb` (single multi-repo store) |
-| MCP / CLI binary | absolute `/home/soot/.volta/bin/memtrace` (cron/unit PATH often lacks volta) |
+| MCP / CLI binary | absolute path to `memtrace` on PATH or under volta (`$(command -v memtrace)` / `$HOME/.volta/bin/memtrace`) — cron/unit PATH often lacks volta |
 | Owner start | `memtrace start --headless` from durable unit or `$HOME` |
 | UI | `http://127.0.0.1:3030` |
 | gRPC | `127.0.0.1:50051` |
@@ -81,7 +81,9 @@ the owner with the terminal unit. Fallout: `:3030` dead, `:50051` flaky,
 orphan memcore, HTTP delta `FLEET_BLIND`, presence publish errors.
 
 **Preferred:** systemd **user** unit with `Restart=always`,
-`WorkingDirectory=%h`, `ExecStart=/home/soot/.volta/bin/memtrace start --headless`.
+`WorkingDirectory=%h`, `ExecStart=%h/.volta/bin/memtrace start --headless`
+(or any absolute `memtrace` on the unit's PATH — avoid hard-coding a
+username in git).
 
 Sketch:
 
@@ -93,7 +95,7 @@ Description=Memtrace owner (headless)
 [Service]
 WorkingDirectory=%h
 Environment=MEMTRACE_MEMDB_DATA_DIR=%h/.memdb
-ExecStart=/home/soot/.volta/bin/memtrace start --headless
+ExecStart=%h/.volta/bin/memtrace start --headless
 Restart=always
 RestartSec=5
 
@@ -210,9 +212,10 @@ After OOM, `memtrace stop/start`, host reboot, or “is the fleet wiped?”:
    initiative threads). If MCP modern and HTTP ancient → **skew, not wipe**.
 5. **git/gh reseed:**
    ```bash
-   git -C /home/soot/github/scuffed-crew fetch origin
-   git -C /home/soot/github/scuffed-crew rev-parse --short origin/main
-   gh pr list --repo FrozenTear/scuffed-crew --state open --limit 20
+   SC_ROOT="${SC_ROOT:-$(git rev-parse --show-toplevel)}"
+   git -C "$SC_ROOT" fetch origin
+   git -C "$SC_ROOT" rev-parse --short origin/main
+   gh pr list --state open --limit 20   # run from clone or pass --repo
    ```
 6. **Intents are volatile** — empty registry is normal; re-publish presence.
 7. **JOIN/REJOIN** on ydoc; quote RESEED ULID before open work; reset
@@ -229,7 +232,7 @@ Quick owner bounce:
 memtrace stop
 ss -ltnp | rg '3030|50051'   # expect free
 cd "$HOME" && MEMTRACE_MEMDB_DATA_DIR="$HOME/.memdb" \
-  /home/soot/.volta/bin/memtrace start --headless
+  "$(command -v memtrace || echo "$HOME/.volta/bin/memtrace")" start --headless
 curl -fsS -m 5 http://127.0.0.1:3030/api/fleet/status
 # then MCP fleet_ydoc_read — not only HTTP tip
 ```
@@ -273,10 +276,11 @@ hermes cron create 'every 3m' \
   --deliver local
 
 # B) heartbeat — agent
+SC_ROOT="${SC_ROOT:-$(git rev-parse --show-toplevel)}"
 PROMPT=$(cat ~/.hermes/skills/memtrace-fleet-watcher/templates/cron-heartbeat-prompt.md)
 hermes cron create 'every 10m' "$PROMPT" \
   --name 'scuffed-fleet-heartbeat' \
-  --workdir /home/soot/github/scuffed-crew \
+  --workdir "$SC_ROOT" \
   --skill memtrace-fleet-watcher \
   --skill memtrace-fleet-first \
   --deliver local
@@ -313,8 +317,8 @@ Ops guidance:
 
 - Canonical graph stays on main/shared `repo_id` `scuffed-crew`.
 - Optional: `index_directory` on
-  `/home/soot/github/scuffed-crew/.claude/worktrees/<agent>-<topic>` for
-  peer-WIP-aware search.
+  `$SC_ROOT/.claude/worktrees/<agent>-<topic>` (repo-relative worktree path)
+  for peer-WIP-aware search.
 - Overlays are **not** a substitute for git push + dual-agree.
 - Sweep stale overlays: `cleanup_worktrees` / TTL; do not leave deleted
   worktree paths as permanent graph noise.
@@ -359,10 +363,10 @@ In-product: MCP `search_docs` / `ask_docs` / `read_doc` when online.
 Truth:     git/gh > MCP ydoc > HTTP :3030 > episodes(advisory) > memory
 Owner:     one memtrace start --headless → :50051 + :3030
 Attach:    many memtrace mcp; never second start
-MCP bin:   /home/soot/.volta/bin/memtrace
+MCP bin:   $(command -v memtrace) or $HOME/.volta/bin/memtrace
 Data:      MEMTRACE_MEMDB_DATA_DIR=~/.memdb
 Cgroup:    NEVER owner under alacritty/niri (OOM 2026-07-18)
-Worktree:  .claude/worktrees/<agent>-topic  |  shared checkout R/O
+Worktree:  .claude/worktrees/<agent>-topic  |  shared checkout R/O ($SC_ROOT)
 Join:      status → branch_context → ydoc_read(MCP) → append → presence 120s
 Poll:      fleet::chat AND initiatives every tick; dual-write review/ACK
 Self-learn: process gap → worktree protocol/ops draft → peer dual-agree → land
