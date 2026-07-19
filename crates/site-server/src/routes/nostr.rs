@@ -11,6 +11,7 @@ use axum::{
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 
+use scuffed_auth::password::MIN_PASSWORD_LEN;
 use scuffed_auth::server::session::ErrorResponse;
 
 use nostr::key::Keys;
@@ -23,7 +24,29 @@ use scuffed_chat::nostr::events::EventBuilder;
 use scuffed_chat::nostr::relay::publish_event_oneshot;
 
 use crate::extractors::{OfficerUser, OrgMember};
+use crate::nostr_rate_limit::{COST_INTERACTIVE, COST_KEY_OP};
 use crate::state::AppState;
+
+/// Enforce the per-member rate limit for a secret-touching Nostr op
+/// (DR1-NOSTR-006). Returns `429` when the member's token bucket is empty.
+fn enforce_nostr_rate_limit(
+    state: &AppState,
+    member_id: &str,
+    cost: f64,
+) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
+    if state.nostr_rate_limiter.check(member_id, cost) {
+        Ok(())
+    } else {
+        Err((
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(ErrorResponse {
+                error:
+                    "Too many Nostr key/message operations — please slow down and retry shortly."
+                        .into(),
+            }),
+        ))
+    }
+}
 
 // ─── NIP-05 well-known endpoint (Phase 1) ───
 
@@ -248,6 +271,8 @@ pub async fn nostr_challenge(
     caller: OrgMember,
     Json(body): Json<ChallengeRequest>,
 ) -> Result<Json<ChallengeResponse>, (StatusCode, Json<ErrorResponse>)> {
+    enforce_nostr_rate_limit(&state, &caller.member.id, COST_INTERACTIVE)?;
+
     let pubkey_hex = resolve_pubkey_hex(&body.pubkey).map_err(|_e| {
         (
             StatusCode::BAD_REQUEST,
@@ -299,6 +324,8 @@ pub async fn nostr_verify(
     caller: OrgMember,
     Json(body): Json<VerifyRequest>,
 ) -> Result<Json<scuffed_db::Member>, (StatusCode, Json<ErrorResponse>)> {
+    enforce_nostr_rate_limit(&state, &caller.member.id, COST_INTERACTIVE)?;
+
     // 1. Verify the challenge token
     let (challenge, token_member_id) =
         verify_challenge_token(&state.nostr_challenge_key, &body.token).map_err(|e| {
@@ -439,6 +466,14 @@ pub async fn nostr_verify(
     Ok(Json(updated))
 }
 
+// NOSTR-011 follow-up (scoped out of DR1 nostr-polish): the key-mode–changing
+// ops below (unlink) and the export/import handlers should require a step-up
+// reauth (recent password re-entry / fresh session assertion) so a stolen live
+// session cannot silently export the nsec or flip key mode. Implementing this
+// cleanly needs a `last_authenticated_at` on the session + a reauth challenge
+// endpoint + UI, which is larger than this branch's footgun/rate-limit scope.
+// Tracked for a dedicated follow-up; the per-member rate limit (DR1-NOSTR-006)
+// and the import server-managed guard (DR1-NOSTR-003) bound the immediate risk.
 /// DELETE /api/nostr/identity — remove the caller's Nostr pubkey.
 pub async fn nostr_unlink(
     State(state): State<AppState>,
@@ -501,11 +536,18 @@ pub async fn nostr_export_backup(
     caller: OrgMember,
     Json(body): Json<ExportBackupRequest>,
 ) -> Result<Json<ExportBackupResponse>, (StatusCode, Json<ErrorResponse>)> {
-    if body.password.len() < 8 {
+    // Expensive NIP-49 (Argon2) op — bound it per member (DR1-NOSTR-006).
+    enforce_nostr_rate_limit(&state, &caller.member.id, COST_KEY_OP)?;
+
+    // Align the backup password floor with the account password policy
+    // (DR1-NOSTR-005): the ncryptsec is an offline-brute-forceable wrapper of the
+    // live nsec, so a shorter floor than login passwords would understate its
+    // strength.
+    if body.password.len() < MIN_PASSWORD_LEN {
         return Err((
             StatusCode::BAD_REQUEST,
             Json(ErrorResponse {
-                error: "Password must be at least 8 characters".into(),
+                error: format!("Password must be at least {MIN_PASSWORD_LEN} characters"),
             }),
         ));
     }
@@ -569,12 +611,37 @@ pub struct ImportKeyRequest {
     pub password: String,
 }
 
-/// POST /api/nostr/import-key — import a key from ncryptsec backup.
+/// POST /api/nostr/import-key — link an *external* Nostr key from an ncryptsec
+/// backup.
+///
+/// This is **not** a restore-into-server-managed path: it decrypts the nsec only
+/// to derive the pubkey, then flips the member to `external` mode (the server no
+/// longer holds the secret). Because that is destructive to a server-managed
+/// key, it is refused when the member currently has one — they must explicitly
+/// `Unlink` first (DR1-NOSTR-003).
 pub async fn nostr_import_key(
     State(state): State<AppState>,
     caller: OrgMember,
     Json(body): Json<ImportKeyRequest>,
 ) -> Result<Json<scuffed_db::Member>, (StatusCode, Json<ErrorResponse>)> {
+    // Expensive NIP-49 (Argon2) op — bound it per member (DR1-NOSTR-006).
+    enforce_nostr_rate_limit(&state, &caller.member.id, COST_KEY_OP)?;
+
+    // Refuse to silently destroy a server-managed key (DR1-NOSTR-003). Importing
+    // sets external mode and clears the server-held secret; a server-managed
+    // member must deliberately unlink first.
+    if caller.member.nostr_key_mode == Some(NostrKeyMode::ServerManaged) {
+        return Err((
+            StatusCode::CONFLICT,
+            Json(ErrorResponse {
+                error: "You have a server-managed key. Unlink it first before importing an \
+                        external key — importing switches you to external mode and discards the \
+                        server-managed secret."
+                    .into(),
+            }),
+        ));
+    }
+
     let mut secret_hex = Zeroizing::new(
         scuffed_auth::nip49::decrypt(&body.ncryptsec, &body.password).map_err(|e| {
             (
@@ -1468,6 +1535,8 @@ pub async fn dm_send(
     caller: OrgMember,
     Json(body): Json<DmSendRequest>,
 ) -> Result<Json<DmSendResponse>, (StatusCode, Json<ErrorResponse>)> {
+    enforce_nostr_rate_limit(&state, &caller.member.id, COST_INTERACTIVE)?;
+
     let recipient = body.recipient_pubkey.trim().to_lowercase();
     validate_pubkey_hex(&recipient).map_err(|e| {
         (
@@ -1500,10 +1569,12 @@ pub async fn dm_send(
         ));
     }
 
-    // NIP-17 DMs use a single conversation context; we reuse the recipient
-    // pubkey as the `h` tag context so unrelated group chatter is not pulled
-    // in by relay-side filters keyed on it.
-    let context_id = format!("dm:{}:{}", sender_pubkey, recipient);
+    // NIP-17 DMs use a single conversation context as the `h` tag. Use the same
+    // canonical, order-independent `conversation_key(a, b)` the DB uses as its
+    // conversation identity (DR1-NOSTR-007) so both directions of a thread and
+    // every device agree on one context — the previous `dm:{sender}:{recipient}`
+    // form was order-dependent and split the two directions into distinct tags.
+    let context_id = scuffed_db::conversation_key(&sender_pubkey, &recipient);
 
     let wraps = encryption
         .build_gift_wraps(

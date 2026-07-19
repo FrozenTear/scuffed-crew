@@ -499,6 +499,7 @@ mod tests {
             notifier: None,
             nostr_challenge_key: [0u8; 32],
             consumed_challenges: crate::challenge_store::ConsumedChallengeStore::new(),
+            nostr_rate_limiter: crate::nostr_rate_limit::NostrRateLimiter::new(),
             crypto: None,
             relay_url: None,
             dm_events: None,

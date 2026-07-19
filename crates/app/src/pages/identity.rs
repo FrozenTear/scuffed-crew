@@ -265,8 +265,8 @@ pub fn IdentitySettings() -> Element {
     // ─── NIP-49: Export backup ───
     let on_export_backup = move |_| {
         let password = backup_password().trim().to_string();
-        if password.len() < 8 {
-            toast.show(Toast::error("Password must be at least 8 characters."));
+        if password.len() < 12 {
+            toast.show(Toast::error("Password must be at least 12 characters."));
             return;
         }
         working.set(true);
@@ -292,6 +292,21 @@ pub fn IdentitySettings() -> Element {
         let password = import_password().trim().to_string();
         if ncryptsec.is_empty() || password.is_empty() {
             toast.show(Toast::error("Both ncryptsec and password are required."));
+            return;
+        }
+        // Importing links an *external* key and replaces any currently linked
+        // identity — confirm before the mode change (DR1-NOSTR-003).
+        let confirmed = web_sys::window()
+            .and_then(|w| {
+                w.confirm_with_message(
+                    "Importing this key sets your identity to EXTERNAL mode and replaces any \
+                     currently linked Nostr key. The server will no longer manage a key for you. \
+                     Continue?",
+                )
+                .ok()
+            })
+            .unwrap_or(false);
+        if !confirmed {
             return;
         }
         working.set(true);
@@ -424,13 +439,13 @@ pub fn IdentitySettings() -> Element {
             if is_server_managed {
                 div { class: "identity-section",
                     h2 { "Key Backup (NIP-49)" }
-                    p { "Export your key as an encrypted ncryptsec backup. You will need the password to restore it." }
+                    p { "Export your key as an encrypted ncryptsec backup. Keep this password — you will need it to import the key later (which links it as an external identity)." }
                     div { class: "identity-field",
-                        label { class: "identity-label", "Backup Password (min 8 chars)" }
+                        label { class: "identity-label", "Backup Password (min 12 chars)" }
                         input {
                             class: "identity-input",
                             r#type: "password",
-                            placeholder: "Enter a strong password",
+                            placeholder: "Enter a strong password (12+ characters)",
                             value: "{backup_password}",
                             oninput: move |e| backup_password.set(e.value()),
                         }
@@ -438,7 +453,7 @@ pub fn IdentitySettings() -> Element {
                     div { class: "identity-actions",
                         button {
                             class: "identity-btn identity-btn-primary",
-                            disabled: working() || backup_password().trim().len() < 8,
+                            disabled: working() || backup_password().trim().len() < 12,
                             onclick: on_export_backup,
                             if working() { "Exporting..." } else { "Export Backup" }
                         }
@@ -455,35 +470,52 @@ pub fn IdentitySettings() -> Element {
                 }
             }
 
-            div { class: "identity-section",
-                h2 { "Import Key (NIP-49)" }
-                p { "Restore a key from an ncryptsec backup." }
-                div { class: "identity-field",
-                    label { class: "identity-label", "ncryptsec" }
-                    input {
-                        class: "identity-input",
-                        r#type: "text",
-                        placeholder: "ncryptsec1...",
-                        value: "{import_ncryptsec}",
-                        oninput: move |e| import_ncryptsec.set(e.value()),
+            if is_server_managed {
+                div { class: "identity-section",
+                    h2 { "Import External Key (NIP-49)" }
+                    p { class: "identity-warning",
+                        "You currently have a server-managed key. Importing an external key is \
+                         disabled to protect it — to switch to an external key, first Unlink your \
+                         identity above, then import. Importing does not restore a key into \
+                         server-managed mode."
                     }
                 }
-                div { class: "identity-field",
-                    label { class: "identity-label", "Password" }
-                    input {
-                        class: "identity-input",
-                        r#type: "password",
-                        placeholder: "Backup password",
-                        value: "{import_password}",
-                        oninput: move |e| import_password.set(e.value()),
+            } else {
+                div { class: "identity-section",
+                    h2 { "Import External Key (NIP-49)" }
+                    p {
+                        "Link an external Nostr key from an ncryptsec backup. This sets your \
+                         identity to external mode — the server will not manage a key for you — \
+                         and replaces any currently linked external key. The nsec is decrypted \
+                         only to derive your public key."
                     }
-                }
-                div { class: "identity-actions",
-                    button {
-                        class: "identity-btn identity-btn-primary",
-                        disabled: working() || import_ncryptsec().trim().is_empty() || import_password().trim().is_empty(),
-                        onclick: on_import_key,
-                        if working() { "Importing..." } else { "Import Key" }
+                    div { class: "identity-field",
+                        label { class: "identity-label", "ncryptsec" }
+                        input {
+                            class: "identity-input",
+                            r#type: "text",
+                            placeholder: "ncryptsec1...",
+                            value: "{import_ncryptsec}",
+                            oninput: move |e| import_ncryptsec.set(e.value()),
+                        }
+                    }
+                    div { class: "identity-field",
+                        label { class: "identity-label", "Password" }
+                        input {
+                            class: "identity-input",
+                            r#type: "password",
+                            placeholder: "Backup password",
+                            value: "{import_password}",
+                            oninput: move |e| import_password.set(e.value()),
+                        }
+                    }
+                    div { class: "identity-actions",
+                        button {
+                            class: "identity-btn identity-btn-primary",
+                            disabled: working() || import_ncryptsec().trim().is_empty() || import_password().trim().is_empty(),
+                            onclick: on_import_key,
+                            if working() { "Importing..." } else { "Import Key" }
+                        }
                     }
                 }
             }

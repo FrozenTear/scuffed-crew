@@ -44,6 +44,7 @@ async fn test_state() -> AppState {
         notifier: None,
         nostr_challenge_key: *blake3::hash(b"test-nostr-challenge-key").as_bytes(),
         consumed_challenges: scuffed_site_server::challenge_store::ConsumedChallengeStore::new(),
+        nostr_rate_limiter: scuffed_site_server::nostr_rate_limit::NostrRateLimiter::new(),
         crypto: None,
         relay_url: None,
         dm_events: None,
@@ -1692,7 +1693,31 @@ async fn nostr_export_backup_rejects_short_password() {
 
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     let json = body_json(resp).await;
-    assert!(json["error"].as_str().unwrap().contains("8 characters"));
+    // Backup password floor is aligned to the account policy (12) — DR1-NOSTR-005.
+    assert!(json["error"].as_str().unwrap().contains("12 characters"));
+}
+
+/// An 8–11 char password (previously accepted) is now rejected: the backup
+/// password floor is aligned to `MIN_PASSWORD_LEN` (DR1-NOSTR-005).
+#[tokio::test]
+async fn nostr_export_backup_rejects_eleven_char_password() {
+    let state = test_state().await;
+    seed_all_roles(&state.db).await;
+    let app = create_router(state);
+
+    let resp = app
+        .oneshot(authed_json_request(
+            Method::POST,
+            "/api/nostr/export-backup",
+            MEMBER_TOKEN,
+            json!({ "password": "elevenchars" }), // 11 chars
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let json = body_json(resp).await;
+    assert!(json["error"].as_str().unwrap().contains("12 characters"));
 }
 
 #[tokio::test]
@@ -1815,6 +1840,46 @@ async fn nostr_import_key_success() {
     assert_eq!(resp.status(), StatusCode::OK);
     let json = body_json(resp).await;
     assert_eq!(json["nostr_pubkey"].as_str().unwrap(), expected_pubkey);
+}
+
+/// Importing must NOT silently destroy a server-managed key (DR1-NOSTR-003):
+/// a member currently in `server_managed` mode is refused with 409 and told to
+/// unlink first.
+#[tokio::test]
+async fn nostr_import_key_rejects_server_managed_member() {
+    let state = test_state().await;
+    seed_all_roles(&state.db).await;
+
+    // Flip the member to server-managed mode (the import gate reads this field).
+    state
+        .db
+        .client
+        .query("UPDATE member:membermember SET nostr_key_mode = 'server_managed'")
+        .await
+        .expect("set server_managed mode");
+
+    let keys = nostr::Keys::generate();
+    let secret_hex = keys.secret_key().to_secret_hex();
+    let password = "secure-backup-password";
+    let ncryptsec = scuffed_auth::nip49::encrypt(&secret_hex, password).expect("encrypt");
+
+    let app = create_router(state);
+    let resp = app
+        .oneshot(authed_json_request(
+            Method::POST,
+            "/api/nostr/import-key",
+            MEMBER_TOKEN,
+            json!({
+                "ncryptsec": ncryptsec,
+                "password": password
+            }),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::CONFLICT);
+    let json = body_json(resp).await;
+    assert!(json["error"].as_str().unwrap().contains("server-managed"));
 }
 
 // ─── First-boot setup + local login ─────────────────────────────────────────

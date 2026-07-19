@@ -23,6 +23,9 @@ pub struct AppState {
     /// One-time store of consumed Nostr login/link challenges (replay guard).
     /// Per-process; see [`crate::challenge_store`] for the multi-instance caveat.
     pub consumed_challenges: crate::challenge_store::ConsumedChallengeStore,
+    /// Per-member token-bucket limiter for the secret-touching Nostr routes
+    /// (challenge/verify/export/import/dm-send). See [`crate::nostr_rate_limit`].
+    pub nostr_rate_limiter: crate::nostr_rate_limit::NostrRateLimiter,
     /// Shared encryption service (same `Arc` as `db.crypto`).
     /// `None` when `ENCRYPTION_KEY` is not configured.
     pub crypto: Option<Arc<CryptoService>>,

@@ -3,6 +3,7 @@ pub mod challenge_store;
 pub mod dm_subscriber;
 pub mod extractors;
 pub mod membership_policy;
+pub mod nostr_rate_limit;
 pub mod notifications;
 pub mod rate_limit;
 pub mod routes;
