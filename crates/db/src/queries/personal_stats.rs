@@ -677,4 +677,89 @@ mod tests {
             "another member's upload must not touch m1's row"
         );
     }
+
+    /// W2 B1 owed: `member_leaderboard(..., hero: Some)` must narrow rows to
+    /// matches on that hero only (bound `AND hero = $hero`). Uses metric
+    /// `"games"` so LEADERBOARD_MIN_GAMES does not mask the filter.
+    #[tokio::test]
+    async fn member_leaderboard_hero_filter_narrows_rows() {
+        use crate::types::OrgRole;
+
+        let db = test_db().await;
+        let ana_main = db
+            .create_member("u-ana", "AnaMain", OrgRole::Member)
+            .await
+            .unwrap();
+        let tracer_only = db
+            .create_member("u-tr", "TracerOnly", OrgRole::Member)
+            .await
+            .unwrap();
+
+        // ana_main: 2 Ana + 1 Tracer. tracer_only: 3 Tracer (no Ana).
+        let mut ana_g1 = entry("a1", "victory", 5);
+        ana_g1.member_id = ana_main.id.clone();
+        ana_g1.hero = "Ana".into();
+        let mut ana_g2 = entry("a2", "defeat", 3);
+        ana_g2.member_id = ana_main.id.clone();
+        ana_g2.hero = "Ana".into();
+        ana_g2.played_at = Utc.with_ymd_and_hms(2026, 7, 2, 20, 0, 0).unwrap();
+        let mut ana_tr = entry("a3", "victory", 8);
+        ana_tr.member_id = ana_main.id.clone();
+        ana_tr.hero = "Tracer".into();
+        ana_tr.played_at = Utc.with_ymd_and_hms(2026, 7, 3, 20, 0, 0).unwrap();
+        db.upsert_personal_matches(&ana_main.id, &[ana_g1, ana_g2, ana_tr])
+            .await
+            .unwrap();
+
+        for (i, sid) in ["t1", "t2", "t3"].iter().enumerate() {
+            let mut m = entry(sid, "victory", 4 + i as u32);
+            m.member_id = tracer_only.id.clone();
+            m.hero = "Tracer".into();
+            m.played_at = Utc
+                .with_ymd_and_hms(2026, 7, 1 + i as u32, 21, 0, 0)
+                .unwrap();
+            db.upsert_personal_matches(&tracer_only.id, &[m])
+                .await
+                .unwrap();
+        }
+
+        let all = db
+            .member_leaderboard("games", 50, None, None)
+            .await
+            .unwrap();
+        assert_eq!(all.len(), 2, "unfiltered LB includes both members");
+        let all_ids: Vec<_> = all.iter().map(|r| r.member_id.as_str()).collect();
+        assert!(all_ids.contains(&ana_main.id.as_str()));
+        assert!(all_ids.contains(&tracer_only.id.as_str()));
+        let ana_all = all.iter().find(|r| r.member_id == ana_main.id).unwrap();
+        assert_eq!(ana_all.games, 3, "unfiltered counts all heroes");
+
+        let ana_lb = db
+            .member_leaderboard("games", 50, None, Some("Ana"))
+            .await
+            .unwrap();
+        assert_eq!(
+            ana_lb.len(),
+            1,
+            "hero=Ana must drop Tracer-only members"
+        );
+        assert_eq!(ana_lb[0].member_id, ana_main.id);
+        assert_eq!(
+            ana_lb[0].games, 2,
+            "hero filter must count only Ana matches"
+        );
+
+        let tr_lb = db
+            .member_leaderboard("games", 50, None, Some("Tracer"))
+            .await
+            .unwrap();
+        assert_eq!(tr_lb.len(), 2, "both members have Tracer games");
+        let tr_ana = tr_lb.iter().find(|r| r.member_id == ana_main.id).unwrap();
+        let tr_only = tr_lb
+            .iter()
+            .find(|r| r.member_id == tracer_only.id)
+            .unwrap();
+        assert_eq!(tr_ana.games, 1);
+        assert_eq!(tr_only.games, 3);
+    }
 }
