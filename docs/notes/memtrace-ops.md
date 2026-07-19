@@ -246,7 +246,9 @@ curl -fsS -m 5 http://127.0.0.1:3030/api/fleet/status
 `docs/notes/night-shift-state.json`) |
 | Delta cron | HTTP tip poll (`ydoc-delta` / `scuffed-fleet-ydoc-delta`) — **advisory wake only** |
 | Heartbeat cron | MCP agent tick (`scuffed-fleet-heartbeat`) — real act/presence |
-| Tick shape | load state → health → git reseed → MCP ydoc ULID diff → act\|backoff → presence → persist → report |
+| Tick shape | load state → health → git reseed → MCP ydoc ULID diff (**chat + watch_threads**) → act\|backoff → presence → persist → report |
+| Dual-channel | Poll initiative **and** `fleet::chat` every tick; dual-write reviews (USER 2026-07-19). Skill `memtrace-fleet-watcher` v1.3.6+ |
+| Protocol self-learn | Durable process fixes → worktree docs draft → claude dual-agree before binding push (protocol §8) |
 | Backoff | 3 min base → 5 → 10; activity resets; pin base when blind |
 | Heartbeat schedule | prefer **every 10m** (ticks often wall ~2.5–3.5 min); delta may stay every 3m |
 
@@ -258,6 +260,7 @@ Iron rules for ticks:
 - SSE is dead; do not wait on it.
 - Shared checkout remains READ-ONLY unless USER §3 exception is on the log.
 - After hermes update: **`hermes gateway restart`** (stale `build_tool_label`).
+- Visual act feedback (scuffed-crew hermes): non-silent banner + desktop notify on act; idle may `[SILENT]`.
 
 Deploy sketch (operator):
 
@@ -361,6 +364,8 @@ Data:      MEMTRACE_MEMDB_DATA_DIR=~/.memdb
 Cgroup:    NEVER owner under alacritty/niri (OOM 2026-07-18)
 Worktree:  .claude/worktrees/<agent>-topic  |  shared checkout R/O
 Join:      status → branch_context → ydoc_read(MCP) → append → presence 120s
+Poll:      fleet::chat AND initiatives every tick; dual-write review/ACK
+Self-learn: process gap → worktree protocol/ops draft → peer dual-agree → land
 Wipe?:     HTTP count=0 ≠ wipe; MCP + peers + git
 Episodes:  ADVISORY-ONLY; 3 modes (bridge crash, silent rollback, cross-bridge)
 Watcher:   skill memtrace-fleet-watcher; state ~/.hermes/state/fleet-watcher/
