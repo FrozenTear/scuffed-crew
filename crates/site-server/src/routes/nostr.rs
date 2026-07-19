@@ -24,17 +24,19 @@ use scuffed_chat::nostr::events::EventBuilder;
 use scuffed_chat::nostr::relay::publish_event_oneshot;
 
 use crate::extractors::{OfficerUser, OrgMember};
-use crate::nostr_rate_limit::{COST_INTERACTIVE, COST_KEY_OP};
+use crate::nostr_rate_limit::RateClass;
 use crate::state::AppState;
 
 /// Enforce the per-member rate limit for a secret-touching Nostr op
-/// (DR1-NOSTR-006). Returns `429` when the member's token bucket is empty.
+/// (DR1-NOSTR-006). Each [`RateClass`] has its own independent per-member
+/// bucket, so exhausting one class never throttles the other. Returns `429`
+/// when the member's bucket for `class` is empty.
 fn enforce_nostr_rate_limit(
     state: &AppState,
     member_id: &str,
-    cost: f64,
+    class: RateClass,
 ) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
-    if state.nostr_rate_limiter.check(member_id, cost) {
+    if state.nostr_rate_limiter.check(member_id, class) {
         Ok(())
     } else {
         Err((
@@ -271,7 +273,7 @@ pub async fn nostr_challenge(
     caller: OrgMember,
     Json(body): Json<ChallengeRequest>,
 ) -> Result<Json<ChallengeResponse>, (StatusCode, Json<ErrorResponse>)> {
-    enforce_nostr_rate_limit(&state, &caller.member.id, COST_INTERACTIVE)?;
+    enforce_nostr_rate_limit(&state, &caller.member.id, RateClass::Interactive)?;
 
     let pubkey_hex = resolve_pubkey_hex(&body.pubkey).map_err(|_e| {
         (
@@ -324,7 +326,7 @@ pub async fn nostr_verify(
     caller: OrgMember,
     Json(body): Json<VerifyRequest>,
 ) -> Result<Json<scuffed_db::Member>, (StatusCode, Json<ErrorResponse>)> {
-    enforce_nostr_rate_limit(&state, &caller.member.id, COST_INTERACTIVE)?;
+    enforce_nostr_rate_limit(&state, &caller.member.id, RateClass::Interactive)?;
 
     // 1. Verify the challenge token
     let (challenge, token_member_id) =
@@ -537,7 +539,7 @@ pub async fn nostr_export_backup(
     Json(body): Json<ExportBackupRequest>,
 ) -> Result<Json<ExportBackupResponse>, (StatusCode, Json<ErrorResponse>)> {
     // Expensive NIP-49 (Argon2) op — bound it per member (DR1-NOSTR-006).
-    enforce_nostr_rate_limit(&state, &caller.member.id, COST_KEY_OP)?;
+    enforce_nostr_rate_limit(&state, &caller.member.id, RateClass::KeyOp)?;
 
     // Align the backup password floor with the account password policy
     // (DR1-NOSTR-005): the ncryptsec is an offline-brute-forceable wrapper of the
@@ -625,7 +627,7 @@ pub async fn nostr_import_key(
     Json(body): Json<ImportKeyRequest>,
 ) -> Result<Json<scuffed_db::Member>, (StatusCode, Json<ErrorResponse>)> {
     // Expensive NIP-49 (Argon2) op — bound it per member (DR1-NOSTR-006).
-    enforce_nostr_rate_limit(&state, &caller.member.id, COST_KEY_OP)?;
+    enforce_nostr_rate_limit(&state, &caller.member.id, RateClass::KeyOp)?;
 
     // Refuse to silently destroy a server-managed key (DR1-NOSTR-003). Importing
     // sets external mode and clears the server-held secret; a server-managed
@@ -1535,7 +1537,7 @@ pub async fn dm_send(
     caller: OrgMember,
     Json(body): Json<DmSendRequest>,
 ) -> Result<Json<DmSendResponse>, (StatusCode, Json<ErrorResponse>)> {
-    enforce_nostr_rate_limit(&state, &caller.member.id, COST_INTERACTIVE)?;
+    enforce_nostr_rate_limit(&state, &caller.member.id, RateClass::Interactive)?;
 
     let recipient = body.recipient_pubkey.trim().to_lowercase();
     validate_pubkey_hex(&recipient).map_err(|e| {
