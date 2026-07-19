@@ -2903,8 +2903,91 @@ async fn suspended_admins_do_not_count_for_setup() {
 
     assert_eq!(state.db.count_actionable_admins().await.unwrap(), 0);
     assert_eq!(state.db.count_active_admins().await.unwrap(), 2);
-    // Setup recovery path opens
+    // has_admin_member still reflects the live actionable count (0 → false); it
+    // is used for UI/recruitment display. NOTE (DR1-ACCT-003): the unauthenticated
+    // /api/auth/setup gate no longer keys off this value — see
+    // setup_rejected_when_all_admins_suspended for the hardened behaviour.
     assert!(!state.db.has_admin_member().await.unwrap());
+    // Bootstrap signal stays closed: members exist, so setup cannot reopen.
+    assert!(state.db.has_any_member().await.unwrap());
+}
+
+/// DR1-ACCT-003: a transient zero-actionable-admin state (every admin
+/// suspended) must NOT reopen the unauthenticated first-boot setup endpoint,
+/// because member rows exist. Setup only bootstraps a genuinely empty instance.
+#[tokio::test]
+async fn setup_rejected_when_all_admins_suspended() {
+    let state = test_state().await;
+    seed_user(
+        &state.db,
+        "adminuser",
+        "adminmember",
+        "TestAdmin",
+        "admin",
+        ADMIN_TOKEN,
+    )
+    .await;
+    seed_user(
+        &state.db,
+        "adminuser2",
+        "adminmember2",
+        "TestAdmin2",
+        "admin",
+        ADMIN2_TOKEN,
+    )
+    .await;
+
+    // Suspend both admins (transient lockout) → zero actionable admins.
+    state
+        .db
+        .create_moderation_action(
+            "adminmember",
+            scuffed_db::ModerationActionType::Suspension,
+            "lockout-sim",
+            "adminmember2",
+            None,
+        )
+        .await
+        .unwrap();
+    state
+        .db
+        .create_moderation_action(
+            "adminmember2",
+            scuffed_db::ModerationActionType::Suspension,
+            "lockout-sim",
+            "adminmember",
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(state.db.count_actionable_admins().await.unwrap(), 0);
+
+    // The unauthenticated setup POST must still be refused (members exist).
+    let app = create_router(state);
+    let res = app
+        .oneshot(
+            rate_limit_ip(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/auth/setup")
+                    .header(header::CONTENT_TYPE, "application/json"),
+            )
+            .body(Body::from(
+                serde_json::to_vec(&json!({
+                    "username": "attacker",
+                    "password": "a-strong-password"
+                }))
+                .unwrap(),
+            ))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        res.status(),
+        StatusCode::FORBIDDEN,
+        "setup must stay closed once any member exists"
+    );
 }
 
 // ─── Public surfaces (is_public gating) ─────────────────────────────────────

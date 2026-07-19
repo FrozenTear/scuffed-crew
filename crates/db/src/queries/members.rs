@@ -528,7 +528,13 @@ impl Database {
         .await
     }
 
-    /// Change a member's org role via field-level SET.
+    /// Change a member's org role via field-level SET (no CAS).
+    ///
+    /// Prefer [`Database::change_member_role_cas`] for admin-panel role edits so
+    /// concurrent changes cannot lose updates or return lying-success responses
+    /// (DR1-ACCT-004). This unconditional form is retained for provisioning
+    /// paths (e.g. application accept) where the target's current role is not a
+    /// meaningful precondition.
     pub async fn change_member_role(&self, id: &str, new_role: OrgRole) -> DbResult<Member> {
         with_timeout(async {
             let rid = RecordId::new("member", id);
@@ -543,6 +549,76 @@ impl Database {
                 updated
                     .ok_or_else(|| crate::DbError::NotFound(format!("Member {id} not found")))?,
             )
+        })
+        .await
+    }
+
+    /// Change a member's org role with a compare-and-swap on the current role.
+    ///
+    /// Only writes when `org_role` still equals `expected` (the role the caller
+    /// read before deciding the change is safe). This closes the DR1-ACCT-004
+    /// lost-update / false-success window: two concurrent role edits on the same
+    /// member can no longer both report success against a role that no longer
+    /// holds, and a compensation write cannot clobber a role that changed under
+    /// it. Returns:
+    /// - [`crate::DbError::NotFound`] if the member does not exist,
+    /// - [`crate::DbError::Conflict`] (→ HTTP 409) if the member's role changed
+    ///   concurrently (no longer `expected`).
+    pub async fn change_member_role_cas(
+        &self,
+        id: &str,
+        expected: OrgRole,
+        new_role: OrgRole,
+    ) -> DbResult<Member> {
+        with_timeout(async {
+            let rid = RecordId::new("member", id);
+            let mut result = self
+                .client
+                .query("UPDATE $rid SET org_role = $role WHERE org_role = $expected RETURN AFTER")
+                .bind(("rid", rid))
+                .bind(("role", new_role.to_string()))
+                .bind(("expected", expected.to_string()))
+                .await?;
+            let updated: Option<DbMember> = result.take(0)?;
+            if let Some(row) = updated {
+                return db_to_member(row);
+            }
+
+            // Zero rows updated: distinguish a missing member from a stale
+            // expected-role (concurrent change).
+            let existing: Option<DbMember> = self.client.select(("member", id)).await?;
+            match existing {
+                None => Err(crate::DbError::NotFound(format!("Member {id} not found"))),
+                Some(row) => Err(crate::DbError::Conflict(format!(
+                    "Member role changed concurrently (expected {expected}, found {})",
+                    row.org_role
+                ))),
+            }
+        })
+        .await
+    }
+
+    /// True if any member row exists at all (active or not, any role).
+    ///
+    /// This is the **monotonic first-boot bootstrap signal** used to gate the
+    /// unauthenticated `/api/auth/setup` endpoint (DR1-ACCT-003). Members are
+    /// only ever deactivated, never hard-deleted, so once the first admin is
+    /// created this stays true forever. Unlike the live actionable-admin count,
+    /// it cannot transiently read false when every admin is merely suspended —
+    /// closing the window in which a suspended-out org could have its
+    /// unauthenticated admin-creation endpoint reopened.
+    pub async fn has_any_member(&self) -> DbResult<bool> {
+        with_timeout(async {
+            #[derive(Deserialize, SurrealValue)]
+            struct CountResult {
+                count: u64,
+            }
+            let mut result = self
+                .client
+                .query("SELECT count() FROM member GROUP ALL")
+                .await?;
+            let counts: Vec<CountResult> = result.take(0)?;
+            Ok(counts.first().map(|c| c.count).unwrap_or(0) > 0)
         })
         .await
     }
@@ -569,44 +645,44 @@ impl Database {
     /// Count admins who can still use admin tools: active, role=admin, and not
     /// currently suspended or banned.
     ///
-    /// Loads only admin ids + blocked member_ids (not full member documents).
+    /// This is the last-admin invariant. It MUST be a single SurrealQL
+    /// statement so the count is a consistent snapshot — a prior two-query
+    /// version (admins, then blocked ids, subtracted in a Rust HashSet) had a
+    /// TOCTOU window where a concurrent ban/lift landing between the
+    /// round-trips produced a torn over- or under-count (DR1-ACCT-002).
+    ///
+    /// Correctness note on the `NOT IN` subquery: `member.id` is a RecordId
+    /// (`member:<key>`) while `moderation_action.member_id` is stored as the
+    /// **bare string key** (see `create_moderation_action`). Comparing the
+    /// RecordId directly against those strings never matches (RecordId !=
+    /// String), which would silently count suspended/banned admins as
+    /// actionable (over-count → could permit removing the last admin). We
+    /// normalise the id with `meta::id(id)` — the same v3 accessor used in
+    /// `roster.rs` — so both sides are bare strings. An empty subquery makes
+    /// `NOT IN ()` true for every admin (no exclusions), and `GROUP ALL`
+    /// yields a single count row (0 when no admins match).
     pub async fn count_actionable_admins(&self) -> DbResult<u64> {
         with_timeout(async {
             #[derive(Deserialize, SurrealValue)]
-            struct IdOnly {
-                id: Option<RecordId>,
+            struct CountResult {
+                count: u64,
             }
-            let mut admins_result = self
-                .client
-                .query("SELECT id FROM member WHERE is_active = true AND org_role = 'admin'")
-                .await?;
-            let admins: Vec<IdOnly> = admins_result.take(0)?;
-            if admins.is_empty() {
-                return Ok(0);
-            }
-
-            #[derive(Deserialize, SurrealValue)]
-            struct BlockedMid {
-                member_id: String,
-            }
-            let mut blocked_result = self
+            let mut result = self
                 .client
                 .query(
-                    "SELECT member_id FROM moderation_action WHERE is_active = true \
-                     AND action_type IN ['suspension', 'ban'] \
-                     AND (expires_at IS NONE OR expires_at > time::now())",
+                    "SELECT count() FROM member \
+                     WHERE is_active = true AND org_role = 'admin' \
+                     AND meta::id(id) NOT IN ( \
+                         SELECT VALUE member_id FROM moderation_action \
+                         WHERE is_active = true \
+                         AND action_type IN ['suspension', 'ban'] \
+                         AND (expires_at IS NONE OR expires_at > time::now()) \
+                     ) \
+                     GROUP ALL",
                 )
                 .await?;
-            let blocked: Vec<BlockedMid> = blocked_result.take(0)?;
-            let blocked_ids: std::collections::HashSet<String> =
-                blocked.into_iter().map(|b| b.member_id).collect();
-
-            let count = admins
-                .into_iter()
-                .filter_map(|a| a.id.map(|r| crate::record_id_key_to_string(r.key)))
-                .filter(|id| !blocked_ids.contains(id))
-                .count() as u64;
-            Ok(count)
+            let counts: Vec<CountResult> = result.take(0)?;
+            Ok(counts.first().map(|c| c.count).unwrap_or(0))
         })
         .await
     }
@@ -627,6 +703,7 @@ impl Database {
 mod tests {
     use super::*;
     use crate::migrations::run_migrations;
+    use crate::ModerationActionType;
     use scuffed_auth::crypto::CryptoService;
     use std::sync::Arc;
 
@@ -671,5 +748,157 @@ mod tests {
         // Full get still has the secret for signing.
         let full = db.get_member(&m.id).await.unwrap().unwrap();
         assert!(full.nostr_secret_key_encrypted.is_some());
+    }
+
+    // ── DR1-ACCT-002: atomic actionable-admin count ────────────────────────
+
+    #[tokio::test]
+    async fn count_actionable_admins_atomic_matches_expected() {
+        let db = test_db_with_crypto().await;
+        let a1 = db
+            .create_member("u-a1", "Admin1", OrgRole::Admin)
+            .await
+            .unwrap();
+        let a2 = db
+            .create_member("u-a2", "Admin2", OrgRole::Admin)
+            .await
+            .unwrap();
+        // A non-admin member must never be counted.
+        db.create_member("u-m1", "Member1", OrgRole::Member)
+            .await
+            .unwrap();
+
+        assert_eq!(db.count_actionable_admins().await.unwrap(), 2);
+        assert_eq!(db.count_active_admins().await.unwrap(), 2);
+
+        // Ban admin1 → excluded via the meta::id(id) NOT IN subquery.
+        // (If the RecordId-vs-string match were wrong this would stay 2.)
+        let ban = db
+            .create_moderation_action(&a1.id, ModerationActionType::Ban, "x", &a2.id, None)
+            .await
+            .unwrap();
+        assert_eq!(db.count_actionable_admins().await.unwrap(), 1);
+        // count_active_admins ignores moderation entirely → still 2.
+        assert_eq!(db.count_active_admins().await.unwrap(), 2);
+
+        // Suspend admin2 → zero actionable (the lockout precondition).
+        db.create_moderation_action(&a2.id, ModerationActionType::Suspension, "x", &a1.id, None)
+            .await
+            .unwrap();
+        assert_eq!(db.count_actionable_admins().await.unwrap(), 0);
+
+        // Lifting admin1's ban (is_active=false) restores them to actionable.
+        db.lift_moderation_action(&ban.id).await.unwrap();
+        assert_eq!(db.count_actionable_admins().await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn count_actionable_admins_ignores_expired_suspension() {
+        let db = test_db_with_crypto().await;
+        let a1 = db
+            .create_member("u-a1", "Admin1", OrgRole::Admin)
+            .await
+            .unwrap();
+        // An already-expired suspension must not block (matches old behaviour).
+        db.create_moderation_action(
+            &a1.id,
+            ModerationActionType::Suspension,
+            "x",
+            &a1.id,
+            Some(Utc::now() - chrono::Duration::days(1)),
+        )
+        .await
+        .unwrap();
+        assert_eq!(db.count_actionable_admins().await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn count_actionable_admins_zero_when_no_admins() {
+        let db = test_db_with_crypto().await;
+        db.create_member("u-m1", "Member1", OrgRole::Member)
+            .await
+            .unwrap();
+        assert_eq!(db.count_actionable_admins().await.unwrap(), 0);
+    }
+
+    // ── DR1-ACCT-003: monotonic first-boot bootstrap signal ────────────────
+
+    #[tokio::test]
+    async fn has_any_member_tracks_first_boot() {
+        let db = test_db_with_crypto().await;
+        assert!(
+            !db.has_any_member().await.unwrap(),
+            "empty instance: setup must be allowed"
+        );
+        let admin = db
+            .create_member("u-a1", "Admin1", OrgRole::Admin)
+            .await
+            .unwrap();
+        assert!(
+            db.has_any_member().await.unwrap(),
+            "after first member: setup must be closed"
+        );
+
+        // Suspending the only admin drops actionable-admin count to zero (the
+        // transient lockout state) but MUST NOT reopen the bootstrap signal.
+        db.create_moderation_action(
+            &admin.id,
+            ModerationActionType::Suspension,
+            "lockout",
+            &admin.id,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            db.count_actionable_admins().await.unwrap(),
+            0,
+            "transient zero-actionable-admin reached"
+        );
+        assert!(
+            db.has_any_member().await.unwrap(),
+            "bootstrap signal must stay closed while members exist"
+        );
+    }
+
+    // ── DR1-ACCT-004: role-change compare-and-swap ─────────────────────────
+
+    #[tokio::test]
+    async fn change_member_role_cas_rejects_stale_and_succeeds_fresh() {
+        let db = test_db_with_crypto().await;
+        let m = db.create_member("u-x", "X", OrgRole::Member).await.unwrap();
+        assert_eq!(m.org_role, OrgRole::Member);
+
+        // Fresh expected → succeeds and applies the new role.
+        let updated = db
+            .change_member_role_cas(&m.id, OrgRole::Member, OrgRole::Officer)
+            .await
+            .unwrap();
+        assert_eq!(updated.org_role, OrgRole::Officer);
+
+        // Stale expected (role already changed under us) → Conflict (409).
+        let err = db
+            .change_member_role_cas(&m.id, OrgRole::Member, OrgRole::Admin)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, crate::DbError::Conflict(_)),
+            "stale expected must be a Conflict, got {err:?}"
+        );
+        // Role unchanged by the rejected CAS.
+        assert_eq!(
+            db.get_member(&m.id).await.unwrap().unwrap().org_role,
+            OrgRole::Officer
+        );
+
+        // Missing member → NotFound (distinct from Conflict).
+        let missing = db
+            .change_member_role_cas("does-not-exist", OrgRole::Member, OrgRole::Admin)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(missing, crate::DbError::NotFound(_)),
+            "missing member must be NotFound, got {missing:?}"
+        );
     }
 }
