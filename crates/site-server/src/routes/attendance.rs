@@ -7,9 +7,12 @@ use chrono::{DateTime, Utc};
 use serde::Deserialize;
 
 use scuffed_auth::server::session::ErrorResponse;
-use scuffed_db::{AttendanceStats, AttendanceStatus, EventAttendance};
+use scuffed_db::{
+    AttendanceStats, AttendanceStatus, AuditAction, AuditTargetType, EventAttendance,
+};
 
 use crate::extractors::{OfficerUser, OrgMember};
+use crate::routes::audit_log::audit;
 use crate::state::AppState;
 
 #[derive(Deserialize)]
@@ -54,6 +57,17 @@ pub async fn batch_mark_attendance(
             })?;
         results.push(record);
     }
+
+    let detail = format!("Marked attendance for {} member(s)", results.len());
+    audit(
+        &state.db,
+        &officer.member.id,
+        AuditAction::MarkedAttendance,
+        AuditTargetType::Event,
+        &event_id,
+        Some(detail.as_str()),
+    )
+    .await;
 
     Ok(Json(results))
 }

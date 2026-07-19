@@ -673,6 +673,19 @@ pub enum AuditAction {
     RevokedDaemonToken,
     SentDirectMessage,
     SyncedDirectMessages,
+    UploadedAvatar,
+    UploadedImage,
+    CreatedSeason,
+    CreatedForumCategory,
+    UpdatedForumCategory,
+    CreatedForumBoard,
+    UpdatedForumBoard,
+    MarkedAttendance,
+    TestedDiscordWebhook,
+    NostrKeyLinked,
+    NostrKeyExported,
+    NostrKeyImported,
+    NostrKeyUnlinked,
 }
 
 impl std::fmt::Display for AuditAction {
@@ -711,6 +724,11 @@ pub enum AuditTargetType {
     PersonalStats,
     DaemonToken,
     DirectMessage,
+    Season,
+    ForumCategory,
+    ForumBoard,
+    Upload,
+    Integration,
 }
 
 impl std::fmt::Display for AuditTargetType {
