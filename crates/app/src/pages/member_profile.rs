@@ -32,13 +32,29 @@ struct GameAccount {
     role: Option<String>,
 }
 
+// Mirrors the backend `HeroAgg` returned by
+// `GET /api/public/members/{id}/heroes` (public, no auth). `winrate` is a
+// ready-made 0.0–1.0 ratio; `avg_elims`/`avg_deaths` are unused in this view
+// but kept so the shape matches the endpoint exactly.
 #[derive(Debug, Clone, Deserialize)]
-struct HeroStats {
+struct HeroAgg {
     hero: String,
-    matches: u32,
+    #[serde(default)]
+    games: u32,
+    #[serde(default)]
     wins: u32,
+    #[serde(default)]
     losses: u32,
+    #[serde(default)]
     draws: u32,
+    #[serde(default)]
+    winrate: f32,
+    #[serde(default)]
+    #[allow(dead_code)]
+    avg_elims: f64,
+    #[serde(default)]
+    #[allow(dead_code)]
+    avg_deaths: f64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -235,6 +251,20 @@ const PAGE_CSS: &str = r#"
         color: var(--text-3);
         margin-top: 0.25rem;
     }
+    .profile-show-all {
+        margin-top: 0.75rem;
+        background: none;
+        border: none;
+        padding: 0;
+        cursor: pointer;
+        color: var(--accent);
+        font-size: 0.85rem;
+        font-weight: 600;
+        font-family: inherit;
+    }
+    .profile-show-all:hover {
+        text-decoration: underline;
+    }
     @media (max-width: 600px) {
         .profile-header {
             flex-direction: column;
@@ -259,8 +289,9 @@ pub fn MemberProfile(id: String) -> Element {
         }
     });
 
-    // Hero showcase is member-gated until #6 ships a public endpoint: anon
-    // (or any failure) collapses to empty and the section stays hidden.
+    // Hero showcase uses the public all-heroes endpoint (`?top=0` => every
+    // hero, sorted below at render time). Works for anonymous visitors; any
+    // failure collapses to empty and the section stays hidden.
     let hero_id = id.clone();
     let heroes = use_resource(move || {
         let id = hero_id.clone();
@@ -269,11 +300,13 @@ pub fn MemberProfile(id: String) -> Element {
                 return Vec::new();
             }
             ApiClient::web()
-                .fetch::<Vec<HeroStats>>(&format!("/api/stats/member/{id}/heroes"))
+                .fetch::<Vec<HeroAgg>>(&format!("/api/public/members/{id}/heroes?top=0"))
                 .await
                 .unwrap_or_default()
         }
     });
+    // Collapse a large hero pool to the top 6 until the visitor expands it.
+    let mut show_all_heroes = use_signal(|| false);
 
     rsx! {
         style { {PAGE_CSS} }
@@ -382,14 +415,33 @@ pub fn MemberProfile(id: String) -> Element {
                             }
 
                             {
-                                let hero_list = heroes.read().clone().unwrap_or_default();
+                                let mut hero_list = heroes.read().clone().unwrap_or_default();
+                                hero_list.sort_by(|a, b| {
+                                    b.games
+                                        .cmp(&a.games)
+                                        .then_with(|| {
+                                            b.winrate
+                                                .partial_cmp(&a.winrate)
+                                                .unwrap_or(std::cmp::Ordering::Equal)
+                                        })
+                                });
+                                let total = hero_list.len();
+                                let expanded = show_all_heroes();
+                                let visible = if !expanded && total > 6 { 6 } else { total };
                                 rsx! {
                                     if !hero_list.is_empty() {
                                         div { class: "profile-section",
-                                            h2 { "Top Heroes" }
+                                            h2 { "Heroes" }
                                             div { class: "profile-heroes",
-                                                for h in hero_list.iter().take(3) {
+                                                for h in hero_list.iter().take(visible) {
                                                     {render_hero_card(h)}
+                                                }
+                                            }
+                                            if total > 6 && !expanded {
+                                                button {
+                                                    class: "profile-show-all",
+                                                    onclick: move |_| show_all_heroes.set(true),
+                                                    "Show all {total} heroes"
                                                 }
                                             }
                                         }
@@ -439,9 +491,9 @@ fn render_account_card(a: &GameAccount) -> Element {
     }
 }
 
-fn render_hero_card(h: &HeroStats) -> Element {
-    let winrate = if h.matches > 0 {
-        format!("{:.0}%", (h.wins as f64 / h.matches as f64) * 100.0)
+fn render_hero_card(h: &HeroAgg) -> Element {
+    let winrate = if h.games > 0 {
+        format!("{:.0}%", h.winrate * 100.0)
     } else {
         "—".to_string()
     };
@@ -449,7 +501,7 @@ fn render_hero_card(h: &HeroStats) -> Element {
         Card {
             div { class: "profile-hero-name", "{h.hero}" }
             div { class: "profile-hero-meta",
-                "{h.matches} games · {winrate} WR · {h.wins}-{h.losses}-{h.draws}"
+                "{h.games} games · {winrate} WR · {h.wins}-{h.losses}-{h.draws}"
             }
         }
     }
