@@ -123,6 +123,10 @@ pub async fn create_wiki_page(
 pub struct UpdateWikiPageRequest {
     pub content_markdown: String,
     pub revision_note: Option<String>,
+    /// Optimistic-concurrency base version: the `updated_at` the editor last saw.
+    /// When present the update is a compare-and-swap; a stale base yields 409.
+    #[serde(default)]
+    pub prev_updated_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// PUT /api/wiki/:topic — update wiki page, creates revision (member auth)
@@ -139,11 +143,13 @@ pub async fn update_wiki_page(
             &body.content_markdown,
             &member.member.id,
             body.revision_note.as_deref(),
+            body.prev_updated_at,
         )
         .await
         .map_err(|e| {
             let status = match &e {
                 scuffed_db::DbError::NotFound(_) => StatusCode::NOT_FOUND,
+                scuffed_db::DbError::Conflict(_) => StatusCode::CONFLICT,
                 _ => StatusCode::INTERNAL_SERVER_ERROR,
             };
             (

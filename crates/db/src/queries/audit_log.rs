@@ -96,3 +96,100 @@ impl Database {
         .await
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::migrations::run_migrations;
+    use crate::types::{AuditAction, AuditTargetType};
+    use crate::Database;
+
+    async fn test_db() -> Database {
+        let db = Database::connect_memory().await.unwrap();
+        run_migrations(&db.client).await.unwrap();
+        db
+    }
+
+    async fn seed_one(db: &Database) {
+        db.insert_audit_log(
+            "actor-1",
+            AuditAction::CreatedWikiPage,
+            AuditTargetType::WikiPage,
+            "target-1",
+            Some("original"),
+        )
+        .await
+        .expect("insert_audit_log (CREATE) must succeed");
+    }
+
+    /// Append (CREATE) and read (SELECT) paths keep working after the
+    /// append-only migration (DR1-DB-007).
+    #[tokio::test]
+    async fn create_and_list_still_work() {
+        let db = test_db().await;
+        seed_one(&db).await;
+
+        assert_eq!(db.count_audit_log().await.unwrap(), 1);
+        let entries = db.list_audit_log(10, 0).await.unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].actor_id, "actor-1");
+        assert_eq!(entries[0].details.as_deref(), Some("original"));
+    }
+
+    /// UPDATE on audit_log is rejected by the append-only event — even for the
+    /// owner-level in-mem connection (the event fires for every writer, which is
+    /// how it binds the EDITOR app user in prod that table permissions cannot).
+    /// The row content is left intact.
+    #[tokio::test]
+    async fn update_is_rejected_and_row_unchanged() {
+        let db = test_db().await;
+        seed_one(&db).await;
+
+        let res = db
+            .client
+            .query("UPDATE audit_log SET details = 'tampered'")
+            .await
+            .expect("query dispatches")
+            .check();
+        assert!(res.is_err(), "UPDATE on audit_log must be rejected");
+
+        // Transaction rolled back: original content survives.
+        let entries = db.list_audit_log(10, 0).await.unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].details.as_deref(), Some("original"));
+    }
+
+    /// DELETE on audit_log is rejected by the append-only event; the row remains.
+    #[tokio::test]
+    async fn delete_is_rejected_and_row_survives() {
+        let db = test_db().await;
+        seed_one(&db).await;
+
+        let res = db
+            .client
+            .query("DELETE audit_log")
+            .await
+            .expect("query dispatches")
+            .check();
+        assert!(res.is_err(), "DELETE on audit_log must be rejected");
+
+        assert_eq!(
+            db.count_audit_log().await.unwrap(),
+            1,
+            "row must survive a blocked DELETE"
+        );
+    }
+
+    /// Re-running migrations (prod boots them every start via OVERWRITE) must not
+    /// drop existing audit rows — confirms DEFINE TABLE OVERWRITE preserves data.
+    #[tokio::test]
+    async fn rerun_migrations_preserves_rows() {
+        let db = test_db().await;
+        seed_one(&db).await;
+        run_migrations(&db.client).await.unwrap();
+        assert_eq!(
+            db.count_audit_log().await.unwrap(),
+            1,
+            "OVERWRITE migration must preserve existing rows"
+        );
+    }
+}

@@ -208,13 +208,36 @@ pub async fn run_migrations(client: &Surreal<Any>) -> DbResult<()> {
         -- ================================================
         -- Audit Log (immutable admin action history)
         -- ================================================
-        DEFINE TABLE IF NOT EXISTS audit_log SCHEMAFULL;
+        -- DR1-DB-007: enforce append-only at the SCHEMA level so a compromised
+        -- app credential cannot rewrite/erase history to cover its tracks.
+        -- Two complementary layers, because they bind different auth classes:
+        --   1. Table PERMISSIONS (select/create FULL, update/delete NONE) —
+        --      governs RECORD/access users. NOTE: SurrealDB *system* users
+        --      (root / the database-scoped EDITOR the app actually connects as)
+        --      BYPASS table permissions, so this layer alone does NOT stop the
+        --      app user; it documents intent and covers any future record user.
+        --   2. DEFINE EVENT ... THROW on UPDATE/DELETE — events run inside the
+        --      write transaction for EVERY writer regardless of role, so THROW
+        --      rolls the mutation back even for the EDITOR app user and root.
+        --      This is the layer that actually enforces immutability in prod.
+        -- CREATE + SELECT stay open: insert_audit_log / list_audit_log / count.
+        -- OVERWRITE (not IF NOT EXISTS) so existing deployments whose audit_log
+        -- predates this migration pick up the new permissions + event. OVERWRITE
+        -- redefines the table/event only; existing rows are preserved.
+        DEFINE TABLE OVERWRITE audit_log SCHEMAFULL
+            PERMISSIONS
+                FOR select, create FULL
+                FOR update, delete NONE;
         DEFINE FIELD OVERWRITE actor_id ON audit_log TYPE string;
         DEFINE FIELD OVERWRITE action ON audit_log TYPE string;
         DEFINE FIELD OVERWRITE target_type ON audit_log TYPE string;
         DEFINE FIELD OVERWRITE target_id ON audit_log TYPE string;
         DEFINE FIELD OVERWRITE details ON audit_log TYPE option<string>;
         DEFINE FIELD OVERWRITE created_at ON audit_log TYPE datetime DEFAULT time::now();
+
+        DEFINE EVENT OVERWRITE audit_log_append_only ON TABLE audit_log
+            WHEN $event = "UPDATE" OR $event = "DELETE"
+            THEN { THROW "audit_log is append-only (DR1-DB-007)"; };
 
         DEFINE INDEX IF NOT EXISTS audit_log_created_idx ON audit_log COLUMNS created_at;
         DEFINE INDEX IF NOT EXISTS audit_log_actor_idx ON audit_log COLUMNS actor_id;
