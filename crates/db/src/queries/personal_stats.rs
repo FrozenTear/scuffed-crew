@@ -300,9 +300,14 @@ impl Database {
     }
 
     /// Top heroes for a member, ranked by games then winrate.
+    ///
+    /// `limit == 0` returns **all** heroes (no truncation). Non-zero limits
+    /// take the first `limit` rows after ranking (hero-stats W2 B4).
     pub async fn top_heroes(&self, member_id: &str, limit: u32) -> DbResult<Vec<HeroStats>> {
         let mut all = self.get_hero_stats(member_id).await?;
-        all.truncate(limit as usize);
+        if limit > 0 {
+            all.truncate(limit as usize);
+        }
         Ok(all)
     }
 
@@ -311,13 +316,17 @@ impl Database {
     /// - `metric`: `"winrate"` | `"kd"` | `"games"`
     /// - optional `season_window` `(starts_at, ends_at)` filters via
     ///   `played_at >= starts AND played_at < ends` (bound params only)
+    /// - optional `hero`: when `Some`, adds `AND hero = $hero` (bound param;
+    ///   canonical `scuffed_types::HEROES` string — validate at the HTTP layer)
     /// - inactive / missing members are omitted (banned stay off public boards)
-    /// - winrate/kd require ≥ [`LEADERBOARD_MIN_GAMES`] matches
+    /// - winrate/kd require ≥ [`LEADERBOARD_MIN_GAMES`] matches (per-hero games
+    ///   when `hero` is set)
     pub async fn member_leaderboard(
         &self,
         metric: &str,
         limit: u32,
         season_window: Option<(DateTime<Utc>, DateTime<Utc>)>,
+        hero: Option<&str>,
     ) -> DbResult<Vec<MemberLeaderboardRow>> {
         with_timeout(async {
             #[derive(Deserialize, SurrealValue)]
@@ -334,6 +343,11 @@ impl Database {
             } else {
                 ""
             };
+            let hero_filter = if hero.is_some() {
+                " AND hero = $hero"
+            } else {
+                ""
+            };
             let sql = format!(
                 r#"
                     SELECT
@@ -343,7 +357,7 @@ impl Database {
                         math::sum(elims) AS elims,
                         math::sum(deaths) AS deaths
                     FROM personal_match
-                    WHERE outcome IN ['victory', 'defeat', 'draw']{season_filter}
+                    WHERE outcome IN ['victory', 'defeat', 'draw']{season_filter}{hero_filter}
                     GROUP BY member_id
                     "#
             );
@@ -353,6 +367,9 @@ impl Database {
                 q = q
                     .bind(("season_start", SurrealDatetime::from(start)))
                     .bind(("season_end", SurrealDatetime::from(end)));
+            }
+            if let Some(hero_name) = hero {
+                q = q.bind(("hero", hero_name.to_owned()));
             }
             let mut result = q.await?;
             let rows: Vec<AggRow> = result.take(0)?;
