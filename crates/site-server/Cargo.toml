@@ -10,6 +10,7 @@ scuffed-db = { path = "../db" }
 scuffed-types = { path = "../types" }
 axum = { version = "0.8", features = ["multipart"] }
 uuid = { version = "1", features = ["v4"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp"] }
 axum-extra = { version = "0.10", features = ["cookie"] }
 tower-http = { version = "0.6", features = ["fs", "cors", "trace"] }
 tower = "0.5"
