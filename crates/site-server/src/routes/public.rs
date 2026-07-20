@@ -14,8 +14,8 @@ use scuffed_db::{
 };
 use scuffed_types::api::{CursorResponse, PaginationParams};
 use scuffed_types::{
-    HEROES, MatchResult as TypesMatchResult, MatchType as TypesMatchType, PublicMatch,
-    RecentResult, UpcomingMatch,
+    MatchResult as TypesMatchResult, MatchType as TypesMatchType, PublicMatch, RecentResult,
+    UpcomingMatch, resolve_hero_query,
 };
 
 use crate::state::AppState;
@@ -306,26 +306,16 @@ pub struct PublicMembersQuery {
 
 /// Resolve query `hero=` to a canonical HEROES display name (same contract as W3 B2).
 fn resolve_members_hero(raw: Option<&str>) -> Result<Option<&'static str>, ()> {
-    let Some(raw) = raw else {
-        return Ok(None);
-    };
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return Ok(None);
-    }
-    let lower = trimmed.to_lowercase();
-    for &hero in HEROES {
-        if hero.to_lowercase() == lower {
-            return Ok(Some(hero));
-        }
-    }
-    Err(())
+    resolve_hero_query(raw)
 }
 
 /// GET /api/public/members — public member list (cursor-paginated).
 ///
 /// Optional `?hero=<name>` (hero-stats W3 B3): attaches `hero_scoped{games,winrate}`
 /// for members who have played that hero. Unknown hero → 400.
+///
+/// HS-DR P1: hero attach is **page-scoped** (`hero_scoped_for_members` over the
+/// current page's ids only) — not a full-table `member_leaderboard(500)`.
 pub async fn public_members(
     State(state): State<AppState>,
     Query(q): Query<PublicMembersQuery>,
@@ -360,12 +350,11 @@ pub async fn public_members(
             )
         })?;
 
-    // When filtering by hero, pull per-member games/winrate via the existing
-    // leaderboard aggregate (bound `AND hero = $hero`) rather than N+1 get_hero_stats.
     let scoped: HashMap<String, HeroScoped> = if let Some(hero_name) = hero {
+        let ids: Vec<String> = members.iter().map(|m| m.id.clone()).collect();
         let rows = state
             .db
-            .member_leaderboard("games", 500, None, Some(hero_name))
+            .hero_scoped_for_members(&ids, hero_name)
             .await
             .map_err(|_e| {
                 (

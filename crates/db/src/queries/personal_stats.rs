@@ -3,7 +3,9 @@ use serde::{Deserialize, Serialize};
 use surrealdb::types::Datetime as SurrealDatetime;
 use surrealdb_types::{RecordId, SurrealValue};
 
-use crate::types::{HeroStats, MapStats, MemberLeaderboardRow, PersonalMatch, PersonalStats};
+use crate::types::{
+    HeroStats, MapStats, MemberHeroScopedAgg, MemberLeaderboardRow, PersonalMatch, PersonalStats,
+};
 use crate::{with_timeout, Database, DbResult};
 
 /// Minimum games required for rate metrics (winrate / kd) on public boards.
@@ -374,6 +376,25 @@ impl Database {
             let mut result = q.await?;
             let rows: Vec<AggRow> = result.take(0)?;
 
+            // One active-member map instead of get_member_safe N+1 (HS-DR P1).
+            #[derive(Deserialize, SurrealValue)]
+            struct ActiveName {
+                id: Option<RecordId>,
+                display_name: String,
+            }
+            let mut active_q = self
+                .client
+                .query("SELECT id, display_name FROM member WHERE is_active = true")
+                .await?;
+            let active_rows: Vec<ActiveName> = active_q.take(0)?;
+            let active: std::collections::HashMap<String, String> = active_rows
+                .into_iter()
+                .filter_map(|r| {
+                    let id = r.id.map(|rid| crate::record_id_key_to_string(rid.key))?;
+                    Some((id, r.display_name))
+                })
+                .collect();
+
             let rate_metric = matches!(metric, "winrate" | "kd");
             let mut out = Vec::with_capacity(rows.len());
             for row in rows {
@@ -383,21 +404,20 @@ impl Database {
                 if rate_metric && row.games < LEADERBOARD_MIN_GAMES {
                     continue;
                 }
-                // Skip missing or inactive members (ban/deactivate = off public LB).
-                let Some(member) = self
-                    .get_member_safe(&row.member_id)
-                    .await
-                    .ok()
-                    .flatten()
-                    .filter(|m| m.is_active)
-                else {
+                // Normalize member_id in case the aggregate returns table-prefixed keys.
+                let mid = row
+                    .member_id
+                    .strip_prefix("member:")
+                    .unwrap_or(&row.member_id)
+                    .to_string();
+                let Some(display_name) = active.get(&mid).cloned() else {
                     continue;
                 };
                 let winrate = row.wins as f32 / row.games as f32;
                 let kd = row.elims as f64 / (row.deaths.max(1) as f64);
                 out.push(MemberLeaderboardRow {
-                    member_id: row.member_id,
-                    display_name: member.display_name,
+                    member_id: mid,
+                    display_name,
                     games: row.games,
                     winrate,
                     kd,
@@ -426,6 +446,65 @@ impl Database {
             }
             out.truncate(limit as usize);
             Ok(out)
+        })
+        .await
+    }
+
+    /// Page-scoped per-hero aggregates for a known set of member ids (HS-DR P1).
+    ///
+    /// Single `GROUP BY` over `personal_match` filtered to `member_id IN $ids`
+    /// and `hero = $hero` — no full-table leaderboard and no per-row member fetch.
+    pub async fn hero_scoped_for_members(
+        &self,
+        member_ids: &[String],
+        hero: &str,
+    ) -> DbResult<Vec<MemberHeroScopedAgg>> {
+        if member_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        with_timeout(async {
+            #[derive(Deserialize, SurrealValue)]
+            struct AggRow {
+                member_id: String,
+                games: u32,
+                wins: u32,
+            }
+
+            let mut result = self
+                .client
+                .query(
+                    r#"
+                    SELECT
+                        member_id,
+                        count() AS games,
+                        math::sum(IF outcome = 'victory' THEN 1 ELSE 0 END) AS wins
+                    FROM personal_match
+                    WHERE member_id IN $ids
+                      AND hero = $hero
+                      AND outcome IN ['victory', 'defeat', 'draw']
+                    GROUP BY member_id
+                    "#,
+                )
+                .bind(("ids", member_ids.to_vec()))
+                .bind(("hero", hero.to_owned()))
+                .await?;
+            let rows: Vec<AggRow> = result.take(0)?;
+            Ok(rows
+                .into_iter()
+                .filter(|r| r.games > 0)
+                .map(|r| {
+                    let mid = r
+                        .member_id
+                        .strip_prefix("member:")
+                        .unwrap_or(&r.member_id)
+                        .to_string();
+                    MemberHeroScopedAgg {
+                        member_id: mid,
+                        games: r.games,
+                        winrate: r.wins as f32 / r.games as f32,
+                    }
+                })
+                .collect())
         })
         .await
     }

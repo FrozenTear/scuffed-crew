@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use scuffed_auth::server::session::ErrorResponse;
 use scuffed_db::{AuditAction, AuditTargetType, HeroStats, MemberLeaderboardRow, Season};
-use scuffed_types::{HEROES, HeroAgg, MemberLeaderboardRow as TypesMemberRow};
+use scuffed_types::{HeroAgg, MemberLeaderboardRow as TypesMemberRow, resolve_hero_query};
 
 use crate::extractors::AdminUser;
 use crate::routes::audit_log::audit;
@@ -117,22 +117,9 @@ fn default_limit() -> u32 {
 }
 
 /// Resolve query `hero=` to a canonical HEROES display name.
-/// Empty / whitespace-only → no filter. Unknown name → None (caller returns 400).
+/// Empty / whitespace-only → no filter. Unknown name → Err (caller returns 400).
 fn resolve_leaderboard_hero(raw: Option<&str>) -> Result<Option<&'static str>, ()> {
-    let Some(raw) = raw else {
-        return Ok(None);
-    };
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return Ok(None);
-    }
-    let lower = trimmed.to_lowercase();
-    for &hero in HEROES {
-        if hero.to_lowercase() == lower {
-            return Ok(Some(hero));
-        }
-    }
-    Err(())
+    resolve_hero_query(raw)
 }
 
 /// GET /api/public/leaderboards?metric=winrate|kd|games&limit=25&season=<id>&hero=<name>
