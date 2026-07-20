@@ -677,4 +677,99 @@ mod tests {
             "another member's upload must not touch m1's row"
         );
     }
+
+    /// W2 B1 owed test (plan mandate): hero filter narrows leaderboard rows;
+    /// per-hero games drive LEADERBOARD_MIN_GAMES for rate metrics.
+    #[tokio::test]
+    async fn member_leaderboard_hero_filter_narrows_and_min_games_is_per_hero() {
+        use crate::types::OrgRole;
+
+        let db = test_db().await;
+        let member = db
+            .create_member("u-lb1", "HeroFilter", OrgRole::Member)
+            .await
+            .unwrap();
+        let mid = member.id.as_str();
+
+        // 6 Genji wins (≥ min_games) + 3 Ana wins (< min_games for rate metrics).
+        let mut batch = Vec::new();
+        for i in 0..6u32 {
+            let mut m = entry(&format!("g{i}"), "victory", 10 + i);
+            m.member_id = mid.into();
+            m.hero = "Genji".into();
+            m.played_at = Utc.with_ymd_and_hms(2026, 7, 1, 12, i, 0).unwrap();
+            batch.push(m);
+        }
+        for i in 0..3u32 {
+            let mut m = entry(&format!("a{i}"), "victory", 5 + i);
+            m.member_id = mid.into();
+            m.hero = "Ana".into();
+            m.played_at = Utc.with_ymd_and_hms(2026, 7, 2, 12, i, 0).unwrap();
+            batch.push(m);
+        }
+        db.upsert_personal_matches(mid, &batch).await.unwrap();
+
+        // All-heroes board (metric=games): 9 total.
+        let all = db
+            .member_leaderboard("games", 25, None, None)
+            .await
+            .unwrap();
+        let row = all.iter().find(|r| r.member_id == mid).expect("on board");
+        assert_eq!(row.games, 9);
+
+        // Hero=Genji narrows to 6.
+        let genji = db
+            .member_leaderboard("games", 25, None, Some("Genji"))
+            .await
+            .unwrap();
+        let g = genji
+            .iter()
+            .find(|r| r.member_id == mid)
+            .expect("genji board");
+        assert_eq!(g.games, 6, "hero filter must narrow games");
+
+        // Hero=Ana narrows to 3.
+        let ana = db
+            .member_leaderboard("games", 25, None, Some("Ana"))
+            .await
+            .unwrap();
+        let a = ana.iter().find(|r| r.member_id == mid).expect("ana board");
+        assert_eq!(a.games, 3);
+
+        // Unknown hero → empty (no rows for this member).
+        let none = db
+            .member_leaderboard("games", 25, None, Some("NotAHero"))
+            .await
+            .unwrap();
+        assert!(
+            none.iter().all(|r| r.member_id != mid),
+            "unknown hero must not surface the member"
+        );
+
+        // winrate: Genji (6≥5) included; Ana-only (3<5) dropped from rate board.
+        let wr_genji = db
+            .member_leaderboard("winrate", 25, None, Some("Genji"))
+            .await
+            .unwrap();
+        assert!(
+            wr_genji.iter().any(|r| r.member_id == mid),
+            "per-hero min_games: Genji 6 should pass"
+        );
+        let wr_ana = db
+            .member_leaderboard("winrate", 25, None, Some("Ana"))
+            .await
+            .unwrap();
+        assert!(
+            wr_ana.iter().all(|r| r.member_id != mid),
+            "per-hero min_games: Ana 3 should fail rate metric gate"
+        );
+
+        // B4: top=0 returns all heroes (Genji + Ana).
+        let tops = db.top_heroes(mid, 0).await.unwrap();
+        assert!(tops.len() >= 2, "top_heroes(0) must not truncate");
+        let names: Vec<_> = tops.iter().map(|h| h.hero.as_str()).collect();
+        assert!(names.contains(&"Genji") && names.contains(&"Ana"));
+        let tops3 = db.top_heroes(mid, 1).await.unwrap();
+        assert_eq!(tops3.len(), 1, "non-zero limit still truncates");
+    }
 }
