@@ -279,7 +279,7 @@ fn acquire_pid_guard(data_dir: &std::path::Path) -> anyhow::Result<PidGuard> {
     let pid_path = data_dir.join("daemon.pid");
     if let Ok(existing_pid) = std::fs::read_to_string(&pid_path) {
         if let Ok(pid) = existing_pid.trim().parse::<u32>()
-            && std::fs::metadata(format!("/proc/{pid}")).is_ok()
+            && pid_is_live_tracker(pid)
         {
             tracing::error!(pid, "another daemon is already running — stop it first");
             anyhow::bail!("another daemon is already running (PID {pid})");
@@ -288,6 +288,26 @@ fn acquire_pid_guard(data_dir: &std::path::Path) -> anyhow::Result<PidGuard> {
     }
     std::fs::write(&pid_path, std::process::id().to_string())?;
     Ok(PidGuard(pid_path))
+}
+
+/// True only if `pid` is alive AND is actually a scuffed-stat-tracker process.
+///
+/// A bare `/proc/{pid}` existence check false-positives on **PID reuse**: after
+/// a daemon dies without cleaning up `daemon.pid`, the kernel can hand that PID
+/// to an unrelated program, and the stale lock would then block every restart
+/// forever behind systemd `Restart=on-failure` — the exact deadlock that ate a
+/// full night of captures. Matching `/proc/{pid}/comm` (world-readable, so no
+/// permission trap) against our binary name rejects the reused-PID case; a
+/// missing entry means the process is dead.
+fn pid_is_live_tracker(pid: u32) -> bool {
+    if pid == std::process::id() {
+        return false; // never deadlock on our own recycled pid
+    }
+    match std::fs::read_to_string(format!("/proc/{pid}/comm")) {
+        // `comm` is truncated to 15 bytes (TASK_COMM_LEN-1): "scuffed-stat-tr".
+        Ok(comm) => comm.trim().starts_with("scuffed-stat"),
+        Err(_) => false, // no /proc entry → dead
+    }
 }
 
 /// `--vacuum` maintenance mode: compact the store and report before/after
@@ -2052,6 +2072,15 @@ async fn try_sync(
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    #[test]
+    fn pid_guard_never_blocks_on_self_or_dead_pid() {
+        // Our own pid must never count as "another daemon" (PID reuse of a
+        // recycled self-pid would otherwise deadlock startup).
+        assert!(!pid_is_live_tracker(std::process::id()));
+        // A pid with no /proc entry is dead → does not block.
+        assert!(!pid_is_live_tracker(u32::MAX));
+    }
 
     // Tests construct `now` in the future so subtracting ages can't underflow
     // the monotonic clock on a freshly-booted machine.

@@ -2,6 +2,12 @@
 Description=Scuffed Stat Tracker — OW2 personal stats capture daemon
 After=graphical-session.target
 PartOf=graphical-session.target
+# A daemon that fails to start on every attempt (e.g. a broken config or a
+# genuinely-stuck lock) must land in `failed` and stay visible — NOT loop on
+# Restart=on-failure forever. Give up after 5 failures inside 5 minutes so the
+# GUI/journal show a clear stopped state instead of a silent 300+ restart churn.
+StartLimitIntervalSec=300
+StartLimitBurst=5
 
 [Service]
 Type=simple
