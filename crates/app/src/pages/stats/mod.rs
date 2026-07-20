@@ -138,10 +138,9 @@ fn initial_density() -> &'static str {
         if let Some(win) = web_sys::window()
             && let Ok(Some(storage)) = win.local_storage()
             && let Ok(Some(v)) = storage.get_item("stats-ui-density")
+            && v == "comfortable"
         {
-            if v == "comfortable" {
-                return "comfortable";
-            }
+            return "comfortable";
         }
     }
     "compact"
