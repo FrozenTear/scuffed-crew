@@ -1,6 +1,6 @@
 # DR-1 P0 Recon — Owned Target Lists
 
-Repo: /home/soot/github/scuffed-crew · Author: claude (P0 recon) · Date: 2026-07-19
+Repo: ~/github/scuffed-crew · Author: claude (P0 recon) · Date: 2026-07-19
 Partition is binding (grok A2). Priority core = AUTH/ACCT/ADMIN (exhaustive).
 FRONT/QUAL lighter. Priority tags: P1-first / P1-second / skip.
 
