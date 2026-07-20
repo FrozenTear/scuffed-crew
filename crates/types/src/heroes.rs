@@ -215,6 +215,10 @@ pub fn match_hero_in_text(text: &str) -> Option<String> {
 /// - anything else → `Err(())` (caller should 400)
 ///
 /// Shared by public leaderboards + public members list (HS-DR P4a).
+///
+/// `Err(())` is intentional: callers only need a boolean unknown-hero signal
+/// to map to HTTP 400 (same contract as the pre-hoist route-local helpers).
+#[allow(clippy::result_unit_err)]
 pub fn resolve_hero_query(raw: Option<&str>) -> Result<Option<&'static str>, ()> {
     let Some(raw) = raw else {
         return Ok(None);
