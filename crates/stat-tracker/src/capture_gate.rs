@@ -38,6 +38,23 @@
 //! of a genuinely-correct held value by the very misreads it exists to stop.
 //! Suspect reads likewise never corroborate an upward jump (C).
 //!
+//! ## Known residuals (documented, out of scope)
+//!
+//! * **F-CG2-1a** — the raw-continuity split vote anchors on `last_raw`, which
+//!   is only trustworthy once at least one capture followed the injection. If a
+//!   ≥120s capture gap lands on the very first capture AFTER a clean-slipping
+//!   inflated read (`last_raw` still = the inject), a later clean read drops
+//!   versus both anchors and can still split mid-game. Requires an idle Tab
+//!   immediately after an inject that also evaded the edge-ink flag — compound
+//!   odds are low. Revisit only if observed in the field.
+//! * **CG-1a (mode c, row-shift)** — a capture that reads a *different
+//!   player's row* produces clean cells (edge-ink cannot flag them: the glyphs
+//!   are well-centered, just the wrong player's). A sustained 3+-capture
+//!   wrong-row run can therefore drive an un-latch DOWN to the wrong player's
+//!   values, where the pre-un-latch gate merely locked high. The fix is row
+//!   identity (name-anchored row selection), tracked as the CG-1a follow-up —
+//!   not edge heuristics here.
+//!
 //! ## Fixtures
 //!
 //! Numeric replay tests below encode real `matches.jsonl` series. The pixel-level
