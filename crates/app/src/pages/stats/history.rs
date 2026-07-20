@@ -2,6 +2,7 @@ use dioxus::prelude::*;
 
 use crate::hooks::ApiResource;
 
+use super::overview::hero_to_role;
 use super::{MatchPage, format_date, load_error_state};
 
 fn outcome_class(outcome: &str) -> &'static str {
@@ -16,6 +17,8 @@ pub(super) fn history_tab(
     matches: ApiResource<MatchPage>,
     mut page_cursor: Signal<Option<String>>,
     mut cursor_history: Signal<Vec<Option<String>>>,
+    mut outcome_filter: Signal<&'static str>,
+    mut role_filter: Signal<&'static str>,
 ) -> Element {
     let err = matches.error.read().clone();
     let data = matches.data.read();
@@ -30,23 +33,83 @@ pub(super) fn history_tab(
             let has_next = page.next_cursor.is_some();
             let next_c = page.next_cursor.clone();
             let can_prev = cursor_history().len() > 1;
+            let of = outcome_filter();
+            let rf = role_filter();
+
+            let rows: Vec<_> = page
+                .data
+                .iter()
+                .filter(|m| {
+                    let o_ok = of == "all"
+                        || m.outcome.eq_ignore_ascii_case(of)
+                        || (of == "draw"
+                            && !m.outcome.eq_ignore_ascii_case("win")
+                            && !m.outcome.eq_ignore_ascii_case("loss"));
+                    let r_ok = rf == "all"
+                        || m.role.eq_ignore_ascii_case(rf)
+                        || hero_to_role(&m.hero).eq_ignore_ascii_case(rf);
+                    o_ok && r_ok
+                })
+                .collect();
+
             rsx! {
-                div { class: "match-cards",
-                    for m in page.data.iter() {
-                        {
-                            let oc = outcome_class(&m.outcome);
-                            let date = format_date(&m.played_at);
+                div { class: "stats-filters",
+                    div { class: "filter-group",
+                        span { class: "filter-label", "Outcome" }
+                        {[["all", "All"], ["win", "Win"], ["loss", "Loss"], ["draw", "Draw"]].iter().map(|&[k, label]| {
+                            let active = of == k;
                             rsx! {
-                                div { class: "match-card", key: "{m.id}",
-                                    div { class: "match-outcome {oc}", "{m.outcome}" }
-                                    div {
-                                        div { class: "match-hero", "{m.hero}" }
-                                        div { class: "match-map", "{m.map_name} · {m.role}" }
+                                button {
+                                    key: "{k}",
+                                    class: if active { "filter-chip active" } else { "filter-chip" },
+                                    onclick: move |_| outcome_filter.set(k),
+                                    "{label}"
+                                }
+                            }
+                        })}
+                    }
+                    div { class: "filter-group",
+                        span { class: "filter-label", "Role" }
+                        {[["all", "All"], ["Tank", "Tank"], ["Damage", "Damage"], ["Support", "Support"]].iter().map(|&[k, label]| {
+                            let active = rf.eq_ignore_ascii_case(k);
+                            rsx! {
+                                button {
+                                    key: "{k}",
+                                    class: if active { "filter-chip active" } else { "filter-chip" },
+                                    onclick: move |_| role_filter.set(k),
+                                    "{label}"
+                                }
+                            }
+                        })}
+                    }
+                    p { class: "filter-hint", "Filters apply to loaded rows (this page)." }
+                }
+
+                if rows.is_empty() {
+                    p { class: "empty-state", "No matches match these filters on this page." }
+                } else {
+                    div { class: "match-cards",
+                        for m in rows.iter() {
+                            {
+                                let oc = outcome_class(&m.outcome);
+                                let date = format_date(&m.played_at);
+                                let map_label = if m.map_name.trim().is_empty() {
+                                    "Unknown map".to_string()
+                                } else {
+                                    m.map_name.clone()
+                                };
+                                rsx! {
+                                    div { class: "match-card", key: "{m.id}",
+                                        div { class: "match-outcome {oc}", "{m.outcome}" }
+                                        div {
+                                            div { class: "match-hero", "{m.hero}" }
+                                            div { class: "match-map", "{map_label} · {m.role}" }
+                                        }
+                                        div { class: "match-scoreline",
+                                            "{m.elims}E / {m.deaths}D / {m.assists}A · {m.damage} dmg · {m.healing} heal"
+                                        }
+                                        div { class: "match-date", "{date}" }
                                     }
-                                    div { class: "match-scoreline",
-                                        "{m.elims}E / {m.deaths}D / {m.assists}A · {m.damage} dmg · {m.healing} heal"
-                                    }
-                                    div { class: "match-date", "{date}" }
                                 }
                             }
                         }
