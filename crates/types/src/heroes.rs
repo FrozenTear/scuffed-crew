@@ -208,9 +208,47 @@ pub fn match_hero_in_text(text: &str) -> Option<String> {
     find_hero(&lines)
 }
 
+/// Resolve an HTTP `?hero=` query value to a canonical [`HEROES`] display name.
+///
+/// - `None` / empty / whitespace → `Ok(None)` (no filter)
+/// - case-insensitive exact match against [`HEROES`] → `Ok(Some(canonical))`
+/// - anything else → `Err(())` (caller should 400)
+///
+/// Shared by public leaderboards + public members list (HS-DR P4a).
+pub fn resolve_hero_query(raw: Option<&str>) -> Result<Option<&'static str>, ()> {
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    let lower = trimmed.to_lowercase();
+    for &hero in HEROES {
+        if hero.to_lowercase() == lower {
+            return Ok(Some(hero));
+        }
+    }
+    Err(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resolve_hero_query_empty_and_case() {
+        assert_eq!(resolve_hero_query(None), Ok(None));
+        assert_eq!(resolve_hero_query(Some("")), Ok(None));
+        assert_eq!(resolve_hero_query(Some("  ")), Ok(None));
+        assert_eq!(resolve_hero_query(Some("ana")), Ok(Some("Ana")));
+        assert_eq!(
+            resolve_hero_query(Some("Wrecking Ball")),
+            Ok(Some("Wrecking Ball"))
+        );
+        assert_eq!(resolve_hero_query(Some("d.va")), Ok(Some("D.Va")));
+        assert!(resolve_hero_query(Some("NotAHero")).is_err());
+    }
 
     #[test]
     fn match_known_and_reject_map_false_positives() {

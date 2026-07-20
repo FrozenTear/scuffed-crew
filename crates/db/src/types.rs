@@ -585,6 +585,15 @@ pub struct MemberLeaderboardRow {
     pub kd: f64,
 }
 
+/// Per-hero aggregate for a single member (no display_name — page already has it).
+/// Used by public members `?hero=` attach (HS-DR P1) so we do not N+1 lookup.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemberHeroScopedAgg {
+    pub member_id: String,
+    pub games: u32,
+    pub winrate: f32,
+}
+
 /// Aggregated stats per map.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MapStats {
