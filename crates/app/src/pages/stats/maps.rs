@@ -42,7 +42,8 @@ pub(super) fn maps_tab(maps: ApiResource<Vec<MapStats>>) -> Element {
             p { class: "empty-state", "No map stats yet." }
         },
         Some(list) => {
-            let mut ranked: Vec<&MapStats> = list.iter().filter(|m| m.matches >= MIN_GAMES).collect();
+            let mut ranked: Vec<&MapStats> =
+                list.iter().filter(|m| m.matches >= MIN_GAMES).collect();
             ranked.sort_by(|a, b| {
                 let wa = winrate_pct(a.wins, a.matches);
                 let wb = winrate_pct(b.wins, b.matches);

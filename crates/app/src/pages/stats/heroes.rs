@@ -5,9 +5,7 @@ use crate::components::charts::{BarEntry, HBarChart};
 use crate::hooks::ApiResource;
 
 use super::overview::hero_to_role;
-use super::{
-    HeroStats, MIN_GAMES, MIN_GAMES_NOTE, load_error_state, winrate_pct, wr_text_class,
-};
+use super::{HeroStats, MIN_GAMES, MIN_GAMES_NOTE, load_error_state, winrate_pct, wr_text_class};
 
 pub(super) fn heroes_tab(
     heroes: ApiResource<Vec<HeroStats>>,
