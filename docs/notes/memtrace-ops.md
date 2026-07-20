@@ -61,7 +61,7 @@ Rules:
 | `repo_id` | `scuffed-crew` |
 | Shared checkout (agent READ-ONLY) | **Repo root** — `git rev-parse --show-toplevel` (or `$SC_ROOT` if set). Do not commit a personal home path here. |
 | Worktrees | `.claude/worktrees/<agent>-<topic>` under shared checkout |
-| Preferred memdb data dir | `MEMTRACE_MEMDB_DATA_DIR=~/.memdb` (single multi-repo store) |
+| Preferred memdb data dir | `MEMTRACE_DATA_DIR=~/.memdb` (single multi-repo store). **The var is `MEMTRACE_DATA_DIR`** — an earlier revision said `MEMTRACE_MEMDB_DATA_DIR`, which memtrace ignores (official docs: config/environment). |
 | MCP / CLI binary | absolute path to `memtrace` on PATH or under volta (`$(command -v memtrace)` / `$HOME/.volta/bin/memtrace`) — cron/unit PATH often lacks volta |
 | Owner start | `memtrace start --headless` from durable unit or `$HOME` |
 | UI | `http://127.0.0.1:3030` |
@@ -85,31 +85,95 @@ orphan memcore, HTTP delta `FLEET_BLIND`, presence publish errors.
 (or any absolute `memtrace` on the unit's PATH — avoid hard-coding a
 username in git).
 
-Sketch:
+**DEPLOYED 2026-07-20** (this exact unit is live at
+`~/.config/systemd/user/memtrace.service`):
 
 ```ini
-# ~/.config/systemd/user/memtrace.service
 [Unit]
-Description=Memtrace owner (headless)
+Description=Memtrace analysis daemon (single owner, ~/.memdb)
+After=network-online.target
+Wants=network-online.target
+# A permanently-failing daemon must land in `failed` and stay visible,
+# not restart-loop silently (same rationale as scuffed-stat-tracker.service).
+StartLimitIntervalSec=300
+StartLimitBurst=5
 
 [Service]
-WorkingDirectory=%h
-Environment=MEMTRACE_MEMDB_DATA_DIR=%h/.memdb
+Type=simple
+# Single source of truth for the store — every attach (MCP) must match this.
+Environment=MEMTRACE_DATA_DIR=%h/.memdb
+# Volta shim resolves the node toolchain; give it a sane PATH.
+Environment=PATH=%h/.volta/bin:/usr/local/bin:/usr/bin:/bin
+# NOTE: no ExecStartPre/ExecStop with `memtrace stop` — that command is
+# systemd-aware and stops the `memtrace` unit itself, canceling our own start
+# job (observed 2026-07-20). Any pre-existing terminal-scoped owner must be
+# stopped manually ONCE before first start; systemd's cgroup TERM handles
+# shutdown thereafter.
 ExecStart=%h/.volta/bin/memtrace start --headless
-Restart=always
-RestartSec=5
+Restart=on-failure
+RestartSec=10
+# memcore holds a multi-GB store; allow a graceful close.
+TimeoutStopSec=120
+# If the kernel OOM-kills memcore, stop the whole unit cleanly, then
+# Restart=on-failure brings it back — no half-dead daemon.
+OOMPolicy=stop
 
 [Install]
 WantedBy=default.target
 ```
 
+Migration procedure (one-time, when an old terminal-scoped owner exists):
+
 ```bash
 systemctl --user daemon-reload
-systemctl --user enable --now memtrace.service
+systemctl --user enable memtrace.service          # do NOT --now yet
+memtrace stop                                     # stop old owner OUTSIDE the unit
+# wait for :3030/:50051 to free, then:
+systemctl --user start memtrace.service
+```
+
+**GOTCHA — `memtrace stop` is systemd-aware.** It stops the `memtrace` *unit*
+(not just the process), so putting it in `ExecStartPre=`/`ExecStop=` cancels
+the unit's own start job. Never reference it from inside the unit.
+
+### Attach pinning — every MCP must resolve the same store
+
+An unpinned `memtrace mcp` resolves its data dir from the **cwd chain** and
+anchors a per-workspace store at the repo root (`repo/.memdb`) instead of
+attaching to the running owner. Result: **split-brain** — that agent reads a
+12 MB phantom while the fleet writes the real 4.2 GB `~/.memdb` (incident
+2026-07-20; the "frozen ydoc" / "empty initiative threads" symptom all day).
+
+Pin `MEMTRACE_DATA_DIR=$HOME/.memdb` in EVERY place an MCP is spawned:
+
+| Spawner | Where the pin lives |
+|---------|---------------------|
+| claude (Claude Code) | `mcpServers.memtrace.env` in `~/.claude/settings.json` **and** `~/.claude.json` |
+| grok (`~/.local/bin/agent`) | the launcher's env for `memtrace mcp` |
+| hermes watchdog + anything else | `~/.config/environment.d/50-memtrace.conf` (whole-session; needs re-login to apply) |
+
+Phantom diagnosis + cleanup:
+
+```bash
+# who is anchored where?
+for p in $(pgrep -f 'linux-x64/bin/memtrace mcp'); do
+  echo "$p cwd=$(readlink /proc/$p/cwd) env=$(tr '\0' '\n' </proc/$p/environ | grep ^MEMTRACE_DATA_DIR)"
+done
+# a phantom is live if repo/.memdb mtime advances or daemon.pid is held open
+fuser -v <repo>/.memdb/* 2>&1 | head
+# cleanup ONLY after every writer is repinned+restarted: tar backup, then rm -rf repo/.memdb
 ```
 
 Avoid dual owners on different data dirs (`~/.memdb` vs `repo/.memdb` vs
 `hermes-agent/.memdb`).
+
+**Incident 2026-07-20 (host migration):** owner moved from
+`app-niri-alacritty` scope into `memtrace.service` (own cgroup, restart
+policy, OOMPolicy=stop). First start attempt self-canceled via the
+`ExecStartPre=memtrace stop` gotcha above — zero downtime, old tree survived
+until the corrected manual-stop-then-start sequence. Both MCP attach clients
+survived the bounce; grok's harness respawned its MCP unpinned and re-anchored
+the phantom, which is why the pin table above exists.
 
 ---
 
