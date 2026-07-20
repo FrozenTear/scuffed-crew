@@ -103,6 +103,28 @@ pub(super) fn wr_text_class(matches: u32) -> &'static str {
     }
 }
 
+/// Fill token for a winrate BAR: two-pole diverging encoding (W5a).
+/// - `> 50%` → cool up-pole, `< 50%` → warm down-pole (poles are chart
+///   tokens, never status colors)
+/// - exactly 50.0% (`wins * 2 == matches`, integer-exact) → neutral midpoint:
+///   a dead-even record has no polarity, and a diverging scale is two hues +
+///   a neutral midpoint — painting an even record blue would claim a lead
+///   that isn't there
+/// - below the min-games gate → neutral too, so a muted low-sample row never
+///   claims a pole (muting overrides polarity; the row also renders at
+///   reduced opacity via the existing `muted` treatment)
+pub(super) fn wr_bar_color(wins: u32, matches: u32) -> &'static str {
+    let wins2 = u64::from(wins) * 2;
+    let total = u64::from(matches);
+    if matches < MIN_GAMES || wins2 == total {
+        "var(--text-3)"
+    } else if wins2 > total {
+        "var(--chart-wr-up)"
+    } else {
+        "var(--chart-wr-down)"
+    }
+}
+
 /// Minimum games before a win rate is shown at full weight (charts gate on it,
 /// tables/bars mute below it).
 pub(super) const MIN_GAMES: u32 = 3;
