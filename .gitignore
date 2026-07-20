@@ -25,3 +25,8 @@ cachyos-repo.tar.xz
 # Local agent runtime (memtrace) — never commit
 .memdb/
 .memtrace/
+
+# OCR benchmark ground truth — real scoreboard captures with other players'
+# gamertags; local-only, never committed (privacy). Screenshots (*.png) are
+# already ignored above; this covers the JSON annotations beside them.
+tests/fixtures/replays/ground_truth.json

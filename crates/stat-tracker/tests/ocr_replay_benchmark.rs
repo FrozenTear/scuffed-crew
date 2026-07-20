@@ -1,15 +1,18 @@
 use image::DynamicImage;
+use serde::Deserialize;
 use stat_tracker::detect::hero_portrait::detect_team_size;
 use stat_tracker::ocr;
 use stat_tracker::ocr::preprocess;
 
+#[derive(Deserialize)]
 struct GroundTruth {
-    name: &'static str,
+    name: String,
     stats: [u32; 6], // E, A, D, DMG, H, MIT
 }
 
+#[derive(Deserialize)]
 struct ReplayGroundTruth {
-    file: &'static str,
+    file: String,
     team1: Vec<GroundTruth>,
     team2: Vec<GroundTruth>,
 }
@@ -22,284 +25,20 @@ fn load_image(path: &str) -> DynamicImage {
     image::open(&full).unwrap_or_else(|e| panic!("failed to open {full}: {e}"))
 }
 
-fn ground_truth_replays() -> Vec<ReplayGroundTruth> {
-    vec![
-        ReplayGroundTruth {
-            file: "replay_01.png",
-            team1: vec![
-                GroundTruth {
-                    name: "FROZEN",
-                    stats: [6, 1, 5, 6000, 920, 3013],
-                },
-                GroundTruth {
-                    name: "BITLO",
-                    stats: [2, 8, 3, 1746, 5301, 475],
-                },
-                GroundTruth {
-                    name: "DIGITAL",
-                    stats: [4, 9, 4, 3214, 5373, 0],
-                },
-                GroundTruth {
-                    name: "HELXZY",
-                    stats: [9, 1, 2, 7807, 724, 512],
-                },
-                GroundTruth {
-                    name: "INVINCIBLE",
-                    stats: [6, 1, 4, 7271, 0, 0],
-                },
-                GroundTruth {
-                    name: "PLANET",
-                    stats: [9, 1, 2, 7561, 1029, 1551],
-                },
-            ],
-            team2: vec![
-                GroundTruth {
-                    name: "AFTERYOU123",
-                    stats: [10, 0, 2, 6530, 0, 400],
-                },
-                GroundTruth {
-                    name: "AKSSU",
-                    stats: [3, 11, 3, 1906, 6709, 0],
-                },
-                GroundTruth {
-                    name: "DIOSASESINO",
-                    stats: [11, 6, 1, 6683, 1158, 3058],
-                },
-                GroundTruth {
-                    name: "EFE",
-                    stats: [4, 6, 4, 1756, 7918, 1752],
-                },
-                GroundTruth {
-                    name: "MCLOVIN",
-                    stats: [12, 4, 1, 6048, 4963, 899],
-                },
-                GroundTruth {
-                    name: "SIONY",
-                    stats: [7, 0, 6, 3545, 305, 176],
-                },
-            ],
-        },
-        ReplayGroundTruth {
-            file: "replay_02.png",
-            team1: vec![
-                GroundTruth {
-                    name: "ANDIRR",
-                    stats: [5, 7, 3, 1619, 3775, 0],
-                },
-                GroundTruth {
-                    name: "BIOSSFA",
-                    stats: [3, 5, 3, 799, 3957, 290],
-                },
-                GroundTruth {
-                    name: "N1CK",
-                    stats: [7, 0, 4, 2431, 695, 3813],
-                },
-                GroundTruth {
-                    name: "P1NSHOOTER",
-                    stats: [8, 5, 1, 2871, 0, 2627],
-                },
-                GroundTruth {
-                    name: "SHIBA",
-                    stats: [2, 0, 3, 2901, 0, 0],
-                },
-                GroundTruth {
-                    name: "TK+OW",
-                    stats: [4, 0, 3, 3622, 0, 0],
-                },
-            ],
-            team2: vec![
-                GroundTruth {
-                    name: "FROZEN",
-                    stats: [6, 5, 1, 3275, 438, 1415],
-                },
-                GroundTruth {
-                    name: "ANTS",
-                    stats: [10, 0, 3, 4016, 321, 0],
-                },
-                GroundTruth {
-                    name: "BERU",
-                    stats: [8, 8, 1, 1239, 2857, 0],
-                },
-                GroundTruth {
-                    name: "CANONSCHIZO",
-                    stats: [5, 3, 1, 1023, 2180, 0],
-                },
-                GroundTruth {
-                    name: "CATLEYA",
-                    stats: [9, 0, 3, 4013, 0, 5548],
-                },
-                GroundTruth {
-                    name: "CIANG43",
-                    stats: [4, 2, 3, 1995, 557, 1557],
-                },
-            ],
-        },
-        ReplayGroundTruth {
-            file: "replay_03.png",
-            team1: vec![
-                GroundTruth {
-                    name: "ALEXFORPS",
-                    stats: [3, 8, 4, 3857, 10266, 4309],
-                },
-                GroundTruth {
-                    name: "BENBO",
-                    stats: [5, 6, 3, 2113, 7687, 73],
-                },
-                GroundTruth {
-                    name: "DAVIDTITUSEN",
-                    stats: [6, 0, 6, 4520, 0, 9137],
-                },
-                GroundTruth {
-                    name: "ILLUSIVEMAN",
-                    stats: [6, 2, 6, 5373, 201, 0],
-                },
-                GroundTruth {
-                    name: "PRATICKTRUE",
-                    stats: [7, 0, 6, 6454, 70, 23],
-                },
-                GroundTruth {
-                    name: "SNAKEEYES",
-                    stats: [7, 1, 6, 5333, 646, 7057],
-                },
-            ],
-            team2: vec![
-                GroundTruth {
-                    name: "FROZEN",
-                    stats: [18, 6, 3, 5178, 545, 2222],
-                },
-                GroundTruth {
-                    name: "D1R1D1",
-                    stats: [6, 17, 0, 1115, 7293, 253],
-                },
-                GroundTruth {
-                    name: "IRONHUNTER",
-                    stats: [23, 6, 2, 6151, 246, 8083],
-                },
-                GroundTruth {
-                    name: "JALLABALLA",
-                    stats: [21, 5, 3, 7309, 0, 0],
-                },
-                GroundTruth {
-                    name: "SCHLAWG",
-                    stats: [19, 0, 2, 8668, 1174, 0],
-                },
-                GroundTruth {
-                    name: "CLAWG",
-                    stats: [13, 17, 1, 3458, 7470, 666],
-                },
-            ],
-        },
-        ReplayGroundTruth {
-            file: "replay_04.png",
-            team1: vec![
-                GroundTruth {
-                    name: "FROZEN",
-                    stats: [6, 14, 5, 2427, 4676, 0],
-                },
-                GroundTruth {
-                    name: "ABDORPTED",
-                    stats: [11, 3, 7, 5980, 0, 5046],
-                },
-                GroundTruth {
-                    name: "GOOSEANGOOSE",
-                    stats: [14, 7, 5, 4170, 770, 3559],
-                },
-                GroundTruth {
-                    name: "MASHIRO",
-                    stats: [5, 12, 5, 2887, 5165, 0],
-                },
-                GroundTruth {
-                    name: "MEGALODON",
-                    stats: [11, 3, 4, 6526, 0, 0],
-                },
-                GroundTruth {
-                    name: "VASQUEZ",
-                    stats: [12, 0, 5, 5320, 0, 0],
-                },
-            ],
-            team2: vec![
-                GroundTruth {
-                    name: "FISKSAPARE",
-                    stats: [15, 1, 4, 6373, 1437, 9614],
-                },
-                GroundTruth {
-                    name: "ILLUSIVEMAN",
-                    stats: [23, 7, 6, 7882, 0, 0],
-                },
-                GroundTruth {
-                    name: "NIGELH",
-                    stats: [16, 4, 4, 5277, 0, 227],
-                },
-                GroundTruth {
-                    name: "ORTOPEDEN",
-                    stats: [18, 0, 4, 6933, 0, 7299],
-                },
-                GroundTruth {
-                    name: "PIR48",
-                    stats: [8, 10, 3, 1249, 4556, 31],
-                },
-                GroundTruth {
-                    name: "BABURON",
-                    stats: [5, 21, 3, 989, 8242, 0],
-                },
-            ],
-        },
-        ReplayGroundTruth {
-            file: "replay_05.png",
-            team1: vec![
-                GroundTruth {
-                    name: "ATINA",
-                    stats: [1, 3, 2, 718, 2860, 0],
-                },
-                GroundTruth {
-                    name: "BUGG",
-                    stats: [5, 2, 2, 2971, 45, 0],
-                },
-                GroundTruth {
-                    name: "KOALAKING",
-                    stats: [3, 0, 4, 1599, 0, 5166],
-                },
-                GroundTruth {
-                    name: "QUILIO",
-                    stats: [4, 0, 3, 3733, 0, 2656],
-                },
-                GroundTruth {
-                    name: "SOMBRUH",
-                    stats: [7, 2, 2, 2325, 4278, 0],
-                },
-                GroundTruth {
-                    name: "ZIAIN",
-                    stats: [2, 2, 4, 1173, 2035, 780],
-                },
-            ],
-            team2: vec![
-                GroundTruth {
-                    name: "FROZEN",
-                    stats: [10, 5, 2, 3250, 415, 992],
-                },
-                GroundTruth {
-                    name: "AKSSU",
-                    stats: [7, 7, 2, 1352, 1796, 0],
-                },
-                GroundTruth {
-                    name: "CH3ARRY",
-                    stats: [8, 7, 2, 1652, 1231, 0],
-                },
-                GroundTruth {
-                    name: "VASQUEZ",
-                    stats: [12, 1, 1, 4108, 0, 0],
-                },
-                GroundTruth {
-                    name: "WASP",
-                    stats: [14, 4, 0, 5254, 940, 1295],
-                },
-                GroundTruth {
-                    name: "GENJI",
-                    stats: [4, 5, 1, 776, 2188, 267],
-                },
-            ],
-        },
-    ]
+/// Ground-truth scoreboard data lives in a LOCAL, gitignored fixture file
+/// (`tests/fixtures/replays/ground_truth.json`, repo-root-relative) next to
+/// the replay screenshots it annotates. It is intentionally NOT committed:
+/// the entries are real Overwatch scoreboard captures containing other
+/// players' gamertags, which must never enter the tracked tree (privacy).
+/// When the file is absent the benchmark skips, exactly like the missing
+/// screenshot fixtures it depends on.
+fn load_ground_truth() -> Option<Vec<ReplayGroundTruth>> {
+    let path = format!(
+        "{}/../../tests/fixtures/replays/ground_truth.json",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let data = std::fs::read_to_string(&path).ok()?;
+    Some(serde_json::from_str(&data).unwrap_or_else(|e| panic!("failed to parse {path}: {e}")))
 }
 
 fn load_all_frames() -> Vec<(String, DynamicImage)> {
@@ -493,7 +232,7 @@ fn debug_measure_columns() {
         println!("    x={s}-{e} center={c} ratio={r:.3} width={}", e - s);
     }
 
-    // Scan a data row (BUGG at y≈100 based on visual inspection)
+    // Scan a data row (around y≈100 based on visual inspection)
     // Try multiple y positions to find actual rows
     for scan_y in [40u32, 60, 80, 100, 120, 140] {
         if scan_y >= h {
@@ -610,7 +349,10 @@ fn debug_save_cell_crops() {
 #[test]
 #[ignore = "requires local OW replay screenshots in tests/fixtures/replays/ (not committed)"]
 fn benchmark_ocr_accuracy() {
-    let replays = ground_truth_replays();
+    let Some(replays) = load_ground_truth() else {
+        println!("No ground_truth.json fixture found, skipping.");
+        return;
+    };
     let stat_labels = ["E", "A", "D", "DMG", "H", "MIT"];
 
     let mut total_cells = 0u32;
@@ -621,7 +363,7 @@ fn benchmark_ocr_accuracy() {
     let mut confidence_count = 0u32;
 
     for replay in &replays {
-        let img = load_image(replay.file);
+        let img = load_image(&replay.file);
         let results = ocr::recognize_scoreboard_cells_with_team_size(&img, Some(6));
 
         let all_gt: Vec<&GroundTruth> = replay.team1.iter().chain(replay.team2.iter()).collect();
