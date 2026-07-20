@@ -3,6 +3,7 @@ use serde::Deserialize;
 
 use crate::components::ui::{EmptyState, HeroSelect, Pill, PillTone};
 use crate::routes::Route;
+use crate::util::encode_query;
 use scuffed_api_client::ApiClient;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -125,22 +126,6 @@ const PAGE_CSS: &str = r#"
     }
 "#;
 
-/// Percent-encode a query-parameter value so hero names with spaces or
-/// non-ASCII (e.g. "Soldier: 76", "Lúcio") survive the URL. Keeps the RFC 3986
-/// unreserved set literal; everything else becomes %XX over UTF-8 bytes.
-fn encode_query(value: &str) -> String {
-    let mut out = String::with_capacity(value.len());
-    for b in value.bytes() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(b as char)
-            }
-            _ => out.push_str(&format!("%{b:02X}")),
-        }
-    }
-    out
-}
-
 #[component]
 pub fn Members() -> Element {
     // `None` = "All heroes" (no filter). Drives both the HeroSelect value and
@@ -153,7 +138,11 @@ pub fn Members() -> Element {
         let hero = hero();
         async move {
             let path = match &hero {
-                Some(h) => format!("/api/public/members?hero={}", encode_query(h)),
+                // A hero filter is applied client-side, so we must pull the whole
+                // org, not the backend's default page (25) — a hero-main past
+                // position 25 would otherwise vanish. `limit=100` is the backend's
+                // max page size (PaginationParams clamps to 1..=100).
+                Some(h) => format!("/api/public/members?hero={}&limit=100", encode_query(h)),
                 None => "/api/public/members".to_string(),
             };
             ApiClient::web()

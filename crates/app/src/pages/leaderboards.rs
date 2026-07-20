@@ -7,6 +7,7 @@ use scuffed_api_client::ApiClient;
 
 use crate::components::ui::{Card, HeroSelect, Pill, PillTone};
 use crate::routes::Route;
+use crate::util::encode_query;
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 struct LeaderboardRow {
@@ -100,22 +101,6 @@ const PAGE_CSS: &str = r#"
         margin-bottom: 1.25rem;
     }
 "#;
-
-/// Percent-encode a query-parameter value so hero names with spaces or
-/// non-ASCII (e.g. "Soldier: 76", "Lúcio") survive the URL. Keeps the RFC 3986
-/// unreserved set literal; everything else becomes %XX over UTF-8 bytes.
-fn encode_query(value: &str) -> String {
-    let mut out = String::with_capacity(value.len());
-    for b in value.bytes() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(b as char)
-            }
-            _ => out.push_str(&format!("%{b:02X}")),
-        }
-    }
-    out
-}
 
 #[component]
 pub fn Leaderboards() -> Element {
