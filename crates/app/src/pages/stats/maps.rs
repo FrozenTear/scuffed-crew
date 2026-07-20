@@ -3,7 +3,7 @@ use dioxus::prelude::*;
 use crate::components::charts::{BarEntry, HBarChart};
 use crate::hooks::ApiResource;
 
-use super::{MapStats, load_error_state, winrate_class, winrate_pct};
+use super::{MIN_GAMES, MIN_GAMES_NOTE, MapStats, load_error_state, winrate_pct, wr_text_class};
 
 // -- Map grouping --
 
@@ -44,6 +44,8 @@ const MODE_ORDER: &[&str] = &[
 ];
 
 /// Return a CSS variable reference for map mode color (chart palette).
+/// Mode identity colors appear ONLY on the section header label — bars use the
+/// single winrate accent (`--chart-wr`), same as the heroes chart.
 fn mode_color(mode: &str) -> &'static str {
     match mode {
         "Escort" => "var(--chart-5)",
@@ -82,12 +84,13 @@ pub(super) fn maps_tab(maps: ApiResource<Vec<MapStats>>) -> Element {
                 .collect();
 
             rsx! {
+                p { class: "stats-gate-note", {MIN_GAMES_NOTE} }
                 {ordered_modes.iter().map(|&&mode| {
                     let maps_in_mode = &groups[mode];
                     let total_m: u32 = maps_in_mode.iter().map(|m| m.matches).sum();
                     let total_w: u32 = maps_in_mode.iter().map(|m| m.wins).sum();
                     let mode_wr = winrate_pct(total_w, total_m);
-                    let mode_wr_cls = winrate_class(mode_wr);
+                    let mode_wr_cls = wr_text_class(total_m);
                     let mc = mode_color(mode);
 
                     let mut sorted_maps: Vec<&&MapStats> = maps_in_mode.iter().collect();
@@ -98,8 +101,9 @@ pub(super) fn maps_tab(maps: ApiResource<Vec<MapStats>>) -> Element {
                         BarEntry {
                             label: m.map_name.clone(),
                             value: wr,
-                            color: mc.to_string(),
+                            color: "var(--chart-wr)".to_string(),
                             display: format!("{wr:.1}% ({} games)", m.matches),
+                            muted: m.matches < MIN_GAMES,
                         }
                     }).collect();
 
@@ -116,7 +120,11 @@ pub(super) fn maps_tab(maps: ApiResource<Vec<MapStats>>) -> Element {
                                     span { class: "{mode_wr_cls}", "{mode_wr:.1}%" }
                                 }
                             }
-                            HBarChart { entries: bar_entries }
+                            HBarChart {
+                                entries: bar_entries,
+                                max: Some(100.0),
+                                reference: Some(50.0),
+                            }
                         }
                     }
                 })}

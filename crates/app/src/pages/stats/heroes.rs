@@ -4,18 +4,7 @@ use crate::components::DataTable;
 use crate::components::charts::{BarEntry, HBarChart};
 use crate::hooks::ApiResource;
 
-use super::{HeroStats, load_error_state, winrate_class, winrate_pct};
-
-/// Return a CSS variable reference for bar chart win-rate color.
-fn wr_bar_color(pct: f64) -> &'static str {
-    if pct >= 55.0 {
-        "var(--ok)"
-    } else if pct >= 45.0 {
-        "var(--warn)"
-    } else {
-        "var(--danger)"
-    }
-}
+use super::{HeroStats, MIN_GAMES, MIN_GAMES_NOTE, load_error_state, winrate_pct, wr_text_class};
 
 pub(super) fn heroes_tab(heroes: ApiResource<Vec<HeroStats>>) -> Element {
     let err = heroes.error.read().clone();
@@ -31,8 +20,8 @@ pub(super) fn heroes_tab(heroes: ApiResource<Vec<HeroStats>>) -> Element {
             let mut sorted: Vec<_> = list.iter().collect();
             sorted.sort_by_key(|b| std::cmp::Reverse(b.matches));
 
-            // Top heroes by win rate (min 3 matches, top 8)
-            let mut by_wr: Vec<_> = list.iter().filter(|h| h.matches >= 3).collect();
+            // Top heroes by win rate (min-games gate, top 8)
+            let mut by_wr: Vec<_> = list.iter().filter(|h| h.matches >= MIN_GAMES).collect();
             by_wr.sort_by(|a, b| {
                 let wa = winrate_pct(a.wins, a.matches);
                 let wb = winrate_pct(b.wins, b.matches);
@@ -46,8 +35,9 @@ pub(super) fn heroes_tab(heroes: ApiResource<Vec<HeroStats>>) -> Element {
                     BarEntry {
                         label: h.hero.clone(),
                         value: wr,
-                        color: wr_bar_color(wr).to_string(),
-                        display: format!("{wr:.1}%"),
+                        color: "var(--chart-wr)".to_string(),
+                        display: format!("{wr:.1}% ({} games)", h.matches),
+                        muted: false,
                     }
                 })
                 .collect();
@@ -56,15 +46,20 @@ pub(super) fn heroes_tab(heroes: ApiResource<Vec<HeroStats>>) -> Element {
                 if !top_heroes.is_empty() {
                     div { class: "heroes-chart-section",
                         div { class: "section-title", "Top Heroes by Win Rate (3+ matches)" }
-                        HBarChart { entries: top_heroes }
+                        HBarChart {
+                            entries: top_heroes,
+                            max: Some(100.0),
+                            reference: Some(50.0),
+                        }
                     }
                 }
 
+                p { class: "stats-gate-note", {MIN_GAMES_NOTE} }
                 DataTable { headers: vec!["Hero", "Matches", "Win %", "Avg Elims", "Avg Deaths", "Avg Dmg", "Avg Heal"],
                     for hero in sorted.iter() {
                         {
                             let wr = winrate_pct(hero.wins, hero.matches);
-                            let wr_cls = winrate_class(wr);
+                            let wr_cls = wr_text_class(hero.matches);
                             rsx! {
                                 tr { key: "{hero.hero}",
                                     td { "{hero.hero}" }

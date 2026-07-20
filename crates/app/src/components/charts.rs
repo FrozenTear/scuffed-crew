@@ -64,6 +64,7 @@ const CHARTS_CSS: &str = r#"
 
     .hbar-list { display: flex; flex-direction: column; gap: 0.4rem; }
     .hbar-row { display: flex; align-items: center; gap: 0.75rem; }
+    .hbar-row.muted .hbar-fill { opacity: 0.45; }
     .hbar-label {
         min-width: 110px;
         font-size: 0.8rem;
@@ -74,6 +75,7 @@ const CHARTS_CSS: &str = r#"
         white-space: nowrap;
     }
     .hbar-track {
+        position: relative;
         flex: 1;
         height: 20px;
         background: var(--surface);
@@ -86,14 +88,24 @@ const CHARTS_CSS: &str = r#"
         transition: width 0.3s ease;
         min-width: 2px;
     }
+    /* Reference hairline (e.g. the 50% winrate mark) — recessive, one shade
+       off the track surface, drawn across the full track height. */
+    .hbar-ref {
+        position: absolute;
+        top: 0;
+        bottom: 0;
+        width: 1px;
+        background: var(--border);
+        pointer-events: none;
+    }
     .hbar-val {
         min-width: 50px;
         font-size: 0.8rem;
         font-weight: 600;
+        color: var(--text-2);
+        font-variant-numeric: tabular-nums;
     }
-    .hbar-val.high { color: var(--ok); }
-    .hbar-val.mid { color: var(--warn); }
-    .hbar-val.low { color: var(--danger); }
+    .hbar-row.muted .hbar-val { color: var(--text-3); font-weight: 400; }
 "#;
 
 #[derive(Clone, PartialEq)]
@@ -176,36 +188,51 @@ pub struct BarEntry {
     pub value: f64,
     pub color: String,
     pub display: String,
+    /// Low-sample rows render recessive (reduced fill opacity, muted value text).
+    pub muted: bool,
 }
 
 #[component]
-pub fn HBarChart(entries: Vec<BarEntry>) -> Element {
-    let max = entries.iter().map(|e| e.value).fold(0.0_f64, f64::max);
-    if max == 0.0 {
+pub fn HBarChart(
+    entries: Vec<BarEntry>,
+    /// Fixed scale maximum (e.g. `Some(100.0)` for percentages). Defaults to
+    /// the data maximum, which makes bars relative to the largest entry.
+    #[props(default)]
+    max: Option<f64>,
+    /// Draw a recessive reference hairline at this value on the track
+    /// (e.g. `Some(50.0)` with `max: Some(100.0)` marks the 50% winrate line).
+    #[props(default)]
+    reference: Option<f64>,
+) -> Element {
+    let data_max = entries.iter().map(|e| e.value).fold(0.0_f64, f64::max);
+    let scale_max = max.unwrap_or(data_max);
+    if scale_max <= 0.0 {
         return rsx! {};
     }
+    let ref_pos = reference.map(|r| (r / scale_max * 100.0).clamp(0.0, 100.0));
 
     rsx! {
         style { {CHARTS_CSS} }
         div { class: "hbar-list",
             {entries.iter().map(|entry| {
-                let w = (entry.value / max) * 100.0;
-                let cls = if entry.value >= 55.0 { "hbar-val high" }
-                    else if entry.value >= 45.0 { "hbar-val mid" }
-                    else { "hbar-val low" };
+                let w = (entry.value / scale_max * 100.0).clamp(0.0, 100.0);
+                let row_cls = if entry.muted { "hbar-row muted" } else { "hbar-row" };
                 let color = entry.color.clone();
                 let label = entry.label.clone();
                 let display = entry.display.clone();
                 rsx! {
-                    div { class: "hbar-row", key: "{label}",
+                    div { class: "{row_cls}", key: "{label}",
                         span { class: "hbar-label", "{label}" }
                         div { class: "hbar-track",
                             div {
                                 class: "hbar-fill",
                                 style: "width:{w:.1}%;background:{color};",
                             }
+                            if let Some(rp) = ref_pos {
+                                div { class: "hbar-ref", style: "left:{rp:.1}%;" }
+                            }
                         }
-                        span { class: "{cls}", "{display}" }
+                        span { class: "hbar-val", "{display}" }
                     }
                 }
             })}

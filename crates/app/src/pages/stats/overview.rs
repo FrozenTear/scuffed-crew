@@ -3,7 +3,7 @@ use dioxus::prelude::*;
 use crate::components::charts::{DonutChart, DonutSegment};
 use crate::hooks::ApiResource;
 
-use super::{HeroStats, load_error_state, winrate_pct};
+use super::{HeroStats, MIN_GAMES, load_error_state, winrate_pct};
 
 // -- Role aggregation --
 
@@ -104,13 +104,13 @@ fn aggregate_roles(heroes: &[HeroStats]) -> Vec<RoleAgg> {
     vec![tank, damage, support]
 }
 
-fn wr_value_class(pct: f64) -> &'static str {
-    if pct >= 55.0 {
-        "role-card-wr high"
-    } else if pct >= 45.0 {
-        "role-card-wr mid"
+/// Role-card win-rate text: plain text tokens (no traffic light); low-sample
+/// roles render muted.
+fn wr_value_class(matches: u32) -> &'static str {
+    if matches < MIN_GAMES {
+        "role-card-wr muted"
     } else {
-        "role-card-wr low"
+        "role-card-wr"
     }
 }
 
@@ -151,7 +151,7 @@ pub(super) fn overview_tab(heroes: ApiResource<Vec<HeroStats>>) -> Element {
                         div { class: "role-cards",
                             {roles.iter().filter(|r| r.matches > 0).map(|r| {
                                 let wr = r.winrate();
-                                let wr_cls = wr_value_class(wr);
+                                let wr_cls = wr_value_class(r.matches);
                                 let border_color = r.color;
                                 let name = r.name;
                                 let avg_e = r.avg_elims();
