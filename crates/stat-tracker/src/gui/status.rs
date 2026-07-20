@@ -88,6 +88,8 @@ pub fn StatusPanel() -> Element {
         div { class: "panel",
             h2 { "Dashboard" }
 
+            super::update::UpdateBanner {}
+
             DaemonCard {}
 
             if !recent.is_empty() {

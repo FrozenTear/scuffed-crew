@@ -7,6 +7,7 @@ mod stats;
 mod status;
 mod style;
 mod tray;
+mod update;
 
 use dioxus::desktop::tao::dpi::LogicalSize;
 use dioxus::desktop::{Config as DesktopConfig, WindowBuilder};

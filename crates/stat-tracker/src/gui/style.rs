@@ -247,6 +247,23 @@ body {
     border-color: var(--warning);
 }
 
+.card-update {
+    border-color: var(--accent);
+}
+.card-update .update-sub { color: var(--text-dim); font-size: 0.85rem; margin-bottom: 0.6rem; }
+.card-update .update-cmd {
+    font-family: var(--font-mono);
+    font-size: 0.8rem;
+    background: var(--bg-input);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 0.6rem 0.8rem;
+    margin-bottom: 0.8rem;
+    white-space: pre-wrap;
+    word-break: break-all;
+    user-select: all;
+}
+
 .card-warning h3 { color: var(--warning); }
 .card-warning p { font-size: 0.85rem; color: var(--text-dim); }
 
