@@ -3,7 +3,9 @@ use dioxus::prelude::*;
 use crate::components::charts::{DonutChart, DonutSegment};
 use crate::hooks::ApiResource;
 
-use super::{HeroStats, MapStats, MatchPage, load_error_state, map_game_mode, winrate_pct};
+use super::{
+    HeroStats, MIN_GAMES, MapStats, MatchPage, load_error_state, map_game_mode, winrate_pct,
+};
 
 // -- Role aggregation --
 
@@ -102,20 +104,22 @@ pub(super) fn aggregate_roles(heroes: &[HeroStats]) -> Vec<RoleAgg> {
     vec![tank, damage, support]
 }
 
-fn wr_value_class(pct: f64) -> &'static str {
-    if pct >= 55.0 {
-        "role-card-wr high"
-    } else if pct >= 45.0 {
-        "role-card-wr mid"
+/// Role-card win-rate text: plain text tokens (no traffic light); low-sample
+/// roles render muted.
+fn wr_value_class(matches: u32) -> &'static str {
+    if matches < MIN_GAMES {
+        "role-card-wr muted"
     } else {
-        "role-card-wr low"
+        "role-card-wr"
     }
 }
 
+/// Tracker outcomes are `victory` / `defeat` / `draw` (`win`/`loss` accepted
+/// as aliases) — same contract as history's `outcome_class`.
 fn outcome_chip_class(outcome: &str) -> &'static str {
     match outcome.to_lowercase().as_str() {
-        "win" => "form-chip win",
-        "loss" => "form-chip loss",
+        "victory" | "win" => "form-chip win",
+        "defeat" | "loss" => "form-chip loss",
         _ => "form-chip draw",
     }
 }
@@ -178,8 +182,8 @@ pub(super) fn overview_tab(
                 })
                 .collect();
 
-            // Top heroes mini (min 3 games, by WR, top 5)
-            let mut by_wr: Vec<_> = list.iter().filter(|h| h.matches >= 3).collect();
+            // Top heroes mini (min-games gate, by WR, top 5)
+            let mut by_wr: Vec<_> = list.iter().filter(|h| h.matches >= MIN_GAMES).collect();
             by_wr.sort_by(|a, b| {
                 let wa = winrate_pct(a.wins, a.matches);
                 let wb = winrate_pct(b.wins, b.matches);
@@ -219,7 +223,7 @@ pub(super) fn overview_tab(
                         div { class: "role-cards",
                             {roles.iter().filter(|r| r.matches > 0).map(|r| {
                                 let wr = r.winrate();
-                                let wr_cls = wr_value_class(wr);
+                                let wr_cls = wr_value_class(r.matches);
                                 let border_color = r.color;
                                 let name = r.name;
                                 let avg_e = r.avg_elims();
@@ -313,8 +317,8 @@ pub(super) fn overview_tab(
                             {form_rows.iter().take(10).map(|m| {
                                 let oc = outcome_chip_class(&m.outcome);
                                 let label = match m.outcome.to_lowercase().as_str() {
-                                    "win" => "W",
-                                    "loss" => "L",
+                                    "victory" | "win" => "W",
+                                    "defeat" | "loss" => "L",
                                     _ => "D",
                                 };
                                 let id = m.id.clone();
