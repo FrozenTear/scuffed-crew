@@ -4645,10 +4645,7 @@ async fn public_members_hero_scoped_query() {
         "top=0 should return all heroes (got {})",
         arr.len()
     );
-    let names: Vec<&str> = arr
-        .iter()
-        .filter_map(|h| h["hero"].as_str())
-        .collect();
+    let names: Vec<&str> = arr.iter().filter_map(|h| h["hero"].as_str()).collect();
     assert!(names.contains(&"Ana"));
     assert!(names.contains(&"Tracer"));
 }
