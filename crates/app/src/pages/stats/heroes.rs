@@ -5,12 +5,9 @@ use crate::components::charts::{BarEntry, HBarChart};
 use crate::hooks::ApiResource;
 
 use super::overview::hero_to_role;
-use super::{HeroStats, load_error_state, winrate_class, winrate_pct};
-
-/// Single accent for WR bars (W2 will refine + 50% hairline); avoid 3-bin on bars.
-fn wr_bar_accent() -> &'static str {
-    "var(--accent)"
-}
+use super::{
+    HeroStats, MIN_GAMES, MIN_GAMES_NOTE, load_error_state, winrate_pct, wr_text_class,
+};
 
 pub(super) fn heroes_tab(
     heroes: ApiResource<Vec<HeroStats>>,
@@ -53,7 +50,7 @@ pub(super) fn heroes_tab(
             let mut by_wr: Vec<_> = filtered
                 .iter()
                 .copied()
-                .filter(|h| h.matches >= 3)
+                .filter(|h| h.matches >= MIN_GAMES)
                 .collect();
             by_wr.sort_by(|a, b| {
                 let wa = winrate_pct(a.wins, a.matches);
@@ -68,8 +65,9 @@ pub(super) fn heroes_tab(
                     BarEntry {
                         label: h.hero.clone(),
                         value: wr,
-                        color: wr_bar_accent().to_string(),
-                        display: format!("{wr:.1}%"),
+                        color: "var(--chart-wr)".to_string(),
+                        display: format!("{wr:.1}% ({} games)", h.matches),
+                        muted: false,
                     }
                 })
                 .collect();
@@ -109,16 +107,21 @@ pub(super) fn heroes_tab(
                 if !top_heroes.is_empty() {
                     div { class: "heroes-chart-section",
                         div { class: "section-title", "Top Heroes by Win Rate (3+ matches)" }
-                        HBarChart { entries: top_heroes }
+                        HBarChart {
+                            entries: top_heroes,
+                            max: Some(100.0),
+                            reference: Some(50.0),
+                        }
                     }
                 }
 
+                p { class: "stats-gate-note", {MIN_GAMES_NOTE} }
                 DataTable { headers: vec!["Hero", "Matches", "Win %", "Avg Elims", "Avg Deaths", "Avg Dmg", "Avg Heal"],
                     for hero in sorted.iter() {
                         {
                             let wr = winrate_pct(hero.wins, hero.matches);
-                            let wr_cls = winrate_class(wr);
-                            let low_n = hero.matches < 3;
+                            let wr_cls = wr_text_class(hero.matches);
+                            let low_n = hero.matches < MIN_GAMES;
                             let row_cls = if low_n { "stats-row-muted" } else { "" };
                             rsx! {
                                 tr { key: "{hero.hero}", class: "{row_cls}",

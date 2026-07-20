@@ -3,7 +3,10 @@ use dioxus::prelude::*;
 use crate::components::charts::{BarEntry, HBarChart};
 use crate::hooks::ApiResource;
 
-use super::{MapStats, load_error_state, map_game_mode, winrate_class, winrate_pct};
+use super::{
+    MIN_GAMES, MIN_GAMES_NOTE, MapStats, load_error_state, map_game_mode, winrate_pct,
+    wr_text_class,
+};
 
 const MODE_ORDER: &[&str] = &[
     "Escort",
@@ -15,7 +18,7 @@ const MODE_ORDER: &[&str] = &[
     "Other",
 ];
 
-/// Mode identity for labels only (never bars).
+/// Mode identity colors appear ONLY on the section header label.
 fn mode_label_color(mode: &str) -> &'static str {
     match mode {
         "Escort" => "var(--chart-5)",
@@ -26,10 +29,6 @@ fn mode_label_color(mode: &str) -> &'static str {
         "Clash" => "var(--chart-4)",
         _ => "var(--text-3)",
     }
-}
-
-fn wr_bar_accent() -> &'static str {
-    "var(--accent)"
 }
 
 pub(super) fn maps_tab(maps: ApiResource<Vec<MapStats>>) -> Element {
@@ -43,7 +42,7 @@ pub(super) fn maps_tab(maps: ApiResource<Vec<MapStats>>) -> Element {
             p { class: "empty-state", "No map stats yet." }
         },
         Some(list) => {
-            let mut ranked: Vec<&MapStats> = list.iter().filter(|m| m.matches >= 3).collect();
+            let mut ranked: Vec<&MapStats> = list.iter().filter(|m| m.matches >= MIN_GAMES).collect();
             ranked.sort_by(|a, b| {
                 let wa = winrate_pct(a.wins, a.matches);
                 let wb = winrate_pct(b.wins, b.matches);
@@ -65,6 +64,8 @@ pub(super) fn maps_tab(maps: ApiResource<Vec<MapStats>>) -> Element {
                 .collect();
 
             rsx! {
+                p { class: "stats-gate-note", {MIN_GAMES_NOTE} }
+
                 if best.is_some() || worst.is_some() {
                     div { class: "map-callouts",
                         if let Some(b) = best {
@@ -99,7 +100,7 @@ pub(super) fn maps_tab(maps: ApiResource<Vec<MapStats>>) -> Element {
                     let total_m: u32 = maps_in_mode.iter().map(|m| m.matches).sum();
                     let total_w: u32 = maps_in_mode.iter().map(|m| m.wins).sum();
                     let mode_wr = winrate_pct(total_w, total_m);
-                    let mode_wr_cls = winrate_class(mode_wr);
+                    let mode_wr_cls = wr_text_class(total_m);
                     let mc = mode_label_color(mode);
 
                     let mut sorted_maps: Vec<&&MapStats> = maps_in_mode.iter().collect();
@@ -110,8 +111,9 @@ pub(super) fn maps_tab(maps: ApiResource<Vec<MapStats>>) -> Element {
                         BarEntry {
                             label: m.map_name.clone(),
                             value: wr,
-                            color: wr_bar_accent().to_string(),
+                            color: "var(--chart-wr)".to_string(),
                             display: format!("{wr:.1}% ({} games)", m.matches),
+                            muted: m.matches < MIN_GAMES,
                         }
                     }).collect();
 
@@ -128,7 +130,11 @@ pub(super) fn maps_tab(maps: ApiResource<Vec<MapStats>>) -> Element {
                                     span { class: "{mode_wr_cls}", "{mode_wr:.1}%" }
                                 }
                             }
-                            HBarChart { entries: bar_entries }
+                            HBarChart {
+                                entries: bar_entries,
+                                max: Some(100.0),
+                                reference: Some(50.0),
+                            }
                         }
                     }
                 })}

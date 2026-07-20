@@ -91,15 +91,24 @@ fn winrate_pct(wins: u32, total: u32) -> f64 {
     }
 }
 
-fn winrate_class(pct: f64) -> &'static str {
-    if pct >= 55.0 {
-        "stats-winrate high"
-    } else if pct >= 45.0 {
-        "stats-winrate mid"
+/// Class for win-rate TEXT values. Plain text tokens — never a traffic light.
+/// Polarity is carried by the bar against the 50% reference hairline; the only
+/// text distinction is sample-size honesty: fewer than `MIN_GAMES` games mutes
+/// the value so a 1-game 100% never shouts.
+pub(super) fn wr_text_class(matches: u32) -> &'static str {
+    if matches < MIN_GAMES {
+        "stats-wr muted"
     } else {
-        "stats-winrate low"
+        "stats-wr"
     }
 }
+
+/// Minimum games before a win rate is shown at full weight (charts gate on it,
+/// tables/bars mute below it).
+pub(super) const MIN_GAMES: u32 = 3;
+
+/// Caption shown wherever the min-games gate/muting applies.
+pub(super) const MIN_GAMES_NOTE: &str = "min 3 games — smaller samples muted";
 
 fn format_date(dt: &DateTime<Utc>) -> String {
     dt.format("%b %d, %Y").to_string()
@@ -239,19 +248,26 @@ const STATS_CSS: &str = r#"
         color: var(--accent);
         border-bottom-color: var(--accent);
     }
-    .stats-winrate {
+    /* Win-rate text values: plain text tokens, muted below the min-games gate.
+       No traffic light — polarity lives in the bar vs the 50% hairline. */
+    .stats-wr {
         display: inline-block;
-        padding: 0.1rem 0.4rem;
-        border-radius: 4px;
         font-size: 0.8rem;
         font-weight: 600;
+        color: var(--text);
+        font-variant-numeric: tabular-nums;
     }
-    .stats-winrate.high { color: var(--ok); }
-    .stats-winrate.mid { color: var(--warn); }
-    .stats-winrate.low { color: var(--danger); }
+    .stats-wr.muted { color: var(--text-3); font-weight: 400; }
+    .stats-gate-note {
+        font-size: 0.7rem;
+        color: var(--text-3);
+        margin: 0 0 0.75rem;
+    }
+    /* Outcome chips: status tokens as status only. Win = good, defeat =
+       serious/danger, draw = neutral text (never gold). */
     .outcome-win { color: var(--ok); font-weight: 600; }
     .outcome-loss { color: var(--danger); font-weight: 600; }
-    .outcome-draw { color: var(--warn); font-weight: 600; }
+    .outcome-draw { color: var(--text-2); font-weight: 600; }
     .match-card {
         background: var(--surface);
         border: 1px solid var(--border);
@@ -408,10 +424,10 @@ const STATS_CSS: &str = r#"
         font-family: var(--font-head);
         font-size: 1.1rem;
         font-weight: 700;
+        color: var(--text);
+        font-variant-numeric: tabular-nums;
     }
-    .role-card-wr.high { color: var(--ok); }
-    .role-card-wr.mid { color: var(--warn); }
-    .role-card-wr.low { color: var(--danger); }
+    .role-card-wr.muted { color: var(--text-3); font-weight: 400; }
 
     /* Heroes: chart + table */
     .heroes-chart-section {
