@@ -105,6 +105,61 @@ fn format_date(dt: &DateTime<Utc>) -> String {
     dt.format("%b %d, %Y").to_string()
 }
 
+/// Shared map → game mode (used by maps tab + overview mode chips).
+pub(super) fn map_game_mode(name: &str) -> &'static str {
+    match name {
+        "Circuit Royal"
+        | "Dorado"
+        | "Havana"
+        | "Junkertown"
+        | "Rialto"
+        | "Route 66"
+        | "Shambali Monastery"
+        | "Watchpoint: Gibraltar" => "Escort",
+        "Blizzard World" | "Eichenwalde" | "Hollywood" | "King's Row" | "Midtown" | "Numbani"
+        | "Paraíso" => "Hybrid",
+        "Antarctic Peninsula"
+        | "Busan"
+        | "Ilios"
+        | "Lijiang Tower"
+        | "Nepal"
+        | "Oasis"
+        | "Samoa" => "Control",
+        "Colosseo" | "Esperança" | "New Queen Street" | "Runasapi" => "Push",
+        "Aatlis" | "New Junk City" | "Suravasa" => "Flashpoint",
+        "Hanaoka" | "Throne of Anubis" => "Clash",
+        _ => "Other",
+    }
+}
+
+fn initial_density() -> &'static str {
+    #[cfg(feature = "web")]
+    {
+        if let Some(win) = web_sys::window()
+            && let Ok(Some(storage)) = win.local_storage()
+            && let Ok(Some(v)) = storage.get_item("stats-ui-density")
+        {
+            if v == "comfortable" {
+                return "comfortable";
+            }
+        }
+    }
+    "compact"
+}
+
+fn persist_density(d: &str) {
+    #[cfg(feature = "web")]
+    {
+        if let Some(win) = web_sys::window()
+            && let Ok(Some(storage)) = win.local_storage()
+        {
+            let _ = storage.set_item("stats-ui-density", d);
+        }
+    }
+    #[cfg(not(feature = "web"))]
+    let _ = d;
+}
+
 /// Fetch-failed state with a retry button (bumps the resource's refresh counter).
 fn load_error_state(what: &'static str, mut refresh: Signal<u64>) -> Element {
     rsx! {
@@ -581,6 +636,110 @@ const STATS_CSS: &str = r#"
         color: var(--text);
         border-color: var(--accent-soft);
     }
+
+    /* W3: filters, density, overview extras */
+    .stats-filters {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 1rem 1.5rem;
+        margin-bottom: 1.25rem;
+        align-items: center;
+    }
+    .filter-group {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.4rem;
+        align-items: center;
+    }
+    .filter-label {
+        font-size: 0.7rem;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        color: var(--text-3);
+        margin-right: 0.25rem;
+    }
+    .filter-chip {
+        padding: 0.25rem 0.65rem;
+        border-radius: 999px;
+        border: 1px solid var(--border);
+        background: var(--bg);
+        color: var(--text-2);
+        font-size: 0.75rem;
+        cursor: pointer;
+    }
+    .filter-chip.active {
+        border-color: var(--accent);
+        color: var(--text);
+        background: color-mix(in srgb, var(--accent) 12%, var(--bg));
+    }
+    .filter-hint {
+        font-size: 0.7rem;
+        color: var(--text-3);
+        margin: 0;
+        width: 100%;
+    }
+    .stats-row-muted { opacity: 0.55; }
+    .density-toggle {
+        font-size: 0.75rem;
+        padding: 0.3rem 0.65rem;
+        border-radius: 6px;
+        border: 1px solid var(--border);
+        background: var(--bg);
+        color: var(--text-2);
+        cursor: pointer;
+    }
+    .density-toggle:hover { color: var(--text); border-color: var(--accent-soft); }
+    .stats-page[data-density="comfortable"] .overview-grid { gap: 1.75rem; }
+    .stats-page[data-density="comfortable"] .match-card { padding: 1rem 1.15rem; }
+    .stats-page[data-density="compact"] .overview-grid { gap: 1rem; }
+    .overview-form { margin-top: 1rem; }
+    .mini-hero-list { display: flex; flex-direction: column; gap: 0.45rem; }
+    .mini-hero-row {
+        display: grid;
+        grid-template-columns: 1fr auto auto;
+        gap: 0.75rem;
+        font-size: 0.85rem;
+        padding: 0.35rem 0;
+        border-bottom: 1px solid var(--border);
+    }
+    .mini-hero-name { color: var(--text); font-weight: 500; }
+    .mini-hero-meta { color: var(--text-3); }
+    .mini-hero-wr { color: var(--accent); font-weight: 600; font-variant-numeric: tabular-nums; }
+    .mode-chips { display: flex; flex-wrap: wrap; gap: 0.5rem; }
+    .mode-chip {
+        display: flex;
+        flex-direction: column;
+        gap: 0.15rem;
+        padding: 0.55rem 0.75rem;
+        border-radius: 8px;
+        border: 1px solid var(--border);
+        background: var(--bg);
+        min-width: 4.5rem;
+    }
+    .mode-chip-name { font-size: 0.7rem; color: var(--text-3); text-transform: uppercase; }
+    .mode-chip-wr { font-size: 1.1rem; font-weight: 700; color: var(--text); font-variant-numeric: tabular-nums; }
+    .mode-chip-n { font-size: 0.7rem; color: var(--text-3); }
+    .form-strip { display: flex; flex-wrap: wrap; gap: 0.35rem; }
+    .form-chip {
+        width: 1.6rem; height: 1.6rem;
+        display: inline-flex; align-items: center; justify-content: center;
+        border-radius: 4px;
+        font-size: 0.7rem; font-weight: 700;
+    }
+    .form-chip.win { background: color-mix(in srgb, var(--ok) 25%, transparent); color: var(--ok); }
+    .form-chip.loss { background: color-mix(in srgb, var(--danger) 25%, transparent); color: var(--danger); }
+    .form-chip.draw { background: color-mix(in srgb, var(--text-3) 20%, transparent); color: var(--text-3); }
+    .map-callouts { display: flex; flex-wrap: wrap; gap: 0.75rem; margin-bottom: 1.25rem; }
+    .map-callout {
+        display: flex; flex-wrap: wrap; gap: 0.5rem 0.75rem; align-items: baseline;
+        padding: 0.6rem 0.9rem; border-radius: 8px; border: 1px solid var(--border);
+        background: var(--surface); font-size: 0.85rem;
+    }
+    .map-callout.best { border-left: 3px solid var(--ok); }
+    .map-callout.worst { border-left: 3px solid var(--danger); }
+    .map-callout-label { font-size: 0.7rem; text-transform: uppercase; color: var(--text-3); }
+    .map-callout-name { font-weight: 600; color: var(--text); }
+    .map-callout-meta { color: var(--text-2); font-variant-numeric: tabular-nums; }
 "#;
 
 #[component]
@@ -640,6 +799,14 @@ pub fn Stats() -> Element {
             None => "/api/stats/me/matches?limit=25".to_string(),
         }
     });
+    // Overview form strip — same endpoint, limit=10, no new backend (Q3).
+    let form_matches = use_api::<MatchPage>("/api/stats/me/matches?limit=10");
+
+    let mut density = use_signal(initial_density);
+    let hero_role = use_signal(|| "All");
+    let hero_sort = use_signal(|| "matches");
+    let hist_outcome = use_signal(|| "all");
+    let hist_role = use_signal(|| "all");
 
     // Progressive disclosure: once the member has tracked matches, the setup
     // chrome collapses to one slim row. Zero-match members keep the full
@@ -656,20 +823,42 @@ pub fn Stats() -> Element {
     let show_full_setup = !slim_tracker || setup_open();
 
     let tab_body = match tab() {
-        StatsTab::Overview => overview::overview_tab(heroes),
-        StatsTab::Heroes => heroes::heroes_tab(heroes),
+        StatsTab::Overview => overview::overview_tab(heroes, maps, form_matches),
+        StatsTab::Heroes => heroes::heroes_tab(heroes, hero_role, hero_sort),
         StatsTab::Maps => maps::maps_tab(maps),
-        StatsTab::History => history::history_tab(matches, page_cursor, cursor_history),
+        StatsTab::History => history::history_tab(
+            matches,
+            page_cursor,
+            cursor_history,
+            hist_outcome,
+            hist_role,
+        ),
     };
+
+    let dens = density();
 
     rsx! {
         style { {STATS_CSS} }
         style { {crate::styles::admin::CSS} }
 
-        div { class: "stats-page",
+        div { class: "stats-page", "data-density": dens,
             div { class: "stats-header",
                 h1 { "My Stats" }
                 div { class: "stats-header-actions",
+                    button {
+                        class: "density-toggle",
+                        title: "Toggle compact / comfortable density",
+                        onclick: move |_| {
+                            let next = if density() == "compact" {
+                                "comfortable"
+                            } else {
+                                "compact"
+                            };
+                            density.set(next);
+                            persist_density(next);
+                        },
+                        if dens == "compact" { "Density: Compact" } else { "Density: Comfortable" }
+                    }
                     Link { to: Route::StatsTokens {}, "Daemon Tokens" }
                 }
             }
