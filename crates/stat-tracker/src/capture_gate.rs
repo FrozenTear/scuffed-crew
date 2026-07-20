@@ -209,6 +209,18 @@ fn corroborates(prev_raw: u32, cur: u32) -> bool {
     prev_raw.abs_diff(cur) <= band
 }
 
+/// Whether `cur` is a real drop below the previous raw read `prev_raw` — below
+/// it by more than the corroboration jitter band, so OCR jitter is not a drop.
+///
+/// Used by the split decision's raw-continuity vote (F-CG2-1): the gate's
+/// `last_raw` tracks reality even while `accepted` is latched high (CG-2), so a
+/// latch-recovery read (10311→10500) is continuous with `last_raw` and does NOT
+/// drop, while a genuine new-game reset (~0) drops below both `accepted` and
+/// `last_raw` and still splits.
+pub fn raw_dropped(prev_raw: u32, cur: u32) -> bool {
+    cur < prev_raw && !corroborates(prev_raw, cur)
+}
+
 /// Whether a new clean below-held read `cur` continues the down-streak begun at
 /// `streak_last`. Cumulative counters only climb, so a coherent run is
 /// non-decreasing within the corroboration jitter band: a constant run
