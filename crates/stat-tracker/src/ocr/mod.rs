@@ -155,6 +155,30 @@ fn prepared_ink_pixels(img: &image::GrayImage) -> usize {
     img.pixels().filter(|p| p.0[0] < 128).count()
 }
 
+/// Width of the edge band, in binarized-cell pixels, scanned for glyph ink by
+/// the CG-3 suspect check (`preprocess::has_edge_ink`). ~2 px on the native
+/// crop; the 2x upscale of small cells doubles it but the fill fraction is
+/// scale-invariant, so the threshold below holds either way.
+const EDGE_INK_COLS: u32 = 2;
+
+/// Per-side edge fill fraction above which a stat cell is flagged `suspect`
+/// (the window is clipping/bleeding a neighbour digit). Calibrated on the 20
+/// real 2026-07-20 drift frames (`examples/edge_ink.rs` offset sweep): a
+/// centred DMG window measures edge fill 0.000 across a broad offset band, while
+/// drifting it ~1-2 digits so a neighbour glyph is pulled against the margin
+/// spikes the fill to 0.167-0.500. This sits in the middle of that empirical gap
+/// — well clear of clean 0.000 (room for production anti-aliasing) and below the
+/// smallest observed real drift (0.167). See `capture_gate` module docs for the
+/// fixture path.
+const EDGE_INK_THRESHOLD: f64 = 0.12;
+
+/// Edge-ink fraction of a raw cell crop, measured on the borderless binarized
+/// image the OCR path also uses. Exposed for the drift-fixture threshold
+/// validation harness (`examples/edge_ink.rs`); returns `(left, right)`.
+pub fn cell_edge_ink(img: &DynamicImage) -> (f64, f64) {
+    preprocess::edge_ink_fraction(&preprocess::prepare_cell_binary(img), EDGE_INK_COLS)
+}
+
 #[derive(Debug)]
 pub struct OcrResult {
     pub raw_text: String,
@@ -165,6 +189,10 @@ pub struct OcrResult {
 pub struct CellOcrResult {
     pub value: String,
     pub confidence: i32,
+    /// Glyph ink touches a vertical crop edge (CG-3 clip/bleed). Suspect values
+    /// are still parsed — they may be right — but the capture gate strips their
+    /// corroboration/un-latch influence (see `capture_gate::apply_gate`).
+    pub suspect: bool,
 }
 
 #[derive(Debug)]
@@ -246,19 +274,23 @@ fn recognize_cell_with_whitelist(
     img: &DynamicImage,
     whitelist: &str,
 ) -> Result<CellOcrResult, Box<dyn std::error::Error + Send + Sync>> {
-    let prepared = preprocess::prepare_cell(img);
-    if prepared_ink_pixels(&prepared) < MIN_CELL_INK_PIXELS {
+    // Binarize once; measure edge ink on the borderless form, OCR the bordered.
+    let binary = preprocess::prepare_cell_binary(img);
+    let suspect = preprocess::has_edge_ink(&binary, EDGE_INK_COLS, EDGE_INK_THRESHOLD);
+    if prepared_ink_pixels(&binary) < MIN_CELL_INK_PIXELS {
         return Ok(CellOcrResult {
             value: String::new(),
             confidence: 0,
+            suspect: false,
         });
     }
-    let png_buf = encode_png(&prepared)?;
+    let png_buf = encode_png(&preprocess::add_cell_border(&binary))?;
     let (text, confidence) = ocr_with("eng", "7", Some(whitelist), &png_buf)?;
 
     Ok(CellOcrResult {
         value: text.trim().to_string(),
         confidence,
+        suspect,
     })
 }
 
@@ -267,10 +299,13 @@ pub fn recognize_name(
     img: &DynamicImage,
 ) -> Result<CellOcrResult, Box<dyn std::error::Error + Send + Sync>> {
     let prepared = preprocess::prepare_name_cell(img);
+    // Name cells feed only the fuzzy row matcher, never the numeric gate, so the
+    // edge-ink suspect flag is not meaningful here.
     let first = if prepared_ink_pixels(&prepared) < MIN_CELL_INK_PIXELS {
         CellOcrResult {
             value: String::new(),
             confidence: 0,
+            suspect: false,
         }
     } else {
         let png_buf = encode_png(&prepared)?;
@@ -278,6 +313,7 @@ pub fn recognize_name(
         CellOcrResult {
             value: text.trim().to_string(),
             confidence,
+            suspect: false,
         }
     };
     if !first.value.is_empty() {
@@ -297,6 +333,7 @@ pub fn recognize_name(
     Ok(CellOcrResult {
         value: text.trim().to_string(),
         confidence,
+        suspect: false,
     })
 }
 
@@ -324,6 +361,7 @@ pub fn recognize_row(
                     .unwrap_or_else(|| CellOcrResult {
                         value: String::new(),
                         confidence: 0,
+                        suspect: false,
                     });
                 (i, result)
             })
@@ -577,8 +615,11 @@ fn count_valid_cells(row: &DynamicImage, cols: &preprocess::StatColumns) -> i32 
         if let Some(cell) = preprocess::crop_stat_cell(row, col_idx, cols)
             && let Ok(result) = recognize_cell(&cell)
         {
+            // A cell whose glyph ink touches a crop edge (CG-3 bleed/clip) does
+            // NOT count toward the offset's score, so the sweep prefers offsets
+            // with clean margins over a drifted one that still reads 6 digits.
             let text = result.value.trim();
-            if is_valid_stat_for_column(text, col_idx) {
+            if !result.suspect && is_valid_stat_for_column(text, col_idx) {
                 valid += 1;
             }
         }
@@ -593,14 +634,14 @@ fn count_valid_cells(row: &DynamicImage, cols: &preprocess::StatColumns) -> i32 
 /// must NOT count toward the offset's score. The wide accumulator columns keep
 /// the permissive digits-and-commas check.
 ///
-/// A right-edge whitespace-margin check (the clean discriminator between a
-/// centered "13" and a clipped "1") was considered but deferred: there are no
-/// real-pixel fixtures on this machine to calibrate a margin threshold against
-/// (the analyst could not even dump a corrupt board — step-0 deviations), so an
-/// unvalidated pixel heuristic in the calibration hot path is the riskier,
-/// irreversible choice. Digit-count structure plus the anchored tie-break is the
-/// reversible half here; the per-cell capture gate (monotonic hold + rate cap)
-/// is the validated safety net that actually catches the clipped/ghost reads.
+/// A margin check (the clean discriminator between a centered "13" and a
+/// clipped/bled read) was previously deferred for want of real-pixel fixtures.
+/// That reason is now resolved: the 2026-07-20 drift frames calibrated an
+/// edge-ink threshold (`EDGE_INK_THRESHOLD`), and `count_valid_cells` drops any
+/// cell whose glyph ink touches a crop edge from the offset score — so the sweep
+/// actively prefers clean-margin offsets. This structural check remains the
+/// digit-count half; the edge-ink check is the margin half; the per-cell capture
+/// gate (monotonic hold + rate cap + un-latch) is the runtime safety net.
 pub(crate) fn is_valid_stat_for_column(text: &str, col_idx: usize) -> bool {
     let text = text.trim();
     if !is_clean_stat(text) {
