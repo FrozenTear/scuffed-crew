@@ -35,6 +35,50 @@ struct HeroScoped {
 #[derive(Deserialize)]
 struct MembersResponse {
     data: Vec<PublicMember>,
+    /// Present when more pages exist (same contract as `CursorResponse`).
+    #[serde(default)]
+    next_cursor: Option<String>,
+}
+
+/// Backend max page size (`PaginationParams` clamps to 1..=100).
+const HERO_FILTER_PAGE_LIMIT: u32 = 100;
+/// Safety cap while walking cursors under a hero filter (100 × 20 = 2000 members).
+/// Large enough for growth; avoids unbounded request loops.
+const HERO_FILTER_MAX_PAGES: usize = 20;
+
+/// Fetch roster members. Unfiltered: first page only (prior UX). Hero filter:
+/// walk `next_cursor` so players past offset 100 still appear (HS-DR FE-1).
+async fn fetch_roster_members(hero: Option<&str>) -> Option<Vec<PublicMember>> {
+    match hero {
+        None => ApiClient::web()
+            .fetch::<MembersResponse>("/api/public/members")
+            .await
+            .ok()
+            .map(|r| r.data),
+        Some(h) => {
+            let mut all = Vec::new();
+            let mut cursor: Option<String> = None;
+            for _ in 0..HERO_FILTER_MAX_PAGES {
+                let mut path = format!(
+                    "/api/public/members?hero={}&limit={HERO_FILTER_PAGE_LIMIT}",
+                    encode_query(h)
+                );
+                if let Some(c) = cursor.as_deref() {
+                    path.push_str(&format!("&cursor={}", encode_query(c)));
+                }
+                let page = ApiClient::web()
+                    .fetch::<MembersResponse>(&path)
+                    .await
+                    .ok()?;
+                all.extend(page.data);
+                match page.next_cursor {
+                    Some(c) if !c.is_empty() => cursor = Some(c),
+                    _ => break,
+                }
+            }
+            Some(all)
+        }
+    }
 }
 
 const PAGE_CSS: &str = r#"
@@ -137,19 +181,10 @@ pub fn Members() -> Element {
     let members = use_resource(move || {
         let hero = hero();
         async move {
-            let path = match &hero {
-                // A hero filter is applied client-side, so we must pull the whole
-                // org, not the backend's default page (25) — a hero-main past
-                // position 25 would otherwise vanish. `limit=100` is the backend's
-                // max page size (PaginationParams clamps to 1..=100).
-                Some(h) => format!("/api/public/members?hero={}&limit=100", encode_query(h)),
-                None => "/api/public/members".to_string(),
-            };
-            ApiClient::web()
-                .fetch::<MembersResponse>(&path)
-                .await
-                .ok()
-                .map(|r| r.data)
+            // Unfiltered: first page (unchanged). Hero filter: cursor-walk the
+            // full org (up to HERO_FILTER_MAX_PAGES) then client-filter/sort —
+            // single-page limit=100 still missed mains past offset 100 (FE-1).
+            fetch_roster_members(hero.as_deref()).await
         }
     });
 
