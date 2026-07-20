@@ -61,8 +61,9 @@ encryption key (`PRODUCTION=1` gate).
 A desktop daemon that watches Overwatch 2, OCRs the scoreboard when you hit
 Tab, and keeps per-game stats locally (optionally syncing to your org's site).
 Ships as a portable tarball per release — see the
-[releases page](../../releases) and `crates/stat-tracker/README` notes in the
-crate. Linux-first; capture via the desktop portal or wlroots screencopy.
+[releases page](https://github.com/FrozenTear/scuffed-crew/releases) and
+[`crates/stat-tracker/README.md`](crates/stat-tracker/README.md). Linux-first;
+capture via the desktop portal or wlroots screencopy.
 
 ## How this repo is built
 
