@@ -633,8 +633,23 @@ const STAT_SPLIT_MIN_GAP: std::time::Duration = std::time::Duration::from_secs(1
 /// of the three to drop keeps a single misread column (e.g. an inflated
 /// elims read) from faking a boundary, while a real new game — all counters
 /// restarting near zero — trips it reliably.
-fn stats_regressed(prev: (u32, u32, u32), cur: (u32, u32, u32)) -> bool {
-    let drops = [cur.0 < prev.0, cur.1 < prev.1, cur.2 < prev.2];
+///
+/// DUP-1 guard: a column whose current read is `suspect` (edge-ink clipped/bled,
+/// CG-3) must NOT vote as a drop. A CG-2-latched accepted value makes every real
+/// read look like a regression, and after the ≥120s gap that split a new session
+/// MID-game (Rialto 2026-07-20T22:23:41Z: "active game replaced after
+/// stat-regression split"). Only clean-read columns may vote for a boundary; a
+/// genuine new game still trips it because its reset counters read clean.
+fn stats_regressed(
+    prev: (u32, u32, u32),
+    cur: (u32, u32, u32),
+    suspect: (bool, bool, bool),
+) -> bool {
+    let drops = [
+        cur.0 < prev.0 && !suspect.0,
+        cur.1 < prev.1 && !suspect.1,
+        cur.2 < prev.2 && !suspect.2,
+    ];
     drops.iter().filter(|&&d| d).count() >= 2
 }
 
@@ -1648,6 +1663,12 @@ async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<
 
         let now = SurrealDatetime::from(Utc::now());
 
+        // Edge-ink suspect mask (CG-3) for the player's row — read from the same
+        // per-cell OCR the stats came from. Threaded into BOTH the split decision
+        // (DUP-1: a suspect column must not vote as a regression) and the capture
+        // gate (a suspect read never corroborates a jump or drives an un-latch).
+        let suspect = parse::player_row_suspect_mask(&rows, player_row_idx);
+
         // Stat-regression boundary (detector-independent): scoreboard stats
         // are cumulative within a match, so if this capture's counters sit
         // below the session's previous accepted capture, the poller missed
@@ -1660,6 +1681,8 @@ async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<
                     && stats_regressed(
                         state.accepted.edd(),
                         (parsed.elims, parsed.deaths, parsed.damage),
+                        // edd order is (elims, deaths, damage) = cols 0, 2, 3.
+                        (suspect[0], suspect[2], suspect[3]),
                     )
             });
         let (target_session, target_create) = if split {
@@ -1691,7 +1714,7 @@ async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<
             healing: parsed.healing,
             mitigation: parsed.mitigation,
         };
-        let gate = capture_gate::apply_gate(req.prev_gate, raw_counters, split);
+        let gate = capture_gate::apply_gate(req.prev_gate, raw_counters, suspect, split);
         for h in &gate.holds {
             tracing::warn!(
                 session_id = %target_session,
@@ -1700,6 +1723,15 @@ async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<
                 raw = h.raw,
                 held = h.held,
                 "capture gate held a cell (suspected OCR misread)"
+            );
+        }
+        for u in &gate.unlatches {
+            tracing::warn!(
+                session_id = %target_session,
+                col = u.col,
+                raw = u.raw,
+                revised_from = u.revised_from,
+                "capture gate un-latched a cell (clean reads revised a latched value down)"
             );
         }
         parsed.elims = gate.accepted.elims;
@@ -2179,6 +2211,7 @@ mod tests {
                 healing: 900,
                 mitigation: 1200,
             },
+            ..Default::default()
         };
         g.gate = Some(gate_state);
         g.last_stats_at = Some(Instant::now());
@@ -2269,27 +2302,30 @@ mod tests {
     // Transitions below are real (elims, deaths, damage) sequences from the
     // 2026-07-14 session-merge incident (matches.jsonl), where three games
     // were appended to one session because the poller missed every boundary.
+    /// No column edge-ink-flagged (the pre-DUP-1 behaviour for these fixtures).
+    const CLEAN3: (bool, bool, bool) = (false, false, false);
+
     #[test]
     fn stat_regression_detects_real_game_boundaries() {
         // Colosseo end -> Neon Junction first capture (E11->0, DMG 2740->0;
         // deaths 0->0 is NOT strictly lower — two drops still suffice).
-        assert!(stats_regressed((11, 0, 2740), (0, 0, 0)));
+        assert!(stats_regressed((11, 0, 2740), (0, 0, 0), CLEAN3));
         // Neon Junction end -> Dorado first capture: all three drop.
-        assert!(stats_regressed((34, 10, 11742), (1, 0, 254)));
+        assert!(stats_regressed((34, 10, 11742), (1, 0, 254), CLEAN3));
     }
 
     #[test]
     fn stat_regression_ignores_single_field_misreads() {
         // Garbage OCR row mid-game (E29->9 misread, deaths/damage rose):
         // one drop must not split the session.
-        assert!(!stats_regressed((29, 5, 9242), (9, 11, 61029)));
+        assert!(!stats_regressed((29, 5, 9242), (9, 11, 61029), CLEAN3));
         // Inflated elims read (E91) settling back next capture, deaths and
         // damage unchanged: still only one drop.
-        assert!(!stats_regressed((91, 3, 9072), (15, 3, 9072)));
+        assert!(!stats_regressed((91, 3, 9072), (15, 3, 9072), CLEAN3));
         // Normal mid-game progression never regresses.
-        assert!(!stats_regressed((5, 1, 1271), (8, 2, 5966)));
+        assert!(!stats_regressed((5, 1, 1271), (8, 2, 5966), CLEAN3));
         // Identical re-capture of the same board (post-match Tab spam).
-        assert!(!stats_regressed((30, 5, 10352), (30, 5, 10352)));
+        assert!(!stats_regressed((30, 5, 10352), (30, 5, 10352), CLEAN3));
     }
 
     #[test]
@@ -2297,8 +2333,43 @@ mod tests {
         // A garbage row (E9 D11 DMG61029) followed by the next real capture
         // DOES look like a regression — the STAT_SPLIT_MIN_GAP guard is what
         // prevents this from splitting (captures were 86s apart, gap is 120s).
-        assert!(stats_regressed((9, 11, 61029), (3, 5, 10865)));
+        assert!(stats_regressed((9, 11, 61029), (3, 5, 10865), CLEAN3));
         assert!(STAT_SPLIT_MIN_GAP > Duration::from_secs(86));
+    }
+
+    #[test]
+    fn dup1_suspect_columns_do_not_vote_for_a_split() {
+        // CG-2 latch: `accepted` sits inflated (E latched 40, DMG latched 35031),
+        // so the real reads (E10, DMG5435) look like a two-column regression and
+        // would split a NEW session mid-game (Rialto 2026-07-20). But those two
+        // columns are edge-ink SUSPECT — with the guard they cannot vote, so only
+        // the (clean) deaths column could, and one drop never splits.
+        let prev = (40, 4, 35031);
+        let cur = (10, 4, 5435);
+        assert!(
+            stats_regressed(prev, cur, CLEAN3),
+            "without the guard the latched inflation fakes a boundary"
+        );
+        assert!(
+            !stats_regressed(prev, cur, (true, false, true)),
+            "suspect E + DMG drops must not vote — no mid-game split"
+        );
+    }
+
+    #[test]
+    fn dup1_genuine_new_game_still_splits_on_clean_resets() {
+        // A real new game resets every counter and reads them CLEAN, so the guard
+        // leaves the boundary fully detectable: E34->1, D10->0, DMG11742->254.
+        assert!(
+            stats_regressed((34, 10, 11742), (1, 0, 254), CLEAN3),
+            "clean reset reads still trip the split"
+        );
+        // Even if ONE reset column happened to be suspect, the other two clean
+        // drops still carry the 2-of-3 vote.
+        assert!(
+            stats_regressed((34, 10, 11742), (1, 0, 254), (false, false, true)),
+            "one suspect reset column does not block a genuine boundary"
+        );
     }
 
     #[test]

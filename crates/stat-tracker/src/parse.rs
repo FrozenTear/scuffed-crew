@@ -152,6 +152,31 @@ fn stats_from_row(row: &RowOcrResult) -> Option<PlayerStats> {
     Some(stats)
 }
 
+/// The per-column edge-ink suspect mask for the player's row, in the same
+/// positional order as the gate counters `[E, A, D, DMG, HLG, MIT]`.
+///
+/// This is the CG-3 signal the capture gate needs alongside the parsed counters:
+/// a `true` entry means that cell's glyph ink touched a crop edge (clip/bleed),
+/// so the gate must strip its corroboration/un-latch influence. The mask is read
+/// from the SAME per-cell OCR row that `parse_scoreboard_cells` reads its stats
+/// from (`stats_from_row`). When the player row was not positively identified —
+/// or the stats came from the raw-text fallback, which carries no per-cell
+/// pixels — every column is `false` (no edge-ink evidence either way).
+pub fn player_row_suspect_mask(
+    rows: &[RowOcrResult],
+    player_row_index: Option<usize>,
+) -> [bool; 6] {
+    let mut mask = [false; 6];
+    if let Some(row) = player_row_index.and_then(|i| rows.get(i))
+        && row.stats.len() >= 6
+    {
+        for (col, flag) in mask.iter_mut().enumerate() {
+            *flag = row.stats[col].suspect;
+        }
+    }
+    mask
+}
+
 fn parse_cell_number(s: &str) -> Option<u32> {
     let cleaned: String = s.chars().filter(|c| c.is_ascii_digit()).collect();
     if cleaned.is_empty() {
@@ -439,6 +464,7 @@ mod tests {
         CellOcrResult {
             value: value.to_string(),
             confidence: 80,
+            suspect: false,
         }
     }
 

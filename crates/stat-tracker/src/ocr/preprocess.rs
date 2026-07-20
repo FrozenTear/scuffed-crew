@@ -114,6 +114,23 @@ pub fn prepare_adaptive(img: &DynamicImage) -> GrayImage {
 /// since the mask already did the heavy lifting. Sauvola on these small, mostly-black
 /// post-mask images produces poor results (local mean ≈ 0 → garbage thresholds).
 pub fn prepare_cell(img: &DynamicImage) -> GrayImage {
+    add_cell_border(&prepare_cell_binary(img))
+}
+
+/// Add the standard 8-px white OCR border to a binarized cell. Split out so the
+/// per-cell path can binarize once (for the edge-ink measurement) and border the
+/// same buffer for Tesseract, rather than re-running the pipeline.
+pub fn add_cell_border(binary: &GrayImage) -> GrayImage {
+    add_white_border(binary, 8)
+}
+
+/// Binarized cell WITHOUT the OCR white border: foreground ink = 0 (black),
+/// background = 255. This is the image [`prepare_cell`] borders for Tesseract;
+/// the edge-ink suspect check ([`edge_ink_fraction`]) runs on the *borderless*
+/// form because its left/right columns are the real stat-column crop boundary —
+/// ink touching them means the window is clipping or bleeding a neighbour glyph
+/// (CG-3 offset drift).
+pub fn prepare_cell_binary(img: &DynamicImage) -> GrayImage {
     let masked = hsv_white_mask(img);
     let gray = DynamicImage::ImageRgb8(masked).to_luma8();
     let (w, _) = gray.dimensions();
@@ -132,8 +149,47 @@ pub fn prepare_cell(img: &DynamicImage) -> GrayImage {
             binary.put_pixel(x, y, Luma([if v > 30 { 0 } else { 255 }]));
         }
     }
+    binary
+}
 
-    add_white_border(&binary, 8)
+/// Per-side fill fraction of the outermost `edge_cols` pixel columns of a
+/// borderless binarized cell ([`prepare_cell_binary`]), returned as
+/// `(left, right)`. Each value is `ink_pixels_in_band / band_area`, so it is
+/// scale-invariant (the 2x cell upscale does not shift it). A centred glyph
+/// leaves both bands near-empty; a clipped/bled glyph jams a vertical stroke
+/// against one edge, spiking that side.
+pub fn edge_ink_fraction(binary: &GrayImage, edge_cols: u32) -> (f64, f64) {
+    let (w, h) = binary.dimensions();
+    if w == 0 || h == 0 || edge_cols == 0 {
+        return (0.0, 0.0);
+    }
+    // Clamp the band so left/right never overlap on a very narrow cell.
+    let ec = edge_cols.min(w.div_ceil(2));
+    let (mut left, mut right) = (0u64, 0u64);
+    for y in 0..h {
+        for x in 0..ec {
+            if binary.get_pixel(x, y).0[0] < 128 {
+                left += 1;
+            }
+        }
+        for x in (w - ec)..w {
+            if binary.get_pixel(x, y).0[0] < 128 {
+                right += 1;
+            }
+        }
+    }
+    let band_area = (ec * h) as f64;
+    (left as f64 / band_area, right as f64 / band_area)
+}
+
+/// Whether a borderless binarized cell has ink touching either vertical edge
+/// beyond `threshold` fill — the "suspect" signal that the stat-column window is
+/// clipping or bleeding a glyph. Uses the worse of the two sides (a clip touches
+/// only one edge). See [`edge_ink_fraction`]; threshold validated against the
+/// 2026-07-20 drift fixtures (see `capture_gate` module docs).
+pub fn has_edge_ink(binary: &GrayImage, edge_cols: u32, threshold: f64) -> bool {
+    let (l, r) = edge_ink_fraction(binary, edge_cols);
+    l.max(r) > threshold
 }
 
 /// Prepare a player name cell — HSV mask + simple threshold (same rationale as prepare_cell).
@@ -832,4 +888,78 @@ pub fn save_debug_stages(img: &DynamicImage, debug_dir: &std::path::Path) {
     // Stage 4: Morphological close (final)
     let final_img = morphological_close(&binary, 1);
     let _ = DynamicImage::ImageLuma8(final_img).save(debug_dir.join("04_final.png"));
+}
+
+#[cfg(test)]
+mod edge_ink_tests {
+    use super::*;
+
+    // Binarized-cell convention: ink = 0 (black), background = 255.
+    fn blank(w: u32, h: u32) -> GrayImage {
+        GrayImage::from_pixel(w, h, Luma([255]))
+    }
+
+    fn fill(img: &mut GrayImage, x0: u32, x1: u32, y0: u32, y1: u32) {
+        for y in y0..y1 {
+            for x in x0..x1 {
+                img.put_pixel(x, y, Luma([0]));
+            }
+        }
+    }
+
+    #[test]
+    fn centered_glyph_has_no_edge_ink() {
+        // A digit stroke in the middle columns leaves the 2-px edge bands empty.
+        let mut img = blank(40, 40);
+        fill(&mut img, 16, 24, 8, 32);
+        assert_eq!(edge_ink_fraction(&img, 2), (0.0, 0.0));
+        assert!(!has_edge_ink(&img, 2, 0.12), "centered digit must not flag");
+    }
+
+    #[test]
+    fn glyph_touching_left_edge_flags() {
+        // A stroke jammed against the left crop edge (a bled neighbour digit).
+        let mut img = blank(40, 40);
+        fill(&mut img, 0, 3, 8, 32);
+        let (l, r) = edge_ink_fraction(&img, 2);
+        assert!(l > 0.5, "left band mostly inked: {l}");
+        assert_eq!(r, 0.0);
+        assert!(has_edge_ink(&img, 2, 0.12), "left-edge stroke must flag");
+    }
+
+    #[test]
+    fn glyph_touching_right_edge_flags() {
+        let mut img = blank(40, 40);
+        fill(&mut img, 37, 40, 8, 32);
+        let (l, r) = edge_ink_fraction(&img, 2);
+        assert_eq!(l, 0.0);
+        assert!(r > 0.5, "right band mostly inked: {r}");
+        assert!(has_edge_ink(&img, 2, 0.12));
+    }
+
+    #[test]
+    fn stroke_just_inside_the_margin_does_not_flag() {
+        // Ends at col 3 — the 2-px edge band (cols 0-1) stays clean. This is the
+        // clean/clipped discriminator: 0.12 sits well above this margin case.
+        let mut img = blank(40, 40);
+        fill(&mut img, 3, 12, 8, 32);
+        assert!(!has_edge_ink(&img, 2, 0.12));
+    }
+
+    #[test]
+    fn threshold_sits_in_the_fixture_gap() {
+        // Real 2026-07-20 frames: centered DMG edge fill = 0.000, drift spikes
+        // >= 0.167. A 1-px incidental touch (~0.0125 fill) models anti-aliasing
+        // and must stay BELOW 0.12; a half-height edge stroke (~0.5 fill) models
+        // a real bleed and must stay ABOVE it.
+        let mut light = blank(40, 40);
+        fill(&mut light, 0, 1, 20, 21);
+        assert!(
+            !has_edge_ink(&light, 2, 0.12),
+            "incidental speck must not flag"
+        );
+        let mut bleed = blank(40, 40);
+        fill(&mut bleed, 0, 2, 10, 30);
+        assert!(has_edge_ink(&bleed, 2, 0.12), "real bleed must flag");
+    }
 }
