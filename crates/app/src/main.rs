@@ -14,6 +14,7 @@ mod routes;
 mod state;
 mod styles;
 mod theme;
+mod util;
 
 use dioxus::prelude::*;
 
