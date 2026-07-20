@@ -106,28 +106,69 @@ pub(super) fn history_tab(
                 if rows.is_empty() {
                     p { class: "empty-state", "No matches match these filters on this page." }
                 } else {
-                    div { class: "match-cards",
-                        for m in rows.iter() {
-                            {
-                                let oc = outcome_class(&m.outcome);
-                                let date = format_date(&m.played_at);
-                                let abs = m.played_at.format("%Y-%m-%d %H:%M UTC").to_string();
-                                let map_label = if m.map_name.trim().is_empty() {
-                                    "Unknown map".to_string()
-                                } else {
-                                    m.map_name.clone()
-                                };
-                                rsx! {
-                                    div { class: "match-card", key: "{m.id}",
-                                        div { class: "match-outcome {oc}", "{m.outcome}" }
-                                        div {
-                                            div { class: "match-hero", "{m.hero}" }
-                                            div { class: "match-map", "{map_label} · {m.role}" }
+                    // W5b: fixed columns for E/D/A | dmg | heal so values
+                    // align across rows (tabular-nums, right-aligned). Header
+                    // uses the same grid track template as each card.
+                    div { class: "match-list",
+                        div { class: "match-list-head", aria_hidden: "true",
+                            span { class: "match-h-outcome" }
+                            span { class: "match-h-id" }
+                            div { class: "match-stats",
+                                span { class: "match-h-stat", "E" }
+                                span { class: "match-h-stat", "D" }
+                                span { class: "match-h-stat", "A" }
+                                span { class: "match-h-stat match-h-wide", "DMG" }
+                                span { class: "match-h-stat match-h-wide", "HEAL" }
+                            }
+                            span { class: "match-h-date" }
+                        }
+                        div { class: "match-cards",
+                            for m in rows.iter() {
+                                {
+                                    let oc = outcome_class(&m.outcome);
+                                    let date = format_date(&m.played_at);
+                                    let abs = m.played_at.format("%Y-%m-%d %H:%M UTC").to_string();
+                                    let map_label = if m.map_name.trim().is_empty() {
+                                        "Unknown map".to_string()
+                                    } else {
+                                        m.map_name.clone()
+                                    };
+                                    rsx! {
+                                        div { class: "match-card", key: "{m.id}",
+                                            div { class: "match-outcome {oc}", "{m.outcome}" }
+                                            div { class: "match-identity",
+                                                div { class: "match-hero", "{m.hero}" }
+                                                div { class: "match-map", "{map_label} · {m.role}" }
+                                            }
+                                            div { class: "match-stats",
+                                                div {
+                                                    class: "match-stat",
+                                                    title: "Eliminations",
+                                                    "{m.elims}"
+                                                }
+                                                div {
+                                                    class: "match-stat",
+                                                    title: "Deaths",
+                                                    "{m.deaths}"
+                                                }
+                                                div {
+                                                    class: "match-stat",
+                                                    title: "Assists",
+                                                    "{m.assists}"
+                                                }
+                                                div {
+                                                    class: "match-stat match-stat-wide",
+                                                    title: "Damage",
+                                                    "{m.damage}"
+                                                }
+                                                div {
+                                                    class: "match-stat match-stat-wide",
+                                                    title: "Healing",
+                                                    "{m.healing}"
+                                                }
+                                            }
+                                            div { class: "match-date", title: "{abs}", "{date}" }
                                         }
-                                        div { class: "match-scoreline",
-                                            "{m.elims}E / {m.deaths}D / {m.assists}A · {m.damage} dmg · {m.healing} heal"
-                                        }
-                                        div { class: "match-date", title: "{abs}", "{date}" }
                                     }
                                 }
                             }
