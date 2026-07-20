@@ -111,6 +111,7 @@ pub(super) fn history_tab(
                             {
                                 let oc = outcome_class(&m.outcome);
                                 let date = format_date(&m.played_at);
+                                let abs = m.played_at.format("%Y-%m-%d %H:%M UTC").to_string();
                                 let map_label = if m.map_name.trim().is_empty() {
                                     "Unknown map".to_string()
                                 } else {
@@ -126,7 +127,7 @@ pub(super) fn history_tab(
                                         div { class: "match-scoreline",
                                             "{m.elims}E / {m.deaths}D / {m.assists}A · {m.damage} dmg · {m.healing} heal"
                                         }
-                                        div { class: "match-date", "{date}" }
+                                        div { class: "match-date", title: "{abs}", "{date}" }
                                     }
                                 }
                             }

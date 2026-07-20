@@ -2,7 +2,7 @@ use dioxus::prelude::*;
 
 use serde::Deserialize;
 
-use crate::components::{DataTable, SummaryCard};
+use crate::components::DataTable;
 use crate::hooks::use_api_with;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -47,13 +47,12 @@ fn winrate_pct(wins: u32, total: u32) -> f64 {
     }
 }
 
-fn winrate_class(pct: f64) -> &'static str {
-    if pct >= 55.0 {
-        "stats-winrate high"
-    } else if pct >= 45.0 {
-        "stats-winrate mid"
+/// Match personal stats: plain WR text; mute low sample (no 3-bin traffic light).
+fn wr_text_class(matches: u32) -> &'static str {
+    if matches < 3 {
+        "stats-wr muted"
     } else {
-        "stats-winrate low"
+        "stats-wr"
     }
 }
 
@@ -83,6 +82,7 @@ const MEMBER_STATS_CSS: &str = r#"
         gap: 0.25rem;
         margin-bottom: 1.5rem;
         border-bottom: 1px solid var(--border);
+        overflow-x: auto;
     }
     .stats-tab {
         padding: 0.6rem 1.2rem;
@@ -98,22 +98,69 @@ const MEMBER_STATS_CSS: &str = r#"
         border-bottom: 2px solid transparent;
         margin-bottom: -1px;
         transition: color 0.15s, border-color 0.15s;
+        white-space: nowrap;
     }
     .stats-tab:hover { color: var(--text); }
     .stats-tab.active {
         color: var(--accent);
         border-bottom-color: var(--accent);
     }
-    .stats-winrate {
-        display: inline-block;
-        padding: 0.1rem 0.4rem;
-        border-radius: 4px;
-        font-size: 0.8rem;
-        font-weight: 600;
+    .stats-summary {
+        display: grid;
+        grid-template-columns: minmax(220px, 2fr) minmax(140px, 1fr);
+        gap: 1rem;
+        margin-bottom: 2rem;
     }
-    .stats-winrate.high { color: var(--ok); }
-    .stats-winrate.mid { color: var(--warn); }
-    .stats-winrate.low { color: var(--danger); }
+    .stat-tile {
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 1.25rem;
+        text-align: center;
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+    }
+    .stat-tile-value {
+        font-family: var(--font-head);
+        font-size: 1.9rem;
+        color: var(--text);
+        letter-spacing: 2px;
+        line-height: 1;
+    }
+    .stat-tile-hero .stat-tile-value {
+        font-size: 2.8rem;
+        color: var(--accent);
+    }
+    .stat-tile-label {
+        font-size: 0.75rem;
+        color: var(--text-3);
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        margin-top: 0.35rem;
+    }
+    .stat-tile-record {
+        font-size: 0.9rem;
+        color: var(--text-2);
+        margin-top: 0.4rem;
+    }
+    .stats-wr { font-weight: 600; color: var(--text); font-variant-numeric: tabular-nums; }
+    .stats-wr.muted { color: var(--text-3); font-weight: 400; }
+    .stats-row-muted { opacity: 0.55; }
+    .stats-page .data-table th:not(:first-child),
+    .stats-page .data-table td:not(:first-child) {
+        text-align: right;
+        font-variant-numeric: tabular-nums;
+    }
+    .stats-page .data-table-scroll {
+        overflow-x: auto;
+        -webkit-overflow-scrolling: touch;
+        max-width: 100%;
+    }
+    @media (max-width: 720px) {
+        .stats-page { padding: 1.25rem 1rem; }
+        .stats-summary { grid-template-columns: 1fr; }
+    }
 "#;
 
 #[component]
@@ -144,15 +191,26 @@ pub fn StatsMember(id: String) -> Element {
                 let s = data.as_ref().and_then(|d| d.as_ref());
                 match s {
                     None => rsx! { p { class: "loading-state", "Loading stats..." } },
+                    Some(s) if s.total_matches == 0 => rsx! {
+                        p { class: "empty-state", "No matches tracked for this member yet." }
+                    },
                     Some(s) => {
                         let wr = winrate_pct(s.wins, s.total_matches);
+                        let mut record = format!("{}W–{}L", s.wins, s.losses);
+                        if s.draws > 0 {
+                            record.push_str(&format!("–{}D", s.draws));
+                        }
                         rsx! {
-                            div { class: "summary-cards",
-                                SummaryCard { value: s.total_matches.to_string(), label: "Matches" }
-                                SummaryCard { value: s.wins.to_string(), label: "Wins" }
-                                SummaryCard { value: s.losses.to_string(), label: "Losses" }
-                                SummaryCard { value: s.draws.to_string(), label: "Draws" }
-                                SummaryCard { value: format!("{wr:.1}%"), label: "Win Rate" }
+                            div { class: "stats-summary",
+                                div { class: "stat-tile stat-tile-hero",
+                                    div { class: "stat-tile-value", "{wr:.1}%" }
+                                    div { class: "stat-tile-label", "Win Rate" }
+                                    div { class: "stat-tile-record", "{record}" }
+                                }
+                                div { class: "stat-tile",
+                                    div { class: "stat-tile-value", "{s.total_matches}" }
+                                    div { class: "stat-tile-label", "Matches" }
+                                }
                             }
                         }
                     }
@@ -201,9 +259,10 @@ pub fn StatsMember(id: String) -> Element {
                                         for hero in sorted.iter() {
                                             {
                                                 let wr = winrate_pct(hero.wins, hero.matches);
-                                                let wr_cls = winrate_class(wr);
+                                                let wr_cls = wr_text_class(hero.matches);
+                                                let row_cls = if hero.matches < 3 { "stats-row-muted" } else { "" };
                                                 rsx! {
-                                                    tr { key: "{hero.hero}",
+                                                    tr { key: "{hero.hero}", class: "{row_cls}",
                                                         td { "{hero.hero}" }
                                                         td { "{hero.matches}" }
                                                         td { span { class: "{wr_cls}", "{wr:.1}%" } }
@@ -238,9 +297,10 @@ pub fn StatsMember(id: String) -> Element {
                                         for map in sorted.iter() {
                                             {
                                                 let wr = winrate_pct(map.wins, map.matches);
-                                                let wr_cls = winrate_class(wr);
+                                                let wr_cls = wr_text_class(map.matches);
+                                                let row_cls = if map.matches < 3 { "stats-row-muted" } else { "" };
                                                 rsx! {
-                                                    tr { key: "{map.map_name}",
+                                                    tr { key: "{map.map_name}", class: "{row_cls}",
                                                         td { "{map.map_name}" }
                                                         td { "{map.matches}" }
                                                         td { span { class: "{wr_cls}", "{wr:.1}%" } }

@@ -111,7 +111,19 @@ pub(super) const MIN_GAMES: u32 = 3;
 pub(super) const MIN_GAMES_NOTE: &str = "min 3 games — smaller samples muted";
 
 fn format_date(dt: &DateTime<Utc>) -> String {
-    dt.format("%b %d, %Y").to_string()
+    let now = Utc::now();
+    let secs = now.signed_duration_since(*dt).num_seconds().max(0);
+    if secs < 45 {
+        "now".into()
+    } else if secs < 3600 {
+        format!("{}m ago", secs / 60)
+    } else if secs < 86_400 {
+        format!("{}h ago", secs / 3600)
+    } else if secs < 86_400 * 14 {
+        format!("{}d ago", secs / 86_400)
+    } else {
+        dt.format("%b %d, %Y").to_string()
+    }
 }
 
 /// Shared map → game mode (used by maps tab + overview mode chips).
@@ -755,6 +767,34 @@ const STATS_CSS: &str = r#"
     .map-callout-label { font-size: 0.7rem; text-transform: uppercase; color: var(--text-3); }
     .map-callout-name { font-weight: 600; color: var(--text); }
     .map-callout-meta { color: var(--text-2); font-variant-numeric: tabular-nums; }
+
+    /* W4 polish: tables, mobile, hold layout */
+    .stats-page .data-table th:not(:first-child),
+    .stats-page .data-table td:not(:first-child) {
+        text-align: right;
+        font-variant-numeric: tabular-nums;
+    }
+    .stats-page .data-table-scroll {
+        overflow-x: auto;
+        -webkit-overflow-scrolling: touch;
+        max-width: 100%;
+    }
+    .stats-page .match-scoreline {
+        font-variant-numeric: tabular-nums;
+    }
+    @media (max-width: 720px) {
+        .stats-page { padding: 1.25rem 1rem; }
+        .overview-grid { grid-template-columns: 1fr; }
+        .stats-summary { grid-template-columns: 1fr; }
+        .match-card {
+            grid-template-columns: 1fr;
+            gap: 0.35rem;
+        }
+        .match-card .match-date { text-align: left; }
+        .stats-tabs { overflow-x: auto; flex-wrap: nowrap; }
+        .stats-tab { white-space: nowrap; padding: 0.55rem 0.9rem; }
+        .map-callouts { flex-direction: column; }
+    }
 "#;
 
 #[component]
