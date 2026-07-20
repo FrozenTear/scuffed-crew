@@ -618,8 +618,10 @@ mod tests {
 
     #[test]
     fn content_align_roundtrips_in_json() {
-        let mut hp = HomepageContent::default();
-        hp.content_align = ContentAlign::Center;
+        let hp = HomepageContent {
+            content_align: ContentAlign::Center,
+            ..Default::default()
+        };
         let json = hp.to_json();
         assert!(
             json.contains("\"content_align\":\"center\""),
