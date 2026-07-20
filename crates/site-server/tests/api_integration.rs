@@ -218,13 +218,19 @@ fn authed_json_request(method: Method, uri: &str, token: &str, body: Value) -> R
 }
 
 /// Build an unauthenticated request.
+///
+/// Injects ConnectInfo (+ loopback X-Forwarded-For) so routes behind
+/// `GovernorLayer`/`TrustedProxyIpKeyExtractor` work under `ServiceExt::oneshot`
+/// (HS-DR P1 public governor; same pattern as `rate_limit_ip` on auth posts).
 fn unauthed_request(method: Method, uri: &str) -> Request<Body> {
-    Request::builder()
-        .method(method)
-        .uri(uri)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(Body::empty())
-        .unwrap()
+    rate_limit_ip(
+        Request::builder()
+            .method(method)
+            .uri(uri)
+            .header(header::CONTENT_TYPE, "application/json"),
+    )
+    .body(Body::empty())
+    .unwrap()
 }
 
 /// Extract response body as JSON.
