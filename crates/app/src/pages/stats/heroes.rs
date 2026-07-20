@@ -5,7 +5,10 @@ use crate::components::charts::{BarEntry, HBarChart};
 use crate::hooks::ApiResource;
 
 use super::overview::hero_to_role;
-use super::{HeroStats, MIN_GAMES, MIN_GAMES_NOTE, load_error_state, winrate_pct, wr_text_class};
+use super::{
+    HeroStats, MIN_GAMES, MIN_GAMES_NOTE, load_error_state, winrate_pct, wr_bar_color,
+    wr_text_class,
+};
 
 pub(super) fn heroes_tab(
     heroes: ApiResource<Vec<HeroStats>>,
@@ -63,7 +66,7 @@ pub(super) fn heroes_tab(
                     BarEntry {
                         label: h.hero.clone(),
                         value: wr,
-                        color: "var(--chart-wr)".to_string(),
+                        color: wr_bar_color(h.wins, h.matches).to_string(),
                         display: format!("{wr:.1}% ({} games)", h.matches),
                         muted: false,
                     }

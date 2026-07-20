@@ -24,8 +24,12 @@ pub fn theme_css(brand: &BrandConfig) -> String {
      the dark surface (#1f1f27) — see docs/notes/stats-ui-w2-validation.md.
      Snap-tuned to the dark lightness band; re-run the validator if edited. */
   --chart-1: #8f73ff; --chart-2: #15ac7d; --chart-3: #b98a02; --chart-4: #ca474c; --chart-5: #089fd7; --chart-6: #984ab2;
-  /* Single accent for all winrate bars (never a traffic light). */
-  --chart-wr: #089fd7;
+  /* Winrate bars: two-pole diverging encoding (W5a). Cool up-pole (> 50%),
+     warm down-pole (< 50%); exactly-50% and sub-min-games rows take the
+     neutral --text-3 midpoint. Chart poles, NOT status tokens. Pair
+     CVD-validated vs both surfaces — see docs/notes/stats-ui-w2-validation.md
+     (W5a section); re-run the validator if edited. */
+  --chart-wr-up: #089fd7; --chart-wr-down: #aa5000;
 }}
 
 [data-theme="dark"] {{
@@ -42,7 +46,7 @@ pub fn theme_css(brand: &BrandConfig) -> String {
   --ok: #0ea66e; --warn: #c2830a; --danger: #d63031;
   /* CVD-validated against #ffffff — see docs/notes/stats-ui-w2-validation.md. */
   --chart-1: #6d4aff; --chart-2: #0ea66e; --chart-3: #c2830a; --chart-4: #d63031; --chart-5: #0284c7; --chart-6: #7405c3;
-  --chart-wr: #0284c7;
+  --chart-wr-up: #0284c7; --chart-wr-down: #843900;
 }}
 
 html, body {{

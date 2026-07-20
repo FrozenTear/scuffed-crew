@@ -5,7 +5,7 @@ use crate::hooks::ApiResource;
 
 use super::{
     MIN_GAMES, MIN_GAMES_NOTE, MapStats, load_error_state, map_game_mode, winrate_pct,
-    wr_text_class,
+    wr_bar_color, wr_text_class,
 };
 
 const MODE_ORDER: &[&str] = &[
@@ -112,7 +112,7 @@ pub(super) fn maps_tab(maps: ApiResource<Vec<MapStats>>) -> Element {
                         BarEntry {
                             label: m.map_name.clone(),
                             value: wr,
-                            color: "var(--chart-wr)".to_string(),
+                            color: wr_bar_color(m.wins, m.matches).to_string(),
                             display: format!("{wr:.1}% ({} games)", m.matches),
                             muted: m.matches < MIN_GAMES,
                         }
