@@ -302,30 +302,84 @@ const STATS_CSS: &str = r#"
     .outcome-win { color: var(--ok); font-weight: 600; }
     .outcome-loss { color: var(--danger); font-weight: 600; }
     .outcome-draw { color: var(--text-2); font-weight: 600; }
+    /* W5b history layout: outcome | identity | E D A | dmg heal | date.
+       Header + cards share the outer grid; numeric cols live in .match-stats
+       with fixed tracks so values column-scan. Tighter than free scoreline. */
+    .match-list { display: flex; flex-direction: column; gap: 0.15rem; }
+    .match-list-head,
+    .match-card {
+        display: grid;
+        grid-template-columns:
+            minmax(4.5rem, 5.5rem)
+            minmax(7rem, 1.4fr)
+            auto
+            minmax(4.25rem, auto);
+        gap: 0.35rem 0.65rem;
+        align-items: center;
+    }
+    .match-stats {
+        display: grid;
+        grid-template-columns: 2.25rem 2.25rem 2.25rem 3.75rem 3.75rem;
+        gap: 0.2rem 0.45rem;
+        align-items: center;
+        justify-self: end;
+    }
+    .match-list-head {
+        padding: 0 0.85rem 0.15rem;
+        font-size: 0.65rem;
+        font-weight: 600;
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+        color: var(--text-3);
+    }
+    .match-h-stat, .match-h-date { text-align: right; }
     .match-card {
         background: var(--surface);
         border: 1px solid var(--border);
         border-radius: 8px;
-        padding: 0.75rem 1rem;
-        display: grid;
-        grid-template-columns: 80px 1fr 1fr auto;
-        gap: 1rem;
-        align-items: center;
+        padding: 0.5rem 0.85rem;
         font-size: 0.85rem;
         transition: background 0.15s;
     }
     .match-card:hover { background: var(--surface-2); }
-    .match-cards { display: flex; flex-direction: column; gap: 0.5rem; }
+    .match-cards { display: flex; flex-direction: column; gap: 0.3rem; }
     .match-card .match-outcome {
         font-family: var(--font-head);
-        font-size: 1rem;
+        font-size: 0.85rem;
         font-weight: 700;
         text-transform: uppercase;
+        line-height: 1.15;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
     }
-    .match-card .match-hero { color: var(--text); font-weight: 500; }
-    .match-card .match-map { color: var(--text-2); font-size: 0.8rem; }
-    .match-card .match-scoreline { color: var(--text-3); font-size: 0.8rem; }
-    .match-card .match-date { color: var(--text-3); font-size: 0.75rem; text-align: right; }
+    .match-identity { min-width: 0; }
+    .match-card .match-hero {
+        color: var(--text);
+        font-weight: 500;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+    .match-card .match-map {
+        color: var(--text-2);
+        font-size: 0.75rem;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+    .match-stat {
+        color: var(--text-2);
+        font-size: 0.8rem;
+        text-align: right;
+        font-variant-numeric: tabular-nums;
+    }
+    .match-card .match-date {
+        color: var(--text-3);
+        font-size: 0.75rem;
+        text-align: right;
+        white-space: nowrap;
+    }
     .stats-pagination {
         display: flex;
         justify-content: center;
@@ -504,14 +558,6 @@ const STATS_CSS: &str = r#"
     }
     @media (max-width: 640px) {
         .stats-summary { grid-template-columns: 1fr; }
-        .match-card {
-            grid-template-columns: 60px 1fr;
-            gap: 0.5rem;
-        }
-        .match-card .match-scoreline,
-        .match-card .match-date {
-            grid-column: 1 / -1;
-        }
     }
 
     /* Slim tracker row (shown once matches exist) */
@@ -739,7 +785,9 @@ const STATS_CSS: &str = r#"
     }
     .density-toggle:hover { color: var(--text); border-color: var(--accent-soft); }
     .stats-page[data-density="comfortable"] .overview-grid { gap: 1.75rem; }
-    .stats-page[data-density="comfortable"] .match-card { padding: 1rem 1.15rem; }
+    .stats-page[data-density="comfortable"] .match-card { padding: 0.75rem 1.1rem; }
+    .stats-page[data-density="compact"] .match-card { padding: 0.4rem 0.75rem; }
+    .stats-page[data-density="compact"] .match-cards { gap: 0.2rem; }
     .stats-page[data-density="compact"] .overview-grid { gap: 1rem; }
     .overview-form { margin-top: 1rem; }
     .mini-hero-list { display: flex; flex-direction: column; gap: 0.45rem; }
@@ -801,18 +849,34 @@ const STATS_CSS: &str = r#"
         -webkit-overflow-scrolling: touch;
         max-width: 100%;
     }
-    .stats-page .match-scoreline {
+    .stats-page .match-stat {
         font-variant-numeric: tabular-nums;
+    }
+    @media (max-width: 900px) {
+        /* Header labels need full width; hide when tracks would crush. */
+        .match-list-head { display: none; }
     }
     @media (max-width: 720px) {
         .stats-page { padding: 1.25rem 1rem; }
         .overview-grid { grid-template-columns: 1fr; }
         .stats-summary { grid-template-columns: 1fr; }
+        /* W5b mobile: row1 outcome | identity | date; row2 equal stats strip.
+           title= on each .match-stat keeps E/D/A/dmg/heal discoverable. */
         .match-card {
-            grid-template-columns: 1fr;
-            gap: 0.35rem;
+            grid-template-columns: 4.5rem minmax(0, 1fr) auto;
+            grid-template-areas:
+                "outcome identity date"
+                "stats stats stats";
+            gap: 0.3rem 0.5rem;
         }
-        .match-card .match-date { text-align: left; }
+        .match-card .match-outcome { grid-area: outcome; }
+        .match-card .match-identity { grid-area: identity; }
+        .match-card .match-stats {
+            grid-area: stats;
+            justify-self: stretch;
+            grid-template-columns: repeat(5, minmax(0, 1fr));
+        }
+        .match-card .match-date { grid-area: date; text-align: right; }
         .stats-tabs { overflow-x: auto; flex-wrap: nowrap; }
         .stats-tab { white-space: nowrap; padding: 0.55rem 0.9rem; }
         .map-callouts { flex-direction: column; }
