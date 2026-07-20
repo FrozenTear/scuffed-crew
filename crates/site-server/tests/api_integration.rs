@@ -218,13 +218,19 @@ fn authed_json_request(method: Method, uri: &str, token: &str, body: Value) -> R
 }
 
 /// Build an unauthenticated request.
+///
+/// Injects ConnectInfo (+ loopback X-Forwarded-For) so routes behind
+/// `GovernorLayer`/`TrustedProxyIpKeyExtractor` work under `ServiceExt::oneshot`
+/// (HS-DR P1 public governor; same pattern as `rate_limit_ip` on auth posts).
 fn unauthed_request(method: Method, uri: &str) -> Request<Body> {
-    Request::builder()
-        .method(method)
-        .uri(uri)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(Body::empty())
-        .unwrap()
+    rate_limit_ip(
+        Request::builder()
+            .method(method)
+            .uri(uri)
+            .header(header::CONTENT_TYPE, "application/json"),
+    )
+    .body(Body::empty())
+    .unwrap()
 }
 
 /// Extract response body as JSON.
@@ -4461,7 +4467,7 @@ async fn public_leaderboards_and_member_heroes() {
     assert_eq!(resp.status(), StatusCode::OK);
 
     // Unknown season → 404
-    let app = create_router(state);
+    let app = create_router(state.clone());
     let resp = app
         .oneshot(unauthed_request(
             Method::GET,
@@ -4470,6 +4476,184 @@ async fn public_leaderboards_and_member_heroes() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+    // W3 B2: known hero filter accepted (case-insensitive); empty board OK
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(unauthed_request(
+            Method::GET,
+            "/api/public/leaderboards?metric=games&limit=10&hero=ana",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let _ = body_json(resp).await;
+
+    // W3 B2: unknown hero → 400
+    let app = create_router(state);
+    let resp = app
+        .oneshot(unauthed_request(
+            Method::GET,
+            "/api/public/leaderboards?metric=games&hero=NotAHero",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+/// W3 B3 + HS-DR P3: `GET /api/public/members?hero=` attaches optional `hero_scoped`.
+#[tokio::test]
+async fn public_members_hero_scoped_query() {
+    use chrono::{TimeZone, Utc};
+    use scuffed_db::types::PersonalMatch;
+
+    let state = test_state().await;
+    seed_all_roles(&state.db).await;
+
+    // Seed Ana games for the known membermember fixture.
+    let ana_matches = [
+        PersonalMatch {
+            id: String::new(),
+            member_id: "membermember".into(),
+            session_id: "hs-dr-a1".into(),
+            hero: "Ana".into(),
+            map_name: "Oasis".into(),
+            game_mode: "control".into(),
+            role: "Support".into(),
+            outcome: "victory".into(),
+            elims: 10,
+            deaths: 2,
+            assists: 8,
+            damage: 3000,
+            healing: 9000,
+            mitigation: 0,
+            played_at: Utc.with_ymd_and_hms(2026, 7, 1, 20, 0, 0).unwrap(),
+            uploaded_at: Utc::now(),
+            edited: false,
+        },
+        PersonalMatch {
+            id: String::new(),
+            member_id: "membermember".into(),
+            session_id: "hs-dr-a2".into(),
+            hero: "Ana".into(),
+            map_name: "Ilios".into(),
+            game_mode: "control".into(),
+            role: "Support".into(),
+            outcome: "defeat".into(),
+            elims: 4,
+            deaths: 5,
+            assists: 3,
+            damage: 2000,
+            healing: 7000,
+            mitigation: 0,
+            played_at: Utc.with_ymd_and_hms(2026, 7, 2, 20, 0, 0).unwrap(),
+            uploaded_at: Utc::now(),
+            edited: false,
+        },
+        // Different hero must not count toward Ana-scoped games.
+        PersonalMatch {
+            id: String::new(),
+            member_id: "membermember".into(),
+            session_id: "hs-dr-tr".into(),
+            hero: "Tracer".into(),
+            map_name: "King's Row".into(),
+            game_mode: "hybrid".into(),
+            role: "Damage".into(),
+            outcome: "victory".into(),
+            elims: 20,
+            deaths: 8,
+            assists: 2,
+            damage: 8000,
+            healing: 0,
+            mitigation: 0,
+            played_at: Utc.with_ymd_and_hms(2026, 7, 3, 20, 0, 0).unwrap(),
+            uploaded_at: Utc::now(),
+            edited: false,
+        },
+    ];
+    state
+        .db
+        .upsert_personal_matches("membermember", &ana_matches)
+        .await
+        .unwrap();
+
+    // No filter: OK, no hero_scoped on rows
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(unauthed_request(
+            Method::GET,
+            "/api/public/members?limit=50",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    let data = json["data"].as_array().expect("data array");
+    if let Some(first) = data.first() {
+        assert!(
+            first.get("hero_scoped").is_none()
+                || first
+                    .get("hero_scoped")
+                    .map(|v| v.is_null())
+                    .unwrap_or(false),
+            "unfiltered list must omit hero_scoped"
+        );
+    }
+
+    // Known hero: populated hero_scoped for membermember (2 Ana games, 50% WR)
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(unauthed_request(
+            Method::GET,
+            "/api/public/members?limit=50&hero=ana",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    let data = json["data"].as_array().expect("data array");
+    let mm = data
+        .iter()
+        .find(|m| m["id"] == "membermember")
+        .expect("membermember on page");
+    let scoped = mm
+        .get("hero_scoped")
+        .expect("hero_scoped present for Ana player");
+    assert_eq!(scoped["games"], 2);
+    let wr = scoped["winrate"].as_f64().expect("winrate f64");
+    assert!((wr - 0.5).abs() < 1e-5, "winrate={wr}");
+
+    // Unknown hero → 400
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(unauthed_request(
+            Method::GET,
+            "/api/public/members?hero=NotAHero",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+    // HS-DR P3: public heroes?top=0 returns all heroes for the member
+    let app = create_router(state);
+    let resp = app
+        .oneshot(unauthed_request(
+            Method::GET,
+            "/api/public/members/membermember/heroes?top=0",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let heroes = body_json(resp).await;
+    let arr = heroes.as_array().expect("heroes array");
+    assert!(
+        arr.len() >= 2,
+        "top=0 should return all heroes (got {})",
+        arr.len()
+    );
+    let names: Vec<&str> = arr.iter().filter_map(|h| h["hero"].as_str()).collect();
+    assert!(names.contains(&"Ana"));
+    assert!(names.contains(&"Tracer"));
 }
 
 // ─── Local self-registration (privacy-first signup) ─────────────────────────

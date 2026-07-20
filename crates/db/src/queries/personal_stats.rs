@@ -3,7 +3,9 @@ use serde::{Deserialize, Serialize};
 use surrealdb::types::Datetime as SurrealDatetime;
 use surrealdb_types::{RecordId, SurrealValue};
 
-use crate::types::{HeroStats, MapStats, MemberLeaderboardRow, PersonalMatch, PersonalStats};
+use crate::types::{
+    HeroStats, MapStats, MemberHeroScopedAgg, MemberLeaderboardRow, PersonalMatch, PersonalStats,
+};
 use crate::{with_timeout, Database, DbResult};
 
 /// Minimum games required for rate metrics (winrate / kd) on public boards.
@@ -374,6 +376,25 @@ impl Database {
             let mut result = q.await?;
             let rows: Vec<AggRow> = result.take(0)?;
 
+            // One active-member map instead of get_member_safe N+1 (HS-DR P1).
+            #[derive(Deserialize, SurrealValue)]
+            struct ActiveName {
+                id: Option<RecordId>,
+                display_name: String,
+            }
+            let mut active_q = self
+                .client
+                .query("SELECT id, display_name FROM member WHERE is_active = true")
+                .await?;
+            let active_rows: Vec<ActiveName> = active_q.take(0)?;
+            let active: std::collections::HashMap<String, String> = active_rows
+                .into_iter()
+                .filter_map(|r| {
+                    let id = r.id.map(|rid| crate::record_id_key_to_string(rid.key))?;
+                    Some((id, r.display_name))
+                })
+                .collect();
+
             let rate_metric = matches!(metric, "winrate" | "kd");
             let mut out = Vec::with_capacity(rows.len());
             for row in rows {
@@ -383,21 +404,20 @@ impl Database {
                 if rate_metric && row.games < LEADERBOARD_MIN_GAMES {
                     continue;
                 }
-                // Skip missing or inactive members (ban/deactivate = off public LB).
-                let Some(member) = self
-                    .get_member_safe(&row.member_id)
-                    .await
-                    .ok()
-                    .flatten()
-                    .filter(|m| m.is_active)
-                else {
+                // Normalize member_id in case the aggregate returns table-prefixed keys.
+                let mid = row
+                    .member_id
+                    .strip_prefix("member:")
+                    .unwrap_or(&row.member_id)
+                    .to_string();
+                let Some(display_name) = active.get(&mid).cloned() else {
                     continue;
                 };
                 let winrate = row.wins as f32 / row.games as f32;
                 let kd = row.elims as f64 / (row.deaths.max(1) as f64);
                 out.push(MemberLeaderboardRow {
-                    member_id: row.member_id,
-                    display_name: member.display_name,
+                    member_id: mid,
+                    display_name,
                     games: row.games,
                     winrate,
                     kd,
@@ -426,6 +446,65 @@ impl Database {
             }
             out.truncate(limit as usize);
             Ok(out)
+        })
+        .await
+    }
+
+    /// Page-scoped per-hero aggregates for a known set of member ids (HS-DR P1).
+    ///
+    /// Single `GROUP BY` over `personal_match` filtered to `member_id IN $ids`
+    /// and `hero = $hero` — no full-table leaderboard and no per-row member fetch.
+    pub async fn hero_scoped_for_members(
+        &self,
+        member_ids: &[String],
+        hero: &str,
+    ) -> DbResult<Vec<MemberHeroScopedAgg>> {
+        if member_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        with_timeout(async {
+            #[derive(Deserialize, SurrealValue)]
+            struct AggRow {
+                member_id: String,
+                games: u32,
+                wins: u32,
+            }
+
+            let mut result = self
+                .client
+                .query(
+                    r#"
+                    SELECT
+                        member_id,
+                        count() AS games,
+                        math::sum(IF outcome = 'victory' THEN 1 ELSE 0 END) AS wins
+                    FROM personal_match
+                    WHERE member_id IN $ids
+                      AND hero = $hero
+                      AND outcome IN ['victory', 'defeat', 'draw']
+                    GROUP BY member_id
+                    "#,
+                )
+                .bind(("ids", member_ids.to_vec()))
+                .bind(("hero", hero.to_owned()))
+                .await?;
+            let rows: Vec<AggRow> = result.take(0)?;
+            Ok(rows
+                .into_iter()
+                .filter(|r| r.games > 0)
+                .map(|r| {
+                    let mid = r
+                        .member_id
+                        .strip_prefix("member:")
+                        .unwrap_or(&r.member_id)
+                        .to_string();
+                    MemberHeroScopedAgg {
+                        member_id: mid,
+                        games: r.games,
+                        winrate: r.wins as f32 / r.games as f32,
+                    }
+                })
+                .collect())
         })
         .await
     }
@@ -676,5 +755,86 @@ mod tests {
             "victory",
             "another member's upload must not touch m1's row"
         );
+    }
+
+    /// W2 B1 owed: `member_leaderboard(..., hero: Some)` must narrow rows to
+    /// matches on that hero only (bound `AND hero = $hero`). Uses metric
+    /// `"games"` so LEADERBOARD_MIN_GAMES does not mask the filter.
+    #[tokio::test]
+    async fn member_leaderboard_hero_filter_narrows_rows() {
+        use crate::types::OrgRole;
+
+        let db = test_db().await;
+        let ana_main = db
+            .create_member("u-ana", "AnaMain", OrgRole::Member)
+            .await
+            .unwrap();
+        let tracer_only = db
+            .create_member("u-tr", "TracerOnly", OrgRole::Member)
+            .await
+            .unwrap();
+
+        // ana_main: 2 Ana + 1 Tracer. tracer_only: 3 Tracer (no Ana).
+        let mut ana_g1 = entry("a1", "victory", 5);
+        ana_g1.member_id = ana_main.id.clone();
+        ana_g1.hero = "Ana".into();
+        let mut ana_g2 = entry("a2", "defeat", 3);
+        ana_g2.member_id = ana_main.id.clone();
+        ana_g2.hero = "Ana".into();
+        ana_g2.played_at = Utc.with_ymd_and_hms(2026, 7, 2, 20, 0, 0).unwrap();
+        let mut ana_tr = entry("a3", "victory", 8);
+        ana_tr.member_id = ana_main.id.clone();
+        ana_tr.hero = "Tracer".into();
+        ana_tr.played_at = Utc.with_ymd_and_hms(2026, 7, 3, 20, 0, 0).unwrap();
+        db.upsert_personal_matches(&ana_main.id, &[ana_g1, ana_g2, ana_tr])
+            .await
+            .unwrap();
+
+        for (i, sid) in ["t1", "t2", "t3"].iter().enumerate() {
+            let mut m = entry(sid, "victory", 4 + i as u32);
+            m.member_id = tracer_only.id.clone();
+            m.hero = "Tracer".into();
+            m.played_at = Utc
+                .with_ymd_and_hms(2026, 7, 1 + i as u32, 21, 0, 0)
+                .unwrap();
+            db.upsert_personal_matches(&tracer_only.id, &[m])
+                .await
+                .unwrap();
+        }
+
+        let all = db
+            .member_leaderboard("games", 50, None, None)
+            .await
+            .unwrap();
+        assert_eq!(all.len(), 2, "unfiltered LB includes both members");
+        let all_ids: Vec<_> = all.iter().map(|r| r.member_id.as_str()).collect();
+        assert!(all_ids.contains(&ana_main.id.as_str()));
+        assert!(all_ids.contains(&tracer_only.id.as_str()));
+        let ana_all = all.iter().find(|r| r.member_id == ana_main.id).unwrap();
+        assert_eq!(ana_all.games, 3, "unfiltered counts all heroes");
+
+        let ana_lb = db
+            .member_leaderboard("games", 50, None, Some("Ana"))
+            .await
+            .unwrap();
+        assert_eq!(ana_lb.len(), 1, "hero=Ana must drop Tracer-only members");
+        assert_eq!(ana_lb[0].member_id, ana_main.id);
+        assert_eq!(
+            ana_lb[0].games, 2,
+            "hero filter must count only Ana matches"
+        );
+
+        let tr_lb = db
+            .member_leaderboard("games", 50, None, Some("Tracer"))
+            .await
+            .unwrap();
+        assert_eq!(tr_lb.len(), 2, "both members have Tracer games");
+        let tr_ana = tr_lb.iter().find(|r| r.member_id == ana_main.id).unwrap();
+        let tr_only = tr_lb
+            .iter()
+            .find(|r| r.member_id == tracer_only.id)
+            .unwrap();
+        assert_eq!(tr_ana.games, 1);
+        assert_eq!(tr_only.games, 3);
     }
 }

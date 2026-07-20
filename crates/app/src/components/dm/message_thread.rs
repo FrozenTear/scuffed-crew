@@ -4,6 +4,7 @@ use scuffed_api_client::{ApiClient, ClientError};
 
 use super::reply_input::ReplyInput;
 use super::types::{DmMessage, MarkReadBody, relative_time, truncate_pubkey};
+use crate::util::encode_query;
 
 const MESSAGE_THREAD_CSS: &str = r#"
 .dm-thread {
@@ -278,11 +279,11 @@ async fn fetch_thread(
 ) -> Result<Vec<DmMessage>, ClientError> {
     let mut url = format!(
         "/api/nostr/dm/thread?peer_pubkey={}&limit={}",
-        urlencoding_encode(peer),
+        encode_query(peer),
         limit
     );
     if let Some(ts) = before_ts {
-        url.push_str(&format!("&before_ts={}", urlencoding_encode(ts)));
+        url.push_str(&format!("&before_ts={}", encode_query(ts)));
     }
     ApiClient::web().fetch::<Vec<DmMessage>>(&url).await
 }
@@ -295,17 +296,4 @@ async fn mark_read(peer: &str, until_ts: &str) {
     let _ = ApiClient::web()
         .post_json::<_, serde_json::Value>("/api/nostr/dm/mark-read", &body)
         .await;
-}
-
-fn urlencoding_encode(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for b in s.bytes() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(b as char);
-            }
-            _ => out.push_str(&format!("%{:02X}", b)),
-        }
-    }
-    out
 }

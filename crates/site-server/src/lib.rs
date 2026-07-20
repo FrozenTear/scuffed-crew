@@ -99,6 +99,46 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/upload/image", post(routes::uploads::upload_image))
         .layer(GovernorLayer::new(upload_governor_config));
 
+    // Per-IP rate limit for public read endpoints (HS-DR P1): 40-burst, then
+    // 1 every 200ms (≈5/s sustained). Previously unthrottled; hero-filter
+    // aggregates made DoS amplification cheap.
+    let public_governor_config = std::sync::Arc::new(
+        GovernorConfigBuilder::default()
+            .key_extractor(key_extractor.clone())
+            .per_millisecond(200)
+            .burst_size(40)
+            .finish()
+            .expect("valid public governor config"),
+    );
+    let public_routes = Router::new()
+        .route("/api/public/overview", get(routes::public::overview))
+        .route("/api/public/members", get(routes::public::public_members))
+        .route(
+            "/api/public/members/{id}",
+            get(routes::public::public_member_profile),
+        )
+        .route(
+            "/api/public/teams/{id}",
+            get(routes::public::public_team_detail),
+        )
+        .route(
+            "/api/public/matches/{id}",
+            get(routes::public::public_match_detail),
+        )
+        .route(
+            "/api/public/members/{id}/heroes",
+            get(routes::leaderboards::public_member_heroes),
+        )
+        .route(
+            "/api/public/leaderboards",
+            get(routes::leaderboards::public_leaderboards),
+        )
+        .route(
+            "/api/public/seasons",
+            get(routes::leaderboards::public_list_seasons),
+        )
+        .layer(GovernorLayer::new(public_governor_config));
+
     // Dev mode mirrors main.rs: in-memory DB when SURREALDB_URL is unset.
     let dev_mode = std::env::var("SURREALDB_URL").is_err();
 
@@ -118,6 +158,8 @@ pub fn create_router(state: AppState) -> Router {
         .merge(auth_routes)
         // Upload routes carry their own (dedicated) rate limiter
         .merge(upload_routes)
+        // Public aggregate routes (dedicated rate limiter — HS-DR P1)
+        .merge(public_routes)
         .route("/api/auth/setup-status", get(routes::auth::setup_status))
         .route("/api/auth/providers", get(routes::auth::auth_providers))
         .route("/api/auth/me", get(routes::auth::me))
@@ -484,33 +526,6 @@ pub fn create_router(state: AppState) -> Router {
         .route(
             "/api/admin/integrations/discord/test",
             post(routes::integrations::test_discord_webhook),
-        )
-        // Public aggregate
-        .route("/api/public/overview", get(routes::public::overview))
-        .route("/api/public/members", get(routes::public::public_members))
-        .route(
-            "/api/public/members/{id}",
-            get(routes::public::public_member_profile),
-        )
-        .route(
-            "/api/public/teams/{id}",
-            get(routes::public::public_team_detail),
-        )
-        .route(
-            "/api/public/matches/{id}",
-            get(routes::public::public_match_detail),
-        )
-        .route(
-            "/api/public/members/{id}/heroes",
-            get(routes::leaderboards::public_member_heroes),
-        )
-        .route(
-            "/api/public/leaderboards",
-            get(routes::leaderboards::public_leaderboards),
-        )
-        .route(
-            "/api/public/seasons",
-            get(routes::leaderboards::public_list_seasons),
         )
         .route(
             "/api/admin/seasons",
