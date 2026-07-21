@@ -199,7 +199,7 @@ fn handle_preinit_flags() -> bool {
              FLAGS:\n\
              \x20 --version, -V         print version and exit\n\
              \x20 --help, -h            this help\n\
-             \x20 --list-outputs        list Wayland outputs and exit\n\
+             \x20 --list-outputs        list capture outputs and exit\n\
              \x20 --generate-tessdata   build the game-font tessdata model and exit\n\
              \x20 --vacuum              compact the local stats DB and exit\n\
              \x20 --collect-portraits   dev: save hero portrait crops while running\n\

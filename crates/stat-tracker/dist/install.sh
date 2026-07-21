@@ -172,7 +172,7 @@ fi
 # ── Smoke check ───────────────────────────────────────────────────────────────
 
 if ! "$BIN_DIR/scuffed-stat-tracker" --version >/dev/null 2>&1; then
-    warn "daemon --version failed. Missing host libs (wayland/evdev) or bundled lib/ not installed beside bin?"
+    warn "daemon --version failed. Missing host libs (display stack/evdev) or bundled lib/ not installed beside bin?"
 else
     info "daemon binary runs ($("$BIN_DIR/scuffed-stat-tracker" --version))"
 fi
