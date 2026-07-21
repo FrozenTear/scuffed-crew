@@ -48,6 +48,7 @@ pub fn StatusPanel() -> Element {
     let backend_label = match backend() {
         None => "detecting…".to_string(),
         Some(CaptureBackend::Wayshot) => "libwayshot (Wayland)".to_string(),
+        Some(CaptureBackend::X11) => "X11 (native)".to_string(),
         Some(CaptureBackend::Portal) => "XDG Desktop Portal".to_string(),
         Some(CaptureBackend::None) => "none available".to_string(),
     };

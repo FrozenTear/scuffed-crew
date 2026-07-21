@@ -7,6 +7,26 @@ pub fn is_available() -> bool {
     std::env::var("WAYLAND_DISPLAY").is_ok()
 }
 
+/// Real availability probe (R5-1, R1-2): a set `WAYLAND_DISPLAY` alone is intent,
+/// not availability, so we cheap-check the env first, then connect and require
+/// ≥1 output. Connection work runs on the blocking pool (Send-safe error), same
+/// shape as `x11::probe`. R2-3: this warms one blocking-thread's thread-local
+/// connection; other threads reconnect lazily — that is correct, leave it.
+pub async fn probe() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    if !is_available() {
+        return Err("WAYLAND_DISPLAY not set".into());
+    }
+    tokio::task::spawn_blocking(|| {
+        with_wayshot(|wayshot| {
+            if wayshot.get_all_outputs().is_empty() {
+                return Err("Wayland probe: no outputs".into());
+            }
+            Ok(())
+        })
+    })
+    .await?
+}
+
 pub fn list_outputs() -> Result<Vec<String>, Box<dyn std::error::Error>> {
     with_wayshot(|wayshot| {
         let outputs = wayshot.get_all_outputs();
