@@ -5,6 +5,7 @@ use dioxus::prelude::*;
 use image::DynamicImage;
 
 use stat_tracker::capture;
+use stat_tracker::capture::CaptureBackend;
 use stat_tracker::config::Config;
 
 fn encode_thumbnail(img: &DynamicImage) -> String {
@@ -20,17 +21,26 @@ fn encode_thumbnail(img: &DynamicImage) -> String {
 #[component]
 pub fn PreviewPanel() -> Element {
     let config = use_signal(|| Config::load().unwrap_or_default());
+    // Root-resolved capture backend (from `app()`); None = still detecting.
+    let backend = use_context::<Signal<Option<CaptureBackend>>>();
     let mut preview_src: Signal<Option<String>> = use_signal(|| None);
     let mut preview_time: Signal<Option<String>> = use_signal(|| None);
     let mut capturing = use_signal(|| false);
     let mut error_msg: Signal<Option<String>> = use_signal(|| None);
 
     let capture_now = move |_| {
+        // Guarded by the button's `disabled` while detecting; belt-and-suspenders
+        // so a click before detection lands surfaces a message, never a panic.
+        let Some(backend) = backend() else {
+            error_msg.set(Some(
+                "still detecting the capture backend — try again in a moment".into(),
+            ));
+            return;
+        };
         let output = config().capture_output.clone();
         capturing.set(true);
         error_msg.set(None);
         spawn(async move {
-            let backend = capture::detect_backend().await;
             match capture::capture_screen_output(&backend, output.as_deref()).await {
                 Ok(img) => {
                     let data_uri =
@@ -68,9 +78,15 @@ pub fn PreviewPanel() -> Element {
                 div { class: "actions",
                     button {
                         class: "btn btn-primary",
-                        disabled: capturing(),
+                        disabled: capturing() || backend().is_none(),
                         onclick: capture_now,
-                        if capturing() { "Capturing..." } else { "Capture Now" }
+                        if backend().is_none() {
+                            "Detecting backend…"
+                        } else if capturing() {
+                            "Capturing..."
+                        } else {
+                            "Capture Now"
+                        }
                     }
                 }
             }

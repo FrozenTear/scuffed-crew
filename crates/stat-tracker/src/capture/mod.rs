@@ -29,3 +29,20 @@ pub async fn capture_screen_output(
         CaptureBackend::None => Err("no capture backend available".into()),
     }
 }
+
+/// List capture targets for the backend already selected by detect_backend.
+/// Connection work must stay off the async/UI thread.
+pub async fn list_outputs(
+    backend: CaptureBackend,
+) -> Result<Vec<String>, Box<dyn std::error::Error + Send + Sync>> {
+    match backend {
+        CaptureBackend::Wayshot => {
+            let result =
+                tokio::task::spawn_blocking(|| wayshot::list_outputs().map_err(|e| e.to_string()))
+                    .await?;
+            result.map_err(Into::into)
+        }
+        // Lane C (Task 3) adds the X11 arm when the variant exists.
+        CaptureBackend::Portal | CaptureBackend::None => Ok(Vec::new()),
+    }
+}

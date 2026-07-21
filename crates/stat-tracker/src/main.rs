@@ -115,7 +115,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Informational flags that need tracing initialized but exit before the
     // daemon starts (tessdata generation, output listing).
-    if handle_info_flags() {
+    if handle_info_flags().await {
         return Ok(());
     }
 
@@ -149,7 +149,7 @@ async fn main() -> anyhow::Result<()> {
     let backend = capture::detect_backend().await;
     tracing::info!(?backend, "capture backend selected");
 
-    log_selected_output(&config);
+    log_selected_output(backend, &config).await;
 
     let store = open_store(&config.data_dir).await?;
 
@@ -214,7 +214,7 @@ fn handle_preinit_flags() -> bool {
 
 /// Informational flags that need tracing initialized but exit before the daemon
 /// starts (tessdata generation, output listing). Returns true if handled.
-fn handle_info_flags() -> bool {
+async fn handle_info_flags() -> bool {
     if std::env::args().any(|a| a == "--generate-tessdata") {
         match setup::ensure_koverwatch_tessdata() {
             Ok(()) => {
@@ -229,15 +229,31 @@ fn handle_info_flags() -> bool {
     }
 
     if std::env::args().any(|a| a == "--list-outputs") {
-        match capture::wayshot::list_outputs() {
-            Ok(outputs) => {
-                println!("Available outputs:");
-                for (i, name) in outputs.iter().enumerate() {
-                    println!("  [{i}] {name}");
-                }
-                println!("\nSet capture_output in config.toml to select one.");
+        // Enumerate through the exact backend detect_backend chose so the CLI
+        // and daemon agree on the capture source. An unavailable backend is a
+        // hard error (non-zero exit) — it must not read as "zero outputs".
+        let backend = capture::detect_backend().await;
+        match backend {
+            capture::CaptureBackend::None => {
+                eprintln!("no capture backend available — cannot list outputs");
+                std::process::exit(1);
             }
-            Err(e) => eprintln!("Failed to list outputs: {e}"),
+            capture::CaptureBackend::Portal => {
+                println!("portal backend does not support output selection");
+            }
+            _ => match capture::list_outputs(backend).await {
+                Ok(outputs) => {
+                    println!("Available outputs:");
+                    for (i, name) in outputs.iter().enumerate() {
+                        println!("  [{i}] {name}");
+                    }
+                    println!("\nSet capture_output in config.toml to select one.");
+                }
+                Err(e) => {
+                    eprintln!("Failed to list outputs: {e}");
+                    std::process::exit(1);
+                }
+            },
         }
         return true;
     }
@@ -332,9 +348,10 @@ async fn maybe_vacuum(data_dir: &std::path::Path) -> anyhow::Result<bool> {
     Ok(true)
 }
 
-/// Log the available Wayland outputs and which one captures will use.
-fn log_selected_output(config: &config::Config) {
-    if let Ok(outputs) = capture::wayshot::list_outputs() {
+/// Log the available capture outputs and which one captures will use, using the
+/// backend `detect_backend` already resolved (Portal/None yield an empty list).
+async fn log_selected_output(backend: capture::CaptureBackend, config: &config::Config) {
+    if let Ok(outputs) = capture::list_outputs(backend).await {
         // `.first()`, not `[0]`: zero outputs (headless / compositor hiccup)
         // must not panic the daemon at startup.
         let selected = config
@@ -345,7 +362,7 @@ fn log_selected_output(config: &config::Config) {
         tracing::info!(
             available = ?outputs,
             selected = %selected,
-            "wayland outputs"
+            "capture outputs"
         );
     }
 }

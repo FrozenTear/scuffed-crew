@@ -13,6 +13,8 @@ use dioxus::desktop::tao::dpi::LogicalSize;
 use dioxus::desktop::{Config as DesktopConfig, WindowBuilder};
 use dioxus::prelude::*;
 
+use stat_tracker::capture::CaptureBackend;
+
 fn main() {
     let _ = gtk::init();
     let _tray = tray::try_create_tray();
@@ -131,6 +133,17 @@ fn Nav() -> Element {
 }
 
 fn app() -> Element {
+    // Root-owned capture backend. `app()` is the only persistent shared
+    // ancestor of the sibling route components (Router mounts them with no
+    // #[layout]), so detect the backend ONCE here and share it via context.
+    // Panels read this signal and never call detect_backend themselves; while
+    // it is `None` they render a "detecting…" pending state. `None` also means
+    // no synchronous, blocking output enumeration at component construction.
+    let mut backend = use_signal(|| None::<CaptureBackend>);
+    use_context_provider(|| backend);
+    use_future(move || async move {
+        backend.set(Some(stat_tracker::capture::detect_backend().await));
+    });
     rsx! {
         style { {style::CSS} }
         Router::<Route> {}

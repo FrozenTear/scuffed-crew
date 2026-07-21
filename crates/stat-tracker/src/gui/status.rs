@@ -30,21 +30,27 @@ pub fn StatusPanel() -> Element {
         }
     });
 
-    let outputs = use_resource(move || async move {
-        tokio::task::spawn_blocking(|| {
-            stat_tracker::capture::wayshot::list_outputs().unwrap_or_default()
-        })
-        .await
-        .unwrap_or_default()
-    });
+    // Root-resolved capture backend (from `app()`); None = still detecting.
+    let backend = use_context::<Signal<Option<CaptureBackend>>>();
 
-    let backend_label = use_resource(move || async move {
-        match stat_tracker::capture::detect_backend().await {
-            CaptureBackend::Wayshot => "libwayshot (Wayland)".to_string(),
-            CaptureBackend::Portal => "XDG Desktop Portal".to_string(),
-            CaptureBackend::None => "none available".to_string(),
+    // Enumerate outputs for the resolved backend only — keyed on `backend` so
+    // it re-runs once detection lands. Empty while detecting or on failure; the
+    // connection work happens inside the backend's own async list path.
+    let outputs = use_resource(move || async move {
+        match backend() {
+            Some(b) => stat_tracker::capture::list_outputs(b)
+                .await
+                .unwrap_or_default(),
+            None => Vec::new(),
         }
     });
+
+    let backend_label = match backend() {
+        None => "detecting…".to_string(),
+        Some(CaptureBackend::Wayshot) => "libwayshot (Wayland)".to_string(),
+        Some(CaptureBackend::Portal) => "XDG Desktop Portal".to_string(),
+        Some(CaptureBackend::None) => "none available".to_string(),
+    };
 
     let selected_output = config().capture_output.clone().unwrap_or_else(|| {
         outputs
@@ -153,16 +159,7 @@ pub fn StatusPanel() -> Element {
                 }
                 div { class: "stat-row",
                     span { class: "label", "Backend" }
-                    span { class: "value",
-                        {
-                            let label = backend_label
-                                .read()
-                                .as_ref()
-                                .cloned()
-                                .unwrap_or_else(|| "…".into());
-                            rsx! { "{label}" }
-                        }
-                    }
+                    span { class: "value", "{backend_label}" }
                 }
             }
 
