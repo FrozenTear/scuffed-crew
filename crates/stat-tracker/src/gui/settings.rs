@@ -1,11 +1,23 @@
 use dioxus::prelude::*;
 
+use stat_tracker::capture::CaptureBackend;
 use stat_tracker::config::{AutoDetectConfig, Config, SyncConfig};
 
 #[component]
 pub fn SettingsPanel() -> Element {
     let mut config = use_signal(|| Config::load().unwrap_or_default());
-    let outputs = use_signal(|| stat_tracker::capture::wayshot::list_outputs().unwrap_or_default());
+    // Root-resolved capture backend (from `app()`); None = still detecting.
+    // Enumerate through it in a resource — never a blocking connect during
+    // component construction. Empty list while detecting or on failure.
+    let backend = use_context::<Signal<Option<CaptureBackend>>>();
+    let outputs = use_resource(move || async move {
+        match backend() {
+            Some(b) => stat_tracker::capture::list_outputs(b)
+                .await
+                .unwrap_or_default(),
+            None => Vec::new(),
+        }
+    });
     let mut toast: Signal<Option<(String, bool)>> = use_signal(|| None);
     let mut confirm_clear = use_signal(|| false);
 
@@ -110,11 +122,16 @@ pub fn SettingsPanel() -> Element {
                         value: "{capture_output}",
                         onchange: move |e| capture_output.set(e.value()),
                         option { value: "", "Auto (first output)" }
-                        for name in outputs().iter() {
-                            option {
-                                value: "{name}",
-                                selected: capture_output() == *name,
-                                "{name}"
+                        {
+                            let opts = outputs.read().clone().unwrap_or_default();
+                            rsx! {
+                                for name in opts {
+                                    option {
+                                        value: "{name}",
+                                        selected: capture_output() == name,
+                                        "{name}"
+                                    }
+                                }
                             }
                         }
                     }
