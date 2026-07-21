@@ -5,6 +5,7 @@
 #   bin/scuffed-stat-tracker
 #   bin/stat-tracker-gui
 #   lib/*          (optional — bundled OCR libs; RPATH $ORIGIN/../lib)
+#   tessdata/eng.traineddata  (optional — runtime OCR model, since v0.3.0)
 #   assets/scuffed-stat-tracker.desktop
 #   assets/scuffed-stat-tracker.service
 #   install.sh   (this file)
@@ -141,6 +142,22 @@ if [[ -d "$PKG_ROOT/lib" ]] && compgen -G "$PKG_ROOT/lib/*" >/dev/null; then
         count=$((count + 1))
     done
     info "Installed $count bundled OCR libs → $LIB_DIR (RPATH \$ORIGIN/../lib)"
+fi
+
+# Bundled runtime eng model → user tessdata dir (first-priority lookup, no root,
+# no distro tessdata package needed). Never clobber a user's own eng model
+# (e.g. a tuned koverwatch or hand-placed eng.traineddata).
+BUNDLED_ENG="$PKG_ROOT/tessdata/eng.traineddata"
+USER_TESSDATA_DIR="$HOME/.local/share/scuffed-stat-tracker/tessdata"
+USER_ENG="$USER_TESSDATA_DIR/eng.traineddata"
+if [[ -f "$BUNDLED_ENG" ]]; then
+    if [[ -f "$USER_ENG" ]]; then
+        info "eng.traineddata already present at $USER_ENG — keeping yours (not overwriting)."
+    else
+        mkdir -p "$USER_TESSDATA_DIR"
+        install -m644 "$BUNDLED_ENG" "$USER_ENG"
+        info "Installed bundled eng.traineddata → $USER_ENG"
+    fi
 fi
 
 if [[ ":$PATH:" != *":$BIN_DIR:"* ]]; then
