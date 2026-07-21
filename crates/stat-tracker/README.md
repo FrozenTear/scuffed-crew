@@ -9,11 +9,12 @@ stats, and daemon controls.
 
 ## Platform requirements
 
-- **Linux + Wayland; experimental X11 capture.**
+- **Linux + Wayland or X11.**
   - Wayland: libwayshot on wlr-screencopy compositors (Sway, Hyprland, …),
     with XDG Desktop Portal fallback.
-  - X11 (experimental): native capture when a usable X server is detected and
-    Wayland capture is unavailable.
+  - X11: native capture when a usable X server is detected and Wayland
+    capture is unavailable. Validated on TODO_DE / TODO_GPU (Task 8 smoke,
+    TODO_DATE).
   - Portal remains last-resort on either stack (slower; not ideal for the poller).
 - **Keyboard access via evdev.** Tab detection reads `/dev/input` — the user
   must be in the `input` group (`sudo usermod -aG input $USER`, re-login).
