@@ -23,6 +23,9 @@ members = [
     "crates/stat-tracker",
 ]
 
+[workspace.package]
+license = "MIT OR Apache-2.0"
+
 # Thin LTO: worthwhile binary-size/speed win for the release daemon + server,
 # small compile-time cost only on release builds.
 [profile.release]
