@@ -1,6 +1,6 @@
 # scuffed-stat-tracker
 
-Overwatch 2 personal stat tracker for Linux/Wayland. A background daemon
+Overwatch 2 personal stat tracker for Linux. A background daemon
 watches for Tab (scoreboard) presses, OCRs the scoreboard, tracks game
 sessions/outcomes, stores everything locally, and optionally syncs per-game
 results to the Scuffed Crew site. An optional Dioxus desktop GUI
@@ -9,8 +9,12 @@ stats, and daemon controls.
 
 ## Platform requirements
 
-- **Linux + Wayland.** Capture uses libwayshot (wlr-screencopy compositors:
-  Sway, Hyprland, etc.) with an XDG Desktop Portal fallback.
+- **Linux + Wayland; experimental X11 capture.**
+  - Wayland: libwayshot on wlr-screencopy compositors (Sway, Hyprland, …),
+    with XDG Desktop Portal fallback.
+  - X11 (experimental): native capture when a usable X server is detected and
+    Wayland capture is unavailable.
+  - Portal remains last-resort on either stack (slower; not ideal for the poller).
 - **Keyboard access via evdev.** Tab detection reads `/dev/input` — the user
   must be in the `input` group (`sudo usermod -aG input $USER`, re-login).
 - **Tessdata (`eng.traineddata`).** Looked up in (first hit wins):
@@ -27,7 +31,7 @@ stats, and daemon controls.
 |-----------|---------|--------|
 | **Daemon** | glibc ≥ 2.35 (Ubuntu 22.04+, Debian 12+, Fedora, Arch, openSUSE, RHEL 9+) | OCR `.so` closure is **bundled** in `lib/` (soname splits across distros). Installer copies `lib/` → `$PREFIX/lib` so RPATH `$ORIGIN/../lib` works. |
 | **GUI** | modern distro with **webkit2gtk-4.1** + glibc ≥ 2.39 (Ubuntu 24.04+, Debian 13, Arch, recent Fedora) | Not portable to older LTS; use daemon-only on older boxes if needed. |
-| **Host still needed** | Wayland + `input` group + `eng.traineddata` | Capture/compositor and keyboard access stay host-provided. |
+| **Host still needed** | Wayland **or** X11 + `input` group + `eng.traineddata` | Capture/compositor and keyboard access stay host-provided. |
 
 HOLD `stat-tracker-v0.1.0` until portable CI + this runtime lane land.
 
@@ -91,7 +95,7 @@ GUI's daemon card (start/stop/autostart route through systemd when installed).
 | Key | Meaning |
 |---|---|
 | `player_name` | Scoreboard name used to find your row (fetched from the server if unset) |
-| `capture_output` | Wayland output to capture (`--list-outputs`) |
+| `capture_output` | Display/output name to capture (`--list-outputs`) |
 | `data_dir` | Store/log/debug location (default `~/.local/share/scuffed-stat-tracker`) |
 | `auto_detect.*` | Poll-based match start/end detection (interval, cooldown) |
 | `game_process_names` | Only capture while one of these processes runs (empty disables the gate) |
