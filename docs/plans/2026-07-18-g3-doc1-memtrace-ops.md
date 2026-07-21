@@ -14,7 +14,7 @@
 - G1 version-integrity is OUT OF SCOPE
 - Dual-agree with Claude after push; do not self-merge main
 
-**Worktree:** `/home/soot/github/scuffed-crew/.claude/worktrees/grok-g3-doc1`  
+**Worktree:** `~/github/scuffed-crew/.claude/worktrees/grok-g3-doc1`  
 **Branch:** `docs/g3-doc1-memtrace-ops` @ `origin/main` (`7420451`)  
 **Reseed quote:** `01KXVBY7AT`
 
@@ -30,7 +30,7 @@
 **Steps:** Ensure worktree clean aside from plan; commit plan.
 
 ```bash
-cd /home/soot/github/scuffed-crew/.claude/worktrees/grok-g3-doc1
+cd ~/github/scuffed-crew/.claude/worktrees/grok-g3-doc1
 git add docs/plans/2026-07-18-g3-doc1-memtrace-ops.md
 git commit -m "docs(plan): G3 state rewrite + DOC-1 memtrace-ops"
 ```
@@ -114,7 +114,7 @@ python3 -c 'import json;d=json.load(open("docs/notes/night-shift-state.json")); 
 **Required sections:**
 1. Purpose + load on every fleet join
 2. Topology (one `memtrace start` owner → memcore :50051 → UI :3030; many `memtrace mcp` attach)
-3. Host bindings table (scuffed-crew): repo_id, MEMTRACE_MEMDB_DATA_DIR=~/.memdb preferred, absolute mcp `/home/soot/.volta/bin/memtrace`, worktrees path, NEVER start under alacritty (OOM 2026-07-18)
+3. Host bindings table (scuffed-crew): repo_id, MEMTRACE_MEMDB_DATA_DIR=~/.memdb preferred, absolute mcp `~/.volta/bin/memtrace`, worktrees path, NEVER start under alacritty (OOM 2026-07-18)
 4. Truth stack: `git/gh > MCP ydoc > HTTP :3030 > episodes > memory`; use `fleet_audit` for forensics
 5. Episode store = ADVISORY-ONLY + 3 failure modes from 01KXVCNT2C:
    - (1) long read/append crash loop on bridge

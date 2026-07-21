@@ -1,7 +1,7 @@
 # Cross-review: Grok → Fable Phase-1 lane (`stat-tracker/fix-sync-contract`)
 
 **Date:** 2026-07-09 · **Reviewer:** Grok · **Target:** worktree  
-`/home/soot/github/scuffed-crew/.claude/worktrees/sync-contract`  
+`~/github/scuffed-crew/.claude/worktrees/sync-contract`  
 branch `stat-tracker/fix-sync-contract` (5 commits ahead of `stat-tracker/add-neon-junction-aatlis`).
 
 **Verdict: APPROVE with 2 pre-merge fixes and a short merge checklist.**  

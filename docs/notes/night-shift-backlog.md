@@ -332,7 +332,7 @@ Adopt at kickoff, before any work item:
    reset on activity, pin to base while any watcher is blind).
 6. **Review rounds capped at 2**, then human.
 7. **Scuffed-crew Appendix-A bindings:** repo_id `scuffed-crew`; shared checkout
-   `/home/soot/github/scuffed-crew` READ-ONLY for agents; worktrees
+   `~/github/scuffed-crew` READ-ONLY for agents; worktrees
    `.claude/worktrees/<agent>-<topic>`; SSE `/api/fleet/events` known-dead — poll
    ydoc via MCP; memdb ydoc survived 2/2 daemon restarts on 07-17 but re-derive
    state from git/gh anyway; 13:32Z 07-17 ydoc wipe remains undiagnosed.
