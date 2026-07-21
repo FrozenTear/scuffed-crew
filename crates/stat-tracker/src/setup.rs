@@ -4,6 +4,11 @@ use std::process::Command;
 const FONT_ZIP_URL: &str = "https://font.download/dl/font/koverwatch.zip";
 const FONT_FAMILY: &str = "Koverwatch";
 
+/// text2image renders ~8-10 sub-pages per training page; 30s killed it
+/// mid-render on every page (observed 2026-07-21). Generous wall clock —
+/// generation is a one-off setup step, not a hot path.
+const TEXT2IMAGE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
+
 const TRAINING_PAGES: &[TrainingPage] = &[
     TrainingPage {
         text: TRAINING_DIGITS,
@@ -327,7 +332,7 @@ fn generate_tessdata_lstm(dir: &Path) -> Result<(), Box<dyn std::error::Error + 
                 .arg(format!("--exposure={}", page.exposure))
                 .arg(format!("--xsize={}", page.xsize))
                 .arg(format!("--ysize={}", page.ysize)),
-            std::time::Duration::from_secs(30),
+            TEXT2IMAGE_TIMEOUT,
         );
         match result {
             Ok(o) if o.status.success() => {}
@@ -491,7 +496,7 @@ fn generate_tessdata_legacy(dir: &Path) -> Result<(), Box<dyn std::error::Error 
             .arg("--exposure=0")
             .arg("--xsize=1800")
             .arg("--ysize=240"),
-        std::time::Duration::from_secs(30),
+        TEXT2IMAGE_TIMEOUT,
     )?;
     if !result.status.success() {
         return Err(format!(
