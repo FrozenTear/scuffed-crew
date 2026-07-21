@@ -218,6 +218,14 @@ jobs:
           cp gui/lib/* "${STAGE}/lib/" 2>/dev/null || true
           cp -r crates/stat-tracker/assets "${STAGE}/assets"
           cp crates/stat-tracker/dist/install.sh "${STAGE}/install.sh"
+          # Bundle the runtime eng model (tessdata_fast, ~4MB) so the daemon's
+          # user tessdata dir is populated with no host apt/pacman step. The app
+          # checks ~/.local/share/scuffed-stat-tracker/tessdata FIRST, so
+          # install.sh drops this file there (without clobbering a user model).
+          mkdir -p "${STAGE}/tessdata"
+          curl -fsSL \
+            https://github.com/tesseract-ocr/tessdata_fast/raw/main/eng.traineddata \
+            -o "${STAGE}/tessdata/eng.traineddata"
           chmod +x "${STAGE}/install.sh" "${STAGE}"/bin/*
           echo "${VERSION}" > "${STAGE}/VERSION"
           tar czf "${STAGE}.tar.gz" "${STAGE}"

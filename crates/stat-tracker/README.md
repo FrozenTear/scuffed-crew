@@ -41,6 +41,11 @@ No Rust toolchain required. GitHub Releases publish
 `scuffed-stat-tracker-linux-x86_64.tar.gz` (`bin/`, optional `lib/`, assets,
 `install.sh`) on tags `stat-tracker-v*`.
 
+Since **v0.3.0** the tarball also bundles `tessdata/eng.traineddata` (the
+runtime OCR model); `install.sh` drops it into
+`~/.local/share/scuffed-stat-tracker/tessdata/` (never overwriting a model you
+already have), so no distro tessdata package is required.
+
 **One-liner** (downloads latest matching release and installs into
 `~/.local`):
 
