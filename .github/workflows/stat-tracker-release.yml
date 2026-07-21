@@ -97,8 +97,8 @@ jobs:
           if-no-files-found: error
 
   build-gui:
-    name: GUI (ubuntu-24.04, needs webkit2gtk-4.1)
-    runs-on: ubuntu-24.04
+    name: GUI (ubuntu-22.04, needs webkit2gtk-4.1)
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
 
