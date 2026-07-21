@@ -4,6 +4,15 @@ use std::process::Command;
 const FONT_ZIP_URL: &str = "https://font.download/dl/font/koverwatch.zip";
 const FONT_FAMILY: &str = "Koverwatch";
 
+/// Float ("best") English LSTM model. System `eng.traineddata` is usually the
+/// tessdata_fast integer variant (Arch and Ubuntu both ship it), which
+/// lstmtraining cannot `--continue_from` ("eng.lstm is an integer (fast)
+/// model, cannot continue training"). Fine-tuning requires the float model, so
+/// we fetch it on demand. Generation already needs network (font download), so
+/// this adds no new requirement.
+const TESSDATA_BEST_ENG_URL: &str =
+    "https://github.com/tesseract-ocr/tessdata_best/raw/main/eng.traineddata";
+
 /// text2image renders ~8-10 sub-pages per training page; 30s killed it
 /// mid-render on every page (observed 2026-07-21). Generous wall clock —
 /// generation is a one-off setup step, not a hot path.
@@ -267,6 +276,40 @@ fn download_and_extract_font(dir: &Path) -> Result<(), Box<dyn std::error::Error
     Ok(())
 }
 
+/// Download the float "best" English model into `dir` for LSTM fine-tuning.
+/// Returns the path to the downloaded `eng.traineddata`.
+fn download_best_eng_traineddata(
+    dir: &Path,
+) -> Result<PathBuf, Box<dyn std::error::Error + Send + Sync>> {
+    tracing::info!("downloading tessdata_best eng.traineddata for LSTM training");
+    let dest = dir.join("eng.traineddata");
+
+    let output = Command::new("curl")
+        .args(["-sL", TESSDATA_BEST_ENG_URL, "-o"])
+        .arg(&dest)
+        .output()?;
+    if !output.status.success() {
+        return Err(format!(
+            "curl failed to download best eng.traineddata: {}",
+            String::from_utf8_lossy(&output.stderr)
+        )
+        .into());
+    }
+
+    // The best eng model is ~15MB; anything under 1MB means the download failed
+    // (e.g. an HTML error page from GitHub) rather than the real float model.
+    let size = std::fs::metadata(&dest).map(|m| m.len()).unwrap_or(0);
+    if size < 1_000_000 {
+        return Err(format!(
+            "downloaded eng.traineddata is too small ({size} bytes) — expected ~15MB float 'best' model; download likely failed"
+        )
+        .into());
+    }
+
+    tracing::info!(bytes = size, "downloaded tessdata_best eng.traineddata");
+    Ok(dest)
+}
+
 fn install_font(dir: &Path) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let font_dir = dirs::data_dir().ok_or("no data dir")?.join("fonts");
     std::fs::create_dir_all(&font_dir)?;
@@ -286,10 +329,10 @@ fn install_font(dir: &Path) -> Result<(), Box<dyn std::error::Error + Send + Syn
 }
 
 fn generate_tessdata_lstm(dir: &Path) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let eng_traineddata = find_system_traineddata("eng")
-        .map(|d| d.join("eng.traineddata"))
-        .filter(|p| p.is_file())
-        .ok_or("eng.traineddata not found — install tesseract-data-eng for LSTM training")?;
+    // lstmtraining needs the float "best" model — the system eng.traineddata is
+    // usually the integer "fast" variant it refuses to continue from. Fetch the
+    // best model on demand into the training temp dir.
+    let eng_traineddata = download_best_eng_traineddata(dir)?;
 
     tracing::info!(
         "LSTM fine-tuning: using base model from {}",
