@@ -11,14 +11,35 @@ pub enum CaptureBackend {
     None,
 }
 
+/// Normalized force target parsed from `STAT_TRACKER_CAPTURE` (pure; unit-tested).
+/// The accepted keyword set (and its case-folding) lives here and nowhere else —
+/// both `select_backend` and `detect_backend` route through `force_target`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ForceTarget {
+    Wayshot,
+    X11,
+    Portal,
+    Unknown,
+}
+
+fn force_target(raw: &str) -> ForceTarget {
+    match raw.to_ascii_lowercase().as_str() {
+        "wayshot" | "wayland" => ForceTarget::Wayshot,
+        "x11" => ForceTarget::X11,
+        "portal" => ForceTarget::Portal,
+        _ => ForceTarget::Unknown,
+    }
+}
+
 /// Pure backend-selection policy (R1-6). Every env read and live probe happens
 /// in `detect_backend`; this takes their already-normalized results so the exact
 /// production decision is unit-testable without touching process env or an X
 /// server. `detect_backend` routes through this — the tests below exercise the
 /// real logic, not a parallel copy.
 ///
-/// `force` is the lowercased `STAT_TRACKER_CAPTURE` value (or `None`). A forced
-/// backend never silently falls back (R1-3): unavailable/unknown force → `None`.
+/// `force` is the raw `STAT_TRACKER_CAPTURE` value (or `None`), normalized here
+/// via `force_target` so the keyword set exists once. A forced backend never
+/// silently falls back (R1-3): unavailable/unknown force → `None`.
 fn select_backend(
     force: Option<&str>,
     wayshot_ok: bool,
@@ -26,29 +47,31 @@ fn select_backend(
     portal_ok: bool,
 ) -> CaptureBackend {
     match force {
-        Some("wayshot") | Some("wayland") => {
-            if wayshot_ok {
-                CaptureBackend::Wayshot
-            } else {
-                CaptureBackend::None
+        Some(raw) => match force_target(raw) {
+            ForceTarget::Wayshot => {
+                if wayshot_ok {
+                    CaptureBackend::Wayshot
+                } else {
+                    CaptureBackend::None
+                }
             }
-        }
-        Some("x11") => {
-            if x11_ok {
-                CaptureBackend::X11
-            } else {
-                CaptureBackend::None
+            ForceTarget::X11 => {
+                if x11_ok {
+                    CaptureBackend::X11
+                } else {
+                    CaptureBackend::None
+                }
             }
-        }
-        Some("portal") => {
-            if portal_ok {
-                CaptureBackend::Portal
-            } else {
-                CaptureBackend::None
+            ForceTarget::Portal => {
+                if portal_ok {
+                    CaptureBackend::Portal
+                } else {
+                    CaptureBackend::None
+                }
             }
-        }
-        // Unknown forced value — fail closed, no fallback.
-        Some(_) => CaptureBackend::None,
+            // Unknown forced value — fail closed, no fallback.
+            ForceTarget::Unknown => CaptureBackend::None,
+        },
         // Automatic priority: usable Wayshot → X11 → Portal → None.
         None => {
             if wayshot_ok {
@@ -67,41 +90,46 @@ fn select_backend(
 pub async fn detect_backend() -> CaptureBackend {
     // STAT_TRACKER_CAPTURE override (R1-3, fail-closed). Env read + live probes
     // live here; the decision is delegated to `select_backend` so tests hit
-    // production logic. Probing is lazy per force so a forced backend never
-    // warms an unrelated connection.
-    let force = std::env::var("STAT_TRACKER_CAPTURE")
-        .ok()
-        .map(|s| s.to_ascii_lowercase());
+    // production logic. The raw value is kept (not lowercased up front) so the
+    // Unknown warn shows exactly what the operator set; `force_target` owns the
+    // keyword set + case-folding. Probing is lazy per force so a forced backend
+    // never warms an unrelated connection.
+    let force = std::env::var("STAT_TRACKER_CAPTURE").ok();
 
     match force.as_deref() {
-        Some("wayshot") | Some("wayland") => {
-            let ok = wayshot::probe().await.is_ok();
-            let backend = select_backend(force.as_deref(), ok, false, false);
-            if backend == CaptureBackend::None {
-                tracing::warn!("STAT_TRACKER_CAPTURE=wayshot is not usable");
+        Some(raw) => match force_target(raw) {
+            ForceTarget::Wayshot => {
+                let ok = wayshot::probe().await.is_ok();
+                let backend = select_backend(Some(raw), ok, false, false);
+                if backend == CaptureBackend::None {
+                    tracing::warn!("STAT_TRACKER_CAPTURE=wayshot is not usable");
+                }
+                backend
             }
-            backend
-        }
-        Some("x11") => {
-            let ok = x11::probe().await.is_ok();
-            let backend = select_backend(force.as_deref(), false, ok, false);
-            if backend == CaptureBackend::None {
-                tracing::warn!("STAT_TRACKER_CAPTURE=x11 is not usable");
+            ForceTarget::X11 => {
+                let ok = x11::probe().await.is_ok();
+                let backend = select_backend(Some(raw), false, ok, false);
+                if backend == CaptureBackend::None {
+                    tracing::warn!("STAT_TRACKER_CAPTURE=x11 is not usable");
+                }
+                backend
             }
-            backend
-        }
-        Some("portal") => {
-            let ok = portal::is_available().await;
-            let backend = select_backend(force.as_deref(), false, false, ok);
-            if backend == CaptureBackend::None {
-                tracing::warn!("STAT_TRACKER_CAPTURE=portal not available");
+            ForceTarget::Portal => {
+                let ok = portal::is_available().await;
+                let backend = select_backend(Some(raw), false, false, ok);
+                if backend == CaptureBackend::None {
+                    tracing::warn!("STAT_TRACKER_CAPTURE=portal not available");
+                }
+                backend
             }
-            backend
-        }
-        Some(other) => {
-            tracing::warn!(%other, "unknown STAT_TRACKER_CAPTURE value");
-            CaptureBackend::None
-        }
+            // Unknown forced value — warn with the raw value, then route the
+            // decision through `select_backend` (fail-closed → None) rather than
+            // returning inline, so the tested policy owns the outcome.
+            ForceTarget::Unknown => {
+                tracing::warn!(%raw, "unknown STAT_TRACKER_CAPTURE value");
+                select_backend(Some(raw), false, false, false)
+            }
+        },
         // Automatic probe order (R1-2): real connect + ≥1 output per candidate;
         // a failed candidate falls through. Short-circuit — a winning probe
         // skips the rest.
@@ -255,6 +283,43 @@ mod tests {
         assert_eq!(
             select_backend(Some(""), true, true, true),
             CaptureBackend::None
+        );
+    }
+
+    // --- Normalizer (single keyword-set home) ---
+
+    #[test]
+    fn force_target_normalizes_case_and_aliases() {
+        // Case-insensitive: uppercase env values map to the same targets.
+        assert_eq!(force_target("X11"), ForceTarget::X11);
+        assert_eq!(force_target("WAYSHOT"), ForceTarget::Wayshot);
+        // `wayland` is an accepted alias for the Wayshot force, any case.
+        assert_eq!(force_target("Wayland"), ForceTarget::Wayshot);
+        assert_eq!(force_target("wayland"), ForceTarget::Wayshot);
+        // Canonical lowercase spellings.
+        assert_eq!(force_target("wayshot"), ForceTarget::Wayshot);
+        assert_eq!(force_target("x11"), ForceTarget::X11);
+        assert_eq!(force_target("portal"), ForceTarget::Portal);
+        // Anything else is Unknown (fail-closed at the decision layer).
+        assert_eq!(force_target("garbage"), ForceTarget::Unknown);
+        assert_eq!(force_target(""), ForceTarget::Unknown);
+    }
+
+    // --- MUTANT_A: a forced backend wins even when a higher-priority,
+    // non-forced backend is also usable. Force means force — the auto priority
+    // order (Wayshot > X11 > Portal) must not leak into a forced decision. ---
+
+    #[test]
+    fn forced_backend_beats_higher_priority_available() {
+        // Forced x11 with the higher-priority Wayshot ALSO usable → still X11.
+        assert_eq!(
+            select_backend(Some("x11"), true, true, false),
+            CaptureBackend::X11
+        );
+        // Forced portal with both higher-priority backends usable → still Portal.
+        assert_eq!(
+            select_backend(Some("portal"), true, true, true),
+            CaptureBackend::Portal
         );
     }
 }
