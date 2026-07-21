@@ -29,6 +29,9 @@ dirs = "6"
 toml = "0.8"
 reqwest = { version = "0.12", features = ["json"] }
 libwayshot = "0.7"
+# Task 0 decision (fleet::x11-capture): pure-Rust X11; randr + image helpers.
+# No shm. Closure evidence: no new native libs vs baseline.
+x11rb = { version = "0.14", features = ["randr", "image"] }
 ashpd = { version = "0.13", features = ["screenshot"] }
 leptess = "0.14"
 evdev = { version = "0.13", features = ["tokio"] }

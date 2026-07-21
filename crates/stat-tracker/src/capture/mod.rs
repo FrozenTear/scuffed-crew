@@ -1,5 +1,7 @@
 pub mod portal;
 pub mod wayshot;
+/// Native X11 capture (pure X11 sessions). Wired into selection by Lane C.
+pub mod x11;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CaptureBackend {
