@@ -30,3 +30,7 @@ cachyos-repo.tar.xz
 # gamertags; local-only, never committed (privacy). Screenshots (*.png) are
 # already ignored above; this covers the JSON annotations beside them.
 tests/fixtures/replays/ground_truth.json
+
+# X11 capture plan review history — local-only narrative archive; the spec and
+# orchestration plan themselves are tracked (docs/superpowers/plans/).
+docs/superpowers/plans/2026-07-21-stat-tracker-x11-review-archive.md
