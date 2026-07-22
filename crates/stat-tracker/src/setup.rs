@@ -10,8 +10,7 @@ const FONT_FAMILY: &str = "Koverwatch";
 /// model, cannot continue training"). Fine-tuning requires the float model, so
 /// we fetch it on demand. Generation already needs network (font download), so
 /// this adds no new requirement.
-const TESSDATA_BEST_ENG_URL: &str =
-    "https://github.com/tesseract-ocr/tessdata_best/raw/e12c65a915945e4c28e237a9b52bc4a8f39a0cec/eng.traineddata";
+const TESSDATA_BEST_ENG_URL: &str = "https://github.com/tesseract-ocr/tessdata_best/raw/e12c65a915945e4c28e237a9b52bc4a8f39a0cec/eng.traineddata";
 
 /// text2image busy-spins forever (100% CPU, no output, no error) when a page's
 /// text does not fit its --ysize — it is not slow, it never finishes, so the
