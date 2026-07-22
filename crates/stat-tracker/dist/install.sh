@@ -5,7 +5,8 @@
 #   bin/scuffed-stat-tracker
 #   bin/stat-tracker-gui
 #   lib/*          (optional — bundled OCR libs; RPATH $ORIGIN/../lib)
-#   tessdata/eng.traineddata  (optional — runtime OCR model, since v0.3.0)
+#   tessdata/eng.traineddata        (optional — runtime OCR model, since v0.3.0)
+#   tessdata/koverwatch.traineddata (optional — CI-trained game-font model, since v0.3.0)
 #   assets/scuffed-stat-tracker.desktop
 #   assets/scuffed-stat-tracker.service
 #   install.sh   (this file)
@@ -157,6 +158,26 @@ if [[ -f "$BUNDLED_ENG" ]]; then
         mkdir -p "$USER_TESSDATA_DIR"
         install -m644 "$BUNDLED_ENG" "$USER_ENG"
         info "Installed bundled eng.traineddata → $USER_ENG"
+    fi
+fi
+
+# Bundled game-font model (koverwatch). Unlike eng, the release bundle is the
+# canonical source for this file — most machines cannot regenerate it locally
+# (text2image hangs/segfaults on pango >= 1.56) — so a differing existing copy
+# is replaced, with a .bak kept for anyone who genuinely self-trained one.
+BUNDLED_KOV="$PKG_ROOT/tessdata/koverwatch.traineddata"
+USER_KOV="$USER_TESSDATA_DIR/koverwatch.traineddata"
+if [[ -f "$BUNDLED_KOV" ]]; then
+    if [[ -f "$USER_KOV" ]] && cmp -s "$BUNDLED_KOV" "$USER_KOV"; then
+        info "koverwatch.traineddata already up to date at $USER_KOV"
+    else
+        mkdir -p "$USER_TESSDATA_DIR"
+        if [[ -f "$USER_KOV" ]]; then
+            cp "$USER_KOV" "$USER_KOV.bak"
+            info "Existing koverwatch.traineddata backed up → $USER_KOV.bak"
+        fi
+        install -m644 "$BUNDLED_KOV" "$USER_KOV"
+        info "Installed bundled koverwatch.traineddata → $USER_KOV"
     fi
 fi
 
