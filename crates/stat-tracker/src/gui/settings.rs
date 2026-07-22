@@ -70,6 +70,7 @@ pub fn SettingsPanel() -> Element {
             session_window_secs: config().session_window_secs,
             game_process_names: config().game_process_names.clone(),
             debug_ocr: config().debug_ocr,
+            ocr_threads: config().ocr_threads,
         };
 
         match save_config(&new_config) {
