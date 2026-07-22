@@ -377,6 +377,12 @@ fn generate_tessdata_lstm(dir: &Path) -> Result<(), Box<dyn std::error::Error + 
                 .arg(&output_base)
                 .arg("--font")
                 .arg(FONT_FAMILY)
+                // text2image builds its own fontconfig in a temp dir and never
+                // scans the user font dir install_font populates — the font is
+                // only found via an explicit --fonts_dir. The zip extracts the
+                // ttf straight into `dir`, so point it there.
+                .arg("--fonts_dir")
+                .arg(dir)
                 .arg(format!("--exposure={}", page.exposure))
                 .arg(format!("--xsize={}", page.xsize))
                 .arg(format!("--ysize={}", page.ysize)),
@@ -541,6 +547,10 @@ fn generate_tessdata_legacy(dir: &Path) -> Result<(), Box<dyn std::error::Error 
             .arg(&output_base)
             .arg("--font")
             .arg(FONT_FAMILY)
+            // Same --fonts_dir requirement as the LSTM path: without it,
+            // text2image cannot see the extracted ttf in `dir`.
+            .arg("--fonts_dir")
+            .arg(dir)
             .arg("--exposure=0")
             .arg("--xsize=1800")
             .arg("--ysize=240"),
