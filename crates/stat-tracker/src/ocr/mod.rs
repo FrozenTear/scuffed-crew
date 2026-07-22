@@ -66,17 +66,36 @@ fn debug_dir() -> Option<PathBuf> {
     Some(dir)
 }
 
-// Dedicated thread pool for OCR — capped well below total CPU count so
-// a capture burst doesn't saturate the system and lag the game.
+// Dedicated thread pool for OCR — size set once at daemon start via
+// [`set_ocr_threads`] (config `ocr_threads` / env / CLI). Default when unset:
+// half the cores, clamped 2..=4 (historical auto). Each worker keeps a
+// thread-local Tesseract (~23 MB model), so lower = less RAM, higher = faster Tab.
+static OCR_THREADS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 static OCR_POOL: OnceLock<rayon::ThreadPool> = OnceLock::new();
+
+/// Configure OCR parallelism before the first OCR call. Clamped to 1..=8.
+/// No-op if the pool was already built (OnceLock).
+pub fn set_ocr_threads(n: usize) {
+    let n = n.clamp(1, 8);
+    OCR_THREADS.store(n, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn ocr_pool_thread_count() -> usize {
+    let configured = OCR_THREADS.load(std::sync::atomic::Ordering::Relaxed);
+    if configured > 0 {
+        return configured.clamp(1, 8);
+    }
+    // Auto path when callers (tests/examples) never call set_ocr_threads.
+    let total = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4);
+    (total / 2).clamp(2, 4)
+}
 
 fn ocr_pool() -> &'static rayon::ThreadPool {
     OCR_POOL.get_or_init(|| {
-        let total = std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(4);
-        // Use at most half the cores, between 2 and 4.
-        let threads = (total / 2).clamp(2, 4);
+        let threads = ocr_pool_thread_count();
+        tracing::info!(ocr_threads = threads, "OCR worker pool ready");
         rayon::ThreadPoolBuilder::new()
             .num_threads(threads)
             .thread_name(|i| format!("ocr-{i}"))

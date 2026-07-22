@@ -105,6 +105,13 @@ GUI's daemon card (start/stop/autostart route through systemd when installed).
 | `auto_detect.*` | Poll-based match start/end detection (interval, cooldown) |
 | `game_process_names` | Only capture while one of these processes runs (empty disables the gate) |
 | `debug_ocr` | Dump OCR intermediate PNGs under `{data_dir}/debug/` (also env `STAT_TRACKER_DEBUG_OCR=1`) |
+| `ocr_threads` | Parallel OCR workers (1–8). Each keeps a ~23 MB Tesseract model in RAM. Omit for auto (`(cores/2)` clamped 2–4). Also env `STAT_TRACKER_OCR_THREADS` or CLI `--ocr-threads N`. Use `1` to minimize RAM; higher speeds Tab OCR. |
+
+Example low-RAM:
+
+```toml
+ocr_threads = 1
+```
 
 The daemon reads config once at startup — restart it after changes.
 

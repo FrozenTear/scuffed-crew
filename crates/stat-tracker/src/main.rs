@@ -133,6 +133,14 @@ async fn main() -> anyhow::Result<()> {
     // instead of re-loading config on first use; dumps land under data_dir.
     ocr::set_debug_ocr(config.debug_ocr_enabled());
     ocr::set_debug_dir(config.data_dir.join("debug"));
+    // OCR pool size (Tesseract instances ≈ workers). Must run before first OCR.
+    let ocr_threads = config.ocr_threads_resolved();
+    ocr::set_ocr_threads(ocr_threads);
+    tracing::info!(
+        ocr_threads,
+        configured = ?config.ocr_threads,
+        "OCR workers (each holds ~23MB tessdata; set ocr_threads / STAT_TRACKER_OCR_THREADS / --ocr-threads)"
+    );
 
     // Refuse to start alongside a live daemon; the guard removes the pid file
     // on drop. Held across --vacuum so no daemon can start mid-compaction.
@@ -203,7 +211,8 @@ fn handle_preinit_flags() -> bool {
              \x20 --generate-tessdata   build the game-font tessdata model and exit\n\
              \x20 --vacuum              compact the local stats DB and exit\n\
              \x20 --collect-portraits   dev: save hero portrait crops while running\n\
-             \x20 --dump-poll-frames    dev: save every polled frame while running\n\n\
+             \x20 --dump-poll-frames    dev: save every polled frame while running\n\
+             \x20 --ocr-threads N       OCR workers 1..=8 (RAM vs speed; also config/env)\n\n\
              With no flags, runs the capture daemon (see README).",
             package_version()
         );

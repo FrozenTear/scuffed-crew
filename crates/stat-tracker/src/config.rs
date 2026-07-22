@@ -26,6 +26,12 @@ pub struct Config {
     /// dominated capture latency. Also enabled by env `STAT_TRACKER_DEBUG_OCR=1`.
     #[serde(default)]
     pub debug_ocr: bool,
+    /// Parallel OCR workers (each keeps a ~23 MB Tesseract model resident).
+    /// `None` / omit = auto (`(cores/2).clamp(2, 4)`). Set to `1` for lowest
+    /// RAM, higher for faster Tab OCR. Clamped to 1..=8 at resolve time.
+    /// Overlay: env `STAT_TRACKER_OCR_THREADS`, CLI `--ocr-threads N`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ocr_threads: Option<u32>,
 }
 
 fn default_session_window_secs() -> u64 {
@@ -128,6 +134,23 @@ impl Config {
             config.debug_ocr = true;
         }
 
+        // OCR worker count: CLI > env > config file > auto (None).
+        if let Some(raw) = Self::arg_value("--ocr-threads")
+            .or_else(|| std::env::var("STAT_TRACKER_OCR_THREADS").ok())
+        {
+            match raw.parse::<u32>() {
+                Ok(n) if n > 0 => config.ocr_threads = Some(n),
+                Ok(_) => tracing::warn!(
+                    value = %raw,
+                    "STAT_TRACKER_OCR_THREADS / --ocr-threads must be >= 1; ignoring"
+                ),
+                Err(_) => tracing::warn!(
+                    value = %raw,
+                    "invalid STAT_TRACKER_OCR_THREADS / --ocr-threads; ignoring"
+                ),
+            }
+        }
+
         Ok(config)
     }
 
@@ -168,6 +191,23 @@ impl Config {
         self.debug_ocr || Self::env_truthy("STAT_TRACKER_DEBUG_OCR")
     }
 
+    /// Resolved OCR worker count for the Rayon pool (and thus Tesseract instances).
+    /// Explicit config/env/CLI wins; otherwise auto from host parallelism.
+    pub fn ocr_threads_resolved(&self) -> usize {
+        if let Some(n) = self.ocr_threads {
+            return (n as usize).clamp(1, 8);
+        }
+        Self::default_ocr_threads()
+    }
+
+    /// Auto worker count when `ocr_threads` is unset: half the cores, 2..=4.
+    pub fn default_ocr_threads() -> usize {
+        let total = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4);
+        (total / 2).clamp(2, 4)
+    }
+
     fn env_truthy(key: &str) -> bool {
         matches!(
             std::env::var(key).as_deref(),
@@ -197,6 +237,29 @@ impl Default for Config {
             session_window_secs: default_session_window_secs(),
             game_process_names: default_game_process_names(),
             debug_ocr: false,
+            ocr_threads: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ocr_threads_resolved_clamps_and_auto() {
+        let mut c = Config::default();
+        assert!(
+            (2..=4).contains(&c.ocr_threads_resolved()),
+            "auto should stay in the historical 2..=4 band"
+        );
+        c.ocr_threads = Some(1);
+        assert_eq!(c.ocr_threads_resolved(), 1);
+        c.ocr_threads = Some(3);
+        assert_eq!(c.ocr_threads_resolved(), 3);
+        c.ocr_threads = Some(99);
+        assert_eq!(c.ocr_threads_resolved(), 8);
+        c.ocr_threads = Some(0);
+        assert_eq!(c.ocr_threads_resolved(), 1);
     }
 }
