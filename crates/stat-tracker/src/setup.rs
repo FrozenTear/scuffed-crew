@@ -10,73 +10,78 @@ const FONT_FAMILY: &str = "Koverwatch";
 /// model, cannot continue training"). Fine-tuning requires the float model, so
 /// we fetch it on demand. Generation already needs network (font download), so
 /// this adds no new requirement.
-const TESSDATA_BEST_ENG_URL: &str =
-    "https://github.com/tesseract-ocr/tessdata_best/raw/main/eng.traineddata";
+const TESSDATA_BEST_ENG_URL: &str = "https://github.com/tesseract-ocr/tessdata_best/raw/e12c65a915945e4c28e237a9b52bc4a8f39a0cec/eng.traineddata";
 
-/// text2image renders ~8-10 sub-pages per training page; 30s killed it
-/// mid-render on every page (observed 2026-07-21). Generous wall clock —
-/// generation is a one-off setup step, not a hot path.
+/// text2image busy-spins forever (100% CPU, no output, no error) when a page's
+/// text does not fit its --ysize — it is not slow, it never finishes, so the
+/// timeout is a backstop for that spin, not a render budget. Reproduced on
+/// Debian bookworm (pango 1.50) 2026-07-22; the 2026-07-21 "killed mid-render"
+/// reading was this same spin. Page geometry below must keep every page
+/// comfortably taller than its text (~60px per line at the default 12pt/300dpi
+/// plus margin). On pango >= 1.56 hosts text2image also hangs/segfaults
+/// regardless of geometry — releases ship a CI-trained koverwatch.traineddata
+/// so end-user machines never run this pipeline.
 const TEXT2IMAGE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
 
 const TRAINING_PAGES: &[TrainingPage] = &[
     TrainingPage {
         text: TRAINING_DIGITS,
         xsize: 1200,
-        ysize: 100,
-        exposure: 0,
-    },
-    TrainingPage {
-        text: TRAINING_DIGITS_COMMAS,
-        xsize: 1600,
-        ysize: 150,
-        exposure: 0,
-    },
-    TrainingPage {
-        text: TRAINING_HEROES_1,
-        xsize: 1800,
-        ysize: 200,
-        exposure: 0,
-    },
-    TrainingPage {
-        text: TRAINING_HEROES_2,
-        xsize: 1800,
-        ysize: 200,
-        exposure: 0,
-    },
-    TrainingPage {
-        text: TRAINING_MAPS,
-        xsize: 1800,
-        ysize: 240,
-        exposure: 0,
-    },
-    TrainingPage {
-        text: TRAINING_MIXED,
-        xsize: 1800,
-        ysize: 240,
-        exposure: 0,
-    },
-    TrainingPage {
-        text: TRAINING_DIGITS,
-        xsize: 900,
-        ysize: 80,
-        exposure: 1,
-    },
-    TrainingPage {
-        text: TRAINING_BATTLETAGS,
-        xsize: 1800,
-        ysize: 200,
-        exposure: 0,
-    },
-    TrainingPage {
-        text: TRAINING_SCOREBOARD_SIM,
-        xsize: 1800,
         ysize: 300,
         exposure: 0,
     },
     TrainingPage {
         text: TRAINING_DIGITS_COMMAS,
+        xsize: 1600,
+        ysize: 420,
+        exposure: 0,
+    },
+    TrainingPage {
+        text: TRAINING_HEROES_1,
+        xsize: 1800,
+        ysize: 360,
+        exposure: 0,
+    },
+    TrainingPage {
+        text: TRAINING_HEROES_2,
+        xsize: 1800,
+        ysize: 360,
+        exposure: 0,
+    },
+    TrainingPage {
+        text: TRAINING_MAPS,
+        xsize: 1800,
+        ysize: 540,
+        exposure: 0,
+    },
+    TrainingPage {
+        text: TRAINING_MIXED,
+        xsize: 1800,
+        ysize: 360,
+        exposure: 0,
+    },
+    TrainingPage {
+        text: TRAINING_DIGITS,
+        xsize: 900,
+        ysize: 300,
+        exposure: 1,
+    },
+    TrainingPage {
+        text: TRAINING_BATTLETAGS,
+        xsize: 1800,
+        ysize: 360,
+        exposure: 0,
+    },
+    TrainingPage {
+        text: TRAINING_SCOREBOARD_SIM,
+        xsize: 1800,
+        ysize: 660,
+        exposure: 0,
+    },
+    TrainingPage {
+        text: TRAINING_DIGITS_COMMAS,
         xsize: 800,
-        ysize: 100,
+        ysize: 420,
         exposure: 1,
     },
 ];

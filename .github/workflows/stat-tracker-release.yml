@@ -41,8 +41,9 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             libwayland-dev libxkbcommon-dev \
             libegl-dev libgbm-dev \
-            tesseract-ocr libtesseract-dev libleptonica-dev \
+            tesseract-ocr tesseract-ocr-eng libtesseract-dev libleptonica-dev \
             libevdev-dev libudev-dev \
+            fontconfig unzip \
             pkg-config patchelf
 
       - uses: dtolnay/rust-toolchain@stable
@@ -77,6 +78,30 @@ jobs:
           bash crates/stat-tracker/dist/bundle-native-libs.sh \
             out/bin/scuffed-stat-tracker out/lib
           patchelf --set-rpath '$ORIGIN/../lib' out/bin/scuffed-stat-tracker
+
+      - name: Train koverwatch OCR model (production code path)
+        run: |
+          set -euo pipefail
+          # Runs setup::ensure_koverwatch_tessdata via the release binary — the
+          # exact pipeline users would run. Must happen on THIS runner (22.04
+          # pango works; pango >= 1.56 hosts hang/segfault text2image) and
+          # BEFORE the clean-room step below uninstalls the training tools.
+          ./target/release/scuffed-stat-tracker --generate-tessdata 2>&1 | tee train.log
+          # ensure_koverwatch_tessdata tolerates skipped pages; a release model
+          # must not silently train on a subset — fail on any page skip.
+          if grep -qE 'text2image (failed|timed out)|produced no output|lstm\.train failed' train.log; then
+            echo "training skipped one or more pages — refusing to ship a partial model" >&2
+            exit 1
+          fi
+          MODEL="$HOME/.local/share/scuffed-stat-tracker/tessdata/koverwatch.traineddata"
+          [ -f "$MODEL" ] || { echo "koverwatch.traineddata not produced" >&2; exit 1; }
+          SIZE=$(stat -c%s "$MODEL")
+          # LSTM fine-tune of the ~15MB float eng model; a tiny file means a
+          # broken download or legacy-pipeline fallback output.
+          [ "$SIZE" -ge 10000000 ] || { echo "koverwatch.traineddata too small: ${SIZE} bytes" >&2; exit 1; }
+          mkdir -p out/tessdata
+          cp "$MODEL" out/tessdata/
+          echo "koverwatch.traineddata trained: ${SIZE} bytes"
 
       - name: Clean-room smoke test (no system OCR libs)
         run: |
@@ -224,8 +249,12 @@ jobs:
           # install.sh drops this file there (without clobbering a user model).
           mkdir -p "${STAGE}/tessdata"
           curl -fsSL \
-            https://github.com/tesseract-ocr/tessdata_fast/raw/main/eng.traineddata \
+            https://github.com/tesseract-ocr/tessdata_fast/raw/87416418657359cb625c412a48b6e1d6d41c29bd/eng.traineddata \
             -o "${STAGE}/tessdata/eng.traineddata"
+          # Game-font model trained in the daemon job (see "Train koverwatch
+          # OCR model"). Required: end-user machines cannot train it themselves
+          # (text2image is broken on pango >= 1.56 hosts).
+          cp daemon/tessdata/koverwatch.traineddata "${STAGE}/tessdata/"
           chmod +x "${STAGE}/install.sh" "${STAGE}"/bin/*
           echo "${VERSION}" > "${STAGE}/VERSION"
           tar czf "${STAGE}.tar.gz" "${STAGE}"
@@ -251,7 +280,7 @@ jobs:
             echo
             echo "**GUI:** needs a modern distro with \`webkit2gtk-4.1\` and glibc ≥ 2.39 (Ubuntu 24.04+, Debian 13, Arch, Fedora)."
             echo
-            echo "**Also required:** Linux + Wayland (wlr-screencopy compositor or XDG portal), membership in the \`input\` group, distro \`eng.traineddata\` for OCR tuning."
+            echo "**Also required:** Linux + Wayland (wlr-screencopy compositor or XDG portal), membership in the \`input\` group. OCR models (\`eng\` + game-font \`koverwatch\`) are bundled."
             echo
             echo "**Install:** extract the tarball and run \`./install.sh\` inside it — no Rust toolchain needed."
           } > release-notes.md

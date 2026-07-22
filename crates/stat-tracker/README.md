@@ -44,7 +44,11 @@ No Rust toolchain required. GitHub Releases publish
 Since **v0.3.0** the tarball also bundles `tessdata/eng.traineddata` (the
 runtime OCR model); `install.sh` drops it into
 `~/.local/share/scuffed-stat-tracker/tessdata/` (never overwriting a model you
-already have), so no distro tessdata package is required.
+already have), so no distro tessdata package is required. The tarball also
+carries a CI-trained `koverwatch.traineddata` (game-font model) installed the
+same way; the bundled copy is canonical and replaces an older one (a `.bak` is
+kept), since most hosts cannot regenerate it locally — `text2image`
+hangs/segfaults with pango ≥ 1.56.
 
 **One-liner** (downloads latest matching release and installs into
 `~/.local`):
