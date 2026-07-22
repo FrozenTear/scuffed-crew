@@ -220,6 +220,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Full history: release notes diff against the previous
+          # stat-tracker-v* tag, which a depth-1 clone doesn't have.
+          fetch-depth: 0
 
       - uses: actions/download-artifact@v4
         with:
@@ -273,14 +277,32 @@ jobs:
             TAG="stat-tracker-manual-${GITHUB_SHA::8}"
             EXTRA_FLAGS="--draft --target ${GITHUB_SHA}"
           fi
+          # RCs are not production releases: pre-release badge, never "Latest".
+          case "${TAG}" in
+            *-rc*) EXTRA_FLAGS="${EXTRA_FLAGS} --prerelease" ;;
+          esac
+          # Changelog since the previous stat-tracker tag, scoped to the
+          # tracker + this workflow (monorepo: site commits are noise here).
+          # On tag push the current tag exists locally — exclude it.
+          PREV="$(git tag --list 'stat-tracker-v*' --sort=-creatordate \
+            | grep -vx "${TAG}" | head -1 || true)"
           {
             echo "Prebuilt Linux x86_64 build of the Overwatch 2 stat tracker (daemon + GUI)."
+            echo
+            if [ -n "${PREV}" ]; then
+              echo "## Changes since ${PREV#stat-tracker-}"
+              echo
+              git log "${PREV}..HEAD" --no-merges --pretty='- %s' -- \
+                crates/stat-tracker .github/workflows/stat-tracker-release.yml
+              echo
+            fi
+            echo "## Requirements & install"
             echo
             echo "**Daemon:** runs on any current systemd distro (glibc ≥ 2.35); OCR libraries are bundled."
             echo
             echo "**GUI:** needs a modern distro with \`webkit2gtk-4.1\` and glibc ≥ 2.39 (Ubuntu 24.04+, Debian 13, Arch, Fedora)."
             echo
-            echo "**Also required:** Linux + Wayland (wlr-screencopy compositor or XDG portal), membership in the \`input\` group. OCR models (\`eng\` + game-font \`koverwatch\`) are bundled."
+            echo "**Also required:** Linux + Wayland (wlr-screencopy compositor or XDG portal) — or X11 (experimental, auto-detected; force with \`STAT_TRACKER_CAPTURE=x11\`) — plus membership in the \`input\` group. OCR models (\`eng\` + game-font \`koverwatch\`) are bundled."
             echo
             echo "**Install:** extract the tarball and run \`./install.sh\` inside it — no Rust toolchain needed."
           } > release-notes.md
