@@ -249,7 +249,7 @@ jobs:
           # install.sh drops this file there (without clobbering a user model).
           mkdir -p "${STAGE}/tessdata"
           curl -fsSL \
-            https://github.com/tesseract-ocr/tessdata_fast/raw/main/eng.traineddata \
+            https://github.com/tesseract-ocr/tessdata_fast/raw/87416418657359cb625c412a48b6e1d6d41c29bd/eng.traineddata \
             -o "${STAGE}/tessdata/eng.traineddata"
           # Game-font model trained in the daemon job (see "Train koverwatch
           # OCR model"). Required: end-user machines cannot train it themselves
