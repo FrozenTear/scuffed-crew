@@ -1,9 +1,11 @@
+use std::collections::HashMap;
+
 use axum::{
     Json,
     extract::{Path, Query, State},
     http::StatusCode,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use scuffed_auth::server::AuthUser;
 use scuffed_auth::server::session::ErrorResponse;
@@ -114,21 +116,85 @@ pub async fn submit_application(
     Ok((StatusCode::CREATED, Json(app)))
 }
 
+/// Application row enriched for admin display: raw ids resolved to names on read.
+#[derive(Serialize)]
+pub struct ApplicationListEntry {
+    #[serde(flatten)]
+    pub application: Application,
+    /// Member display name when provisioned, else account username, else the raw user id.
+    pub applicant_name: String,
+    /// Game names in the same order as `preferred_games`; unknown ids pass through raw.
+    pub preferred_game_names: Vec<String>,
+}
+
 /// GET /api/applications — list applications (officer+), cursor-paginated.
 pub async fn list_applications(
     State(state): State<AppState>,
     _officer: OfficerUser,
     axum::extract::Query(pagination): axum::extract::Query<scuffed_types::api::PaginationParams>,
-) -> Result<Json<scuffed_types::api::CursorResponse<Application>>, (StatusCode, Json<ErrorResponse>)>
-{
+) -> Result<
+    Json<scuffed_types::api::CursorResponse<ApplicationListEntry>>,
+    (StatusCode, Json<ErrorResponse>),
+> {
     let (limit, offset) = pagination.resolve();
     let items = state
         .db
         .list_applications_paginated(limit, offset)
         .await
         .map_err(|e| internal_err(e, "list_applications"))?;
+
+    let members = state
+        .db
+        .list_members()
+        .await
+        .map_err(|e| internal_err(e, "list_members for application names"))?;
+    let member_names: HashMap<&str, &str> = members
+        .iter()
+        .map(|m| (m.user_id.as_str(), m.display_name.as_str()))
+        .collect();
+    let games = state
+        .db
+        .list_games()
+        .await
+        .map_err(|e| internal_err(e, "list_games for application names"))?;
+    let game_names: HashMap<&str, &str> = games
+        .iter()
+        .map(|g| (g.id.as_str(), g.name.as_str()))
+        .collect();
+
+    let mut entries = Vec::with_capacity(items.len());
+    for app in items {
+        let applicant_name = match member_names.get(app.user_id.as_str()) {
+            Some(name) => (*name).to_string(),
+            // Applicants without a member row (pending, never provisioned): use the
+            // account username. A vanished user degrades to the raw id.
+            None => state
+                .db
+                .get_user(&app.user_id)
+                .await
+                .map_err(|e| internal_err(e, "get_user for application name"))?
+                .map(|u| u.username)
+                .unwrap_or_else(|| app.user_id.clone()),
+        };
+        let preferred_game_names = app
+            .preferred_games
+            .iter()
+            .map(|id| {
+                game_names
+                    .get(id.as_str())
+                    .map(|n| (*n).to_string())
+                    .unwrap_or_else(|| id.clone())
+            })
+            .collect();
+        entries.push(ApplicationListEntry {
+            application: app,
+            applicant_name,
+            preferred_game_names,
+        });
+    }
+
     Ok(Json(scuffed_types::api::CursorResponse::from_oversized(
-        items, limit, offset,
+        entries, limit, offset,
     )))
 }
 
@@ -470,41 +536,11 @@ pub async fn expiring_trials(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
-    use std::sync::Arc;
+    use scuffed_db::OrgRole;
 
-    use scuffed_auth::SessionConfig;
-    use scuffed_db::migrations::run_migrations;
-    use scuffed_db::{Database, OrgRole};
-
-    use crate::state::{AppState, OAuthConfig};
-
-    async fn test_state() -> AppState {
-        let db = Database::connect_memory()
-            .await
-            .expect("in-memory DB connect");
-        run_migrations(&db.client).await.expect("migrations");
-        AppState {
-            db: Arc::new(db),
-            session_config: SessionConfig::default(),
-            oauth_config: OAuthConfig {
-                discord_client_id: String::new(),
-                discord_client_secret: String::new(),
-                google_client_id: String::new(),
-                google_client_secret: String::new(),
-                redirect_base_url: "http://localhost:3000".into(),
-                allowed_origins: vec!["http://localhost:3000".into()],
-            },
-            upload_dir: PathBuf::from("/tmp/scuffed-test-uploads"),
-            notifier: None,
-            nostr_challenge_key: [0u8; 32],
-            consumed_challenges: crate::challenge_store::ConsumedChallengeStore::new(),
-            nostr_rate_limiter: crate::nostr_rate_limit::NostrRateLimiter::new(),
-            crypto: None,
-            relay_url: None,
-            dm_events: None,
-        }
-    }
+    use crate::extractors::OfficerUser;
+    use crate::state::AppState;
+    use crate::test_support::{seed_user, test_state};
 
     async fn session_count(state: &AppState, user_id: &str) -> usize {
         let mut r = state
@@ -516,6 +552,91 @@ mod tests {
             .expect("count sessions");
         let rows: Vec<String> = r.take(0).expect("take sessions");
         rows.len()
+    }
+
+    /// List enrichment: applicant_name prefers the member display name, falls back to
+    /// the account username for never-provisioned applicants; game ids resolve to
+    /// names with unknown ids passing through raw.
+    #[tokio::test]
+    async fn list_applications_enriches_applicant_and_game_names() {
+        let state = test_state().await;
+
+        let game = state
+            .db
+            .create_game("Overwatch", Some("OW"))
+            .await
+            .expect("create game");
+
+        // Applicant WITHOUT a member row → username.
+        seed_user(&state, "applicant1", "AppliedAlice").await;
+        state
+            .db
+            .submit_application(
+                "applicant1",
+                vec![game.id.clone(), "ghostgame".into()],
+                vec![],
+                Some("hi"),
+            )
+            .await
+            .expect("submit app1");
+
+        // Applicant WITH a member row → member display name wins over username.
+        seed_user(&state, "applicant2", "bob_login").await;
+        state
+            .db
+            .create_member("applicant2", "BobDisplay", OrgRole::Recruit)
+            .await
+            .expect("provision bob");
+        state
+            .db
+            .submit_application("applicant2", vec![], vec![], None)
+            .await
+            .expect("submit app2");
+
+        seed_user(&state, "officeruser", "Off").await;
+        let officer_member = state
+            .db
+            .create_member("officeruser", "Off", OrgRole::Officer)
+            .await
+            .expect("officer member");
+        let officer_user = state
+            .db
+            .get_user("officeruser")
+            .await
+            .expect("get officer user")
+            .expect("officer user exists");
+
+        let Json(resp) = list_applications(
+            State(state.clone()),
+            OfficerUser {
+                user: officer_user,
+                member: officer_member,
+            },
+            axum::extract::Query(scuffed_types::api::PaginationParams {
+                cursor: None,
+                limit: 25,
+            }),
+        )
+        .await
+        .unwrap_or_else(|(status, _)| panic!("list applications failed: {status}"));
+
+        let alice = resp
+            .data
+            .iter()
+            .find(|e| e.application.user_id == "applicant1")
+            .expect("alice row");
+        assert_eq!(alice.applicant_name, "AppliedAlice");
+        assert_eq!(
+            alice.preferred_game_names,
+            vec!["Overwatch".to_string(), "ghostgame".to_string()]
+        );
+
+        let bob = resp
+            .data
+            .iter()
+            .find(|e| e.application.user_id == "applicant2")
+            .expect("bob row");
+        assert_eq!(bob.applicant_name, "BobDisplay");
     }
 
     /// DR1-ACCT-001 regression: an Accept racing a self-Withdraw must not leave the

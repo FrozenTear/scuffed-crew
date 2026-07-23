@@ -1,20 +1,48 @@
 use dioxus::prelude::*;
 use serde::Deserialize;
 
+use crate::components::modal::Modal;
 use crate::components::{ConfirmDialog, DataTable, StatusPill, Toast, admin_pending, use_toast};
 use crate::hooks::{ModalController, use_api_list};
+use crate::util::format_datetime;
 use scuffed_api_client::ApiClient;
 use scuffed_types::api::PatchApplicationRequest;
 
-// Matches scuffed_db::Application JSON (no joined display name yet).
+// Matches the enriched ApplicationListEntry JSON from GET /api/applications.
+// Name/label fields are optional so the page still renders against an older server.
 #[derive(Debug, Clone, Deserialize)]
 struct Application {
     id: String,
     user_id: String,
+    #[serde(default)]
+    applicant_name: Option<String>,
     preferred_games: Vec<String>,
+    #[serde(default)]
+    preferred_game_names: Option<Vec<String>>,
+    #[serde(default)]
+    preferred_roles: Vec<String>,
     message: Option<String>,
     status: String,
+    #[serde(default)]
+    review_notes: Option<String>,
     created_at: String,
+    #[serde(default)]
+    updated_at: Option<String>,
+}
+
+impl Application {
+    fn applicant_label(&self) -> String {
+        self.applicant_name
+            .clone()
+            .unwrap_or_else(|| self.user_id.clone())
+    }
+
+    fn games_label(&self) -> String {
+        match &self.preferred_game_names {
+            Some(names) if !names.is_empty() => names.join(", "),
+            _ => self.preferred_games.join(", "),
+        }
+    }
 }
 
 #[component]
@@ -26,6 +54,10 @@ pub fn AdminApplications() -> Element {
     // Reject dialog state
     let mut reject_modal = ModalController::<String>::new();
     let mut reject_notes = use_signal(String::new);
+
+    // Read-only detail drawer (any application, incl. closed ones)
+    let mut view_open = use_signal(|| false);
+    let mut view_target = use_signal(|| None::<Application>);
 
     let accept = move |id: String| {
         spawn(async move {
@@ -89,20 +121,24 @@ pub fn AdminApplications() -> Element {
                             {
                                 let id = app.id.clone();
                                 let id2 = app.id.clone();
-                                let games = app.preferred_games.join(", ");
+                                let applicant = app.applicant_label();
+                                let games = app.games_label();
                                 let msg = app.message.clone().unwrap_or_default();
                                 let date: String = app.created_at.chars().take(10).collect();
-                                let is_pending = app.status == "pending";
+                                // Officers can act on the open pipeline: pending and trial
+                                // (server validates transitions either way).
+                                let can_action = app.status == "pending" || app.status == "trial";
+                                let view_app = app.clone();
                                 rsx! {
                                     tr { key: "{id}",
-                                        td { "{app.user_id}" }
+                                        td { "{applicant}" }
                                         td { "{games}" }
                                         td { "{msg}" }
                                         td { StatusPill { status: app.status.clone() } }
                                         td { "{date}" }
                                         td {
-                                            if is_pending {
-                                                div { class: "row-actions",
+                                            div { class: "row-actions",
+                                                if can_action {
                                                     button {
                                                         class: "row-btn primary",
                                                         onclick: move |_| accept(id.clone()),
@@ -114,6 +150,14 @@ pub fn AdminApplications() -> Element {
                                                         "Reject"
                                                     }
                                                 }
+                                                button {
+                                                    class: "row-btn",
+                                                    onclick: move |_| {
+                                                        view_target.set(Some(view_app.clone()));
+                                                        view_open.set(true);
+                                                    },
+                                                    "View"
+                                                }
                                             }
                                         }
                                     }
@@ -122,6 +166,52 @@ pub fn AdminApplications() -> Element {
                         }
                     }
                 },
+            }
+        }
+
+        Modal {
+            open: view_open,
+            on_close: move |_| view_open.set(false),
+            {
+                match view_target() {
+                    Some(app) => {
+                        let roles = if app.preferred_roles.is_empty() {
+                            "—".to_string()
+                        } else {
+                            app.preferred_roles.join(", ")
+                        };
+                        let message = app.message.clone().unwrap_or_else(|| "—".into());
+                        let notes = app.review_notes.clone().unwrap_or_else(|| "—".into());
+                        let submitted = format_datetime(&app.created_at);
+                        let updated = app
+                            .updated_at
+                            .as_deref()
+                            .map(format_datetime)
+                            .unwrap_or_else(|| "—".into());
+                        rsx! {
+                            div { class: "application-detail",
+                                h2 { "Application: {app.applicant_label()}" }
+                                dl {
+                                    dt { "Status" }
+                                    dd { StatusPill { status: app.status.clone() } }
+                                    dt { "Games" }
+                                    dd { "{app.games_label()}" }
+                                    dt { "Roles" }
+                                    dd { "{roles}" }
+                                    dt { "Message" }
+                                    dd { "{message}" }
+                                    dt { "Review notes" }
+                                    dd { "{notes}" }
+                                    dt { "Submitted" }
+                                    dd { "{submitted}" }
+                                    dt { "Last update" }
+                                    dd { "{updated}" }
+                                }
+                            }
+                        }
+                    }
+                    None => rsx! {},
+                }
             }
         }
 

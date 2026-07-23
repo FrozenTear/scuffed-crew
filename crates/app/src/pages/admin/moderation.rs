@@ -172,7 +172,7 @@ pub fn AdminModeration() -> Element {
                         for action in resp.entries.iter() {
                             {
                                 let id = action.id.clone();
-                                let date: String = action.created_at.chars().take(10).collect();
+                                let date = crate::util::format_datetime(&action.created_at);
                                 let active_label = if action.is_active { "active" } else { "inactive" };
                                 let is_active = action.is_active;
                                 rsx! {
