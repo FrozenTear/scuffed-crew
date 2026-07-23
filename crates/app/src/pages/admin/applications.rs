@@ -125,7 +125,9 @@ pub fn AdminApplications() -> Element {
                                 let games = app.games_label();
                                 let msg = app.message.clone().unwrap_or_default();
                                 let date: String = app.created_at.chars().take(10).collect();
-                                let is_pending = app.status == "pending";
+                                // Officers can act on the open pipeline: pending and trial
+                                // (server validates transitions either way).
+                                let can_action = app.status == "pending" || app.status == "trial";
                                 let view_app = app.clone();
                                 rsx! {
                                     tr { key: "{id}",
@@ -136,7 +138,7 @@ pub fn AdminApplications() -> Element {
                                         td { "{date}" }
                                         td {
                                             div { class: "row-actions",
-                                                if is_pending {
+                                                if can_action {
                                                     button {
                                                         class: "row-btn primary",
                                                         onclick: move |_| accept(id.clone()),
