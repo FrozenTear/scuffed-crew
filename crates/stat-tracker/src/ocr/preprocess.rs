@@ -124,6 +124,18 @@ pub fn add_cell_border(binary: &GrayImage) -> GrayImage {
     add_white_border(binary, 8)
 }
 
+/// Target height (px) for a scoreboard stat cell after upscale, before the
+/// fixed threshold. CG-4 D: lone kill-col digits at ~40px cell height OCR as
+/// empty under the old `w < 150` nearest-2× gate; a smooth upscale to ~56px
+/// (capped ≤3×) recovers them (cell_probe: 42px "8" → "" at 1×, "8"@95 at 2×
+/// Lanczos; 3× oversmooths — hence the cap). Main 1080p (0.75× of 1440p)
+/// reliability lever.
+const CELL_UPSCALE_TARGET_H: u32 = 56;
+
+/// Hard ceiling on the cell upscale factor (CG-4 D). Beyond this, Lanczos
+/// oversmooths thin digits into empty reads.
+const CELL_UPSCALE_MAX_FACTOR: f64 = 3.0;
+
 /// Binarized cell WITHOUT the OCR white border: foreground ink = 0 (black),
 /// background = 255. This is the image [`prepare_cell`] borders for Tesseract;
 /// the edge-ink suspect check ([`edge_ink_fraction`]) runs on the *borderless*
@@ -133,13 +145,7 @@ pub fn add_cell_border(binary: &GrayImage) -> GrayImage {
 pub fn prepare_cell_binary(img: &DynamicImage) -> GrayImage {
     let masked = hsv_white_mask(img);
     let gray = DynamicImage::ImageRgb8(masked).to_luma8();
-    let (w, _) = gray.dimensions();
-
-    let work_img = if w < 150 {
-        nearest_2x_upscale(&gray)
-    } else {
-        gray
-    };
+    let work_img = upscale_cell_for_ocr(&gray);
 
     let (ww, hh) = work_img.dimensions();
     let mut binary = GrayImage::new(ww, hh);
@@ -152,12 +158,40 @@ pub fn prepare_cell_binary(img: &DynamicImage) -> GrayImage {
     binary
 }
 
+/// CG-4 D: bring a binarized-pipeline cell up to [`CELL_UPSCALE_TARGET_H`] with
+/// a smooth filter so small lone kill-col digits remain Tesseract-readable.
+/// Factor is `target/h`, capped at [`CELL_UPSCALE_MAX_FACTOR`]; cells already
+/// ≥ target height pass through unchanged.
+fn upscale_cell_for_ocr(gray: &GrayImage) -> GrayImage {
+    let (w, h) = gray.dimensions();
+    if w == 0 || h == 0 || h >= CELL_UPSCALE_TARGET_H {
+        return gray.clone();
+    }
+    let factor = (CELL_UPSCALE_TARGET_H as f64 / h as f64).min(CELL_UPSCALE_MAX_FACTOR);
+    if factor < 1.05 {
+        return gray.clone();
+    }
+    let nw = ((w as f64) * factor).round().max(1.0) as u32;
+    let nh = ((h as f64) * factor).round().max(1.0) as u32;
+    image::imageops::resize(gray, nw, nh, image::imageops::FilterType::Lanczos3)
+}
+
+/// Test-visible factor selection for CG-4 D (height → scale, capped).
+#[cfg(test)]
+fn cell_upscale_factor(h: u32) -> f64 {
+    if h == 0 || h >= CELL_UPSCALE_TARGET_H {
+        1.0
+    } else {
+        (CELL_UPSCALE_TARGET_H as f64 / h as f64).min(CELL_UPSCALE_MAX_FACTOR)
+    }
+}
+
 /// Per-side fill fraction of the outermost `edge_cols` pixel columns of a
 /// borderless binarized cell ([`prepare_cell_binary`]), returned as
 /// `(left, right)`. Each value is `ink_pixels_in_band / band_area`, so it is
-/// scale-invariant (the 2x cell upscale does not shift it). A centred glyph
-/// leaves both bands near-empty; a clipped/bled glyph jams a vertical stroke
-/// against one edge, spiking that side.
+/// scale-invariant (cell upscale does not shift the fill fraction). A centred
+/// glyph leaves both bands near-empty; a clipped/bled glyph jams a vertical
+/// stroke against one edge, spiking that side.
 pub fn edge_ink_fraction(binary: &GrayImage, edge_cols: u32) -> (f64, f64) {
     let (w, h) = binary.dimensions();
     if w == 0 || h == 0 || edge_cols == 0 {
@@ -1190,5 +1224,63 @@ mod header_anchor_tests {
             STAT_COL_BOUNDARIES_FALLBACK[0].0 + STAT_COL_BOUNDARIES_FALLBACK[0].1 / 2.0;
         assert!((offset - (e_center - fallback_center)).abs() < 1e-9);
         assert_eq!(offset_from_header_groups(&[], FIXTURE_W), 0.0);
+    }
+}
+
+#[cfg(test)]
+mod cell_upscale_tests {
+    use super::*;
+
+    #[test]
+    fn factor_is_one_when_already_tall_enough() {
+        assert!((cell_upscale_factor(CELL_UPSCALE_TARGET_H) - 1.0).abs() < 1e-9);
+        assert!((cell_upscale_factor(80) - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn factor_targets_56_and_caps_at_3x() {
+        // 42px → 56/42 ≈ 1.333 (not a forced 2×; height-driven)
+        let f42 = cell_upscale_factor(42);
+        assert!((f42 - (56.0 / 42.0)).abs() < 1e-9);
+        assert!(f42 < CELL_UPSCALE_MAX_FACTOR);
+
+        // 0.75×-class short cell ~28px → exactly 2×
+        assert!((cell_upscale_factor(28) - 2.0).abs() < 1e-9);
+
+        // Very short cell would want >3× → capped
+        assert!((cell_upscale_factor(15) - 3.0).abs() < 1e-9);
+        assert!((cell_upscale_factor(10) - 3.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn upscale_grows_short_cell_to_about_target_height() {
+        let gray = GrayImage::from_pixel(20, 28, Luma([200]));
+        let up = upscale_cell_for_ocr(&gray);
+        let (w, h) = up.dimensions();
+        assert_eq!(h, 56, "28×2 → 56");
+        assert_eq!(w, 40, "width scales with height");
+    }
+
+    #[test]
+    fn upscale_leaves_tall_cell_unchanged() {
+        let gray = GrayImage::from_pixel(40, 60, Luma([200]));
+        let up = upscale_cell_for_ocr(&gray);
+        assert_eq!(up.dimensions(), (40, 60));
+    }
+
+    #[test]
+    fn prepare_cell_binary_runs_on_small_crop() {
+        // Smoke: tiny RGB crop goes through HSV + target-height upscale + threshold.
+        let img = DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
+            18,
+            24,
+            image::Rgb([240, 240, 240]),
+        ));
+        let bin = prepare_cell_binary(&img);
+        let (w, h) = bin.dimensions();
+        assert!(h >= 24, "upscaled height {h}");
+        assert!(w >= 18);
+        // Output is binary (only 0 or 255).
+        assert!(bin.pixels().all(|p| p.0[0] == 0 || p.0[0] == 255));
     }
 }

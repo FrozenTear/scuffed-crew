@@ -38,7 +38,9 @@ for scale in native x0.75 x1.5; do
         fail=1
         continue
     fi
-    for want in "22" "16,456" "2,644" "7,795"; do
+    # Kill cols (E/A/D = 22/9/12) are the CG-4 D pin at 0.75× — small lone
+    # digits used to OCR empty under nearest-2×. Wide cols stay regression pins.
+    for want in "22" "9" "12" "16,456" "2,644" "7,795"; do
         if ! grep -qF "$want" <<<"$row0"; then
             echo "FAIL [$scale]: row 0 missing '$want': $row0"
             fail=1
