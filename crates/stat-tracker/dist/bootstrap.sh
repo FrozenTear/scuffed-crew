@@ -9,6 +9,11 @@
 # Env:
 #   STAT_TRACKER_REPO   default FrozenTear/scuffed-crew
 #   STAT_TRACKER_TAG    optional release tag (default: latest with matching asset)
+#   STAT_TRACKER_CHANNEL stable|prerelease — which release channel to install
+#                       when no tag is pinned (default: stable). If unset and a
+#                       prerelease newer than the latest stable exists, an
+#                       interactive terminal is prompted (default: stable);
+#                       without a tty the stable release is used silently.
 #   STAT_TRACKER_PREFIX install prefix passed as PREFIX to install.sh (default ~/.local)
 #   STAT_TRACKER_DIR    extract directory (default: mktemp -d, removed after install)
 #   SKIP_INTEGRATION    non-empty ⇒ install binaries/libs only (no desktop entry
@@ -34,6 +39,15 @@ NC='\033[0m'
 info()  { echo -e "${GRN}[bootstrap]${NC} $*" >&2; }
 warn()  { echo -e "${YLW}[ warn ]${NC} $*" >&2; }
 error() { echo -e "${RED}[error ]${NC} $*" >&2; }
+
+CHANNEL="${STAT_TRACKER_CHANNEL:-}"
+case "$CHANNEL" in
+    ""|stable|prerelease) ;;
+    *)
+        error "invalid STAT_TRACKER_CHANNEL='${CHANNEL}' (expected 'stable' or 'prerelease')"
+        exit 1
+        ;;
+esac
 
 need() {
     command -v "$1" &>/dev/null || { error "need '$1' on PATH"; exit 1; }
@@ -61,23 +75,85 @@ resolve_release() {
         json="$(curl -fsSL "${GH_HEADERS[@]}" "${API}/tags/${STAT_TRACKER_TAG}")"
     else
         info "Fetching latest GitHub releases for ${REPO}…"
-        # Walk recent releases for the first that ships our asset (drafts skipped by /releases).
         json="$(curl -fsSL "${GH_HEADERS[@]}" "${API}?per_page=20")"
-        # Pick first non-draft release whose assets include ASSET_NAME.
-        json="$(python3 -c '
+        # Two candidates that ship our asset: the newest stable, and the newest
+        # prerelease that is newer than it (list is newest-first; drafts skipped).
+        local stable_tag pre_tag chosen channel
+        { read -r stable_tag; read -r pre_tag; } < <(python3 -c '
 import json,sys
 releases=json.load(sys.stdin)
 name=sys.argv[1]
+stable=pre=""
 for r in releases:
-    if r.get("draft") or r.get("prerelease"):
+    if r.get("draft"):
         continue
-    for a in r.get("assets") or []:
-        if a.get("name")==name:
-            json.dump(r, sys.stdout)
-            sys.exit(0)
-sys.stderr.write("no published release with asset %s\n" % name)
+    if not any(a.get("name")==name for a in r.get("assets") or []):
+        continue
+    if r.get("prerelease"):
+        if not pre:
+            pre=r.get("tag_name","")
+    else:
+        stable=r.get("tag_name","")
+        break
+if not (stable or pre):
+    sys.stderr.write("no published release with asset %s\n" % name)
+    sys.exit(1)
+print(stable)
+print(pre)
+' "$ASSET_NAME" <<<"$json")
+        if [[ -z "$stable_tag" && -z "$pre_tag" ]]; then
+            exit 1
+        fi
+
+        channel="$CHANNEL"
+        # Prompt only with a real controlling terminal (curl|bash keeps stdin
+        # busy, so talk to /dev/tty; opening it is the only reliable tty test).
+        if [[ -z "$channel" && -n "$pre_tag" && -n "$stable_tag" ]] \
+            && { exec 3<>/dev/tty; } 2>/dev/null; then
+            local reply=""
+            printf '%b' "${YLW}[bootstrap]${NC} Prerelease ${pre_tag} is available (stable: ${stable_tag}). Install [s]table or [p]rerelease? [S/p] " >&3
+            IFS= read -r reply <&3 || reply=""
+            exec 3>&-
+            case "$reply" in
+                [pP]*) channel=prerelease ;;
+                *)     channel=stable ;;
+            esac
+        fi
+
+        case "$channel" in
+            prerelease)
+                if [[ -n "$pre_tag" ]]; then
+                    chosen="$pre_tag"
+                else
+                    info "No prerelease newer than stable; using ${stable_tag}."
+                    chosen="$stable_tag"
+                fi
+                ;;
+            stable|"")
+                if [[ -n "$stable_tag" ]]; then
+                    chosen="$stable_tag"
+                elif [[ -z "$CHANNEL" ]]; then
+                    warn "No stable release ships ${ASSET_NAME}; falling back to prerelease ${pre_tag}."
+                    chosen="$pre_tag"
+                else
+                    error "no stable release with asset ${ASSET_NAME} (prerelease ${pre_tag} exists — set STAT_TRACKER_CHANNEL=prerelease or pin STAT_TRACKER_TAG)"
+                    exit 1
+                fi
+                ;;
+        esac
+
+        # Reduce the list to the chosen release object for the extractor below.
+        json="$(python3 -c '
+import json,sys
+releases=json.load(sys.stdin)
+tag=sys.argv[1]
+for r in releases:
+    if r.get("tag_name")==tag:
+        json.dump(r, sys.stdout)
+        sys.exit(0)
+sys.stderr.write("release %s vanished from listing\n" % tag)
 sys.exit(1)
-' "$ASSET_NAME" <<<"$json")"
+' "$chosen" <<<"$json")"
     fi
 
     python3 -c '

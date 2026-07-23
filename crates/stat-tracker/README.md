@@ -57,6 +57,12 @@ hangs/segfaults with pango ≥ 1.56.
 curl -fsSL https://raw.githubusercontent.com/FrozenTear/scuffed-crew/main/crates/stat-tracker/dist/bootstrap.sh | bash
 ```
 
+Defaults to the newest **stable** release. If a newer prerelease (RC) exists
+and you're at an interactive terminal, the script asks which one you want
+(stable is the default answer). Skip the question with
+`STAT_TRACKER_CHANNEL=prerelease` (or `=stable`); non-interactive runs always
+get stable.
+
 Pin a tag or change the install prefix:
 
 ```sh
@@ -76,6 +82,19 @@ cd scuffed-stat-tracker-linux-x86_64
 The in-tarball installer lives at `dist/install.sh` in this crate (copied to
 the tarball root by the release workflow). Source checkouts still use
 `crates/stat-tracker/install.sh`, which **builds with cargo**.
+
+**Uninstall:**
+
+```sh
+scuffed-stat-tracker-uninstall            # keeps match log + config for reinstalls
+scuffed-stat-tracker-uninstall --purge    # also deletes app data and config
+```
+
+`install.sh` records everything it installs in
+`$PREFIX/share/scuffed-stat-tracker/install-manifest.txt`; the uninstaller
+removes exactly those files (plus stopping/disabling the systemd unit). For
+installs made before the manifest existed it falls back to the known default
+paths and prints how to identify the bundled libs from the tarball.
 
 ## Running
 
