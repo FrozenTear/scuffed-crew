@@ -89,6 +89,10 @@ pub struct AuditLogEntry {
     pub action: String,
     pub target_type: String,
     pub target_id: String,
+    /// Resolved target display name (enriched on list read; not stored on the row).
+    /// Falls back to `target_id` for types without a display field.
+    #[serde(default)]
+    pub target_label: String,
     pub details: Option<String>,
     pub created_at: DateTime<Utc>,
 }

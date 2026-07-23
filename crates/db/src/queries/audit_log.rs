@@ -28,6 +28,8 @@ fn db_to_entry(db: DbAuditLogEntry) -> AuditLogEntry {
     let actor_id = db.actor_id;
     // Fallback until list path enriches via member join.
     let actor_name = actor_id.clone();
+    // Fallback until list path enriches via per-type target join.
+    let target_label = db.target_id.clone();
     AuditLogEntry {
         id,
         actor_id,
@@ -35,6 +37,7 @@ fn db_to_entry(db: DbAuditLogEntry) -> AuditLogEntry {
         action: db.action,
         target_type: db.target_type,
         target_id: db.target_id,
+        target_label,
         details: db.details,
         created_at: db.created_at.into(),
     }
@@ -68,8 +71,9 @@ impl Database {
 
     /// List audit log entries with pagination.
     ///
-    /// Enriches each entry with `actor_name` from `member.display_name` (read-time
-    /// join only — audit_log rows stay append-only without a name column).
+    /// Enriches each entry with `actor_name` from `member.display_name` and
+    /// `target_label` from the target's display field (read-time joins only —
+    /// audit_log rows stay append-only without name/label columns).
     pub async fn list_audit_log(&self, limit: u32, offset: u32) -> DbResult<Vec<AuditLogEntry>> {
         with_timeout(async {
             let mut result = self
@@ -83,6 +87,7 @@ impl Database {
             let entries: Vec<DbAuditLogEntry> = result.take(0)?;
             let mut out: Vec<AuditLogEntry> = entries.into_iter().map(db_to_entry).collect();
             self.enrich_audit_actor_names(&mut out).await?;
+            self.enrich_audit_target_labels(&mut out).await?;
             Ok(out)
         })
         .await
@@ -134,6 +139,82 @@ impl Database {
                 entry.actor_name = name.clone();
             }
             // else leave actor_name = actor_id (set in db_to_entry)
+        }
+        Ok(())
+    }
+
+    /// Fill `target_label` for a page of audit entries from the target's display field.
+    ///
+    /// **Page-scoped map:** like `enrich_audit_actor_names`, only resolves targets
+    /// present on *this* page — one `SELECT id, <field>` per target type present,
+    /// with the page's unique ids bound as `RecordId`s (v3). Types without a clear
+    /// single display field (roster, match, settings, moderation, application,
+    /// tournament participant/match, …) keep the `target_id` fallback set in
+    /// `db_to_entry`. Label is joined in process; audit_log stays append-only.
+    async fn enrich_audit_target_labels(&self, entries: &mut [AuditLogEntry]) -> DbResult<()> {
+        if entries.is_empty() {
+            return Ok(());
+        }
+
+        // (target_type as stored on audit rows, table, display field). Compile-time
+        // constants only — never user input — so the fixed query fragments below
+        // stay safe; the ids themselves are bound as RecordId params.
+        const LABEL_SOURCES: &[(&str, &str, &str)] = &[
+            ("member", "member", "display_name"),
+            ("game", "game", "name"),
+            ("team", "team", "name"),
+            ("tournament", "tournament", "name"),
+            ("event", "event", "title"),
+            ("announcement", "announcement", "title"),
+        ];
+
+        #[derive(Debug, Deserialize, SurrealValue)]
+        struct LabelRow {
+            id: Option<RecordId>,
+            label: String,
+        }
+
+        for (target_type, table, field) in LABEL_SOURCES {
+            let mut target_ids: Vec<&str> = entries
+                .iter()
+                .filter(|e| e.target_type == *target_type)
+                .map(|e| e.target_id.as_str())
+                .collect();
+            target_ids.sort_unstable();
+            target_ids.dedup();
+            if target_ids.is_empty() {
+                continue;
+            }
+
+            // Bind RecordIds so Surreal matches the table's id type (v3).
+            let rids: Vec<RecordId> = target_ids
+                .iter()
+                .map(|id| RecordId::new(*table, *id))
+                .collect();
+
+            // Projection is intentionally minimal (id + display field only) —
+            // in particular member must never leak nostr_secret_key_encrypted.
+            let mut result = self
+                .client
+                .query(format!(
+                    "SELECT id, {field} AS label FROM {table} WHERE id IN $rids"
+                ))
+                .bind(("rids", rids))
+                .await?;
+            let rows: Vec<LabelRow> = result.take(0).unwrap_or_default();
+            let mut map = std::collections::HashMap::with_capacity(rows.len());
+            for row in rows {
+                if let Some(rid) = row.id {
+                    let key = crate::record_id_key_to_string(rid.key);
+                    map.insert(key, row.label);
+                }
+            }
+            for entry in entries.iter_mut().filter(|e| e.target_type == *target_type) {
+                if let Some(label) = map.get(&entry.target_id) {
+                    entry.target_label = label.clone();
+                }
+                // else leave target_label = target_id (set in db_to_entry)
+            }
         }
         Ok(())
     }
@@ -193,6 +274,8 @@ mod tests {
         assert_eq!(entries[0].actor_id, "actor-1");
         // No matching member → actor_name falls back to actor_id
         assert_eq!(entries[0].actor_name, "actor-1");
+        // wiki_page has no label source → target_label falls back to target_id
+        assert_eq!(entries[0].target_label, "target-1");
         assert_eq!(entries[0].details.as_deref(), Some("original"));
     }
 
@@ -224,6 +307,101 @@ mod tests {
             .find(|e| e.actor_id == member.id)
             .expect("audit row");
         assert_eq!(hit.actor_name, "Audit Actor");
+    }
+
+    #[tokio::test]
+    async fn list_enriches_target_label_for_member_target() {
+        let db = test_db().await;
+        // Seed a member, then audit an action *targeting* that member.
+        db.create_member("user-target", "Target Member", OrgRole::Member)
+            .await
+            .expect("create_member");
+        let member = db
+            .get_member_by_user("user-target")
+            .await
+            .unwrap()
+            .expect("member");
+        db.insert_audit_log(
+            "actor-1",
+            AuditAction::UpdatedMember,
+            AuditTargetType::Member,
+            &member.id,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let entries = db.list_audit_log(10, 0).await.unwrap();
+        let hit = entries
+            .iter()
+            .find(|e| e.target_id == member.id)
+            .expect("audit row");
+        assert_eq!(hit.target_label, "Target Member");
+        // The raw id stays available alongside the label.
+        assert_eq!(hit.target_id, member.id);
+    }
+
+    #[tokio::test]
+    async fn list_enriches_target_label_for_announcement_target() {
+        let db = test_db().await;
+        let ann = db
+            .create_announcement("Patch Notes", "content", "author-1", false)
+            .await
+            .expect("create_announcement");
+        db.insert_audit_log(
+            "actor-1",
+            AuditAction::CreatedAnnouncement,
+            AuditTargetType::Announcement,
+            &ann.id,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let entries = db.list_audit_log(10, 0).await.unwrap();
+        let hit = entries
+            .iter()
+            .find(|e| e.target_id == ann.id)
+            .expect("audit row");
+        assert_eq!(hit.target_label, "Patch Notes");
+    }
+
+    /// Types without a display field (and unmatched ids) keep the id fallback.
+    #[tokio::test]
+    async fn target_label_falls_back_to_target_id() {
+        let db = test_db().await;
+        // Opaque type: settings has no display field → never enriched.
+        db.insert_audit_log(
+            "actor-1",
+            AuditAction::UpdatedSettings,
+            AuditTargetType::Settings,
+            "org",
+            None,
+        )
+        .await
+        .unwrap();
+        // Enrichable type, but the target row doesn't exist → fallback too.
+        db.insert_audit_log(
+            "actor-1",
+            AuditAction::UpdatedTeam,
+            AuditTargetType::Team,
+            "no-such-team",
+            None,
+        )
+        .await
+        .unwrap();
+
+        let entries = db.list_audit_log(10, 0).await.unwrap();
+        let settings = entries
+            .iter()
+            .find(|e| e.target_type == "settings")
+            .expect("settings row");
+        assert_eq!(settings.target_label, "org");
+        let team = entries
+            .iter()
+            .find(|e| e.target_type == "team")
+            .expect("team row");
+        assert_eq!(team.target_label, "no-such-team");
     }
 
     /// UPDATE on audit_log is rejected by the append-only event — even for the

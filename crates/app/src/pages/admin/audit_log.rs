@@ -15,6 +15,9 @@ struct AuditLogEntry {
     action: String,
     target_type: String,
     target_id: String,
+    /// Resolved target display name (server enriches on read; empty/id = no label).
+    #[serde(default)]
+    target_label: String,
     details: Option<String>,
     created_at: String,
 }
@@ -84,7 +87,15 @@ pub fn AdminAuditLog() -> Element {
                             for entry in resp.entries.iter() {
                                 {
                                     let timestamp: String = entry.created_at.chars().take(19).collect();
-                                    let target = format!("{}:{}", entry.target_type, entry.target_id);
+                                    // Prefer the resolved display label; fall back to the raw id
+                                    // when the server had no label source (label empty or == id).
+                                    let target = if !entry.target_label.is_empty()
+                                        && entry.target_label != entry.target_id
+                                    {
+                                        format!("{}: {}", entry.target_type, entry.target_label)
+                                    } else {
+                                        format!("{}:{}", entry.target_type, entry.target_id)
+                                    };
                                     let details = entry.details.clone().unwrap_or_else(|| "—".into());
                                     rsx! {
                                         tr { key: "{entry.id}",
