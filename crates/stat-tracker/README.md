@@ -57,6 +57,12 @@ hangs/segfaults with pango ≥ 1.56.
 curl -fsSL https://raw.githubusercontent.com/FrozenTear/scuffed-crew/main/crates/stat-tracker/dist/bootstrap.sh | bash
 ```
 
+Defaults to the newest **stable** release. If a newer prerelease (RC) exists
+and you're at an interactive terminal, the script asks which one you want
+(stable is the default answer). Skip the question with
+`STAT_TRACKER_CHANNEL=prerelease` (or `=stable`); non-interactive runs always
+get stable.
+
 Pin a tag or change the install prefix:
 
 ```sh
