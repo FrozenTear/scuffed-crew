@@ -1789,6 +1789,25 @@ async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<
             mitigation: parsed.mitigation,
         };
         let gate = capture_gate::apply_gate(req.prev_gate, raw_counters, suspect, split);
+        // CG-4 B3: always surface the per-column suspect mask on the accept
+        // path so a latched inflation can be diagnosed as flagged vs clean
+        // (the 07-22 HLG 22994 case was undiagnosable without this).
+        if suspect.iter().any(|&s| s) {
+            tracing::info!(
+                session_id = %target_session,
+                suspect = ?suspect,
+                raw_elims = raw_counters.elims,
+                raw_assists = raw_counters.assists,
+                raw_deaths = raw_counters.deaths,
+                raw_damage = raw_counters.damage,
+                raw_healing = raw_counters.healing,
+                raw_mitigation = raw_counters.mitigation,
+                accepted_healing = gate.accepted.healing,
+                accepted_damage = gate.accepted.damage,
+                accepted_mitigation = gate.accepted.mitigation,
+                "capture accepted with edge-ink suspect mask"
+            );
+        }
         for h in &gate.holds {
             tracing::warn!(
                 session_id = %target_session,
