@@ -83,6 +83,9 @@ impl std::fmt::Display for AuditTargetType {
 pub struct AuditLogEntry {
     pub id: String,
     pub actor_id: String,
+    /// Resolved member display name (enriched on list read; not stored on the row).
+    #[serde(default)]
+    pub actor_name: String,
     pub action: String,
     pub target_type: String,
     pub target_id: String,

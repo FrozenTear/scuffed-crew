@@ -13,12 +13,24 @@ use crate::extractors::OrgMember;
 use crate::routes::audit_log::audit;
 use crate::state::AppState;
 
+/// Query for `GET /api/scrims` — pagination + filters.
+///
+/// Fields are inlined (not `#[serde(flatten)]` of `PaginationParams`) because
+/// axum's `Query` uses `serde_urlencoded`, which does not support `flatten` —
+/// a flattened `limit: u32` deserializes as a string and fails with 400
+/// (`invalid type: string "100", expected u32`). Same pattern as
+/// [`crate::routes::public::PublicMembersQuery`].
 #[derive(Deserialize)]
 pub struct ScrimListParams {
-    #[serde(flatten)]
-    pub pagination: PaginationParams,
+    pub cursor: Option<String>,
+    #[serde(default = "default_scrim_list_limit")]
+    pub limit: u32,
     pub team_id: Option<String>,
     pub status: Option<String>,
+}
+
+fn default_scrim_list_limit() -> u32 {
+    25
 }
 
 /// GET /api/scrims — list scrims (cursor-paginated, member auth)
@@ -27,7 +39,11 @@ pub async fn list_scrims(
     _member: OrgMember,
     axum::extract::Query(params): axum::extract::Query<ScrimListParams>,
 ) -> Result<Json<CursorResponse<Scrim>>, (StatusCode, Json<ErrorResponse>)> {
-    let (limit, offset) = params.pagination.resolve();
+    let pagination = PaginationParams {
+        cursor: params.cursor.clone(),
+        limit: params.limit,
+    };
+    let (limit, offset) = pagination.resolve();
     let items = state
         .db
         .list_scrims(

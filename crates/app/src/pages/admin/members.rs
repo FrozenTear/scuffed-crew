@@ -6,7 +6,7 @@ use crate::components::{
     ConfirmDialog, DataTable, FormModal, RolePill, StatusPill, SummaryCard, Toast, admin_pending,
     use_toast,
 };
-use crate::hooks::{ModalController, use_api, use_api_list};
+use crate::hooks::{ModalController, use_api_list};
 use scuffed_api_client::ApiClient;
 use scuffed_types::api::{ChangeRoleRequest, CreateGameAccountRequest, ToggleActiveRequest};
 
@@ -70,7 +70,7 @@ const ROLES: [&str; 4] = ["recruit", "member", "officer", "admin"];
 #[component]
 pub fn AdminMembers() -> Element {
     let mut members = use_api_list::<Member>("/api/members");
-    let mut games = use_api::<Vec<Game>>("/api/games");
+    let mut games = use_api_list::<Game>("/api/games");
     let mut toast = use_toast();
 
     // Role change modal

@@ -1,7 +1,7 @@
 use dioxus::prelude::*;
 
 use crate::components::{DataTable, FormModal, Toast, admin_pending, use_toast};
-use crate::hooks::{ModalController, use_api};
+use crate::hooks::{ModalController, use_api_list};
 use scuffed_api_client::ApiClient;
 use scuffed_types::{
     Game,
@@ -10,7 +10,8 @@ use scuffed_types::{
 
 #[component]
 pub fn AdminGames() -> Element {
-    let mut games = use_api::<Vec<Game>>("/api/games");
+    // Cursor-paginated envelope from GET /api/games (trust-p0).
+    let mut games = use_api_list::<Game>("/api/games");
     let mut toast = use_toast();
 
     // Modal state

@@ -21,7 +21,9 @@ struct StrategySummary {
 
 #[derive(Debug, Clone, Deserialize)]
 struct ListResponse {
-    strategies: Vec<StrategySummary>,
+    /// Server serializes this as `data` (`StrategyListResponse`).
+    #[serde(alias = "strategies")]
+    data: Vec<StrategySummary>,
     #[allow(dead_code)]
     total: u64,
 }
@@ -237,7 +239,8 @@ pub fn StrategyBrowse() -> Element {
         }
     });
 
-    // Fetch strategies whenever debounced_search or selected_mode changes
+    // Fetch strategies whenever debounced_search or selected_mode changes.
+    // Result is Result so we can surface errors instead of eternal Loading.
     let strategies = use_resource(move || {
         let search = debounced_search();
         let mode = selected_mode();
@@ -254,7 +257,10 @@ pub fn StrategyBrowse() -> Element {
                 path.push('?');
                 path.push_str(&params.join("&"));
             }
-            ApiClient::web().fetch::<ListResponse>(&path).await.ok()
+            ApiClient::web()
+                .fetch::<ListResponse>(&path)
+                .await
+                .map_err(|e| e.to_string())
         }
     });
 
@@ -303,12 +309,18 @@ pub fn StrategyBrowse() -> Element {
             // Results
             {
                 let data = strategies.read();
-                let data = data.as_ref().and_then(|d| d.as_ref());
-                match data {
+                match data.as_ref() {
                     None => rsx! {
                         p { class: "strategy-loading", "Loading strategies..." }
                     },
-                    Some(resp) if resp.strategies.is_empty() => rsx! {
+                    Some(Err(err)) => rsx! {
+                        div { class: "strategy-empty",
+                            p { style: "color: var(--danger);",
+                                "Failed to load strategies: {err}"
+                            }
+                        }
+                    },
+                    Some(Ok(resp)) if resp.data.is_empty() => rsx! {
                         div { class: "strategy-empty",
                             p { "No strategies found." }
                             if !debounced_search().is_empty() || selected_mode() != "All" {
@@ -318,9 +330,9 @@ pub fn StrategyBrowse() -> Element {
                             }
                         }
                     },
-                    Some(resp) => rsx! {
+                    Some(Ok(resp)) => rsx! {
                         div { class: "strategy-grid",
-                            for strat in resp.strategies.iter() {
+                            for strat in resp.data.iter() {
                                 {render_strategy_card(strat)}
                             }
                         }

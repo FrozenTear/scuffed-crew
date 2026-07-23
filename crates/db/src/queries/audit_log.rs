@@ -25,9 +25,13 @@ fn db_to_entry(db: DbAuditLogEntry) -> AuditLogEntry {
         .id
         .map(|r| crate::record_id_key_to_string(r.key))
         .unwrap_or_else(|| "unknown".to_string());
+    let actor_id = db.actor_id;
+    // Fallback until list path enriches via member join.
+    let actor_name = actor_id.clone();
     AuditLogEntry {
         id,
-        actor_id: db.actor_id,
+        actor_id,
+        actor_name,
         action: db.action,
         target_type: db.target_type,
         target_id: db.target_id,
@@ -63,6 +67,9 @@ impl Database {
     }
 
     /// List audit log entries with pagination.
+    ///
+    /// Enriches each entry with `actor_name` from `member.display_name` (read-time
+    /// join only — audit_log rows stay append-only without a name column).
     pub async fn list_audit_log(&self, limit: u32, offset: u32) -> DbResult<Vec<AuditLogEntry>> {
         with_timeout(async {
             let mut result = self
@@ -74,9 +81,47 @@ impl Database {
                 .bind(("offset", offset))
                 .await?;
             let entries: Vec<DbAuditLogEntry> = result.take(0)?;
-            Ok(entries.into_iter().map(db_to_entry).collect())
+            let mut out: Vec<AuditLogEntry> = entries.into_iter().map(db_to_entry).collect();
+            self.enrich_audit_actor_names(&mut out).await?;
+            Ok(out)
         })
         .await
+    }
+
+    /// Fill `actor_name` for a page of audit entries from member display names.
+    ///
+    /// Loads the (small) member name map in one query and joins in process —
+    /// avoids Surreal record-id `IN` quirks and keeps audit_log append-only.
+    async fn enrich_audit_actor_names(&self, entries: &mut [AuditLogEntry]) -> DbResult<()> {
+        if entries.is_empty() {
+            return Ok(());
+        }
+
+        #[derive(Debug, Deserialize, SurrealValue)]
+        struct NameRow {
+            id: Option<RecordId>,
+            display_name: String,
+        }
+
+        let mut result = self
+            .client
+            .query("SELECT id, display_name FROM member")
+            .await?;
+        let rows: Vec<NameRow> = result.take(0).unwrap_or_default();
+        let mut map = std::collections::HashMap::with_capacity(rows.len());
+        for row in rows {
+            if let Some(rid) = row.id {
+                let key = crate::record_id_key_to_string(rid.key);
+                map.insert(key, row.display_name);
+            }
+        }
+        for entry in entries.iter_mut() {
+            if let Some(name) = map.get(&entry.actor_id) {
+                entry.actor_name = name.clone();
+            }
+            // else leave actor_name = actor_id (set in db_to_entry)
+        }
+        Ok(())
     }
 
     /// Count total audit log entries.
@@ -100,7 +145,7 @@ impl Database {
 #[cfg(test)]
 mod tests {
     use crate::migrations::run_migrations;
-    use crate::types::{AuditAction, AuditTargetType};
+    use crate::types::{AuditAction, AuditTargetType, OrgRole};
     use crate::Database;
 
     async fn test_db() -> Database {
@@ -132,7 +177,39 @@ mod tests {
         let entries = db.list_audit_log(10, 0).await.unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].actor_id, "actor-1");
+        // No matching member → actor_name falls back to actor_id
+        assert_eq!(entries[0].actor_name, "actor-1");
         assert_eq!(entries[0].details.as_deref(), Some("original"));
+    }
+
+    #[tokio::test]
+    async fn list_enriches_actor_name_from_member() {
+        let db = test_db().await;
+        // Seed a member with a known id key, then audit as that actor.
+        db.create_member("user-audit", "Audit Actor", OrgRole::Member)
+            .await
+            .expect("create_member");
+        let member = db
+            .get_member_by_user("user-audit")
+            .await
+            .unwrap()
+            .expect("member");
+        db.insert_audit_log(
+            &member.id,
+            AuditAction::UpdatedSettings,
+            AuditTargetType::Settings,
+            "org",
+            Some("changed"),
+        )
+        .await
+        .unwrap();
+
+        let entries = db.list_audit_log(10, 0).await.unwrap();
+        let hit = entries
+            .iter()
+            .find(|e| e.actor_id == member.id)
+            .expect("audit row");
+        assert_eq!(hit.actor_name, "Audit Actor");
     }
 
     /// UPDATE on audit_log is rejected by the append-only event — even for the
