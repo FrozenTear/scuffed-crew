@@ -2,7 +2,8 @@ use dioxus::prelude::*;
 use serde::Deserialize;
 
 use crate::components::SummaryCard;
-use crate::hooks::use_api_list;
+use crate::hooks::{use_api, use_api_list};
+use crate::routes::Route;
 
 #[derive(Debug, Clone, Deserialize)]
 struct Member {
@@ -35,6 +36,14 @@ struct Announcement {
     id: String,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+struct RelayHealth {
+    configured: bool,
+    reachable: bool,
+    #[serde(default)]
+    forum_backend: String,
+}
+
 #[component]
 pub fn AdminDashboard() -> Element {
     let members = use_api_list::<Member>("/api/members");
@@ -42,6 +51,7 @@ pub fn AdminDashboard() -> Element {
     let teams = use_api_list::<Team>("/api/teams");
     let events = use_api_list::<Event>("/api/events");
     let announcements = use_api_list::<Announcement>("/api/announcements");
+    let health = use_api::<RelayHealth>("/api/nostr/health");
 
     let member_count = members
         .data
@@ -79,15 +89,70 @@ pub fn AdminDashboard() -> Element {
         .map(|v| v.len())
         .unwrap_or(0);
 
-    rsx! {
+    let health_chip = {
+        let data = health.data.read();
+        let data = data.as_ref().and_then(|d| d.as_ref());
+        match data {
+            None => None,
+            Some(h) => {
+                // Local forum + no/offline relay is normal for small installs —
+                // soft "optional" chip, not an alarm.
+                let forum_local =
+                    h.forum_backend.eq_ignore_ascii_case("local") || h.forum_backend.is_empty();
+                if !h.configured || (forum_local && !h.reachable) {
+                    Some((
+                        "dash-chip soft",
+                        "Relay optional — forum runs locally. Wire Nostr when ready.",
+                    ))
+                } else if h.configured && !h.reachable {
+                    Some((
+                        "dash-chip warn",
+                        "Relay configured but offline — check Admin → Relay.",
+                    ))
+                } else if h.reachable {
+                    Some(("dash-chip ok", "Relay online"))
+                } else {
+                    None
+                }
+            }
+        }
+    };
 
+    rsx! {
         h1 { "Dashboard" }
+
+        if let Some((chip_class, chip_text)) = health_chip {
+            div { class: "dash-health",
+                Link { to: Route::AdminRelay {}, class: "{chip_class}", "{chip_text}" }
+            }
+        }
+
         div { class: "summary-cards",
-            SummaryCard { value: member_count.to_string(), label: "Members" }
-            SummaryCard { value: pending_count.to_string(), label: "Pending Apps" }
-            SummaryCard { value: team_count.to_string(), label: "Teams" }
-            SummaryCard { value: event_count.to_string(), label: "Events" }
-            SummaryCard { value: announcement_count.to_string(), label: "Announcements" }
+            SummaryCard {
+                value: member_count.to_string(),
+                label: "Members",
+                to: Some(Route::AdminMembers {}),
+            }
+            SummaryCard {
+                value: pending_count.to_string(),
+                label: "Pending Apps",
+                to: Some(Route::AdminApplications {}),
+            }
+            SummaryCard {
+                value: team_count.to_string(),
+                label: "Teams",
+                to: Some(Route::AdminTeams {}),
+            }
+            SummaryCard {
+                value: event_count.to_string(),
+                label: "Events",
+                to: Some(Route::AdminSchedule {}),
+            }
+            SummaryCard {
+                value: announcement_count.to_string(),
+                label: "Announcements",
+                to: Some(Route::AdminAnnouncements {}),
+            }
         }
     }
 }

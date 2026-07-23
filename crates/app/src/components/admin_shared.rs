@@ -185,11 +185,28 @@ pub fn RolePill(role: String) -> Element {
 }
 
 #[component]
-pub fn SummaryCard(value: String, label: &'static str) -> Element {
-    rsx! {
-        div { class: "summary-card",
-            div { class: "value", "{value}" }
-            div { class: "label", "{label}" }
-        }
+pub fn SummaryCard(
+    value: String,
+    label: &'static str,
+    /// When set, the card is a click-through link (admin dashboard KPIs).
+    #[props(default)]
+    to: Option<Route>,
+) -> Element {
+    let class = if to.is_some() {
+        "summary-card summary-card-link"
+    } else {
+        "summary-card"
+    };
+    let body = rsx! {
+        div { class: "value", "{value}" }
+        div { class: "label", "{label}" }
+    };
+    match to {
+        Some(route) => rsx! {
+            Link { to: route, class: "{class}", {body} }
+        },
+        None => rsx! {
+            div { class: "{class}", {body} }
+        },
     }
 }

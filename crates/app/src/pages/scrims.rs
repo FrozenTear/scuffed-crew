@@ -355,30 +355,47 @@ pub fn Scrims() -> Element {
                 Some(list) => {
                     let team_lookup = teams_list.cloned().unwrap_or_default();
                     let game_lookup = games_list.cloned().unwrap_or_default();
+                    let confirmed_list = confirmed.clone().unwrap_or_default();
+                    let past_list = past.clone().unwrap_or_default();
+                    let all_empty =
+                        list.is_empty() && confirmed_list.is_empty() && past_list.is_empty();
                     rsx! {
-                        ScrimSection {
-                            title: "Open",
-                            scrims: list.clone(),
-                            teams: team_lookup.clone(),
-                            games: game_lookup.clone(),
-                            show_actions: is_logged_in,
-                            on_change: on_change,
-                        }
-                        ScrimSection {
-                            title: "Upcoming",
-                            scrims: confirmed.clone().unwrap_or_default(),
-                            teams: team_lookup.clone(),
-                            games: game_lookup.clone(),
-                            show_actions: is_logged_in,
-                            on_change: on_change,
-                        }
-                        ScrimSection {
-                            title: "Past",
-                            scrims: past.clone().unwrap_or_default(),
-                            teams: team_lookup,
-                            games: game_lookup,
-                            show_actions: false,
-                            on_change: on_change,
+                        if all_empty {
+                            div { class: "scrims-empty",
+                                p { "No scrims on the board yet." }
+                                p { style: "margin-top:0.5rem; font-size:0.85rem;",
+                                    if is_logged_in {
+                                        "Post an open request above when your team wants practice."
+                                    } else {
+                                        "Log in as a member to post practice requests."
+                                    }
+                                }
+                            }
+                        } else {
+                            ScrimSection {
+                                title: "Open",
+                                scrims: list.clone(),
+                                teams: team_lookup.clone(),
+                                games: game_lookup.clone(),
+                                show_actions: is_logged_in,
+                                on_change: on_change,
+                            }
+                            ScrimSection {
+                                title: "Upcoming",
+                                scrims: confirmed_list,
+                                teams: team_lookup.clone(),
+                                games: game_lookup.clone(),
+                                show_actions: is_logged_in,
+                                on_change: on_change,
+                            }
+                            ScrimSection {
+                                title: "Past",
+                                scrims: past_list,
+                                teams: team_lookup,
+                                games: game_lookup,
+                                show_actions: false,
+                                on_change: on_change,
+                            }
                         }
                     }
                 }

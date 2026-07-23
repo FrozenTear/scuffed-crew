@@ -96,6 +96,9 @@ For complex research tasks, use a wave-based approach:
 
 ## Brand
 
-- Brand color: `#7c3aed` (purple)
+- Product-default accent: `#8f73ff` / light `#6d4aff` (`BrandConfig::product_default`)
+- Historical / marketing purple: `#7c3aed` (same family; docs often still say this)
+- Success / “ok” token: `#46d8a4` (mint) — not the brand accent; do not confuse with Settings brand
+- Live orgs may override accent via **Settings → Brand**; no forced pack apply without USER
 - Age requirement: 16+
 - Tone: direct, no-drama, no politics

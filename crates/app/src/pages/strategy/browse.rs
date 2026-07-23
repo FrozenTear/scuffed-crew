@@ -322,10 +322,15 @@ pub fn StrategyBrowse() -> Element {
                     },
                     Some(Ok(resp)) if resp.data.is_empty() => rsx! {
                         div { class: "strategy-empty",
-                            p { "No strategies found." }
                             if !debounced_search().is_empty() || selected_mode() != "All" {
+                                p { "No strategies match these filters." }
                                 p { style: "margin-top:0.5rem; font-size:0.85rem;",
-                                    "Try adjusting your search or filter."
+                                    "Try clearing search or switching the mode filter."
+                                }
+                            } else {
+                                p { "No public strategies yet." }
+                                p { style: "margin-top:0.5rem; font-size:0.85rem;",
+                                    "Members can draft plans in Strategy → My Strategies and publish when ready."
                                 }
                             }
                         }

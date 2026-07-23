@@ -15,6 +15,9 @@ struct PublicMember {
     avatar_url: Option<String>,
     #[allow(dead_code)]
     joined_at: String,
+    /// Preferred competitive role (public API field).
+    #[serde(default)]
+    main_role: Option<String>,
     /// Hero-scoped performance, only present when the roster was fetched with a
     /// `?hero=` filter (contract Q2). A nested block — NOT sibling fields.
     /// Absent for members who have not played the selected hero (or when no
@@ -163,6 +166,19 @@ const PAGE_CSS: &str = r#"
         color: var(--accent);
         letter-spacing: 0.5px;
     }
+    .member-main-role {
+        margin-top: 0.4rem;
+        font-size: 0.75rem;
+        color: var(--text-2);
+        text-transform: capitalize;
+    }
+    .member-pills {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.35rem;
+        justify-content: center;
+        align-items: center;
+    }
     .members-loading {
         color: var(--text-3);
         text-align: center;
@@ -299,7 +315,12 @@ fn render_member_card(m: &PublicMember, hero: Option<&str>) -> Element {
                 }
             }
             h3 { class: "member-name", "{m.display_name}" }
-            Pill { tone: role_tone, "{m.org_role}" }
+            div { class: "member-pills",
+                Pill { tone: role_tone, "{m.org_role}" }
+            }
+            if let Some(role) = m.main_role.as_ref().filter(|r| !r.is_empty()) {
+                p { class: "member-main-role", "{role}" }
+            }
             if !bio.is_empty() {
                 p { class: "member-bio", "{bio}" }
             }

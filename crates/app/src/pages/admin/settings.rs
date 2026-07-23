@@ -700,14 +700,14 @@ pub fn AdminSettings() -> Element {
                         onclick: move |_| {
                             nav.set(NavConfig::default());
                             toast.show(Toast::success(
-                                "Nav reset to lean defaults — click Save to persist.",
+                                "Nav reset to small-org defaults — click Save to persist.",
                             ));
                         },
                         "Reset defaults"
                     }
                 }
                 p { class: "form-section-lead",
-                    "Primary bar, More menu, or hidden. Hidden routes still work via direct URL."
+                    "Primary bar, More menu, or hidden. Small-org default: Members, Forum, Events, Stats primary; Tournaments / Scrims / Strategy under More. Hidden routes still work via URL."
                 }
                 NavColumn {
                     title: "Primary bar",
