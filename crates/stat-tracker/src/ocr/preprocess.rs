@@ -301,6 +301,93 @@ pub fn columns_with_offset(offset: f64) -> StatColumns {
     columns
 }
 
+/// Widest a real header label can be, as a board-width ratio. "DMG" measures
+/// 0.023 on the 2026-07 fixtures; UI junk that leaks into the header strip
+/// (mic icon + highlighted-hero overlay art) merges into a ~0.37-wide pseudo
+/// group, so a generous 2x margin over the widest real label separates them
+/// cleanly (CG-4).
+const HEADER_LABEL_MAX_W: f64 = 0.05;
+
+/// Plausible spacing between adjacent header label centers. Measured gaps on
+/// the 2026-07-20/23 fixtures (identical for 5v5 and 6v6): 0.034–0.065.
+const HEADER_GAP_MIN: f64 = 0.02;
+const HEADER_GAP_MAX: f64 = 0.10;
+
+/// Anchored stat-cell window widths, as board-width ratios, centered on the
+/// header label. Narrow kill columns (E/A/D) hold 1–2 digits (widest observed
+/// span 0.012); wide accumulator columns hold up to 7 chars ("102,208" ≈
+/// 0.045). Both leave clear margin to the smallest measured neighbor gap
+/// (0.034 narrow / 0.057 wide), so a centered value can never bleed into the
+/// next window — the CG-4 defect this replaces: the fallback comb's 0.070-wide
+/// windows overlapped MIT's leading digit into HLG ("2,299"+"4" → 22994) while
+/// MIT itself was decapitated ("4,351" → ",351" → OCR "1351").
+const ANCHOR_NARROW_W: f64 = 0.026;
+const ANCHOR_WIDE_W: f64 = 0.048;
+
+/// Build per-column stat windows anchored on the six header label groups
+/// (E, A, D, DMG, H, MIT), one window centered under each label.
+///
+/// The scoreboard renders stat values center-aligned under their header
+/// labels (fixture-verified within ±0.004 board-width on both 5v5 and 6v6
+/// boards, 2026-07-20 + 2026-07-23). Anchoring each column to its own label —
+/// instead of sliding one fallback comb by a single global offset — makes the
+/// geometry per-frame and layout-independent: 6v6 compresses the table
+/// relative to 5v5 by more than a pure translation, which is exactly why the
+/// global-offset sweep left the rightmost column (MIT) clipped (CG-4).
+/// Because the anchors come from the frame itself, the result also holds
+/// across display resolutions without recalibration.
+///
+/// Returns `None` when the groups do not look like the six stat labels
+/// (wrong count after junk filtering, or implausible spacing) — callers fall
+/// back to the offset-sweep calibration.
+pub fn columns_from_header_groups(groups: &[(u32, u32)], board_w: u32) -> Option<StatColumns> {
+    if board_w == 0 {
+        return None;
+    }
+    let w = board_w as f64;
+    let labels: Vec<f64> = groups
+        .iter()
+        .filter(|(s, e)| (e.saturating_sub(*s)) as f64 / w <= HEADER_LABEL_MAX_W)
+        .map(|(s, e)| (*s + *e) as f64 / 2.0 / w)
+        .collect();
+    if labels.len() < STAT_COLUMNS {
+        return None;
+    }
+    let centers = &labels[..STAT_COLUMNS];
+    for pair in centers.windows(2) {
+        let gap = pair[1] - pair[0];
+        if !(HEADER_GAP_MIN..=HEADER_GAP_MAX).contains(&gap) {
+            return None;
+        }
+    }
+
+    let mut cols = [(0.0f64, 0.0f64); STAT_COLUMNS];
+    for (i, &center) in centers.iter().enumerate() {
+        let width = if i < 3 {
+            ANCHOR_NARROW_W
+        } else {
+            ANCHOR_WIDE_W
+        };
+        let mut start = center - width / 2.0;
+        let mut end = center + width / 2.0;
+        // Never cross the midpoint toward a neighboring label: guarantees the
+        // windows stay disjoint even if a label center is slightly off.
+        if i > 0 {
+            start = start.max((centers[i - 1] + center) / 2.0);
+        }
+        if i + 1 < STAT_COLUMNS {
+            end = end.min((center + centers[i + 1]) / 2.0);
+        }
+        start = start.max(0.0);
+        end = end.min(1.0);
+        if end <= start {
+            return None;
+        }
+        cols[i] = (start, end - start);
+    }
+    Some(cols)
+}
+
 /// Detect the column offset by finding stat header labels (E, A, D, DMG, H, MIT)
 /// in the scoreboard header area. The header has dark text on a bright bar.
 ///
@@ -308,15 +395,21 @@ pub fn columns_with_offset(offset: f64) -> StatColumns {
 /// 6 stat columns by their characteristic spacing pattern (3 narrow E/A/D, then
 /// 3 wider DMG/H/MIT). Returns the offset from the fallback E position.
 pub fn detect_column_offset(scoreboard: &DynamicImage) -> f64 {
-    let w = scoreboard.width();
-    let groups = header_label_groups(scoreboard);
-    if groups.is_empty() {
+    offset_from_header_groups(&header_label_groups(scoreboard), scoreboard.width())
+}
+
+/// Global fallback-comb offset derived from already-detected header groups —
+/// the single-offset half of header detection, kept for the sweep fallback
+/// path so `calibrate_columns` can reuse one `header_label_groups` pass for
+/// both the per-column anchoring and this offset seed (CG-4).
+pub fn offset_from_header_groups(groups: &[(u32, u32)], board_w: u32) -> f64 {
+    if groups.is_empty() || board_w == 0 {
         return 0.0;
     }
 
     // We expect 6 groups for E, A, D, DMG, H, MIT.
     // The first group should be the "E" label.
-    let first_center = (groups[0].0 + groups[0].1) as f64 / 2.0 / w as f64;
+    let first_center = (groups[0].0 + groups[0].1) as f64 / 2.0 / board_w as f64;
     let fallback_e_center =
         STAT_COL_BOUNDARIES_FALLBACK[0].0 + STAT_COL_BOUNDARIES_FALLBACK[0].1 / 2.0;
     let offset = first_center - fallback_e_center;
@@ -360,7 +453,19 @@ pub fn header_label_groups(scoreboard: &DynamicImage) -> Vec<(u32, u32)> {
         }
     }
 
-    // Find dark-text clusters
+    // Find dark-text clusters. Cluster minimum width and the letter→label
+    // merge distance below are board-width-RELATIVE (anchored to their
+    // long-serving 3px / 15px values at the 1664px reference board): the "H"
+    // label is only ~3px at 1664 and an absolute 3px floor deleted it outright
+    // on a 1080p board (2.2px), silently degrading per-column anchoring to the
+    // sweep, while an absolute 15px merge distance would fragment "DMG" into
+    // letters on a 4K board (CG-4 multi-resolution gate).
+    // The cluster minimum is pure noise rejection — cap it at the 1664px
+    // reference value of 3 so it never outgrows the thinnest real label ("H"
+    // is ~3px at 1664, ~4.5px at 4K: a proportionally-scaled 5px floor would
+    // delete it there, the mirror image of the 1080p failure above).
+    let min_cluster_w = ((w as f64 * 3.0 / 1664.0).round() as u32).clamp(2, 3);
+    let merge_dist = ((w as f64 * 15.0 / 1664.0).round() as u32).max(4);
     let threshold = (scan_rows / 4).max(1);
     let mut raw_clusters: Vec<(u32, u32)> = Vec::new();
     let mut in_cluster = false;
@@ -373,14 +478,14 @@ pub fn header_label_groups(scoreboard: &DynamicImage) -> Vec<(u32, u32)> {
                 in_cluster = true;
             }
         } else if in_cluster {
-            if (x as u32) - cluster_start >= 3 {
+            if (x as u32) - cluster_start >= min_cluster_w {
                 raw_clusters.push((cluster_start, x as u32));
             }
             in_cluster = false;
         }
     }
 
-    // Filter to stat area (ratio > 0.25) and merge clusters within 15px
+    // Filter to stat area (ratio > 0.25) and merge nearby clusters
     let stat_area_start = (w as f64 * 0.25) as u32;
     let filtered: Vec<(u32, u32)> = raw_clusters
         .iter()
@@ -397,7 +502,7 @@ pub fn header_label_groups(scoreboard: &DynamicImage) -> Vec<(u32, u32)> {
     let mut g_start = filtered[0].0;
     let mut g_end = filtered[0].1;
     for &(s, e) in &filtered[1..] {
-        if s <= g_end + 15 {
+        if s <= g_end + merge_dist {
             g_end = e;
         } else {
             groups.push((g_start, g_end));
@@ -961,5 +1066,129 @@ mod edge_ink_tests {
         let mut bleed = blank(40, 40);
         fill(&mut bleed, 0, 2, 10, 30);
         assert!(has_edge_ink(&bleed, 2, 0.12), "real bleed must flag");
+    }
+}
+
+#[cfg(test)]
+mod header_anchor_tests {
+    use super::*;
+
+    /// The six header label groups measured on the 2026-07-23 King's Row 6v6
+    /// fixture (board width 1664) — identical spans on the 2026-07-20 5v5
+    /// drift fixtures — plus the junk pseudo-group the mic icon + highlighted
+    /// hero overlay art merge into. Centers: E 0.3206, A 0.3549, D 0.3912,
+    /// DMG 0.4441, H 0.5093, MIT 0.5661.
+    const FIXTURE_W: u32 = 1664;
+    const FIXTURE_GROUPS: [(u32, u32); 7] = [
+        (530, 537),
+        (586, 595),
+        (649, 653),
+        (720, 758),
+        (846, 849),
+        (935, 949),
+        (1049, 1669), // overlay junk, width 0.37 — must be filtered
+    ];
+
+    /// Real ink spans from the same fixture rows the windows must respect:
+    /// MIT value "8,619" spans 0.554–0.586; a 6-char healing value centered
+    /// under H spans at most ~0.493–0.526.
+    const MIT_INK_START: f64 = 0.554;
+    const MIT_INK_END: f64 = 0.5865;
+
+    #[test]
+    fn anchors_all_six_columns_and_filters_junk() {
+        let cols = columns_from_header_groups(&FIXTURE_GROUPS, FIXTURE_W)
+            .expect("six labels + junk must anchor");
+        let expected_centers = [0.3206, 0.3549, 0.3912, 0.4441, 0.5093, 0.5661];
+        for (i, ((start, width), expect)) in cols.iter().zip(expected_centers).enumerate() {
+            let center = start + width / 2.0;
+            assert!(
+                (center - expect).abs() < 0.004,
+                "col {i} center {center:.4} != label center {expect:.4}"
+            );
+        }
+    }
+
+    #[test]
+    fn windows_are_ordered_and_disjoint() {
+        let cols = columns_from_header_groups(&FIXTURE_GROUPS, FIXTURE_W).unwrap();
+        for i in 1..cols.len() {
+            let prev_end = cols[i - 1].0 + cols[i - 1].1;
+            assert!(
+                cols[i].0 >= prev_end,
+                "window {i} starts at {:.4} before window {} ends at {prev_end:.4}",
+                cols[i].0,
+                i - 1
+            );
+        }
+    }
+
+    #[test]
+    fn mit_window_covers_its_leading_digit_and_hlg_cannot_steal_it() {
+        // THE CG-4 regression pin: the 2026-07-22 Numbani corruption was the
+        // HLG window annexing MIT's lead digit ("2,299"+"4" → 22994) while the
+        // MIT window read the remainder ("4,251" → "251" / "1351"). Anchored
+        // windows must put the full MIT ink span inside MIT and none of it
+        // inside HLG.
+        let cols = columns_from_header_groups(&FIXTURE_GROUPS, FIXTURE_W).unwrap();
+        let (hlg_start, hlg_w) = cols[4];
+        let (mit_start, mit_w) = cols[5];
+        assert!(
+            mit_start < MIT_INK_START,
+            "MIT window starts {mit_start:.4}, clips leading digit at {MIT_INK_START}"
+        );
+        assert!(
+            mit_start + mit_w > MIT_INK_END,
+            "MIT window ends {:.4}, clips trailing digit at {MIT_INK_END}",
+            mit_start + mit_w
+        );
+        assert!(
+            hlg_start + hlg_w < MIT_INK_START,
+            "HLG window ends {:.4}, would annex MIT's lead digit at {MIT_INK_START}",
+            hlg_start + hlg_w
+        );
+    }
+
+    #[test]
+    fn too_few_labels_returns_none() {
+        assert!(columns_from_header_groups(&FIXTURE_GROUPS[..5], FIXTURE_W).is_none());
+        // Six groups but one is junk-wide → five usable → None.
+        let mut with_junk = FIXTURE_GROUPS[..5].to_vec();
+        with_junk.push((1049, 1669));
+        assert!(columns_from_header_groups(&with_junk, FIXTURE_W).is_none());
+    }
+
+    #[test]
+    fn implausible_spacing_returns_none() {
+        // Two labels nearly on top of each other (gap << HEADER_GAP_MIN).
+        let squeezed = [
+            (530, 537),
+            (540, 547),
+            (649, 653),
+            (720, 758),
+            (846, 849),
+            (935, 949),
+        ];
+        assert!(columns_from_header_groups(&squeezed, FIXTURE_W).is_none());
+        // A gap wider than HEADER_GAP_MAX (labels from different UI regions).
+        let torn = [
+            (530, 537),
+            (586, 595),
+            (649, 653),
+            (720, 758),
+            (846, 849),
+            (1400, 1420),
+        ];
+        assert!(columns_from_header_groups(&torn, FIXTURE_W).is_none());
+    }
+
+    #[test]
+    fn offset_from_groups_matches_first_label_delta() {
+        let offset = offset_from_header_groups(&FIXTURE_GROUPS, FIXTURE_W);
+        let e_center = (530.0 + 537.0) / 2.0 / FIXTURE_W as f64;
+        let fallback_center =
+            STAT_COL_BOUNDARIES_FALLBACK[0].0 + STAT_COL_BOUNDARIES_FALLBACK[0].1 / 2.0;
+        assert!((offset - (e_center - fallback_center)).abs() < 1e-9);
+        assert_eq!(offset_from_header_groups(&[], FIXTURE_W), 0.0);
     }
 }
