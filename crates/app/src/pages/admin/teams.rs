@@ -2,7 +2,7 @@ use dioxus::prelude::*;
 use serde::Deserialize;
 
 use crate::components::{ConfirmDialog, DataTable, FormModal, Toast, admin_pending, use_toast};
-use crate::hooks::{ModalController, use_api, use_api_list};
+use crate::hooks::{ModalController, use_api_list};
 use scuffed_api_client::ApiClient;
 use scuffed_types::api::{AddRosterMemberRequest, CreateTeamRequest, UpdateRosterRoleRequest};
 
@@ -43,7 +43,7 @@ const TEAM_ROLES: [&str; 4] = ["player", "captain", "coach", "sub"];
 #[component]
 pub fn AdminTeams() -> Element {
     let mut teams = use_api_list::<Team>("/api/teams");
-    let mut games = use_api::<Vec<Game>>("/api/games");
+    let mut games = use_api_list::<Game>("/api/games");
     let mut members = use_api_list::<Member>("/api/members");
     let mut toast = use_toast();
 

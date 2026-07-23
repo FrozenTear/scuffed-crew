@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use crate::components::{
     ConfirmDialog, DataTable, FormModal, StatusPill, Toast, admin_pending, use_toast,
 };
-use crate::hooks::{ModalController, use_api, use_api_list};
+use crate::hooks::{ModalController, use_api_list};
 use scuffed_api_client::ApiClient;
 use scuffed_types::api::{
     AddParticipantRequest, CreateTournamentRequest, MatchReportRequest, StatusChangeRequest,
@@ -91,7 +91,7 @@ const STATUS_FILTERS: [&str; 6] = [
 #[component]
 pub fn AdminTournaments() -> Element {
     let mut tournaments = use_api_list::<Tournament>("/api/tournaments");
-    let mut games = use_api::<Vec<Game>>("/api/games");
+    let mut games = use_api_list::<Game>("/api/games");
     let mut members = use_api_list::<Member>("/api/members");
     let mut toast = use_toast();
 

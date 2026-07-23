@@ -7,23 +7,37 @@ use serde::Deserialize;
 
 use scuffed_auth::server::session::ErrorResponse;
 use scuffed_db::{AuditAction, AuditTargetType, Game};
+use scuffed_types::api::{CursorResponse, PaginationParams};
 
 use crate::extractors::AdminUser;
 use crate::routes::audit_log::audit;
 use crate::state::AppState;
 
-/// GET /api/games — list all games (public)
+/// GET /api/games — list all games (public, cursor-paginated envelope).
+///
+/// Returns [`CursorResponse`] so admin + public clients can share `use_api_list`.
+///
+/// **Paging model (intentional):** the game catalog is tiny (one row per title
+/// the org runs). We load the full set from the DB once and apply `limit`/
+/// `cursor` in process rather than adding a Surreal OFFSET path. At org scale
+/// this is O(n) with n ≪ page size budget; if the catalog ever grows large,
+/// move the skip/limit into `Database::list_games_paginated` instead.
 pub async fn list_games(
     State(state): State<AppState>,
-) -> Result<Json<Vec<Game>>, (StatusCode, Json<ErrorResponse>)> {
-    state.db.list_games().await.map(Json).map_err(|_e| {
+    axum::extract::Query(pagination): axum::extract::Query<PaginationParams>,
+) -> Result<Json<CursorResponse<Game>>, (StatusCode, Json<ErrorResponse>)> {
+    let (limit, offset) = pagination.resolve();
+    let items = state.db.list_games().await.map_err(|_e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse {
                 error: "Internal error".into(),
             }),
         )
-    })
+    })?;
+    // See module docs: in-memory page over the full catalog.
+    let page: Vec<Game> = items.into_iter().skip(offset as usize).collect();
+    Ok(Json(CursorResponse::from_oversized(page, limit, offset)))
 }
 
 /// GET /api/games/:id — get game detail (public)

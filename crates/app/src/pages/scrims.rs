@@ -335,7 +335,23 @@ pub fn Scrims() -> Element {
             }
 
             {match &open {
-                None => rsx! { p { class: "scrims-loading", "Loading scrims..." } },
+                None => {
+                    if let Some(err) = scrims.error.read().as_ref().cloned() {
+                        let mut refresh = scrims.refresh;
+                        rsx! {
+                            p { class: "scrims-loading", style: "color: var(--danger);",
+                                "Failed to load scrims: {err}"
+                            }
+                            button {
+                                class: "row-btn",
+                                onclick: move |_| refresh += 1,
+                                "Retry"
+                            }
+                        }
+                    } else {
+                        rsx! { p { class: "scrims-loading", "Loading scrims..." } }
+                    }
+                },
                 Some(list) => {
                     let team_lookup = teams_list.cloned().unwrap_or_default();
                     let game_lookup = games_list.cloned().unwrap_or_default();

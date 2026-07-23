@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::components::ui::{BtnVariant, Button, Card, Pill, PillTone, Textarea};
 use crate::components::{Toast, use_toast};
-use crate::hooks::use_api;
+use crate::hooks::{use_api, use_api_list};
 use crate::routes::Route;
 use crate::state::auth::use_auth;
 use scuffed_api_client::ApiClient;
@@ -47,7 +47,7 @@ pub fn Apply() -> Element {
     let auth = use_auth();
 
     let settings = use_api::<SiteSettings>("/api/settings");
-    let games = use_api::<Vec<Game>>("/api/games");
+    let games = use_api_list::<Game>("/api/games");
     let mut my_app = use_api::<Option<Application>>("/api/applications/mine");
 
     let mut selected_games = use_signal(Vec::<String>::new);
