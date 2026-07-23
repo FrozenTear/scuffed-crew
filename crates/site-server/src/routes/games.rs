@@ -16,7 +16,12 @@ use crate::state::AppState;
 /// GET /api/games — list all games (public, cursor-paginated envelope).
 ///
 /// Returns [`CursorResponse`] so admin + public clients can share `use_api_list`.
-/// Games tables are small; we still honor `limit`/`cursor` for consistency.
+///
+/// **Paging model (intentional):** the game catalog is tiny (one row per title
+/// the org runs). We load the full set from the DB once and apply `limit`/
+/// `cursor` in process rather than adding a Surreal OFFSET path. At org scale
+/// this is O(n) with n ≪ page size budget; if the catalog ever grows large,
+/// move the skip/limit into `Database::list_games_paginated` instead.
 pub async fn list_games(
     State(state): State<AppState>,
     axum::extract::Query(pagination): axum::extract::Query<PaginationParams>,
@@ -30,7 +35,7 @@ pub async fn list_games(
             }),
         )
     })?;
-    // In-memory page over the full list (game catalog is tiny).
+    // See module docs: in-memory page over the full catalog.
     let page: Vec<Game> = items.into_iter().skip(offset as usize).collect();
     Ok(Json(CursorResponse::from_oversized(page, limit, offset)))
 }

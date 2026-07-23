@@ -90,12 +90,19 @@ impl Database {
 
     /// Fill `actor_name` for a page of audit entries from member display names.
     ///
-    /// Loads the (small) member name map in one query and joins in process —
-    /// avoids Surreal record-id `IN` quirks and keeps audit_log append-only.
+    /// **Page-scoped map:** only resolves actors present on *this* page (unique
+    /// `actor_id`s), not the full member table. Org rosters are still small, so
+    /// a full `SELECT id, display_name FROM member` would also be fine — we
+    /// prefer the page set so cost stays proportional to the audit page size.
+    /// Name is joined in process; audit_log stays append-only (no name column).
     async fn enrich_audit_actor_names(&self, entries: &mut [AuditLogEntry]) -> DbResult<()> {
         if entries.is_empty() {
             return Ok(());
         }
+
+        let mut actor_ids: Vec<String> = entries.iter().map(|e| e.actor_id.clone()).collect();
+        actor_ids.sort();
+        actor_ids.dedup();
 
         #[derive(Debug, Deserialize, SurrealValue)]
         struct NameRow {
@@ -103,9 +110,16 @@ impl Database {
             display_name: String,
         }
 
+        // Bind RecordIds so Surreal matches the member table's id type (v3).
+        let rids: Vec<RecordId> = actor_ids
+            .iter()
+            .map(|id| RecordId::new("member", id.as_str()))
+            .collect();
+
         let mut result = self
             .client
-            .query("SELECT id, display_name FROM member")
+            .query("SELECT id, display_name FROM member WHERE id IN $rids")
+            .bind(("rids", rids))
             .await?;
         let rows: Vec<NameRow> = result.take(0).unwrap_or_default();
         let mut map = std::collections::HashMap::with_capacity(rows.len());
