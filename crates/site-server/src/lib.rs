@@ -9,6 +9,8 @@ pub mod rate_limit;
 pub mod routes;
 pub mod seed;
 pub mod state;
+#[cfg(test)]
+pub(crate) mod test_support;
 pub mod uploads;
 
 use axum::{

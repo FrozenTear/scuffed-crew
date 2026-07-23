@@ -237,6 +237,17 @@ fn default_limit() -> u32 {
     50
 }
 
+/// Moderation row enriched for admin display: member ids resolved to names on read.
+#[derive(serde::Serialize)]
+pub struct ModerationListEntry {
+    #[serde(flatten)]
+    pub action: ModerationAction,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub member_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub issued_by_name: Option<String>,
+}
+
 /// GET /api/moderation — list all moderation actions (officer+)
 pub async fn list_moderation(
     State(state): State<AppState>,
@@ -253,6 +264,28 @@ pub async fn list_moderation(
         .count_moderation()
         .await
         .map_err(|e| internal_err(e, "count_moderation"))?;
+
+    let members = state
+        .db
+        .list_members()
+        .await
+        .map_err(|e| internal_err(e, "list_members for moderation names"))?;
+    let names: std::collections::HashMap<&str, &str> = members
+        .iter()
+        .map(|m| (m.id.as_str(), m.display_name.as_str()))
+        .collect();
+    let entries: Vec<ModerationListEntry> = entries
+        .into_iter()
+        .map(|action| ModerationListEntry {
+            member_name: names
+                .get(action.member_id.as_str())
+                .map(|n| (*n).to_string()),
+            issued_by_name: names
+                .get(action.issued_by.as_str())
+                .map(|n| (*n).to_string()),
+            action,
+        })
+        .collect();
 
     Ok(Json(serde_json::json!({
         "entries": entries,
@@ -300,4 +333,73 @@ pub async fn lift_moderation_action(
     .await;
 
     Ok(Json(action))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use scuffed_db::OrgRole;
+
+    use crate::extractors::OfficerUser;
+    use crate::test_support::{seed_user, test_state};
+
+    /// List enrichment: member ids on moderation rows resolve to display names for
+    /// both the target member and the issuing officer.
+    #[tokio::test]
+    async fn list_moderation_enriches_member_names() {
+        let state = test_state().await;
+
+        seed_user(&state, "officeruser", "off_login").await;
+        let officer_member = state
+            .db
+            .create_member("officeruser", "OfficerOlly", OrgRole::Admin)
+            .await
+            .expect("officer member");
+        seed_user(&state, "targetuser", "tgt_login").await;
+        let target = state
+            .db
+            .create_member("targetuser", "TargetTerry", OrgRole::Member)
+            .await
+            .expect("target member");
+
+        state
+            .db
+            .create_moderation_action(
+                &target.id,
+                ModerationActionType::Warning,
+                "testing enrichment",
+                &officer_member.id,
+                None,
+            )
+            .await
+            .expect("create action");
+
+        let officer_user = state
+            .db
+            .get_user("officeruser")
+            .await
+            .expect("get officer user")
+            .expect("officer user exists");
+        let Json(body) = list_moderation(
+            State(state),
+            OfficerUser {
+                user: officer_user,
+                member: officer_member,
+            },
+            Query(ListModerationQuery {
+                limit: 50,
+                offset: 0,
+            }),
+        )
+        .await
+        .unwrap_or_else(|(status, _)| panic!("list moderation failed: {status}"));
+
+        let entries = body["entries"].as_array().expect("entries array");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0]["member_name"], "TargetTerry");
+        assert_eq!(entries[0]["issued_by_name"], "OfficerOlly");
+        // Flattened action fields survive the wrapper.
+        assert_eq!(entries[0]["reason"], "testing enrichment");
+        assert_eq!(entries[0]["member_id"], target.id.as_str());
+    }
 }

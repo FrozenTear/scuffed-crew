@@ -533,12 +533,13 @@ pub fn AdminMembers() -> Element {
                                 let m_pw = member.clone();
                                 let status_str = if member.is_active { "active" } else { "inactive" };
                                 let toggle_label = if member.is_active { "Deactivate" } else { "Activate" };
+                                let joined = crate::util::format_datetime(&member.joined_at);
                                 rsx! {
                                     tr { key: "{member.id}",
                                         td { "{member.display_name}" }
                                         td { RolePill { role: member.org_role.clone() } }
                                         td { StatusPill { status: status_str.to_string() } }
-                                        td { "{member.joined_at}" }
+                                        td { "{joined}" }
                                         td {
                                             div { class: "row-actions",
                                                 button {
@@ -688,12 +689,13 @@ pub fn AdminMembers() -> Element {
                                     for action in mod_data.read().iter() {
                                         {
                                             let active_str = if action.is_active { "active" } else { "inactive" };
+                                            let created = crate::util::format_datetime(&action.created_at);
                                             rsx! {
                                                 tr { key: "{action.id}",
                                                     td { "{action.action_type}" }
                                                     td { "{action.reason}" }
                                                     td { StatusPill { status: active_str.to_string() } }
-                                                    td { "{action.created_at}" }
+                                                    td { "{created}" }
                                                 }
                                             }
                                         }
