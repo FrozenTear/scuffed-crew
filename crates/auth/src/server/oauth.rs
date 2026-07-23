@@ -1,6 +1,6 @@
 use oauth2::{
-    basic::BasicClient, AuthUrl, AuthorizationCode, ClientId, ClientSecret, CsrfToken, RedirectUrl,
-    Scope, TokenResponse, TokenUrl,
+    basic::BasicClient, AuthUrl, AuthorizationCode, ClientId, ClientSecret, CsrfToken,
+    EndpointNotSet, EndpointSet, RedirectUrl, Scope, TokenResponse, TokenUrl,
 };
 use serde::de::DeserializeOwned;
 use std::collections::HashMap;
@@ -99,23 +99,25 @@ impl Default for ProviderRegistry {
 }
 
 /// Create an OAuth2 client from provider config
-fn create_client(config: &ProviderConfig) -> BasicClient {
-    BasicClient::new(
-        ClientId::new(config.client_id.clone()),
-        Some(ClientSecret::new(config.client_secret.clone())),
-        AuthUrl::new(config.auth_url.to_string()).expect("Invalid auth URL (this is a bug)"),
-        Some(
+fn create_client(
+    config: &ProviderConfig,
+) -> BasicClient<EndpointSet, EndpointNotSet, EndpointNotSet, EndpointNotSet, EndpointSet> {
+    BasicClient::new(ClientId::new(config.client_id.clone()))
+        .set_client_secret(ClientSecret::new(config.client_secret.clone()))
+        .set_auth_uri(
+            AuthUrl::new(config.auth_url.to_string()).expect("Invalid auth URL (this is a bug)"),
+        )
+        .set_token_uri(
             TokenUrl::new(config.token_url.to_string()).expect("Invalid token URL (this is a bug)"),
-        ),
-    )
-    .set_redirect_uri(
-        RedirectUrl::new(config.redirect_url.clone()).unwrap_or_else(|_| {
-            panic!(
-                "Invalid redirect URL configuration: '{}' is not a valid URL",
-                config.redirect_url
-            )
-        }),
-    )
+        )
+        .set_redirect_uri(
+            RedirectUrl::new(config.redirect_url.clone()).unwrap_or_else(|_| {
+                panic!(
+                    "Invalid redirect URL configuration: '{}' is not a valid URL",
+                    config.redirect_url
+                )
+            }),
+        )
 }
 
 /// Get authorization URL for any OAuth provider
@@ -135,9 +137,16 @@ pub fn get_auth_url(config: &ProviderConfig) -> (String, CsrfToken) {
 pub async fn exchange_code(config: &ProviderConfig, code: &str) -> Result<String, AuthError> {
     let client = create_client(config);
 
+    // Redirects on the token endpoint would let a malicious provider bounce
+    // the request (and credentials) elsewhere — oauth2 v5 requires opting out.
+    let http_client = reqwest::ClientBuilder::new()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|e| AuthError::TokenExchange(e.to_string()))?;
+
     let token_result = client
         .exchange_code(AuthorizationCode::new(code.to_string()))
-        .request_async(oauth2::reqwest::async_http_client)
+        .request_async(&http_client)
         .await
         .map_err(|e| AuthError::TokenExchange(e.to_string()))?;
 
