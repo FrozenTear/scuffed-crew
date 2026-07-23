@@ -474,11 +474,22 @@ pub fn recognize_scoreboard_cells_pre_cropped(
     results
 }
 
-/// Two-phase calibration: coarse sweep centered on the header-detected offset,
-/// then fine-tune around the best coarse result. Caches the winning offset per
-/// scoreboard resolution/team size and reuses it when a quick re-score holds.
+/// Column calibration (CG-4 revision). Preferred path: anchor each stat
+/// window to its own header label center via
+/// [`preprocess::columns_from_header_groups`] — per-frame, per-column,
+/// layout- and resolution-independent. The 6v6 board compresses the table by
+/// more than a pure translation, so the legacy single-global-offset comb
+/// cannot align all six columns at once; the residual concentrated on the
+/// rightmost column and decapitated MIT / injected its lead digit into HLG
+/// (the 2026-07-22 Numbani 22994 defect).
+///
+/// Fallback path (headers unreadable or anchored windows score poorly): the
+/// two-phase offset sweep — coarse around the header-detected offset, then
+/// fine-tune — with the winning offset cached per board geometry and reused
+/// while a quick re-score holds ≥75% of the max probe score.
 fn calibrate_columns(scoreboard: &DynamicImage, team_size: usize) -> preprocess::StatColumns {
-    let header_offset = preprocess::detect_column_offset(scoreboard);
+    let header_groups = preprocess::header_label_groups(scoreboard);
+    let header_offset = preprocess::offset_from_header_groups(&header_groups, scoreboard.width());
     let (board_w, board_h) = (scoreboard.width(), scoreboard.height());
 
     let probe_rows: Vec<_> = [0usize, 1, team_size]
@@ -487,19 +498,44 @@ fn calibrate_columns(scoreboard: &DynamicImage, team_size: usize) -> preprocess:
         .collect();
 
     if probe_rows.is_empty() {
-        return preprocess::columns_with_offset(header_offset);
+        return preprocess::columns_from_header_groups(&header_groups, board_w)
+            .unwrap_or_else(|| preprocess::columns_with_offset(header_offset));
     }
 
-    let max_score = (probe_rows.len() * 6) as i32;
+    // CELL_SCORE_CLEAN per clean valid cell; suspect cells (edge ink) subtract
+    // CELL_SCORE_SUSPECT so a drifted geometry that still reads digits scores
+    // strictly below a clean-margin one (continuous penalty, CG-4 review).
+    let max_score = (probe_rows.len() * 6) as i32 * CELL_SCORE_CLEAN;
 
-    // Score an offset by how many probe-row cells OCR as clean numeric stats.
-    // Each candidate offset is independent, so the sweeps are evaluated in
-    // parallel on the OCR pool — calibration was previously ~288 serial OCR
-    // calls and dominated capture latency.
-    let score = |offset: f64| -> i32 {
-        let cols = preprocess::columns_with_offset(offset);
-        probe_rows.iter().map(|r| count_valid_cells(r, &cols)).sum()
+    // Score a candidate column layout by how cleanly the probe-row cells OCR.
+    // Each candidate is independent, so the sweeps are evaluated in parallel on
+    // the OCR pool — calibration was previously ~288 serial OCR calls and
+    // dominated capture latency.
+    let score_cols = |cols: &preprocess::StatColumns| -> i32 {
+        probe_rows.iter().map(|r| count_valid_cells(r, cols)).sum()
     };
+    let score = |offset: f64| -> i32 { score_cols(&preprocess::columns_with_offset(offset)) };
+
+    // Header-anchored per-column windows: accept immediately when they score
+    // at least the same 75%-of-max floor the cached-offset reuse path uses.
+    let anchored = preprocess::columns_from_header_groups(&header_groups, board_w)
+        .map(|cols| (cols, score_cols(&cols)));
+    let anchored_floor = (max_score * 3 / 4).max(1);
+    if let Some((cols, anchored_score)) = &anchored {
+        if *anchored_score >= anchored_floor {
+            tracing::debug!(
+                anchored_score,
+                max_score,
+                "using header-anchored per-column calibration"
+            );
+            return *cols;
+        }
+        tracing::debug!(
+            anchored_score,
+            floor = anchored_floor,
+            "header-anchored columns scored low — trying offset sweep"
+        );
+    }
 
     // Anchor for tie-breaking: the last known-good offset for this geometry, if
     // any. On an equal score we prefer the candidate closest to it rather than a
@@ -538,7 +574,7 @@ fn calibrate_columns(scoreboard: &DynamicImage, team_size: usize) -> preprocess:
             offsets
                 .into_par_iter()
                 .map(|o| (o, score(o)))
-                .reduce(|| (0.0f64, -1i32), |a, b| better_offset(a, b, anchor))
+                .reduce(|| (0.0f64, i32::MIN), |a, b| better_offset(a, b, anchor))
         })
     };
 
@@ -577,6 +613,20 @@ fn calibrate_columns(scoreboard: &DynamicImage, team_size: usize) -> preprocess:
                 best_valid = fine_best_valid;
             }
         }
+    }
+
+    // A below-floor anchored layout still beats the sweep when it scores
+    // higher: frame-derived geometry outranks a translated fallback comb on
+    // anything but a worse read (ties go to anchored for the same reason).
+    if let Some((cols, anchored_score)) = &anchored
+        && *anchored_score >= best_valid
+    {
+        tracing::debug!(
+            anchored_score,
+            sweep_score = best_valid,
+            "header-anchored columns beat the offset sweep"
+        );
+        return *cols;
     }
 
     if let Ok(mut guard) = COLUMN_OFFSET_CACHE.lock() {
@@ -628,18 +678,28 @@ fn better_offset(a: (f64, i32), b: (f64, i32), anchor: Option<f64>) -> (f64, i32
     }
 }
 
+/// Calibration score contribution of one clean, structurally-valid cell.
+pub(crate) const CELL_SCORE_CLEAN: i32 = 2;
+/// Calibration score penalty for a suspect (edge-ink) cell: a drifted layout
+/// that still reads digits must score strictly BELOW a clean-margin layout,
+/// not merely fail to gain (CG-4 review — the old no-op treatment let a
+/// drifted offset tie a clean one when both read the same digit count).
+pub(crate) const CELL_SCORE_SUSPECT: i32 = 1;
+
 fn count_valid_cells(row: &DynamicImage, cols: &preprocess::StatColumns) -> i32 {
     let mut valid = 0i32;
     for col_idx in 0..6 {
         if let Some(cell) = preprocess::crop_stat_cell(row, col_idx, cols)
             && let Ok(result) = recognize_cell(&cell)
         {
-            // A cell whose glyph ink touches a crop edge (CG-3 bleed/clip) does
-            // NOT count toward the offset's score, so the sweep prefers offsets
+            // A cell whose glyph ink touches a crop edge (CG-3 bleed/clip)
+            // SUBTRACTS from the layout's score, so the sweep prefers offsets
             // with clean margins over a drifted one that still reads 6 digits.
             let text = result.value.trim();
-            if !result.suspect && is_valid_stat_for_column(text, col_idx) {
-                valid += 1;
+            if result.suspect {
+                valid -= CELL_SCORE_SUSPECT;
+            } else if is_valid_stat_for_column(text, col_idx) {
+                valid += CELL_SCORE_CLEAN;
             }
         }
     }
