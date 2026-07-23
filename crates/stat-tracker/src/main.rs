@@ -1,4 +1,5 @@
 use stat_tracker::capture_gate::{self, Counters, GateState};
+use stat_tracker::hero_auth::{self, HeroAuthState, HeroSource};
 use stat_tracker::{capture, config, detect, ocr, parse, setup, storage, sync};
 
 use std::sync::Arc;
@@ -84,6 +85,8 @@ struct CaptureRequest {
     /// whole-row game-split signal ([`stats_regressed`]) and the per-cell
     /// monotonic-hold + rate-cap gate ([`capture_gate::apply_gate`]).
     prev_gate: Option<(GateState, std::time::Duration)>,
+    /// CG-4 C: career/portrait authority carried across captures of this game.
+    hero_auth: HeroAuthState,
 }
 
 /// Package version shown by `--version` / `--help`.
@@ -466,6 +469,8 @@ struct ActiveGame {
     gate: Option<GateState>,
     /// When `gate` was last updated (an accepted capture).
     last_stats_at: Option<Instant>,
+    /// CG-4 C: portrait confirm-not-switch + career-ever-ok for this game.
+    hero_auth: HeroAuthState,
 }
 
 impl ActiveGame {
@@ -486,6 +491,7 @@ impl ActiveGame {
             last_activity: now,
             gate: None,
             last_stats_at: None,
+            hero_auth: HeroAuthState::default(),
         }
     }
 
@@ -527,6 +533,8 @@ struct PersistedGame {
     gate: Option<GateState>,
     #[serde(default)]
     last_stats_at: Option<chrono::DateTime<Utc>>,
+    #[serde(default)]
+    hero_auth: HeroAuthState,
 }
 
 fn active_game_path(data_dir: &std::path::Path) -> std::path::PathBuf {
@@ -557,6 +565,7 @@ fn persist_active_game(data_dir: &std::path::Path, game: Option<&ActiveGame>) {
         outcome_recorded_at: g.outcome_recorded_at.map(to_wall),
         gate: g.gate,
         last_stats_at: g.last_stats_at.map(to_wall),
+        hero_auth: g.hero_auth.clone(),
     };
     let write = || -> std::io::Result<()> {
         let tmp = path.with_extension("json.tmp");
@@ -594,6 +603,7 @@ fn recover_active_game(data_dir: &std::path::Path) -> Option<ActiveGame> {
         outcome_recorded_at: p.outcome_recorded_at.and_then(to_instant),
         last_stats_at: p.last_stats_at.and_then(to_instant),
         gate: p.gate,
+        hero_auth: p.hero_auth,
     })
 }
 
@@ -843,6 +853,8 @@ struct CaptureReport {
     /// checks and the whole-row regression check. `None` when nothing was
     /// recorded.
     gate_state: Option<GateState>,
+    /// Updated hero authority after this capture (carry into the next Tab).
+    hero_auth: HeroAuthState,
 }
 
 /// Volatile session-tracking state owned by [`run_loop`]. Bundles the mutable
@@ -997,7 +1009,7 @@ async fn run_loop(ctx: Arc<DaemonCtx>) -> anyhow::Result<()> {
                             persist_active_game(data_dir, st.active_game.as_ref());
                         }
 
-                        let (sid, create, outcome, session_map, candidates, banner_ok, prev_gate) = {
+                        let (sid, create, outcome, session_map, candidates, banner_ok, prev_gate, hero_auth) = {
                             let g = st.active_game.as_ref().expect("active_game set above");
                             // A banner-color outcome off a Tab frame is only
                             // plausible when the daemon just joined mid/post
@@ -1011,7 +1023,16 @@ async fn run_loop(ctx: Arc<DaemonCtx>) -> anyhow::Result<()> {
                                 (Some(state), Some(at)) => Some((state, at.elapsed())),
                                 _ => None,
                             };
-                            (g.session_id.clone(), !g.session_created, g.outcome, g.map.clone(), g.map_candidates.clone(), banner_ok, prev_gate)
+                            (
+                                g.session_id.clone(),
+                                !g.session_created,
+                                g.outcome,
+                                g.map.clone(),
+                                g.map_candidates.clone(),
+                                banner_ok,
+                                prev_gate,
+                                g.hero_auth.clone(),
+                            )
                         };
 
                         let tx = capture_tx.clone();
@@ -1024,6 +1045,7 @@ async fn run_loop(ctx: Arc<DaemonCtx>) -> anyhow::Result<()> {
                             map_candidates: candidates,
                             allow_banner_recovery: banner_ok,
                             prev_gate,
+                            hero_auth,
                         };
                         capture_task = Some(tokio::spawn(async move {
                             // Wait for the game to render the scoreboard
@@ -1115,6 +1137,7 @@ async fn run_loop(ctx: Arc<DaemonCtx>) -> anyhow::Result<()> {
                                 g.gate = Some(gate_state);
                                 g.last_stats_at = Some(Instant::now());
                             }
+                            g.hero_auth = report.hero_auth.clone();
                             // First trusted map discovery propagates
                             // to the whole session (one game, one map).
                             if g.map.is_none()
@@ -1611,6 +1634,7 @@ async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<
                 session_id: session_id.to_string(),
                 split: false,
                 gate_state: None,
+                hero_auth: req.hero_auth.clone(),
             });
         }
     };
@@ -1671,10 +1695,13 @@ async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<
             session_id: session_id.to_string(),
             split: false,
             gate_state: None,
+            hero_auth: req.hero_auth.clone(),
         });
     }
 
     let outcome_label = outcome.to_string();
+    // CG-4 C: mutates across this capture; carried back on CaptureReport.
+    let mut hero_auth = req.hero_auth.clone();
 
     if let Some(mut parsed) = parse::parse_scoreboard_cells(
         &rows,
@@ -1683,30 +1710,35 @@ async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<
         &outcome_label,
         player_name,
     ) {
-        // Hero priority: career-panel title (plain text, most reliable) >
-        // portrait template match > scoreboard-text guess already in `parsed`.
-        if let Some(hero_name) = &career_hero {
-            tracing::info!(hero = %hero_name, source = "career_panel", "hero identified via career-panel title");
-            parsed.hero = hero_name.clone();
-            parsed.role = parse::guess_role_public(&parsed.hero);
-        } else if let Some((hero_name, confidence)) = &portrait_hero {
-            tracing::info!(
-                hero = %hero_name,
-                confidence = confidence,
-                source = "portrait",
-                "hero identified via portrait template matching"
-            );
-            // Portrait references are keyed by file stem ("wrecking_ball") —
-            // canonicalize so they count together with career-panel reads.
-            parsed.hero = parse::canonical_hero(hero_name);
-            parsed.role = parse::guess_role_public(&parsed.hero);
-        } else {
-            tracing::info!(
-                hero = %parsed.hero,
-                source = "ocr_text",
-                "hero identified via OCR text (career panel + portrait missed)"
-            );
-        }
+        // Hero authority (CG-4 C): career-panel always wins; portrait may
+        // confirm current hero but may only switch if career never succeeded
+        // this game and ≥2 consecutive matches ≥0.85. See hero_auth::resolve_hero.
+        let portrait = portrait_hero
+            .as_ref()
+            .map(|(name, conf)| (name.as_str(), *conf));
+        let (hero, source, next_auth) = hero_auth::resolve_hero(
+            career_hero.as_deref(),
+            portrait,
+            &parsed.hero,
+            &hero_auth,
+            parse::canonical_hero,
+        );
+        hero_auth = next_auth;
+        parsed.hero = hero;
+        parsed.role = parse::guess_role_public(&parsed.hero);
+        let source_label = match source {
+            HeroSource::CareerPanel => "career_panel",
+            HeroSource::Portrait => "portrait",
+            HeroSource::Held => "held",
+            HeroSource::OcrText => "ocr_text",
+        };
+        tracing::info!(
+            hero = %parsed.hero,
+            source = source_label,
+            career_ever_ok = hero_auth.career_ever_ok,
+            portrait_conf = portrait_hero.as_ref().map(|(_, c)| *c),
+            "hero resolved (CG-4 C authority)"
+        );
 
         // Auto-collect portrait reference when hero is identified and collection is enabled
         if collect_portraits && parsed.hero != "Unknown" {
@@ -1940,6 +1972,7 @@ async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<
             session_id: target_session,
             split,
             gate_state: Some(gate.state),
+            hero_auth,
         })
     } else {
         // Scoreboard-shaped frame, but the player's row couldn't be positively
@@ -1957,6 +1990,7 @@ async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<
             session_id: session_id.to_string(),
             split: false,
             gate_state: None,
+            hero_auth,
         })
     }
 }
@@ -2229,6 +2263,7 @@ mod tests {
             last_activity: now - Duration::from_secs(30),
             gate: None,
             last_stats_at: None,
+            hero_auth: HeroAuthState::default(),
         }
     }
 
@@ -2350,6 +2385,7 @@ mod tests {
             outcome_recorded_at: None,
             gate: None,
             last_stats_at: None,
+            hero_auth: HeroAuthState::default(),
         };
         std::fs::write(
             active_game_path(dir.path()),
