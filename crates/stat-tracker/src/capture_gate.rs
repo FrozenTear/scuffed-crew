@@ -26,17 +26,30 @@
 //! ## Un-latch (CG-2)
 //!
 //! A one-sided hold has a failure mode: if a corrupt *inflated* read is ever
-//! accepted (the wide accumulator columns have no rate cap, so a drifted read
-//! like DMG 35031 sails through — CG-2), the monotonic hold then rejects every
-//! later CORRECT read as a "decrease" for the rest of the match. So the gate
-//! also un-latches: `UNLATCH_STREAK` consecutive **clean** reads of a cell, each
-//! below the held value and forming one coherent (non-decreasing, within the
-//! corroboration band) run, revise the accepted value DOWN to the latest of
-//! them. The CLEAN requirement is load-bearing — a per-cell `suspect` mask
-//! (edge-ink, CG-3) excludes deterministic clip reads (e.g. Havana HLG
-//! 1898→224/234) from ever driving an un-latch, so the gate cannot be talked out
-//! of a genuinely-correct held value by the very misreads it exists to stop.
-//! Suspect reads likewise never corroborate an upward jump (C).
+//! accepted, the monotonic hold then rejects every later CORRECT read as a
+//! "decrease" for the rest of the match. So the gate also un-latches:
+//! `UNLATCH_STREAK` consecutive **clean** reads of a cell, each below the held
+//! value and forming one coherent (non-decreasing, within the corroboration
+//! band) run, revise the accepted value DOWN to the latest of them. The CLEAN
+//! requirement is load-bearing — a per-cell `suspect` mask (edge-ink, CG-3)
+//! excludes deterministic clip reads (e.g. Havana HLG 1898→224/234) from ever
+//! driving an un-latch, so the gate cannot be talked out of a genuinely-correct
+//! held value by the very misreads it exists to stop. Suspect reads likewise
+//! never corroborate an upward jump (C).
+//!
+//! ## Wide-column inflation (CG-4 B1 / B2)
+//!
+//! Pre-CG-4, wide accumulator columns (DMG/HLG/MIT) had **no** rate cap, so a
+//! drifted inject (DMG 35031, HLG 22994) was accepted and latched. CG-4 closes
+//! that gap without re-capping clean wide advances (real multi-k damage bursts
+//! must never hold):
+//!
+//! * **B1** — when the *current* read is edge-ink suspect, wide cols get a
+//!   calibrated rate ceiling (same HoldKind::RateCap path as kill cols).
+//! * **B2** — trailing-digit inject heuristic (`accepted_digits+1` and prefix
+//!   ≥ accepted) holds as `HoldKind::DigitInject`. Belt for `1681→22994`-style
+//!   cases; does **not** cover `2782→22994` alone (prefix < accepted) — that
+//!   needs B1 + Lane A geometry.
 //!
 //! ## Known residuals (documented, out of scope)
 //!
@@ -145,8 +158,15 @@ pub enum HoldKind {
     /// collapse (B).
     Monotonic,
     /// Counter jumped beyond the plausible per-second rate and no corroborating
-    /// prior read backed it → suspected inflation (C).
+    /// prior read backed it → suspected inflation (C). Kill cols always; wide
+    /// cols only when the current read is edge-ink suspect (CG-4 B1).
     RateCap,
+    /// Cur has exactly one more digit than the accepted value, and dropping the
+    /// trailing digit yields a non-decreasing "advance" of that accepted value
+    /// (CG-4 B2). Classic OCR trailing-digit inject (`1681` → `16814` / `22994`
+    /// from a lower accepted base). Does not fire on real rollovers like
+    /// `9906` → `10311` (prefix `1031` < accepted).
+    DigitInject,
 }
 
 /// One held cell in a capture — which column, why, and the raw→held swap.
@@ -193,6 +213,18 @@ const KILL_COLS: [usize; 3] = [0, 1, 2];
 const KILL_RATE_DIVISOR_SECS: u64 = 5;
 const KILL_RATE_SLACK: u32 = 8;
 
+/// Wide-column (DMG/HLG/MIT) rate ceiling applied **only when the current read
+/// is edge-ink suspect** (CG-4 B1). Clean wide advances stay uncapped so a real
+/// multi-thousand damage burst is never rejected. Cap =
+/// `elapsed_secs * WIDE_RATE_PER_SEC + WIDE_RATE_SLACK`, calibrated one-sided
+/// against the real series:
+/// - Route66 DMG 10470→12672 in 90s (+2202) must pass if ever suspect
+/// - Antarctic clean climb 6810→10311 in 60s (+3501) must pass if ever suspect
+/// - Antarctic inject 3235→35031 in 20s (+31796) must hold when suspect
+/// - Field HLG 2782→22994 (any short gap) must hold when suspect
+const WIDE_RATE_PER_SEC: u32 = 80;
+const WIDE_RATE_SLACK: u32 = 2500;
+
 /// Absolute floor of the corroboration band; the effective band is
 /// `max(CORROBORATION_ABS, level/10)` so a repeated high read still corroborates
 /// after small OCR jitter.
@@ -207,13 +239,55 @@ fn is_kill_col(col: usize) -> bool {
     KILL_COLS.contains(&col)
 }
 
-/// Maximum plausible increase for column `col` over `elapsed`. Wide accumulator
-/// columns (DMG/HLG/MIT) get no upper cap — their only observed corruption is
-/// the tail-clip *collapse*, which the monotonic hold catches, and a real burst
-/// of several thousand damage in seconds must never be rejected.
-fn max_delta(col: usize, elapsed: Duration) -> u32 {
+fn digit_len(n: u32) -> u32 {
+    if n == 0 { 1 } else { n.ilog10() + 1 }
+}
+
+/// CG-4 B2: trailing-digit injection heuristic.
+///
+/// Fires when all of:
+/// 1. `cur` has exactly one more digit than `prev_acc`
+/// 2. dropping the last digit of `cur` yields a value ≥ `prev_acc` (looks like
+///    a cumulative advance with a garbage trailing digit glued on)
+/// 3. the delta exceeds the same wide rate ceiling used by B1
+///    (`elapsed * WIDE_RATE_PER_SEC + WIDE_RATE_SLACK`) — otherwise a genuine
+///    long-gap climb that gains a digit (e.g. 1681→16900 after ≥10 min) or a
+///    near-zero 1→2 digit climb (0..9 → 10..99) would latch forever with no
+///    corroboration escape (Claude MED B2-FP review).
+///
+/// Does **not** fire on `2782→22994` alone (prefix `2299` < accepted) — that
+/// needs B1 + geometry (Lane A). Does not fire on real rollovers
+/// `9906→10311` (prefix `1031` < accepted).
+fn is_trailing_digit_inject(prev_acc: u32, cur: u32, elapsed: Duration) -> bool {
+    if cur <= prev_acc {
+        return false;
+    }
+    if digit_len(cur) != digit_len(prev_acc) + 1 {
+        return false;
+    }
+    let prefix = cur / 10;
+    if prefix < prev_acc {
+        return false;
+    }
+    let ceiling = (elapsed.as_secs() as u32)
+        .saturating_mul(WIDE_RATE_PER_SEC)
+        .saturating_add(WIDE_RATE_SLACK);
+    cur.saturating_sub(prev_acc) > ceiling
+}
+
+/// Maximum plausible increase for column `col` over `elapsed`.
+///
+/// * Kill cols (E/A/D): always rate-capped.
+/// * Wide cols (DMG/HLG/MIT): uncapped when the current read is clean; when
+///   edge-ink suspect (CG-4 B1), apply the wide rate ceiling so a drifted
+///   inject like HLG `22994` or DMG `35031` cannot latch.
+fn max_delta(col: usize, elapsed: Duration, cur_suspect: bool) -> u32 {
     if is_kill_col(col) {
         ((elapsed.as_secs() / KILL_RATE_DIVISOR_SECS) as u32).saturating_add(KILL_RATE_SLACK)
+    } else if cur_suspect {
+        (elapsed.as_secs() as u32)
+            .saturating_mul(WIDE_RATE_PER_SEC)
+            .saturating_add(WIDE_RATE_SLACK)
     } else {
         u32::MAX
     }
@@ -254,16 +328,18 @@ fn downstreak_continues(streak_last: u32, cur: u32) -> bool {
 /// capture's parsed counters. `suspect` — per-column edge-ink mask (CG-3): a
 /// `true` column had glyph ink touching a crop edge, so its read is stripped of
 /// all gate influence (never corroborates a jump, never drives an un-latch),
-/// though it is still accepted if it is a plausible in-rate advance. `split` —
-/// whether the whole-row game-split signal already fired (a real new game).
+/// though a *suspect* wide-column advance is now also rate-capped (CG-4 B1)
+/// and trailing-digit injects are held (CG-4 B2). `split` — whether the
+/// whole-row game-split signal already fired (a real new game).
 ///
 /// On a split or a first capture the raw read is accepted verbatim (a new game
 /// legitimately resets every counter). Otherwise each cell is checked
 /// independently: a decrease is held to the previous accepted value (B) unless a
 /// run of `UNLATCH_STREAK` clean coherent decreases revises the latched value
-/// DOWN (CG-2 un-latch); an increase beyond the plausible rate is held unless a
-/// clean previous raw read corroborates it (C); an advance within rate passes
-/// through unchanged.
+/// DOWN (CG-2 un-latch); a trailing-digit inject is held (CG-4 B2); an increase
+/// beyond the plausible rate is held unless a clean previous raw read
+/// corroborates it (C / CG-4 B1 for suspect wide cols); an advance within rate
+/// passes through unchanged.
 pub fn apply_gate(
     prev: Option<(GateState, Duration)>,
     raw: Counters,
@@ -339,11 +415,30 @@ pub fn apply_gate(
             // At or above the accepted value → no active decrease run.
             down_len[col] = 0;
             down_last[col] = 0;
-            let ceiling = prev_acc[col].saturating_add(max_delta(col, elapsed));
+
+            // (CG-4 B2) Trailing-digit inject on wide cols only — kill cols
+            // already have a tight rate cap (and 9→91 would otherwise re-label
+            // as DigitInject). Hold before rate/corroboration so a repeated
+            // inject cannot corroborate itself past the guard.
+            if !is_kill_col(col)
+                && cur[col] > prev_acc[col]
+                && is_trailing_digit_inject(prev_acc[col], cur[col], elapsed)
+            {
+                out[col] = prev_acc[col];
+                holds.push(Hold {
+                    col,
+                    kind: HoldKind::DigitInject,
+                    raw: cur[col],
+                    held: prev_acc[col],
+                });
+                continue;
+            }
+
+            let ceiling = prev_acc[col].saturating_add(max_delta(col, elapsed, suspect[col]));
             // A suspect prior read must never corroborate the current jump.
             let corroborated = !prev_raw_suspect[col] && corroborates(prev_raw[col], cur[col]);
             if cur[col] > ceiling && !corroborated {
-                // (C) implausible jump, uncorroborated → hold last accepted.
+                // (C / CG-4 B1) implausible jump, uncorroborated → hold last accepted.
                 out[col] = prev_acc[col];
                 holds.push(Hold {
                     col,
@@ -795,15 +890,14 @@ mod tests {
 
     /// Antarctic Peninsula, damage column: real DMG climbs 1728→2559→3235, then
     /// the stat window drifts one digit and injects the deaths digit ("3") in
-    /// front of a clipped DMG → 35031 (CG-3). Wide columns have no rate cap, so
-    /// the injected value is accepted and the monotonic hold then LATCHES it,
-    /// rejecting every later CORRECT read (4543/5852/6810/10311) as a decrease
-    /// (CG-2). The un-latch must recover the clean level, not keep 35031.
+    /// front of a clipped DMG → 35031 (CG-3). Pre-CG-4 the inject latched and
+    /// un-latch recovered; post-CG-4 B1 (suspect rate) + B2 (trailing digit)
+    /// reject the inject at acceptance so the later clean climb is never blocked.
+    /// Final still settles at the real 10311 either path.
     ///
     /// `inject_suspect` models both ways it reached the gate: `true` — edge-ink
-    /// (b) flags the drifted read (its clipped glyph touches the window edge);
-    /// `false` — it slipped through as clean. The recovery is identical either
-    /// way, because a wide column has no rate cap to reject the injection at all.
+    /// flags the drifted read; `false` — it slipped through as clean (B2 still
+    /// holds the digit inject).
     fn antarctic_damage_recovers(inject_suspect: bool) -> u32 {
         // (e, a, d, dmg, hlg, mit, gap), then per-step suspect on the DMG col (3).
         let series: &[Step] = &[
@@ -914,5 +1008,210 @@ mod tests {
             assert!(out.unlatches.is_empty());
             st = (out.state, secs(15));
         }
+    }
+
+    // --- CG-4 B1 / B2: wide-col suspect rate + trailing-digit inject ---
+
+    #[test]
+    fn cg4_b1_suspect_wide_advance_is_rate_capped() {
+        // Field-shaped: HLG accepted 2782, raw 22994 (MIT digit bleed), edge-ink
+        // suspect, short gap. Pre-CG-4 latched 22994; B1 holds at 2782.
+        let prev = state(c(12, 4, 3, 8000, 2782, 5119));
+        let hlg_suspect = [false, false, false, false, true, false];
+        let out = apply_gate(
+            Some((prev, secs(20))),
+            c(12, 4, 3, 8200, 22994, 5200),
+            hlg_suspect,
+            false,
+        );
+        assert_eq!(out.accepted.healing, 2782, "suspect HLG inject held");
+        assert!(
+            out.holds
+                .iter()
+                .any(|h| h.col == 4 && h.kind == HoldKind::RateCap)
+        );
+        assert_eq!(out.accepted.damage, 8200, "clean DMG advance kept");
+    }
+
+    #[test]
+    fn cg4_b1_clean_wide_burst_still_uncapped() {
+        // One-sided guarantee: a clean multi-k damage climb must never hold.
+        let prev = state(c(12, 4, 3, 6810, 2000, 3000));
+        let out = apply_gate(
+            Some((prev, secs(60))),
+            c(12, 4, 3, 10311, 2200, 3400),
+            CLEAN,
+            false,
+        );
+        assert_eq!(out.accepted.damage, 10311);
+        assert!(
+            out.holds.iter().all(|h| h.col != 3),
+            "clean wide burst must not RateCap: {:?}",
+            out.holds
+        );
+    }
+
+    #[test]
+    fn cg4_b1_genuine_suspect_wide_stomp_passes() {
+        // Route66-scale DMG climb (+2202 / 90s) even if flagged suspect must pass.
+        let prev = state(c(22, 14, 5, 10470, 2344, 5664));
+        let dmg_suspect = [false, false, false, true, false, false];
+        let out = apply_gate(
+            Some((prev, secs(90))),
+            c(28, 17, 10, 12672, 2544, 6428),
+            dmg_suspect,
+            false,
+        );
+        assert_eq!(out.accepted.damage, 12672, "genuine suspect stomp passes");
+        assert!(
+            !out.holds.iter().any(|h| h.col == 3),
+            "no hold on in-rate suspect DMG: {:?}",
+            out.holds
+        );
+    }
+
+    #[test]
+    fn cg4_b2_trailing_digit_inject_holds() {
+        // Plan example: 1681 → 22994 (prefix 2299 ≥ 1681, +1 digit).
+        let prev = state(c(5, 2, 1, 4000, 1681, 2000));
+        let out = apply_gate(
+            Some((prev, secs(15))),
+            c(5, 2, 1, 4100, 22994, 2100),
+            CLEAN,
+            false,
+        );
+        assert_eq!(out.accepted.healing, 1681);
+        assert!(
+            out.holds
+                .iter()
+                .any(|h| h.col == 4 && h.kind == HoldKind::DigitInject)
+        );
+    }
+
+    #[test]
+    fn cg4_b2_real_digit_rollover_does_not_fire() {
+        // Plan counterexample: 9906 → 10311 (prefix 1031 < accepted).
+        let prev = state(c(22, 10, 5, 9906, 1898, 5958));
+        let out = apply_gate(
+            Some((prev, secs(13))),
+            c(23, 10, 5, 10311, 1898, 5958),
+            CLEAN,
+            false,
+        );
+        assert_eq!(out.accepted.damage, 10311);
+        assert!(
+            !out.holds.iter().any(|h| h.kind == HoldKind::DigitInject),
+            "real rollover must not DigitInject: {:?}",
+            out.holds
+        );
+    }
+
+    #[test]
+    fn cg4_b2_primary_field_case_needs_b1_not_digit_alone() {
+        // Review clarify: 2782 → 22994 does NOT fire B2 (prefix 2299 < 2782).
+        // Without suspect, gate still accepts (geometry/B1 must cover).
+        let prev = state(c(12, 4, 3, 8000, 2782, 5119));
+        let out = apply_gate(
+            Some((prev, secs(20))),
+            c(12, 4, 3, 8200, 22994, 5200),
+            CLEAN,
+            false,
+        );
+        assert!(
+            !out.holds
+                .iter()
+                .any(|h| h.col == 4 && h.kind == HoldKind::DigitInject),
+            "B2 must not claim the 2782→22994 primary case"
+        );
+        // Document residual without B1/suspect: inject still latches clean.
+        assert_eq!(
+            out.accepted.healing, 22994,
+            "clean non-B2 inject still latches — B1+A required"
+        );
+    }
+
+    #[test]
+    fn cg4_b2_sparse_tab_genuine_10x_growth_does_not_latch() {
+        // Claude MED B2-FP (a): acc 1681, genuine 16900 after ≥10 min Tab gap.
+        // Pre-fix: +1 digit + prefix 1690≥1681 → DigitInject forever.
+        // With rate conjunct: delta 15219 @ 600s < ceiling 50500 → pass.
+        let prev = state(c(5, 2, 1, 4000, 1681, 2000));
+        let out = apply_gate(
+            Some((prev, secs(600))),
+            c(8, 3, 2, 12000, 16900, 5000),
+            CLEAN,
+            false,
+        );
+        assert_eq!(
+            out.accepted.healing, 16900,
+            "genuine long-gap climb must pass"
+        );
+        assert!(
+            !out.holds
+                .iter()
+                .any(|h| h.col == 4 && h.kind == HoldKind::DigitInject),
+            "sparse-Tab 10x must not DigitInject: {:?}",
+            out.holds
+        );
+    }
+
+    #[test]
+    fn cg4_b2_near_zero_one_to_two_digit_does_not_fire() {
+        // Claude MED B2-FP (b): acc 0..9, genuine cur 10..99 early game.
+        // Delta ≤99 < WIDE_RATE_SLACK 2500 → never fires even at short gap.
+        let prev = state(c(0, 0, 0, 50, 5, 0));
+        let out = apply_gate(
+            Some((prev, secs(10))),
+            c(1, 0, 0, 200, 47, 100),
+            CLEAN,
+            false,
+        );
+        assert_eq!(out.accepted.healing, 47);
+        assert!(
+            !out.holds.iter().any(|h| h.kind == HoldKind::DigitInject),
+            "near-zero 1→2 digit climb must not DigitInject: {:?}",
+            out.holds
+        );
+    }
+
+    /// Synthetic 07-22 Numbani-shaped HLG series (string-level, from field
+    /// notes): climbs to ~2782, injects 22994 as edge-ink suspect, then clean
+    /// reads resume near the real level. B1 must hold the inject; finals must
+    /// not settle at 22994. Havana/Route66/Antarctic fixtures stay green above.
+    #[test]
+    fn cg4_b4_numbani_hlg_suspect_inject_held() {
+        // (e, a, d, dmg, hlg, mit, gap)
+        let series: &[Step] = &[
+            (4, 1, 1, 2000, 400, 800, 0),
+            (6, 2, 1, 3500, 900, 1500, 40),
+            (8, 2, 2, 5200, 1600, 2800, 50),
+            (10, 3, 2, 7000, 2200, 4000, 45),
+            (12, 4, 3, 8000, 2782, 5119, 40),  // last good HLG ~2782
+            (12, 4, 3, 8200, 22994, 5200, 20), // inject (suspect)
+            (13, 4, 3, 8500, 2900, 5400, 25),  // clean recovery reads
+            (14, 5, 3, 9000, 3100, 5600, 30),
+            (15, 5, 4, 9500, 3300, 5800, 28),
+        ];
+        let inject_idx = 5usize;
+        let mut st: Option<(GateState, Duration)> = None;
+        let mut hlg_hist = Vec::new();
+        for (i, &(e, a, d, dmg, hlg, mit, gap)) in series.iter().enumerate() {
+            let raw = c(e, a, d, dmg, hlg, mit);
+            let mut suspect = [false; GATE_COLS];
+            if i == inject_idx {
+                suspect[4] = true; // HLG edge-ink
+            }
+            let prev = st.map(|(s, _)| (s, Duration::from_secs(gap)));
+            let out = apply_gate(prev, raw, suspect, false);
+            hlg_hist.push(out.accepted.healing);
+            st = Some((out.state, Duration::from_secs(gap)));
+        }
+        assert_eq!(hlg_hist[4], 2782);
+        assert_eq!(hlg_hist[5], 2782, "suspect inject must not latch");
+        assert_eq!(*hlg_hist.last().unwrap(), 3300, "clean climb resumes");
+        assert!(
+            hlg_hist.iter().all(|&h| h != 22994),
+            "22994 must never be stored: {hlg_hist:?}"
+        );
     }
 }
