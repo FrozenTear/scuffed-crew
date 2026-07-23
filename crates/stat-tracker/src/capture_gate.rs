@@ -245,13 +245,20 @@ fn digit_len(n: u32) -> u32 {
 
 /// CG-4 B2: trailing-digit injection heuristic.
 ///
-/// Fires when `cur` has exactly one more digit than `prev_acc` and dropping the
-/// last digit of `cur` yields a value ≥ `prev_acc` (looks like a cumulative
-/// advance with a garbage trailing digit glued on). Does **not** fire on the
-/// primary 07-22 field case `2782→22994` (prefix `2299` < accepted) — that
+/// Fires when all of:
+/// 1. `cur` has exactly one more digit than `prev_acc`
+/// 2. dropping the last digit of `cur` yields a value ≥ `prev_acc` (looks like
+///    a cumulative advance with a garbage trailing digit glued on)
+/// 3. the delta exceeds the same wide rate ceiling used by B1
+///    (`elapsed * WIDE_RATE_PER_SEC + WIDE_RATE_SLACK`) — otherwise a genuine
+///    long-gap climb that gains a digit (e.g. 1681→16900 after ≥10 min) or a
+///    near-zero 1→2 digit climb (0..9 → 10..99) would latch forever with no
+///    corroboration escape (Claude MED B2-FP review).
+///
+/// Does **not** fire on `2782→22994` alone (prefix `2299` < accepted) — that
 /// needs B1 + geometry (Lane A). Does not fire on real rollovers
 /// `9906→10311` (prefix `1031` < accepted).
-fn is_trailing_digit_inject(prev_acc: u32, cur: u32) -> bool {
+fn is_trailing_digit_inject(prev_acc: u32, cur: u32, elapsed: Duration) -> bool {
     if cur <= prev_acc {
         return false;
     }
@@ -259,7 +266,13 @@ fn is_trailing_digit_inject(prev_acc: u32, cur: u32) -> bool {
         return false;
     }
     let prefix = cur / 10;
-    prefix >= prev_acc
+    if prefix < prev_acc {
+        return false;
+    }
+    let ceiling = (elapsed.as_secs() as u32)
+        .saturating_mul(WIDE_RATE_PER_SEC)
+        .saturating_add(WIDE_RATE_SLACK);
+    cur.saturating_sub(prev_acc) > ceiling
 }
 
 /// Maximum plausible increase for column `col` over `elapsed`.
@@ -409,7 +422,7 @@ pub fn apply_gate(
             // inject cannot corroborate itself past the guard.
             if !is_kill_col(col)
                 && cur[col] > prev_acc[col]
-                && is_trailing_digit_inject(prev_acc[col], cur[col])
+                && is_trailing_digit_inject(prev_acc[col], cur[col], elapsed)
             {
                 out[col] = prev_acc[col];
                 holds.push(Hold {
@@ -1114,6 +1127,50 @@ mod tests {
         assert_eq!(
             out.accepted.healing, 22994,
             "clean non-B2 inject still latches — B1+A required"
+        );
+    }
+
+    #[test]
+    fn cg4_b2_sparse_tab_genuine_10x_growth_does_not_latch() {
+        // Claude MED B2-FP (a): acc 1681, genuine 16900 after ≥10 min Tab gap.
+        // Pre-fix: +1 digit + prefix 1690≥1681 → DigitInject forever.
+        // With rate conjunct: delta 15219 @ 600s < ceiling 50500 → pass.
+        let prev = state(c(5, 2, 1, 4000, 1681, 2000));
+        let out = apply_gate(
+            Some((prev, secs(600))),
+            c(8, 3, 2, 12000, 16900, 5000),
+            CLEAN,
+            false,
+        );
+        assert_eq!(
+            out.accepted.healing, 16900,
+            "genuine long-gap climb must pass"
+        );
+        assert!(
+            !out.holds
+                .iter()
+                .any(|h| h.col == 4 && h.kind == HoldKind::DigitInject),
+            "sparse-Tab 10x must not DigitInject: {:?}",
+            out.holds
+        );
+    }
+
+    #[test]
+    fn cg4_b2_near_zero_one_to_two_digit_does_not_fire() {
+        // Claude MED B2-FP (b): acc 0..9, genuine cur 10..99 early game.
+        // Delta ≤99 < WIDE_RATE_SLACK 2500 → never fires even at short gap.
+        let prev = state(c(0, 0, 0, 50, 5, 0));
+        let out = apply_gate(
+            Some((prev, secs(10))),
+            c(1, 0, 0, 200, 47, 100),
+            CLEAN,
+            false,
+        );
+        assert_eq!(out.accepted.healing, 47);
+        assert!(
+            !out.holds.iter().any(|h| h.kind == HoldKind::DigitInject),
+            "near-zero 1→2 digit climb must not DigitInject: {:?}",
+            out.holds
         );
     }
 
