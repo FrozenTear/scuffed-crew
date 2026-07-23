@@ -247,6 +247,7 @@ jobs:
           cp gui/lib/* "${STAGE}/lib/" 2>/dev/null || true
           cp -r crates/stat-tracker/assets "${STAGE}/assets"
           cp crates/stat-tracker/dist/install.sh "${STAGE}/install.sh"
+          cp crates/stat-tracker/dist/uninstall.sh "${STAGE}/uninstall.sh"
           # Bundle the runtime eng model (tessdata_fast, ~4MB) so the daemon's
           # user tessdata dir is populated with no host apt/pacman step. The app
           # checks ~/.local/share/scuffed-stat-tracker/tessdata FIRST, so
@@ -259,7 +260,7 @@ jobs:
           # OCR model"). Required: end-user machines cannot train it themselves
           # (text2image is broken on pango >= 1.56 hosts).
           cp daemon/tessdata/koverwatch.traineddata "${STAGE}/tessdata/"
-          chmod +x "${STAGE}/install.sh" "${STAGE}"/bin/*
+          chmod +x "${STAGE}/install.sh" "${STAGE}/uninstall.sh" "${STAGE}"/bin/*
           echo "${VERSION}" > "${STAGE}/VERSION"
           tar czf "${STAGE}.tar.gz" "${STAGE}"
           sha256sum "${STAGE}.tar.gz" > "${STAGE}.tar.gz.sha256"

@@ -48,6 +48,12 @@ error() { echo -e "${RED}[error ]${NC} $*" >&2; }
 # install (default, unchanged). bootstrap.sh passes this through.
 SKIP_INTEGRATION="${SKIP_INTEGRATION:-}"
 
+# Every file this script installs is recorded here and written to
+# $PREFIX/share/scuffed-stat-tracker/install-manifest.txt so uninstall.sh can
+# remove exactly what we put on disk (the bundled libs land in a shared
+# $PREFIX/lib and are unidentifiable without it).
+MANIFEST_ENTRIES=()
+
 # ── Layout checks ─────────────────────────────────────────────────────────────
 
 if [[ ! -x "$DAEMON_BIN" && ! -f "$DAEMON_BIN" ]]; then
@@ -131,7 +137,14 @@ fi
 mkdir -p "$BIN_DIR"
 install -m755 "$DAEMON_BIN" "$BIN_DIR/scuffed-stat-tracker"
 install -m755 "$GUI_BIN"     "$BIN_DIR/stat-tracker-gui"
+MANIFEST_ENTRIES+=("$BIN_DIR/scuffed-stat-tracker" "$BIN_DIR/stat-tracker-gui")
 info "Installed binaries → $BIN_DIR"
+
+if [[ -f "$PKG_ROOT/uninstall.sh" ]]; then
+    install -m755 "$PKG_ROOT/uninstall.sh" "$BIN_DIR/scuffed-stat-tracker-uninstall"
+    MANIFEST_ENTRIES+=("$BIN_DIR/scuffed-stat-tracker-uninstall")
+    info "Installed uninstaller → $BIN_DIR/scuffed-stat-tracker-uninstall"
+fi
 
 # Bundled OCR library closure (portable releases). Daemon RPATH is
 # $ORIGIN/../lib so libs must land next to bin under PREFIX.
@@ -140,6 +153,7 @@ if [[ -d "$PKG_ROOT/lib" ]] && compgen -G "$PKG_ROOT/lib/*" >/dev/null; then
     count=0
     for f in "$PKG_ROOT/lib"/*; do
         install -m755 "$f" "$LIB_DIR/$(basename "$f")"
+        MANIFEST_ENTRIES+=("$LIB_DIR/$(basename "$f")")
         count=$((count + 1))
     done
     info "Installed $count bundled OCR libs → $LIB_DIR (RPATH \$ORIGIN/../lib)"
@@ -193,6 +207,7 @@ else
     # ── Desktop entry ─────────────────────────────────────────────────────────
     mkdir -p "$DESKTOP_DIR"
     install -m644 "$ASSETS_DIR/$DESKTOP" "$DESKTOP_DIR/$DESKTOP"
+    MANIFEST_ENTRIES+=("$DESKTOP_DIR/$DESKTOP")
     if command -v update-desktop-database &>/dev/null; then
         update-desktop-database "$DESKTOP_DIR" 2>/dev/null || true
     fi
@@ -201,11 +216,26 @@ else
     # ── systemd user service (installed, NOT enabled) ─────────────────────────
     mkdir -p "$SYSTEMD_DIR"
     install -m644 "$ASSETS_DIR/$UNIT" "$SYSTEMD_DIR/$UNIT"
+    MANIFEST_ENTRIES+=("$SYSTEMD_DIR/$UNIT")
     if command -v systemctl &>/dev/null; then
         systemctl --user daemon-reload 2>/dev/null || true
     fi
     info "Installed systemd service → $SYSTEMD_DIR (not enabled)"
 fi
+
+# ── Install manifest ──────────────────────────────────────────────────────────
+# Union with any previous manifest so an upgrade that drops a file still
+# leaves the old copy removable by the uninstaller.
+
+MANIFEST_DIR="$PREFIX/share/scuffed-stat-tracker"
+MANIFEST="$MANIFEST_DIR/install-manifest.txt"
+mkdir -p "$MANIFEST_DIR"
+{
+    [[ -f "$MANIFEST" ]] && cat "$MANIFEST"
+    printf '%s\n' "${MANIFEST_ENTRIES[@]}"
+} | sort -u > "$MANIFEST.tmp"
+mv "$MANIFEST.tmp" "$MANIFEST"
+info "Wrote install manifest → $MANIFEST"
 
 # ── Smoke check ───────────────────────────────────────────────────────────────
 
@@ -231,6 +261,8 @@ fi
     echo
     echo "  First run: open the GUI, go to Settings, paste your server URL"
     echo "  and daemon token (from the web UI under My Stats → Daemon Tokens)."
+    echo
+    echo "  Uninstall:        scuffed-stat-tracker-uninstall   (--purge removes data/config too)"
     echo
     echo "  Source rebuilds (dev): crates/stat-tracker/install.sh (requires cargo)."
     echo

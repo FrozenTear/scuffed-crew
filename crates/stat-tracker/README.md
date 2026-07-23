@@ -83,6 +83,19 @@ The in-tarball installer lives at `dist/install.sh` in this crate (copied to
 the tarball root by the release workflow). Source checkouts still use
 `crates/stat-tracker/install.sh`, which **builds with cargo**.
 
+**Uninstall:**
+
+```sh
+scuffed-stat-tracker-uninstall            # keeps match log + config for reinstalls
+scuffed-stat-tracker-uninstall --purge    # also deletes app data and config
+```
+
+`install.sh` records everything it installs in
+`$PREFIX/share/scuffed-stat-tracker/install-manifest.txt`; the uninstaller
+removes exactly those files (plus stopping/disabling the systemd unit). For
+installs made before the manifest existed it falls back to the known default
+paths and prints how to identify the bundled libs from the tarball.
+
 ## Running
 
 ```sh

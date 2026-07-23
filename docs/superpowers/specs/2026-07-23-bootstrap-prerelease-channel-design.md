@@ -1,7 +1,8 @@
-# bootstrap.sh release-channel selection (stable vs prerelease)
+# bootstrap.sh release-channel selection (stable vs prerelease) + uninstaller
 
 **Date:** 2026-07-23
-**Scope:** `crates/stat-tracker/dist/bootstrap.sh`, `crates/stat-tracker/README.md`
+**Scope:** `crates/stat-tracker/dist/{bootstrap.sh,install.sh,uninstall.sh}`,
+`crates/stat-tracker/README.md`, `.github/workflows/stat-tracker-release.yml`
 
 ## Problem
 
@@ -63,3 +64,31 @@ live GitHub API using a throwaway `PREFIX` + `SKIP_INTEGRATION=1`:
 - `STAT_TRACKER_CHANNEL=stable` → resolves v0.2.2
 - `STAT_TRACKER_CHANNEL=bogus` → early error
 - prompt path under a pty (`script -qec …`), answering `p` and empty
+
+## Uninstaller (second increment, same branch)
+
+Problem: no uninstall existed, and the 33 bundled OCR libs land in the
+*shared* `$PREFIX/lib` under generic sonames — unidentifiable after the
+tarball is gone.
+
+- `install.sh` records every file it installs (bins, uninstaller, libs,
+  desktop entry, systemd unit — **not** tessdata, which is app data) in
+  `$PREFIX/share/scuffed-stat-tracker/install-manifest.txt`. Reinstalls merge
+  with the previous manifest (`sort -u`) so upgrades that drop files leave
+  them removable. `$PREFIX`-relative placement keeps throwaway-PREFIX smoke
+  installs from touching the real `$HOME`.
+- New `dist/uninstall.sh`, shipped at tarball root and installed as
+  `$PREFIX/bin/scuffed-stat-tracker-uninstall`. Behavior: `systemctl --user
+  disable --now` the unit (best-effort), remove manifest entries (absolute
+  paths only, files/symlinks only), refresh desktop DB / systemd, then handle
+  data (`~/.local/share/scuffed-stat-tracker`) + config
+  (`~/.config/scuffed-stat-tracker`): kept by default, deleted with `--purge`
+  or an interactive `[y/N]` prompt (stdin tty; `--yes` suppresses).
+- No manifest (pre-manifest install): falls back to known default paths and
+  prints the `tar tzf … | grep '/lib/'` recipe for the libs.
+- Release workflow stages + chmods `uninstall.sh` into the tarball.
+
+Verified against the real rc4 tarball in a fake `$HOME`: install → manifest
+(38 entries) → default uninstall removes all 38, keeps data; `--purge` leaves
+an empty tree; manifest-less fallback removes the 5 known paths and warns
+about libs; pty prompt answering `y` purges.
