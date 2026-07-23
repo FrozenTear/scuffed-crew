@@ -124,17 +124,18 @@ pub fn add_cell_border(binary: &GrayImage) -> GrayImage {
     add_white_border(binary, 8)
 }
 
-/// Target height (px) for a scoreboard stat cell after upscale, before the
-/// fixed threshold. CG-4 D: lone kill-col digits at ~40px cell height OCR as
-/// empty under the old `w < 150` nearest-2× gate; a smooth upscale toward this
-/// target (capped ≤3×) recovers them. Raised 56→64 after Claude MED-2: at
-/// 0.75×, ~1px floor truncation in `crop_stat_cell` left A slightly short and
-/// the pipeline still misread even with upscale — 64px + rounded crop edges
-/// stabilizes kill cols without hitting the 3× oversmooth ceiling.
+/// Only cells shorter than this are smooth-upscaled (CG-4 D REJECT fix).
+/// Native 1440p kill cells land ~53–55px — upscaling those invented phantom
+/// "9"s from dim "0"/empty (277-cell native regression vs main). Short cells
+/// (1080p / 0.75×, lone-digit crops) stay below this floor and still get help.
+const CELL_UPSCALE_TRIGGER_H: u32 = 48;
+
+/// Target height (px) when a short cell *is* upscaled. Kept ≥ trigger so short
+/// cells grow enough for lone-8 recovery without needing the old always-on path.
 const CELL_UPSCALE_TARGET_H: u32 = 64;
 
-/// Hard ceiling on the cell upscale factor (CG-4 D). Beyond this, Lanczos
-/// oversmooths thin digits into empty reads.
+/// Hard ceiling on the cell upscale factor (CG-4 D). Beyond this, smooth filters
+/// oversmooth thin digits into empty reads.
 const CELL_UPSCALE_MAX_FACTOR: f64 = 3.0;
 
 /// Binarized cell WITHOUT the OCR white border: foreground ink = 0 (black),
@@ -159,13 +160,14 @@ pub fn prepare_cell_binary(img: &DynamicImage) -> GrayImage {
     binary
 }
 
-/// CG-4 D: bring a binarized-pipeline cell up to [`CELL_UPSCALE_TARGET_H`] with
-/// a smooth filter so small lone kill-col digits remain Tesseract-readable.
-/// Factor is `target/h`, capped at [`CELL_UPSCALE_MAX_FACTOR`]; cells already
-/// ≥ target height pass through unchanged.
+/// CG-4 D: upscale **only** cells with height &lt; [`CELL_UPSCALE_TRIGGER_H`]
+/// toward [`CELL_UPSCALE_TARGET_H`] (factor capped at [`CELL_UPSCALE_MAX_FACTOR`]).
+/// Native-height cells pass through unchanged so dim low-contrast glyphs are not
+/// smooth-warped into phantom digits. CatmullRom (not Lanczos) — Lanczos on dim
+/// "0" glyphs produced conf-96 "9" phantoms at any factor ≥1.05 (Claude reject).
 fn upscale_cell_for_ocr(gray: &GrayImage) -> GrayImage {
     let (w, h) = gray.dimensions();
-    if w == 0 || h == 0 || h >= CELL_UPSCALE_TARGET_H {
+    if w == 0 || h == 0 || h >= CELL_UPSCALE_TRIGGER_H {
         return gray.clone();
     }
     let factor = (CELL_UPSCALE_TARGET_H as f64 / h as f64).min(CELL_UPSCALE_MAX_FACTOR);
@@ -174,13 +176,14 @@ fn upscale_cell_for_ocr(gray: &GrayImage) -> GrayImage {
     }
     let nw = ((w as f64) * factor).round().max(1.0) as u32;
     let nh = ((h as f64) * factor).round().max(1.0) as u32;
-    image::imageops::resize(gray, nw, nh, image::imageops::FilterType::Lanczos3)
+    image::imageops::resize(gray, nw, nh, image::imageops::FilterType::CatmullRom)
 }
 
 /// Test-visible factor selection for CG-4 D (height → scale, capped).
+/// Returns 1.0 when the cell is at/above the trigger (no upscale).
 #[cfg(test)]
 fn cell_upscale_factor(h: u32) -> f64 {
-    if h == 0 || h >= CELL_UPSCALE_TARGET_H {
+    if h == 0 || h >= CELL_UPSCALE_TRIGGER_H {
         1.0
     } else {
         (CELL_UPSCALE_TARGET_H as f64 / h as f64).min(CELL_UPSCALE_MAX_FACTOR)
@@ -1238,14 +1241,17 @@ mod cell_upscale_tests {
     use super::*;
 
     #[test]
-    fn factor_is_one_when_already_tall_enough() {
-        assert!((cell_upscale_factor(CELL_UPSCALE_TARGET_H) - 1.0).abs() < 1e-9);
+    fn factor_is_one_at_or_above_trigger() {
+        // Native ~53–55px cells must never upscale (phantom-9 reject).
+        assert!((cell_upscale_factor(CELL_UPSCALE_TRIGGER_H) - 1.0).abs() < 1e-9);
+        assert!((cell_upscale_factor(53) - 1.0).abs() < 1e-9);
+        assert!((cell_upscale_factor(55) - 1.0).abs() < 1e-9);
         assert!((cell_upscale_factor(80) - 1.0).abs() < 1e-9);
     }
 
     #[test]
-    fn factor_targets_64_and_caps_at_3x() {
-        // 42px → 64/42 ≈ 1.524 (height-driven, not forced 2×)
+    fn factor_targets_64_only_below_trigger_and_caps_at_3x() {
+        // 42px (<48) → 64/42 ≈ 1.524
         let f42 = cell_upscale_factor(42);
         assert!((f42 - (64.0 / 42.0)).abs() < 1e-9);
         assert!(f42 < CELL_UPSCALE_MAX_FACTOR);
@@ -1268,11 +1274,13 @@ mod cell_upscale_tests {
     }
 
     #[test]
-    fn upscale_leaves_tall_cell_unchanged() {
-        // ≥ CELL_UPSCALE_TARGET_H (64) must pass through.
-        let gray = GrayImage::from_pixel(40, 70, Luma([200]));
-        let up = upscale_cell_for_ocr(&gray);
-        assert_eq!(up.dimensions(), (40, 70));
+    fn upscale_leaves_native_height_cells_unchanged() {
+        // ≥ TRIGGER (48), including pre-D native ~53–55px, pass through.
+        for h in [48u32, 53, 55, 60, 70] {
+            let gray = GrayImage::from_pixel(40, h, Luma([200]));
+            let up = upscale_cell_for_ocr(&gray);
+            assert_eq!(up.dimensions(), (40, h), "h={h} must not upscale");
+        }
     }
 
     #[test]
