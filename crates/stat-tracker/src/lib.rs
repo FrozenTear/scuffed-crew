@@ -2,6 +2,7 @@ pub mod capture;
 pub mod capture_gate;
 pub mod config;
 pub mod detect;
+pub mod hero_auth;
 pub mod ocr;
 pub mod parse;
 pub mod setup;
