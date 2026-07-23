@@ -126,11 +126,12 @@ pub fn add_cell_border(binary: &GrayImage) -> GrayImage {
 
 /// Target height (px) for a scoreboard stat cell after upscale, before the
 /// fixed threshold. CG-4 D: lone kill-col digits at ~40px cell height OCR as
-/// empty under the old `w < 150` nearest-2× gate; a smooth upscale to ~56px
-/// (capped ≤3×) recovers them (cell_probe: 42px "8" → "" at 1×, "8"@95 at 2×
-/// Lanczos; 3× oversmooths — hence the cap). Main 1080p (0.75× of 1440p)
-/// reliability lever.
-const CELL_UPSCALE_TARGET_H: u32 = 56;
+/// empty under the old `w < 150` nearest-2× gate; a smooth upscale toward this
+/// target (capped ≤3×) recovers them. Raised 56→64 after Claude MED-2: at
+/// 0.75×, ~1px floor truncation in `crop_stat_cell` left A slightly short and
+/// the pipeline still misread even with upscale — 64px + rounded crop edges
+/// stabilizes kill cols without hitting the 3× oversmooth ceiling.
+const CELL_UPSCALE_TARGET_H: u32 = 64;
 
 /// Hard ceiling on the cell upscale factor (CG-4 D). Beyond this, Lanczos
 /// oversmooths thin digits into empty reads.
@@ -665,15 +666,20 @@ pub fn crop_stat_cell(
     let (w, h) = (row.width(), row.height());
     let (col_x_ratio, col_w_ratio) = columns[col_index];
 
-    let x = (w as f64 * col_x_ratio).max(0.0) as u32;
-    let cell_w = (w as f64 * col_w_ratio) as u32;
+    // CG-4 D MED-2: round (not floor-via-as-u32) so 0.75× / scaled boards don't
+    // systematically truncate ~1px off the right of kill-col windows — that
+    // jitter produced unflagged wrong reads (A 9→"5") worse than empty.
+    let x = (w as f64 * col_x_ratio).max(0.0).round() as u32;
+    let cell_w = (w as f64 * col_w_ratio).round().max(1.0) as u32;
 
-    let pad_y = (h as f64 * 0.15) as u32;
-    let cell_h = h - (pad_y * 2);
+    let pad_y = (h as f64 * 0.15).round() as u32;
+    let cell_h = h.saturating_sub(pad_y.saturating_mul(2));
 
-    if x + cell_w > w || pad_y + cell_h > h || cell_w == 0 {
+    if x >= w || pad_y >= h || cell_w == 0 || cell_h == 0 {
         return None;
     }
+    let cell_w = cell_w.min(w - x);
+    let cell_h = cell_h.min(h - pad_y);
 
     Some(row.crop_imm(x, pad_y, cell_w, cell_h))
 }
@@ -1238,14 +1244,14 @@ mod cell_upscale_tests {
     }
 
     #[test]
-    fn factor_targets_56_and_caps_at_3x() {
-        // 42px → 56/42 ≈ 1.333 (not a forced 2×; height-driven)
+    fn factor_targets_64_and_caps_at_3x() {
+        // 42px → 64/42 ≈ 1.524 (height-driven, not forced 2×)
         let f42 = cell_upscale_factor(42);
-        assert!((f42 - (56.0 / 42.0)).abs() < 1e-9);
+        assert!((f42 - (64.0 / 42.0)).abs() < 1e-9);
         assert!(f42 < CELL_UPSCALE_MAX_FACTOR);
 
-        // 0.75×-class short cell ~28px → exactly 2×
-        assert!((cell_upscale_factor(28) - 2.0).abs() < 1e-9);
+        // 32px → exactly 2×
+        assert!((cell_upscale_factor(32) - 2.0).abs() < 1e-9);
 
         // Very short cell would want >3× → capped
         assert!((cell_upscale_factor(15) - 3.0).abs() < 1e-9);
@@ -1254,18 +1260,19 @@ mod cell_upscale_tests {
 
     #[test]
     fn upscale_grows_short_cell_to_about_target_height() {
-        let gray = GrayImage::from_pixel(20, 28, Luma([200]));
+        let gray = GrayImage::from_pixel(20, 32, Luma([200]));
         let up = upscale_cell_for_ocr(&gray);
         let (w, h) = up.dimensions();
-        assert_eq!(h, 56, "28×2 → 56");
+        assert_eq!(h, 64, "32×2 → 64");
         assert_eq!(w, 40, "width scales with height");
     }
 
     #[test]
     fn upscale_leaves_tall_cell_unchanged() {
-        let gray = GrayImage::from_pixel(40, 60, Luma([200]));
+        // ≥ CELL_UPSCALE_TARGET_H (64) must pass through.
+        let gray = GrayImage::from_pixel(40, 70, Luma([200]));
         let up = upscale_cell_for_ocr(&gray);
-        assert_eq!(up.dimensions(), (40, 60));
+        assert_eq!(up.dimensions(), (40, 70));
     }
 
     #[test]
