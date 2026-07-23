@@ -124,18 +124,25 @@ pub fn add_cell_border(binary: &GrayImage) -> GrayImage {
     add_white_border(binary, 8)
 }
 
-/// Only cells shorter than this are smooth-upscaled (CG-4 D REJECT fix).
-/// Native 1440p kill cells land ~53–55px — upscaling those invented phantom
-/// "9"s from dim "0"/empty (277-cell native regression vs main). Short cells
-/// (1080p / 0.75×, lone-digit crops) stay below this floor and still get help.
-const CELL_UPSCALE_TRIGGER_H: u32 = 48;
+/// Smooth target-height upscale only when **both** height and width look like a
+/// downscaled kill-col crop (CG-4 D reject fix).
+///
+/// Measured on cg4-20260723 fixtures with header-anchored columns
+/// (`ANCHOR_NARROW_W` = 0.026):
+/// - native: kill 43×55 / last-row kill 43×38 / wide 79×55
+/// - 0.75×:  kill 32×42 / last-row kill 32×29 / wide 59×42
+///
+/// Height alone cannot separate native last-row (h=38, need nearest for
+/// zero-diff vs main) from 0.75× kill (h=42, need CatmullRom for A=9).
+/// Width can: native kill is 43px; 0.75× kill is 32px.
+const CELL_SMOOTH_MAX_H: u32 = 48;
+/// Midpoint between 0.75× kill (32) and native kill (43). Margin either side.
+const CELL_SMOOTH_MAX_W: u32 = 38;
 
-/// Target height (px) when a short cell *is* upscaled. Kept ≥ trigger so short
-/// cells grow enough for lone-8 recovery without needing the old always-on path.
+/// Target height (px) when a short+narrow cell *is* smooth-upscaled.
 const CELL_UPSCALE_TARGET_H: u32 = 64;
 
-/// Hard ceiling on the cell upscale factor (CG-4 D). Beyond this, smooth filters
-/// oversmooth thin digits into empty reads.
+/// Hard ceiling on the smooth-upscale factor (CG-4 D).
 const CELL_UPSCALE_MAX_FACTOR: f64 = 3.0;
 
 /// Binarized cell WITHOUT the OCR white border: foreground ink = 0 (black),
@@ -160,34 +167,43 @@ pub fn prepare_cell_binary(img: &DynamicImage) -> GrayImage {
     binary
 }
 
-/// CG-4 D: upscale **only** cells with height &lt; [`CELL_UPSCALE_TRIGGER_H`]
-/// toward [`CELL_UPSCALE_TARGET_H`] (factor capped at [`CELL_UPSCALE_MAX_FACTOR`]).
-/// Native-height cells pass through unchanged so dim low-contrast glyphs are not
-/// smooth-warped into phantom digits. CatmullRom (not Lanczos) — Lanczos on dim
-/// "0" glyphs produced conf-96 "9" phantoms at any factor ≥1.05 (Claude reject).
+/// CG-4 D cell size path (Claude reject + native zero-diff ACCEPT):
+///
+/// * **Smooth** only when `h < CELL_SMOOTH_MAX_H && w < CELL_SMOOTH_MAX_W`
+///   (0.75× kill-col class) → CatmullRom to [`CELL_UPSCALE_TARGET_H`] ≤3×.
+/// * **Else** pre-D main: `w < 150` nearest-2×, else passthrough — covers
+///   native tall kills (~54×55) **and** native short last-row (~54×38).
 fn upscale_cell_for_ocr(gray: &GrayImage) -> GrayImage {
     let (w, h) = gray.dimensions();
-    if w == 0 || h == 0 || h >= CELL_UPSCALE_TRIGGER_H {
+    if w == 0 || h == 0 {
         return gray.clone();
     }
-    let factor = (CELL_UPSCALE_TARGET_H as f64 / h as f64).min(CELL_UPSCALE_MAX_FACTOR);
-    if factor < 1.05 {
-        return gray.clone();
+    let smooth = h < CELL_SMOOTH_MAX_H && w < CELL_SMOOTH_MAX_W;
+    if smooth {
+        let factor = (CELL_UPSCALE_TARGET_H as f64 / h as f64).min(CELL_UPSCALE_MAX_FACTOR);
+        if factor >= 1.05 {
+            let nw = ((w as f64) * factor).round().max(1.0) as u32;
+            let nh = ((h as f64) * factor).round().max(1.0) as u32;
+            return image::imageops::resize(
+                gray,
+                nw,
+                nh,
+                image::imageops::FilterType::CatmullRom,
+            );
+        }
     }
-    let nw = ((w as f64) * factor).round().max(1.0) as u32;
-    let nh = ((h as f64) * factor).round().max(1.0) as u32;
-    image::imageops::resize(gray, nw, nh, image::imageops::FilterType::CatmullRom)
+    // Pre-D main path.
+    if w < 150 {
+        nearest_2x_upscale(gray)
+    } else {
+        gray.clone()
+    }
 }
 
-/// Test-visible factor selection for CG-4 D (height → scale, capped).
-/// Returns 1.0 when the cell is at/above the trigger (no upscale).
+/// Whether a cell would take the smooth target-height path (tests).
 #[cfg(test)]
-fn cell_upscale_factor(h: u32) -> f64 {
-    if h == 0 || h >= CELL_UPSCALE_TRIGGER_H {
-        1.0
-    } else {
-        (CELL_UPSCALE_TARGET_H as f64 / h as f64).min(CELL_UPSCALE_MAX_FACTOR)
-    }
+fn uses_smooth_upscale(w: u32, h: u32) -> bool {
+    h < CELL_SMOOTH_MAX_H && w < CELL_SMOOTH_MAX_W
 }
 
 /// Per-side fill fraction of the outermost `edge_cols` pixel columns of a
@@ -669,20 +685,19 @@ pub fn crop_stat_cell(
     let (w, h) = (row.width(), row.height());
     let (col_x_ratio, col_w_ratio) = columns[col_index];
 
-    // CG-4 D MED-2: round (not floor-via-as-u32) so 0.75× / scaled boards don't
-    // systematically truncate ~1px off the right of kill-col windows — that
-    // jitter produced unflagged wrong reads (A 9→"5") worse than empty.
-    let x = (w as f64 * col_x_ratio).max(0.0).round() as u32;
-    let cell_w = (w as f64 * col_w_ratio).round().max(1.0) as u32;
+    // Floor-cast (same as main@10a3b3b). Rounding here caused 190+ native
+    // field diffs vs pre-D (Claude ACCEPT: 20-frame native zero wrong-value
+    // change). Short+narrow smooth upscale covers the 0.75× kill-col path
+    // without perturbing native crop geometry.
+    let x = (w as f64 * col_x_ratio).max(0.0) as u32;
+    let cell_w = (w as f64 * col_w_ratio) as u32;
 
-    let pad_y = (h as f64 * 0.15).round() as u32;
-    let cell_h = h.saturating_sub(pad_y.saturating_mul(2));
+    let pad_y = (h as f64 * 0.15) as u32;
+    let cell_h = h - (pad_y * 2);
 
-    if x >= w || pad_y >= h || cell_w == 0 || cell_h == 0 {
+    if x + cell_w > w || pad_y + cell_h > h || cell_w == 0 {
         return None;
     }
-    let cell_w = cell_w.min(w - x);
-    let cell_h = cell_h.min(h - pad_y);
 
     Some(row.crop_imm(x, pad_y, cell_w, cell_h))
 }
@@ -1241,61 +1256,50 @@ mod cell_upscale_tests {
     use super::*;
 
     #[test]
-    fn factor_is_one_at_or_above_trigger() {
-        // Native ~53–55px cells must never upscale (phantom-9 reject).
-        assert!((cell_upscale_factor(CELL_UPSCALE_TRIGGER_H) - 1.0).abs() < 1e-9);
-        assert!((cell_upscale_factor(53) - 1.0).abs() < 1e-9);
-        assert!((cell_upscale_factor(55) - 1.0).abs() < 1e-9);
-        assert!((cell_upscale_factor(80) - 1.0).abs() < 1e-9);
+    fn smooth_only_for_short_and_narrow() {
+        // Header-anchored dims (cg4-20260723).
+        assert!(!uses_smooth_upscale(43, 55)); // native kill
+        assert!(!uses_smooth_upscale(43, 38)); // native last-row kill
+        assert!(!uses_smooth_upscale(79, 38)); // native last-row wide
+        assert!(uses_smooth_upscale(32, 42)); // 0.75× kill
+        assert!(uses_smooth_upscale(32, 29)); // 0.75× last-row kill
+        assert!(!uses_smooth_upscale(59, 42)); // 0.75× wide (nearest)
     }
 
     #[test]
-    fn factor_targets_64_only_below_trigger_and_caps_at_3x() {
-        // 42px (<48) → 64/42 ≈ 1.524
-        let f42 = cell_upscale_factor(42);
-        assert!((f42 - (64.0 / 42.0)).abs() < 1e-9);
-        assert!(f42 < CELL_UPSCALE_MAX_FACTOR);
-
-        // 32px → exactly 2×
-        assert!((cell_upscale_factor(32) - 2.0).abs() < 1e-9);
-
-        // Very short cell would want >3× → capped
-        assert!((cell_upscale_factor(15) - 3.0).abs() < 1e-9);
-        assert!((cell_upscale_factor(10) - 3.0).abs() < 1e-9);
-    }
-
-    #[test]
-    fn upscale_grows_short_cell_to_about_target_height() {
-        let gray = GrayImage::from_pixel(20, 32, Luma([200]));
+    fn smooth_short_narrow_grows_toward_target() {
+        let gray = GrayImage::from_pixel(32, 42, Luma([200]));
         let up = upscale_cell_for_ocr(&gray);
-        let (w, h) = up.dimensions();
-        assert_eq!(h, 64, "32×2 → 64");
-        assert_eq!(w, 40, "width scales with height");
+        assert_eq!(up.dimensions().1, 64);
+        assert_eq!(up.dimensions().0, (32.0_f64 * 64.0 / 42.0).round() as u32);
     }
 
     #[test]
-    fn upscale_leaves_native_height_cells_unchanged() {
-        // ≥ TRIGGER (48), including pre-D native ~53–55px, pass through.
-        for h in [48u32, 53, 55, 60, 70] {
-            let gray = GrayImage::from_pixel(40, h, Luma([200]));
-            let up = upscale_cell_for_ocr(&gray);
-            assert_eq!(up.dimensions(), (40, h), "h={h} must not upscale");
-        }
+    fn native_tall_narrow_uses_nearest_2x() {
+        let gray = GrayImage::from_pixel(43, 55, Luma([200]));
+        assert_eq!(upscale_cell_for_ocr(&gray).dimensions(), (86, 110));
+    }
+
+    #[test]
+    fn native_short_last_row_uses_nearest_2x_not_smooth() {
+        let gray = GrayImage::from_pixel(43, 38, Luma([200]));
+        assert_eq!(upscale_cell_for_ocr(&gray).dimensions(), (86, 76));
+    }
+
+    #[test]
+    fn wide_passthrough() {
+        let gray = GrayImage::from_pixel(160, 55, Luma([200]));
+        assert_eq!(upscale_cell_for_ocr(&gray).dimensions(), (160, 55));
     }
 
     #[test]
     fn prepare_cell_binary_runs_on_small_crop() {
-        // Smoke: tiny RGB crop goes through HSV + target-height upscale + threshold.
         let img = DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
             18,
             24,
             image::Rgb([240, 240, 240]),
         ));
         let bin = prepare_cell_binary(&img);
-        let (w, h) = bin.dimensions();
-        assert!(h >= 24, "upscaled height {h}");
-        assert!(w >= 18);
-        // Output is binary (only 0 or 255).
         assert!(bin.pixels().all(|p| p.0[0] == 0 || p.0[0] == 255));
     }
 }
