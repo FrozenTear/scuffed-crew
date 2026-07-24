@@ -12,6 +12,30 @@ use serde::{Deserialize, Serialize};
 use scuffed_site_server::extractors::{OfficerUser, OrgMember};
 use scuffed_site_server::state::AppState;
 
+fn internal_err(e: impl std::fmt::Display, ctx: &str) -> (StatusCode, Json<ErrorResponse>) {
+    tracing::error!(error = %e, "{ctx}");
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(ErrorResponse {
+            error: "Internal error".into(),
+        }),
+    )
+}
+
+fn bad_request_logged(
+    e: impl std::fmt::Display,
+    ctx: &str,
+    client_msg: &str,
+) -> (StatusCode, Json<ErrorResponse>) {
+    tracing::error!(error = %e, "{ctx}");
+    (
+        StatusCode::BAD_REQUEST,
+        Json(ErrorResponse {
+            error: client_msg.into(),
+        }),
+    )
+}
+
 /// POST /api/chat/auth-token — provision a NIP-42 auth event for relay authentication.
 ///
 /// Flow:
@@ -57,15 +81,7 @@ pub async fn provision_auth_token(
             let challenge = body.challenge.as_deref().unwrap_or("");
             let response = auth_service
                 .provision_auth_event(encrypted, pubkey, &body.relay_url, challenge)
-                .map_err(|e| {
-                    tracing::error!("Auth event provisioning failed: {e}");
-                    (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(ErrorResponse {
-                            error: format!("Failed to provision auth event: {e}"),
-                        }),
-                    )
-                })?;
+                .map_err(|e| internal_err(e, "Auth event provisioning failed"))?;
 
             Ok(Json(response))
         }
@@ -107,14 +123,7 @@ pub async fn provision_auth_token(
             let challenge = body.challenge.as_deref().unwrap_or("");
             let response = auth_service
                 .provision_auth_event(&encrypted, &pubkey, &body.relay_url, challenge)
-                .map_err(|e| {
-                    (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(ErrorResponse {
-                            error: format!("Failed to provision auth event: {e}"),
-                        }),
-                    )
-                })?;
+                .map_err(|e| internal_err(e, "Auth event provisioning failed after keygen"))?;
 
             Ok(Json(response))
         }
@@ -320,15 +329,7 @@ pub async fn send_encrypted(
             body.reply_to.as_deref(),
         )
         .await
-        .map_err(|e| {
-            tracing::error!("Gift wrap construction failed: {e}");
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: format!("Encryption failed: {e}"),
-                }),
-            )
-        })?;
+        .map_err(|e| internal_err(e, "Gift wrap construction failed"))?;
 
     let recipients_count = gift_wraps.len();
 
@@ -439,15 +440,7 @@ pub async fn decrypt_message(
     let msg = enc_service
         .unwrap_gift_wrap_json(encrypted_key, recipient_pubkey, &body.event_json)
         .await
-        .map_err(|e| {
-            tracing::error!("Gift wrap decryption failed: {e}");
-            (
-                StatusCode::BAD_REQUEST,
-                Json(ErrorResponse {
-                    error: format!("Decryption failed: {e}"),
-                }),
-            )
-        })?;
+        .map_err(|e| bad_request_logged(e, "Gift wrap decryption failed", "Decryption failed"))?;
 
     Ok(Json(DecryptMessageResponse {
         sender_pubkey: msg.sender_pubkey,
