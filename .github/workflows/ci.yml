@@ -69,8 +69,19 @@ jobs:
   build-and-test:
     name: Build & Test
     runs-on: ubuntu-latest
+    env:
+      # Debuginfo dominates target/ size; without it the workspace build fits
+      # the hosted runner's disk alongside the restored cache. Backtraces in CI
+      # lose line numbers, which we accept — panic messages stay intact.
+      CARGO_PROFILE_DEV_DEBUG: "0"
     steps:
       - uses: actions/checkout@v4
+
+      - name: Free runner disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /opt/hostedtoolcache/CodeQL
+          df -h /
 
       - name: Install system dependencies
         run: |
