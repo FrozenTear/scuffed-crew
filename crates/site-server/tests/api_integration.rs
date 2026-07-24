@@ -5521,3 +5521,49 @@ async fn update_roster_role_404_when_not_on_roster() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
+
+// ─── Relay health (F-AUI-003) ───────────────────────────────────────────────
+
+#[tokio::test]
+async fn nostr_health_unconfigured_when_relay_url_none() {
+    let state = test_state().await;
+    let app = create_router(state);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/nostr/health")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    assert_eq!(json["configured"], false);
+    assert_eq!(json["reachable"], false);
+    assert!(json["relay_url"].is_null());
+}
+
+#[tokio::test]
+async fn nostr_health_blank_relay_url_not_configured() {
+    // Prod mis-set NOSTR_RELAY_URL="" used to yield configured:true + empty URL.
+    let mut state = test_state().await;
+    state.relay_url = Some(String::new());
+    let app = create_router(state);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/nostr/health")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    assert_eq!(json["configured"], false);
+    assert_eq!(json["reachable"], false);
+    assert!(json["relay_url"].is_null());
+}

@@ -7,7 +7,7 @@ use scuffed_db::migrations::run_migrations;
 use scuffed_site_server::{
     create_router,
     notifications::Notifier,
-    state::{AppState, OAuthConfig},
+    state::{AppState, OAuthConfig, relay_url_from_env},
     uploads,
 };
 use tracing_subscriber::EnvFilter;
@@ -503,11 +503,11 @@ async fn main() {
         tracing::info!("ENCRYPTION_KEY not set — Nostr key encryption disabled");
     }
 
-    let relay_url = std::env::var("NOSTR_RELAY_URL").ok();
+    let relay_url = relay_url_from_env();
     if let Some(ref url) = relay_url {
         tracing::info!("Nostr relay URL: {url}");
     } else {
-        tracing::info!("NOSTR_RELAY_URL not set — kind 0 profile publishing disabled");
+        tracing::info!("NOSTR_RELAY_URL not set (or blank) — kind 0 profile publishing disabled");
     }
 
     // Start the persistent NIP-44 DM relay subscriber (Phase 5 real-time delivery,
