@@ -138,13 +138,17 @@ pub struct UpdateRosterRoleRequest {
 }
 
 /// PUT /api/teams/:id/roster/:member_id — update team role (officer+)
+///
+/// Returns the updated entry as JSON (same shape as POST/GET) — the admin UI
+/// deserializes success bodies, so a bare `200 OK` reads as a false failure
+/// (F-AUI-001). 404 when the member has no active roster edge on the team.
 pub async fn update_roster_role(
     State(state): State<AppState>,
     _officer: OfficerUser,
     Path((team_id, member_id)): Path<(String, String)>,
     Json(body): Json<UpdateRosterRoleRequest>,
-) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
-    state
+) -> Result<Json<RosterMemberResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let entry = state
         .db
         .update_roster_role(&member_id, &team_id, body.team_role)
         .await
@@ -153,6 +157,14 @@ pub async fn update_roster_role(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
                     error: "Internal error".into(),
+                }),
+            )
+        })?
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse {
+                    error: "Member is not on this team's roster".into(),
                 }),
             )
         })?;
@@ -167,7 +179,7 @@ pub async fn update_roster_role(
     )
     .await;
 
-    Ok(StatusCode::OK)
+    Ok(Json(enrich(&state, entry).await))
 }
 
 /// DELETE /api/teams/:id/roster/:member_id — remove from roster (officer+)

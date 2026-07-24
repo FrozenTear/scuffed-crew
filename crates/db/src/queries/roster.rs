@@ -206,17 +206,25 @@ impl Database {
         .await
     }
 
-    /// Update a member's role on a team.
+    /// Update a member's role on a team. Returns the updated entry, or `None`
+    /// when the member has no active roster edge on the team (nothing updated).
     pub async fn update_roster_role(
         &self,
         member_id: &str,
         team_id: &str,
         new_role: TeamRole,
-    ) -> DbResult<()> {
+    ) -> DbResult<Option<RosterEntry>> {
         with_timeout(async {
-            self.client
+            // UPDATE then SELECT back with string casts for proper deserialization
+            let mut result = self
+                .client
                 .query(
                     r#"UPDATE plays_on SET team_role = $role
+                       WHERE in = $member_rid
+                       AND out = $team_rid
+                       AND is_active = true;
+                       SELECT *, meta::id(id) as id, <string>in as in, <string>out as out
+                       FROM plays_on
                        WHERE in = $member_rid
                        AND out = $team_rid
                        AND is_active = true"#,
@@ -225,7 +233,8 @@ impl Database {
                 .bind(("member_rid", member_rid(member_id)))
                 .bind(("team_rid", team_rid(team_id)))
                 .await?;
-            Ok(())
+            let entries: Vec<DbRosterEntry> = result.take(1)?;
+            Ok(entries.into_iter().next().map(db_to_roster_entry))
         })
         .await
     }
@@ -313,6 +322,49 @@ mod tests {
         let roster = db.get_team_roster_named("t1").await.expect("join");
         assert_eq!(roster.len(), 1);
         assert_eq!(roster[0].member_id, "alice");
+    }
+
+    #[tokio::test]
+    async fn update_roster_role_returns_updated_entry() {
+        let db = seeded_db().await;
+        db.add_to_roster("alice", "t1", TeamRole::Player)
+            .await
+            .expect("add alice");
+
+        let updated = db
+            .update_roster_role("alice", "t1", TeamRole::Coach)
+            .await
+            .expect("update role")
+            .expect("alice is on the roster");
+        assert_eq!(updated.member_id, "alice");
+        assert_eq!(updated.team_id, "t1");
+        assert_eq!(updated.team_role, TeamRole::Coach);
+
+        let roster = db.get_team_roster_named("t1").await.expect("join");
+        assert_eq!(roster[0].team_role, TeamRole::Coach);
+    }
+
+    #[tokio::test]
+    async fn update_roster_role_none_when_not_on_roster() {
+        let db = seeded_db().await;
+        let updated = db
+            .update_roster_role("bob", "t1", TeamRole::Coach)
+            .await
+            .expect("update runs");
+        assert!(updated.is_none(), "no active edge => None");
+
+        // Inactive edge must not be updated either.
+        db.add_to_roster("alice", "t1", TeamRole::Player)
+            .await
+            .expect("add alice");
+        db.remove_from_roster("alice", "t1")
+            .await
+            .expect("soft delete");
+        let updated = db
+            .update_roster_role("alice", "t1", TeamRole::Coach)
+            .await
+            .expect("update runs");
+        assert!(updated.is_none(), "inactive edge => None");
     }
 
     #[tokio::test]

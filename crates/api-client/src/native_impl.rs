@@ -35,9 +35,11 @@ async fn json_request<B: serde::Serialize, T: serde::de::DeserializeOwned>(
         return Err(ClientError::Http { status, body });
     }
 
-    resp.json()
+    let text = resp
+        .text()
         .await
-        .map_err(|e| ClientError::Deserialize(e.to_string()))
+        .map_err(|e| ClientError::Network(e.to_string()))?;
+    crate::decode_body(&text)
 }
 
 pub async fn get<T: serde::de::DeserializeOwned>(
@@ -64,9 +66,11 @@ pub async fn get<T: serde::de::DeserializeOwned>(
         return Err(ClientError::Http { status, body });
     }
 
-    resp.json()
+    let text = resp
+        .text()
         .await
-        .map_err(|e| ClientError::Deserialize(e.to_string()))
+        .map_err(|e| ClientError::Network(e.to_string()))?;
+    crate::decode_body(&text)
 }
 
 pub async fn post_empty(
