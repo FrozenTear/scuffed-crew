@@ -5460,3 +5460,64 @@ async fn upload_avatar_quota_exceeded_rejected() {
 
     std::fs::remove_dir_all(&dir).ok();
 }
+
+// ─── Roster role update contract (F-AUI-001) ────────────────────────────────
+
+#[tokio::test]
+async fn update_roster_role_returns_json_entry() {
+    let state = test_state().await;
+    seed_all_roles(&state.db).await;
+    seed_game(&state.db, "ow2", "Overwatch 2").await;
+    seed_team(&state.db, "teamalpha", "Alpha Squad", "ow2").await;
+    state
+        .db
+        .add_to_roster("membermember", "teamalpha", scuffed_db::TeamRole::Player)
+        .await
+        .expect("add to roster");
+
+    // The admin UI deserializes success bodies — a bare 200 OK with no body
+    // false-fails, so the route must return the updated entry as JSON.
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(authed_json_request(
+            Method::PUT,
+            "/api/teams/teamalpha/roster/membermember",
+            OFFICER_TOKEN,
+            json!({ "team_role": "coach" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    assert_eq!(json["member_id"], "membermember");
+    assert_eq!(json["member_name"], "TestMember");
+    assert_eq!(json["team_role"], "coach");
+
+    // Server truth matches the response.
+    let roster = state
+        .db
+        .get_team_roster_named("teamalpha")
+        .await
+        .expect("roster");
+    assert_eq!(roster[0].team_role.to_string(), "coach");
+}
+
+#[tokio::test]
+async fn update_roster_role_404_when_not_on_roster() {
+    let state = test_state().await;
+    seed_all_roles(&state.db).await;
+    seed_game(&state.db, "ow2", "Overwatch 2").await;
+    seed_team(&state.db, "teamalpha", "Alpha Squad", "ow2").await;
+
+    let app = create_router(state);
+    let resp = app
+        .oneshot(authed_json_request(
+            Method::PUT,
+            "/api/teams/teamalpha/roster/membermember",
+            OFFICER_TOKEN,
+            json!({ "team_role": "coach" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}

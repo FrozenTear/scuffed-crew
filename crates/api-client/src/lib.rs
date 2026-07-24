@@ -24,6 +24,14 @@ fn format_http_error(status: u16, body: &str) -> String {
     }
 }
 
+/// Decode a success-response body. An empty body decodes as JSON `null`, so
+/// callers that discard the payload (`*_json_empty` deserializing `Value`)
+/// succeed on a bare `200 OK` instead of failing with an EOF parse error.
+pub(crate) fn decode_body<T: DeserializeOwned>(text: &str) -> Result<T, ClientError> {
+    let text = if text.trim().is_empty() { "null" } else { text };
+    serde_json::from_str(text).map_err(|e| ClientError::Deserialize(e.to_string()))
+}
+
 /// Base URL for API requests.
 /// In web mode, this is empty (same-origin). In native mode, it's configurable.
 pub struct ApiClient {
@@ -210,7 +218,40 @@ impl ApiClient {
 
 #[cfg(test)]
 mod tests {
-    use super::format_http_error;
+    use super::{decode_body, format_http_error};
+
+    #[test]
+    fn empty_success_body_decodes_as_null() {
+        // *_json_empty helpers discard the payload as Value — a bare 200 OK
+        // with no body must succeed (F-AUI-004).
+        let v: serde_json::Value = decode_body("").expect("empty body ok");
+        assert!(v.is_null());
+        let v: serde_json::Value = decode_body("  \n").expect("whitespace body ok");
+        assert!(v.is_null());
+    }
+
+    #[test]
+    fn empty_body_still_fails_for_typed_responses() {
+        #[derive(serde::Deserialize)]
+        struct Entry {
+            #[allow(dead_code)]
+            member_id: String,
+        }
+        assert!(
+            decode_body::<Entry>("").is_err(),
+            "typed callers need a body"
+        );
+    }
+
+    #[test]
+    fn populated_body_decodes_typed() {
+        #[derive(serde::Deserialize)]
+        struct Entry {
+            member_id: String,
+        }
+        let e: Entry = decode_body(r#"{"member_id":"alice"}"#).expect("decode");
+        assert_eq!(e.member_id, "alice");
+    }
 
     #[test]
     fn http_error_includes_server_message() {
