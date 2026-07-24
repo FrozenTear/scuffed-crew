@@ -279,9 +279,10 @@ internal error text to clients: `format!("Encryption failed: {e}")` (:328),
 tournaments, forum and members but never reached chat. Mirror B5 exactly.
 
 **(b) Connection reuse — [R], the first sketch of this item aimed at the wrong
-seam.** `send_encrypted` (:336) opens a fresh relay WebSocket per request and
-publishes gift wraps sequentially. But note `chat.rs:337`: it publishes to
-**`channel.relay_url` — a per-channel DB column** (`types.rs:777`), NOT the
+seam.** `send_encrypted` (`chat.rs:194`) opens a fresh relay WebSocket per
+request (`RelayClient::new`, `:338`) and publishes gift wraps sequentially. But
+note `chat.rs:337`: it publishes to
+**`channel.relay_url` — a per-channel DB column** (`db/src/types.rs:777`), NOT the
 process-wide `AppState.relay_url` / `NOSTR_RELAY_URL`. The `dm_subscriber`
 persistent connection is built from the env URL (`dm_subscriber.rs:132`), so
 "just reuse dm_subscriber's connection" would silently publish every channel's
@@ -294,8 +295,9 @@ relay. Research first: whether `RelayClient` tolerates concurrent publishes,
 and whether channels in practice all share one relay URL today (if provably
 yes and enforced, a simpler design is defensible — document the invariant).
 **Files.** (a) `crates/server/src/routes/chat.rs` only. (b) also
-`crates/server/src/state.rs` or wherever the unified server's shared state
-lives, `crates/chat/src/relay.rs`.
+`crates/site-server/src/state.rs` (the unified server has no state module of
+its own — it imports `scuffed_site_server::state::AppState`,
+`crates/server/src/main.rs:13`) and `crates/chat/src/nostr/relay.rs`.
 **Done when.** (a) no `{e}` reaches a chat client; detail still in logs.
 (b) one message to N officers reuses a connection **to that channel's relay**;
 concurrent publishes; B7's "502 if any gift-wrap publish fails" preserved; a
