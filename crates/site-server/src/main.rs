@@ -528,6 +528,7 @@ async fn main() {
         crypto,
         relay_url,
         dm_events,
+        nip05_domain: scuffed_site_server::state::nip05_domain_from_env(),
     };
 
     // Spawn hourly session cleanup task

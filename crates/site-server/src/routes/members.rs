@@ -389,6 +389,7 @@ fn publish_profile_metadata(state: &AppState, member: &Member) {
     let display_name = member.display_name.clone();
     let bio = member.bio.clone();
     let avatar_url = member.avatar_url.clone();
+    let nip05_domain = state.nip05_domain.clone();
 
     tokio::spawn(async move {
         let mut secret_hex = match db.get_nostr_secret_key(&member_id).await {
@@ -412,17 +413,18 @@ fn publish_profile_metadata(state: &AppState, member: &Member) {
         };
         secret_hex.zeroize();
 
-        // Build NIP-05 identifier from display name
-        let nip05_name: String = display_name
-            .to_lowercase()
-            .chars()
-            .filter(|c| c.is_ascii_alphanumeric() || *c == '_')
-            .collect();
-        let nip05 = if nip05_name.is_empty() {
-            None
-        } else {
-            Some(format!("{nip05_name}@scuffed.gg"))
-        };
+        // Build the NIP-05 identifier from the display name + the *configured*
+        // domain. When no valid public domain is configured this is `None` and
+        // the kind-0 event publishes without a `nip05` field — deliberately.
+        // These events are immutable on relays, so minting an identity against
+        // a domain we do not control would break verification for that member
+        // permanently and hand takeover to whoever registers the domain.
+        let nip05 = crate::state::nip05_identifier(&display_name, nip05_domain.as_deref());
+        if nip05.is_none() {
+            tracing::debug!(
+                "Publishing kind-0 profile without nip05 (no valid NIP05_DOMAIN configured)"
+            );
+        }
 
         let event = match EventBuilder::build_profile_metadata(
             &keys,

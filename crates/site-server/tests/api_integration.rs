@@ -48,6 +48,7 @@ async fn test_state() -> AppState {
         crypto: None,
         relay_url: None,
         dm_events: None,
+        nip05_domain: None,
     }
 }
 
@@ -1508,7 +1509,7 @@ async fn nip05_json_has_cors_header() {
 #[tokio::test]
 async fn nip05_json_includes_relay_hints_when_configured() {
     let mut state = test_state().await;
-    state.relay_url = Some("wss://relay.scuffed.gg".into());
+    state.relay_url = Some("wss://relay.example.com".into());
     seed_all_roles(&state.db).await;
 
     let fake_pubkey = "c".repeat(64);
@@ -1535,7 +1536,55 @@ async fn nip05_json_includes_relay_hints_when_configured() {
     let relays = json["relays"].as_object().unwrap();
     assert_eq!(relays.len(), 1);
     let hints = relays[&fake_pubkey].as_array().unwrap();
-    assert_eq!(hints[0], "wss://relay.scuffed.gg");
+    assert_eq!(hints[0], "wss://relay.example.com");
+}
+
+/// A deploy with no valid public NIP-05 domain must report **no** identifier
+/// rather than minting one against a domain it does not control. This is the
+/// default-configuration case (loopback `REDIRECT_BASE_URL`, no `NIP05_DOMAIN`)
+/// and the one that shipped broken: identities were published as
+/// `name@scuffed.gg`, a domain the org does not own.
+#[tokio::test]
+async fn me_omits_nip05_when_no_domain_configured() {
+    let state = test_state().await;
+    assert!(
+        state.nip05_domain.is_none(),
+        "test_state models a default deploy"
+    );
+    seed_all_roles(&state.db).await;
+
+    let app = create_router(state);
+    let resp = app
+        .oneshot(authed_request(Method::GET, "/api/auth/me", MEMBER_TOKEN))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let me = body_json(resp).await;
+    assert!(
+        me["nip05"].is_null(),
+        "no configured domain must yield no identifier, got {:?}",
+        me["nip05"]
+    );
+}
+
+#[tokio::test]
+async fn me_reports_nip05_when_domain_configured() {
+    let mut state = test_state().await;
+    state.nip05_domain = Some("ow.scuffedcrew.no".into());
+    seed_all_roles(&state.db).await;
+
+    let app = create_router(state);
+    let resp = app
+        .oneshot(authed_request(Method::GET, "/api/auth/me", MEMBER_TOKEN))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let me = body_json(resp).await;
+    // "TestMember" normalizes to "testmember" — same rule the well-known uses,
+    // so the identifier the client shows resolves against our own nostr.json.
+    assert_eq!(me["nip05"], "testmember@ow.scuffedcrew.no");
 }
 
 // ─── Nostr Challenge / Verify ──────────────────────────────────────────────
