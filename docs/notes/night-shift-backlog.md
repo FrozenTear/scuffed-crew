@@ -13,13 +13,15 @@ Every item: problem, fix plan, files, size, done-criteria. Standing rules per
 IRON LAW), dual-agree before merge (author never merges own branch), human holds
 the tag/release gate.
 
-**⚠ Coordination change: no Memtrace on this machine tonight.** The fleet log is
-unavailable, so the protocol's "all findings on the fleet channel" rule has no
-transport. Substitute, in priority order: (1) **branch + PR per item** — the PR
-body is the finding record; (2) **this doc** — append status inline as items
-land; (3) commit bodies for dissent (record it verbatim, same as the log rule).
-Git/gh was already the authority after restarts; tonight it is the *only*
-authority. Do not block waiting for a channel that isn't there.
+**Coordination (updated 2026-07-25, supersedes the "no Memtrace tonight"
+clause).** The fleet transport is **back up** — `fleet_status` answers,
+`backend: memdb`. The protocol's "all findings on the fleet channel" rule is
+live again. It is still not the authority: **git/gh outranks the fleet log**,
+and the ordering below holds if they disagree — (1) **branch + PR per item**,
+the PR body is the finding record; (2) **this doc**, append status inline as
+items land; (3) commit bodies for dissent, recorded verbatim; (4) the fleet log
+for pointers and presence (≤400 chars, per §P). If the channel drops again
+mid-shift, do not block on it — fall through to 1–3 and carry on.
 
 ---
 
@@ -53,16 +55,57 @@ branch — pair up: whoever implements NS2-1 reviews NS2-3, etc. Research-first
 items are marked **[R]**: post the research result in the PR/draft *before*
 writing the fix, so a wrong premise dies cheap.
 
-| Order | ID | Branch suggestion | Gate |
-|---|---|---|---|
-| 1 | NS2-1 + NS2-2 | `ci/app-tests-and-clippy-all-targets` | measure disk before merging (see NS2-1) |
-| 2 | NS2-3 **[R]** | `fix/nip05-domain` | **USER decision on canonical domain before merge.** Land only the omit-bad-`nip05`-on-new-publishes path — **do not merge anything that auto-republishes** kind-0 to relays |
-| 3 | NS2-4 **[R]** | `fix/nip05-wellknown-conformance` | pairs with NS2-3, same reviewer |
-| 4 | NS2-5 | `fix/public-member-profile-n1` | includes the `plays_on` index |
-| 5 | NS2-6 | `fix/unthrottled-public-routes` | — |
-| 6 | NS2-7a | `fix/chat-error-hygiene` | small, independent |
-| 7 | NS2-7b **[R]** | `feat/chat-relay-conn-reuse` | per-channel relay — read the caution in item 7 first |
-| 8 | NS2-8 | `docs/fix-list-hygiene` | filler while builds run |
+**Amended 2026-07-25 (claude, USER-approved).** The order below replaces the
+first draft's. Four changes, each with its reason — the items themselves are
+unchanged, only their sequence, ownership, and gating:
+
+1. **NS2-3 splits into 3a / 3b.** The draft gated the whole branch on USER's
+   canonical-domain answer, which held the *defensive* half hostage to a
+   decision nobody can make at 03:00. **3a** — omit `nip05` unless a validated
+   non-loopback public domain is configured — needs no decision, closes the
+   hijack exposure, and merges tonight. **3b** — set the real domain, republish
+   kind-0 — stays USER-gated and does not start.
+2. **NS2-1 moves from first to last.** It is labelled TINY, but it adds a full
+   native `scuffed-app` compile to the exact job that died **three times in two
+   days** on runner disk (`e0d16e6`). Landing it first means a CI regression
+   poisons the signal for every other branch all night. Measure in a draft PR
+   early; **merge last**, after the other lanes have had clean runs. (The
+   exclusion itself dates to `3a4a906`, the original workflow commit — it was
+   never a considered disk mitigation, so dropping it overrides no decision.)
+3. **NS2-6 moves ahead of NS2-4a.** Option (a) explicitly leaves the 2000-row
+   scan in place and defers protection to "NS2-6 rate-limiting". If 4a lands
+   and 6 does not, 4a ships with its own justification unmet. 6 first makes 4a
+   honest. **4a must not merge before 6.**
+4. **Value ordering.** Seven of eight items are internal hygiene. NS2-3 is the
+   only thing broken for real users right now (NIP-05 verification fails for
+   every member, against a domain a stranger could register). It goes first.
+
+| Order | ID | Branch | Owner | Reviewer | Gate |
+|---|---|---|---|---|---|
+| 1 | NS2-3a | `fix/nip05-omit-unvalidated-domain` | claude | grok | no auto-republish; no domain decision needed |
+| 2 | NS2-7a | `fix/chat-error-hygiene` | grok | claude | independent, zero coupling |
+| 3 | NS2-6 | `fix/unthrottled-public-routes` | claude | grok | **blocks NS2-4a** |
+| 4 | NS2-4a | `fix/nip05-wellknown-conformance` | grok | claude | (a) only — **do not** do (b) tonight |
+| 5 | NS2-5 | `fix/public-member-profile-n1` | claude | grok | includes the `plays_on` index; sole `migrations.rs` writer |
+| 6 | NS2-8 | `docs/fix-list-hygiene` | grok | claude | filler while builds run |
+| 7 | NS2-2 | `ci/clippy-all-targets` | grok | claude | clear the 14 warnings in the same PR |
+| 8 | NS2-1 | `ci/app-tests` | claude | grok | draft-measure early, **merge last** |
+| — | NS2-7b **[R]** | `feat/chat-relay-conn-reuse` | either, stretch | the other | research note posted **before** code |
+| — | NS2-3b | — | nobody | — | **USER-gated. Do not start.** |
+
+**Lane rules.**
+- Owners author in their own worktree; the reviewer column is the dual-agree
+  partner. **Author never merges own branch** — unchanged, no exceptions.
+- **Only NS2-5 touches `crates/db/src/migrations.rs` tonight.** NS2-4's option
+  (b) is the other migration-writer and is explicitly out of scope, so there is
+  no second writer. If (b) somehow becomes urgent, it waits for NS2-5 to land.
+- Cross-lane dependency: **NS2-6 (claude) gates NS2-4a (grok).** grok can
+  author and open 4a early; it merges only after 6 is in.
+- If one agent runs alone, the lanes collapse but the gate does not: **work
+  becomes a queue of open, review-ready PRs for the morning.** That is a
+  successful shift, not a stalled one. Do not self-merge to "finish".
+- Estimate risk on NS2-2: the 14-warning count was measured native-only. The
+  wasm clippy step may surface more. Treat 14 as a floor, not a scope.
 
 Items **10–12** (§3) stay USER-gated — do not start them, but do not drop them
 either: if USER appears mid-shift, surface them. Item 9 is a logged non-action
@@ -152,7 +195,13 @@ Same root: `docs/external-clients.md:14,24,59` instructs members to add
 - Confirm the canonical domain with USER — `ow.scuffedcrew.no` today, but a
   future apex changes the answer, and republishing twice is worse than waiting.
 
-**Plan.** Derive the NIP-05 domain from configuration — but **NOT** by blindly
+**Plan.** Split into **3a** (tonight) and **3b** (USER-gated) per the §1
+amendment: 3a is everything below except the republish; 3b is the canonical
+domain answer plus the kind-0 republish, and does not start tonight. 3a needs
+no decision from USER — "omit when unvalidated" is correct under every possible
+answer to "which domain is ours".
+
+Derive the NIP-05 domain from configuration — but **NOT** by blindly
 reusing `state.oauth_config.redirect_base_url`: that value defaults to
 `http://localhost:3000` (`state.rs:90`) / `http://127.0.0.1:3000`
 (`compose.yml:76`) and the installer's public-URL prompt accepts blank. A naive
