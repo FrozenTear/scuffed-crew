@@ -301,7 +301,25 @@ pub fn AdminTeams() -> Element {
                                 let t_edit = team.clone();
                                 let t_del = team.clone();
                                 let t_roster = team.clone();
-                                let game_display = team.game_name.clone().unwrap_or_else(|| "\u{2014}".into());
+                                // API Team has no game_name; resolve from games list already loaded
+                                // for the create/edit form (F-AUI-002). Prefer API field if present.
+                                let game_display = team
+                                    .game_name
+                                    .clone()
+                                    .or_else(|| {
+                                        games
+                                            .data
+                                            .read()
+                                            .as_ref()
+                                            .and_then(|d| d.as_ref())
+                                            .and_then(|games_list| {
+                                                games_list
+                                                    .iter()
+                                                    .find(|g| g.id == team.game_id)
+                                                    .map(|g| g.name.clone())
+                                            })
+                                    })
+                                    .unwrap_or_else(|| "\u{2014}".into());
                                 let div_display = team.division.clone().unwrap_or_else(|| "\u{2014}".into());
                                 let color_display = team.color.clone().unwrap_or_else(|| "\u{2014}".into());
                                 rsx! {
