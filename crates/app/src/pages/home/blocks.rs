@@ -402,7 +402,7 @@ fn render_team_card(team: &OverviewTeam, game_map: &HashMap<String, String>) -> 
     let roster = if forming {
         "Open roster".to_string()
     } else {
-        format!("{} players", team.roster_count)
+        crate::util::pluralize(team.roster_count, "player", "players")
     };
     let wl = if team.record.wins == 0 && team.record.losses == 0 {
         String::new()

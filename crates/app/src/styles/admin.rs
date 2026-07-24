@@ -129,6 +129,15 @@ pub const CSS: &str = r#"
         background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
         padding: 1.25rem; text-align: center;
     }
+    a.summary-card-link {
+        display: block; text-decoration: none; color: inherit;
+        transition: border-color 0.15s, transform 0.15s;
+        cursor: pointer;
+    }
+    a.summary-card-link:hover {
+        border-color: var(--accent-soft);
+        transform: translateY(-1px);
+    }
     .summary-card .value {
         font-family: var(--font-head); font-size: 2.2rem; color: var(--accent);
         letter-spacing: 2px; line-height: 1;
@@ -137,6 +146,25 @@ pub const CSS: &str = r#"
         font-size: 0.75rem; color: var(--text-3); text-transform: uppercase;
         letter-spacing: 0.05em; margin-top: 0.3rem;
     }
+    .dash-health { margin: 0 0 1.25rem; }
+    .dash-chip {
+        display: inline-block; padding: 0.35rem 0.75rem; border-radius: var(--radius-pill);
+        font-size: 0.75rem; text-decoration: none; border: 1px solid var(--border);
+        background: var(--surface); color: var(--text-2);
+    }
+    .dash-chip.soft {
+        border-color: color-mix(in srgb, var(--text-3) 35%, transparent);
+        color: var(--text-3);
+    }
+    .dash-chip.warn {
+        border-color: color-mix(in srgb, var(--warn) 40%, transparent);
+        color: var(--warn);
+    }
+    .dash-chip.ok {
+        border-color: color-mix(in srgb, var(--ok) 40%, transparent);
+        color: var(--ok);
+    }
+    .dash-chip:hover { filter: brightness(1.08); }
 
     /* Pagination */
     .pagination { display: flex; align-items: center; gap: 0.75rem; margin-top: 1.5rem; }

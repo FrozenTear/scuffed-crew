@@ -126,23 +126,24 @@ pub const NAV_CATALOG: &[NavCatalogEntry] = &[
 
 impl Default for NavConfig {
     fn default() -> Self {
-        // Lean public chrome. Extra features stay in the catalog as Hidden
-        // so admins can promote them without a deploy.
+        // Small-org pack: day-to-day surfaces primary; competitive tools
+        // (tournaments / scrims / strategy) sit in More until the org uses them.
+        // Admins can re-order in Settings → Navigation without a deploy.
         Self {
             items: vec![
                 item("members", NavPlacement::Primary, 0),
-                item("tournaments", NavPlacement::Primary, 1),
-                item("news", NavPlacement::Primary, 2),
-                item("forum", NavPlacement::Primary, 3),
-                item("events", NavPlacement::More, 0),
-                item("stats", NavPlacement::More, 1),
+                item("forum", NavPlacement::Primary, 1),
+                item("events", NavPlacement::Primary, 2),
+                item("stats", NavPlacement::Primary, 3),
+                item("news", NavPlacement::More, 0),
+                item("tournaments", NavPlacement::More, 1),
+                item("scrims", NavPlacement::More, 2),
+                item("strategy", NavPlacement::More, 3),
                 item("community", NavPlacement::Hidden, 0),
                 item("feed", NavPlacement::Hidden, 1),
                 item("polls", NavPlacement::Hidden, 2),
                 item("blog", NavPlacement::Hidden, 3),
                 item("wiki", NavPlacement::Hidden, 4),
-                item("strategy", NavPlacement::Hidden, 5),
-                item("scrims", NavPlacement::Hidden, 6),
             ],
         }
     }
@@ -271,16 +272,17 @@ mod tests {
             .into_iter()
             .map(|i| i.id.as_str())
             .collect();
-        assert_eq!(primary, ["members", "tournaments", "news", "forum"]);
+        assert_eq!(primary, ["members", "forum", "events", "stats"]);
+        let more: Vec<_> = cfg
+            .items_in(NavPlacement::More)
+            .into_iter()
+            .map(|i| i.id.as_str())
+            .collect();
+        assert_eq!(more, ["news", "tournaments", "scrims", "strategy"]);
         assert!(
             cfg.items
                 .iter()
-                .any(|i| i.id == "strategy" && i.placement == NavPlacement::Hidden)
-        );
-        assert!(
-            cfg.items
-                .iter()
-                .any(|i| i.id == "scrims" && i.placement == NavPlacement::Hidden)
+                .any(|i| i.id == "tournaments" && i.placement == NavPlacement::More)
         );
     }
 

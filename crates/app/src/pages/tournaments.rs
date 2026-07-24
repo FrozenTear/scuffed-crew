@@ -163,7 +163,14 @@ pub fn Tournaments() -> Element {
                             .filter(|t| t.status != "draft")
                             .collect();
                         if visible.is_empty() {
-                            rsx! { p { class: "tournaments-empty", "No tournaments yet." } }
+                            rsx! {
+                                div { class: "tournaments-empty",
+                                    p { "No tournaments yet." }
+                                    p { style: "margin-top:0.5rem; font-size:0.85rem; color: var(--text-3);",
+                                        "When the org runs a bracket or open cup, it shows up here. Officers add them under Admin → Tournaments."
+                                    }
+                                }
+                            }
                         } else {
                             rsx! {
                                 div { class: "tournament-grid",

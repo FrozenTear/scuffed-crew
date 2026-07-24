@@ -1,5 +1,14 @@
 //! Small shared helpers used across pages and components.
 
+/// English count noun: `1 player`, `0 players`, `2 players`.
+pub fn pluralize(n: usize, singular: &str, plural: &str) -> String {
+    if n == 1 {
+        format!("1 {singular}")
+    } else {
+        format!("{n} {plural}")
+    }
+}
+
 /// Percent-encode a query-parameter value so values with spaces or non-ASCII
 /// (e.g. "Soldier: 76", "Lúcio", nostr pubkeys/timestamps) survive the URL.
 /// Keeps the RFC 3986 unreserved set literal (`A-Za-z0-9-_.~`); everything else
