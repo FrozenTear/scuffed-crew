@@ -554,8 +554,10 @@ mod tests {
 
     #[test]
     fn next_available_slot_5v5() {
-        let mut state = StrategyState::default();
-        state.team_format = TeamFormat::FiveVFive;
+        let mut state = StrategyState {
+            team_format: TeamFormat::FiveVFive,
+            ..Default::default()
+        };
 
         // First tank slot should be Tank1.
         assert_eq!(
@@ -649,10 +651,12 @@ mod tests {
 
     #[test]
     fn strategy_serialization_roundtrip() {
-        let mut state = StrategyState::default();
-        state.name = "Test Strategy".to_string();
-        state.description = Some("A test".to_string());
-        state.visibility = Visibility::Public;
+        let mut state = StrategyState {
+            name: "Test Strategy".to_string(),
+            description: Some("A test".to_string()),
+            visibility: Visibility::Public,
+            ..Default::default()
+        };
 
         let marker = StrategyElement::new(ElementType::PlayerMarker, Position::new(42.0, 99.0));
         state.add_element(marker);
