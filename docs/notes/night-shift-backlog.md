@@ -56,7 +56,7 @@ writing the fix, so a wrong premise dies cheap.
 | Order | ID | Branch suggestion | Gate |
 |---|---|---|---|
 | 1 | NS2-1 + NS2-2 | `ci/app-tests-and-clippy-all-targets` | measure disk before merging (see NS2-1) |
-| 2 | NS2-3 **[R]** | `fix/nip05-domain` | **USER decision on canonical domain before merge** |
+| 2 | NS2-3 **[R]** | `fix/nip05-domain` | **USER decision on canonical domain before merge.** Land only the omit-bad-`nip05`-on-new-publishes path — **do not merge anything that auto-republishes** kind-0 to relays |
 | 3 | NS2-4 **[R]** | `fix/nip05-wellknown-conformance` | pairs with NS2-3, same reviewer |
 | 4 | NS2-5 | `fix/public-member-profile-n1` | includes the `plays_on` index |
 | 5 | NS2-6 | `fix/unthrottled-public-routes` | — |
@@ -73,9 +73,18 @@ either: if USER appears mid-shift, surface them. Item 9 is a logged non-action
   (`stats.surrealkv` under the daemon's data dir). It holds the ONLY copies of
   the Route 66 (35 caps), Lijiang, and Ilios capture series — real-pixel
   regression material that exists nowhere in git (only the Havana series was
-  extracted, as the numeric fixture in `capture_gate.rs:669-769`). Item 10's
+  extracted, as the numeric fixture in `capture_gate.rs:673-769`). Item 10's
   off-machine backup has not happened yet. This guard was in the 07-17 doc and
   it still binds.
+- **`git fetch` before you orient, and cut every branch from `origin/main`.**
+  Every file:line pointer in this doc is stated against `origin/main` @
+  `6f239b6`. The shared checkout `~/github/scuffed-crew` was found 13 commits
+  stale during this PR's review (`6da9b95`), and verifying against it produced
+  two confidently-wrong "corrections" — `ci.yml`'s excludes sit at `:89/:92`
+  there vs `:100/:103` on `origin/main` (the 11-line offset is the
+  `Free runner disk space` step from `e0d16e6`), and `state.rs:90` reads as
+  `get_session_user` instead of the `REDIRECT_BASE_URL` default. A stale tree
+  turns a correct pointer into a review finding and back again; refetch first.
 - No tags, releases, force-push, data deletion, protected paths, policy
   overrides. Human-only.
 - Kind-0 / NIP-05 **republish is USER-gated** (item 3) — prepare the branch,
