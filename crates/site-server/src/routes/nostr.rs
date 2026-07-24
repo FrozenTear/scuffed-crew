@@ -73,10 +73,39 @@ fn normalize_nip05_name(display_name: &str) -> String {
 }
 
 /// GET /.well-known/nostr.json — NIP-05 identity verification endpoint.
+///
+/// Query semantics (NS2-4a):
+/// - `?name=<local>` — return that single normalized name if a member matches
+///   (display names are lowercased and stripped to `[a-z0-9_]` in Rust; no DB
+///   column yet — option (b) is out of scope tonight).
+/// - `?name=_` — NIP-05 **root** identifier for the domain itself, **not** a
+///   wildcard. We have no configured root identity yet, so this returns an
+///   empty `names` map (never enumerates every member).
+/// - missing / empty `name` — deliberate empty `names` map (not a bulk dump).
+///
+/// The 2000-row identity scan remains; rate-limit coverage is NS2-6's job.
 pub async fn nostr_json(
     State(state): State<AppState>,
     Query(query): Query<Nip05Query>,
 ) -> impl IntoResponse {
+    let empty = || {
+        (
+            StatusCode::OK,
+            [(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")],
+            Json(Nip05Response {
+                names: HashMap::new(),
+                relays: HashMap::new(),
+            }),
+        )
+    };
+
+    let requested_name = query.name.as_deref().unwrap_or("").trim().to_lowercase();
+
+    // Empty name or NIP-05 root `_` — never enumerate the member table.
+    if requested_name.is_empty() || requested_name == "_" {
+        return empty();
+    }
+
     let members = match state.db.list_nostr_identities().await {
         Ok(m) => m,
         Err(e) => {
@@ -94,7 +123,6 @@ pub async fn nostr_json(
 
     let mut names = HashMap::new();
     let mut relays: HashMap<String, Vec<String>> = HashMap::new();
-    let requested_name = query.name.unwrap_or_default().to_lowercase();
 
     for member in &members {
         if let Some(ref pubkey) = member.nostr_pubkey {
@@ -102,12 +130,13 @@ pub async fn nostr_json(
             if nip05_name.is_empty() {
                 continue;
             }
-            if requested_name == "_" || requested_name == nip05_name {
+            if requested_name == nip05_name {
                 names.insert(nip05_name, pubkey.clone());
-                // Add relay hints for this pubkey if relay URL is configured
                 if let Some(ref relay_url) = state.relay_url {
                     relays.insert(pubkey.clone(), vec![relay_url.clone()]);
                 }
+                // Single-name lookup: at most one match under the normalize rule.
+                break;
             }
         }
     }

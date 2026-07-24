@@ -68,7 +68,7 @@ async fn seed_user(
     let pid = format!("{user_key}-provider-id");
     let pid_hash = hash_session_token(&pid); // reuse hash fn for convenience
     db.client
-        .query(&format!(
+        .query(format!(
             r#"CREATE user:{user_key} SET
                 provider = 'discord',
                 username = '{username}',
@@ -83,7 +83,7 @@ async fn seed_user(
 
     // Create member
     db.client
-        .query(&format!(
+        .query(format!(
             r#"CREATE member:{member_key} SET
                 user_id = '{user_key}',
                 org_role = '{role}',
@@ -101,7 +101,7 @@ async fn seed_user(
 
     // Create session
     db.client
-        .query(&format!(
+        .query(format!(
             r#"CREATE session:sess_{member_key} SET
                 user_id = '{user_key}',
                 token = $tok,
@@ -116,7 +116,7 @@ async fn seed_user(
 /// Seed a game record.
 async fn seed_game(db: &Database, key: &str, name: &str) {
     db.client
-        .query(&format!(
+        .query(format!(
             r#"
             CREATE game:{key} SET
                 name = '{name}',
@@ -132,7 +132,7 @@ async fn seed_game(db: &Database, key: &str, name: &str) {
 /// Seed a team record.
 async fn seed_team(db: &Database, key: &str, name: &str, game_id: &str) {
     db.client
-        .query(&format!(
+        .query(format!(
             r#"
             CREATE team:{key} SET
                 name = '{name}',
@@ -1409,11 +1409,9 @@ async fn nip05_json_returns_empty_when_no_identities() {
     let state = test_state().await;
     let app = create_router(state);
 
+    // Missing name → deliberate empty set (not a bulk dump).
     let resp = app
-        .oneshot(unauthed_request(
-            Method::GET,
-            "/.well-known/nostr.json?name=_",
-        ))
+        .oneshot(unauthed_request(Method::GET, "/.well-known/nostr.json"))
         .await
         .unwrap();
 
@@ -1432,7 +1430,7 @@ async fn nip05_json_returns_identity_for_member_with_pubkey() {
     state
         .db
         .client
-        .query(&format!(
+        .query(format!(
             "UPDATE member:adminmember SET nostr_pubkey = '{fake_pubkey}'"
         ))
         .await
@@ -1442,7 +1440,7 @@ async fn nip05_json_returns_identity_for_member_with_pubkey() {
     let resp = app
         .oneshot(unauthed_request(
             Method::GET,
-            "/.well-known/nostr.json?name=_",
+            "/.well-known/nostr.json?name=testadmin",
         ))
         .await
         .unwrap();
@@ -1455,6 +1453,71 @@ async fn nip05_json_returns_identity_for_member_with_pubkey() {
 }
 
 #[tokio::test]
+async fn nip05_json_underscore_never_enumerates() {
+    let state = test_state().await;
+    seed_all_roles(&state.db).await;
+
+    let fake_pubkey = "a".repeat(64);
+    state
+        .db
+        .client
+        .query(format!(
+            "UPDATE member:adminmember SET nostr_pubkey = '{fake_pubkey}'"
+        ))
+        .await
+        .expect("set nostr pubkey");
+
+    let app = create_router(state);
+    // NIP-05 `_` is the root identifier, not a wildcard.
+    let resp = app
+        .oneshot(unauthed_request(
+            Method::GET,
+            "/.well-known/nostr.json?name=_",
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    assert!(
+        json["names"].as_object().unwrap().is_empty(),
+        "name=_ must not enumerate members"
+    );
+}
+
+#[tokio::test]
+async fn nip05_json_normalizes_spaced_display_name() {
+    let state = test_state().await;
+    seed_all_roles(&state.db).await;
+
+    let fake_pubkey = "d".repeat(64);
+    // Display name with spaces/caps → local-part frozentear after normalize.
+    state
+        .db
+        .client
+        .query(format!(
+            "UPDATE member:adminmember SET display_name = 'Frozen Tear', nostr_pubkey = '{fake_pubkey}'"
+        ))
+        .await
+        .expect("set display name + pubkey");
+
+    let app = create_router(state);
+    let resp = app
+        .oneshot(unauthed_request(
+            Method::GET,
+            "/.well-known/nostr.json?name=frozentear",
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    let names = json["names"].as_object().unwrap();
+    assert_eq!(names.len(), 1);
+    assert_eq!(names["frozentear"], fake_pubkey);
+}
+
+#[tokio::test]
 async fn nip05_json_filters_by_name() {
     let state = test_state().await;
     seed_all_roles(&state.db).await;
@@ -1464,7 +1527,7 @@ async fn nip05_json_filters_by_name() {
     state
         .db
         .client
-        .query(&format!(
+        .query(format!(
             "UPDATE member:adminmember SET nostr_pubkey = '{pk_admin}'; \
              UPDATE member:officermember SET nostr_pubkey = '{pk_officer}'"
         ))
@@ -1495,7 +1558,7 @@ async fn nip05_json_has_cors_header() {
     let resp = app
         .oneshot(unauthed_request(
             Method::GET,
-            "/.well-known/nostr.json?name=_",
+            "/.well-known/nostr.json?name=testadmin",
         ))
         .await
         .unwrap();
@@ -1515,7 +1578,7 @@ async fn nip05_json_includes_relay_hints_when_configured() {
     state
         .db
         .client
-        .query(&format!(
+        .query(format!(
             "UPDATE member:adminmember SET nostr_pubkey = '{fake_pubkey}'"
         ))
         .await
@@ -1525,7 +1588,7 @@ async fn nip05_json_includes_relay_hints_when_configured() {
     let resp = app
         .oneshot(unauthed_request(
             Method::GET,
-            "/.well-known/nostr.json?name=_",
+            "/.well-known/nostr.json?name=testadmin",
         ))
         .await
         .unwrap();
@@ -1645,7 +1708,7 @@ async fn nostr_unlink_removes_pubkey() {
     state
         .db
         .client
-        .query(&format!(
+        .query(format!(
             "UPDATE member:membermember SET nostr_pubkey = '{fake_pubkey}'"
         ))
         .await
@@ -2061,7 +2124,7 @@ async fn seed_applicant(db: &Database, user_key: &str, username: &str, token: &s
     let pid = format!("{user_key}-provider-id");
     let pid_hash = hash_session_token(&pid);
     db.client
-        .query(&format!(
+        .query(format!(
             r#"CREATE user:{user_key} SET
                 provider = 'discord',
                 username = '{username}',
@@ -2074,7 +2137,7 @@ async fn seed_applicant(db: &Database, user_key: &str, username: &str, token: &s
         .await
         .unwrap_or_else(|e| panic!("seed applicant user {user_key}: {e}"));
     db.client
-        .query(&format!(
+        .query(format!(
             r#"CREATE session:sess_{user_key} SET
                 user_id = '{user_key}',
                 token = $tok,
