@@ -84,6 +84,7 @@ impl ApiClient {
         self.do_post_json(path, body).await
     }
 
+    /// POST that discards the response body (empty 2xx OK via [`decode_body`]).
     pub async fn post_json_empty<B: serde::Serialize>(
         &self,
         path: &str,
@@ -101,6 +102,11 @@ impl ApiClient {
         self.do_put_json(path, body).await
     }
 
+    /// PUT that discards the response body.
+    ///
+    /// Empty 2xx bodies succeed via [`decode_body`] (F-AUI-004). Prefer this (or
+    /// `delete`) for bare `StatusCode::OK` handlers — never `put_json::<T>` when
+    /// the server returns no JSON.
     pub async fn put_json_empty<B: serde::Serialize>(
         &self,
         path: &str,
@@ -118,6 +124,7 @@ impl ApiClient {
         self.do_patch_json(path, body).await
     }
 
+    /// PATCH that discards the response body (empty 2xx OK via [`decode_body`]).
     pub async fn patch_json_empty<B: serde::Serialize>(
         &self,
         path: &str,

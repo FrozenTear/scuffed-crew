@@ -1282,8 +1282,10 @@ pub async fn nostr_health(State(state): State<AppState>) -> Json<RelayHealthResp
         })
         .unwrap_or_default();
 
-    let relay_url = match &state.relay_url {
-        Some(url) => url.clone(),
+    // Defense in depth: blank `Some("")` from a stale process or mis-set env
+    // must not report configured (F-AUI-003). Prefer `relay_url_from_env` at boot.
+    let relay_url = match crate::state::normalize_relay_url(state.relay_url.clone()) {
+        Some(url) => url,
         None => {
             return Json(RelayHealthResponse {
                 configured: false,

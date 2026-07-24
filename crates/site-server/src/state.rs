@@ -31,12 +31,46 @@ pub struct AppState {
     pub crypto: Option<Arc<CryptoService>>,
     /// WebSocket URL for the Nostr relay (e.g., `ws://strfry:7777`).
     /// Used for publishing kind 0 profile metadata and NIP-05 relay hints.
-    /// `None` when `NOSTR_RELAY_URL` is not set.
+    /// `None` when `NOSTR_RELAY_URL` is unset or blank (F-AUI-003).
     pub relay_url: Option<String>,
     /// In-process event bus fed by the persistent DM relay subscriber.
     /// `None` when real-time delivery is disabled (no relay or no encryption
     /// configured); SSE handlers should treat that as a 503.
     pub dm_events: Option<DmEventBus>,
+}
+
+/// Treat blank/whitespace as unset so `NOSTR_RELAY_URL=""` does not report
+/// `configured: true` with an empty URL (F-AUI-003).
+pub fn normalize_relay_url(url: Option<String>) -> Option<String> {
+    url.and_then(|u| {
+        let t = u.trim();
+        if t.is_empty() {
+            None
+        } else {
+            Some(t.to_string())
+        }
+    })
+}
+
+/// Load primary relay URL from `NOSTR_RELAY_URL`, ignoring empty values.
+pub fn relay_url_from_env() -> Option<String> {
+    normalize_relay_url(std::env::var("NOSTR_RELAY_URL").ok())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_relay_url;
+
+    #[test]
+    fn blank_env_style_urls_are_not_configured() {
+        assert_eq!(normalize_relay_url(None), None);
+        assert_eq!(normalize_relay_url(Some(String::new())), None);
+        assert_eq!(normalize_relay_url(Some("   ".into())), None);
+        assert_eq!(
+            normalize_relay_url(Some("  wss://relay.example  ".into())),
+            Some("wss://relay.example".into())
+        );
+    }
 }
 
 /// OAuth configuration loaded from environment.
