@@ -361,6 +361,46 @@ its own — it imports `scuffed_site_server::state::AppState`,
 concurrent publishes; B7's "502 if any gift-wrap publish fails" preserved; a
 test covers two channels with different relay URLs.
 
+#### [R] Research result — 2026-07-25 (claude). **Recommendation: do NOT build (b).**
+
+Both research questions answered; the second one kills the item for now.
+
+**Q1: does `RelayClient` tolerate concurrent publishes? — Yes.**
+`#[derive(Clone)]` over `Arc<Mutex<Option<mpsc::Sender<String>>>>`
+(`relay.rs:44-50`). `send_message` (`:197-208`) briefly locks the sender and
+pushes JSON onto an mpsc channel; the socket write happens in the background
+task `connect()` spawns. Concurrent publishes serialize on a short mutex, never
+interleave frames, and never race. A connection cache would be safe to share.
+
+**Q2: do channels share one relay URL? — Unanswerable, because there are no
+channels.** `provision_team_channels` (`chat/src/provisioning.rs:41`) is the
+only writer of `team_channel` rows, and it has **zero call sites** — it is
+exported from `chat/src/lib.rs:23` and never invoked by either binary
+(verified by grep across `crates/`). So:
+- nothing ever creates a `team_channel`, therefore
+- `channel.relay_url` (read at `chat.rs:337`) is read from a table no live code
+  path populates, therefore
+- `send_encrypted` cannot reach its relay-publish block in a real deploy — it
+  fails at the channel lookup first.
+
+Optimizing per-request connection setup on a code path that cannot execute is
+optimizing dead code. **(b) is deferred until channel provisioning is actually
+wired.** (a) was independent and shipped as PR #24.
+
+**The escape hatch in the sketch above is closed.** "If channels provably all
+share one relay, a simpler design is defensible" — they do not, and multi-relay
+is already live elsewhere: `site_settings.extra_relay_urls` exists
+(`migrations.rs:273`, admin UI at `app/src/pages/admin/relay.rs`) and the forum
+fan-out publishes each thread to the primary relay **plus** every extra URL
+(`forum.rs:779-798`). Any future (b) must therefore be the per-relay-URL
+connection cache as specified — not a single shared client.
+
+**The bigger finding is the dead provisioning path**, not the perf item. Either
+team chat is unfinished Phase-2 work or the provisioning call was lost in a
+refactor. Worth confirming intent before anyone builds on `team_channel`.
+`chat.rs:336` still carries a `TODO(Phase 2c)` about reusing a shared
+`RelayClient`, which suggests the former.
+
 ### 8. Doc + branch hygiene  [NS2-8 — LOW, TINY — good filler]
 
 - `docs/website-review-fix-list.md` lists **P2-2 (raw hex CI guard) as open**.
