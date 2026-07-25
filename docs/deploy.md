@@ -190,6 +190,23 @@ systemctl reload caddy
 
 Template also lives in repo: `deploy/Caddyfile`.
 
+> **Optional: cache the ICS feeds at the edge.** `/api/calendar/all.ics` and
+> `/api/calendar/team/{id}` run a full event list plus a settings read per hit,
+> and they already send `Cache-Control: public, max-age=3600` — which only does
+> anything if something upstream honors it. The server-side per-IP governor
+> (NS2-6) is the floor that holds regardless, but if calendar clients ever
+> generate real load, caching the response in Caddy is the cheaper lever:
+>
+> ```caddy
+> # inside the site block, before reverse_proxy — requires the cache-handler plugin
+> @ics path /api/calendar/*.ics /api/calendar/team/*
+> route @ics {
+> 	cache
+> }
+> ```
+>
+> Without the plugin, the governor alone is sufficient for this org's scale.
+
 > **Rate limiting & `X-Forwarded-For`.** The auth and upload rate limiters key
 > off the client IP. To stop an attacker from spraying fresh buckets by rotating
 > `X-Forwarded-For`, forwarded headers are only trusted when the request arrives

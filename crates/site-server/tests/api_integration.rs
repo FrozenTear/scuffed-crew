@@ -234,6 +234,23 @@ fn unauthed_request(method: Method, uri: &str) -> Request<Body> {
     .unwrap()
 }
 
+/// Hammer one URI from a single source IP and report the statuses seen.
+///
+/// The governor is per-`Router`, so the caller must reuse one instance —
+/// `create_router` per request would hand every call a fresh bucket.
+async fn hammer(app: &axum::Router, uri: &str, n: usize) -> Vec<StatusCode> {
+    let mut seen = Vec::with_capacity(n);
+    for _ in 0..n {
+        let resp = app
+            .clone()
+            .oneshot(unauthed_request(Method::GET, uri))
+            .await
+            .unwrap();
+        seen.push(resp.status());
+    }
+    seen
+}
+
 /// Extract response body as JSON.
 async fn body_json(resp: axum::response::Response) -> Value {
     let bytes = resp.into_body().collect().await.unwrap().to_bytes();
@@ -1587,6 +1604,72 @@ async fn me_reports_nip05_when_domain_configured() {
     assert_eq!(me["nip05"], "testmember@ow.scuffedcrew.no");
 }
 
+// ─── NS2-6: unauthenticated routes sit behind the public governor ──────────
+
+/// Each ICS hit runs `list_events()` plus a settings read, and the feed is
+/// unauthenticated — a poll loop from one source was free amplification before
+/// this. Normal calendar-client refresh (minutes apart) is nowhere near the
+/// 5/s sustained budget, so the first request must still succeed.
+#[tokio::test]
+async fn calendar_ics_is_rate_limited_per_ip() {
+    let state = test_state().await;
+    let app = create_router(state);
+
+    let seen = hammer(&app, "/api/calendar/all.ics", 80).await;
+    assert_ne!(
+        seen[0],
+        StatusCode::TOO_MANY_REQUESTS,
+        "a single poll must never be throttled"
+    );
+    assert!(
+        seen.contains(&StatusCode::TOO_MANY_REQUESTS),
+        "a poll loop from one IP must hit the governor, saw {:?}",
+        seen.last()
+    );
+}
+
+#[tokio::test]
+async fn well_known_nostr_json_is_rate_limited_per_ip() {
+    let state = test_state().await;
+    let app = create_router(state);
+
+    let seen = hammer(&app, "/.well-known/nostr.json?name=someone", 80).await;
+    assert_ne!(seen[0], StatusCode::TOO_MANY_REQUESTS);
+    assert!(
+        seen.contains(&StatusCode::TOO_MANY_REQUESTS),
+        "the member scan behind NIP-05 must not be free to loop on"
+    );
+}
+
+#[tokio::test]
+async fn setup_status_and_providers_are_rate_limited_per_ip() {
+    let state = test_state().await;
+    let app = create_router(state);
+
+    for uri in ["/api/auth/setup-status", "/api/auth/providers"] {
+        let seen = hammer(&app, uri, 80).await;
+        assert!(
+            seen.contains(&StatusCode::TOO_MANY_REQUESTS),
+            "{uri} must not be a free unauthenticated probe"
+        );
+    }
+}
+
+/// Health is the deliberate exception: liveness probes must not be told 429
+/// because something else shared their source IP. If this ever starts
+/// throttling, container restarts under load are the symptom.
+#[tokio::test]
+async fn health_is_never_rate_limited() {
+    let state = test_state().await;
+    let app = create_router(state);
+
+    let seen = hammer(&app, "/api/health", 80).await;
+    assert!(
+        !seen.contains(&StatusCode::TOO_MANY_REQUESTS),
+        "health must stay outside every governor (liveness probes)"
+    );
+}
+
 // ─── Nostr Challenge / Verify ──────────────────────────────────────────────
 
 #[tokio::test]
@@ -1957,13 +2040,11 @@ fn rate_limit_ip(builder: axum::http::request::Builder) -> axum::http::request::
 async fn setup_status_needs_setup_on_empty_db() {
     let state = test_state().await;
     let app = create_router(state);
+    // setup-status moved behind the public governor (NS2-6), so the request
+    // needs a peer address the key extractor can key off — the real server
+    // injects it via `into_make_service_with_connect_info`.
     let res = app
-        .oneshot(
-            Request::builder()
-                .uri("/api/auth/setup-status")
-                .body(Body::empty())
-                .unwrap(),
-        )
+        .oneshot(unauthed_request(Method::GET, "/api/auth/setup-status"))
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::OK);
