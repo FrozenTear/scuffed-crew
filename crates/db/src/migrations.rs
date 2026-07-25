@@ -103,6 +103,12 @@ pub async fn run_migrations(client: &Surreal<Any>) -> DbResult<()> {
             ASSERT $value IN ['captain', 'player', 'sub', 'coach'];
         DEFINE FIELD OVERWRITE joined_at ON plays_on TYPE datetime DEFAULT time::now();
         DEFINE FIELD OVERWRITE is_active ON plays_on TYPE bool DEFAULT true;
+        -- Both traversal directions are hot and were unindexed: `in` backs
+        -- get_member_teams (public member profile), `out` backs get_team_roster
+        -- (public team page + chat provisioning). Without these, every roster
+        -- lookup on a traffic-bearing public endpoint is an edge-table scan.
+        DEFINE INDEX IF NOT EXISTS plays_on_in_idx ON plays_on COLUMNS in;
+        DEFINE INDEX IF NOT EXISTS plays_on_out_idx ON plays_on COLUMNS out;
 
         -- ================================================
         -- Events (schedule)

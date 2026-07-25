@@ -445,27 +445,47 @@ pub async fn public_member_profile(
         )
     })?;
 
-    // Find roster entries for this member across all teams
-    let mut member_teams = Vec::new();
-    for team in &teams {
-        let roster = state.db.get_team_roster(&team.id).await.map_err(|_e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: "Internal error".into(),
-                }),
-            )
-        })?;
-        for entry in roster {
-            if entry.member_id == id && entry.is_active {
-                member_teams.push(MemberTeamInfo {
-                    team_id: team.id.clone(),
-                    team_name: team.name.clone(),
-                    team_role: entry.team_role.to_string(),
-                });
-            }
-        }
-    }
+    // One `plays_on` traversal for this member, then resolve names from the
+    // teams we already have. This used to fetch every team's *full* roster and
+    // scan it for one member — N+1 over the whole org on a public, traffic-
+    // bearing endpoint. `get_member_teams` already filters `is_active` in the
+    // query, so the entries need no further filtering here.
+    let roster_entries = state.db.get_member_teams(&id).await.map_err(|_e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: "Internal error".into(),
+            }),
+        )
+    })?;
+
+    let team_names: std::collections::HashMap<&str, &str> = teams
+        .iter()
+        .map(|t| (t.id.as_str(), t.name.as_str()))
+        .collect();
+
+    let member_teams: Vec<MemberTeamInfo> = roster_entries
+        .into_iter()
+        .filter_map(|entry| {
+            // A dangling edge (team deleted, edge left behind) yields no name.
+            // Skipping matches the old behaviour — the loop could only ever
+            // produce entries for teams present in `list_teams()` — but now it
+            // is visible rather than structurally impossible.
+            let Some(team_name) = team_names.get(entry.team_id.as_str()) else {
+                tracing::warn!(
+                    member_id = %id,
+                    team_id = %entry.team_id,
+                    "plays_on edge references a team missing from list_teams"
+                );
+                return None;
+            };
+            Some(MemberTeamInfo {
+                team_id: entry.team_id,
+                team_name: (*team_name).to_string(),
+                team_role: entry.team_role.to_string(),
+            })
+        })
+        .collect();
 
     // Get game accounts
     let game_accounts = state
