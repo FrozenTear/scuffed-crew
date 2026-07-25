@@ -55,6 +55,7 @@ jobs:
         run: |
           cargo clippy \
             --workspace \
+            --all-targets \
             --exclude scuffed-app \
             --exclude scuffed-stat-tracker \
             -- -D warnings
@@ -63,6 +64,7 @@ jobs:
         run: |
           cargo clippy \
             --target wasm32-unknown-unknown \
+            --all-targets \
             -p scuffed-app \
             -- -D warnings
 

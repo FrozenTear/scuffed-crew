@@ -69,7 +69,7 @@ async fn seed_user(
     let pid = format!("{user_key}-provider-id");
     let pid_hash = hash_session_token(&pid); // reuse hash fn for convenience
     db.client
-        .query(&format!(
+        .query(format!(
             r#"CREATE user:{user_key} SET
                 provider = 'discord',
                 username = '{username}',
@@ -84,7 +84,7 @@ async fn seed_user(
 
     // Create member
     db.client
-        .query(&format!(
+        .query(format!(
             r#"CREATE member:{member_key} SET
                 user_id = '{user_key}',
                 org_role = '{role}',
@@ -102,7 +102,7 @@ async fn seed_user(
 
     // Create session
     db.client
-        .query(&format!(
+        .query(format!(
             r#"CREATE session:sess_{member_key} SET
                 user_id = '{user_key}',
                 token = $tok,
@@ -117,7 +117,7 @@ async fn seed_user(
 /// Seed a game record.
 async fn seed_game(db: &Database, key: &str, name: &str) {
     db.client
-        .query(&format!(
+        .query(format!(
             r#"
             CREATE game:{key} SET
                 name = '{name}',
@@ -133,7 +133,7 @@ async fn seed_game(db: &Database, key: &str, name: &str) {
 /// Seed a team record.
 async fn seed_team(db: &Database, key: &str, name: &str, game_id: &str) {
     db.client
-        .query(&format!(
+        .query(format!(
             r#"
             CREATE team:{key} SET
                 name = '{name}',
@@ -1450,7 +1450,7 @@ async fn nip05_json_returns_identity_for_member_with_pubkey() {
     state
         .db
         .client
-        .query(&format!(
+        .query(format!(
             "UPDATE member:adminmember SET nostr_pubkey = '{fake_pubkey}'"
         ))
         .await
@@ -1482,7 +1482,7 @@ async fn nip05_json_filters_by_name() {
     state
         .db
         .client
-        .query(&format!(
+        .query(format!(
             "UPDATE member:adminmember SET nostr_pubkey = '{pk_admin}'; \
              UPDATE member:officermember SET nostr_pubkey = '{pk_officer}'"
         ))
@@ -1533,7 +1533,7 @@ async fn nip05_json_includes_relay_hints_when_configured() {
     state
         .db
         .client
-        .query(&format!(
+        .query(format!(
             "UPDATE member:adminmember SET nostr_pubkey = '{fake_pubkey}'"
         ))
         .await
@@ -1777,7 +1777,7 @@ async fn nostr_unlink_removes_pubkey() {
     state
         .db
         .client
-        .query(&format!(
+        .query(format!(
             "UPDATE member:membermember SET nostr_pubkey = '{fake_pubkey}'"
         ))
         .await
@@ -2191,7 +2191,7 @@ async fn seed_applicant(db: &Database, user_key: &str, username: &str, token: &s
     let pid = format!("{user_key}-provider-id");
     let pid_hash = hash_session_token(&pid);
     db.client
-        .query(&format!(
+        .query(format!(
             r#"CREATE user:{user_key} SET
                 provider = 'discord',
                 username = '{username}',
@@ -2204,7 +2204,7 @@ async fn seed_applicant(db: &Database, user_key: &str, username: &str, token: &s
         .await
         .unwrap_or_else(|e| panic!("seed applicant user {user_key}: {e}"));
     db.client
-        .query(&format!(
+        .query(format!(
             r#"CREATE session:sess_{user_key} SET
                 user_id = '{user_key}',
                 token = $tok,

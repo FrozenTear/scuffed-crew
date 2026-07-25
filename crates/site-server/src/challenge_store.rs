@@ -61,6 +61,12 @@ impl ConsumedChallengeStore {
     pub fn len(&self) -> usize {
         self.inner.lock().unwrap_or_else(|e| e.into_inner()).len()
     }
+
+    /// True when no live entries remain — pairs with `len` for clippy.
+    #[cfg(test)]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
 }
 
 #[cfg(test)]
