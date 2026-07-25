@@ -16,6 +16,7 @@ use scuffed_auth::SessionConfig;
 use scuffed_auth::crypto::hash_session_token;
 use scuffed_db::Database;
 use scuffed_db::migrations::run_migrations;
+use scuffed_db::types::TeamRole;
 use scuffed_site_server::create_router;
 use scuffed_site_server::state::{AppState, OAuthConfig};
 
@@ -475,6 +476,88 @@ async fn update_member_profile_fields_and_game_account_meta() {
     assert_eq!(accounts.len(), 1);
     assert_eq!(accounts[0]["rank"], "Diamond 2");
     assert_eq!(accounts[0]["sr"], 3200);
+}
+
+/// NS2-5: the profile's team list now comes from one `plays_on` traversal
+/// instead of scanning every team's full roster. Two teams and zero teams are
+/// the cases the old loop and the new query can disagree on.
+#[tokio::test]
+async fn public_profile_lists_every_team_the_member_is_on() {
+    let state = test_state().await;
+    seed_all_roles(&state.db).await;
+    seed_game(&state.db, "ow", "Overwatch").await;
+    seed_team(&state.db, "alpha", "Team Alpha", "ow").await;
+    seed_team(&state.db, "bravo", "Team Bravo", "ow").await;
+
+    state
+        .db
+        .add_to_roster("membermember", "alpha", TeamRole::Player)
+        .await
+        .expect("roster alpha");
+    state
+        .db
+        .add_to_roster("membermember", "bravo", TeamRole::Captain)
+        .await
+        .expect("roster bravo");
+
+    let app = create_router(state);
+    let resp = app
+        .oneshot(unauthed_request(
+            Method::GET,
+            "/api/public/members/membermember",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let json = body_json(resp).await;
+    let mut teams: Vec<(String, String)> = json["teams"]
+        .as_array()
+        .expect("teams array")
+        .iter()
+        .map(|t| {
+            (
+                t["team_name"].as_str().unwrap().to_string(),
+                t["team_role"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+    teams.sort();
+
+    assert_eq!(
+        teams,
+        vec![
+            ("Team Alpha".to_string(), "player".to_string()),
+            ("Team Bravo".to_string(), "captain".to_string()),
+        ],
+        "both memberships, with names resolved and per-team roles preserved"
+    );
+}
+
+#[tokio::test]
+async fn public_profile_has_empty_teams_when_member_is_on_none() {
+    let state = test_state().await;
+    seed_all_roles(&state.db).await;
+    seed_game(&state.db, "ow", "Overwatch").await;
+    // A team exists, but this member is not on it — the old loop scanned it and
+    // found nothing; the new query must not invent an entry.
+    seed_team(&state.db, "alpha", "Team Alpha", "ow").await;
+
+    let app = create_router(state);
+    let resp = app
+        .oneshot(unauthed_request(
+            Method::GET,
+            "/api/public/members/membermember",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let json = body_json(resp).await;
+    assert!(
+        json["teams"].as_array().expect("teams array").is_empty(),
+        "member on no teams must report no teams"
+    );
 }
 
 #[tokio::test]
