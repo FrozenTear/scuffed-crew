@@ -1427,11 +1427,9 @@ async fn nip05_json_returns_empty_when_no_identities() {
     let state = test_state().await;
     let app = create_router(state);
 
+    // Missing name → deliberate empty set (not a bulk dump).
     let resp = app
-        .oneshot(unauthed_request(
-            Method::GET,
-            "/.well-known/nostr.json?name=_",
-        ))
+        .oneshot(unauthed_request(Method::GET, "/.well-known/nostr.json"))
         .await
         .unwrap();
 
@@ -1460,7 +1458,7 @@ async fn nip05_json_returns_identity_for_member_with_pubkey() {
     let resp = app
         .oneshot(unauthed_request(
             Method::GET,
-            "/.well-known/nostr.json?name=_",
+            "/.well-known/nostr.json?name=testadmin",
         ))
         .await
         .unwrap();
@@ -1470,6 +1468,71 @@ async fn nip05_json_returns_identity_for_member_with_pubkey() {
     let names = json["names"].as_object().unwrap();
     assert_eq!(names.len(), 1);
     assert_eq!(names["testadmin"], fake_pubkey);
+}
+
+#[tokio::test]
+async fn nip05_json_underscore_never_enumerates() {
+    let state = test_state().await;
+    seed_all_roles(&state.db).await;
+
+    let fake_pubkey = "a".repeat(64);
+    state
+        .db
+        .client
+        .query(format!(
+            "UPDATE member:adminmember SET nostr_pubkey = '{fake_pubkey}'"
+        ))
+        .await
+        .expect("set nostr pubkey");
+
+    let app = create_router(state);
+    // NIP-05 `_` is the root identifier, not a wildcard.
+    let resp = app
+        .oneshot(unauthed_request(
+            Method::GET,
+            "/.well-known/nostr.json?name=_",
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    assert!(
+        json["names"].as_object().unwrap().is_empty(),
+        "name=_ must not enumerate members"
+    );
+}
+
+#[tokio::test]
+async fn nip05_json_normalizes_spaced_display_name() {
+    let state = test_state().await;
+    seed_all_roles(&state.db).await;
+
+    let fake_pubkey = "d".repeat(64);
+    // Display name with spaces/caps → local-part frozentear after normalize.
+    state
+        .db
+        .client
+        .query(format!(
+            "UPDATE member:adminmember SET display_name = 'Frozen Tear', nostr_pubkey = '{fake_pubkey}'"
+        ))
+        .await
+        .expect("set display name + pubkey");
+
+    let app = create_router(state);
+    let resp = app
+        .oneshot(unauthed_request(
+            Method::GET,
+            "/.well-known/nostr.json?name=frozentear",
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    let names = json["names"].as_object().unwrap();
+    assert_eq!(names.len(), 1);
+    assert_eq!(names["frozentear"], fake_pubkey);
 }
 
 #[tokio::test]
@@ -1513,7 +1576,7 @@ async fn nip05_json_has_cors_header() {
     let resp = app
         .oneshot(unauthed_request(
             Method::GET,
-            "/.well-known/nostr.json?name=_",
+            "/.well-known/nostr.json?name=testadmin",
         ))
         .await
         .unwrap();
@@ -1543,7 +1606,7 @@ async fn nip05_json_includes_relay_hints_when_configured() {
     let resp = app
         .oneshot(unauthed_request(
             Method::GET,
-            "/.well-known/nostr.json?name=_",
+            "/.well-known/nostr.json?name=testadmin",
         ))
         .await
         .unwrap();
