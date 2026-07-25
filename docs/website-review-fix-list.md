@@ -116,7 +116,7 @@ Priorities: **P0** ship this week · **P1** next product pass · **P2** design-s
 ## P2 — Design system / platform debt
 
 ### P2-1. Finish migrating public pages onto `components/ui`
-**Problem:** Library exists (`Button`, `Card`, `EmptyState`, `PageShell`, …) but most pages still inject one-off `const PAGE_CSS` (**27** blocks as of 2026-07-25 — down from ~71 in the original list; home remains the heaviest).  
+**Problem:** Library exists (`Button`, `Card`, `EmptyState`, `PageShell`, …) but most pages still inject one-off `const PAGE_CSS` (**27** blocks as of 2026-07-25). The original list's "~71" mixed other `*_CSS` consts (~76 of those now — the broader metric **grew**); home remains the heaviest single `PAGE_CSS`.  
 **Batches (from design revamp plan):**
 - [ ] Content/public: home, members, profile, news, blog, community, apply, events, polls, wiki, forum, tournaments, scrims, stats, dm, identity
 - [ ] Admin pages
