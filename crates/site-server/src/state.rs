@@ -43,6 +43,13 @@ pub struct AppState {
     /// publish kind-0 metadata **without** a `nip05` field rather than minting
     /// an identity that cannot verify. See [`nip05_domain_from_env`].
     pub nip05_domain: Option<String>,
+    /// Whether the kind-0 republish endpoint is armed (`NIP05_REPUBLISH_ENABLED=1`).
+    ///
+    /// Off by default and deliberately not inferred from anything else.
+    /// Republishing writes new immutable events to public relays on members'
+    /// behalf, so it takes an explicit operator action to even become callable
+    /// — see `routes::members::republish_profiles`.
+    pub nip05_republish_enabled: bool,
 }
 
 /// Treat blank/whitespace as unset so `NOSTR_RELAY_URL=""` does not report
@@ -179,6 +186,16 @@ pub fn nip05_domain_from_env() -> Option<String> {
             None
         }
     }
+}
+
+/// Whether the kind-0 republish endpoint is armed.
+///
+/// Strictly opt-in: only the exact string `1` arms it. Anything else — unset,
+/// empty, `true`, `yes` — leaves it off. A republish writes immutable events to
+/// public relays for every member, so "I typed something truthy" is not a good
+/// enough signal.
+pub fn nip05_republish_enabled_from_env() -> bool {
+    std::env::var("NIP05_REPUBLISH_ENABLED").is_ok_and(|v| v.trim() == "1")
 }
 
 /// Build a member's NIP-05 identifier, or `None` when we have no valid domain

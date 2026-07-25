@@ -34,6 +34,7 @@ pub(crate) async fn test_state() -> AppState {
         relay_url: None,
         dm_events: None,
         nip05_domain: None,
+        nip05_republish_enabled: false,
     }
 }
 
