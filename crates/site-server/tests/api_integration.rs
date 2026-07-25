@@ -1798,6 +1798,25 @@ async fn setup_status_and_providers_are_rate_limited_per_ip() {
         assert!(
             seen.contains(&StatusCode::TOO_MANY_REQUESTS),
             "{uri} must not be a free unauthenticated probe"
+        );
+    }
+}
+
+/// Health is the deliberate exception: liveness probes must not be told 429
+/// because something else shared their source IP. If this ever starts
+/// throttling, container restarts under load are the symptom.
+#[tokio::test]
+async fn health_is_never_rate_limited() {
+    let state = test_state().await;
+    let app = create_router(state);
+
+    let seen = hammer(&app, "/api/health", 80).await;
+    assert!(
+        !seen.contains(&StatusCode::TOO_MANY_REQUESTS),
+        "health must stay outside every governor (liveness probes)"
+    );
+}
+
 // ─── NS2-3b: staged kind-0 republish ───────────────────────────────────────
 
 /// Default posture: the endpoint exists but refuses. Republishing emits
@@ -1846,21 +1865,6 @@ async fn republish_requires_admin() {
             "armed is not the same as open to everyone"
         );
     }
-}
-
-/// Health is the deliberate exception: liveness probes must not be told 429
-/// because something else shared their source IP. If this ever starts
-/// throttling, container restarts under load are the symptom.
-#[tokio::test]
-async fn health_is_never_rate_limited() {
-    let state = test_state().await;
-    let app = create_router(state);
-
-    let seen = hammer(&app, "/api/health", 80).await;
-    assert!(
-        !seen.contains(&StatusCode::TOO_MANY_REQUESTS),
-        "health must stay outside every governor (liveness probes)"
-    );
 }
 
 /// Armed but with no valid domain, a republish would re-emit the same broken
