@@ -116,23 +116,26 @@ Priorities: **P0** ship this week · **P1** next product pass · **P2** design-s
 ## P2 — Design system / platform debt
 
 ### P2-1. Finish migrating public pages onto `components/ui`
-**Problem:** Library exists (`Button`, `Card`, `EmptyState`, `PageShell`, …) but most pages still inject one-off `const PAGE_CSS` (~71 blocks). Home is the worst (~1150 lines).  
+**Problem:** Library exists (`Button`, `Card`, `EmptyState`, `PageShell`, …) but most pages still inject one-off `const PAGE_CSS` (**27** blocks as of 2026-07-25). The original list's "~71" mixed other `*_CSS` consts (~76 of those now — the broader metric **grew**); home remains the heaviest single `PAGE_CSS`.  
 **Batches (from design revamp plan):**
 - [ ] Content/public: home, members, profile, news, blog, community, apply, events, polls, wiki, forum, tournaments, scrims, stats, dm, identity
 - [ ] Admin pages
 - [ ] Strategy section last (has its own accent)
 
+**Guard idea (not blocking tonight):** fail CI when `rg -c 'const PAGE_CSS' crates/app` rises above a pinned budget so the migration cannot quietly lose ground.
+
 **Done when:** Primary public flows use `PageShell` + shared buttons/cards; page CSS is layout-only.
 
 ---
 
-### P2-2. Raw hex / rgba guard
-**Problem:** Spec required CI to ban raw colors outside `theme/`; ~39 hits remain in pages/layouts/components.  
-**Work:**
-- [ ] Confirm/extend guard script (e.g. next to `scripts/check-frontend-deps.sh`)
-- [ ] Clean remaining violations, starting with public chrome + home
+### P2-2. Raw hex / rgba guard — **done (code + CI)**
+**Problem:** Spec required CI to ban raw colors outside `theme/`.  
+**Fix (landed):**
+- [x] `scripts/check-design-tokens.sh` enforces no raw hex/rgba outside `theme/` (canvas exceptions as needed)
+- [x] Wired in CI `dep-guardrails` job (`.github/workflows/ci.yml`)
+- [x] Verified 2026-07-25: script reports clean (`OK: component CSS uses design-system tokens`)
 
-**Done when:** CI fails on new raw hex outside `theme/` (and canvas exceptions if needed).
+**Done when:** CI fails on new raw hex outside `theme/` (and canvas exceptions if needed). ✅
 
 ---
 
@@ -213,7 +216,7 @@ Week 2 (P1)
 
 Later (P2)
   P2-1 page migration
-  P2-2 hex CI guard
+  P2-2 hex CI guard — **done**
   P2-3 brand settings
   P2-4 domain externalization
   P2-5 header dedupe
@@ -239,7 +242,7 @@ Later (P2)
 | P1-7 | | done |
 | P1-8 | | done |
 | P2-1 | | open |
-| P2-2 | | open |
+| P2-2 | | done |
 | P2-3 | | open |
 | P2-4 | | open |
 | P2-5 | | open |
