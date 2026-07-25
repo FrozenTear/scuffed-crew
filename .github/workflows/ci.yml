@@ -99,8 +99,27 @@ jobs:
       - name: Build (native crates)
         run: cargo build --workspace --exclude scuffed-app --exclude scuffed-stat-tracker
 
+      # scuffed-app was excluded here from the very first workflow commit
+      # (3a4a906) — never a considered disk mitigation, just an exclusion that
+      # was never revisited. Its 39 tests (undo stack, editor state, canvas
+      # tools, brand/theme tokens) had therefore never run in CI.
+      #
+      # Note the build step above still excludes it, which is now a no-op
+      # rather than a saving: `cargo test` compiles the crate it tests, so the
+      # app gets built either way. Left alone to keep this diff to the one
+      # thing being changed.
       - name: Test (workspace)
-        run: cargo test --workspace --exclude scuffed-app --exclude scuffed-stat-tracker
+        run: cargo test --workspace --exclude scuffed-stat-tracker
+
+      # Records headroom on the job that died 3x in 2 days from disk exhaustion
+      # (e0d16e6). If this trends toward zero, split the app tests into their
+      # own job with their own cache key rather than shrinking the budget.
+      - name: Disk headroom after tests
+        if: always()
+        run: |
+          echo "### Disk after Build & Test" >> "$GITHUB_STEP_SUMMARY"
+          df -h / | tee -a "$GITHUB_STEP_SUMMARY"
+          du -sh target 2>/dev/null | tee -a "$GITHUB_STEP_SUMMARY" || true
 
   app-build:
     name: App Build (Dioxus)
