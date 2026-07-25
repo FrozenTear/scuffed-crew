@@ -84,6 +84,10 @@ services:
       # are immutable on relays, so an identity pointing at a domain we don't
       # control breaks verification permanently and is hijackable.
       NIP05_DOMAIN: ${NIP05_DOMAIN:-}
+      # Arms POST /api/admin/nostr/republish-profiles (admin-only, dry-run by
+      # default). Leave unset. Set to exactly "1" only while deliberately
+      # repairing kind-0 events that carry an old domain, then unset again.
+      NIP05_REPUBLISH_ENABLED: ${NIP05_REPUBLISH_ENABLED:-}
       # Required outside dev — server refuses to boot without it (no public dev-key
       # fallback). install.sh/update.sh generate it into data/secrets.env.
       NOSTR_CHALLENGE_SECRET: ${NOSTR_CHALLENGE_SECRET:-}

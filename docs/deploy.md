@@ -297,7 +297,43 @@ curl -s https://ow.scuffedcrew.no/.well-known/nostr.json?name=yourname | jq
 The `names` entry must map your NIP-05 local name to your pubkey. If members
 already have kind-0 events carrying an older, wrong domain, changing this
 setting does **not** rewrite them — republishing is a separate, deliberate
-operation.
+operation, documented next.
+
+### Repairing already-published identities
+
+Kind-0 events are immutable once a relay has them. Members provisioned while
+the server published the wrong domain still advertise it, and only a *new*
+event fixes that. `POST /api/admin/nostr/republish-profiles` does it, behind
+three independent locks so nothing reaches a relay by accident:
+
+1. **Admin session** — the route uses the admin extractor.
+2. **`NIP05_REPUBLISH_ENABLED=1`** — off by default; only the exact string `1`
+   arms it. Restart the server with it set, and unset it afterwards.
+3. **`{"confirm": true}`** — any other body, or none, is a **dry run**.
+
+It also refuses outright if `NIP05_DOMAIN` is invalid or `NOSTR_RELAY_URL` is
+unset, rather than reporting a success that published nothing.
+
+Always dry-run first — it lists every member that would be touched and the
+exact identifier each would receive:
+
+```bash
+# 1. dry run (no body = dry run)
+curl -s -X POST https://ow.scuffedcrew.no/api/admin/nostr/republish-profiles \
+  -H "Cookie: <admin session>" | jq
+
+# 2. read candidate_count and the candidates[].nip05 values, then commit
+curl -s -X POST https://ow.scuffedcrew.no/api/admin/nostr/republish-profiles \
+  -H "Cookie: <admin session>" -H 'Content-Type: application/json' \
+  -d '{"confirm": true}' | jq
+```
+
+Only **server-managed** keys are republished. Members holding their own key
+(`external`) sign their own events; the server will not overwrite an identity
+it does not control. Those members must republish from their own client.
+
+The confirmed run is audit-logged. Unset `NIP05_REPUBLISH_ENABLED` and restart
+once you are done — leaving it armed serves no purpose.
 
 ## Backups
 
