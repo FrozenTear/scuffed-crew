@@ -205,6 +205,7 @@ async fn main() {
         relay_url,
         dm_events,
         nip05_domain: scuffed_site_server::state::nip05_domain_from_env(),
+        nip05_republish_enabled: scuffed_site_server::state::nip05_republish_enabled_from_env(),
     };
 
     // Create the collaboration room manager

@@ -875,3 +875,169 @@ pub async fn admin_reset_local_password(
 
     Ok(StatusCode::OK)
 }
+
+// ─── NS2-3b: kind-0 republish (staged, opt-in) ─────────────────────────────
+
+#[derive(Deserialize, Default)]
+pub struct RepublishRequest {
+    /// Must be explicitly `true` to publish. Absent or `false` = dry run.
+    #[serde(default)]
+    pub confirm: bool,
+}
+
+#[derive(serde::Serialize)]
+pub struct RepublishCandidate {
+    pub member_id: String,
+    pub display_name: String,
+    /// The identifier this member *would* be republished with.
+    pub nip05: Option<String>,
+}
+
+#[derive(serde::Serialize)]
+pub struct RepublishResponse {
+    pub dry_run: bool,
+    pub domain: String,
+    pub candidate_count: usize,
+    pub candidates: Vec<RepublishCandidate>,
+    /// Republish attempts spawned. Always 0 on a dry run.
+    pub published: usize,
+}
+
+/// POST /api/admin/nostr/republish-profiles — re-emit kind-0 profile metadata.
+///
+/// Exists because kind-0 events are **immutable on relays**. Members who were
+/// provisioned while the server published `name@scuffed.gg` — a domain the org
+/// does not own — still carry that identifier out there; fixing the config
+/// (NS2-3a) only changes what *future* publishes look like. Repairing the
+/// existing ones means emitting new events on their behalf.
+///
+/// That is a write to public infrastructure for other people's identities, so
+/// it sits behind three independent locks and no single mistake reaches a relay:
+///
+/// 1. `AdminUser` — admin only.
+/// 2. `NIP05_REPUBLISH_ENABLED=1` — off by default, and nothing else implies it.
+/// 3. `confirm: true` in the body — anything else is a dry run that reports
+///    exactly who would be touched and with which identifier.
+///
+/// Nothing calls this on startup, on a schedule, or as a side effect of any
+/// other route. It is operator-triggered, once, deliberately.
+pub async fn republish_profiles(
+    State(state): State<AppState>,
+    admin: AdminUser,
+    // Taken as a raw String, not `Json<_>`, deliberately: an extractor runs
+    // *before* the handler, so `Json` would answer a malformed/empty body with
+    // 400 even when the feature is disabled — reporting a parse error for an
+    // endpoint that is not armed. Parsing here keeps the locks in front.
+    body: String,
+) -> Result<Json<RepublishResponse>, (StatusCode, Json<ErrorResponse>)> {
+    if !state.nip05_republish_enabled {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(ErrorResponse {
+                error: "Republish is disabled. Set NIP05_REPUBLISH_ENABLED=1 to arm it.".into(),
+            }),
+        ));
+    }
+
+    // Without a valid domain there is nothing correct to republish *to* — a
+    // republish now would just re-emit the same broken shape (NS2-3a omits the
+    // field entirely in that case), burning immutable events for nothing.
+    let Some(domain) = state.nip05_domain.clone() else {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "No valid NIP05_DOMAIN configured; refusing to republish.".into(),
+            }),
+        ));
+    };
+
+    // Absent/empty body = dry run. A malformed one fails closed rather than
+    // being charitably read as "probably didn't mean confirm".
+    // publish_profile_metadata returns early when no relay is configured, so a
+    // confirmed run would report "published: N" while emitting nothing. Refuse
+    // instead of handing back a false success.
+    if state.relay_url.is_none() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "No NOSTR_RELAY_URL configured; nothing could be published.".into(),
+            }),
+        ));
+    }
+
+    let confirm = if body.trim().is_empty() {
+        false
+    } else {
+        serde_json::from_str::<RepublishRequest>(&body)
+            .map_err(|e| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(ErrorResponse {
+                        error: format!("Invalid request body: {e}"),
+                    }),
+                )
+            })?
+            .confirm
+    };
+
+    let members = state.db.list_nostr_identities().await.map_err(|e| {
+        tracing::error!(error = %e, "list_nostr_identities for republish");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: "Internal server error".into(),
+            }),
+        )
+    })?;
+
+    // Only server-managed keys can be republished: an external-key member holds
+    // their own secret, so their kind-0 is theirs to fix, not ours to overwrite.
+    let candidates: Vec<&Member> = members
+        .iter()
+        .filter(|m| {
+            m.nostr_key_mode == Some(NostrKeyMode::ServerManaged) && m.nostr_pubkey.is_some()
+        })
+        .collect();
+
+    let listed: Vec<RepublishCandidate> = candidates
+        .iter()
+        .map(|m| RepublishCandidate {
+            member_id: m.id.clone(),
+            display_name: m.display_name.clone(),
+            nip05: crate::state::nip05_identifier(&m.display_name, Some(&domain)),
+        })
+        .collect();
+
+    let mut published = 0usize;
+    if confirm {
+        for m in &candidates {
+            publish_profile_metadata(&state, m);
+            published += 1;
+        }
+        tracing::warn!(
+            actor = %admin.member.id,
+            count = published,
+            %domain,
+            "kind-0 republish CONFIRMED — new immutable events emitted"
+        );
+        audit(
+            &state.db,
+            &admin.member.id,
+            AuditAction::UpdatedMember,
+            AuditTargetType::Member,
+            "nip05-republish",
+            Some(&format!(
+                "Republished kind-0 profile metadata for {published} member(s) under {domain}"
+            )),
+        )
+        .await;
+    }
+
+    Ok(Json(RepublishResponse {
+        dry_run: !confirm,
+        domain,
+        candidate_count: listed.len(),
+        candidates: listed,
+        published,
+    }))
+}

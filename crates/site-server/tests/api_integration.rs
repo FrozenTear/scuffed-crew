@@ -49,6 +49,7 @@ async fn test_state() -> AppState {
         relay_url: None,
         dm_events: None,
         nip05_domain: None,
+        nip05_republish_enabled: false,
     }
 }
 
@@ -1585,6 +1586,171 @@ async fn me_reports_nip05_when_domain_configured() {
     // "TestMember" normalizes to "testmember" — same rule the well-known uses,
     // so the identifier the client shows resolves against our own nostr.json.
     assert_eq!(me["nip05"], "testmember@ow.scuffedcrew.no");
+}
+
+// ─── NS2-3b: staged kind-0 republish ───────────────────────────────────────
+
+/// Default posture: the endpoint exists but refuses. Republishing emits
+/// immutable events to public relays for other people's identities, so it must
+/// take a deliberate operator action to become callable at all.
+#[tokio::test]
+async fn republish_is_disabled_by_default() {
+    let state = test_state().await;
+    assert!(!state.nip05_republish_enabled, "off unless armed");
+    seed_all_roles(&state.db).await;
+
+    let app = create_router(state);
+    let resp = app
+        .oneshot(authed_request(
+            Method::POST,
+            "/api/admin/nostr/republish-profiles",
+            ADMIN_TOKEN,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn republish_requires_admin() {
+    let mut state = test_state().await;
+    state.nip05_republish_enabled = true;
+    state.nip05_domain = Some("ow.scuffedcrew.no".into());
+    state.relay_url = Some("wss://relay.example.com".into());
+    seed_all_roles(&state.db).await;
+
+    let app = create_router(state);
+    for token in [MEMBER_TOKEN, OFFICER_TOKEN] {
+        let resp = app
+            .clone()
+            .oneshot(authed_request(
+                Method::POST,
+                "/api/admin/nostr/republish-profiles",
+                token,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "armed is not the same as open to everyone"
+        );
+    }
+}
+
+/// Armed but with no valid domain, a republish would re-emit the same broken
+/// shape NS2-3a exists to avoid — burning immutable events for nothing.
+#[tokio::test]
+async fn republish_refuses_without_a_valid_domain() {
+    let mut state = test_state().await;
+    state.nip05_republish_enabled = true;
+    state.nip05_domain = None;
+    seed_all_roles(&state.db).await;
+
+    let app = create_router(state);
+    let resp = app
+        .oneshot(authed_request(
+            Method::POST,
+            "/api/admin/nostr/republish-profiles",
+            ADMIN_TOKEN,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+/// The default call, once armed, must still publish nothing — it reports who
+/// *would* be touched and with which identifier, so an operator can check the
+/// blast radius before committing to it.
+#[tokio::test]
+async fn republish_defaults_to_a_dry_run() {
+    let mut state = test_state().await;
+    state.nip05_republish_enabled = true;
+    state.nip05_domain = Some("ow.scuffedcrew.no".into());
+    state.relay_url = Some("wss://relay.example.com".into());
+    seed_all_roles(&state.db).await;
+
+    let fake_pubkey = "e".repeat(64);
+    state
+        .db
+        .client
+        .query(format!(
+            "UPDATE member:adminmember SET nostr_pubkey = '{fake_pubkey}', \
+             nostr_key_mode = 'server_managed'"
+        ))
+        .await
+        .expect("provision a server-managed identity");
+
+    let app = create_router(state);
+    let resp = app
+        .oneshot(authed_request(
+            Method::POST,
+            "/api/admin/nostr/republish-profiles",
+            ADMIN_TOKEN,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let json = body_json(resp).await;
+    assert_eq!(json["dry_run"], true, "no body must mean no publish");
+    assert_eq!(json["published"], 0);
+    assert_eq!(json["domain"], "ow.scuffedcrew.no");
+    assert_eq!(json["candidate_count"], 1);
+    assert_eq!(
+        json["candidates"][0]["nip05"], "testadmin@ow.scuffedcrew.no",
+        "the operator sees the exact identifier that would be emitted"
+    );
+}
+
+/// Armed and confirmed, but with no relay: `publish_profile_metadata` returns
+/// early when `relay_url` is None, so this would otherwise answer
+/// "published: N" having emitted nothing. A false success on an operation whose
+/// whole purpose is repairing broken published state is worse than a refusal.
+#[tokio::test]
+async fn republish_refuses_when_no_relay_is_configured() {
+    let mut state = test_state().await;
+    state.nip05_republish_enabled = true;
+    state.nip05_domain = Some("ow.scuffedcrew.no".into());
+    state.relay_url = None;
+    seed_all_roles(&state.db).await;
+
+    let app = create_router(state);
+    let resp = app
+        .oneshot(authed_json_request(
+            Method::POST,
+            "/api/admin/nostr/republish-profiles",
+            ADMIN_TOKEN,
+            json!({"confirm": true}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+/// A body we cannot parse must not be charitably read as "probably not confirm".
+#[tokio::test]
+async fn republish_fails_closed_on_a_malformed_body() {
+    let mut state = test_state().await;
+    state.nip05_republish_enabled = true;
+    state.nip05_domain = Some("ow.scuffedcrew.no".into());
+    state.relay_url = Some("wss://relay.example.com".into());
+    seed_all_roles(&state.db).await;
+
+    let app = create_router(state);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/admin/nostr/republish-profiles")
+                .header(header::AUTHORIZATION, format!("Bearer {ADMIN_TOKEN}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from("{ not json"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }
 
 // ─── Nostr Challenge / Verify ──────────────────────────────────────────────

@@ -168,6 +168,13 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/auth/logout", post(routes::auth::logout))
         // Member routes
         .route("/api/members", get(routes::members::list_members))
+        // Staged kind-0 republish (NS2-3b). Admin-only, disabled unless
+        // NIP05_REPUBLISH_ENABLED=1, and a dry run unless the body says
+        // `confirm: true`. Nothing triggers it automatically.
+        .route(
+            "/api/admin/nostr/republish-profiles",
+            post(routes::members::republish_profiles),
+        )
         .route(
             "/api/members/{id}",
             get(routes::members::get_member).put(routes::members::update_member),
