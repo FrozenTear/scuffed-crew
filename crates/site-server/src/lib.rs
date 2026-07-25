@@ -104,6 +104,14 @@ pub fn create_router(state: AppState) -> Router {
     // Per-IP rate limit for public read endpoints (HS-DR P1): 40-burst, then
     // 1 every 200ms (≈5/s sustained). Previously unthrottled; hero-filter
     // aggregates made DoS amplification cheap.
+    //
+    // NS2-6 widened this to every remaining unauthenticated route rather than
+    // adding a second budget. An attacker does not care *which* endpoint
+    // amplifies for them, so one shared per-IP bucket across all anonymous
+    // reads is the honest boundary; a per-group budget would just hand the same
+    // source several independent ones. 40-burst absorbs a page load that fans
+    // out across several of these, and 5/s sustained is far above any real
+    // calendar-client poll (ICS refresh is measured in minutes, not seconds).
     let public_governor_config = std::sync::Arc::new(
         GovernorConfigBuilder::default()
             .key_extractor(key_extractor.clone())
@@ -139,15 +147,40 @@ pub fn create_router(state: AppState) -> Router {
             "/api/public/seasons",
             get(routes::leaderboards::public_list_seasons),
         )
+        // ── Unauthenticated routes that used to sit outside every limiter ──
+        // ICS feeds: each hit runs `list_events()` plus a settings read. The
+        // `Cache-Control: public, max-age=3600` they already send only helps if
+        // something upstream actually caches; edge caching in Caddy is the
+        // better lever for the ICS specifically, and this layer is the floor
+        // that holds regardless of whether that is configured.
+        .route(
+            "/api/calendar/all.ics",
+            get(routes::calendar::all_events_ics),
+        )
+        .route(
+            "/api/calendar/team/{id}",
+            get(routes::calendar::team_events_ics),
+        )
+        // NIP-05 verification: a member-table scan per request until NS2-4a
+        // lands. Explicit routes win over the SPA fallback regardless of merge
+        // order, so moving it into this group keeps it ahead of the fallback.
+        .route("/.well-known/nostr.json", get(routes::nostr::nostr_json))
+        // Cheap, but free unauthenticated probes; no reason to leave them open.
+        // Deliberately here rather than in `auth_routes` (2/s): both are needed
+        // before login, and the stricter budget would fight normal first loads.
+        .route("/api/auth/setup-status", get(routes::auth::setup_status))
+        .route("/api/auth/providers", get(routes::auth::auth_providers))
         .layer(GovernorLayer::new(public_governor_config));
 
     // Dev mode mirrors main.rs: in-memory DB when SURREALDB_URL is unset.
     let dev_mode = std::env::var("SURREALDB_URL").is_err();
 
     let mut router = Router::new()
-        // NIP-05 Nostr identity verification (must be before fallback)
-        .route("/.well-known/nostr.json", get(routes::nostr::nostr_json))
-        // Health check
+        // Health check. Deliberately the one unauthenticated route with no
+        // governor: container/orchestrator liveness probes must never be told
+        // "429" because something else shared their source IP, and a probe that
+        // fails under load is worse than the amplification it would prevent.
+        // The handler touches no database.
         .route("/api/health", get(routes::health::health));
 
     if dev_mode {
@@ -162,8 +195,6 @@ pub fn create_router(state: AppState) -> Router {
         .merge(upload_routes)
         // Public aggregate routes (dedicated rate limiter — HS-DR P1)
         .merge(public_routes)
-        .route("/api/auth/setup-status", get(routes::auth::setup_status))
-        .route("/api/auth/providers", get(routes::auth::auth_providers))
         .route("/api/auth/me", get(routes::auth::me))
         .route("/api/auth/logout", post(routes::auth::logout))
         // Member routes
@@ -313,15 +344,8 @@ pub fn create_router(state: AppState) -> Router {
             "/api/stats/daemon-config",
             get(routes::stats::daemon_config),
         )
-        // Calendar routes
-        .route(
-            "/api/calendar/all.ics",
-            get(routes::calendar::all_events_ics),
-        )
-        .route(
-            "/api/calendar/team/{id}",
-            get(routes::calendar::team_events_ics),
-        )
+        // Calendar ICS feeds moved into `public_routes` (NS2-6) — they are
+        // unauthenticated and now share the public per-IP governor.
         // Audit log
         .route("/api/audit-log", get(routes::audit_log::list_audit_log))
         // Moderation routes
