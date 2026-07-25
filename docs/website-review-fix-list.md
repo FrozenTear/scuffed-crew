@@ -150,6 +150,18 @@ Priorities: **P0** ship this week · **P1** next product pass · **P2** design-s
 **Problem:** `scuffed.gg` / NIP-05 domain still hardcoded in places (identity, community copy, server routes).  
 **Work:** Settings field for primary domain; use for NIP-05 display and docs links.
 
+**Status (2026-07-25, NS2-3a):** the NIP-05 half is **done**. The domain now
+comes from `NIP05_DOMAIN` (falling back to a *validated* `REDIRECT_BASE_URL`
+derivation) via `state::nip05_domain_from_env`; kind-0 publishes omit `nip05`
+entirely when no valid public domain is configured, and the identity page shows
+the server-computed identifier instead of appending a hardcoded domain. USER
+confirmed the canonical domain is `ow.scuffedcrew.no` (2026-07-25).
+
+**Remaining:** an admin **Settings** field (this is env-only today), and the
+non-NIP-05 copy — community/docs links. Republishing existing kind-0 events
+that already carry the bad domain is tracked separately as NS2-3b and is
+USER-gated.
+
 **Done when:** No hardcoded production domain in user-facing strings for multi-host deploys (`ow.scuffedcrew.no` vs future apex).
 
 ---

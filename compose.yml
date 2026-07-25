@@ -78,6 +78,12 @@ services:
       ENCRYPTION_KEY: ${ENCRYPTION_KEY:-}
       ENCRYPTION_KEY_VERSION: ${ENCRYPTION_KEY_VERSION:-1}
       NOSTR_RELAY_URL: ${NOSTR_RELAY_URL:-}
+      # Public domain serving /.well-known/nostr.json — the right-hand side of
+      # members' NIP-05 identifiers. Unset (or loopback/IP/private) means kind-0
+      # profiles publish WITHOUT a nip05 field, which is deliberate: those events
+      # are immutable on relays, so an identity pointing at a domain we don't
+      # control breaks verification permanently and is hijackable.
+      NIP05_DOMAIN: ${NIP05_DOMAIN:-}
       # Required outside dev — server refuses to boot without it (no public dev-key
       # fallback). install.sh/update.sh generate it into data/secrets.env.
       NOSTR_CHALLENGE_SECRET: ${NOSTR_CHALLENGE_SECRET:-}

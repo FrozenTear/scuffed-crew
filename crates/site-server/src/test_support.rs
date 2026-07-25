@@ -33,6 +33,7 @@ pub(crate) async fn test_state() -> AppState {
         crypto: None,
         relay_url: None,
         dm_events: None,
+        nip05_domain: None,
     }
 }
 

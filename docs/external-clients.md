@@ -11,7 +11,7 @@ Discord-like interface built for NIP-29 groups. Best for desktop/browser use.
 **Setup:**
 1. Go to [flotilla.social](https://flotilla.social)
 2. Log in with your Nostr key (NIP-07 extension like nos2x or Alby)
-3. Click **Add Relay** and enter our relay URL: `wss://relay.scuffed.gg`
+3. Click **Add Relay** and enter our relay URL (see [Our Relay](#our-relay) below for how to find it)
 4. Our team channels will appear in the sidebar
 
 ### 0xChat (Mobile) — Primary
@@ -21,7 +21,7 @@ Best mobile Nostr client with full NIP-29 group support, push notifications, and
 **Setup:**
 1. Install 0xChat from [App Store](https://apps.apple.com/app/0xchat/id1675309861) or [Google Play](https://play.google.com/store/apps/details?id=com.oxchat.nostr)
 2. Import your key or create a new one
-3. Go to **Settings > Relays > Add Relay** and enter: `wss://relay.scuffed.gg`
+3. Go to **Settings > Relays > Add Relay** and enter our relay URL (see [Our Relay](#our-relay) below)
 4. Navigate to **Groups** to see our team channels
 
 ### Other Compatible Clients
@@ -56,7 +56,12 @@ If you started with a server-managed key and want to use it in external clients:
 
 ## Our Relay
 
-- **URL:** `wss://relay.scuffed.gg`
+- **URL:** the relay this instance advertises. Fetch
+  <https://ow.scuffedcrew.no/.well-known/nostr.json?name=YOURNAME> and read the
+  `relays` entry for your pubkey — that is the authoritative value, and it
+  follows the deploy's `NOSTR_RELAY_URL` setting. Ask an officer if unsure.
+  (Earlier revisions of this guide named `wss://relay.scuffed.gg`, a domain the
+  org does **not** control — do not use it.)
 - **Auth:** NIP-42 (your key must be registered with the clan)
 - **Groups:** NIP-29 (team channels are auto-provisioned)
 - **Encryption:** Officer channels use NIP-44 encrypted events

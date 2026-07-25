@@ -30,6 +30,12 @@ pub struct UserInfo {
 pub struct MeResponse {
     pub user: MeUser,
     pub member: Option<MeMember>,
+    /// The member's full NIP-05 identifier (`name@domain`), or `None` when the
+    /// deploy has no valid public NIP-05 domain configured. Computed
+    /// server-side so the client never has to guess the domain — guessing is
+    /// what produced identities pointing at a domain we do not own.
+    #[serde(default)]
+    pub nip05: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

@@ -93,6 +93,10 @@ const PAGE_CSS: &str = r#"
         color: var(--text-2);
         font-size: 0.85rem;
     }
+    .identity-nip05-unset {
+        font-style: italic;
+        opacity: 0.75;
+    }
     .identity-row {
         display: flex;
         gap: 0.5rem;
@@ -195,14 +199,6 @@ fn truncate_pubkey(pk: &str) -> String {
     } else {
         pk.to_string()
     }
-}
-
-fn nip05_name(display_name: &str) -> String {
-    display_name
-        .to_lowercase()
-        .chars()
-        .filter(|c| c.is_ascii_alphanumeric() || *c == '_')
-        .collect()
 }
 
 fn has_nip07_extension() -> bool {
@@ -352,6 +348,15 @@ pub fn IdentitySettings() -> Element {
         .and_then(|o| o.as_ref())
         .and_then(|me| me.member.as_ref());
 
+    // Server-computed: `None` when the deploy has no valid public NIP-05
+    // domain. Never rebuild this client-side — the client cannot know which
+    // domain serves `/.well-known/nostr.json`, and guessing is what published
+    // identities pointing at a domain we do not own.
+    let nip05 = me_data
+        .as_ref()
+        .and_then(|o| o.as_ref())
+        .and_then(|me| me.nip05.clone());
+
     let has_pubkey = member.map(|m| m.nostr_pubkey.is_some()).unwrap_or(false);
     let is_server_managed = member
         .map(|m| m.nostr_key_mode.as_deref() == Some("server_managed"))
@@ -380,8 +385,12 @@ pub fn IdentitySettings() -> Element {
                             }
                             div { class: "identity-field",
                                 label { class: "identity-label", "NIP-05" }
-                                span { class: "identity-nip05",
-                                    "{nip05_name(&m.display_name)}@scuffed.gg"
+                                if let Some(ref id) = nip05 {
+                                    span { class: "identity-nip05", "{id}" }
+                                } else {
+                                    span { class: "identity-nip05 identity-nip05-unset",
+                                        "Not configured"
+                                    }
                                 }
                             }
                         }

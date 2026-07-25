@@ -552,7 +552,7 @@ mod tests {
             "Scuffed Crew",
             Some("A gaming community"),
             Some("Be respectful"),
-            Some("https://scuffed.gg/logo.png"),
+            Some("https://example.com/logo.png"),
             &mods,
         )
         .unwrap();
@@ -570,7 +570,7 @@ mod tests {
         assert_eq!(relay_event.tag_value("rules"), Some("Be respectful"));
         assert_eq!(
             relay_event.tag_value("image"),
-            Some("https://scuffed.gg/logo.png")
+            Some("https://example.com/logo.png")
         );
 
         let p_tags = relay_event.tag_values("p");
@@ -724,7 +724,7 @@ mod tests {
             "TestUser",
             Some("A test user"),
             Some("https://example.com/avatar.png"),
-            Some("testuser@scuffed.gg"),
+            Some("testuser@example.com"),
             None,
         )
         .unwrap();
@@ -735,7 +735,7 @@ mod tests {
         assert_eq!(content["name"], "TestUser");
         assert_eq!(content["about"], "A test user");
         assert_eq!(content["picture"], "https://example.com/avatar.png");
-        assert_eq!(content["nip05"], "testuser@scuffed.gg");
+        assert_eq!(content["nip05"], "testuser@example.com");
         assert!(content.get("banner").is_none());
     }
 

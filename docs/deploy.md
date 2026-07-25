@@ -225,6 +225,7 @@ cd /root/github/scuffed-crew   # your clone path
 # edit data/secrets.env:
 #   REDIRECT_BASE_URL=https://ow.scuffedcrew.no
 #   ALLOWED_ORIGINS=https://ow.scuffedcrew.no
+#   NIP05_DOMAIN=ow.scuffedcrew.no      # see "NIP-05 domain" below
 
 podman compose --env-file data/secrets.env up -d --force-recreate site-server
 ```
@@ -248,6 +249,38 @@ podman compose --env-file data/secrets.env up --build -d
 # also set NOSTR_RELAY_URL=ws://strfry:7777 in secrets
 podman compose --env-file data/secrets.env --profile relay up --build -d
 ```
+
+## NIP-05 domain
+
+`NIP05_DOMAIN` is the domain that serves `/.well-known/nostr.json`, and it
+becomes the right-hand side of every member's NIP-05 identifier
+(`name@ow.scuffedcrew.no`). For this deploy:
+
+```bash
+NIP05_DOMAIN=ow.scuffedcrew.no
+```
+
+If it is unset, the server falls back to `REDIRECT_BASE_URL` **only when that
+resolves to a valid public domain**. Loopback hosts, bare IPs, ports, and
+`.local`/`.internal`-style names are all rejected, and in that case kind-0
+profile events publish **without** a `nip05` field.
+
+That omission is deliberate, not a degradation: kind-0 events are immutable
+once they reach a relay, so publishing an identifier against a domain you do
+not control breaks NIP-05 verification for that member permanently — and lets
+whoever registers the domain impersonate them. No identity is better than a
+wrong one.
+
+Verify a live deploy:
+
+```bash
+curl -s https://ow.scuffedcrew.no/.well-known/nostr.json?name=yourname | jq
+```
+
+The `names` entry must map your NIP-05 local name to your pubkey. If members
+already have kind-0 events carrying an older, wrong domain, changing this
+setting does **not** rewrite them — republishing is a separate, deliberate
+operation.
 
 ## Backups
 

@@ -224,6 +224,10 @@ pub async fn callback(
 pub struct MeResponse {
     pub user: UserInfo,
     pub member: Option<Member>,
+    /// Full NIP-05 identifier (`name@domain`), or `None` when this deploy has
+    /// no valid public NIP-05 domain configured. Computed here so the client
+    /// never guesses the domain. Mirrors `scuffed_types::MeResponse::nip05`.
+    pub nip05: Option<String>,
 }
 
 /// GET /api/auth/me — return current user + member info
@@ -243,7 +247,15 @@ pub async fn me(
                 .await
                 .ok()
                 .flatten();
-            Json(MeResponse { user: info, member }).into_response()
+            let nip05 = member.as_ref().and_then(|m| {
+                crate::state::nip05_identifier(&m.display_name, state.nip05_domain.as_deref())
+            });
+            Json(MeResponse {
+                user: info,
+                member,
+                nip05,
+            })
+            .into_response()
         }
         Err(rejection) => rejection.into_response(),
     }
