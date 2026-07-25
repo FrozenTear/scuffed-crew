@@ -151,7 +151,10 @@ mod tests {
         mgr.push(UndoableAction::AddElement {
             element: elem.clone(),
         });
-        assert!(!mgr.can_undo(), "TEMPORARY NS2-1 CANARY - must fail CI, reverted next commit");
+        assert!(
+            !mgr.can_undo(),
+            "TEMPORARY NS2-1 CANARY - must fail CI, reverted next commit"
+        );
         assert!(!mgr.can_redo());
 
         let action = mgr.undo();
