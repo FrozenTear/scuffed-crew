@@ -1,15 +1,24 @@
-# Fleet Protocol — Multi-Agent Collaboration over Memtrace
+> # ⚠️ SUPERSEDED — NOT BINDING
+>
+> **Replaced 2026-08-11 by `docs/agent-protocol.md`** (front door: `AGENTS.md`).
+>
+> This file was the operational multi-agent protocol for scuffed-crew through the
+> 2026-07 fleet sessions. It has been folded into `docs/agent-protocol.md`, which
+> keeps every battle-tested rule (IRON LAW, dual-channel, dual-agree, episodes
+> advisory, deadlock ladder, protocol self-learn, Appendix A bindings) and adopts
+> the overwatch-strategy-app document shape (THE CARD, Evidence Law, solo-skippable
+> fleet module, durable vs prunable appendices, no-paraphrase `AGENTS.md`).
+>
+> **Do not follow this file and do not cite it as current law.** Host ops remain in
+> `docs/notes/memtrace-ops.md`. If you arrived here from a link or habit, go to
+> `AGENTS.md` → `docs/agent-protocol.md`.
+>
+> Kept only as provenance for agent-protocol Appendix C.
 
-A portable protocol for running two or more independent AI coding agents
-(different vendors welcome — e.g. Claude + Grok) against one repository,
-coordinated through a Memtrace fleet, with a human holding the final gate.
+# Fleet Protocol — Multi-Agent Collaboration over Memtrace (SUPERSEDED)
 
-The core protocol (§1–§7) is project-agnostic. Project-specific bindings live in
-**Appendix A**. Origin: authored from the overwatch-strategy-app "Great Review"
-session (2026-07-17, 10 PRs, two daemon restarts survived) and battle-tested the
-same day on scuffed-crew (v0.1.0 ship). Canonical shared copy:
-claude.ai artifact `3f9c0a32-ecb7-49dc-824e-afd8d283d911`; this file is the
-operational copy for this repo — if they diverge, this file wins here.
+Historical copy retained below for archaeology. Binding text is
+`docs/agent-protocol.md`.
 
 ---
 

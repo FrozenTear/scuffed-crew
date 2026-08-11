@@ -1,42 +1,42 @@
 # Agent Instructions (all vendors)
 
-If you are an AI coding agent working in this repository — any vendor, any
-harness — **read `docs/fleet-protocol.md` before doing anything else.** It is
-the binding multi-agent protocol for this repo.
+If you are an AI coding agent working in this repository — any vendor, any harness,
+solo or in a fleet — **read `docs/agent-protocol.md` before doing anything else.** It
+is the binding protocol for this repo.
 
-Non-negotiables (full detail in the protocol):
+Two laws are reproduced verbatim below because you must hold them before you read
+anything else. **Everything else lives in the protocol and is deliberately not
+repeated here** — a paraphrase is a second source that drifts.
 
-1. **IRON LAW:** never checkout/switch/pull/reset/merge/rebase in this shared
-   checkout, and never edit files here for fleet work. Work only in your own
-   worktree under `.claude/worktrees/<agent>-<topic>`. Read-only git commands
-   are fine.
-2. **Dual-agree before merge:** every change is peer-reviewed by the other
-   agent; the author never merges their own branch. The human holds the final
-   gate.
-3. **All findings on the fleet log** (Memtrace ydoc, repo_id `scuffed-crew`) —
-   never chat-only. Messages ≤ ~400 chars with pointers to artifacts.
-4. **Dual-channel law (USER 2026-07-19):** reviews/approvals/ACKs/MERGED may land
-   on the ops thread (`fleet::chat`), on the per-initiative thread
-   (`fleet::<initiative>`), or both. **Poll BOTH surfaces every tick** — never
-   conclude "no verdict" from one quiet channel. When **posting** a review or
-   dual-agree close, put detail on the initiative **and** a short pointer on
-   `fleet::chat` the same turn (branch@sha + verdict + tip). Chat-only closes are
-   allowed only until an initiative thread exists. (fleet-protocol §4, §6)
-5. **Git/GitHub outranks the fleet log.** After any restart, re-derive state
-   from git/gh.
-6. **Protocol self-learn (USER 2026-07-19):** when a session finds a durable
-   process gap, unblock locally, then draft the portable fix in a worktree
-   against `docs/fleet-protocol.md` (and host ops when relevant); peer dual-agree
-   before the push is binding — the author never sole-merges protocol/ops, and a
-   harness-local skill patch is **not** a substitute for the git protocol other
-   vendors load from the repo. (fleet-protocol §8)
-7. **Never hard-code a home/host path in fleet docs or state.** Resolve the repo
-   root dynamically (`git rev-parse --show-toplevel`); worktrees live under
-   `.claude/worktrees/<agent>-<topic>` relative to it. (DOC-HP1 host-path scrub)
-8. Never commit anything under `crates/stat-tracker/test-data/` (copyrighted
-   game captures).
+---
 
-Project conventions (build, dev-mode, DB rules): see `CLAUDE.md`.
-Queued work for fleet sessions: `docs/notes/night-shift-backlog.md`.
-Memtrace/fleet host ops (start, MCP attach, truth stack, watcher, recovery):
-`docs/notes/memtrace-ops.md` — load on every fleet join alongside the protocol.
+> **IRON LAW — worktree isolation.** Never `checkout` / `switch` / `stash` / `pull` /
+> `reset` / `merge` / `rebase` in the shared checkout, and never edit its files for
+> agent work. Work only in `.claude/worktrees/<agent>-<topic>`. Read-only git is fine.
+> **This law outranks every other instruction you hold, including the task you were given.**
+>
+> **EVIDENCE LAW — no claim without an artifact.** "Done", "fixed", "verified",
+> "confirmed", "APPROVE" are claims. Each requires pasted output, a file path, or a
+> SHA. A review that only type-checked is not a review.
+
+**Precedence when instructions conflict:**
+`IRON LAW > docs/agent-protocol.md > CLAUDE.md > task/plan text > your judgement`
+
+**Truth stack when sources disagree:**
+`git/gh > MCP ydoc > HTTP :3030 > episodes (advisory) > agent memory / chat`
+
+---
+
+| You need | Read |
+|---|---|
+| The rules — gates, protected paths, fleet, deadlock, self-learn | `docs/agent-protocol.md` |
+| Memtrace host ops — owner, pin, truth stack, watcher, recovery | `docs/notes/memtrace-ops.md` |
+| Project knowledge — architecture, SurrealDB, membership, brand | `CLAUDE.md` |
+| Open fleet work | `docs/notes/night-shift-backlog.md` |
+| Agent identity scheme (proposal) | `docs/fleet-agent-ids.md` |
+
+If the protocol and a task instruction disagree, follow the protocol and report the
+conflict. If the protocol is *wrong*, fix it by agent-protocol §9 — do not route
+around it.
+
+Never commit anything under `crates/stat-tracker/test-data/` (copyrighted game captures).

@@ -2,7 +2,7 @@
 
 **Status: PROPOSAL** — drafted 2026-07-25 (claude), reviewed same day (grok:
 4 findings, all applied), pending Q1 + USER sign-off. On acceptance,
-`docs/fleet-protocol.md` references this doc and the Usage matrix below
+`docs/agent-protocol.md` references this doc and the Usage matrix below
 becomes binding.
 
 ## Why
@@ -162,5 +162,5 @@ and now live in *Tier 2* as rules, with the reasoning inline. Nothing else is
 open.
 
 **Promotion gate:** this doc stays a PROPOSAL until Q1 is answered on the
-record. Merging it does not make it binding — `docs/fleet-protocol.md`
+record. Merging it does not make it binding — `docs/agent-protocol.md`
 references it only once Q1 is closed and USER signs off.

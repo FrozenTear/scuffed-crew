@@ -9,7 +9,7 @@ items 1–4 and 7–10 of that list are **all merged** (see §A). What remains f
 it is only the USER-gated items in §3.
 
 Every item: problem, fix plan, files, size, done-criteria. Standing rules per
-`docs/fleet-protocol.md`: worktrees only (shared checkout read-only for agents —
+`docs/agent-protocol.md`: worktrees only (shared checkout read-only for agents —
 IRON LAW), dual-agree before merge (author never merges own branch), human holds
 the tag/release gate.
 
