@@ -18,6 +18,23 @@ const SYNC_EVERY_N_CAPTURES: u32 = 5;
 /// bounding how long a single stray read stays actionable.
 const OUTCOME_CONFIRM_WINDOW: std::time::Duration = std::time::Duration::from_secs(60);
 
+/// PR-B (fleet::tracker-fps): mid-match the poller performs its screencopy
+/// only on every Nth interval tick. Each compositor screencopy is a GPU
+/// readback on the gaming output — the frametime hitch behind the "fuzzy"
+/// reports — and mid-match ticks carry no signal worth that cost at full
+/// cadence. 2 (not 3): phase/end screens must still land two poll ticks
+/// inside their lifetime — the OCR stability gate defers the first sighting,
+/// and the shortest screen (map vote, ~15s) only fits two ticks at the 8s
+/// effective cadence this yields under the default 4s interval.
+const SLOW_POLL_DIVISOR: u32 = 2;
+
+/// How recently a game must have opened for the poller to stay at full
+/// cadence: start screens (map vote / ban / hero select) and early corrective
+/// evidence cluster in the first stretch of a session, and matches don't end
+/// this early — after it, mid-match slow cadence applies until end evidence
+/// shows up (outcome recorded, fresh word-OCR streak, or a new game opening).
+const SLOW_AFTER_GAME_OPEN: std::time::Duration = std::time::Duration::from_secs(120);
+
 /// How many poll-tick frames `--dump-poll-frames` keeps (ring buffer on disk).
 /// At a 4s poll interval this is ~10 minutes — enough that a defeat's
 /// post-match sequence survives even if the next game is already underway
@@ -895,6 +912,27 @@ struct SessionState {
     /// Tesseract call every tick. Taken (`mem::take`) into the poll tick's
     /// `spawn_blocking` closure and moved back out through its return value.
     ocr_stability: detect::stability::FrameStability,
+    /// Interval ticks skipped since the last performed poll capture (PR-B
+    /// adaptive cadence): while [`poll_slow_mode`] holds, only every
+    /// [`SLOW_POLL_DIVISOR`]th tick pays the screencopy.
+    poll_ticks_skipped: u32,
+}
+
+/// PR-B: whether the poller sits mid-match with nothing imminent — a mature
+/// open game, outcome still unknown, and no fresh word-OCR read awaiting its
+/// confirming partner. Every end-of-match signal path already drops this back
+/// to full cadence through existing state: a banner records the outcome
+/// (`finished()`), a word read sets `word_outcome_streak`, and a detected
+/// start phase opens a new game (resetting `last_game_open`).
+fn poll_slow_mode(st: &SessionState, now: Instant) -> bool {
+    st.active_game.as_ref().is_some_and(|g| !g.finished())
+        && st
+            .last_game_open
+            .is_none_or(|t| now.duration_since(t) >= SLOW_AFTER_GAME_OPEN)
+        && st
+            .word_outcome_streak
+            .as_ref()
+            .is_none_or(|(_, t)| now.duration_since(*t) > OUTCOME_CONFIRM_WINDOW)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -939,6 +977,7 @@ async fn run_loop(ctx: Arc<DaemonCtx>) -> anyhow::Result<()> {
         word_outcome_streak: None,
         suspend_probe: (Instant::now(), Utc::now()),
         ocr_stability: detect::stability::FrameStability::default(),
+        poll_ticks_skipped: 0,
     };
     if let Some(g) = &st.active_game {
         tracing::info!(
@@ -1204,6 +1243,19 @@ async fn run_loop(ctx: Arc<DaemonCtx>) -> anyhow::Result<()> {
                     st.ocr_stability.reset();
                     continue;
                 }
+
+                // PR-B: adaptive cadence — mid-match, pay the screencopy only
+                // on every SLOW_POLL_DIVISORth tick. The skipped ticks cost
+                // nothing (no capture, no scans); full cadence resumes the
+                // moment any end/start evidence lands in session state.
+                if poll_slow_mode(&st, Instant::now()) {
+                    st.poll_ticks_skipped += 1;
+                    if st.poll_ticks_skipped < SLOW_POLL_DIVISOR {
+                        tracing::trace!("poll tick skipped — adaptive slow cadence mid-match");
+                        continue;
+                    }
+                }
+                st.poll_ticks_skipped = 0;
 
                 match capture::capture_screen_output(backend, capture_output).await {
                     Ok(img) => {
@@ -2281,6 +2333,59 @@ mod tests {
             last_stats_at: None,
             hero_auth: HeroAuthState::default(),
         }
+    }
+
+    /// Session state around an optional game, everything else quiescent —
+    /// the baseline the poll_slow_mode tests perturb.
+    fn session(active_game: Option<ActiveGame>, now: Instant) -> SessionState {
+        SessionState {
+            capture_count: 0,
+            last_game_open: None,
+            last_tab_capture: None,
+            active_game,
+            pending_outcome: None,
+            word_outcome_streak: None,
+            suspend_probe: (now, Utc::now()),
+            ocr_stability: detect::stability::FrameStability::default(),
+            poll_ticks_skipped: 0,
+        }
+    }
+
+    #[test]
+    fn slow_mode_only_for_mature_unfinished_game() {
+        let now = test_now();
+        // No game open → full cadence (start screens could show any tick).
+        assert!(!poll_slow_mode(&session(None, now), now));
+        // Mature unfinished game, nothing pending → slow. (`game()` opens
+        // 300s ago; `last_game_open: None` models a recovered session.)
+        let mut st = session(Some(game(detect::MatchOutcome::Unknown, None, now)), now);
+        assert!(poll_slow_mode(&st, now));
+        // Freshly opened game → full cadence (start screens still live).
+        st.last_game_open = Some(now - Duration::from_secs(30));
+        assert!(!poll_slow_mode(&st, now));
+        st.last_game_open = Some(now - SLOW_AFTER_GAME_OPEN);
+        assert!(poll_slow_mode(&st, now));
+    }
+
+    #[test]
+    fn slow_mode_drops_on_end_evidence() {
+        let now = test_now();
+        // Outcome recorded (banner / confirmed word) → full cadence for the
+        // between-games window where the next start screens appear.
+        let st = session(Some(game(detect::MatchOutcome::Victory, Some(5), now)), now);
+        assert!(!poll_slow_mode(&st, now));
+        // A fresh unconfirmed word read holds full cadence while it waits for
+        // its agreeing partner...
+        let mut st = session(Some(game(detect::MatchOutcome::Unknown, None, now)), now);
+        st.word_outcome_streak =
+            Some((detect::MatchOutcome::Defeat, now - Duration::from_secs(10)));
+        assert!(!poll_slow_mode(&st, now));
+        // ...but a streak past the confirmation window no longer does.
+        st.word_outcome_streak = Some((
+            detect::MatchOutcome::Defeat,
+            now - OUTCOME_CONFIRM_WINDOW - Duration::from_secs(1),
+        ));
+        assert!(poll_slow_mode(&st, now));
     }
 
     #[test]
