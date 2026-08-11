@@ -890,6 +890,11 @@ struct SessionState {
     /// (`SUSPEND_RESET_GAP`): refreshed each cmd tick; wall time advancing much
     /// further than the monotonic clock between ticks means the machine slept.
     suspend_probe: (Instant, chrono::DateTime<Utc>),
+    /// Poll-tick OCR stability gate (PR-A): word/phase OCR only runs on crops
+    /// that held still since the previous tick, so combat frames stop paying a
+    /// Tesseract call every tick. Taken (`mem::take`) into the poll tick's
+    /// `spawn_blocking` closure and moved back out through its return value.
+    ocr_stability: detect::stability::FrameStability,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -933,6 +938,7 @@ async fn run_loop(ctx: Arc<DaemonCtx>) -> anyhow::Result<()> {
         pending_outcome: None,
         word_outcome_streak: None,
         suspend_probe: (Instant::now(), Utc::now()),
+        ocr_stability: detect::stability::FrameStability::default(),
     };
     if let Some(g) = &st.active_game {
         tracing::info!(
@@ -1195,21 +1201,28 @@ async fn run_loop(ctx: Arc<DaemonCtx>) -> anyhow::Result<()> {
                 }
                 if !game_gate.is_running() {
                     st.word_outcome_streak = None;
+                    st.ocr_stability.reset();
                     continue;
                 }
 
                 match capture::capture_screen_output(backend, capture_output).await {
                     Ok(img) => {
                         let dump_dir = dump_poll_frames.then(|| data_dir.join("debug").join("poll"));
-                        let (signal, phase, accolade_map) = tokio::task::spawn_blocking(move || {
+                        let mut stability = std::mem::take(&mut st.ocr_stability);
+                        let (signal, phase, accolade_map, stability) = tokio::task::spawn_blocking(move || {
                             if let Some(dir) = &dump_dir {
                                 save_frame_ring(dir, "poll", &img, POLL_DUMP_KEEP);
                             }
                             // One RGBA→RGB conversion shared by banner + phase
                             // detectors (P6); title OCR still uses the original frame.
                             let rgb = img.to_rgb8();
+                            // PR-A: the polled variants gate their OCR on the
+                            // crop holding still across consecutive ticks —
+                            // combat frames stop paying a Tesseract call per
+                            // tick; static post-match/phase screens still read
+                            // (one tick later at most).
                             let signal =
-                                detect::match_end::detect_outcome_signal_with_rgb(&img, &rgb);
+                                detect::match_end::detect_outcome_signal_polled(&img, &rgb, &mut stability);
                             // The accolade screen also prints the map — read it
                             // while we're here; it recovers games where the
                             // in-game top-bar OCR missed all match.
@@ -1219,9 +1232,12 @@ async fn run_loop(ctx: Arc<DaemonCtx>) -> anyhow::Result<()> {
                                 }
                                 _ => None,
                             };
-                            let phase = detect::match_start::detect_phase_with_rgb(&img, &rgb);
-                            (signal, phase, accolade_map)
-                        }).await.unwrap_or((None, detect::GamePhase::Unknown, None));
+                            let phase = detect::match_start::detect_phase_polled(&img, &rgb, &mut stability);
+                            (signal, phase, accolade_map, stability)
+                        }).await.unwrap_or_else(|_| {
+                            (None, detect::GamePhase::Unknown, None, detect::stability::FrameStability::default())
+                        });
+                        st.ocr_stability = stability;
 
                         // The banner color-flood is specific enough to act on
                         // immediately (and only lasts ~3s — a second tick may

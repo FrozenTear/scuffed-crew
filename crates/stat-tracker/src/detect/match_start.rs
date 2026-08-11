@@ -1,6 +1,7 @@
 use image::{DynamicImage, RgbImage};
 
 use super::GamePhase;
+use super::stability::FrameStability;
 
 /// Detect map-vote / hero-ban / hero-select phase.
 ///
@@ -20,6 +21,74 @@ pub fn detect_phase_with_rgb(img: &DynamicImage, rgb: &RgbImage) -> GamePhase {
         return GamePhase::HeroBan;
     }
     if detect_hero_select(img, rgb) {
+        return GamePhase::HeroSelect;
+    }
+    GamePhase::Unknown
+}
+
+/// Poll-tick phase detection (PR-A). Two differences from the one-shot path,
+/// neither changing what a phase screen ultimately detects as:
+///
+/// 1. All three detectors confirm with OCR of the *identical* top-center crop
+///    — the one-shot path can run that same Tesseract call up to three times
+///    on a tick where several pixel gates pass (dark combat scenes routinely
+///    pass the ban/select gates). Here the crop is recognized once and each
+///    gate-passing detector checks its phrases against the shared text.
+/// 2. The OCR is gated on temporal stability ([`FrameStability`]): phase
+///    screens hold still for 10s+, combat frames never do, so the confirm
+///    OCR stops burning a Tesseract call on every dark mid-fight tick. First
+///    sighting of a screen defers one tick — well inside every phase screen's
+///    lifetime.
+///
+/// Pixel gates, thresholds, phrase checks, and priority order are shared with
+/// the one-shot detectors — fixture parity holds by construction.
+pub fn detect_phase_polled(
+    img: &DynamicImage,
+    rgb: &RgbImage,
+    stability: &mut FrameStability,
+) -> GamePhase {
+    let (w, h) = rgb.dimensions();
+
+    let navy = navy_ratio(rgb);
+    let vote_gate = navy >= 0.40;
+    let (red_ratio, dark_ratio) = ban_ratios(rgb);
+    let ban_gate = red_ratio >= 0.003 && dark_ratio >= 0.30;
+    let select_dark = select_header_dark_ratio(rgb);
+    // The grid-variance scan only matters when the header gate passed.
+    let select_variance = if select_dark >= 0.50 {
+        select_grid_variance(rgb)
+    } else {
+        0.0
+    };
+    let select_gate = select_dark >= 0.50 && select_variance >= 2000.0;
+
+    if !vote_gate && !ban_gate && !select_gate {
+        return GamePhase::Unknown;
+    }
+
+    let top_region = img.crop_imm(w / 4, 0, w / 2, h / 4);
+    if !stability.check("phase_top", &top_region) {
+        tracing::trace!(
+            vote_gate,
+            ban_gate,
+            select_gate,
+            "phase pixel gate passed but top region not stable — deferring OCR"
+        );
+        return GamePhase::Unknown;
+    }
+
+    let Ok(text) = crate::ocr::recognize_sparse_region(&top_region) else {
+        return GamePhase::Unknown;
+    };
+    let upper = text.to_uppercase();
+
+    if vote_gate && let Some(phase) = confirm_map_vote(&upper, navy) {
+        return phase;
+    }
+    if ban_gate && confirm_hero_ban(&upper, red_ratio, dark_ratio) {
+        return GamePhase::HeroBan;
+    }
+    if select_gate && confirm_hero_select(&upper, select_dark, select_variance) {
         return GamePhase::HeroSelect;
     }
     GamePhase::Unknown
@@ -99,26 +168,29 @@ fn detect_map_vote(img: &DynamicImage, rgb: &RgbImage) -> Option<GamePhase> {
     }
 
     // Confirm with OCR on the top portion. The "VOTE FOR A MAP" header bottoms
-    // out around 0.17h, so crop h/4 to include it whole; require BOTH words —
-    // the crop can also catch chat/scoreboard text where one alone may appear.
+    // out around 0.17h, so crop h/4 to include it whole.
     let top_region = img.crop_imm(w / 4, 0, w / 2, h / 4);
     match crate::ocr::recognize_sparse_region(&top_region) {
-        Ok(text) => {
-            let upper = text.to_uppercase();
-            if upper.contains("VOTE") && upper.contains("MAP") {
-                let maps = extract_map_names(&upper);
-                tracing::info!(navy_ratio, maps = ?maps, "map vote screen detected");
-                Some(GamePhase::MapVote { maps })
-            } else {
-                tracing::debug!(
-                    navy_ratio,
-                    text = %upper.chars().take(80).collect::<String>(),
-                    "map-vote pixel gate passed but OCR did not confirm"
-                );
-                None
-            }
-        }
+        Ok(text) => confirm_map_vote(&text.to_uppercase(), navy_ratio),
         Err(_) => None,
+    }
+}
+
+/// Phrase check for the vote screen's OCR text. Requires BOTH words — the
+/// top-center crop can also catch chat/scoreboard text where one alone may
+/// appear.
+fn confirm_map_vote(upper: &str, navy_ratio: f32) -> Option<GamePhase> {
+    if upper.contains("VOTE") && upper.contains("MAP") {
+        let maps = extract_map_names(upper);
+        tracing::info!(navy_ratio, maps = ?maps, "map vote screen detected");
+        Some(GamePhase::MapVote { maps })
+    } else {
+        tracing::debug!(
+            navy_ratio,
+            text = %upper.chars().take(80).collect::<String>(),
+            "map-vote pixel gate passed but OCR did not confirm"
+        );
+        None
     }
 }
 
@@ -166,26 +238,28 @@ fn detect_hero_ban(img: &DynamicImage, rgb: &RgbImage) -> bool {
     }
 
     // Confirm with OCR. Crop h/4: "TEAM BAN SCORE" sits near the top edge and
-    // "BAN HEROES n" bottoms out around 0.20h. Require a phrase, not bare
-    // "BAN" — the crop can catch scoreboard player names and chat.
+    // "BAN HEROES n" bottoms out around 0.20h.
     let top_region = img.crop_imm(w / 4, 0, w / 2, h / 4);
     match crate::ocr::recognize_sparse_region(&top_region) {
-        Ok(text) => {
-            let upper = text.to_uppercase();
-            if upper.contains("BAN HERO") || upper.contains("TEAM BAN SCORE") {
-                tracing::info!(red_ratio, "hero ban screen detected");
-                true
-            } else {
-                tracing::debug!(
-                    red_ratio,
-                    dark_ratio,
-                    text = %upper.chars().take(80).collect::<String>(),
-                    "hero-ban pixel gate passed but OCR did not confirm"
-                );
-                false
-            }
-        }
+        Ok(text) => confirm_hero_ban(&text.to_uppercase(), red_ratio, dark_ratio),
         Err(_) => false,
+    }
+}
+
+/// Phrase check for the hero-ban screen's OCR text. Requires a phrase, not
+/// bare "BAN" — the crop can catch scoreboard player names and chat.
+fn confirm_hero_ban(upper: &str, red_ratio: f32, dark_ratio: f32) -> bool {
+    if upper.contains("BAN HERO") || upper.contains("TEAM BAN SCORE") {
+        tracing::info!(red_ratio, "hero ban screen detected");
+        true
+    } else {
+        tracing::debug!(
+            red_ratio,
+            dark_ratio,
+            text = %upper.chars().take(80).collect::<String>(),
+            "hero-ban pixel gate passed but OCR did not confirm"
+        );
+        false
     }
 }
 
@@ -274,31 +348,33 @@ fn detect_hero_select(img: &DynamicImage, rgb: &RgbImage) -> bool {
     }
 
     // Confirm with OCR. The title bottoms out around 0.20h — well below the
-    // h/8 dark-header band — so crop h/4. Scoreboard frames pass both pixel
-    // gates and their top rows land in this crop, so bare "HERO" would match
-    // player names/titles ("Unrelenting Hero"); require phrases instead.
+    // h/8 dark-header band — so crop h/4.
     let top_region = img.crop_imm(w / 4, 0, w / 2, h / 4);
     match crate::ocr::recognize_sparse_region(&top_region) {
-        Ok(text) => {
-            let upper = text.to_uppercase();
-            let is_hero_select = upper.contains("CHOOSE")
-                || upper.contains("ASSEMBLE")
-                || upper.contains("PREFERRED HERO")
-                || (upper.contains("SELECT") && upper.contains("HERO"));
-            if is_hero_select {
-                tracing::info!(variance, "hero select screen detected");
-            } else {
-                tracing::debug!(
-                    dark_ratio,
-                    variance,
-                    text = %upper.chars().take(80).collect::<String>(),
-                    "hero-select pixel gates passed but OCR did not confirm"
-                );
-            }
-            is_hero_select
-        }
+        Ok(text) => confirm_hero_select(&text.to_uppercase(), dark_ratio, variance),
         Err(_) => false,
     }
+}
+
+/// Phrase check for the hero-select screen's OCR text. Scoreboard frames pass
+/// both pixel gates and their top rows land in the crop, so bare "HERO" would
+/// match player names/titles ("Unrelenting Hero"); require phrases instead.
+fn confirm_hero_select(upper: &str, dark_ratio: f32, variance: f64) -> bool {
+    let is_hero_select = upper.contains("CHOOSE")
+        || upper.contains("ASSEMBLE")
+        || upper.contains("PREFERRED HERO")
+        || (upper.contains("SELECT") && upper.contains("HERO"));
+    if is_hero_select {
+        tracing::info!(variance, "hero select screen detected");
+    } else {
+        tracing::debug!(
+            dark_ratio,
+            variance,
+            text = %upper.chars().take(80).collect::<String>(),
+            "hero-select pixel gates passed but OCR did not confirm"
+        );
+    }
+    is_hero_select
 }
 
 const MAP_NAMES: &[&str] = &[
