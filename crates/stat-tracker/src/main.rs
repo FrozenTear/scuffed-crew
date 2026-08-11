@@ -146,12 +146,19 @@ async fn main() -> anyhow::Result<()> {
     );
 
     // Refuse to start alongside a live daemon; the guard removes the pid file
-    // on drop. Held across --vacuum so no daemon can start mid-compaction.
+    // on drop. Held across --vacuum / auto-vacuum so no second instance starts
+    // mid-compaction.
     let _pid_guard = acquire_pid_guard(&config.data_dir)?;
 
     // Maintenance mode: compact the store and exit (see LocalStore::vacuum).
     if maybe_vacuum(&config.data_dir).await? {
         return Ok(());
+    }
+
+    // Log rotate, prune old pre-vacuum backups, auto-vacuum if store is bloated.
+    // Must run before open_store (single-writer SurrealKV).
+    if let Err(e) = storage::maintain::startup_maintenance(&config.data_dir).await {
+        tracing::warn!(error = %e, "startup maintenance failed — continuing with live store");
     }
 
     // Tessdata generation is triggered manually via --generate-tessdata or the GUI button.
@@ -213,6 +220,7 @@ fn handle_preinit_flags() -> bool {
              \x20 --list-outputs        list capture outputs and exit\n\
              \x20 --generate-tessdata   build the game-font tessdata model and exit\n\
              \x20 --vacuum              compact the local stats DB and exit\n\
+             \x20                       (daemon also auto-vacuums at start if store is bloated)\n\
              \x20 --collect-portraits   dev: save hero portrait crops while running\n\
              \x20 --dump-poll-frames    dev: save every polled frame while running\n\
              \x20 --ocr-threads N       OCR workers 1..=8 (RAM vs speed; also config/env)\n\n\
@@ -345,15 +353,16 @@ async fn maybe_vacuum(data_dir: &std::path::Path) -> anyhow::Result<bool> {
     if !std::env::args().any(|a| a == "--vacuum") {
         return Ok(false);
     }
-    let before = dir_size(&data_dir.join("stats.surrealkv"));
+    let before = storage::maintain::store_size_bytes(data_dir);
     let (matches, sessions, tombstones) = storage::LocalStore::vacuum(data_dir)
         .await
         .map_err(anyhow::Error::from_boxed)
         .context("vacuum failed")?;
-    let after = dir_size(&data_dir.join("stats.surrealkv"));
+    let after = storage::maintain::store_size_bytes(data_dir);
+    // vacuum() already prunes to keep-1; report for the operator.
     println!(
         "vacuum complete: {matches} matches, {sessions} sessions, {tombstones} tombstones; \
-         store {:.1} MB -> {:.1} MB (old store kept as stats.surrealkv.pre-vacuum-*)",
+         store {:.1} MB -> {:.1} MB (newest pre-vacuum backup kept)",
         before as f64 / 1e6,
         after as f64 / 1e6,
     );
@@ -2044,25 +2053,6 @@ fn save_accepted_frame(data_dir: &std::path::Path, board: image::DynamicImage) {
     tokio::task::spawn_blocking(move || {
         save_frame_ring(&dir, "accepted", &board, ACCEPTED_KEEP);
     });
-}
-
-/// Total size in bytes of a directory tree (best-effort; used for the
-/// before/after report of `--vacuum`).
-fn dir_size(dir: &std::path::Path) -> u64 {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return std::fs::metadata(dir).map(|m| m.len()).unwrap_or(0);
-    };
-    entries
-        .flatten()
-        .map(|e| {
-            let p = e.path();
-            if p.is_dir() {
-                dir_size(&p)
-            } else {
-                e.metadata().map(|m| m.len()).unwrap_or(0)
-            }
-        })
-        .sum()
 }
 
 fn rand_id() -> u64 {

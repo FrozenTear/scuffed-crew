@@ -1,5 +1,7 @@
 use std::path::{Path, PathBuf};
 
+pub mod maintain;
+
 use serde::{Deserialize, Serialize};
 use surrealdb::Surreal;
 use surrealdb::engine::local::SurrealKv;
@@ -789,6 +791,18 @@ impl LocalStore {
         std::fs::rename(&live_path, &backup)?;
         std::fs::rename(fresh_dir.join("stats.surrealkv"), &live_path)?;
         let _ = std::fs::remove_dir_all(&fresh_dir);
+        // Keep only the newest pre-vacuum backup (this one) so data_dir does
+        // not accumulate multi-hundred-MB copies across repeated vacua.
+        if let Ok(n) =
+            maintain::prune_pre_vacuum_backups(data_dir, maintain::PRE_VACUUM_BACKUPS_KEEP)
+            && n > 0
+        {
+            tracing::info!(
+                pruned = n,
+                keep = maintain::PRE_VACUUM_BACKUPS_KEEP,
+                "pruned older pre-vacuum backups after vacuum"
+            );
+        }
         tracing::info!(
             matches = matches.len(),
             sessions = sessions.len(),
