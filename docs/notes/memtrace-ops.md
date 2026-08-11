@@ -1,8 +1,9 @@
 # Memtrace / fleet ops runbook (scuffed-crew)
 
-**Load this file on every fleet join.** Companion to the portable protocol:
-`docs/fleet-protocol.md` (§1 join, §3 IRON LAW, §6 liveness). Protocol = rules;
+**Load this file on every fleet join.** Companion to the binding protocol:
+`docs/agent-protocol.md` (§1 IRON LAW, §7 fleet module). Protocol = rules;
 this note = host topology, truth stack, recovery, Hermes watcher/approvals.
+(`docs/fleet-protocol.md` is superseded — do not treat it as current law.)
 
 Do not treat chat memory or a single HTTP curl as SoT. After any restart or
 suspected wipe, re-derive from git/gh first, then MCP ydoc.
@@ -449,8 +450,9 @@ Reseed eg: 01KXVBY7AT … / main@7420451 (quote before claim)
 
 | Doc | Role |
 |-----|------|
-| `docs/fleet-protocol.md` | Portable multi-agent protocol + Appendix A bindings |
+| `docs/agent-protocol.md` | Binding multi-agent + solo agent protocol |
+| `docs/fleet-protocol.md` | **Superseded** — provenance only |
 | `docs/notes/night-shift-runbook.md` | Night-shift act table / ops loop |
 | `docs/notes/night-shift-backlog.md` | Queued work |
 | `docs/notes/night-shift-state.json` | Git-derived scoreboard snapshot (not live cursor) |
-| `AGENTS.md` | Entry pointer for all harnesses |
+| `AGENTS.md` | Front door for all harnesses |

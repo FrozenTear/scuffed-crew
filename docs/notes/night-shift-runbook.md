@@ -41,7 +41,7 @@ Host topology, MCP vs HTTP truth stack, episode advisory rules, durable
 `memtrace start`, Hermes watcher crons, and restart recovery:
 
 → **`docs/notes/memtrace-ops.md`** (binding for this machine; pairs with
-`docs/fleet-protocol.md`).
+`docs/agent-protocol.md`).
 
 Live watcher cursor is **not** `night-shift-state.json` — see
 `~/.hermes/state/fleet-watcher/` and skill `memtrace-fleet-watcher`.

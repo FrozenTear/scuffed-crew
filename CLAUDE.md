@@ -72,12 +72,12 @@ Production = `scuffed-server` serving `dist/` (built by `dx build` from crates/a
 ## Fleet Protocol (multi-agent sessions)
 
 When working alongside other agents (grok, or any peer) on this repo, the
-binding protocol is **`docs/fleet-protocol.md`** — read it at session start.
-Headlines: work only in your own worktree (shared checkout is read-only for
-agents; IRON LAW), dual-agree before every merge (author never merges own
-branch), ALL findings on the Memtrace fleet log (≤400-char messages with
-pointers), git/gh outranks the fleet log after restarts. Queued fleet work:
-`docs/notes/night-shift-backlog.md`. Cross-vendor copy of these rules: `AGENTS.md`.
+binding protocol is **`docs/agent-protocol.md`** (front door: `AGENTS.md`) —
+read it at session start. Host Memtrace ops: `docs/notes/memtrace-ops.md`.
+Headlines: IRON LAW (worktree-only), Evidence Law (no claim without artifact),
+dual-agree before every merge (author never merges own branch), dual-channel
+fleet log, git/gh outranks ydoc after restarts. Queued fleet work:
+`docs/notes/night-shift-backlog.md`. `docs/fleet-protocol.md` is superseded.
 
 ## Research Strategy: Wave-Based Multi-Agent
 
