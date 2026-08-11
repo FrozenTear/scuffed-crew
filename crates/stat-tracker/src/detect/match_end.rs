@@ -1,6 +1,7 @@
 use image::{DynamicImage, RgbImage};
 
 use super::MatchOutcome;
+use super::stability::FrameStability;
 
 /// Which detector produced an outcome. The banner color-flood is specific
 /// enough to act on from a single frame; the word-OCR sources (accolade
@@ -41,14 +42,37 @@ pub fn detect_outcome_signal_with_rgb(
     img: &DynamicImage,
     rgb: &RgbImage,
 ) -> Option<(MatchOutcome, OutcomeSource)> {
+    detect_outcome_signal_inner(img, rgb, None)
+}
+
+/// Poll-tick outcome detection: identical to
+/// [`detect_outcome_signal_with_rgb`] except the word-OCR crops are gated on
+/// temporal stability — Tesseract only runs once a crop has held still across
+/// consecutive ticks (see [`FrameStability`]). The banner color-flood is never
+/// gated: it is cheap, lasts ~3s, and a second tick may never come. Word
+/// detection shifts at most one tick later, inside the budget of screens that
+/// stay up 15–20s and already need two agreeing reads to confirm.
+pub fn detect_outcome_signal_polled(
+    img: &DynamicImage,
+    rgb: &RgbImage,
+    stability: &mut FrameStability,
+) -> Option<(MatchOutcome, OutcomeSource)> {
+    detect_outcome_signal_inner(img, rgb, Some(stability))
+}
+
+fn detect_outcome_signal_inner(
+    img: &DynamicImage,
+    rgb: &RgbImage,
+    mut stability: Option<&mut FrameStability>,
+) -> Option<(MatchOutcome, OutcomeSource)> {
     if let Some(outcome) = detect_banner(rgb) {
         return Some((outcome, OutcomeSource::Banner));
     }
-    match read_result_word(img) {
+    match read_result_word(img, stability.as_deref_mut()) {
         MatchOutcome::Unknown => {}
         outcome => return Some((outcome, OutcomeSource::ResultWord)),
     }
-    match read_rank_screen_result(img) {
+    match read_rank_screen_result(img, stability) {
         MatchOutcome::Unknown => None,
         outcome => Some((outcome, OutcomeSource::RankScreen)),
     }
@@ -161,8 +185,8 @@ fn detect_banner(rgb: &RgbImage) -> Option<MatchOutcome> {
 /// MVP screen (shown ~15-20s after Play of the Game).
 /// Region calibrated against a native 16:9 accolade frame: x 0.5-14%, y 3.5-9.5%.
 /// Validated on a custom magenta UI theme (2026-06-11 defeat frame).
-fn read_result_word(img: &DynamicImage) -> MatchOutcome {
-    ocr_outcome_word(img, 5, 35, 135, 60, "accolade screen")
+fn read_result_word(img: &DynamicImage, stability: Option<&mut FrameStability>) -> MatchOutcome {
+    ocr_outcome_word(img, 5, 35, 135, 60, "accolade screen", stability)
 }
 
 /// Read the result word off the competitive summary (rank update) screen —
@@ -170,8 +194,11 @@ fn read_result_word(img: &DynamicImage) -> MatchOutcome {
 /// background is dark regardless of UI color theme, and the screen stays up
 /// 40s+ (the longest-lived outcome signal, surviving even a starved poller).
 /// Region measured from a real 16:9 frame: word spans x 4-12.5%, y 16-21%.
-fn read_rank_screen_result(img: &DynamicImage) -> MatchOutcome {
-    ocr_outcome_word(img, 10, 145, 150, 80, "rank screen")
+fn read_rank_screen_result(
+    img: &DynamicImage,
+    stability: Option<&mut FrameStability>,
+) -> MatchOutcome {
+    ocr_outcome_word(img, 10, 145, 150, 80, "rank screen", stability)
 }
 
 /// Read the map name printed beside the accolade screen's result word
@@ -209,7 +236,8 @@ fn ocr_outcome_word(
     y_pm: u32,
     w_pm: u32,
     h_pm: u32,
-    context: &str,
+    context: &'static str,
+    stability: Option<&mut FrameStability>,
 ) -> MatchOutcome {
     let (fw, fh) = (img.width(), img.height());
     let (gx, gy, gw, gh) = crate::ocr::preprocess::game_rect_16_9(fw, fh);
@@ -225,6 +253,18 @@ fn ocr_outcome_word(
     // P8: most idle ticks are in-game — the title crop is near-black. Skip the
     // Lanczos+Otsu+Tess pipeline when the crop has no bright glyph mass.
     if !title_crop_has_signal(&crop) {
+        return MatchOutcome::Unknown;
+    }
+
+    // PR-A: brightness cannot distinguish a lit combat frame from a real title
+    // (see title_crop_has_signal), so on the poll path additionally require the
+    // crop to have held still since the previous tick. Result screens are
+    // static for 15-20s+; combat never is. `context` doubles as the history
+    // key so the accolade and rank crops track independently.
+    if let Some(stability) = stability
+        && !stability.check(context, &crop)
+    {
+        tracing::trace!(context, "title crop lit but not stable — deferring OCR");
         return MatchOutcome::Unknown;
     }
 
