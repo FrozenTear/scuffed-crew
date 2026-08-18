@@ -463,10 +463,21 @@ fn detect_banner(rgb: &RgbImage) -> Option<MatchOutcome> {
 
 /// Read the large top-left VICTORY/DEFEAT title off the post-match accolade /
 /// MVP screen (shown ~15-20s after Play of the Game).
-/// Region calibrated against a native 16:9 accolade frame: x 0.5-14%, y 3.5-9.5%.
-/// Validated on a custom magenta UI theme (2026-06-11 defeat frame).
+/// Region: x 0.5-25.5%, y 3.5-9.5% of the 16:9 playfield.
+///
+/// The right edge was 14% until 2026-08-18 (fleet::tracker-wl C6). On the
+/// current title font a 2560x1440 "DEFEAT" already spans x 2.7-12.0%
+/// (2026-07-15 endcards frame) and the seven wider glyphs of "VICTORY"
+/// project past 14%, so the crop clipped the word to "VICTOR"/"VICTO" and
+/// victories went unread while defeats still landed (store 07-31..08-17:
+/// V=10 vs D=39; 08-17 was five wins, 5/5 unknown). The map name printed
+/// right of the title enters the wider crop, and Tesseract PSM 7 gives up on
+/// the mixed line ("" at >= 21.5% on the 05-30 reference, "DEFEATJT" on the
+/// 07-15 frame), so the crop is OCR'd through `prepare_title_trimmed`, which
+/// cuts the binary back to the tall title glyphs; measured on both fixtures
+/// the 25% crop then reads "VICTORY" / "DEFEAT" exactly like the old 14% one.
 fn read_result_word(img: &DynamicImage, stability: Option<&mut FrameStability>) -> MatchOutcome {
-    ocr_outcome_word(img, 5, 35, 135, 60, "accolade screen", stability)
+    ocr_outcome_word(img, 5, 35, 250, 60, "accolade screen", stability)
 }
 
 /// Read the result word off the competitive summary (rank update) screen —
@@ -474,11 +485,14 @@ fn read_result_word(img: &DynamicImage, stability: Option<&mut FrameStability>) 
 /// background is dark regardless of UI color theme, and the screen stays up
 /// 40s+ (the longest-lived outcome signal, surviving even a starved poller).
 /// Region measured from a real 16:9 frame: word spans x 4-12.5%, y 16-21%.
+/// Right edge widened 16% -> 25% alongside the accolade crop (C6): same
+/// title face, same "VICTORY is wider than DEFEAT" clipping risk — journal
+/// 08-13..08-17 read DEFEAT off this screen 78 times and VICTORY zero.
 fn read_rank_screen_result(
     img: &DynamicImage,
     stability: Option<&mut FrameStability>,
 ) -> MatchOutcome {
-    ocr_outcome_word(img, 10, 145, 150, 80, "rank screen", stability)
+    ocr_outcome_word(img, 10, 145, 240, 80, "rank screen", stability)
 }
 
 /// Read the map name printed beside the accolade screen's result word
@@ -548,7 +562,9 @@ fn ocr_outcome_word(
         return MatchOutcome::Unknown;
     }
 
-    let prepared = crate::ocr::preprocess::prepare_title(&crop);
+    // Trimmed: the widened crops (C6) run into the map/time block right of
+    // the title; the trim cuts the binary back to the title glyphs.
+    let prepared = crate::ocr::preprocess::prepare_title_trimmed(&crop);
 
     match crate::ocr::recognize_prepared(&prepared, "7", Some("ABCDEFGHIJKLMNOPQRSTUVWXYZ")) {
         Ok(text) => {
