@@ -1865,9 +1865,22 @@ async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<
             "hero resolved (CG-4 C authority)"
         );
 
-        // Auto-collect portrait reference when hero is identified and collection is enabled
-        if collect_portraits && parsed.hero != "Unknown" {
-            let portraits_path = detect::hero_portrait::portraits_dir(data_dir);
+        // Auto-collect a portrait reference when the hero is identified and
+        // collection is enabled — or, always, when the career panel (the
+        // authoritative OCR read) names a hero that has no reference on disk
+        // yet. New heroes ship faster than bundled portraits (D.Mon, WL-5):
+        // the first game on one seeds its reference here, and the matcher
+        // picks it up on the next daemon start. Only the career-panel source
+        // may seed (a portrait/held/text guess must not template itself).
+        let portraits_path = detect::hero_portrait::portraits_dir(data_dir);
+        let seed_missing = matches!(source, HeroSource::CareerPanel)
+            && parsed.hero != "Unknown"
+            && !detect::hero_portrait::portrait_reference_path(&portraits_path, &parsed.hero)
+                .exists();
+        if seed_missing {
+            tracing::info!(hero = %parsed.hero, "no portrait reference for career-panel hero — seeding one from this capture");
+        }
+        if (collect_portraits || seed_missing) && parsed.hero != "Unknown" {
             // Shared geometry (5v5/6v6 + team gap) — an inlined 5v5-only copy
             // here used to mis-crop 6v6/team-2 references into the template
             // library.

@@ -347,9 +347,9 @@ pub fn outcome_from_board_header(raw_text: &str) -> crate::detect::MatchOutcome 
 
 fn guess_role(hero: &str) -> String {
     match hero.to_lowercase().as_str() {
-        "d.va" | "dva" | "doomfist" | "domina" | "junker queen" | "junker_queen" | "mauga"
-        | "orisa" | "ramattra" | "reinhardt" | "roadhog" | "sigma" | "winston"
-        | "wrecking ball" | "wrecking_ball" | "zarya" | "hazard" => "Tank".to_string(),
+        "d.mon" | "dmon" | "d.va" | "dva" | "doomfist" | "domina" | "junker queen"
+        | "junker_queen" | "mauga" | "orisa" | "ramattra" | "reinhardt" | "roadhog" | "sigma"
+        | "winston" | "wrecking ball" | "wrecking_ball" | "zarya" | "hazard" => "Tank".to_string(),
         "ana" | "baptiste" | "brigitte" | "illari" | "jetpack cat" | "juno" | "kiriko"
         | "lifeweaver" | "lucio" | "mercy" | "mizuki" | "moira" | "wuyang" | "zenyatta" => {
             "Support".to_string()
@@ -577,6 +577,17 @@ mod tests {
         // the primary path and needs no portrait reference.
         assert_eq!(match_hero_in_text("SHION").as_deref(), Some("Shion"));
         assert_eq!(guess_role("Shion"), "Damage");
+    }
+
+    #[test]
+    fn dmon_is_a_tank() {
+        // Added 2026-08-18 (WL-5, USER-confirmed role). Career-panel text is
+        // the primary path; the portrait reference seeds itself on the first
+        // game (see handle_capture's missing-reference auto-collect).
+        assert_eq!(match_hero_in_text("D.MON").as_deref(), Some("D.Mon"));
+        assert_eq!(guess_role("D.Mon"), "Tank");
+        assert_eq!(guess_role("dmon"), "Tank");
+        assert_eq!(guess_role("D.Va"), "Tank");
     }
 
     #[test]

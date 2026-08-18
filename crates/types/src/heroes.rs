@@ -16,6 +16,7 @@ pub const HEROES: &[&str] = &[
     "Bastion",
     "Brigitte",
     "Cassidy",
+    "D.Mon",
     "D.Va",
     "Domina",
     "Doomfist",
@@ -271,6 +272,23 @@ mod tests {
     fn canonical_hero_underscores() {
         assert_eq!(canonical_hero("wrecking_ball"), "Wrecking Ball");
         assert_eq!(canonical_hero("illari"), "Illari");
+    }
+
+    /// D.Mon (added 2026-08-18, WL-5): the career panel prints "D.MON", the
+    /// portrait reference stem is "dmon", the query form is "d.mon" — all
+    /// three must land on the same canonical name and must not collide with
+    /// D.Va, whose dotted form is one character off.
+    #[test]
+    fn dmon_resolves_and_is_distinct_from_dva() {
+        assert_eq!(match_hero_in_text("D.MON").as_deref(), Some("D.Mon"));
+        assert_eq!(
+            match_hero_in_text("D.Mon: 12 elims").as_deref(),
+            Some("D.Mon")
+        );
+        assert_eq!(canonical_hero("dmon"), "D.Mon");
+        assert_eq!(resolve_hero_query(Some("d.mon")), Ok(Some("D.Mon")));
+        assert_eq!(match_hero_in_text("D.VA").as_deref(), Some("D.Va"));
+        assert_eq!(canonical_hero("dva"), "D.Va");
     }
 
     #[test]
