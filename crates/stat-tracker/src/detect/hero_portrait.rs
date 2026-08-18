@@ -617,3 +617,23 @@ mod portrait_rect_tests {
         assert!(portrait_rect((1000, 1000), 0, 0).is_none());
     }
 }
+
+#[cfg(test)]
+mod reference_path_tests {
+    use super::portrait_reference_path;
+    use std::path::Path;
+
+    /// The on-disk stem is what `PortraitMatcher::load` keys on, so a
+    /// dotted/spaced hero name must map to exactly one predictable file
+    /// (WL-5 review nit).
+    #[test]
+    fn stem_drops_dots_and_underscores_spaces() {
+        let dir = Path::new("/tmp/portraits");
+        assert_eq!(portrait_reference_path(dir, "D.Mon"), dir.join("dmon.png"));
+        assert_eq!(portrait_reference_path(dir, "D.Va"), dir.join("dva.png"));
+        assert_eq!(
+            portrait_reference_path(dir, "Wrecking Ball"),
+            dir.join("wrecking_ball.png")
+        );
+    }
+}
