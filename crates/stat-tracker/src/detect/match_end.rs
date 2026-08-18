@@ -1,4 +1,4 @@
-use image::{DynamicImage, RgbImage};
+use image::{DynamicImage, GrayImage, Luma, RgbImage};
 
 use super::MatchOutcome;
 use super::stability::FrameStability;
@@ -14,6 +14,10 @@ pub enum OutcomeSource {
     ResultWord,
     /// Result word under the "COMPETITIVE" title on the rank-update screen.
     RankScreen,
+    /// Centered italic VICTORY/DEFEAT on the in-world end-title overlay
+    /// (theme-colored; no gold/red banner flood). Added 2026-08-18 after a
+    /// magenta-UI frame where every other source missed.
+    EndTitle,
 }
 
 /// One-shot outcome read for a single frame (Tab captures, dev tools).
@@ -72,9 +76,13 @@ fn detect_outcome_signal_inner(
         MatchOutcome::Unknown => {}
         outcome => return Some((outcome, OutcomeSource::ResultWord)),
     }
-    match read_rank_screen_result(img, stability) {
+    match read_rank_screen_result(img, stability.as_deref_mut()) {
+        MatchOutcome::Unknown => {}
+        outcome => return Some((outcome, OutcomeSource::RankScreen)),
+    }
+    match read_end_title(img, rgb, stability) {
         MatchOutcome::Unknown => None,
-        outcome => Some((outcome, OutcomeSource::RankScreen)),
+        outcome => Some((outcome, OutcomeSource::EndTitle)),
     }
 }
 
@@ -97,7 +105,8 @@ pub fn detect_outcome_text(img: &DynamicImage) -> MatchOutcome {
     let band_w = gw * 400 / 1000;
     let band_h = gh * 220 / 1000;
     if band_w == 0 || band_h == 0 || x + band_w > fw || y + band_h > fh {
-        return MatchOutcome::Unknown;
+        let rgb = img.to_rgb8();
+        return read_end_title(img, &rgb, None);
     }
     let region = img.crop_imm(x, y, band_w, band_h);
 
@@ -114,13 +123,272 @@ pub fn detect_outcome_text(img: &DynamicImage) -> MatchOutcome {
                 MatchOutcome::Draw
             } else {
                 tracing::debug!(text = %text.trim(), "scoreboard header text did not contain an outcome");
-                MatchOutcome::Unknown
+                let rgb = img.to_rgb8();
+                read_end_title(img, &rgb, None)
             }
         }
         Err(e) => {
             tracing::debug!(error = %e, "scoreboard header OCR failed");
+            let rgb = img.to_rgb8();
+            read_end_title(img, &rgb, None)
+        }
+    }
+}
+
+/// Centered italic end-title (theme-colored VICTORY/DEFEAT over the world).
+/// Cheap sat-mass / scoreline gate first so mid-fight ticks do not pay OCR.
+fn read_end_title(
+    img: &DynamicImage,
+    rgb: &RgbImage,
+    stability: Option<&mut FrameStability>,
+) -> MatchOutcome {
+    let mass = center_title_mass(rgb);
+    let scoreline = mass < END_TITLE_MASS_MIN && scoreline_looks_present(img, rgb);
+    if mass < END_TITLE_MASS_MIN && !scoreline {
+        return MatchOutcome::Unknown;
+    }
+
+    let (fw, fh) = (img.width(), img.height());
+    let (gx, gy, gw, gh) = crate::ocr::preprocess::game_rect_16_9(fw, fh);
+    // Tighter than the mass window — just the italic word.
+    // Calibrated on rejected_preflight_20260817_232203.png (magenta VICTORY!).
+    let x = gx + gw * 320 / 1000;
+    let y = gy + gh * 340 / 1000;
+    let cw = gw * 360 / 1000;
+    let ch = gh * 180 / 1000;
+    if cw == 0 || ch == 0 || x + cw > fw || y + ch > fh {
+        return MatchOutcome::Unknown;
+    }
+    let crop = img.crop_imm(x, y, cw, ch);
+
+    if let Some(stability) = stability
+        && !stability.check("end title", &crop)
+    {
+        tracing::trace!("end title crop not stable — deferring OCR");
+        return MatchOutcome::Unknown;
+    }
+
+    let prepared = prepare_end_title(&crop);
+    match crate::ocr::recognize_prepared_lang(
+        &prepared,
+        "7",
+        Some("ABCDEFGHIJKLMNOPQRSTUVWXYZ!"),
+        "eng",
+    ) {
+        Ok(text) => {
+            let outcome = fuzzy_outcome_word(&text);
+            if outcome.is_decided() {
+                let word = match outcome {
+                    MatchOutcome::Victory => "VICTORY",
+                    MatchOutcome::Defeat => "DEFEAT",
+                    MatchOutcome::Draw => "DRAW",
+                    MatchOutcome::Unknown => "UNKNOWN",
+                };
+                tracing::info!(text = %text.trim(), context = "end title", "result word: {word}");
+            } else {
+                tracing::trace!(ocr_text = %text.trim(), "end title OCR did not match an outcome");
+            }
+            outcome
+        }
+        Err(e) => {
+            tracing::debug!(error = %e, "end title OCR failed");
             MatchOutcome::Unknown
         }
+    }
+}
+
+const END_TITLE_MASS_MIN: f32 = 0.06;
+
+fn fuzzy_outcome_word(raw: &str) -> MatchOutcome {
+    let letters: String = raw
+        .chars()
+        .filter(|c| c.is_ascii_alphabetic())
+        .map(|c| c.to_ascii_uppercase())
+        .collect();
+    if letters.is_empty() {
+        return MatchOutcome::Unknown;
+    }
+    const TARGETS: &[(&str, MatchOutcome)] = &[
+        ("VICTORY", MatchOutcome::Victory),
+        ("DEFEAT", MatchOutcome::Defeat),
+        ("DRAW", MatchOutcome::Draw),
+    ];
+    let hits: Vec<MatchOutcome> = TARGETS
+        .iter()
+        .filter(|(word, _)| letters.contains(word) || strsim::levenshtein(&letters, word) <= 2)
+        .map(|(_, outcome)| *outcome)
+        .collect();
+    if hits.len() == 1 {
+        hits[0]
+    } else {
+        MatchOutcome::Unknown
+    }
+}
+
+fn rgb_to_hsv(r: u8, g: u8, b: u8) -> (u16, u8, u8) {
+    let r = i32::from(r);
+    let g = i32::from(g);
+    let b = i32::from(b);
+    let max = r.max(g).max(b);
+    let min = r.min(g).min(b);
+    let delta = max - min;
+    let v = max as u8;
+    let s = if max == 0 {
+        0
+    } else {
+        ((delta * 255) / max) as u8
+    };
+    let h = if delta == 0 {
+        0
+    } else if max == r {
+        let x = ((g - b) * 60) / delta;
+        if x < 0 { x + 360 } else { x }
+    } else if max == g {
+        120 + ((b - r) * 60) / delta
+    } else {
+        240 + ((r - g) * 60) / delta
+    };
+    ((h as u16) % 360, s, v)
+}
+
+fn hue_near(a: u16, b: u16, window: u16) -> bool {
+    let d = (i32::from(a) - i32::from(b)).unsigned_abs() as u16;
+    d.min(360 - d) <= window
+}
+
+fn center_title_mass(rgb: &RgbImage) -> f32 {
+    let (w, h) = rgb.dimensions();
+    let (gx, gy, gw, gh) = crate::ocr::preprocess::game_rect_16_9(w, h);
+    let x0 = gx + gw * 300 / 1000;
+    let y0 = gy + gh * 300 / 1000;
+    let x1 = x0 + gw * 400 / 1000;
+    let y1 = y0 + gh * 250 / 1000;
+    if x1 <= x0 || y1 <= y0 {
+        return 0.0;
+    }
+
+    const STRIDE: u32 = 2;
+    let mut bins = [0u32; 18];
+    let mut sat_hits = 0u32;
+    let mut total = 0u32;
+    for y in (y0..y1.min(h)).step_by(STRIDE as usize) {
+        for x in (x0..x1.min(w)).step_by(STRIDE as usize) {
+            let [r, g, b] = rgb.get_pixel(x, y).0;
+            total += 1;
+            let (hue, sat, val) = rgb_to_hsv(r, g, b);
+            if sat > 150 && val > 120 {
+                sat_hits += 1;
+                bins[(hue as usize) / 20] += 1;
+            }
+        }
+    }
+    if total == 0 || sat_hits == 0 {
+        return 0.0;
+    }
+    let (dom_bin, _) = bins
+        .iter()
+        .enumerate()
+        .max_by_key(|(_, c)| *c)
+        .unwrap_or((0, &0));
+    let locked = bins[dom_bin];
+    locked as f32 / total as f32
+}
+
+fn scoreline_looks_present(img: &DynamicImage, rgb: &RgbImage) -> bool {
+    let (w, h) = rgb.dimensions();
+    let (gx, gy, gw, gh) = crate::ocr::preprocess::game_rect_16_9(w, h);
+    let x0 = gx + gw * 300 / 1000;
+    let y0 = gy + gh * 730 / 1000;
+    let cw = gw * 400 / 1000;
+    let ch = gh * 80 / 1000;
+    if cw == 0 || ch == 0 || x0 + cw > w || y0 + ch > h {
+        return false;
+    }
+    let mut white = 0u32;
+    let mut total = 0u32;
+    for y in (y0..y0 + ch).step_by(2) {
+        for x in (x0..x0 + cw).step_by(2) {
+            let [r, g, b] = rgb.get_pixel(x, y).0;
+            total += 1;
+            let (_, sat, val) = rgb_to_hsv(r, g, b);
+            if val > 200 && sat < 40 {
+                white += 1;
+            }
+        }
+    }
+    if total == 0 || (white as f32 / total as f32) < 0.008 {
+        return false;
+    }
+    let crop = img.crop_imm(x0, y0, cw, ch);
+    let prepared = crate::ocr::preprocess::prepare_title(&crop);
+    match crate::ocr::recognize_prepared(&prepared, "7", Some("ABCDEFGHIJKLMNOPQRSTUVWXYZ ")) {
+        Ok(text) => {
+            let letters: String = text
+                .chars()
+                .filter(|c| c.is_ascii_alphabetic())
+                .map(|c| c.to_ascii_uppercase())
+                .collect();
+            letters.contains("FINAL") || letters.contains("SCORE")
+        }
+        Err(_) => false,
+    }
+}
+
+fn opponent_ink(r: u8, g: u8, b: u8, dom_hue: u16) -> u8 {
+    let r = i16::from(r);
+    let g = i16::from(g);
+    let b = i16::from(b);
+    let v = if hue_near(dom_hue, 300, 40) {
+        (r + b) / 2 - g
+    } else if hue_near(dom_hue, 50, 40) {
+        (r + g) / 2 - b
+    } else if hue_near(dom_hue, 0, 25) || hue_near(dom_hue, 360, 25) {
+        r - g.max(b)
+    } else {
+        r.max(g).max(b) - r.min(g).min(b)
+    };
+    v.clamp(0, 255) as u8
+}
+
+fn prepare_end_title(crop: &DynamicImage) -> GrayImage {
+    let rgb = crop.to_rgb8();
+    let (w, h) = rgb.dimensions();
+    let mut hue_bins = [0u32; 18];
+    for p in rgb.pixels() {
+        let (hue, sat, val) = rgb_to_hsv(p.0[0], p.0[1], p.0[2]);
+        if sat > 150 && val > 120 {
+            hue_bins[(hue as usize) / 20] += 1;
+        }
+    }
+    let dom_hue = (hue_bins
+        .iter()
+        .enumerate()
+        .max_by_key(|(_, c)| *c)
+        .map(|(i, _)| i)
+        .unwrap_or(0)
+        * 20) as u16;
+
+    // Opponent-color ink for the dominant UI hue (magenta → (r+b)/2−g,
+    // gold → (r+g)/2−b, red → r−max(g,b)). CLI tesseract reads the
+    // magenta form as "VCTORY!"; hue-locked chroma/binary did not.
+    let mut gray = GrayImage::new(w, h);
+    for y in 0..h {
+        for x in 0..w {
+            let [r, g, b] = rgb.get_pixel(x, y).0;
+            gray.put_pixel(x, y, Luma([opponent_ink(r, g, b, dom_hue)]));
+        }
+    }
+    let (sw, sh) = gray.dimensions();
+    let scale = (120 / sh.max(1)).clamp(1, 4);
+    if scale > 1 {
+        image::imageops::resize(
+            &gray,
+            sw * scale,
+            sh * scale,
+            image::imageops::FilterType::CatmullRom,
+        )
+    } else {
+        gray
     }
 }
 
@@ -356,5 +624,47 @@ mod tests {
     fn black_frame_is_no_signal() {
         assert_eq!(detect_outcome_signal(&flood([0, 0, 0])), None);
         assert_eq!(detect_outcome(&flood([0, 0, 0])), MatchOutcome::Unknown);
+    }
+
+    #[test]
+    fn fuzzy_outcome_accepts_near_miss_and_rejects_ambiguity() {
+        assert_eq!(fuzzy_outcome_word("VCTORY!"), MatchOutcome::Victory);
+        assert_eq!(fuzzy_outcome_word("SVICTORY"), MatchOutcome::Victory);
+        assert_eq!(fuzzy_outcome_word("DEFEA"), MatchOutcome::Defeat);
+        assert_eq!(fuzzy_outcome_word("DRAW"), MatchOutcome::Draw);
+        // VECTOR is uniquely closer to VICTORY than DEFEAT/DRAW at lev≤2.
+        assert_eq!(fuzzy_outcome_word("VECTOR"), MatchOutcome::Victory);
+        assert_eq!(fuzzy_outcome_word(""), MatchOutcome::Unknown);
+        assert_eq!(fuzzy_outcome_word("HELLO"), MatchOutcome::Unknown);
+        // Two targets inside the window → Unknown (do not pick a winner).
+        assert_eq!(fuzzy_outcome_word("VICTORYDEFEAT"), MatchOutcome::Unknown);
+    }
+
+    #[test]
+    fn center_title_mass_sees_magenta_blob_not_black() {
+        let mut img = RgbImage::from_pixel(640, 360, Rgb([10, 10, 10]));
+        // Magenta title band: x 30–70%, y 35–50% of the 16:9 frame.
+        for y in 126..180 {
+            for x in 192..448 {
+                img.put_pixel(x, y, Rgb([220, 40, 220]));
+            }
+        }
+        assert!(
+            center_title_mass(&img) >= END_TITLE_MASS_MIN,
+            "mass={}",
+            center_title_mass(&img)
+        );
+        assert_eq!(
+            center_title_mass(&RgbImage::from_pixel(640, 360, Rgb([0, 0, 0]))),
+            0.0
+        );
+    }
+
+    #[test]
+    fn gold_flood_still_wins_over_end_title() {
+        assert_eq!(
+            detect_outcome_signal(&flood([230, 180, 20])),
+            Some((MatchOutcome::Victory, OutcomeSource::Banner))
+        );
     }
 }

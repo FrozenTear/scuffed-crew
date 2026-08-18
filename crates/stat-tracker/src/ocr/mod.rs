@@ -280,6 +280,20 @@ pub fn recognize_prepared(
     Ok(text)
 }
 
+/// Like [`recognize_prepared`] but pins the Tesseract language. End-title
+/// words are Latin UI ("VICTORY"), not the scoreboard font `koverwatch`
+/// is trained on — forcing `eng` is the difference between "VCTORY!" and "VOY!".
+pub fn recognize_prepared_lang(
+    img: &image::GrayImage,
+    psm: &str,
+    whitelist: Option<&str>,
+    lang: &'static str,
+) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    let png_buf = encode_png(img)?;
+    let (text, _conf) = ocr_with(lang, psm, whitelist, &png_buf)?;
+    Ok(text)
+}
+
 /// Per-cell OCR: extract and recognize a single stat cell.
 /// Uses PSM 7 (single text line) for short numeric strings.
 /// `whitelist` controls which characters Tesseract will consider.
