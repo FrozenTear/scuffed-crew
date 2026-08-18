@@ -290,6 +290,65 @@ pub fn prepare_title(img: &DynamicImage) -> GrayImage {
     add_white_border(&binary, 12)
 }
 
+/// [`prepare_title`] for a crop that may run past the title into smaller
+/// neighbouring text (the accolade screen prints the map name and match time
+/// right of VICTORY/DEFEAT). Tesseract PSM 7 returns nothing at all when one
+/// "line" mixes the tall title glyphs with that two-line block, so after
+/// binarizing, cut the image at the end of the tall-glyph run: a column is
+/// "tall" when its ink spans at least half the crop height (title stems do,
+/// the map/time face does not). Everything right of the last tall column
+/// (plus a small pad) is dropped. A crop with no tall column is returned
+/// untrimmed. Measured on the 2026-05-30 and 2026-07-15 accolade fixtures:
+/// untrimmed 25%-wide crops OCR to "" / "DEFEATJT", trimmed to "VICTORY" /
+/// "DEFEAT" (fleet::tracker-wl C6).
+pub fn prepare_title_trimmed(img: &DynamicImage) -> GrayImage {
+    let bordered = prepare_title(img);
+    // prepare_title pads 12px of white; work on the inner image.
+    let (bw, bh) = bordered.dimensions();
+    if bw <= 24 || bh <= 24 {
+        return bordered;
+    }
+    let inner = image::imageops::crop_imm(&bordered, 12, 12, bw - 24, bh - 24).to_image();
+    let trimmed = trim_to_tall_glyphs(&inner);
+    add_white_border(&trimmed, 12)
+}
+
+/// Cut a black-on-white binary at the end of its tall-glyph run — see
+/// [`prepare_title_trimmed`]. Public for the synthetic unit test only.
+pub fn trim_to_tall_glyphs(binary: &GrayImage) -> GrayImage {
+    let (w, h) = binary.dimensions();
+    if w == 0 || h == 0 {
+        return binary.clone();
+    }
+    let min_span = h / 2;
+    let mut last_tall: Option<u32> = None;
+    for x in 0..w {
+        let mut top = None;
+        let mut bottom = 0u32;
+        for y in 0..h {
+            if binary.get_pixel(x, y).0[0] < 128 {
+                if top.is_none() {
+                    top = Some(y);
+                }
+                bottom = y;
+            }
+        }
+        if let Some(t) = top
+            && bottom - t + 1 >= min_span
+        {
+            last_tall = Some(x);
+        }
+    }
+    match last_tall {
+        // Pad by a glyph-ish width so a trailing thin stem is not clipped.
+        Some(x) => {
+            let end = (x + h / 4 + 1).min(w);
+            image::imageops::crop_imm(binary, 0, 0, end, h).to_image()
+        }
+        None => binary.clone(),
+    }
+}
+
 /// Otsu's method: pick the gray level that maximizes between-class variance.
 fn otsu_threshold(img: &GrayImage) -> u8 {
     let mut hist = [0u32; 256];
@@ -1297,5 +1356,50 @@ mod cell_upscale_tests {
         assert!(w >= 18);
         // Output is binary (only 0 or 255).
         assert!(bin.pixels().all(|p| p.0[0] == 0 || p.0[0] == 255));
+    }
+}
+
+#[cfg(test)]
+mod tall_glyph_trim_tests {
+    use super::trim_to_tall_glyphs;
+    use image::{GrayImage, Luma};
+
+    /// White canvas with a "title" block of full-height ink on the left and a
+    /// short "map name" block of half-height ink further right.
+    fn title_then_small_text() -> GrayImage {
+        let mut img = GrayImage::from_pixel(400, 80, Luma([255]));
+        for y in 4..76 {
+            for x in 10..150 {
+                img.put_pixel(x, y, Luma([0]));
+            }
+        }
+        for y in 30..50 {
+            for x in 200..390 {
+                img.put_pixel(x, y, Luma([0]));
+            }
+        }
+        img
+    }
+
+    #[test]
+    fn cuts_after_the_tall_run_and_keeps_a_pad() {
+        let trimmed = trim_to_tall_glyphs(&title_then_small_text());
+        // Last tall column is 149; pad = h/4 = 20 → width 170.
+        assert_eq!(trimmed.width(), 170);
+        assert_eq!(trimmed.height(), 80);
+        // Small text is gone.
+        assert!((0..trimmed.width()).all(|x| trimmed.get_pixel(x, 40).0[0] == 255 || x < 150));
+    }
+
+    #[test]
+    fn no_tall_column_leaves_the_image_alone() {
+        let mut img = GrayImage::from_pixel(100, 80, Luma([255]));
+        for y in 35..45 {
+            for x in 0..100 {
+                img.put_pixel(x, y, Luma([0]));
+            }
+        }
+        assert_eq!(trim_to_tall_glyphs(&img).width(), 100);
+        assert_eq!(trim_to_tall_glyphs(&GrayImage::new(0, 0)).width(), 0);
     }
 }

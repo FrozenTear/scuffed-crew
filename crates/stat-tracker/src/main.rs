@@ -1135,8 +1135,33 @@ async fn run_loop(ctx: Arc<DaemonCtx>) -> anyhow::Result<()> {
                 match result {
                     Err(e) => tracing::error!(error = %e, "capture cycle failed"),
                     // Rejected by a trust gate — nothing was recorded, so
-                    // the session must not be marked as created.
-                    Ok(report) if !report.recorded => {}
+                    // the session must not be marked as created. The frame
+                    // may still carry the game's outcome (a Tab on the
+                    // VICTORY!/DEFEAT! end-title or the endcards screen has
+                    // no scoreboard rows and is rejected by preflight —
+                    // exactly the 2026-08-17 23:22:03 frame), so adopt that
+                    // like the recorded path does; without this the outcome
+                    // detected on the Tab path was silently dropped
+                    // (fleet::tracker-wl ET-2).
+                    Ok(report) if !report.recorded => {
+                        if !matches!(report.outcome, detect::MatchOutcome::Unknown)
+                            && let Some(g) = st.active_game.as_mut().filter(|g| g.session_id == sid)
+                            && !g.finished()
+                        {
+                            g.record_outcome(report.outcome);
+                            tracing::info!(
+                                outcome = ?report.outcome,
+                                session_id = %g.session_id,
+                                "outcome recovered from rejected capture frame — adopting"
+                            );
+                            if g.session_created
+                                && let Err(e) = store.set_session_outcome(&g.session_id, &g.outcome.to_string()).await
+                            {
+                                tracing::warn!(error = %e, "failed to back-fill session outcome");
+                            }
+                            persist_active_game(data_dir, Some(g));
+                        }
+                    }
                     Ok(report) if report.split => {
                         // The capture detected a stat regression and wrote a
                         // fresh session — the game this Tab was requested for
@@ -1730,6 +1755,25 @@ async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<
     let ocr_result = ocr
         .map_err(anyhow::Error::from_boxed)
         .context("full-board OCR failed")?;
+
+    // Last-resort outcome source: the result header printed inside the
+    // scoreboard region itself. Observed 2026-08-16 22:19:24Z (session
+    // 018cea57): the full-board OCR of a Tab frame began "~ Defeat" while
+    // every dedicated detector returned Unknown and the game stayed unknown.
+    // The full-board text is already paid for, so this costs nothing; it is
+    // limited to the first lines (header position) so chat or player names
+    // deeper in the board can never supply a result (fleet::tracker-wl ET-2).
+    let outcome = if matches!(outcome, detect::MatchOutcome::Unknown) {
+        match parse::outcome_from_board_header(&ocr_result.raw_text) {
+            detect::MatchOutcome::Unknown => outcome,
+            o => {
+                tracing::info!(outcome = ?o, "outcome read from scoreboard OCR header line");
+                o
+            }
+        }
+    } else {
+        outcome
+    };
 
     tracing::info!(?outcome, "frame analysis");
     let preview_end = ocr_result

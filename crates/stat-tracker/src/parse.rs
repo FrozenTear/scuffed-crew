@@ -320,6 +320,31 @@ pub fn match_map_in_text(text: &str) -> Option<String> {
     find_map(&lines)
 }
 
+/// Result word printed as the header of the scoreboard region itself, read
+/// from the full-board OCR text a Tab capture already paid for. Only the
+/// first two non-empty lines count — that is where a header lives; player
+/// names and chat sit deeper and must never supply an outcome. Whole-word,
+/// case-insensitive (the 2026-08-16 22:19:24Z frame OCR'd as "~ Defeat").
+pub fn outcome_from_board_header(raw_text: &str) -> crate::detect::MatchOutcome {
+    use crate::detect::MatchOutcome;
+    for line in raw_text
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .take(2)
+    {
+        for word in line.split(|c: char| !c.is_ascii_alphabetic()) {
+            match word.to_ascii_uppercase().as_str() {
+                "VICTORY" => return MatchOutcome::Victory,
+                "DEFEAT" => return MatchOutcome::Defeat,
+                "DRAW" => return MatchOutcome::Draw,
+                _ => {}
+            }
+        }
+    }
+    MatchOutcome::Unknown
+}
+
 fn guess_role(hero: &str) -> String {
     match hero.to_lowercase().as_str() {
         "d.va" | "dva" | "doomfist" | "domina" | "junker queen" | "junker_queen" | "mauga"
@@ -683,5 +708,39 @@ mod hero_map_name_tests {
             match_map_in_text("KINGS ROW").as_deref(),
             Some("King's Row")
         );
+    }
+}
+
+#[cfg(test)]
+mod board_header_tests {
+    use super::outcome_from_board_header;
+    use crate::detect::MatchOutcome;
+
+    #[test]
+    fn reads_result_word_from_header_lines() {
+        assert_eq!(
+            outcome_from_board_header("~ Defeat\n\u{2014} J | J |"),
+            MatchOutcome::Defeat
+        );
+        assert_eq!(
+            outcome_from_board_header("\n  VICTORY   RIALTO\nE A D DMG"),
+            MatchOutcome::Victory
+        );
+        assert_eq!(outcome_from_board_header("Draw"), MatchOutcome::Draw);
+    }
+
+    #[test]
+    fn ignores_words_deeper_than_the_header_and_substrings() {
+        // Chat / names below the header never decide a game.
+        assert_eq!(
+            outcome_from_board_header("E A D DMG\nFROZEN 12 3 4\nSOOT: ez victory"),
+            MatchOutcome::Unknown
+        );
+        // Whole word only: "VICTORYLANE" is a name, not a result.
+        assert_eq!(
+            outcome_from_board_header("VICTORYLANE 3 4"),
+            MatchOutcome::Unknown
+        );
+        assert_eq!(outcome_from_board_header(""), MatchOutcome::Unknown);
     }
 }
