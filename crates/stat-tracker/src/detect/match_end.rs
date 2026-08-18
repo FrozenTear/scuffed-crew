@@ -471,10 +471,11 @@ fn detect_banner(rgb: &RgbImage) -> Option<MatchOutcome> {
 /// project past 14%, so the crop clipped the word to "VICTOR"/"VICTO" and
 /// victories went unread while defeats still landed (store 07-31..08-17:
 /// V=10 vs D=39; 08-17 was five wins, 5/5 unknown). The map name printed
-/// right of the title is a smaller, thinner face that Otsu drops on the
-/// title crop; measured on the 07-15 DEFEAT and 05-30 VICTORY fixtures the
-/// read is identical at 14%, 18%, 21.5% and 25% widths, so the wider crop
-/// costs nothing on the frames we have and stops clipping the long word.
+/// right of the title enters the wider crop, and Tesseract PSM 7 gives up on
+/// the mixed line ("" at >= 21.5% on the 05-30 reference, "DEFEATJT" on the
+/// 07-15 frame), so the crop is OCR'd through `prepare_title_trimmed`, which
+/// cuts the binary back to the tall title glyphs; measured on both fixtures
+/// the 25% crop then reads "VICTORY" / "DEFEAT" exactly like the old 14% one.
 fn read_result_word(img: &DynamicImage, stability: Option<&mut FrameStability>) -> MatchOutcome {
     ocr_outcome_word(img, 5, 35, 250, 60, "accolade screen", stability)
 }

@@ -1154,10 +1154,14 @@ async fn run_loop(ctx: Arc<DaemonCtx>) -> anyhow::Result<()> {
                                 session_id = %g.session_id,
                                 "outcome recovered from rejected capture frame — adopting"
                             );
-                            if g.session_created
-                                && let Err(e) = store.set_session_outcome(&g.session_id, &g.outcome.to_string()).await
-                            {
-                                tracing::warn!(error = %e, "failed to back-fill session outcome");
+                            if g.session_created {
+                                if let Err(e) = store.set_session_outcome(&g.session_id, &g.outcome.to_string()).await {
+                                    tracing::warn!(error = %e, "failed to back-fill session outcome");
+                                }
+                                // The GUI reads the snapshot, not the store —
+                                // publish the adopted outcome like the recorded
+                                // path does (ET-2b).
+                                refresh_snapshot(store, data_dir).await;
                             }
                             persist_active_game(data_dir, Some(g));
                         }
