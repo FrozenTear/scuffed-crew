@@ -97,6 +97,7 @@ fn detect_outcome_signal_inner(
 /// `detect_outcome` returns `Unknown` and no outcome was carried over from the
 /// poller.
 pub fn detect_outcome_text(img: &DynamicImage) -> MatchOutcome {
+    let rgb = img.to_rgb8();
     let (fw, fh) = (img.width(), img.height());
     let (gx, gy, gw, gh) = crate::ocr::preprocess::game_rect_16_9(fw, fh);
     // Top-center band where OW2 renders the result header (1/1000ths of 16:9).
@@ -105,7 +106,6 @@ pub fn detect_outcome_text(img: &DynamicImage) -> MatchOutcome {
     let band_w = gw * 400 / 1000;
     let band_h = gh * 220 / 1000;
     if band_w == 0 || band_h == 0 || x + band_w > fw || y + band_h > fh {
-        let rgb = img.to_rgb8();
         return read_end_title(img, &rgb, None);
     }
     let region = img.crop_imm(x, y, band_w, band_h);
@@ -123,13 +123,11 @@ pub fn detect_outcome_text(img: &DynamicImage) -> MatchOutcome {
                 MatchOutcome::Draw
             } else {
                 tracing::debug!(text = %text.trim(), "scoreboard header text did not contain an outcome");
-                let rgb = img.to_rgb8();
                 read_end_title(img, &rgb, None)
             }
         }
         Err(e) => {
             tracing::debug!(error = %e, "scoreboard header OCR failed");
-            let rgb = img.to_rgb8();
             read_end_title(img, &rgb, None)
         }
     }
@@ -140,10 +138,11 @@ pub fn detect_outcome_text(img: &DynamicImage) -> MatchOutcome {
 fn read_end_title(
     img: &DynamicImage,
     rgb: &RgbImage,
-    stability: Option<&mut FrameStability>,
+    mut stability: Option<&mut FrameStability>,
 ) -> MatchOutcome {
     let mass = center_title_mass(rgb);
-    let scoreline = mass < END_TITLE_MASS_MIN && scoreline_looks_present(img, rgb);
+    let scoreline =
+        mass < END_TITLE_MASS_MIN && scoreline_looks_present(img, rgb, stability.as_deref_mut());
     if mass < END_TITLE_MASS_MIN && !scoreline {
         return MatchOutcome::Unknown;
     }
@@ -215,7 +214,10 @@ fn fuzzy_outcome_word(raw: &str) -> MatchOutcome {
     ];
     let hits: Vec<MatchOutcome> = TARGETS
         .iter()
-        .filter(|(word, _)| letters.contains(word) || strsim::levenshtein(&letters, word) <= 2)
+        .filter(|(word, _)| {
+            letters.contains(word)
+                || (letters.len() + 1 >= word.len() && strsim::levenshtein(&letters, word) <= 2)
+        })
         .map(|(_, outcome)| *outcome)
         .collect();
     if hits.len() == 1 {
@@ -294,7 +296,11 @@ fn center_title_mass(rgb: &RgbImage) -> f32 {
     locked as f32 / total as f32
 }
 
-fn scoreline_looks_present(img: &DynamicImage, rgb: &RgbImage) -> bool {
+fn scoreline_looks_present(
+    img: &DynamicImage,
+    rgb: &RgbImage,
+    stability: Option<&mut FrameStability>,
+) -> bool {
     let (w, h) = rgb.dimensions();
     let (gx, gy, gw, gh) = crate::ocr::preprocess::game_rect_16_9(w, h);
     let x0 = gx + gw * 300 / 1000;
@@ -320,6 +326,12 @@ fn scoreline_looks_present(img: &DynamicImage, rgb: &RgbImage) -> bool {
         return false;
     }
     let crop = img.crop_imm(x0, y0, cw, ch);
+    if let Some(stability) = stability
+        && !stability.check("scoreline", &crop)
+    {
+        tracing::trace!("scoreline crop not stable — deferring OCR");
+        return false;
+    }
     let prepared = crate::ocr::preprocess::prepare_title(&crop);
     match crate::ocr::recognize_prepared(&prepared, "7", Some("ABCDEFGHIJKLMNOPQRSTUVWXYZ ")) {
         Ok(text) => {
@@ -638,6 +650,10 @@ mod tests {
         assert_eq!(fuzzy_outcome_word("HELLO"), MatchOutcome::Unknown);
         // Two targets inside the window → Unknown (do not pick a winner).
         assert_eq!(fuzzy_outcome_word("VICTORYDEFEAT"), MatchOutcome::Unknown);
+        // 2-letter fragments are lev≤2 from DRAW; must not become a Draw.
+        assert_eq!(fuzzy_outcome_word("DR"), MatchOutcome::Unknown);
+        assert_eq!(fuzzy_outcome_word("RA"), MatchOutcome::Unknown);
+        assert_eq!(fuzzy_outcome_word("AW"), MatchOutcome::Unknown);
     }
 
     #[test]
