@@ -73,9 +73,9 @@ impl RoleAgg {
 
 pub(super) fn hero_to_role(name: &str) -> &'static str {
     match name {
-        "D.Va" | "Domina" | "Doomfist" | "Hazard" | "Junker Queen" | "Mauga" | "Orisa"
-        | "Ramattra" | "Reinhardt" | "Roadhog" | "Sigma" | "Winston" | "Wrecking Ball"
-        | "Zarya" => "Tank",
+        "D.Mon" | "D.Va" | "Domina" | "Doomfist" | "Hazard" | "Junker Queen" | "Mauga"
+        | "Orisa" | "Ramattra" | "Reinhardt" | "Roadhog" | "Sigma" | "Winston"
+        | "Wrecking Ball" | "Zarya" => "Tank",
         "Ana" | "Baptiste" | "Brigitte" | "Illari" | "Juno" | "Kiriko" | "Lifeweaver" | "Lúcio"
         | "Mercy" | "Mizuki" | "Moira" | "Wuyang" | "Zenyatta" => "Support",
         _ => "Damage",

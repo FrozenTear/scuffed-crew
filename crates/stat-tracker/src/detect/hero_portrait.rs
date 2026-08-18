@@ -521,6 +521,14 @@ fn mean_absolute_difference(a: &RgbImage, b: &RgbImage) -> f64 {
     total_diff as f64 / (pixel_count * 3) as f64
 }
 
+/// Where the reference image for `hero_name` lives: the hero name lowercased,
+/// spaces to underscores, dots dropped ("D.Mon" -> dmon.png, "Wrecking Ball"
+/// -> wrecking_ball.png) — the same stem `PortraitMatcher::load` keys on.
+pub fn portrait_reference_path(portraits_dir: &Path, hero_name: &str) -> PathBuf {
+    let filename = hero_name.to_lowercase().replace(' ', "_").replace('.', "");
+    portraits_dir.join(format!("{filename}.png"))
+}
+
 /// Save a portrait crop as a reference image.
 /// The filename is the hero name (lowercase, no spaces).
 pub fn save_portrait_reference(
@@ -529,8 +537,7 @@ pub fn save_portrait_reference(
     crop: &DynamicImage,
 ) -> Result<PathBuf, Box<dyn std::error::Error>> {
     std::fs::create_dir_all(portraits_dir)?;
-    let filename = hero_name.to_lowercase().replace(' ', "_").replace('.', "");
-    let path = portraits_dir.join(format!("{filename}.png"));
+    let path = portrait_reference_path(portraits_dir, hero_name);
     let resized = crop.resize_exact(PORTRAIT_SIZE, PORTRAIT_SIZE, FilterType::Lanczos3);
     resized.save(&path)?;
     tracing::info!(hero = hero_name, path = %path.display(), "saved portrait reference");
@@ -608,5 +615,25 @@ mod portrait_rect_tests {
         assert!(portrait_rect((0, 1000), 0, 5).is_none());
         assert!(portrait_rect((1000, 0), 0, 5).is_none());
         assert!(portrait_rect((1000, 1000), 0, 0).is_none());
+    }
+}
+
+#[cfg(test)]
+mod reference_path_tests {
+    use super::portrait_reference_path;
+    use std::path::Path;
+
+    /// The on-disk stem is what `PortraitMatcher::load` keys on, so a
+    /// dotted/spaced hero name must map to exactly one predictable file
+    /// (WL-5 review nit).
+    #[test]
+    fn stem_drops_dots_and_underscores_spaces() {
+        let dir = Path::new("/tmp/portraits");
+        assert_eq!(portrait_reference_path(dir, "D.Mon"), dir.join("dmon.png"));
+        assert_eq!(portrait_reference_path(dir, "D.Va"), dir.join("dva.png"));
+        assert_eq!(
+            portrait_reference_path(dir, "Wrecking Ball"),
+            dir.join("wrecking_ball.png")
+        );
     }
 }
