@@ -199,6 +199,17 @@ fn read_end_title(
 const END_TITLE_MASS_MIN: f32 = 0.06;
 
 fn fuzzy_outcome_word(raw: &str) -> MatchOutcome {
+    fuzzy_outcome_word_inner(raw, 2)
+}
+
+/// Accolade/rank (Tab) path: same VICTORY/DEFEAT window as EndTitle, but DRAW
+/// is exact-contains only. Tab has no sat-mass gate and no two-read confirm;
+/// lev≤1 still accepts `DRA`/`RAW` (distance 1 from DRAW).
+fn fuzzy_outcome_word_accolade(raw: &str) -> MatchOutcome {
+    fuzzy_outcome_word_inner(raw, 0)
+}
+
+fn fuzzy_outcome_word_inner(raw: &str, draw_max_dist: usize) -> MatchOutcome {
     let letters: String = raw
         .chars()
         .filter(|c| c.is_ascii_alphabetic())
@@ -214,9 +225,19 @@ fn fuzzy_outcome_word(raw: &str) -> MatchOutcome {
     ];
     let hits: Vec<MatchOutcome> = TARGETS
         .iter()
-        .filter(|(word, _)| {
-            letters.contains(word)
-                || (letters.len() + 1 >= word.len() && strsim::levenshtein(&letters, word) <= 2)
+        .filter(|(word, outcome)| {
+            if letters.contains(word) {
+                return true;
+            }
+            if letters.len() + 1 < word.len() {
+                return false;
+            }
+            let max_dist = if matches!(outcome, MatchOutcome::Draw) {
+                draw_max_dist
+            } else {
+                2
+            };
+            strsim::levenshtein(&letters, word) <= max_dist
         })
         .map(|(_, outcome)| *outcome)
         .collect();
@@ -568,19 +589,19 @@ fn ocr_outcome_word(
 
     match crate::ocr::recognize_prepared(&prepared, "7", Some("ABCDEFGHIJKLMNOPQRSTUVWXYZ")) {
         Ok(text) => {
-            let upper = text.to_uppercase();
-            if upper.contains("VICTORY") {
-                tracing::info!(text = %text.trim(), context, "result word: VICTORY");
-                MatchOutcome::Victory
-            } else if upper.contains("DEFEAT") {
-                tracing::info!(text = %text.trim(), context, "result word: DEFEAT");
-                MatchOutcome::Defeat
-            } else if upper.contains("DRAW") {
-                MatchOutcome::Draw
+            let outcome = fuzzy_outcome_word_accolade(&text);
+            if outcome.is_decided() {
+                let word = match outcome {
+                    MatchOutcome::Victory => "VICTORY",
+                    MatchOutcome::Defeat => "DEFEAT",
+                    MatchOutcome::Draw => "DRAW",
+                    MatchOutcome::Unknown => "UNKNOWN",
+                };
+                tracing::info!(text = %text.trim(), context, "result word: {word}");
             } else {
                 tracing::trace!(ocr_text = %text.trim(), context, "no result word in region");
-                MatchOutcome::Unknown
             }
+            outcome
         }
         Err(e) => {
             // Runs every poll tick now — a broken Tesseract setup would make a
@@ -670,6 +691,27 @@ mod tests {
         assert_eq!(fuzzy_outcome_word("DR"), MatchOutcome::Unknown);
         assert_eq!(fuzzy_outcome_word("RA"), MatchOutcome::Unknown);
         assert_eq!(fuzzy_outcome_word("AW"), MatchOutcome::Unknown);
+    }
+
+    #[test]
+    fn accolade_fuzzy_reads_near_victory_and_defeat() {
+        assert_eq!(
+            fuzzy_outcome_word_accolade("VCTORY!"),
+            MatchOutcome::Victory
+        );
+        assert_eq!(fuzzy_outcome_word_accolade("DEFEATM"), MatchOutcome::Defeat);
+        assert_eq!(fuzzy_outcome_word_accolade("DRAW"), MatchOutcome::Draw);
+        assert_eq!(fuzzy_outcome_word_accolade("DRW"), MatchOutcome::Unknown);
+    }
+
+    #[test]
+    fn accolade_fuzzy_rejects_three_letter_draw_garbage() {
+        // Tab path has no sat-mass gate and no 2-read confirm. lev≤2 on DRAW
+        // would accept DRA/RAW/DAG; keep those Unknown on this path.
+        assert_eq!(fuzzy_outcome_word_accolade("DRA"), MatchOutcome::Unknown);
+        assert_eq!(fuzzy_outcome_word_accolade("RAW"), MatchOutcome::Unknown);
+        assert_eq!(fuzzy_outcome_word_accolade("DAG"), MatchOutcome::Unknown);
+        assert_eq!(fuzzy_outcome_word_accolade("HELLO"), MatchOutcome::Unknown);
     }
 
     #[test]
