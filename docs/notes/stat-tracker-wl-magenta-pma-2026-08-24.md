@@ -3,7 +3,7 @@
 **Date:** 2026-08-24  
 **Author:** grok (Grok 4.6)  
 **Repo:** scuffed-crew @ `origin/main` `1e37529` (live daemon **0.3.3**)  
-**Request (USER):** tracker only records losses. Rialto tonight was also a win. Two surfaces: huge center EndTitle at game end, small top-left in the PMA lobby. Figure out a way to deal with that. **No code claimed. Design only — USER asked to run it by claude before implement.**
+**Request (USER):** tracker only records losses. Rialto tonight was also a win. Two surfaces: huge center EndTitle at game end, small top-left in the PMA lobby. Figure out a way to deal with that. **Design locked A-only after claude review (PR #43). No detector code in this branch.**
 
 **Fleet:** `fleet::tracker-wl` (detail) + `fleet::chat` (pointer). Branch: `docs/tracker-wl-magenta-pma`.
 
@@ -63,26 +63,24 @@ Fixes Runasapi-class. Leaves Rialto-class if USER never lands on PMA cards.
 
 **B. Extra in-match peeks while Tab is in flight.** Catches the 2s EndTitle. Reopens the FPS/fuzzy hitch (compositor readback on the game output). USER already paid for PR-A/B to stop that.
 
-**C. A + post-match-only full cadence (grok recommendation).** Do A. After a **non-scoreboard** capture (preflight / spawn / POTG) while the session is still `unknown`, keep **cheap outcome polls** at the 4s interval until decided or `Overwatch.exe` gone. Do not add copies **during** an in-game scoreboard Tab.
-
-- Post-match hitch does not affect in-match FPS.
-- Rialto: spawn reject at 00:22:57 would keep looking; PMA cards or leftover EndTitle can still land. If both screens are skipped, we still cannot invent a result.
+**C. A + post-match-only full cadence (original grok rec; REFUTED — §8).** After a non-scoreboard capture while outcome is `unknown`, keep cheap outcome polls at 4s until decided or the game process is gone. Does **not** cover Rialto (blocking Tab was an accepted in-game board) and **does** re-enable H3 for the whole match (hero-select Tabs look like the same reject). Do not ship..
 
 ---
 
-## 5. Proposed design (if C holds)
+## 5. Locked design (A-only — see §8)
 
-1. **`prepare_title`:** grayscale from `max(R,G,B)` instead of Rec.601 luma. Magenta and yellow both become ink; dark HUD stays dark. Do **not** change `prepare_end_title` (already hue-locked). Scoreline `FINAL SCORE` and accolade map still go through `prepare_title` — white-on-dark stays bright under max-channel.
-2. **One classifier:** `ocr_outcome_word` (accolade + rank) uses `fuzzy_outcome_word`, same as EndTitle. Exact `contains` is why `VICTOR` / `VCTORY` die while `DEFEATM` lives.
-3. **Cadence:** if Tab/poll just rejected a frame as not-a-scoreboard **and** active game outcome is still `Unknown`, disable the “skip poll while Tab in flight” shortcut and the mid-match slow divisor until `finished()` or game process gone.
+1. **`prepare_title`:** grayscale from `max(R,G,B)` instead of Rec.601 luma. Magenta and yellow both become ink; dark HUD stays dark. Do **not** change `prepare_end_title` (already hue-locked). Do **not** reuse `opponent_ink` here — it zeros white (`(r+b)/2−g` on 255,255,255) and `prepare_title` also feeds `scoreline_looks_present` + `read_accolade_map`.
+2. **Classifier:** `ocr_outcome_word` (accolade + rank) uses `fuzzy_outcome_word` for VICTORY/DEFEAT. **DRAW** on this path: exact `contains("DRAW")` or lev≤1 — Tab has no sat-mass gate and no 2-read confirm, and `len+1 >= 4 && lev<=2` accepts 3-letter garbage (`DRA`/`RAW`/`DAG`). EndTitle keeps the existing fuzzy (gated).
+3. **Cadence:** **no change.** Do not un-skip poll-during-Tab or drop the slow divisor based on a non-scoreboard reject (C is dead; see §8).
 4. **Tests (no live PNGs in git):**
    - Synthetic magenta-on-dark “VICTORY” crop → `Victory` through `prepare_title_trimmed` + `fuzzy_outcome_word`.
    - Synthetic yellow-on-dark “DEFEAT” still `Defeat`.
    - Title + smaller map/time to the right still trims (C6).
-   - Optional `#[ignore]` replay of the host PMA PNG via existing `tests/outcome_fixtures.rs` (gitignored dir).
-5. **Out of scope:** back-filling tonight’s rows; inferring W/L from stats; in-match extra screencopies; bumping 0.3.3 in this PR.
+   - DRAW 3-letter fragments stay `Unknown` on the accolade path.
+   - Optional `#[ignore]` replay of the host PMA PNG via existing `tests/outcome_fixtures.rs` (gitignored dir) — covers tess4 vs the tess5 probe.
+5. **Out of scope:** back-filling tonight’s rows; inferring W/L from stats; in-match extra screencopies; poll-cadence changes; bumping 0.3.3 in the implementation PR.
 
-**Files (expected):** `crates/stat-tracker/src/ocr/preprocess.rs` (`prepare_title`), `crates/stat-tracker/src/detect/match_end.rs` (`ocr_outcome_word`), `crates/stat-tracker/src/main.rs` (poll skip / `poll_slow_mode` gate), tests next to those. Example `probe_outcome.rs` if it still assumes luma.
+**Files (expected):** `crates/stat-tracker/src/ocr/preprocess.rs` (`prepare_title`), `crates/stat-tracker/src/detect/match_end.rs` (`ocr_outcome_word` / DRAW tightness), tests next to those. Example `probe_outcome.rs` if it still assumes luma. **Not** `main.rs` poll skip.
 
 ---
 
@@ -107,3 +105,21 @@ Please CONFIRM/REFUTE with file:line. Rubric:
 ~/.local/share/scuffed-stat-tracker/debug/rejected/rejected_preflight_20260823_234801.png  # EndTitle DEFEAT
 ~/.local/share/scuffed-stat-tracker/debug/rejected/rejected_preflight_20260824_002257.png  # Rialto 3D spawn, no title
 ```
+
+---
+
+## 8. Claude verdict (2026-08-24, PR #43 comment + `fleet::tracker-wl`)
+
+**APPROVE note, ship A-only.** Grok ACK: C is wrong as specified.
+
+| Ask | Verdict | Why (verified against host frames, not just the comment) |
+|---|---|---|
+| R1 max-channel | **CONFIRM** | 001227 luma=`MATCHT` → Unknown; max=`VICTORY`. `opponent_ink` zeros white; would break FINAL SCORE + map OCR. |
+| R3 FP | **CONFIRM** | Claude: 400 crops (200 frames × accolade+rank), 0 false decided under max+fuzzy. |
+| R4 yellow/C6 | **CONFIRM** | DEFEAT still reads; EndTitle untouched so `DEFERT` stands. |
+| R2/R5 approach C | **REFUTE** | (1) Rialto blocker was **accepted** `accepted_20260824_002255`, not a reject — C’s gate flips after the 2s title is gone. (2) Gate fires at **match start**: `rejected_noplayerrow_20260824_000115` / `_001421` are TIME 0:00 spawn/hero-select (`Select your hero` on 001421). Sticky until finished = full-cadence + un-skip **all match** = H3 regression. (3) PMA/rank 15–20s+ at 8s cadence is enough once A can read magenta. |
+| DRAW nit | **TAKE** | Tight DRAW on Tab/accolade path only. |
+
+Probe used tess5; live daemon is tess4 — `#[ignore]` fixture replay is the coverage for that gap.
+
+Implementation follows §5 (A-only). Author does not merge this docs PR.
