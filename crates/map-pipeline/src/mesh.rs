@@ -73,7 +73,7 @@ fn collect_node_triangles(
 
             if let Some(indices) = reader.read_indices() {
                 let indices: Vec<u32> = indices.into_u32().collect();
-                for tri in indices.chunks_exact(3) {
+                for tri in indices.as_chunks::<3>().0 {
                     let v0 = positions[tri[0] as usize];
                     let v1 = positions[tri[1] as usize];
                     let v2 = positions[tri[2] as usize];
@@ -81,7 +81,7 @@ fn collect_node_triangles(
                 }
             } else {
                 // Non-indexed geometry
-                for tri in positions.chunks_exact(3) {
+                for tri in positions.as_chunks::<3>().0 {
                     triangles.push(Triangle::new(tri[0], tri[1], tri[2]));
                 }
             }
