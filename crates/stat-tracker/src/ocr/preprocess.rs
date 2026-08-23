@@ -257,13 +257,21 @@ pub fn prepare_name_cell(img: &DynamicImage) -> GrayImage {
 /// Prepare a large title-text region (e.g. the post-match VICTORY/DEFEAT
 /// header). Unlike the scoreboard cell paths, this is bright, anti-aliased text
 /// over a dark/gradient background, so the HSV white-mask + fixed-threshold
-/// pipeline erases it. Instead: grayscale, upscale small crops, then Otsu —
-/// which adapts to either cyan (VICTORY) or red (DEFEAT) text without a
-/// hand-tuned threshold. Text is the brighter cluster, so it becomes black on
-/// white for Tesseract.
+/// pipeline erases it. Grayscale is **max(R,G,B)** rather than Rec.601 luma:
+/// magenta PMA titles sit at ~luma 90 with a high-Otsu pulled up by white
+/// MATCH TIME (`rejected_preflight_20260824_001227`), while max-channel keeps
+/// magenta, yellow, and white all as the bright cluster. Then Otsu + invert
+/// so text is black on white for Tesseract.
 pub fn prepare_title(img: &DynamicImage) -> GrayImage {
-    let gray = img.to_luma8();
-    let (w, h) = gray.dimensions();
+    let rgb = img.to_rgb8();
+    let (w, h) = rgb.dimensions();
+    let mut gray = GrayImage::new(w, h);
+    for y in 0..h {
+        for x in 0..w {
+            let [r, g, b] = rgb.get_pixel(x, y).0;
+            gray.put_pixel(x, y, Luma([r.max(g).max(b)]));
+        }
+    }
     // Upscale small crops so the glyphs are tall enough for Tesseract.
     let scale = (120 / h.max(1)).clamp(1, 4);
     let work = if scale > 1 {
@@ -1401,5 +1409,104 @@ mod tall_glyph_trim_tests {
         }
         assert_eq!(trim_to_tall_glyphs(&img).width(), 100);
         assert_eq!(trim_to_tall_glyphs(&GrayImage::new(0, 0)).width(), 0);
+    }
+}
+
+#[cfg(test)]
+mod prepare_title_chroma_tests {
+    use super::{prepare_title, prepare_title_trimmed};
+    use image::{DynamicImage, GrayImage, Rgb, RgbImage};
+
+    /// PMA-like crop: tall magenta title (low Rec.601 luma) plus short white
+    /// map/time text. White pixels pull Otsu above magenta-luma, which is how
+    /// `rejected_preflight_20260824_001227` lost VICTORY and OCR'd MATCH TIME.
+    fn magenta_title_white_map() -> DynamicImage {
+        let mut img = RgbImage::from_pixel(200, 40, Rgb([12, 10, 18]));
+        for y in 2..38 {
+            for x in 4..72 {
+                img.put_pixel(x, y, Rgb([200, 40, 210]));
+            }
+        }
+        for y in 14..26 {
+            for x in 100..190 {
+                img.put_pixel(x, y, Rgb([245, 245, 245]));
+            }
+        }
+        DynamicImage::ImageRgb8(img)
+    }
+
+    fn yellow_title_white_map() -> DynamicImage {
+        let mut img = RgbImage::from_pixel(200, 40, Rgb([12, 10, 18]));
+        for y in 2..38 {
+            for x in 4..72 {
+                img.put_pixel(x, y, Rgb([230, 180, 20]));
+            }
+        }
+        for y in 14..26 {
+            for x in 100..190 {
+                img.put_pixel(x, y, Rgb([245, 245, 245]));
+            }
+        }
+        DynamicImage::ImageRgb8(img)
+    }
+
+    fn tall_ink_columns(bin: &GrayImage) -> u32 {
+        let (w, h) = bin.dimensions();
+        if w == 0 || h == 0 {
+            return 0;
+        }
+        let min_span = h / 2;
+        let mut n = 0u32;
+        for x in 0..w {
+            let mut top = None;
+            let mut bottom = 0u32;
+            for y in 0..h {
+                if bin.get_pixel(x, y).0[0] < 128 {
+                    if top.is_none() {
+                        top = Some(y);
+                    }
+                    bottom = y;
+                }
+            }
+            if let Some(t) = top
+                && bottom - t + 1 >= min_span
+            {
+                n += 1;
+            }
+        }
+        n
+    }
+
+    #[test]
+    fn magenta_title_is_ink_despite_white_map_text() {
+        let bin = prepare_title(&magenta_title_white_map());
+        let n = tall_ink_columns(&bin);
+        assert!(
+            n >= 30,
+            "magenta title dropped by luma Otsu: {n} tall ink columns (need max-channel gray)"
+        );
+    }
+
+    #[test]
+    fn yellow_title_is_still_ink() {
+        let bin = prepare_title(&yellow_title_white_map());
+        let n = tall_ink_columns(&bin);
+        assert!(n >= 30, "yellow DEFEAT title lost ink: {n} tall columns");
+    }
+
+    #[test]
+    fn magenta_title_trim_drops_the_map_block() {
+        let trimmed = prepare_title_trimmed(&magenta_title_white_map());
+        // Scale is 120/40=3, title ends at x=72 → 216 plus pad; map starts at 100→300.
+        // After 12px border the inner width should stay left of the map block.
+        assert!(
+            trimmed.width() < 300,
+            "trim kept the white map block: width={}",
+            trimmed.width()
+        );
+        assert!(
+            tall_ink_columns(&trimmed) >= 30,
+            "trimmed image has no magenta title ink"
+        );
     }
 }
