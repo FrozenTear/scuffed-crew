@@ -54,9 +54,6 @@ pub fn AdminTeams() -> Element {
     let mut form_color = use_signal(String::new);
     let mut form_division = use_signal(String::new);
 
-    // Delete confirm state
-    let mut delete_modal = ModalController::<Team>::new();
-
     // Roster modal state
     let mut roster_modal = ModalController::<Team>::new();
     let mut roster_data: Signal<Vec<RosterEntry>> = use_signal(Vec::new);
@@ -148,34 +145,6 @@ pub fn AdminTeams() -> Element {
                 Err(e) => toast.show(Toast::error(format!("Failed to save team: {e}"))),
             }
         });
-    };
-
-    // --- Delete handlers ---
-
-    let mut open_delete = move |team: Team| {
-        delete_modal.show(team);
-    };
-
-    let on_delete_confirm = move |_| {
-        if let Some(team) = delete_modal.get_target() {
-            let id = team.id.clone();
-            delete_modal.close();
-            spawn(async move {
-                match ApiClient::web().delete(&format!("/api/teams/{id}")).await {
-                    Ok(_) => {
-                        toast.show(Toast::success("Team deleted."));
-                        teams.refresh += 1;
-                        games.refresh += 1;
-                        members.refresh += 1;
-                    }
-                    Err(e) => toast.show(Toast::error(format!("Delete failed: {e}"))),
-                }
-            });
-        }
-    };
-
-    let on_delete_cancel = move |_| {
-        delete_modal.close();
     };
 
     // --- Roster handlers ---
@@ -284,6 +253,9 @@ pub fn AdminTeams() -> Element {
             h1 { "Teams" }
             button { class: "btn-add", onclick: open_create, "+ Add Team" }
         }
+        p { class: "empty-state", style: "text-align:left;padding:0 0 1rem;margin:0;",
+            "Teams can be edited or have their roster cleared. There is no delete or archive endpoint."
+        }
 
         // Teams table
         {
@@ -299,7 +271,6 @@ pub fn AdminTeams() -> Element {
                         for team in list.iter() {
                             {
                                 let t_edit = team.clone();
-                                let t_del = team.clone();
                                 let t_roster = team.clone();
                                 // API Team has no game_name; resolve from games list already loaded
                                 // for the create/edit form (F-AUI-002). Prefer API field if present.
@@ -341,11 +312,6 @@ pub fn AdminTeams() -> Element {
                                                     class: "row-btn",
                                                     onclick: move |_| open_edit(t_edit.clone()),
                                                     "Edit"
-                                                }
-                                                button {
-                                                    class: "row-btn danger",
-                                                    onclick: move |_| open_delete(t_del.clone()),
-                                                    "Delete"
                                                 }
                                                 button {
                                                     class: "row-btn primary",
@@ -421,19 +387,6 @@ pub fn AdminTeams() -> Element {
                     oninput: move |e| form_color.set(e.value()),
                 }
             }
-        }
-
-        // Delete confirm
-        ConfirmDialog {
-            title: "Delete Team".to_string(),
-            message: format!(
-                "Are you sure you want to delete \"{}\"? All roster data will be lost.",
-                delete_modal.get_target().map(|t| t.name).unwrap_or_default()
-            ),
-            open: delete_modal.is_open(),
-            danger: true,
-            on_confirm: on_delete_confirm,
-            on_cancel: on_delete_cancel,
         }
 
         // Roster modal (wide)

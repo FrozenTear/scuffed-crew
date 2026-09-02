@@ -5,7 +5,9 @@ use wasm_bindgen::prelude::*;
 
 use scuffed_api_client::ApiClient;
 
-use crate::components::{Toast, use_toast};
+use crate::components::{Toast, is_http_status, use_toast};
+use crate::routes::Route;
+use crate::state::auth::use_auth;
 
 const PAGE_CSS: &str = r#"
     .identity-page {
@@ -156,6 +158,12 @@ const PAGE_CSS: &str = r#"
         gap: 0.5rem;
         margin-top: 0.5rem;
     }
+    .identity-cta-actions {
+        display: flex;
+        gap: 0.6rem;
+        flex-wrap: wrap;
+        margin-top: 0.25rem;
+    }
 "#;
 
 #[derive(Serialize)]
@@ -220,9 +228,10 @@ pub fn IdentitySettings() -> Element {
     let mut import_password = use_signal(String::new);
     let mut working = use_signal(|| false);
 
+    let auth = use_auth();
     let identity = use_resource(move || {
         let _ = refresh();
-        async move { ApiClient::web().get_me().await.ok() }
+        async move { ApiClient::web().get_me().await }
     });
 
     let has_extension = has_nip07_extension();
@@ -343,19 +352,54 @@ pub fn IdentitySettings() -> Element {
     };
 
     let me_data = identity.read();
-    let member = me_data
-        .as_ref()
-        .and_then(|o| o.as_ref())
-        .and_then(|me| me.member.as_ref());
+    let me_ok = me_data.as_ref().and_then(|r| r.as_ref().ok());
+    let member = me_ok.and_then(|me| me.member.as_ref());
 
     // Server-computed: `None` when the deploy has no valid public NIP-05
     // domain. Never rebuild this client-side — the client cannot know which
     // domain serves `/.well-known/nostr.json`, and guessing is what published
     // identities pointing at a domain we do not own.
-    let nip05 = me_data
+    let nip05 = me_ok.and_then(|me| me.nip05.clone());
+
+    let auth_state = auth();
+    let identity_gate: Option<(&str, &str, Route, &str)> = match me_data.as_ref() {
+        None if !auth_state.loading && !auth_state.is_logged_in() => Some((
+            "Sign in to manage your Nostr identity.",
+            "Sign in",
+            Route::Login {},
+            "ui-btn ui-btn--primary ui-btn--md",
+        )),
+        None if !auth_state.loading && !auth_state.is_org_member() => Some((
+            "You need to be an org member to link a Nostr identity.",
+            "Apply",
+            Route::Apply {},
+            "ui-btn ui-btn--primary ui-btn--md",
+        )),
+        Some(Err(e)) if is_http_status(&e.to_string(), 401) => Some((
+            "Sign in to manage your Nostr identity.",
+            "Sign in",
+            Route::Login {},
+            "ui-btn ui-btn--primary ui-btn--md",
+        )),
+        Some(Ok(me)) if me.member.is_none() => Some((
+            "You need to be an org member to link a Nostr identity.",
+            "Apply",
+            Route::Apply {},
+            "ui-btn ui-btn--primary ui-btn--md",
+        )),
+        _ => None,
+    };
+    let identity_fetch_error = me_data
         .as_ref()
-        .and_then(|o| o.as_ref())
-        .and_then(|me| me.nip05.clone());
+        .and_then(|r| r.as_ref().err())
+        .and_then(|e| {
+            let msg = e.to_string();
+            if is_http_status(&msg, 401) {
+                None
+            } else {
+                Some(msg)
+            }
+        });
 
     let has_pubkey = member.map(|m| m.nostr_pubkey.is_some()).unwrap_or(false);
     let is_server_managed = member
@@ -405,12 +449,19 @@ pub fn IdentitySettings() -> Element {
                     } else {
                         p { "No Nostr identity linked. Use one of the options below to get started." }
                     }
+                } else if let Some((lead, label, route, btn_class)) = identity_gate {
+                    p { "{lead}" }
+                    div { class: "identity-cta-actions",
+                        Link { to: route, class: "{btn_class}", "{label}" }
+                    }
+                } else if let Some(err) = identity_fetch_error {
+                    p { "Couldn't load identity: {err}" }
                 } else {
                     p { "Loading..." }
                 }
             }
 
-            if !has_pubkey {
+            if member.is_some() && !has_pubkey {
                 div { class: "identity-section",
                     h2 { "Link Nostr Identity" }
                     if has_extension {
@@ -445,7 +496,7 @@ pub fn IdentitySettings() -> Element {
                 }
             }
 
-            if is_server_managed {
+            if member.is_some() && is_server_managed {
                 div { class: "identity-section",
                     h2 { "Key Backup (NIP-49)" }
                     p { "Export your key as an encrypted ncryptsec backup. Keep this password — you will need it to import the key later (which links it as an external identity)." }
@@ -479,7 +530,7 @@ pub fn IdentitySettings() -> Element {
                 }
             }
 
-            if is_server_managed {
+            if member.is_some() && is_server_managed {
                 div { class: "identity-section",
                     h2 { "Import External Key (NIP-49)" }
                     p { class: "identity-warning",
@@ -489,7 +540,7 @@ pub fn IdentitySettings() -> Element {
                          server-managed mode."
                     }
                 }
-            } else {
+            } else if member.is_some() {
                 div { class: "identity-section",
                     h2 { "Import External Key (NIP-49)" }
                     p {
