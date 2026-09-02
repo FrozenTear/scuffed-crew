@@ -3,6 +3,7 @@ use serde::Deserialize;
 
 use crate::components::{ConfirmDialog, DataTable, FormModal, Toast, admin_pending, use_toast};
 use crate::hooks::{ModalController, use_api_list};
+use crate::state::use_auth;
 use scuffed_api_client::ApiClient;
 use scuffed_types::api::{AddRosterMemberRequest, CreateTeamRequest, UpdateRosterRoleRequest};
 
@@ -42,6 +43,8 @@ const TEAM_ROLES: [&str; 4] = ["player", "captain", "coach", "sub"];
 
 #[component]
 pub fn AdminTeams() -> Element {
+    let auth = use_auth();
+    let is_admin = auth().is_admin();
     let mut teams = use_api_list::<Team>("/api/teams");
     let mut games = use_api_list::<Game>("/api/games");
     let mut members = use_api_list::<Member>("/api/members");
@@ -251,7 +254,9 @@ pub fn AdminTeams() -> Element {
 
         div { class: "admin-toolbar",
             h1 { "Teams" }
-            button { class: "btn-add", onclick: open_create, "+ Add Team" }
+            if is_admin {
+                button { class: "btn-add", onclick: open_create, "+ Add Team" }
+            }
         }
         p { class: "empty-state", style: "text-align:left;padding:0 0 1rem;margin:0;",
             "Teams can be edited or have their roster cleared. There is no delete or archive endpoint."

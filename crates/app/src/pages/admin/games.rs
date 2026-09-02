@@ -2,6 +2,7 @@ use dioxus::prelude::*;
 
 use crate::components::{DataTable, FormModal, Toast, admin_pending, use_toast};
 use crate::hooks::{ModalController, use_api_list};
+use crate::state::use_auth;
 use scuffed_api_client::ApiClient;
 use scuffed_types::{
     Game,
@@ -10,6 +11,8 @@ use scuffed_types::{
 
 #[component]
 pub fn AdminGames() -> Element {
+    let auth = use_auth();
+    let is_admin = auth().is_admin();
     // Cursor-paginated envelope from GET /api/games (trust-p0).
     let mut games = use_api_list::<Game>("/api/games");
     let mut toast = use_toast();
@@ -85,7 +88,9 @@ pub fn AdminGames() -> Element {
 
         div { class: "admin-toolbar",
             h1 { "Games" }
-            button { class: "btn-add", onclick: open_create, "+ Add Game" }
+            if is_admin {
+                button { class: "btn-add", onclick: open_create, "+ Add Game" }
+            }
         }
 
         {
@@ -97,7 +102,12 @@ pub fn AdminGames() -> Element {
                     p { class: "empty-state", "No games configured yet." }
                 },
                 Some(list) => rsx! {
-                    DataTable { headers: vec!["Name", "Abbreviation", "Actions"],
+                    DataTable {
+                        headers: if is_admin {
+                            vec!["Name", "Abbreviation", "Actions"]
+                        } else {
+                            vec!["Name", "Abbreviation"]
+                        },
                         for game in list.iter() {
                             {
                                 let g = game.clone();
@@ -106,12 +116,14 @@ pub fn AdminGames() -> Element {
                                     tr { key: "{game.id}",
                                         td { "{game.name}" }
                                         td { "{abbr_display}" }
-                                        td {
-                                            div { class: "row-actions",
-                                                button {
-                                                    class: "row-btn",
-                                                    onclick: move |_| open_edit(g.clone()),
-                                                    "Edit"
+                                        if is_admin {
+                                            td {
+                                                div { class: "row-actions",
+                                                    button {
+                                                        class: "row-btn",
+                                                        onclick: move |_| open_edit(g.clone()),
+                                                        "Edit"
+                                                    }
                                                 }
                                             }
                                         }
