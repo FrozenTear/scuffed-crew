@@ -7,6 +7,8 @@
 **Out of scope:** Dioxus `crates/app`, OCR `crates/stat-tracker` (except where they consume these APIs).  
 **No merges. No functional patches.**
 
+**Post-review status (2026-09-02):** After this review SHA, merged [PR #50](https://github.com/FrozenTear/scuffed-crew/pull/50) addressed **F-API-001** (forum `min_role` list leak + fail-closed thread/reply ACL) and **F-API-002** (first-boot `/api/auth/setup` TOCTOU via `bootstrap_lock` CAS). Those two findings below are historical; they stay in the doc but are **resolved on `main`**. No other findings were re-audited in this rebase.
+
 ---
 
 ## Verdict (Evidence Law)
@@ -36,7 +38,7 @@ Nothing in this pass is a "skip the next deploy" Critical on a correctly-run `in
 
 ### High
 
-#### F-API-001 — Forum `min_role` bypass via unfiltered thread list
+#### F-API-001 — Forum `min_role` bypass via unfiltered thread list — **RESOLVED on main via #50**
 - **Where:** `crates/site-server/src/routes/forum.rs` `list_threads` (`:401–449`); `crates/db/src/queries/forum.rs` `list_forum_threads` (`:631–668`).
 - **What:** `forum_tree` and `get_board` hide/enforce `min_role`. `get_thread` also calls `enforce_board_access` when a board row exists. **`GET /api/forum/threads` with no `board` (or with only `category`) does not.** The DB path is `SELECT * FROM forum_thread WHERE is_active = true …` — every active thread, including officer/admin boards. Title + body metadata of the thread row come back to anonymous callers.
 - **Why it matters:** `docs/security-quality-review-fix-list.md` marks A1/H4 "forum `min_role` never enforced" as **fixed**. The tree is fixed; the list is not. Anyone who can hit the API learns officer-board thread titles (and whatever fields `ForumThread` serializes) without logging in.
@@ -44,7 +46,7 @@ Nothing in this pass is a "skip the next deploy" Critical on a correctly-run `in
 - **Fix direction:** After fetch, drop threads whose board fails `enforce_board_access`. Never serve a thread whose board cannot be resolved. Add a test: restricted board + anonymous `GET /api/forum/threads` returns zero of those rows.
 - **Confidence:** high (code path is unconditional).
 
-#### F-API-002 — First-boot `/api/auth/setup` is TOCTOU
+#### F-API-002 — First-boot `/api/auth/setup` is TOCTOU — **RESOLVED on main via #50**
 - **Where:** `crates/site-server/src/routes/auth.rs` `setup` (`:490–580`); `crates/db/src/queries/members.rs` `has_any_member` (`:610–623`) / `create_member` (`:115–158`).
 - **What:** Gate is `has_any_member() == false`, then `create_local_user` + `create_member(..., OrgRole::Admin)`. There is no CAS / single-row lock / "only while member count is 0" write. `member_user_idx` is UNIQUE on `user_id`, not "at most one bootstrap admin".
 - **Why it matters:** Two concurrent POSTs with different usernames both observe an empty member table and both become admins. The window is first-boot only (members are never hard-deleted, so the endpoint stays closed after the first successful create) — but that is exactly the window a newly-exposed VPS is on the public internet waiting for the operator to open a browser.
@@ -205,8 +207,8 @@ Nothing in this pass is a "skip the next deploy" Critical on a correctly-run `in
 
 **Blockers before you treat the API as "done" for a public hostname**
 
-1. **F-API-001** — close the forum list leak if any board has `min_role` (or you plan to add one).
-2. **F-API-002** — CAS/lock setup before the next fresh install on a public IP.
+1. **F-API-001** — **resolved on `main` via #50.** Historical: close the forum list leak if any board has `min_role` (or you plan to add one).
+2. **F-API-002** — **resolved on `main` via #50.** Historical: CAS/lock setup before the next fresh install on a public IP.
 3. **F-API-004** — blank `ALLOWED_ORIGINS` handling + harden existing `secrets.env`, or strategy WS is a landmine.
 4. **F-API-007 + F-API-015** — readiness that touches Surreal; fix the stale deploy.md sentence. You cannot operate what you cannot probe.
 5. **F-API-003** — either wire channel provisioning or hide/disable the chat encrypt routes so the contract matches reality.
@@ -249,8 +251,8 @@ NS2-3a omit invalid NIP-05 · NS2-4a `_` is not a wildcard · NS2-5 `get_member_
 
 ## Suggested ticket order (no patches in this PR)
 
-1. F-API-001 forum list ACL + test  
-2. F-API-002 setup CAS  
+1. F-API-001 forum list ACL + test — **done on `main` via #50**  
+2. F-API-002 setup CAS — **done on `main` via #50**  
 3. F-API-004 blank-origins = unset  
 4. F-API-007 `/api/ready` + deploy.md  
 5. F-API-003 provision or hide chat encrypt  
