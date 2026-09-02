@@ -8,12 +8,9 @@ use crate::widgets;
 
 pub fn view(app: &TrackerApp) -> Element<'_, Message> {
     let stats = aggregate_filtered(&app.games, &app.header_filter());
-    let mut col = column![
-        text("Heroes").size(SIZE_TITLE).font(FONT_BOLD).color(TEXT),
-        widgets::label_text("Honours season switch and role chips"),
-    ]
-    .spacing(GRID_GAP)
-    .width(Fill);
+    let mut col = column![text("Heroes").size(SIZE_TITLE).font(FONT_BOLD).color(TEXT),]
+        .spacing(GRID_GAP)
+        .width(Fill);
 
     if stats.heroes.is_empty() {
         col = col.push(widgets::empty_surface("No heroes in this window"));

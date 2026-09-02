@@ -1,10 +1,12 @@
 use iced::widget::{column, row, space, text};
 use iced::{Alignment, Element, Fill};
 
-use crate::aggregate::{distinct_heroes, distinct_maps, filter_games, group_by_local_day};
+use crate::aggregate::{
+    DEFAULT_SESSION_GAP, distinct_heroes, distinct_maps, filter_games, group_by_session_gap,
+};
 use crate::app::{Message, TrackerApp};
-use crate::model::Outcome;
-use crate::theme::{FONT_BOLD, FONT_MEDIUM, GRID_GAP, SIZE_TITLE, TEXT, TEXT_3};
+use crate::model::{Game, Outcome};
+use crate::theme::{FONT_BOLD, GRID_GAP, SIZE_TITLE, TEXT};
 use crate::widgets;
 
 pub fn view(app: &TrackerApp) -> Element<'_, Message> {
@@ -13,11 +15,10 @@ pub fn view(app: &TrackerApp) -> Element<'_, Message> {
     let heroes = distinct_heroes(&option_pool);
     let maps = distinct_maps(&option_pool);
     let shown = filter_games(&app.games, &app.games_filter());
-    let groups = group_by_local_day(&shown);
+    let groups = group_by_session_gap(&shown, DEFAULT_SESSION_GAP);
 
     let mut col = column![
         text("Games").size(SIZE_TITLE).font(FONT_BOLD).color(TEXT),
-        widgets::label_text("Season inherits the header switch · role chips apply"),
         filter_bar(app, &heroes, &maps),
     ]
     .spacing(GRID_GAP)
@@ -35,32 +36,58 @@ pub fn view(app: &TrackerApp) -> Element<'_, Message> {
                 .font(FONT_BOLD)
                 .color(TEXT),
         );
-        for chunk in group.games.chunks(2) {
-            let mut pair = row![].spacing(GRID_GAP).width(Fill);
-            let mut expanded_sid = None;
-            for g in chunk {
-                let selected = app.expanded.as_deref() == Some(g.session_id.as_str());
-                if selected {
-                    expanded_sid = Some(g.session_id.clone());
+        col = col.push(sitting_cards(&group.games, app));
+    }
+    col.into()
+}
+
+/// 2-column compact shelf. An expanded game *replaces* its compact card
+/// (full-width) instead of duplicating below the row.
+fn sitting_cards<'a>(games: &'a [Game], app: &'a TrackerApp) -> Element<'a, Message> {
+    let mut col = column![].spacing(GRID_GAP).width(Fill);
+    let mut pending: Vec<&Game> = Vec::new();
+    for g in games {
+        let selected = app.expanded.as_deref() == Some(g.session_id.as_str());
+        if selected {
+            if !pending.is_empty() {
+                let mut pair = row![].spacing(GRID_GAP).width(Fill);
+                let n = pending.len();
+                for p in pending.drain(..) {
+                    pair = pair.push(widgets::compact_game_card_clickable(p, false));
                 }
-                pair = pair.push(widgets::compact_game_card_clickable(g, selected));
+                if n == 1 {
+                    pair = pair.push(space().width(Fill));
+                }
+                col = col.push(pair);
             }
-            if chunk.len() == 1 {
-                pair = pair.push(space().width(Fill));
-            }
-            col = col.push(pair);
-            if let Some(sid) = expanded_sid
-                && let Some(g) = chunk.iter().find(|g| g.session_id == sid).cloned()
-            {
-                let confirm = app.confirm_delete.as_deref() == Some(sid.as_str());
-                col = col.push(widgets::expanded_game_card(
-                    &g,
-                    app.editing && app.edit.session_id == sid,
-                    &app.edit,
-                    confirm,
-                ));
+            let confirm = app.confirm_delete.as_deref() == Some(g.session_id.as_str());
+            col = col.push(widgets::expanded_game_card(
+                g,
+                app.editing && app.edit.session_id == g.session_id,
+                &app.edit,
+                confirm,
+            ));
+        } else {
+            pending.push(g);
+            if pending.len() == 2 {
+                let mut pair = row![].spacing(GRID_GAP).width(Fill);
+                for p in pending.drain(..) {
+                    pair = pair.push(widgets::compact_game_card_clickable(p, false));
+                }
+                col = col.push(pair);
             }
         }
+    }
+    if !pending.is_empty() {
+        let mut pair = row![].spacing(GRID_GAP).width(Fill);
+        let n = pending.len();
+        for p in pending.drain(..) {
+            pair = pair.push(widgets::compact_game_card_clickable(p, false));
+        }
+        if n == 1 {
+            pair = pair.push(space().width(Fill));
+        }
+        col = col.push(pair);
     }
     col.into()
 }
@@ -68,7 +95,8 @@ pub fn view(app: &TrackerApp) -> Element<'_, Message> {
 fn filter_bar(app: &TrackerApp, heroes: &[String], maps: &[String]) -> Element<'static, Message> {
     let mut hero_row = row![widgets::label_text("Hero")]
         .spacing(8)
-        .align_y(Alignment::Center);
+        .align_y(Alignment::Center)
+        .width(Fill);
     hero_row = hero_row.push(widgets::filter_chip(
         "All".into(),
         app.filter_hero.is_none(),
@@ -76,7 +104,7 @@ fn filter_bar(app: &TrackerApp, heroes: &[String], maps: &[String]) -> Element<'
     ));
     for h in heroes {
         hero_row = hero_row.push(widgets::filter_chip(
-            h.clone(),
+            crate::model::display_hero_name(h),
             app.filter_hero.as_deref() == Some(h.as_str()),
             Message::FilterHero(Some(h.clone())),
         ));
@@ -84,7 +112,8 @@ fn filter_bar(app: &TrackerApp, heroes: &[String], maps: &[String]) -> Element<'
 
     let mut map_row = row![widgets::label_text("Map")]
         .spacing(8)
-        .align_y(Alignment::Center);
+        .align_y(Alignment::Center)
+        .width(Fill);
     map_row = map_row.push(widgets::filter_chip(
         "All".into(),
         app.filter_map.is_none(),
@@ -122,23 +151,11 @@ fn filter_bar(app: &TrackerApp, heroes: &[String], maps: &[String]) -> Element<'
         ),
     ]
     .spacing(8)
-    .align_y(Alignment::Center);
+    .align_y(Alignment::Center)
+    .width(Fill);
 
-    column![hero_row, map_row, outcome_row]
+    column![hero_row.wrap(), map_row.wrap(), outcome_row.wrap()]
         .spacing(8)
-        .push(
-            text(if app.fixture.is_some() {
-                "Fixture mode: commands still write under this --data-dir /commands/"
-            } else {
-                "Actions write StoreCommand files; the daemon applies them and refreshes the snapshot"
-            })
-            .size(theme_meta())
-            .font(FONT_MEDIUM)
-            .color(TEXT_3),
-        )
+        .width(Fill)
         .into()
-}
-
-fn theme_meta() -> f32 {
-    crate::theme::SIZE_META
 }

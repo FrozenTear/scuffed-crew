@@ -94,8 +94,8 @@ impl TrackerApp {
             };
 
         let snapshot_mtime = snapshot::snapshot_mtime(&cli.data_dir);
-        let live_status = live_status_for(&games, cli.fixture);
-        let health_status = health_status_for(&cli.data_dir, cli.fixture, &seasons);
+        let live_status = live_status_for(&games);
+        let health_status = health_status_for(&cli.data_dir, &games);
         let app = Self {
             live_status,
             health_status,
@@ -155,7 +155,8 @@ impl TrackerApp {
                         self.snapshot_mtime = mtime;
                         let snap = snapshot::load_snapshot(&self.data_dir);
                         self.games = games_from_snapshot(&snap);
-                        self.live_status = live_status_for(&self.games, self.fixture);
+                        self.live_status = live_status_for(&self.games);
+                        self.health_status = health_status_for(&self.data_dir, &self.games);
                         self.clock = Utc::now();
                     }
                 }
@@ -204,13 +205,11 @@ impl TrackerApp {
                         {
                             self.season = seasons::default_selection(&self.seasons.seasons);
                         }
-                        self.health_status =
-                            health_status_for(&self.data_dir, self.fixture, &self.seasons);
+                        self.health_status = health_status_for(&self.data_dir, &self.games);
                     }
                     Err(e) => {
                         tracing::info!(error = %e, "seasons fetch failed; using cache");
-                        self.health_status =
-                            health_status_for(&self.data_dir, self.fixture, &self.seasons);
+                        self.health_status = health_status_for(&self.data_dir, &self.games);
                     }
                 }
                 Task::none()
@@ -245,8 +244,8 @@ impl TrackerApp {
             } => {
                 self.toast = Some(
                     match crate::commands::set_outcome(&self.data_dir, &session_id, outcome) {
-                        Ok(()) => format!("Queued SetOutcome → {}", outcome.store_label()),
-                        Err(e) => format!("Command failed: {e}"),
+                        Ok(()) => format!("Outcome set to {}", outcome.store_label()),
+                        Err(e) => format!("Could not save outcome: {e}"),
                     },
                 );
                 Task::none()
@@ -262,8 +261,8 @@ impl TrackerApp {
             Message::DeleteSession(sid) => {
                 self.toast = Some(
                     match crate::commands::delete_session(&self.data_dir, &sid) {
-                        Ok(()) => "Queued DeleteSession".into(),
-                        Err(e) => format!("Command failed: {e}"),
+                        Ok(()) => "Game deleted".into(),
+                        Err(e) => format!("Could not delete game: {e}"),
                     },
                 );
                 self.confirm_delete = None;
@@ -292,7 +291,7 @@ impl TrackerApp {
                 {
                     self.toast = Some(
                         match crate::commands::save_edit(&self.data_dir, g, &self.edit) {
-                            Ok(()) => "Queued EditMatch".into(),
+                            Ok(()) => "Stats corrected".into(),
                             Err(e) => e,
                         },
                     );
@@ -314,12 +313,12 @@ impl TrackerApp {
                     ) {
                         Ok(()) => {
                             if confirm {
-                                "Queued ResolveSegment confirm".into()
+                                "Hero swap confirmed".into()
                             } else {
-                                "Queued ResolveSegment dismiss".into()
+                                "Hero swap dismissed".into()
                             }
                         }
-                        Err(e) => format!("Command failed: {e}"),
+                        Err(e) => format!("Could not update hero swap: {e}"),
                     },
                 );
                 Task::none()
@@ -336,57 +335,44 @@ impl TrackerApp {
             Screen::Heroes => crate::heroes::view(self),
             Screen::Maps => crate::maps::view(self),
         };
-        let toast = self.toast.as_ref().map(|t| widgets::toast_bar(t));
 
-        let main = container(body)
+        // Header + toast + body share the same ~1400 content column so season /
+        // role / status chips sit on the body's right edge, not the ultrawide
+        // window's. Sidebar stays left of that column.
+        let mut content = column![header].spacing(16).width(Fill);
+        if let Some(t) = &self.toast {
+            content = content.push(widgets::toast_bar(t));
+        }
+        content = content.push(body);
+
+        let main = container(content)
             .width(Fill)
             .max_width(CONTENT_MAX)
             .padding(Padding {
-                top: 0.0,
+                top: PAGE_PAD_Y,
                 bottom: PAGE_PAD_Y,
                 left: PAGE_PAD_X,
                 right: PAGE_PAD_X,
             });
 
-        let mut stack = column![container(header).padding(Padding {
-            top: PAGE_PAD_Y,
-            bottom: 16.0,
-            left: PAGE_PAD_X,
-            right: PAGE_PAD_X,
-        }),]
+        let chrome = row![
+            container(nav).width(SIDEBAR_WIDTH).padding(Padding {
+                top: PAGE_PAD_Y,
+                bottom: PAGE_PAD_Y,
+                left: PAGE_PAD_X,
+                right: 8.0,
+            }),
+            iced::widget::scrollable(container(
+                row![main, space().width(Fill)].align_y(Alignment::Start)
+            ))
+            .width(Fill)
+            .height(Fill),
+        ]
         .spacing(0)
         .width(Fill)
         .height(Fill);
 
-        if let Some(t) = toast {
-            stack = stack.push(container(t).padding(Padding {
-                top: 0.0,
-                bottom: 8.0,
-                left: PAGE_PAD_X,
-                right: PAGE_PAD_X,
-            }));
-        }
-
-        stack = stack.push(
-            row![
-                container(nav).width(SIDEBAR_WIDTH).padding(Padding {
-                    top: 0.0,
-                    bottom: PAGE_PAD_Y,
-                    left: PAGE_PAD_X,
-                    right: 8.0,
-                }),
-                iced::widget::scrollable(container(
-                    row![main, space().width(Fill)].align_y(Alignment::Start)
-                ))
-                .width(Fill)
-                .height(Fill),
-            ]
-            .spacing(0)
-            .width(Fill)
-            .height(Fill),
-        );
-
-        container(stack)
+        container(chrome)
             .width(Fill)
             .height(Fill)
             .style(theme::page_background)
@@ -402,35 +388,18 @@ fn fixture_clock(fixture: Option<FixtureKind>, games: &[Game]) -> DateTime<Utc> 
     }
 }
 
-fn live_status_for(games: &[Game], fixture: Option<FixtureKind>) -> String {
-    if fixture.is_some() {
-        return "Fixture · read-only snapshot".into();
-    }
+fn live_status_for(games: &[Game]) -> String {
     if let Some(g) = games.first() {
-        format!("Idle · last game {}", g.played_at.format("%H:%M"))
+        format!("Last game {}", g.played_at.format("%H:%M"))
     } else {
-        "Idle · waiting for snapshot".into()
+        "Waiting for a capture".into()
     }
 }
 
-fn health_status_for(
-    data_dir: &std::path::Path,
-    fixture: Option<FixtureKind>,
-    seasons: &SeasonCache,
-) -> String {
-    let source = if fixture.is_some() {
-        "fixture snapshot"
-    } else if data_dir.join("live_snapshot.json").exists() {
-        "live_snapshot.json"
+fn health_status_for(data_dir: &std::path::Path, games: &[Game]) -> String {
+    if data_dir.join("live_snapshot.json").exists() || !games.is_empty() {
+        "Ready".into()
     } else {
-        "no snapshot yet"
-    };
-    let seasons_note = if seasons.seasons.is_empty() {
-        "seasons: none (picker hidden)"
-    } else if seasons.from_network {
-        "seasons: network"
-    } else {
-        "seasons: cache"
-    };
-    format!("{source} · {seasons_note} · commands → <data_dir>/commands/")
+        "Waiting for a capture".into()
+    }
 }

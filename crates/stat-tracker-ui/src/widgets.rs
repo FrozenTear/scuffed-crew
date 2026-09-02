@@ -3,7 +3,9 @@ use iced::{Alignment, Element, Fill, Length, Padding};
 
 use crate::aggregate::{HeroAgg, MapAgg, Record};
 use crate::app::{Message, TrackerApp};
-use crate::model::{EditField, EditForm, Game, Outcome, Role, Screen, SeasonSel};
+use crate::model::{
+    EditField, EditForm, Game, Outcome, Role, Screen, SeasonSel, display_hero_name,
+};
 use crate::theme::{
     self, FONT_BOLD, FONT_EXTRABOLD, FONT_MEDIUM, FONT_SEMIBOLD, GRID_GAP, PAD_INNER, SIZE_BODY,
     SIZE_FEATURED, SIZE_LABEL, SIZE_META, SIZE_TITLE, STRIPE, TEXT, TEXT_2, TEXT_3,
@@ -174,7 +176,7 @@ pub fn featured_game_card(game: &Game) -> Element<'static, Message> {
             .color(TEXT),
         text(format!(
             "{}  ·  {}",
-            game.hero,
+            game.display_hero(),
             game.played_at.format("%H:%M")
         ))
         .size(SIZE_BODY)
@@ -213,7 +215,7 @@ fn compact_game_card_inner(game: &Game, selected: bool) -> Element<'static, Mess
             .size(SIZE_TITLE)
             .font(FONT_BOLD)
             .color(TEXT),
-        text(game.hero.clone())
+        text(game.display_hero())
             .size(SIZE_META)
             .font(FONT_MEDIUM)
             .color(TEXT_2),
@@ -243,14 +245,9 @@ fn compact_game_card_inner(game: &Game, selected: bool) -> Element<'static, Mess
 
 pub fn hero_card(hero: &HeroAgg) -> Element<'static, Message> {
     let wr = format!("{:.0}%", hero.record.win_rate_pct());
-    let games = format!(
-        "{} game{}",
-        hero.record.games,
-        if hero.record.games == 1 { "" } else { "s" }
-    );
     let body = column![
         label_text(hero.role.label()),
-        text(hero.hero.clone())
+        text(display_hero_name(&hero.hero))
             .size(SIZE_TITLE)
             .font(FONT_BOLD)
             .color(TEXT),
@@ -258,7 +255,10 @@ pub fn hero_card(hero: &HeroAgg) -> Element<'static, Message> {
             .size(SIZE_FEATURED)
             .font(FONT_EXTRABOLD)
             .color(TEXT),
-        text(games).size(SIZE_META).font(FONT_MEDIUM).color(TEXT_2),
+        text(hero.record.games_label())
+            .size(SIZE_META)
+            .font(FONT_MEDIUM)
+            .color(TEXT_2),
         win_bar(hero.record.win_rate()),
     ]
     .spacing(6);
@@ -290,7 +290,7 @@ pub fn season_panel(
             .size(SIZE_BODY)
             .font(FONT_SEMIBOLD)
             .color(TEXT_2),
-            text(format!("{} games", record.games))
+            text(record.games_label())
                 .size(SIZE_META)
                 .font(FONT_MEDIUM)
                 .color(TEXT_3),
@@ -341,8 +341,8 @@ pub fn map_row(m: &MapAgg) -> Element<'static, Message> {
         ]
         .align_y(Alignment::Center),
         text(format!(
-            "{} games · {}",
-            m.record.games,
+            "{} · {}",
+            m.record.games_label(),
             m.record.wl_label()
         ))
         .size(SIZE_META)
@@ -362,14 +362,6 @@ pub fn health_panel(status: &str) -> Element<'static, Message> {
                 .size(SIZE_BODY)
                 .font(FONT_MEDIUM)
                 .color(TEXT_2),
-            text("Companion overlay — P3")
-                .size(SIZE_META)
-                .font(FONT_MEDIUM)
-                .color(TEXT_3),
-            text("Writes StoreCommand files only")
-                .size(SIZE_META)
-                .font(FONT_MEDIUM)
-                .color(TEXT_3),
         ]
         .spacing(8),
     )
@@ -420,7 +412,7 @@ pub fn expanded_game_card<'a>(
             .color(TEXT),
         text(format!(
             "{}  ·  {}",
-            game.hero,
+            game.display_hero(),
             game.played_at.format("%H:%M")
         ))
         .size(SIZE_BODY)
@@ -717,12 +709,21 @@ fn format_stat(n: u32) -> String {
     }
 }
 
-fn win_bar(rate: f32) -> Element<'static, Message> {
+/// Fill / rest portions for a 0–1 win rate. Portions go on the *containers*
+/// (not Shrink-wrapped `space()` children) or the bar stays ~50/50.
+pub fn win_bar_portions(rate: f32) -> (u16, u16) {
     let fill = (rate.clamp(0.0, 1.0) * 100.0).round() as u16;
     let rest = 100u16.saturating_sub(fill);
-    container(
-        row![
-            container(space().height(6).width(Length::FillPortion(fill.max(1))))
+    (fill, rest)
+}
+
+fn win_bar(rate: f32) -> Element<'static, Message> {
+    let (fill, rest) = win_bar_portions(rate);
+    let mut parts = Row::new().spacing(0).width(Fill).height(6);
+    if fill > 0 {
+        parts = parts.push(
+            container(space().height(6))
+                .width(Length::FillPortion(fill))
                 .height(6)
                 .style(|_| container::Style {
                     background: Some(iced::Background::Color(theme::OK)),
@@ -732,7 +733,12 @@ fn win_bar(rate: f32) -> Element<'static, Message> {
                     },
                     ..container::Style::default()
                 }),
-            container(space().height(6).width(Length::FillPortion(rest.max(1))))
+        );
+    }
+    if rest > 0 {
+        parts = parts.push(
+            container(space().height(6))
+                .width(Length::FillPortion(rest))
                 .height(6)
                 .style(|_| container::Style {
                     background: Some(iced::Background::Color(theme::BORDER)),
@@ -742,11 +748,38 @@ fn win_bar(rate: f32) -> Element<'static, Message> {
                     },
                     ..container::Style::default()
                 }),
-        ]
-        .spacing(0),
-    )
-    .width(Fill)
-    .into()
+        );
+    }
+    if fill == 0 && rest == 0 {
+        parts = parts.push(
+            container(space().height(6))
+                .width(Fill)
+                .height(6)
+                .style(|_| container::Style {
+                    background: Some(iced::Background::Color(theme::BORDER)),
+                    border: iced::Border {
+                        radius: 999.0.into(),
+                        ..iced::Border::default()
+                    },
+                    ..container::Style::default()
+                }),
+        );
+    }
+    container(parts).width(Fill).into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::win_bar_portions;
+
+    #[test]
+    fn win_bar_portions_match_rate() {
+        assert_eq!(win_bar_portions(0.0), (0, 100));
+        assert_eq!(win_bar_portions(0.18), (18, 82));
+        assert_eq!(win_bar_portions(0.5), (50, 50));
+        assert_eq!(win_bar_portions(0.7), (70, 30));
+        assert_eq!(win_bar_portions(1.0), (100, 0));
+    }
 }
 
 fn card_shell(

@@ -255,6 +255,10 @@ impl Game {
         }
     }
 
+    pub fn display_hero(&self) -> String {
+        display_hero_name(&self.hero)
+    }
+
     pub fn has_stat_line(&self) -> bool {
         self.elims + self.deaths + self.assists + self.damage + self.healing + self.mitigation > 0
     }
@@ -351,8 +355,31 @@ impl Game {
     }
 }
 
+pub fn display_hero_name(name: &str) -> String {
+    let t = name.trim();
+    if t.is_empty() || t.eq_ignore_ascii_case("unknown") {
+        "Unknown hero".into()
+    } else {
+        t.to_string()
+    }
+}
+
 fn empty_dash(s: String) -> String {
     if s.is_empty() { "—".into() } else { s }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::display_hero_name;
+
+    #[test]
+    fn unknown_hero_label() {
+        assert_eq!(display_hero_name(""), "Unknown hero");
+        assert_eq!(display_hero_name("   "), "Unknown hero");
+        assert_eq!(display_hero_name("Unknown"), "Unknown hero");
+        assert_eq!(display_hero_name("unknown"), "Unknown hero");
+        assert_eq!(display_hero_name("Ana"), "Ana");
+    }
 }
 
 /// Editable text state for `EditMatch`. One `String` per field (parsed on save).

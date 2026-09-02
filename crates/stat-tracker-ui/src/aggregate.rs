@@ -70,6 +70,14 @@ impl Record {
             format!("{}–{}", self.wins, self.losses)
         }
     }
+
+    pub fn games_label(&self) -> String {
+        if self.games == 1 {
+            "1 game".into()
+        } else {
+            format!("{} games", self.games)
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -99,14 +107,18 @@ pub struct Aggregates {
     pub roles: Vec<RoleAgg>,
 }
 
-/// Local-calendar-day group for the Games screen (`Sat Aug 30 · 4–1`).
+/// One sitting of games (daemon session window: 30-minute idle gap).
+/// Header uses the local date of the oldest game (`Sat Aug 30 · 4–1`).
 #[derive(Debug, Clone, PartialEq)]
-pub struct DayGroup {
+pub struct SessionGroup {
     pub heading: String,
-    pub day: NaiveDate,
+    pub started_on: NaiveDate,
     pub record: Record,
     pub games: Vec<Game>,
 }
+
+/// Matches `Config::session_window_secs` default (30 minutes).
+pub const DEFAULT_SESSION_GAP: chrono::TimeDelta = chrono::TimeDelta::seconds(1800);
 
 /// Filter + aggregate. `window = None` is all time. `role = None` keeps every role.
 pub fn aggregate(games: &[Game], window: Option<SeasonWindow>, role: Option<Role>) -> Aggregates {
@@ -157,38 +169,44 @@ pub fn distinct_maps(games: &[&Game]) -> Vec<String> {
     out
 }
 
-/// Group newest-first games by the local calendar day. Header matches the
-/// design example (`Sat Aug 30 · 4–1`). Daemon `session_id` is one game, so
-/// the Games screen groups by sitting/day, not by session_id.
-pub fn group_by_local_day(games: &[&Game]) -> Vec<DayGroup> {
-    let mut groups: Vec<DayGroup> = Vec::new();
+/// Group newest-first games by the daemon sitting gap: a game continues the
+/// current sitting when it is within `gap` of the oldest game already in that
+/// sitting (same rule as `session_window_secs` between captures). Midnight
+/// does not split a sitting. Header date is the oldest game's local day.
+pub fn group_by_session_gap(games: &[&Game], gap: chrono::TimeDelta) -> Vec<SessionGroup> {
+    let mut groups: Vec<SessionGroup> = Vec::new();
     for g in games {
-        let day = g.played_at.with_timezone(&Local).date_naive();
-        match groups.last_mut() {
-            Some(grp) if grp.day == day => {
+        let continues = groups
+            .last()
+            .and_then(|grp| grp.games.last())
+            .is_some_and(|prev| prev.played_at.signed_duration_since(g.played_at) <= gap);
+        if continues {
+            if let Some(grp) = groups.last_mut() {
                 bump_outcome(&mut grp.record, g.outcome);
                 grp.record.games += 1;
                 grp.games.push((*g).clone());
             }
-            _ => {
-                let mut record = Record {
-                    games: 1,
-                    wins: 0,
-                    losses: 0,
-                    draws: 0,
-                };
-                bump_outcome(&mut record, g.outcome);
-                groups.push(DayGroup {
-                    heading: String::new(),
-                    day,
-                    record,
-                    games: vec![(*g).clone()],
-                });
-            }
+        } else {
+            let mut record = Record {
+                games: 1,
+                wins: 0,
+                losses: 0,
+                draws: 0,
+            };
+            bump_outcome(&mut record, g.outcome);
+            groups.push(SessionGroup {
+                heading: String::new(),
+                started_on: g.played_at.with_timezone(&Local).date_naive(),
+                record,
+                games: vec![(*g).clone()],
+            });
         }
     }
     for grp in &mut groups {
-        grp.heading = format!("{} · {}", format_day(grp.day), grp.record.wl_label());
+        if let Some(oldest) = grp.games.last() {
+            grp.started_on = oldest.played_at.with_timezone(&Local).date_naive();
+        }
+        grp.heading = format!("{} · {}", format_day(grp.started_on), grp.record.wl_label());
     }
     groups
 }
@@ -498,18 +516,23 @@ mod tests {
         assert_eq!(map_only.len(), 1);
         assert_eq!(map_only[0].outcome, Outcome::Loss);
 
-        // Midday stamps so local-day grouping is stable across timezones.
+        // Far-apart sittings stay split even if we used calendar days before.
         let day_a = game("Ashe", Role::Damage, Outcome::Win, ts_h(2026, 8, 18, 12));
         let day_b1 = game("Ana", Role::Support, Outcome::Win, ts_h(2026, 9, 2, 12));
-        let day_b2 = game("Ashe", Role::Damage, Outcome::Loss, ts_h(2026, 9, 2, 14));
+        let day_b2 = game(
+            "Ashe",
+            Role::Damage,
+            Outcome::Loss,
+            ts_h(2026, 9, 2, 12) + chrono::TimeDelta::minutes(12),
+        );
         let day_b3 = game(
             "Junker Queen",
             Role::Tank,
             Outcome::Win,
-            ts_h(2026, 9, 2, 16),
+            ts_h(2026, 9, 2, 12) + chrono::TimeDelta::minutes(24),
         );
         let sitting = vec![&day_b3, &day_b2, &day_b1, &day_a];
-        let groups = group_by_local_day(&sitting);
+        let groups = group_by_session_gap(&sitting, DEFAULT_SESSION_GAP);
         assert_eq!(
             groups.len(),
             2,
@@ -517,16 +540,74 @@ mod tests {
         );
         assert!(
             groups[0].heading.contains("· 2–1"),
-            "newest day heading {}",
+            "newest sitting heading {}",
             groups[0].heading
         );
         assert!(
             groups[1].heading.contains("· 1–0"),
-            "older day heading {}",
+            "older sitting heading {}",
             groups[1].heading
         );
         assert!(groups[0].heading.contains("Sep"), "{}", groups[0].heading);
         assert!(groups[1].heading.contains("Aug"), "{}", groups[1].heading);
+    }
+
+    #[test]
+    fn sitting_gap_keeps_midnight_together_and_splits_idle() {
+        let after = game(
+            "Ana",
+            Role::Support,
+            Outcome::Win,
+            Utc.with_ymd_and_hms(2026, 8, 29, 0, 10, 0).unwrap(),
+        );
+        let before = game(
+            "Ashe",
+            Role::Damage,
+            Outcome::Loss,
+            Utc.with_ymd_and_hms(2026, 8, 28, 23, 50, 0).unwrap(),
+        );
+        let earlier = game(
+            "Reinhardt",
+            Role::Tank,
+            Outcome::Win,
+            Utc.with_ymd_and_hms(2026, 8, 28, 22, 00, 0).unwrap(),
+        );
+        let night = group_by_session_gap(&[&after, &before], DEFAULT_SESSION_GAP);
+        assert_eq!(
+            night.len(),
+            1,
+            "20 min across midnight is one sitting: {night:?}"
+        );
+        assert!(
+            night[0].heading.contains("· 1–1"),
+            "heading {}",
+            night[0].heading
+        );
+
+        let split = group_by_session_gap(&[&before, &earlier], DEFAULT_SESSION_GAP);
+        assert_eq!(
+            split.len(),
+            2,
+            "110 min idle must split sittings: {split:?}"
+        );
+    }
+
+    #[test]
+    fn games_label_singular() {
+        let one = Record {
+            games: 1,
+            wins: 1,
+            losses: 0,
+            draws: 0,
+        };
+        assert_eq!(one.games_label(), "1 game");
+        let many = Record {
+            games: 7,
+            wins: 3,
+            losses: 4,
+            draws: 0,
+        };
+        assert_eq!(many.games_label(), "7 games");
     }
 
     #[test]
