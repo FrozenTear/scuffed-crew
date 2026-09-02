@@ -60,6 +60,8 @@ pub struct TrackerApp {
     pub filter_outcome: Option<Outcome>,
     pub toast: Option<String>,
     snapshot_mtime: Option<SystemTime>,
+    seasons_url: Option<String>,
+    last_seasons_attempt: Option<DateTime<Utc>>,
 }
 
 impl TrackerApp {
@@ -80,17 +82,22 @@ impl TrackerApp {
         {
             seasons.seasons = list;
         }
-        let season = seasons::default_selection(&seasons.seasons);
+        let persisted = seasons::load_ui_state(&cli.data_dir);
+        let season = seasons::resolve_selection(persisted, &seasons.seasons);
         let clock = fixture_clock(cli.fixture, &games);
-        let fetch =
-            if seasons::should_fetch_seasons(cli.fixture.is_some(), cli.seasons_url.as_deref()) {
-                let url = cli
-                    .seasons_url
+        let seasons_url = cli.seasons_url.clone();
+        let now = Utc::now();
+        let (fetch, last_seasons_attempt) =
+            if seasons::should_fetch_seasons(cli.fixture.is_some(), seasons_url.as_deref()) {
+                let url = seasons_url
                     .clone()
                     .expect("should_fetch_seasons requires a URL");
-                Task::perform(seasons::fetch_seasons(url), Message::SeasonsFetched)
+                (
+                    Task::perform(seasons::fetch_seasons(url), Message::SeasonsFetched),
+                    Some(now),
+                )
             } else {
-                Task::none()
+                (Task::none(), None)
             };
 
         let snapshot_mtime = snapshot::snapshot_mtime(&cli.data_dir);
@@ -116,6 +123,8 @@ impl TrackerApp {
             filter_outcome: None,
             toast: None,
             snapshot_mtime,
+            seasons_url,
+            last_seasons_attempt,
         };
         (app, fetch)
     }
@@ -160,6 +169,20 @@ impl TrackerApp {
                         self.clock = Utc::now();
                     }
                 }
+                let now = Utc::now();
+                if seasons::should_refetch(
+                    self.fixture.is_some(),
+                    self.seasons_url.as_deref(),
+                    self.last_seasons_attempt,
+                    now,
+                ) {
+                    let url = self
+                        .seasons_url
+                        .clone()
+                        .expect("should_refetch requires a URL");
+                    self.last_seasons_attempt = Some(now);
+                    return Task::perform(seasons::fetch_seasons(url), Message::SeasonsFetched);
+                }
                 Task::none()
             }
             Message::Navigate(screen) => {
@@ -173,6 +196,9 @@ impl TrackerApp {
             }
             Message::SelectSeason(sel) => {
                 self.season = sel;
+                if let Err(e) = seasons::save_ui_state(&self.data_dir, &self.season) {
+                    tracing::warn!(error = %e, "failed to write ui_state.json");
+                }
                 Task::none()
             }
             Message::ToggleRole(role) => {
@@ -204,6 +230,9 @@ impl TrackerApp {
                             .is_some_and(|id| !self.seasons.seasons.iter().any(|s| s.id == id))
                         {
                             self.season = seasons::default_selection(&self.seasons.seasons);
+                            if let Err(e) = seasons::save_ui_state(&self.data_dir, &self.season) {
+                                tracing::warn!(error = %e, "failed to write ui_state.json");
+                            }
                         }
                         self.health_status = health_status_for(&self.data_dir, &self.games);
                     }
@@ -343,6 +372,7 @@ impl TrackerApp {
                 Screen::Games => crate::games::view(self, size.width),
                 Screen::Heroes => crate::heroes::view(self, size.width),
                 Screen::Maps => crate::maps::view(self),
+                Screen::Seasons => crate::seasons::view(self),
             })
             .width(Fill)
             .height(Length::Shrink),

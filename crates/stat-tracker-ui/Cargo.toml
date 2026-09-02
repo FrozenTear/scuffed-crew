@@ -3,7 +3,7 @@ name = "scuffed-stat-tracker-ui"
 version = "0.1.0"
 edition = "2024"
 license.workspace = true
-description = "Iced 0.14 tracker GUI for the Scuffed Crew stat tracker (Overview, Games, Heroes, Maps)."
+description = "Iced 0.14 tracker GUI for the Scuffed Crew stat tracker (Overview, Games, Heroes, Maps, Seasons)."
 
 [[bin]]
 name = "stat-tracker-gui"

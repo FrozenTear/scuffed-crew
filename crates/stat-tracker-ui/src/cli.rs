@@ -91,7 +91,7 @@ impl Cli {
     }
 
     pub fn help_text() -> &'static str {
-        "stat-tracker-gui — Scuffed Crew tracker (Iced 0.14, P1)
+        "stat-tracker-gui — Scuffed Crew tracker (Iced 0.14, P2)
 
 USAGE:
   cargo run -p scuffed-stat-tracker-ui -- [OPTIONS]
@@ -102,8 +102,9 @@ OPTIONS:
   --data-dir PATH       Daemon data dir (default: config / XDG, or a temp dir with --fixture)
   --fixture empty|sample
                         Install a demo live_snapshot.json and read it back via storage::read_snapshot
-  --seasons-url URL     GET /api/public/seasons (default: $SCUFFED_SERVER or config sync URL).
-                        Ignored when --fixture is set.
+  --seasons-url URL     GET /api/public/seasons on launch and every 30 min
+                        (default: $SCUFFED_SERVER or config sync URL).
+                        Cached to <data-dir>/seasons.json. Ignored when --fixture is set.
   -h, --help            Show this help
 "
     }

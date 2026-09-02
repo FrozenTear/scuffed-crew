@@ -26,7 +26,11 @@ pub fn app_header(app: &TrackerApp) -> Element<'_, Message> {
             .font(FONT_EXTRABOLD)
             .color(TEXT),
         space().width(Fill),
-        season_switch(&app.seasons.seasons, &app.season),
+        if crate::seasons::show_season_picker(&app.seasons.seasons) {
+            season_switch(&app.seasons.seasons, &app.season)
+        } else {
+            space().width(0).into()
+        },
         role_chips(app.roles),
         status_stub(&app.live_status),
     ]
@@ -715,6 +719,11 @@ pub fn win_bar_portions(rate: f32) -> (u16, u16) {
     let fill = (rate.clamp(0.0, 1.0) * 100.0).round() as u16;
     let rest = 100u16.saturating_sub(fill);
     (fill, rest)
+}
+
+/// Public so the Seasons screen can reuse the same 4–8 px bar.
+pub fn win_bar_for(rate: f32) -> Element<'static, Message> {
+    win_bar(rate)
 }
 
 fn win_bar(rate: f32) -> Element<'static, Message> {

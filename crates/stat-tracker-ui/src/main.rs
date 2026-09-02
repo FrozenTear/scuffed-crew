@@ -19,7 +19,7 @@ fn main() -> anyhow::Result<()> {
     }
 
     let data_dir = cli.data_dir.clone();
-    tracing::info!(path = %data_dir.display(), "starting tracker GUI (Iced 0.14 P1)");
+    tracing::info!(path = %data_dir.display(), "starting tracker GUI (Iced 0.14 P2)");
 
     iced::application(
         {

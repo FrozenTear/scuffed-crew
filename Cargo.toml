@@ -21,7 +21,7 @@ members = [
     "crates/chat",
     # Overwatch stat tracker
     "crates/stat-tracker",
-    # Iced 0.14 tracker GUI (P1). Binary name: stat-tracker-gui.
+    # Iced 0.14 tracker GUI (P2). Binary name: stat-tracker-gui.
     "crates/stat-tracker-ui",
 ]
 
