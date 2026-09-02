@@ -1,15 +1,15 @@
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
-use surrealdb::Surreal;
 use surrealdb::engine::any::Any;
 use surrealdb::types::Datetime as SurrealDatetime;
+use surrealdb::Surreal;
 use surrealdb_types::RecordId;
 use surrealdb_types::SurrealValue;
 
 use scuffed_auth::crypto::EncryptedBlob;
 
 use crate::types::{Member, NostrKeyMode, OrgRole};
-use crate::{Database, DbResult, with_timeout};
+use crate::{with_timeout, Database, DbResult};
 
 /// Columns safe to load for list/API paths — omits `nostr_secret_key_encrypted`
 /// so encrypted secrets never enter process memory on bulk reads.
@@ -781,8 +781,8 @@ impl Database {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ModerationActionType;
     use crate::migrations::run_migrations;
+    use crate::ModerationActionType;
     use scuffed_auth::crypto::CryptoService;
     use std::sync::Arc;
 
