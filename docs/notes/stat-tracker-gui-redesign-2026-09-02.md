@@ -1,6 +1,6 @@
 # Stat Tracker desktop GUI redesign — design document
 
-Status: **proposal for review** (claude, 2026-09-02). Owner: USER. Reviewer: grok.
+Status: **proposal for review** (claude, 2026-09-02; rev 2 after grok's design-system notes). Owner: USER. Reviewer: grok. Merge: USER only.
 Mockups: gallery https://claude.ai/code/artifact/39b79ec2-d70c-4697-bf3c-728eab98858c (the "Your pick" section at the top is this design; 30 alternatives below it).
 
 ## 1. Decisions already made (USER, 2026-09-02)
@@ -32,26 +32,27 @@ Non-goals
 
 Card grammar (the one rule everything follows): **the hero's role colour tints the card; the outcome is a 4 px stripe on the left plus a small label.** Games and heroes are the same card, differing only in content.
 
-Tokens (dark-first; a light theme is out of scope for v1)
+Tokens (dark-first; a light theme is out of scope for v1). Names follow the brief's roles; the second column is the brief slot each maps to, so nothing here is a new vocabulary.
 
-| Token | Value | Use |
-|---|---|---|
-| bg | `#121218` | window background |
-| surface | `#1c1c25` | panels, card base |
-| surface-line | `#2a2a36` | dividers, chip borders |
-| text | `#f2f2f7` | primary text |
-| text-2 | `#c9c9d6` | secondary |
-| muted | `#8d8da0` | labels, meta |
-| accent | `#8f73ff` | season ring, links, selected chip (brand product accent) |
-| win / loss / draw | `#46d8a4` / `#ff5c7a` / `#8a8fa8` | outcome stripe + label only |
-| role Tank / Damage / Support | `#5b8def` / `#ff7a59` / `#46d8a4` | card tint (gradient `role55 → surface` at 160°), role chips, role split bar |
-| warn | `#f5b84a` | keyboard-grab and pending-sync warnings |
+| Token | Brief role | Value | Use |
+|---|---|---|---|
+| bg | bg | `#121218` | window background |
+| surface | surface | `#1c1c25` | panels, card base |
+| border | border | `#2a2a36` | dividers, chip borders (was "surface-line") |
+| text | text | `#f2f2f7` | primary text |
+| text-2 | text-2 | `#c9c9d6` | secondary |
+| text-3 | text-3 | `#8d8da0` | labels, meta, draw outcome (was "muted") |
+| accent | accent | `#8f73ff` | season ring, links, selected chip (brand product accent) |
+| ok | ok | `#46d8a4` | win stripe + label |
+| danger | danger | `#ff5c7a` | loss stripe + label |
+| warn | warn | `#f5b84a` | keyboard-grab and pending-sync warnings |
+| role-tank / role-damage / role-support | domain chrome | `#5b8def` / `#ff7a59` / `#46d8a4` | card tint (gradient `role55 → surface` at 160°), role chips, role split bar — same carve-out as the strategy canvas |
 
-Note: Support role colour and the win colour are the same mint on purpose; they never sit in the same slot (tint vs stripe).
+Notes: `role-support` and `ok` are the same mint on purpose; they never sit in the same slot (tint vs stripe). Draw uses `text-3`, not a fourth outcome colour.
 
-Typography: **Urbanist** (OFL, bundle the TTFs; weights 500/600/700/800). Scale: 11 px labels (uppercase, +0.12 em tracking), 13 px meta, 14 px body, 20/22 px card titles, 26–34 px featured card title, 32 px hero win rate, 55.6 %-style hero numbers at 26–34 px, tabular figures everywhere numbers align.
+Typography: **Urbanist** is the *tracker product face* (OFL; bundle the TTFs; weights 500/600/700/800). This is a deliberate, labelled divergence from the Scuffed web faces, scoped to the desktop tracker; if family sprawl becomes a concern the fallback is the system sans with the same scale. Scale: 11 px labels (uppercase, +0.12 em tracking), 13 px meta, 14 px body, 20/22 px card titles, 26–34 px featured card title and hero numbers, tabular figures wherever numbers align.
 
-Shape and spacing: cards radius 18 px, inner padding 16–18 px, grid gap 12 px, page padding 26/36 px, stripes 4 px, bars 5–6 px. Shadows only on the companion pane.
+Shape and spacing (4 px grid): `radius-card` **16** (documented product exception, in line with Nirify's 16–20 for large cards), `radius-inner` **12** (stat boxes, panels' inner blocks), chips 999. Inner padding 16, grid gap 12, page padding **24 / 32**, stripes 4, bars 4–8. Shadows only on the companion pane.
 
 Iconography: stroke SVG (existing set from the mocks: home, list, chart, calendar, gear, camera, eye, cloud, keyboard). No emoji.
 
@@ -79,7 +80,7 @@ List of seasons from the server (name, window, current marker) with per-season s
 Same fields as today's Settings page, written to `config.toml`: capture output, player name, session window, game process names, auto-detect (enabled, poll interval, cooldown), server sync (URL, token), OCR setup (tessdata generate/install), diagnostics (`debug_ocr`), data management (vacuum, clear). Capture preview (one-shot screenshot of the selected output through the existing capture backends). Daemon control (start/stop/restart through systemctl, as today) and the update banner.
 
 ### 4.6 Companion overlay
-Layer-shell surface, `Layer::Overlay`, anchored top-right, margins 28 px, width 360 px, height to content, `KeyboardInteractivity::None`, exclusive zone 0, output = the capture output from config. Contents: header (status dot, season + win rate + record), last game card (large, with stat line), tonight results strip (one bar per game), top three heroes tonight (mini cards), footer chips (last Tab, sync). Visibility: on while the game process is running (from the snapshot), hidden otherwise, plus a manual toggle from the main window and the tray. Blur: request `org_kde_kwin_blur` when available (follow-up, not v1).
+Layer-shell surface, `Layer::Overlay`, anchored top-right, margins 24 px, width 360 px, height to content, `KeyboardInteractivity::None`, exclusive zone 0, output = the capture output from config. Contents: header (status dot, season + win rate + record), last game card (large, with stat line), tonight results strip (one bar per game), top three heroes tonight (mini cards), footer chips (last Tab, sync). Visibility: on while the game process is running (from the snapshot), hidden otherwise, plus a manual toggle from the main window and the tray. Blur: request `org_kde_kwin_blur` when available (follow-up, not v1).
 
 ## 5. Seasons in the desktop app
 
