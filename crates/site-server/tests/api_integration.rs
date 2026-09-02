@@ -306,6 +306,167 @@ async fn list_members_returns_seeded_members() {
     assert_eq!(data.len(), 4, "should have 4 seeded members");
 }
 
+fn member_list_ids(json: &Value) -> Vec<String> {
+    json["data"]
+        .as_array()
+        .expect("data array")
+        .iter()
+        .map(|m| m["id"].as_str().expect("member id").to_string())
+        .collect()
+}
+
+async fn deactivate_recruit(state: &AppState) {
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(authed_json_request(
+            Method::PUT,
+            "/api/members/recruitmember",
+            ADMIN_TOKEN,
+            json!({ "is_active": false }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK, "deactivate recruit");
+    let json = body_json(resp).await;
+    assert_eq!(json["is_active"], false);
+}
+
+#[tokio::test]
+async fn list_members_omits_inactive_by_default() {
+    let state = test_state().await;
+    seed_all_roles(&state.db).await;
+    deactivate_recruit(&state).await;
+
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(authed_request(Method::GET, "/api/members", ADMIN_TOKEN))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    let ids = member_list_ids(&json);
+    assert!(!ids.iter().any(|id| id == "recruitmember"));
+    assert_eq!(ids.len(), 3, "active-only default after one deactivation");
+    for row in json["data"].as_array().unwrap() {
+        assert_eq!(row["is_active"], true);
+    }
+
+    let app = create_router(state);
+    let resp = app
+        .oneshot(authed_request(
+            Method::GET,
+            "/api/members?include_inactive=false",
+            ADMIN_TOKEN,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    assert!(
+        !member_list_ids(&json)
+            .iter()
+            .any(|id| id == "recruitmember")
+    );
+}
+
+#[tokio::test]
+async fn list_members_include_inactive_returns_inactive_for_officer_plus() {
+    let state = test_state().await;
+    seed_all_roles(&state.db).await;
+    deactivate_recruit(&state).await;
+
+    for token in [ADMIN_TOKEN, OFFICER_TOKEN] {
+        let app = create_router(state.clone());
+        let resp = app
+            .oneshot(authed_request(
+                Method::GET,
+                "/api/members?include_inactive=true",
+                token,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "officer+ may include_inactive"
+        );
+        let json = body_json(resp).await;
+        let ids = member_list_ids(&json);
+        assert!(
+            ids.iter().any(|id| id == "recruitmember"),
+            "inactive recruit must be listed"
+        );
+        assert_eq!(ids.len(), 4);
+        let inactive = json["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["id"] == "recruitmember")
+            .expect("recruit row");
+        assert_eq!(inactive["is_active"], false);
+        assert_eq!(inactive["display_name"], "TestRecruit");
+        assert_eq!(inactive["org_role"], "recruit");
+    }
+}
+
+#[tokio::test]
+async fn list_members_include_inactive_forbidden_without_officer() {
+    let state = test_state().await;
+    seed_all_roles(&state.db).await;
+
+    for token in [MEMBER_TOKEN, RECRUIT_TOKEN] {
+        let app = create_router(state.clone());
+        let resp = app
+            .oneshot(authed_request(
+                Method::GET,
+                "/api/members?include_inactive=true",
+                token,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "member/recruit cannot use include_inactive"
+        );
+        let json = body_json(resp).await;
+        assert_eq!(json["error"], "Officer access required");
+    }
+
+    let app = create_router(state);
+    let resp = app
+        .oneshot(unauthed_request(
+            Method::GET,
+            "/api/members?include_inactive=true",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn public_members_does_not_leak_inactive_via_include_inactive() {
+    let state = test_state().await;
+    seed_all_roles(&state.db).await;
+    deactivate_recruit(&state).await;
+
+    let app = create_router(state);
+    let resp = app
+        .oneshot(unauthed_request(
+            Method::GET,
+            "/api/public/members?include_inactive=true&limit=50",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    let ids = member_list_ids(&json);
+    assert!(
+        !ids.iter().any(|id| id == "recruitmember"),
+        "public list must stay active-only even if include_inactive is passed"
+    );
+}
+
 #[tokio::test]
 async fn get_member_by_id() {
     let state = test_state().await;
