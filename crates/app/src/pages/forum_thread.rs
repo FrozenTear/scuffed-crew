@@ -231,6 +231,7 @@ const PAGE_CSS: &str = r#"
 #[component]
 pub fn ForumThread(id: String) -> Element {
     let auth = use_auth();
+    let mut toast = use_toast();
     let mut refresh = use_signal(|| 0u64);
     let mut reply_content = use_signal(String::new);
     let mut submitting = use_signal(|| false);
@@ -345,7 +346,6 @@ pub fn ForumThread(id: String) -> Element {
                                                 onclick: move |_| {
                                                     let content = reply_content();
                                                     if content.trim().is_empty() {
-                                                        let mut toast = use_toast();
                                                         toast.show(Toast::error("Reply cannot be empty"));
                                                         return;
                                                     }
@@ -356,13 +356,11 @@ pub fn ForumThread(id: String) -> Element {
                                                         let url = format!("/api/forum/threads/{tid}/replies");
                                                         match ApiClient::web().post_json::<_, serde_json::Value>(&url, &body).await {
                                                             Ok(_) => {
-                                                                let mut toast = use_toast();
                                                                 toast.show(Toast::success("Reply posted!"));
                                                                 reply_content.set(String::new());
                                                                 refresh += 1;
                                                             }
                                                             Err(e) => {
-                                                                let mut toast = use_toast();
                                                                 toast.show(Toast::error(format!("Failed: {e}")));
                                                             }
                                                         }

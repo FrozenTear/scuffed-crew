@@ -146,6 +146,8 @@ pub fn AdminModeration() -> Element {
         });
     };
 
+    let is_admin = auth().is_admin();
+
     if !auth().is_officer_or_above() {
         return rsx! {
             AccessDenied { message: "You need officer permissions to view moderation.".to_string() }
@@ -201,7 +203,7 @@ pub fn AdminModeration() -> Element {
                                         td { StatusPill { status: active_label.to_string() } }
                                         td { "{date}" }
                                         td {
-                                            if is_active {
+                                            if is_admin && is_active {
                                                 div { class: "row-actions",
                                                     button {
                                                         class: "row-btn danger",

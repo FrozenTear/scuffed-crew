@@ -147,7 +147,7 @@ pub fn ToastProvider(children: Element) -> Element {
                           button {
                               class: "toast-dismiss",
                               onclick: move |_| {
-                                  let mut s = use_toast();
+                                  let mut s = state;
                                   s.dismiss(id);
                               },
                               "\u{00d7}"

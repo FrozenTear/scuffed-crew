@@ -2,8 +2,13 @@ use dioxus::prelude::*;
 use serde::Deserialize;
 
 use crate::components::{ConfirmDialog, DataTable, FormModal, Toast, admin_pending, use_toast};
-use crate::hooks::{ModalController, use_api};
+use crate::hooks::{ModalController, use_api_with};
+use crate::state::use_auth;
 use scuffed_api_client::ApiClient;
+
+/// Matches audit-log page size. API default is 20 with no total; a full page
+/// means another offset page may exist.
+const PAGE_SIZE: u32 = 50;
 
 #[derive(Debug, Clone, Deserialize)]
 struct Article {
@@ -38,7 +43,13 @@ struct UpdateArticleBody {
 
 #[component]
 pub fn AdminArticles() -> Element {
-    let mut articles = use_api::<Vec<Article>>("/api/articles/admin/all");
+    let auth = use_auth();
+    let is_admin = auth().is_admin();
+    let mut page = use_signal(|| 0u32);
+    let mut articles = use_api_with::<Vec<Article>>(move || {
+        let offset = page() * PAGE_SIZE;
+        format!("/api/articles/admin/all?limit={PAGE_SIZE}&offset={offset}")
+    });
     let mut toast = use_toast();
 
     let mut modal = ModalController::<String>::new();
@@ -158,6 +169,7 @@ pub fn AdminArticles() -> Element {
                 Ok(_) => {
                     toast.show(Toast::success("Article saved."));
                     modal.close();
+                    page.set(0);
                     articles.refresh += 1;
                 }
                 Err(e) => {
@@ -191,6 +203,24 @@ pub fn AdminArticles() -> Element {
         delete_modal.close();
     };
 
+    let on_prev = move |_| {
+        if page() > 0 {
+            page -= 1;
+        }
+    };
+
+    let on_next = {
+        let articles_data = articles.data;
+        move |_| {
+            let data = articles_data.read();
+            if let Some(Some(list)) = data.as_ref()
+                && (list.len() as u32) >= PAGE_SIZE
+            {
+                page += 1;
+            }
+        }
+    };
+
     rsx! {
         div { class: "admin-toolbar",
             h1 { "Articles" }
@@ -202,90 +232,115 @@ pub fn AdminArticles() -> Element {
             let data = data.as_ref().and_then(|d| d.as_ref());
             match data {
                 None => admin_pending(&articles, "articles"),
-                Some(list) if list.is_empty() => rsx! {
+                Some(list) if list.is_empty() && page() == 0 => rsx! {
                     p { class: "empty-state", "No articles yet." }
                 },
-                Some(list) => rsx! {
-                    DataTable { headers: vec!["Title", "Slug", "Status", "Created", "Actions"],
-                        for a in list.iter() {
-                            {
-                                let ae = a.clone();
-                                let ad = a.clone();
-                                let ap = a.clone();
-                                let status_class = if a.published { "active" } else { "inactive" };
-                                let status_label = if a.published { "Published" } else { "Draft" };
-                                let date: String = a.created_at.chars().take(10).collect();
-                                rsx! {
-                                    tr { key: "{a.id}",
-                                        td { "{a.title}" }
-                                        td { code { "{a.slug}" } }
-                                        td { span { class: "status-pill {status_class}", "{status_label}" } }
-                                        td { "{date}" }
-                                        td {
-                                            div { class: "row-actions",
-                                                button {
-                                                    class: "row-btn",
-                                                    onclick: move |_| open_edit(ae.clone()),
-                                                    "Edit"
-                                                }
-                                                {
-                                                    let ap2 = ap.clone();
-                                                    if ap2.published {
-                                                        rsx! {
-                                                            button {
-                                                                class: "row-btn",
-                                                                onclick: {
-                                                                    let slug = ap2.slug.clone();
-                                                                    move |_| {
-                                                                        let slug = slug.clone();
-                                                                        spawn(async move {
-                                                                            let client = ApiClient::web();
-                                                                            match client.post_json_empty(&format!("/api/articles/{slug}/unpublish"), &serde_json::Value::Null).await {
-                                                                                Ok(_) => {
-                                                                                    toast.show(Toast::success("Article unpublished."));
-                                                                                    articles.refresh += 1;
-                                                                                }
-                                                                                Err(e) => toast.show(Toast::error(format!("Failed: {e}"))),
+                Some(list) => {
+                    let current = page() + 1;
+                    let has_next = (list.len() as u32) >= PAGE_SIZE;
+                    rsx! {
+                        if list.is_empty() {
+                            p { class: "empty-state", "No articles on this page." }
+                        } else {
+                            DataTable { headers: vec!["Title", "Slug", "Status", "Created", "Actions"],
+                                for a in list.iter() {
+                                    {
+                                        let ae = a.clone();
+                                        let ad = a.clone();
+                                        let ap = a.clone();
+                                        let status_class = if a.published { "active" } else { "inactive" };
+                                        let status_label = if a.published { "Published" } else { "Draft" };
+                                        let date: String = a.created_at.chars().take(10).collect();
+                                        rsx! {
+                                            tr { key: "{a.id}",
+                                                td { "{a.title}" }
+                                                td { code { "{a.slug}" } }
+                                                td { span { class: "status-pill {status_class}", "{status_label}" } }
+                                                td { "{date}" }
+                                                td {
+                                                    div { class: "row-actions",
+                                                        button {
+                                                            class: "row-btn",
+                                                            onclick: move |_| open_edit(ae.clone()),
+                                                            "Edit"
+                                                        }
+                                                        {
+                                                            let ap2 = ap.clone();
+                                                            if ap2.published {
+                                                                rsx! {
+                                                                    button {
+                                                                        class: "row-btn",
+                                                                        onclick: {
+                                                                            let slug = ap2.slug.clone();
+                                                                            move |_| {
+                                                                                let slug = slug.clone();
+                                                                                spawn(async move {
+                                                                                    let client = ApiClient::web();
+                                                                                    match client.post_json_empty(&format!("/api/articles/{slug}/unpublish"), &serde_json::Value::Null).await {
+                                                                                        Ok(_) => {
+                                                                                            toast.show(Toast::success("Article unpublished."));
+                                                                                            articles.refresh += 1;
+                                                                                        }
+                                                                                        Err(e) => toast.show(Toast::error(format!("Failed: {e}"))),
+                                                                                    }
+                                                                                });
                                                                             }
-                                                                        });
+                                                                        },
+                                                                        "Unpublish"
                                                                     }
-                                                                },
-                                                                "Unpublish"
+                                                                }
+                                                            } else {
+                                                                rsx! {
+                                                                    button {
+                                                                        class: "row-btn",
+                                                                        onclick: {
+                                                                            let slug = ap2.slug.clone();
+                                                                            move |_| {
+                                                                                let slug = slug.clone();
+                                                                                spawn(async move {
+                                                                                    let client = ApiClient::web();
+                                                                                    match client.post_json_empty(&format!("/api/articles/{slug}/publish"), &serde_json::Value::Null).await {
+                                                                                        Ok(_) => {
+                                                                                            toast.show(Toast::success("Article published!"));
+                                                                                            articles.refresh += 1;
+                                                                                        }
+                                                                                        Err(e) => toast.show(Toast::error(format!("Failed: {e}"))),
+                                                                                    }
+                                                                                });
+                                                                            }
+                                                                        },
+                                                                        "Publish"
+                                                                    }
+                                                                }
                                                             }
                                                         }
-                                                    } else {
-                                                        rsx! {
+                                                        if is_admin {
                                                             button {
-                                                                class: "row-btn",
-                                                                onclick: {
-                                                                    let slug = ap2.slug.clone();
-                                                                    move |_| {
-                                                                        let slug = slug.clone();
-                                                                        spawn(async move {
-                                                                            let client = ApiClient::web();
-                                                                            match client.post_json_empty(&format!("/api/articles/{slug}/publish"), &serde_json::Value::Null).await {
-                                                                                Ok(_) => {
-                                                                                    toast.show(Toast::success("Article published!"));
-                                                                                    articles.refresh += 1;
-                                                                                }
-                                                                                Err(e) => toast.show(Toast::error(format!("Failed: {e}"))),
-                                                                            }
-                                                                        });
-                                                                    }
-                                                                },
-                                                                "Publish"
+                                                                class: "row-btn danger",
+                                                                onclick: move |_| open_delete(ad.clone()),
+                                                                "Delete"
                                                             }
                                                         }
                                                     }
                                                 }
-                                                button {
-                                                    class: "row-btn danger",
-                                                    onclick: move |_| open_delete(ad.clone()),
-                                                    "Delete"
-                                                }
                                             }
                                         }
                                     }
+                                }
+                            }
+                        }
+                        if page() > 0 || has_next {
+                            div { class: "pagination",
+                                button {
+                                    disabled: page() == 0,
+                                    onclick: on_prev,
+                                    "Previous"
+                                }
+                                span { class: "page-info", "Page {current}" }
+                                button {
+                                    disabled: !has_next,
+                                    onclick: on_next,
+                                    "Next"
                                 }
                             }
                         }

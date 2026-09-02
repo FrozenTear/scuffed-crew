@@ -124,6 +124,7 @@ fn session_inactive_not_in_list(recent: &[Member], listed_ids: &[String]) -> Vec
 #[component]
 pub fn AdminMembers() -> Element {
     let auth = use_auth();
+    let is_admin = auth().is_admin();
     let (mut members, include_inactive_fell_back) = use_api_list_prefer::<Member>(
         move || preferred_members_path(auth().is_officer_or_above()).map(str::to_string),
         ADMIN_MEMBERS_ACTIVE_ONLY,
@@ -612,10 +613,12 @@ pub fn AdminMembers() -> Element {
                                         td { "{joined}" }
                                         td {
                                             div { class: "row-actions",
-                                                button {
-                                                    class: "row-btn",
-                                                    onclick: move |_| open_role(m_role.clone()),
-                                                    "Role"
+                                                if is_admin {
+                                                    button {
+                                                        class: "row-btn",
+                                                        onclick: move |_| open_role(m_role.clone()),
+                                                        "Role"
+                                                    }
                                                 }
                                                 if member.is_active {
                                                     button {
@@ -630,10 +633,12 @@ pub fn AdminMembers() -> Element {
                                                         "Activate"
                                                     }
                                                 }
-                                                button {
-                                                    class: "row-btn",
-                                                    onclick: move |_| { pw_new.set(String::new()); pw_modal.show(m_pw.clone()); },
-                                                    "PW"
+                                                if is_admin {
+                                                    button {
+                                                        class: "row-btn",
+                                                        onclick: move |_| { pw_new.set(String::new()); pw_modal.show(m_pw.clone()); },
+                                                        "PW"
+                                                    }
                                                 }
                                                 button {
                                                     class: "row-btn",

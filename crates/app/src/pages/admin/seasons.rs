@@ -7,8 +7,11 @@
 use chrono::{DateTime, NaiveDateTime, Utc};
 use dioxus::prelude::*;
 
-use crate::components::{ConfirmDialog, DataTable, FormModal, Toast, admin_pending, use_toast};
+use crate::components::{
+    AccessDenied, ConfirmDialog, DataTable, FormModal, Toast, admin_pending, use_toast,
+};
 use crate::hooks::{ModalController, use_api};
+use crate::state::use_auth;
 use scuffed_api_client::ApiClient;
 use scuffed_types::{
     Season,
@@ -36,6 +39,7 @@ fn fmt_display(dt: &DateTime<Utc>) -> String {
 
 #[component]
 pub fn AdminSeasons() -> Element {
+    let auth = use_auth();
     let mut seasons = use_api::<Vec<Season>>("/api/admin/seasons");
     let mut toast = use_toast();
 
@@ -152,6 +156,12 @@ pub fn AdminSeasons() -> Element {
     let on_cancel_delete = move |_| {
         delete_modal.close();
     };
+
+    if !auth().is_admin() {
+        return rsx! {
+            AccessDenied { message: "You need admin permissions to manage seasons.".to_string() }
+        };
+    }
 
     rsx! {
         div { class: "admin-toolbar",

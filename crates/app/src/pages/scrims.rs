@@ -449,6 +449,7 @@ fn ScrimCard(
     let status_class = format!("scrim-status {status}");
     let team_name = find_name(&teams, &scrim.team_id).to_string();
     let game_name = find_game_name(&games, &scrim.game_id).to_string();
+    let mut toast = use_toast();
     let date: String = scrim.scheduled_at.chars().take(16).collect();
     let date = date.replace('T', " ");
 
@@ -480,7 +481,6 @@ fn ScrimCard(
                                 let sid = scrim_id.clone();
                                 let on_change = on_change;
                                 spawn(async move {
-                                    let mut toast = use_toast();
                                     let body = UpdateScrimBody {
                                         status: "confirmed".to_string(),
                                         opponent_name: None,
@@ -506,7 +506,6 @@ fn ScrimCard(
                                 let sid = scrim_id.clone();
                                 let on_change = on_change;
                                 spawn(async move {
-                                    let mut toast = use_toast();
                                     let body = UpdateScrimBody {
                                         status: "cancelled".to_string(),
                                         opponent_name: None,
@@ -536,7 +535,6 @@ fn ScrimCard(
                                 let sid = scrim_id.clone();
                                 let on_change = on_change;
                                 spawn(async move {
-                                    let mut toast = use_toast();
                                     let body = UpdateScrimBody {
                                         status: "completed".to_string(),
                                         opponent_name: None,
@@ -562,7 +560,6 @@ fn ScrimCard(
                                 let sid = scrim_id.clone();
                                 let on_change = on_change;
                                 spawn(async move {
-                                    let mut toast = use_toast();
                                     let body = UpdateScrimBody {
                                         status: "cancelled".to_string(),
                                         opponent_name: None,
@@ -593,6 +590,7 @@ fn ScrimCreateForm(teams: Vec<Team>, games: Vec<Game>, on_created: EventHandler<
     let mut duration = use_signal(|| "90".to_string());
     let mut notes = use_signal(String::new);
     let mut submitting = use_signal(|| false);
+    let mut toast = use_toast();
 
     rsx! {
         div { class: "scrim-create-form",
@@ -668,14 +666,12 @@ fn ScrimCreateForm(teams: Vec<Team>, games: Vec<Game>, on_created: EventHandler<
                     let on_created = on_created;
 
                     if tid.is_empty() || gid.is_empty() || sched.is_empty() {
-                        let mut toast = use_toast();
                         toast.show(Toast::error("Please fill in team, game, and date/time"));
                         return;
                     }
 
                     submitting.set(true);
                     spawn(async move {
-                        let mut toast = use_toast();
                         let dur: u32 = dur_str.parse().unwrap_or(90);
                         let scheduled_iso = format!("{sched}:00Z");
                         let body = CreateScrimBody {

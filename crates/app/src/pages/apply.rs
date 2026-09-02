@@ -45,6 +45,7 @@ const APPLY_CSS: &str = r#"
 #[component]
 pub fn Apply() -> Element {
     let auth = use_auth();
+    let mut toast = use_toast();
 
     let settings = use_api::<SiteSettings>("/api/settings");
     let games = use_api_list::<Game>("/api/games");
@@ -169,12 +170,10 @@ pub fn Apply() -> Element {
                                                         .await
                                                     {
                                                         Ok(_) => {
-                                                            let mut toast = use_toast();
                                                             toast.show(Toast::success("Application withdrawn"));
                                                             my_app.refresh += 1;
                                                         }
                                                         Err(e) => {
-                                                            let mut toast = use_toast();
                                                             toast.show(Toast::error(format!("Failed: {e}")));
                                                         }
                                                     }
@@ -249,7 +248,6 @@ pub fn Apply() -> Element {
                                             let games = selected_games();
                                             let msg = message();
                                             if games.is_empty() {
-                                                let mut toast = use_toast();
                                                 toast.show(Toast::error("Select at least one game"));
                                                 return;
                                             }
@@ -269,12 +267,10 @@ pub fn Apply() -> Element {
                                                     .await
                                                 {
                                                     Ok(_) => {
-                                                        let mut toast = use_toast();
                                                         toast.show(Toast::success("Application submitted!"));
                                                         my_app.refresh += 1;
                                                     }
                                                     Err(e) => {
-                                                        let mut toast = use_toast();
                                                         toast.show(Toast::error(format!("Failed: {e}")));
                                                     }
                                                 }
