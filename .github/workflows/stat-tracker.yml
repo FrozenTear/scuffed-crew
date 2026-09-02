@@ -5,12 +5,14 @@ on:
     branches: [main]
     paths:
       - "crates/stat-tracker/**"
+      - "crates/stat-tracker-ui/**"
       - "crates/types/**"
       - ".github/workflows/stat-tracker.yml"
   pull_request:
     branches: [main]
     paths:
       - "crates/stat-tracker/**"
+      - "crates/stat-tracker-ui/**"
       - "crates/types/**"
       - ".github/workflows/stat-tracker.yml"
 
@@ -120,3 +122,41 @@ jobs:
 
       - name: Clippy
         run: cargo clippy -- -D warnings
+
+  ui-overview:
+    # P0 Iced Overview crate depends on the tracker lib (same native deps).
+    name: Build & Test (stat-tracker-ui)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwayland-dev libxkbcommon-dev \
+            libegl-dev libgbm-dev \
+            tesseract-ocr libtesseract-dev libleptonica-dev \
+            libevdev-dev libudev-dev \
+            libasound2-dev libvulkan-dev libssl-dev \
+            pkg-config
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: stat-tracker-ui
+
+      - name: Rustfmt
+        run: cargo fmt -p scuffed-stat-tracker-ui --check
+
+      - name: Clippy
+        run: cargo clippy -p scuffed-stat-tracker-ui --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test -p scuffed-stat-tracker-ui

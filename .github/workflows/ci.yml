@@ -58,6 +58,7 @@ jobs:
             --all-targets \
             --exclude scuffed-app \
             --exclude scuffed-stat-tracker \
+            --exclude scuffed-stat-tracker-ui \
             -- -D warnings
 
       - name: Clippy (WASM crates)
@@ -99,7 +100,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Build (native crates)
-        run: cargo build --workspace --exclude scuffed-app --exclude scuffed-stat-tracker
+        run: cargo build --workspace --exclude scuffed-app --exclude scuffed-stat-tracker --exclude scuffed-stat-tracker-ui
 
       # scuffed-app was excluded here from the very first workflow commit
       # (3a4a906) — never a considered disk mitigation, just an exclusion that
@@ -111,7 +112,7 @@ jobs:
       # app gets built either way. Left alone to keep this diff to the one
       # thing being changed.
       - name: Test (workspace)
-        run: cargo test --workspace --exclude scuffed-stat-tracker
+        run: cargo test --workspace --exclude scuffed-stat-tracker --exclude scuffed-stat-tracker-ui
 
       # Records headroom on the job that died 3x in 2 days from disk exhaustion
       # (e0d16e6). If this trends toward zero, split the app tests into their

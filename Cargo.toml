@@ -21,6 +21,8 @@ members = [
     "crates/chat",
     # Overwatch stat tracker
     "crates/stat-tracker",
+    # Iced 0.14 Overview spike (P0). Binary name: stat-tracker-gui.
+    "crates/stat-tracker-ui",
 ]
 
 [workspace.package]
