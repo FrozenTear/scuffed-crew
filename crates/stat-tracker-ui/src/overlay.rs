@@ -15,12 +15,12 @@ use chrono::{DateTime, TimeDelta, Utc};
 use iced::widget::{column, container, row, space, text};
 use iced::{Alignment, Background, Border, Element, Fill, Padding, Shadow};
 use scuffed_types::Season;
-use stat_tracker::detect::game_running::GameProcessGate;
 use stat_tracker::detect::MatchOutcome;
+use stat_tracker::detect::game_running::GameProcessGate;
 
-use crate::aggregate::{aggregate, Record};
+use crate::aggregate::{Record, aggregate};
 use crate::cli::{Cli, FixtureKind};
-use crate::model::{display_hero_name, Game, Outcome, Role, SeasonSel};
+use crate::model::{Game, Outcome, Role, SeasonSel, display_hero_name};
 use crate::overview::tonight_games;
 use crate::seasons;
 use crate::snapshot::{self, games_from_snapshot};

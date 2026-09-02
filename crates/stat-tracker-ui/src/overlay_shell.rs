@@ -11,7 +11,7 @@ use iced_layershell::to_layer_message;
 
 use crate::cli::Cli;
 use crate::overlay::{
-    content_height, overlay_shell_spec, view as overlay_view, OverlayApp, OVERLAY_NAMESPACE,
+    OVERLAY_NAMESPACE, OverlayApp, content_height, overlay_shell_spec, view as overlay_view,
 };
 use crate::theme;
 
