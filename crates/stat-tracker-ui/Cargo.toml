@@ -1,0 +1,31 @@
+[package]
+name = "scuffed-stat-tracker-ui"
+version = "0.1.0"
+edition = "2024"
+license.workspace = true
+description = "P0 Iced 0.14 Overview spike for the Scuffed Crew stat tracker (read-only)."
+
+[[bin]]
+name = "stat-tracker-gui"
+path = "src/main.rs"
+
+[lib]
+name = "stat_tracker_ui"
+path = "src/lib.rs"
+
+[dependencies]
+scuffed-stat-tracker = { path = "../stat-tracker" }
+scuffed-types = { path = "../types" }
+ab_glyph = "0.2"
+anyhow = "1"
+chrono = { workspace = true }
+dirs = "6"
+iced = { version = "0.14", features = ["tokio", "advanced"] }
+image = { version = "0.25", default-features = false, features = ["png"] }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+surrealdb-types = "3"
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
