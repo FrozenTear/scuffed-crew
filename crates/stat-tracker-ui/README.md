@@ -122,11 +122,11 @@ cargo run -p scuffed-stat-tracker-ui -- --data-dir "$HOME/.local/share/scuffed-s
 2. **Tracker service** — Start / Stop / Restart. When `~/.config/systemd/user/scuffed-stat-tracker.service` exists, verbs go through `systemctl --user`. Otherwise Start launches `scuffed-stat-tracker` from PATH / next to this binary; Stop reads `daemon.pid` and signals only if `/proc/<pid>/comm` is the tracker.
 3. **Start on login** — `systemctl --user enable --now` / `disable --now` when the unit file is installed.
 4. **Capture** — pick a monitor (or Auto), then **Capture now** for a one-shot preview of what the tracker sees.
-5. **Save settings** writes today's fields: monitor, BattleTag, session window, game process names, auto-detect, website URL + token, debug images. Restart the service after a save if it is running.
+5. **Save settings** writes today's fields: monitor, in-game name (`player_name` — no `#1234` discriminator), session window, game process names, auto-detect, website URL + token, debug images. Restart the service after a save if it is running.
 6. **Scoreboard reading** — Install copies `koverwatch.traineddata` if missing (`ensure_koverwatch_tessdata`). Rebuild trains it again (`regenerate_koverwatch_tessdata`).
 7. **Stored data** — Compact (`LocalStore::vacuum`) or delete all local matches. Both refuse while the service is running.
-8. **Update banner** (Overview + Settings) appears only when GitHub has a newer `stat-tracker-v*` release. It never downloads an installer.
-9. **Tray** — Show window / Hide window / Quit (`tray-icon`). Left-click shows the window.
+8. **Update banner** (Overview + Settings) appears only when GitHub has a newer `stat-tracker-v*` release. It never downloads an installer. The "you're on" version is `SST_RELEASE_VERSION` (runtime or compile-time, set by release CI / packaging) or `scuffed-stat-tracker --version` from the installed daemon — never this crate's `0.1.0`. If none of those resolve, the banner stays hidden.
+9. **Tray** — Show window / Hide window / Quit (`tray-icon`). Left-click shows the window. Hide uses iced `Mode::Hidden` (not minimize — that is a no-op on Wayland/niri); Show restores `Mode::Windowed`.
 
 ```sh
 systemctl --user status scuffed-stat-tracker.service

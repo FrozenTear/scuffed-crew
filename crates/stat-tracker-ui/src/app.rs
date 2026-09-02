@@ -681,14 +681,19 @@ impl TrackerApp {
         let Some(id) = self.window_id else {
             return window::oldest().map(Message::WindowReady);
         };
-        Task::batch([window::minimize(id, false), window::gain_focus(id)])
+        // Wayland/niri: minimize is a no-op. Hidden → Windowed actually
+        // unmaps/remaps the surface so tray Show / left-click restore it.
+        Task::batch([
+            window::set_mode(id, window::Mode::Windowed),
+            window::gain_focus(id),
+        ])
     }
 
     fn hide_window(&self) -> Task<Message> {
         let Some(id) = self.window_id else {
             return Task::none();
         };
-        window::minimize(id, true)
+        window::set_mode(id, window::Mode::Hidden)
     }
 
     pub fn view(&self) -> Element<'_, Message> {

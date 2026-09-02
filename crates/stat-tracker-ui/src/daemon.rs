@@ -114,7 +114,7 @@ pub fn service_file_installed() -> bool {
     service_unit_path().is_some_and(|p| p.exists())
 }
 
-fn find_daemon_binary() -> Option<PathBuf> {
+pub(crate) fn find_daemon_binary() -> Option<PathBuf> {
     if let Ok(current_exe) = std::env::current_exe()
         && let Some(dir) = current_exe.parent()
     {

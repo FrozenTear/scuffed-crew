@@ -358,13 +358,17 @@ fn capture_card(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
 fn player_card(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
     let body = column![
         field_input(
-            "BattleTag",
-            "e.g. YourName#1234",
+            "In-game name",
+            "e.g. FROZEN",
             &app.settings.player_name,
             SettingsField::PlayerName,
             false,
             demo,
         ),
+        text("Scoreboard name (`player_name` in the settings file). Type the name as it appears in-game — do not add a #1234 discriminator.")
+            .size(SIZE_META)
+            .font(FONT_MEDIUM)
+            .color(TEXT_3),
         field_input(
             "Session window (seconds)",
             "1800",
@@ -760,7 +764,7 @@ mod tests {
     fn roundtrip_preserves_today_fields() {
         let mut base = base();
         base.capture_output = Some("DP-1".into());
-        base.player_name = Some("Ada#1".into());
+        base.player_name = Some("Ada".into());
         base.sync = Some(SyncConfig {
             server_url: "https://crew.example".into(),
             token: "secret".into(),
@@ -776,7 +780,7 @@ mod tests {
         let form = SettingsForm::from_config(&base);
         let out = form.to_config(&base);
         assert_eq!(out.capture_output.as_deref(), Some("DP-1"));
-        assert_eq!(out.player_name.as_deref(), Some("Ada#1"));
+        assert_eq!(out.player_name.as_deref(), Some("Ada"));
         assert_eq!(
             out.sync.as_ref().map(|s| s.server_url.as_str()),
             Some("https://crew.example")

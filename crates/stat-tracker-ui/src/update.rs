@@ -22,11 +22,70 @@ pub const UPDATE_CMD: &str = "curl -fsSL https://raw.githubusercontent.com/Froze
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UpdateInfo {
     pub latest: String,
+    pub current: String,
     pub url: String,
 }
 
-pub fn current_version() -> &'static str {
-    option_env!("SST_RELEASE_VERSION").unwrap_or(env!("CARGO_PKG_VERSION"))
+/// Version used for the update banner.
+///
+/// Never uses this crate's `0.1.0`. Order:
+/// 1. runtime `SST_RELEASE_VERSION` (installer / release packaging)
+/// 2. compile-time `SST_RELEASE_VERSION` (release CI, same as the old GUI)
+/// 3. installed daemon: `scuffed-stat-tracker --version`
+///
+/// If none of those resolve, the check is skipped (no false "update" against 0.1.0).
+pub fn current_version() -> Option<String> {
+    resolve_current_version(
+        std::env::var("SST_RELEASE_VERSION").ok().as_deref(),
+        option_env!("SST_RELEASE_VERSION"),
+        installed_daemon_version().as_deref(),
+    )
+}
+
+/// Pure resolver so tests can pin the three sources.
+pub fn resolve_current_version(
+    runtime_env: Option<&str>,
+    compile_env: Option<&str>,
+    daemon_version: Option<&str>,
+) -> Option<String> {
+    for raw in [runtime_env, compile_env, daemon_version]
+        .into_iter()
+        .flatten()
+    {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if parse_semver(trimmed).is_some() {
+            return Some(trimmed.trim_start_matches('v').to_string());
+        }
+    }
+    None
+}
+
+/// `scuffed-stat-tracker --version` prints `scuffed-stat-tracker 0.3.3`.
+pub fn parse_daemon_version_line(line: &str) -> Option<String> {
+    let line = line.trim();
+    let rest = line
+        .strip_prefix("scuffed-stat-tracker")
+        .or_else(|| line.strip_prefix("stat-tracker-gui"))
+        .unwrap_or(line)
+        .trim();
+    let ver = rest.trim_start_matches('v').trim();
+    parse_semver(ver)?;
+    Some(ver.to_string())
+}
+
+fn installed_daemon_version() -> Option<String> {
+    let exe = crate::daemon::find_daemon_binary()?;
+    let out = std::process::Command::new(exe)
+        .arg("--version")
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    parse_daemon_version_line(&String::from_utf8_lossy(&out.stdout))
 }
 
 /// Parse `MAJOR.MINOR.PATCH`; a leading `v` and any `-pre`/`+build` suffix
@@ -50,7 +109,8 @@ pub fn is_newer(latest: &str, current: &str) -> bool {
 
 /// Query GitHub Releases; `None` on failure or when already current.
 pub async fn check_for_update() -> Option<UpdateInfo> {
-    let cur = parse_semver(current_version())?;
+    let current = current_version()?;
+    let cur = parse_semver(&current)?;
     let url = format!("https://api.github.com/repos/{REPO}/releases?per_page=20");
     let client = reqwest::Client::builder()
         .user_agent("scuffed-stat-tracker-gui")
@@ -90,6 +150,7 @@ pub async fn check_for_update() -> Option<UpdateInfo> {
     let (latest_ver, latest_str, html_url) = best?;
     (latest_ver > cur).then_some(UpdateInfo {
         latest: latest_str,
+        current,
         url: html_url,
     })
 }
@@ -108,7 +169,7 @@ pub fn banner(info: &UpdateInfo) -> Element<'static, Message> {
                 .color(TEXT),
             text(format!(
                 "You're on v{}. Update by re-running the installer:",
-                current_version()
+                info.current
             ))
             .size(SIZE_BODY)
             .font(FONT_MEDIUM)
@@ -160,5 +221,51 @@ mod tests {
         assert!(is_newer("0.3.0", "0.2.1"));
         assert!(!is_newer("0.2.1", "0.2.1"));
         assert!(!is_newer("nope", "0.1.0"));
+    }
+
+    #[test]
+    fn resolve_prefers_env_then_compile_then_daemon() {
+        assert_eq!(
+            resolve_current_version(Some("0.3.3"), Some("0.2.0"), Some("0.1.9")).as_deref(),
+            Some("0.3.3")
+        );
+        assert_eq!(
+            resolve_current_version(Some(""), Some("v0.3.1"), Some("0.2.0")).as_deref(),
+            Some("0.3.1")
+        );
+        assert_eq!(
+            resolve_current_version(None, None, Some("0.3.3")).as_deref(),
+            Some("0.3.3")
+        );
+        assert_eq!(resolve_current_version(None, None, None), None);
+        assert_eq!(
+            resolve_current_version(Some("not-a-version"), None, None),
+            None
+        );
+    }
+
+    #[test]
+    fn daemon_version_line_parses() {
+        assert_eq!(
+            parse_daemon_version_line("scuffed-stat-tracker 0.3.3").as_deref(),
+            Some("0.3.3")
+        );
+        assert_eq!(
+            parse_daemon_version_line("scuffed-stat-tracker v0.3.3\n").as_deref(),
+            Some("0.3.3")
+        );
+        assert!(parse_daemon_version_line("scuffed-stat-tracker").is_none());
+        assert!(parse_daemon_version_line("garbage").is_none());
+    }
+
+    #[test]
+    fn ui_crate_version_is_not_a_source() {
+        // The UI package is 0.1.0; that must never be treated as "the tracker".
+        assert_ne!(env!("CARGO_PKG_VERSION"), "0.3.3");
+        assert_eq!(
+            resolve_current_version(None, None, None),
+            None,
+            "no fallback to CARGO_PKG_VERSION"
+        );
     }
 }
