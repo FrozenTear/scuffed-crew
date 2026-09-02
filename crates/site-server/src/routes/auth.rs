@@ -482,6 +482,12 @@ pub async fn local_register(
 /// deleted, so once the first admin is created this endpoint stays closed
 /// permanently.
 ///
+/// The `has_any_member` check alone is not atomic: two concurrent first-boot
+/// POSTs can both observe an empty member table (F-API-002). After validation,
+/// we CAS-claim `bootstrap_lock:setup` (`UPDATE … WHERE claimed = false`) so
+/// only one request may call `create_member(..., Admin)`. The lock is never
+/// reset, so setup stays closed after the first successful claim.
+///
 /// Lockout recovery for an already-provisioned org (all admins
 /// suspended/banned) is intentionally NOT this endpoint: recovery is an
 /// operator action (lift the suspension / reactivate an admin directly against
@@ -549,6 +555,33 @@ pub async fn setup(
                 .into_response();
         }
     };
+
+    // F-API-002: claim the singleton before creating user/member so two
+    // concurrent POSTs cannot both become admins. Loser → 403 (same as the
+    // sequential "already completed" path). Claim stays held if a later
+    // create_* fails — fail closed rather than reopen first-boot.
+    match state.db.claim_bootstrap_lock().await {
+        Ok(()) => {}
+        Err(scuffed_db::DbError::Conflict(_)) => {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(ErrorResponse {
+                    error: "setup already completed".into(),
+                }),
+            )
+                .into_response();
+        }
+        Err(e) => {
+            tracing::error!("setup claim_bootstrap_lock: {e}");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: "database error".into(),
+                }),
+            )
+                .into_response();
+        }
+    }
 
     let user = match state.db.create_local_user(&username, &password_hash).await {
         Ok(u) => u,

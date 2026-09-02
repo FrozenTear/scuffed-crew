@@ -1,6 +1,8 @@
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
+use surrealdb::engine::any::Any;
 use surrealdb::types::Datetime as SurrealDatetime;
+use surrealdb::Surreal;
 use surrealdb_types::RecordId;
 use surrealdb_types::SurrealValue;
 
@@ -45,6 +47,53 @@ struct DbMember {
     #[serde(default)]
     #[surreal(default)]
     twitter: Option<String>,
+}
+
+/// Singleton first-boot lock row (`bootstrap_lock:setup`).
+#[derive(Debug, Clone, Serialize, Deserialize, SurrealValue)]
+struct DbBootstrapLock {
+    #[surreal(default)]
+    #[allow(dead_code)]
+    id: Option<RecordId>,
+    slot: String,
+    claimed: bool,
+    #[serde(default)]
+    #[surreal(default)]
+    claimed_at: Option<SurrealDatetime>,
+}
+
+/// Ensure the unclaimed `bootstrap_lock:setup` sentinel exists.
+///
+/// CREATE only when the row is missing — never UPDATE — so a claimed lock
+/// cannot be reset by re-running migrations (F-API-002).
+pub async fn ensure_bootstrap_lock_sentinel(client: &Surreal<Any>) -> DbResult<()> {
+    let existing: Option<DbBootstrapLock> = client.select(("bootstrap_lock", "setup")).await?;
+    if existing.is_some() {
+        return Ok(());
+    }
+    let row = DbBootstrapLock {
+        id: None,
+        slot: "setup".into(),
+        claimed: false,
+        claimed_at: None,
+    };
+    // Concurrent migrators: the unique record id / slot index rejects the loser.
+    let _: Option<DbBootstrapLock> = match client
+        .create(("bootstrap_lock", "setup"))
+        .content(row)
+        .await
+    {
+        Ok(created) => created,
+        Err(e) => {
+            let msg = e.to_string().to_ascii_lowercase();
+            if msg.contains("already") || msg.contains("unique") || msg.contains("exists") {
+                None
+            } else {
+                return Err(e.into());
+            }
+        }
+    };
+    Ok(())
 }
 
 fn parse_role(s: &str) -> OrgRole {
@@ -623,6 +672,36 @@ impl Database {
         .await
     }
 
+    /// Atomically claim the first-boot setup lock (F-API-002).
+    ///
+    /// `UPDATE … WHERE claimed = false` is the same CAS shape as application
+    /// status / role-change: two concurrent `/api/auth/setup` calls cannot both
+    /// match. Winner proceeds to `create_member(..., Admin)`; loser gets
+    /// [`crate::DbError::Conflict`]. Once claimed, the row is never reset — the
+    /// lock stays closed even if every admin is later suspended (DR1-ACCT-003).
+    pub async fn claim_bootstrap_lock(&self) -> DbResult<()> {
+        with_timeout(async {
+            let now = SurrealDatetime::from(Utc::now());
+            let rid = RecordId::new("bootstrap_lock", "setup");
+            let mut result = self
+                .client
+                .query(
+                    "UPDATE $rid SET claimed = true, claimed_at = $now \
+                     WHERE claimed = false \
+                     RETURN AFTER",
+                )
+                .bind(("rid", rid))
+                .bind(("now", now))
+                .await?;
+            let updated: Option<DbBootstrapLock> = result.take(0)?;
+            if updated.is_some() {
+                return Ok(());
+            }
+            Err(crate::DbError::Conflict("setup already completed".into()))
+        })
+        .await
+    }
+
     /// Count currently active admin members (is_active = true, org_role = admin).
     pub async fn count_active_admins(&self) -> DbResult<u64> {
         with_timeout(async {
@@ -858,6 +937,27 @@ mod tests {
         assert!(
             db.has_any_member().await.unwrap(),
             "bootstrap signal must stay closed while members exist"
+        );
+    }
+
+    /// F-API-002: concurrent claims — exactly one winner, loser is Conflict.
+    /// Sequential retry stays closed (lock is not reopened).
+    #[tokio::test]
+    async fn claim_bootstrap_lock_only_one_winner() {
+        let db = test_db_with_crypto().await;
+        let (r1, r2) = tokio::join!(db.claim_bootstrap_lock(), db.claim_bootstrap_lock());
+        let oks = [&r1, &r2].iter().filter(|r| r.is_ok()).count();
+        let confs = [&r1, &r2]
+            .iter()
+            .filter(|r| matches!(r, Err(crate::DbError::Conflict(_))))
+            .count();
+        assert_eq!(oks, 1, "exactly one claim must win: {r1:?} / {r2:?}");
+        assert_eq!(confs, 1, "loser must Conflict: {r1:?} / {r2:?}");
+
+        let r3 = db.claim_bootstrap_lock().await;
+        assert!(
+            matches!(r3, Err(crate::DbError::Conflict(_))),
+            "claimed lock must stay closed, got {r3:?}"
         );
     }
 
