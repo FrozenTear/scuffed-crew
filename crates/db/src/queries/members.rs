@@ -234,12 +234,37 @@ impl Database {
     /// Fetches `limit + 1` rows so the caller can detect a next page.
     /// Omits encrypted Nostr secrets from the SELECT projection.
     pub async fn list_members_paginated(&self, limit: u32, offset: u32) -> DbResult<Vec<Member>> {
+        self.list_members_paginated_filtered(limit, offset, false)
+            .await
+    }
+
+    /// List members with cursor-based pagination.
+    ///
+    /// `include_inactive = false` (default) is active-only — same as
+    /// [`Self::list_members_paginated`]. When `true`, deactivated rows are
+    /// included; the HTTP layer must gate that on officer+.
+    /// Fetches `limit + 1` rows so the caller can detect a next page.
+    /// Omits encrypted Nostr secrets from the SELECT projection.
+    pub async fn list_members_paginated_filtered(
+        &self,
+        limit: u32,
+        offset: u32,
+        include_inactive: bool,
+    ) -> DbResult<Vec<Member>> {
         with_timeout(async {
             let fetch = limit + 1;
-            let q = format!(
-                "SELECT {MEMBER_SAFE_COLS} FROM member WHERE is_active = true \
-                 ORDER BY display_name ASC LIMIT $lim START $off"
-            );
+            // Fixed fragments only — `include_inactive` is a trusted bool, not user SQL.
+            let q = if include_inactive {
+                format!(
+                    "SELECT {MEMBER_SAFE_COLS} FROM member \
+                     ORDER BY display_name ASC LIMIT $lim START $off"
+                )
+            } else {
+                format!(
+                    "SELECT {MEMBER_SAFE_COLS} FROM member WHERE is_active = true \
+                     ORDER BY display_name ASC LIMIT $lim START $off"
+                )
+            };
             let mut result = self
                 .client
                 .query(&q)
@@ -827,6 +852,55 @@ mod tests {
         // Full get still has the secret for signing.
         let full = db.get_member(&m.id).await.unwrap().unwrap();
         assert!(full.nostr_secret_key_encrypted.is_some());
+    }
+
+    #[tokio::test]
+    async fn list_paginated_filtered_includes_inactive_only_when_asked() {
+        let db = test_db_with_crypto().await;
+        let active = db
+            .create_member("user-a", "Active", OrgRole::Member)
+            .await
+            .unwrap();
+        let inactive = db
+            .create_member("user-i", "Inactive", OrgRole::Member)
+            .await
+            .unwrap();
+        db.update_member(
+            &inactive.id,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(false),
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let listed = db.list_members_paginated(10, 0).await.unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, active.id);
+        assert!(listed[0].is_active);
+
+        let all = db
+            .list_members_paginated_filtered(10, 0, true)
+            .await
+            .unwrap();
+        assert_eq!(all.len(), 2);
+        let inactive_row = all
+            .iter()
+            .find(|m| m.id == inactive.id)
+            .expect("inactive member present when include_inactive");
+        assert!(!inactive_row.is_active);
+        assert!(
+            all.iter().any(|m| m.id == active.id && m.is_active),
+            "active member still present"
+        );
     }
 
     // ── DR1-ACCT-002: atomic actionable-admin count ────────────────────────

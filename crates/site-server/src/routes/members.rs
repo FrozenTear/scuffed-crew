@@ -15,16 +15,48 @@ use crate::extractors::{AdminUser, OrgMember};
 use crate::routes::audit_log::audit;
 use crate::state::AppState;
 
-/// GET /api/members — list active members (cursor-paginated)
+/// Query params for `GET /api/members`.
+#[derive(Deserialize)]
+pub struct ListMembersQuery {
+    pub cursor: Option<String>,
+    #[serde(default = "default_list_members_limit")]
+    pub limit: u32,
+    /// Officer+ only. When true, include deactivated members (`is_active = false`).
+    /// Omit / `false` = active-only (unchanged default).
+    #[serde(default)]
+    pub include_inactive: bool,
+}
+
+fn default_list_members_limit() -> u32 {
+    25
+}
+
+/// GET /api/members — list members (cursor-paginated).
+///
+/// Default / `include_inactive=false`: active members only (any org member).
+/// `include_inactive=true`: officer+; same JSON shape, inactive rows have
+/// `is_active: false`. Member/recruit → 403; anonymous → 401.
 pub async fn list_members(
     State(state): State<AppState>,
-    _member: OrgMember,
-    axum::extract::Query(pagination): axum::extract::Query<PaginationParams>,
+    caller: OrgMember,
+    axum::extract::Query(query): axum::extract::Query<ListMembersQuery>,
 ) -> Result<Json<CursorResponse<Member>>, (StatusCode, Json<ErrorResponse>)> {
+    if query.include_inactive && !caller.member.org_role.is_at_least(OrgRole::Officer) {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(ErrorResponse {
+                error: "Officer access required".into(),
+            }),
+        ));
+    }
+    let pagination = PaginationParams {
+        cursor: query.cursor,
+        limit: query.limit,
+    };
     let (limit, offset) = pagination.resolve();
     let items = state
         .db
-        .list_members_paginated(limit, offset)
+        .list_members_paginated_filtered(limit, offset, query.include_inactive)
         .await
         .map_err(|_e| {
             (
