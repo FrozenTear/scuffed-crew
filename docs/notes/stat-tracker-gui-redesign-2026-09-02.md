@@ -1,6 +1,6 @@
 # Stat Tracker desktop GUI redesign — design document
 
-Status: **proposal for review** (claude, 2026-09-02; rev 2 after grok's design-system notes). Owner: USER. Reviewer: grok. Merge: USER only.
+Status: **proposal for review** (claude, 2026-09-02; rev 3: responsive layout rule added after the P1 spike review). Owner: USER. Reviewer: grok. Merge: USER only.
 Mockups: gallery https://claude.ai/code/artifact/39b79ec2-d70c-4697-bf3c-728eab98858c (the "Your pick" section at the top is this design; 30 alternatives below it).
 
 ## 1. Decisions already made (USER, 2026-09-02)
@@ -51,6 +51,8 @@ Tokens (dark-first; a light theme is out of scope for v1). Names follow the brie
 Notes: `role-support` and `ok` are the same mint on purpose; they never sit in the same slot (tint vs stripe). Draw uses `text-3`, not a fourth outcome colour.
 
 Typography: **Urbanist** is the *tracker product face* (OFL; bundle the TTFs; weights 500/600/700/800). This is a deliberate, labelled divergence from the Scuffed web faces, scoped to the desktop tracker; if family sprawl becomes a concern the fallback is the system sans with the same scale. Scale: 11 px labels (uppercase, +0.12 em tracking), 13 px meta, 14 px body, 20/22 px card titles, 26–34 px featured card title and hero numbers, tabular figures wherever numbers align.
+
+Layout responds to the window: grid column counts come from the available width with a ~300 px minimum card (Games 2 → 3 → 4 columns, Heroes 4 → 6, Tonight 1 featured + N compact); the sidebar is fixed and the content area flexes. A hard cap, if any, is applied as a centered column with the header controls inside it, never as a left-pinned column with empty space beside it.
 
 Shape and spacing (4 px grid): `radius-card` **16** (documented product exception, in line with Nirify's 16–20 for large cards), `radius-inner` **12** (stat boxes, panels' inner blocks), chips 999. Inner padding 16, grid gap 12, page padding **24 / 32**, stripes 4, bars 4–8. Shadows only on the companion pane.
 
@@ -115,7 +117,7 @@ Fonts and assets: Urbanist TTFs embedded with `include_bytes!` and loaded via `i
 | Phase | Deliverable | Acceptance |
 |---|---|---|
 | P0 spike | Overview screen, read-only, real `live_snapshot.json`, season switch wired to the cached server list | USER judges the native look against the mock; runs on the USER's Wayland/niri setup with wgpu |
-| P1 | Games, Heroes & maps screens; role chips; corrections via `StoreCommand` | Parity with today's Matches/Stats tabs; commands round-trip through the daemon |
+| P1 | Games, Heroes & maps screens; role chips; corrections via `StoreCommand`; responsive grid (see §3) | Parity with today's Matches/Stats tabs; commands round-trip through the daemon; no empty band at 1280 / 1920 / 2560 wide |
 | P2 | Seasons screen; persistence; offline cache; aggregate unit tests | Season numbers equal the website's for a synced account |
 | P3 | Companion overlay via layer-shell; show/hide on game process; tray toggle | Overlay visible above fullscreen Overwatch on niri; game keeps input |
 | P4 | Settings, capture preview, daemon control, update banner, tray parity | Everything the Dioxus GUI does; `install.sh` unchanged apart from the binary |
