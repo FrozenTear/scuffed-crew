@@ -78,6 +78,30 @@ impl Record {
             format!("{} games", self.games)
         }
     }
+
+    /// Games whose outcome is not win/loss/draw. They count in `games` but
+    /// not in [`Self::win_rate`] (decided-only, same as P0/P1).
+    pub fn undecided(&self) -> usize {
+        self.games
+            .saturating_sub(self.wins + self.losses + self.draws)
+    }
+
+    /// Seasons-screen line: `62 games · 10–15–0 · 37 undecided`.
+    /// The undecided tail is omitted when every game is decided.
+    pub fn season_line(&self) -> String {
+        let base = format!(
+            "{} · {}–{}–{}",
+            self.games_label(),
+            self.wins,
+            self.losses,
+            self.draws
+        );
+        match self.undecided() {
+            0 => base,
+            1 => format!("{base} · 1 undecided"),
+            n => format!("{base} · {n} undecided"),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -608,6 +632,36 @@ mod tests {
             draws: 0,
         };
         assert_eq!(many.games_label(), "7 games");
+    }
+
+    #[test]
+    fn season_line_appends_undecided() {
+        let decided = Record {
+            games: 25,
+            wins: 10,
+            losses: 15,
+            draws: 0,
+        };
+        assert_eq!(decided.undecided(), 0);
+        assert_eq!(decided.season_line(), "25 games · 10–15–0");
+
+        let mixed = Record {
+            games: 62,
+            wins: 10,
+            losses: 15,
+            draws: 0,
+        };
+        assert_eq!(mixed.undecided(), 37);
+        assert_eq!(mixed.season_line(), "62 games · 10–15–0 · 37 undecided");
+        assert!((mixed.win_rate() - 0.4).abs() < f32::EPSILON);
+
+        let one_unknown = Record {
+            games: 2,
+            wins: 1,
+            losses: 0,
+            draws: 0,
+        };
+        assert_eq!(one_unknown.season_line(), "2 games · 1–0–0 · 1 undecided");
     }
 
     #[test]

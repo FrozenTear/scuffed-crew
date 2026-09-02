@@ -186,6 +186,19 @@ pub fn surface_panel(_theme: &Theme) -> container::Style {
     }
 }
 
+pub fn selected_surface_panel(_theme: &Theme) -> container::Style {
+    container::Style {
+        background: Some(Background::Color(SURFACE)),
+        text_color: Some(TEXT),
+        border: Border {
+            color: ACCENT,
+            width: 2.0,
+            radius: card_radius(),
+        },
+        ..container::Style::default()
+    }
+}
+
 pub fn role_card(role: Role) -> impl Fn(&Theme) -> container::Style {
     move |_theme| container::Style {
         background: Some(role_card_background(role)),
@@ -200,8 +213,12 @@ pub fn role_card(role: Role) -> impl Fn(&Theme) -> container::Style {
 }
 
 pub fn stripe(outcome: Outcome) -> impl Fn(&Theme) -> container::Style {
+    stripe_color(outcome_color(outcome))
+}
+
+pub fn stripe_color(color: Color) -> impl Fn(&Theme) -> container::Style {
     move |_theme| container::Style {
-        background: Some(Background::Color(outcome_color(outcome))),
+        background: Some(Background::Color(color)),
         border: Border {
             color: Color::TRANSPARENT,
             width: 0.0,
