@@ -11,6 +11,7 @@ pub mod commands;
 pub mod fixtures;
 pub mod games;
 pub mod heroes;
+pub mod layout;
 pub mod maps;
 pub mod model;
 pub mod overview;

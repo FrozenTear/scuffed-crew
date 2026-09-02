@@ -5,17 +5,19 @@ use crate::aggregate::{
     DEFAULT_SESSION_GAP, distinct_heroes, distinct_maps, filter_games, group_by_session_gap,
 };
 use crate::app::{Message, TrackerApp};
+use crate::layout::games_columns;
 use crate::model::{Game, Outcome};
 use crate::theme::{FONT_BOLD, GRID_GAP, SIZE_TITLE, TEXT};
 use crate::widgets;
 
-pub fn view(app: &TrackerApp) -> Element<'_, Message> {
+pub fn view(app: &TrackerApp, content_width: f32) -> Element<'_, Message> {
     let header_only = app.header_filter();
     let option_pool = filter_games(&app.games, &header_only);
     let heroes = distinct_heroes(&option_pool);
     let maps = distinct_maps(&option_pool);
     let shown = filter_games(&app.games, &app.games_filter());
     let groups = group_by_session_gap(&shown, DEFAULT_SESSION_GAP);
+    let cols = games_columns(content_width);
 
     let mut col = column![
         text("Games").size(SIZE_TITLE).font(FONT_BOLD).color(TEXT),
@@ -36,29 +38,22 @@ pub fn view(app: &TrackerApp) -> Element<'_, Message> {
                 .font(FONT_BOLD)
                 .color(TEXT),
         );
-        col = col.push(sitting_cards(&group.games, app));
+        col = col.push(sitting_cards(&group.games, app, cols));
     }
     col.into()
 }
 
-/// 2-column compact shelf. An expanded game *replaces* its compact card
+/// Compact shelf at `cols` (2–4). An expanded game *replaces* its compact card
 /// (full-width) instead of duplicating below the row.
-fn sitting_cards<'a>(games: &[Game], app: &'a TrackerApp) -> Element<'a, Message> {
+fn sitting_cards<'a>(games: &[Game], app: &'a TrackerApp, cols: usize) -> Element<'a, Message> {
+    let cols = cols.max(1);
     let mut col = column![].spacing(GRID_GAP).width(Fill);
     let mut pending: Vec<&Game> = Vec::new();
     for g in games {
         let selected = app.expanded.as_deref() == Some(g.session_id.as_str());
         if selected {
             if !pending.is_empty() {
-                let mut pair = row![].spacing(GRID_GAP).width(Fill);
-                let n = pending.len();
-                for p in pending.drain(..) {
-                    pair = pair.push(widgets::compact_game_card_clickable(p, false));
-                }
-                if n == 1 {
-                    pair = pair.push(space().width(Fill));
-                }
-                col = col.push(pair);
+                col = col.push(flush_compact(&mut pending, cols));
             }
             let confirm = app.confirm_delete.as_deref() == Some(g.session_id.as_str());
             col = col.push(widgets::expanded_game_card(
@@ -69,27 +64,27 @@ fn sitting_cards<'a>(games: &[Game], app: &'a TrackerApp) -> Element<'a, Message
             ));
         } else {
             pending.push(g);
-            if pending.len() == 2 {
-                let mut pair = row![].spacing(GRID_GAP).width(Fill);
-                for p in pending.drain(..) {
-                    pair = pair.push(widgets::compact_game_card_clickable(p, false));
-                }
-                col = col.push(pair);
+            if pending.len() == cols {
+                col = col.push(flush_compact(&mut pending, cols));
             }
         }
     }
     if !pending.is_empty() {
-        let mut pair = row![].spacing(GRID_GAP).width(Fill);
-        let n = pending.len();
-        for p in pending.drain(..) {
-            pair = pair.push(widgets::compact_game_card_clickable(p, false));
-        }
-        if n == 1 {
-            pair = pair.push(space().width(Fill));
-        }
-        col = col.push(pair);
+        col = col.push(flush_compact(&mut pending, cols));
     }
     col.into()
+}
+
+fn flush_compact(pending: &mut Vec<&Game>, cols: usize) -> Element<'static, Message> {
+    let mut pair = row![].spacing(GRID_GAP).width(Fill);
+    let n = pending.len();
+    for p in pending.drain(..) {
+        pair = pair.push(widgets::compact_game_card_clickable(p, false));
+    }
+    for _ in n..cols {
+        pair = pair.push(space().width(Fill));
+    }
+    pair.into()
 }
 
 fn filter_bar(app: &TrackerApp, heroes: &[String], maps: &[String]) -> Element<'static, Message> {

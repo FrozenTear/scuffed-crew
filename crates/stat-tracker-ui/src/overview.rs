@@ -4,6 +4,7 @@ use iced::{Alignment, Element, Fill};
 
 use crate::aggregate::{aggregate, aggregate_filtered};
 use crate::app::{Message, TrackerApp};
+use crate::layout::{heroes_columns, tonight_compact_columns};
 use crate::model::{Game, Screen, SeasonSel};
 use crate::theme::{self, FONT_SEMIBOLD, GRID_GAP};
 use crate::widgets;
@@ -11,7 +12,7 @@ use crate::widgets;
 pub const TONIGHT_EMPTY: &str =
     "No games yet tonight — press Tab in-game to capture the scoreboard.";
 
-pub fn view(app: &TrackerApp) -> Element<'_, Message> {
+pub fn view(app: &TrackerApp, content_width: f32) -> Element<'_, Message> {
     let filter = app.header_filter();
     let tonight_all = tonight_games(&app.games, app.clock);
     let tonight: Vec<&Game> = tonight_all
@@ -21,8 +22,8 @@ pub fn view(app: &TrackerApp) -> Element<'_, Message> {
     let stats = aggregate_filtered(&app.games, &filter);
     let all_time = aggregate(&app.games, None, None);
 
-    let tonight_shelf = tonight_shelf(&tonight);
-    let heroes_shelf = heroes_shelf(&stats);
+    let tonight_shelf = tonight_shelf(&tonight, tonight_compact_columns(content_width));
+    let heroes_shelf = heroes_shelf(&stats, heroes_columns(content_width));
     let bottom = row![
         widgets::season_panel(
             &stats.record,
@@ -32,7 +33,8 @@ pub fn view(app: &TrackerApp) -> Element<'_, Message> {
         widgets::maps_panel(&stats.maps),
         widgets::health_panel(&app.health_status),
     ]
-    .spacing(GRID_GAP);
+    .spacing(GRID_GAP)
+    .width(Fill);
 
     column![tonight_shelf, heroes_shelf, bottom]
         .spacing(24)
@@ -40,24 +42,33 @@ pub fn view(app: &TrackerApp) -> Element<'_, Message> {
         .into()
 }
 
-fn tonight_shelf(games: &[&Game]) -> Element<'static, Message> {
-    let mut col = column![widgets::label_text("Tonight")].spacing(GRID_GAP);
+fn tonight_shelf(games: &[&Game], compact_cols: usize) -> Element<'static, Message> {
+    let cols = compact_cols.max(1);
+    let mut col = column![widgets::label_text("Tonight")]
+        .spacing(GRID_GAP)
+        .width(Fill);
     if games.is_empty() {
         col = col.push(widgets::empty_surface(TONIGHT_EMPTY));
         return col.into();
     }
     col = col.push(widgets::featured_game_card(games[0]));
-    if games.len() > 1 {
-        let mut rest = Row::new().spacing(GRID_GAP);
-        for g in games.iter().skip(1) {
-            rest = rest.push(widgets::compact_game_card(g));
+    let rest: Vec<_> = games.iter().skip(1).copied().collect();
+    if !rest.is_empty() {
+        for chunk in rest.chunks(cols) {
+            let mut row = Row::new().spacing(GRID_GAP).width(Fill);
+            for g in chunk {
+                row = row.push(widgets::compact_game_card(g));
+            }
+            for _ in chunk.len()..cols {
+                row = row.push(space().width(Fill));
+            }
+            col = col.push(row);
         }
-        col = col.push(rest);
     }
     col.into()
 }
 
-fn heroes_shelf(stats: &crate::aggregate::Aggregates) -> Element<'static, Message> {
+fn heroes_shelf(stats: &crate::aggregate::Aggregates, cols: usize) -> Element<'static, Message> {
     let header = row![
         widgets::label_text("Heroes"),
         space().width(Fill),
@@ -77,14 +88,19 @@ fn heroes_shelf(stats: &crate::aggregate::Aggregates) -> Element<'static, Messag
         .on_press(Message::Navigate(Screen::Heroes)),
     ]
     .align_y(Alignment::Center);
-    let mut col = column![header].spacing(GRID_GAP);
+    let mut col = column![header].spacing(GRID_GAP).width(Fill);
     if stats.heroes.is_empty() {
         col = col.push(widgets::empty_surface("No heroes in this window"));
         return col.into();
     }
-    let mut cards = Row::new().spacing(GRID_GAP);
-    for h in stats.heroes.iter().take(4) {
+    let mut cards = Row::new().spacing(GRID_GAP).width(Fill);
+    let show = cols.max(1);
+    let shown = stats.heroes.len().min(show);
+    for h in stats.heroes.iter().take(show) {
         cards = cards.push(widgets::hero_card(h));
+    }
+    for _ in shown..show {
+        cards = cards.push(space().width(Fill));
     }
     col.push(cards).into()
 }

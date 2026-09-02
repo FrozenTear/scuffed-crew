@@ -107,8 +107,7 @@ pub const STRIPE: f32 = 4.0;
 pub const HEIGHT_FEATURED: f32 = 216.0;
 pub const HEIGHT_COMPACT: f32 = 180.0;
 pub const HEIGHT_HERO: f32 = 160.0;
-/// Cap the main column so cards do not stretch on ultrawide (design P1).
-pub const CONTENT_MAX: f32 = 1400.0;
+/// Fixed sidebar; the content pane flexes (rev 3 — no left-pinned 1400 cap).
 pub const SIDEBAR_WIDTH: f32 = 168.0;
 
 pub const SIZE_LABEL: f32 = 11.0;

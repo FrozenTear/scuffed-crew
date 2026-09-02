@@ -2,15 +2,15 @@ use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 
 use chrono::{DateTime, Utc};
-use iced::widget::{column, container, row, space};
-use iced::{Alignment, Element, Fill, Padding, Subscription, Task};
+use iced::widget::{column, container, responsive, row};
+use iced::{Element, Fill, Length, Padding, Subscription, Task};
 
 use crate::aggregate::GameFilter;
 use crate::cli::{Cli, FixtureKind};
 use crate::model::{EditField, EditForm, Game, Outcome, Role, RoleFilter, Screen, SeasonSel};
 use crate::seasons::{self, SeasonCache};
 use crate::snapshot::{self, games_from_snapshot};
-use crate::theme::{self, CONTENT_MAX, PAGE_PAD_X, PAGE_PAD_Y, SIDEBAR_WIDTH};
+use crate::theme::{self, PAGE_PAD_X, PAGE_PAD_Y, SIDEBAR_WIDTH};
 use crate::widgets;
 
 #[derive(Debug, Clone)]
@@ -329,31 +329,31 @@ impl TrackerApp {
     pub fn view(&self) -> Element<'_, Message> {
         let header = widgets::app_header(self);
         let nav = widgets::sidebar(self.screen);
-        let body = match self.screen {
-            Screen::Overview => crate::overview::view(self),
-            Screen::Games => crate::games::view(self),
-            Screen::Heroes => crate::heroes::view(self),
-            Screen::Maps => crate::maps::view(self),
-        };
 
-        // Header + toast + body share the same ~1400 content column so season /
-        // role / status chips sit on the body's right edge, not the ultrawide
-        // window's. Sidebar stays left of that column.
+        // Sidebar is a fixed width. The remaining pane flexes with the window
+        // (rev 3). Header chips live in that pane — no left-pinned 1400 cap
+        // and no empty right band. Column counts come from `responsive`.
         let mut content = column![header].spacing(16).width(Fill);
         if let Some(t) = &self.toast {
             content = content.push(widgets::toast_bar(t));
         }
-        content = content.push(body);
-
-        let main = container(content)
+        content = content.push(
+            responsive(|size| match self.screen {
+                Screen::Overview => crate::overview::view(self, size.width),
+                Screen::Games => crate::games::view(self, size.width),
+                Screen::Heroes => crate::heroes::view(self, size.width),
+                Screen::Maps => crate::maps::view(self),
+            })
             .width(Fill)
-            .max_width(CONTENT_MAX)
-            .padding(Padding {
-                top: PAGE_PAD_Y,
-                bottom: PAGE_PAD_Y,
-                left: PAGE_PAD_X,
-                right: PAGE_PAD_X,
-            });
+            .height(Length::Shrink),
+        );
+
+        let main = container(content).width(Fill).padding(Padding {
+            top: PAGE_PAD_Y,
+            bottom: PAGE_PAD_Y,
+            left: PAGE_PAD_X,
+            right: PAGE_PAD_X,
+        });
 
         let chrome = row![
             container(nav).width(SIDEBAR_WIDTH).padding(Padding {
@@ -362,11 +362,7 @@ impl TrackerApp {
                 left: PAGE_PAD_X,
                 right: 8.0,
             }),
-            iced::widget::scrollable(container(
-                row![main, space().width(Fill)].align_y(Alignment::Start)
-            ))
-            .width(Fill)
-            .height(Fill),
+            iced::widget::scrollable(main).width(Fill).height(Fill),
         ]
         .spacing(0)
         .width(Fill)
