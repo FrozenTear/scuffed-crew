@@ -4,7 +4,7 @@
 //! `stat_tracker::storage::read_snapshot` so the spike exercises the real API.
 
 use chrono::{TimeZone, Utc};
-use stat_tracker::storage::{MatchSession, PersonalMatch, Snapshot};
+use stat_tracker::storage::{HeroSegment, MatchSession, PersonalMatch, Snapshot};
 use surrealdb_types::Datetime as SurrealDatetime;
 
 use crate::cli::FixtureKind;
@@ -108,34 +108,62 @@ fn sample_snapshot() -> Snapshot {
             18600,
             dt(2026, 9, 2, 21, 14),
         ),
-        pm(
-            "sess-t2",
-            "Ashe",
-            "Busan",
-            "Damage",
-            "defeat",
-            19,
-            11,
-            4,
-            9800,
-            0,
-            0,
-            dt(2026, 9, 2, 20, 51),
-        ),
-        pm(
-            "sess-t3",
-            "Ana",
-            "Ilios",
-            "Support",
-            "victory",
-            14,
-            5,
-            16,
-            4200,
-            11200,
-            0,
-            dt(2026, 9, 2, 20, 28),
-        ),
+        {
+            let mut m = pm(
+                "sess-t2",
+                "Ashe",
+                "Busan",
+                "Damage",
+                "defeat",
+                19,
+                11,
+                4,
+                9800,
+                0,
+                0,
+                dt(2026, 9, 2, 20, 51),
+            );
+            m.corrected_elims = Some(21);
+            m.edited_fields = vec!["elims".into()];
+            m
+        },
+        {
+            let mut m = pm(
+                "sess-t3",
+                "Ana",
+                "Ilios",
+                "Support",
+                "victory",
+                14,
+                5,
+                16,
+                4200,
+                11200,
+                0,
+                dt(2026, 9, 2, 20, 28),
+            );
+            m.heroes_played = vec![
+                HeroSegment {
+                    hero: "Ana".into(),
+                    role: "Support".into(),
+                    first_seen: dt(2026, 9, 2, 20, 20),
+                    last_seen: dt(2026, 9, 2, 20, 26),
+                    snapshots: 3,
+                    confirmed: true,
+                    resolution: None,
+                },
+                HeroSegment {
+                    hero: "Kiriko".into(),
+                    role: "Support".into(),
+                    first_seen: dt(2026, 9, 2, 20, 27),
+                    last_seen: dt(2026, 9, 2, 20, 28),
+                    snapshots: 1,
+                    confirmed: false,
+                    resolution: None,
+                },
+            ];
+            m
+        },
         pm(
             "sess-s16-1",
             "Reinhardt",

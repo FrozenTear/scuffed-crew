@@ -91,7 +91,7 @@ impl Cli {
     }
 
     pub fn help_text() -> &'static str {
-        "stat-tracker-gui — Scuffed Crew tracker Overview (Iced 0.14 P0 spike)
+        "stat-tracker-gui — Scuffed Crew tracker (Iced 0.14, P1)
 
 USAGE:
   cargo run -p scuffed-stat-tracker-ui -- [OPTIONS]

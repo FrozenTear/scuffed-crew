@@ -1,13 +1,18 @@
-//! Read-only Iced Overview spike for the Scuffed Crew stat tracker.
+//! Iced 0.14 tracker GUI for the Scuffed Crew stat tracker (P1).
 //!
-//! P0 scope: Overview screen, season switch, snapshot read, local aggregation.
-//! Does not talk to the daemon write path (`StoreCommand`) and does not change
-//! OCR / capture / store schema.
+//! Reads `live_snapshot.json` / `active_game` via the daemon lib API and writes
+//! `StoreCommand` files under `<data_dir>/commands/`. Does not change OCR,
+//! capture, sync, or the store schema. There is no software `--preview` path.
 
 pub mod aggregate;
 pub mod app;
 pub mod cli;
+pub mod commands;
 pub mod fixtures;
+pub mod games;
+pub mod heroes;
+pub mod layout;
+pub mod maps;
 pub mod model;
 pub mod overview;
 pub mod seasons;

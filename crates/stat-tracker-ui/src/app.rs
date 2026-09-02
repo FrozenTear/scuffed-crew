@@ -2,19 +2,42 @@ use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 
 use chrono::{DateTime, Utc};
-use iced::widget::scrollable;
-use iced::{Element, Subscription, Task};
+use iced::widget::{column, container, responsive, row};
+use iced::{Element, Fill, Length, Padding, Subscription, Task};
 
+use crate::aggregate::GameFilter;
 use crate::cli::{Cli, FixtureKind};
-use crate::model::{Game, SeasonSel};
+use crate::model::{EditField, EditForm, Game, Outcome, Role, RoleFilter, Screen, SeasonSel};
 use crate::seasons::{self, SeasonCache};
 use crate::snapshot::{self, games_from_snapshot};
+use crate::theme::{self, PAGE_PAD_X, PAGE_PAD_Y, SIDEBAR_WIDTH};
+use crate::widgets;
 
 #[derive(Debug, Clone)]
 pub enum Message {
     Tick,
+    Navigate(Screen),
     SelectSeason(SeasonSel),
+    ToggleRole(Role),
     SeasonsFetched(Result<Vec<scuffed_types::Season>, String>),
+    ToggleGame(String),
+    FilterHero(Option<String>),
+    FilterMap(Option<String>),
+    FilterOutcome(Option<Outcome>),
+    SetOutcome {
+        session_id: String,
+        outcome: Outcome,
+    },
+    ConfirmDelete(String),
+    DeleteSession(String),
+    ToggleEdit,
+    EditField(EditField, String),
+    SaveEdit,
+    ResolveSegment {
+        session_id: String,
+        segment: u32,
+        confirm: bool,
+    },
 }
 
 pub struct TrackerApp {
@@ -23,9 +46,19 @@ pub struct TrackerApp {
     pub games: Vec<Game>,
     pub seasons: SeasonCache,
     pub season: SeasonSel,
+    pub roles: RoleFilter,
+    pub screen: Screen,
     pub live_status: String,
     pub health_status: String,
     pub clock: DateTime<Utc>,
+    pub expanded: Option<String>,
+    pub editing: bool,
+    pub edit: EditForm,
+    pub confirm_delete: Option<String>,
+    pub filter_hero: Option<String>,
+    pub filter_map: Option<String>,
+    pub filter_outcome: Option<Outcome>,
+    pub toast: Option<String>,
     snapshot_mtime: Option<SystemTime>,
 }
 
@@ -61,8 +94,8 @@ impl TrackerApp {
             };
 
         let snapshot_mtime = snapshot::snapshot_mtime(&cli.data_dir);
-        let live_status = live_status_for(&games, cli.fixture);
-        let health_status = health_status_for(&cli.data_dir, cli.fixture, &seasons);
+        let live_status = live_status_for(&games);
+        let health_status = health_status_for(&cli.data_dir, &games);
         let app = Self {
             live_status,
             health_status,
@@ -71,7 +104,17 @@ impl TrackerApp {
             games,
             seasons,
             season,
+            roles: RoleFilter::default(),
+            screen: Screen::Overview,
             clock,
+            expanded: None,
+            editing: false,
+            edit: EditForm::default(),
+            confirm_delete: None,
+            filter_hero: None,
+            filter_map: None,
+            filter_outcome: None,
+            toast: None,
             snapshot_mtime,
         };
         (app, fetch)
@@ -85,6 +128,24 @@ impl TrackerApp {
         iced::time::every(Duration::from_secs(1)).map(|_| Message::Tick)
     }
 
+    pub fn season_window(&self) -> Option<crate::aggregate::SeasonWindow> {
+        crate::seasons::window_for(&self.season, &self.seasons.seasons)
+    }
+
+    pub fn header_filter(&self) -> GameFilter {
+        GameFilter::from_header(self.season_window(), self.roles)
+    }
+
+    pub fn games_filter(&self) -> GameFilter {
+        GameFilter {
+            window: self.season_window(),
+            roles: self.roles.selected_roles(),
+            hero: self.filter_hero.clone(),
+            map: self.filter_map.clone(),
+            outcome: self.filter_outcome,
+        }
+    }
+
     pub fn update(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::Tick => {
@@ -94,14 +155,28 @@ impl TrackerApp {
                         self.snapshot_mtime = mtime;
                         let snap = snapshot::load_snapshot(&self.data_dir);
                         self.games = games_from_snapshot(&snap);
-                        self.live_status = live_status_for(&self.games, self.fixture);
+                        self.live_status = live_status_for(&self.games);
+                        self.health_status = health_status_for(&self.data_dir, &self.games);
                         self.clock = Utc::now();
                     }
                 }
                 Task::none()
             }
+            Message::Navigate(screen) => {
+                self.screen = screen;
+                if screen != Screen::Games {
+                    self.expanded = None;
+                    self.editing = false;
+                    self.confirm_delete = None;
+                }
+                Task::none()
+            }
             Message::SelectSeason(sel) => {
                 self.season = sel;
+                Task::none()
+            }
+            Message::ToggleRole(role) => {
+                self.roles = self.roles.toggle(role);
                 Task::none()
             }
             Message::SeasonsFetched(result) => {
@@ -129,29 +204,174 @@ impl TrackerApp {
                             .is_some_and(|id| !self.seasons.seasons.iter().any(|s| s.id == id))
                         {
                             self.season = seasons::default_selection(&self.seasons.seasons);
-                        } else if matches!(keep, SeasonSel::AllTime)
-                            && self.season.as_id().is_none()
-                        {
-                            // already all-time; leave it
                         }
-                        self.health_status =
-                            health_status_for(&self.data_dir, self.fixture, &self.seasons);
+                        self.health_status = health_status_for(&self.data_dir, &self.games);
                     }
                     Err(e) => {
                         tracing::info!(error = %e, "seasons fetch failed; using cache");
-                        self.health_status =
-                            health_status_for(&self.data_dir, self.fixture, &self.seasons);
+                        self.health_status = health_status_for(&self.data_dir, &self.games);
                     }
                 }
+                Task::none()
+            }
+            Message::ToggleGame(sid) => {
+                if self.expanded.as_deref() == Some(sid.as_str()) {
+                    self.expanded = None;
+                    self.editing = false;
+                    self.confirm_delete = None;
+                } else {
+                    self.expanded = Some(sid);
+                    self.editing = false;
+                    self.confirm_delete = None;
+                }
+                Task::none()
+            }
+            Message::FilterHero(v) => {
+                self.filter_hero = v;
+                Task::none()
+            }
+            Message::FilterMap(v) => {
+                self.filter_map = v;
+                Task::none()
+            }
+            Message::FilterOutcome(v) => {
+                self.filter_outcome = v;
+                Task::none()
+            }
+            Message::SetOutcome {
+                session_id,
+                outcome,
+            } => {
+                self.toast = Some(
+                    match crate::commands::set_outcome(&self.data_dir, &session_id, outcome) {
+                        Ok(()) => format!("Outcome set to {}", outcome.store_label()),
+                        Err(e) => format!("Could not save outcome: {e}"),
+                    },
+                );
+                Task::none()
+            }
+            Message::ConfirmDelete(sid) => {
+                if self.confirm_delete.as_deref() == Some(sid.as_str()) {
+                    self.confirm_delete = None;
+                } else {
+                    self.confirm_delete = Some(sid);
+                }
+                Task::none()
+            }
+            Message::DeleteSession(sid) => {
+                self.toast = Some(
+                    match crate::commands::delete_session(&self.data_dir, &sid) {
+                        Ok(()) => "Game deleted".into(),
+                        Err(e) => format!("Could not delete game: {e}"),
+                    },
+                );
+                self.confirm_delete = None;
+                self.expanded = None;
+                self.editing = false;
+                Task::none()
+            }
+            Message::ToggleEdit => {
+                if self.editing {
+                    self.editing = false;
+                } else if let Some(sid) = &self.expanded
+                    && let Some(g) = self.games.iter().find(|g| &g.session_id == sid)
+                {
+                    self.edit = EditForm::from_game(g);
+                    self.editing = true;
+                }
+                Task::none()
+            }
+            Message::EditField(field, value) => {
+                self.edit.set(field, value);
+                Task::none()
+            }
+            Message::SaveEdit => {
+                if let Some(sid) = &self.expanded
+                    && let Some(g) = self.games.iter().find(|g| &g.session_id == sid)
+                {
+                    self.toast = Some(
+                        match crate::commands::save_edit(&self.data_dir, g, &self.edit) {
+                            Ok(()) => "Stats corrected".into(),
+                            Err(e) => e,
+                        },
+                    );
+                }
+                self.editing = false;
+                Task::none()
+            }
+            Message::ResolveSegment {
+                session_id,
+                segment,
+                confirm,
+            } => {
+                self.toast = Some(
+                    match crate::commands::resolve_segment(
+                        &self.data_dir,
+                        &session_id,
+                        segment,
+                        confirm,
+                    ) {
+                        Ok(()) => {
+                            if confirm {
+                                "Hero swap confirmed".into()
+                            } else {
+                                "Hero swap dismissed".into()
+                            }
+                        }
+                        Err(e) => format!("Could not update hero swap: {e}"),
+                    },
+                );
                 Task::none()
             }
         }
     }
 
     pub fn view(&self) -> Element<'_, Message> {
-        scrollable(crate::overview::view(self))
-            .width(iced::Fill)
-            .height(iced::Fill)
+        let header = widgets::app_header(self);
+        let nav = widgets::sidebar(self.screen);
+
+        // Sidebar is a fixed width. The remaining pane flexes with the window
+        // (rev 3). Header chips live in that pane — no left-pinned 1400 cap
+        // and no empty right band. Column counts come from `responsive`.
+        let mut content = column![header].spacing(16).width(Fill);
+        if let Some(t) = &self.toast {
+            content = content.push(widgets::toast_bar(t));
+        }
+        content = content.push(
+            responsive(|size| match self.screen {
+                Screen::Overview => crate::overview::view(self, size.width),
+                Screen::Games => crate::games::view(self, size.width),
+                Screen::Heroes => crate::heroes::view(self, size.width),
+                Screen::Maps => crate::maps::view(self),
+            })
+            .width(Fill)
+            .height(Length::Shrink),
+        );
+
+        let main = container(content).width(Fill).padding(Padding {
+            top: PAGE_PAD_Y,
+            bottom: PAGE_PAD_Y,
+            left: PAGE_PAD_X,
+            right: PAGE_PAD_X,
+        });
+
+        let chrome = row![
+            container(nav).width(SIDEBAR_WIDTH).padding(Padding {
+                top: PAGE_PAD_Y,
+                bottom: PAGE_PAD_Y,
+                left: PAGE_PAD_X,
+                right: 8.0,
+            }),
+            iced::widget::scrollable(main).width(Fill).height(Fill),
+        ]
+        .spacing(0)
+        .width(Fill)
+        .height(Fill);
+
+        container(chrome)
+            .width(Fill)
+            .height(Fill)
+            .style(theme::page_background)
             .into()
     }
 }
@@ -164,35 +384,18 @@ fn fixture_clock(fixture: Option<FixtureKind>, games: &[Game]) -> DateTime<Utc> 
     }
 }
 
-fn live_status_for(games: &[Game], fixture: Option<FixtureKind>) -> String {
-    if fixture.is_some() {
-        return "Fixture · read-only".into();
-    }
+fn live_status_for(games: &[Game]) -> String {
     if let Some(g) = games.first() {
-        format!("Idle · last game {}", g.played_at.format("%H:%M"))
+        format!("Last game {}", g.played_at.format("%H:%M"))
     } else {
-        "Idle · waiting for snapshot".into()
+        "Waiting for a capture".into()
     }
 }
 
-fn health_status_for(
-    data_dir: &std::path::Path,
-    fixture: Option<FixtureKind>,
-    seasons: &SeasonCache,
-) -> String {
-    let source = if fixture.is_some() {
-        "fixture snapshot"
-    } else if data_dir.join("live_snapshot.json").exists() {
-        "live_snapshot.json"
+fn health_status_for(data_dir: &std::path::Path, games: &[Game]) -> String {
+    if data_dir.join("live_snapshot.json").exists() || !games.is_empty() {
+        "Ready".into()
     } else {
-        "no snapshot yet"
-    };
-    let seasons_note = if seasons.seasons.is_empty() {
-        "seasons: none (picker hidden)"
-    } else if seasons.from_network {
-        "seasons: network"
-    } else {
-        "seasons: cache"
-    };
-    format!("{source} · {seasons_note}")
+        "Waiting for a capture".into()
+    }
 }

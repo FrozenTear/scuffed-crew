@@ -1,39 +1,29 @@
 use chrono::{DateTime, Local, Utc};
-use iced::widget::{Row, column, container, row, space, text};
-use iced::{Alignment, Element, Fill, Padding};
+use iced::widget::{Row, button, column, row, space, text};
+use iced::{Alignment, Element, Fill};
 
-use crate::aggregate::aggregate;
+use crate::aggregate::{aggregate, aggregate_filtered};
 use crate::app::{Message, TrackerApp};
-use crate::model::{Game, SeasonSel};
-use crate::theme::{
-    self, FONT_EXTRABOLD, FONT_MEDIUM, FONT_SEMIBOLD, GRID_GAP, PAGE_PAD_X, PAGE_PAD_Y, SIZE_BODY,
-    SIZE_FEATURED, TEXT, TEXT_3,
-};
+use crate::layout::{heroes_columns, tonight_compact_columns};
+use crate::model::{Game, Screen, SeasonSel};
+use crate::theme::{self, FONT_SEMIBOLD, GRID_GAP};
 use crate::widgets;
 
 pub const TONIGHT_EMPTY: &str =
     "No games yet tonight — press Tab in-game to capture the scoreboard.";
 
-pub fn view(app: &TrackerApp) -> Element<'_, Message> {
-    let window = crate::seasons::window_for(&app.season, &app.seasons.seasons);
-    let tonight = tonight_games(&app.games, app.clock);
-    let stats = aggregate(&app.games, window, None);
+pub fn view(app: &TrackerApp, content_width: f32) -> Element<'_, Message> {
+    let filter = app.header_filter();
+    let tonight_all = tonight_games(&app.games, app.clock);
+    let tonight: Vec<&Game> = tonight_all
+        .into_iter()
+        .filter(|g| app.roles.matches(g.role))
+        .collect();
+    let stats = aggregate_filtered(&app.games, &filter);
     let all_time = aggregate(&app.games, None, None);
 
-    let header = row![
-        text("Scuffed Tracker")
-            .size(SIZE_FEATURED)
-            .font(FONT_EXTRABOLD)
-            .color(TEXT),
-        space().width(Fill),
-        widgets::season_switch(&app.seasons.seasons, &app.season),
-        widgets::status_stub(&app.live_status),
-    ]
-    .spacing(16)
-    .align_y(Alignment::Center);
-
-    let tonight_shelf = tonight_shelf(&tonight);
-    let heroes_shelf = heroes_shelf(&stats);
+    let tonight_shelf = tonight_shelf(&tonight, tonight_compact_columns(content_width));
+    let heroes_shelf = heroes_shelf(&stats, heroes_columns(content_width));
     let bottom = row![
         widgets::season_panel(
             &stats.record,
@@ -43,79 +33,74 @@ pub fn view(app: &TrackerApp) -> Element<'_, Message> {
         widgets::maps_panel(&stats.maps),
         widgets::health_panel(&app.health_status),
     ]
-    .spacing(GRID_GAP);
+    .spacing(GRID_GAP)
+    .width(Fill);
 
-    container(
-        column![header, tonight_shelf, heroes_shelf, bottom]
-            .spacing(24)
-            .width(Fill),
-    )
-    .padding(Padding {
-        top: PAGE_PAD_Y,
-        bottom: PAGE_PAD_Y,
-        left: PAGE_PAD_X,
-        right: PAGE_PAD_X,
-    })
-    .width(Fill)
-    .style(theme::page_background)
-    .into()
+    column![tonight_shelf, heroes_shelf, bottom]
+        .spacing(24)
+        .width(Fill)
+        .into()
 }
 
-fn tonight_shelf(games: &[&Game]) -> Element<'static, Message> {
-    let mut col = column![widgets::label_text("Tonight")].spacing(GRID_GAP);
+fn tonight_shelf(games: &[&Game], compact_cols: usize) -> Element<'static, Message> {
+    let cols = compact_cols.max(1);
+    let mut col = column![widgets::label_text("Tonight")]
+        .spacing(GRID_GAP)
+        .width(Fill);
     if games.is_empty() {
-        col = col.push(
-            container(
-                text(TONIGHT_EMPTY.to_string())
-                    .size(SIZE_BODY)
-                    .font(FONT_MEDIUM)
-                    .color(TEXT_3),
-            )
-            .padding(theme::PAD_INNER)
-            .width(Fill)
-            .style(theme::surface_panel),
-        );
+        col = col.push(widgets::empty_surface(TONIGHT_EMPTY));
         return col.into();
     }
     col = col.push(widgets::featured_game_card(games[0]));
-    if games.len() > 1 {
-        let mut rest = Row::new().spacing(GRID_GAP);
-        for g in games.iter().skip(1) {
-            rest = rest.push(widgets::compact_game_card(g));
+    let rest: Vec<_> = games.iter().skip(1).copied().collect();
+    if !rest.is_empty() {
+        for chunk in rest.chunks(cols) {
+            let mut row = Row::new().spacing(GRID_GAP).width(Fill);
+            for g in chunk {
+                row = row.push(widgets::compact_game_card(g));
+            }
+            for _ in chunk.len()..cols {
+                row = row.push(space().width(Fill));
+            }
+            col = col.push(row);
         }
-        col = col.push(rest);
     }
     col.into()
 }
 
-fn heroes_shelf(stats: &crate::aggregate::Aggregates) -> Element<'static, Message> {
+fn heroes_shelf(stats: &crate::aggregate::Aggregates, cols: usize) -> Element<'static, Message> {
     let header = row![
         widgets::label_text("Heroes"),
         space().width(Fill),
-        text("all heroes →")
-            .size(theme::SIZE_META)
-            .font(FONT_SEMIBOLD)
-            .color(theme::ACCENT),
+        button(
+            text("all heroes →")
+                .size(theme::SIZE_META)
+                .font(FONT_SEMIBOLD)
+                .color(theme::ACCENT),
+        )
+        .style(|_, _| iced::widget::button::Style {
+            background: None,
+            text_color: theme::ACCENT,
+            border: iced::Border::default(),
+            shadow: iced::Shadow::default(),
+            snap: false,
+        })
+        .on_press(Message::Navigate(Screen::Heroes)),
     ]
     .align_y(Alignment::Center);
-    let mut col = column![header].spacing(GRID_GAP);
+    let mut col = column![header].spacing(GRID_GAP).width(Fill);
     if stats.heroes.is_empty() {
-        col = col.push(
-            container(
-                text("No heroes in this window")
-                    .size(SIZE_BODY)
-                    .font(FONT_MEDIUM)
-                    .color(TEXT_3),
-            )
-            .padding(theme::PAD_INNER)
-            .width(Fill)
-            .style(theme::surface_panel),
-        );
+        col = col.push(widgets::empty_surface("No heroes in this window"));
         return col.into();
     }
-    let mut cards = Row::new().spacing(GRID_GAP);
-    for h in stats.heroes.iter().take(4) {
+    let mut cards = Row::new().spacing(GRID_GAP).width(Fill);
+    let show = cols.max(1);
+    let shown = stats.heroes.len().min(show);
+    for h in stats.heroes.iter().take(show) {
         cards = cards.push(widgets::hero_card(h));
+    }
+    for _ in shown..show {
+        cards = cards.push(space().width(Fill));
     }
     col.push(cards).into()
 }

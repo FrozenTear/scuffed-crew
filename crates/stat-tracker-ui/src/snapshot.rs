@@ -75,6 +75,14 @@ mod tests {
         assert_eq!(games.len(), 5);
         assert_eq!(games[0].hero, "Junker Queen");
         assert_eq!(games[0].map_name, "King's Row");
+        assert!(
+            games[1].edited,
+            "sample Ashe row carries an elims correction"
+        );
+        assert!(
+            games[2].show_timeline(),
+            "sample Ana row has two hero segments"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

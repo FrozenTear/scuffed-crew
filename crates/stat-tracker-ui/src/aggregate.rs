@@ -3,9 +3,9 @@
 //! A game belongs to a window when `starts_at <= played_at < ends_at` (UTC),
 //! matching `GET /api/public/seasons` / the website.
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Datelike, Local, NaiveDate, Utc};
 
-use crate::model::{Game, Outcome, Role};
+use crate::model::{Game, Outcome, Role, RoleFilter};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SeasonWindow {
@@ -16,6 +16,27 @@ pub struct SeasonWindow {
 impl SeasonWindow {
     pub fn contains(self, played_at: DateTime<Utc>) -> bool {
         self.starts_at <= played_at && played_at < self.ends_at
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct GameFilter {
+    pub window: Option<SeasonWindow>,
+    pub roles: Vec<Role>,
+    pub hero: Option<String>,
+    pub map: Option<String>,
+    pub outcome: Option<Outcome>,
+}
+
+impl GameFilter {
+    pub fn from_header(window: Option<SeasonWindow>, roles: RoleFilter) -> Self {
+        Self {
+            window,
+            roles: roles.selected_roles(),
+            hero: None,
+            map: None,
+            outcome: None,
+        }
     }
 }
 
@@ -39,6 +60,23 @@ impl Record {
 
     pub fn win_rate_pct(&self) -> f32 {
         self.win_rate() * 100.0
+    }
+
+    /// `4–1` or `4–1–1` when draws are present (Games session header).
+    pub fn wl_label(&self) -> String {
+        if self.draws > 0 {
+            format!("{}–{}–{}", self.wins, self.losses, self.draws)
+        } else {
+            format!("{}–{}", self.wins, self.losses)
+        }
+    }
+
+    pub fn games_label(&self) -> String {
+        if self.games == 1 {
+            "1 game".into()
+        } else {
+            format!("{} games", self.games)
+        }
     }
 }
 
@@ -69,14 +107,149 @@ pub struct Aggregates {
     pub roles: Vec<RoleAgg>,
 }
 
+/// One sitting of games (daemon session window: 30-minute idle gap).
+/// Header uses the local date of the oldest game (`Sat Aug 30 · 4–1`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct SessionGroup {
+    pub heading: String,
+    pub started_on: NaiveDate,
+    pub record: Record,
+    pub games: Vec<Game>,
+}
+
+/// Matches `Config::session_window_secs` default (30 minutes).
+pub const DEFAULT_SESSION_GAP: chrono::TimeDelta = chrono::TimeDelta::seconds(1800);
+
 /// Filter + aggregate. `window = None` is all time. `role = None` keeps every role.
 pub fn aggregate(games: &[Game], window: Option<SeasonWindow>, role: Option<Role>) -> Aggregates {
-    let filtered: Vec<&Game> = games
-        .iter()
-        .filter(|g| window.is_none_or(|w| w.contains(g.played_at)))
-        .filter(|g| role.is_none_or(|r| g.role == r))
-        .collect();
+    aggregate_filtered(
+        games,
+        &GameFilter {
+            window,
+            roles: role.into_iter().collect(),
+            ..GameFilter::default()
+        },
+    )
+}
 
+pub fn aggregate_filtered(games: &[Game], filter: &GameFilter) -> Aggregates {
+    aggregate_rows(&filter_games(games, filter))
+}
+
+pub fn filter_games<'a>(games: &'a [Game], filter: &GameFilter) -> Vec<&'a Game> {
+    games
+        .iter()
+        .filter(|g| filter.window.is_none_or(|w| w.contains(g.played_at)))
+        .filter(|g| filter.roles.is_empty() || filter.roles.contains(&g.role))
+        .filter(|g| filter.hero.as_ref().is_none_or(|h| &g.hero == h))
+        .filter(|g| filter.map.as_ref().is_none_or(|m| &g.map_name == m))
+        .filter(|g| filter.outcome.is_none_or(|o| g.outcome == o))
+        .collect()
+}
+
+pub fn distinct_heroes(games: &[&Game]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for g in games {
+        if !g.hero.is_empty() && !out.iter().any(|h| h == &g.hero) {
+            out.push(g.hero.clone());
+        }
+    }
+    out.sort();
+    out
+}
+
+pub fn distinct_maps(games: &[&Game]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for g in games {
+        if !g.map_name.is_empty() && !out.iter().any(|m| m == &g.map_name) {
+            out.push(g.map_name.clone());
+        }
+    }
+    out.sort();
+    out
+}
+
+/// Group newest-first games by the daemon sitting gap: a game continues the
+/// current sitting when it is within `gap` of the oldest game already in that
+/// sitting (same rule as `session_window_secs` between captures). Midnight
+/// does not split a sitting. Header date is the oldest game's local day.
+pub fn group_by_session_gap(games: &[&Game], gap: chrono::TimeDelta) -> Vec<SessionGroup> {
+    let mut groups: Vec<SessionGroup> = Vec::new();
+    for g in games {
+        let continues = groups
+            .last()
+            .and_then(|grp| grp.games.last())
+            .is_some_and(|prev| prev.played_at.signed_duration_since(g.played_at) <= gap);
+        if continues {
+            if let Some(grp) = groups.last_mut() {
+                bump_outcome(&mut grp.record, g.outcome);
+                grp.record.games += 1;
+                grp.games.push((*g).clone());
+            }
+        } else {
+            let mut record = Record {
+                games: 1,
+                wins: 0,
+                losses: 0,
+                draws: 0,
+            };
+            bump_outcome(&mut record, g.outcome);
+            groups.push(SessionGroup {
+                heading: String::new(),
+                started_on: g.played_at.with_timezone(&Local).date_naive(),
+                record,
+                games: vec![(*g).clone()],
+            });
+        }
+    }
+    for grp in &mut groups {
+        if let Some(oldest) = grp.games.last() {
+            grp.started_on = oldest.played_at.with_timezone(&Local).date_naive();
+        }
+        grp.heading = format!("{} · {}", format_day(grp.started_on), grp.record.wl_label());
+    }
+    groups
+}
+
+fn format_day(day: NaiveDate) -> String {
+    format!(
+        "{} {} {}",
+        weekday_short(day.weekday().num_days_from_sunday()),
+        month_short(day.month()),
+        day.day()
+    )
+}
+
+fn weekday_short(from_sunday: u32) -> &'static str {
+    match from_sunday {
+        0 => "Sun",
+        1 => "Mon",
+        2 => "Tue",
+        3 => "Wed",
+        4 => "Thu",
+        5 => "Fri",
+        _ => "Sat",
+    }
+}
+
+fn month_short(m: u32) -> &'static str {
+    match m {
+        1 => "Jan",
+        2 => "Feb",
+        3 => "Mar",
+        4 => "Apr",
+        5 => "May",
+        6 => "Jun",
+        7 => "Jul",
+        8 => "Aug",
+        9 => "Sep",
+        10 => "Oct",
+        11 => "Nov",
+        _ => "Dec",
+    }
+}
+
+fn aggregate_rows(filtered: &[&Game]) -> Aggregates {
     let mut record = Record {
         games: filtered.len(),
         wins: 0,
@@ -87,7 +260,7 @@ pub fn aggregate(games: &[Game], window: Option<SeasonWindow>, role: Option<Role
     let mut map_map: Vec<(String, Record)> = Vec::new();
     let mut role_map: Vec<(Role, Record)> = Vec::new();
 
-    for g in &filtered {
+    for g in filtered {
         bump_outcome(&mut record, g.outcome);
         bump_hero(&mut hero_map, g);
         if !g.map_name.is_empty() {
@@ -178,13 +351,18 @@ fn bump_role(rows: &mut Vec<(Role, Record)>, g: &Game) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::GameOcr;
     use chrono::TimeZone;
 
     fn game(hero: &str, role: Role, outcome: Outcome, at: DateTime<Utc>) -> Game {
+        game_on("King's Row", hero, role, outcome, at)
+    }
+
+    fn game_on(map: &str, hero: &str, role: Role, outcome: Outcome, at: DateTime<Utc>) -> Game {
         Game {
-            session_id: "s".into(),
+            session_id: format!("s-{hero}-{at}"),
             hero: hero.into(),
-            map_name: "King's Row".into(),
+            map_name: map.into(),
             role,
             outcome,
             elims: 12,
@@ -194,11 +372,19 @@ mod tests {
             healing: 0,
             mitigation: 0,
             played_at: at,
+            edited: false,
+            edited_fields: Vec::new(),
+            ocr: GameOcr::default(),
+            segments: Vec::new(),
         }
     }
 
     fn ts(y: i32, m: u32, d: u32) -> DateTime<Utc> {
         Utc.with_ymd_and_hms(y, m, d, 12, 0, 0).unwrap()
+    }
+
+    fn ts_h(y: i32, m: u32, d: u32, hh: u32) -> DateTime<Utc> {
+        Utc.with_ymd_and_hms(y, m, d, hh, 0, 0).unwrap()
     }
 
     #[test]
@@ -249,5 +435,196 @@ mod tests {
         assert_eq!(agg.record.games, 2);
         assert_eq!(agg.record.wins, 1);
         assert!((agg.record.win_rate() - 1.0).abs() < f32::EPSILON);
+    }
+
+    /// Games immediately before and on a season start stay on the correct
+    /// side of the half-open window; hero/map lists and day groups follow.
+    #[test]
+    fn season_boundary_filters_hero_map_and_day_groups() {
+        let window = SeasonWindow {
+            starts_at: ts_h(2026, 9, 1, 0),
+            ends_at: ts_h(2026, 12, 10, 0),
+        };
+        let before = game_on(
+            "Numbani",
+            "Reinhardt",
+            Role::Tank,
+            Outcome::Win,
+            ts_h(2026, 8, 31, 23),
+        );
+        let on_start = game_on(
+            "King's Row",
+            "Junker Queen",
+            Role::Tank,
+            Outcome::Loss,
+            ts_h(2026, 9, 1, 0),
+        );
+        let later = game_on(
+            "Ilios",
+            "Ana",
+            Role::Support,
+            Outcome::Win,
+            ts_h(2026, 9, 1, 21),
+        );
+        let rows = vec![later.clone(), on_start.clone(), before.clone()];
+
+        let in_s17 = filter_games(
+            &rows,
+            &GameFilter {
+                window: Some(window),
+                ..GameFilter::default()
+            },
+        );
+        assert_eq!(in_s17.len(), 2);
+        assert_eq!(in_s17[0].hero, "Ana");
+        assert_eq!(in_s17[1].hero, "Junker Queen");
+        assert!(in_s17.iter().all(|g| g.hero != "Reinhardt"));
+
+        let tank_s17 = aggregate_filtered(
+            &rows,
+            &GameFilter {
+                window: Some(window),
+                roles: vec![Role::Tank],
+                ..GameFilter::default()
+            },
+        );
+        assert_eq!(tank_s17.record.games, 1);
+        assert_eq!(tank_s17.heroes.len(), 1);
+        assert_eq!(tank_s17.heroes[0].hero, "Junker Queen");
+        assert_eq!(tank_s17.maps.len(), 1);
+        assert_eq!(tank_s17.maps[0].map_name, "King's Row");
+
+        let hero_only = filter_games(
+            &rows,
+            &GameFilter {
+                window: Some(window),
+                hero: Some("Ana".into()),
+                ..GameFilter::default()
+            },
+        );
+        assert_eq!(hero_only.len(), 1);
+        assert_eq!(hero_only[0].map_name, "Ilios");
+
+        let map_only = filter_games(
+            &rows,
+            &GameFilter {
+                window: Some(window),
+                map: Some("King's Row".into()),
+                ..GameFilter::default()
+            },
+        );
+        assert_eq!(map_only.len(), 1);
+        assert_eq!(map_only[0].outcome, Outcome::Loss);
+
+        // Far-apart sittings stay split even if we used calendar days before.
+        let day_a = game("Ashe", Role::Damage, Outcome::Win, ts_h(2026, 8, 18, 12));
+        let day_b1 = game("Ana", Role::Support, Outcome::Win, ts_h(2026, 9, 2, 12));
+        let day_b2 = game(
+            "Ashe",
+            Role::Damage,
+            Outcome::Loss,
+            ts_h(2026, 9, 2, 12) + chrono::TimeDelta::minutes(12),
+        );
+        let day_b3 = game(
+            "Junker Queen",
+            Role::Tank,
+            Outcome::Win,
+            ts_h(2026, 9, 2, 12) + chrono::TimeDelta::minutes(24),
+        );
+        let sitting = vec![&day_b3, &day_b2, &day_b1, &day_a];
+        let groups = group_by_session_gap(&sitting, DEFAULT_SESSION_GAP);
+        assert_eq!(
+            groups.len(),
+            2,
+            "Aug 18 and Sep 2 must stay split: {groups:?}"
+        );
+        assert!(
+            groups[0].heading.contains("· 2–1"),
+            "newest sitting heading {}",
+            groups[0].heading
+        );
+        assert!(
+            groups[1].heading.contains("· 1–0"),
+            "older sitting heading {}",
+            groups[1].heading
+        );
+        assert!(groups[0].heading.contains("Sep"), "{}", groups[0].heading);
+        assert!(groups[1].heading.contains("Aug"), "{}", groups[1].heading);
+    }
+
+    #[test]
+    fn sitting_gap_keeps_midnight_together_and_splits_idle() {
+        let after = game(
+            "Ana",
+            Role::Support,
+            Outcome::Win,
+            Utc.with_ymd_and_hms(2026, 8, 29, 0, 10, 0).unwrap(),
+        );
+        let before = game(
+            "Ashe",
+            Role::Damage,
+            Outcome::Loss,
+            Utc.with_ymd_and_hms(2026, 8, 28, 23, 50, 0).unwrap(),
+        );
+        let earlier = game(
+            "Reinhardt",
+            Role::Tank,
+            Outcome::Win,
+            Utc.with_ymd_and_hms(2026, 8, 28, 22, 00, 0).unwrap(),
+        );
+        let night = group_by_session_gap(&[&after, &before], DEFAULT_SESSION_GAP);
+        assert_eq!(
+            night.len(),
+            1,
+            "20 min across midnight is one sitting: {night:?}"
+        );
+        assert!(
+            night[0].heading.contains("· 1–1"),
+            "heading {}",
+            night[0].heading
+        );
+
+        let split = group_by_session_gap(&[&before, &earlier], DEFAULT_SESSION_GAP);
+        assert_eq!(
+            split.len(),
+            2,
+            "110 min idle must split sittings: {split:?}"
+        );
+    }
+
+    #[test]
+    fn games_label_singular() {
+        let one = Record {
+            games: 1,
+            wins: 1,
+            losses: 0,
+            draws: 0,
+        };
+        assert_eq!(one.games_label(), "1 game");
+        let many = Record {
+            games: 7,
+            wins: 3,
+            losses: 4,
+            draws: 0,
+        };
+        assert_eq!(many.games_label(), "7 games");
+    }
+
+    #[test]
+    fn role_filter_union_and_distinct_lists() {
+        let rows = vec![
+            game("Ana", Role::Support, Outcome::Win, ts(2026, 9, 2)),
+            game("Ashe", Role::Damage, Outcome::Loss, ts(2026, 9, 2)),
+            game("Junker Queen", Role::Tank, Outcome::Win, ts(2026, 9, 2)),
+        ];
+        let mut roles = RoleFilter::default();
+        roles = roles.toggle(Role::Tank);
+        roles = roles.toggle(Role::Support);
+        let filtered = filter_games(&rows, &GameFilter::from_header(None, roles));
+        assert_eq!(filtered.len(), 2);
+        let heroes = distinct_heroes(&filtered);
+        assert_eq!(heroes, vec!["Ana".to_string(), "Junker Queen".to_string()]);
+        let maps = distinct_maps(&filtered);
+        assert_eq!(maps, vec!["King's Row".to_string()]);
     }
 }
