@@ -274,7 +274,10 @@ async fn run_device(
         Ok(s) => s,
         Err(e) => {
             tracing::warn!(device = %name, error = %e, "failed to open event stream");
-            registry.lock().expect("keyboard registry poisoned").remove(&path);
+            registry
+                .lock()
+                .expect("keyboard registry poisoned")
+                .remove(&path);
             return;
         }
     };
@@ -316,7 +319,10 @@ async fn run_device(
             }
         }
     }
-    registry.lock().expect("keyboard registry poisoned").remove(&path);
+    registry
+        .lock()
+        .expect("keyboard registry poisoned")
+        .remove(&path);
     log_all_grabbed(&registry, false);
 }
 
