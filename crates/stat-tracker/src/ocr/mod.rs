@@ -129,7 +129,21 @@ fn ocr_with(
         if !cache.contains_key(lang) {
             let path = tessdata_path_for_lang(lang);
             let path_str = path.as_ref().and_then(|p| p.to_str());
-            cache.insert(lang, leptess::LepTess::new(path_str, lang)?);
+            let mut lt = leptess::LepTess::new(path_str, lang)?;
+            // Tesseract prints "Warning: Invalid resolution 0 dpi" and
+            // "Estimating resolution as N" to stderr on EVERY call because the
+            // in-memory PNGs carry no DPI. Hundreds of cells per Tab capture ×
+            // a full evening turned that into thousands of journal lines: on a
+            // 50 MB journald cap the daemon's own INFO lines rotated out within
+            // ~10 h, which is what made the 2026-09-01 zero-games night
+            // undiagnosable from logs. Routing tesseract's debug channel to
+            // /dev/null silences it without touching recognition — the DPI
+            // estimate itself still runs (setting a fixed source resolution
+            // would change the per-image estimate the OCR is calibrated on).
+            if let Err(e) = lt.set_variable(leptess::Variable::DebugFile, "/dev/null") {
+                tracing::debug!(error = %e, "could not redirect tesseract debug output");
+            }
+            cache.insert(lang, lt);
         }
         let lt = cache.get_mut(lang).expect("instance just inserted");
         lt.set_variable(leptess::Variable::TesseditPagesegMode, psm)?;

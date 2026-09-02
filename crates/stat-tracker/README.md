@@ -146,6 +146,19 @@ mutations (debounced) and appends to `matches.jsonl`; the GUI reads those when
 the daemon holds the lock and sends manual edits through a file command queue
 (`{data_dir}/commands/`).
 
+## Troubleshooting
+
+**Games play but nothing is recorded, and `debug/accepted/` stays empty.**
+The daemon reads Tab presses straight from `/dev/input`. A global-hotkey daemon
+that grabs keyboards exclusively (e.g. GPU Screen Recorder's `gsr-global-hotkeys
+--all`) silently starves it: the kernel delivers events only to the grabber. The
+daemon logs `keyboard is exclusively grabbed by another process` at WARN and
+picks up the grabber's virtual pass-through keyboard automatically when it
+appears (hotplug). If the WARN says *every* keyboard is grabbed, switch the
+hotkey tool to its no-grab / virtual-devices mode or restart the tracker after
+it. Games the poller saw but never got a Tab for are listed in
+`debug/unrecorded_games.jsonl`.
+
 ## Dev tools
 
 `examples/` contains the diagnosis workflow — each file documents its usage:
