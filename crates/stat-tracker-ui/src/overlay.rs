@@ -838,7 +838,8 @@ mod tests {
             vec![Outcome::Win, Outcome::Loss, Outcome::Win]
         );
         assert_eq!(model.top_heroes.len(), 3);
-        assert_eq!(model.top_heroes[0].hero, "Junker Queen");
+        let names: Vec<&str> = model.top_heroes.iter().map(|h| h.hero.as_str()).collect();
+        assert_eq!(names, ["Ana", "Ashe", "Junker Queen"]);
         assert_eq!(model.last_tab, "Last Tab 21:14");
         assert_eq!(model.sync_label, "Sync on");
         assert!(content_height(&model) >= 200);
