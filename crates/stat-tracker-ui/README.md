@@ -126,7 +126,7 @@ cargo run -p scuffed-stat-tracker-ui -- --data-dir "$HOME/.local/share/scuffed-s
 6. **Scoreboard reading** — Install copies `koverwatch.traineddata` if missing (`ensure_koverwatch_tessdata`). Rebuild trains it again (`regenerate_koverwatch_tessdata`).
 7. **Stored data** — Compact (`LocalStore::vacuum`) or delete all local matches. Both refuse while the service is running.
 8. **Update banner** (Overview + Settings) appears only when GitHub has a newer `stat-tracker-v*` release. It never downloads an installer. The "you're on" version is `SST_RELEASE_VERSION` (runtime or compile-time, set by release CI / packaging) or `scuffed-stat-tracker --version` from the installed daemon — never this crate's `0.1.0`. If none of those resolve, the banner stays hidden.
-9. **Tray** — Show window / Hide window / Quit (`tray-icon`). Left-click shows the window. Hide uses iced `Mode::Hidden` (not minimize — that is a no-op on Wayland/niri); Show restores `Mode::Windowed`.
+9. **Tray** — Show window / Hide window / Quit (`tray-icon`). Left-click shows the window. The GUI runs as `iced::daemon` so the process stays alive with no window. Hide is `window::close` (destroys the surface — `Mode::Hidden` / minimize stay in niri Alt-Tab); Show is `window::open` and rebinds `window_id`. App state (screen, settings draft, etc.) is kept in the daemon.
 
 ```sh
 systemctl --user status scuffed-stat-tracker.service

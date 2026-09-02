@@ -68,8 +68,37 @@ pub enum Message {
     ClearReady(Result<String, String>),
     UpdateChecked(Option<UpdateInfo>),
     OpenUpdate(String),
-    WindowReady(Option<window::Id>),
+    WindowOpened(window::Id),
+    WindowClosed(window::Id),
     Tray(TrayAction),
+}
+
+/// What tray Hide / Show must do. Close+open (not Hidden/minimize) is the
+/// only path that drops the surface from Wayland/niri Alt-Tab.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TrayWindowOp {
+    Close(window::Id),
+    Open,
+    Focus(window::Id),
+}
+
+pub(crate) fn tray_hide_op(window_id: Option<window::Id>) -> Option<TrayWindowOp> {
+    window_id.map(TrayWindowOp::Close)
+}
+
+pub(crate) fn tray_show_op(window_id: Option<window::Id>) -> TrayWindowOp {
+    match window_id {
+        Some(id) => TrayWindowOp::Focus(id),
+        None => TrayWindowOp::Open,
+    }
+}
+
+pub fn window_settings() -> window::Settings {
+    window::Settings {
+        size: iced::Size::new(1280.0, 860.0),
+        min_size: Some(iced::Size::new(960.0, 640.0)),
+        ..window::Settings::default()
+    }
 }
 
 pub struct TrackerApp {
@@ -160,6 +189,7 @@ impl TrackerApp {
             autostart: false,
         };
         let live = cli.fixture.is_none();
+        let (window_id, open) = window::open(window_settings());
         let app = Self {
             live_status,
             health_status,
@@ -196,12 +226,12 @@ impl TrackerApp {
             snapshot_mtime,
             seasons_url,
             last_seasons_attempt,
-            window_id: None,
+            window_id: Some(window_id),
             tick_count: 0,
             tray: tray::try_create(),
         };
 
-        let mut tasks = vec![fetch, window::oldest().map(Message::WindowReady)];
+        let mut tasks = vec![fetch, open.map(Message::WindowOpened)];
         if live {
             tasks.push(Task::perform(
                 stat_tracker::capture::detect_backend(),
@@ -219,12 +249,15 @@ impl TrackerApp {
         (app, Task::batch(tasks))
     }
 
-    pub fn title(&self) -> String {
+    pub fn title(&self, _window: window::Id) -> String {
         "Scuffed Tracker".into()
     }
 
     pub fn subscription(&self) -> Subscription<Message> {
-        iced::time::every(Duration::from_secs(1)).map(|_| Message::Tick)
+        Subscription::batch([
+            iced::time::every(Duration::from_secs(1)).map(|_| Message::Tick),
+            window::close_events().map(Message::WindowClosed),
+        ])
     }
 
     pub fn season_window(&self) -> Option<crate::aggregate::SeasonWindow> {
@@ -602,9 +635,20 @@ impl TrackerApp {
                 update::open_release_page(&url);
                 Task::none()
             }
-            Message::WindowReady(id) => {
-                self.window_id = id;
-                Task::none()
+            Message::WindowOpened(id) => {
+                self.window_id = Some(id);
+                window::gain_focus(id)
+            }
+            Message::WindowClosed(id) => {
+                if self.window_id == Some(id) {
+                    self.window_id = None;
+                }
+                // No tray and no window: nothing can restore us — exit.
+                if self.window_id.is_none() && self.tray.is_none() {
+                    iced::exit()
+                } else {
+                    Task::none()
+                }
             }
             Message::Tray(action) => self.apply_tray(action),
         }
@@ -632,9 +676,6 @@ impl TrackerApp {
         }
 
         let mut tasks = Vec::new();
-        if self.window_id.is_none() {
-            tasks.push(window::oldest().map(Message::WindowReady));
-        }
 
         self.tick_count = self.tick_count.saturating_add(1);
         if self.fixture.is_none() && self.tick_count.is_multiple_of(10) {
@@ -677,26 +718,29 @@ impl TrackerApp {
         }
     }
 
-    fn show_window(&self) -> Task<Message> {
-        let Some(id) = self.window_id else {
-            return window::oldest().map(Message::WindowReady);
-        };
-        // Wayland/niri: minimize is a no-op. Hidden → Windowed actually
-        // unmaps/remaps the surface so tray Show / left-click restore it.
-        Task::batch([
-            window::set_mode(id, window::Mode::Windowed),
-            window::gain_focus(id),
-        ])
+    fn show_window(&mut self) -> Task<Message> {
+        match tray_show_op(self.window_id) {
+            TrayWindowOp::Focus(id) => window::gain_focus(id),
+            TrayWindowOp::Open => {
+                let (id, open) = window::open(window_settings());
+                self.window_id = Some(id);
+                open.map(Message::WindowOpened)
+            }
+            TrayWindowOp::Close(_) => Task::none(),
+        }
     }
 
-    fn hide_window(&self) -> Task<Message> {
-        let Some(id) = self.window_id else {
-            return Task::none();
-        };
-        window::set_mode(id, window::Mode::Hidden)
+    fn hide_window(&mut self) -> Task<Message> {
+        match tray_hide_op(self.window_id) {
+            Some(TrayWindowOp::Close(id)) => {
+                self.window_id = None;
+                window::close(id)
+            }
+            _ => Task::none(),
+        }
     }
 
-    pub fn view(&self) -> Element<'_, Message> {
+    pub fn view(&self, _window: window::Id) -> Element<'_, Message> {
         let header = widgets::app_header(self);
         let nav = widgets::sidebar(self.screen);
 
@@ -769,5 +813,25 @@ fn health_status_for(data_dir: &std::path::Path, games: &[Game]) -> String {
         "Ready".into()
     } else {
         "Waiting for a capture".into()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{TrayWindowOp, tray_hide_op, tray_show_op};
+    use iced::window;
+
+    #[test]
+    fn hide_closes_the_open_window_and_is_noop_when_already_hidden() {
+        let id = window::Id::unique();
+        assert_eq!(tray_hide_op(Some(id)), Some(TrayWindowOp::Close(id)));
+        assert_eq!(tray_hide_op(None), None);
+    }
+
+    #[test]
+    fn show_opens_when_hidden_and_focuses_when_visible() {
+        let id = window::Id::unique();
+        assert_eq!(tray_show_op(None), TrayWindowOp::Open);
+        assert_eq!(tray_show_op(Some(id)), TrayWindowOp::Focus(id));
     }
 }

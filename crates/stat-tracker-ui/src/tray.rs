@@ -1,6 +1,7 @@
 //! System tray via `tray-icon` (v1 — same crate as the Dioxus GUI).
 //!
 //! Menu: Show window · Hide window · Quit. Left-click also shows the window.
+//! Hide/Show are handled by the iced daemon as close/open — not minimize.
 
 use tray_icon::menu::{Menu, MenuEvent, MenuId, MenuItem};
 use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
