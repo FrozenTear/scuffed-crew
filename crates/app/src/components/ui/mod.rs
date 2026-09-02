@@ -5,6 +5,7 @@ pub mod field;
 pub mod hero_select;
 pub mod label;
 pub mod pill;
+pub mod season_select;
 pub mod shell;
 #[allow(unused_imports)]
 pub use button::BtnSize;
@@ -21,6 +22,7 @@ pub use hero_select::HeroSelect;
 #[allow(unused_imports)]
 pub use label::Label;
 pub use pill::{Pill, PillTone};
+pub use season_select::SeasonSelect;
 #[allow(unused_imports)]
 pub use shell::PageShell;
 
@@ -34,6 +36,7 @@ pub fn ui_css() -> String {
         shell::SHELL_CSS,
         field::FIELD_CSS,
         hero_select::HERO_SELECT_CSS,
+        season_select::SEASON_SELECT_CSS,
         feedback::FEEDBACK_CSS,
     ]
     .concat()

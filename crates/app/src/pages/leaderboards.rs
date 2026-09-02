@@ -5,9 +5,9 @@ use serde::Deserialize;
 
 use scuffed_api_client::ApiClient;
 
-use crate::components::ui::{Card, HeroSelect, Pill, PillTone};
+use crate::components::ui::{Card, HeroSelect, Pill, PillTone, SeasonSelect};
 use crate::routes::Route;
-use crate::util::encode_query;
+use crate::util::{encode_query, season_url};
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 struct LeaderboardRow {
@@ -96,6 +96,7 @@ const PAGE_CSS: &str = r#"
         font-family: var(--font-mono);
         font-variant-numeric: tabular-nums;
     }
+    .lb-filters { display: flex; gap: 1rem; flex-wrap: wrap; align-items: flex-end; }
     .lb-hero {
         max-width: 280px;
         margin-bottom: 1.25rem;
@@ -106,14 +107,17 @@ const PAGE_CSS: &str = r#"
 pub fn Leaderboards() -> Element {
     let mut metric = use_signal(|| "winrate".to_string());
     let mut hero = use_signal(|| None::<String>);
+    let mut season = use_signal(|| None::<String>);
     let rows = use_resource(move || {
         let m = metric();
         let h = hero();
+        let se = season();
         async move {
             let mut url = format!("/api/public/leaderboards?metric={m}&limit=50");
             if let Some(h) = h {
                 url.push_str(&format!("&hero={}", encode_query(&h)));
             }
+            let url = season_url(&url, se);
             ApiClient::web()
                 .fetch::<Vec<LeaderboardRow>>(&url)
                 .await
@@ -145,11 +149,20 @@ pub fn Leaderboards() -> Element {
                 }
             }
 
-            div { class: "lb-hero",
-                HeroSelect {
-                    label: "Hero".to_string(),
-                    value: hero(),
-                    onchange: move |h| hero.set(h),
+            div { class: "lb-filters",
+                div { class: "lb-hero",
+                    HeroSelect {
+                        label: "Hero".to_string(),
+                        value: hero(),
+                        onchange: move |h| hero.set(h),
+                    }
+                }
+                div { class: "lb-hero",
+                    SeasonSelect {
+                        label: "Season".to_string(),
+                        value: season(),
+                        onchange: move |s| season.set(s),
+                    }
                 }
             }
 

@@ -6298,3 +6298,279 @@ async fn forum_get_thread_enforces_min_role_and_fails_closed_without_board() {
         "missing board fails closed even for admin"
     );
 }
+
+// ─── Seasons: admin CRUD + season window on personal stats ──────────────────
+
+#[tokio::test]
+async fn seasons_crud_and_stats_season_filter() {
+    use chrono::{TimeZone, Utc};
+    use scuffed_db::PersonalMatch;
+
+    let state = test_state().await;
+    seed_all_roles(&state.db).await;
+
+    let mk = |sid: &str, hero: &str, map: &str, outcome: &str, m: u32| PersonalMatch {
+        id: String::new(),
+        member_id: "membermember".into(),
+        session_id: sid.into(),
+        hero: hero.into(),
+        map_name: map.into(),
+        game_mode: "control".into(),
+        role: "Support".into(),
+        outcome: outcome.into(),
+        elims: 10,
+        deaths: 5,
+        assists: 5,
+        damage: 4000,
+        healing: 6000,
+        mitigation: 0,
+        played_at: Utc.with_ymd_and_hms(2026, m, 15, 20, 0, 0).unwrap(),
+        uploaded_at: Utc::now(),
+        edited: false,
+    };
+    // January game inside season 1, July game outside it.
+    let matches = vec![
+        mk("season-a", "Ana", "King's Row", "victory", 1),
+        mk("season-b", "Tracer", "Dorado", "defeat", 7),
+    ];
+    state
+        .db
+        .upsert_personal_matches("membermember", &matches)
+        .await
+        .unwrap();
+
+    // Create season 1 = [2026-01-01, 2026-06-01)
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(authed_json_request(
+            Method::POST,
+            "/api/admin/seasons",
+            ADMIN_TOKEN,
+            json!({
+                "name": "Season 1",
+                "starts_at": "2026-01-01T00:00:00Z",
+                "ends_at": "2026-06-01T00:00:00Z",
+                "is_current": true
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let season = body_json(resp).await;
+    let season_id = season["id"].as_str().unwrap().to_string();
+
+    // All time: 2 games, 1 win, 1 loss
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(authed_request(
+            Method::GET,
+            "/api/stats/member/membermember",
+            ADMIN_TOKEN,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let all = body_json(resp).await;
+    assert_eq!(all["total_matches"], 2);
+    assert_eq!(all["wins"], 1);
+    assert_eq!(all["losses"], 1);
+
+    // Season 1: only the January win
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(authed_request(
+            Method::GET,
+            &format!("/api/stats/member/membermember?season={season_id}"),
+            ADMIN_TOKEN,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let s1 = body_json(resp).await;
+    assert_eq!(s1["total_matches"], 1);
+    assert_eq!(s1["wins"], 1);
+    assert_eq!(s1["losses"], 0);
+
+    // Hero + map aggregates and history honour the same window (own-stats routes)
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(authed_request(
+            Method::GET,
+            &format!("/api/stats/me/heroes?season={season_id}"),
+            MEMBER_TOKEN,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let heroes = body_json(resp).await;
+    let heroes = heroes.as_array().unwrap();
+    assert_eq!(heroes.len(), 1);
+    assert_eq!(heroes[0]["hero"], "Ana");
+    assert_eq!(heroes[0]["losses"], 0);
+
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(authed_request(
+            Method::GET,
+            &format!("/api/stats/me/maps?season={season_id}"),
+            MEMBER_TOKEN,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let maps = body_json(resp).await;
+    assert_eq!(maps.as_array().unwrap().len(), 1);
+    assert_eq!(maps[0]["map_name"], "King's Row");
+
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(authed_request(
+            Method::GET,
+            &format!("/api/stats/me/matches?limit=10&season={season_id}"),
+            MEMBER_TOKEN,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let hist = body_json(resp).await;
+    assert_eq!(hist["data"].as_array().unwrap().len(), 1);
+    assert_eq!(hist["data"][0]["hero"], "Ana");
+
+    // Blank season = all time; unknown season = 404
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(authed_request(
+            Method::GET,
+            "/api/stats/me?season=",
+            MEMBER_TOKEN,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(body_json(resp).await["total_matches"], 2);
+
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(authed_request(
+            Method::GET,
+            "/api/stats/me?season=nope",
+            MEMBER_TOKEN,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+    // Update: rename + demote current; window validation; member forbidden
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(authed_json_request(
+            Method::PUT,
+            &format!("/api/admin/seasons/{season_id}"),
+            ADMIN_TOKEN,
+            json!({ "name": "Season One", "is_current": false }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let upd = body_json(resp).await;
+    assert_eq!(upd["name"], "Season One");
+    assert_eq!(upd["is_current"], false);
+    assert_eq!(upd["starts_at"], "2026-01-01T00:00:00Z");
+
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(authed_json_request(
+            Method::PUT,
+            &format!("/api/admin/seasons/{season_id}"),
+            ADMIN_TOKEN,
+            json!({ "ends_at": "2025-12-31T00:00:00Z" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(authed_json_request(
+            Method::PUT,
+            &format!("/api/admin/seasons/{season_id}"),
+            MEMBER_TOKEN,
+            json!({ "name": "nope" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+    // Second season becomes current and demotes the first
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(authed_json_request(
+            Method::POST,
+            "/api/admin/seasons",
+            ADMIN_TOKEN,
+            json!({
+                "name": "Season 2",
+                "starts_at": "2026-06-01T00:00:00Z",
+                "ends_at": "2026-09-01T00:00:00Z",
+                "is_current": true
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let s2_id = body_json(resp).await["id"].as_str().unwrap().to_string();
+
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(unauthed_request(Method::GET, "/api/public/seasons"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let list = body_json(resp).await;
+    let list = list.as_array().unwrap();
+    assert_eq!(list.len(), 2);
+    let current: Vec<_> = list.iter().filter(|s| s["is_current"] == true).collect();
+    assert_eq!(current.len(), 1);
+    assert_eq!(current[0]["name"], "Season 2");
+
+    // Delete season 2: 204, then its id is unknown to stats; matches untouched
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(authed_request(
+            Method::DELETE,
+            &format!("/api/admin/seasons/{s2_id}"),
+            ADMIN_TOKEN,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(authed_request(
+            Method::DELETE,
+            &format!("/api/admin/seasons/{s2_id}"),
+            ADMIN_TOKEN,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(authed_request(
+            Method::GET,
+            &format!("/api/stats/me?season={s2_id}"),
+            MEMBER_TOKEN,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(authed_request(Method::GET, "/api/stats/me", MEMBER_TOKEN))
+        .await
+        .unwrap();
+    assert_eq!(body_json(resp).await["total_matches"], 2);
+}

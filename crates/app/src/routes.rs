@@ -88,6 +88,8 @@ pub enum Route {
         AdminApplications {},
         #[route("/admin/matches")]
         AdminMatches {},
+        #[route("/admin/seasons")]
+        AdminSeasons {},
         #[route("/admin/tournaments")]
         AdminTournaments {},
         #[route("/admin/announcements")]

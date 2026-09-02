@@ -564,16 +564,8 @@ pub struct HeroStats {
     pub avg_healing: f64,
 }
 
-/// Competitive season (re-export shape used by queries).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Season {
-    pub id: String,
-    pub name: String,
-    pub starts_at: DateTime<Utc>,
-    pub ends_at: DateTime<Utc>,
-    #[serde(default)]
-    pub is_current: bool,
-}
+/// Competitive season — shared with the app via `scuffed_types`.
+pub use scuffed_types::Season;
 
 /// Public leaderboard member row.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -685,6 +677,8 @@ pub enum AuditAction {
     UploadedAvatar,
     UploadedImage,
     CreatedSeason,
+    UpdatedSeason,
+    DeletedSeason,
     CreatedForumCategory,
     UpdatedForumCategory,
     CreatedForumBoard,

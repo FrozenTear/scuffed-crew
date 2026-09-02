@@ -80,6 +80,22 @@ fn legacy_session_id(member_id: &str, m: &crate::types::PersonalMatch) -> String
     format!("legacy-{h:016x}")
 }
 
+/// Season window `[starts_at, ends_at)` applied to `played_at`.
+pub type SeasonWindow = (DateTime<Utc>, DateTime<Utc>);
+
+/// Fixed SQL fragment for an optional season window. Only this constant is
+/// interpolated; the datetimes are always bound as `$season_start` /
+/// `$season_end` (same shape as `member_leaderboard`, DR1-P1 reviewed).
+const SEASON_FILTER: &str = " AND played_at >= $season_start AND played_at < $season_end";
+
+fn season_filter(season: Option<SeasonWindow>) -> &'static str {
+    if season.is_some() {
+        SEASON_FILTER
+    } else {
+        ""
+    }
+}
+
 impl Database {
     /// Upsert uploaded matches, one server row per (member, session).
     ///
@@ -173,68 +189,113 @@ impl Database {
         limit: u32,
         offset: u32,
     ) -> DbResult<Vec<PersonalMatch>> {
+        self.list_personal_matches_in(member_id, limit, offset, None)
+            .await
+    }
+
+    /// Match history, optionally restricted to a season window.
+    pub async fn list_personal_matches_in(
+        &self,
+        member_id: &str,
+        limit: u32,
+        offset: u32,
+        season: Option<SeasonWindow>,
+    ) -> DbResult<Vec<PersonalMatch>> {
         with_timeout(async {
             let fetch = limit + 1;
-            let mut result = self
+            let mut q = self
                 .client
-                .query("SELECT * FROM personal_match WHERE member_id = $mid ORDER BY played_at DESC LIMIT $lim START $off")
+                .query(format!(
+                    "SELECT * FROM personal_match WHERE member_id = $mid{} ORDER BY played_at DESC LIMIT $lim START $off",
+                    season_filter(season)
+                ))
                 .bind(("mid", member_id.to_string()))
                 .bind(("lim", fetch))
-                .bind(("off", offset))
-                .await?;
+                .bind(("off", offset));
+            if let Some((start, end)) = season {
+                q = q
+                    .bind(("season_start", SurrealDatetime::from(start)))
+                    .bind(("season_end", SurrealDatetime::from(end)));
+            }
+            let mut result = q.await?;
             let matches: Vec<DbPersonalMatch> = result.take(0)?;
             Ok(matches.into_iter().map(db_to_personal_match).collect())
         })
         .await
     }
 
+    /// `SELECT count() FROM personal_match WHERE member_id = $mid {extra} {season}`.
+    /// `extra` is a fixed fragment chosen by the caller (never user input);
+    /// the season window is bound.
+    async fn count_matches(
+        &self,
+        member_id: &str,
+        extra: &'static str,
+        season: Option<SeasonWindow>,
+    ) -> DbResult<u32> {
+        #[derive(Deserialize, SurrealValue)]
+        struct CountResult {
+            count: u32,
+        }
+        let mut q = self
+            .client
+            .query(format!(
+                "SELECT count() FROM personal_match WHERE member_id = $mid{extra}{} GROUP ALL",
+                season_filter(season)
+            ))
+            .bind(("mid", member_id.to_string()));
+        if let Some((start, end)) = season {
+            q = q
+                .bind(("season_start", SurrealDatetime::from(start)))
+                .bind(("season_end", SurrealDatetime::from(end)));
+        }
+        let mut result = q.await?;
+        let rows: Vec<CountResult> = result.take(0)?;
+        Ok(rows.first().map(|c| c.count).unwrap_or(0))
+    }
+
     pub async fn get_personal_stats(&self, member_id: &str) -> DbResult<PersonalStats> {
+        self.get_personal_stats_in(member_id, None).await
+    }
+
+    /// W/L/D totals, optionally restricted to a season window.
+    pub async fn get_personal_stats_in(
+        &self,
+        member_id: &str,
+        season: Option<SeasonWindow>,
+    ) -> DbResult<PersonalStats> {
         with_timeout(async {
-            #[derive(Deserialize, SurrealValue)]
-            struct CountResult {
-                count: u32,
-            }
-
-            let mut total_result = self
-                .client
-                .query("SELECT count() FROM personal_match WHERE member_id = $mid GROUP ALL")
-                .bind(("mid", member_id.to_string()))
+            let total = self.count_matches(member_id, "", season).await?;
+            let wins = self
+                .count_matches(member_id, " AND outcome = 'victory'", season)
                 .await?;
-            let total: Vec<CountResult> = total_result.take(0)?;
-
-            let mut wins_result = self
-                .client
-                .query("SELECT count() FROM personal_match WHERE member_id = $mid AND outcome = 'victory' GROUP ALL")
-                .bind(("mid", member_id.to_string()))
+            let losses = self
+                .count_matches(member_id, " AND outcome = 'defeat'", season)
                 .await?;
-            let wins: Vec<CountResult> = wins_result.take(0)?;
-
-            let mut losses_result = self
-                .client
-                .query("SELECT count() FROM personal_match WHERE member_id = $mid AND outcome = 'defeat' GROUP ALL")
-                .bind(("mid", member_id.to_string()))
+            let draws = self
+                .count_matches(member_id, " AND outcome = 'draw'", season)
                 .await?;
-            let losses: Vec<CountResult> = losses_result.take(0)?;
-
-            let mut draws_result = self
-                .client
-                .query("SELECT count() FROM personal_match WHERE member_id = $mid AND outcome = 'draw' GROUP ALL")
-                .bind(("mid", member_id.to_string()))
-                .await?;
-            let draws: Vec<CountResult> = draws_result.take(0)?;
-
             Ok(PersonalStats {
                 member_id: member_id.to_string(),
-                total_matches: total.first().map(|c| c.count).unwrap_or(0),
-                wins: wins.first().map(|c| c.count).unwrap_or(0),
-                losses: losses.first().map(|c| c.count).unwrap_or(0),
-                draws: draws.first().map(|c| c.count).unwrap_or(0),
+                total_matches: total,
+                wins,
+                losses,
+                draws,
             })
         })
         .await
     }
 
     pub async fn get_hero_stats(&self, member_id: &str) -> DbResult<Vec<HeroStats>> {
+        self.get_hero_stats_in(member_id, None).await
+    }
+
+    /// Per-hero aggregates, optionally restricted to a season window.
+    pub async fn get_hero_stats_in(
+        &self,
+        member_id: &str,
+        season: Option<SeasonWindow>,
+    ) -> DbResult<Vec<HeroStats>> {
         with_timeout(async {
             #[derive(Deserialize, SurrealValue)]
             struct HeroRow {
@@ -246,10 +307,15 @@ impl Database {
                 avg_damage: f64,
                 avg_healing: f64,
             }
+            #[derive(Deserialize, SurrealValue)]
+            struct Cnt {
+                count: u32,
+            }
 
-            let mut result = self
+            let mut q = self
                 .client
-                .query(r#"
+                .query(format!(
+                    r#"
                     SELECT
                         hero,
                         count() AS matches,
@@ -259,26 +325,37 @@ impl Database {
                         math::mean(damage) AS avg_damage,
                         math::mean(healing) AS avg_healing
                     FROM personal_match
-                    WHERE member_id = $mid
+                    WHERE member_id = $mid{}
                     GROUP BY hero
                     ORDER BY matches DESC
-                "#)
-                .bind(("mid", member_id.to_string()))
-                .await?;
+                "#,
+                    season_filter(season)
+                ))
+                .bind(("mid", member_id.to_string()));
+            if let Some((start, end)) = season {
+                q = q
+                    .bind(("season_start", SurrealDatetime::from(start)))
+                    .bind(("season_end", SurrealDatetime::from(end)));
+            }
+            let mut result = q.await?;
             let rows: Vec<HeroRow> = result.take(0)?;
 
             let mut hero_stats = Vec::with_capacity(rows.len());
             for row in rows {
-                let mut losses_result = self
+                let mut lq = self
                     .client
-                    .query("SELECT count() FROM personal_match WHERE member_id = $mid AND hero = $hero AND outcome = 'defeat' GROUP ALL")
+                    .query(format!(
+                        "SELECT count() FROM personal_match WHERE member_id = $mid AND hero = $hero AND outcome = 'defeat'{} GROUP ALL",
+                        season_filter(season)
+                    ))
                     .bind(("mid", member_id.to_string()))
-                    .bind(("hero", row.hero.clone()))
-                    .await?;
-
-                #[derive(Deserialize, SurrealValue)]
-                struct Cnt { count: u32 }
-
+                    .bind(("hero", row.hero.clone()));
+                if let Some((start, end)) = season {
+                    lq = lq
+                        .bind(("season_start", SurrealDatetime::from(start)))
+                        .bind(("season_end", SurrealDatetime::from(end)));
+                }
+                let mut losses_result = lq.await?;
                 let losses_vec: Vec<Cnt> = losses_result.take(0)?;
                 let losses = losses_vec.first().map(|c| c.count).unwrap_or(0);
                 let draws = row.matches.saturating_sub(row.wins).saturating_sub(losses);
@@ -510,6 +587,15 @@ impl Database {
     }
 
     pub async fn get_map_stats(&self, member_id: &str) -> DbResult<Vec<MapStats>> {
+        self.get_map_stats_in(member_id, None).await
+    }
+
+    /// Per-map aggregates, optionally restricted to a season window.
+    pub async fn get_map_stats_in(
+        &self,
+        member_id: &str,
+        season: Option<SeasonWindow>,
+    ) -> DbResult<Vec<MapStats>> {
         with_timeout(async {
             #[derive(Deserialize, SurrealValue)]
             struct MapRow {
@@ -517,35 +603,51 @@ impl Database {
                 matches: u32,
                 wins: u32,
             }
+            #[derive(Deserialize, SurrealValue)]
+            struct Cnt {
+                count: u32,
+            }
 
-            let mut result = self
+            let mut q = self
                 .client
-                .query(r#"
+                .query(format!(
+                    r#"
                     SELECT
                         map_name,
                         count() AS matches,
                         math::sum(IF outcome = 'victory' THEN 1 ELSE 0 END) AS wins
                     FROM personal_match
-                    WHERE member_id = $mid
+                    WHERE member_id = $mid{}
                     GROUP BY map_name
                     ORDER BY matches DESC
-                "#)
-                .bind(("mid", member_id.to_string()))
-                .await?;
+                "#,
+                    season_filter(season)
+                ))
+                .bind(("mid", member_id.to_string()));
+            if let Some((start, end)) = season {
+                q = q
+                    .bind(("season_start", SurrealDatetime::from(start)))
+                    .bind(("season_end", SurrealDatetime::from(end)));
+            }
+            let mut result = q.await?;
             let rows: Vec<MapRow> = result.take(0)?;
 
             let mut map_stats = Vec::with_capacity(rows.len());
             for row in rows {
-                let mut losses_result = self
+                let mut lq = self
                     .client
-                    .query("SELECT count() FROM personal_match WHERE member_id = $mid AND map_name = $map AND outcome = 'defeat' GROUP ALL")
+                    .query(format!(
+                        "SELECT count() FROM personal_match WHERE member_id = $mid AND map_name = $map AND outcome = 'defeat'{} GROUP ALL",
+                        season_filter(season)
+                    ))
                     .bind(("mid", member_id.to_string()))
-                    .bind(("map", row.map_name.clone()))
-                    .await?;
-
-                #[derive(Deserialize, SurrealValue)]
-                struct Cnt { count: u32 }
-
+                    .bind(("map", row.map_name.clone()));
+                if let Some((start, end)) = season {
+                    lq = lq
+                        .bind(("season_start", SurrealDatetime::from(start)))
+                        .bind(("season_end", SurrealDatetime::from(end)));
+                }
+                let mut losses_result = lq.await?;
                 let losses_vec: Vec<Cnt> = losses_result.take(0)?;
                 let losses = losses_vec.first().map(|c| c.count).unwrap_or(0);
                 let draws = row.matches.saturating_sub(row.wins).saturating_sub(losses);

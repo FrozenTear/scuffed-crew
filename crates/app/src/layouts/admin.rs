@@ -300,6 +300,7 @@ pub fn AdminLayout() -> Element {
                     // visible to every officer+ — matching the AdminLayout access tier.
                     Link { to: Route::AdminModeration {}, onclick: close_nav, "Moderation" }
                     if is_admin {
+                        Link { to: Route::AdminSeasons {}, onclick: close_nav, "Seasons" }
                         Link { to: Route::AdminRelay {}, onclick: close_nav, "Relay" }
                         Link { to: Route::AdminAuditLog {}, onclick: close_nav, "Audit Log" }
                         Link { to: Route::AdminSettings {}, onclick: close_nav, "Settings" }

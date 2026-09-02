@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use scuffed_auth::server::session::ErrorResponse;
 use scuffed_db::{AuditAction, AuditTargetType, HeroStats, MemberLeaderboardRow, Season};
+use scuffed_types::api::{CreateSeasonRequest, UpdateSeasonRequest};
 use scuffed_types::{HeroAgg, MemberLeaderboardRow as TypesMemberRow, resolve_hero_query};
 
 use crate::extractors::AdminUser;
@@ -122,6 +123,52 @@ fn resolve_leaderboard_hero(raw: Option<&str>) -> Result<Option<&'static str>, (
     resolve_hero_query(raw)
 }
 
+type ApiError = (StatusCode, Json<ErrorResponse>);
+
+fn internal_error() -> ApiError {
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(ErrorResponse {
+            error: "Internal error".into(),
+        }),
+    )
+}
+
+fn bad_request(msg: &str) -> ApiError {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(ErrorResponse { error: msg.into() }),
+    )
+}
+
+fn season_not_found() -> ApiError {
+    (
+        StatusCode::NOT_FOUND,
+        Json(ErrorResponse {
+            error: "Season not found".into(),
+        }),
+    )
+}
+
+/// Resolve `?season=<id>` to a `played_at` window. Omitted / blank → `None`
+/// (all time). Unknown id → 404. Shared by leaderboards and every personal
+/// stats endpoint so "total or per season" means the same thing everywhere.
+pub async fn resolve_season_window(
+    state: &AppState,
+    season: Option<&str>,
+) -> Result<Option<(DateTime<Utc>, DateTime<Utc>)>, ApiError> {
+    let Some(sid) = season.map(str::trim).filter(|s| !s.is_empty()) else {
+        return Ok(None);
+    };
+    let season = state
+        .db
+        .get_season(sid)
+        .await
+        .map_err(|_e| internal_error())?
+        .ok_or_else(season_not_found)?;
+    Ok(Some((season.starts_at, season.ends_at)))
+}
+
 /// GET /api/public/leaderboards?metric=winrate|kd|games&limit=25&season=<id>&hero=<name>
 pub async fn public_leaderboards(
     State(state): State<AppState>,
@@ -133,32 +180,7 @@ pub async fn public_leaderboards(
     };
     let limit = q.limit.clamp(1, 100);
 
-    let season_window = if let Some(ref sid) = q.season {
-        let sid = sid.trim();
-        if sid.is_empty() {
-            None
-        } else {
-            let season = state.db.get_season(sid).await.map_err(|_e| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(ErrorResponse {
-                        error: "Internal error".into(),
-                    }),
-                )
-            })?;
-            let Some(season) = season else {
-                return Err((
-                    StatusCode::NOT_FOUND,
-                    Json(ErrorResponse {
-                        error: "Season not found".into(),
-                    }),
-                ));
-            };
-            Some((season.starts_at, season.ends_at))
-        }
-    } else {
-        None
-    };
+    let season_window = resolve_season_window(&state, q.season.as_deref()).await?;
 
     // W3 B2: optional ?hero= → canonical HEROES name, then DB bound filter.
     let hero = match resolve_leaderboard_hero(q.hero.as_deref()) {
@@ -229,15 +251,6 @@ pub async fn public_list_seasons(
     })
 }
 
-#[derive(Deserialize)]
-pub struct CreateSeasonRequest {
-    pub name: String,
-    pub starts_at: DateTime<Utc>,
-    pub ends_at: DateTime<Utc>,
-    #[serde(default)]
-    pub is_current: bool,
-}
-
 /// POST /api/admin/seasons — create season (admin).
 pub async fn admin_create_season(
     State(state): State<AppState>,
@@ -303,4 +316,93 @@ pub async fn admin_list_seasons(
 pub struct LeaderboardPageMeta {
     pub metric: String,
     pub count: usize,
+}
+
+/// PUT /api/admin/seasons/:id — partial update (admin). The merged window
+/// must stay non-empty; `is_current = true` demotes any other current season.
+pub async fn admin_update_season(
+    State(state): State<AppState>,
+    admin: AdminUser,
+    Path(id): Path<String>,
+    Json(body): Json<UpdateSeasonRequest>,
+) -> Result<Json<Season>, ApiError> {
+    let existing = state
+        .db
+        .get_season(&id)
+        .await
+        .map_err(|_e| internal_error())?
+        .ok_or_else(season_not_found)?;
+
+    let name = match body.name {
+        Some(n) => {
+            let n = n.trim().to_string();
+            if n.is_empty() {
+                return Err(bad_request("name is required"));
+            }
+            n
+        }
+        None => existing.name.clone(),
+    };
+    let starts_at = body.starts_at.unwrap_or(existing.starts_at);
+    let ends_at = body.ends_at.unwrap_or(existing.ends_at);
+    if ends_at <= starts_at {
+        return Err(bad_request("ends_at must be after starts_at"));
+    }
+    let is_current = body.is_current.unwrap_or(existing.is_current);
+
+    let s = state
+        .db
+        .update_season(&id, &name, starts_at, ends_at, is_current)
+        .await
+        .map_err(|e| match e {
+            scuffed_db::DbError::NotFound(_) => season_not_found(),
+            _ => internal_error(),
+        })?;
+
+    audit(
+        &state.db,
+        &admin.member.id,
+        AuditAction::UpdatedSeason,
+        AuditTargetType::Season,
+        &s.id,
+        Some(s.name.as_str()),
+    )
+    .await;
+
+    Ok(Json(s))
+}
+
+/// DELETE /api/admin/seasons/:id — remove a season (admin). Matches are
+/// untouched; the season was only a window over `played_at`.
+pub async fn admin_delete_season(
+    State(state): State<AppState>,
+    admin: AdminUser,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    let existing = state
+        .db
+        .get_season(&id)
+        .await
+        .map_err(|_e| internal_error())?
+        .ok_or_else(season_not_found)?;
+    let deleted = state
+        .db
+        .delete_season(&id)
+        .await
+        .map_err(|_e| internal_error())?;
+    if !deleted {
+        return Err(season_not_found());
+    }
+
+    audit(
+        &state.db,
+        &admin.member.id,
+        AuditAction::DeletedSeason,
+        AuditTargetType::Season,
+        &id,
+        Some(existing.name.as_str()),
+    )
+    .await;
+
+    Ok(StatusCode::NO_CONTENT)
 }
