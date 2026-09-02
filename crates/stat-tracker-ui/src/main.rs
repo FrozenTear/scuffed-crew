@@ -1,5 +1,4 @@
 use iced::Font;
-use iced::window;
 use stat_tracker_ui::app::TrackerApp;
 use stat_tracker_ui::cli::Cli;
 use stat_tracker_ui::theme;
@@ -18,10 +17,19 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let data_dir = cli.data_dir.clone();
-    tracing::info!(path = %data_dir.display(), "starting tracker GUI (Iced 0.14 P2)");
+    // tray-icon on Linux needs GTK before the menu is built. Failure is fine
+    // on headless hosts — the window still runs without a tray.
+    if gtk::init().is_err() {
+        tracing::info!("system tray unavailable (no display / GTK)");
+    }
 
-    iced::application(
+    let data_dir = cli.data_dir.clone();
+    tracing::info!(path = %data_dir.display(), "starting tracker GUI (Iced 0.14 P4)");
+
+    // Daemon (not application): the process stays alive with zero windows so
+    // tray Hide can `window::close` the surface. Mode::Hidden / set_visible
+    // leave the window in niri's Alt-Tab list.
+    iced::daemon(
         {
             let cli = cli.clone();
             move || TrackerApp::new(cli.clone())
@@ -41,11 +49,6 @@ fn main() -> anyhow::Result<()> {
         weight: iced::font::Weight::Medium,
         stretch: iced::font::Stretch::Normal,
         style: iced::font::Style::Normal,
-    })
-    .window(window::Settings {
-        size: iced::Size::new(1280.0, 860.0),
-        min_size: Some(iced::Size::new(960.0, 640.0)),
-        ..window::Settings::default()
     })
     .run()?;
     Ok(())

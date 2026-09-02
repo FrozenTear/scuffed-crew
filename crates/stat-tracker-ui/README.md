@@ -7,19 +7,22 @@ Native **Iced 0.14** (wgpu) tracker GUI for the Scuffed Crew stat tracker.
 - Reads the daemon snapshot via `stat_tracker::storage::read_snapshot` (`live_snapshot.json`)
 - Writes `StoreCommand` files under `<data_dir>/commands/` — same contract as the Dioxus GUI (`SetOutcome`, `EditMatch`, `DeleteSession`, `ResolveSegment`)
 - Fetches `GET /api/public/seasons` on launch and every 30 minutes; cache is `<data_dir>/seasons.json`. Header season choice persists in `<data_dir>/ui_state.json`.
+- Settings write `~/.config/scuffed-stat-tracker/config.toml` through `Config::save` (0600). Same keys as the daemon / Dioxus page.
+- Capture preview is a one-shot screenshot of the selected output through the existing capture backends.
+- Tracker service start/stop/restart goes through the `scuffed-stat-tracker.service` user unit when installed. PID liveness requires `/proc/<pid>/comm` to start with `scuffed-stat` — a reused PID is never signalled.
 - Does **not** change the daemon, OCR, capture, sync, or store schema
-- Does **not** open SurrealKV; the running daemon applies queued commands and refreshes the snapshot
+- Does **not** open SurrealKV for match edits; the running daemon applies queued commands and refreshes the snapshot. Compact / delete on Settings open the store only after the service is stopped.
 
-Design: `docs/notes/stat-tracker-gui-redesign-2026-09-02.md` rev 3 (branch `docs/tracker-gui-redesign`). Tokens: `radius-card` 16, `radius-inner` 12, page pad 24/32, Urbanist, role tints, `border` / `text-3` / `ok` / `danger`.
+Design: `docs/notes/stat-tracker-gui-redesign-2026-09-02.md` rev 2 tokens + rev 3 responsive layout (branch `docs/tracker-gui-redesign`). Tokens: `radius-card` 16, `radius-inner` 12, page pad 24/32, Urbanist, role tints, `border` / `text-3` / `ok` / `danger`.
 
-P0 Overview is on `main` (PR #56). P1 Games / Heroes / Maps + StoreCommand writes + rev 3 responsive layout is on `main` (PR #57). This crate is **P2**: Seasons screen, cache, persistence, aggregation parity.
+P0–P2 are on `main` (PRs #56–#58). This crate is **P4**: Settings, capture preview, daemon control, update banner, tray. Companion overlay is P3 (later).
 
-There is **no** software `--preview` path and no `preview.rs`. Robert will capture real niri window shots (empty + sample + live) for Design.
+There is **no** software `--preview` path and no `preview.rs`. **Robert will capture real niri window shots for Design.**
 
 ## Run fixtures
 
 ```sh
-# Empty Overview / Games / Heroes / Maps / Seasons (no season picker)
+# Empty Overview / Games / Heroes / Maps / Seasons / Settings (no season picker)
 cargo run -p scuffed-stat-tracker-ui -- --fixture empty
 
 # Sample matches + seasons (picker stays; defaults to the current season)
@@ -106,8 +109,34 @@ Fixture mode still writes those files (under the fixture `--data-dir`); there is
 
 Seasons URL falls back to `SCUFFED_SERVER` or `config.toml` sync URL (live mode only). Offline: cache only. No seasons → picker hidden, all time.
 
+### Settings and tracker service
+
+Live mode only. `--fixture` shows the Settings page but does not write `config.toml`, start/stop the service, compact, or delete data.
+
+```sh
+# same data dir the service uses (XDG default if omitted)
+cargo run -p scuffed-stat-tracker-ui -- --data-dir "$HOME/.local/share/scuffed-stat-tracker"
+```
+
+1. Sidebar **Settings**.
+2. **Tracker service** — Start / Stop / Restart. When `~/.config/systemd/user/scuffed-stat-tracker.service` exists, verbs go through `systemctl --user`. Otherwise Start launches `scuffed-stat-tracker` from PATH / next to this binary; Stop reads `daemon.pid` and signals only if `/proc/<pid>/comm` is the tracker.
+3. **Start on login** — `systemctl --user enable --now` / `disable --now` when the unit file is installed.
+4. **Capture** — pick a monitor (or Auto), then **Capture now** for a one-shot preview of what the tracker sees.
+5. **Save settings** writes today's fields: monitor, in-game name (`player_name` — no `#1234` discriminator), session window, game process names, auto-detect, website URL + token, debug images. Restart the service after a save if it is running.
+6. **Scoreboard reading** — Install copies `koverwatch.traineddata` if missing (`ensure_koverwatch_tessdata`). Rebuild trains it again (`regenerate_koverwatch_tessdata`).
+7. **Stored data** — Compact (`LocalStore::vacuum`) or delete all local matches. Both refuse while the service is running.
+8. **Update banner** (Overview + Settings) appears only when GitHub has a newer `stat-tracker-v*` release. It never downloads an installer. The "you're on" version is `SST_RELEASE_VERSION` (runtime or compile-time, set by release CI / packaging) or `scuffed-stat-tracker --version` from the installed daemon — never this crate's `0.1.0`. If none of those resolve, the banner stays hidden.
+9. **Tray** — Show window / Hide window / Quit (`tray-icon`). Left-click shows the window. The GUI runs as `iced::daemon` so the process stays alive with no window. Hide is `window::close` (destroys the surface — `Mode::Hidden` / minimize stay in niri Alt-Tab); Show is `window::open` and rebinds `window_id`. App state (screen, settings draft, etc.) is kept in the daemon.
+
+```sh
+systemctl --user status scuffed-stat-tracker.service
+systemctl --user start scuffed-stat-tracker.service
+# after Save settings:
+systemctl --user restart scuffed-stat-tracker.service
+```
+
 ## Out of scope (later phases)
 
-P3 companion overlay, P4 settings/tray, P5 remove the Dioxus `gui` feature.
+P3 companion overlay (layer-shell). P5 remove the Dioxus `gui` feature.
 
 Urbanist (OFL) is bundled as the labelled tracker product face — see `fonts/OFL.txt`.

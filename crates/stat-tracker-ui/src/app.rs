@@ -2,15 +2,23 @@ use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 
 use chrono::{DateTime, Utc};
+use iced::widget::image::Handle;
 use iced::widget::{column, container, responsive, row};
-use iced::{Element, Fill, Length, Padding, Subscription, Task};
+use iced::{Element, Fill, Length, Padding, Subscription, Task, window};
+use stat_tracker::capture::CaptureBackend;
+use stat_tracker::config::Config;
 
 use crate::aggregate::GameFilter;
+use crate::capture::{self, PreviewShot};
 use crate::cli::{Cli, FixtureKind};
+use crate::daemon::{self, DaemonVerb, DaemonView};
 use crate::model::{EditField, EditForm, Game, Outcome, Role, RoleFilter, Screen, SeasonSel};
 use crate::seasons::{self, SeasonCache};
+use crate::settings::{self, SettingsField, SettingsForm, SettingsToggle};
 use crate::snapshot::{self, games_from_snapshot};
 use crate::theme::{self, PAGE_PAD_X, PAGE_PAD_Y, SIDEBAR_WIDTH};
+use crate::tray::{self, TrayAction, TrayHandle};
+use crate::update::{self, UpdateInfo};
 use crate::widgets;
 
 #[derive(Debug, Clone)]
@@ -38,6 +46,59 @@ pub enum Message {
         segment: u32,
         confirm: bool,
     },
+    SettingsText(SettingsField, String),
+    SettingsToggle(SettingsToggle, bool),
+    SelectOutput(Option<String>),
+    SaveSettings,
+    Daemon(DaemonVerb),
+    DaemonDone(Result<String, String>),
+    ToggleAutostart,
+    AutostartReady(bool),
+    BackendReady(CaptureBackend),
+    OutputsReady(Vec<String>),
+    CaptureNow,
+    CaptureReady(Result<PreviewShot, String>),
+    InstallModel,
+    RebuildModel,
+    ModelReady(Result<String, String>),
+    Vacuum,
+    VacuumReady(Result<String, String>),
+    ConfirmClear,
+    ClearData,
+    ClearReady(Result<String, String>),
+    UpdateChecked(Option<UpdateInfo>),
+    OpenUpdate(String),
+    WindowOpened(window::Id),
+    WindowClosed(window::Id),
+    Tray(TrayAction),
+}
+
+/// What tray Hide / Show must do. Close+open (not Hidden/minimize) is the
+/// only path that drops the surface from Wayland/niri Alt-Tab.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TrayWindowOp {
+    Close(window::Id),
+    Open,
+    Focus(window::Id),
+}
+
+pub(crate) fn tray_hide_op(window_id: Option<window::Id>) -> Option<TrayWindowOp> {
+    window_id.map(TrayWindowOp::Close)
+}
+
+pub(crate) fn tray_show_op(window_id: Option<window::Id>) -> TrayWindowOp {
+    match window_id {
+        Some(id) => TrayWindowOp::Focus(id),
+        None => TrayWindowOp::Open,
+    }
+}
+
+pub fn window_settings() -> window::Settings {
+    window::Settings {
+        size: iced::Size::new(1280.0, 860.0),
+        min_size: Some(iced::Size::new(960.0, 640.0)),
+        ..window::Settings::default()
+    }
 }
 
 pub struct TrackerApp {
@@ -59,9 +120,26 @@ pub struct TrackerApp {
     pub filter_map: Option<String>,
     pub filter_outcome: Option<Outcome>,
     pub toast: Option<String>,
+    pub settings: SettingsForm,
+    pub saved_config: Config,
+    pub daemon: DaemonView,
+    pub daemon_busy: bool,
+    pub outputs: Vec<String>,
+    pub backend: Option<CaptureBackend>,
+    pub capturing: bool,
+    pub preview: Option<(Handle, String)>,
+    pub preview_error: Option<String>,
+    pub update: Option<UpdateInfo>,
+    pub confirm_clear: bool,
+    pub tessdata_busy: bool,
+    pub tessdata_installed: bool,
+    pub vacuum_busy: bool,
     snapshot_mtime: Option<SystemTime>,
     seasons_url: Option<String>,
     last_seasons_attempt: Option<DateTime<Utc>>,
+    window_id: Option<window::Id>,
+    tick_count: u64,
+    tray: Option<TrayHandle>,
 }
 
 impl TrackerApp {
@@ -103,6 +181,15 @@ impl TrackerApp {
         let snapshot_mtime = snapshot::snapshot_mtime(&cli.data_dir);
         let live_status = live_status_for(&games);
         let health_status = health_status_for(&cli.data_dir, &games);
+        let saved_config = Config::load().unwrap_or_default();
+        let settings = SettingsForm::from_config(&saved_config);
+        let daemon = DaemonView {
+            pid: daemon::daemon_running(&cli.data_dir),
+            service_installed: daemon::service_file_installed(),
+            autostart: false,
+        };
+        let live = cli.fixture.is_none();
+        let (window_id, open) = window::open(window_settings());
         let app = Self {
             live_status,
             health_status,
@@ -122,19 +209,55 @@ impl TrackerApp {
             filter_map: None,
             filter_outcome: None,
             toast: None,
+            settings,
+            saved_config,
+            daemon,
+            daemon_busy: false,
+            outputs: Vec::new(),
+            backend: None,
+            capturing: false,
+            preview: None,
+            preview_error: None,
+            update: None,
+            confirm_clear: false,
+            tessdata_busy: false,
+            tessdata_installed: capture::tessdata_installed(),
+            vacuum_busy: false,
             snapshot_mtime,
             seasons_url,
             last_seasons_attempt,
+            window_id: Some(window_id),
+            tick_count: 0,
+            tray: tray::try_create(),
         };
-        (app, fetch)
+
+        let mut tasks = vec![fetch, open.map(Message::WindowOpened)];
+        if live {
+            tasks.push(Task::perform(
+                stat_tracker::capture::detect_backend(),
+                Message::BackendReady,
+            ));
+            tasks.push(Task::perform(
+                update::check_for_update(),
+                Message::UpdateChecked,
+            ));
+            tasks.push(Task::perform(
+                daemon::systemd_enabled(),
+                Message::AutostartReady,
+            ));
+        }
+        (app, Task::batch(tasks))
     }
 
-    pub fn title(&self) -> String {
+    pub fn title(&self, _window: window::Id) -> String {
         "Scuffed Tracker".into()
     }
 
     pub fn subscription(&self) -> Subscription<Message> {
-        iced::time::every(Duration::from_secs(1)).map(|_| Message::Tick)
+        Subscription::batch([
+            iced::time::every(Duration::from_secs(1)).map(|_| Message::Tick),
+            window::close_events().map(Message::WindowClosed),
+        ])
     }
 
     pub fn season_window(&self) -> Option<crate::aggregate::SeasonWindow> {
@@ -157,40 +280,21 @@ impl TrackerApp {
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
         match message {
-            Message::Tick => {
-                if self.fixture.is_none() {
-                    let mtime = snapshot::snapshot_mtime(&self.data_dir);
-                    if mtime != self.snapshot_mtime {
-                        self.snapshot_mtime = mtime;
-                        let snap = snapshot::load_snapshot(&self.data_dir);
-                        self.games = games_from_snapshot(&snap);
-                        self.live_status = live_status_for(&self.games);
-                        self.health_status = health_status_for(&self.data_dir, &self.games);
-                        self.clock = Utc::now();
-                    }
-                }
-                let now = Utc::now();
-                if seasons::should_refetch(
-                    self.fixture.is_some(),
-                    self.seasons_url.as_deref(),
-                    self.last_seasons_attempt,
-                    now,
-                ) {
-                    let url = self
-                        .seasons_url
-                        .clone()
-                        .expect("should_refetch requires a URL");
-                    self.last_seasons_attempt = Some(now);
-                    return Task::perform(seasons::fetch_seasons(url), Message::SeasonsFetched);
-                }
-                Task::none()
-            }
+            Message::Tick => self.on_tick(),
             Message::Navigate(screen) => {
                 self.screen = screen;
                 if screen != Screen::Games {
                     self.expanded = None;
                     self.editing = false;
                     self.confirm_delete = None;
+                }
+                if screen != Screen::Settings {
+                    self.confirm_clear = false;
+                }
+                if screen == Screen::Settings
+                    && let Some(backend) = self.backend
+                {
+                    return Task::perform(capture::list_outputs(backend), Message::OutputsReady);
                 }
                 Task::none()
             }
@@ -352,10 +456,291 @@ impl TrackerApp {
                 );
                 Task::none()
             }
+            Message::SettingsText(field, value) => {
+                self.settings.set_text(field, value);
+                Task::none()
+            }
+            Message::SettingsToggle(toggle, value) => {
+                self.settings.set_toggle(toggle, value);
+                Task::none()
+            }
+            Message::SelectOutput(name) => {
+                self.settings.capture_output = name.unwrap_or_default();
+                Task::none()
+            }
+            Message::SaveSettings => {
+                if self.fixture.is_some() {
+                    return Task::none();
+                }
+                let config = self.settings.to_config(&self.saved_config);
+                match settings::save_config(&config) {
+                    Ok(()) => {
+                        let daemon_up = daemon::is_daemon_running(&self.data_dir);
+                        self.saved_config = config;
+                        self.settings = SettingsForm::from_config(&self.saved_config);
+                        self.toast = Some(if daemon_up {
+                            "Settings saved — restart the tracker for changes to take effect".into()
+                        } else {
+                            "Settings saved".into()
+                        });
+                    }
+                    Err(e) => {
+                        self.toast = Some(format!("Could not save settings: {e}"));
+                    }
+                }
+                Task::none()
+            }
+            Message::Daemon(verb) => {
+                if self.fixture.is_some() || self.daemon_busy {
+                    return Task::none();
+                }
+                self.daemon_busy = true;
+                let data_dir = self.data_dir.clone();
+                let installed = self.daemon.service_installed;
+                Task::perform(
+                    daemon::run_verb(data_dir, verb, installed),
+                    Message::DaemonDone,
+                )
+            }
+            Message::DaemonDone(result) => {
+                self.daemon_busy = false;
+                self.toast = Some(match result {
+                    Ok(m) => m,
+                    Err(e) => e,
+                });
+                self.daemon = daemon::refresh_view(&self.data_dir, &self.daemon);
+                Task::perform(daemon::systemd_enabled(), Message::AutostartReady)
+            }
+            Message::ToggleAutostart => {
+                if self.fixture.is_some() || !self.daemon.service_installed {
+                    return Task::none();
+                }
+                self.daemon_busy = true;
+                Task::perform(
+                    daemon::toggle_autostart(self.daemon.autostart),
+                    Message::DaemonDone,
+                )
+            }
+            Message::AutostartReady(enabled) => {
+                self.daemon.autostart = enabled;
+                Task::none()
+            }
+            Message::BackendReady(backend) => {
+                self.backend = Some(backend);
+                Task::perform(capture::list_outputs(backend), Message::OutputsReady)
+            }
+            Message::OutputsReady(outputs) => {
+                self.outputs = outputs;
+                Task::none()
+            }
+            Message::CaptureNow => {
+                let backend = match capture::backend_ready(self.backend) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        self.preview_error = Some(e);
+                        return Task::none();
+                    }
+                };
+                self.capturing = true;
+                self.preview_error = None;
+                let output = settings::nonempty(&self.settings.capture_output);
+                Task::perform(capture::capture_now(backend, output), Message::CaptureReady)
+            }
+            Message::CaptureReady(result) => {
+                self.capturing = false;
+                match result {
+                    Ok(shot) => {
+                        self.preview = Some((
+                            Handle::from_rgba(shot.width, shot.height, shot.rgba),
+                            shot.captured_at,
+                        ));
+                        self.preview_error = None;
+                    }
+                    Err(e) => self.preview_error = Some(e),
+                }
+                Task::none()
+            }
+            Message::InstallModel => {
+                if self.fixture.is_some() || self.tessdata_busy {
+                    return Task::none();
+                }
+                self.tessdata_busy = true;
+                Task::perform(capture::install_reading_model(), Message::ModelReady)
+            }
+            Message::RebuildModel => {
+                if self.fixture.is_some() || self.tessdata_busy {
+                    return Task::none();
+                }
+                self.tessdata_busy = true;
+                Task::perform(capture::rebuild_reading_model(), Message::ModelReady)
+            }
+            Message::ModelReady(result) => {
+                self.tessdata_busy = false;
+                self.tessdata_installed = capture::tessdata_installed();
+                self.toast = Some(match result {
+                    Ok(m) => m,
+                    Err(e) => e,
+                });
+                Task::none()
+            }
+            Message::Vacuum => {
+                if self.fixture.is_some() || self.vacuum_busy {
+                    return Task::none();
+                }
+                self.vacuum_busy = true;
+                Task::perform(
+                    capture::vacuum_store(self.data_dir.clone()),
+                    Message::VacuumReady,
+                )
+            }
+            Message::VacuumReady(result) => {
+                self.vacuum_busy = false;
+                self.toast = Some(match result {
+                    Ok(m) => m,
+                    Err(e) => e,
+                });
+                Task::none()
+            }
+            Message::ConfirmClear => {
+                self.confirm_clear = !self.confirm_clear;
+                Task::none()
+            }
+            Message::ClearData => {
+                if self.fixture.is_some() {
+                    return Task::none();
+                }
+                self.confirm_clear = false;
+                Task::perform(
+                    capture::clear_store(self.data_dir.clone()),
+                    Message::ClearReady,
+                )
+            }
+            Message::ClearReady(result) => {
+                let ok = result.is_ok();
+                self.toast = Some(match result {
+                    Ok(m) => m,
+                    Err(e) => e,
+                });
+                if ok {
+                    self.games.clear();
+                    self.health_status = health_status_for(&self.data_dir, &self.games);
+                }
+                Task::none()
+            }
+            Message::UpdateChecked(info) => {
+                self.update = info;
+                Task::none()
+            }
+            Message::OpenUpdate(url) => {
+                update::open_release_page(&url);
+                Task::none()
+            }
+            Message::WindowOpened(id) => {
+                self.window_id = Some(id);
+                window::gain_focus(id)
+            }
+            Message::WindowClosed(id) => {
+                if self.window_id == Some(id) {
+                    self.window_id = None;
+                }
+                // No tray and no window: nothing can restore us — exit.
+                if self.window_id.is_none() && self.tray.is_none() {
+                    iced::exit()
+                } else {
+                    Task::none()
+                }
+            }
+            Message::Tray(action) => self.apply_tray(action),
         }
     }
 
-    pub fn view(&self) -> Element<'_, Message> {
+    fn on_tick(&mut self) -> Task<Message> {
+        if self.fixture.is_none() {
+            let mtime = snapshot::snapshot_mtime(&self.data_dir);
+            if mtime != self.snapshot_mtime {
+                self.snapshot_mtime = mtime;
+                let snap = snapshot::load_snapshot(&self.data_dir);
+                self.games = games_from_snapshot(&snap);
+                self.live_status = live_status_for(&self.games);
+                self.health_status = health_status_for(&self.data_dir, &self.games);
+                self.clock = Utc::now();
+            }
+            self.daemon = daemon::refresh_view(&self.data_dir, &self.daemon);
+        }
+
+        tray::pump_gtk();
+        if let Some(handle) = &self.tray
+            && let Some(action) = tray::poll(handle)
+        {
+            return self.apply_tray(action);
+        }
+
+        let mut tasks = Vec::new();
+
+        self.tick_count = self.tick_count.saturating_add(1);
+        if self.fixture.is_none() && self.tick_count.is_multiple_of(10) {
+            tasks.push(Task::perform(
+                daemon::systemd_enabled(),
+                Message::AutostartReady,
+            ));
+        }
+
+        let now = Utc::now();
+        if seasons::should_refetch(
+            self.fixture.is_some(),
+            self.seasons_url.as_deref(),
+            self.last_seasons_attempt,
+            now,
+        ) {
+            let url = self
+                .seasons_url
+                .clone()
+                .expect("should_refetch requires a URL");
+            self.last_seasons_attempt = Some(now);
+            tasks.push(Task::perform(
+                seasons::fetch_seasons(url),
+                Message::SeasonsFetched,
+            ));
+        }
+
+        if tasks.is_empty() {
+            Task::none()
+        } else {
+            Task::batch(tasks)
+        }
+    }
+
+    fn apply_tray(&mut self, action: TrayAction) -> Task<Message> {
+        match action {
+            TrayAction::Quit => iced::exit(),
+            TrayAction::Show => self.show_window(),
+            TrayAction::Hide => self.hide_window(),
+        }
+    }
+
+    fn show_window(&mut self) -> Task<Message> {
+        match tray_show_op(self.window_id) {
+            TrayWindowOp::Focus(id) => window::gain_focus(id),
+            TrayWindowOp::Open => {
+                let (id, open) = window::open(window_settings());
+                self.window_id = Some(id);
+                open.map(Message::WindowOpened)
+            }
+            TrayWindowOp::Close(_) => Task::none(),
+        }
+    }
+
+    fn hide_window(&mut self) -> Task<Message> {
+        match tray_hide_op(self.window_id) {
+            Some(TrayWindowOp::Close(id)) => {
+                self.window_id = None;
+                window::close(id)
+            }
+            _ => Task::none(),
+        }
+    }
+
+    pub fn view(&self, _window: window::Id) -> Element<'_, Message> {
         let header = widgets::app_header(self);
         let nav = widgets::sidebar(self.screen);
 
@@ -373,6 +758,7 @@ impl TrackerApp {
                 Screen::Heroes => crate::heroes::view(self, size.width),
                 Screen::Maps => crate::maps::view(self),
                 Screen::Seasons => crate::seasons::view(self),
+                Screen::Settings => crate::settings::view(self),
             })
             .width(Fill)
             .height(Length::Shrink),
@@ -427,5 +813,25 @@ fn health_status_for(data_dir: &std::path::Path, games: &[Game]) -> String {
         "Ready".into()
     } else {
         "Waiting for a capture".into()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{TrayWindowOp, tray_hide_op, tray_show_op};
+    use iced::window;
+
+    #[test]
+    fn hide_closes_the_open_window_and_is_noop_when_already_hidden() {
+        let id = window::Id::unique();
+        assert_eq!(tray_hide_op(Some(id)), Some(TrayWindowOp::Close(id)));
+        assert_eq!(tray_hide_op(None), None);
+    }
+
+    #[test]
+    fn show_opens_when_hidden_and_focuses_when_visible() {
+        let id = window::Id::unique();
+        assert_eq!(tray_show_op(None), TrayWindowOp::Open);
+        assert_eq!(tray_show_op(Some(id)), TrayWindowOp::Focus(id));
     }
 }
