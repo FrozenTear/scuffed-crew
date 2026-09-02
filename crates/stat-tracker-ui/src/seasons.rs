@@ -43,7 +43,7 @@ pub struct SeasonRow {
     pub record: Record,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct UiStateFile {
     /// `None` / omitted = all time. Some(id) = that season.
     #[serde(default)]
@@ -51,15 +51,6 @@ struct UiStateFile {
     /// Session-scoped companion hide (`session_id` / `process`). `None` = auto.
     #[serde(default)]
     overlay_hidden_key: Option<String>,
-}
-
-impl Default for UiStateFile {
-    fn default() -> Self {
-        Self {
-            season: None,
-            overlay_hidden_key: None,
-        }
-    }
 }
 
 pub fn cache_path(data_dir: &Path) -> PathBuf {
