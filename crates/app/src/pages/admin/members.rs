@@ -6,7 +6,8 @@ use crate::components::{
     ConfirmDialog, DataTable, FormModal, RolePill, StatusPill, SummaryCard, Toast, admin_pending,
     use_toast,
 };
-use crate::hooks::{ModalController, use_api_list};
+use crate::hooks::{ModalController, use_api_list, use_api_list_prefer};
+use crate::state::use_auth;
 use scuffed_api_client::ApiClient;
 use scuffed_types::api::{ChangeRoleRequest, CreateGameAccountRequest, ToggleActiveRequest};
 
@@ -67,14 +68,73 @@ struct UpdateAvatarBody {
 
 const ROLES: [&str; 4] = ["recruit", "member", "officer", "admin"];
 
+/// Active-only list — any org member. Do not put `include_inactive` here.
+const ADMIN_MEMBERS_ACTIVE_ONLY: &str = "/api/members";
+/// Officer+ contract from API PR #52. Recruit/member → 403.
+const ADMIN_MEMBERS_INCLUDE_INACTIVE: &str = "/api/members?include_inactive=true";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MembersListMode {
+    /// Flag not sent (non-officer).
+    ActiveOnly,
+    /// Officer requested include_inactive and the server accepted (200).
+    IncludeInactive,
+    /// Officer requested include_inactive, got 403, fell back to active-only.
+    FallbackActiveOnly,
+}
+
+fn preferred_members_path(is_officer: bool) -> Option<&'static str> {
+    is_officer.then_some(ADMIN_MEMBERS_INCLUDE_INACTIVE)
+}
+
+fn members_list_mode(is_officer: bool, used_forbidden_fallback: bool) -> MembersListMode {
+    if !is_officer {
+        MembersListMode::ActiveOnly
+    } else if used_forbidden_fallback {
+        MembersListMode::FallbackActiveOnly
+    } else {
+        MembersListMode::IncludeInactive
+    }
+}
+
+fn list_intro_copy(mode: MembersListMode) -> &'static str {
+    match mode {
+        MembersListMode::IncludeInactive => {
+            "Inactive members stay on this list (dimmed) with Activate. If a deactivated row disappears, it is kept under Recently deactivated until the include_inactive API (#52) is live."
+        }
+        MembersListMode::FallbackActiveOnly => {
+            "Could not load inactive members (officer access required). Showing active members only. Members you deactivate this session stay under Recently deactivated."
+        }
+        MembersListMode::ActiveOnly => "Active members only.",
+    }
+}
+
+fn member_row_class(is_active: bool) -> &'static str {
+    if is_active { "" } else { "is-inactive" }
+}
+
+fn session_inactive_not_in_list(recent: &[Member], listed_ids: &[String]) -> Vec<Member> {
+    recent
+        .iter()
+        .filter(|m| !listed_ids.iter().any(|id| id == &m.id))
+        .cloned()
+        .collect()
+}
+
 #[component]
 pub fn AdminMembers() -> Element {
-    let mut members = use_api_list::<Member>("/api/members");
+    let auth = use_auth();
+    let (mut members, include_inactive_fell_back) = use_api_list_prefer::<Member>(
+        move || preferred_members_path(auth().is_officer_or_above()).map(str::to_string),
+        ADMIN_MEMBERS_ACTIVE_ONLY,
+    );
     let mut games = use_api_list::<Game>("/api/games");
     let mut toast = use_toast();
-    // GET /api/members is active-only — keep this-session deactivations so
-    // Activate can still hit PUT /api/members/:id (the real toggle endpoint).
+    // Session fallback: if include_inactive (#52) is not live, a deactivate
+    // drops the row from GET /api/members. Keep those here so Activate still
+    // works. When #52 is live they reappear in `members` and this list hides.
     let mut recently_inactive: Signal<Vec<Member>> = use_signal(Vec::new);
+    let list_mode = members_list_mode(auth().is_officer_or_above(), include_inactive_fell_back());
 
     // Role change modal
     let mut role_modal = ModalController::<Member>::new();
@@ -244,9 +304,7 @@ pub fn AdminMembers() -> Element {
                             row.is_active = false;
                             recently_inactive.write().retain(|m| m.id != id);
                             recently_inactive.write().push(row);
-                            toast.show(Toast::success(
-                                "Member deactivated. They left the active list — Activate remains available in Recently deactivated (this session).",
-                            ));
+                            toast.show(Toast::success("Member deactivated."));
                         }
                         members.refresh += 1;
                         games.refresh += 1;
@@ -520,7 +578,7 @@ pub fn AdminMembers() -> Element {
             h1 { "Members" }
         }
         p { class: "empty-state", style: "text-align:left;padding:0 0 1rem;margin:0;",
-            "This list is active members only. Deactivating someone removes the row. Activate is available for members you deactivate in this session."
+            "{list_intro_copy(list_mode)}"
         }
 
         // Members table
@@ -545,8 +603,9 @@ pub fn AdminMembers() -> Element {
                                 let m_pw = member.clone();
                                 let status_str = if member.is_active { "active" } else { "inactive" };
                                 let joined = crate::util::format_datetime(&member.joined_at);
+                                let row_class = member_row_class(member.is_active);
                                 rsx! {
-                                    tr { key: "{member.id}",
+                                    tr { key: "{member.id}", class: "{row_class}",
                                         td { "{member.display_name}" }
                                         td { RolePill { role: member.org_role.clone() } }
                                         td { StatusPill { status: status_str.to_string() } }
@@ -563,6 +622,12 @@ pub fn AdminMembers() -> Element {
                                                         class: "row-btn danger",
                                                         onclick: move |_| open_toggle(m_toggle.clone()),
                                                         "Deactivate"
+                                                    }
+                                                } else {
+                                                    button {
+                                                        class: "row-btn",
+                                                        onclick: move |_| open_toggle(m_toggle.clone()),
+                                                        "Activate"
                                                     }
                                                 }
                                                 button {
@@ -602,17 +667,15 @@ pub fn AdminMembers() -> Element {
         }
 
         {
-            let active_ids: Vec<String> = members
+            let listed_ids: Vec<String> = members
                 .data
                 .read()
                 .as_ref()
                 .and_then(|d| d.as_ref())
                 .map(|list| list.iter().map(|m| m.id.clone()).collect())
                 .unwrap_or_default();
-            let inactive: Vec<Member> = recently_inactive()
-                .into_iter()
-                .filter(|m| !active_ids.iter().any(|id| id == &m.id))
-                .collect();
+            let recent = recently_inactive();
+            let inactive = session_inactive_not_in_list(&recent, &listed_ids);
             if inactive.is_empty() {
                 rsx! {}
             } else {
@@ -622,14 +685,14 @@ pub fn AdminMembers() -> Element {
                         "Recently deactivated (this session)"
                     }
                     p { class: "empty-state", style: "text-align:left;padding:0 0 0.75rem;margin:0;",
-                        "Earlier inactive members are not listed — the API has no include_inactive param."
+                        "These members are not in the current API response. Activate still works here. Earlier inactive members appear in the main list when include_inactive (#52) is available."
                     }
                     DataTable { headers: vec!["Name", "Role", "Status", "Actions"],
                         for member in inactive.iter() {
                             {
                                 let m_toggle = member.clone();
                                 rsx! {
-                                    tr { key: "inactive-{member.id}",
+                                    tr { key: "inactive-{member.id}", class: "is-inactive",
                                         td { "{member.display_name}" }
                                         td { RolePill { role: member.org_role.clone() } }
                                         td { StatusPill { status: "inactive".to_string() } }
@@ -1026,5 +1089,83 @@ pub fn AdminMembers() -> Element {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn member(id: &str, active: bool) -> Member {
+        Member {
+            id: id.into(),
+            display_name: id.into(),
+            org_role: "member".into(),
+            is_active: active,
+            joined_at: "2026-09-02T00:00:00Z".into(),
+        }
+    }
+
+    #[test]
+    fn officer_requests_include_inactive_non_officer_omits_flag() {
+        assert_eq!(
+            preferred_members_path(true),
+            Some("/api/members?include_inactive=true")
+        );
+        assert_eq!(preferred_members_path(false), None);
+        assert!(
+            !ADMIN_MEMBERS_ACTIVE_ONLY.contains("include_inactive"),
+            "fallback/active-only path must not send the flag"
+        );
+    }
+
+    #[test]
+    fn list_mode_maps_officer_and_403_fallback() {
+        assert_eq!(members_list_mode(false, false), MembersListMode::ActiveOnly);
+        assert_eq!(
+            members_list_mode(false, true),
+            MembersListMode::ActiveOnly,
+            "non-officer never requested the flag"
+        );
+        assert_eq!(
+            members_list_mode(true, false),
+            MembersListMode::IncludeInactive
+        );
+        assert_eq!(
+            members_list_mode(true, true),
+            MembersListMode::FallbackActiveOnly
+        );
+    }
+
+    #[test]
+    fn session_workaround_hides_when_api_returns_the_row() {
+        let recent = vec![member("gone", false), member("listed", false)];
+        let listed = vec!["listed".to_string()];
+        let visible = session_inactive_not_in_list(&recent, &listed);
+        assert_eq!(visible.len(), 1);
+        assert_eq!(visible[0].id, "gone");
+    }
+
+    #[test]
+    fn session_workaround_empty_when_include_inactive_lists_them() {
+        let recent = vec![member("a", false)];
+        let listed = vec!["a".to_string()];
+        assert!(session_inactive_not_in_list(&recent, &listed).is_empty());
+    }
+
+    #[test]
+    fn inactive_rows_use_distinct_class() {
+        assert_eq!(member_row_class(true), "");
+        assert_eq!(member_row_class(false), "is-inactive");
+    }
+
+    #[test]
+    fn intro_copy_mentions_fallback_and_hash_52() {
+        assert!(list_intro_copy(MembersListMode::IncludeInactive).contains("#52"));
+        assert!(
+            list_intro_copy(MembersListMode::FallbackActiveOnly)
+                .contains("officer access required")
+        );
+        assert!(!list_intro_copy(MembersListMode::ActiveOnly).contains("include_inactive"));
     }
 }

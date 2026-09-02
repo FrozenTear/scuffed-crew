@@ -17,6 +17,13 @@ pub const CSS: &str = r#"
     }
     .data-table td { padding: 0.6rem 0.75rem; border-bottom: 1px solid var(--border); color: var(--text-2); }
     .data-table tr:hover td { background: var(--surface); }
+    .data-table tr.is-inactive td {
+        color: var(--text-3);
+        background: color-mix(in srgb, var(--danger) 7%, transparent);
+    }
+    .data-table tr.is-inactive:hover td {
+        background: color-mix(in srgb, var(--danger) 12%, var(--surface));
+    }
 
     /* Action buttons in table rows */
     .row-actions { display: flex; gap: 0.35rem; flex-wrap: wrap; }

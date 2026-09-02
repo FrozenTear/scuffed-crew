@@ -12,6 +12,21 @@ pub enum ClientError {
     Deserialize(String),
 }
 
+impl ClientError {
+    /// HTTP status when the server answered; `None` for network/parse failures.
+    pub fn http_status(&self) -> Option<u16> {
+        match self {
+            Self::Http { status, .. } => Some(*status),
+            _ => None,
+        }
+    }
+
+    /// `GET /api/members?include_inactive=true` is officer+; recruit/member → 403.
+    pub fn is_forbidden(&self) -> bool {
+        self.http_status() == Some(403)
+    }
+}
+
 /// Servers reply with `{"error": "..."}` bodies; surface that message so user-facing
 /// toasts explain the failure instead of only showing the status code.
 fn format_http_error(status: u16, body: &str) -> String {
@@ -275,6 +290,34 @@ mod tests {
         assert_eq!(
             format_http_error(404, r#"{"detail":"x"}"#),
             "HTTP error: 404"
+        );
+    }
+
+    #[test]
+    fn forbidden_is_http_403_only() {
+        use super::ClientError;
+        assert!(
+            ClientError::Http {
+                status: 403,
+                body: r#"{"error":"Officer access required"}"#.into(),
+            }
+            .is_forbidden()
+        );
+        assert!(
+            !ClientError::Http {
+                status: 401,
+                body: String::new(),
+            }
+            .is_forbidden()
+        );
+        assert!(!ClientError::Network("offline".into()).is_forbidden());
+        assert_eq!(
+            ClientError::Http {
+                status: 403,
+                body: String::new(),
+            }
+            .http_status(),
+            Some(403)
         );
     }
 }
