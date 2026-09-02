@@ -43,7 +43,7 @@ pub fn view(app: &TrackerApp) -> Element<'_, Message> {
 
 /// 2-column compact shelf. An expanded game *replaces* its compact card
 /// (full-width) instead of duplicating below the row.
-fn sitting_cards<'a>(games: &'a [Game], app: &'a TrackerApp) -> Element<'a, Message> {
+fn sitting_cards<'a>(games: &[Game], app: &'a TrackerApp) -> Element<'a, Message> {
     let mut col = column![].spacing(GRID_GAP).width(Fill);
     let mut pending: Vec<&Game> = Vec::new();
     for g in games {

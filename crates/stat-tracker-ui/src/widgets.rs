@@ -768,20 +768,6 @@ fn win_bar(rate: f32) -> Element<'static, Message> {
     container(parts).width(Fill).into()
 }
 
-#[cfg(test)]
-mod tests {
-    use super::win_bar_portions;
-
-    #[test]
-    fn win_bar_portions_match_rate() {
-        assert_eq!(win_bar_portions(0.0), (0, 100));
-        assert_eq!(win_bar_portions(0.18), (18, 82));
-        assert_eq!(win_bar_portions(0.5), (50, 50));
-        assert_eq!(win_bar_portions(0.7), (70, 30));
-        assert_eq!(win_bar_portions(1.0), (100, 0));
-    }
-}
-
 fn card_shell(
     role: Role,
     outcome: Outcome,
@@ -811,4 +797,18 @@ fn card_shell(
     .height(height)
     .clip(true)
     .into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::win_bar_portions;
+
+    #[test]
+    fn win_bar_portions_match_rate() {
+        assert_eq!(win_bar_portions(0.0), (0, 100));
+        assert_eq!(win_bar_portions(0.18), (18, 82));
+        assert_eq!(win_bar_portions(0.5), (50, 50));
+        assert_eq!(win_bar_portions(0.7), (70, 30));
+        assert_eq!(win_bar_portions(1.0), (100, 0));
+    }
 }
