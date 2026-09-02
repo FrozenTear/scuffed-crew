@@ -200,6 +200,7 @@ impl TrackerApp {
             &cli.data_dir,
             &saved_config.game_process_names,
             cli.fixture.is_some(),
+            saved_config.session_window_secs,
         );
         let overlay_hold = overlay::reconcile_hold(
             OverlayHold::from_persisted(seasons::load_overlay_hidden_key(&cli.data_dir)),
@@ -312,6 +313,7 @@ impl TrackerApp {
             &self.data_dir,
             &self.saved_config.game_process_names,
             self.fixture.is_some(),
+            self.saved_config.session_window_secs,
         );
         let next = overlay::reconcile_hold(self.overlay_hold.clone(), key.as_deref());
         if next != self.overlay_hold {
@@ -799,6 +801,7 @@ impl TrackerApp {
             &self.data_dir,
             &self.saved_config.game_process_names,
             self.fixture.is_some(),
+            self.saved_config.session_window_secs,
         );
         self.overlay_hold = overlay::toggle_hold(self.overlay_hold.clone(), key.as_deref());
         if let Err(e) =

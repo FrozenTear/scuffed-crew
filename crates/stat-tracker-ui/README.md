@@ -140,7 +140,7 @@ systemctl --user restart scuffed-stat-tracker.service
 
 Layer-shell surface (`iced_layershell` 0.19, pinned with Iced 0.14): `Layer::Overlay`, top-right, margins 24, width 360, height to content, `KeyboardInteractivity::None`, exclusive zone 0, output = `capture_output` from config (same monitor the daemon captures). Clicks and keys pass through (`events_transparent`) so fullscreen Overwatch keeps input.
 
-**Visibility:** auto-show while the game is running (`active_game.json` or the configured game process). Header / Overview health / tray **Hide / show overlay** hides it for **this game only** — it does not reopen mid-session. When the game process ends, the hold clears and the next launch auto-shows again. The hold is `overlay_hidden_key` in `<data_dir>/ui_state.json` (the live `session_id`, or `process` before the first Tab). Esc is N/A (`KeyboardInteractivity::None`).
+**Visibility:** auto-show while the **game process** is running (configured `game_process_names` in `/proc`). A leftover `active_game.json` does **not** count as live — the daemon keeps that file after a match. While the process is up, the file may supply a `session_id` only for an unfinished game inside `session_window_secs`; decided outcomes and stale `last_activity` are ignored. Empty process names → not running. Header / Overview health / tray **Hide / show overlay** hides it until the **process ends** — it does not reopen mid-session (new match ids keep the hold). Next launch auto-shows. The hold is `overlay_hidden_key` in `<data_dir>/ui_state.json`. Esc is N/A (`KeyboardInteractivity::None`).
 
 The overlay is a **second process**, not a second window on `iced::daemon`:
 

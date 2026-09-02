@@ -11,15 +11,16 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant, SystemTime};
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, TimeDelta, Utc};
 use iced::widget::{column, container, row, space, text};
 use iced::{Alignment, Background, Border, Element, Fill, Padding, Shadow};
 use scuffed_types::Season;
 use stat_tracker::detect::game_running::GameProcessGate;
+use stat_tracker::detect::MatchOutcome;
 
-use crate::aggregate::{Record, aggregate};
+use crate::aggregate::{aggregate, Record};
 use crate::cli::{Cli, FixtureKind};
-use crate::model::{Game, Outcome, Role, SeasonSel, display_hero_name};
+use crate::model::{display_hero_name, Game, Outcome, Role, SeasonSel};
 use crate::overview::tonight_games;
 use crate::seasons;
 use crate::snapshot::{self, games_from_snapshot};
@@ -39,6 +40,8 @@ const MINI_HERO_HEIGHT: f32 = 52.0;
 const RESPAWN_GRACE: Duration = Duration::from_secs(2);
 const PROCESS_SESSION_KEY: &str = "process";
 const FIXTURE_SESSION_KEY: &str = "fixture";
+/// Same default as `Config::session_window_secs`.
+pub const DEFAULT_SESSION_WINDOW_SECS: u64 = 1800;
 
 /// Manual hide is scoped to one live game. Auto-show resumes when that
 /// process ends and the next one starts — we do not reopen mid-session.
@@ -73,18 +76,14 @@ pub fn overlay_visible(hold: &OverlayHold, game_running: bool) -> bool {
 
 /// Bind / release a session hide. `key` is [`live_session_key`].
 ///
-/// - Game ended (`key` is `None`) → Auto (next launch shows).
-/// - Same key, or `process` upgraded to a real `session_id` → stay Hidden.
-/// - Different key → Auto (new game).
+/// Hide sticks until the **process** ends (`key` is `None`). A new match id
+/// or a `process` ↔ `session_id` swap while Overwatch is still up keeps the
+/// hold — we do not reopen mid-session. Next launch (None, then a key) is Auto.
 pub fn reconcile_hold(hold: OverlayHold, key: Option<&str>) -> OverlayHold {
     match (hold, key) {
         (OverlayHold::Auto, _) => OverlayHold::Auto,
         (OverlayHold::Hidden(_), None) => OverlayHold::Auto,
-        (OverlayHold::Hidden(h), Some(c)) if h == c => OverlayHold::Hidden(h),
-        (OverlayHold::Hidden(h), Some(c)) if h == PROCESS_SESSION_KEY => {
-            OverlayHold::Hidden(c.to_string())
-        }
-        (OverlayHold::Hidden(_), Some(_)) => OverlayHold::Auto,
+        (OverlayHold::Hidden(_), Some(c)) => OverlayHold::Hidden(c.to_string()),
     }
 }
 
@@ -100,21 +99,78 @@ pub fn toggle_hold(hold: OverlayHold, key: Option<&str>) -> OverlayHold {
     }
 }
 
-/// Identity of the live game, if any. `process` is used until `active_game.json`
-/// has a session id so a hide-before-first-Tab stays hidden.
+/// Identity of the live game, if any.
+///
+/// **Process-first:** `active_game.json` never opens the gate — the daemon
+/// leaves that file on disk after a match (Robert's last-night Defeat). Empty
+/// process names are not running. While the process is live the file may
+/// supply a `session_id` only for an *unfinished* game inside `window_secs`;
+/// otherwise the key is `process` (hide-before-first-Tab).
 pub fn live_session_key(
     data_dir: &Path,
     process_names: &[String],
     fixture: bool,
+    window_secs: u64,
+) -> Option<String> {
+    resolve_live_session_key(
+        data_dir,
+        fixture,
+        window_secs,
+        Utc::now(),
+        fixture || process_is_running(process_names),
+    )
+}
+
+pub fn resolve_live_session_key(
+    data_dir: &Path,
+    fixture: bool,
+    window_secs: u64,
+    now: DateTime<Utc>,
+    process_running: bool,
 ) -> Option<String> {
     if fixture {
         return Some(FIXTURE_SESSION_KEY.into());
     }
-    if let Some(id) = active_game_session_id(data_dir) {
-        return Some(id);
+    if !process_running {
+        return None;
     }
-    if process_is_running(process_names) {
-        return Some(PROCESS_SESSION_KEY.into());
+    Some(
+        live_active_game_key(data_dir, window_secs, now)
+            .unwrap_or_else(|| PROCESS_SESSION_KEY.into()),
+    )
+}
+
+/// Unfinished `active_game.json` session still inside the sitting window.
+/// Decided outcomes and stale `last_activity` are ignored.
+pub fn live_active_game_key(
+    data_dir: &Path,
+    window_secs: u64,
+    now: DateTime<Utc>,
+) -> Option<String> {
+    let bytes = std::fs::read(data_dir.join("active_game.json")).ok()?;
+    let v: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    let id = v.get("session_id")?.as_str()?.trim();
+    if id.is_empty() {
+        return None;
+    }
+    let outcome = v.get("outcome").and_then(|o| o.as_str()).unwrap_or("");
+    if MatchOutcome::parse_lenient(outcome).is_decided() {
+        return None;
+    }
+    let last = parse_last_activity(&v)?;
+    let age = now.signed_duration_since(last);
+    if age < TimeDelta::zero() || age > TimeDelta::seconds(window_secs as i64) {
+        return None;
+    }
+    Some(id.to_string())
+}
+
+fn parse_last_activity(v: &serde_json::Value) -> Option<DateTime<Utc>> {
+    let raw = v.get("last_activity")?;
+    if let Some(s) = raw.as_str() {
+        return DateTime::parse_from_rfc3339(s)
+            .ok()
+            .map(|dt| dt.with_timezone(&Utc));
     }
     None
 }
@@ -124,11 +180,6 @@ pub fn active_game_session_id(data_dir: &Path) -> Option<String> {
     let v: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
     let id = v.get("session_id")?.as_str()?.trim();
     (!id.is_empty()).then(|| id.to_string())
-}
-
-/// Whether the daemon currently has an open game (`active_game.json`).
-pub fn active_game_present(data_dir: &Path) -> bool {
-    active_game_session_id(data_dir).is_some()
 }
 
 /// Process scan using the daemon's gate, but **empty names mean not running**.
@@ -143,10 +194,16 @@ pub fn process_is_running(names: &[String]) -> bool {
 }
 
 /// Fixture mode pretends the game is running so the toggle can open the
-/// overlay for layout shots. Live mode uses `active_game.json` and, when
-/// process names are set, the same `/proc` comm scan the daemon uses.
+/// overlay for layout shots. Live mode is the configured process scan only
+/// — a leftover `active_game.json` does not count.
 pub fn detect_game_running(data_dir: &Path, process_names: &[String], fixture: bool) -> bool {
-    live_session_key(data_dir, process_names, fixture).is_some()
+    live_session_key(
+        data_dir,
+        process_names,
+        fixture,
+        DEFAULT_SESSION_WINDOW_SECS,
+    )
+    .is_some()
 }
 
 /// Layer-shell numbers the runner applies. Kept free of Wayland types so
@@ -312,7 +369,7 @@ fn season_label(sel: &SeasonSel, seasons: &[Season]) -> String {
 /// tracks the card stack so the panel is "height to content".
 pub fn content_height(model: &OverlayModel) -> u32 {
     let mut h: u32 = 16 + 48 + 12;
-    h += if model.last_game.is_some() { 196 } else { 56 };
+    h += if model.last_game.is_some() { 196 } else { 72 };
     h += 12 + 28;
     h += 12 + 18;
     if model.top_heroes.is_empty() {
@@ -485,12 +542,12 @@ pub fn view<'a>(model: &'a OverlayModel) -> Element<'a, OverlayViewMessage> {
 fn header_row(model: &OverlayModel) -> Element<'_, OverlayViewMessage> {
     row![
         status_dot(model.live),
-        text(model.win_rate_line())
+        text(ellipsize(&model.win_rate_line(), 42))
             .size(SIZE_META)
             .font(FONT_SEMIBOLD)
             .color(TEXT)
             .width(Fill)
-            .wrapping(iced::widget::text::Wrapping::Word),
+            .wrapping(iced::widget::text::Wrapping::None),
     ]
     .spacing(10)
     .align_y(Alignment::Center)
@@ -523,21 +580,23 @@ fn last_game_card(game: Option<&OverlayLastGame>) -> Element<'_, OverlayViewMess
         )
         .padding(PAD_INNER)
         .width(Fill)
+        .height(72.0)
         .style(theme::surface_panel)
+        .clip(true)
         .into();
     };
 
     let mut col = column![
         label(game.role.label()),
-        text(game.map_name.clone())
+        text(ellipsize(&game.map_name, 28))
             .size(SIZE_TITLE)
             .font(FONT_EXTRABOLD)
             .color(TEXT)
             .width(Fill)
-            .wrapping(iced::widget::text::Wrapping::Word),
+            .wrapping(iced::widget::text::Wrapping::None),
         text(format!(
             "{}  ·  {}",
-            game.hero,
+            ellipsize(&game.hero, 18),
             game.played_at.format("%H:%M")
         ))
         .size(SIZE_META)
@@ -643,12 +702,12 @@ fn mini_hero(hero: &OverlayHero) -> Element<'static, OverlayViewMessage> {
     let body = row![
         column![
             label(hero.role.label()),
-            text(hero.hero.clone())
+            text(ellipsize(&hero.hero, 18))
                 .size(SIZE_BODY)
                 .font(FONT_SEMIBOLD)
                 .color(TEXT)
                 .width(Fill)
-                .wrapping(iced::widget::text::Wrapping::Word),
+                .wrapping(iced::widget::text::Wrapping::None),
         ]
         .spacing(2)
         .width(Fill),
@@ -698,6 +757,16 @@ fn chip<'a>(label_s: &'a str) -> Element<'a, OverlayViewMessage> {
     .into()
 }
 
+/// One line at 360px — wrapping grew the stack past the computed height.
+fn ellipsize(s: &str, max_chars: usize) -> String {
+    let count = s.chars().count();
+    if count <= max_chars {
+        return s.to_string();
+    }
+    let take = max_chars.saturating_sub(1);
+    format!("{}…", s.chars().take(take).collect::<String>())
+}
+
 fn label(s: &str) -> text::Text<'static> {
     text(s.to_ascii_uppercase())
         .size(SIZE_LABEL)
@@ -741,6 +810,7 @@ pub(crate) struct OverlayApp {
     pub(crate) model: OverlayModel,
     snapshot_mtime: Option<SystemTime>,
     clock: DateTime<Utc>,
+    surface_height: u32,
 }
 
 impl OverlayApp {
@@ -772,13 +842,25 @@ impl OverlayApp {
                 cli.fixture.is_some(),
             ),
         );
+        let surface_height = content_height(&model);
         Self {
             data_dir: cli.data_dir.clone(),
             fixture: cli.fixture,
             model,
             snapshot_mtime: snapshot::snapshot_mtime(&cli.data_dir),
             clock,
+            surface_height,
         }
+    }
+
+    /// After a model refresh, the layer size to apply (if it changed).
+    pub(crate) fn take_size_change(&mut self) -> Option<(u32, u32)> {
+        let height = content_height(&self.model);
+        if height == self.surface_height {
+            return None;
+        }
+        self.surface_height = height;
+        Some((OVERLAY_WIDTH, height))
     }
 
     pub(crate) fn refresh(&mut self) {
@@ -882,11 +964,14 @@ mod tests {
     }
 
     #[test]
-    fn new_session_clears_previous_hide() {
+    fn new_match_while_process_up_keeps_hide() {
         let hold = OverlayHold::Hidden("sess-old".into());
         let next = reconcile_hold(hold, Some("sess-new"));
-        assert_eq!(next, OverlayHold::Auto);
-        assert!(overlay_visible(&next, true));
+        assert_eq!(next, OverlayHold::Hidden("sess-new".into()));
+        assert!(!overlay_visible(&next, true));
+        let menu = reconcile_hold(next, Some("process"));
+        assert_eq!(menu, OverlayHold::Hidden("process".into()));
+        assert!(!overlay_visible(&menu, true));
     }
 
     #[test]
@@ -921,7 +1006,7 @@ mod tests {
     }
 
     #[test]
-    fn active_game_json_opens_the_gate() {
+    fn stale_active_game_json_does_not_open_the_gate() {
         let dir = std::env::temp_dir().join(format!(
             "sst-overlay-ag-{}",
             std::time::SystemTime::now()
@@ -930,10 +1015,62 @@ mod tests {
                 .as_nanos()
         ));
         std::fs::create_dir_all(&dir).unwrap();
-        assert!(!active_game_present(&dir));
-        std::fs::write(dir.join("active_game.json"), r#"{"session_id":"s1"}"#).unwrap();
-        assert!(active_game_present(&dir));
-        assert!(detect_game_running(&dir, &[], false));
+        let now = Utc.with_ymd_and_hms(2026, 9, 2, 20, 0, 0).unwrap();
+        std::fs::write(
+            dir.join("active_game.json"),
+            r#"{"session_id":"s1","outcome":"defeat","session_created":false,"last_activity":"2026-09-01T18:00:00Z"}"#,
+        )
+        .unwrap();
+        assert_eq!(active_game_session_id(&dir).as_deref(), Some("s1"));
+        assert_eq!(live_active_game_key(&dir, 1800, now), None);
+        assert!(!detect_game_running(&dir, &[], false));
+        assert!(!detect_game_running(&dir, &["Overwatch.exe".into()], false));
+        assert_eq!(
+            resolve_live_session_key(&dir, false, 1800, now, false),
+            None,
+            "no process → not running, file ignored"
+        );
+        assert_eq!(
+            resolve_live_session_key(&dir, false, 1800, now, true).as_deref(),
+            Some("process"),
+            "process live + decided leftover → process key, not last night's id"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn unfinished_recent_active_game_supplies_key_only_while_process_live() {
+        let dir = std::env::temp_dir().join(format!(
+            "sst-overlay-ag-live-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let now = Utc.with_ymd_and_hms(2026, 9, 2, 20, 0, 0).unwrap();
+        std::fs::write(
+            dir.join("active_game.json"),
+            r#"{"session_id":"sess-tab","outcome":"unknown","last_activity":"2026-09-02T19:55:00Z"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            live_active_game_key(&dir, 1800, now).as_deref(),
+            Some("sess-tab")
+        );
+        assert_eq!(
+            live_active_game_key(&dir, 1800, now + chrono::Duration::hours(1)),
+            None,
+            "last_activity older than session window"
+        );
+        assert_eq!(
+            resolve_live_session_key(&dir, false, 1800, now, false),
+            None
+        );
+        assert_eq!(
+            resolve_live_session_key(&dir, false, 1800, now, true).as_deref(),
+            Some("sess-tab")
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -955,7 +1092,9 @@ mod tests {
     fn sample_model_has_header_last_game_strip_and_heroes() {
         let games = sample_games();
         let seasons = sample_seasons();
-        let clock = Utc.with_ymd_and_hms(2026, 9, 2, 22, 0, 0).unwrap();
+        // Newest game's instant — 22:00 UTC is already 00:00 in Europe/Oslo
+        // and drops the Sept 2 evening games off "tonight".
+        let clock = games[0].played_at;
         let model = build_model(
             &games,
             &seasons,
@@ -1013,11 +1152,12 @@ mod tests {
 
     #[test]
     fn overlay_view_builds_for_empty_and_sample() {
-        let clock = Utc.with_ymd_and_hms(2026, 9, 2, 22, 0, 0).unwrap();
+        let games = sample_games();
+        let clock = games[0].played_at;
         let empty = build_model(&[], &[], &SeasonSel::AllTime, clock, false, false);
         let _ = view(&empty);
         let sample = build_model(
-            &sample_games(),
+            &games,
             &sample_seasons(),
             &SeasonSel::Season("season-17".into()),
             clock,
@@ -1025,5 +1165,34 @@ mod tests {
             true,
         );
         let _ = view(&sample);
+    }
+
+    #[test]
+    fn tonight_heroes_survive_utc_offsets() {
+        use chrono::FixedOffset;
+        let games = sample_games();
+        let clock = games[0].played_at;
+        for hours in [-12, -5, 0, 2, 9, 12] {
+            let tz = FixedOffset::east_opt(hours * 3600).unwrap();
+            let today = clock.with_timezone(&tz).date_naive();
+            let tonight: Vec<Game> = games
+                .iter()
+                .filter(|g| g.played_at.with_timezone(&tz).date_naive() == today)
+                .cloned()
+                .collect();
+            assert_eq!(tonight.len(), 3, "offset {hours}h tonight count");
+            let stats = crate::aggregate::aggregate(&tonight, None, None);
+            assert_eq!(
+                stats.heroes.len(),
+                3,
+                "offset {hours}h heroes (aggregation is not TZ-dated)"
+            );
+        }
+    }
+
+    #[test]
+    fn ellipsize_caps_one_line() {
+        assert_eq!(ellipsize("King's Row", 28), "King's Row");
+        assert_eq!(ellipsize("abcdefghij", 8), "abcdefg…");
     }
 }

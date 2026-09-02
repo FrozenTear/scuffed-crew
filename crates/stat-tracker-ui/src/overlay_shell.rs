@@ -11,7 +11,7 @@ use iced_layershell::to_layer_message;
 
 use crate::cli::Cli;
 use crate::overlay::{
-    OVERLAY_NAMESPACE, OverlayApp, content_height, overlay_shell_spec, view as overlay_view,
+    content_height, overlay_shell_spec, view as overlay_view, OverlayApp, OVERLAY_NAMESPACE,
 };
 use crate::theme;
 
@@ -29,7 +29,10 @@ fn update(app: &mut OverlayApp, message: Message) -> Task<Message> {
     match message {
         Message::Tick => {
             app.refresh();
-            Task::none()
+            match app.take_size_change() {
+                Some(size) => Task::done(Message::SizeChange(size)),
+                None => Task::none(),
+            }
         }
         _ => Task::none(),
     }
