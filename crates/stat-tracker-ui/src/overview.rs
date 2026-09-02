@@ -31,7 +31,11 @@ pub fn view(app: &TrackerApp, content_width: f32) -> Element<'_, Message> {
             !matches!(app.season, SeasonSel::AllTime),
         ),
         widgets::maps_panel(&stats.maps),
-        widgets::health_panel(&app.health_status),
+        widgets::health_panel(
+            &app.health_status,
+            app.overlay_enabled,
+            app.overlay_showing(),
+        ),
     ]
     .spacing(GRID_GAP)
     .width(Fill);

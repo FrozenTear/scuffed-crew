@@ -898,6 +898,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32637268377fc7b10a8c6d51de3e7fba1ce5dd371a96e342b34e6078db558e7f"
 
 [[package]]
+name = "beul"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d3c3baedf037b161e69da9200947329f52afa3b6e1cdbe6f344d6aa350fedd2f"
+
+[[package]]
 name = "bevy"
 version = "0.18.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1532,7 +1538,7 @@ dependencies = [
  "inventory",
  "serde",
  "smallvec",
- "smol_str",
+ "smol_str 0.2.2",
  "thiserror 2.0.18",
  "uuid",
  "variadics_please",
@@ -2903,7 +2909,7 @@ dependencies = [
  "rustc-hash 1.1.0",
  "self_cell",
  "skrifa 0.37.0",
- "smol_str",
+ "smol_str 0.2.2",
  "swash",
  "sys-locale",
  "unicode-bidi",
@@ -3144,12 +3150,36 @@ dependencies = [
 
 [[package]]
 name = "darling"
+version = "0.20.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fc7f46116c46ff9ab3eb1597a45688b6715c6e628b5c133e288e709a29bcb4ee"
+dependencies = [
+ "darling_core 0.20.11",
+ "darling_macro 0.20.11",
+]
+
+[[package]]
+name = "darling"
 version = "0.21.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9cdf337090841a411e2a7f3deb9187445851f91b309c0c0a29e05f74a00a48c0"
 dependencies = [
- "darling_core",
- "darling_macro",
+ "darling_core 0.21.3",
+ "darling_macro 0.21.3",
+]
+
+[[package]]
+name = "darling_core"
+version = "0.20.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0d00b9596d185e565c2207a0b01f8bd1a135483d02d9b7b0a54b11da8d53412e"
+dependencies = [
+ "fnv",
+ "ident_case",
+ "proc-macro2",
+ "quote",
+ "strsim",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -3167,11 +3197,22 @@ dependencies = [
 
 [[package]]
 name = "darling_macro"
+version = "0.20.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fc34b93ccb385b40dc71c6fceac4b2ad23662c7eeb248cf10d529b7e055b6ead"
+dependencies = [
+ "darling_core 0.20.11",
+ "quote",
+ "syn 2.0.117",
+]
+
+[[package]]
+name = "darling_macro"
 version = "0.21.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d38308df82d1080de0afee5d069fa14b0326a88c14f15c5ccda35b4a6c414c81"
 dependencies = [
- "darling_core",
+ "darling_core 0.21.3",
  "quote",
  "syn 2.0.117",
 ]
@@ -3645,7 +3686,7 @@ dependencies = [
  "futures-channel",
  "futures-util",
  "generational-box",
- "keyboard-types",
+ "keyboard-types 0.7.0",
  "lazy-js-bundle",
  "rustversion",
  "serde",
@@ -4248,7 +4289,7 @@ version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f43e744e4ea338060faee68ed933e46e722fb7f3617e722a5772d7e856d8b3ce"
 dependencies = [
- "darling",
+ "darling 0.21.3",
  "proc-macro2",
  "quote",
  "syn 2.0.117",
@@ -5205,7 +5246,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b9247516746aa8e53411a0db9b62b0e24efbcf6a76e0ba73e5a91b512ddabed7"
 dependencies = [
  "crossbeam-channel",
- "keyboard-types",
+ "keyboard-types 0.7.0",
  "objc2 0.6.4",
  "objc2-app-kit 0.3.2",
  "once_cell",
@@ -6003,7 +6044,7 @@ dependencies = [
  "js-sys",
  "log",
  "wasm-bindgen",
- "windows-core 0.61.2",
+ "windows-core 0.62.2",
 ]
 
 [[package]]
@@ -6045,7 +6086,7 @@ dependencies = [
  "log",
  "num-traits",
  "rustc-hash 2.1.1",
- "smol_str",
+ "smol_str 0.2.2",
  "thiserror 2.0.18",
  "web-time",
 ]
@@ -6059,6 +6100,32 @@ dependencies = [
  "iced_core",
  "iced_futures",
  "log",
+]
+
+[[package]]
+name = "iced_devtools"
+version = "0.14.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "59b8e2a306ac5c583234b02f5404afdb7b7467c8f72a4a44ad3e7be30fc4b339"
+dependencies = [
+ "iced_debug",
+ "iced_program",
+ "iced_widget",
+ "log",
+]
+
+[[package]]
+name = "iced_exdevtools"
+version = "0.19.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b0d34d1c027d135037c34ece007cbfc5aa5c2be54595d2891589f24abafebf25"
+dependencies = [
+ "iced_debug",
+ "iced_devtools",
+ "iced_program",
+ "iced_widget",
+ "log",
+ "winit-core",
 ]
 
 [[package]]
@@ -6095,6 +6162,45 @@ dependencies = [
  "rustc-hash 2.1.1",
  "thiserror 2.0.18",
  "unicode-segmentation",
+]
+
+[[package]]
+name = "iced_layershell"
+version = "0.19.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "51b59e8af02bf4c51db2ee5d130293e6e1e5ac4ae9f74a1e57990a19221aa0d5"
+dependencies = [
+ "enumflags2",
+ "futures",
+ "iced_core",
+ "iced_debug",
+ "iced_devtools",
+ "iced_exdevtools",
+ "iced_futures",
+ "iced_graphics",
+ "iced_layershell_macros",
+ "iced_program",
+ "iced_renderer",
+ "iced_runtime",
+ "layershellev",
+ "log",
+ "mundy",
+ "thiserror 2.0.18",
+ "tracing",
+ "window_clipboard",
+]
+
+[[package]]
+name = "iced_layershell_macros"
+version = "0.19.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "99d35752ff73ef8eb5f15008e501d011aead655baab9a5689dcea40e42e3463e"
+dependencies = [
+ "darling 0.20.11",
+ "manyhow",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -6654,6 +6760,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "keyboard-types"
+version = "0.8.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0fbe853b403ae61a04233030ae8a79d94975281ed9770a1f9e246732b534b28d"
+dependencies = [
+ "bitflags 2.11.0",
+ "serde",
+]
+
+[[package]]
 name = "khronos-egl"
 version = "6.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6690,6 +6806,28 @@ checksum = "1618d4ebd923e97d67e7cd363d80aef35fe961005cbbbb3d2dad8bdd1bc63440"
 dependencies = [
  "arrayvec",
  "smallvec",
+]
+
+[[package]]
+name = "layershellev"
+version = "0.19.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "69fbd3ced50d91a5a118e3e00f49c72040ea6b48b78b159a3936104fc2632925"
+dependencies = [
+ "calloop 0.14.4",
+ "calloop-wayland-source 0.4.1",
+ "log",
+ "raw-window-handle 0.6.2",
+ "smithay-client-toolkit 0.20.0",
+ "tempfile",
+ "thiserror 2.0.18",
+ "waycrate_xkbkeycode",
+ "wayland-backend",
+ "wayland-client",
+ "wayland-cursor",
+ "wayland-protocols",
+ "wayland-protocols-misc",
+ "wayland-protocols-wlr",
 ]
 
 [[package]]
@@ -7205,6 +7343,7 @@ version = "0.11.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b33efb3ca6d3b07393750d4030418d594ab1139cee518f0dc88db70fec873587"
 dependencies = [
+ "darling_core 0.20.11",
  "manyhow-macros",
  "proc-macro2",
  "quote",
@@ -7436,7 +7575,7 @@ dependencies = [
  "crossbeam-channel",
  "dpi",
  "gtk",
- "keyboard-types",
+ "keyboard-types 0.7.0",
  "libxdo",
  "objc2 0.6.4",
  "objc2-app-kit 0.3.2",
@@ -7457,7 +7596,7 @@ dependencies = [
  "crossbeam-channel",
  "dpi",
  "gtk",
- "keyboard-types",
+ "keyboard-types 0.7.0",
  "libxdo",
  "objc2 0.6.4",
  "objc2-app-kit 0.3.2",
@@ -7494,6 +7633,7 @@ checksum = "f32eb0db40f2df2bcfb05c93b8f73938d4c26ce9ac8881f1df0c8d3296921a73"
 dependencies = [
  "android-build",
  "async-io",
+ "beul",
  "cfg-if",
  "dispatch",
  "futures-channel",
@@ -10780,6 +10920,7 @@ dependencies = [
  "dirs",
  "gtk",
  "iced",
+ "iced_layershell",
  "image",
  "reqwest 0.12.28",
  "scuffed-stat-tracker",
@@ -11351,12 +11492,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0512da38f5e2b31201a93524adb8d3136276fa4fe4aafab4e1f727a82b534cc0"
 dependencies = [
  "bitflags 2.11.0",
+ "bytemuck",
  "calloop 0.14.4",
  "calloop-wayland-source 0.4.1",
  "cursor-icon",
  "libc",
  "log",
  "memmap2",
+ "pkg-config",
  "rustix 1.1.4",
  "thiserror 2.0.18",
  "wayland-backend",
@@ -11368,6 +11511,7 @@ dependencies = [
  "wayland-protocols-misc",
  "wayland-protocols-wlr",
  "wayland-scanner",
+ "xkbcommon",
  "xkeysym",
 ]
 
@@ -11389,6 +11533,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dd538fb6910ac1099850255cf94a94df6551fbdd602454387d0adb2d1ca6dead"
 dependencies = [
  "serde",
+]
+
+[[package]]
+name = "smol_str"
+version = "0.3.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4aaa7368fcf4852a4c2dd92df0cace6a71f2091ca0a23391ce7f3a31833f1523"
+dependencies = [
+ "borsh",
+ "serde_core",
 ]
 
 [[package]]
@@ -13381,6 +13535,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "waycrate_xkbkeycode"
+version = "0.19.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e904c31025b16851793aa2e8eae3c1b4466af8345b45fb7e46ec61b05a4f9086"
+dependencies = [
+ "calloop 0.14.4",
+ "log",
+ "memmap2",
+ "wayland-backend",
+ "wayland-client",
+ "winit-common",
+ "winit-core",
+ "xkbcommon-dl",
+]
+
+[[package]]
 name = "wayland-backend"
 version = "0.3.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -14449,7 +14619,7 @@ dependencies = [
  "rustix 0.38.44",
  "sctk-adwaita",
  "smithay-client-toolkit 0.19.2",
- "smol_str",
+ "smol_str 0.2.2",
  "tracing",
  "unicode-segmentation",
  "wasm-bindgen",
@@ -14464,6 +14634,34 @@ dependencies = [
  "x11-dl",
  "x11rb 0.13.2",
  "xkbcommon-dl",
+]
+
+[[package]]
+name = "winit-common"
+version = "0.31.0-beta.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "45375fbac4cbb77260d83a30b1f9d8105880dbac99a9ae97f56656694680ff69"
+dependencies = [
+ "memmap2",
+ "smol_str 0.3.6",
+ "tracing",
+ "winit-core",
+ "xkbcommon-dl",
+]
+
+[[package]]
+name = "winit-core"
+version = "0.31.0-beta.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e4f0ccd7abb43740e2c6124ac7cae7d865ecec74eec63783e8922577ac232583"
+dependencies = [
+ "bitflags 2.11.0",
+ "cursor-icon",
+ "dpi",
+ "keyboard-types 0.8.3",
+ "raw-window-handle 0.6.2",
+ "smol_str 0.3.6",
+ "web-time",
 ]
 
 [[package]]
@@ -14705,6 +14903,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "163b33ed8786455e2fa5d72f554057ce3f3182425434f756cd39c99839d88e23"
 
 [[package]]
+name = "xkbcommon"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8d66ca9352cbd4eecbbc40871d8a11b4ac8107cfc528a6e14d7c19c69d0e1ac9"
+dependencies = [
+ "libc",
+ "memmap2",
+ "xkeysym",
+]
+
+[[package]]
 name = "xkbcommon-dl"
 version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -14722,6 +14931,9 @@ name = "xkeysym"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b9cc00251562a284751c9973bace760d86c0276c471b4be569fe6b068ee97a56"
+dependencies = [
+ "bytemuck",
+]
 
 [[package]]
 name = "xml-rs"

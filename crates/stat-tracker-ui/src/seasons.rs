@@ -43,11 +43,27 @@ pub struct SeasonRow {
     pub record: Record,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct UiStateFile {
     /// `None` / omitted = all time. Some(id) = that season.
     #[serde(default)]
     season: Option<String>,
+    /// Manual companion overlay toggle. Default on (show while the game runs).
+    #[serde(default = "overlay_enabled_default")]
+    overlay_enabled: bool,
+}
+
+fn overlay_enabled_default() -> bool {
+    true
+}
+
+impl Default for UiStateFile {
+    fn default() -> Self {
+        Self {
+            season: None,
+            overlay_enabled: true,
+        }
+    }
 }
 
 pub fn cache_path(data_dir: &Path) -> PathBuf {
@@ -84,11 +100,22 @@ pub fn write_cache(data_dir: &Path, seasons: &[Season]) -> std::io::Result<()> {
     std::fs::write(cache_path(data_dir), bytes)
 }
 
+fn read_ui_state_file(data_dir: &Path) -> Option<UiStateFile> {
+    let bytes = std::fs::read(ui_state_path(data_dir)).ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+fn write_ui_state_file(data_dir: &Path, file: &UiStateFile) -> std::io::Result<()> {
+    std::fs::create_dir_all(data_dir)?;
+    let bytes = serde_json::to_vec_pretty(file)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    std::fs::write(ui_state_path(data_dir), bytes)
+}
+
 /// `None` when the file is missing or unreadable — caller applies
 /// [`default_selection`]. A present file with `season: null` is All time.
 pub fn load_ui_state(data_dir: &Path) -> Option<SeasonSel> {
-    let bytes = std::fs::read(ui_state_path(data_dir)).ok()?;
-    let file: UiStateFile = serde_json::from_slice(&bytes).ok()?;
+    let file = read_ui_state_file(data_dir)?;
     Some(match file.season.filter(|id| !id.is_empty()) {
         Some(id) => SeasonSel::Season(id),
         None => SeasonSel::AllTime,
@@ -96,13 +123,22 @@ pub fn load_ui_state(data_dir: &Path) -> Option<SeasonSel> {
 }
 
 pub fn save_ui_state(data_dir: &Path, sel: &SeasonSel) -> std::io::Result<()> {
-    std::fs::create_dir_all(data_dir)?;
-    let file = UiStateFile {
-        season: sel.as_id().map(str::to_string),
-    };
-    let bytes = serde_json::to_vec_pretty(&file)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    std::fs::write(ui_state_path(data_dir), bytes)
+    let mut file = read_ui_state_file(data_dir).unwrap_or_default();
+    file.season = sel.as_id().map(str::to_string);
+    write_ui_state_file(data_dir, &file)
+}
+
+/// Missing file / missing field → on (show while the game is running).
+pub fn load_overlay_enabled(data_dir: &Path) -> bool {
+    read_ui_state_file(data_dir)
+        .map(|f| f.overlay_enabled)
+        .unwrap_or(true)
+}
+
+pub fn save_overlay_enabled(data_dir: &Path, enabled: bool) -> std::io::Result<()> {
+    let mut file = read_ui_state_file(data_dir).unwrap_or_default();
+    file.overlay_enabled = enabled;
+    write_ui_state_file(data_dir, &file)
 }
 
 /// Default = the season marked current, else all time. Empty list → all time
@@ -515,6 +551,18 @@ mod tests {
         assert_eq!(load_ui_state(&dir), Some(SeasonSel::Season("s17".into())));
         let raw = std::fs::read_to_string(ui_state_path(&dir)).unwrap();
         assert!(raw.contains("s17"), "{raw}");
+        assert!(
+            load_overlay_enabled(&dir),
+            "overlay defaults on when the field is written with season"
+        );
+        save_overlay_enabled(&dir, false).unwrap();
+        assert!(!load_overlay_enabled(&dir));
+        assert_eq!(load_ui_state(&dir), Some(SeasonSel::Season("s17".into())));
+        save_ui_state(&dir, &SeasonSel::AllTime).unwrap();
+        assert!(
+            !load_overlay_enabled(&dir),
+            "season save must not reset the overlay toggle"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

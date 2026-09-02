@@ -7,7 +7,7 @@ use iced::border::Radius;
 use iced::font::{Family, Stretch, Style, Weight};
 use iced::gradient::Linear;
 use iced::widget::{button, container};
-use iced::{Background, Border, Color, Degrees, Font, Shadow, Theme, theme};
+use iced::{Background, Border, Color, Degrees, Font, Shadow, Theme, Vector, theme};
 
 use crate::model::{Outcome, Role};
 
@@ -181,6 +181,28 @@ pub fn surface_panel(_theme: &Theme) -> container::Style {
             color: BORDER,
             width: 1.0,
             radius: card_radius(),
+        },
+        ..container::Style::default()
+    }
+}
+
+/// Translucent companion pane. Design §3: shadows only on this surface.
+/// Compositor blur (`org_kde_kwin_blur`) is a follow-up, not v1.
+pub fn companion_panel(_theme: &Theme) -> container::Style {
+    let mut fill = SURFACE;
+    fill.a = 0.88;
+    container::Style {
+        background: Some(Background::Color(fill)),
+        text_color: Some(TEXT),
+        border: Border {
+            color: BORDER,
+            width: 1.0,
+            radius: card_radius(),
+        },
+        shadow: Shadow {
+            color: Color::from_rgba(0.0, 0.0, 0.0, 0.35),
+            offset: Vector::new(0.0, 8.0),
+            blur_radius: 24.0,
         },
         ..container::Style::default()
     }

@@ -13,6 +13,7 @@ use crate::capture::{self, PreviewShot};
 use crate::cli::{Cli, FixtureKind};
 use crate::daemon::{self, DaemonVerb, DaemonView};
 use crate::model::{EditField, EditForm, Game, Outcome, Role, RoleFilter, Screen, SeasonSel};
+use crate::overlay::{self, CompanionChild};
 use crate::seasons::{self, SeasonCache};
 use crate::settings::{self, SettingsField, SettingsForm, SettingsToggle};
 use crate::snapshot::{self, games_from_snapshot};
@@ -71,6 +72,7 @@ pub enum Message {
     WindowOpened(window::Id),
     WindowClosed(window::Id),
     Tray(TrayAction),
+    ToggleOverlay,
 }
 
 /// What tray Hide / Show must do. Close+open (not Hidden/minimize) is the
@@ -140,6 +142,10 @@ pub struct TrackerApp {
     window_id: Option<window::Id>,
     tick_count: u64,
     tray: Option<TrayHandle>,
+    pub overlay_enabled: bool,
+    overlay_child: Option<CompanionChild>,
+    overlay_spawn_blocked: bool,
+    game_running: bool,
 }
 
 impl TrackerApp {
@@ -190,7 +196,13 @@ impl TrackerApp {
         };
         let live = cli.fixture.is_none();
         let (window_id, open) = window::open(window_settings());
-        let app = Self {
+        let overlay_enabled = seasons::load_overlay_enabled(&cli.data_dir);
+        let game_running = overlay::detect_game_running(
+            &cli.data_dir,
+            &saved_config.game_process_names,
+            cli.fixture.is_some(),
+        );
+        let mut app = Self {
             live_status,
             health_status,
             data_dir: cli.data_dir,
@@ -229,7 +241,21 @@ impl TrackerApp {
             window_id: Some(window_id),
             tick_count: 0,
             tray: tray::try_create(),
+            overlay_enabled,
+            overlay_child: None,
+            overlay_spawn_blocked: false,
+            game_running,
         };
+
+        if let Some(err) = overlay::reconcile_companion(
+            &mut app.overlay_child,
+            overlay::overlay_visible(app.overlay_enabled, app.game_running),
+            &app.data_dir,
+            app.fixture,
+            &mut app.overlay_spawn_blocked,
+        ) {
+            app.toast = Some(err);
+        }
 
         let mut tasks = vec![fetch, open.map(Message::WindowOpened)];
         if live {
@@ -266,6 +292,10 @@ impl TrackerApp {
 
     pub fn header_filter(&self) -> GameFilter {
         GameFilter::from_header(self.season_window(), self.roles)
+    }
+
+    pub fn overlay_showing(&self) -> bool {
+        overlay::overlay_visible(self.overlay_enabled, self.game_running)
     }
 
     pub fn games_filter(&self) -> GameFilter {
@@ -645,12 +675,14 @@ impl TrackerApp {
                 }
                 // No tray and no window: nothing can restore us — exit.
                 if self.window_id.is_none() && self.tray.is_none() {
+                    overlay::stop_companion(&mut self.overlay_child, &self.data_dir);
                     iced::exit()
                 } else {
                     Task::none()
                 }
             }
             Message::Tray(action) => self.apply_tray(action),
+            Message::ToggleOverlay => self.toggle_overlay(),
         }
     }
 
@@ -673,6 +705,22 @@ impl TrackerApp {
             && let Some(action) = tray::poll(handle)
         {
             return self.apply_tray(action);
+        }
+
+        self.game_running = overlay::detect_game_running(
+            &self.data_dir,
+            &self.saved_config.game_process_names,
+            self.fixture.is_some(),
+        );
+        let want_overlay = self.overlay_showing();
+        if let Some(err) = overlay::reconcile_companion(
+            &mut self.overlay_child,
+            want_overlay,
+            &self.data_dir,
+            self.fixture,
+            &mut self.overlay_spawn_blocked,
+        ) {
+            self.toast = Some(err);
         }
 
         let mut tasks = Vec::new();
@@ -712,10 +760,37 @@ impl TrackerApp {
 
     fn apply_tray(&mut self, action: TrayAction) -> Task<Message> {
         match action {
-            TrayAction::Quit => iced::exit(),
+            TrayAction::Quit => {
+                overlay::stop_companion(&mut self.overlay_child, &self.data_dir);
+                iced::exit()
+            }
             TrayAction::Show => self.show_window(),
             TrayAction::Hide => self.hide_window(),
+            TrayAction::ToggleOverlay => self.toggle_overlay(),
         }
+    }
+
+    fn toggle_overlay(&mut self) -> Task<Message> {
+        self.overlay_enabled = !self.overlay_enabled;
+        if let Err(e) = seasons::save_overlay_enabled(&self.data_dir, self.overlay_enabled) {
+            tracing::warn!(error = %e, "failed to persist overlay toggle");
+        }
+        self.game_running = overlay::detect_game_running(
+            &self.data_dir,
+            &self.saved_config.game_process_names,
+            self.fixture.is_some(),
+        );
+        let want_overlay = self.overlay_showing();
+        if let Some(err) = overlay::reconcile_companion(
+            &mut self.overlay_child,
+            want_overlay,
+            &self.data_dir,
+            self.fixture,
+            &mut self.overlay_spawn_blocked,
+        ) {
+            self.toast = Some(err);
+        }
+        Task::none()
     }
 
     fn show_window(&mut self) -> Task<Message> {

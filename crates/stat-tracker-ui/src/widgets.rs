@@ -32,6 +32,7 @@ pub fn app_header(app: &TrackerApp) -> Element<'_, Message> {
             space().width(0).into()
         },
         role_chips(app.roles),
+        overlay_chip(app.overlay_enabled, app.overlay_showing()),
         status_stub(&app.live_status),
     ]
     .spacing(16)
@@ -113,6 +114,19 @@ fn season_chip(label: String, selected: bool, msg: Message) -> Element<'static, 
     .padding(Padding::from([6, 14]))
     .style(theme::chip(selected))
     .on_press(msg)
+    .into()
+}
+
+pub fn overlay_chip(enabled: bool, showing: bool) -> Element<'static, Message> {
+    button(
+        text(crate::overlay::companion_copy(enabled, showing))
+            .size(SIZE_META)
+            .font(FONT_SEMIBOLD)
+            .color(if enabled { TEXT } else { TEXT_2 }),
+    )
+    .padding(Padding::from([6, 14]))
+    .style(theme::chip(enabled))
+    .on_press(Message::ToggleOverlay)
     .into()
 }
 
@@ -358,7 +372,11 @@ pub fn map_row(m: &MapAgg) -> Element<'static, Message> {
     .into()
 }
 
-pub fn health_panel(status: &str) -> Element<'static, Message> {
+pub fn health_panel(
+    status: &str,
+    overlay_enabled: bool,
+    overlay_showing: bool,
+) -> Element<'static, Message> {
     container(
         column![
             label_text("Tracker health"),
@@ -366,6 +384,7 @@ pub fn health_panel(status: &str) -> Element<'static, Message> {
                 .size(SIZE_BODY)
                 .font(FONT_MEDIUM)
                 .color(TEXT_2),
+            overlay_chip(overlay_enabled, overlay_showing),
         ]
         .spacing(8),
     )
