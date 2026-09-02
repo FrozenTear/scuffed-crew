@@ -3,7 +3,9 @@
 //! The main window stays on `iced::daemon` + tray (P4). The overlay is a
 //! same-binary `--companion` process on `iced_layershell` (`Layer::Overlay`,
 //! keyboard none, exclusive zone 0) so the game keeps input. Parent starts
-//! and stops that child from [`overlay_visible`].
+//! and stops that child from [`overlay_visible`]. Manual hide is session-scoped
+//! ([`OverlayHold`]): it sticks until the game ends, then the next launch
+//! auto-shows. Esc is N/A (`KeyboardInteractivity::None`).
 
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -32,22 +34,101 @@ pub const OVERLAY_MARGIN: i32 = 24;
 pub const OVERLAY_EXCLUSIVE_ZONE: i32 = 0;
 pub const OVERLAY_NAMESPACE: &str = "scuffed-companion";
 
-const LAST_GAME_HEIGHT: f32 = 168.0;
+const LAST_GAME_HEIGHT: f32 = 196.0;
 const MINI_HERO_HEIGHT: f32 = 52.0;
 const RESPAWN_GRACE: Duration = Duration::from_secs(2);
+const PROCESS_SESSION_KEY: &str = "process";
+const FIXTURE_SESSION_KEY: &str = "fixture";
 
-/// Pure visibility: enabled by the user **and** the game is running.
-pub fn overlay_visible(enabled: bool, game_running: bool) -> bool {
-    enabled && game_running
+/// Manual hide is scoped to one live game. Auto-show resumes when that
+/// process ends and the next one starts — we do not reopen mid-session.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum OverlayHold {
+    #[default]
+    Auto,
+    Hidden(String),
+}
+
+impl OverlayHold {
+    pub fn from_persisted(key: Option<String>) -> Self {
+        match key.filter(|k| !k.is_empty()) {
+            Some(k) => Self::Hidden(k),
+            None => Self::Auto,
+        }
+    }
+
+    pub fn persisted_key(&self) -> Option<&str> {
+        match self {
+            Self::Auto => None,
+            Self::Hidden(k) => Some(k.as_str()),
+        }
+    }
+}
+
+/// After [`reconcile_hold`]: show only when a game is live and the user has
+/// not hidden this session.
+pub fn overlay_visible(hold: &OverlayHold, game_running: bool) -> bool {
+    game_running && matches!(hold, OverlayHold::Auto)
+}
+
+/// Bind / release a session hide. `key` is [`live_session_key`].
+///
+/// - Game ended (`key` is `None`) → Auto (next launch shows).
+/// - Same key, or `process` upgraded to a real `session_id` → stay Hidden.
+/// - Different key → Auto (new game).
+pub fn reconcile_hold(hold: OverlayHold, key: Option<&str>) -> OverlayHold {
+    match (hold, key) {
+        (OverlayHold::Auto, _) => OverlayHold::Auto,
+        (OverlayHold::Hidden(_), None) => OverlayHold::Auto,
+        (OverlayHold::Hidden(h), Some(c)) if h == c => OverlayHold::Hidden(h),
+        (OverlayHold::Hidden(h), Some(c)) if h == PROCESS_SESSION_KEY => {
+            OverlayHold::Hidden(c.to_string())
+        }
+        (OverlayHold::Hidden(_), Some(_)) => OverlayHold::Auto,
+    }
+}
+
+/// Tray / main-window toggle. No-op when no game is live (nothing to hide).
+/// Hide while live sticks until [`reconcile_hold`] sees the game end.
+pub fn toggle_hold(hold: OverlayHold, key: Option<&str>) -> OverlayHold {
+    let Some(k) = key else {
+        return OverlayHold::Auto;
+    };
+    match hold {
+        OverlayHold::Auto => OverlayHold::Hidden(k.to_string()),
+        OverlayHold::Hidden(_) => OverlayHold::Auto,
+    }
+}
+
+/// Identity of the live game, if any. `process` is used until `active_game.json`
+/// has a session id so a hide-before-first-Tab stays hidden.
+pub fn live_session_key(
+    data_dir: &Path,
+    process_names: &[String],
+    fixture: bool,
+) -> Option<String> {
+    if fixture {
+        return Some(FIXTURE_SESSION_KEY.into());
+    }
+    if let Some(id) = active_game_session_id(data_dir) {
+        return Some(id);
+    }
+    if process_is_running(process_names) {
+        return Some(PROCESS_SESSION_KEY.into());
+    }
+    None
+}
+
+pub fn active_game_session_id(data_dir: &Path) -> Option<String> {
+    let bytes = std::fs::read(data_dir.join("active_game.json")).ok()?;
+    let v: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    let id = v.get("session_id")?.as_str()?.trim();
+    (!id.is_empty()).then(|| id.to_string())
 }
 
 /// Whether the daemon currently has an open game (`active_game.json`).
 pub fn active_game_present(data_dir: &Path) -> bool {
-    let path = data_dir.join("active_game.json");
-    let Ok(bytes) = std::fs::read(&path) else {
-        return false;
-    };
-    serde_json::from_slice::<serde_json::Map<String, serde_json::Value>>(&bytes).is_ok()
+    active_game_session_id(data_dir).is_some()
 }
 
 /// Process scan using the daemon's gate, but **empty names mean not running**.
@@ -65,10 +146,7 @@ pub fn process_is_running(names: &[String]) -> bool {
 /// overlay for layout shots. Live mode uses `active_game.json` and, when
 /// process names are set, the same `/proc` comm scan the daemon uses.
 pub fn detect_game_running(data_dir: &Path, process_names: &[String], fixture: bool) -> bool {
-    if fixture {
-        return true;
-    }
-    active_game_present(data_dir) || process_is_running(process_names)
+    live_session_key(data_dir, process_names, fixture).is_some()
 }
 
 /// Layer-shell numbers the runner applies. Kept free of Wayland types so
@@ -234,7 +312,7 @@ fn season_label(sel: &SeasonSel, seasons: &[Season]) -> String {
 /// tracks the card stack so the panel is "height to content".
 pub fn content_height(model: &OverlayModel) -> u32 {
     let mut h: u32 = 16 + 48 + 12;
-    h += if model.last_game.is_some() { 168 } else { 56 };
+    h += if model.last_game.is_some() { 196 } else { 56 };
     h += 12 + 28;
     h += 12 + 18;
     if model.top_heroes.is_empty() {
@@ -246,11 +324,11 @@ pub fn content_height(model: &OverlayModel) -> u32 {
     h.clamp(200, 900)
 }
 
-pub fn companion_copy(enabled: bool, showing: bool) -> &'static str {
-    if !enabled {
-        "Companion off"
-    } else if showing {
+pub fn companion_copy(showing: bool, game_running: bool) -> &'static str {
+    if showing {
         "Companion showing"
+    } else if game_running {
+        "Companion hidden"
     } else {
         "Companion waiting for game"
     }
@@ -397,9 +475,10 @@ pub fn view<'a>(model: &'a OverlayModel) -> Element<'a, OverlayViewMessage> {
     body = body.push(footer_row(model));
 
     container(body)
-        .padding(PAD_INNER + 4.0)
+        .padding(PAD_INNER)
         .width(OVERLAY_WIDTH as f32)
         .style(theme::companion_panel)
+        .clip(true)
         .into()
 }
 
@@ -410,7 +489,8 @@ fn header_row(model: &OverlayModel) -> Element<'_, OverlayViewMessage> {
             .size(SIZE_META)
             .font(FONT_SEMIBOLD)
             .color(TEXT)
-            .width(Fill),
+            .width(Fill)
+            .wrapping(iced::widget::text::Wrapping::Word),
     ]
     .spacing(10)
     .align_y(Alignment::Center)
@@ -437,7 +517,9 @@ fn last_game_card(game: Option<&OverlayLastGame>) -> Element<'_, OverlayViewMess
             text("No games yet tonight — press Tab in-game to capture the scoreboard.")
                 .size(SIZE_BODY)
                 .font(FONT_MEDIUM)
-                .color(TEXT_3),
+                .color(TEXT_3)
+                .width(Fill)
+                .wrapping(iced::widget::text::Wrapping::Word),
         )
         .padding(PAD_INNER)
         .width(Fill)
@@ -450,7 +532,9 @@ fn last_game_card(game: Option<&OverlayLastGame>) -> Element<'_, OverlayViewMess
         text(game.map_name.clone())
             .size(SIZE_TITLE)
             .font(FONT_EXTRABOLD)
-            .color(TEXT),
+            .color(TEXT)
+            .width(Fill)
+            .wrapping(iced::widget::text::Wrapping::Word),
         text(format!(
             "{}  ·  {}",
             game.hero,
@@ -474,15 +558,25 @@ fn last_game_card(game: Option<&OverlayLastGame>) -> Element<'_, OverlayViewMess
 }
 
 fn stat_line(game: &OverlayLastGame) -> Element<'static, OverlayViewMessage> {
-    row![
-        stat_box("E", game.elims),
-        stat_box("D", game.deaths),
-        stat_box("A", game.assists),
-        stat_box("DMG", game.damage),
-        stat_box("HEAL", game.healing),
-        stat_box("MIT", game.mitigation),
+    // Two rows of three — a 6-across row crushes labels at 360px.
+    column![
+        row![
+            stat_box("E", game.elims),
+            stat_box("D", game.deaths),
+            stat_box("A", game.assists),
+        ]
+        .spacing(6)
+        .width(Fill),
+        row![
+            stat_box("DMG", game.damage),
+            stat_box("HEAL", game.healing),
+            stat_box("MIT", game.mitigation),
+        ]
+        .spacing(6)
+        .width(Fill),
     ]
     .spacing(6)
+    .width(Fill)
     .into()
 }
 
@@ -499,9 +593,11 @@ fn stat_box(label_s: &'static str, value: u32) -> Element<'static, OverlayViewMe
                 .color(TEXT),
         ]
         .spacing(2)
-        .align_x(Alignment::Center),
+        .align_x(Alignment::Center)
+        .width(Fill),
     )
-    .padding(Padding::from([6, 8]))
+    .padding(Padding::from([4, 6]))
+    .width(Fill)
     .style(theme::stat_box)
     .into()
 }
@@ -550,7 +646,9 @@ fn mini_hero(hero: &OverlayHero) -> Element<'static, OverlayViewMessage> {
             text(hero.hero.clone())
                 .size(SIZE_BODY)
                 .font(FONT_SEMIBOLD)
-                .color(TEXT),
+                .color(TEXT)
+                .width(Fill)
+                .wrapping(iced::widget::text::Wrapping::Word),
         ]
         .spacing(2)
         .width(Fill),
@@ -742,11 +840,63 @@ mod tests {
     }
 
     #[test]
-    fn visible_only_when_enabled_and_game_running() {
-        assert!(!overlay_visible(false, false));
-        assert!(!overlay_visible(false, true));
-        assert!(!overlay_visible(true, false));
-        assert!(overlay_visible(true, true));
+    fn visible_only_when_game_live_and_not_session_hidden() {
+        assert!(!overlay_visible(&OverlayHold::Auto, false));
+        assert!(overlay_visible(&OverlayHold::Auto, true));
+        assert!(!overlay_visible(
+            &OverlayHold::Hidden("sess-1".into()),
+            true
+        ));
+        assert!(!overlay_visible(
+            &OverlayHold::Hidden("sess-1".into()),
+            false
+        ));
+    }
+
+    #[test]
+    fn manual_hide_sticks_until_game_ends_then_next_launch_shows() {
+        let key = Some("sess-1");
+        let hidden = toggle_hold(OverlayHold::Auto, key);
+        assert_eq!(hidden, OverlayHold::Hidden("sess-1".into()));
+        assert!(!overlay_visible(&hidden, true));
+
+        let still = reconcile_hold(hidden.clone(), key);
+        assert_eq!(still, hidden, "do not reopen mid-session");
+        assert!(!overlay_visible(&still, true));
+
+        let ended = reconcile_hold(still, None);
+        assert_eq!(ended, OverlayHold::Auto);
+        assert!(!overlay_visible(&ended, false));
+
+        let next = reconcile_hold(ended, Some("sess-2"));
+        assert_eq!(next, OverlayHold::Auto);
+        assert!(overlay_visible(&next, true));
+    }
+
+    #[test]
+    fn hide_before_first_tab_survives_session_id() {
+        let hidden = toggle_hold(OverlayHold::Auto, Some("process"));
+        let upgraded = reconcile_hold(hidden, Some("sess-tab"));
+        assert_eq!(upgraded, OverlayHold::Hidden("sess-tab".into()));
+        assert!(!overlay_visible(&upgraded, true));
+    }
+
+    #[test]
+    fn new_session_clears_previous_hide() {
+        let hold = OverlayHold::Hidden("sess-old".into());
+        let next = reconcile_hold(hold, Some("sess-new"));
+        assert_eq!(next, OverlayHold::Auto);
+        assert!(overlay_visible(&next, true));
+    }
+
+    #[test]
+    fn unhide_mid_session_and_toggle_without_game() {
+        let hidden = OverlayHold::Hidden("sess-1".into());
+        assert_eq!(toggle_hold(hidden, Some("sess-1")), OverlayHold::Auto);
+        assert_eq!(
+            toggle_hold(OverlayHold::Hidden("x".into()), None),
+            OverlayHold::Auto
+        );
     }
 
     #[test]
@@ -856,8 +1006,8 @@ mod tests {
         assert!(model.top_heroes.is_empty());
         assert_eq!(model.last_tab, "No Tab yet");
         assert_eq!(model.sync_label, "Sync off");
-        assert_eq!(companion_copy(false, false), "Companion off");
-        assert_eq!(companion_copy(true, false), "Companion waiting for game");
+        assert_eq!(companion_copy(false, false), "Companion waiting for game");
+        assert_eq!(companion_copy(false, true), "Companion hidden");
         assert_eq!(companion_copy(true, true), "Companion showing");
     }
 

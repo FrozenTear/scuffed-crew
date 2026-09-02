@@ -27,7 +27,7 @@ pub fn try_create() -> Option<TrayHandle> {
     let menu = Menu::new();
     let show_item = MenuItem::new("Show window", true, None);
     let hide_item = MenuItem::new("Hide window", true, None);
-    let overlay_item = MenuItem::new("Toggle companion overlay", true, None);
+    let overlay_item = MenuItem::new("Hide / show overlay", true, None);
     let quit_item = MenuItem::new("Quit", true, None);
     let show_id = show_item.id().clone();
     let hide_id = hide_item.id().clone();

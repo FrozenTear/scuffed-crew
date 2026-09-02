@@ -48,20 +48,16 @@ struct UiStateFile {
     /// `None` / omitted = all time. Some(id) = that season.
     #[serde(default)]
     season: Option<String>,
-    /// Manual companion overlay toggle. Default on (show while the game runs).
-    #[serde(default = "overlay_enabled_default")]
-    overlay_enabled: bool,
-}
-
-fn overlay_enabled_default() -> bool {
-    true
+    /// Session-scoped companion hide (`session_id` / `process`). `None` = auto.
+    #[serde(default)]
+    overlay_hidden_key: Option<String>,
 }
 
 impl Default for UiStateFile {
     fn default() -> Self {
         Self {
             season: None,
-            overlay_enabled: true,
+            overlay_hidden_key: None,
         }
     }
 }
@@ -128,16 +124,14 @@ pub fn save_ui_state(data_dir: &Path, sel: &SeasonSel) -> std::io::Result<()> {
     write_ui_state_file(data_dir, &file)
 }
 
-/// Missing file / missing field → on (show while the game is running).
-pub fn load_overlay_enabled(data_dir: &Path) -> bool {
-    read_ui_state_file(data_dir)
-        .map(|f| f.overlay_enabled)
-        .unwrap_or(true)
+/// Missing file / missing field → Auto (show while the game is running).
+pub fn load_overlay_hidden_key(data_dir: &Path) -> Option<String> {
+    read_ui_state_file(data_dir).and_then(|f| f.overlay_hidden_key)
 }
 
-pub fn save_overlay_enabled(data_dir: &Path, enabled: bool) -> std::io::Result<()> {
+pub fn save_overlay_hidden_key(data_dir: &Path, key: Option<&str>) -> std::io::Result<()> {
     let mut file = read_ui_state_file(data_dir).unwrap_or_default();
-    file.overlay_enabled = enabled;
+    file.overlay_hidden_key = key.filter(|k| !k.is_empty()).map(str::to_string);
     write_ui_state_file(data_dir, &file)
 }
 
@@ -551,17 +545,19 @@ mod tests {
         assert_eq!(load_ui_state(&dir), Some(SeasonSel::Season("s17".into())));
         let raw = std::fs::read_to_string(ui_state_path(&dir)).unwrap();
         assert!(raw.contains("s17"), "{raw}");
-        assert!(
-            load_overlay_enabled(&dir),
-            "overlay defaults on when the field is written with season"
+        assert_eq!(
+            load_overlay_hidden_key(&dir),
+            None,
+            "overlay hold defaults to Auto when the field is written with season"
         );
-        save_overlay_enabled(&dir, false).unwrap();
-        assert!(!load_overlay_enabled(&dir));
+        save_overlay_hidden_key(&dir, Some("sess-1")).unwrap();
+        assert_eq!(load_overlay_hidden_key(&dir).as_deref(), Some("sess-1"));
         assert_eq!(load_ui_state(&dir), Some(SeasonSel::Season("s17".into())));
         save_ui_state(&dir, &SeasonSel::AllTime).unwrap();
-        assert!(
-            !load_overlay_enabled(&dir),
-            "season save must not reset the overlay toggle"
+        assert_eq!(
+            load_overlay_hidden_key(&dir).as_deref(),
+            Some("sess-1"),
+            "season save must not reset the overlay hold"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

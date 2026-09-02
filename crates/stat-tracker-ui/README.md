@@ -127,7 +127,7 @@ cargo run -p scuffed-stat-tracker-ui -- --data-dir "$HOME/.local/share/scuffed-s
 6. **Scoreboard reading** — Install copies `koverwatch.traineddata` if missing (`ensure_koverwatch_tessdata`). Rebuild trains it again (`regenerate_koverwatch_tessdata`).
 7. **Stored data** — Compact (`LocalStore::vacuum`) or delete all local matches. Both refuse while the service is running.
 8. **Update banner** (Overview + Settings) appears only when GitHub has a newer `stat-tracker-v*` release. It never downloads an installer. The "you're on" version is `SST_RELEASE_VERSION` (runtime or compile-time, set by release CI / packaging) or `scuffed-stat-tracker --version` from the installed daemon — never this crate's `0.1.0`. If none of those resolve, the banner stays hidden.
-9. **Tray** — Show window / Hide window / Toggle companion overlay / Quit (`tray-icon`). Left-click shows the window. The GUI runs as `iced::daemon` so the process stays alive with no window. Hide is `window::close` (destroys the surface — `Mode::Hidden` / minimize stay in niri Alt-Tab); Show is `window::open` and rebinds `window_id`. App state (screen, settings draft, overlay toggle, etc.) is kept in the daemon.
+9. **Tray** — Show window / Hide window / Hide / show overlay / Quit (`tray-icon`). Left-click shows the window. The GUI runs as `iced::daemon` so the process stays alive with no window. Hide is `window::close` (destroys the surface — `Mode::Hidden` / minimize stay in niri Alt-Tab); Show is `window::open` and rebinds `window_id`. App state (screen, settings draft, overlay session hold, etc.) is kept in the daemon. Overlay hide is session-scoped: it sticks until the game ends, then the next launch auto-shows.
 
 ```sh
 systemctl --user status scuffed-stat-tracker.service
@@ -140,7 +140,7 @@ systemctl --user restart scuffed-stat-tracker.service
 
 Layer-shell surface (`iced_layershell` 0.19, pinned with Iced 0.14): `Layer::Overlay`, top-right, margins 24, width 360, height to content, `KeyboardInteractivity::None`, exclusive zone 0, output = `capture_output` from config (same monitor the daemon captures). Clicks and keys pass through (`events_transparent`) so fullscreen Overwatch keeps input.
 
-**Visibility:** on while the game is running (`active_game.json` or the configured game process), off otherwise. A manual toggle in the header, Overview health card, and tray persists in `<data_dir>/ui_state.json` (`overlay_enabled`, default on).
+**Visibility:** auto-show while the game is running (`active_game.json` or the configured game process). Header / Overview health / tray **Hide / show overlay** hides it for **this game only** — it does not reopen mid-session. When the game process ends, the hold clears and the next launch auto-shows again. The hold is `overlay_hidden_key` in `<data_dir>/ui_state.json` (the live `session_id`, or `process` before the first Tab). Esc is N/A (`KeyboardInteractivity::None`).
 
 The overlay is a **second process**, not a second window on `iced::daemon`:
 
@@ -156,11 +156,11 @@ That keeps Hide/Show / zero-window tray behaviour from #59 unchanged. Two iced e
 cargo run -p scuffed-stat-tracker-ui -- --companion --fixture empty
 cargo run -p scuffed-stat-tracker-ui -- --companion --fixture sample
 
-# Main window; overlay appears when the game is running and the toggle is on
+# Main window; overlay auto-shows when the game is running
 cargo run -p scuffed-stat-tracker-ui -- --data-dir "$HOME/.local/share/scuffed-stat-tracker"
 ```
 
-Header chip **Companion off / waiting for game / showing** toggles the preference. Tray **Toggle companion overlay** does the same. `--fixture` counts as “game running” so the toggle can open the overlay for Design shots.
+Header chip **Companion showing / hidden / waiting for game**. Tray **Hide / show overlay** does the same. Hide while the game is live sticks until that process ends. `--fixture` counts as one live session so Design can hide/show for shots.
 
 KDE blur (`org_kde_kwin_blur`) is a follow-up, not v1. The panel is translucent (`surface` @ 88%).
 
