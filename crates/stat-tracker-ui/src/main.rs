@@ -18,8 +18,14 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
+    // tray-icon on Linux needs GTK before the menu is built. Failure is fine
+    // on headless hosts — the window still runs without a tray.
+    if gtk::init().is_err() {
+        tracing::info!("system tray unavailable (no display / GTK)");
+    }
+
     let data_dir = cli.data_dir.clone();
-    tracing::info!(path = %data_dir.display(), "starting tracker GUI (Iced 0.14 P2)");
+    tracing::info!(path = %data_dir.display(), "starting tracker GUI (Iced 0.14 P4)");
 
     iced::application(
         {

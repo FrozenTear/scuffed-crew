@@ -124,6 +124,7 @@ pub enum Screen {
     Heroes,
     Maps,
     Seasons,
+    Settings,
 }
 
 impl Screen {
@@ -134,16 +135,18 @@ impl Screen {
             Screen::Heroes => "Heroes",
             Screen::Maps => "Maps",
             Screen::Seasons => "Seasons",
+            Screen::Settings => "Settings",
         }
     }
 
-    pub fn all() -> [Screen; 5] {
+    pub fn all() -> [Screen; 6] {
         [
             Screen::Overview,
             Screen::Games,
             Screen::Heroes,
             Screen::Maps,
             Screen::Seasons,
+            Screen::Settings,
         ]
     }
 }

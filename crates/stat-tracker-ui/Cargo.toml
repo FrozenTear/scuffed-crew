@@ -3,7 +3,7 @@ name = "scuffed-stat-tracker-ui"
 version = "0.1.0"
 edition = "2024"
 license.workspace = true
-description = "Iced 0.14 tracker GUI for the Scuffed Crew stat tracker (Overview, Games, Heroes, Maps, Seasons)."
+description = "Iced 0.14 tracker GUI for the Scuffed Crew stat tracker (Overview, Games, Heroes, Maps, Seasons, Settings)."
 
 [[bin]]
 name = "stat-tracker-gui"
@@ -18,7 +18,10 @@ scuffed-stat-tracker = { path = "../stat-tracker" }
 scuffed-types = { path = "../types" }
 anyhow = "1"
 chrono = { workspace = true }
-iced = { version = "0.14", features = ["tokio", "advanced"] }
+dirs = "6"
+gtk = "0.18"
+iced = { version = "0.14", features = ["tokio", "advanced", "image"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -26,3 +29,7 @@ surrealdb-types = "3"
 tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tray-icon = "0.23"
+
+[dev-dependencies]
+tempfile = "3"
