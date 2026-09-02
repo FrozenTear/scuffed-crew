@@ -300,16 +300,10 @@ fn season_card(row: &SeasonRow, selected: bool) -> Element<'static, Message> {
         ]
         .align_y(Alignment::Center),
         text(window).size(SIZE_META).font(FONT_MEDIUM).color(TEXT_3),
-        text(format!(
-            "{} · {}–{}–{}",
-            row.record.games_label(),
-            row.record.wins,
-            row.record.losses,
-            row.record.draws
-        ))
-        .size(SIZE_BODY)
-        .font(FONT_SEMIBOLD)
-        .color(TEXT_2),
+        text(row.record.season_line())
+            .size(SIZE_BODY)
+            .font(FONT_SEMIBOLD)
+            .color(TEXT_2),
         widgets::win_bar_for(row.record.win_rate()),
     ]
     .spacing(8);
