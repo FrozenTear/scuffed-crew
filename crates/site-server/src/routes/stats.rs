@@ -1,6 +1,6 @@
 use axum::{
     Json,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
 };
 
@@ -10,12 +10,13 @@ use scuffed_db::{
 };
 use scuffed_types::api::{
     CreateDaemonTokenRequest, CreateDaemonTokenResponse, CursorResponse, DaemonConfigResponse,
-    MemberSettingsResponse, PaginationParams, StatsUploadRequest, StatsUploadResponse,
+    MemberSettingsResponse, PaginationParams, SeasonQuery, StatsUploadRequest, StatsUploadResponse,
     UpdateMemberSettingsRequest,
 };
 
 use crate::extractors::{DaemonUser, OrgMember};
 use crate::routes::audit_log::audit;
+use crate::routes::leaderboards::resolve_season_window;
 use crate::state::AppState;
 
 /// POST /api/stats/upload — bulk upload personal matches (daemon token auth)
@@ -120,10 +121,12 @@ pub async fn upload_stats(
 pub async fn my_stats(
     State(state): State<AppState>,
     member: OrgMember,
+    Query(sq): Query<SeasonQuery>,
 ) -> Result<Json<PersonalStats>, (StatusCode, Json<ErrorResponse>)> {
+    let season = resolve_season_window(&state, sq.season.as_deref()).await?;
     state
         .db
-        .get_personal_stats(&member.member.id)
+        .get_personal_stats_in(&member.member.id, season)
         .await
         .map(Json)
         .map_err(|_e| {
@@ -140,12 +143,14 @@ pub async fn my_stats(
 pub async fn my_matches(
     State(state): State<AppState>,
     member: OrgMember,
-    axum::extract::Query(pagination): axum::extract::Query<PaginationParams>,
+    Query(pagination): Query<PaginationParams>,
+    Query(sq): Query<SeasonQuery>,
 ) -> Result<Json<CursorResponse<PersonalMatch>>, (StatusCode, Json<ErrorResponse>)> {
     let (limit, offset) = pagination.resolve();
+    let season = resolve_season_window(&state, sq.season.as_deref()).await?;
     let items = state
         .db
-        .list_personal_matches(&member.member.id, limit, offset)
+        .list_personal_matches_in(&member.member.id, limit, offset, season)
         .await
         .map_err(|_e| {
             (
@@ -162,10 +167,12 @@ pub async fn my_matches(
 pub async fn my_hero_stats(
     State(state): State<AppState>,
     member: OrgMember,
+    Query(sq): Query<SeasonQuery>,
 ) -> Result<Json<Vec<HeroStats>>, (StatusCode, Json<ErrorResponse>)> {
+    let season = resolve_season_window(&state, sq.season.as_deref()).await?;
     state
         .db
-        .get_hero_stats(&member.member.id)
+        .get_hero_stats_in(&member.member.id, season)
         .await
         .map(Json)
         .map_err(|_e| {
@@ -182,10 +189,12 @@ pub async fn my_hero_stats(
 pub async fn my_map_stats(
     State(state): State<AppState>,
     member: OrgMember,
+    Query(sq): Query<SeasonQuery>,
 ) -> Result<Json<Vec<MapStats>>, (StatusCode, Json<ErrorResponse>)> {
+    let season = resolve_season_window(&state, sq.season.as_deref()).await?;
     state
         .db
-        .get_map_stats(&member.member.id)
+        .get_map_stats_in(&member.member.id, season)
         .await
         .map(Json)
         .map_err(|_e| {
@@ -203,10 +212,12 @@ pub async fn member_stats(
     State(state): State<AppState>,
     _member: OrgMember,
     Path(member_id): Path<String>,
+    Query(sq): Query<SeasonQuery>,
 ) -> Result<Json<PersonalStats>, (StatusCode, Json<ErrorResponse>)> {
+    let season = resolve_season_window(&state, sq.season.as_deref()).await?;
     state
         .db
-        .get_personal_stats(&member_id)
+        .get_personal_stats_in(&member_id, season)
         .await
         .map(Json)
         .map_err(|_e| {
@@ -224,10 +235,12 @@ pub async fn member_hero_stats(
     State(state): State<AppState>,
     _member: OrgMember,
     Path(member_id): Path<String>,
+    Query(sq): Query<SeasonQuery>,
 ) -> Result<Json<Vec<HeroStats>>, (StatusCode, Json<ErrorResponse>)> {
+    let season = resolve_season_window(&state, sq.season.as_deref()).await?;
     state
         .db
-        .get_hero_stats(&member_id)
+        .get_hero_stats_in(&member_id, season)
         .await
         .map(Json)
         .map_err(|_e| {
@@ -245,10 +258,12 @@ pub async fn member_map_stats(
     State(state): State<AppState>,
     _member: OrgMember,
     Path(member_id): Path<String>,
+    Query(sq): Query<SeasonQuery>,
 ) -> Result<Json<Vec<MapStats>>, (StatusCode, Json<ErrorResponse>)> {
+    let season = resolve_season_window(&state, sq.season.as_deref()).await?;
     state
         .db
-        .get_map_stats(&member_id)
+        .get_map_stats_in(&member_id, season)
         .await
         .map(Json)
         .map_err(|_e| {

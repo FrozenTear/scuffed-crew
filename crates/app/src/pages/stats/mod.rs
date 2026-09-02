@@ -11,10 +11,12 @@ use serde::Deserialize;
 use scuffed_api_client::ApiClient;
 use scuffed_types::api::{MemberSettingsResponse, UpdateMemberSettingsRequest};
 
+use crate::components::ui::SeasonSelect;
 use crate::components::{Toast, member_pending, use_toast};
 use crate::hooks::{use_api, use_api_with};
 use crate::routes::Route;
 use crate::state::use_auth;
+use crate::util::season_url;
 
 // -- Shared data models (fetched once here, consumed by the tab modules) --
 
@@ -188,6 +190,37 @@ fn initial_density() -> &'static str {
         }
     }
     "compact"
+}
+
+/// Last chosen season id (per browser); `None` = all time.
+fn initial_season() -> Option<String> {
+    #[cfg(feature = "web")]
+    {
+        if let Some(win) = web_sys::window()
+            && let Ok(Some(storage)) = win.local_storage()
+            && let Ok(Some(v)) = storage.get_item("stats-season")
+            && !v.is_empty()
+        {
+            return Some(v);
+        }
+    }
+    None
+}
+
+fn persist_season(season: Option<&str>) {
+    #[cfg(feature = "web")]
+    {
+        if let Some(win) = web_sys::window()
+            && let Ok(Some(storage)) = win.local_storage()
+        {
+            let _ = match season {
+                Some(id) => storage.set_item("stats-season", id),
+                None => storage.remove_item("stats-season"),
+            };
+        }
+    }
+    #[cfg(not(feature = "web"))]
+    let _ = season;
 }
 
 fn persist_density(d: &str) {
@@ -887,9 +920,13 @@ const STATS_CSS: &str = r#"
 #[component]
 pub fn Stats() -> Element {
     let auth = use_auth();
-    let stats = use_api::<PersonalStats>("/api/stats/me");
-    let heroes = use_api::<Vec<HeroStats>>("/api/stats/me/heroes");
-    let maps = use_api::<Vec<MapStats>>("/api/stats/me/maps");
+    // "Total or per season": one selection drives every tab's fetch. `None`
+    // = all time. Remembered per browser, like the density toggle.
+    let mut season = use_signal(initial_season);
+    let stats = use_api_with::<PersonalStats>(move || season_url("/api/stats/me", season()));
+    let heroes =
+        use_api_with::<Vec<HeroStats>>(move || season_url("/api/stats/me/heroes", season()));
+    let maps = use_api_with::<Vec<MapStats>>(move || season_url("/api/stats/me/maps", season()));
     let server_settings = use_api::<MemberSettingsResponse>("/api/stats/settings");
 
     let mut tab = use_signal(|| StatsTab::Overview);
@@ -936,14 +973,15 @@ pub fn Stats() -> Element {
     let mut cursor_history: Signal<Vec<Option<String>>> = use_signal(|| vec![None]);
 
     let matches = use_api_with::<MatchPage>(move || {
-        let cursor = page_cursor();
-        match cursor {
+        let base = match page_cursor() {
             Some(c) => format!("/api/stats/me/matches?limit=25&cursor={c}"),
             None => "/api/stats/me/matches?limit=25".to_string(),
-        }
+        };
+        season_url(&base, season())
     });
     // Overview form strip — same endpoint, limit=10, no new backend (Q3).
-    let form_matches = use_api::<MatchPage>("/api/stats/me/matches?limit=10");
+    let form_matches =
+        use_api_with::<MatchPage>(move || season_url("/api/stats/me/matches?limit=10", season()));
 
     let mut density = use_signal(initial_density);
     let hero_role = use_signal(|| "All");
@@ -988,6 +1026,17 @@ pub fn Stats() -> Element {
             div { class: "stats-header",
                 h1 { "My Stats" }
                 div { class: "stats-header-actions",
+                    SeasonSelect {
+                        id: "stats-season".to_string(),
+                        value: season(),
+                        onchange: move |s: Option<String>| {
+                            persist_season(s.as_deref());
+                            season.set(s);
+                            // History pagination belongs to one window — restart it.
+                            page_cursor.set(None);
+                            cursor_history.set(vec![None]);
+                        },
+                    }
                     button {
                         class: "density-toggle",
                         title: "Toggle compact / comfortable density",

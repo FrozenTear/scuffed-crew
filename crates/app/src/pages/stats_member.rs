@@ -2,9 +2,11 @@ use dioxus::prelude::*;
 
 use serde::Deserialize;
 
+use crate::components::ui::SeasonSelect;
 use crate::components::{DataTable, member_pending};
 use crate::hooks::use_api_with;
 use crate::state::use_auth;
+use crate::util::season_url;
 
 #[derive(Debug, Clone, Deserialize)]
 struct PersonalStats {
@@ -158,6 +160,7 @@ const MEMBER_STATS_CSS: &str = r#"
         -webkit-overflow-scrolling: touch;
         max-width: 100%;
     }
+    .stats-season-row { max-width: 280px; margin-bottom: 1.25rem; }
     @media (max-width: 720px) {
         .stats-page { padding: 1.25rem 1rem; }
         .stats-summary { grid-template-columns: 1fr; }
@@ -171,13 +174,20 @@ pub fn StatsMember(id: String) -> Element {
     let member_id_h = id.clone();
     let member_id_m = id.clone();
 
-    let stats = use_api_with::<PersonalStats>(move || format!("/api/stats/member/{member_id}"));
+    // Total or per season — same `?season=` contract as My Stats.
+    let mut season = use_signal(|| None::<String>);
 
-    let heroes =
-        use_api_with::<Vec<HeroStats>>(move || format!("/api/stats/member/{member_id_h}/heroes"));
+    let stats = use_api_with::<PersonalStats>(move || {
+        season_url(&format!("/api/stats/member/{member_id}"), season())
+    });
 
-    let maps =
-        use_api_with::<Vec<MapStats>>(move || format!("/api/stats/member/{member_id_m}/maps"));
+    let heroes = use_api_with::<Vec<HeroStats>>(move || {
+        season_url(&format!("/api/stats/member/{member_id_h}/heroes"), season())
+    });
+
+    let maps = use_api_with::<Vec<MapStats>>(move || {
+        season_url(&format!("/api/stats/member/{member_id_m}/maps"), season())
+    });
 
     let mut tab = use_signal(|| MemberStatsTab::Overview);
 
@@ -187,6 +197,13 @@ pub fn StatsMember(id: String) -> Element {
 
         div { class: "stats-page",
             h1 { "Member Stats" }
+            div { class: "stats-season-row",
+                SeasonSelect {
+                    id: "member-stats-season".to_string(),
+                    value: season(),
+                    onchange: move |s| season.set(s),
+                }
+            }
 
             {
                 let data = stats.data.read();

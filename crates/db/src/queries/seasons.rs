@@ -82,4 +82,45 @@ impl Database {
         })
         .await
     }
+    /// Replace every field of a season. `is_current = true` clears the flag on
+    /// all other seasons first (same best-effort rule as create).
+    pub async fn update_season(
+        &self,
+        id: &str,
+        name: &str,
+        starts_at: DateTime<Utc>,
+        ends_at: DateTime<Utc>,
+        is_current: bool,
+    ) -> DbResult<Season> {
+        with_timeout(async {
+            let existing: Option<DbSeason> = self.client.select(("season", id)).await?;
+            let mut db = existing
+                .ok_or_else(|| crate::DbError::NotFound(format!("Season {id} not found")))?;
+            if is_current && !db.is_current {
+                let _ = self
+                    .client
+                    .query("UPDATE season SET is_current = false WHERE is_current = true")
+                    .await?;
+            }
+            db.name = name.to_string();
+            db.starts_at = SurrealDatetime::from(starts_at);
+            db.ends_at = SurrealDatetime::from(ends_at);
+            db.is_current = is_current;
+            let updated: Option<DbSeason> = self.client.update(("season", id)).content(db).await?;
+            Ok(db_to_season(updated.ok_or_else(|| {
+                crate::DbError::NotFound(format!("Season {id} not found after update"))
+            })?))
+        })
+        .await
+    }
+
+    /// Delete a season. Returns `false` when no such season existed. Matches
+    /// are never touched — a season is only a window over `played_at`.
+    pub async fn delete_season(&self, id: &str) -> DbResult<bool> {
+        with_timeout(async {
+            let deleted: Option<DbSeason> = self.client.delete(("season", id)).await?;
+            Ok(deleted.is_some())
+        })
+        .await
+    }
 }

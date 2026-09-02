@@ -565,6 +565,11 @@ pub fn create_router(state: AppState) -> Router {
             get(routes::leaderboards::admin_list_seasons)
                 .post(routes::leaderboards::admin_create_season),
         )
+        .route(
+            "/api/admin/seasons/{id}",
+            put(routes::leaderboards::admin_update_season)
+                .delete(routes::leaderboards::admin_delete_season),
+        )
         // Serve uploaded files
         .nest_service("/uploads", ServeDir::new(state.upload_dir.clone()))
         // Static files from dist/, falling back to index.html for SPA routing (Dioxus handles all routes)

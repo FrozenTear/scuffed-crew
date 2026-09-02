@@ -37,3 +37,16 @@ pub fn encode_query(value: &str) -> String {
     }
     out
 }
+
+/// Append `season=<id>` to an API path (`?` or `&` as needed). `None` = all
+/// time, path returned unchanged — the server treats a missing/blank season
+/// as "total".
+pub fn season_url(path: &str, season: Option<String>) -> String {
+    match season {
+        Some(id) if !id.is_empty() => {
+            let sep = if path.contains('?') { '&' } else { '?' };
+            format!("{path}{sep}season={}", encode_query(&id))
+        }
+        _ => path.to_string(),
+    }
+}
