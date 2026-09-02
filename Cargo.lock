@@ -10757,12 +10757,9 @@ dependencies = [
 name = "scuffed-stat-tracker-ui"
 version = "0.1.0"
 dependencies = [
- "ab_glyph",
  "anyhow",
  "chrono",
- "dirs",
  "iced",
- "image",
  "reqwest 0.12.28",
  "scuffed-stat-tracker",
  "scuffed-types",

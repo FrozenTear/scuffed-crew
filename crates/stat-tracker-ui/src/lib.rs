@@ -10,7 +10,6 @@ pub mod cli;
 pub mod fixtures;
 pub mod model;
 pub mod overview;
-pub mod preview;
 pub mod seasons;
 pub mod snapshot;
 pub mod theme;

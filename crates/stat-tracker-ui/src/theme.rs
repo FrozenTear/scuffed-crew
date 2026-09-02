@@ -102,15 +102,17 @@ pub const PAD_INNER: f32 = 12.0;
 pub const PAGE_PAD_Y: f32 = 24.0;
 pub const PAGE_PAD_X: f32 = 32.0;
 pub const GRID_GAP: f32 = 12.0;
+/// Outcome stripe — 4 px, not a Fill-height child (that collapses in Row).
 pub const STRIPE: f32 = 4.0;
+pub const HEIGHT_FEATURED: f32 = 216.0;
+pub const HEIGHT_COMPACT: f32 = 180.0;
+pub const HEIGHT_HERO: f32 = 160.0;
 
 pub const SIZE_LABEL: f32 = 11.0;
 pub const SIZE_META: f32 = 13.0;
 pub const SIZE_BODY: f32 = 14.0;
 pub const SIZE_TITLE: f32 = 20.0;
 pub const SIZE_FEATURED: f32 = 28.0;
-#[allow(dead_code)]
-pub const LABEL_TRACKING: f32 = SIZE_LABEL * 0.12;
 
 pub fn iced_theme() -> Theme {
     Theme::custom(
@@ -201,7 +203,7 @@ pub fn stripe(outcome: Outcome) -> impl Fn(&Theme) -> container::Style {
         border: Border {
             color: Color::TRANSPARENT,
             width: 0.0,
-            radius: Radius::new(RADIUS_CARD).left(RADIUS_CARD),
+            radius: 0.0.into(),
         },
         ..container::Style::default()
     }
@@ -248,18 +250,4 @@ pub fn chip(selected: bool) -> impl Fn(&Theme, button::Status) -> button::Style 
             }
         }
     }
-}
-
-/// sRGB bytes for the software preview renderer (same tokens).
-pub fn rgb(color: Color) -> [u8; 3] {
-    [
-        (color.r * 255.0).round() as u8,
-        (color.g * 255.0).round() as u8,
-        (color.b * 255.0).round() as u8,
-    ]
-}
-
-pub fn rgba(color: Color) -> [u8; 4] {
-    let [r, g, b] = rgb(color);
-    [r, g, b, (color.a * 255.0).round() as u8]
 }

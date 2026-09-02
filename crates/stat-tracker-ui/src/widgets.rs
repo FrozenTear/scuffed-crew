@@ -112,7 +112,12 @@ pub fn featured_game_card(game: &Game) -> Element<'static, Message> {
     if let Some(stats) = stats {
         inner = inner.push(stats);
     }
-    card_shell(game.role, game.outcome, inner.into())
+    card_shell(
+        game.role,
+        game.outcome,
+        inner.into(),
+        theme::HEIGHT_FEATURED,
+    )
 }
 
 pub fn compact_game_card(game: &Game) -> Element<'static, Message> {
@@ -133,7 +138,7 @@ pub fn compact_game_card(game: &Game) -> Element<'static, Message> {
         outcome_label(game.outcome),
     ]
     .spacing(4);
-    card_shell(game.role, game.outcome, body.into())
+    card_shell(game.role, game.outcome, body.into(), theme::HEIGHT_COMPACT)
 }
 
 pub fn hero_card(hero: &HeroAgg) -> Element<'static, Message> {
@@ -157,7 +162,7 @@ pub fn hero_card(hero: &HeroAgg) -> Element<'static, Message> {
         win_bar(hero.record.win_rate()),
     ]
     .spacing(6);
-    card_shell(hero.role, Outcome::Unknown, body.into())
+    card_shell(hero.role, Outcome::Unknown, body.into(), theme::HEIGHT_HERO)
 }
 
 pub fn season_panel(
@@ -344,18 +349,29 @@ fn card_shell(
     role: Role,
     outcome: Outcome,
     content: Element<'static, Message>,
+    height: f32,
 ) -> Element<'static, Message> {
+    // Fixed height + explicit stripe height (not Fill). A Fill-height stripe
+    // inside a shrink-height Row resolves to 0 — featured worked only because
+    // it sat in a Column that already had a measured height.
     container(
         row![
-            container(space())
+            container(space().width(STRIPE).height(height))
                 .width(STRIPE)
-                .height(Fill)
+                .height(height)
                 .style(theme::stripe(outcome)),
-            container(content).padding(PAD_INNER).width(Fill),
+            container(content)
+                .padding(PAD_INNER)
+                .width(Fill)
+                .height(height),
         ]
-        .spacing(0),
+        .spacing(0)
+        .width(Fill)
+        .height(height),
     )
     .style(theme::role_card(role))
     .width(Fill)
+    .height(height)
+    .clip(true)
     .into()
 }

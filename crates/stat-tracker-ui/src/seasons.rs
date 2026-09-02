@@ -76,7 +76,67 @@ pub fn seasons_url_from_server(server_url: &str) -> String {
     format!("{}/api/public/seasons", server_url.trim_end_matches('/'))
 }
 
+/// Fixtures never hit the network — production `[]` would wipe the sample list.
+pub fn should_fetch_seasons(fixture_active: bool, url: Option<&str>) -> bool {
+    !fixture_active && url.is_some()
+}
+
+/// An empty 200 must not replace a cache written this run (or any existing list).
+pub fn apply_fetched_seasons(existing: Vec<Season>, fetched: Vec<Season>) -> Vec<Season> {
+    if fetched.is_empty() && !existing.is_empty() {
+        existing
+    } else {
+        fetched
+    }
+}
+
 fn system_time_to_utc(t: SystemTime) -> Option<DateTime<Utc>> {
     let d = t.duration_since(SystemTime::UNIX_EPOCH).ok()?;
     DateTime::<Utc>::from_timestamp(d.as_secs() as i64, d.subsec_nanos())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::TimeZone;
+
+    fn season(id: &str, current: bool) -> Season {
+        Season {
+            id: id.into(),
+            name: id.into(),
+            starts_at: Utc.with_ymd_and_hms(2026, 9, 1, 0, 0, 0).unwrap(),
+            ends_at: Utc.with_ymd_and_hms(2026, 12, 1, 0, 0, 0).unwrap(),
+            is_current: current,
+        }
+    }
+
+    #[test]
+    fn fixture_never_fetches() {
+        assert!(!should_fetch_seasons(
+            true,
+            Some("https://example.test/api/public/seasons")
+        ));
+        assert!(should_fetch_seasons(
+            false,
+            Some("https://example.test/api/public/seasons")
+        ));
+        assert!(!should_fetch_seasons(false, None));
+    }
+
+    #[test]
+    fn empty_fetch_does_not_wipe_existing() {
+        let existing = vec![season("season-17", true)];
+        let kept = apply_fetched_seasons(existing.clone(), Vec::new());
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].id, "season-17");
+    }
+
+    #[test]
+    fn nonempty_fetch_replaces_cache() {
+        let existing = vec![season("old", false)];
+        let fetched = vec![season("season-17", true)];
+        let out = apply_fetched_seasons(existing, fetched);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].id, "season-17");
+    }
 }

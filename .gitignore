@@ -1,7 +1,6 @@
 .playwright-mcp/
 *.png
 !crates/stat-tracker/portraits/*.png
-!crates/stat-tracker-ui/artifacts/*.png
 target/
 .env
 data/secrets.env

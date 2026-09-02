@@ -13,8 +13,6 @@ pub struct Cli {
     pub data_dir: PathBuf,
     pub fixture: Option<FixtureKind>,
     pub seasons_url: Option<String>,
-    /// Write a software-rendered Overview PNG and exit (no window).
-    pub preview: Option<PathBuf>,
     pub help: bool,
 }
 
@@ -23,7 +21,6 @@ impl Cli {
         let mut data_dir = None;
         let mut fixture = None;
         let mut seasons_url = None;
-        let mut preview = None;
         let mut help = false;
         let args: Vec<String> = std::env::args().skip(1).collect();
         let mut i = 0;
@@ -55,12 +52,6 @@ impl Cli {
                         i += 1;
                     }
                 }
-                "--preview" => {
-                    if let Some(v) = args.get(i + 1) {
-                        preview = Some(PathBuf::from(v));
-                        i += 1;
-                    }
-                }
                 other => eprintln!("unknown argument: {other}"),
             }
             i += 1;
@@ -75,7 +66,9 @@ impl Cli {
             }
         });
 
-        if seasons_url.is_none() {
+        // Fixture runs never resolve a server URL — production `[]` must not
+        // replace the sample season list written into the fixture cache.
+        if fixture.is_none() && seasons_url.is_none() {
             if let Some(sync) = &config.sync
                 && !sync.server_url.is_empty()
             {
@@ -85,13 +78,14 @@ impl Cli {
             {
                 seasons_url = Some(crate::seasons::seasons_url_from_server(&server));
             }
+        } else if fixture.is_some() {
+            seasons_url = None;
         }
 
         Self {
             data_dir,
             fixture,
             seasons_url,
-            preview,
             help,
         }
     }
@@ -102,14 +96,14 @@ impl Cli {
 USAGE:
   cargo run -p scuffed-stat-tracker-ui -- [OPTIONS]
   cargo run -p scuffed-stat-tracker-ui -- --fixture sample
-  cargo run -p scuffed-stat-tracker-ui -- --fixture empty --preview overview-empty.png
+  cargo run -p scuffed-stat-tracker-ui -- --fixture empty
 
 OPTIONS:
   --data-dir PATH       Daemon data dir (default: config / XDG, or a temp dir with --fixture)
   --fixture empty|sample
                         Install a demo live_snapshot.json and read it back via storage::read_snapshot
-  --seasons-url URL     GET /api/public/seasons (default: $SCUFFED_SERVER or config sync URL)
-  --preview PATH        Software-render Overview to PNG and exit (no window / wgpu)
+  --seasons-url URL     GET /api/public/seasons (default: $SCUFFED_SERVER or config sync URL).
+                        Ignored when --fixture is set.
   -h, --help            Show this help
 "
     }

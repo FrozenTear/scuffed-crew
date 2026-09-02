@@ -2,7 +2,6 @@ use iced::Font;
 use iced::window;
 use stat_tracker_ui::app::TrackerApp;
 use stat_tracker_ui::cli::Cli;
-use stat_tracker_ui::preview;
 use stat_tracker_ui::theme;
 
 fn main() -> anyhow::Result<()> {
@@ -16,13 +15,6 @@ fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     if cli.help {
         print!("{}", Cli::help_text());
-        return Ok(());
-    }
-
-    if let Some(path) = cli.preview.clone() {
-        let (app, _task) = TrackerApp::new(cli);
-        preview::write_overview_png(&app, &path)?;
-        println!("wrote {}", path.display());
         return Ok(());
     }
 

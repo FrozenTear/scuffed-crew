@@ -16,21 +16,16 @@ Design: PR #55 rev 2 (`docs/notes/stat-tracker-gui-redesign-2026-09-02.md`).
 # Live daemon data (default XDG data dir / config.toml)
 cargo run -p scuffed-stat-tracker-ui
 
-# Empty Overview
+# Empty Overview (no season picker)
 cargo run -p scuffed-stat-tracker-ui -- --fixture empty
 
-# Sample matches + seasons (season switch defaults to the current season)
+# Sample matches + seasons (picker stays; defaults to the current season)
 cargo run -p scuffed-stat-tracker-ui -- --fixture sample
 ```
 
-Headless software-rendered PNGs (no window / wgpu):
+`--fixture` never fetches `GET /api/public/seasons`. Verify on a real window (niri/Wayland): sample must show Tonight + Heroes shelves and the season switch; empty must show the Tonight empty copy.
 
-```sh
-cargo run -p scuffed-stat-tracker-ui -- --fixture empty --preview crates/stat-tracker-ui/artifacts/overview-empty.png
-cargo run -p scuffed-stat-tracker-ui -- --fixture sample --preview crates/stat-tracker-ui/artifacts/overview-sample.png
-```
-
-Checked-in previews: `artifacts/overview-empty.png` and `artifacts/overview-sample.png`.
+Evidence screenshots are **real window captures** (Robert on niri). There is no software `--preview` path.
 
 ### Flags
 
@@ -38,10 +33,9 @@ Checked-in previews: `artifacts/overview-empty.png` and `artifacts/overview-samp
 |---|---|
 | `--data-dir PATH` | Daemon data dir (default: config / XDG; temp dir when `--fixture` is set) |
 | `--fixture empty\|sample` | Write a demo `live_snapshot.json` and read it back through `storage::read_snapshot` |
-| `--seasons-url URL` | `GET /api/public/seasons`; cached to `<data_dir>/seasons.json` |
-| `--preview PATH` | Software-render Overview to PNG and exit |
+| `--seasons-url URL` | `GET /api/public/seasons`; cached to `<data_dir>/seasons.json`. Ignored with `--fixture`. |
 
-Seasons URL falls back to `SCUFFED_SERVER` or `config.toml` sync URL. Offline: cache only. No seasons → picker hidden, all time.
+Seasons URL falls back to `SCUFFED_SERVER` or `config.toml` sync URL (live mode only). Offline: cache only. No seasons → picker hidden, all time.
 
 ## Out of scope (later phases)
 

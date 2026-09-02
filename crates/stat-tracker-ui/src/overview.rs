@@ -101,10 +101,15 @@ fn heroes_shelf(stats: &crate::aggregate::Aggregates) -> Element<'static, Messag
     let mut col = column![header].spacing(GRID_GAP);
     if stats.heroes.is_empty() {
         col = col.push(
-            text("No heroes in this window")
-                .size(SIZE_BODY)
-                .font(FONT_MEDIUM)
-                .color(TEXT_3),
+            container(
+                text("No heroes in this window")
+                    .size(SIZE_BODY)
+                    .font(FONT_MEDIUM)
+                    .color(TEXT_3),
+            )
+            .padding(theme::PAD_INNER)
+            .width(Fill)
+            .style(theme::surface_panel),
         );
         return col.into();
     }

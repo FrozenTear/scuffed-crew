@@ -49,11 +49,16 @@ impl TrackerApp {
         }
         let season = seasons::default_selection(&seasons.seasons);
         let clock = fixture_clock(cli.fixture, &games);
-        let fetch = if let Some(url) = cli.seasons_url.clone() {
-            Task::perform(seasons::fetch_seasons(url), Message::SeasonsFetched)
-        } else {
-            Task::none()
-        };
+        let fetch =
+            if seasons::should_fetch_seasons(cli.fixture.is_some(), cli.seasons_url.as_deref()) {
+                let url = cli
+                    .seasons_url
+                    .clone()
+                    .expect("should_fetch_seasons requires a URL");
+                Task::perform(seasons::fetch_seasons(url), Message::SeasonsFetched)
+            } else {
+                Task::none()
+            };
 
         let snapshot_mtime = snapshot::snapshot_mtime(&cli.data_dir);
         let live_status = live_status_for(&games, cli.fixture);
@@ -100,16 +105,24 @@ impl TrackerApp {
                 Task::none()
             }
             Message::SeasonsFetched(result) => {
+                if self.fixture.is_some() {
+                    return Task::none();
+                }
                 match result {
                     Ok(list) => {
-                        if let Err(e) = seasons::write_cache(&self.data_dir, &list) {
+                        let list =
+                            seasons::apply_fetched_seasons(self.seasons.seasons.clone(), list);
+                        if !list.is_empty()
+                            && let Err(e) = seasons::write_cache(&self.data_dir, &list)
+                        {
                             tracing::warn!(error = %e, "failed to write seasons.json cache");
                         }
+                        let from_network = !list.is_empty();
                         let keep = self.season.clone();
                         self.seasons = SeasonCache {
                             seasons: list,
                             fetched_at: Some(Utc::now()),
-                            from_network: true,
+                            from_network,
                         };
                         if keep
                             .as_id()
