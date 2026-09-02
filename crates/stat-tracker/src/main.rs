@@ -569,6 +569,45 @@ fn active_game_path(data_dir: &std::path::Path) -> std::path::PathBuf {
 
 /// Persist (or clear) the open-game skeleton. Fire-and-forget: losing this
 /// file only degrades restart recovery, never the capture itself.
+/// A game that closes without a single accepted Tab capture never reached the
+/// store: `session_created` stays false, the outcome/map the poller saw live
+/// only in `active_game.json` and are overwritten by the next game. Until the
+/// 2026-09-01 zero-games night this was silent at INFO level (the poller had
+/// happily logged "outcome confirmed" for a game that was then discarded).
+/// Say so at WARN, and keep a one-line record in `debug/unrecorded_games.jsonl`
+/// so the evening can be reconstructed from disk after the journal rotates.
+fn note_unrecorded_game(data_dir: &std::path::Path, g: &ActiveGame, reason: &str) {
+    if g.session_created {
+        return;
+    }
+    tracing::warn!(
+        session_id = %g.session_id,
+        outcome = %g.outcome,
+        map = g.map.as_deref().unwrap_or("?"),
+        age_secs = g.opened_at.elapsed().as_secs(),
+        reason,
+        "game closed with NO Tab captures — it was not recorded (no scoreboard seen: Tab not pressed, keyboard grabbed, or capture rejected)"
+    );
+    let row = serde_json::json!({
+        "closed_at": Utc::now().to_rfc3339(),
+        "session_id": g.session_id,
+        "outcome": g.outcome.to_string(),
+        "map": g.map,
+        "age_secs": g.opened_at.elapsed().as_secs(),
+        "reason": reason,
+    });
+    let dir = data_dir.join("debug");
+    if std::fs::create_dir_all(&dir).is_ok()
+        && let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(dir.join("unrecorded_games.jsonl"))
+    {
+        use std::io::Write;
+        let _ = writeln!(f, "{row}");
+    }
+}
+
 fn persist_active_game(data_dir: &std::path::Path, game: Option<&ActiveGame>) {
     let path = active_game_path(data_dir);
     let Some(g) = game else {
@@ -1050,6 +1089,9 @@ async fn run_loop(ctx: Arc<DaemonCtx>) -> anyhow::Result<()> {
                         // the poller saw before any game was open.
                         let opened_by_this_tab = should_start_fresh_session(st.active_game.as_ref(), Instant::now());
                         if opened_by_this_tab {
+                            if let Some(prev) = st.active_game.as_ref() {
+                                note_unrecorded_game(data_dir, prev, "superseded by Tab-opened game");
+                            }
                             let inherited = take_fresh_pending(&mut st.pending_outcome, Instant::now());
                             st.active_game = Some(ActiveGame::open_now(
                                 format!("{:016x}", rand_id()),
@@ -1429,6 +1471,9 @@ async fn run_loop(ctx: Arc<DaemonCtx>) -> anyhow::Result<()> {
                                         .filter_map(|m| parse::canonical_map(m))
                                         .collect();
                                     tracing::info!(?candidates, session_id = %sid, "auto-detect: map vote — new game");
+                                    if let Some(prev) = st.active_game.as_ref() {
+                                        note_unrecorded_game(data_dir, prev, "superseded by map vote");
+                                    }
                                     st.active_game = Some(ActiveGame::open_now(sid, detect::MatchOutcome::Unknown, candidates));
                                     st.last_game_open = Some(Instant::now());
                                     // Evidence about the previous match must not
@@ -1445,6 +1490,9 @@ async fn run_loop(ctx: Arc<DaemonCtx>) -> anyhow::Result<()> {
                             {
                                 let sid = format!("{:016x}", rand_id());
                                 tracing::info!(session_id = %sid, "auto-detect: hero select/ban — new game (map vote missed)");
+                                if let Some(prev) = st.active_game.as_ref() {
+                                    note_unrecorded_game(data_dir, prev, "superseded by hero select/ban");
+                                }
                                 st.active_game = Some(ActiveGame::open_now(sid, detect::MatchOutcome::Unknown, Vec::new()));
                                 st.last_game_open = Some(Instant::now());
                                 st.word_outcome_streak = None;
