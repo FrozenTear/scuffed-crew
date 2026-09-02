@@ -2495,6 +2495,55 @@ async fn setup_rejects_short_password() {
     assert_eq!(res.status(), StatusCode::BAD_REQUEST);
 }
 
+/// F-API-002: two concurrent first-boot POSTs with different usernames must
+/// not both become admins. The bootstrap_lock CAS lets exactly one win.
+#[tokio::test]
+async fn setup_concurrent_posts_mint_only_one_admin() {
+    let state = test_state().await;
+    let db = state.db.clone();
+    let app = create_router(state);
+
+    let req = |username: &str| {
+        rate_limit_ip(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/auth/setup")
+                .header(header::CONTENT_TYPE, "application/json"),
+        )
+        .body(Body::from(
+            serde_json::to_vec(&json!({
+                "username": username,
+                "password": "a-strong-password"
+            }))
+            .unwrap(),
+        ))
+        .unwrap()
+    };
+
+    let (res1, res2) = tokio::join!(
+        app.clone().oneshot(req("adminone")),
+        app.clone().oneshot(req("admintwo")),
+    );
+    let s1 = res1.unwrap().status();
+    let s2 = res2.unwrap().status();
+    let wins = [s1, s2].iter().filter(|s| **s == StatusCode::OK).count();
+    let losses = [s1, s2]
+        .iter()
+        .filter(|s| **s == StatusCode::FORBIDDEN || **s == StatusCode::CONFLICT)
+        .count();
+    assert_eq!(wins, 1, "exactly one setup must succeed: {s1} / {s2}");
+    assert_eq!(losses, 1, "loser must be 403/409: {s1} / {s2}");
+    assert_eq!(
+        db.count_active_admins().await.unwrap(),
+        1,
+        "concurrent setup must not mint two admins"
+    );
+    assert!(
+        db.has_any_member().await.unwrap(),
+        "bootstrap signal must close after the winning setup"
+    );
+}
+
 // ─── Membership spine + admin authority ─────────────────────────────────────
 
 /// Seed a logged-in user with no member record (applicant).
@@ -6008,4 +6057,244 @@ async fn nostr_health_blank_relay_url_not_configured() {
     assert_eq!(json["configured"], false);
     assert_eq!(json["reachable"], false);
     assert!(json["relay_url"].is_null());
+}
+
+// ─── F-API-001: forum min_role on unfiltered list + fail-closed get_thread ──
+
+fn thread_titles(json: &Value) -> Vec<String> {
+    json["threads"]
+        .as_array()
+        .unwrap_or(&Vec::new())
+        .iter()
+        .filter_map(|t| t["title"].as_str().map(|s| s.to_string()))
+        .collect()
+}
+
+/// Seed a public thread and an officer-only thread (plus an orphan whose board
+/// row is missing). Returns (public_id, officer_id, orphan_id).
+async fn seed_forum_acl_fixtures(db: &Database) -> (String, String, String) {
+    seed_all_roles(db).await;
+
+    let general = db
+        .get_forum_board_by_slug("general")
+        .await
+        .expect("get general")
+        .expect("default general board");
+    let officers = db
+        .create_forum_board(
+            &general.category_id,
+            None,
+            "Officers",
+            "officers-only",
+            Some("Officer board"),
+            99,
+        )
+        .await
+        .expect("create officers board");
+    db.client
+        .query("UPDATE forum_board SET min_role = 'officer' WHERE slug = 'officers-only'")
+        .await
+        .expect("set min_role");
+
+    let public = db
+        .create_forum_thread("Public Chat", &general.id, "officermember", "hello public")
+        .await
+        .expect("public thread");
+    let secret = db
+        .create_forum_thread(
+            "Secret Officer Thread",
+            &officers.id,
+            "officermember",
+            "classified body",
+        )
+        .await
+        .expect("officer thread");
+
+    db.client
+        .query(
+            r#"CREATE forum_thread:orphan SET
+                title = 'Orphan Secret',
+                category = 'ghost',
+                board_id = 'missing-board',
+                author_member_id = 'officermember',
+                content = 'should not leak',
+                pinned = false,
+                locked = false,
+                created_at = time::now(),
+                updated_at = time::now(),
+                is_active = true"#,
+        )
+        .await
+        .expect("orphan thread");
+
+    (public.id, secret.id, "orphan".into())
+}
+
+#[tokio::test]
+async fn forum_unfiltered_list_hides_restricted_and_orphan_threads() {
+    let state = test_state().await;
+    seed_forum_acl_fixtures(&state.db).await;
+    let app = create_router(state);
+
+    let anon = app
+        .clone()
+        .oneshot(unauthed_request(Method::GET, "/api/forum/threads"))
+        .await
+        .unwrap();
+    assert_eq!(anon.status(), StatusCode::OK);
+    let anon_json = body_json(anon).await;
+    let anon_titles = thread_titles(&anon_json);
+    assert!(
+        anon_titles.iter().any(|t| t == "Public Chat"),
+        "public thread must remain visible: {anon_titles:?}"
+    );
+    assert!(
+        !anon_titles.iter().any(|t| t == "Secret Officer Thread"),
+        "officer-board thread must not leak on unfiltered list: {anon_titles:?}"
+    );
+    assert!(
+        !anon_titles.iter().any(|t| t == "Orphan Secret"),
+        "thread with missing board must not leak: {anon_titles:?}"
+    );
+
+    let member = app
+        .clone()
+        .oneshot(authed_request(
+            Method::GET,
+            "/api/forum/threads",
+            MEMBER_TOKEN,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(member.status(), StatusCode::OK);
+    let member_titles = thread_titles(&body_json(member).await);
+    assert!(
+        !member_titles.iter().any(|t| t == "Secret Officer Thread"),
+        "member must not see officer-board threads: {member_titles:?}"
+    );
+
+    let officer = app
+        .clone()
+        .oneshot(authed_request(
+            Method::GET,
+            "/api/forum/threads",
+            OFFICER_TOKEN,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(officer.status(), StatusCode::OK);
+    let officer_titles = thread_titles(&body_json(officer).await);
+    assert!(
+        officer_titles.iter().any(|t| t == "Secret Officer Thread"),
+        "officer must see their board: {officer_titles:?}"
+    );
+    assert!(
+        !officer_titles.iter().any(|t| t == "Orphan Secret"),
+        "even officers must not see unresolved-board threads: {officer_titles:?}"
+    );
+
+    // Category-only query is the other unfiltered path (no board= ACL gate).
+    let cat = app
+        .oneshot(unauthed_request(
+            Method::GET,
+            "/api/forum/threads?category=officers-only",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(cat.status(), StatusCode::OK);
+    let cat_titles = thread_titles(&body_json(cat).await);
+    assert!(
+        !cat_titles.iter().any(|t| t == "Secret Officer Thread"),
+        "category-only list must not leak restricted threads: {cat_titles:?}"
+    );
+}
+
+#[tokio::test]
+async fn forum_get_thread_enforces_min_role_and_fails_closed_without_board() {
+    let state = test_state().await;
+    let (_public_id, secret_id, orphan_id) = seed_forum_acl_fixtures(&state.db).await;
+    let app = create_router(state);
+
+    let anon = app
+        .clone()
+        .oneshot(unauthed_request(
+            Method::GET,
+            &format!("/api/forum/threads/{secret_id}"),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        anon.status(),
+        StatusCode::UNAUTHORIZED,
+        "anonymous must not skip officer-board ACL"
+    );
+    let anon_body = body_json(anon).await;
+    assert!(
+        anon_body["thread"].is_null() || anon_body.get("thread").is_none(),
+        "must not serialize the restricted thread: {anon_body}"
+    );
+
+    let member = app
+        .clone()
+        .oneshot(authed_request(
+            Method::GET,
+            &format!("/api/forum/threads/{secret_id}"),
+            MEMBER_TOKEN,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        member.status(),
+        StatusCode::FORBIDDEN,
+        "member must not read officer-board thread"
+    );
+
+    let officer = app
+        .clone()
+        .oneshot(authed_request(
+            Method::GET,
+            &format!("/api/forum/threads/{secret_id}"),
+            OFFICER_TOKEN,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(officer.status(), StatusCode::OK);
+    let officer_json = body_json(officer).await;
+    assert_eq!(officer_json["thread"]["title"], "Secret Officer Thread");
+
+    // Missing board must not skip ACL (previously served the row to anyone).
+    let orphan_anon = app
+        .clone()
+        .oneshot(unauthed_request(
+            Method::GET,
+            &format!("/api/forum/threads/{orphan_id}"),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        orphan_anon.status(),
+        StatusCode::NOT_FOUND,
+        "missing board must fail closed, got {}",
+        orphan_anon.status()
+    );
+    let orphan_body = body_json(orphan_anon).await;
+    let dumped = orphan_body.to_string();
+    assert!(
+        !dumped.contains("should not leak") && !dumped.contains("Orphan Secret"),
+        "orphan thread body must not leak: {dumped}"
+    );
+
+    let orphan_admin = app
+        .oneshot(authed_request(
+            Method::GET,
+            &format!("/api/forum/threads/{orphan_id}"),
+            ADMIN_TOKEN,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        orphan_admin.status(),
+        StatusCode::NOT_FOUND,
+        "missing board fails closed even for admin"
+    );
 }

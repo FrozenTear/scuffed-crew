@@ -1,5 +1,5 @@
-use surrealdb::engine::any::Any;
 use surrealdb::Surreal;
+use surrealdb::engine::any::Any;
 
 use crate::DbResult;
 
@@ -725,6 +725,16 @@ pub async fn run_migrations(client: &Surreal<Any>) -> DbResult<()> {
         DEFINE FIELD OVERWRITE ends_at ON season TYPE datetime;
         DEFINE FIELD OVERWRITE is_current ON season TYPE bool DEFAULT false;
         DEFINE INDEX IF NOT EXISTS season_current_idx ON season COLUMNS is_current;
+
+        -- ================================================
+        -- First-boot setup lock (F-API-002)
+        -- Singleton CAS so concurrent POST /api/auth/setup cannot mint two admins.
+        -- ================================================
+        DEFINE TABLE IF NOT EXISTS bootstrap_lock SCHEMAFULL;
+        DEFINE FIELD OVERWRITE slot ON bootstrap_lock TYPE string;
+        DEFINE FIELD OVERWRITE claimed ON bootstrap_lock TYPE bool DEFAULT false;
+        DEFINE FIELD OVERWRITE claimed_at ON bootstrap_lock TYPE option<datetime>;
+        DEFINE INDEX IF NOT EXISTS bootstrap_lock_slot_idx ON bootstrap_lock COLUMNS slot UNIQUE;
     "#,
         )
         .await?
@@ -733,6 +743,12 @@ pub async fn run_migrations(client: &Surreal<Any>) -> DbResult<()> {
     // Seed default category/board tree and migrate legacy thread.category strings.
     if let Err(e) = crate::queries::forum::ensure_forum_hierarchy(client).await {
         tracing::warn!("forum hierarchy seed/migrate: {e}");
+    }
+
+    // Unclaimed first-boot sentinel. CREATE only when missing so a claimed lock
+    // is never reset on restart (do not UPDATE this row from migrations).
+    if let Err(e) = crate::queries::members::ensure_bootstrap_lock_sentinel(client).await {
+        tracing::warn!("bootstrap_lock sentinel: {e}");
     }
 
     tracing::info!("Database migrations complete");

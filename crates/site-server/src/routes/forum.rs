@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use axum::{
     Json,
     extract::{Path, Query, State},
@@ -71,6 +73,25 @@ fn enforce_board_access(
         Some(role) if role_meets_min(role, min) => Ok(()),
         Some(_) => Err(err_forbidden_role()),
     }
+}
+
+/// Resolve the thread's board for ACL. Fail closed when `board_id` is missing
+/// or the board row cannot be loaded (F-API-001) — never skip min_role.
+async fn require_thread_board(
+    state: &AppState,
+    thread: &ForumThread,
+) -> Result<ForumBoard, (StatusCode, Json<ErrorResponse>)> {
+    let bid = thread
+        .board_id
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| err_404("Thread not found"))?;
+    state
+        .db
+        .get_forum_board(bid)
+        .await
+        .map_err(err_500)?
+        .ok_or_else(|| err_404("Thread not found"))
 }
 
 // ─── Request/Response types ─────────────────────────────────
@@ -432,8 +453,26 @@ pub async fn list_threads(
         .await
         .map_err(err_500)?;
 
+    // F-API-001: unfiltered / category-only lists used to return every thread
+    // row. Drop any thread whose board is missing or whose min_role the caller
+    // does not meet. When `board=` was supplied we already enforced above;
+    // still re-check so a stale board_id cannot leak.
+    let mut board_cache: HashMap<String, Option<ForumBoard>> = HashMap::new();
     let mut items = Vec::with_capacity(threads.len());
     for thread in threads {
+        let Some(bid) = thread.board_id.as_deref().filter(|s| !s.is_empty()) else {
+            continue;
+        };
+        if let std::collections::hash_map::Entry::Vacant(e) = board_cache.entry(bid.to_string()) {
+            let resolved = state.db.get_forum_board(bid).await.map_err(err_500)?;
+            e.insert(resolved);
+        }
+        let Some(Some(board)) = board_cache.get(bid) else {
+            continue;
+        };
+        if enforce_board_access(board, role).is_err() {
+            continue;
+        }
         let reply_count = state.db.count_forum_replies(&thread.id).await.unwrap_or(0);
         items.push(ThreadWithReplyCount {
             thread,
@@ -465,24 +504,20 @@ pub async fn get_thread(
         )
     })?;
 
-    let mut board = None;
+    // Fail closed: a missing board must not skip min_role (F-API-001).
+    let b = require_thread_board(&state, &thread).await?;
+    enforce_board_access(&b, caller.as_ref().map(|m| m.org_role))?;
     let mut parent_board = None;
-    let mut category = None;
-    if let Some(bid) = thread.board_id.as_deref()
-        && let Ok(Some(b)) = state.db.get_forum_board(bid).await
-    {
-        enforce_board_access(&b, caller.as_ref().map(|m| m.org_role))?;
-        if let Some(pid) = b.parent_board_id.as_deref() {
-            parent_board = state.db.get_forum_board(pid).await.ok().flatten();
-        }
-        category = state
-            .db
-            .get_forum_category(&b.category_id)
-            .await
-            .ok()
-            .flatten();
-        board = Some(b);
+    if let Some(pid) = b.parent_board_id.as_deref() {
+        parent_board = state.db.get_forum_board(pid).await.ok().flatten();
     }
+    let category = state
+        .db
+        .get_forum_category(&b.category_id)
+        .await
+        .ok()
+        .flatten();
+    let board = Some(b);
 
     let replies = state
         .db
@@ -612,11 +647,8 @@ pub async fn create_reply(
         ));
     }
 
-    if let Some(bid) = thread.board_id.as_deref()
-        && let Ok(Some(b)) = state.db.get_forum_board(bid).await
-    {
-        enforce_board_access(&b, Some(member.member.org_role))?;
-    }
+    let board = require_thread_board(&state, &thread).await?;
+    enforce_board_access(&board, Some(member.member.org_role))?;
 
     let reply = state
         .db
