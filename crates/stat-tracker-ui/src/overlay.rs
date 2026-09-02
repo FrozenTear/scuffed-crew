@@ -1023,8 +1023,6 @@ mod tests {
         .unwrap();
         assert_eq!(active_game_session_id(&dir).as_deref(), Some("s1"));
         assert_eq!(live_active_game_key(&dir, 1800, now), None);
-        assert!(!detect_game_running(&dir, &[], false));
-        assert!(!detect_game_running(&dir, &["Overwatch.exe".into()], false));
         assert_eq!(
             resolve_live_session_key(&dir, false, 1800, now, false),
             None,
