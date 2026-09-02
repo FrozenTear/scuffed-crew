@@ -107,6 +107,9 @@ pub const STRIPE: f32 = 4.0;
 pub const HEIGHT_FEATURED: f32 = 216.0;
 pub const HEIGHT_COMPACT: f32 = 180.0;
 pub const HEIGHT_HERO: f32 = 160.0;
+/// Cap the main column so cards do not stretch on ultrawide (design P1).
+pub const CONTENT_MAX: f32 = 1400.0;
+pub const SIDEBAR_WIDTH: f32 = 168.0;
 
 pub const SIZE_LABEL: f32 = 11.0;
 pub const SIZE_META: f32 = 13.0;
@@ -249,5 +252,112 @@ pub fn chip(selected: bool) -> impl Fn(&Theme, button::Status) -> button::Style 
                 snap: false,
             }
         }
+    }
+}
+
+pub fn role_chip(role: Role, selected: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
+    let accent = role_color(role);
+    move |_theme, _status| {
+        if selected {
+            button::Style {
+                background: Some(Background::Color(accent)),
+                text_color: TEXT,
+                border: Border {
+                    color: accent,
+                    width: 1.0,
+                    radius: RADIUS_CHIP.into(),
+                },
+                shadow: Shadow::default(),
+                snap: false,
+            }
+        } else {
+            button::Style {
+                background: Some(Background::Color(SURFACE)),
+                text_color: TEXT_2,
+                border: Border {
+                    color: BORDER,
+                    width: 1.0,
+                    radius: RADIUS_CHIP.into(),
+                },
+                shadow: Shadow::default(),
+                snap: false,
+            }
+        }
+    }
+}
+
+pub fn nav_btn(selected: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
+    move |_theme, _status| {
+        if selected {
+            button::Style {
+                background: Some(Background::Color(ACCENT)),
+                text_color: TEXT,
+                border: Border {
+                    color: ACCENT,
+                    width: 1.0,
+                    radius: inner_radius(),
+                },
+                shadow: Shadow::default(),
+                snap: false,
+            }
+        } else {
+            button::Style {
+                background: Some(Background::Color(SURFACE)),
+                text_color: TEXT_2,
+                border: Border {
+                    color: BORDER,
+                    width: 1.0,
+                    radius: inner_radius(),
+                },
+                shadow: Shadow::default(),
+                snap: false,
+            }
+        }
+    }
+}
+
+pub fn ghost_btn() -> impl Fn(&Theme, button::Status) -> button::Style {
+    |_theme, _status| button::Style {
+        background: Some(Background::Color(SURFACE)),
+        text_color: TEXT,
+        border: Border {
+            color: BORDER,
+            width: 1.0,
+            radius: RADIUS_CHIP.into(),
+        },
+        shadow: Shadow::default(),
+        snap: false,
+    }
+}
+
+pub fn danger_btn(armed: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
+    move |_theme, _status| button::Style {
+        background: Some(Background::Color(if armed { DANGER } else { SURFACE })),
+        text_color: if armed { TEXT } else { DANGER },
+        border: Border {
+            color: DANGER,
+            width: 1.0,
+            radius: RADIUS_CHIP.into(),
+        },
+        shadow: Shadow::default(),
+        snap: false,
+    }
+}
+
+pub fn text_input_style(
+    _theme: &Theme,
+    _status: iced::widget::text_input::Status,
+) -> iced::widget::text_input::Style {
+    iced::widget::text_input::Style {
+        background: Background::Color(BG),
+        border: Border {
+            color: BORDER,
+            width: 1.0,
+            radius: inner_radius(),
+        },
+        icon: TEXT_3,
+        placeholder: TEXT_3,
+        value: TEXT,
+        selection: ACCENT,
     }
 }
