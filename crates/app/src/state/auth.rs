@@ -20,6 +20,12 @@ impl AuthState {
         self.user.is_some()
     }
 
+    /// Session user has a recognized org role (recruit+). Logged-in accounts
+    /// without a member row — typical after local register — are not members.
+    pub fn is_org_member(&self) -> bool {
+        self.user.as_ref().and_then(|u| u.role.as_ref()).is_some()
+    }
+
     pub fn is_admin(&self) -> bool {
         self.user
             .as_ref()
@@ -82,4 +88,47 @@ pub fn use_auth_init() {
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn user(role: Option<OrgRole>) -> UserInfo {
+        UserInfo {
+            id: "u1".into(),
+            username: "dev".into(),
+            avatar_url: None,
+            role,
+        }
+    }
+
+    #[test]
+    fn org_member_requires_recognized_role() {
+        let loading = AuthState::new();
+        assert!(loading.loading);
+        assert!(!loading.is_logged_in());
+        assert!(!loading.is_org_member());
+
+        let anon = AuthState {
+            user: None,
+            loading: false,
+        };
+        assert!(!anon.is_logged_in());
+        assert!(!anon.is_org_member());
+
+        let bare = AuthState {
+            user: Some(user(None)),
+            loading: false,
+        };
+        assert!(bare.is_logged_in());
+        assert!(!bare.is_org_member());
+
+        let member = AuthState {
+            user: Some(user(Some(OrgRole::Member))),
+            loading: false,
+        };
+        assert!(member.is_logged_in());
+        assert!(member.is_org_member());
+    }
 }

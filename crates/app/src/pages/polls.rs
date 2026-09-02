@@ -1,5 +1,6 @@
 use dioxus::prelude::*;
 
+use crate::components::member_gate::member_pending;
 use crate::components::poll::{PollCard, PollCreate, PollResultsData};
 use crate::hooks::use_api;
 use crate::state::use_auth;
@@ -64,7 +65,7 @@ pub fn Polls() -> Element {
                 let data = polls.data.read();
                 let data = data.as_ref().and_then(|d| d.as_ref());
                 match data {
-                    None => rsx! { p { class: "polls-loading", "Loading polls..." } },
+                    None => member_pending(&auth(), &polls, "polls"),
                     Some(poll_list) => {
                         if poll_list.is_empty() {
                             rsx! {

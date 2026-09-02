@@ -72,6 +72,9 @@ pub fn AdminMembers() -> Element {
     let mut members = use_api_list::<Member>("/api/members");
     let mut games = use_api_list::<Game>("/api/games");
     let mut toast = use_toast();
+    // GET /api/members is active-only — keep this-session deactivations so
+    // Activate can still hit PUT /api/members/:id (the real toggle endpoint).
+    let mut recently_inactive: Signal<Vec<Member>> = use_signal(Vec::new);
 
     // Role change modal
     let mut role_modal = ModalController::<Member>::new();
@@ -233,12 +236,18 @@ pub fn AdminMembers() -> Element {
                     .await;
                 match result {
                     Ok(_) => {
-                        let action = if new_active {
-                            "activated"
+                        if new_active {
+                            recently_inactive.write().retain(|m| m.id != id);
+                            toast.show(Toast::success("Member activated."));
                         } else {
-                            "deactivated"
-                        };
-                        toast.show(Toast::success(format!("Member {action}.")));
+                            let mut row = member.clone();
+                            row.is_active = false;
+                            recently_inactive.write().retain(|m| m.id != id);
+                            recently_inactive.write().push(row);
+                            toast.show(Toast::success(
+                                "Member deactivated. They left the active list — Activate remains available in Recently deactivated (this session).",
+                            ));
+                        }
                         members.refresh += 1;
                         games.refresh += 1;
                     }
@@ -510,6 +519,9 @@ pub fn AdminMembers() -> Element {
         div { class: "admin-toolbar",
             h1 { "Members" }
         }
+        p { class: "empty-state", style: "text-align:left;padding:0 0 1rem;margin:0;",
+            "This list is active members only. Deactivating someone removes the row. Activate is available for members you deactivate in this session."
+        }
 
         // Members table
         {
@@ -532,7 +544,6 @@ pub fn AdminMembers() -> Element {
                                 let m_avatar = member.clone();
                                 let m_pw = member.clone();
                                 let status_str = if member.is_active { "active" } else { "inactive" };
-                                let toggle_label = if member.is_active { "Deactivate" } else { "Activate" };
                                 let joined = crate::util::format_datetime(&member.joined_at);
                                 rsx! {
                                     tr { key: "{member.id}",
@@ -547,10 +558,12 @@ pub fn AdminMembers() -> Element {
                                                     onclick: move |_| open_role(m_role.clone()),
                                                     "Role"
                                                 }
-                                                button {
-                                                    class: "row-btn danger",
-                                                    onclick: move |_| open_toggle(m_toggle.clone()),
-                                                    "{toggle_label}"
+                                                if member.is_active {
+                                                    button {
+                                                        class: "row-btn danger",
+                                                        onclick: move |_| open_toggle(m_toggle.clone()),
+                                                        "Deactivate"
+                                                    }
                                                 }
                                                 button {
                                                     class: "row-btn",
@@ -585,6 +598,54 @@ pub fn AdminMembers() -> Element {
                         }
                     }
                 },
+            }
+        }
+
+        {
+            let active_ids: Vec<String> = members
+                .data
+                .read()
+                .as_ref()
+                .and_then(|d| d.as_ref())
+                .map(|list| list.iter().map(|m| m.id.clone()).collect())
+                .unwrap_or_default();
+            let inactive: Vec<Member> = recently_inactive()
+                .into_iter()
+                .filter(|m| !active_ids.iter().any(|id| id == &m.id))
+                .collect();
+            if inactive.is_empty() {
+                rsx! {}
+            } else {
+                rsx! {
+                    h2 {
+                        style: "font-family:var(--font-head);font-size:0.95rem;color:var(--text);margin:1.5rem 0 0.75rem;",
+                        "Recently deactivated (this session)"
+                    }
+                    p { class: "empty-state", style: "text-align:left;padding:0 0 0.75rem;margin:0;",
+                        "Earlier inactive members are not listed — the API has no include_inactive param."
+                    }
+                    DataTable { headers: vec!["Name", "Role", "Status", "Actions"],
+                        for member in inactive.iter() {
+                            {
+                                let m_toggle = member.clone();
+                                rsx! {
+                                    tr { key: "inactive-{member.id}",
+                                        td { "{member.display_name}" }
+                                        td { RolePill { role: member.org_role.clone() } }
+                                        td { StatusPill { status: "inactive".to_string() } }
+                                        td {
+                                            button {
+                                                class: "row-btn",
+                                                onclick: move |_| open_toggle(m_toggle.clone()),
+                                                "Activate"
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
 

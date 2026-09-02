@@ -214,13 +214,24 @@ pub fn Login() -> Element {
                 .await
             {
                 Ok(_) => {
-                    if let Ok(me) = client.get_me().await {
-                        auth.set(AuthState {
-                            user: Some(me_to_user_info(&me)),
-                            loading: false,
-                        });
+                    match client.get_me().await {
+                        Ok(me) => {
+                            let is_member = me.member.is_some();
+                            auth.set(AuthState {
+                                user: Some(me_to_user_info(&me)),
+                                loading: false,
+                            });
+                            // Align with register / Nostr: bare accounts go to Apply.
+                            if is_member {
+                                nav.replace(Route::Home {});
+                            } else {
+                                nav.replace(Route::Apply {});
+                            }
+                        }
+                        Err(_) => {
+                            nav.replace(Route::Home {});
+                        }
                     }
-                    nav.replace(Route::Home {});
                 }
                 Err(_) => {
                     error.set(Some("Invalid username or password".into()));

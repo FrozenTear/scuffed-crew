@@ -6,8 +6,9 @@ use serde::Deserialize;
 use scuffed_api_client::ApiClient;
 use scuffed_types::api::{CreateDaemonTokenRequest, CreateDaemonTokenResponse};
 
-use crate::components::{DataTable, FormModal, Toast, use_toast};
+use crate::components::{DataTable, FormModal, Toast, member_pending, use_toast};
 use crate::hooks::{ModalController, use_api};
+use crate::state::use_auth;
 
 #[derive(Debug, Clone, Deserialize)]
 struct DaemonToken {
@@ -71,6 +72,7 @@ fn format_date(dt: &DateTime<Utc>) -> String {
 
 #[component]
 pub fn StatsTokens() -> Element {
+    let auth = use_auth();
     let mut tokens = use_api::<Vec<DaemonToken>>("/api/stats/tokens");
     let mut toast = use_toast();
 
@@ -160,7 +162,7 @@ pub fn StatsTokens() -> Element {
                 let data = tokens.data.read();
                 let data = data.as_ref().and_then(|d| d.as_ref());
                 match data {
-                    None => rsx! { p { class: "loading-state", "Loading tokens..." } },
+                    None => member_pending(&auth(), &tokens, "daemon tokens"),
                     Some(list) if list.is_empty() => rsx! {
                         p { class: "empty-state", "No daemon tokens yet. Create one to start uploading stats." }
                     },

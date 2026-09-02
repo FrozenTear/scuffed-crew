@@ -2,8 +2,9 @@ use dioxus::prelude::*;
 
 use serde::Deserialize;
 
-use crate::components::DataTable;
+use crate::components::{DataTable, member_pending};
 use crate::hooks::use_api_with;
+use crate::state::use_auth;
 
 #[derive(Debug, Clone, Deserialize)]
 struct PersonalStats {
@@ -165,6 +166,7 @@ const MEMBER_STATS_CSS: &str = r#"
 
 #[component]
 pub fn StatsMember(id: String) -> Element {
+    let auth = use_auth();
     let member_id = id.clone();
     let member_id_h = id.clone();
     let member_id_m = id.clone();
@@ -190,7 +192,7 @@ pub fn StatsMember(id: String) -> Element {
                 let data = stats.data.read();
                 let s = data.as_ref().and_then(|d| d.as_ref());
                 match s {
-                    None => rsx! { p { class: "loading-state", "Loading stats..." } },
+                    None => member_pending(&auth(), &stats, "member stats"),
                     Some(s) if s.total_matches == 0 => rsx! {
                         p { class: "empty-state", "No matches tracked for this member yet." }
                     },

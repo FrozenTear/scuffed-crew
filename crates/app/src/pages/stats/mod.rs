@@ -11,9 +11,10 @@ use serde::Deserialize;
 use scuffed_api_client::ApiClient;
 use scuffed_types::api::{MemberSettingsResponse, UpdateMemberSettingsRequest};
 
-use crate::components::{Toast, use_toast};
+use crate::components::{Toast, member_pending, use_toast};
 use crate::hooks::{use_api, use_api_with};
 use crate::routes::Route;
+use crate::state::use_auth;
 
 // -- Shared data models (fetched once here, consumed by the tab modules) --
 
@@ -885,6 +886,7 @@ const STATS_CSS: &str = r#"
 
 #[component]
 pub fn Stats() -> Element {
+    let auth = use_auth();
     let stats = use_api::<PersonalStats>("/api/stats/me");
     let heroes = use_api::<Vec<HeroStats>>("/api/stats/me/heroes");
     let maps = use_api::<Vec<MapStats>>("/api/stats/me/maps");
@@ -1076,12 +1078,10 @@ pub fn Stats() -> Element {
 
             // Summary (always visible)
             {
-                let err = stats.error.read().clone();
                 let data = stats.data.read();
                 let s = data.as_ref().and_then(|d| d.as_ref());
                 match s {
-                    None if err.is_some() => load_error_state("stats", stats.refresh),
-                    None => rsx! { p { class: "loading-state", "Loading stats..." } },
+                    None => member_pending(&auth(), &stats, "stats"),
                     Some(s) if s.total_matches == 0 => rsx! {
                         p { class: "empty-state",
                             "No matches tracked yet. Install the tracker above and play — your stats land here automatically."

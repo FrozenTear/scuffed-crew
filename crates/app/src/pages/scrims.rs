@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 
 use scuffed_api_client::ApiClient;
 
-use crate::components::{Toast, use_toast};
+use crate::components::{Toast, member_pending, use_toast};
 use crate::hooks::use_api_list;
 use crate::state::use_auth;
 
@@ -285,6 +285,7 @@ pub fn Scrims() -> Element {
     let games = use_api_list::<Game>("/api/games");
 
     let is_logged_in = auth().is_logged_in();
+    let is_org_member = auth().is_org_member();
 
     let on_change = move |_: ()| {
         scrims.refresh += 1;
@@ -324,7 +325,7 @@ pub fn Scrims() -> Element {
             h1 { class: "scrims-page-title", "Scrim Board" }
             p { class: "scrims-subtitle", "Request, schedule, and track practice matches." }
 
-            if is_logged_in {
+            if is_org_member {
                 if let (Some(t_list), Some(g_list)) = (teams_list, games_list) {
                     ScrimCreateForm {
                         teams: t_list.clone(),
@@ -335,23 +336,7 @@ pub fn Scrims() -> Element {
             }
 
             {match &open {
-                None => {
-                    if let Some(err) = scrims.error.read().as_ref().cloned() {
-                        let mut refresh = scrims.refresh;
-                        rsx! {
-                            p { class: "scrims-loading", style: "color: var(--danger);",
-                                "Failed to load scrims: {err}"
-                            }
-                            button {
-                                class: "row-btn",
-                                onclick: move |_| refresh += 1,
-                                "Retry"
-                            }
-                        }
-                    } else {
-                        rsx! { p { class: "scrims-loading", "Loading scrims..." } }
-                    }
-                },
+                None => member_pending(&auth(), &scrims, "scrims"),
                 Some(list) => {
                     let team_lookup = teams_list.cloned().unwrap_or_default();
                     let game_lookup = games_list.cloned().unwrap_or_default();
