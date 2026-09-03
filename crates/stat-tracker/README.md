@@ -39,7 +39,7 @@ No Rust toolchain required. GitHub Releases publish
 `scuffed-stat-tracker-linux-x86_64.tar.gz` (`bin/`, optional `lib/`, assets,
 `install.sh`) on tags `stat-tracker-v*`. Release notes:
 `CHANGELOG.md`. Tag runbook (human gate):
-`docs/notes/stat-tracker-v0.4.2-tag.md`.
+`docs/notes/stat-tracker-v0.4.3-tag.md`.
 
 Since **v0.3.0** the tarball also bundles `tessdata/eng.traineddata` (the
 runtime OCR model); `install.sh` drops it into
@@ -66,7 +66,7 @@ get stable.
 Pin a tag or change the install prefix:
 
 ```sh
-STAT_TRACKER_TAG=stat-tracker-v0.4.2 \
+STAT_TRACKER_TAG=stat-tracker-v0.4.3 \
 STAT_TRACKER_PREFIX=$HOME/.local \
   bash -c 'curl -fsSL https://raw.githubusercontent.com/FrozenTear/scuffed-crew/main/crates/stat-tracker/dist/bootstrap.sh | bash'
 ```
@@ -151,6 +151,21 @@ the daemon holds the lock and sends manual edits through a file command queue
 (`{data_dir}/commands/`).
 
 ## Troubleshooting
+
+**App launcher does not start `stat-tracker-gui` (works from a terminal).**
+Graphical sessions (GNOME, Cosmic, **AerynOS**) often have a PATH that
+does not include `~/.local/bin`. Through **v0.4.2** the `.desktop` `Exec=`
+was the bare binary name, so the launcher could not find it. **v0.4.3**
+writes absolute `Exec=` / `TryExec=` to `$PREFIX/bin/stat-tracker-gui`.
+Reinstall, then if the menu entry is stale:
+
+```sh
+update-desktop-database ~/.local/share/applications
+```
+
+`gtk-update-icon-cache` is not required (`Icon=applications-games` is a
+theme name, not a file we install). Log out/in if the launcher still
+caches the old entry.
 
 **`stat-tracker-gui` panics with `Failed to load ayatana-appindicator3` (v0.4.0 / v0.4.1).**
 `tray-icon` loads `libayatana-appindicator3.so.1` or `libappindicator3.so.1`

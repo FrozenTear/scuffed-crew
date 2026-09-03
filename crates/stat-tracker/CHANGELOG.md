@@ -2,7 +2,37 @@
 
 User-facing notes for `stat-tracker-v*` GitHub Releases. The release workflow
 prepends the section whose heading matches the tag version (for example
-`## 0.4.2` for `stat-tracker-v0.4.2`).
+`## 0.4.3` for `stat-tracker-v0.4.3`).
+
+## 0.4.3
+
+Packaging hotfix for laptop installs after v0.4.2: `stat-tracker-gui` ran
+from a terminal but **not from the app launcher**. The installed `.desktop`
+had a bare `Exec=stat-tracker-gui`. Graphical sessions (Cosmic / GNOME /
+**AerynOS**) often omit `~/.local/bin` from launcher PATH even when a
+login shell has it.
+
+- Installer writes absolute `Exec=` and `TryExec=` to
+  `$PREFIX/bin/stat-tracker-gui` (default `~/.local/bin/stat-tracker-gui`).
+- `Icon=applications-games` is a Freedesktop **theme name**, not a file
+  path. A missing theme icon only drops the pictogram; it does not block
+  launch. `gtk-update-icon-cache` is not required.
+- After install, `update-desktop-database ~/.local/share/applications`
+  (already run when `desktop-file-utils` is present; printed as a hint
+  when it is not).
+
+Daemon OCR / capture / sync / store schema are unchanged. OpenSSL
+packaging (0.4.1) and optional-tray (0.4.2) are unchanged. Reinstall to
+refresh the `.desktop` file.
+
+### Install
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/FrozenTear/scuffed-crew/main/crates/stat-tracker/dist/bootstrap.sh | bash
+```
+
+Or extract the tarball and run `./install.sh`. Pin with
+`STAT_TRACKER_TAG=stat-tracker-v0.4.3`.
 
 ## 0.4.2
 

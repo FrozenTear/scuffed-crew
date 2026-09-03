@@ -20,6 +20,62 @@ info()  { echo -e "${GRN}[install]${NC} $*" >&2; }
 warn()  { echo -e "${YLW}[ warn ]${NC} $*" >&2; }
 error() { echo -e "${RED}[error ]${NC} $*" >&2; }
 
+# Quote a path for Desktop Entry Exec/TryExec (Freedesktop reserved chars).
+desktop_exec_value() {
+    local p="$1"
+    case "$p" in
+        *[[:space:]\"\'\\\<\>~\|\&\;\$\*\?\#\(\)\`]*)
+            p="${p//\\/\\\\}"
+            p="${p//\"/\\\"}"
+            printf '"%s"' "$p"
+            ;;
+        *)
+            printf '%s' "$p"
+            ;;
+    esac
+}
+
+# Resolve BIN_DIR/stat-tracker-gui to an absolute path. App launchers
+# (AerynOS / Cosmic / GNOME) often omit ~/.local/bin from session PATH,
+# so a bare Exec=stat-tracker-gui works from a terminal but not the menu.
+absolute_gui_bin() {
+    local gui="$BIN_DIR/stat-tracker-gui"
+    if [[ "$gui" != /* ]]; then
+        gui="$(cd "$(dirname "$gui")" && pwd)/stat-tracker-gui"
+    fi
+    printf '%s' "$gui"
+}
+
+write_desktop_entry() {
+    local src="$1" dest="$2" gui_bin="$3"
+    local exec_val
+    exec_val="$(desktop_exec_value "$gui_bin")"
+    mkdir -p "$(dirname "$dest")"
+    {
+        while IFS= read -r line || [[ -n "$line" ]]; do
+            case "$line" in
+                Exec=*)    printf 'Exec=%s\n' "$exec_val" ;;
+                TryExec=*) printf 'TryExec=%s\n' "$exec_val" ;;
+                *)         printf '%s\n' "$line" ;;
+            esac
+        done < "$src"
+    } > "$dest"
+    chmod 644 "$dest"
+}
+
+refresh_desktop_database() {
+    local dir="$1"
+    if command -v update-desktop-database &>/dev/null; then
+        update-desktop-database "$dir" 2>/dev/null || true
+        info "Refreshed desktop database → $dir"
+    else
+        warn "update-desktop-database not found (desktop-file-utils)."
+        warn "If the app launcher does not show Scuffed Stat Tracker, run:"
+        warn "    update-desktop-database $dir"
+        warn "then log out/in. gtk-update-icon-cache is not needed (theme Icon)."
+    fi
+}
+
 # SKIP_INTEGRATION=<non-empty> installs binaries/libs only and skips the
 # desktop entry + systemd user unit — so throwaway-PREFIX installs (clean-room
 # tests, bootstrap smoke) don't pollute the real $HOME. Unset/empty = full
@@ -112,26 +168,24 @@ info "Installed binaries → $BIN_DIR"
 
 info "OCR will use eng tessdata (default). Koverwatch tessdata can be generated later from the GUI → Settings → Install Koverwatch Tessdata"
 
-# Ensure ~/.local/bin is on PATH
+# Ensure ~/.local/bin is on PATH (terminals). Launchers often omit it.
 if [[ ":$PATH:" != *":$BIN_DIR:"* ]]; then
-    warn "$BIN_DIR is not in your PATH."
+    warn "$BIN_DIR is not in your shell PATH."
     warn "Add this to your shell config (~/.bashrc, ~/.zshrc, etc.):"
     warn "    export PATH=\"\$HOME/.local/bin:\$PATH\""
+    warn "App launchers (AerynOS / Cosmic / GNOME) often omit this dir even"
+    warn "when a terminal has it — the .desktop Exec is an absolute path so"
+    warn "the menu does not depend on session PATH."
 fi
 
 if [[ -n "$SKIP_INTEGRATION" ]]; then
     info "SKIP_INTEGRATION set — skipping desktop entry and systemd unit (binaries only)"
 else
     # ── Desktop entry ─────────────────────────────────────────────────────────
-    mkdir -p "$DESKTOP_DIR"
-    install -m644 "$ASSETS/scuffed-stat-tracker.desktop" \
-        "$DESKTOP_DIR/scuffed-stat-tracker.desktop"
-
-    # Refresh the desktop database so the launcher picks it up immediately
-    if command -v update-desktop-database &>/dev/null; then
-        update-desktop-database "$DESKTOP_DIR" 2>/dev/null || true
-    fi
-    info "Installed desktop entry → $DESKTOP_DIR"
+    write_desktop_entry "$ASSETS/scuffed-stat-tracker.desktop" \
+        "$DESKTOP_DIR/scuffed-stat-tracker.desktop" "$(absolute_gui_bin)"
+    refresh_desktop_database "$DESKTOP_DIR"
+    info "Installed desktop entry → $DESKTOP_DIR (Exec=$(absolute_gui_bin))"
 
     # ── systemd user service (installed, NOT enabled) ─────────────────────────
     mkdir -p "$SYSTEMD_DIR"
@@ -152,8 +206,9 @@ fi
     echo
     echo -e "${GRN}Installation complete.${NC}"
     echo
-    echo "  Launch the app:   stat-tracker-gui"
+    echo "  Launch the app:   $(absolute_gui_bin)"
     echo "  Or find it in your application launcher: Scuffed Stat Tracker"
+    echo "  If the launcher is stale: update-desktop-database $DESKTOP_DIR"
     echo
     echo "  The GUI Settings page has Start / Stop and Start on login."
     echo "  Autostart (systemd) starts the daemon automatically on login."
