@@ -24,7 +24,7 @@ PREFIX="$TMP/prefix"
 mkdir -p "$PKG/bin" "$PKG/assets" "$HOME_DIR" "$PREFIX"
 
 # Stub binaries: install.sh requires them and runs daemon --version.
-printf '%s\n' '#!/bin/sh' 'echo scuffed-stat-tracker 0.4.3' > "$PKG/bin/scuffed-stat-tracker"
+printf '%s\n' '#!/bin/sh' 'echo scuffed-stat-tracker 0.4.4' > "$PKG/bin/scuffed-stat-tracker"
 printf '%s\n' '#!/bin/sh' 'echo stat-tracker-gui' > "$PKG/bin/stat-tracker-gui"
 chmod +x "$PKG/bin/scuffed-stat-tracker" "$PKG/bin/stat-tracker-gui"
 cp "$TEMPLATE" "$UNIT" "$PKG/assets/"

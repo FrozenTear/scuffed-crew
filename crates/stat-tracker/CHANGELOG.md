@@ -2,7 +2,32 @@
 
 User-facing notes for `stat-tracker-v*` GitHub Releases. The release workflow
 prepends the section whose heading matches the tag version (for example
-`## 0.4.3` for `stat-tracker-v0.4.3`).
+`## 0.4.4` for `stat-tracker-v0.4.4`).
+
+## 0.4.4
+
+Companion overlay show/hide hotkey (#68). **Settings → Companion**: enable
+(default on) and a bind field, default **Super+Shift+C**. The overlay stays
+click-through (`KeyboardInteractivity::None`); Esc does not apply.
+
+The **main GUI process** reads `/dev/input` with **evdev** (same path as
+daemon Tab capture — not X11 `XGrabKey`). Needs the `input` group or seat
+`uaccess`, same as Tab. OverlayHold is the same as the tray / header
+**Hide / show overlay**: hide sticks until the game ends; the shortcut
+shows the overlay again mid-session if you press it while hidden.
+
+Daemon OCR / capture / sync / store schema are unchanged. Desktop-launcher
+absolute Exec (0.4.3), optional-tray (0.4.2), and OpenSSL packaging (0.4.1)
+are unchanged.
+
+### Install
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/FrozenTear/scuffed-crew/main/crates/stat-tracker/dist/bootstrap.sh | bash
+```
+
+Or extract the tarball and run `./install.sh`. Pin with
+`STAT_TRACKER_TAG=stat-tracker-v0.4.4`.
 
 ## 0.4.3
 
