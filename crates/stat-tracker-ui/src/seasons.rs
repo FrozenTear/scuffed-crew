@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::aggregate::{Record, SeasonWindow, aggregate};
 use crate::app::{Message, TrackerApp};
+use crate::hotkey::{self, OverlayHotkey};
 use crate::model::{Game, SeasonSel};
 use crate::theme::{
     self, FONT_BOLD, FONT_EXTRABOLD, FONT_MEDIUM, FONT_SEMIBOLD, GRID_GAP, PAD_INNER, SIZE_BODY,
@@ -51,6 +52,12 @@ struct UiStateFile {
     /// Session-scoped companion hide (`session_id` / `process`). `None` = auto.
     #[serde(default)]
     overlay_hidden_key: Option<String>,
+    /// Companion show/hide shortcut (`Super+Shift+C`). Missing → default.
+    #[serde(default)]
+    overlay_hotkey: Option<String>,
+    /// Missing → on. The overlay stays click-through; this is an evdev bind.
+    #[serde(default)]
+    overlay_hotkey_enabled: Option<bool>,
 }
 
 pub fn cache_path(data_dir: &Path) -> PathBuf {
@@ -123,6 +130,26 @@ pub fn load_overlay_hidden_key(data_dir: &Path) -> Option<String> {
 pub fn save_overlay_hidden_key(data_dir: &Path, key: Option<&str>) -> std::io::Result<()> {
     let mut file = read_ui_state_file(data_dir).unwrap_or_default();
     file.overlay_hidden_key = key.filter(|k| !k.is_empty()).map(str::to_string);
+    write_ui_state_file(data_dir, &file)
+}
+
+/// Missing file / fields → enabled with [`hotkey::DEFAULT_BIND`].
+pub fn load_overlay_hotkey(data_dir: &Path) -> OverlayHotkey {
+    match read_ui_state_file(data_dir) {
+        Some(file) => OverlayHotkey::normalized(
+            file.overlay_hotkey_enabled.unwrap_or(true),
+            file.overlay_hotkey
+                .as_deref()
+                .unwrap_or(hotkey::DEFAULT_BIND),
+        ),
+        None => OverlayHotkey::default(),
+    }
+}
+
+pub fn save_overlay_hotkey(data_dir: &Path, hotkey: &OverlayHotkey) -> std::io::Result<()> {
+    let mut file = read_ui_state_file(data_dir).unwrap_or_default();
+    file.overlay_hotkey = Some(hotkey.bind.clone());
+    file.overlay_hotkey_enabled = Some(hotkey.enabled);
     write_ui_state_file(data_dir, &file)
 }
 
@@ -550,6 +577,22 @@ mod tests {
             Some("sess-1"),
             "season save must not reset the overlay hold"
         );
+        let default_hk = load_overlay_hotkey(&dir);
+        assert!(default_hk.enabled);
+        assert_eq!(default_hk.bind, crate::hotkey::DEFAULT_BIND);
+        let custom = crate::hotkey::OverlayHotkey {
+            enabled: false,
+            bind: "Ctrl+Alt+O".into(),
+        };
+        save_overlay_hotkey(&dir, &custom).unwrap();
+        assert_eq!(load_overlay_hotkey(&dir), custom);
+        assert_eq!(
+            load_overlay_hidden_key(&dir).as_deref(),
+            Some("sess-1"),
+            "hotkey save must not reset the overlay hold"
+        );
+        save_overlay_hidden_key(&dir, Some("sess-2")).unwrap();
+        assert_eq!(load_overlay_hotkey(&dir), custom);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

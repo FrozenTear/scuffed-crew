@@ -5,9 +5,10 @@
 //! `GET /api/public/seasons`, cached to `<data_dir>/seasons.json`. Settings
 //! write `config.toml` through `Config::save`. Capture preview uses the
 //! existing capture backends. The companion overlay is a `--companion`
-//! iced_layershell process the daemon window starts and stops. Does not change
-//! OCR, capture, sync, or the store schema. There is no software `--preview`
-//! path.
+//! iced_layershell process the daemon window starts and stops. Companion
+//! show/hide shortcut is evdev in this process (Settings → Companion). Does
+//! not change OCR, capture, sync, or the store schema. There is no software
+//! `--preview` path.
 
 pub mod aggregate;
 pub mod app;
@@ -18,6 +19,7 @@ pub mod daemon;
 pub mod fixtures;
 pub mod games;
 pub mod heroes;
+pub mod hotkey;
 pub mod layout;
 pub mod maps;
 pub mod model;

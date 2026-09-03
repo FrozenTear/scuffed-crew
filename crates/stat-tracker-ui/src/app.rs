@@ -12,6 +12,7 @@ use crate::aggregate::GameFilter;
 use crate::capture::{self, PreviewShot};
 use crate::cli::{Cli, FixtureKind};
 use crate::daemon::{self, DaemonVerb, DaemonView};
+use crate::hotkey::{self, OverlayHotkey};
 use crate::model::{EditField, EditForm, Game, Outcome, Role, RoleFilter, Screen, SeasonSel};
 use crate::overlay::{self, CompanionChild, OverlayHold};
 use crate::seasons::{self, SeasonCache};
@@ -146,6 +147,8 @@ pub struct TrackerApp {
     overlay_child: Option<CompanionChild>,
     overlay_spawn_blocked: bool,
     pub game_running: bool,
+    pub overlay_hotkey: OverlayHotkey,
+    companion_toggle_mtime: Option<SystemTime>,
 }
 
 impl TrackerApp {
@@ -188,7 +191,10 @@ impl TrackerApp {
         let live_status = live_status_for(&games);
         let health_status = health_status_for(&cli.data_dir, &games);
         let saved_config = Config::load().unwrap_or_default();
-        let settings = SettingsForm::from_config(&saved_config);
+        let overlay_hotkey = seasons::load_overlay_hotkey(&cli.data_dir);
+        let mut settings = SettingsForm::from_config(&saved_config);
+        settings.overlay_hotkey = overlay_hotkey.bind.clone();
+        settings.overlay_hotkey_enabled = overlay_hotkey.enabled;
         let daemon = DaemonView {
             pid: daemon::daemon_running(&cli.data_dir),
             service_installed: daemon::service_file_installed(),
@@ -255,6 +261,8 @@ impl TrackerApp {
             overlay_child: None,
             overlay_spawn_blocked: false,
             game_running,
+            overlay_hotkey,
+            companion_toggle_mtime: None,
         };
 
         if let Some(err) = overlay::reconcile_companion(
@@ -293,10 +301,16 @@ impl TrackerApp {
     }
 
     pub fn subscription(&self) -> Subscription<Message> {
-        Subscription::batch([
+        let mut subs = vec![
             iced::time::every(Duration::from_secs(1)).map(|_| Message::Tick),
             window::close_events().map(Message::WindowClosed),
-        ])
+        ];
+        if self.overlay_hotkey.enabled
+            && let Ok(bind) = hotkey::parse_bind(&self.overlay_hotkey.bind)
+        {
+            subs.push(hotkey::subscription(bind));
+        }
+        Subscription::batch(subs)
     }
 
     pub fn season_window(&self) -> Option<crate::aggregate::SeasonWindow> {
@@ -534,20 +548,42 @@ impl TrackerApp {
                 if self.fixture.is_some() {
                     return Task::none();
                 }
-                let config = self.settings.to_config(&self.saved_config);
-                match settings::save_config(&config) {
-                    Ok(()) => {
-                        let daemon_up = daemon::is_daemon_running(&self.data_dir);
-                        self.saved_config = config;
-                        self.settings = SettingsForm::from_config(&self.saved_config);
-                        self.toast = Some(if daemon_up {
-                            "Settings saved — restart the tracker for changes to take effect".into()
-                        } else {
-                            "Settings saved".into()
-                        });
+                let hotkey = OverlayHotkey::normalized(
+                    self.settings.overlay_hotkey_enabled,
+                    &self.settings.overlay_hotkey,
+                );
+                match hotkey.validate_for_save() {
+                    Ok(hotkey) => {
+                        let config = self.settings.to_config(&self.saved_config);
+                        match settings::save_config(&config) {
+                            Ok(()) => {
+                                if let Err(e) =
+                                    seasons::save_overlay_hotkey(&self.data_dir, &hotkey)
+                                {
+                                    self.toast =
+                                        Some(format!("Could not save companion shortcut: {e}"));
+                                    return Task::none();
+                                }
+                                let daemon_up = daemon::is_daemon_running(&self.data_dir);
+                                self.saved_config = config;
+                                self.overlay_hotkey = hotkey;
+                                self.settings = SettingsForm::from_config(&self.saved_config);
+                                self.settings.overlay_hotkey = self.overlay_hotkey.bind.clone();
+                                self.settings.overlay_hotkey_enabled = self.overlay_hotkey.enabled;
+                                self.toast = Some(if daemon_up {
+                                    "Settings saved — restart the tracker for changes to take effect"
+                                        .into()
+                                } else {
+                                    "Settings saved".into()
+                                });
+                            }
+                            Err(e) => {
+                                self.toast = Some(format!("Could not save settings: {e}"));
+                            }
+                        }
                     }
                     Err(e) => {
-                        self.toast = Some(format!("Could not save settings: {e}"));
+                        self.toast = Some(e);
                     }
                 }
                 Task::none()
@@ -737,6 +773,10 @@ impl TrackerApp {
             && let Some(action) = tray::poll(handle)
         {
             return self.apply_tray(action);
+        }
+
+        if hotkey::consume_toggle(&self.data_dir, &mut self.companion_toggle_mtime) {
+            return self.toggle_overlay();
         }
 
         self.apply_overlay_policy();

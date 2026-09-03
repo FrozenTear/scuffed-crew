@@ -24,12 +24,14 @@ pub enum SettingsField {
     Cooldown,
     SyncUrl,
     SyncToken,
+    OverlayHotkey,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingsToggle {
     AutoDetect,
     DebugOcr,
+    OverlayHotkey,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -44,6 +46,8 @@ pub struct SettingsForm {
     pub sync_url: String,
     pub sync_token: String,
     pub debug_ocr: bool,
+    pub overlay_hotkey: String,
+    pub overlay_hotkey_enabled: bool,
 }
 
 impl Default for SettingsForm {
@@ -73,6 +77,8 @@ impl SettingsForm {
                 .map(|s| s.token.clone())
                 .unwrap_or_default(),
             debug_ocr: config.debug_ocr,
+            overlay_hotkey: crate::hotkey::DEFAULT_BIND.to_string(),
+            overlay_hotkey_enabled: true,
         }
     }
 
@@ -85,6 +91,7 @@ impl SettingsForm {
             SettingsField::Cooldown => self.cooldown_secs = value,
             SettingsField::SyncUrl => self.sync_url = value,
             SettingsField::SyncToken => self.sync_token = value,
+            SettingsField::OverlayHotkey => self.overlay_hotkey = value,
         }
     }
 
@@ -92,6 +99,7 @@ impl SettingsForm {
         match toggle {
             SettingsToggle::AutoDetect => self.auto_detect_enabled = value,
             SettingsToggle::DebugOcr => self.debug_ocr = value,
+            SettingsToggle::OverlayHotkey => self.overlay_hotkey_enabled = value,
         }
     }
 
@@ -172,6 +180,7 @@ pub fn view(app: &TrackerApp) -> Element<'_, Message> {
     col = col
         .push(daemon_card(app, demo))
         .push(capture_card(app, demo))
+        .push(companion_card(app, demo))
         .push(player_card(app, demo))
         .push(auto_detect_card(app, demo))
         .push(sync_card(app, demo))
@@ -353,6 +362,42 @@ fn capture_card(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
     }
 
     settings_card("Capture", body.into())
+}
+
+fn companion_card(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
+    let mut body = column![
+        checkbox(app.settings.overlay_hotkey_enabled)
+            .label("Keyboard shortcut to hide or show the overlay")
+            .on_toggle(|v| Message::SettingsToggle(SettingsToggle::OverlayHotkey, v))
+            .size(16)
+            .text_size(SIZE_BODY)
+            .style(checkbox_style),
+        text("Works while a game is fullscreen. The overlay stays click-through, so the game keeps the keyboard.")
+            .size(SIZE_META)
+            .font(FONT_MEDIUM)
+            .color(TEXT_3),
+    ]
+    .spacing(8);
+
+    if app.settings.overlay_hotkey_enabled {
+        body = body
+            .push(field_input(
+                "Shortcut",
+                crate::hotkey::DEFAULT_BIND,
+                &app.settings.overlay_hotkey,
+                SettingsField::OverlayHotkey,
+                false,
+                demo,
+            ))
+            .push(
+                text("Example: Super+Shift+C. Super is the Windows key. Join keys with +. Needs the same keyboard access as Tab capture.")
+                    .size(SIZE_META)
+                    .font(FONT_MEDIUM)
+                    .color(TEXT_3),
+            );
+    }
+
+    settings_card("Companion", body.into())
 }
 
 fn player_card(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
@@ -714,6 +759,8 @@ mod tests {
             sync_url: String::new(),
             sync_token: "tok".into(),
             debug_ocr: false,
+            overlay_hotkey: crate::hotkey::DEFAULT_BIND.into(),
+            overlay_hotkey_enabled: true,
         };
         let c = form.to_config(&base());
         assert!(c.capture_output.is_none());
@@ -790,5 +837,7 @@ mod tests {
         assert_eq!(out.game_process_names, vec!["Overwatch.exe"]);
         assert!(out.debug_ocr);
         assert_eq!(out.ocr_threads, Some(2));
+        assert_eq!(form.overlay_hotkey, crate::hotkey::DEFAULT_BIND);
+        assert!(form.overlay_hotkey_enabled);
     }
 }

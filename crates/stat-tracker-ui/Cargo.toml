@@ -25,6 +25,7 @@ scuffed-types = { path = "../types" }
 anyhow = "1"
 chrono = { workspace = true }
 dirs = "6"
+evdev = "0.13"
 gtk = "0.18"
 iced = { version = "0.14", features = ["tokio", "advanced", "image"] }
 iced_layershell = { version = "0.19", optional = true }
