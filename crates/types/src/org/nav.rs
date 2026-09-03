@@ -122,6 +122,11 @@ pub const NAV_CATALOG: &[NavCatalogEntry] = &[
         label: "Scrims",
         description: "Scrim finder",
     },
+    NavCatalogEntry {
+        id: "chat",
+        label: "Chat",
+        description: "Team chat",
+    },
 ];
 
 impl Default for NavConfig {
@@ -144,6 +149,7 @@ impl Default for NavConfig {
                 item("polls", NavPlacement::Hidden, 2),
                 item("blog", NavPlacement::Hidden, 3),
                 item("wiki", NavPlacement::Hidden, 4),
+                item("chat", NavPlacement::Hidden, 5),
             ],
         }
     }
@@ -283,6 +289,12 @@ mod tests {
             cfg.items
                 .iter()
                 .any(|i| i.id == "tournaments" && i.placement == NavPlacement::More)
+        );
+        assert!(
+            cfg.items
+                .iter()
+                .any(|i| i.id == "chat" && i.placement == NavPlacement::Hidden),
+            "team chat is member-gated; default public nav stays hidden"
         );
     }
 

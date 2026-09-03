@@ -144,6 +144,7 @@ fn DmPageInner(selected_peer: Option<String>) -> Element {
                 let needs_managed = status == 400
                     || status == 403
                     || status == 409
+                    || status == 412
                     || body.contains("server_managed");
                 load_state.set(if needs_managed {
                     LoadState::NeedsServerManaged

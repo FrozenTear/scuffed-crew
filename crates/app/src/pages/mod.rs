@@ -1,6 +1,7 @@
 mod apply;
 mod blog;
 mod blog_post;
+mod chat;
 mod community;
 mod dm;
 mod events;
@@ -36,6 +37,7 @@ pub mod strategy;
 pub use apply::Apply;
 pub use blog::Blog;
 pub use blog_post::BlogPost;
+pub use chat::TeamChat;
 pub use community::Community;
 pub use dm::{DmInbox, DmThread};
 pub use events::Events;

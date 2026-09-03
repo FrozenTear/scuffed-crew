@@ -195,9 +195,13 @@ fn MessageBubble(message: ChatMessage) -> Element {
                     span { class: "chat-msg__author", "{display_name}" }
                     span { class: "chat-msg__time", "{time_str}" }
                 }
-                if message.encrypted {
+                if message.encrypted && message.content.is_empty() {
                     div { class: "chat-msg__encrypted",
                         "Encrypted message"
+                    }
+                } else if message.encrypted {
+                    div { class: "chat-msg__encrypted",
+                        "{message.content}"
                     }
                 } else {
                     div { class: "chat-msg__content",

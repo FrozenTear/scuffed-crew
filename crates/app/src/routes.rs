@@ -38,6 +38,8 @@ pub enum Route {
         DmInbox {},
         #[route("/dm/:peer_pubkey")]
         DmThread { peer_pubkey: String },
+        #[route("/chat")]
+        TeamChat {},
         #[route("/community")]
         Community {},
         #[route("/feed")]
