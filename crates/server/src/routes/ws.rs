@@ -58,11 +58,21 @@ pub async fn websocket_handler(
 
 /// Browser WS requests include Origin; must match ALLOWED_ORIGINS.
 /// Missing Origin is allowed only outside PRODUCTION (native / test clients).
+///
+/// `OAuthConfig::from_env` treats blank `ALLOWED_ORIGINS` as unset (F-API-004)
+/// so this list is never `[""]` from compose's empty default.
 fn ws_origin_allowed(state: &WsState, headers: &HeaderMap) -> bool {
-    let allowed = &state.app.oauth_config.allowed_origins;
-    match headers.get(header::ORIGIN).and_then(|v| v.to_str().ok()) {
+    origin_is_allowed(
+        &state.app.oauth_config.allowed_origins,
+        headers.get(header::ORIGIN).and_then(|v| v.to_str().ok()),
+        is_production(),
+    )
+}
+
+fn origin_is_allowed(allowed: &[String], origin: Option<&str>, production: bool) -> bool {
+    match origin {
         Some(origin) => allowed.iter().any(|o| o == origin),
-        None => !is_production(),
+        None => !production,
     }
 }
 
@@ -573,5 +583,44 @@ async fn handle_message(
         }
 
         ClientMessage::Ping => Some(ServerMessage::Pong),
+    }
+}
+
+#[cfg(test)]
+mod origin_tests {
+    use super::origin_is_allowed;
+
+    #[test]
+    fn explicit_origin_must_match() {
+        let allowed = vec!["https://ow.scuffedcrew.no".to_string()];
+        assert!(origin_is_allowed(
+            &allowed,
+            Some("https://ow.scuffedcrew.no"),
+            true
+        ));
+        assert!(!origin_is_allowed(
+            &allowed,
+            Some("http://localhost:3000"),
+            true
+        ));
+    }
+
+    #[test]
+    fn empty_string_in_allowlist_does_not_match_browser_origin() {
+        // Documents the F-API-004 landmine: compose `ALLOWED_ORIGINS=""` used
+        // to parse as `[""]`, which never equals a real Origin → 403.
+        let landmine = vec![String::new()];
+        assert!(!origin_is_allowed(
+            &landmine,
+            Some("http://127.0.0.1:3000"),
+            true
+        ));
+    }
+
+    #[test]
+    fn missing_origin_allowed_only_outside_production() {
+        let allowed = vec!["http://localhost:3000".to_string()];
+        assert!(origin_is_allowed(&allowed, None, false));
+        assert!(!origin_is_allowed(&allowed, None, true));
     }
 }

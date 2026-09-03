@@ -31,68 +31,141 @@ pub struct ProvisionedChannels {
     pub members_synced: usize,
 }
 
-/// Provision NIP-29 groups for a team and sync membership.
+/// Stable NIP-29 group id for a team's public channel.
 ///
-/// Creates two channels per team:
-/// - `{team_slug}` — public group for all team members
-/// - `{team_slug}-officers` — private group for officers/admins (NIP-44 encrypted)
+/// Uses the team record id (unique, rename-stable). Site discovers ids via
+/// `GET /api/teams/:id/channels` rather than guessing slugs.
+pub fn public_group_id(team_id: &str) -> String {
+    team_id.to_string()
+}
+
+/// Stable NIP-29 group id for a team's officer (gift-wrap) channel.
+pub fn officer_group_id(team_id: &str) -> String {
+    format!("{team_id}-officers")
+}
+
+/// Write `team_channel` rows for a team if they are missing (F-API-003).
 ///
-/// Idempotent: if channels already exist in the DB, skips creation.
-pub async fn provision_team_channels(
+/// This is the path `send_encrypted` actually needs: a `GroupType::Officer`
+/// row so `get_channel_by_group_id` does not 404. Relay NIP-29 group
+/// creation is optional — there is no configured relay-admin key today, so
+/// team create/update must not depend on a live `GroupManager`.
+///
+/// Idempotent: existing public/officer rows are left untouched.
+pub async fn ensure_team_channel_rows(
     db: &Database,
-    group_manager: &GroupManager,
     team_id: &str,
-    team_name: &str,
-    team_slug: &str,
     relay_url: &str,
 ) -> Result<ProvisionedChannels, ProvisioningError> {
     let existing = db.get_team_channels(team_id).await?;
+    let public_group_id = public_group_id(team_id);
+    let officer_group_id = officer_group_id(team_id);
 
-    // Create public channel if not exists
-    let public_group_id = team_slug.to_string();
     if !existing.iter().any(|c| c.group_type == GroupType::Public) {
-        group_manager
-            .create_group(
-                &public_group_id,
-                &format!("{team_name} — General"),
-                Some(&format!("Public channel for {team_name}")),
-                true,  // public
-                false, // not open (server-managed membership)
-            )
-            .await?;
-
         db.create_team_channel(team_id, &public_group_id, GroupType::Public, relay_url)
             .await?;
-
         tracing::info!(team_id, group_id = %public_group_id, "Provisioned public team channel");
     }
 
-    // Create officer channel if not exists
-    let officer_group_id = format!("{team_slug}-officers");
-    let has_officer = existing.iter().any(|c| c.group_type == GroupType::Officer);
-
-    if !has_officer {
-        group_manager
-            .create_group(
-                &officer_group_id,
-                &format!("{team_name} — Officers"),
-                Some("Officer-only channel. Messages are NIP-44 encrypted."),
-                false, // private
-                false, // not open
-            )
-            .await?;
-
+    if !existing.iter().any(|c| c.group_type == GroupType::Officer) {
         db.create_team_channel(team_id, &officer_group_id, GroupType::Officer, relay_url)
             .await?;
-
         tracing::info!(team_id, group_id = %officer_group_id, "Provisioned officer channel");
     }
 
     Ok(ProvisionedChannels {
         public_group_id,
         officer_group_id: Some(officer_group_id),
-        members_synced: 0, // sync_team_roster fills this in
+        members_synced: 0,
     })
+}
+
+/// Ensure every active team has public + officer `team_channel` rows.
+///
+/// Safe backfill for teams created before F-API-003. Continues past per-team
+/// errors so one bad row cannot block the rest.
+pub async fn provision_all_team_channels(
+    db: &Database,
+    relay_url: &str,
+) -> Result<usize, ProvisioningError> {
+    let teams = db.list_teams().await?;
+    let mut ok = 0usize;
+    for team in teams {
+        match ensure_team_channel_rows(db, &team.id, relay_url).await {
+            Ok(_) => ok += 1,
+            Err(e) => {
+                tracing::error!(team_id = %team.id, error = %e, "Team channel backfill failed");
+            }
+        }
+    }
+    Ok(ok)
+}
+
+/// Provision NIP-29 groups for a team and sync membership.
+///
+/// Writes DB rows first (so encrypt can find a channel), then best-effort
+/// publishes group metadata if a `GroupManager` is provided. Relay failures
+/// do not roll back the DB rows.
+///
+/// Group ids:
+/// - `{team_id}` — public group for all team members
+/// - `{team_id}-officers` — private group for officers/admins (NIP-44)
+///
+/// `team_slug` is accepted for compatibility but ignored; ids are team-id
+/// based so a rename cannot collide or orphan `send_encrypted` lookups.
+///
+/// Idempotent: if channels already exist in the DB, skips creation.
+pub async fn provision_team_channels(
+    db: &Database,
+    group_manager: Option<&GroupManager>,
+    team_id: &str,
+    team_name: &str,
+    _team_slug: &str,
+    relay_url: &str,
+) -> Result<ProvisionedChannels, ProvisioningError> {
+    let provisioned = ensure_team_channel_rows(db, team_id, relay_url).await?;
+
+    if let Some(group_manager) = group_manager {
+        if let Err(e) = group_manager
+            .create_group(
+                &provisioned.public_group_id,
+                &format!("{team_name} — General"),
+                Some(&format!("Public channel for {team_name}")),
+                true,  // public
+                false, // not open (server-managed membership)
+            )
+            .await
+        {
+            tracing::warn!(
+                team_id,
+                group_id = %provisioned.public_group_id,
+                error = %e,
+                "NIP-29 public group publish failed; DB channel row kept"
+            );
+        }
+
+        if let Some(ref officer_group_id) = provisioned.officer_group_id {
+            if let Err(e) = group_manager
+                .create_group(
+                    officer_group_id,
+                    &format!("{team_name} — Officers"),
+                    Some("Officer-only channel. Messages are NIP-44 encrypted."),
+                    false, // private
+                    false, // not open
+                )
+                .await
+            {
+                tracing::warn!(
+                    team_id,
+                    group_id = %officer_group_id,
+                    error = %e,
+                    "NIP-29 officer group publish failed; DB channel row kept"
+                );
+            }
+        }
+    }
+
+    Ok(provisioned)
 }
 
 /// Sync a team's roster to NIP-29 group membership.
@@ -158,4 +231,71 @@ pub async fn sync_team_roster(
 
     tracing::info!(team_id, synced, "Roster synced to NIP-29 groups");
     Ok(synced)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use scuffed_db::migrations::run_migrations;
+    use scuffed_db::Database;
+
+    #[test]
+    fn group_ids_are_team_id_stable() {
+        assert_eq!(public_group_id("teamalpha"), "teamalpha");
+        assert_eq!(officer_group_id("teamalpha"), "teamalpha-officers");
+    }
+
+    #[tokio::test]
+    async fn ensure_rows_creates_officer_channel_send_encrypted_can_find() {
+        let db = Database::connect_memory().await.expect("mem db");
+        run_migrations(&db.client).await.expect("migrations");
+        let team = db
+            .create_team("Alpha Squad", "ow2", None, None, None)
+            .await
+            .expect("create team");
+
+        let first = ensure_team_channel_rows(&db, &team.id, "ws://relay.test")
+            .await
+            .expect("provision");
+        let second = ensure_team_channel_rows(&db, &team.id, "ws://other")
+            .await
+            .expect("idempotent");
+        assert_eq!(first.public_group_id, second.public_group_id);
+        assert_eq!(first.officer_group_id, second.officer_group_id);
+
+        let channels = db.get_team_channels(&team.id).await.expect("list");
+        assert_eq!(channels.len(), 2);
+        assert!(channels.iter().any(|c| c.group_type == GroupType::Public));
+        assert!(channels.iter().any(|c| c.group_type == GroupType::Officer));
+
+        let officer_id = first.officer_group_id.expect("officer id");
+        let found = db
+            .get_channel_by_group_id(&officer_id)
+            .await
+            .expect("lookup")
+            .expect("send_encrypted must find officer channel");
+        assert_eq!(found.group_type, GroupType::Officer);
+        assert_eq!(found.team_id, team.id);
+        assert_eq!(found.relay_url, "ws://relay.test");
+    }
+
+    #[tokio::test]
+    async fn backfill_provisions_existing_teams() {
+        let db = Database::connect_memory().await.expect("mem db");
+        run_migrations(&db.client).await.expect("migrations");
+        let a = db.create_team("A", "ow2", None, None, None).await.unwrap();
+        let b = db.create_team("B", "ow2", None, None, None).await.unwrap();
+
+        let n = provision_all_team_channels(&db, "")
+            .await
+            .expect("backfill");
+        assert_eq!(n, 2);
+        assert_eq!(db.get_team_channels(&a.id).await.unwrap().len(), 2);
+        assert_eq!(db.get_team_channels(&b.id).await.unwrap().len(), 2);
+        assert!(db
+            .get_channel_by_group_id(&officer_group_id(&a.id))
+            .await
+            .unwrap()
+            .is_some());
+    }
 }

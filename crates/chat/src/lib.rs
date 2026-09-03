@@ -20,5 +20,7 @@ pub use nostr::events::{EventBuilder, EventError};
 pub use nostr::groups::{GroupError, GroupManager};
 pub use nostr::relay::{publish_event_oneshot, RelayClient, RelayError};
 pub use provisioning::{
-    provision_team_channels, sync_team_roster, ProvisionedChannels, ProvisioningError,
+    ensure_team_channel_rows, officer_group_id, provision_all_team_channels,
+    provision_team_channels, public_group_id, sync_team_roster, ProvisionedChannels,
+    ProvisioningError,
 };

@@ -216,7 +216,54 @@ pub fn nip05_identifier(display_name: &str, domain: Option<&str>) -> Option<Stri
 
 #[cfg(test)]
 mod tests {
-    use super::{nip05_identifier, normalize_relay_url, validate_nip05_domain};
+    use super::{
+        nip05_identifier, normalize_relay_url, parse_allowed_origins, validate_nip05_domain,
+    };
+
+    #[test]
+    fn allowed_origins_blank_or_unset_falls_back_to_redirect() {
+        let fallback = "http://localhost:3000";
+        // Unset
+        assert_eq!(
+            parse_allowed_origins(None, fallback),
+            vec![fallback.to_string()]
+        );
+        // Empty / whitespace (compose `ALLOWED_ORIGINS=`)
+        assert_eq!(
+            parse_allowed_origins(Some(""), fallback),
+            vec![fallback.to_string()]
+        );
+        assert_eq!(
+            parse_allowed_origins(Some("   "), fallback),
+            vec![fallback.to_string()]
+        );
+        assert_eq!(
+            parse_allowed_origins(Some(","), fallback),
+            vec![fallback.to_string()]
+        );
+        assert_eq!(
+            parse_allowed_origins(Some(" ,  , "), fallback),
+            vec![fallback.to_string()]
+        );
+    }
+
+    #[test]
+    fn allowed_origins_explicit_list_is_kept() {
+        assert_eq!(
+            parse_allowed_origins(Some("https://ow.scuffedcrew.no"), "http://localhost:3000"),
+            vec!["https://ow.scuffedcrew.no".to_string()]
+        );
+        assert_eq!(
+            parse_allowed_origins(
+                Some(" https://a.example , , https://b.example "),
+                "http://localhost:3000"
+            ),
+            vec![
+                "https://a.example".to_string(),
+                "https://b.example".to_string()
+            ]
+        );
+    }
 
     #[test]
     fn blank_env_style_urls_are_not_configured() {
@@ -304,14 +351,36 @@ pub struct OAuthConfig {
     pub allowed_origins: Vec<String>,
 }
 
+/// Parse `ALLOWED_ORIGINS`. Blank / whitespace-only (and empty after split)
+/// is treated as unset and falls back to `redirect_base_url` (F-API-004).
+///
+/// Compose historically injects `ALLOWED_ORIGINS=` even when the host env
+/// is unset (`${ALLOWED_ORIGINS:-}`), which used to yield `[""]` and 403
+/// every browser WebSocket / CORS request.
+pub fn parse_allowed_origins(raw: Option<&str>, redirect_base_url: &str) -> Vec<String> {
+    let origins: Vec<String> = raw
+        .unwrap_or("")
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .collect();
+    if origins.is_empty() {
+        vec![redirect_base_url.to_string()]
+    } else {
+        origins
+    }
+}
+
 impl OAuthConfig {
     pub fn from_env() -> Self {
         let redirect_base_url = std::env::var("REDIRECT_BASE_URL")
             .unwrap_or_else(|_| "http://localhost:3000".to_string());
 
-        let allowed_origins = std::env::var("ALLOWED_ORIGINS")
-            .map(|s| s.split(',').map(|s| s.trim().to_string()).collect())
-            .unwrap_or_else(|_| vec![redirect_base_url.clone()]);
+        let allowed_origins = parse_allowed_origins(
+            std::env::var("ALLOWED_ORIGINS").ok().as_deref(),
+            &redirect_base_url,
+        );
 
         let discord_client_id = std::env::var("DISCORD_CLIENT_ID").unwrap_or_default();
         let discord_client_secret = std::env::var("DISCORD_CLIENT_SECRET").unwrap_or_default();

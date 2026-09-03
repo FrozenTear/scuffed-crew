@@ -532,6 +532,9 @@ async fn main() {
         nip05_republish_enabled: scuffed_site_server::state::nip05_republish_enabled_from_env(),
     };
 
+    // F-API-003: existing teams have no team_channel rows until backfill.
+    scuffed_site_server::team_channels::backfill_on_startup(&state).await;
+
     // Spawn hourly session cleanup task
     let cleanup_db = db.clone();
     tokio::spawn(async move {

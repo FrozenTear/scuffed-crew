@@ -242,6 +242,8 @@ cd /root/github/scuffed-crew   # your clone path
 # edit data/secrets.env:
 #   REDIRECT_BASE_URL=https://ow.scuffedcrew.no
 #   ALLOWED_ORIGINS=https://ow.scuffedcrew.no
+#   # Blank ALLOWED_ORIGINS is treated as unset and falls back to REDIRECT_BASE_URL
+#   # (F-API-004). Do not leave it empty thinking it means "allow all".
 #   NIP05_DOMAIN=ow.scuffedcrew.no      # see "NIP-05 domain" below
 
 podman compose --env-file data/secrets.env up -d --force-recreate site-server
