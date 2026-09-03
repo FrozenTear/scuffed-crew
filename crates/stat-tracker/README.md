@@ -30,16 +30,16 @@ install paths and the `.desktop` entry stay the same).
 | Component | Minimum | Notes |
 |-----------|---------|--------|
 | **Daemon** | glibc ≥ 2.35 (Ubuntu 22.04+, Debian 12+, Fedora, Arch, openSUSE, RHEL 9+) | OCR `.so` closure is **bundled** in `lib/` (soname splits across distros). Installer copies `lib/` → `$PREFIX/lib` so RPATH `$ORIGIN/../lib` works. |
-| **GUI** | glibc ≥ 2.35 + **GTK 3** + Vulkan (or Iced software fallback) | Iced 0.14 (`scuffed-stat-tracker-ui`). No webkit2gtk. |
+| **GUI** | glibc ≥ 2.35 + **GTK 3** + Vulkan (or Iced software fallback) | Iced 0.14 (`scuffed-stat-tracker-ui`), binary name `stat-tracker-gui`. |
 | **Host still needed** | Wayland **or** X11 + `input` group + `eng.traineddata` | Capture/compositor and keyboard access stay host-provided. |
-
-HOLD `stat-tracker-v0.1.0` until portable CI + this runtime lane land.
 
 ## Install (prebuilt Linux x86_64)
 
 No Rust toolchain required. GitHub Releases publish
 `scuffed-stat-tracker-linux-x86_64.tar.gz` (`bin/`, optional `lib/`, assets,
-`install.sh`) on tags `stat-tracker-v*`.
+`install.sh`) on tags `stat-tracker-v*`. Release notes:
+`CHANGELOG.md`. Tag runbook (human gate):
+`docs/notes/stat-tracker-v0.4.0-tag.md`.
 
 Since **v0.3.0** the tarball also bundles `tessdata/eng.traineddata` (the
 runtime OCR model); `install.sh` drops it into
@@ -66,7 +66,7 @@ get stable.
 Pin a tag or change the install prefix:
 
 ```sh
-STAT_TRACKER_TAG=stat-tracker-v0.1.0 \
+STAT_TRACKER_TAG=stat-tracker-v0.4.0 \
 STAT_TRACKER_PREFIX=$HOME/.local \
   bash -c 'curl -fsSL https://raw.githubusercontent.com/FrozenTear/scuffed-crew/main/crates/stat-tracker/dist/bootstrap.sh | bash'
 ```

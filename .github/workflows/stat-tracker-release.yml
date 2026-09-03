@@ -12,7 +12,7 @@ name: Stat Tracker Release
 #   BUNDLED into the tarball's lib/ and binaries get RPATH $ORIGIN/../lib.
 #   glibc-family / toolchain / compositor-stack libs stay host-provided.
 # - The GUI is Iced 0.14 (wgpu) + GTK tray from crates/stat-tracker-ui.
-#   No webkit2gtk. Built on ubuntu-22.04 (glibc 2.35 floor, same as the daemon).
+#   Built on ubuntu-22.04 (glibc 2.35 floor, same as the daemon).
 #   Host still provides Vulkan/GTK/Wayland or X11.
 # - Clean-room proof: the daemon job uninstalls the OCR packages after the
 #   build and runs the staged binary purely from the bundled libs.
@@ -284,11 +284,22 @@ jobs:
           # On tag push the current tag exists locally — exclude it.
           PREV="$(git tag --list 'stat-tracker-v*' --sort=-creatordate \
             | grep -vx "${TAG}" | head -1 || true)"
+          NOTES_VERSION="${TAG#stat-tracker-v}"
           {
-            echo "Prebuilt Linux x86_64 build of the Overwatch 2 stat tracker (daemon + GUI)."
+            echo "Prebuilt Linux x86_64 build of the Overwatch 2 stat tracker (daemon + Iced GUI)."
             echo
+            if [ -f crates/stat-tracker/CHANGELOG.md ]; then
+              CURATED="$(awk -v ver="${NOTES_VERSION}" '
+                $0 == "## " ver {p=1; next}
+                /^## / && p {exit}
+                p
+              ' crates/stat-tracker/CHANGELOG.md)"
+              if [ -n "$(printf '%s' "${CURATED}" | tr -d '[:space:]')" ]; then
+                printf '%s\n\n' "${CURATED}"
+              fi
+            fi
             if [ -n "${PREV}" ]; then
-              echo "## Changes since ${PREV#stat-tracker-}"
+              echo "## Commits since ${PREV#stat-tracker-}"
               echo
               git log "${PREV}..HEAD" --no-merges --pretty='- %s' -- \
                 crates/stat-tracker crates/stat-tracker-ui \
@@ -299,7 +310,7 @@ jobs:
             echo
             echo "**Daemon:** runs on any current systemd distro (glibc ≥ 2.35); OCR libraries are bundled."
             echo
-            echo "**GUI:** Iced 0.14 desktop app (\`stat-tracker-gui\` from \`scuffed-stat-tracker-ui\`). Needs GTK 3, a Vulkan-capable GPU/compositor (or software fallback), and glibc ≥ 2.35. This replaces the old Dioxus / webkit2gtk GUI — reinstall to swap the binary; the desktop-entry and PATH name stay \`stat-tracker-gui\`."
+            echo "**GUI:** Iced 0.14 desktop app (\`stat-tracker-gui\` from \`scuffed-stat-tracker-ui\`). Needs GTK 3, a Vulkan-capable GPU/compositor (or software fallback), and glibc ≥ 2.35. Reinstall to replace an old Dioxus binary; the desktop-entry and PATH name stay \`stat-tracker-gui\`."
             echo
             echo "**Also required:** Linux + Wayland (wlr-screencopy compositor or XDG portal) — or X11 (experimental, auto-detected; force with \`STAT_TRACKER_CAPTURE=x11\`) — plus membership in the \`input\` group. OCR models (\`eng\` + game-font \`koverwatch\`) are bundled."
             echo
