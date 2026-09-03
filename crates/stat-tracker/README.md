@@ -3,9 +3,9 @@
 Overwatch 2 personal stat tracker for Linux. A background daemon
 watches for Tab (scoreboard) presses, OCRs the scoreboard, tracks game
 sessions/outcomes, stores everything locally, and optionally syncs per-game
-results to the Scuffed Crew site. An optional Dioxus desktop GUI
-(`stat-tracker-gui`, behind the `gui` feature) shows live status, history,
-stats, and daemon controls.
+results to the Scuffed Crew site. The desktop GUI is the Iced crate
+`scuffed-stat-tracker-ui` (binary still named `stat-tracker-gui` so
+install paths and the `.desktop` entry stay the same).
 
 ## Platform requirements
 
@@ -30,7 +30,7 @@ stats, and daemon controls.
 | Component | Minimum | Notes |
 |-----------|---------|--------|
 | **Daemon** | glibc ≥ 2.35 (Ubuntu 22.04+, Debian 12+, Fedora, Arch, openSUSE, RHEL 9+) | OCR `.so` closure is **bundled** in `lib/` (soname splits across distros). Installer copies `lib/` → `$PREFIX/lib` so RPATH `$ORIGIN/../lib` works. |
-| **GUI** | modern distro with **webkit2gtk-4.1** + glibc ≥ 2.39 (Ubuntu 24.04+, Debian 13, Arch, recent Fedora) | Not portable to older LTS; use daemon-only on older boxes if needed. |
+| **GUI** | glibc ≥ 2.35 + **GTK 3** + Vulkan (or Iced software fallback) | Iced 0.14 (`scuffed-stat-tracker-ui`). No webkit2gtk. |
 | **Host still needed** | Wayland **or** X11 + `input` group + `eng.traineddata` | Capture/compositor and keyboard access stay host-provided. |
 
 HOLD `stat-tracker-v0.1.0` until portable CI + this runtime lane land.
@@ -102,9 +102,13 @@ paths and prints how to identify the bundled libs from the tarball.
 # daemon (foreground; logs to stderr)
 cargo run -p scuffed-stat-tracker
 
-# GUI
-cargo run -p scuffed-stat-tracker --features gui --bin stat-tracker-gui
+# desktop GUI (Iced — crate scuffed-stat-tracker-ui, binary stat-tracker-gui)
+cargo run -p scuffed-stat-tracker-ui
 ```
+
+Replacing an old Dioxus `stat-tracker-gui`: reinstall (prebuilt `./install.sh`,
+or `crates/stat-tracker/install.sh` from a source checkout). The binary name
+does not change; only the implementation does.
 
 First-run sync setup: `scuffed-stat-tracker --token <daemon-token> --server
 https://…` writes `~/.config/scuffed-stat-tracker/config.toml` (chmod 600 —

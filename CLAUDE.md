@@ -14,7 +14,8 @@ crates/
   db/            # SurrealDB client, migrations, queries
   auth/          # OAuth, sessions, crypto (shared crate)
   chat/          # Nostr chat backend (relay client, NIP-44/59 crypto)
-  stat-tracker/  # Overwatch stat tracker (OCR capture daemon + optional Dioxus desktop GUI)
+  stat-tracker/    # Overwatch stat tracker (OCR capture daemon)
+  stat-tracker-ui/ # Iced 0.14 desktop GUI (binary: stat-tracker-gui)
   map-pipeline/  # Map asset processing tooling
   map-renderer/  # Map rendering tooling
   relay-policy/  # Nostr relay policy plugin (NIP-42/29, rate limits) — standalone, not yet in deploy (future work)

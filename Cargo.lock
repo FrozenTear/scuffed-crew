@@ -10885,12 +10885,9 @@ version = "0.3.3"
 dependencies = [
  "anyhow",
  "ashpd",
- "base64 0.22.1",
  "chrono",
- "dioxus",
  "dirs",
  "evdev",
- "gtk",
  "image",
  "leptess",
  "libwayshot",
@@ -10907,7 +10904,6 @@ dependencies = [
  "toml 0.8.2",
  "tracing",
  "tracing-subscriber",
- "tray-icon 0.23.1",
  "x11rb 0.14.0",
 ]
 

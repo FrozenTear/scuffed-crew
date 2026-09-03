@@ -11,8 +11,9 @@ name: Stat Tracker Release
 #   liblept.so.5, Arch libleptonica.so.6), so the OCR library closure is
 #   BUNDLED into the tarball's lib/ and binaries get RPATH $ORIGIN/../lib.
 #   glibc-family / toolchain / compositor-stack libs stay host-provided.
-# - The GUI needs webkit2gtk-4.1 (not packaged on 22.04) → separate job on
-#   ubuntu-24.04; GUI therefore needs a modern distro, daemon does not.
+# - The GUI is Iced 0.14 (wgpu) + GTK tray from crates/stat-tracker-ui.
+#   No webkit2gtk. Built on ubuntu-22.04 (glibc 2.35 floor, same as the daemon).
+#   Host still provides Vulkan/GTK/Wayland or X11.
 # - Clean-room proof: the daemon job uninstalls the OCR packages after the
 #   build and runs the staged binary purely from the bundled libs.
 
@@ -122,7 +123,7 @@ jobs:
           if-no-files-found: error
 
   build-gui:
-    name: GUI (ubuntu-22.04, needs webkit2gtk-4.1)
+    name: GUI (ubuntu-22.04, Iced + GTK tray)
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
@@ -135,7 +136,8 @@ jobs:
             libegl-dev libgbm-dev \
             tesseract-ocr libtesseract-dev libleptonica-dev \
             libevdev-dev libudev-dev \
-            libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev \
+            libasound2-dev libvulkan-dev libssl-dev \
+            libgtk-3-dev libayatana-appindicator3-dev \
             libxdo-dev \
             pkg-config patchelf
 
@@ -143,7 +145,7 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          key: gui-2404
+          key: gui-iced-2204
 
       - name: Set release version env
         run: |
@@ -157,23 +159,18 @@ jobs:
           echo "SST_RELEASE_VERSION=${V}" >> "$GITHUB_ENV"
 
       - name: Build GUI (release)
-        working-directory: crates/stat-tracker
-        run: cargo build --release --features gui --bin stat-tracker-gui
+        run: cargo build --release -p scuffed-stat-tracker-ui --bin stat-tracker-gui
 
       - name: Bundle libxdo + set RPATH
         run: |
           set -euo pipefail
           mkdir -p out/bin out/lib
           cp target/release/stat-tracker-gui out/bin/
-          # The GUI gets webkit2gtk-4.1, GTK, and the X11 client libs from the
-          # host (release notes require a modern distro), so we bundle ONLY the
-          # soname-fragmented lib the GUI can't get on Arch: libxdo (Ubuntu
-          # ships libxdo.so.3, Arch libxdo.so.4). Its transitive deps are the
-          # ABI-stable X11/xcb libs — denied so they stay host-provided.
-          #
-          # The shipped v0.1.0 GUI also had NO RPATH at all (only the daemon got
-          # $ORIGIN/../lib), so it couldn't see bundled libs even if present;
-          # the patchelf below fixes that.
+          # Iced + tray-icon still need GTK / Vulkan / X11 from the host. We
+          # bundle ONLY the soname-fragmented lib the GUI can't get on Arch:
+          # libxdo (Ubuntu ships libxdo.so.3, Arch libxdo.so.4). Its transitive
+          # deps are the ABI-stable X11/xcb libs — denied so they stay
+          # host-provided.
           xdo="$(ldd out/bin/stat-tracker-gui | awk '/libxdo/ {print $3}')"
           [ -n "${xdo}" ] || { echo "libxdo not found in GUI deps" >&2; exit 1; }
           cp -n "${xdo}" out/lib/
@@ -203,10 +200,10 @@ jobs:
             "${bundle_dir}"/*) echo "libxdo resolves to the bundled copy — OK" ;;
             *) echo "libxdo did NOT resolve to the bundled copy (got: ${xdo_real:-missing}, want prefix: ${bundle_dir}/)" >&2; exit 1 ;;
           esac
-          # No headless launch probe: the Dioxus/webkit2gtk GUI has no --smoke
-          # or --version flag (only the SST_VIEW env for view routing) and would
-          # open a real window with no self-exit — a flaky gate, deliberately
-          # omitted. The ldd assertion above is the ship gate for this class.
+          # --help exits without opening a window (Iced CLI). Not a display
+          # smoke test — just proves the binary starts and parses flags.
+          ./out/bin/stat-tracker-gui --help | grep -q 'stat-tracker-gui' \
+            || { echo "stat-tracker-gui --help did not print usage" >&2; exit 1; }
 
       - uses: actions/upload-artifact@v4
         with:
@@ -294,18 +291,19 @@ jobs:
               echo "## Changes since ${PREV#stat-tracker-}"
               echo
               git log "${PREV}..HEAD" --no-merges --pretty='- %s' -- \
-                crates/stat-tracker .github/workflows/stat-tracker-release.yml
+                crates/stat-tracker crates/stat-tracker-ui \
+                .github/workflows/stat-tracker-release.yml
               echo
             fi
             echo "## Requirements & install"
             echo
             echo "**Daemon:** runs on any current systemd distro (glibc ≥ 2.35); OCR libraries are bundled."
             echo
-            echo "**GUI:** needs a modern distro with \`webkit2gtk-4.1\` and glibc ≥ 2.39 (Ubuntu 24.04+, Debian 13, Arch, Fedora)."
+            echo "**GUI:** Iced 0.14 desktop app (\`stat-tracker-gui\` from \`scuffed-stat-tracker-ui\`). Needs GTK 3, a Vulkan-capable GPU/compositor (or software fallback), and glibc ≥ 2.35. This replaces the old Dioxus / webkit2gtk GUI — reinstall to swap the binary; the desktop-entry and PATH name stay \`stat-tracker-gui\`."
             echo
             echo "**Also required:** Linux + Wayland (wlr-screencopy compositor or XDG portal) — or X11 (experimental, auto-detected; force with \`STAT_TRACKER_CAPTURE=x11\`) — plus membership in the \`input\` group. OCR models (\`eng\` + game-font \`koverwatch\`) are bundled."
             echo
-            echo "**Install:** extract the tarball and run \`./install.sh\` inside it — no Rust toolchain needed."
+            echo "**Install:** extract the tarball and run \`./install.sh\` inside it — no Rust toolchain needed. Existing Dioxus installs: run the same installer (or \`crates/stat-tracker/install.sh\` from a source checkout) to replace \`stat-tracker-gui\`."
           } > release-notes.md
           gh release create "${TAG}" ${EXTRA_FLAGS} \
             --title "Stat Tracker ${TAG#stat-tracker-}" \
