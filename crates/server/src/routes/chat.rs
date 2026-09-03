@@ -492,8 +492,8 @@ mod tests {
     use axum::routing::post;
     use http_body_util::BodyExt;
     use scuffed_auth::SessionConfig;
-    use scuffed_auth::crypto::hash_session_token;
-    use scuffed_chat::officer_group_id;
+    use scuffed_auth::crypto::{CryptoService, hash_session_token};
+    use scuffed_chat::{NostrAuthService, officer_group_id};
     use scuffed_db::Database;
     use scuffed_db::migrations::run_migrations;
     use scuffed_site_server::state::{AppState, OAuthConfig};
@@ -503,6 +503,11 @@ mod tests {
     use tower::ServiceExt;
 
     const OFFICER_TOKEN: &str = "test-officer-token";
+
+    fn test_crypto() -> CryptoService {
+        CryptoService::new("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=", 1)
+            .expect("32-byte zero key")
+    }
 
     async fn test_state() -> AppState {
         let db = Database::connect_memory().await.expect("mem db");
@@ -524,7 +529,7 @@ mod tests {
             consumed_challenges: scuffed_site_server::challenge_store::ConsumedChallengeStore::new(
             ),
             nostr_rate_limiter: scuffed_site_server::nostr_rate_limit::NostrRateLimiter::new(),
-            crypto: None,
+            crypto: Some(Arc::new(test_crypto())),
             relay_url: None,
             dm_events: None,
             nip05_domain: None,
@@ -574,6 +579,20 @@ mod tests {
             .bind(("tok", token_hash))
             .await
             .expect("seed session");
+
+        // send_encrypted checks key mode before channel lookup — provision
+        // vs 404 is only observable after this gate.
+        let (pubkey, encrypted) = NostrAuthService::new(test_crypto())
+            .generate_keypair()
+            .expect("keypair");
+        db.update_member_nostr_keys(
+            "officermember",
+            Some(&pubkey),
+            Some("server_managed"),
+            Some(&encrypted),
+        )
+        .await
+        .expect("store keys");
     }
 
     fn send_req(group_id: &str) -> Request<Body> {
@@ -638,12 +657,8 @@ mod tests {
         );
         assert_eq!(
             status,
-            StatusCode::BAD_REQUEST,
-            "officer has no Nostr keys yet: {body}"
-        );
-        assert!(
-            body.contains("Nostr keys"),
-            "expected key-missing contract, got {body}"
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "channel found; empty roster has no recipient pubkeys: {body}"
         );
     }
 }
