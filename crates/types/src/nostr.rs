@@ -103,6 +103,18 @@ impl NostrFilter {
         }
     }
 
+    /// Create a filter for NIP-59 gift wraps addressed to `pubkey` (`#p`).
+    pub fn gift_wraps(pubkey: &str, limit: Option<usize>) -> Self {
+        let mut tags = HashMap::new();
+        tags.insert(format!("#{}", "p"), vec![pubkey.to_string()]);
+        Self {
+            kinds: Some(vec![event_kinds::GIFT_WRAP]),
+            limit,
+            tags,
+            ..Default::default()
+        }
+    }
+
     /// Create a filter for NIP-29 group metadata events.
     pub fn group_metadata(group_id: &str) -> Self {
         let mut tags = HashMap::new();

@@ -1,6 +1,7 @@
 pub mod announcements;
 pub mod applications;
 pub mod articles;
+pub mod chat;
 pub mod events;
 pub mod games;
 pub mod matches;
@@ -15,6 +16,7 @@ pub mod tournaments;
 pub use announcements::*;
 pub use applications::*;
 pub use articles::*;
+pub use chat::*;
 pub use events::*;
 pub use games::*;
 pub use matches::*;

@@ -22,6 +22,7 @@ fn nav_route(id: &str) -> Option<Route> {
         "stats" => Route::Stats {},
         "strategy" => Route::StrategyBrowse {},
         "scrims" => Route::Scrims {},
+        "chat" => Route::TeamChat {},
         _ => return None,
     })
 }
@@ -530,6 +531,11 @@ pub fn PublicLayout() -> Element {
                                 onclick: move |_| account_open.set(false),
                                 "DMs"
                             }
+                            Link {
+                                to: Route::TeamChat {},
+                                onclick: move |_| account_open.set(false),
+                                "Chat"
+                            }
                             div { class: "nav-drop-sep" }
                             button {
                                 onclick: move |_| {
@@ -636,6 +642,11 @@ pub fn PublicLayout() -> Element {
                     to: Route::DmInbox {},
                     onclick: move |_| mobile_open.set(false),
                     "DMs"
+                }
+                Link {
+                    to: Route::TeamChat {},
+                    onclick: move |_| mobile_open.set(false),
+                    "Chat"
                 }
                 button {
                     onclick: move |_| {
