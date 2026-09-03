@@ -2784,10 +2784,11 @@ mod tests {
     #[test]
     fn active_game_persists_and_recovers() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let mut g = ActiveGame::open_now("abc123".into(), detect::MatchOutcome::Unknown, vec![
-            "Oasis".into(),
-            "Busan".into(),
-        ]);
+        let mut g = ActiveGame::open_now(
+            "abc123".into(),
+            detect::MatchOutcome::Unknown,
+            vec!["Oasis".into(), "Busan".into()],
+        );
         g.session_created = true;
         g.map = Some("Oasis".into());
         let gate_state = GateState {
@@ -2817,10 +2818,10 @@ mod tests {
         assert_eq!(r.session_id, "abc123");
         assert_eq!(r.outcome, detect::MatchOutcome::Unknown);
         assert_eq!(r.map.as_deref(), Some("Oasis"));
-        assert_eq!(r.map_candidates, vec![
-            "Oasis".to_string(),
-            "Busan".to_string()
-        ]);
+        assert_eq!(
+            r.map_candidates,
+            vec!["Oasis".to_string(), "Busan".to_string()]
+        );
         assert!(r.session_created);
         assert_eq!(
             r.gate.map(|s| s.accepted.edd()),
