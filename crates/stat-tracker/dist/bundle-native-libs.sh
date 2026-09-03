@@ -7,28 +7,50 @@
 #             can't provide (Ubuntu ships libxdo.so.3, Arch libxdo.so.4)
 #
 # Host-provided families (glibc, loader, toolchain runtimes, ubiquitous
-# compression, and the session/graphics stack) are never bundled. Callers pass
-# an extra deny regex to widen the exclusion for their own host stack.
+# compression, OpenSSL, and the session/graphics stack) are never bundled.
+# Callers pass an extra deny regex to widen the exclusion for their own host
+# stack.
 #
-# Usage: bundle-native-libs.sh <seed-elf> <out-lib-dir> [extra-deny-regex]
+# Usage:
+#   bundle-native-libs.sh <seed-elf> <out-lib-dir> [extra-deny-regex]
+#   bundle-native-libs.sh --print-deny [extra-deny-regex]
 #
-# The seed binary's own RPATH is left to the caller (the daemon and GUI want
-# $ORIGIN/../lib on the binary, $ORIGIN on the libs); this script only copies
-# and stamps the bundled libraries.
+# The seed binary's own RPATH is left to the caller. v0.4.1+ stamps:
+#   daemon  $ORIGIN/../lib/scuffed-stat-tracker/ocr
+#   GUI     $ORIGIN/../lib/scuffed-stat-tracker/gui
+#   libs    $ORIGIN
+# so OCR deps never sit on the GUI RUNPATH (v0.4.0 shipped a flat
+# $ORIGIN/../lib that included Ubuntu 22.04 libcrypto.so.3 and shadowed
+# system OpenSSL — OPENSSL_3.2.0 not found on Aerynos).
 set -euo pipefail
+
+# Host-provided libs (never bundle): glibc family, loader, toolchain runtimes,
+# ubiquitous compression, OpenSSL, and session/graphics stack.
+# libcrypto/libssl MUST stay host-provided: a 22.04-built libcrypto.so.3 only
+# exports OPENSSL_3.0.* and, if placed on a binary's RUNPATH, wins over a
+# newer /usr/lib/libcrypto.so.3 (needed by libcryptsetup and friends).
+DENY='^(ld-linux|libc\.|libm\.|libdl\.|libpthread\.|librt\.|libresolv\.|libnsl\.|libutil\.|libgcc_s|libstdc\+\+|libz\.|libsystemd|libselinux|libwayland|libxkbcommon|libudev|libevdev|libEGL|libGL|libgbm|libdrm|libcrypto\.|libssl\.)'
+
+print_deny() {
+  local extra_deny="${1:-}"
+  if [ -n "${extra_deny}" ]; then
+    echo "${DENY}|${extra_deny}"
+  else
+    echo "${DENY}"
+  fi
+}
+
+if [ "${1:-}" = "--print-deny" ]; then
+  print_deny "${2:-}"
+  exit 0
+fi
 
 seed="${1:?usage: bundle-native-libs.sh <seed-elf> <out-lib-dir> [extra-deny-regex]}"
 out_lib="${2:?usage: bundle-native-libs.sh <seed-elf> <out-lib-dir> [extra-deny-regex]}"
 extra_deny="${3:-}"
+DENY="$(print_deny "${extra_deny}")"
 
 mkdir -p "${out_lib}"
-
-# Host-provided libs (never bundle): glibc family, loader, toolchain runtimes,
-# ubiquitous compression, and session/graphics stack.
-DENY='^(ld-linux|libc\.|libm\.|libdl\.|libpthread\.|librt\.|libresolv\.|libnsl\.|libutil\.|libgcc_s|libstdc\+\+|libz\.|libsystemd|libselinux|libwayland|libxkbcommon|libudev|libevdev|libEGL|libGL|libgbm|libdrm)'
-if [ -n "${extra_deny}" ]; then
-  DENY="${DENY}|${extra_deny}"
-fi
 
 # BFS the dependency closure starting from the seed; bundle everything not
 # denied, with consistent versions.
@@ -50,6 +72,14 @@ while [ -n "${queue}" ]; do
   done
   queue="${next}"
 done
+
+# Belt: refuse even if DENY is later edited incorrectly.
+openssl_hits="$(find "${out_lib}" -maxdepth 1 \( -name 'libcrypto.so*' -o -name 'libssl.so*' \) -print 2>/dev/null || true)"
+if [ -n "${openssl_hits}" ]; then
+  echo "refusing to bundle OpenSSL (must stay host-provided):" >&2
+  echo "${openssl_hits}" >&2
+  exit 1
+fi
 
 for lib in "${out_lib}"/*; do
   [ -e "$lib" ] || continue

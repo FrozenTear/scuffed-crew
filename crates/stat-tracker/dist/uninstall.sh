@@ -78,9 +78,12 @@ else
         "$DESKTOP_DIR/$DESKTOP"
         "$SYSTEMD_DIR/$UNIT"
     )
-    warn "Bundled OCR libs in $PREFIX/lib cannot be identified without a"
+    warn "Bundled libs in $PREFIX/lib/scuffed-stat-tracker (or leftover"
+    warn "v0.4.0 files in $PREFIX/lib) cannot be identified without a"
     warn "manifest — list them from the release tarball and remove by hand:"
     warn "    tar tzf scuffed-stat-tracker-linux-x86_64.tar.gz | grep '/lib/'"
+    warn "Also remove leftover OpenSSL if present:"
+    warn "    rm -f $PREFIX/lib/libcrypto.so.3 $PREFIX/lib/libssl.so.3"
 fi
 
 removed=0
@@ -91,6 +94,9 @@ for f in "${files[@]}"; do
     fi
 done
 info "Removed $removed installed file(s)."
+rmdir "$PREFIX/lib/scuffed-stat-tracker/ocr" 2>/dev/null || true
+rmdir "$PREFIX/lib/scuffed-stat-tracker/gui" 2>/dev/null || true
+rmdir "$PREFIX/lib/scuffed-stat-tracker" 2>/dev/null || true
 
 if command -v systemctl &>/dev/null; then
     systemctl --user daemon-reload 2>/dev/null || true

@@ -29,7 +29,7 @@ install paths and the `.desktop` entry stay the same).
 
 | Component | Minimum | Notes |
 |-----------|---------|--------|
-| **Daemon** | glibc ≥ 2.35 (Ubuntu 22.04+, Debian 12+, Fedora, Arch, openSUSE, RHEL 9+) | OCR `.so` closure is **bundled** in `lib/` (soname splits across distros). Installer copies `lib/` → `$PREFIX/lib` so RPATH `$ORIGIN/../lib` works. |
+| **Daemon** | glibc ≥ 2.35 (Ubuntu 22.04+, Debian 12+, Fedora, Arch, openSUSE, RHEL 9+) | OCR `.so` closure is **bundled** in `lib/scuffed-stat-tracker/ocr` (soname splits across distros). Installer copies that tree so RUNPATH `$ORIGIN/../lib/scuffed-stat-tracker/ocr` works. OpenSSL is **not** bundled. |
 | **GUI** | glibc ≥ 2.35 + **GTK 3** + Vulkan (or Iced software fallback) | Iced 0.14 (`scuffed-stat-tracker-ui`), binary name `stat-tracker-gui`. |
 | **Host still needed** | Wayland **or** X11 + `input` group + `eng.traineddata` | Capture/compositor and keyboard access stay host-provided. |
 
@@ -39,7 +39,7 @@ No Rust toolchain required. GitHub Releases publish
 `scuffed-stat-tracker-linux-x86_64.tar.gz` (`bin/`, optional `lib/`, assets,
 `install.sh`) on tags `stat-tracker-v*`. Release notes:
 `CHANGELOG.md`. Tag runbook (human gate):
-`docs/notes/stat-tracker-v0.4.0-tag.md`.
+`docs/notes/stat-tracker-v0.4.1-tag.md`.
 
 Since **v0.3.0** the tarball also bundles `tessdata/eng.traineddata` (the
 runtime OCR model); `install.sh` drops it into
@@ -66,7 +66,7 @@ get stable.
 Pin a tag or change the install prefix:
 
 ```sh
-STAT_TRACKER_TAG=stat-tracker-v0.4.0 \
+STAT_TRACKER_TAG=stat-tracker-v0.4.1 \
 STAT_TRACKER_PREFIX=$HOME/.local \
   bash -c 'curl -fsSL https://raw.githubusercontent.com/FrozenTear/scuffed-crew/main/crates/stat-tracker/dist/bootstrap.sh | bash'
 ```
@@ -76,7 +76,7 @@ extract, then:
 
 ```sh
 cd scuffed-stat-tracker-linux-x86_64
-./install.sh          # bins → $PREFIX/bin, bundled lib/ → $PREFIX/lib, desktop + systemd unit
+./install.sh          # bins → $PREFIX/bin, OCR/gui libs → $PREFIX/lib/scuffed-stat-tracker/{ocr,gui}
 ```
 
 The in-tarball installer lives at `dist/install.sh` in this crate (copied to
@@ -151,6 +151,17 @@ the daemon holds the lock and sends manual edits through a file command queue
 (`{data_dir}/commands/`).
 
 ## Troubleshooting
+
+**`stat-tracker-gui` fails with `OPENSSL_3.2.0 not found` (v0.4.0).**
+v0.4.0 bundled Ubuntu 22.04 `libcrypto.so.3` / `libssl.so.3` into
+`~/.local/lib`. Both binaries used RUNPATH `$ORIGIN/../lib`, so that copy
+won over `/usr/lib` and broke hosts whose `libcryptsetup` needs OpenSSL
+3.2 (Aerynos). Install **v0.4.1** (the installer removes those leftovers)
+or delete the tracker-owned files:
+
+```sh
+rm -f ~/.local/lib/libcrypto.so.3 ~/.local/lib/libssl.so.3
+```
 
 **Games play but nothing is recorded, and `debug/accepted/` stays empty.**
 The daemon reads Tab presses straight from `/dev/input`. A global-hotkey daemon
