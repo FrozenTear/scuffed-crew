@@ -2,7 +2,16 @@
 Name=Scuffed Stat Tracker
 GenericName=OW2 Stats Tracker
 Comment=Capture your Overwatch 2 personal stats automatically
+# Exec/TryExec are rewritten at install time to the absolute
+# $PREFIX/bin/stat-tracker-gui. A bare name fails in app launchers whose
+# session PATH omits ~/.local/bin (AerynOS, Cosmic, GNOME). Terminal
+# shells usually have that dir, which is why `stat-tracker-gui` works
+# from a terminal but not from the launcher.
 Exec=stat-tracker-gui
+TryExec=stat-tracker-gui
+# Freedesktop theme icon name (not a file path). A missing theme icon
+# only drops the pictogram; it does not block launch.
+# gtk-update-icon-cache is not required for a theme name.
 Icon=applications-games
 Type=Application
 Categories=Game;Utility;
