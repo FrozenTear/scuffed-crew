@@ -2,7 +2,38 @@
 
 User-facing notes for `stat-tracker-v*` GitHub Releases. The release workflow
 prepends the section whose heading matches the tag version (for example
-`## 0.4.1` for `stat-tracker-v0.4.1`).
+`## 0.4.2` for `stat-tracker-v0.4.2`).
+
+## 0.4.2
+
+Hotfix for laptop installs after v0.4.1: `stat-tracker-gui` panicked on start
+when `libayatana-appindicator3` / `libappindicator3` was missing:
+
+```
+Failed to load ayatana-appindicator3 or appindicator3 dynamic library
+```
+
+`tray-icon` → `libappindicator-sys` `dlopen`s those sonames and used to
+`panic!` if neither loaded. The Iced window now starts without a tray
+(warning + toast). Hide-to-tray needs the system lib; closing the window
+quits when there is no tray.
+
+- Optional Ayatana AppIndicator package on distros that ship it
+  (Debian/Ubuntu: `libayatana-appindicator3-1`, Fedora:
+  `libayatana-appindicator-gtk3`, Arch: `libayatana-appindicator`).
+- AerynOS may not ship it — the main window still works.
+
+Daemon OCR / capture / sync / store schema are unchanged. OpenSSL packaging
+from 0.4.1 is unchanged.
+
+### Install
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/FrozenTear/scuffed-crew/main/crates/stat-tracker/dist/bootstrap.sh | bash
+```
+
+Or extract the tarball and run `./install.sh`. Pin with
+`STAT_TRACKER_TAG=stat-tracker-v0.4.2`.
 
 ## 0.4.1
 

@@ -266,6 +266,9 @@ impl TrackerApp {
         ) {
             app.toast = Some(err);
         }
+        if app.tray.is_none() && app.toast.is_none() && app.fixture.is_none() {
+            app.toast = Some(tray::MISSING_TRAY_TOAST.to_string());
+        }
 
         let mut tasks = vec![fetch, open.map(Message::WindowOpened)];
         if live {

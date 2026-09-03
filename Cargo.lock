@@ -10883,7 +10883,7 @@ dependencies = [
 
 [[package]]
 name = "scuffed-stat-tracker"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "anyhow",
  "ashpd",
@@ -10920,6 +10920,7 @@ dependencies = [
  "iced",
  "iced_layershell",
  "image",
+ "libloading 0.7.4",
  "reqwest 0.12.28",
  "scuffed-stat-tracker",
  "scuffed-types",
