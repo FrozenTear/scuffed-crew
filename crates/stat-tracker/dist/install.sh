@@ -328,6 +328,32 @@ else
     info "daemon binary runs ($("$BIN_DIR/scuffed-stat-tracker" --version))"
 fi
 
+# Optional tray (Hide-to-tray). Missing is fine — the Iced window still starts.
+appindicator_found=0
+if ldconfig -p 2>/dev/null | grep -qE 'libayatana-appindicator3|libappindicator3'; then
+    appindicator_found=1
+else
+    for p in /usr/lib/libayatana-appindicator3.so.1 \
+             /usr/lib64/libayatana-appindicator3.so.1 \
+             /usr/lib/x86_64-linux-gnu/libayatana-appindicator3.so.1 \
+             /usr/lib/libappindicator3.so.1 \
+             /usr/lib64/libappindicator3.so.1 \
+             /usr/lib/x86_64-linux-gnu/libappindicator3.so.1; do
+        if [[ -e "$p" ]]; then
+            appindicator_found=1
+            break
+        fi
+    done
+fi
+if [[ "$appindicator_found" -eq 0 ]]; then
+    warn "Ayatana AppIndicator not found — stat-tracker-gui will start without a tray."
+    warn "Hide-to-tray needs libayatana-appindicator3 (or libappindicator3)."
+    warn "  Debian/Ubuntu: sudo apt install libayatana-appindicator3-1"
+    warn "  Fedora:        sudo dnf install libayatana-appindicator-gtk3"
+    warn "  Arch:          sudo pacman -S libayatana-appindicator"
+    warn "AerynOS may not ship this package; the window still works."
+fi
+
 # ── Done ──────────────────────────────────────────────────────────────────────
 # Human-facing summary to stderr too — stdout stays reserved for machine output
 # (there is none), so an output-parsing caller never sees install chatter.
