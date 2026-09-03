@@ -48,6 +48,9 @@ struct UiStateFile {
     /// `None` / omitted = all time. Some(id) = that season.
     #[serde(default)]
     season: Option<String>,
+    /// Session-scoped companion hide (`session_id` / `process`). `None` = auto.
+    #[serde(default)]
+    overlay_hidden_key: Option<String>,
 }
 
 pub fn cache_path(data_dir: &Path) -> PathBuf {
@@ -84,11 +87,22 @@ pub fn write_cache(data_dir: &Path, seasons: &[Season]) -> std::io::Result<()> {
     std::fs::write(cache_path(data_dir), bytes)
 }
 
+fn read_ui_state_file(data_dir: &Path) -> Option<UiStateFile> {
+    let bytes = std::fs::read(ui_state_path(data_dir)).ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+fn write_ui_state_file(data_dir: &Path, file: &UiStateFile) -> std::io::Result<()> {
+    std::fs::create_dir_all(data_dir)?;
+    let bytes = serde_json::to_vec_pretty(file)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    std::fs::write(ui_state_path(data_dir), bytes)
+}
+
 /// `None` when the file is missing or unreadable — caller applies
 /// [`default_selection`]. A present file with `season: null` is All time.
 pub fn load_ui_state(data_dir: &Path) -> Option<SeasonSel> {
-    let bytes = std::fs::read(ui_state_path(data_dir)).ok()?;
-    let file: UiStateFile = serde_json::from_slice(&bytes).ok()?;
+    let file = read_ui_state_file(data_dir)?;
     Some(match file.season.filter(|id| !id.is_empty()) {
         Some(id) => SeasonSel::Season(id),
         None => SeasonSel::AllTime,
@@ -96,13 +110,20 @@ pub fn load_ui_state(data_dir: &Path) -> Option<SeasonSel> {
 }
 
 pub fn save_ui_state(data_dir: &Path, sel: &SeasonSel) -> std::io::Result<()> {
-    std::fs::create_dir_all(data_dir)?;
-    let file = UiStateFile {
-        season: sel.as_id().map(str::to_string),
-    };
-    let bytes = serde_json::to_vec_pretty(&file)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    std::fs::write(ui_state_path(data_dir), bytes)
+    let mut file = read_ui_state_file(data_dir).unwrap_or_default();
+    file.season = sel.as_id().map(str::to_string);
+    write_ui_state_file(data_dir, &file)
+}
+
+/// Missing file / missing field → Auto (show while the game is running).
+pub fn load_overlay_hidden_key(data_dir: &Path) -> Option<String> {
+    read_ui_state_file(data_dir).and_then(|f| f.overlay_hidden_key)
+}
+
+pub fn save_overlay_hidden_key(data_dir: &Path, key: Option<&str>) -> std::io::Result<()> {
+    let mut file = read_ui_state_file(data_dir).unwrap_or_default();
+    file.overlay_hidden_key = key.filter(|k| !k.is_empty()).map(str::to_string);
+    write_ui_state_file(data_dir, &file)
 }
 
 /// Default = the season marked current, else all time. Empty list → all time
@@ -515,6 +536,20 @@ mod tests {
         assert_eq!(load_ui_state(&dir), Some(SeasonSel::Season("s17".into())));
         let raw = std::fs::read_to_string(ui_state_path(&dir)).unwrap();
         assert!(raw.contains("s17"), "{raw}");
+        assert_eq!(
+            load_overlay_hidden_key(&dir),
+            None,
+            "overlay hold defaults to Auto when the field is written with season"
+        );
+        save_overlay_hidden_key(&dir, Some("sess-1")).unwrap();
+        assert_eq!(load_overlay_hidden_key(&dir).as_deref(), Some("sess-1"));
+        assert_eq!(load_ui_state(&dir), Some(SeasonSel::Season("s17".into())));
+        save_ui_state(&dir, &SeasonSel::AllTime).unwrap();
+        assert_eq!(
+            load_overlay_hidden_key(&dir).as_deref(),
+            Some("sess-1"),
+            "season save must not reset the overlay hold"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

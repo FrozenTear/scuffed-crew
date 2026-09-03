@@ -24,11 +24,18 @@ fn main() -> anyhow::Result<()> {
     }
 
     let data_dir = cli.data_dir.clone();
-    tracing::info!(path = %data_dir.display(), "starting tracker GUI (Iced 0.14 P4)");
+    if cli.companion {
+        tracing::info!(path = %data_dir.display(), "starting companion overlay");
+        return stat_tracker_ui::overlay::run_companion(cli);
+    }
+
+    tracing::info!(path = %data_dir.display(), "starting tracker GUI (Iced 0.14 P4 + P3 overlay)");
 
     // Daemon (not application): the process stays alive with zero windows so
     // tray Hide can `window::close` the surface. Mode::Hidden / set_visible
-    // leave the window in niri's Alt-Tab list.
+    // leave the window in niri's Alt-Tab list. The companion overlay is a
+    // second process (`--companion` / iced_layershell), not a second iced
+    // window on this runtime.
     iced::daemon(
         {
             let cli = cli.clone();

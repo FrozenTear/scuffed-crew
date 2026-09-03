@@ -3,7 +3,7 @@ name = "scuffed-stat-tracker-ui"
 version = "0.1.0"
 edition = "2024"
 license.workspace = true
-description = "Iced 0.14 tracker GUI for the Scuffed Crew stat tracker (Overview, Games, Heroes, Maps, Seasons, Settings)."
+description = "Iced 0.14 tracker GUI for the Scuffed Crew stat tracker (Overview, Games, Heroes, Maps, Seasons, Settings, companion overlay)."
 
 [[bin]]
 name = "stat-tracker-gui"
@@ -13,6 +13,12 @@ path = "src/main.rs"
 name = "stat_tracker_ui"
 path = "src/lib.rs"
 
+[features]
+default = ["companion"]
+# Layer-shell overlay (`--companion`). Off only if iced_layershell cannot
+# build on a host; visibility / view-model unit tests do not need it.
+companion = ["dep:iced_layershell"]
+
 [dependencies]
 scuffed-stat-tracker = { path = "../stat-tracker" }
 scuffed-types = { path = "../types" }
@@ -21,6 +27,7 @@ chrono = { workspace = true }
 dirs = "6"
 gtk = "0.18"
 iced = { version = "0.14", features = ["tokio", "advanced", "image"] }
+iced_layershell = { version = "0.19", optional = true }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 reqwest = { workspace = true }
 serde = { workspace = true }

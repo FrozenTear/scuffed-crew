@@ -31,7 +31,7 @@ pub fn view(app: &TrackerApp, content_width: f32) -> Element<'_, Message> {
             !matches!(app.season, SeasonSel::AllTime),
         ),
         widgets::maps_panel(&stats.maps),
-        widgets::health_panel(&app.health_status),
+        widgets::health_panel(&app.health_status, app.overlay_showing(), app.game_running),
     ]
     .spacing(GRID_GAP)
     .width(Fill);
@@ -108,10 +108,33 @@ fn heroes_shelf(stats: &crate::aggregate::Aggregates, cols: usize) -> Element<'s
 }
 
 /// Games on `clock`'s local calendar day, newest first (one row per game).
+/// Callers in tests should pass a clock on the same instant as a tonight
+/// game — a fixed "22:00 UTC" is the next calendar day east of UTC+2.
 pub fn tonight_games(games: &[Game], clock: DateTime<Utc>) -> Vec<&Game> {
     let today = clock.with_timezone(&Local).date_naive();
     games
         .iter()
         .filter(|g| g.played_at.with_timezone(&Local).date_naive() == today)
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cli::FixtureKind;
+    use crate::fixtures;
+    use crate::snapshot::games_from_snapshot;
+    use chrono::TimeZone;
+
+    #[test]
+    fn tonight_uses_clock_local_day_not_a_fixed_utc_evening() {
+        let games = games_from_snapshot(&fixtures::snapshot(FixtureKind::Sample));
+        let on_game = tonight_games(&games, games[0].played_at);
+        assert_eq!(on_game.len(), 3, "clock = newest game keeps the sitting");
+        let next_utc_day = Utc.with_ymd_and_hms(2026, 9, 3, 12, 0, 0).unwrap();
+        assert!(
+            tonight_games(&games, next_utc_day).is_empty(),
+            "a clock on the next UTC noon is not tonight"
+        );
+    }
 }

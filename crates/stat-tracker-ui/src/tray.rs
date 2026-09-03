@@ -10,6 +10,7 @@ use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEv
 pub enum TrayAction {
     Show,
     Hide,
+    ToggleOverlay,
     Quit,
 }
 
@@ -17,6 +18,7 @@ pub struct TrayHandle {
     pub _icon: tray_icon::TrayIcon,
     pub show_id: MenuId,
     pub hide_id: MenuId,
+    pub overlay_id: MenuId,
     pub quit_id: MenuId,
 }
 
@@ -25,12 +27,15 @@ pub fn try_create() -> Option<TrayHandle> {
     let menu = Menu::new();
     let show_item = MenuItem::new("Show window", true, None);
     let hide_item = MenuItem::new("Hide window", true, None);
+    let overlay_item = MenuItem::new("Hide / show overlay", true, None);
     let quit_item = MenuItem::new("Quit", true, None);
     let show_id = show_item.id().clone();
     let hide_id = hide_item.id().clone();
+    let overlay_id = overlay_item.id().clone();
     let quit_id = quit_item.id().clone();
     menu.append(&show_item).ok()?;
     menu.append(&hide_item).ok()?;
+    menu.append(&overlay_item).ok()?;
     menu.append(&quit_item).ok()?;
 
     let tray = TrayIconBuilder::new()
@@ -44,6 +49,7 @@ pub fn try_create() -> Option<TrayHandle> {
         _icon: tray,
         show_id,
         hide_id,
+        overlay_id,
         quit_id,
     })
 }
@@ -60,6 +66,9 @@ pub fn poll(handle: &TrayHandle) -> Option<TrayAction> {
         }
         if event.id == handle.hide_id {
             return Some(TrayAction::Hide);
+        }
+        if event.id == handle.overlay_id {
+            return Some(TrayAction::ToggleOverlay);
         }
     }
 
@@ -113,5 +122,6 @@ mod tests {
     fn tray_actions_are_show_hide_quit() {
         assert_ne!(TrayAction::Show, TrayAction::Hide);
         assert_ne!(TrayAction::Show, TrayAction::Quit);
+        assert_ne!(TrayAction::ToggleOverlay, TrayAction::Quit);
     }
 }

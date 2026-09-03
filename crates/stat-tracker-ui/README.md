@@ -15,9 +15,9 @@ Native **Iced 0.14** (wgpu) tracker GUI for the Scuffed Crew stat tracker.
 
 Design: `docs/notes/stat-tracker-gui-redesign-2026-09-02.md` rev 2 tokens + rev 3 responsive layout (branch `docs/tracker-gui-redesign`). Tokens: `radius-card` 16, `radius-inner` 12, page pad 24/32, Urbanist, role tints, `border` / `text-3` / `ok` / `danger`.
 
-P0–P2 are on `main` (PRs #56–#58). This crate is **P4**: Settings, capture preview, daemon control, update banner, tray. Companion overlay is P3 (later).
+P0–P2 are on `main` (PRs #56–#58). **P4** (PR #59) is Settings, capture preview, daemon control, update banner, tray. **P3** is the companion overlay (this crate, `iced_layershell` 0.19).
 
-There is **no** software `--preview` path and no `preview.rs`. **Robert will capture real niri window shots for Design.**
+There is **no** software `--preview` path and no `preview.rs`. **Robert will capture real niri window shots for Design** (empty + with-data cadence, overlay on/off).
 
 ## Run fixtures
 
@@ -105,6 +105,7 @@ Fixture mode still writes those files (under the fixture `--data-dir`); there is
 |------|---------|
 | `--data-dir PATH` | Daemon data dir (default: config / XDG; temp dir when `--fixture` is set) |
 | `--fixture empty\|sample` | Write a demo `live_snapshot.json` and read it back through `storage::read_snapshot` |
+| `--companion` | Run the layer-shell overlay only (needs niri / wlr-layer-shell). |
 | `--seasons-url URL` | `GET /api/public/seasons`; cached to `<data_dir>/seasons.json`. Ignored with `--fixture`. |
 
 Seasons URL falls back to `SCUFFED_SERVER` or `config.toml` sync URL (live mode only). Offline: cache only. No seasons → picker hidden, all time.
@@ -126,7 +127,7 @@ cargo run -p scuffed-stat-tracker-ui -- --data-dir "$HOME/.local/share/scuffed-s
 6. **Scoreboard reading** — Install copies `koverwatch.traineddata` if missing (`ensure_koverwatch_tessdata`). Rebuild trains it again (`regenerate_koverwatch_tessdata`).
 7. **Stored data** — Compact (`LocalStore::vacuum`) or delete all local matches. Both refuse while the service is running.
 8. **Update banner** (Overview + Settings) appears only when GitHub has a newer `stat-tracker-v*` release. It never downloads an installer. The "you're on" version is `SST_RELEASE_VERSION` (runtime or compile-time, set by release CI / packaging) or `scuffed-stat-tracker --version` from the installed daemon — never this crate's `0.1.0`. If none of those resolve, the banner stays hidden.
-9. **Tray** — Show window / Hide window / Quit (`tray-icon`). Left-click shows the window. The GUI runs as `iced::daemon` so the process stays alive with no window. Hide is `window::close` (destroys the surface — `Mode::Hidden` / minimize stay in niri Alt-Tab); Show is `window::open` and rebinds `window_id`. App state (screen, settings draft, etc.) is kept in the daemon.
+9. **Tray** — Show window / Hide window / Hide / show overlay / Quit (`tray-icon`). Left-click shows the window. The GUI runs as `iced::daemon` so the process stays alive with no window. Hide is `window::close` (destroys the surface — `Mode::Hidden` / minimize stay in niri Alt-Tab); Show is `window::open` and rebinds `window_id`. App state (screen, settings draft, overlay session hold, etc.) is kept in the daemon. Overlay hide is session-scoped: it sticks until the game ends, then the next launch auto-shows.
 
 ```sh
 systemctl --user status scuffed-stat-tracker.service
@@ -135,8 +136,40 @@ systemctl --user start scuffed-stat-tracker.service
 systemctl --user restart scuffed-stat-tracker.service
 ```
 
+### Companion overlay (P3)
+
+Layer-shell surface (`iced_layershell` 0.19, pinned with Iced 0.14): `Layer::Overlay`, top-right, margins 24, width 360, height to content, `KeyboardInteractivity::None`, exclusive zone 0, output = `capture_output` from config (same monitor the daemon captures). Clicks and keys pass through (`events_transparent`) so fullscreen Overwatch keeps input.
+
+**Visibility:** auto-show while the **game process** is running (configured `game_process_names` in `/proc`). A leftover `active_game.json` does **not** count as live — the daemon keeps that file after a match. While the process is up, the file may supply a `session_id` only for an unfinished game inside `session_window_secs`; decided outcomes and stale `last_activity` are ignored. Empty process names → not running. Header / Overview health / tray **Hide / show overlay** hides it until the **process ends** — it does not reopen mid-session (new match ids keep the hold). Next launch auto-shows. The hold is `overlay_hidden_key` in `<data_dir>/ui_state.json`. Esc is N/A (`KeyboardInteractivity::None`).
+
+The overlay is a **second process**, not a second window on `iced::daemon`:
+
+```
+stat-tracker-gui                 # iced::daemon + tray (P4)
+  └── stat-tracker-gui --companion --data-dir …   # iced_layershell overlay
+```
+
+That keeps Hide/Show / zero-window tray behaviour from #59 unchanged. Two iced event loops cannot share one process (winit vs layershellev).
+
+```sh
+# Overlay only (layout / niri acceptance). Fixture treats the game as running.
+cargo run -p scuffed-stat-tracker-ui -- --companion --fixture empty
+cargo run -p scuffed-stat-tracker-ui -- --companion --fixture sample
+
+# Main window; overlay auto-shows when the game is running
+cargo run -p scuffed-stat-tracker-ui -- --data-dir "$HOME/.local/share/scuffed-stat-tracker"
+```
+
+Header chip **Companion showing / hidden / waiting for game**. Tray **Hide / show overlay** does the same. Hide while the game is live sticks until that process ends. `--fixture` counts as one live session so Design can hide/show for shots.
+
+KDE blur (`org_kde_kwin_blur`) is a follow-up, not v1. The panel is translucent (`surface` @ 88%).
+
+`iced_layershell` is the default `companion` feature. If it cannot build on a host: `--no-default-features` keeps the main window; `--companion` then prints a rebuild hint.
+
+**Robert:** live niri acceptance — overlay sits above fullscreen Overwatch; the game keeps keyboard and pointer. Design shots: empty + with-data.
+
 ## Out of scope (later phases)
 
-P3 companion overlay (layer-shell). P5 remove the Dioxus `gui` feature.
+P5 remove the Dioxus `gui` feature. Compositor blur on the overlay.
 
 Urbanist (OFL) is bundled as the labelled tracker product face — see `fonts/OFL.txt`.

@@ -13,6 +13,7 @@ pub struct Cli {
     pub data_dir: PathBuf,
     pub fixture: Option<FixtureKind>,
     pub seasons_url: Option<String>,
+    pub companion: bool,
     pub help: bool,
 }
 
@@ -21,6 +22,7 @@ impl Cli {
         let mut data_dir = None;
         let mut fixture = None;
         let mut seasons_url = None;
+        let mut companion = false;
         let mut help = false;
         let args: Vec<String> = std::env::args().skip(1).collect();
         let mut i = 0;
@@ -46,6 +48,7 @@ impl Cli {
                         i += 1;
                     }
                 }
+                "--companion" => companion = true,
                 "--seasons-url" => {
                     if let Some(v) = args.get(i + 1) {
                         seasons_url = Some(v.clone());
@@ -86,22 +89,26 @@ impl Cli {
             data_dir,
             fixture,
             seasons_url,
+            companion,
             help,
         }
     }
 
     pub fn help_text() -> &'static str {
-        "stat-tracker-gui — Scuffed Crew tracker (Iced 0.14, P4)
+        "stat-tracker-gui — Scuffed Crew tracker (Iced 0.14, P4 + P3 overlay)
 
 USAGE:
   cargo run -p scuffed-stat-tracker-ui -- [OPTIONS]
   cargo run -p scuffed-stat-tracker-ui -- --fixture sample
   cargo run -p scuffed-stat-tracker-ui -- --fixture empty
+  cargo run -p scuffed-stat-tracker-ui -- --companion --fixture sample
 
 OPTIONS:
   --data-dir PATH       Daemon data dir (default: config / XDG, or a temp dir with --fixture)
   --fixture empty|sample
                         Install a demo live_snapshot.json and read it back via storage::read_snapshot
+  --companion           Run the layer-shell overlay only (no main window / tray).
+                        Needs a Wayland compositor with wlr-layer-shell (niri).
   --seasons-url URL     GET /api/public/seasons on launch and every 30 min
                         (default: $SCUFFED_SERVER or config sync URL).
                         Cached to <data-dir>/seasons.json. Ignored when --fixture is set.
