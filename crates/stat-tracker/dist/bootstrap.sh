@@ -4,7 +4,7 @@
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/FrozenTear/scuffed-crew/main/crates/stat-tracker/dist/bootstrap.sh | bash
 #   # or pin a tag:
-#   STAT_TRACKER_TAG=stat-tracker-v0.4.3 bash bootstrap.sh
+#   STAT_TRACKER_TAG=stat-tracker-v0.4.4 bash bootstrap.sh
 #
 # Env:
 #   STAT_TRACKER_REPO   default FrozenTear/scuffed-crew
