@@ -720,6 +720,111 @@ fn should_start_fresh_session(game: Option<&ActiveGame>, now: Instant) -> bool {
     }
 }
 
+/// Identity of a would-be new session (map-vote, Tab, or stat-regression split).
+/// Missing map/hero are wildcards so a vote screen (no hero) can still match
+/// an unfinished game that already learned its map from a Tab.
+struct IncomingIdentity<'a> {
+    map: Option<&'a str>,
+    hero: Option<&'a str>,
+    vote_candidates: &'a [String],
+}
+
+fn known_label(s: Option<&str>) -> Option<&str> {
+    s.map(str::trim)
+        .filter(|s| !s.is_empty() && !s.eq_ignore_ascii_case("unknown"))
+}
+
+fn maps_compatible(
+    prev_map: Option<&str>,
+    incoming_map: Option<&str>,
+    vote_candidates: &[String],
+) -> bool {
+    match (known_label(prev_map), known_label(incoming_map)) {
+        (Some(prev), Some(incoming)) => prev.eq_ignore_ascii_case(incoming),
+        (Some(prev), None) if !vote_candidates.is_empty() => {
+            vote_candidates.iter().any(|c| c.eq_ignore_ascii_case(prev))
+        }
+        // Unfinished game already has a map; the opener has no map yet
+        // (lingering vote with empty OCR, or a split frame that hasn't
+        // resolved). Same match until a contradictory map arrives.
+        (Some(_), None) => true,
+        // No confirmed previous map — identity reuse does not apply.
+        // Map-vote debounce still covers a lingering vote with no Tab yet.
+        (None, _) => false,
+    }
+}
+
+fn heroes_compatible(prev: Option<&str>, incoming: Option<&str>) -> bool {
+    match (known_label(prev), known_label(incoming)) {
+        (Some(prev), Some(incoming)) => prev.eq_ignore_ascii_case(incoming),
+        _ => true,
+    }
+}
+
+/// Reuse the open session instead of splitting when an unfinished (no-outcome)
+/// game with the same map+hero is still active or recently active.
+///
+/// The map-vote cooldown (`auto_detect.cooldown_secs`, default 120s) only
+/// debounces a lingering vote opening a *second* new game. A Tab that opened
+/// the first session sets `last_game_open`, so after 120s a lingering or
+/// false-positive vote can open another — observed as two Games cards for one
+/// match (same map/hero, empty first row + later WIN, ~6 min apart).
+fn same_unfinished_match(
+    unfinished: bool,
+    activity_age: std::time::Duration,
+    prev_map: Option<&str>,
+    prev_hero: Option<&str>,
+    incoming: IncomingIdentity<'_>,
+) -> bool {
+    unfinished
+        && activity_age <= UNFINISHED_SESSION_IDLE
+        && maps_compatible(prev_map, incoming.map, incoming.vote_candidates)
+        && heroes_compatible(prev_hero, incoming.hero)
+}
+
+fn should_reuse_unfinished_same_match(
+    previous: Option<&ActiveGame>,
+    incoming: IncomingIdentity<'_>,
+    now: Instant,
+) -> bool {
+    let Some(g) = previous else {
+        return false;
+    };
+    same_unfinished_match(
+        !g.finished(),
+        now.saturating_duration_since(g.last_activity),
+        g.map.as_deref(),
+        g.hero_auth.accepted_hero.as_deref(),
+        incoming,
+    )
+}
+
+/// Map-vote opener: existing debounce, plus same-map/hero reuse so a lingering
+/// vote after the 120s cooldown cannot split an unfinished match.
+fn map_vote_should_open_new_game(
+    active: Option<&ActiveGame>,
+    last_game_open: Option<Instant>,
+    now: Instant,
+    debounce: std::time::Duration,
+    vote_candidates: &[String],
+) -> bool {
+    let game_finished = active.is_some_and(ActiveGame::finished);
+    let cooldown_elapsed =
+        last_game_open.is_none_or(|t| now.saturating_duration_since(t) >= debounce);
+    if !(active.is_none() || game_finished || cooldown_elapsed) {
+        return false;
+    }
+    !should_reuse_unfinished_same_match(
+        active,
+        IncomingIdentity {
+            map: None,
+            hero: None,
+            vote_candidates,
+        },
+        now,
+    )
+}
+
 /// Minimum time since the session's last accepted capture before a stat
 /// regression is allowed to split off a new session. Real between-game gaps
 /// (result screens + queue + load) measured ≥3 min; consecutive captures of
@@ -1457,19 +1562,24 @@ async fn run_loop(ctx: Arc<DaemonCtx>) -> anyhow::Result<()> {
                         let game_finished = st.active_game.as_ref().is_some_and(ActiveGame::finished);
                         match phase {
                             detect::GamePhase::MapVote { maps } => {
-                                let can_open = st.active_game.is_none()
-                                    || game_finished
-                                    || st.last_game_open.is_none_or(|t| t.elapsed() >= new_game_debounce);
+                                // Vote names are screen-text constants
+                                // ("SHAMBALI") — canonicalize through the
+                                // MAPS table so candidate checks compare
+                                // display names with display names.
+                                let candidates: Vec<String> = maps
+                                    .iter()
+                                    .filter_map(|m| parse::canonical_map(m))
+                                    .collect();
+                                let now = Instant::now();
+                                let can_open = map_vote_should_open_new_game(
+                                    st.active_game.as_ref(),
+                                    st.last_game_open,
+                                    now,
+                                    new_game_debounce,
+                                    &candidates,
+                                );
                                 if can_open {
                                     let sid = format!("{:016x}", rand_id());
-                                    // Vote names are screen-text constants
-                                    // ("SHAMBALI") — canonicalize through the
-                                    // MAPS table so candidate checks compare
-                                    // display names with display names.
-                                    let candidates: Vec<String> = maps
-                                        .iter()
-                                        .filter_map(|m| parse::canonical_map(m))
-                                        .collect();
                                     tracing::info!(?candidates, session_id = %sid, "auto-detect: map vote — new game");
                                     if let Some(prev) = st.active_game.as_ref() {
                                         note_unrecorded_game(data_dir, prev, "superseded by map vote");
@@ -1483,6 +1593,23 @@ async fn run_loop(ctx: Arc<DaemonCtx>) -> anyhow::Result<()> {
                                     st.word_outcome_streak = None;
                                     st.pending_outcome = None;
                                     persist_active_game(data_dir, st.active_game.as_ref());
+                                } else if should_reuse_unfinished_same_match(
+                                    st.active_game.as_ref(),
+                                    IncomingIdentity {
+                                        map: None,
+                                        hero: None,
+                                        vote_candidates: &candidates,
+                                    },
+                                    now,
+                                ) {
+                                    tracing::info!(
+                                        session_id = st
+                                            .active_game
+                                            .as_ref()
+                                            .map(|g| g.session_id.as_str()),
+                                        ?candidates,
+                                        "auto-detect: map vote reused unfinished same-map/hero game"
+                                    );
                                 }
                             }
                             detect::GamePhase::HeroBan | detect::GamePhase::HeroSelect
@@ -1961,7 +2088,27 @@ async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<
         // the game boundary (end screens + start screens) and this board
         // belongs to a NEW game. Split it into a fresh session instead of
         // appending — 2026-07-14 three games merged into one session this way.
+        // Same-map/hero unfinished session: a stat-looking regression after
+        // the 120s gap is almost always OCR noise or a late scoreboard of
+        // THIS match (21:49 empty + 21:55 WIN). Do not split it off.
+        let incoming_map = map_from_panel
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .or(session_map)
+            .or(Some(parsed.map_name.as_str()).filter(|s| !s.is_empty()));
+        let suppress_split = same_unfinished_match(
+            matches!(req.game_outcome, detect::MatchOutcome::Unknown),
+            std::time::Duration::ZERO,
+            session_map,
+            req.hero_auth.accepted_hero.as_deref(),
+            IncomingIdentity {
+                map: incoming_map,
+                hero: Some(parsed.hero.as_str()),
+                vote_candidates: map_candidates,
+            },
+        );
         let split = !create_session
+            && !suppress_split
             && req.prev_gate.is_some_and(|(state, age)| {
                 age >= STAT_SPLIT_MIN_GAP
                     && stats_regressed(
@@ -2532,14 +2679,115 @@ mod tests {
         assert!(should_start_fresh_session(Some(&stale), now));
     }
 
+    /// The reported pair: Tank / Neon Junction / Wrecking Ball at 21:49 with
+    /// outcome `—`, then the same identity at 21:55 WIN. Six minutes exceeds
+    /// the 120s map-vote cooldown and `STAT_SPLIT_MIN_GAP`, so both openers
+    /// would have created a second card. Same unfinished map+hero must reuse.
+    #[test]
+    fn unfinished_neon_junction_ball_2149_empty_2155_win_reuses() {
+        let first_tab = test_now();
+        let second = first_tab + Duration::from_secs(6 * 60);
+        let mut g = game(detect::MatchOutcome::Unknown, None, first_tab);
+        g.map = Some("Neon Junction".into());
+        g.hero_auth.accepted_hero = Some("Wrecking Ball".into());
+        g.last_activity = first_tab;
+        g.opened_at = first_tab;
+
+        let incoming = IncomingIdentity {
+            map: Some("Neon Junction"),
+            hero: Some("Wrecking Ball"),
+            vote_candidates: &[],
+        };
+        assert!(
+            should_reuse_unfinished_same_match(Some(&g), incoming, second),
+            "21:55 same map+hero must merge into the 21:49 unfinished row"
+        );
+
+        // Map-vote after cooldown (default 120s): lingering vote includes the
+        // played map. Pre-fix this opened a second session.
+        let vote = [String::from("Neon Junction"), String::from("Dorado")];
+        assert!(
+            !map_vote_should_open_new_game(
+                Some(&g),
+                Some(first_tab),
+                second,
+                Duration::from_secs(120),
+                &vote,
+            ),
+            "lingering map-vote 6 min after Tab must not open a second game"
+        );
+
+        // Stat-regression split path: unfinished + same identity, age > 120s.
+        assert!(
+            same_unfinished_match(
+                true,
+                Duration::from_secs(6 * 60),
+                Some("Neon Junction"),
+                Some("Wrecking Ball"),
+                IncomingIdentity {
+                    map: Some("Neon Junction"),
+                    hero: Some("Wrecking Ball"),
+                    vote_candidates: &[],
+                },
+            ),
+            "stat-looking regression 6 min later must not split this match"
+        );
+
+        // A real next game on a different map still opens once cooldown elapses.
+        let other_vote = [String::from("Ilios"), String::from("Busan")];
+        assert!(map_vote_should_open_new_game(
+            Some(&g),
+            Some(first_tab),
+            second,
+            Duration::from_secs(120),
+            &other_vote,
+        ));
+
+        // Outcome already recorded — this is a finished game, not the pair.
+        let mut won = game(detect::MatchOutcome::Victory, Some(6 * 60 - 30), second);
+        won.map = Some("Neon Junction".into());
+        won.hero_auth.accepted_hero = Some("Wrecking Ball".into());
+        won.last_activity = first_tab + Duration::from_secs(30);
+        assert!(map_vote_should_open_new_game(
+            Some(&won),
+            Some(first_tab),
+            second,
+            Duration::from_secs(120),
+            &vote,
+        ));
+    }
+
+    #[test]
+    fn map_vote_cooldown_still_blocks_without_identity() {
+        // No map/hero on the unfinished game: identity reuse does not apply,
+        // so the 120s debounce is still the only guard (lingering vote at
+        // start, before any Tab). Tab itself is not delayed.
+        let opened = test_now();
+        let g = game(detect::MatchOutcome::Unknown, None, opened);
+        let vote = [String::from("Oasis")];
+        assert!(!map_vote_should_open_new_game(
+            Some(&g),
+            Some(opened),
+            opened + Duration::from_secs(30),
+            Duration::from_secs(120),
+            &vote,
+        ));
+        assert!(map_vote_should_open_new_game(
+            Some(&g),
+            Some(opened),
+            opened + Duration::from_secs(121),
+            Duration::from_secs(120),
+            &vote,
+        ));
+    }
+
     #[test]
     fn active_game_persists_and_recovers() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let mut g = ActiveGame::open_now(
-            "abc123".into(),
-            detect::MatchOutcome::Unknown,
-            vec!["Oasis".into(), "Busan".into()],
-        );
+        let mut g = ActiveGame::open_now("abc123".into(), detect::MatchOutcome::Unknown, vec![
+            "Oasis".into(),
+            "Busan".into(),
+        ]);
         g.session_created = true;
         g.map = Some("Oasis".into());
         let gate_state = GateState {
@@ -2569,10 +2817,10 @@ mod tests {
         assert_eq!(r.session_id, "abc123");
         assert_eq!(r.outcome, detect::MatchOutcome::Unknown);
         assert_eq!(r.map.as_deref(), Some("Oasis"));
-        assert_eq!(
-            r.map_candidates,
-            vec!["Oasis".to_string(), "Busan".to_string()]
-        );
+        assert_eq!(r.map_candidates, vec![
+            "Oasis".to_string(),
+            "Busan".to_string()
+        ]);
         assert!(r.session_created);
         assert_eq!(
             r.gate.map(|s| s.accepted.edd()),
