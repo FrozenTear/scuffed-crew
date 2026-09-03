@@ -67,10 +67,9 @@ cargo build --release -p scuffed-stat-tracker \
     --bin scuffed-stat-tracker \
     2>&1
 
-info "Building GUI (release, --features gui)..."
-cargo build --release -p scuffed-stat-tracker \
+info "Building GUI (release, scuffed-stat-tracker-ui / Iced)..."
+cargo build --release -p scuffed-stat-tracker-ui \
     --bin stat-tracker-gui \
-    --features gui \
     2>&1
 
 # ── Install binaries ──────────────────────────────────────────────────────────
@@ -129,7 +128,7 @@ fi
     echo "  Launch the app:   stat-tracker-gui"
     echo "  Or find it in your application launcher: Scuffed Stat Tracker"
     echo
-    echo "  The GUI's Status page has Start / Stop and Enable Autostart buttons."
+    echo "  The GUI Settings page has Start / Stop and Start on login."
     echo "  Autostart (systemd) starts the daemon automatically on login."
     echo
     echo "  First run: open the GUI, go to Settings, paste your server URL"

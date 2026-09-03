@@ -3,7 +3,7 @@
 #
 # Expected layout (release asset root after extract):
 #   bin/scuffed-stat-tracker
-#   bin/stat-tracker-gui
+#   bin/stat-tracker-gui   (Iced UI from scuffed-stat-tracker-ui)
 #   lib/*          (optional — bundled OCR libs; RPATH $ORIGIN/../lib)
 #   tessdata/eng.traineddata        (optional — runtime OCR model, since v0.3.0)
 #   tessdata/koverwatch.traineddata (optional — CI-trained game-font model, since v0.3.0)
@@ -256,7 +256,7 @@ fi
     echo "  Launch the app:   stat-tracker-gui"
     echo "  Or find it in your application launcher: Scuffed Stat Tracker"
     echo
-    echo "  The GUI's Status page has Start / Stop and Enable Autostart buttons."
+    echo "  The GUI Settings page has Start / Stop and Start on login."
     echo "  Autostart (systemd) starts the daemon automatically on login."
     echo
     echo "  First run: open the GUI, go to Settings, paste your server URL"

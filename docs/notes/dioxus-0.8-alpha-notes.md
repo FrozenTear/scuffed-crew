@@ -89,7 +89,7 @@ Checklist when trying:
 
 1. [ ] Matching **crate + CLI** alpha versions  
 2. [ ] App WASM check / `dx build`  
-3. [ ] Optional: `stat-tracker` with `--features gui`  
+3. [x] ~~Optional: `stat-tracker` with `--features gui`~~ (P5: desktop GUI is Iced in `scuffed-stat-tracker-ui`)
 4. [ ] Grep again for `Props {` hand construction  
 5. [ ] Leave server/container on **0.7.9** until docs + stable  
 

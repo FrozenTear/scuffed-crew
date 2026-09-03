@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build and (re)install the stat tracker: daemon + GUI binaries into
+# Build and (re)install the stat tracker: daemon + Iced GUI binaries into
 # ~/.local/bin, the user systemd unit into ~/.config/systemd/user, then
 # restart the service if it is running. Run from anywhere.
 #
@@ -14,8 +14,10 @@ BIN_DIR="${HOME}/.local/bin"
 UNIT_DIR="${HOME}/.config/systemd/user"
 UNIT="scuffed-stat-tracker.service"
 
-echo "==> building release binaries (daemon + gui)"
-cargo build --release -p scuffed-stat-tracker --features gui \
+echo "==> building release binaries (daemon + iced GUI)"
+cargo build --release \
+    -p scuffed-stat-tracker --bin scuffed-stat-tracker \
+    -p scuffed-stat-tracker-ui --bin stat-tracker-gui \
     --manifest-path "$REPO_ROOT/Cargo.toml"
 
 echo "==> installing binaries to $BIN_DIR"

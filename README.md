@@ -20,7 +20,8 @@ Built with [Dioxus](https://dioxuslabs.com) (WASM frontend), [Axum](https://gith
 | `crates/db` | SurrealDB client, migrations, queries |
 | `crates/auth` | OAuth, sessions, crypto |
 | `crates/chat` | Nostr chat backend (relay client, NIP-44/59) |
-| `crates/stat-tracker` | Overwatch 2 stat tracker — OCR capture daemon + desktop GUI |
+| `crates/stat-tracker` | Overwatch 2 stat tracker — OCR capture daemon |
+| `crates/stat-tracker-ui` | Iced 0.14 desktop GUI (`stat-tracker-gui`) |
 | `crates/map-pipeline`, `crates/map-renderer` | Map asset tooling for the strategy editor |
 | `crates/relay-policy` | Nostr relay policy plugin (NIP-42/29, rate limits) |
 

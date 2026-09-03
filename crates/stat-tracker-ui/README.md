@@ -3,11 +3,11 @@
 Native **Iced 0.14** (wgpu) tracker GUI for the Scuffed Crew stat tracker.
 
 - Package: `scuffed-stat-tracker-ui`
-- Binary: `stat-tracker-gui` (same name the Dioxus GUI uses, so install paths stay compatible)
+- Binary: `stat-tracker-gui` (the only desktop UI entry; install paths and the `.desktop` file stay this name)
 - Reads the daemon snapshot via `stat_tracker::storage::read_snapshot` (`live_snapshot.json`)
-- Writes `StoreCommand` files under `<data_dir>/commands/` — same contract as the Dioxus GUI (`SetOutcome`, `EditMatch`, `DeleteSession`, `ResolveSegment`)
+- Writes `StoreCommand` files under `<data_dir>/commands/` (`SetOutcome`, `EditMatch`, `DeleteSession`, `ResolveSegment`)
 - Fetches `GET /api/public/seasons` on launch and every 30 minutes; cache is `<data_dir>/seasons.json`. Header season choice persists in `<data_dir>/ui_state.json`.
-- Settings write `~/.config/scuffed-stat-tracker/config.toml` through `Config::save` (0600). Same keys as the daemon / Dioxus page.
+- Settings write `~/.config/scuffed-stat-tracker/config.toml` through `Config::save` (0600). Same keys as the daemon.
 - Capture preview is a one-shot screenshot of the selected output through the existing capture backends.
 - Tracker service start/stop/restart goes through the `scuffed-stat-tracker.service` user unit when installed. PID liveness requires `/proc/<pid>/comm` to start with `scuffed-stat` — a reused PID is never signalled.
 - Does **not** change the daemon, OCR, capture, sync, or store schema
@@ -15,7 +15,7 @@ Native **Iced 0.14** (wgpu) tracker GUI for the Scuffed Crew stat tracker.
 
 Design: `docs/notes/stat-tracker-gui-redesign-2026-09-02.md` rev 2 tokens + rev 3 responsive layout (branch `docs/tracker-gui-redesign`). Tokens: `radius-card` 16, `radius-inner` 12, page pad 24/32, Urbanist, role tints, `border` / `text-3` / `ok` / `danger`.
 
-P0–P2 are on `main` (PRs #56–#58). **P4** (PR #59) is Settings, capture preview, daemon control, update banner, tray. **P3** is the companion overlay (this crate, `iced_layershell` 0.19).
+P0–P4 + companion overlay are on `main` (PRs #56–#60). **P5** removed the Dioxus `gui` feature and `crates/stat-tracker/src/gui/` — this crate is the desktop UI.
 
 There is **no** software `--preview` path and no `preview.rs`. **Robert will capture real niri window shots for Design** (empty + with-data cadence, overlay on/off).
 
@@ -91,7 +91,7 @@ Inspect a queued file before the daemon eats it:
 cat "$HOME/.local/share/scuffed-stat-tracker/commands/"cmd_*.json
 ```
 
-Example payload (same tagged JSON the Dioxus GUI wrote):
+Example payload (same tagged JSON the daemon applies):
 
 ```json
 {"op":"set_outcome","session_id":"sess-t1","outcome":"defeat"}
@@ -168,8 +168,8 @@ KDE blur (`org_kde_kwin_blur`) is a follow-up, not v1. The panel is translucent 
 
 **Robert:** live niri acceptance — overlay sits above fullscreen Overwatch; the game keeps keyboard and pointer. Design shots: empty + with-data.
 
-## Out of scope (later phases)
+## Out of scope (later)
 
-P5 remove the Dioxus `gui` feature. Compositor blur on the overlay.
+Compositor blur on the overlay (`org_kde_kwin_blur`).
 
 Urbanist (OFL) is bundled as the labelled tracker product face — see `fonts/OFL.txt`.
