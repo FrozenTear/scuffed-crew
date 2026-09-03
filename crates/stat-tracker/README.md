@@ -15,8 +15,11 @@ install paths and the `.desktop` entry stay the same).
   - X11 (experimental): native capture when a usable X server is detected and
     Wayland capture is unavailable.
   - Portal remains last-resort on either stack (slower; not ideal for the poller).
-- **Keyboard access via evdev.** Tab detection reads `/dev/input` — the user
-  must be in the `input` group (`sudo usermod -aG input $USER`, re-login).
+- **Keyboard access via evdev.** Tab detection (daemon) and the companion
+  overlay show/hide shortcut (GUI, default Super+Shift+C) read `/dev/input` —
+  the user must be in the `input` group (`sudo usermod -aG input $USER`,
+  re-login) or have seat `uaccess` on those nodes. No X11 key grab. See
+  `crates/stat-tracker-ui/README.md` (Companion shortcut).
 - **Tessdata (`eng.traineddata`).** Looked up in (first hit wins):
   user `~/.local/share/scuffed-stat-tracker/tessdata/`, `TESSDATA_PREFIX`,
   `/usr/share/tessdata`, `/usr/share/tesseract-ocr/*/tessdata` (Debian/Ubuntu),

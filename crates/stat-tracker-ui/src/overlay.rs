@@ -5,7 +5,10 @@
 //! keyboard none, exclusive zone 0) so the game keeps input. Parent starts
 //! and stops that child from [`overlay_visible`]. Manual hide is session-scoped
 //! ([`OverlayHold`]): it sticks until the game ends, then the next launch
-//! auto-shows. Esc is N/A (`KeyboardInteractivity::None`).
+//! auto-shows. Esc is N/A (`KeyboardInteractivity::None`). The show/hide
+//! shortcut (Settings → Companion, default Super+Shift+C) is the same action
+//! as tray **Hide / show overlay** — it toggles [`OverlayHold`] now. Hide
+//! sticks until the game ends; show mid-session clears the hold.
 
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -291,6 +294,8 @@ pub struct OverlayModel {
     pub last_tab: String,
     pub sync_label: String,
     pub live: bool,
+    /// One-line footer when a companion shortcut is on. `None` when disabled.
+    pub hotkey_hint: Option<String>,
 }
 
 impl OverlayModel {
@@ -351,6 +356,7 @@ pub fn build_model(
             "Sync off".into()
         },
         live,
+        hotkey_hint: None,
     }
 }
 
@@ -378,6 +384,9 @@ pub fn content_height(model: &OverlayModel) -> u32 {
         h += model.top_heroes.len() as u32 * 56;
     }
     h += 12 + 36 + 16;
+    if model.hotkey_hint.is_some() {
+        h += 22;
+    }
     h.clamp(200, 900)
 }
 
@@ -726,14 +735,28 @@ fn mini_hero(hero: &OverlayHero) -> Element<'static, OverlayViewMessage> {
 }
 
 fn footer_row(model: &OverlayModel) -> Element<'_, OverlayViewMessage> {
-    row![
+    let chips = row![
         chip(&model.last_tab),
         space().width(Fill),
         chip(&model.sync_label),
     ]
     .spacing(8)
-    .align_y(Alignment::Center)
-    .into()
+    .align_y(Alignment::Center);
+
+    match &model.hotkey_hint {
+        Some(hint) => column![
+            chips,
+            text(hint)
+                .size(SIZE_LABEL)
+                .font(FONT_MEDIUM)
+                .color(TEXT_3)
+                .width(Fill),
+        ]
+        .spacing(6)
+        .width(Fill)
+        .into(),
+        None => chips.into(),
+    }
 }
 
 fn chip<'a>(label_s: &'a str) -> Element<'a, OverlayViewMessage> {
@@ -830,7 +853,7 @@ impl OverlayApp {
         };
         let config = stat_tracker::config::Config::load().unwrap_or_default();
         let sync_on = config.sync.is_some();
-        let model = build_model(
+        let mut model = build_model(
             &games,
             &seasons.seasons,
             &season,
@@ -842,6 +865,7 @@ impl OverlayApp {
                 cli.fixture.is_some(),
             ),
         );
+        model.hotkey_hint = seasons::load_overlay_hotkey(&cli.data_dir).footer_hint();
         let surface_height = content_height(&model);
         Self {
             data_dir: cli.data_dir.clone(),
@@ -864,29 +888,31 @@ impl OverlayApp {
     }
 
     pub(crate) fn refresh(&mut self) {
+        let hint = seasons::load_overlay_hotkey(&self.data_dir).footer_hint();
         if self.fixture.is_some() {
+            self.model.hotkey_hint = hint;
             return;
         }
         let mtime = snapshot::snapshot_mtime(&self.data_dir);
-        if mtime == self.snapshot_mtime {
-            return;
+        if mtime != self.snapshot_mtime {
+            self.snapshot_mtime = mtime;
+            let snap = snapshot::load_snapshot(&self.data_dir);
+            let games = games_from_snapshot(&snap);
+            let seasons = seasons::load_cache(&self.data_dir);
+            let persisted = seasons::load_ui_state(&self.data_dir);
+            let season = seasons::resolve_selection(persisted, &seasons.seasons);
+            self.clock = Utc::now();
+            let config = stat_tracker::config::Config::load().unwrap_or_default();
+            self.model = build_model(
+                &games,
+                &seasons.seasons,
+                &season,
+                self.clock,
+                config.sync.is_some(),
+                detect_game_running(&self.data_dir, &config.game_process_names, false),
+            );
         }
-        self.snapshot_mtime = mtime;
-        let snap = snapshot::load_snapshot(&self.data_dir);
-        let games = games_from_snapshot(&snap);
-        let seasons = seasons::load_cache(&self.data_dir);
-        let persisted = seasons::load_ui_state(&self.data_dir);
-        let season = seasons::resolve_selection(persisted, &seasons.seasons);
-        self.clock = Utc::now();
-        let config = stat_tracker::config::Config::load().unwrap_or_default();
-        self.model = build_model(
-            &games,
-            &seasons.seasons,
-            &season,
-            self.clock,
-            config.sync.is_some(),
-            detect_game_running(&self.data_dir, &config.game_process_names, false),
-        );
+        self.model.hotkey_hint = hint;
     }
 }
 
@@ -1146,6 +1172,17 @@ mod tests {
         assert_eq!(companion_copy(false, false), "Companion waiting for game");
         assert_eq!(companion_copy(false, true), "Companion hidden");
         assert_eq!(companion_copy(true, true), "Companion showing");
+        assert_eq!(model.hotkey_hint, None);
+        let with_hint = OverlayModel {
+            hotkey_hint: Some("Hide or show with Super+Shift+C".into()),
+            ..model
+        };
+        assert!(content_height(&with_hint) > content_height(&empty_without_hint(&clock)));
+        let _ = view(&with_hint);
+    }
+
+    fn empty_without_hint(clock: &DateTime<Utc>) -> OverlayModel {
+        build_model(&[], &[], &SeasonSel::AllTime, *clock, false, false)
     }
 
     #[test]

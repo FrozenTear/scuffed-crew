@@ -125,7 +125,7 @@ cargo run -p scuffed-stat-tracker-ui -- --data-dir "$HOME/.local/share/scuffed-s
 2. **Tracker service** — Start / Stop / Restart. When `~/.config/systemd/user/scuffed-stat-tracker.service` exists, verbs go through `systemctl --user`. Otherwise Start launches `scuffed-stat-tracker` from PATH / next to this binary; Stop reads `daemon.pid` and signals only if `/proc/<pid>/comm` is the tracker.
 3. **Start on login** — `systemctl --user enable --now` / `disable --now` when the unit file is installed.
 4. **Capture** — pick a monitor (or Auto), then **Capture now** for a one-shot preview of what the tracker sees.
-5. **Save settings** writes today's fields: monitor, in-game name (`player_name` — no `#1234` discriminator), session window, game process names, auto-detect, website URL + token, debug images. Restart the service after a save if it is running.
+5. **Save settings** writes today's fields: monitor, in-game name (`player_name` — no `#1234` discriminator), session window, game process names, auto-detect, website URL + token, debug images. **Companion** shortcut is stored in `<data_dir>/ui_state.json` (not `config.toml` / not `StoreCommand`). Restart the service after a save if it is running.
 6. **Scoreboard reading** — Install copies `koverwatch.traineddata` if missing (`ensure_koverwatch_tessdata`). Rebuild trains it again (`regenerate_koverwatch_tessdata`).
 7. **Stored data** — Compact (`LocalStore::vacuum`) or delete all local matches. Both refuse while the service is running.
 8. **Update banner** (Overview + Settings) appears only when GitHub has a newer `stat-tracker-v*` release. It never downloads an installer. The "you're on" version is `SST_RELEASE_VERSION` (runtime or compile-time, set by release CI / packaging) or `scuffed-stat-tracker --version` from the installed daemon — never this crate's `0.1.0`. If none of those resolve, the banner stays hidden.
@@ -143,6 +143,22 @@ systemctl --user restart scuffed-stat-tracker.service
 Layer-shell surface (`iced_layershell` 0.19, pinned with Iced 0.14): `Layer::Overlay`, top-right, margins 24, width 360, height to content, `KeyboardInteractivity::None`, exclusive zone 0, output = `capture_output` from config (same monitor the daemon captures). Clicks and keys pass through (`events_transparent`) so fullscreen Overwatch keeps input.
 
 **Visibility:** auto-show while the **game process** is running (configured `game_process_names` in `/proc`). A leftover `active_game.json` does **not** count as live — the daemon keeps that file after a match. While the process is up, the file may supply a `session_id` only for an unfinished game inside `session_window_secs`; decided outcomes and stale `last_activity` are ignored. Empty process names → not running. Header / Overview health / tray **Hide / show overlay** hides it until the **process ends** — it does not reopen mid-session (new match ids keep the hold). Next launch auto-shows. The hold is `overlay_hidden_key` in `<data_dir>/ui_state.json`. Esc is N/A (`KeyboardInteractivity::None`).
+
+**Show / hide shortcut:** Settings → **Companion**. Default **Super+Shift+C**, on. The overlay cannot receive keys (`KeyboardInteractivity::None`), so the main GUI process reads `/dev/input` (same evdev path as Tab capture — not X11 `XGrabKey`). Same `input` group / seat `uaccess` as the daemon. The shortcut is an explicit user action: it toggles visibility **now** through the same OverlayHold as the tray button. Hide sticks until the game ends; pressing it again mid-session shows the overlay. The current bind is a one-line footer on the overlay when the shortcut is on. Bind is stored in `<data_dir>/ui_state.json` (`overlay_hotkey`, `overlay_hotkey_enabled`).
+
+Bind format: `Super+Shift+C` (modifiers joined with `+`, then one key). Super aliases: `Meta`, `Win`. Also `Ctrl`, `Alt`, `Shift`. Key: `A`–`Z`, `0`–`9`, `F1`–`F12`, `Tab`, `Space`, `Esc`, `Enter`. At least one modifier is required. Empty field saves as Super+Shift+C.
+
+**Why not the GlobalShortcuts portal?** niri (Robert’s CachyOS / AerynOS) has no xdg-desktop-portal GlobalShortcuts backend. A portal bind would not fire there. This path does not prompt for a portal permission.
+
+**Optional niri bind** (only if the in-app shortcut does not fire — do not use both or one press will hide then show):
+
+```kdl
+binds {
+    Super+Shift+C { spawn-sh "touch ~/.local/share/scuffed-stat-tracker/companion_toggle"; }
+}
+```
+
+The GUI notices `companion_toggle` mtime on its 1s tick and runs the same toggle. That file is **not** a `StoreCommand` (do not put it under `commands/`).
 
 The overlay is a **second process**, not a second window on `iced::daemon`:
 
