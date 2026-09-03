@@ -15,7 +15,9 @@ Native **Iced 0.14** (wgpu) tracker GUI for the Scuffed Crew stat tracker.
 
 Design: `docs/notes/stat-tracker-gui-redesign-2026-09-02.md` rev 2 tokens + rev 3 responsive layout (branch `docs/tracker-gui-redesign`). Tokens: `radius-card` 16, `radius-inner` 12, page pad 24/32, Urbanist, role tints, `border` / `text-3` / `ok` / `danger`.
 
-P0–P4 + companion overlay are on `main` (PRs #56–#60). **P5** removed the Dioxus `gui` feature and `crates/stat-tracker/src/gui/` — this crate is the desktop UI.
+P0–P5 are on `main` (PRs #56–#61). **v0.4.0** is the first Iced-only tracker
+release (Overview / Games / Heroes / Maps / Seasons / Settings + companion
+overlay; Dioxus GUI removed). Binary name stays `stat-tracker-gui`.
 
 There is **no** software `--preview` path and no `preview.rs`. **Robert will capture real niri window shots for Design** (empty + with-data cadence, overlay on/off).
 
