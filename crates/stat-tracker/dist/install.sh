@@ -4,7 +4,9 @@
 # Expected layout (release asset root after extract):
 #   bin/scuffed-stat-tracker
 #   bin/stat-tracker-gui   (Iced UI from scuffed-stat-tracker-ui)
-#   lib/*          (optional — bundled OCR libs; RPATH $ORIGIN/../lib)
+#   lib/scuffed-stat-tracker/ocr/*  (daemon OCR closure; RPATH …/ocr)
+#   lib/scuffed-stat-tracker/gui/*  (GUI libxdo; RPATH …/gui)
+#   (v0.4.0 used a flat lib/* on $ORIGIN/../lib — that shadowed system OpenSSL)
 #   tessdata/eng.traineddata        (optional — runtime OCR model, since v0.3.0)
 #   tessdata/koverwatch.traineddata (optional — CI-trained game-font model, since v0.3.0)
 #   assets/scuffed-stat-tracker.desktop
@@ -51,8 +53,10 @@ SKIP_INTEGRATION="${SKIP_INTEGRATION:-}"
 # Every file this script installs is recorded here and written to
 # $PREFIX/share/scuffed-stat-tracker/install-manifest.txt so uninstall.sh can
 # remove exactly what we put on disk (the bundled libs land in a shared
-# $PREFIX/lib and are unidentifiable without it).
+# $PREFIX/lib/scuffed-stat-tracker/{ocr,gui} and are unidentifiable without it).
 MANIFEST_ENTRIES=()
+# Paths removed during a v0.4.0 → 0.4.1 upgrade (flat $PREFIX/lib leftovers).
+REMOVED_ENTRIES=()
 
 # ── Layout checks ─────────────────────────────────────────────────────────────
 
@@ -146,17 +150,90 @@ if [[ -f "$PKG_ROOT/uninstall.sh" ]]; then
     info "Installed uninstaller → $BIN_DIR/scuffed-stat-tracker-uninstall"
 fi
 
-# Bundled OCR library closure (portable releases). Daemon RPATH is
-# $ORIGIN/../lib so libs must land next to bin under PREFIX.
-if [[ -d "$PKG_ROOT/lib" ]] && compgen -G "$PKG_ROOT/lib/*" >/dev/null; then
-    mkdir -p "$LIB_DIR"
+# Bundled native libs (portable releases). Never dump into $PREFIX/lib itself:
+# v0.4.0 put Ubuntu 22.04 libcrypto.so.3 there, and both binaries' RUNPATH
+# ($ORIGIN/../lib) made that copy win over /usr/lib — OPENSSL_3.2.0 not found
+# when the GUI loaded system libcryptsetup.
+#
+# v0.4.1+ layout (matches the stamped RUNPATHs):
+#   $PREFIX/lib/scuffed-stat-tracker/ocr  ← daemon
+#   $PREFIX/lib/scuffed-stat-tracker/gui  ← GUI (libxdo only)
+is_openssl_lib() {
+    local base="$1"
+    [[ "$base" == libcrypto.so* || "$base" == libssl.so* ]]
+}
+
+install_bundled_tree() {
+    local src="$1" dest="$2"
+    local count=0
+    INSTALLED_LIB_COUNT=0
+    [[ -d "$src" ]] || return 0
+    local f rel base dest_file
+    while IFS= read -r -d '' f; do
+        rel="${f#"$src"/}"
+        base="$(basename "$f")"
+        if is_openssl_lib "$base"; then
+            warn "skipping bundled OpenSSL $rel (host libcrypto/libssl must win)"
+            continue
+        fi
+        dest_file="$dest/$rel"
+        mkdir -p "$(dirname "$dest_file")"
+        install -m755 "$f" "$dest_file"
+        MANIFEST_ENTRIES+=("$dest_file")
+        count=$((count + 1))
+    done < <(find "$src" -type f -print0)
+    INSTALLED_LIB_COUNT=$count
+}
+
+BUNDLE_SRC="$PKG_ROOT/lib/scuffed-stat-tracker"
+BUNDLE_DEST="$LIB_DIR/scuffed-stat-tracker"
+if [[ -d "$BUNDLE_SRC" ]]; then
+    install_bundled_tree "$BUNDLE_SRC" "$BUNDLE_DEST"
+    info "Installed $INSTALLED_LIB_COUNT bundled libs → $BUNDLE_DEST"
+    info "  daemon RUNPATH \$ORIGIN/../lib/scuffed-stat-tracker/ocr"
+    info "  GUI    RUNPATH \$ORIGIN/../lib/scuffed-stat-tracker/gui"
+elif [[ -d "$PKG_ROOT/lib" ]] && compgen -G "$PKG_ROOT/lib/*" >/dev/null; then
+    # Older tarball with a flat lib/. Isolate into the private OCR dir and
+    # skip OpenSSL so a mixed upgrade cannot re-shadow system libcrypto.
+    warn "flat lib/ layout (pre-0.4.1 tarball) — installing into $BUNDLE_DEST/ocr, skipping OpenSSL"
+    mkdir -p "$BUNDLE_DEST/ocr"
     count=0
     for f in "$PKG_ROOT/lib"/*; do
-        install -m755 "$f" "$LIB_DIR/$(basename "$f")"
-        MANIFEST_ENTRIES+=("$LIB_DIR/$(basename "$f")")
+        [[ -f "$f" ]] || continue
+        base="$(basename "$f")"
+        if is_openssl_lib "$base"; then
+            warn "skipping bundled OpenSSL $base (host libcrypto/libssl must win)"
+            continue
+        fi
+        install -m755 "$f" "$BUNDLE_DEST/ocr/$base"
+        MANIFEST_ENTRIES+=("$BUNDLE_DEST/ocr/$base")
         count=$((count + 1))
     done
-    info "Installed $count bundled OCR libs → $LIB_DIR (RPATH \$ORIGIN/../lib)"
+    info "Installed $count bundled libs → $BUNDLE_DEST/ocr"
+fi
+
+# Upgrade cleanup: v0.4.0 wrote sonames into $PREFIX/lib (the GUI RUNPATH).
+# Delete those leftover files if our previous manifest listed them, especially
+# libcrypto/libssl which break hosts with a newer system OpenSSL.
+MANIFEST_DIR="$PREFIX/share/scuffed-stat-tracker"
+MANIFEST="$MANIFEST_DIR/install-manifest.txt"
+if [[ -f "$MANIFEST" ]]; then
+    while IFS= read -r line; do
+        [[ "$line" == /* ]] || continue
+        rel="${line#"$LIB_DIR"/}"
+        # Only flat files we previously dumped into $PREFIX/lib — not the
+        # new private tree ($LIB_DIR/scuffed-stat-tracker/…).
+        if [[ "$rel" == "$line" || "$rel" == */* ]]; then
+            continue
+        fi
+        if [[ -f "$line" || -L "$line" ]]; then
+            rm -f "$line"
+            REMOVED_ENTRIES+=("$line")
+        fi
+    done < "$MANIFEST"
+    if [[ ${#REMOVED_ENTRIES[@]} -gt 0 ]]; then
+        info "Removed ${#REMOVED_ENTRIES[@]} leftover v0.4.0 lib(s) from $LIB_DIR"
+    fi
 fi
 
 # Bundled runtime eng model → user tessdata dir (first-priority lookup, no root,
@@ -231,7 +308,13 @@ MANIFEST_DIR="$PREFIX/share/scuffed-stat-tracker"
 MANIFEST="$MANIFEST_DIR/install-manifest.txt"
 mkdir -p "$MANIFEST_DIR"
 {
-    [[ -f "$MANIFEST" ]] && cat "$MANIFEST"
+    if [[ -f "$MANIFEST" ]]; then
+        if [[ ${#REMOVED_ENTRIES[@]} -gt 0 ]]; then
+            grep -Fvx -f <(printf '%s\n' "${REMOVED_ENTRIES[@]}") "$MANIFEST" || true
+        else
+            cat "$MANIFEST"
+        fi
+    fi
     printf '%s\n' "${MANIFEST_ENTRIES[@]}"
 } | sort -u > "$MANIFEST.tmp"
 mv "$MANIFEST.tmp" "$MANIFEST"
@@ -240,7 +323,7 @@ info "Wrote install manifest → $MANIFEST"
 # ── Smoke check ───────────────────────────────────────────────────────────────
 
 if ! "$BIN_DIR/scuffed-stat-tracker" --version >/dev/null 2>&1; then
-    warn "daemon --version failed. Missing host libs (display stack/evdev) or bundled lib/ not installed beside bin?"
+    warn "daemon --version failed. Missing host libs (display stack/evdev) or bundled OCR libs not at \$ORIGIN/../lib/scuffed-stat-tracker/ocr?"
 else
     info "daemon binary runs ($("$BIN_DIR/scuffed-stat-tracker" --version))"
 fi

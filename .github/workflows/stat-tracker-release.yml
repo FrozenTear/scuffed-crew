@@ -9,8 +9,11 @@ name: Stat Tracker Release
 #   Debian 12+, Fedora, Arch, openSUSE, RHEL 9+).
 # - tesseract/leptonica sonames are fragmented across distros (Ubuntu ships
 #   liblept.so.5, Arch libleptonica.so.6), so the OCR library closure is
-#   BUNDLED into the tarball's lib/ and binaries get RPATH $ORIGIN/../lib.
-#   glibc-family / toolchain / compositor-stack libs stay host-provided.
+#   BUNDLED into lib/scuffed-stat-tracker/ocr (daemon RUNPATH
+#   $ORIGIN/../lib/scuffed-stat-tracker/ocr). GUI libxdo lives in
+#   lib/scuffed-stat-tracker/gui so OCR deps never sit on the GUI RUNPATH.
+#   glibc / toolchain / compositor / OpenSSL stay host-provided — never
+#   bundle libcrypto/libssl (v0.4.0 shadowed system OpenSSL on Aerynos).
 # - The GUI is Iced 0.14 (wgpu) + GTK tray from crates/stat-tracker-ui.
 #   Built on ubuntu-22.04 (glibc 2.35 floor, same as the daemon).
 #   Host still provides Vulkan/GTK/Wayland or X11.
@@ -71,14 +74,21 @@ jobs:
       - name: Bundle OCR library closure + set RPATH
         run: |
           set -euo pipefail
-          mkdir -p out/bin out/lib
+          mkdir -p out/bin out/lib/scuffed-stat-tracker/ocr
           cp target/release/scuffed-stat-tracker out/bin/
           # Seed the closure from the binary: pulls tesseract, leptonica, image
           # codecs, and their transitive deps with consistent versions. Shared
-          # script also bundles/stamps for the GUI job (libxdo).
+          # script also bundles/stamps for the GUI job (libxdo). OpenSSL is
+          # denied — never land libcrypto/libssl on a RUNPATH.
           bash crates/stat-tracker/dist/bundle-native-libs.sh \
-            out/bin/scuffed-stat-tracker out/lib
-          patchelf --set-rpath '$ORIGIN/../lib' out/bin/scuffed-stat-tracker
+            out/bin/scuffed-stat-tracker out/lib/scuffed-stat-tracker/ocr
+          if find out/lib -name 'libcrypto.so*' -o -name 'libssl.so*' | grep -q .; then
+            echo "refusing to ship OpenSSL in the daemon bundle" >&2
+            find out/lib -name 'libcrypto.so*' -o -name 'libssl.so*'
+            exit 1
+          fi
+          patchelf --set-rpath '$ORIGIN/../lib/scuffed-stat-tracker/ocr' \
+            out/bin/scuffed-stat-tracker
 
       - name: Train koverwatch OCR model (production code path)
         run: |
@@ -115,6 +125,14 @@ jobs:
             || { echo "version mismatch: got '${out}', want scuffed-stat-tracker ${SST_RELEASE_VERSION}" >&2; exit 1; }
           echo "daemon runs with bundled OCR libs only"
           ldd ./out/bin/scuffed-stat-tracker | grep -iE 'tesseract|lept' || true
+          crypto_line="$(ldd ./out/bin/scuffed-stat-tracker | awk '/libcrypto\.so/ {print $3; exit}')"
+          echo "libcrypto resolves to: ${crypto_line:-<none>}"
+          case "${crypto_line:-}" in
+            */out/lib/*|*/scuffed-stat-tracker/*)
+              echo "libcrypto must not resolve from the bundle (got: ${crypto_line})" >&2
+              exit 1
+              ;;
+          esac
 
       - uses: actions/upload-artifact@v4
         with:
@@ -164,19 +182,26 @@ jobs:
       - name: Bundle libxdo + set RPATH
         run: |
           set -euo pipefail
-          mkdir -p out/bin out/lib
+          mkdir -p out/bin out/lib/scuffed-stat-tracker/gui
           cp target/release/stat-tracker-gui out/bin/
           # Iced + tray-icon still need GTK / Vulkan / X11 from the host. We
           # bundle ONLY the soname-fragmented lib the GUI can't get on Arch:
           # libxdo (Ubuntu ships libxdo.so.3, Arch libxdo.so.4). Its transitive
           # deps are the ABI-stable X11/xcb libs — denied so they stay
-          # host-provided.
+          # host-provided. OCR closure is NOT on this RUNPATH.
           xdo="$(ldd out/bin/stat-tracker-gui | awk '/libxdo/ {print $3}')"
           [ -n "${xdo}" ] || { echo "libxdo not found in GUI deps" >&2; exit 1; }
-          cp -n "${xdo}" out/lib/
+          cp -n "${xdo}" out/lib/scuffed-stat-tracker/gui/
           bash crates/stat-tracker/dist/bundle-native-libs.sh \
-            "out/lib/$(basename "${xdo}")" out/lib '^libX|^libxcb'
-          patchelf --set-rpath '$ORIGIN/../lib' out/bin/stat-tracker-gui
+            "out/lib/scuffed-stat-tracker/gui/$(basename "${xdo}")" \
+            out/lib/scuffed-stat-tracker/gui '^libX|^libxcb'
+          if find out/lib -name 'libcrypto.so*' -o -name 'libssl.so*' | grep -q .; then
+            echo "refusing to ship OpenSSL in the GUI bundle" >&2
+            find out/lib -name 'libcrypto.so*' -o -name 'libssl.so*'
+            exit 1
+          fi
+          patchelf --set-rpath '$ORIGIN/../lib/scuffed-stat-tracker/gui' \
+            out/bin/stat-tracker-gui
 
       - name: Clean-room ldd check (bundled libxdo, no system libxdo)
         run: |
@@ -195,10 +220,18 @@ jobs:
           # The loader reports the RUNPATH path unnormalized (out/bin/../lib/…),
           # so realpath both sides before comparing.
           xdo_real="$(realpath "${xdo_line:-/nonexistent}" 2>/dev/null || true)"
-          bundle_dir="$(realpath ./out/lib)"
+          bundle_dir="$(realpath ./out/lib/scuffed-stat-tracker/gui)"
           case "${xdo_real}" in
             "${bundle_dir}"/*) echo "libxdo resolves to the bundled copy — OK" ;;
             *) echo "libxdo did NOT resolve to the bundled copy (got: ${xdo_real:-missing}, want prefix: ${bundle_dir}/)" >&2; exit 1 ;;
+          esac
+          crypto_line="$(ldd ./out/bin/stat-tracker-gui | awk '/libcrypto\.so/ {print $3; exit}')"
+          echo "libcrypto resolves to: ${crypto_line:-<none>}"
+          case "${crypto_line:-}" in
+            */out/lib/*|*/scuffed-stat-tracker/*)
+              echo "libcrypto must not resolve from the bundle (got: ${crypto_line})" >&2
+              exit 1
+              ;;
           esac
           # --help exits without opening a window (Iced CLI). Not a display
           # smoke test — just proves the binary starts and parses flags.
@@ -232,16 +265,30 @@ jobs:
           name: gui
           path: gui
 
+      - name: Packaging unit checks (OpenSSL deny + isolated lib dirs)
+        run: bash crates/stat-tracker/dist/test-packaging.sh
+
       - name: Assemble tarball
         run: |
           set -euo pipefail
           VERSION="${GITHUB_REF_NAME#stat-tracker-v}"
           [ "${GITHUB_REF_NAME}" = "${VERSION}" ] && VERSION="dev-${GITHUB_SHA::8}"
-          mkdir -p "${STAGE}/bin" "${STAGE}/lib"
+          mkdir -p "${STAGE}/bin" "${STAGE}/lib/scuffed-stat-tracker"
           cp daemon/bin/scuffed-stat-tracker "${STAGE}/bin/"
-          cp daemon/lib/* "${STAGE}/lib/" 2>/dev/null || true
           cp gui/bin/stat-tracker-gui "${STAGE}/bin/"
-          cp gui/lib/* "${STAGE}/lib/" 2>/dev/null || true
+          if [ -d daemon/lib/scuffed-stat-tracker/ocr ]; then
+            cp -a daemon/lib/scuffed-stat-tracker/ocr \
+              "${STAGE}/lib/scuffed-stat-tracker/"
+          fi
+          if [ -d gui/lib/scuffed-stat-tracker/gui ]; then
+            cp -a gui/lib/scuffed-stat-tracker/gui \
+              "${STAGE}/lib/scuffed-stat-tracker/"
+          fi
+          if find "${STAGE}/lib" \( -name 'libcrypto.so*' -o -name 'libssl.so*' \) | grep -q .; then
+            echo "refusing to ship OpenSSL in the release tarball" >&2
+            find "${STAGE}/lib" \( -name 'libcrypto.so*' -o -name 'libssl.so*' \)
+            exit 1
+          fi
           cp -r crates/stat-tracker/assets "${STAGE}/assets"
           cp crates/stat-tracker/dist/install.sh "${STAGE}/install.sh"
           cp crates/stat-tracker/dist/uninstall.sh "${STAGE}/uninstall.sh"
