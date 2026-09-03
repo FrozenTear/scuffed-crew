@@ -22,6 +22,14 @@ pub(crate) const FIELD_SHORT: f32 = 280.0;
 /// URL, token, process list. Capped so they do not become a full-pane bar.
 pub(crate) const FIELD_TEXT: f32 = 480.0;
 
+const _: () = {
+    assert!(FIELD_NUMERIC <= 200.0);
+    assert!(FIELD_SHORT < 400.0);
+    assert!(FIELD_TEXT <= 560.0);
+    assert!(FIELD_NUMERIC < FIELD_SHORT);
+    assert!(FIELD_SHORT < FIELD_TEXT);
+};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingsField {
     PlayerName,
@@ -891,11 +899,9 @@ mod tests {
                 "{field:?} must stay a compact numeric"
             );
         }
-        assert!(FIELD_NUMERIC <= 200.0);
-        assert!(FIELD_SHORT < 400.0);
-        assert!(FIELD_TEXT <= 560.0);
-        assert!(FIELD_NUMERIC < FIELD_SHORT);
-        assert!(FIELD_SHORT < FIELD_TEXT);
+        assert_eq!(field_max_width(SettingsField::SessionWindow), FIELD_NUMERIC);
+        assert_eq!(field_max_width(SettingsField::PollInterval), FIELD_NUMERIC);
+        assert_eq!(field_max_width(SettingsField::Cooldown), FIELD_NUMERIC);
     }
 
     #[test]
