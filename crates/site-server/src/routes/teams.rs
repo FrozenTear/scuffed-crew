@@ -3,17 +3,17 @@ use axum::{
     extract::{Path, State},
     http::StatusCode,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use scuffed_auth::server::session::ErrorResponse;
-use scuffed_db::Team;
+use scuffed_db::{AuditAction, AuditTargetType, GroupType, Team, TeamChannel};
 
-use scuffed_db::{AuditAction, AuditTargetType};
 use scuffed_types::api::{CursorResponse, PaginationParams};
 
-use crate::extractors::{AdminUser, OfficerUser};
+use crate::extractors::{AdminUser, OfficerUser, OrgMember};
 use crate::routes::audit_log::audit;
 use crate::state::AppState;
+use crate::team_channels;
 
 /// GET /api/teams — list all teams (cursor-paginated, public)
 pub async fn list_teams(
@@ -107,6 +107,10 @@ pub async fn create_team(
     )
     .await;
 
+    // F-API-003: write team_channel rows so send_encrypted can find a channel.
+    // Best-effort — team create already committed.
+    team_channels::provision_for_team(&state, &team.id).await;
+
     Ok((StatusCode::CREATED, Json(team)))
 }
 
@@ -156,5 +160,80 @@ pub async fn update_team(
     )
     .await;
 
+    // Idempotent: also backfills teams created before F-API-003.
+    team_channels::provision_for_team(&state, &team.id).await;
+
     Ok(Json(team))
+}
+
+/// GET /api/teams/:id/channels — list provisioned chat channels for a team.
+///
+/// Site chat mount: use `group_id` of the `officer` row as `POST
+/// /api/chat/send-encrypted` `group_id`. Members see public channels only;
+/// officer+ also see the officer channel.
+pub async fn list_team_channels(
+    State(state): State<AppState>,
+    caller: OrgMember,
+    Path(id): Path<String>,
+) -> Result<Json<Vec<TeamChannel>>, (StatusCode, Json<ErrorResponse>)> {
+    let team = state
+        .db
+        .get_team(&id)
+        .await
+        .map_err(|_e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: "Internal error".into(),
+                }),
+            )
+        })?
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse {
+                    error: "Team not found".into(),
+                }),
+            )
+        })?;
+
+    let mut channels = state.db.get_team_channels(&team.id).await.map_err(|_e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: "Internal error".into(),
+            }),
+        )
+    })?;
+
+    if !caller.member.org_role.can_access_officer_channel() {
+        channels.retain(|c| c.group_type != GroupType::Officer);
+    }
+
+    Ok(Json(channels))
+}
+
+#[derive(Serialize)]
+pub struct ProvisionChannelsResponse {
+    pub teams_provisioned: usize,
+}
+
+/// POST /api/admin/teams/provision-channels — backfill channels for all teams.
+pub async fn provision_all_channels(
+    State(state): State<AppState>,
+    admin: AdminUser,
+) -> Result<Json<ProvisionChannelsResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let n = team_channels::backfill_all_teams(&state.db, state.relay_url.as_deref()).await;
+    audit(
+        &state.db,
+        &admin.member.id,
+        AuditAction::UpdatedTeam,
+        AuditTargetType::Team,
+        "all",
+        Some(&format!("Backfilled chat channels for {n} team(s)")),
+    )
+    .await;
+    Ok(Json(ProvisionChannelsResponse {
+        teams_provisioned: n,
+    }))
 }

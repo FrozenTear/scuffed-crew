@@ -74,7 +74,10 @@ services:
       GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
       GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
       REDIRECT_BASE_URL: ${REDIRECT_BASE_URL:-http://127.0.0.1:3000}
-      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-}
+      # Blank/unset falls back to REDIRECT_BASE_URL (F-API-004). Do not default
+      # to empty — that used to become ALLOWED_ORIGINS="" inside the container
+      # and 403 browser strategy WS / CORS.
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-${REDIRECT_BASE_URL:-http://127.0.0.1:3000}}
       ENCRYPTION_KEY: ${ENCRYPTION_KEY:-}
       ENCRYPTION_KEY_VERSION: ${ENCRYPTION_KEY_VERSION:-1}
       NOSTR_RELAY_URL: ${NOSTR_RELAY_URL:-}

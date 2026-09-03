@@ -208,6 +208,9 @@ async fn main() {
         nip05_republish_enabled: scuffed_site_server::state::nip05_republish_enabled_from_env(),
     };
 
+    // F-API-003: existing teams have no team_channel rows until backfill.
+    scuffed_site_server::team_channels::backfill_on_startup(&state).await;
+
     // Create the collaboration room manager
     let rooms = Arc::new(collab::RoomManager::new());
     let ws_state = routes::ws::WsState {

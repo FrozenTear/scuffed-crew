@@ -949,6 +949,146 @@ async fn update_team_requires_officer() {
     assert_eq!(json["name"], "Renamed Squad");
 }
 
+#[tokio::test]
+async fn create_team_provisions_public_and_officer_channels() {
+    let state = test_state().await;
+    seed_all_roles(&state.db).await;
+    seed_game(&state.db, "ow2", "Overwatch 2").await;
+
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(authed_json_request(
+            Method::POST,
+            "/api/teams",
+            ADMIN_TOKEN,
+            json!({ "name": "Chat Squad", "game_id": "ow2" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let team = body_json(resp).await;
+    let team_id = team["id"].as_str().expect("team id").to_string();
+
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(authed_request(
+            Method::GET,
+            &format!("/api/teams/{team_id}/channels"),
+            OFFICER_TOKEN,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let channels = body_json(resp).await;
+    let list = channels.as_array().expect("channel list");
+    assert_eq!(list.len(), 2, "public + officer");
+    let types: Vec<&str> = list
+        .iter()
+        .filter_map(|c| c["group_type"].as_str())
+        .collect();
+    assert!(types.contains(&"public"));
+    assert!(types.contains(&"officer"));
+    let officer = list
+        .iter()
+        .find(|c| c["group_type"] == "officer")
+        .expect("officer channel");
+    assert_eq!(officer["group_id"], format!("{team_id}-officers"));
+
+    // Member must not see the officer group id.
+    let app = create_router(state);
+    let resp = app
+        .oneshot(authed_request(
+            Method::GET,
+            &format!("/api/teams/{team_id}/channels"),
+            MEMBER_TOKEN,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let channels = body_json(resp).await;
+    let list = channels.as_array().expect("channel list");
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0]["group_type"], "public");
+}
+
+#[tokio::test]
+async fn update_team_backfills_channels_for_existing_team() {
+    let state = test_state().await;
+    seed_all_roles(&state.db).await;
+    seed_game(&state.db, "ow2", "Overwatch 2").await;
+    seed_team(&state.db, "teamalpha", "Alpha Squad", "ow2").await;
+
+    let before = state.db.get_team_channels("teamalpha").await.unwrap();
+    assert!(before.is_empty(), "seeded team has no channels yet");
+
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(authed_json_request(
+            Method::PUT,
+            "/api/teams/teamalpha",
+            OFFICER_TOKEN,
+            json!({ "name": "Alpha Squad" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let found = state
+        .db
+        .get_channel_by_group_id("teamalpha-officers")
+        .await
+        .unwrap();
+    assert!(
+        found.is_some(),
+        "send_encrypted must find officer channel after update backfill"
+    );
+}
+
+#[tokio::test]
+async fn admin_provision_channels_backfills_seeded_teams() {
+    let state = test_state().await;
+    seed_all_roles(&state.db).await;
+    seed_game(&state.db, "ow2", "Overwatch 2").await;
+    seed_team(&state.db, "teamalpha", "Alpha Squad", "ow2").await;
+
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(authed_json_request(
+            Method::POST,
+            "/api/admin/teams/provision-channels",
+            MEMBER_TOKEN,
+            json!({}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(authed_json_request(
+            Method::POST,
+            "/api/admin/teams/provision-channels",
+            ADMIN_TOKEN,
+            json!({}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    assert_eq!(json["teams_provisioned"], 1);
+
+    let channels = state.db.get_team_channels("teamalpha").await.unwrap();
+    assert_eq!(channels.len(), 2);
+    assert!(
+        state
+            .db
+            .get_channel_by_group_id("teamalpha-officers")
+            .await
+            .unwrap()
+            .is_some()
+    );
+}
+
 // ─── Tournaments ────────────────────────────────────────────────────────────
 
 #[tokio::test]

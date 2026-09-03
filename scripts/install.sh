@@ -127,6 +127,9 @@ if [[ -f "$SECRETS" ]]; then
         # MAC key for Nostr login challenge tokens; server refuses to boot without it.
         ensure_secret_key NOSTR_CHALLENGE_SECRET "$(openssl rand -base64 32 | tr -d '\n')"
     fi
+    # Older secrets.env from before ALLOWED_ORIGINS was written. Blank values
+    # are left as-is — the server now treats blank as unset (F-API-004).
+    ensure_secret_key ALLOWED_ORIGINS "${REDIRECT_BASE_URL:-http://127.0.0.1:${HOST_PORT:-3000}}"
 fi
 
 if podman compose version >/dev/null 2>&1; then

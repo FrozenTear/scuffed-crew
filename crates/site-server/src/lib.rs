@@ -9,6 +9,7 @@ pub mod rate_limit;
 pub mod routes;
 pub mod seed;
 pub mod state;
+pub mod team_channels;
 #[cfg(test)]
 pub(crate) mod test_support;
 pub mod uploads;
@@ -253,6 +254,14 @@ pub fn create_router(state: AppState) -> Router {
         .route(
             "/api/teams/{id}",
             get(routes::teams::get_team).put(routes::teams::update_team),
+        )
+        .route(
+            "/api/teams/{id}/channels",
+            get(routes::teams::list_team_channels),
+        )
+        .route(
+            "/api/admin/teams/provision-channels",
+            post(routes::teams::provision_all_channels),
         )
         // Roster routes
         .route(

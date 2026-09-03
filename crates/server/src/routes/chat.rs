@@ -200,6 +200,10 @@ fn require_crypto(
 /// 5. Publish all gift wraps to the relay
 ///
 /// The caller's server-managed key is used for signing.
+///
+/// Site chat mount: `group_id` comes from `GET /api/teams/:id/channels`
+/// (`group_type: officer`). Channels are provisioned on team create/update
+/// and via `POST /api/admin/teams/provision-channels` (F-API-003).
 pub async fn send_encrypted(
     State(state): State<AppState>,
     caller: OfficerUser,
@@ -477,4 +481,169 @@ async fn load_member_with_secret(
                 }),
             )
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::Router;
+    use axum::body::Body;
+    use axum::http::{Method, Request, StatusCode, header};
+    use axum::routing::post;
+    use http_body_util::BodyExt;
+    use scuffed_auth::SessionConfig;
+    use scuffed_auth::crypto::hash_session_token;
+    use scuffed_chat::officer_group_id;
+    use scuffed_db::Database;
+    use scuffed_db::migrations::run_migrations;
+    use scuffed_site_server::state::{AppState, OAuthConfig};
+    use serde_json::json;
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    use tower::ServiceExt;
+
+    const OFFICER_TOKEN: &str = "test-officer-token";
+
+    async fn test_state() -> AppState {
+        let db = Database::connect_memory().await.expect("mem db");
+        run_migrations(&db.client).await.expect("migrations");
+        AppState {
+            db: Arc::new(db),
+            session_config: SessionConfig::default(),
+            oauth_config: OAuthConfig {
+                discord_client_id: String::new(),
+                discord_client_secret: String::new(),
+                google_client_id: String::new(),
+                google_client_secret: String::new(),
+                redirect_base_url: "http://localhost:3000".into(),
+                allowed_origins: vec!["http://localhost:3000".into()],
+            },
+            upload_dir: PathBuf::from("/tmp/scuffed-test-uploads"),
+            notifier: None,
+            nostr_challenge_key: [0u8; 32],
+            consumed_challenges: scuffed_site_server::challenge_store::ConsumedChallengeStore::new(
+            ),
+            nostr_rate_limiter: scuffed_site_server::nostr_rate_limit::NostrRateLimiter::new(),
+            crypto: None,
+            relay_url: None,
+            dm_events: None,
+            nip05_domain: None,
+            nip05_republish_enabled: false,
+        }
+    }
+
+    async fn seed_officer(db: &Database) {
+        let token_hash = hash_session_token(OFFICER_TOKEN);
+        db.client
+            .query(
+                r#"CREATE user:officeruser SET
+                    provider = 'discord',
+                    username = 'TestOfficer',
+                    avatar_url = NONE,
+                    provider_id = 'officer-pid',
+                    provider_id_hash = 'officer-pidh',
+                    provider_id_encrypted = NONE,
+                    created_at = time::now()"#,
+            )
+            .await
+            .expect("seed user");
+        db.client
+            .query(
+                r#"CREATE member:officermember SET
+                    user_id = 'officeruser',
+                    org_role = 'officer',
+                    display_name = 'TestOfficer',
+                    bio = NONE,
+                    avatar_url = NONE,
+                    timezone = NONE,
+                    pronouns = NONE,
+                    availability_status = NONE,
+                    joined_at = time::now(),
+                    is_active = true"#,
+            )
+            .await
+            .expect("seed member");
+        db.client
+            .query(
+                r#"CREATE session:sess_officer SET
+                    user_id = 'officeruser',
+                    token = $tok,
+                    expires_at = time::now() + 365d,
+                    created_at = time::now()"#,
+            )
+            .bind(("tok", token_hash))
+            .await
+            .expect("seed session");
+    }
+
+    fn send_req(group_id: &str) -> Request<Body> {
+        Request::builder()
+            .method(Method::POST)
+            .uri("/api/chat/send-encrypted")
+            .header(header::AUTHORIZATION, format!("Bearer {OFFICER_TOKEN}"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                serde_json::to_vec(&json!({
+                    "group_id": group_id,
+                    "content": "hello officers"
+                }))
+                .unwrap(),
+            ))
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn send_encrypted_finds_provisioned_officer_channel() {
+        let state = test_state().await;
+        seed_officer(&state.db).await;
+        let team = state
+            .db
+            .create_team("Alpha", "ow2", None, None, None)
+            .await
+            .unwrap();
+        let group_id = officer_group_id(&team.id);
+
+        let app = Router::new()
+            .route("/api/chat/send-encrypted", post(send_encrypted))
+            .with_state(state.clone());
+        let resp = app.oneshot(send_req(&group_id)).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::NOT_FOUND,
+            "unprovisioned team must 404"
+        );
+
+        scuffed_chat::ensure_team_channel_rows(&state.db, &team.id, "")
+            .await
+            .unwrap();
+
+        let app = Router::new()
+            .route("/api/chat/send-encrypted", post(send_encrypted))
+            .with_state(state);
+        let resp = app.oneshot(send_req(&group_id)).await.unwrap();
+        let status = resp.status();
+        let body = String::from_utf8(
+            resp.into_body()
+                .collect()
+                .await
+                .unwrap()
+                .to_bytes()
+                .to_vec(),
+        )
+        .unwrap();
+        assert_ne!(
+            status,
+            StatusCode::NOT_FOUND,
+            "provisioned officer channel must be found: {body}"
+        );
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "officer has no Nostr keys yet: {body}"
+        );
+        assert!(
+            body.contains("Nostr keys"),
+            "expected key-missing contract, got {body}"
+        );
+    }
 }
