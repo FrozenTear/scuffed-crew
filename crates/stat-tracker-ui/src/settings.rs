@@ -9,11 +9,18 @@ use stat_tracker::config::{AutoDetectConfig, Config, SyncConfig};
 
 use crate::app::{Message, TrackerApp};
 use crate::theme::{
-    self, FONT_BOLD, FONT_MEDIUM, FONT_SEMIBOLD, PAD_INNER, SIZE_BODY, SIZE_META, SIZE_TITLE, TEXT,
-    TEXT_2, TEXT_3,
+    self, FONT_BOLD, FONT_MEDIUM, FONT_SEMIBOLD, GRID_GAP, PAGE_PAD_X, PAGE_PAD_Y, SIZE_BODY,
+    SIZE_META, SIZE_TITLE, TEXT, TEXT_2, TEXT_3,
 };
 use crate::update;
 use crate::widgets;
+
+/// Seconds / counts — must stay compact on ultrawide.
+pub(crate) const FIELD_NUMERIC: f32 = 168.0;
+/// Shortcut, in-game name.
+pub(crate) const FIELD_SHORT: f32 = 280.0;
+/// URL, token, process list. Capped so they do not become a full-pane bar.
+pub(crate) const FIELD_TEXT: f32 = 480.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingsField {
@@ -163,9 +170,22 @@ pub fn save_config(config: &Config) -> Result<(), String> {
     config.save().map_err(|e| e.to_string())
 }
 
+/// Layout-only width cap. Save / bind behaviour is unchanged.
+pub(crate) fn field_max_width(field: SettingsField) -> f32 {
+    match field {
+        SettingsField::SessionWindow | SettingsField::PollInterval | SettingsField::Cooldown => {
+            FIELD_NUMERIC
+        }
+        SettingsField::PlayerName | SettingsField::OverlayHotkey => FIELD_SHORT,
+        SettingsField::ProcessNames | SettingsField::SyncUrl | SettingsField::SyncToken => {
+            FIELD_TEXT
+        }
+    }
+}
+
 pub fn view(app: &TrackerApp) -> Element<'_, Message> {
     let demo = app.fixture.is_some();
-    let mut col = column![].spacing(16).width(Fill);
+    let mut col = column![].spacing(GRID_GAP).width(Fill);
 
     if let Some(info) = &app.update {
         col = col.push(update::banner(info));
@@ -305,10 +325,7 @@ fn capture_card(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
     };
 
     let mut body = column![
-        text("Monitor")
-            .size(SIZE_META)
-            .font(FONT_SEMIBOLD)
-            .color(TEXT_2),
+        field_caption("Monitor"),
         chips.wrap(),
         text(format!("Capture method: {backend}"))
             .size(SIZE_META)
@@ -372,29 +389,20 @@ fn companion_card(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
             .size(16)
             .text_size(SIZE_BODY)
             .style(checkbox_style),
-        text("Works while a game is fullscreen. The overlay stays click-through, so the game keeps the keyboard.")
-            .size(SIZE_META)
-            .font(FONT_MEDIUM)
-            .color(TEXT_3),
+        hint("Works in fullscreen. Overlay stays click-through so the game keeps the keyboard."),
     ]
     .spacing(8);
 
     if app.settings.overlay_hotkey_enabled {
-        body = body
-            .push(field_input(
-                "Shortcut",
-                crate::hotkey::DEFAULT_BIND,
-                &app.settings.overlay_hotkey,
-                SettingsField::OverlayHotkey,
-                false,
-                demo,
-            ))
-            .push(
-                text("Example: Super+Shift+C. Super is the Windows key. Join keys with +. Needs the same keyboard access as Tab capture.")
-                    .size(SIZE_META)
-                    .font(FONT_MEDIUM)
-                    .color(TEXT_3),
-            );
+        body = body.push(field_input(
+            "Shortcut",
+            crate::hotkey::DEFAULT_BIND,
+            &app.settings.overlay_hotkey,
+            SettingsField::OverlayHotkey,
+            false,
+            demo,
+            Some("Super is the Windows key. Join with +. Same keyboard access as Tab capture."),
+        ));
     }
 
     settings_card("Companion", body.into())
@@ -409,23 +417,20 @@ fn player_card(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
             SettingsField::PlayerName,
             false,
             demo,
+            Some("Scoreboard name as it appears in-game — no #1234."),
         ),
-        text("Scoreboard name (`player_name` in the settings file). Type the name as it appears in-game — do not add a #1234 discriminator.")
-            .size(SIZE_META)
-            .font(FONT_MEDIUM)
-            .color(TEXT_3),
-        field_input(
-            "Session window (seconds)",
-            "1800",
-            &app.settings.session_window_secs,
-            SettingsField::SessionWindow,
-            false,
-            demo,
+        compact_row(
+            Some(field_input(
+                "Session window (seconds)",
+                "1800",
+                &app.settings.session_window_secs,
+                SettingsField::SessionWindow,
+                false,
+                demo,
+                Some("Nearby games count as one session."),
+            )),
+            None
         ),
-        text("Games played within this many seconds are grouped as one session.")
-            .size(SIZE_META)
-            .font(FONT_MEDIUM)
-            .color(TEXT_3),
         field_input(
             "Game process names",
             "Overwatch.exe",
@@ -433,13 +438,10 @@ fn player_card(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
             SettingsField::ProcessNames,
             false,
             demo,
+            Some("Comma-separated. Empty = always allow capture."),
         ),
-        text("Only capture while these processes are running. Comma-separated. Leave empty to always allow capture.")
-            .size(SIZE_META)
-            .font(FONT_MEDIUM)
-            .color(TEXT_3),
     ]
-    .spacing(8);
+    .spacing(10);
     settings_card("Player and sessions", body.into())
 }
 
@@ -455,23 +457,26 @@ fn auto_detect_card(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
     .spacing(8);
 
     if app.settings.auto_detect_enabled {
-        body = body
-            .push(field_input(
+        body = body.push(compact_row(
+            Some(field_input(
                 "Check every (seconds)",
                 "4",
                 &app.settings.poll_interval_secs,
                 SettingsField::PollInterval,
                 false,
                 demo,
-            ))
-            .push(field_input(
-                "Wait after a detection (seconds)",
+                None,
+            )),
+            Some(field_input(
+                "Wait after detection (seconds)",
                 "120",
                 &app.settings.cooldown_secs,
                 SettingsField::Cooldown,
                 false,
                 demo,
-            ));
+                None,
+            )),
+        ));
     }
 
     settings_card("Auto-detect", body.into())
@@ -486,6 +491,7 @@ fn sync_card(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
             SettingsField::SyncUrl,
             false,
             demo,
+            None,
         ),
         field_input(
             "Account token",
@@ -494,13 +500,10 @@ fn sync_card(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
             SettingsField::SyncToken,
             true,
             demo,
+            Some("Both needed to upload matches. Leave either blank to turn sync off."),
         ),
-        text("Both fields are needed to upload matches. Leave either blank to turn sync off.")
-            .size(SIZE_META)
-            .font(FONT_MEDIUM)
-            .color(TEXT_3),
     ]
-    .spacing(8);
+    .spacing(10);
     settings_card("Website sync", body.into())
 }
 
@@ -653,10 +656,43 @@ fn settings_card<'a>(title: &'static str, body: Element<'a, Message>) -> Element
         ]
         .spacing(12),
     )
-    .padding(PAD_INNER)
+    .padding(Padding::from([PAGE_PAD_Y, PAGE_PAD_X]))
     .width(Fill)
     .style(theme::surface_panel)
     .into()
+}
+
+fn field_caption(label: &'static str) -> text::Text<'static> {
+    text(label)
+        .size(SIZE_META)
+        .font(FONT_SEMIBOLD)
+        .color(TEXT_2)
+}
+
+fn hint(copy: impl Into<String>) -> text::Text<'static> {
+    text(copy.into())
+        .size(SIZE_META)
+        .font(FONT_MEDIUM)
+        .color(TEXT_3)
+}
+
+/// One or two compact fields, left-aligned. Trailing Fill keeps them from
+/// stretching across an ultrawide card.
+fn compact_row<'a>(
+    left: Option<Element<'a, Message>>,
+    right: Option<Element<'a, Message>>,
+) -> Element<'a, Message> {
+    let mut r = row![]
+        .spacing(GRID_GAP)
+        .align_y(Alignment::Start)
+        .width(Fill);
+    if let Some(left) = left {
+        r = r.push(left);
+    }
+    if let Some(right) = right {
+        r = r.push(right);
+    }
+    r.push(space().width(Fill)).into()
 }
 
 fn field_input<'a>(
@@ -666,6 +702,7 @@ fn field_input<'a>(
     field: SettingsField,
     secret: bool,
     demo: bool,
+    hint_copy: Option<&'static str>,
 ) -> Element<'a, Message> {
     let mut input = text_input(placeholder, value)
         .padding(Padding::from([8, 10]))
@@ -676,10 +713,11 @@ fn field_input<'a>(
     if !demo {
         input = input.on_input(move |v| Message::SettingsText(field, v));
     }
-    column![widgets::label_text(label), input,]
-        .spacing(4)
-        .width(Fill)
-        .into()
+    let mut col = column![field_caption(label), input].spacing(4);
+    if let Some(copy) = hint_copy {
+        col = col.push(hint(copy));
+    }
+    col.width(Fill).max_width(field_max_width(field)).into()
 }
 
 fn output_chip(
@@ -839,5 +877,47 @@ mod tests {
         assert_eq!(out.ocr_threads, Some(2));
         assert_eq!(form.overlay_hotkey, crate::hotkey::DEFAULT_BIND);
         assert!(form.overlay_hotkey_enabled);
+    }
+
+    #[test]
+    fn short_numeric_fields_do_not_span_ultrawide() {
+        for field in [
+            SettingsField::SessionWindow,
+            SettingsField::PollInterval,
+            SettingsField::Cooldown,
+        ] {
+            assert!(
+                field_max_width(field) <= FIELD_NUMERIC,
+                "{field:?} must stay a compact numeric"
+            );
+        }
+        assert!(FIELD_NUMERIC <= 200.0);
+        assert!(FIELD_SHORT < 400.0);
+        assert!(FIELD_TEXT <= 560.0);
+        assert!(FIELD_NUMERIC < FIELD_SHORT);
+        assert!(FIELD_SHORT < FIELD_TEXT);
+    }
+
+    #[test]
+    fn settings_cards_use_page_pad_and_card_radius() {
+        assert_eq!(PAGE_PAD_Y, 24.0);
+        assert_eq!(PAGE_PAD_X, 32.0);
+        assert_eq!(theme::RADIUS_CARD, 16.0);
+        assert_eq!(theme::ACCENT, {
+            iced::Color::from_rgb(
+                0x8f as f32 / 255.0,
+                0x73 as f32 / 255.0,
+                0xff as f32 / 255.0,
+            )
+        });
+    }
+
+    #[test]
+    fn text_fields_are_capped_but_wider_than_numerics() {
+        assert_eq!(field_max_width(SettingsField::SyncUrl), FIELD_TEXT);
+        assert_eq!(field_max_width(SettingsField::SyncToken), FIELD_TEXT);
+        assert_eq!(field_max_width(SettingsField::ProcessNames), FIELD_TEXT);
+        assert_eq!(field_max_width(SettingsField::PlayerName), FIELD_SHORT);
+        assert_eq!(field_max_width(SettingsField::OverlayHotkey), FIELD_SHORT);
     }
 }
