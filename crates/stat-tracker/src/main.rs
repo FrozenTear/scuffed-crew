@@ -2679,10 +2679,11 @@ mod tests {
         assert!(should_start_fresh_session(Some(&stale), now));
     }
 
-    /// The reported pair: Tank / Neon Junction / Wrecking Ball at 21:49 with
-    /// outcome `—`, then the same identity at 21:55 WIN. Six minutes exceeds
-    /// the 120s map-vote cooldown and `STAT_SPLIT_MIN_GAP`, so both openers
-    /// would have created a second card. Same unfinished map+hero must reuse.
+    /// Career profile (Competitive Open Queue): **one** Neon Junction,
+    /// ~10:02, 3–0 Victory. Oasis defeat and Ilios victory are different maps.
+    /// The Games pair (21:49 empty `—`, 21:55 WIN, same Tank / Neon Junction /
+    /// Wrecking Ball) is a double capture of that one match — not two queues.
+    /// Do not invent a second Neon Junction session.
     #[test]
     fn unfinished_neon_junction_ball_2149_empty_2155_win_reuses() {
         let first_tab = test_now();
@@ -2700,7 +2701,7 @@ mod tests {
         };
         assert!(
             should_reuse_unfinished_same_match(Some(&g), incoming, second),
-            "21:55 same map+hero must merge into the 21:49 unfinished row"
+            "double capture: merge 21:55 WIN into the 21:49 empty row; no second match"
         );
 
         // Map-vote after cooldown (default 120s): lingering vote includes the
@@ -2733,7 +2734,8 @@ mod tests {
             "stat-looking regression 6 min later must not split this match"
         );
 
-        // A real next game on a different map still opens once cooldown elapses.
+        // Ilios on the career profile is a later, different match — a vote
+        // that does not include Neon Junction may still open. Same-map must not.
         let other_vote = [String::from("Ilios"), String::from("Busan")];
         assert!(map_vote_should_open_new_game(
             Some(&g),
