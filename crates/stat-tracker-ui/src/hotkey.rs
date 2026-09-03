@@ -16,6 +16,7 @@ use std::time::{Duration, Instant, SystemTime};
 use evdev::{Device, EventSummary, KeyCode};
 use iced::Subscription;
 use iced::futures::SinkExt;
+use iced::futures::stream::BoxStream;
 use tokio::sync::mpsc;
 
 use crate::app::Message;
@@ -446,24 +447,26 @@ pub fn consume_toggle(data_dir: &Path, last: &mut Option<SystemTime>) -> bool {
 }
 
 pub fn subscription(bind: Keybind) -> Subscription<Message> {
-    Subscription::run_with_id(
-        format!("companion-hotkey:{bind}"),
-        iced::stream::channel(4, move |mut output| async move {
-            let (tx, mut rx) = mpsc::unbounded_channel();
-            if let Err(e) = std::thread::Builder::new()
-                .name("companion-hotkey".into())
-                .spawn(move || evdev_loop(bind, tx))
-            {
-                tracing::warn!(error = %e, "companion shortcut thread failed to start");
-                return;
+    Subscription::run_with(bind, listen_stream)
+}
+
+fn listen_stream(bind: &Keybind) -> BoxStream<'static, Message> {
+    let bind = *bind;
+    Box::pin(iced::stream::channel(4, async move |mut output| {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        if let Err(e) = std::thread::Builder::new()
+            .name("companion-hotkey".into())
+            .spawn(move || evdev_loop(bind, tx))
+        {
+            tracing::warn!(error = %e, "companion shortcut thread failed to start");
+            return;
+        }
+        while rx.recv().await.is_some() {
+            if output.send(Message::ToggleOverlay).await.is_err() {
+                break;
             }
-            while rx.recv().await.is_some() {
-                if output.send(Message::ToggleOverlay).await.is_err() {
-                    break;
-                }
-            }
-        }),
-    )
+        }
+    }))
 }
 
 fn is_keyboard(device: &Device) -> bool {
@@ -517,7 +520,7 @@ fn evdev_loop(bind: Keybind, tx: mpsc::UnboundedSender<()>) {
 }
 
 fn scan_keyboards(devices: &mut HashMap<PathBuf, Device>) {
-    for (path, mut device) in evdev::enumerate() {
+    for (path, device) in evdev::enumerate() {
         if devices.contains_key(&path) || !is_keyboard(&device) {
             continue;
         }
