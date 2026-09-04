@@ -260,7 +260,8 @@ pub(crate) fn pack_columns(sections: &[SettingsSection], cols: usize) -> Vec<Vec
     columns
 }
 
-pub(crate) fn column_weight(column: &[SettingsSection]) -> u16 {
+#[cfg(test)]
+fn column_weight(column: &[SettingsSection]) -> u16 {
     column.iter().copied().map(section_weight).sum()
 }
 
