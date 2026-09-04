@@ -2,7 +2,31 @@
 
 User-facing notes for `stat-tracker-v*` GitHub Releases. The release workflow
 prepends the section whose heading matches the tag version (for example
-`## 0.4.4` for `stat-tracker-v0.4.4`).
+`## 0.4.5` for `stat-tracker-v0.4.5`).
+
+## 0.4.5
+
+Compact Settings layout (#70): section cards, capped field widths, and a
+two-column row for short numbers. Companion hotkey setting is unchanged.
+
+Split-game dedupe (#71): reuse an unfinished same-map/hero session within
+~20 min instead of opening a second empty Games card. Tab debounce and the
+1800s session grouping window are unchanged.
+
+Maps visual polish (#72): compact 2–4 column map cards with a WR bar and
+win/loss stripe.
+
+Daemon OCR / capture / sync / store schema are unchanged. Packaging hotfixes
+0.4.1–0.4.3 and the companion overlay hotkey (0.4.4) are unchanged.
+
+### Install
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/FrozenTear/scuffed-crew/main/crates/stat-tracker/dist/bootstrap.sh | bash
+```
+
+Or extract the tarball and run `./install.sh`. Pin with
+`STAT_TRACKER_TAG=stat-tracker-v0.4.5`.
 
 ## 0.4.4
 
