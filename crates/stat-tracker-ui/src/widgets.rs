@@ -397,7 +397,12 @@ pub fn map_card(m: &MapAgg) -> Element<'static, Message> {
         win_bar(m.record.win_rate()),
     ]
     .spacing(6);
-    map_card_shell(map_stripe_outcome(&m.record), body.into())
+    surface_stat_card(
+        map_stripe_outcome(&m.record),
+        false,
+        theme::HEIGHT_MAP,
+        body.into(),
+    )
 }
 
 /// Stripe from decided win rate. Neutral at 50% and when nothing is decided.
@@ -415,11 +420,14 @@ pub fn map_stripe_outcome(record: &Record) -> Outcome {
     }
 }
 
-fn map_card_shell(
+/// Surface card + 4 px WR stripe (no role tint). Maps and Seasons share this
+/// chrome. `selected` is the accent border used on the current season.
+pub fn surface_stat_card(
     outcome: Outcome,
+    selected: bool,
+    height: f32,
     content: Element<'static, Message>,
 ) -> Element<'static, Message> {
-    let height = theme::HEIGHT_MAP;
     container(
         row![
             container(space().width(STRIPE).height(height))
@@ -435,7 +443,13 @@ fn map_card_shell(
         .width(Fill)
         .height(height),
     )
-    .style(theme::surface_panel)
+    .style(move |t| {
+        if selected {
+            theme::selected_surface_panel(t)
+        } else {
+            theme::surface_panel(t)
+        }
+    })
     .width(Fill)
     .height(height)
     .clip(true)

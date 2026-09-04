@@ -3,14 +3,15 @@
 //! Does not invent daemon config keys. `data_dir` and `ocr_threads` are
 //! preserved from the loaded file (the Dioxus page did not edit them either).
 
-use iced::widget::{button, checkbox, column, container, row, space, text, text_input};
+use iced::widget::{Row, button, checkbox, column, container, row, space, text, text_input};
 use iced::{Alignment, Element, Fill, Padding};
 use stat_tracker::config::{AutoDetectConfig, Config, SyncConfig};
 
 use crate::app::{Message, TrackerApp};
+use crate::layout::settings_columns;
 use crate::theme::{
-    self, FONT_BOLD, FONT_MEDIUM, FONT_SEMIBOLD, GRID_GAP, PAGE_PAD_X, PAGE_PAD_Y, SIZE_BODY,
-    SIZE_META, SIZE_TITLE, TEXT, TEXT_2, TEXT_3,
+    self, FONT_BOLD, FONT_MEDIUM, FONT_SEMIBOLD, GRID_GAP, PAD_INNER, SIZE_BODY, SIZE_META,
+    SIZE_TITLE, TEXT, TEXT_2, TEXT_3,
 };
 use crate::update;
 use crate::widgets;
@@ -191,8 +192,9 @@ pub(crate) fn field_max_width(field: SettingsField) -> f32 {
     }
 }
 
-pub fn view(app: &TrackerApp) -> Element<'_, Message> {
+pub fn view(app: &TrackerApp, content_width: f32) -> Element<'_, Message> {
     let demo = app.fixture.is_some();
+    let cols = settings_columns(content_width);
     let mut col = column![].spacing(GRID_GAP).width(Fill);
 
     if let Some(info) = &app.update {
@@ -205,18 +207,43 @@ pub fn view(app: &TrackerApp) -> Element<'_, Message> {
         ));
     }
 
-    col = col
-        .push(daemon_card(app, demo))
-        .push(capture_card(app, demo))
-        .push(companion_card(app, demo))
-        .push(player_card(app, demo))
-        .push(auto_detect_card(app, demo))
-        .push(sync_card(app, demo))
-        .push(ocr_card(app, demo))
-        .push(diagnostics_card(app, demo))
-        .push(data_card(app, demo))
-        .push(save_row(demo));
+    let cards = vec![
+        daemon_card(app, demo),
+        capture_card(app, demo),
+        companion_card(app, demo),
+        player_card(app, demo),
+        auto_detect_card(app, demo),
+        sync_card(app, demo),
+        ocr_card(app, demo),
+        diagnostics_card(app, demo),
+        data_card(app, demo),
+    ];
+    col = col.push(section_grid(cards, cols)).push(save_row(demo));
 
+    col.into()
+}
+
+fn section_grid<'a>(cards: Vec<Element<'a, Message>>, cols: usize) -> Element<'a, Message> {
+    let cols = cols.max(1);
+    let mut col = column![].spacing(GRID_GAP).width(Fill);
+    let mut cards = cards.into_iter().peekable();
+    while cards.peek().is_some() {
+        let mut row = Row::new()
+            .spacing(GRID_GAP)
+            .align_y(Alignment::Start)
+            .width(Fill);
+        let mut n = 0;
+        for _ in 0..cols {
+            if let Some(card) = cards.next() {
+                row = row.push(card);
+                n += 1;
+            }
+        }
+        for _ in n..cols {
+            row = row.push(space().width(Fill));
+        }
+        col = col.push(row);
+    }
     col.into()
 }
 
@@ -418,16 +445,16 @@ fn companion_card(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
 
 fn player_card(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
     let body = column![
-        field_input(
-            "In-game name",
-            "e.g. FROZEN",
-            &app.settings.player_name,
-            SettingsField::PlayerName,
-            false,
-            demo,
-            Some("Scoreboard name as it appears in-game — no #1234."),
-        ),
         compact_row(
+            Some(field_input(
+                "In-game name",
+                "e.g. FROZEN",
+                &app.settings.player_name,
+                SettingsField::PlayerName,
+                false,
+                demo,
+                Some("Scoreboard name as it appears in-game — no #1234."),
+            )),
             Some(field_input(
                 "Session window (seconds)",
                 "1800",
@@ -437,7 +464,6 @@ fn player_card(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
                 demo,
                 Some("Nearby games count as one session."),
             )),
-            None
         ),
         field_input(
             "Game process names",
@@ -662,9 +688,9 @@ fn settings_card<'a>(title: &'static str, body: Element<'a, Message>) -> Element
             text(title).size(SIZE_TITLE).font(FONT_BOLD).color(TEXT),
             body,
         ]
-        .spacing(12),
+        .spacing(GRID_GAP),
     )
-    .padding(Padding::from([PAGE_PAD_Y, PAGE_PAD_X]))
+    .padding(PAD_INNER)
     .width(Fill)
     .style(theme::surface_panel)
     .into()
@@ -905,10 +931,13 @@ mod tests {
     }
 
     #[test]
-    fn settings_cards_use_page_pad_and_card_radius() {
+    fn settings_cards_use_maps_density_tokens() {
+        use crate::theme::{PAGE_PAD_X, PAGE_PAD_Y};
         assert_eq!(PAGE_PAD_Y, 24.0);
         assert_eq!(PAGE_PAD_X, 32.0);
+        assert_eq!(PAD_INNER, 12.0);
         assert_eq!(theme::RADIUS_CARD, 16.0);
+        assert_eq!(theme::GRID_GAP, 12.0);
         assert_eq!(theme::ACCENT, {
             iced::Color::from_rgb(
                 0x8f as f32 / 255.0,
@@ -916,6 +945,15 @@ mod tests {
                 0xff as f32 / 255.0,
             )
         });
+    }
+
+    #[test]
+    fn settings_section_grid_is_one_or_two_columns() {
+        use crate::layout::settings_columns;
+        assert_eq!(settings_columns(200.0), 1);
+        assert_eq!(settings_columns(480.0), 1);
+        assert_eq!(settings_columns(972.0), 2);
+        assert_eq!(settings_columns(10_000.0), 2);
     }
 
     #[test]
