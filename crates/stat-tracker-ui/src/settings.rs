@@ -260,11 +260,6 @@ pub(crate) fn pack_columns(sections: &[SettingsSection], cols: usize) -> Vec<Vec
     columns
 }
 
-#[cfg(test)]
-fn column_weight(column: &[SettingsSection]) -> u16 {
-    column.iter().copied().map(section_weight).sum()
-}
-
 pub fn view(app: &TrackerApp, content_width: f32) -> Element<'_, Message> {
     let demo = app.fixture.is_some();
     let cols = settings_columns(content_width);
@@ -1119,7 +1114,9 @@ mod tests {
                 SettingsSection::Diagnostics,
             ]
         );
-        assert_eq!(column_weight(&packed[0]), column_weight(&packed[1]));
+        let left: u16 = packed[0].iter().copied().map(section_weight).sum();
+        let right: u16 = packed[1].iter().copied().map(section_weight).sum();
+        assert_eq!(left, right);
         assert!(!packed[0].contains(&SettingsSection::Data));
         assert!(!packed[1].contains(&SettingsSection::Data));
     }
