@@ -372,6 +372,76 @@ pub fn map_row(m: &MapAgg) -> Element<'static, Message> {
     .into()
 }
 
+/// Compact Maps-screen card. Surface + 4 px WR stripe (no role tint — a map
+/// is not a single role). Same hierarchy as [`hero_card`]: title, featured WR,
+/// games · W–L, FillPortion win bar.
+pub fn map_card(m: &MapAgg) -> Element<'static, Message> {
+    let wr = format!("{:.0}%", m.record.win_rate_pct());
+    let body = column![
+        text(m.map_name.clone())
+            .size(SIZE_TITLE)
+            .font(FONT_BOLD)
+            .color(TEXT),
+        text(wr)
+            .size(SIZE_FEATURED)
+            .font(FONT_EXTRABOLD)
+            .color(TEXT),
+        text(format!(
+            "{} · {}",
+            m.record.games_label(),
+            m.record.wl_label()
+        ))
+        .size(SIZE_META)
+        .font(FONT_MEDIUM)
+        .color(TEXT_2),
+        win_bar(m.record.win_rate()),
+    ]
+    .spacing(6);
+    map_card_shell(map_stripe_outcome(&m.record), body.into())
+}
+
+/// Stripe from decided win rate. Neutral at 50% and when nothing is decided.
+pub fn map_stripe_outcome(record: &Record) -> Outcome {
+    if record.wins + record.losses + record.draws == 0 {
+        return Outcome::Unknown;
+    }
+    let wr = record.win_rate();
+    if wr > 0.5 {
+        Outcome::Win
+    } else if wr < 0.5 {
+        Outcome::Loss
+    } else {
+        Outcome::Unknown
+    }
+}
+
+fn map_card_shell(
+    outcome: Outcome,
+    content: Element<'static, Message>,
+) -> Element<'static, Message> {
+    let height = theme::HEIGHT_MAP;
+    container(
+        row![
+            container(space().width(STRIPE).height(height))
+                .width(STRIPE)
+                .height(height)
+                .style(theme::stripe(outcome)),
+            container(content)
+                .padding(PAD_INNER)
+                .width(Fill)
+                .height(height),
+        ]
+        .spacing(0)
+        .width(Fill)
+        .height(height),
+    )
+    .style(theme::surface_panel)
+    .width(Fill)
+    .height(height)
+    .clip(true)
+    .into()
+}
+
 pub fn health_panel(
     status: &str,
     overlay_showing: bool,
@@ -829,7 +899,9 @@ fn card_shell(
 
 #[cfg(test)]
 mod tests {
-    use super::win_bar_portions;
+    use super::{map_stripe_outcome, win_bar_portions};
+    use crate::aggregate::Record;
+    use crate::model::Outcome;
 
     #[test]
     fn win_bar_portions_match_rate() {
@@ -838,5 +910,44 @@ mod tests {
         assert_eq!(win_bar_portions(0.5), (50, 50));
         assert_eq!(win_bar_portions(0.7), (70, 30));
         assert_eq!(win_bar_portions(1.0), (100, 0));
+    }
+
+    #[test]
+    fn map_stripe_follows_decided_win_rate() {
+        let unbeaten = Record {
+            games: 4,
+            wins: 3,
+            losses: 1,
+            draws: 0,
+        };
+        assert_eq!(map_stripe_outcome(&unbeaten), Outcome::Win);
+        assert_eq!(win_bar_portions(unbeaten.win_rate()), (75, 25));
+
+        let losing = Record {
+            games: 30,
+            wins: 12,
+            losses: 14,
+            draws: 0,
+        };
+        assert_eq!(map_stripe_outcome(&losing), Outcome::Loss);
+        assert_eq!(win_bar_portions(losing.win_rate()), (46, 54));
+
+        let even = Record {
+            games: 2,
+            wins: 1,
+            losses: 1,
+            draws: 0,
+        };
+        assert_eq!(map_stripe_outcome(&even), Outcome::Unknown);
+        assert_eq!(win_bar_portions(even.win_rate()), (50, 50));
+
+        let none = Record {
+            games: 0,
+            wins: 0,
+            losses: 0,
+            draws: 0,
+        };
+        assert_eq!(map_stripe_outcome(&none), Outcome::Unknown);
+        assert_eq!(win_bar_portions(none.win_rate()), (0, 100));
     }
 }
