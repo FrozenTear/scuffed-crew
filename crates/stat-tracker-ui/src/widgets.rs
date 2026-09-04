@@ -941,7 +941,12 @@ mod tests {
         assert_eq!(map_stripe_outcome(&even), Outcome::Unknown);
         assert_eq!(win_bar_portions(even.win_rate()), (50, 50));
 
-        let none = Record::default();
+        let none = Record {
+            games: 0,
+            wins: 0,
+            losses: 0,
+            draws: 0,
+        };
         assert_eq!(map_stripe_outcome(&none), Outcome::Unknown);
         assert_eq!(win_bar_portions(none.win_rate()), (0, 100));
     }
