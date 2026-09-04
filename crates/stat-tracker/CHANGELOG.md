@@ -2,7 +2,28 @@
 
 User-facing notes for `stat-tracker-v*` GitHub Releases. The release workflow
 prepends the section whose heading matches the tag version (for example
-`## 0.4.5` for `stat-tracker-v0.4.5`).
+`## 0.4.6` for `stat-tracker-v0.4.6`).
+
+## 0.4.6
+
+Seasons Maps-grammar grid (#74): season cards use the same 2–4 column
+layout as Maps, with a big WR, win/loss stripe, and FillPortion bar.
+
+Settings denser cards (#74): surface cards with a 1–2 column field grid.
+Companion hotkey setting is unchanged.
+
+Daemon OCR / capture / sync / store schema are unchanged. Packaging
+hotfixes 0.4.1–0.4.3, companion overlay hotkey (0.4.4), and prior
+Settings/Maps/Games polish (0.4.5) are unchanged.
+
+### Install
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/FrozenTear/scuffed-crew/main/crates/stat-tracker/dist/bootstrap.sh | bash
+```
+
+Or extract the tarball and run `./install.sh`. Pin with
+`STAT_TRACKER_TAG=stat-tracker-v0.4.6`.
 
 ## 0.4.5
 
