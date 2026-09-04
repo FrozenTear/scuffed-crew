@@ -688,12 +688,12 @@ mod tests {
     #[test]
     fn season_card_line_matches_maps_grammar() {
         let decided = Record {
-            games: 10,
+            games: 4,
             wins: 3,
             losses: 1,
             draws: 0,
         };
-        assert_eq!(season_card_line(&decided), "10 games · 3–1");
+        assert_eq!(season_card_line(&decided), "4 games · 3–1");
 
         let draws = Record {
             games: 5,
