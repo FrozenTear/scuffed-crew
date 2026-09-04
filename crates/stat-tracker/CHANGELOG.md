@@ -2,7 +2,26 @@
 
 User-facing notes for `stat-tracker-v*` GitHub Releases. The release workflow
 prepends the section whose heading matches the tag version (for example
-`## 0.4.6` for `stat-tracker-v0.4.6`).
+`## 0.4.7` for `stat-tracker-v0.4.7`).
+
+## 0.4.7
+
+Settings Maps-level polish (#76): two-column masonry, Stored data spanning
+pane, full-width Save footer, denser surface cards. Companion hotkey
+setting is unchanged.
+
+Daemon OCR / capture / sync / store schema are unchanged. Packaging
+hotfixes 0.4.1–0.4.3, companion overlay hotkey (0.4.4), Settings/Maps/Games
+polish (0.4.5), and Maps-grammar Seasons grid (0.4.6) are unchanged.
+
+### Install
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/FrozenTear/scuffed-crew/main/crates/stat-tracker/dist/bootstrap.sh | bash
+```
+
+Or extract the tarball and run `./install.sh`. Pin with
+`STAT_TRACKER_TAG=stat-tracker-v0.4.7`.
 
 ## 0.4.6
 
