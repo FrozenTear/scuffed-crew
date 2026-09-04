@@ -1,7 +1,8 @@
 //! Settings form + screen. Writes today's `Config` fields via `Config::save`.
 //!
-//! Does not invent daemon config keys. `data_dir` and `ocr_threads` are
-//! preserved from the loaded file (the Dioxus page did not edit them either).
+//! Layout: two-column masonry (Maps density tokens), Stored data spanning the
+//! pane, Save as a full-width footer strip. Does not invent daemon config keys.
+//! `data_dir` and `ocr_threads` are preserved from the loaded file.
 
 use iced::widget::{Row, button, checkbox, column, container, row, space, text, text_input};
 use iced::{Alignment, Element, Fill, Padding};
@@ -10,8 +11,8 @@ use stat_tracker::config::{AutoDetectConfig, Config, SyncConfig};
 use crate::app::{Message, TrackerApp};
 use crate::layout::settings_columns;
 use crate::theme::{
-    self, FONT_BOLD, FONT_MEDIUM, FONT_SEMIBOLD, GRID_GAP, PAD_INNER, SIZE_BODY, SIZE_META,
-    SIZE_TITLE, TEXT, TEXT_2, TEXT_3,
+    self, FONT_BOLD, FONT_MEDIUM, FONT_SEMIBOLD, GRID_GAP, PAD_INNER, SIZE_BODY, SIZE_LABEL,
+    SIZE_META, SIZE_TITLE, TEXT, TEXT_2, TEXT_3,
 };
 use crate::update;
 use crate::widgets;
@@ -192,6 +193,73 @@ pub(crate) fn field_max_width(field: SettingsField) -> f32 {
     }
 }
 
+/// Every settings card. Order here is the 1-column stack and the masonry input.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SettingsSection {
+    Daemon,
+    Capture,
+    Companion,
+    Player,
+    AutoDetect,
+    Sync,
+    Ocr,
+    Diagnostics,
+    Data,
+}
+
+/// Two-column masonry. Stored data spans the pane so the last row is not
+/// a skyscraper + empty pocket.
+pub(crate) const MASONRY_SECTIONS: &[SettingsSection] = &[
+    SettingsSection::Daemon,
+    SettingsSection::Capture,
+    SettingsSection::Companion,
+    SettingsSection::Player,
+    SettingsSection::AutoDetect,
+    SettingsSection::Sync,
+    SettingsSection::Ocr,
+    SettingsSection::Diagnostics,
+];
+
+pub(crate) const SPANNING_SECTION: SettingsSection = SettingsSection::Data;
+pub(crate) const SAVE_LABEL: &str = "Save settings";
+
+/// Relative visual height after caption tightening. Used only to pack columns.
+pub(crate) fn section_weight(section: SettingsSection) -> u16 {
+    match section {
+        SettingsSection::Daemon => 3,
+        SettingsSection::Capture => 3,
+        SettingsSection::Companion => 3,
+        SettingsSection::Player => 4,
+        SettingsSection::AutoDetect => 3,
+        SettingsSection::Sync => 3,
+        SettingsSection::Ocr => 3,
+        SettingsSection::Diagnostics => 2,
+        SettingsSection::Data => 3,
+    }
+}
+
+/// Greedy masonry: each section goes into the currently shorter column.
+/// Tie → leftmost. One column returns the input order.
+pub(crate) fn pack_columns(sections: &[SettingsSection], cols: usize) -> Vec<Vec<SettingsSection>> {
+    let cols = cols.max(1);
+    if cols == 1 {
+        return vec![sections.to_vec()];
+    }
+    let mut columns = vec![Vec::new(); cols];
+    let mut heights = vec![0u16; cols];
+    for &section in sections {
+        let i = heights
+            .iter()
+            .enumerate()
+            .min_by_key(|&(i, h)| (*h, i))
+            .map(|(i, _)| i)
+            .unwrap_or(0);
+        columns[i].push(section);
+        heights[i] = heights[i].saturating_add(section_weight(section));
+    }
+    columns
+}
+
 pub fn view(app: &TrackerApp, content_width: f32) -> Element<'_, Message> {
     let demo = app.fixture.is_some();
     let cols = settings_columns(content_width);
@@ -207,44 +275,59 @@ pub fn view(app: &TrackerApp, content_width: f32) -> Element<'_, Message> {
         ));
     }
 
-    let cards = vec![
-        daemon_card(app, demo),
-        capture_card(app, demo),
-        companion_card(app, demo),
-        player_card(app, demo),
-        auto_detect_card(app, demo),
-        sync_card(app, demo),
-        ocr_card(app, demo),
-        diagnostics_card(app, demo),
-        data_card(app, demo),
-    ];
-    col = col.push(section_grid(cards, cols)).push(save_row(demo));
+    let packed = pack_columns(MASONRY_SECTIONS, cols);
+    let columns: Vec<Vec<Element<'_, Message>>> = packed
+        .into_iter()
+        .map(|ids| {
+            ids.into_iter()
+                .map(|id| section_card(id, app, demo))
+                .collect()
+        })
+        .collect();
+    col = col
+        .push(section_columns(columns))
+        .push(section_card(SPANNING_SECTION, app, demo))
+        .push(save_footer(demo));
 
     col.into()
 }
 
-fn section_grid<'a>(cards: Vec<Element<'a, Message>>, cols: usize) -> Element<'a, Message> {
-    let cols = cols.max(1);
-    let mut col = column![].spacing(GRID_GAP).width(Fill);
-    let mut cards = cards.into_iter().peekable();
-    while cards.peek().is_some() {
-        let mut row = Row::new()
-            .spacing(GRID_GAP)
-            .align_y(Alignment::Start)
-            .width(Fill);
-        let mut n = 0;
-        for _ in 0..cols {
-            if let Some(card) = cards.next() {
-                row = row.push(card);
-                n += 1;
+fn section_card(id: SettingsSection, app: &TrackerApp, demo: bool) -> Element<'_, Message> {
+    match id {
+        SettingsSection::Daemon => daemon_card(app, demo),
+        SettingsSection::Capture => capture_card(app, demo),
+        SettingsSection::Companion => companion_card(app, demo),
+        SettingsSection::Player => player_card(app, demo),
+        SettingsSection::AutoDetect => auto_detect_card(app, demo),
+        SettingsSection::Sync => sync_card(app, demo),
+        SettingsSection::Ocr => ocr_card(app, demo),
+        SettingsSection::Diagnostics => diagnostics_card(app, demo),
+        SettingsSection::Data => data_card(app, demo),
+    }
+}
+
+fn section_columns<'a>(columns: Vec<Vec<Element<'a, Message>>>) -> Element<'a, Message> {
+    if columns.len() <= 1 {
+        let mut col = column![].spacing(GRID_GAP).width(Fill);
+        if let Some(cards) = columns.into_iter().next() {
+            for card in cards {
+                col = col.push(card);
             }
         }
-        for _ in n..cols {
-            row = row.push(space().width(Fill));
-        }
-        col = col.push(row);
+        return col.into();
     }
-    col.into()
+    let mut row = Row::new()
+        .spacing(GRID_GAP)
+        .align_y(Alignment::Start)
+        .width(Fill);
+    for cards in columns {
+        let mut col = column![].spacing(GRID_GAP).width(Fill);
+        for card in cards {
+            col = col.push(card);
+        }
+        row = row.push(col);
+    }
+    row.into()
 }
 
 fn daemon_card(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
@@ -313,7 +396,7 @@ fn daemon_card(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
         .font(FONT_MEDIUM)
         .color(TEXT_3),
     ]
-    .spacing(8);
+    .spacing(6);
 
     if app.daemon_busy {
         body = body.push(
@@ -367,7 +450,7 @@ fn capture_card(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
             .font(FONT_MEDIUM)
             .color(TEXT_3),
     ]
-    .spacing(8);
+    .spacing(6);
 
     if !demo {
         let mut btn = button(
@@ -406,8 +489,8 @@ fn capture_card(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
                 .height(iced::Length::Fixed(280.0)),
         );
         body = body.push(
-            text("This is what the tracker sees. Make sure the scoreboard is visible.")
-                .size(SIZE_META)
+            text("What the tracker sees — scoreboard should be visible.")
+                .size(SIZE_LABEL)
                 .font(FONT_MEDIUM)
                 .color(TEXT_3),
         );
@@ -424,9 +507,9 @@ fn companion_card(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
             .size(16)
             .text_size(SIZE_BODY)
             .style(checkbox_style),
-        hint("Works in fullscreen. Overlay stays click-through so the game keeps the keyboard."),
+        hint("Works in fullscreen. Overlay is click-through."),
     ]
-    .spacing(8);
+    .spacing(6);
 
     if app.settings.overlay_hotkey_enabled {
         body = body.push(field_input(
@@ -436,7 +519,7 @@ fn companion_card(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
             SettingsField::OverlayHotkey,
             false,
             demo,
-            Some("Super is the Windows key. Join with +. Same keyboard access as Tab capture."),
+            Some("Super = Windows key. Join with +."),
         ));
     }
 
@@ -453,7 +536,7 @@ fn player_card(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
                 SettingsField::PlayerName,
                 false,
                 demo,
-                Some("Scoreboard name as it appears in-game — no #1234."),
+                Some("Scoreboard name as shown in-game — no #1234."),
             )),
             Some(field_input(
                 "Session window (seconds)",
@@ -475,7 +558,7 @@ fn player_card(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
             Some("Comma-separated. Empty = always allow capture."),
         ),
     ]
-    .spacing(10);
+    .spacing(6);
     settings_card("Player and sessions", body.into())
 }
 
@@ -488,7 +571,7 @@ fn auto_detect_card(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
             .text_size(SIZE_BODY)
             .style(checkbox_style),
     ]
-    .spacing(8);
+    .spacing(6);
 
     if app.settings.auto_detect_enabled {
         body = body.push(compact_row(
@@ -534,10 +617,10 @@ fn sync_card(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
             SettingsField::SyncToken,
             true,
             demo,
-            Some("Both needed to upload matches. Leave either blank to turn sync off."),
+            Some("Both needed to upload. Blank either to turn sync off."),
         ),
     ]
-    .spacing(10);
+    .spacing(6);
     settings_card("Website sync", body.into())
 }
 
@@ -570,12 +653,12 @@ fn ocr_card(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
             } else {
                 theme::WARN
             }),
-        text("Install copies the model if it is missing. Rebuild trains it again (needs a network connection and can take a few minutes).")
-            .size(SIZE_META)
+        text("Install if missing. Rebuild retrains (needs network, a few minutes).")
+            .size(SIZE_LABEL)
             .font(FONT_MEDIUM)
             .color(TEXT_3),
     ]
-    .spacing(8);
+    .spacing(6);
     if app.tessdata_busy {
         body = body.push(
             text("Working on the reading model…")
@@ -596,35 +679,51 @@ fn diagnostics_card(app: &TrackerApp, _demo: bool) -> Element<'_, Message> {
             .size(16)
             .text_size(SIZE_BODY)
             .style(checkbox_style),
-        text("Writes extra images under the data folder. Slows capture — leave off unless you are diagnosing a bad read.")
-            .size(SIZE_META)
+        text("Writes images under the data folder. Slows capture — leave off unless diagnosing.")
+            .size(SIZE_LABEL)
             .font(FONT_MEDIUM)
             .color(TEXT_3),
     ]
-    .spacing(8);
+    .spacing(6);
     settings_card("Diagnostics", body.into())
 }
 
 fn data_card(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
     let running = app.daemon.running();
-    let mut body = column![
-        text("Compacting rewrites the local store and keeps one backup. Deleting removes every local match on this computer — it does not change the website. Stop the tracker first.")
-            .size(SIZE_META)
+    let mut copy = column![
+        text("Compact rewrites the store and keeps one backup. Delete removes local matches only — not the website.")
+            .size(SIZE_LABEL)
             .font(FONT_MEDIUM)
             .color(TEXT_3),
     ]
-    .spacing(8);
+    .spacing(6);
 
     if running {
-        body = body.push(
-            text("Tracker is running — stop it before compacting or deleting data.")
-                .size(SIZE_META)
+        copy = copy.push(
+            text("Stop the tracker before compact or delete.")
+                .size(SIZE_LABEL)
                 .font(FONT_MEDIUM)
                 .color(theme::WARN),
         );
     }
+    if app.confirm_clear {
+        copy = copy.push(
+            text("Really delete all local match history? This cannot be undone.")
+                .size(SIZE_META)
+                .font(FONT_MEDIUM)
+                .color(theme::DANGER),
+        );
+    }
+    if app.vacuum_busy {
+        copy = copy.push(
+            text("Compacting…")
+                .size(SIZE_META)
+                .font(FONT_MEDIUM)
+                .color(TEXT_3),
+        );
+    }
 
-    let mut actions = row![].spacing(8);
+    let mut actions = row![].spacing(8).align_y(Alignment::Center);
     if !demo && !running && !app.vacuum_busy {
         actions = actions.push(action_btn("Compact stored data", false, Message::Vacuum));
         if app.confirm_clear {
@@ -655,31 +754,34 @@ fn data_card(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
             );
         }
     }
-    if app.confirm_clear {
-        body = body.push(
-            text("Really delete all local match history? This cannot be undone.")
-                .size(SIZE_META)
-                .font(FONT_MEDIUM)
-                .color(theme::DANGER),
-        );
-    }
-    if app.vacuum_busy {
-        body = body.push(
-            text("Compacting…")
-                .size(SIZE_META)
-                .font(FONT_MEDIUM)
-                .color(TEXT_3),
-        );
-    }
-    body = body.push(actions);
+
+    let body = row![copy.width(Fill), actions]
+        .align_y(Alignment::Start)
+        .spacing(GRID_GAP)
+        .width(Fill);
     settings_card("Stored data", body.into())
 }
 
-fn save_row(demo: bool) -> Element<'static, Message> {
+fn save_footer(demo: bool) -> Element<'static, Message> {
     if demo {
         return space().height(0).into();
     }
-    action_btn("Save settings", true, Message::SaveSettings)
+    container(
+        row![
+            text("Writes config and the companion shortcut.")
+                .size(SIZE_META)
+                .font(FONT_MEDIUM)
+                .color(TEXT_3),
+            space().width(Fill),
+            action_btn(SAVE_LABEL, true, Message::SaveSettings),
+        ]
+        .align_y(Alignment::Center)
+        .spacing(GRID_GAP),
+    )
+    .padding(PAD_INNER)
+    .width(Fill)
+    .style(theme::surface_panel)
+    .into()
 }
 
 fn settings_card<'a>(title: &'static str, body: Element<'a, Message>) -> Element<'a, Message> {
@@ -688,7 +790,7 @@ fn settings_card<'a>(title: &'static str, body: Element<'a, Message>) -> Element
             text(title).size(SIZE_TITLE).font(FONT_BOLD).color(TEXT),
             body,
         ]
-        .spacing(GRID_GAP),
+        .spacing(8),
     )
     .padding(PAD_INNER)
     .width(Fill)
@@ -705,7 +807,7 @@ fn field_caption(label: &'static str) -> text::Text<'static> {
 
 fn hint(copy: impl Into<String>) -> text::Text<'static> {
     text(copy.into())
-        .size(SIZE_META)
+        .size(SIZE_LABEL)
         .font(FONT_MEDIUM)
         .color(TEXT_3)
 }
@@ -938,6 +1040,7 @@ mod tests {
         assert_eq!(PAD_INNER, 12.0);
         assert_eq!(theme::RADIUS_CARD, 16.0);
         assert_eq!(theme::GRID_GAP, 12.0);
+        assert_eq!(theme::SIZE_LABEL, 11.0);
         assert_eq!(theme::ACCENT, {
             iced::Color::from_rgb(
                 0x8f as f32 / 255.0,
@@ -963,5 +1066,70 @@ mod tests {
         assert_eq!(field_max_width(SettingsField::ProcessNames), FIELD_TEXT);
         assert_eq!(field_max_width(SettingsField::PlayerName), FIELD_SHORT);
         assert_eq!(field_max_width(SettingsField::OverlayHotkey), FIELD_SHORT);
+    }
+
+    #[test]
+    fn masonry_omits_stored_data_and_keeps_every_other_section() {
+        assert_eq!(MASONRY_SECTIONS.len(), 8);
+        assert_eq!(SPANNING_SECTION, SettingsSection::Data);
+        assert!(!MASONRY_SECTIONS.contains(&SettingsSection::Data));
+        let all = [
+            SettingsSection::Daemon,
+            SettingsSection::Capture,
+            SettingsSection::Companion,
+            SettingsSection::Player,
+            SettingsSection::AutoDetect,
+            SettingsSection::Sync,
+            SettingsSection::Ocr,
+            SettingsSection::Diagnostics,
+            SettingsSection::Data,
+        ];
+        for section in all {
+            assert!(
+                MASONRY_SECTIONS.contains(&section) || section == SPANNING_SECTION,
+                "missing {section:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn two_column_pack_balances_and_leaves_no_empty_column() {
+        let packed = pack_columns(MASONRY_SECTIONS, 2);
+        assert_eq!(packed.len(), 2);
+        assert_eq!(
+            packed[0],
+            [
+                SettingsSection::Daemon,
+                SettingsSection::Companion,
+                SettingsSection::AutoDetect,
+                SettingsSection::Ocr,
+            ]
+        );
+        assert_eq!(
+            packed[1],
+            [
+                SettingsSection::Capture,
+                SettingsSection::Player,
+                SettingsSection::Sync,
+                SettingsSection::Diagnostics,
+            ]
+        );
+        let left: u16 = packed[0].iter().copied().map(section_weight).sum();
+        let right: u16 = packed[1].iter().copied().map(section_weight).sum();
+        assert_eq!(left, right);
+        assert!(!packed[0].contains(&SettingsSection::Data));
+        assert!(!packed[1].contains(&SettingsSection::Data));
+    }
+
+    #[test]
+    fn one_column_pack_keeps_input_order() {
+        let packed = pack_columns(MASONRY_SECTIONS, 1);
+        assert_eq!(packed, vec![MASONRY_SECTIONS.to_vec()]);
+    }
+
+    #[test]
+    fn save_footer_label_stays_primary_action() {
+        assert_eq!(SAVE_LABEL, "Save settings");
+        assert_eq!(theme::SIZE_LABEL, 11.0);
     }
 }
