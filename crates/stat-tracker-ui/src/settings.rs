@@ -266,7 +266,7 @@ pub fn view(app: &TrackerApp, content_width: f32) -> Element<'_, Message> {
     let mut col = column![].spacing(GRID_GAP).width(Fill);
 
     if let Some(info) = &app.update {
-        col = col.push(update::banner(info));
+        col = col.push(update::banner(info, &app.update_progress, &app.update_plan));
     }
 
     if demo {
@@ -407,6 +407,27 @@ fn daemon_card(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
         );
     }
     body = body.push(actions);
+
+    let install_cmd = app
+        .update
+        .as_ref()
+        .map(|i| update::pinned_install_command(&i.latest))
+        .unwrap_or_else(|| update::UPDATE_CMD.to_string());
+    body = body.push(
+        text("Install / update command")
+            .size(SIZE_META)
+            .font(FONT_SEMIBOLD)
+            .color(TEXT_2),
+    );
+    body = body.push(
+        text(install_cmd)
+            .size(SIZE_LABEL)
+            .font(FONT_MEDIUM)
+            .color(theme::ACCENT),
+    );
+    if !demo {
+        body = body.push(action_btn("Copy command", false, Message::CopyUpdateCmd));
+    }
 
     settings_card("Tracker service", body.into())
 }

@@ -38,7 +38,11 @@ pub fn view(app: &TrackerApp, content_width: f32) -> Element<'_, Message> {
 
     let mut col = column![].spacing(24).width(Fill);
     if let Some(info) = &app.update {
-        col = col.push(crate::update::banner(info));
+        col = col.push(crate::update::banner(
+            info,
+            &app.update_progress,
+            &app.update_plan,
+        ));
     }
     col = col.push(tonight_shelf).push(heroes_shelf).push(bottom);
     col.into()
