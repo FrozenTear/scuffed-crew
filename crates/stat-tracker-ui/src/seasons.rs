@@ -9,18 +9,19 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use chrono::{DateTime, Utc};
-use iced::widget::{column, container, mouse_area, row, space, text};
-use iced::{Alignment, Element, Fill};
+use iced::widget::{Row, column, mouse_area, space, text};
+use iced::{Element, Fill};
 use scuffed_types::Season;
 use serde::{Deserialize, Serialize};
 
 use crate::aggregate::{Record, SeasonWindow, aggregate};
 use crate::app::{Message, TrackerApp};
 use crate::hotkey::{self, OverlayHotkey};
+use crate::layout::seasons_columns;
 use crate::model::{Game, SeasonSel};
 use crate::theme::{
-    self, FONT_BOLD, FONT_EXTRABOLD, FONT_MEDIUM, FONT_SEMIBOLD, GRID_GAP, PAD_INNER, SIZE_BODY,
-    SIZE_FEATURED, SIZE_META, SIZE_TITLE, STRIPE, TEXT, TEXT_2, TEXT_3,
+    FONT_BOLD, FONT_EXTRABOLD, FONT_MEDIUM, GRID_GAP, SIZE_FEATURED, SIZE_META, SIZE_TITLE, TEXT,
+    TEXT_2, TEXT_3,
 };
 use crate::widgets;
 
@@ -294,8 +295,9 @@ fn system_time_to_utc(t: SystemTime) -> Option<DateTime<Utc>> {
     DateTime::<Utc>::from_timestamp(d.as_secs() as i64, d.subsec_nanos())
 }
 
-pub fn view(app: &TrackerApp) -> Element<'_, Message> {
+pub fn view(app: &TrackerApp, content_width: f32) -> Element<'_, Message> {
     let rows = season_rows(&app.games, &app.seasons.seasons);
+    let cols = seasons_columns(content_width);
     let mut col = column![
         text("Seasons").size(SIZE_TITLE).font(FONT_BOLD).color(TEXT),
         text("Read-only. Seasons are managed on the website under /admin/seasons.")
@@ -316,11 +318,28 @@ pub fn view(app: &TrackerApp) -> Element<'_, Message> {
         ));
     }
 
-    for row in &rows {
-        let selected = row.sel == app.season;
-        col = col.push(season_card(row, selected));
+    for chunk in rows.chunks(cols) {
+        let mut row = Row::new().spacing(GRID_GAP).width(Fill);
+        for season in chunk {
+            row = row.push(season_card(season, season.sel == app.season));
+        }
+        for _ in chunk.len()..cols {
+            row = row.push(space().width(Fill));
+        }
+        col = col.push(row);
     }
     col.into()
+}
+
+/// Maps grammar: name, featured WR, `N games · W–L`, muted window, win bar.
+/// Undecided is appended only when some games have no outcome.
+pub fn season_card_line(record: &Record) -> String {
+    let base = format!("{} · {}", record.games_label(), record.wl_label());
+    match record.undecided() {
+        0 => base,
+        1 => format!("{base} · 1 undecided"),
+        n => format!("{base} · {n} undecided"),
+    }
 }
 
 fn season_card(row: &SeasonRow, selected: bool) -> Element<'static, Message> {
@@ -335,56 +354,28 @@ fn season_card(row: &SeasonRow, selected: bool) -> Element<'static, Message> {
         .unwrap_or_else(|| "Every recorded game".into());
     let wr = format!("{:.0}%", row.record.win_rate_pct());
     let body = column![
-        row![
-            text(title)
-                .size(SIZE_TITLE)
-                .font(FONT_BOLD)
-                .color(TEXT)
-                .width(Fill),
-            text(wr)
-                .size(SIZE_FEATURED)
-                .font(FONT_EXTRABOLD)
-                .color(TEXT),
-        ]
-        .align_y(Alignment::Center),
-        text(window).size(SIZE_META).font(FONT_MEDIUM).color(TEXT_3),
-        text(row.record.season_line())
-            .size(SIZE_BODY)
-            .font(FONT_SEMIBOLD)
+        text(title).size(SIZE_TITLE).font(FONT_BOLD).color(TEXT),
+        text(wr)
+            .size(SIZE_FEATURED)
+            .font(FONT_EXTRABOLD)
+            .color(TEXT),
+        text(season_card_line(&row.record))
+            .size(SIZE_META)
+            .font(FONT_MEDIUM)
             .color(TEXT_2),
+        text(window).size(SIZE_META).font(FONT_MEDIUM).color(TEXT_3),
         widgets::win_bar_for(row.record.win_rate()),
     ]
-    .spacing(8);
+    .spacing(6);
 
-    // Column-hosted card: stripe uses measured content height (not Fill in a
-    // shrink Row — that collapses to 0, same P0/P1 contract).
-    let inner = container(
-        row![
-            container(space().width(STRIPE))
-                .width(STRIPE)
-                .style(theme::stripe_color(if selected {
-                    theme::ACCENT
-                } else {
-                    theme::BORDER
-                })),
-            container(body).padding(PAD_INNER).width(Fill),
-        ]
-        .spacing(0)
-        .width(Fill),
-    )
-    .style(move |t| {
-        if selected {
-            theme::selected_surface_panel(t)
-        } else {
-            theme::surface_panel(t)
-        }
-    })
-    .width(Fill)
-    .clip(true);
-
-    mouse_area(inner)
-        .on_press(Message::SelectSeason(row.sel.clone()))
-        .into()
+    mouse_area(widgets::surface_stat_card(
+        widgets::map_stripe_outcome(&row.record),
+        selected,
+        crate::theme::HEIGHT_MAP,
+        body.into(),
+    ))
+    .on_press(Message::SelectSeason(row.sel.clone()))
+    .into()
 }
 
 #[cfg(test)]
@@ -692,5 +683,49 @@ mod tests {
             format_window(ts(2026, 6, 24, 0), ts(2026, 9, 1, 0)),
             "24 Jun 2026 – 01 Sep 2026"
         );
+    }
+
+    #[test]
+    fn season_card_line_matches_maps_grammar() {
+        let decided = Record {
+            games: 4,
+            wins: 3,
+            losses: 1,
+            draws: 0,
+        };
+        assert_eq!(season_card_line(&decided), "4 games · 3–1");
+
+        let draws = Record {
+            games: 5,
+            wins: 2,
+            losses: 2,
+            draws: 1,
+        };
+        assert_eq!(season_card_line(&draws), "5 games · 2–2–1");
+
+        let mixed = Record {
+            games: 62,
+            wins: 10,
+            losses: 15,
+            draws: 0,
+        };
+        assert_eq!(season_card_line(&mixed), "62 games · 10–15 · 37 undecided");
+    }
+
+    #[test]
+    fn season_cards_use_maps_tokens() {
+        use crate::theme::{self, PAGE_PAD_X, PAGE_PAD_Y};
+        assert_eq!(PAGE_PAD_Y, 24.0);
+        assert_eq!(PAGE_PAD_X, 32.0);
+        assert_eq!(theme::RADIUS_CARD, 16.0);
+        assert_eq!(theme::HEIGHT_MAP, 148.0);
+        assert_eq!(theme::STRIPE, 4.0);
+        assert_eq!(theme::ACCENT, {
+            iced::Color::from_rgb(
+                0x8f as f32 / 255.0,
+                0x73 as f32 / 255.0,
+                0xff as f32 / 255.0,
+            )
+        });
     }
 }

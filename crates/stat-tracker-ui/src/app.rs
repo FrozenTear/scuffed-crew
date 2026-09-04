@@ -905,8 +905,8 @@ impl TrackerApp {
                 Screen::Games => crate::games::view(self, size.width),
                 Screen::Heroes => crate::heroes::view(self, size.width),
                 Screen::Maps => crate::maps::view(self, size.width),
-                Screen::Seasons => crate::seasons::view(self),
-                Screen::Settings => crate::settings::view(self),
+                Screen::Seasons => crate::seasons::view(self, size.width),
+                Screen::Settings => crate::settings::view(self, size.width),
             })
             .width(Fill)
             .height(Length::Shrink),
