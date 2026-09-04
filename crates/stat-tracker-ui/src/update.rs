@@ -1,17 +1,20 @@
-//! "Update available" banner — detect + notify only, same as the Dioxus GUI.
+//! Update banner: version check, in-app install, and Copy for the bootstrap command.
 //!
-//! Never downloads or executes an installer. The user re-runs the published
-//! one-liner or opens the release page.
+//! Check still uses GitHub Releases (`stat-tracker-v*`). "Update now" downloads
+//! `bootstrap.sh` and runs it with `STAT_TRACKER_TAG` pinned to the advertised
+//! release. If the prefix is not writable or tools are missing, the banner
+//! says so instead of offering a dead button.
 
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use iced::widget::{button, column, container, text};
+use iced::widget::{button, column, container, row, text};
 use iced::{Element, Fill, Padding};
 
 use crate::app::Message;
 use crate::theme::{
     self, FONT_BOLD, FONT_MEDIUM, FONT_SEMIBOLD, PAD_INNER, SIZE_BODY, SIZE_META, SIZE_TITLE, TEXT,
-    TEXT_2,
+    TEXT_2, TEXT_3,
 };
 
 const REPO: &str = "FrozenTear/scuffed-crew";
@@ -19,11 +22,36 @@ const REPO: &str = "FrozenTear/scuffed-crew";
 /// Installer one-liner surfaced in the banner (matches the website).
 pub const UPDATE_CMD: &str = "curl -fsSL https://raw.githubusercontent.com/FrozenTear/scuffed-crew/main/crates/stat-tracker/dist/bootstrap.sh | bash";
 
+pub const BOOTSTRAP_URL: &str = "https://raw.githubusercontent.com/FrozenTear/scuffed-crew/main/crates/stat-tracker/dist/bootstrap.sh";
+
+const REQUIRED_TOOLS: &[&str] = &["curl", "tar", "bash", "mktemp"];
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UpdateInfo {
     pub latest: String,
     pub current: String,
     pub url: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum UpdateProgress {
+    #[default]
+    Idle,
+    Running,
+    Succeeded(String),
+    Failed(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UpdatePlan {
+    Ready { prefix: PathBuf, tag: String },
+    Blocked { reason: String, hint: String },
+}
+
+impl UpdatePlan {
+    pub fn can_run(&self) -> bool {
+        matches!(self, Self::Ready { .. })
+    }
 }
 
 /// Version used for the update banner.
@@ -107,6 +135,145 @@ pub fn is_newer(latest: &str, current: &str) -> bool {
     }
 }
 
+pub fn release_tag(latest: &str) -> String {
+    let core = latest.trim().trim_start_matches('v');
+    format!("stat-tracker-v{core}")
+}
+
+/// Command shown in the banner / copied to the clipboard. Pins the advertised tag.
+pub fn pinned_install_command(latest: &str) -> String {
+    format!("STAT_TRACKER_TAG={} {}", release_tag(latest), UPDATE_CMD)
+}
+
+pub fn bootstrap_env(latest: &str, prefix: &Path) -> Vec<(&'static str, String)> {
+    vec![
+        ("STAT_TRACKER_TAG", release_tag(latest)),
+        ("STAT_TRACKER_CHANNEL", "stable".into()),
+        ("STAT_TRACKER_PREFIX", prefix.display().to_string()),
+    ]
+}
+
+pub fn default_install_prefix() -> PathBuf {
+    if let Ok(p) = std::env::var("STAT_TRACKER_PREFIX") {
+        let t = p.trim();
+        if !t.is_empty() {
+            return PathBuf::from(t);
+        }
+    }
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(bin) = exe.parent()
+        && bin.file_name().is_some_and(|n| n == "bin")
+        && let Some(prefix) = bin.parent()
+    {
+        return prefix.to_path_buf();
+    }
+    dirs::home_dir()
+        .map(|h| h.join(".local"))
+        .unwrap_or_else(|| PathBuf::from("/usr/local"))
+}
+
+pub fn prefix_from_exe(exe: &Path) -> Option<PathBuf> {
+    let bin = exe.parent()?;
+    if bin.file_name()? != "bin" {
+        return None;
+    }
+    Some(bin.parent()?.to_path_buf())
+}
+
+pub fn missing_tools(has: impl Fn(&str) -> bool) -> Vec<&'static str> {
+    REQUIRED_TOOLS
+        .iter()
+        .copied()
+        .filter(|name| !has(name))
+        .collect()
+}
+
+pub fn explain_unwritable(prefix: &Path, err: &std::io::Error) -> String {
+    format!(
+        "Cannot write to {} ({err}). The install prefix is not writable from this app \
+         (permissions or a sandbox). Copy the command and run it in a terminal, or set \
+         STAT_TRACKER_PREFIX to a writable directory (default is ~/.local).",
+        prefix.display()
+    )
+}
+
+fn prefix_write_error(prefix: &Path) -> Option<String> {
+    let bin = prefix.join("bin");
+    if let Err(e) = std::fs::create_dir_all(&bin) {
+        return Some(explain_unwritable(prefix, &e));
+    }
+    let probe = bin.join(".sst-gui-write-probe");
+    match std::fs::write(&probe, b"ok") {
+        Ok(()) => {
+            let _ = std::fs::remove_file(&probe);
+            None
+        }
+        Err(e) => Some(explain_unwritable(prefix, &e)),
+    }
+}
+
+pub struct UpdateProbes<'a> {
+    pub has_tool: &'a dyn Fn(&str) -> bool,
+    pub prefix: PathBuf,
+    pub os: &'a str,
+    pub arch: &'a str,
+    pub check_write: bool,
+}
+
+impl UpdateProbes<'static> {
+    pub fn live() -> Self {
+        Self {
+            has_tool: &crate::clipboard::tool_on_path,
+            prefix: default_install_prefix(),
+            os: std::env::consts::OS,
+            arch: std::env::consts::ARCH,
+            check_write: true,
+        }
+    }
+}
+
+pub fn evaluate_plan(latest: &str) -> UpdatePlan {
+    evaluate_plan_with(latest, UpdateProbes::live())
+}
+
+pub fn evaluate_plan_with(latest: &str, probes: UpdateProbes<'_>) -> UpdatePlan {
+    if probes.os != "linux" {
+        return UpdatePlan::Blocked {
+            reason: format!("In-app update is Linux-only (this OS: {}).", probes.os),
+            hint: "Copy the command and run it on a Linux x86_64 machine.".into(),
+        };
+    }
+    if probes.arch != "x86_64" && probes.arch != "amd64" {
+        return UpdatePlan::Blocked {
+            reason: format!(
+                "Prebuilt releases are x86_64 only (this machine: {}).",
+                probes.arch
+            ),
+            hint: "Copy the command and run it on x86_64, or build from source.".into(),
+        };
+    }
+    let missing = missing_tools(probes.has_tool);
+    if !missing.is_empty() {
+        return UpdatePlan::Blocked {
+            reason: format!("Missing tools on PATH: {}.", missing.join(", ")),
+            hint: "Install them, then press Update now, or copy the command into a terminal."
+                .into(),
+        };
+    }
+    if probes.check_write
+        && let Some(reason) = prefix_write_error(&probes.prefix)
+    {
+        return UpdatePlan::Blocked {
+            hint: "The Copy button still works — paste the command into a terminal that can write the prefix.".into(),
+            reason,
+        };
+    }
+    UpdatePlan::Ready {
+        prefix: probes.prefix,
+        tag: release_tag(latest),
+    }
+}
+
 /// Query GitHub Releases; `None` on failure or when already current.
 pub async fn check_for_update() -> Option<UpdateInfo> {
     let current = current_version()?;
@@ -159,55 +326,269 @@ pub fn open_release_page(url: &str) {
     let _ = std::process::Command::new("xdg-open").arg(url).spawn();
 }
 
-pub fn banner(info: &UpdateInfo) -> Element<'static, Message> {
+pub struct UpdateRunRequest {
+    pub latest: String,
+    pub data_dir: PathBuf,
+    pub stop_daemon: bool,
+    pub service_installed: bool,
+}
+
+pub fn strip_ansi(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' && chars.peek() == Some(&'[') {
+            chars.next();
+            for x in chars.by_ref() {
+                if x.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+fn tail_useful(output: &str) -> String {
+    let cleaned = strip_ansi(output);
+    cleaned
+        .lines()
+        .rev()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .unwrap_or("installer finished")
+        .to_string()
+}
+
+pub async fn run_in_app_update(req: UpdateRunRequest) -> Result<String, String> {
+    let plan = evaluate_plan(&req.latest);
+    let UpdatePlan::Ready { prefix, tag } = plan else {
+        let UpdatePlan::Blocked { reason, hint } = plan else {
+            unreachable!("evaluate_plan is Ready or Blocked");
+        };
+        return Err(format!("{reason} {hint}"));
+    };
+
+    if req.stop_daemon {
+        let _ = crate::daemon::run_verb(
+            req.data_dir.clone(),
+            crate::daemon::DaemonVerb::Stop,
+            req.service_installed,
+        )
+        .await;
+    }
+
+    let work = std::env::temp_dir().join(format!(
+        "sst-gui-update-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0)
+    ));
+    std::fs::create_dir_all(&work)
+        .map_err(|e| format!("Could not create a temp dir for the update: {e}"))?;
+    let script = work.join("bootstrap.sh");
+
+    let install = download_and_run_bootstrap(&script, &req.latest, &prefix, &tag).await;
+    let _ = std::fs::remove_dir_all(&work);
+    if req.stop_daemon {
+        let _ = crate::daemon::run_verb(
+            req.data_dir,
+            crate::daemon::DaemonVerb::Start,
+            req.service_installed,
+        )
+        .await;
+    }
+    install
+}
+
+async fn download_and_run_bootstrap(
+    script: &Path,
+    latest: &str,
+    prefix: &Path,
+    tag: &str,
+) -> Result<String, String> {
+    let client = reqwest::Client::builder()
+        .user_agent("scuffed-stat-tracker-gui")
+        .timeout(Duration::from_secs(30))
+        .build()
+        .map_err(|e| format!("Could not start the downloader: {e}"))?;
+    let response = client
+        .get(BOOTSTRAP_URL)
+        .send()
+        .await
+        .map_err(|e| format!("Could not download bootstrap.sh: {e}"))?;
+    if !response.status().is_success() {
+        return Err(format!(
+            "Could not download bootstrap.sh (HTTP {}). Copy the command and run it in a terminal.",
+            response.status()
+        ));
+    }
+    let bytes = response
+        .bytes()
+        .await
+        .map_err(|e| format!("Could not read bootstrap.sh: {e}"))?;
+    std::fs::write(script, &bytes).map_err(|e| format!("Could not write bootstrap.sh: {e}"))?;
+
+    let mut cmd = tokio::process::Command::new("bash");
+    cmd.arg(script);
+    for (key, value) in bootstrap_env(latest, prefix) {
+        cmd.env(key, value);
+    }
+    let out = cmd
+        .output()
+        .await
+        .map_err(|e| format!("Could not run bootstrap.sh: {e}"))?;
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let combined = format!("{stderr}\n{stdout}");
+    if !out.status.success() {
+        return Err(format!(
+            "Installer failed ({tag}): {}. Copy the command and run it in a terminal if this keeps failing.",
+            tail_useful(&combined)
+        ));
+    }
+    Ok(format!(
+        "Installed {tag}. Restart this window to run the new GUI. {}",
+        tail_useful(&combined)
+    ))
+}
+
+pub fn banner(
+    info: &UpdateInfo,
+    progress: &UpdateProgress,
+    plan: &UpdatePlan,
+) -> Element<'static, Message> {
     let url = info.url.clone();
-    container(
-        column![
-            text(format!("Update available — v{}", info.latest))
-                .size(SIZE_TITLE)
-                .font(FONT_BOLD)
-                .color(TEXT),
-            text(format!(
-                "You're on v{}. Update by re-running the installer:",
-                info.current
-            ))
-            .size(SIZE_BODY)
-            .font(FONT_MEDIUM)
-            .color(TEXT_2),
-            text(UPDATE_CMD.to_string())
+    let cmd = pinned_install_command(&info.latest);
+    let running = matches!(progress, UpdateProgress::Running);
+    let can_run = plan.can_run() && !running && !matches!(progress, UpdateProgress::Succeeded(_));
+
+    let mut body = column![
+        text(format!("Update available — v{}", info.latest))
+            .size(SIZE_TITLE)
+            .font(FONT_BOLD)
+            .color(TEXT),
+        text(format!(
+            "You're on v{}. Update now downloads the release and runs the installer, or copy the command and run it in a terminal.",
+            info.current
+        ))
+        .size(SIZE_BODY)
+        .font(FONT_MEDIUM)
+        .color(TEXT_2),
+    ]
+    .spacing(10);
+
+    match progress {
+        UpdateProgress::Idle => {}
+        UpdateProgress::Running => {
+            body = body.push(
+                text("Downloading the release and running the installer… The tracker service is stopped for the install.")
+                    .size(SIZE_META)
+                    .font(FONT_MEDIUM)
+                    .color(TEXT_3),
+            );
+        }
+        UpdateProgress::Succeeded(msg) => {
+            body = body.push(
+                text(msg.clone())
+                    .size(SIZE_META)
+                    .font(FONT_MEDIUM)
+                    .color(theme::OK),
+            );
+        }
+        UpdateProgress::Failed(msg) => {
+            body = body.push(
+                text(msg.clone())
+                    .size(SIZE_META)
+                    .font(FONT_MEDIUM)
+                    .color(theme::DANGER),
+            );
+        }
+    }
+
+    if let UpdatePlan::Blocked { reason, hint } = plan
+        && !matches!(progress, UpdateProgress::Succeeded(_))
+    {
+        body = body.push(
+            text(format!("{reason} {hint}"))
                 .size(SIZE_META)
                 .font(FONT_MEDIUM)
-                .color(theme::ACCENT),
-            button(
-                text("View release notes")
-                    .size(SIZE_META)
-                    .font(FONT_SEMIBOLD)
-                    .color(TEXT),
-            )
-            .padding(Padding::from([8, 16]))
-            .style(theme::chip(true))
-            .on_press(Message::OpenUpdate(url)),
-        ]
-        .spacing(10),
+                .color(theme::WARN),
+        );
+    }
+
+    body = body.push(
+        text(cmd)
+            .size(SIZE_META)
+            .font(FONT_MEDIUM)
+            .color(theme::ACCENT),
+    );
+
+    let mut update_btn = button(
+        text(if running {
+            "Installing…"
+        } else {
+            "Update now"
+        })
+        .size(SIZE_META)
+        .font(FONT_SEMIBOLD)
+        .color(TEXT),
     )
-    .padding(PAD_INNER)
-    .width(Fill)
-    .style(|_t| iced::widget::container::Style {
-        background: Some(iced::Background::Color(theme::SURFACE)),
-        text_color: Some(TEXT),
-        border: iced::Border {
-            color: theme::WARN,
-            width: 1.0,
-            radius: theme::card_radius(),
-        },
-        ..iced::widget::container::Style::default()
-    })
-    .into()
+    .padding(Padding::from([8, 16]))
+    .style(theme::chip(can_run));
+    if can_run {
+        update_btn = update_btn.on_press(Message::RunUpdate);
+    }
+
+    let actions = row![
+        update_btn,
+        button(
+            text("Copy command")
+                .size(SIZE_META)
+                .font(FONT_SEMIBOLD)
+                .color(TEXT),
+        )
+        .padding(Padding::from([8, 16]))
+        .style(theme::ghost_btn())
+        .on_press(Message::CopyUpdateCmd),
+        button(
+            text("Release notes")
+                .size(SIZE_META)
+                .font(FONT_SEMIBOLD)
+                .color(TEXT),
+        )
+        .padding(Padding::from([8, 16]))
+        .style(theme::ghost_btn())
+        .on_press(Message::OpenUpdate(url)),
+    ]
+    .spacing(8);
+
+    body = body.push(actions);
+
+    container(body)
+        .padding(PAD_INNER)
+        .width(Fill)
+        .style(|_t| iced::widget::container::Style {
+            background: Some(iced::Background::Color(theme::SURFACE)),
+            text_color: Some(TEXT),
+            border: iced::Border {
+                color: theme::WARN,
+                width: 1.0,
+                radius: theme::card_radius(),
+            },
+            ..iced::widget::container::Style::default()
+        })
+        .into()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
     #[test]
     fn semver_parses_and_orders() {
@@ -267,5 +648,157 @@ mod tests {
             None,
             "no fallback to CARGO_PKG_VERSION"
         );
+    }
+
+    #[test]
+    fn release_tag_and_pinned_command_use_stat_tracker_prefix() {
+        assert_eq!(release_tag("0.4.7"), "stat-tracker-v0.4.7");
+        assert_eq!(release_tag("v0.4.7"), "stat-tracker-v0.4.7");
+        let cmd = pinned_install_command("0.4.7");
+        assert!(
+            cmd.starts_with("STAT_TRACKER_TAG=stat-tracker-v0.4.7 "),
+            "{cmd}"
+        );
+        assert!(cmd.contains(UPDATE_CMD), "{cmd}");
+        assert!(cmd.contains("bootstrap.sh"), "{cmd}");
+    }
+
+    #[test]
+    fn bootstrap_env_pins_tag_channel_and_prefix() {
+        let env = bootstrap_env("0.4.7", Path::new("/tmp/prefix"));
+        assert_eq!(
+            env.iter()
+                .find(|(k, _)| *k == "STAT_TRACKER_TAG")
+                .map(|(_, v)| v.as_str()),
+            Some("stat-tracker-v0.4.7")
+        );
+        assert_eq!(
+            env.iter()
+                .find(|(k, _)| *k == "STAT_TRACKER_CHANNEL")
+                .map(|(_, v)| v.as_str()),
+            Some("stable")
+        );
+        assert_eq!(
+            env.iter()
+                .find(|(k, _)| *k == "STAT_TRACKER_PREFIX")
+                .map(|(_, v)| v.as_str()),
+            Some("/tmp/prefix")
+        );
+    }
+
+    #[test]
+    fn prefix_from_exe_only_when_under_bin() {
+        assert_eq!(
+            prefix_from_exe(Path::new("/home/ada/.local/bin/stat-tracker-gui")),
+            Some(PathBuf::from("/home/ada/.local"))
+        );
+        assert_eq!(
+            prefix_from_exe(Path::new("/opt/scuffed/stat-tracker-gui")),
+            None
+        );
+    }
+
+    #[test]
+    fn missing_curl_blocks_in_app_update() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let plan = evaluate_plan_with(
+            "0.4.7",
+            UpdateProbes {
+                has_tool: &|n| n != "curl",
+                prefix: dir.path().to_path_buf(),
+                os: "linux",
+                arch: "x86_64",
+                check_write: false,
+            },
+        );
+        match plan {
+            UpdatePlan::Blocked { reason, hint } => {
+                assert!(reason.contains("curl"), "{reason}");
+                assert!(
+                    hint.contains("terminal") || hint.contains("Update now"),
+                    "{hint}"
+                );
+            }
+            other => panic!("expected blocked, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unwritable_prefix_blocks_with_copy_hint() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let not_dir = dir.path().join("not-a-dir");
+        std::fs::write(&not_dir, b"x").unwrap();
+        let plan = evaluate_plan_with(
+            "0.4.7",
+            UpdateProbes {
+                has_tool: &|_| true,
+                prefix: not_dir,
+                os: "linux",
+                arch: "x86_64",
+                check_write: true,
+            },
+        );
+        match plan {
+            UpdatePlan::Blocked { reason, hint } => {
+                assert!(
+                    reason.contains("not writable") || reason.contains("Cannot write"),
+                    "{reason}"
+                );
+                assert!(hint.contains("Copy"), "{hint}");
+            }
+            other => panic!("expected blocked, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ready_when_linux_x86_tools_and_writable() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let plan = evaluate_plan_with(
+            "0.4.7",
+            UpdateProbes {
+                has_tool: &|_| true,
+                prefix: dir.path().to_path_buf(),
+                os: "linux",
+                arch: "x86_64",
+                check_write: true,
+            },
+        );
+        match plan {
+            UpdatePlan::Ready { tag, prefix } => {
+                assert_eq!(tag, "stat-tracker-v0.4.7");
+                assert_eq!(prefix, dir.path());
+            }
+            other => panic!("expected ready, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn non_linux_is_blocked() {
+        let plan = evaluate_plan_with(
+            "0.4.7",
+            UpdateProbes {
+                has_tool: &|_| true,
+                prefix: PathBuf::from("/tmp"),
+                os: "macos",
+                arch: "x86_64",
+                check_write: false,
+            },
+        );
+        assert!(!plan.can_run());
+        match plan {
+            UpdatePlan::Blocked { reason, .. } => {
+                assert!(reason.contains("Linux-only"), "{reason}");
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn strip_ansi_drops_bootstrap_colors() {
+        assert_eq!(
+            strip_ansi("\u{1b}[0;32m[bootstrap]\u{1b}[0m Done."),
+            "[bootstrap] Done."
+        );
+        assert_eq!(strip_ansi("plain"), "plain");
     }
 }

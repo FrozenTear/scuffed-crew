@@ -20,7 +20,7 @@ use crate::settings::{self, SettingsField, SettingsForm, SettingsToggle};
 use crate::snapshot::{self, games_from_snapshot};
 use crate::theme::{self, PAGE_PAD_X, PAGE_PAD_Y, SIDEBAR_WIDTH};
 use crate::tray::{self, TrayAction, TrayHandle};
-use crate::update::{self, UpdateInfo};
+use crate::update::{self, UpdateInfo, UpdatePlan, UpdateProgress};
 use crate::widgets;
 
 #[derive(Debug, Clone)]
@@ -70,6 +70,9 @@ pub enum Message {
     ClearReady(Result<String, String>),
     UpdateChecked(Option<UpdateInfo>),
     OpenUpdate(String),
+    CopyUpdateCmd,
+    RunUpdate,
+    UpdateFinished(Result<String, String>),
     WindowOpened(window::Id),
     WindowClosed(window::Id),
     Tray(TrayAction),
@@ -133,6 +136,8 @@ pub struct TrackerApp {
     pub preview: Option<(Handle, String)>,
     pub preview_error: Option<String>,
     pub update: Option<UpdateInfo>,
+    pub update_progress: UpdateProgress,
+    pub update_plan: UpdatePlan,
     pub confirm_clear: bool,
     pub tessdata_busy: bool,
     pub tessdata_installed: bool,
@@ -247,6 +252,11 @@ impl TrackerApp {
             preview: None,
             preview_error: None,
             update: None,
+            update_progress: UpdateProgress::Idle,
+            update_plan: UpdatePlan::Blocked {
+                reason: String::new(),
+                hint: String::new(),
+            },
             confirm_clear: false,
             tessdata_busy: false,
             tessdata_installed: capture::tessdata_installed(),
@@ -726,11 +736,78 @@ impl TrackerApp {
                 Task::none()
             }
             Message::UpdateChecked(info) => {
+                self.update_plan = info
+                    .as_ref()
+                    .map(|i| update::evaluate_plan(&i.latest))
+                    .unwrap_or_else(|| UpdatePlan::Blocked {
+                        reason: String::new(),
+                        hint: String::new(),
+                    });
                 self.update = info;
                 Task::none()
             }
             Message::OpenUpdate(url) => {
                 update::open_release_page(&url);
+                Task::none()
+            }
+            Message::CopyUpdateCmd => {
+                let cmd = self
+                    .update
+                    .as_ref()
+                    .map(|i| update::pinned_install_command(&i.latest))
+                    .unwrap_or_else(|| update::UPDATE_CMD.to_string());
+                match crate::clipboard::copy_text(&cmd) {
+                    Ok(backend) => {
+                        self.toast =
+                            Some(format!("Copied install command via {}", backend.label()));
+                        Task::none()
+                    }
+                    Err(e) => {
+                        self.toast = Some(format!(
+                            "Copied via the app clipboard. If paste is empty, {e}"
+                        ));
+                        iced::clipboard::write(cmd)
+                    }
+                }
+            }
+            Message::RunUpdate => {
+                if matches!(self.update_progress, UpdateProgress::Running) {
+                    return Task::none();
+                }
+                let Some(info) = self.update.clone() else {
+                    return Task::none();
+                };
+                let plan = update::evaluate_plan(&info.latest);
+                self.update_plan = plan.clone();
+                if let UpdatePlan::Blocked { reason, hint } = &plan {
+                    let msg = format!("{reason} {hint}");
+                    self.update_progress = UpdateProgress::Failed(msg.clone());
+                    self.toast = Some(msg);
+                    return Task::none();
+                }
+                self.update_progress = UpdateProgress::Running;
+                Task::perform(
+                    update::run_in_app_update(update::UpdateRunRequest {
+                        latest: info.latest,
+                        data_dir: self.data_dir.clone(),
+                        stop_daemon: self.daemon.running(),
+                        service_installed: self.daemon.service_installed,
+                    }),
+                    Message::UpdateFinished,
+                )
+            }
+            Message::UpdateFinished(result) => {
+                match result {
+                    Ok(msg) => {
+                        self.update_progress = UpdateProgress::Succeeded(msg.clone());
+                        self.toast = Some(msg);
+                    }
+                    Err(e) => {
+                        self.update_progress = UpdateProgress::Failed(e.clone());
+                        self.toast = Some(e);
+                    }
+                }
+                self.daemon = daemon::refresh_view(&self.data_dir, &self.daemon);
                 Task::none()
             }
             Message::WindowOpened(id) => {

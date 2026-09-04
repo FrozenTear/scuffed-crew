@@ -10916,6 +10916,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "dirs",
+ "evdev",
  "gtk",
  "iced",
  "iced_layershell",
