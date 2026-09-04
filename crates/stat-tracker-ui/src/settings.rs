@@ -4,7 +4,7 @@
 //! pane, Save as a full-width footer strip. Does not invent daemon config keys.
 //! `data_dir` and `ocr_threads` are preserved from the loaded file.
 
-use iced::widget::{button, checkbox, column, container, row, space, text, text_input, Row};
+use iced::widget::{Row, button, checkbox, column, container, row, space, text, text_input};
 use iced::{Alignment, Element, Fill, Padding};
 use stat_tracker::config::{AutoDetectConfig, Config, SyncConfig};
 
@@ -567,12 +567,14 @@ fn player_card(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
 }
 
 fn auto_detect_card(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
-    let mut body = column![checkbox(app.settings.auto_detect_enabled)
-        .label("Watch for match start and end")
-        .on_toggle(|v| Message::SettingsToggle(SettingsToggle::AutoDetect, v))
-        .size(16)
-        .text_size(SIZE_BODY)
-        .style(checkbox_style),]
+    let mut body = column![
+        checkbox(app.settings.auto_detect_enabled)
+            .label("Watch for match start and end")
+            .on_toggle(|v| Message::SettingsToggle(SettingsToggle::AutoDetect, v))
+            .size(16)
+            .text_size(SIZE_BODY)
+            .style(checkbox_style),
+    ]
     .spacing(6);
 
     if app.settings.auto_detect_enabled {
