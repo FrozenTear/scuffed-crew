@@ -1,7 +1,8 @@
 //! Responsive column counts from available content width (design rev 3).
 //!
-//! Cards stay at least ~[`MIN_CARD`] wide. Games clamp 2–4 columns, heroes 4–6.
-//! Tonight is one featured card plus as many compact cards as fit at that minimum.
+//! Cards stay at least ~[`MIN_CARD`] wide. Games and maps clamp 2–4 columns,
+//! heroes 4–6. Tonight is one featured card plus as many compact cards as fit
+//! at that minimum.
 
 use crate::theme::{GRID_GAP, PAGE_PAD_X, SIDEBAR_WIDTH};
 
@@ -26,6 +27,11 @@ pub fn games_columns(available: f32) -> usize {
     columns_fit(available, MIN_CARD, GRID_GAP).clamp(2, 4)
 }
 
+/// Maps use the Games clamp: names + win bar need ~300 px, not a hero-grid squeeze.
+pub fn maps_columns(available: f32) -> usize {
+    columns_fit(available, MIN_CARD, GRID_GAP).clamp(2, 4)
+}
+
 pub fn heroes_columns(available: f32) -> usize {
     columns_fit(available, MIN_CARD, GRID_GAP).clamp(4, 6)
 }
@@ -40,11 +46,12 @@ mod tests {
     use super::*;
 
     /// Chrome used in `content_width_for_window`: sidebar 168 + page pads 64.
-    fn at_window(window: f32) -> (f32, usize, usize, usize) {
+    fn at_window(window: f32) -> (f32, usize, usize, usize, usize) {
         let w = content_width_for_window(window);
         (
             w,
             games_columns(w),
+            maps_columns(w),
             heroes_columns(w),
             tonight_compact_columns(w),
         )
@@ -52,30 +59,33 @@ mod tests {
 
     #[test]
     fn accept_widths_map_to_column_counts() {
-        let (w1280, g1280, h1280, t1280) = at_window(1280.0);
+        let (w1280, g1280, m1280, h1280, t1280) = at_window(1280.0);
         assert!(
             (w1280 - 1048.0).abs() < f32::EPSILON,
             "1280 content {w1280}"
         );
         assert_eq!(g1280, 3, "1280 games");
+        assert_eq!(m1280, 3, "1280 maps");
         assert_eq!(h1280, 4, "1280 heroes");
         assert_eq!(t1280, 3, "1280 tonight compact");
 
-        let (w1920, g1920, h1920, t1920) = at_window(1920.0);
+        let (w1920, g1920, m1920, h1920, t1920) = at_window(1920.0);
         assert!(
             (w1920 - 1688.0).abs() < f32::EPSILON,
             "1920 content {w1920}"
         );
         assert_eq!(g1920, 4, "1920 games");
+        assert_eq!(m1920, 4, "1920 maps");
         assert_eq!(h1920, 5, "1920 heroes");
         assert_eq!(t1920, 5, "1920 tonight compact");
 
-        let (w2560, g2560, h2560, t2560) = at_window(2560.0);
+        let (w2560, g2560, m2560, h2560, t2560) = at_window(2560.0);
         assert!(
             (w2560 - 2328.0).abs() < f32::EPSILON,
             "2560 content {w2560}"
         );
         assert_eq!(g2560, 4, "2560 games");
+        assert_eq!(m2560, 4, "2560 maps");
         assert_eq!(h2560, 6, "2560 heroes");
         assert_eq!(t2560, 7, "2560 tonight compact");
     }
@@ -85,6 +95,15 @@ mod tests {
         assert_eq!(games_columns(0.0), 2);
         assert_eq!(games_columns(200.0), 2);
         assert_eq!(games_columns(10_000.0), 4);
+    }
+
+    #[test]
+    fn maps_never_below_two_or_above_four() {
+        assert_eq!(maps_columns(0.0), 2);
+        assert_eq!(maps_columns(200.0), 2);
+        assert_eq!(maps_columns(10_000.0), 4);
+        assert_eq!(maps_columns(1048.0), 3);
+        assert_eq!(maps_columns(1688.0), 4);
     }
 
     #[test]
