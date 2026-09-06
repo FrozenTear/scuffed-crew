@@ -21,9 +21,12 @@ pub struct Config {
     /// disables the gate.
     #[serde(default = "default_game_process_names")]
     pub game_process_names: Vec<String>,
-    /// When true, every Tab OCR writes intermediate PNGs under `{data_dir}/debug/`.
-    /// Off by default — the pipeline recomputes preprocess just to dump stages and
-    /// dominated capture latency. Also enabled by env `STAT_TRACKER_DEBUG_OCR=1`.
+    /// When true, Tab OCR writes intermediate PNGs under `{data_dir}/debug/`,
+    /// and the poller writes Victory/Defeat evidence frames to `debug/poll/`
+    /// on confirm (banner or second agreeing word-OCR) and first word-OCR
+    /// streak — not every mid-match tick. Off by default — the Tab path
+    /// recomputes preprocess just to dump stages and dominated capture
+    /// latency. Also enabled by env `STAT_TRACKER_DEBUG_OCR=1`.
     #[serde(default)]
     pub debug_ocr: bool,
     /// Parallel OCR workers (each keeps a ~23 MB Tesseract model resident).
