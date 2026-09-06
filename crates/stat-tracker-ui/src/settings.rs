@@ -700,7 +700,7 @@ fn diagnostics_card(app: &TrackerApp, _demo: bool) -> Element<'_, Message> {
             .size(16)
             .text_size(SIZE_BODY)
             .style(checkbox_style),
-        text("Writes images under the data folder. Slows capture — leave off unless diagnosing.")
+        text("Writes Tab crops plus poll Victory/Defeat evidence frames (not every tick). Slows capture — leave off unless diagnosing.")
             .size(SIZE_LABEL)
             .font(FONT_MEDIUM)
             .color(TEXT_3),

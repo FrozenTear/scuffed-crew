@@ -83,6 +83,10 @@ struct DaemonCtx {
     portrait_matcher: Arc<detect::hero_portrait::PortraitMatcher>,
     collect_portraits: bool,
     dump_poll_frames: bool,
+    /// Same gate as Tab OCR dumps (`debug_ocr` / `STAT_TRACKER_DEBUG_OCR`).
+    /// When set, the poller writes Victory/Defeat evidence frames on confirm
+    /// and first word-OCR streak — not every mid-match tick.
+    debug_ocr: bool,
     data_dir: std::path::PathBuf,
     /// Consecutive scoreboard captures that parsed but resolved no map. Drives
     /// the `debug/mapmiss/` region dump (see `EMPTY_MAP_DUMP_THRESHOLD`).
@@ -213,6 +217,7 @@ async fn main() -> anyhow::Result<()> {
         portrait_matcher,
         collect_portraits,
         dump_poll_frames,
+        debug_ocr: config.debug_ocr_enabled(),
         data_dir,
         empty_map_reads: std::sync::atomic::AtomicUsize::new(0),
     });
@@ -448,6 +453,11 @@ fn log_startup_readiness(config: &config::Config, dump_poll_frames: bool, collec
         tracing::info!(
             dir = %config.data_dir.join("debug").join("poll").display(),
             "poll-frame dumping enabled (keeps the last {POLL_DUMP_KEEP} frames)"
+        );
+    } else if config.debug_ocr_enabled() {
+        tracing::info!(
+            dir = %config.data_dir.join("debug").join("poll").display(),
+            "debug_ocr: poll Victory/Defeat evidence frames on confirm and first streak (keeps the last {POLL_DUMP_KEEP} frames)"
         );
     }
     tracing::info!("daemon ready — press Tab in-game to capture scoreboard");
@@ -1097,6 +1107,7 @@ async fn run_loop(ctx: Arc<DaemonCtx>) -> anyhow::Result<()> {
     let capture_output = ctx.capture_output.as_deref();
     let auto_detect = &ctx.auto_detect;
     let dump_poll_frames = ctx.dump_poll_frames;
+    let debug_ocr = ctx.debug_ocr;
     let data_dir: &std::path::Path = &ctx.data_dir;
 
     let mut game_gate = detect::game_running::GameProcessGate::new(&ctx.game_process_names);
@@ -1445,6 +1456,10 @@ async fn run_loop(ctx: Arc<DaemonCtx>) -> anyhow::Result<()> {
                 match capture::capture_screen_output(backend, capture_output).await {
                     Ok(img) => {
                         let dump_dir = dump_poll_frames.then(|| data_dir.join("debug").join("poll"));
+                        // On-hit evidence (debug_ocr): confirm + first streak only.
+                        // `--dump-poll-frames` still writes every tick as `poll_*`.
+                        let on_hit_dir = debug_ocr.then(|| data_dir.join("debug").join("poll"));
+                        let prior_streak = st.word_outcome_streak.map(|(o, t)| (o, t.elapsed()));
                         let mut stability = std::mem::take(&mut st.ocr_stability);
                         let (signal, phase, accolade_map, stability) = tokio::task::spawn_blocking(move || {
                             if let Some(dir) = &dump_dir {
@@ -1470,6 +1485,17 @@ async fn run_loop(ctx: Arc<DaemonCtx>) -> anyhow::Result<()> {
                                 _ => None,
                             };
                             let phase = detect::match_start::detect_phase_polled(&img, &rgb, &mut stability);
+                            if let Some(dir) = &on_hit_dir
+                                && let Some((kind, outcome)) =
+                                    poll_debug_hit(signal, prior_streak, OUTCOME_CONFIRM_WINDOW)
+                            {
+                                save_frame_ring(
+                                    dir,
+                                    &poll_debug_prefix(kind, outcome),
+                                    &img,
+                                    POLL_DUMP_KEEP,
+                                );
+                            }
                             (signal, phase, accolade_map, stability)
                         }).await.unwrap_or_else(|_| {
                             (None, detect::GamePhase::Unknown, None, detect::stability::FrameStability::default())
@@ -1480,15 +1506,19 @@ async fn run_loop(ctx: Arc<DaemonCtx>) -> anyhow::Result<()> {
                         // immediately (and only lasts ~3s — a second tick may
                         // never come). A word-OCR outcome (accolade or rank
                         // screen) needs a second agreeing read within the
-                        // confirmation window.
+                        // confirmation window. `poll_debug_hit` is the same
+                        // confirm/streak rule used for debug_ocr PNGs.
+                        let hit = poll_debug_hit(
+                            signal,
+                            st.word_outcome_streak.map(|(o, t)| (o, t.elapsed())),
+                            OUTCOME_CONFIRM_WINDOW,
+                        );
                         let confirmed = match signal {
                             Some((outcome, detect::match_end::OutcomeSource::Banner)) => {
                                 Some(outcome)
                             }
                             Some((outcome, source)) => {
-                                let agreed = st.word_outcome_streak
-                                    .as_ref()
-                                    .is_some_and(|(prev, t)| *prev == outcome && t.elapsed() <= OUTCOME_CONFIRM_WINDOW);
+                                let agreed = matches!(hit, Some((PollDebugHit::Confirm, _)));
                                 st.word_outcome_streak = Some((outcome, Instant::now()));
                                 if agreed {
                                     Some(outcome)
@@ -2328,10 +2358,56 @@ async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<
     }
 }
 
+/// Why a poll tick earned a `debug_ocr` evidence PNG. Mid-match ticks with
+/// no outcome signal are not saved; `--dump-poll-frames` is the every-tick
+/// hammer and stays independent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PollDebugHit {
+    /// Banner one-shot, or the second agreeing word-OCR tick.
+    Confirm,
+    /// First word-OCR streak sighting (pre-confirm). A lone VICTORY/SVACTORY
+    /// that never gets a second tick still leaves a frame.
+    Streak,
+}
+
+/// Decide whether this poll tick should write a `debug/poll/` evidence PNG
+/// when `debug_ocr` is on. Mirrors the poller's confirm/streak match so a
+/// test can pin the triggers without driving the `select!` loop.
+fn poll_debug_hit(
+    signal: Option<(detect::MatchOutcome, detect::match_end::OutcomeSource)>,
+    prior_streak: Option<(detect::MatchOutcome, std::time::Duration)>,
+    confirm_window: std::time::Duration,
+) -> Option<(PollDebugHit, detect::MatchOutcome)> {
+    match signal {
+        Some((outcome, detect::match_end::OutcomeSource::Banner)) => {
+            Some((PollDebugHit::Confirm, outcome))
+        }
+        Some((outcome, _)) => {
+            let agreed =
+                prior_streak.is_some_and(|(prev, age)| prev == outcome && age <= confirm_window);
+            if agreed {
+                Some((PollDebugHit::Confirm, outcome))
+            } else {
+                Some((PollDebugHit::Streak, outcome))
+            }
+        }
+        None => None,
+    }
+}
+
+fn poll_debug_prefix(hit: PollDebugHit, outcome: detect::MatchOutcome) -> String {
+    let kind = match hit {
+        PollDebugHit::Confirm => "confirm",
+        PollDebugHit::Streak => "streak",
+    };
+    format!("poll_{kind}_{outcome}")
+}
+
 /// Save a debug frame into `dir` as `<prefix>_<timestamp>.png`, keeping at
 /// most `keep` PNGs in the directory (oldest by mtime evicted). Each ring gets
 /// a dedicated directory (`debug/poll`, `debug/rejected`), so every PNG there
-/// participates in the same ring regardless of prefix.
+/// participates in the same ring regardless of prefix. On-hit names are
+/// `poll_confirm_{outcome}_…` / `poll_streak_{outcome}_…`.
 fn save_frame_ring(dir: &std::path::Path, prefix: &str, img: &image::DynamicImage, keep: usize) {
     if std::fs::create_dir_all(dir).is_err() {
         return;
@@ -3045,5 +3121,178 @@ mod tests {
         assert!(stale.is_none());
 
         assert_eq!(take_fresh_pending(&mut None, now), None);
+    }
+
+    fn word(
+        outcome: detect::MatchOutcome,
+    ) -> Option<(detect::MatchOutcome, detect::match_end::OutcomeSource)> {
+        Some((outcome, detect::match_end::OutcomeSource::ResultWord))
+    }
+
+    #[test]
+    fn poll_debug_hit_skips_mid_match_no_signal() {
+        assert_eq!(poll_debug_hit(None, None, OUTCOME_CONFIRM_WINDOW), None);
+        assert_eq!(
+            poll_debug_hit(
+                None,
+                Some((detect::MatchOutcome::Victory, Duration::from_secs(5))),
+                OUTCOME_CONFIRM_WINDOW
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn poll_debug_hit_banner_is_confirm() {
+        assert_eq!(
+            poll_debug_hit(
+                Some((
+                    detect::MatchOutcome::Victory,
+                    detect::match_end::OutcomeSource::Banner
+                )),
+                None,
+                OUTCOME_CONFIRM_WINDOW
+            ),
+            Some((PollDebugHit::Confirm, detect::MatchOutcome::Victory))
+        );
+        assert_eq!(
+            poll_debug_hit(
+                Some((
+                    detect::MatchOutcome::Defeat,
+                    detect::match_end::OutcomeSource::Banner
+                )),
+                Some((detect::MatchOutcome::Defeat, Duration::from_secs(1))),
+                OUTCOME_CONFIRM_WINDOW
+            ),
+            Some((PollDebugHit::Confirm, detect::MatchOutcome::Defeat))
+        );
+    }
+
+    #[test]
+    fn poll_debug_hit_first_word_is_streak() {
+        assert_eq!(
+            poll_debug_hit(
+                word(detect::MatchOutcome::Victory),
+                None,
+                OUTCOME_CONFIRM_WINDOW
+            ),
+            Some((PollDebugHit::Streak, detect::MatchOutcome::Victory))
+        );
+        // Expired prior streak is a new first sighting, not a confirm.
+        assert_eq!(
+            poll_debug_hit(
+                word(detect::MatchOutcome::Defeat),
+                Some((
+                    detect::MatchOutcome::Defeat,
+                    OUTCOME_CONFIRM_WINDOW + Duration::from_secs(1)
+                )),
+                OUTCOME_CONFIRM_WINDOW
+            ),
+            Some((PollDebugHit::Streak, detect::MatchOutcome::Defeat))
+        );
+        // Disagreement restarts the streak.
+        assert_eq!(
+            poll_debug_hit(
+                word(detect::MatchOutcome::Draw),
+                Some((detect::MatchOutcome::Victory, Duration::from_secs(2))),
+                OUTCOME_CONFIRM_WINDOW
+            ),
+            Some((PollDebugHit::Streak, detect::MatchOutcome::Draw))
+        );
+    }
+
+    #[test]
+    fn poll_debug_hit_second_agreeing_word_is_confirm() {
+        assert_eq!(
+            poll_debug_hit(
+                word(detect::MatchOutcome::Victory),
+                Some((detect::MatchOutcome::Victory, Duration::from_secs(10))),
+                OUTCOME_CONFIRM_WINDOW
+            ),
+            Some((PollDebugHit::Confirm, detect::MatchOutcome::Victory))
+        );
+        assert_eq!(
+            poll_debug_hit(
+                Some((
+                    detect::MatchOutcome::Defeat,
+                    detect::match_end::OutcomeSource::RankScreen
+                )),
+                Some((detect::MatchOutcome::Defeat, Duration::from_secs(1))),
+                OUTCOME_CONFIRM_WINDOW
+            ),
+            Some((PollDebugHit::Confirm, detect::MatchOutcome::Defeat))
+        );
+        assert_eq!(
+            poll_debug_hit(
+                Some((
+                    detect::MatchOutcome::Draw,
+                    detect::match_end::OutcomeSource::EndTitle
+                )),
+                Some((detect::MatchOutcome::Draw, Duration::from_secs(50))),
+                OUTCOME_CONFIRM_WINDOW
+            ),
+            Some((PollDebugHit::Confirm, detect::MatchOutcome::Draw))
+        );
+    }
+
+    #[test]
+    fn poll_debug_prefix_is_greppable_by_kind_and_outcome() {
+        assert_eq!(
+            poll_debug_prefix(PollDebugHit::Confirm, detect::MatchOutcome::Victory),
+            "poll_confirm_victory"
+        );
+        assert_eq!(
+            poll_debug_prefix(PollDebugHit::Streak, detect::MatchOutcome::Defeat),
+            "poll_streak_defeat"
+        );
+        assert_eq!(
+            poll_debug_prefix(PollDebugHit::Confirm, detect::MatchOutcome::Draw),
+            "poll_confirm_draw"
+        );
+    }
+
+    #[test]
+    fn save_frame_ring_uses_on_hit_prefix_and_bounds() {
+        let dir = tempfile::tempdir().unwrap();
+        let img = image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
+            2,
+            2,
+            image::Rgb([8, 16, 32]),
+        ));
+        let prefix = poll_debug_prefix(PollDebugHit::Confirm, detect::MatchOutcome::Victory);
+        save_frame_ring(dir.path(), &prefix, &img, 2);
+        save_frame_ring(
+            dir.path(),
+            &poll_debug_prefix(PollDebugHit::Streak, detect::MatchOutcome::Defeat),
+            &img,
+            2,
+        );
+        let names: Vec<String> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            names
+                .iter()
+                .any(|n| n.starts_with("poll_confirm_victory_") && n.ends_with(".png")),
+            "names={names:?}"
+        );
+        assert!(
+            names
+                .iter()
+                .any(|n| n.starts_with("poll_streak_defeat_") && n.ends_with(".png")),
+            "names={names:?}"
+        );
+        assert_eq!(names.len(), 2);
+
+        // Bounded keep: a third write evicts the oldest PNG in the ring.
+        save_frame_ring(dir.path(), "poll_confirm_draw", &img, 2);
+        let names: Vec<String> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names.len(), 2, "names={names:?}");
     }
 }
