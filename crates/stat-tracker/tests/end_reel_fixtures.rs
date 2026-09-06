@@ -30,6 +30,15 @@ fn open(rel: &str) -> Option<image::DynamicImage> {
     }
 }
 
+fn open_any(rels: &[&str]) -> Option<image::DynamicImage> {
+    for rel in rels {
+        if let Some(img) = open(rel) {
+            return Some(img);
+        }
+    }
+    None
+}
+
 #[test]
 fn synthetic_nameplate_potg_wakes_end_reel() {
     let path = "tests/fixtures/end-reel/nameplate_potg_synthetic.png";
@@ -43,7 +52,10 @@ fn synthetic_nameplate_potg_wakes_end_reel() {
 
 #[test]
 fn known_potg_003708_wakes_if_present() {
-    let Some(img) = open("test-data/end-reel/known-potg-003708.png") else {
+    let Some(img) = open_any(&[
+        "test-data/end-reel/known-potg-003708.png",
+        "../../potg-test/known-potg-003708.png",
+    ]) else {
         return;
     };
     let rgb = img.to_rgb8();
@@ -55,19 +67,38 @@ fn known_potg_003708_wakes_if_present() {
 
 #[test]
 fn entering_game_does_not_wake_if_present() {
-    let Some(img) = open("test-data/end-reel/entering_game.png") else {
-        return;
-    };
-    let rgb = img.to_rgb8();
-    assert!(
-        !detect_end_reel(&img, &rgb),
-        "ENTERING GAME loading must not end-reel-wake"
-    );
+    let paths = [
+        "test-data/end-reel/entering_game.png",
+        "../../batch-check/rej_013904.png",
+        "../../batch-check/poll_223050.png",
+    ];
+    let mut saw = false;
+    for rel in paths {
+        let Some(img) = open(rel) else {
+            continue;
+        };
+        saw = true;
+        let rgb = img.to_rgb8();
+        assert!(
+            !detect_end_reel(&img, &rgb),
+            "{rel}: ENTERING GAME loading must not end-reel-wake"
+        );
+        assert!(
+            !detect_ban_screen(&img, &rgb),
+            "{rel}: ENTERING GAME is not a ban screen"
+        );
+    }
+    if !saw {
+        eprintln!("skip (missing): any ENTERING GAME fixture");
+    }
 }
 
 #[test]
 fn ban_heroes_does_not_wake_if_present() {
-    let Some(img) = open("test-data/end-reel/ban_heroes.png") else {
+    let Some(img) = open_any(&[
+        "test-data/end-reel/ban_heroes.png",
+        "../../batch-check/poll_223022.png",
+    ]) else {
         return;
     };
     let rgb = img.to_rgb8();
@@ -83,7 +114,10 @@ fn ban_heroes_does_not_wake_if_present() {
 
 #[test]
 fn scoreboard_tab_does_not_wake_if_present() {
-    let Some(img) = open("test-data/end-reel/scoreboard_tab.png") else {
+    let Some(img) = open_any(&[
+        "test-data/end-reel/scoreboard_tab.png",
+        "../../batch-check/acc_020455.png",
+    ]) else {
         return;
     };
     let rgb = img.to_rgb8();

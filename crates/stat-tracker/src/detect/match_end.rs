@@ -544,8 +544,38 @@ fn end_reel_letterbox(rgb: &RgbImage) -> bool {
     top_dark >= 0.72
         && bot_dark >= 0.72
         && mid_dark < 0.50
+        && letterbox_shoulders_are_content(rgb, gx, gy, gw, gh)
         && letterbox_mid_is_footage(rgb, gx, mid_y, gw, mid_h)
 }
+
+/// Cinematic 2.35:1 bars are ~12% of 16:9. `ENTERING GAME` keeps ~35–40%
+/// black above and below a thin navy strip (Soot 2026-09-06 recheck on
+/// rejected_preflight_013904 / poll_223050). The 7% edge bands are dark
+/// in both cases; the *shoulders* just inside those edges are gameplay
+/// on a real reel and still black on the loading slab.
+fn letterbox_shoulders_are_content(rgb: &RgbImage, gx: u32, gy: u32, gw: u32, gh: u32) -> bool {
+    let sh = (gh * LETTERBOX_SHOULDER_H_PM / 1000).max(1);
+    let top = dark_ratio(
+        rgb,
+        gx,
+        gy + gh * LETTERBOX_SHOULDER_TOP_Y_PM / 1000,
+        gw,
+        sh,
+    );
+    let bot = dark_ratio(
+        rgb,
+        gx,
+        gy + gh * LETTERBOX_SHOULDER_BOT_Y_PM / 1000,
+        gw,
+        sh,
+    );
+    top < LETTERBOX_SHOULDER_DARK_MAX && bot < LETTERBOX_SHOULDER_DARK_MAX
+}
+
+const LETTERBOX_SHOULDER_TOP_Y_PM: u32 = 150;
+const LETTERBOX_SHOULDER_BOT_Y_PM: u32 = 770;
+const LETTERBOX_SHOULDER_H_PM: u32 = 80;
+const LETTERBOX_SHOULDER_DARK_MAX: f32 = 0.60;
 
 /// Reject a uniform loading / transition slab. `ENTERING GAME` is a navy
 /// strip with a few white glyphs — among *lit* mid pixels one 16-wide
@@ -745,6 +775,12 @@ fn nameplate_potg_signal(rgb: &RgbImage) -> bool {
     if playfield_hit_ratio(rgb, 0, 0, 1000, 1000, is_potg_orange) > 0.30 {
         return false;
     }
+    // Tab scoreboard crop (Soot accepted_020455): one mustard team *slab*
+    // (no dark gaps) plus a magenta team above. Group-count of 3+ misses
+    // a solid block; a single battletag is a short gold run, not a slab.
+    if nameplate_looks_like_scoreboard(rgb) {
+        return false;
+    }
     // Tab scoreboard: stacked gold team rows (highlighted mustard ≠ a
     // single battletag). Three or more gold-heavy bands in the lower-left
     // are a board, not PLAY OF THE GAME + name.
@@ -776,6 +812,39 @@ fn nameplate_potg_signal(rgb: &RgbImage) -> bool {
 const NAMEPLATE_ORANGE_MIN: f32 = 0.035;
 const NAMEPLATE_ORANGE_MAX: f32 = 0.28;
 const NAMEPLATE_WHITE_MIN: f32 = 0.012;
+
+fn nameplate_looks_like_scoreboard(rgb: &RgbImage) -> bool {
+    // Solid gold team block: many full-width hot strips. The committed
+    // synthetic nameplate lights 5 strips at this threshold; a gold-team
+    // slab lights ~10+. known-potg gold is a short left-side run.
+    if nameplate_gold_hot_strips(rgb) >= 8 {
+        return true;
+    }
+    let left_lower_gold = playfield_hit_ratio(rgb, 0, 500, 500, 500, is_potg_orange);
+    let upper_magenta = playfield_hit_ratio(rgb, 0, 50, 1000, 430, is_team_magenta);
+    // Magenta team over gold team — Tab board, not a POTG card.
+    // Synthetic nameplate upper-magenta ≈ 0.003; left-lower gold ≈ 0.098.
+    upper_magenta > 0.06 && left_lower_gold > 0.04
+}
+
+fn is_team_magenta(r: u8, g: u8, b: u8) -> bool {
+    let (hue, sat, val) = rgb_to_hsv(r, g, b);
+    hue_near(hue, 300, 35) && sat > 80 && val > 35
+}
+
+fn nameplate_gold_hot_strips(rgb: &RgbImage) -> u32 {
+    const STRIPS: u32 = 20;
+    const HOT: f32 = 0.08;
+    let mut hot = 0u32;
+    for i in 0..STRIPS {
+        let y_pm = 400 + i * 550 / STRIPS;
+        let h_pm = (550 / STRIPS).max(1);
+        if playfield_hit_ratio(rgb, 0, y_pm, 1000, h_pm, is_potg_orange) > HOT {
+            hot += 1;
+        }
+    }
+    hot
+}
 
 /// Count contiguous gold-heavy horizontal strips in the lower-left half.
 /// POTG nameplate ≈ 1–2 runs (title stack). Tab gold team ≈ 6 row blocks.
@@ -1225,10 +1294,15 @@ mod tests {
     }
 
     fn entering_game_frame() -> RgbImage {
+        // Soot 013904 / 223050: ~38% black bars + a ~24% navy strip.
+        // A vertical navy gradient splits 16-wide bins (old footage
+        // check) but the shoulders at y 15–23% / 77–85% stay black.
         let mut img = RgbImage::from_pixel(640, 360, Rgb([0, 0, 0]));
-        for y in 140..220 {
+        for y in 136..224 {
+            let t = (y - 136) as u8;
+            let navy = Rgb([20 + t / 4, 28 + t / 5, 42 + t / 3]);
             for x in 0..640 {
-                img.put_pixel(x, y, Rgb([18, 24, 38]));
+                img.put_pixel(x, y, navy);
             }
         }
         // Centered white "ENTERING GAME" glyphs.
@@ -1239,32 +1313,32 @@ mod tests {
                 }
             }
         }
+        // Thin HUD line in the top 7% band (MangoHud / FPS overlay).
+        for x in 8..400 {
+            img.put_pixel(x, 4, Rgb([220, 220, 220]));
+        }
         img
     }
 
     fn tab_scoreboard_frame() -> RgbImage {
         let mut img = RgbImage::from_pixel(640, 360, Rgb([0, 0, 0]));
-        // Purple team (upper).
-        for row in 0..6 {
-            let y0 = 16 + row * 22;
-            for y in y0..y0 + 18 {
-                for x in 40..600 {
-                    img.put_pixel(x, y, Rgb([90, 40, 140]));
-                }
+        // Soot accepted_020455: one magenta team *slab* over one mustard
+        // slab (no dark row gaps). Group-count of 3+ misses this.
+        for y in 12..165 {
+            for x in 24..620 {
+                img.put_pixel(x, y, Rgb([90, 40, 140]));
             }
         }
-        // Gold team (lower) — mustard fills + white names/stats. This is
-        // the 0.4.10 nameplate FP: orange+white in the lower-left ROI.
-        for row in 0..6 {
-            let y0 = 190 + row * 24;
-            for y in y0..y0 + 20 {
-                for x in 40..600 {
-                    img.put_pixel(x, y, Rgb([188, 146, 0]));
-                }
-                for x in 80..220 {
-                    if x % 5 < 2 {
-                        img.put_pixel(x, y0 + 6, Rgb([235, 235, 235]));
-                    }
+        for y in 185..348 {
+            for x in 24..620 {
+                img.put_pixel(x, y, Rgb([188, 146, 0]));
+            }
+        }
+        // White names / stats on both teams (nameplate white gate).
+        for y in [40, 70, 100, 130, 210, 240, 270, 300] {
+            for x in 80..240 {
+                if x % 5 < 2 {
+                    img.put_pixel(x, y, Rgb([235, 235, 235]));
                 }
             }
         }
