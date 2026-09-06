@@ -493,11 +493,11 @@ fn detect_banner(rgb: &RgbImage) -> Option<MatchOutcome> {
 /// 1. Cinematic letterbox (dark top+bottom bars, lit middle) — no OCR.
 /// 2. Title-band OCR for PLAY OF THE GAME / HIGHLIGHT INTRO, gated on
 ///    [`cinematic_title_band`] so mid-fight ticks do not pay Tesseract.
-/// 3. Nameplate POTG title card (large orange player name + white title
+/// 3. Nameplate POTG title card (lower-left gold battletag + white title
 ///    glyphs). Chat / endorsement toasts light the cinematic band, so path
 ///    2 never runs on a real nameplate frame (`known-potg-003708`). Phrase
-///    OCR is still required — the orange+white gate only decides whether
-///    to pay Tesseract.
+///    OCR is still required — the gold+white gate only decides whether to
+///    pay Tesseract.
 pub fn detect_end_reel(img: &DynamicImage, rgb: &RgbImage) -> bool {
     if end_reel_letterbox(rgb) {
         tracing::info!("end-reel letterbox — POTG / highlight wake");
@@ -600,12 +600,11 @@ fn read_end_reel_nameplate(img: &DynamicImage, rgb: &RgbImage) -> bool {
     )
 }
 
-/// Left-half stack: PLAY OF THE GAME above the large orange battletag.
-/// Left-biased so the hero render (right two-thirds) stays out of the crop.
-/// Tall enough to catch a vertically-centered nameplate; still left of the
-/// centered in-world V/D end-title (x ~32–68%).
+/// Left-half stack: PLAY OF THE GAME above the large gold battletag.
+/// Measured on known-potg-003708 (2560×1440): title ~y 64–67%, name
+/// ~y 69–75%. Left-biased so the hero (right two-thirds) stays out.
 fn end_reel_nameplate_crop(img: &DynamicImage) -> Option<DynamicImage> {
-    playfield_crop(img, 20, 100, 500, 480)
+    playfield_crop(img, 20, 550, 500, 300)
 }
 
 fn playfield_crop(
@@ -677,22 +676,59 @@ fn prepare_nameplate_title(crop: &DynamicImage) -> GrayImage {
     bordered
 }
 
-/// Cheap nameplate gate: large OW-orange battletag in the left-center plus
-/// bright white title glyphs above it. Does not require a dark field.
+/// Cheap nameplate gate: large gold battletag in the lower-left plus
+/// bright white title glyphs just above it. Does not require a dark field.
+///
+/// ROI + hue calibrated on known-potg-003708 (Soot, 2026-09-06): the
+/// first #83 gate used a mid-frame orange band (y 34–58%) and
+/// `hue_near(30, 12)`. On the real 2560×1440 card the battletag sits at
+/// y ≈ 990–1080 (≈69–75%) with sample `rgb(255, 221, 0)` ≈ hue 52, so
+/// orange ratio was 0.0 and `detect_end_reel` returned false.
 fn nameplate_potg_signal(rgb: &RgbImage) -> bool {
-    let orange = playfield_hit_ratio(rgb, 30, 340, 460, 240, is_potg_orange);
-    let white = playfield_hit_ratio(rgb, 30, 140, 460, 260, is_title_white);
+    // Victory banner saturates the whole playfield with the same gold
+    // family as the nameplate. Reject that flood; the white-title check
+    // alone is usually enough, this is the belt.
+    if playfield_hit_ratio(rgb, 0, 0, 1000, 1000, is_potg_orange) > 0.30 {
+        return false;
+    }
+    let orange = playfield_hit_ratio(
+        rgb,
+        NAMEPLATE_ORANGE_X_PM,
+        NAMEPLATE_ORANGE_Y_PM,
+        NAMEPLATE_ORANGE_W_PM,
+        NAMEPLATE_ORANGE_H_PM,
+        is_potg_orange,
+    );
+    let white = playfield_hit_ratio(
+        rgb,
+        NAMEPLATE_WHITE_X_PM,
+        NAMEPLATE_WHITE_Y_PM,
+        NAMEPLATE_WHITE_W_PM,
+        NAMEPLATE_WHITE_H_PM,
+        is_title_white,
+    );
     orange >= NAMEPLATE_ORANGE_MIN && white >= NAMEPLATE_WHITE_MIN
 }
 
 const NAMEPLATE_ORANGE_MIN: f32 = 0.035;
 const NAMEPLATE_WHITE_MIN: f32 = 0.012;
+/// Lower-left battletag band (y 66–82%, x 5–45%).
+const NAMEPLATE_ORANGE_X_PM: u32 = 50;
+const NAMEPLATE_ORANGE_Y_PM: u32 = 660;
+const NAMEPLATE_ORANGE_W_PM: u32 = 400;
+const NAMEPLATE_ORANGE_H_PM: u32 = 160;
+/// White "PLAY OF THE GAME" just above the name (y 58–70%).
+const NAMEPLATE_WHITE_X_PM: u32 = 50;
+const NAMEPLATE_WHITE_Y_PM: u32 = 580;
+const NAMEPLATE_WHITE_W_PM: u32 = 420;
+const NAMEPLATE_WHITE_H_PM: u32 = 120;
 
 fn is_potg_orange(r: u8, g: u8, b: u8) -> bool {
     let (hue, sat, val) = rgb_to_hsv(r, g, b);
-    // POTG battletag orange (~hue 31). Tight enough to drop victory gold
-    // (~hue 46) and defeat red (~hue 0).
-    hue_near(hue, 30, 12) && sat > 150 && val > 150 && r > g && g > b
+    // Real nameplate gold ~rgb(255,221,0) hue ~52. Window also keeps
+    // deeper orange. Defeat red (~hue 0) is out. Victory-banner gold
+    // (~hue 46) matches this predicate and is dropped by the flood veto.
+    hue_near(hue, 48, 16) && sat > 140 && val > 160 && r > g && g > b
 }
 
 fn is_title_white(r: u8, g: u8, b: u8) -> bool {
@@ -1122,9 +1158,15 @@ mod tests {
         assert!(cinematic_title_band(&DynamicImage::ImageRgb8(card)));
     }
 
-    /// Lit indoor frame + toast + chat + orange name + white title glyphs.
-    /// Matches the measured miss on known-potg-003708: no letterbox, no
-    /// cinematic dark band, but the nameplate stack is present.
+    /// First #83 mid-band orange ROI — the real battletag sits lower.
+    const NAMEPLATE_ORANGE_OLD_X_PM: u32 = 30;
+    const NAMEPLATE_ORANGE_OLD_Y_PM: u32 = 340;
+    const NAMEPLATE_ORANGE_OLD_W_PM: u32 = 460;
+    const NAMEPLATE_ORANGE_OLD_H_PM: u32 = 240;
+
+    /// Lit indoor frame matching known-potg-003708 geometry: no letterbox,
+    /// toast lights the cinematic band, gold battletag in the lower-left
+    /// (y ~70%, rgb 255,221,0), white PLAY OF THE GAME just above it.
     fn nameplate_potg_frame() -> RgbImage {
         let mut img = RgbImage::from_pixel(640, 360, Rgb([110, 95, 85]));
         for y in 0..360 {
@@ -1132,7 +1174,7 @@ mod tests {
                 img.put_pixel(x, y, Rgb([150, 120, 100]));
             }
         }
-        // Yellow endorsement toast in the cinematic band.
+        // Yellow endorsement toast in the cinematic band (y ~8–30%).
         for y in 40..70 {
             for x in 20..280 {
                 img.put_pixel(x, y, Rgb([240, 210, 40]));
@@ -1144,20 +1186,19 @@ mod tests {
                 img.put_pixel(x, y, Rgb([255, 140, 40]));
             }
         }
-        // White title glyphs in the nameplate title band (y ~14–40%).
-        // Thick strokes so stride-2 sampling still hits (real italic stems
-        // are several pixels wide; a 1-px lattice can miss every sample).
-        for y in 90..120 {
-            for x in 30..300 {
+        // White title glyphs at y ~64–67% (real PLAY OF THE GAME).
+        // Thick strokes so stride-2 sampling still hits.
+        for y in 230..242 {
+            for x in 40..260 {
                 if x % 8 < 3 {
                     img.put_pixel(x, y, Rgb([235, 235, 235]));
                 }
             }
         }
-        // Large orange battletag (y ~34–58%).
-        for y in 140..190 {
-            for x in 30..320 {
-                img.put_pixel(x, y, Rgb([255, 150, 40]));
+        // Gold battletag at y ~70–75%, sample from the real frame.
+        for y in 252..272 {
+            for x in 40..280 {
+                img.put_pixel(x, y, Rgb([255, 221, 0]));
             }
         }
         img
@@ -1176,11 +1217,37 @@ mod tests {
             !cinematic_title_band(&crop),
             "toast + hero light the cinematic band — old gate must miss"
         );
-        let orange = playfield_hit_ratio(&frame, 30, 340, 460, 240, is_potg_orange);
-        let white = playfield_hit_ratio(&frame, 30, 140, 460, 260, is_title_white);
+        let old_orange = playfield_hit_ratio(
+            &frame,
+            NAMEPLATE_ORANGE_OLD_X_PM,
+            NAMEPLATE_ORANGE_OLD_Y_PM,
+            NAMEPLATE_ORANGE_OLD_W_PM,
+            NAMEPLATE_ORANGE_OLD_H_PM,
+            is_potg_orange,
+        );
+        assert!(
+            old_orange < NAMEPLATE_ORANGE_MIN,
+            "mid-band ROI from first #83 must miss the lower-third name (old_orange={old_orange:.4})"
+        );
+        let orange = playfield_hit_ratio(
+            &frame,
+            NAMEPLATE_ORANGE_X_PM,
+            NAMEPLATE_ORANGE_Y_PM,
+            NAMEPLATE_ORANGE_W_PM,
+            NAMEPLATE_ORANGE_H_PM,
+            is_potg_orange,
+        );
+        let white = playfield_hit_ratio(
+            &frame,
+            NAMEPLATE_WHITE_X_PM,
+            NAMEPLATE_WHITE_Y_PM,
+            NAMEPLATE_WHITE_W_PM,
+            NAMEPLATE_WHITE_H_PM,
+            is_title_white,
+        );
         assert!(
             nameplate_potg_signal(&frame),
-            "orange name + white title must open the nameplate path (orange={orange:.4} white={white:.4})"
+            "gold name + white title must open the nameplate path (orange={orange:.4} white={white:.4})"
         );
     }
 
@@ -1194,19 +1261,19 @@ mod tests {
         ));
 
         let mut orange_only = RgbImage::from_pixel(640, 360, Rgb([40, 40, 40]));
-        for y in 140..190 {
-            for x in 30..320 {
-                orange_only.put_pixel(x, y, Rgb([255, 150, 40]));
+        for y in 252..272 {
+            for x in 40..280 {
+                orange_only.put_pixel(x, y, Rgb([255, 221, 0]));
             }
         }
         assert!(
             !nameplate_potg_signal(&orange_only),
-            "orange blob without white title glyphs"
+            "gold blob without white title glyphs"
         );
 
         let mut white_only = RgbImage::from_pixel(640, 360, Rgb([40, 40, 40]));
-        for y in 90..120 {
-            for x in 30..300 {
+        for y in 230..242 {
+            for x in 40..260 {
                 if x % 8 < 3 {
                     white_only.put_pixel(x, y, Rgb([235, 235, 235]));
                 }
@@ -1214,7 +1281,7 @@ mod tests {
         }
         assert!(
             !nameplate_potg_signal(&white_only),
-            "white HUD without orange name"
+            "white HUD without gold name"
         );
 
         let gold = RgbImage::from_pixel(640, 360, Rgb([230, 180, 20]));
@@ -1222,5 +1289,8 @@ mod tests {
             !nameplate_potg_signal(&gold),
             "victory gold flood is not a POTG nameplate"
         );
+
+        let red = RgbImage::from_pixel(640, 360, Rgb([200, 30, 30]));
+        assert!(!nameplate_potg_signal(&red), "defeat red flood");
     }
 }
