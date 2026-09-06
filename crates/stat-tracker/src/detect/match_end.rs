@@ -1145,9 +1145,11 @@ mod tests {
             }
         }
         // White title glyphs in the nameplate title band (y ~14–40%).
+        // Thick strokes so stride-2 sampling still hits (real italic stems
+        // are several pixels wide; a 1-px lattice can miss every sample).
         for y in 90..120 {
             for x in 30..300 {
-                if x % 4 == 0 {
+                if x % 8 < 3 {
                     img.put_pixel(x, y, Rgb([235, 235, 235]));
                 }
             }
@@ -1174,9 +1176,11 @@ mod tests {
             !cinematic_title_band(&crop),
             "toast + hero light the cinematic band — old gate must miss"
         );
+        let orange = playfield_hit_ratio(&frame, 30, 340, 460, 240, is_potg_orange);
+        let white = playfield_hit_ratio(&frame, 30, 140, 460, 260, is_title_white);
         assert!(
             nameplate_potg_signal(&frame),
-            "orange name + white title must open the nameplate path"
+            "orange name + white title must open the nameplate path (orange={orange:.4} white={white:.4})"
         );
     }
 
@@ -1203,7 +1207,7 @@ mod tests {
         let mut white_only = RgbImage::from_pixel(640, 360, Rgb([40, 40, 40]));
         for y in 90..120 {
             for x in 30..300 {
-                if x % 4 == 0 {
+                if x % 8 < 3 {
                     white_only.put_pixel(x, y, Rgb([235, 235, 235]));
                 }
             }
