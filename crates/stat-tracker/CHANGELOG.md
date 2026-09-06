@@ -2,7 +2,33 @@
 
 User-facing notes for `stat-tracker-v*` GitHub Releases. The release workflow
 prepends the section whose heading matches the tag version (for example
-`## 0.4.8` for `stat-tracker-v0.4.8`).
+`## 0.4.9` for `stat-tracker-v0.4.9`).
+
+## 0.4.9
+
+On-hit poll debug PNGs (#80): when debug OCR is on (Settings / config
+or `STAT_TRACKER_DEBUG_OCR=1`), the normal poll path saves
+Victory/Defeat/Draw frames under `debug/poll/` on confirm and on the
+first word-OCR streak. Mid-match ticks stay silent.
+
+POTG / end-reel slow-mode wake (#81): a Play of the Game or highlight
+end-reel sighting holds full ~4s poll cadence for 45s so the short
+Victory/Defeat window is sampled. Confirm rules are unchanged.
+
+Daemon OCR / capture / sync / store schema are unchanged. In-app
+Update now (0.4.8), Settings Maps-level polish (0.4.7), Maps-grammar
+Seasons grid (0.4.6), Settings/Maps/Games polish (0.4.5), companion
+overlay hotkey (0.4.4), and packaging hotfixes 0.4.1–0.4.3 are
+unchanged.
+
+### Install
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/FrozenTear/scuffed-crew/main/crates/stat-tracker/dist/bootstrap.sh | bash
+```
+
+Or extract the tarball and run `./install.sh`. Pin with
+`STAT_TRACKER_TAG=stat-tracker-v0.4.9`.
 
 ## 0.4.8
 
