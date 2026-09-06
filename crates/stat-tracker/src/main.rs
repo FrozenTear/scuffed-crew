@@ -32,8 +32,18 @@ const SLOW_POLL_DIVISOR: u32 = 2;
 /// cadence: start screens (map vote / ban / hero select) and early corrective
 /// evidence cluster in the first stretch of a session, and matches don't end
 /// this early — after it, mid-match slow cadence applies until end evidence
-/// shows up (outcome recorded, fresh word-OCR streak, or a new game opening).
+/// shows up (outcome recorded, fresh word-OCR streak, POTG / end-reel wake,
+/// or a new game opening).
 const SLOW_AFTER_GAME_OPEN: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// How long a Play of the Game / end-reel sighting holds the poller at full
+/// cadence. POTG is ~15–20s; the Victory/Defeat banner is ~3s and the
+/// accolade screen follows immediately (see `read_result_word`). 45s from
+/// first sighting covers remaining reel + the short V/D window with margin,
+/// then slow mode resumes if no outcome/streak has landed. Mid-point of the
+/// 30–60s range — long enough to not miss Victory, short enough that a
+/// false letterbox does not pin 4s screencopy for a full minute.
+const END_REEL_WAKE: std::time::Duration = std::time::Duration::from_secs(45);
 
 /// How many poll-tick frames `--dump-poll-frames` keeps (ring buffer on disk).
 /// At a 4s poll interval this is ~10 minutes — enough that a defeat's
@@ -1079,23 +1089,38 @@ struct SessionState {
     /// adaptive cadence): while [`poll_slow_mode`] holds, only every
     /// [`SLOW_POLL_DIVISOR`]th tick pays the screencopy.
     poll_ticks_skipped: u32,
+    /// Deadline through which a POTG / end-reel sighting holds full poll
+    /// cadence. None = no active wake. See [`END_REEL_WAKE`].
+    end_reel_wake_until: Option<Instant>,
+}
+
+/// Fresh word-OCR streak or an unexpired end-reel wake — both force full
+/// cadence. One helper so the two wake sources cannot drift.
+fn cadence_wake_active(st: &SessionState, now: Instant) -> bool {
+    st.word_outcome_streak
+        .as_ref()
+        .is_some_and(|(_, t)| now.duration_since(*t) <= OUTCOME_CONFIRM_WINDOW)
+        || st.end_reel_wake_until.is_some_and(|until| now < until)
+}
+
+fn clear_cadence_wakes(st: &mut SessionState) {
+    st.word_outcome_streak = None;
+    st.end_reel_wake_until = None;
 }
 
 /// PR-B: whether the poller sits mid-match with nothing imminent — a mature
-/// open game, outcome still unknown, and no fresh word-OCR read awaiting its
-/// confirming partner. Every end-of-match signal path already drops this back
-/// to full cadence through existing state: a banner records the outcome
-/// (`finished()`), a word read sets `word_outcome_streak`, and a detected
-/// start phase opens a new game (resetting `last_game_open`).
+/// open game, outcome still unknown, and no cadence wake (fresh word-OCR
+/// streak or POTG / end-reel deadline). Every end-of-match signal path
+/// already drops this back to full cadence through existing state: a banner
+/// records the outcome (`finished()`), a word read sets `word_outcome_streak`,
+/// an end-reel / POTG hit sets `end_reel_wake_until`, and a detected start
+/// phase opens a new game (resetting `last_game_open`).
 fn poll_slow_mode(st: &SessionState, now: Instant) -> bool {
     st.active_game.as_ref().is_some_and(|g| !g.finished())
         && st
             .last_game_open
             .is_none_or(|t| now.duration_since(t) >= SLOW_AFTER_GAME_OPEN)
-        && st
-            .word_outcome_streak
-            .as_ref()
-            .is_none_or(|(_, t)| now.duration_since(*t) > OUTCOME_CONFIRM_WINDOW)
+        && !cadence_wake_active(st, now)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1142,6 +1167,7 @@ async fn run_loop(ctx: Arc<DaemonCtx>) -> anyhow::Result<()> {
         suspend_probe: (Instant::now(), Utc::now()),
         ocr_stability: detect::stability::FrameStability::default(),
         poll_ticks_skipped: 0,
+        end_reel_wake_until: None,
     };
     if let Some(g) = &st.active_game {
         tracing::info!(
@@ -1215,9 +1241,9 @@ async fn run_loop(ctx: Arc<DaemonCtx>) -> anyhow::Result<()> {
                                 Vec::new(),
                             ));
                             st.last_game_open = Some(Instant::now());
-                            // Word reads about the previous match must not
-                            // confirm into this one.
-                            st.word_outcome_streak = None;
+                            // Word reads / end-reel wake about the previous
+                            // match must not carry into this one.
+                            clear_cadence_wakes(&mut st);
                             persist_active_game(data_dir, st.active_game.as_ref());
                         }
 
@@ -1347,9 +1373,9 @@ async fn run_loop(ctx: Arc<DaemonCtx>) -> anyhow::Result<()> {
                             );
                             st.active_game = Some(g);
                             st.last_game_open = Some(Instant::now());
-                            // Result-word reads about the previous game must
-                            // not confirm into this one.
-                            st.word_outcome_streak = None;
+                            // Result-word reads / end-reel wake about the
+                            // previous game must not confirm into this one.
+                            clear_cadence_wakes(&mut st);
                             persist_active_game(data_dir, st.active_game.as_ref());
                         }
                         st.capture_count += 1;
@@ -1435,7 +1461,7 @@ async fn run_loop(ctx: Arc<DaemonCtx>) -> anyhow::Result<()> {
                     continue;
                 }
                 if !game_gate.is_running() {
-                    st.word_outcome_streak = None;
+                    clear_cadence_wakes(&mut st);
                     st.ocr_stability.reset();
                     continue;
                 }
@@ -1461,7 +1487,7 @@ async fn run_loop(ctx: Arc<DaemonCtx>) -> anyhow::Result<()> {
                         let on_hit_dir = debug_ocr.then(|| data_dir.join("debug").join("poll"));
                         let prior_streak = st.word_outcome_streak.map(|(o, t)| (o, t.elapsed()));
                         let mut stability = std::mem::take(&mut st.ocr_stability);
-                        let (signal, phase, accolade_map, stability) = tokio::task::spawn_blocking(move || {
+                        let (signal, phase, accolade_map, end_reel, stability) = tokio::task::spawn_blocking(move || {
                             if let Some(dir) = &dump_dir {
                                 save_frame_ring(dir, "poll", &img, POLL_DUMP_KEEP);
                             }
@@ -1485,6 +1511,8 @@ async fn run_loop(ctx: Arc<DaemonCtx>) -> anyhow::Result<()> {
                                 _ => None,
                             };
                             let phase = detect::match_start::detect_phase_polled(&img, &rgb, &mut stability);
+                            // Wake hint only — does not confirm an outcome.
+                            let end_reel = detect::match_end::detect_end_reel(&img, &rgb);
                             if let Some(dir) = &on_hit_dir
                                 && let Some((kind, outcome)) =
                                     poll_debug_hit(signal, prior_streak, OUTCOME_CONFIRM_WINDOW)
@@ -1496,11 +1524,24 @@ async fn run_loop(ctx: Arc<DaemonCtx>) -> anyhow::Result<()> {
                                     POLL_DUMP_KEEP,
                                 );
                             }
-                            (signal, phase, accolade_map, stability)
+                            (signal, phase, accolade_map, end_reel, stability)
                         }).await.unwrap_or_else(|_| {
-                            (None, detect::GamePhase::Unknown, None, detect::stability::FrameStability::default())
+                            (None, detect::GamePhase::Unknown, None, false, detect::stability::FrameStability::default())
                         });
                         st.ocr_stability = stability;
+
+                        if end_reel {
+                            let already_awake = st
+                                .end_reel_wake_until
+                                .is_some_and(|t| Instant::now() < t);
+                            st.end_reel_wake_until = Some(Instant::now() + END_REEL_WAKE);
+                            if !already_awake {
+                                tracing::info!(
+                                    hold_secs = END_REEL_WAKE.as_secs(),
+                                    "end-reel / POTG — holding full poll cadence"
+                                );
+                            }
+                        }
 
                         // The banner color-flood is specific enough to act on
                         // immediately (and only lasts ~3s — a second tick may
@@ -1620,7 +1661,7 @@ async fn run_loop(ctx: Arc<DaemonCtx>) -> anyhow::Result<()> {
                                     // confirm into this one — and a pending
                                     // outcome from before any game was open
                                     // can't be this new game's result either.
-                                    st.word_outcome_streak = None;
+                                    clear_cadence_wakes(&mut st);
                                     st.pending_outcome = None;
                                     persist_active_game(data_dir, st.active_game.as_ref());
                                 } else if should_reuse_unfinished_same_match(
@@ -1652,7 +1693,7 @@ async fn run_loop(ctx: Arc<DaemonCtx>) -> anyhow::Result<()> {
                                 }
                                 st.active_game = Some(ActiveGame::open_now(sid, detect::MatchOutcome::Unknown, Vec::new()));
                                 st.last_game_open = Some(Instant::now());
-                                st.word_outcome_streak = None;
+                                clear_cadence_wakes(&mut st);
                                 st.pending_outcome = None;
                                 persist_active_game(data_dir, st.active_game.as_ref());
                             }
@@ -1678,7 +1719,7 @@ async fn run_loop(ctx: Arc<DaemonCtx>) -> anyhow::Result<()> {
                         "suspend/clock-jump detected — resetting session windows"
                     );
                     st.pending_outcome = None;
-                    st.word_outcome_streak = None;
+                    clear_cadence_wakes(&mut st);
                     st.last_game_open = None;
                     st.last_tab_capture = None;
                     st.active_game = recover_active_game(data_dir);
@@ -2670,6 +2711,7 @@ mod tests {
             suspend_probe: (now, Utc::now()),
             ocr_stability: detect::stability::FrameStability::default(),
             poll_ticks_skipped: 0,
+            end_reel_wake_until: None,
         }
     }
 
@@ -2708,6 +2750,51 @@ mod tests {
             now - OUTCOME_CONFIRM_WINDOW - Duration::from_secs(1),
         ));
         assert!(poll_slow_mode(&st, now));
+    }
+
+    #[test]
+    fn slow_mode_drops_on_end_reel_wake_then_returns() {
+        let now = test_now();
+        let mut st = session(Some(game(detect::MatchOutcome::Unknown, None, now)), now);
+        assert!(poll_slow_mode(&st, now), "mature unfinished → slow");
+
+        st.end_reel_wake_until = Some(now + END_REEL_WAKE);
+        assert!(!poll_slow_mode(&st, now), "POTG wake → full cadence");
+        assert!(
+            !poll_slow_mode(&st, now + Duration::from_secs(44)),
+            "still inside the 45s window"
+        );
+        assert!(
+            poll_slow_mode(&st, now + END_REEL_WAKE),
+            "at expiry → slow again"
+        );
+        assert!(
+            poll_slow_mode(&st, now + END_REEL_WAKE + Duration::from_secs(1)),
+            "after expiry → slow"
+        );
+
+        // Outcome streak / finished still win over a leftover wake field.
+        st.end_reel_wake_until = None;
+        st.word_outcome_streak =
+            Some((detect::MatchOutcome::Victory, now - Duration::from_secs(5)));
+        assert!(!poll_slow_mode(&st, now));
+        let finished = session(Some(game(detect::MatchOutcome::Defeat, Some(2), now)), now);
+        assert!(!poll_slow_mode(&finished, now));
+    }
+
+    #[test]
+    fn cadence_wake_active_covers_streak_and_end_reel() {
+        let now = test_now();
+        let mut st = session(Some(game(detect::MatchOutcome::Unknown, None, now)), now);
+        assert!(!cadence_wake_active(&st, now));
+        st.word_outcome_streak =
+            Some((detect::MatchOutcome::Victory, now - Duration::from_secs(1)));
+        assert!(cadence_wake_active(&st, now));
+        st.word_outcome_streak = None;
+        st.end_reel_wake_until = Some(now + Duration::from_secs(10));
+        assert!(cadence_wake_active(&st, now));
+        st.end_reel_wake_until = Some(now);
+        assert!(!cadence_wake_active(&st, now), "deadline is exclusive");
     }
 
     #[test]
@@ -2862,11 +2949,10 @@ mod tests {
     #[test]
     fn active_game_persists_and_recovers() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let mut g = ActiveGame::open_now(
-            "abc123".into(),
-            detect::MatchOutcome::Unknown,
-            vec!["Oasis".into(), "Busan".into()],
-        );
+        let mut g = ActiveGame::open_now("abc123".into(), detect::MatchOutcome::Unknown, vec![
+            "Oasis".into(),
+            "Busan".into(),
+        ]);
         g.session_created = true;
         g.map = Some("Oasis".into());
         let gate_state = GateState {
@@ -2896,10 +2982,10 @@ mod tests {
         assert_eq!(r.session_id, "abc123");
         assert_eq!(r.outcome, detect::MatchOutcome::Unknown);
         assert_eq!(r.map.as_deref(), Some("Oasis"));
-        assert_eq!(
-            r.map_candidates,
-            vec!["Oasis".to_string(), "Busan".to_string()]
-        );
+        assert_eq!(r.map_candidates, vec![
+            "Oasis".to_string(),
+            "Busan".to_string()
+        ]);
         assert!(r.session_created);
         assert_eq!(
             r.gate.map(|s| s.accepted.edd()),

@@ -482,6 +482,154 @@ fn detect_banner(rgb: &RgbImage) -> Option<MatchOutcome> {
     }
 }
 
+/// Cheap Play of the Game / highlight end-reel hint for the poller.
+///
+/// Not an outcome confirm — banner / two-agreeing word OCR are unchanged.
+/// The poller uses this only to leave mid-match slow cadence (~8s) so the
+/// short Victory/Defeat window that follows the reel is sampled at full
+/// rate. Accolade / MVP lands ~15–20s after POTG (see [`read_result_word`]).
+///
+/// Two cheap paths, either is enough to wake:
+/// 1. Cinematic letterbox (dark top+bottom bars, lit middle) — no OCR.
+/// 2. Title-band OCR for PLAY OF THE GAME / HIGHLIGHT INTRO, gated so
+///    mid-fight ticks do not pay Tesseract.
+pub fn detect_end_reel(img: &DynamicImage, rgb: &RgbImage) -> bool {
+    if end_reel_letterbox(rgb) {
+        tracing::info!("end-reel letterbox — POTG / highlight wake");
+        return true;
+    }
+    if read_end_reel_title(img) {
+        tracing::info!("end-reel title — POTG / highlight wake");
+        return true;
+    }
+    false
+}
+
+/// OW2 POTG / highlight replay letterboxes the 16:9 playfield. Mid-match HUD
+/// lights the top bar, so both-bars-dark plus a lit middle is a cheap
+/// discriminator. A fade-to-black frame fails the middle check.
+fn end_reel_letterbox(rgb: &RgbImage) -> bool {
+    let (w, h) = rgb.dimensions();
+    let (gx, gy, gw, gh) = crate::ocr::preprocess::game_rect_16_9(w, h);
+    let band = (gh * 70 / 1000).max(1);
+    if band * 2 >= gh {
+        return false;
+    }
+    let top_dark = dark_ratio(rgb, gx, gy, gw, band);
+    let bot_dark = dark_ratio(rgb, gx, gy + gh - band, gw, band);
+    let mid_y = gy + gh * 300 / 1000;
+    let mid_h = gh * 400 / 1000;
+    let mid_dark = dark_ratio(rgb, gx, mid_y, gw, mid_h);
+    top_dark >= 0.72 && bot_dark >= 0.72 && mid_dark < 0.50
+}
+
+fn dark_ratio(rgb: &RgbImage, x0: u32, y0: u32, cw: u32, ch: u32) -> f32 {
+    let (w, h) = rgb.dimensions();
+    let x1 = (x0 + cw).min(w);
+    let y1 = (y0 + ch).min(h);
+    if x1 <= x0 || y1 <= y0 {
+        return 0.0;
+    }
+    const STRIDE: u32 = 2;
+    let mut dark = 0u32;
+    let mut total = 0u32;
+    for y in (y0..y1).step_by(STRIDE as usize) {
+        for x in (x0..x1).step_by(STRIDE as usize) {
+            let [r, g, b] = rgb.get_pixel(x, y).0;
+            total += 1;
+            if r.max(g).max(b) < 36 {
+                dark += 1;
+            }
+        }
+    }
+    if total == 0 {
+        0.0
+    } else {
+        dark as f32 / total as f32
+    }
+}
+
+/// Title-card path: dark cinematic band + bright glyphs, then phrase OCR.
+fn read_end_reel_title(img: &DynamicImage) -> bool {
+    let (fw, fh) = (img.width(), img.height());
+    let (gx, gy, gw, gh) = crate::ocr::preprocess::game_rect_16_9(fw, fh);
+    // Wide upper band where the POTG title card / overlay sits. Tighter than
+    // a full-frame OCR; high enough to miss the in-world end-title V/D word
+    // (y ~34–52%) so this does not double as an outcome reader.
+    let x = gx + gw * 120 / 1000;
+    let y = gy + gh * 80 / 1000;
+    let cw = gw * 760 / 1000;
+    let ch = gh * 220 / 1000;
+    if cw == 0 || ch == 0 || x + cw > fw || y + ch > fh {
+        return false;
+    }
+    let crop = img.crop_imm(x, y, cw, ch);
+    if !cinematic_title_band(&crop) {
+        return false;
+    }
+    let prepared = crate::ocr::preprocess::prepare_title(&crop);
+    match crate::ocr::recognize_prepared(&prepared, "6", Some("ABCDEFGHIJKLMNOPQRSTUVWXYZ ")) {
+        Ok(text) => {
+            let hit = end_reel_title_match(&text);
+            if hit {
+                tracing::debug!(text = %text.trim(), "end-reel title OCR matched");
+            } else {
+                tracing::trace!(text = %text.trim(), "end-reel title OCR did not match");
+            }
+            hit
+        }
+        Err(e) => {
+            tracing::debug!(error = %e, "end-reel title OCR failed");
+            false
+        }
+    }
+}
+
+/// Dark cinematic field plus some bright glyphs — skips mid-fight sky/HUD
+/// (bright world, low dark ratio) without a Tesseract call.
+fn cinematic_title_band(crop: &DynamicImage) -> bool {
+    if !title_crop_has_signal(crop) {
+        return false;
+    }
+    let rgb = crop.to_rgb8();
+    let (w, h) = rgb.dimensions();
+    if w == 0 || h == 0 {
+        return false;
+    }
+    let mut dark = 0u32;
+    let mut total = 0u32;
+    for y in (0..h).step_by(4) {
+        for x in (0..w).step_by(4) {
+            let [r, g, b] = rgb.get_pixel(x, y).0;
+            total += 1;
+            if r.max(g).max(b) < 50 {
+                dark += 1;
+            }
+        }
+    }
+    total > 0 && (dark as f32 / total as f32) > 0.40
+}
+
+/// Phrase check for POTG / highlight-intro title OCR. Letter-only so spaces
+/// and punctuation drop out; short tokens like PLAY/GAME alone do not match.
+fn end_reel_title_match(raw: &str) -> bool {
+    let letters: String = raw
+        .chars()
+        .filter(|c| c.is_ascii_alphabetic())
+        .map(|c| c.to_ascii_uppercase())
+        .collect();
+    if letters.is_empty() {
+        return false;
+    }
+    if letters.contains("PLAYOFTHEGAME") || letters.contains("HIGHLIGHTINTRO") {
+        return true;
+    }
+    const TARGETS: &[&str] = &["PLAYOFTHEGAME", "HIGHLIGHTINTRO"];
+    TARGETS
+        .iter()
+        .any(|t| letters.len() + 2 >= t.len() && strsim::levenshtein(&letters, t) <= 3)
+}
+
 /// Read the large top-left VICTORY/DEFEAT title off the post-match accolade /
 /// MVP screen (shown ~15-20s after Play of the Game).
 /// Region: x 0.5-25.5%, y 3.5-9.5% of the 16:9 playfield.
@@ -740,5 +888,86 @@ mod tests {
             detect_outcome_signal(&flood([230, 180, 20])),
             Some((MatchOutcome::Victory, OutcomeSource::Banner))
         );
+    }
+
+    #[test]
+    fn end_reel_title_match_accepts_potg_phrases() {
+        assert!(end_reel_title_match("PLAY OF THE GAME"));
+        assert!(end_reel_title_match("YOUR PLAY OF THE GAME"));
+        assert!(end_reel_title_match("PLAYOFTHEGAME"));
+        assert!(end_reel_title_match("HIGHLIGHT INTRO"));
+        assert!(end_reel_title_match("P1AY OF THE GAME")); // letters → PAYOFTHEGAME, lev 1
+        assert!(end_reel_title_match("PLAY OF THE GARIE"));
+        assert!(!end_reel_title_match("VICTORY"));
+        assert!(!end_reel_title_match("DEFEAT"));
+        assert!(!end_reel_title_match("PLAY"));
+        assert!(!end_reel_title_match("GAME"));
+        assert!(!end_reel_title_match("HIGHLIGHTS"));
+        assert!(!end_reel_title_match("HELLO"));
+        assert!(!end_reel_title_match(""));
+    }
+
+    fn letterbox_frame(mid: [u8; 3]) -> RgbImage {
+        let mut img = RgbImage::from_pixel(640, 360, Rgb(mid));
+        // 7% of 360 = 25.2 → paint 30px bars so the 70/1000 band is black.
+        for y in 0..30 {
+            for x in 0..640 {
+                img.put_pixel(x, y, Rgb([8, 8, 8]));
+                img.put_pixel(x, 359 - y, Rgb([8, 8, 8]));
+            }
+        }
+        img
+    }
+
+    #[test]
+    fn end_reel_letterbox_needs_dark_bars_and_lit_middle() {
+        let reel = letterbox_frame([80, 90, 100]);
+        assert!(end_reel_letterbox(&reel), "letterboxed reel should wake");
+        assert!(
+            detect_end_reel(&DynamicImage::ImageRgb8(reel.clone()), &reel),
+            "letterbox path should wake without title OCR"
+        );
+
+        let black = RgbImage::from_pixel(640, 360, Rgb([0, 0, 0]));
+        assert!(
+            !end_reel_letterbox(&black),
+            "fade-to-black is not a reel (middle is dark)"
+        );
+        assert!(!detect_end_reel(
+            &DynamicImage::ImageRgb8(black.clone()),
+            &black
+        ));
+
+        let gray = RgbImage::from_pixel(640, 360, Rgb([80, 80, 80]));
+        assert!(!end_reel_letterbox(&gray));
+
+        let gold = RgbImage::from_pixel(640, 360, Rgb([230, 180, 20]));
+        assert!(
+            !end_reel_letterbox(&gold),
+            "victory banner flood is not a letterbox"
+        );
+    }
+
+    #[test]
+    fn cinematic_title_band_needs_dark_field_and_glyphs() {
+        let dark = DynamicImage::ImageRgb8(RgbImage::from_pixel(80, 40, Rgb([10, 10, 10])));
+        assert!(
+            !cinematic_title_band(&dark),
+            "dark with no glyphs should skip OCR"
+        );
+        let sky = DynamicImage::ImageRgb8(RgbImage::from_pixel(80, 40, Rgb([180, 200, 220])));
+        assert!(
+            !cinematic_title_band(&sky),
+            "bright mid-fight sky should skip OCR"
+        );
+        let mut card = RgbImage::from_pixel(80, 40, Rgb([12, 12, 12]));
+        for y in 10..30 {
+            for x in 10..70 {
+                if x % 3 == 0 {
+                    card.put_pixel(x, y, Rgb([220, 220, 220]));
+                }
+            }
+        }
+        assert!(cinematic_title_band(&DynamicImage::ImageRgb8(card)));
     }
 }
