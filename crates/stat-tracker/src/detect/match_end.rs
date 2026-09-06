@@ -775,9 +775,10 @@ fn nameplate_potg_signal(rgb: &RgbImage) -> bool {
     if playfield_hit_ratio(rgb, 0, 0, 1000, 1000, is_potg_orange) > 0.30 {
         return false;
     }
-    // Tab scoreboard crop (Soot accepted_020455): one mustard team *slab*
-    // (no dark gaps) plus a magenta team above. Group-count of 3+ misses
-    // a solid block; a single battletag is a short gold run, not a slab.
+    // Tab scoreboard crop (Soot accepted_020455): mustard team *slab*
+    // (often muted — fails is_potg_orange) plus a burgundy team above.
+    // Group-count of 3+ and neon-gold hot strips miss that; a battletag
+    // is a short left-aligned run, not a full-width slab.
     if nameplate_looks_like_scoreboard(rgb) {
         return false;
     }
@@ -824,7 +825,34 @@ fn nameplate_looks_like_scoreboard(rgb: &RgbImage) -> bool {
     let upper_magenta = playfield_hit_ratio(rgb, 0, 50, 1000, 430, is_team_magenta);
     // Magenta team over gold team — Tab board, not a POTG card.
     // Synthetic nameplate upper-magenta ≈ 0.003; left-lower gold ≈ 0.098.
-    upper_magenta > 0.06 && left_lower_gold > 0.04
+    if upper_magenta > 0.06 && left_lower_gold > 0.04 {
+        return true;
+    }
+    // Soot accepted_020455 on 486219f: mustard team is human-bright but
+    // most pixels fail is_potg_orange (val≤160 / dirtier sat). The wake
+    // still sees enough neon specks + white names in the nameplate ROIs.
+    // A left-aligned battletag does not paint the *right* lower half.
+    let mustard_l = playfield_hit_ratio(rgb, 0, 500, 500, 500, is_scoreboard_mustard);
+    let mustard_r = playfield_hit_ratio(rgb, 500, 500, 500, 500, is_scoreboard_mustard);
+    if mustard_l > 0.12 && mustard_r > 0.10 {
+        return true;
+    }
+    let maroon_up = playfield_hit_ratio(rgb, 0, 50, 1000, 430, is_scoreboard_maroon);
+    maroon_up > 0.08 && mustard_l > 0.08
+}
+
+/// Tab team gold — darker / dirtier than neon POTG battletag gold.
+/// Veto-only; the wake gate stays on [`is_potg_orange`].
+fn is_scoreboard_mustard(r: u8, g: u8, b: u8) -> bool {
+    let (hue, sat, val) = rgb_to_hsv(r, g, b);
+    hue_near(hue, 48, 22) && sat > 70 && val > 70 && r > b && g > b
+}
+
+/// Tab home-team purple is often burgundy (hue ~340), outside
+/// [`is_team_magenta`]'s 300±35 window. Veto-only.
+fn is_scoreboard_maroon(r: u8, g: u8, b: u8) -> bool {
+    let (hue, sat, val) = rgb_to_hsv(r, g, b);
+    hue_near(hue, 320, 40) && sat > 40 && (21..180).contains(&val)
 }
 
 fn is_team_magenta(r: u8, g: u8, b: u8) -> bool {
@@ -1456,6 +1484,141 @@ mod tests {
             "gold team rows are not a POTG battletag stack"
         );
         assert!(!detect_end_reel(&img, &rgb), "Tab scoreboard must not wake");
+    }
+
+    #[test]
+    fn tab_scoreboard_muted_mustard_does_not_nameplate_wake() {
+        // Geometry that passed 486219f: white names in the title ROI +
+        // enough neon-gold specks for the cheap gate, but the mustard
+        // slab fails is_potg_orange so hot-strips / flood / magenta miss.
+        let rgb = tab_scoreboard_muted_mustard_frame();
+        let img = DynamicImage::ImageRgb8(rgb.clone());
+        let orange = playfield_hit_ratio(
+            &rgb,
+            NAMEPLATE_ORANGE_X_PM,
+            NAMEPLATE_ORANGE_Y_PM,
+            NAMEPLATE_ORANGE_W_PM,
+            NAMEPLATE_ORANGE_H_PM,
+            is_potg_orange,
+        );
+        let white = playfield_hit_ratio(
+            &rgb,
+            NAMEPLATE_WHITE_X_PM,
+            NAMEPLATE_WHITE_Y_PM,
+            NAMEPLATE_WHITE_W_PM,
+            NAMEPLATE_WHITE_H_PM,
+            is_title_white,
+        );
+        assert!(
+            (NAMEPLATE_ORANGE_MIN..=NAMEPLATE_ORANGE_MAX).contains(&orange)
+                && white >= NAMEPLATE_WHITE_MIN,
+            "fixture must still look like a nameplate to the cheap gate (orange={orange:.4} white={white:.4})"
+        );
+        assert!(
+            nameplate_gold_hot_strips(&rgb) < 8,
+            "486219f hot-strip veto must miss this slab"
+        );
+        assert!(
+            nameplate_gold_row_groups(&rgb) < 3,
+            "gapped-row veto must miss a solid mustard block"
+        );
+        assert!(
+            !nameplate_potg_signal(&rgb),
+            "muted mustard team slab must not be a POTG battletag"
+        );
+        assert!(
+            !detect_end_reel(&img, &rgb),
+            "Tab scoreboard crop accepted_020455 must not wake"
+        );
+    }
+
+    /// Soot accepted_020455: tight Tab crop — burgundy team over a *muted*
+    /// mustard slab (human-bright, but most pixels fail `is_potg_orange`
+    /// val>160 / sat>140). White names sit on the gold. 486219f slab
+    /// vetoes used the strict orange predicate and missed this.
+    fn tab_scoreboard_muted_mustard_frame() -> RgbImage {
+        let mut img = RgbImage::from_pixel(640, 360, Rgb([12, 10, 14]));
+        // Header strip (E A D DMG H MIT).
+        for y in 0..18 {
+            for x in 0..640 {
+                img.put_pixel(x, y, Rgb([168, 168, 172]));
+            }
+        }
+        // Burgundy / maroon team — hue ~340, outside is_team_magenta 300±35.
+        for y in 18..168 {
+            let row = ((y - 18) / 25) as u8;
+            let fill = Rgb([72 + row * 4, 22, 40 + row]);
+            for x in 8..632 {
+                img.put_pixel(x, y, fill);
+            }
+        }
+        // Highlighted top row: pink/magenta border (FROZEN), not gold.
+        for y in 20..44 {
+            for x in 8..632 {
+                if y < 23 || y > 41 || x < 12 || x > 628 {
+                    img.put_pixel(x, y, Rgb([220, 50, 150]));
+                }
+            }
+        }
+        // VS divider.
+        for y in 168..184 {
+            for x in 0..640 {
+                img.put_pixel(x, y, Rgb([24, 24, 26]));
+            }
+        }
+        for y in 172..180 {
+            for x in 300..340 {
+                img.put_pixel(x, y, Rgb([230, 230, 230]));
+            }
+        }
+        // Mustard team slab. Base #9A7A12 fails val>160; sparse #C6A307
+        // specks keep the nameplate orange ROI in [0.035, 0.28].
+        for y in 184..358 {
+            for x in 8..632 {
+                img.put_pixel(x, y, Rgb([154, 122, 18]));
+            }
+        }
+        // Gray hero portraits + speaker column.
+        for row in 0..6 {
+            let y0 = 188 + row * 28;
+            for y in y0..y0 + 22 {
+                for x in 16..40 {
+                    img.put_pixel(x, y, Rgb([96, 96, 100]));
+                }
+                for x in 600..624 {
+                    img.put_pixel(x, y, Rgb([110, 110, 114]));
+                }
+            }
+        }
+        // White names on gold. y 58–70% is the nameplate title ROI —
+        // the first gold-team rows sit there on a real Tab crop.
+        for y in 210..250 {
+            if y % 6 > 2 {
+                continue;
+            }
+            for x in 56..240 {
+                if x % 4 < 2 {
+                    img.put_pixel(x, y, Rgb([240, 240, 240]));
+                }
+            }
+        }
+        for y in [268, 296, 324] {
+            for x in 56..220 {
+                if x % 5 < 2 {
+                    img.put_pixel(x, y, Rgb([240, 240, 240]));
+                }
+            }
+        }
+        // Brighter gold patches in the battletag ROI so strict orange
+        // still enters the wake window (the rest of the slab does not).
+        for y in 240..292 {
+            for x in 48..260 {
+                if (x + y) % 7 == 0 {
+                    img.put_pixel(x, y, Rgb([198, 163, 7]));
+                }
+            }
+        }
+        img
     }
 
     #[test]
