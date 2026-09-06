@@ -249,7 +249,7 @@ fn detect_hero_ban(img: &DynamicImage, rgb: &RgbImage) -> bool {
 /// Phrase check for the hero-ban screen's OCR text. Requires a phrase, not
 /// bare "BAN" — the crop can catch scoreboard player names and chat.
 fn confirm_hero_ban(upper: &str, red_ratio: f32, dark_ratio: f32) -> bool {
-    if upper.contains("BAN HERO") || upper.contains("TEAM BAN SCORE") {
+    if hero_ban_phrase(upper) {
         tracing::info!(red_ratio, "hero ban screen detected");
         true
     } else {
@@ -260,6 +260,60 @@ fn confirm_hero_ban(upper: &str, red_ratio: f32, dark_ratio: f32) -> bool {
             "hero-ban pixel gate passed but OCR did not confirm"
         );
         false
+    }
+}
+
+fn hero_ban_phrase(upper: &str) -> bool {
+    upper.contains("BAN HERO") || upper.contains("TEAM BAN SCORE") || upper.contains("VOTE TO BAN")
+}
+
+/// Cheap Ban Heroes layout — not an outcome / end-reel wake.
+///
+/// Future: OCR should register the voted hero bans (parse the grid +
+/// `YOUR VOTES` slots). This hook only answers "is this the ban UI?"
+/// so callers can keep it off [`crate::detect::match_end::detect_end_reel`]
+/// and off `end_reel_wake_until`. Not wired into `poll_slow_mode`.
+///
+/// Layout only (no Tesseract): dark chrome header + red accent and/or the
+/// full-width `VOTE TO BAN HEROES` bar. Phrase OCR stays on
+/// [`detect_hero_ban`] / [`detect_phase`] for the match-start path.
+pub fn detect_ban_screen(_img: &DynamicImage, rgb: &RgbImage) -> bool {
+    // `_img` reserved for future ban-grid OCR (register voted heroes).
+    ban_screen_layout(rgb)
+}
+
+/// Pixel-only Ban Heroes gate used to veto letterbox end-reel wakes.
+pub(crate) fn ban_screen_layout(rgb: &RgbImage) -> bool {
+    let (red, dark) = ban_ratios(rgb);
+    let banner = center_red_banner_ratio(rgb);
+    // Strong full-width vote bar is enough (Soot batch: Ban Heroes looks
+    // letterboxed). Header red+dark is the existing hero-ban pixel gate;
+    // require a weaker banner so a red-title-only header does not veto
+    // unrelated screens.
+    banner >= 0.10 || (red >= 0.003 && dark >= 0.30 && banner >= 0.04)
+}
+
+/// Red-accent fraction in a thin mid-frame band (the `VOTE TO BAN HEROES`
+/// bar sits around y 44–56% and spans the playfield).
+fn center_red_banner_ratio(rgb: &RgbImage) -> f32 {
+    let (w, h) = rgb.dimensions();
+    let y0 = h * 440 / 1000;
+    let y1 = (h * 560 / 1000).max(y0 + 1);
+    let mut red = 0u32;
+    let mut total = 0u32;
+    for y in (y0..y1.min(h)).step_by(SCAN_STRIDE as usize) {
+        for x in (0..w).step_by(SCAN_STRIDE as usize) {
+            let [r, g, b] = rgb.get_pixel(x, y).0;
+            total += 1;
+            if r > 140 && (i16::from(r) - i16::from(g)) > 50 && (i16::from(r) - i16::from(b)) > 50 {
+                red += 1;
+            }
+        }
+    }
+    if total == 0 {
+        0.0
+    } else {
+        red as f32 / total as f32
     }
 }
 
@@ -485,5 +539,89 @@ mod tests {
         // Header words and hero names on the vote screen must not read as maps.
         let maps = extract_map_names("VOTE FOR A MAP  REAPER  SOMBRA");
         assert!(maps.is_empty(), "unexpected maps: {maps:?}");
+    }
+
+    #[test]
+    fn hero_ban_phrase_accepts_vote_to_ban() {
+        assert!(hero_ban_phrase("BAN HEROES 20"));
+        assert!(hero_ban_phrase("TEAM BAN SCORE"));
+        assert!(hero_ban_phrase("VOTE TO BAN HEROES"));
+        assert!(!hero_ban_phrase("BAN"));
+        assert!(!hero_ban_phrase("READY"));
+        assert!(!hero_ban_phrase("ENTERING GAME"));
+    }
+
+    fn ban_heroes_layout_frame() -> RgbImage {
+        use image::Rgb;
+        let mut img = RgbImage::from_pixel(640, 360, Rgb([12, 16, 28]));
+        for y in 0..40 {
+            for x in 0..640 {
+                img.put_pixel(x, y, Rgb([8, 8, 12]));
+                img.put_pixel(x, 359 - y, Rgb([8, 8, 12]));
+            }
+        }
+        // Colorful hero-grid tiles in the mid band.
+        for row in 0..3 {
+            for col in 0..8 {
+                let x0 = 40 + col * 72;
+                let y0 = 70 + row * 70;
+                let color = Rgb([
+                    40 + (col as u8) * 24,
+                    80 + (row as u8) * 40,
+                    160u8.saturating_sub(col as u8 * 12),
+                ]);
+                for y in y0..y0 + 50 {
+                    for x in x0..x0 + 60 {
+                        if x < 640 && y < 360 {
+                            img.put_pixel(x, y, color);
+                        }
+                    }
+                }
+            }
+        }
+        // Full-width VOTE TO BAN bar (y ~46–54%).
+        for y in 166..196 {
+            for x in 0..640 {
+                img.put_pixel(x, y, Rgb([180, 28, 32]));
+            }
+        }
+        // Header red accent ("BAN HEROES 20").
+        for y in 8..22 {
+            for x in 250..390 {
+                img.put_pixel(x, y, Rgb([200, 24, 24]));
+            }
+        }
+        img
+    }
+
+    #[test]
+    fn detect_ban_screen_fires_on_vote_bar_layout() {
+        let rgb = ban_heroes_layout_frame();
+        let img = DynamicImage::ImageRgb8(rgb.clone());
+        assert!(
+            ban_screen_layout(&rgb),
+            "Ban Heroes chrome + red vote bar must open the hook"
+        );
+        assert!(
+            detect_ban_screen(&img, &rgb),
+            "public hook is the layout gate (OCR not required this PR)"
+        );
+    }
+
+    #[test]
+    fn detect_ban_screen_rejects_flat_loading_and_combat() {
+        use image::Rgb;
+        let black = RgbImage::from_pixel(640, 360, Rgb([0, 0, 0]));
+        assert!(!ban_screen_layout(&black));
+        let sky = RgbImage::from_pixel(640, 360, Rgb([180, 200, 220]));
+        assert!(!ban_screen_layout(&sky));
+        // ENTERING GAME: dark bars + flat navy mid, no red vote bar.
+        let mut entering = RgbImage::from_pixel(640, 360, Rgb([0, 0, 0]));
+        for y in 140..220 {
+            for x in 0..640 {
+                entering.put_pixel(x, y, Rgb([18, 24, 38]));
+            }
+        }
+        assert!(!ban_screen_layout(&entering));
     }
 }

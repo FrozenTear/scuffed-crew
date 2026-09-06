@@ -490,13 +490,22 @@ fn detect_banner(rgb: &RgbImage) -> Option<MatchOutcome> {
 /// rate. Accolade / MVP lands ~15–20s after POTG (see [`read_result_word`]).
 ///
 /// Three cheap paths, either is enough to wake:
-/// 1. Cinematic letterbox (dark top+bottom bars, lit middle) — no OCR.
+/// 1. Cinematic letterbox (dark top+bottom bars, lit middle that looks
+///    like footage, not a flat loading slab) — no OCR.
 /// 2. Title-band OCR for PLAY OF THE GAME / HIGHLIGHT INTRO, gated on
 ///    [`cinematic_title_band`] so mid-fight ticks do not pay Tesseract.
 /// 3. Nameplate POTG title card (lower-left gold battletag + white title
 ///    glyphs). Same class as letterbox: the cheap gate is the wake.
 ///    Phrase OCR is logged when it hits but is not required.
+///
+/// Ban Heroes UI is a **distinct** signal ([`super::match_start::detect_ban_screen`])
+/// and must not set `end_reel_wake_until`. Future: register voted bans;
+/// this path only vetoes the wake.
 pub fn detect_end_reel(img: &DynamicImage, rgb: &RgbImage) -> bool {
+    if super::match_start::detect_ban_screen(img, rgb) {
+        tracing::debug!("ban screen — not an end-reel wake");
+        return false;
+    }
     if end_reel_letterbox(rgb) {
         tracing::info!("end-reel letterbox — POTG / highlight wake");
         return true;
@@ -515,6 +524,11 @@ pub fn detect_end_reel(img: &DynamicImage, rgb: &RgbImage) -> bool {
 /// OW2 POTG / highlight replay letterboxes the 16:9 playfield. Mid-match HUD
 /// lights the top bar, so both-bars-dark plus a lit middle is a cheap
 /// discriminator. A fade-to-black frame fails the middle check.
+///
+/// A flat mid slab (`ENTERING GAME` / other loading chrome) also looks
+/// letterboxed (Soot 2026-09-06 batch: top/bot dark ≥0.85, mid <0.5) but
+/// is one dominant color, not footage. Require the mid band to spread
+/// across coarse color bins.
 fn end_reel_letterbox(rgb: &RgbImage) -> bool {
     let (w, h) = rgb.dimensions();
     let (gx, gy, gw, gh) = crate::ocr::preprocess::game_rect_16_9(w, h);
@@ -527,7 +541,82 @@ fn end_reel_letterbox(rgb: &RgbImage) -> bool {
     let mid_y = gy + gh * 300 / 1000;
     let mid_h = gh * 400 / 1000;
     let mid_dark = dark_ratio(rgb, gx, mid_y, gw, mid_h);
-    top_dark >= 0.72 && bot_dark >= 0.72 && mid_dark < 0.50
+    top_dark >= 0.72
+        && bot_dark >= 0.72
+        && mid_dark < 0.50
+        && letterbox_shoulders_are_content(rgb, gx, gy, gw, gh)
+        && letterbox_mid_is_footage(rgb, gx, mid_y, gw, mid_h)
+}
+
+/// Cinematic 2.35:1 bars are ~12% of 16:9. `ENTERING GAME` keeps ~35–40%
+/// black above and below a thin navy strip (Soot 2026-09-06 recheck on
+/// rejected_preflight_013904 / poll_223050). The 7% edge bands are dark
+/// in both cases; the *shoulders* just inside those edges are gameplay
+/// on a real reel and still black on the loading slab.
+fn letterbox_shoulders_are_content(rgb: &RgbImage, gx: u32, gy: u32, gw: u32, gh: u32) -> bool {
+    let sh = (gh * LETTERBOX_SHOULDER_H_PM / 1000).max(1);
+    let top = dark_ratio(
+        rgb,
+        gx,
+        gy + gh * LETTERBOX_SHOULDER_TOP_Y_PM / 1000,
+        gw,
+        sh,
+    );
+    let bot = dark_ratio(
+        rgb,
+        gx,
+        gy + gh * LETTERBOX_SHOULDER_BOT_Y_PM / 1000,
+        gw,
+        sh,
+    );
+    top < LETTERBOX_SHOULDER_DARK_MAX && bot < LETTERBOX_SHOULDER_DARK_MAX
+}
+
+const LETTERBOX_SHOULDER_TOP_Y_PM: u32 = 150;
+const LETTERBOX_SHOULDER_BOT_Y_PM: u32 = 770;
+const LETTERBOX_SHOULDER_H_PM: u32 = 80;
+const LETTERBOX_SHOULDER_DARK_MAX: f32 = 0.60;
+
+/// Reject a uniform loading / transition slab. `ENTERING GAME` is a navy
+/// strip with a few white glyphs — among *lit* mid pixels one 16-wide
+/// RGB bin holds ~90%+. Dark padding around that strip is ignored so a
+/// thin chrome band cannot look like mixed footage. Real highlight
+/// footage spreads across bins.
+fn letterbox_mid_is_footage(rgb: &RgbImage, x0: u32, y0: u32, cw: u32, ch: u32) -> bool {
+    mid_dominant_lit_bin_ratio(rgb, x0, y0, cw, ch) < LETTERBOX_FLAT_UI_MAX
+}
+
+const LETTERBOX_FLAT_UI_MAX: f32 = 0.82;
+
+fn mid_dominant_lit_bin_ratio(rgb: &RgbImage, x0: u32, y0: u32, cw: u32, ch: u32) -> f32 {
+    let (w, h) = rgb.dimensions();
+    let x1 = (x0 + cw).min(w);
+    let y1 = (y0 + ch).min(h);
+    if x1 <= x0 || y1 <= y0 {
+        return 1.0;
+    }
+    // 16-wide channel bins (16³). Coarse enough for capture noise, fine
+    // enough that a character + world scene does not collapse to one bin.
+    const BINS: usize = 16 * 16 * 16;
+    let mut counts = [0u32; BINS];
+    let mut total = 0u32;
+    const STRIDE: u32 = 2;
+    for y in (y0..y1).step_by(STRIDE as usize) {
+        for x in (x0..x1).step_by(STRIDE as usize) {
+            let [r, g, b] = rgb.get_pixel(x, y).0;
+            if r.max(g).max(b) < 36 {
+                continue;
+            }
+            let idx = ((r as usize) >> 4) * 256 + ((g as usize) >> 4) * 16 + ((b as usize) >> 4);
+            counts[idx] += 1;
+            total += 1;
+        }
+    }
+    if total == 0 {
+        return 1.0;
+    }
+    let best = counts.iter().copied().max().unwrap_or(0);
+    best as f32 / total as f32
 }
 
 fn dark_ratio(rgb: &RgbImage, x0: u32, y0: u32, cw: u32, ch: u32) -> f32 {
@@ -686,6 +775,19 @@ fn nameplate_potg_signal(rgb: &RgbImage) -> bool {
     if playfield_hit_ratio(rgb, 0, 0, 1000, 1000, is_potg_orange) > 0.30 {
         return false;
     }
+    // Tab scoreboard crop (Soot accepted_020455): mustard team *slab*
+    // (often muted — fails is_potg_orange) plus a burgundy team above.
+    // Group-count of 3+ and neon-gold hot strips miss that; a battletag
+    // is a short left-aligned run, not a full-width slab.
+    if nameplate_looks_like_scoreboard(rgb) {
+        return false;
+    }
+    // Tab scoreboard: stacked gold team rows (highlighted mustard ≠ a
+    // single battletag). Three or more gold-heavy bands in the lower-left
+    // are a board, not PLAY OF THE GAME + name.
+    if nameplate_gold_row_groups(rgb) >= 3 {
+        return false;
+    }
     let orange = playfield_hit_ratio(
         rgb,
         NAMEPLATE_ORANGE_X_PM,
@@ -702,11 +804,98 @@ fn nameplate_potg_signal(rgb: &RgbImage) -> bool {
         NAMEPLATE_WHITE_H_PM,
         is_title_white,
     );
-    orange >= NAMEPLATE_ORANGE_MIN && white >= NAMEPLATE_WHITE_MIN
+    // Real known-potg-003708 orange ≈ 0.0685 (glyph, not a fill). A gold
+    // scoreboard row painted into this ROI is typically >0.35. Cap sits
+    // above the committed synthetic nameplate (~0.22) and below row fills.
+    (NAMEPLATE_ORANGE_MIN..=NAMEPLATE_ORANGE_MAX).contains(&orange) && white >= NAMEPLATE_WHITE_MIN
 }
 
 const NAMEPLATE_ORANGE_MIN: f32 = 0.035;
+const NAMEPLATE_ORANGE_MAX: f32 = 0.28;
 const NAMEPLATE_WHITE_MIN: f32 = 0.012;
+
+fn nameplate_looks_like_scoreboard(rgb: &RgbImage) -> bool {
+    // Solid gold team block: many full-width hot strips. The committed
+    // synthetic nameplate lights 5 strips at this threshold; a gold-team
+    // slab lights ~10+. known-potg gold is a short left-side run.
+    if nameplate_gold_hot_strips(rgb) >= 8 {
+        return true;
+    }
+    let left_lower_gold = playfield_hit_ratio(rgb, 0, 500, 500, 500, is_potg_orange);
+    let upper_magenta = playfield_hit_ratio(rgb, 0, 50, 1000, 430, is_team_magenta);
+    // Magenta team over gold team — Tab board, not a POTG card.
+    // Synthetic nameplate upper-magenta ≈ 0.003; left-lower gold ≈ 0.098.
+    if upper_magenta > 0.06 && left_lower_gold > 0.04 {
+        return true;
+    }
+    // Soot accepted_020455 on 486219f: mustard team is human-bright but
+    // most pixels fail is_potg_orange (val≤160 / dirtier sat). The wake
+    // still sees enough neon specks + white names in the nameplate ROIs.
+    // A left-aligned battletag does not paint the *right* lower half.
+    let mustard_l = playfield_hit_ratio(rgb, 0, 500, 500, 500, is_scoreboard_mustard);
+    let mustard_r = playfield_hit_ratio(rgb, 500, 500, 500, 500, is_scoreboard_mustard);
+    if mustard_l > 0.12 && mustard_r > 0.10 {
+        return true;
+    }
+    let maroon_up = playfield_hit_ratio(rgb, 0, 50, 1000, 430, is_scoreboard_maroon);
+    maroon_up > 0.08 && mustard_l > 0.08
+}
+
+/// Tab team gold — darker / dirtier than neon POTG battletag gold.
+/// Veto-only; the wake gate stays on [`is_potg_orange`].
+fn is_scoreboard_mustard(r: u8, g: u8, b: u8) -> bool {
+    let (hue, sat, val) = rgb_to_hsv(r, g, b);
+    hue_near(hue, 48, 22) && sat > 70 && val > 70 && r > b && g > b
+}
+
+/// Tab home-team purple is often burgundy (hue ~340), outside
+/// [`is_team_magenta`]'s 300±35 window. Veto-only.
+fn is_scoreboard_maroon(r: u8, g: u8, b: u8) -> bool {
+    let (hue, sat, val) = rgb_to_hsv(r, g, b);
+    hue_near(hue, 320, 40) && sat > 40 && (21..180).contains(&val)
+}
+
+fn is_team_magenta(r: u8, g: u8, b: u8) -> bool {
+    let (hue, sat, val) = rgb_to_hsv(r, g, b);
+    hue_near(hue, 300, 35) && sat > 80 && val > 35
+}
+
+fn nameplate_gold_hot_strips(rgb: &RgbImage) -> u32 {
+    const STRIPS: u32 = 20;
+    const HOT: f32 = 0.08;
+    let mut hot = 0u32;
+    for i in 0..STRIPS {
+        let y_pm = 400 + i * 550 / STRIPS;
+        let h_pm = (550 / STRIPS).max(1);
+        if playfield_hit_ratio(rgb, 0, y_pm, 1000, h_pm, is_potg_orange) > HOT {
+            hot += 1;
+        }
+    }
+    hot
+}
+
+/// Count contiguous gold-heavy horizontal strips in the lower-left half.
+/// POTG nameplate ≈ 1–2 runs (title stack). Tab gold team ≈ 6 row blocks.
+fn nameplate_gold_row_groups(rgb: &RgbImage) -> u32 {
+    const STRIPS: u32 = 20;
+    const HOT: f32 = 0.20;
+    let mut groups = 0u32;
+    let mut in_run = false;
+    for i in 0..STRIPS {
+        let y_pm = 400 + i * 550 / STRIPS;
+        let h_pm = (550 / STRIPS).max(1);
+        let ratio = playfield_hit_ratio(rgb, 0, y_pm, 500, h_pm, is_potg_orange);
+        if ratio > HOT {
+            if !in_run {
+                groups += 1;
+                in_run = true;
+            }
+        } else {
+            in_run = false;
+        }
+    }
+    groups
+}
 /// Lower-left battletag band (y 66–82%, x 5–45%).
 const NAMEPLATE_ORANGE_X_PM: u32 = 50;
 const NAMEPLATE_ORANGE_Y_PM: u32 = 660;
@@ -1089,8 +1278,7 @@ mod tests {
         assert!(!end_reel_title_match(""));
     }
 
-    fn letterbox_frame(mid: [u8; 3]) -> RgbImage {
-        let mut img = RgbImage::from_pixel(640, 360, Rgb(mid));
+    fn letterbox_bars(img: &mut RgbImage) {
         // 7% of 360 = 25.2 → paint 30px bars so the 70/1000 band is black.
         for y in 0..30 {
             for x in 0..640 {
@@ -1098,12 +1286,96 @@ mod tests {
                 img.put_pixel(x, 359 - y, Rgb([8, 8, 8]));
             }
         }
+    }
+
+    /// Flat mid band — loading / `ENTERING GAME` chrome, not footage.
+    fn letterbox_flat_frame(mid: [u8; 3]) -> RgbImage {
+        let mut img = RgbImage::from_pixel(640, 360, Rgb(mid));
+        letterbox_bars(&mut img);
+        img
+    }
+
+    /// Letterboxed highlight-style mid: spatial color spread so the flat-UI
+    /// veto does not fire.
+    fn letterbox_footage_frame() -> RgbImage {
+        let mut img = RgbImage::from_pixel(640, 360, Rgb([80, 90, 100]));
+        for y in 30u32..330 {
+            for x in 0u32..640 {
+                let n = ((x.wrapping_mul(37) ^ y.wrapping_mul(17)) % 50) as u8;
+                let warm = (x / 80) % 3 == 0;
+                let pix = if warm {
+                    Rgb([110 + n / 2, 70 + n / 3, 50 + n / 4])
+                } else {
+                    Rgb([50 + n / 3, 90 + n / 2, 80 + n / 3])
+                };
+                img.put_pixel(x, y, pix);
+            }
+        }
+        // Brighter "character" blob so one bin cannot dominate.
+        for y in 90..250 {
+            for x in 280..480 {
+                img.put_pixel(x, y, Rgb([160, 120, 90]));
+            }
+        }
+        letterbox_bars(&mut img);
+        img
+    }
+
+    fn entering_game_frame() -> RgbImage {
+        // Soot 013904 / 223050: ~38% black bars + a ~24% navy strip.
+        // A vertical navy gradient splits 16-wide bins (old footage
+        // check) but the shoulders at y 15–23% / 77–85% stay black.
+        let mut img = RgbImage::from_pixel(640, 360, Rgb([0, 0, 0]));
+        for y in 136..224 {
+            let t = (y - 136) as u8;
+            let navy = Rgb([20 + t / 4, 28 + t / 5, 42 + t / 3]);
+            for x in 0..640 {
+                img.put_pixel(x, y, navy);
+            }
+        }
+        // Centered white "ENTERING GAME" glyphs.
+        for y in 168..192 {
+            for x in 200..440 {
+                if x % 7 < 3 {
+                    img.put_pixel(x, y, Rgb([240, 240, 240]));
+                }
+            }
+        }
+        // Thin HUD line in the top 7% band (MangoHud / FPS overlay).
+        for x in 8..400 {
+            img.put_pixel(x, 4, Rgb([220, 220, 220]));
+        }
+        img
+    }
+
+    fn tab_scoreboard_frame() -> RgbImage {
+        let mut img = RgbImage::from_pixel(640, 360, Rgb([0, 0, 0]));
+        // Soot accepted_020455: one magenta team *slab* over one mustard
+        // slab (no dark row gaps). Group-count of 3+ misses this.
+        for y in 12..165 {
+            for x in 24..620 {
+                img.put_pixel(x, y, Rgb([90, 40, 140]));
+            }
+        }
+        for y in 185..348 {
+            for x in 24..620 {
+                img.put_pixel(x, y, Rgb([188, 146, 0]));
+            }
+        }
+        // White names / stats on both teams (nameplate white gate).
+        for y in [40, 70, 100, 130, 210, 240, 270, 300] {
+            for x in 80..240 {
+                if x % 5 < 2 {
+                    img.put_pixel(x, y, Rgb([235, 235, 235]));
+                }
+            }
+        }
         img
     }
 
     #[test]
-    fn end_reel_letterbox_needs_dark_bars_and_lit_middle() {
-        let reel = letterbox_frame([80, 90, 100]);
+    fn end_reel_letterbox_needs_dark_bars_and_lit_footage() {
+        let reel = letterbox_footage_frame();
         assert!(end_reel_letterbox(&reel), "letterboxed reel should wake");
         assert!(
             detect_end_reel(&DynamicImage::ImageRgb8(reel.clone()), &reel),
@@ -1128,6 +1400,225 @@ mod tests {
             !end_reel_letterbox(&gold),
             "victory banner flood is not a letterbox"
         );
+
+        let flat = letterbox_flat_frame([80, 90, 100]);
+        assert!(
+            !end_reel_letterbox(&flat),
+            "uniform mid slab is loading chrome, not a reel"
+        );
+    }
+
+    #[test]
+    fn entering_game_loading_does_not_wake() {
+        let rgb = entering_game_frame();
+        let img = DynamicImage::ImageRgb8(rgb.clone());
+        assert!(
+            !end_reel_letterbox(&rgb),
+            "ENTERING GAME dark bars + navy slab must not letterbox-wake"
+        );
+        assert!(
+            !detect_end_reel(&img, &rgb),
+            "loading transition must not set end-reel wake"
+        );
+        assert!(!super::super::match_start::detect_ban_screen(&img, &rgb));
+    }
+
+    #[test]
+    fn ban_heroes_layout_does_not_wake_end_reel() {
+        // Same layout helper as match_start's hook test — keep the wake
+        // veto in this module so a letterboxed hero grid cannot sneak
+        // through detect_end_reel.
+        use super::super::match_start::detect_ban_screen;
+        let mut img = RgbImage::from_pixel(640, 360, Rgb([12, 16, 28]));
+        for y in 0..40 {
+            for x in 0..640 {
+                img.put_pixel(x, y, Rgb([8, 8, 12]));
+                img.put_pixel(x, 359 - y, Rgb([8, 8, 12]));
+            }
+        }
+        for row in 0..3 {
+            for col in 0..8 {
+                let x0 = 40 + col * 72;
+                let y0 = 70 + row * 70;
+                let color = Rgb([
+                    40 + (col as u8) * 24,
+                    80 + (row as u8) * 40,
+                    160u8.saturating_sub(col as u8 * 12),
+                ]);
+                for y in y0..y0 + 50 {
+                    for x in x0..x0 + 60 {
+                        if x < 640 && y < 360 {
+                            img.put_pixel(x, y, color);
+                        }
+                    }
+                }
+            }
+        }
+        for y in 166..196 {
+            for x in 0..640 {
+                img.put_pixel(x, y, Rgb([180, 28, 32]));
+            }
+        }
+        for y in 8..22 {
+            for x in 250..390 {
+                img.put_pixel(x, y, Rgb([200, 24, 24]));
+            }
+        }
+        let dyn_img = DynamicImage::ImageRgb8(img.clone());
+        assert!(
+            detect_ban_screen(&dyn_img, &img),
+            "Ban Heroes must still be a first-class hook"
+        );
+        assert!(
+            !detect_end_reel(&dyn_img, &img),
+            "ban UI must not set end_reel_wake_until"
+        );
+    }
+
+    #[test]
+    fn tab_scoreboard_does_not_nameplate_wake() {
+        let rgb = tab_scoreboard_frame();
+        let img = DynamicImage::ImageRgb8(rgb.clone());
+        assert!(
+            !nameplate_potg_signal(&rgb),
+            "gold team rows are not a POTG battletag stack"
+        );
+        assert!(!detect_end_reel(&img, &rgb), "Tab scoreboard must not wake");
+    }
+
+    #[test]
+    fn tab_scoreboard_muted_mustard_does_not_nameplate_wake() {
+        // Geometry that passed 486219f: white names in the title ROI +
+        // enough neon-gold specks for the cheap gate, but the mustard
+        // slab fails is_potg_orange so hot-strips / flood / magenta miss.
+        let rgb = tab_scoreboard_muted_mustard_frame();
+        let img = DynamicImage::ImageRgb8(rgb.clone());
+        let orange = playfield_hit_ratio(
+            &rgb,
+            NAMEPLATE_ORANGE_X_PM,
+            NAMEPLATE_ORANGE_Y_PM,
+            NAMEPLATE_ORANGE_W_PM,
+            NAMEPLATE_ORANGE_H_PM,
+            is_potg_orange,
+        );
+        let white = playfield_hit_ratio(
+            &rgb,
+            NAMEPLATE_WHITE_X_PM,
+            NAMEPLATE_WHITE_Y_PM,
+            NAMEPLATE_WHITE_W_PM,
+            NAMEPLATE_WHITE_H_PM,
+            is_title_white,
+        );
+        assert!(
+            (NAMEPLATE_ORANGE_MIN..=NAMEPLATE_ORANGE_MAX).contains(&orange)
+                && white >= NAMEPLATE_WHITE_MIN,
+            "fixture must still look like a nameplate to the cheap gate (orange={orange:.4} white={white:.4})"
+        );
+        assert!(
+            nameplate_gold_hot_strips(&rgb) < 8,
+            "486219f hot-strip veto must miss this slab"
+        );
+        assert!(
+            nameplate_gold_row_groups(&rgb) < 3,
+            "gapped-row veto must miss a solid mustard block"
+        );
+        assert!(
+            !nameplate_potg_signal(&rgb),
+            "muted mustard team slab must not be a POTG battletag"
+        );
+        assert!(
+            !detect_end_reel(&img, &rgb),
+            "Tab scoreboard crop accepted_020455 must not wake"
+        );
+    }
+
+    /// Soot accepted_020455: tight Tab crop — burgundy team over a *muted*
+    /// mustard slab (human-bright, but most pixels fail `is_potg_orange`
+    /// val>160 / sat>140). White names sit on the gold. 486219f slab
+    /// vetoes used the strict orange predicate and missed this.
+    fn tab_scoreboard_muted_mustard_frame() -> RgbImage {
+        let mut img = RgbImage::from_pixel(640, 360, Rgb([12, 10, 14]));
+        // Header strip (E A D DMG H MIT).
+        for y in 0..18 {
+            for x in 0..640 {
+                img.put_pixel(x, y, Rgb([168, 168, 172]));
+            }
+        }
+        // Burgundy / maroon team — hue ~340, outside is_team_magenta 300±35.
+        for y in 18..168 {
+            let row = ((y - 18) / 25) as u8;
+            let fill = Rgb([72 + row * 4, 22, 40 + row]);
+            for x in 8..632 {
+                img.put_pixel(x, y, fill);
+            }
+        }
+        // Highlighted top row: pink/magenta border (FROZEN), not gold.
+        for y in 20..44 {
+            for x in 8..632 {
+                if y < 23 || y > 41 || x < 12 || x > 628 {
+                    img.put_pixel(x, y, Rgb([220, 50, 150]));
+                }
+            }
+        }
+        // VS divider.
+        for y in 168..184 {
+            for x in 0..640 {
+                img.put_pixel(x, y, Rgb([24, 24, 26]));
+            }
+        }
+        for y in 172..180 {
+            for x in 300..340 {
+                img.put_pixel(x, y, Rgb([230, 230, 230]));
+            }
+        }
+        // Mustard team slab. Base #9A7A12 fails val>160; sparse #C6A307
+        // specks keep the nameplate orange ROI in [0.035, 0.28].
+        for y in 184..358 {
+            for x in 8..632 {
+                img.put_pixel(x, y, Rgb([154, 122, 18]));
+            }
+        }
+        // Gray hero portraits + speaker column.
+        for row in 0..6 {
+            let y0 = 188 + row * 28;
+            for y in y0..y0 + 22 {
+                for x in 16..40 {
+                    img.put_pixel(x, y, Rgb([96, 96, 100]));
+                }
+                for x in 600..624 {
+                    img.put_pixel(x, y, Rgb([110, 110, 114]));
+                }
+            }
+        }
+        // White names on gold. y 58–70% is the nameplate title ROI —
+        // the first gold-team rows sit there on a real Tab crop.
+        for y in 210..250 {
+            if y % 6 > 2 {
+                continue;
+            }
+            for x in 56..240 {
+                if x % 4 < 2 {
+                    img.put_pixel(x, y, Rgb([240, 240, 240]));
+                }
+            }
+        }
+        for y in [268, 296, 324] {
+            for x in 56..220 {
+                if x % 5 < 2 {
+                    img.put_pixel(x, y, Rgb([240, 240, 240]));
+                }
+            }
+        }
+        // Brighter gold patches in the battletag ROI so strict orange
+        // still enters the wake window (the rest of the slab does not).
+        for y in 240..292 {
+            for x in 48..260 {
+                if (x + y) % 7 == 0 {
+                    img.put_pixel(x, y, Rgb([198, 163, 7]));
+                }
+            }
+        }
+        img
     }
 
     #[test]
@@ -1191,9 +1682,13 @@ mod tests {
             }
         }
         // Gold battletag at y ~70–75%, sample from the real frame.
+        // Glyph-like gaps: a solid plate trips NAMEPLATE_ORANGE_MAX
+        // (scoreboard row fills). Real known-potg-003708 is ~0.0685.
         for y in 252..272 {
             for x in 40..280 {
-                img.put_pixel(x, y, Rgb([255, 221, 0]));
+                if x % 6 < 3 {
+                    img.put_pixel(x, y, Rgb([255, 221, 0]));
+                }
             }
         }
         img
@@ -1262,7 +1757,9 @@ mod tests {
         let mut orange_only = RgbImage::from_pixel(640, 360, Rgb([40, 40, 40]));
         for y in 252..272 {
             for x in 40..280 {
-                orange_only.put_pixel(x, y, Rgb([255, 221, 0]));
+                if x % 6 < 3 {
+                    orange_only.put_pixel(x, y, Rgb([255, 221, 0]));
+                }
             }
         }
         assert!(
