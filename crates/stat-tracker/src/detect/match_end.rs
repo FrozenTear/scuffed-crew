@@ -494,10 +494,8 @@ fn detect_banner(rgb: &RgbImage) -> Option<MatchOutcome> {
 /// 2. Title-band OCR for PLAY OF THE GAME / HIGHLIGHT INTRO, gated on
 ///    [`cinematic_title_band`] so mid-fight ticks do not pay Tesseract.
 /// 3. Nameplate POTG title card (lower-left gold battletag + white title
-///    glyphs). Chat / endorsement toasts light the cinematic band, so path
-///    2 never runs on a real nameplate frame (`known-potg-003708`). Phrase
-///    OCR is still required — the gold+white gate only decides whether to
-///    pay Tesseract.
+///    glyphs). Same class as letterbox: the cheap gate is the wake.
+///    Phrase OCR is logged when it hits but is not required.
 pub fn detect_end_reel(img: &DynamicImage, rgb: &RgbImage) -> bool {
     if end_reel_letterbox(rgb) {
         tracing::info!("end-reel letterbox — POTG / highlight wake");
@@ -578,26 +576,23 @@ fn end_reel_cinematic_crop(img: &DynamicImage) -> Option<DynamicImage> {
     playfield_crop(img, 120, 80, 760, 220)
 }
 
-/// Nameplate POTG title card: orange name + white title glyphs, then the
-/// same phrase OCR as [`read_end_reel_title`]. Does not require a dark
-/// cinematic field — chat, endorsement toasts, and the hero render light
-/// the upper band on a real nameplate frame.
+/// Nameplate POTG title card: gold battletag + white title glyphs.
+/// Cadence wake only — same class as [`end_reel_letterbox`]. Phrase OCR
+/// is attempted for the log; it must not gate the wake (Soot 2026-09-06:
+/// known-potg-003708 passed the cheap gate, then Tesseract returned
+/// `PIAN AF TIIF AR` because the endorsement toast sits on the title).
 fn read_end_reel_nameplate(img: &DynamicImage, rgb: &RgbImage) -> bool {
     if !nameplate_potg_signal(rgb) {
         return false;
     }
-    let Some(crop) = end_reel_nameplate_crop(img) else {
-        return false;
-    };
-    if ocr_end_reel_phrase(prepare_nameplate_title(&crop), "end-reel nameplate") {
-        return true;
+    if let Some(crop) = end_reel_nameplate_crop(img) {
+        let _ = ocr_end_reel_phrase(prepare_nameplate_title(&crop), "end-reel nameplate")
+            || ocr_end_reel_phrase(
+                crate::ocr::preprocess::prepare_title(&crop),
+                "end-reel nameplate title-prep",
+            );
     }
-    // Fallback: same Otsu title prep as the cinematic path, in case the
-    // left stack sits on a darker field than the toast-lit upper band.
-    ocr_end_reel_phrase(
-        crate::ocr::preprocess::prepare_title(&crop),
-        "end-reel nameplate title-prep",
-    )
+    true
 }
 
 /// Left-half stack: PLAY OF THE GAME above the large gold battletag.
@@ -1248,6 +1243,10 @@ mod tests {
         assert!(
             nameplate_potg_signal(&frame),
             "gold name + white title must open the nameplate path (orange={orange:.4} white={white:.4})"
+        );
+        assert!(
+            detect_end_reel(&img, &frame),
+            "signal-true nameplate must wake even when title OCR would fail"
         );
     }
 
