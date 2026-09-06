@@ -489,10 +489,15 @@ fn detect_banner(rgb: &RgbImage) -> Option<MatchOutcome> {
 /// short Victory/Defeat window that follows the reel is sampled at full
 /// rate. Accolade / MVP lands ~15–20s after POTG (see [`read_result_word`]).
 ///
-/// Two cheap paths, either is enough to wake:
+/// Three cheap paths, either is enough to wake:
 /// 1. Cinematic letterbox (dark top+bottom bars, lit middle) — no OCR.
-/// 2. Title-band OCR for PLAY OF THE GAME / HIGHLIGHT INTRO, gated so
-///    mid-fight ticks do not pay Tesseract.
+/// 2. Title-band OCR for PLAY OF THE GAME / HIGHLIGHT INTRO, gated on
+///    [`cinematic_title_band`] so mid-fight ticks do not pay Tesseract.
+/// 3. Nameplate POTG title card (large orange player name + white title
+///    glyphs). Chat / endorsement toasts light the cinematic band, so path
+///    2 never runs on a real nameplate frame (`known-potg-003708`). Phrase
+///    OCR is still required — the orange+white gate only decides whether
+///    to pay Tesseract.
 pub fn detect_end_reel(img: &DynamicImage, rgb: &RgbImage) -> bool {
     if end_reel_letterbox(rgb) {
         tracing::info!("end-reel letterbox — POTG / highlight wake");
@@ -500,6 +505,10 @@ pub fn detect_end_reel(img: &DynamicImage, rgb: &RgbImage) -> bool {
     }
     if read_end_reel_title(img) {
         tracing::info!("end-reel title — POTG / highlight wake");
+        return true;
+    }
+    if read_end_reel_nameplate(img, rgb) {
+        tracing::info!("end-reel nameplate — POTG / highlight wake");
         return true;
     }
     false
@@ -551,37 +560,179 @@ fn dark_ratio(rgb: &RgbImage, x0: u32, y0: u32, cw: u32, ch: u32) -> f32 {
 
 /// Title-card path: dark cinematic band + bright glyphs, then phrase OCR.
 fn read_end_reel_title(img: &DynamicImage) -> bool {
-    let (fw, fh) = (img.width(), img.height());
-    let (gx, gy, gw, gh) = crate::ocr::preprocess::game_rect_16_9(fw, fh);
-    // Wide upper band where the POTG title card / overlay sits. Tighter than
-    // a full-frame OCR; high enough to miss the in-world end-title V/D word
-    // (y ~34–52%) so this does not double as an outcome reader.
-    let x = gx + gw * 120 / 1000;
-    let y = gy + gh * 80 / 1000;
-    let cw = gw * 760 / 1000;
-    let ch = gh * 220 / 1000;
-    if cw == 0 || ch == 0 || x + cw > fw || y + ch > fh {
+    let Some(crop) = end_reel_cinematic_crop(img) else {
         return false;
-    }
-    let crop = img.crop_imm(x, y, cw, ch);
+    };
     if !cinematic_title_band(&crop) {
         return false;
     }
-    let prepared = crate::ocr::preprocess::prepare_title(&crop);
+    ocr_end_reel_phrase(
+        crate::ocr::preprocess::prepare_title(&crop),
+        "end-reel title",
+    )
+}
+
+/// Wide upper band where a cinematic POTG / highlight overlay sits.
+/// High enough to miss the in-world end-title V/D word (y ~34–52%).
+fn end_reel_cinematic_crop(img: &DynamicImage) -> Option<DynamicImage> {
+    playfield_crop(img, 120, 80, 760, 220)
+}
+
+/// Nameplate POTG title card: orange name + white title glyphs, then the
+/// same phrase OCR as [`read_end_reel_title`]. Does not require a dark
+/// cinematic field — chat, endorsement toasts, and the hero render light
+/// the upper band on a real nameplate frame.
+fn read_end_reel_nameplate(img: &DynamicImage, rgb: &RgbImage) -> bool {
+    if !nameplate_potg_signal(rgb) {
+        return false;
+    }
+    let Some(crop) = end_reel_nameplate_crop(img) else {
+        return false;
+    };
+    if ocr_end_reel_phrase(prepare_nameplate_title(&crop), "end-reel nameplate") {
+        return true;
+    }
+    // Fallback: same Otsu title prep as the cinematic path, in case the
+    // left stack sits on a darker field than the toast-lit upper band.
+    ocr_end_reel_phrase(
+        crate::ocr::preprocess::prepare_title(&crop),
+        "end-reel nameplate title-prep",
+    )
+}
+
+/// Left-half stack: PLAY OF THE GAME above the large orange battletag.
+/// Left-biased so the hero render (right two-thirds) stays out of the crop.
+/// Tall enough to catch a vertically-centered nameplate; still left of the
+/// centered in-world V/D end-title (x ~32–68%).
+fn end_reel_nameplate_crop(img: &DynamicImage) -> Option<DynamicImage> {
+    playfield_crop(img, 20, 100, 500, 480)
+}
+
+fn playfield_crop(
+    img: &DynamicImage,
+    x_pm: u32,
+    y_pm: u32,
+    w_pm: u32,
+    h_pm: u32,
+) -> Option<DynamicImage> {
+    let (fw, fh) = (img.width(), img.height());
+    let (gx, gy, gw, gh) = crate::ocr::preprocess::game_rect_16_9(fw, fh);
+    let x = gx + gw * x_pm / 1000;
+    let y = gy + gh * y_pm / 1000;
+    let cw = gw * w_pm / 1000;
+    let ch = gh * h_pm / 1000;
+    if cw == 0 || ch == 0 || x + cw > fw || y + ch > fh {
+        return None;
+    }
+    Some(img.crop_imm(x, y, cw, ch))
+}
+
+fn ocr_end_reel_phrase(prepared: GrayImage, context: &'static str) -> bool {
     match crate::ocr::recognize_prepared(&prepared, "6", Some("ABCDEFGHIJKLMNOPQRSTUVWXYZ ")) {
         Ok(text) => {
             let hit = end_reel_title_match(&text);
             if hit {
-                tracing::debug!(text = %text.trim(), "end-reel title OCR matched");
+                tracing::debug!(text = %text.trim(), context, "end-reel title OCR matched");
             } else {
-                tracing::trace!(text = %text.trim(), "end-reel title OCR did not match");
+                tracing::trace!(text = %text.trim(), context, "end-reel title OCR did not match");
             }
             hit
         }
         Err(e) => {
-            tracing::debug!(error = %e, "end-reel title OCR failed");
+            tracing::debug!(error = %e, context, "end-reel title OCR failed");
             false
         }
+    }
+}
+
+/// Isolate bright desaturated glyphs (PLAY OF THE GAME) on a lit nameplate
+/// card. Yellow endorsement toasts and the orange battletag fail the sat
+/// cap; mid-tone world fails the value floor. Black-on-white for Tesseract.
+fn prepare_nameplate_title(crop: &DynamicImage) -> GrayImage {
+    let rgb = crop.to_rgb8();
+    let (w, h) = rgb.dimensions();
+    let mut ink = GrayImage::new(w, h);
+    for y in 0..h {
+        for x in 0..w {
+            let [r, g, b] = rgb.get_pixel(x, y).0;
+            let (_, sat, val) = rgb_to_hsv(r, g, b);
+            let v = if val > 200 && sat < 55 { 0 } else { 255 };
+            ink.put_pixel(x, y, Luma([v]));
+        }
+    }
+    let scale = (120 / h.max(1)).clamp(1, 4);
+    let work = if scale > 1 {
+        image::imageops::resize(
+            &ink,
+            w * scale,
+            h * scale,
+            image::imageops::FilterType::Lanczos3,
+        )
+    } else {
+        ink
+    };
+    let (ww, hh) = work.dimensions();
+    let mut bordered = GrayImage::from_pixel(ww + 24, hh + 24, Luma([255]));
+    image::imageops::replace(&mut bordered, &work, 12, 12);
+    bordered
+}
+
+/// Cheap nameplate gate: large OW-orange battletag in the left-center plus
+/// bright white title glyphs above it. Does not require a dark field.
+fn nameplate_potg_signal(rgb: &RgbImage) -> bool {
+    let orange = playfield_hit_ratio(rgb, 30, 340, 460, 240, is_potg_orange);
+    let white = playfield_hit_ratio(rgb, 30, 140, 460, 260, is_title_white);
+    orange >= NAMEPLATE_ORANGE_MIN && white >= NAMEPLATE_WHITE_MIN
+}
+
+const NAMEPLATE_ORANGE_MIN: f32 = 0.035;
+const NAMEPLATE_WHITE_MIN: f32 = 0.012;
+
+fn is_potg_orange(r: u8, g: u8, b: u8) -> bool {
+    let (hue, sat, val) = rgb_to_hsv(r, g, b);
+    // POTG battletag orange (~hue 31). Tight enough to drop victory gold
+    // (~hue 46) and defeat red (~hue 0).
+    hue_near(hue, 30, 12) && sat > 150 && val > 150 && r > g && g > b
+}
+
+fn is_title_white(r: u8, g: u8, b: u8) -> bool {
+    let (_, sat, val) = rgb_to_hsv(r, g, b);
+    val > 205 && sat < 45
+}
+
+fn playfield_hit_ratio(
+    rgb: &RgbImage,
+    x_pm: u32,
+    y_pm: u32,
+    w_pm: u32,
+    h_pm: u32,
+    pred: impl Fn(u8, u8, u8) -> bool,
+) -> f32 {
+    let (w, h) = rgb.dimensions();
+    let (gx, gy, gw, gh) = crate::ocr::preprocess::game_rect_16_9(w, h);
+    let x0 = gx + gw * x_pm / 1000;
+    let y0 = gy + gh * y_pm / 1000;
+    let x1 = (x0 + gw * w_pm / 1000).min(w);
+    let y1 = (y0 + gh * h_pm / 1000).min(h);
+    if x1 <= x0 || y1 <= y0 {
+        return 0.0;
+    }
+    const STRIDE: u32 = 2;
+    let mut hits = 0u32;
+    let mut total = 0u32;
+    for y in (y0..y1).step_by(STRIDE as usize) {
+        for x in (x0..x1).step_by(STRIDE as usize) {
+            let [r, g, b] = rgb.get_pixel(x, y).0;
+            total += 1;
+            if pred(r, g, b) {
+                hits += 1;
+            }
+        }
+    }
+    if total == 0 {
+        0.0
+    } else {
+        hits as f32 / total as f32
     }
 }
 
@@ -969,5 +1120,103 @@ mod tests {
             }
         }
         assert!(cinematic_title_band(&DynamicImage::ImageRgb8(card)));
+    }
+
+    /// Lit indoor frame + toast + chat + orange name + white title glyphs.
+    /// Matches the measured miss on known-potg-003708: no letterbox, no
+    /// cinematic dark band, but the nameplate stack is present.
+    fn nameplate_potg_frame() -> RgbImage {
+        let mut img = RgbImage::from_pixel(640, 360, Rgb([110, 95, 85]));
+        for y in 0..360 {
+            for x in 280..640 {
+                img.put_pixel(x, y, Rgb([150, 120, 100]));
+            }
+        }
+        // Yellow endorsement toast in the cinematic band.
+        for y in 40..70 {
+            for x in 20..280 {
+                img.put_pixel(x, y, Rgb([240, 210, 40]));
+            }
+        }
+        // Chat-like bright line at the top-left.
+        for y in 8..14 {
+            for x in 10..180 {
+                img.put_pixel(x, y, Rgb([255, 140, 40]));
+            }
+        }
+        // White title glyphs in the nameplate title band (y ~14–40%).
+        for y in 90..120 {
+            for x in 30..300 {
+                if x % 4 == 0 {
+                    img.put_pixel(x, y, Rgb([235, 235, 235]));
+                }
+            }
+        }
+        // Large orange battletag (y ~34–58%).
+        for y in 140..190 {
+            for x in 30..320 {
+                img.put_pixel(x, y, Rgb([255, 150, 40]));
+            }
+        }
+        img
+    }
+
+    #[test]
+    fn nameplate_potg_signal_fires_when_cinematic_band_does_not() {
+        let frame = nameplate_potg_frame();
+        let img = DynamicImage::ImageRgb8(frame.clone());
+        assert!(
+            !end_reel_letterbox(&frame),
+            "nameplate card is not letterboxed"
+        );
+        let crop = end_reel_cinematic_crop(&img).expect("cinematic crop");
+        assert!(
+            !cinematic_title_band(&crop),
+            "toast + hero light the cinematic band — old gate must miss"
+        );
+        assert!(
+            nameplate_potg_signal(&frame),
+            "orange name + white title must open the nameplate path"
+        );
+    }
+
+    #[test]
+    fn nameplate_potg_signal_rejects_combat_and_partial_cues() {
+        let sky = RgbImage::from_pixel(640, 360, Rgb([180, 200, 220]));
+        assert!(!nameplate_potg_signal(&sky), "mid-fight sky");
+        assert!(!detect_end_reel(
+            &DynamicImage::ImageRgb8(sky.clone()),
+            &sky
+        ));
+
+        let mut orange_only = RgbImage::from_pixel(640, 360, Rgb([40, 40, 40]));
+        for y in 140..190 {
+            for x in 30..320 {
+                orange_only.put_pixel(x, y, Rgb([255, 150, 40]));
+            }
+        }
+        assert!(
+            !nameplate_potg_signal(&orange_only),
+            "orange blob without white title glyphs"
+        );
+
+        let mut white_only = RgbImage::from_pixel(640, 360, Rgb([40, 40, 40]));
+        for y in 90..120 {
+            for x in 30..300 {
+                if x % 4 == 0 {
+                    white_only.put_pixel(x, y, Rgb([235, 235, 235]));
+                }
+            }
+        }
+        assert!(
+            !nameplate_potg_signal(&white_only),
+            "white HUD without orange name"
+        );
+
+        let gold = RgbImage::from_pixel(640, 360, Rgb([230, 180, 20]));
+        assert!(
+            !nameplate_potg_signal(&gold),
+            "victory gold flood is not a POTG nameplate"
+        );
     }
 }
