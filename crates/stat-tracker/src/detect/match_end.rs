@@ -490,13 +490,22 @@ fn detect_banner(rgb: &RgbImage) -> Option<MatchOutcome> {
 /// rate. Accolade / MVP lands ~15–20s after POTG (see [`read_result_word`]).
 ///
 /// Three cheap paths, either is enough to wake:
-/// 1. Cinematic letterbox (dark top+bottom bars, lit middle) — no OCR.
+/// 1. Cinematic letterbox (dark top+bottom bars, lit middle that looks
+///    like footage, not a flat loading slab) — no OCR.
 /// 2. Title-band OCR for PLAY OF THE GAME / HIGHLIGHT INTRO, gated on
 ///    [`cinematic_title_band`] so mid-fight ticks do not pay Tesseract.
 /// 3. Nameplate POTG title card (lower-left gold battletag + white title
 ///    glyphs). Same class as letterbox: the cheap gate is the wake.
 ///    Phrase OCR is logged when it hits but is not required.
+///
+/// Ban Heroes UI is a **distinct** signal ([`super::match_start::detect_ban_screen`])
+/// and must not set `end_reel_wake_until`. Future: register voted bans;
+/// this path only vetoes the wake.
 pub fn detect_end_reel(img: &DynamicImage, rgb: &RgbImage) -> bool {
+    if super::match_start::detect_ban_screen(img, rgb) {
+        tracing::debug!("ban screen — not an end-reel wake");
+        return false;
+    }
     if end_reel_letterbox(rgb) {
         tracing::info!("end-reel letterbox — POTG / highlight wake");
         return true;
@@ -515,6 +524,11 @@ pub fn detect_end_reel(img: &DynamicImage, rgb: &RgbImage) -> bool {
 /// OW2 POTG / highlight replay letterboxes the 16:9 playfield. Mid-match HUD
 /// lights the top bar, so both-bars-dark plus a lit middle is a cheap
 /// discriminator. A fade-to-black frame fails the middle check.
+///
+/// A flat mid slab (`ENTERING GAME` / other loading chrome) also looks
+/// letterboxed (Soot 2026-09-06 batch: top/bot dark ≥0.85, mid <0.5) but
+/// is one dominant color, not footage. Require the mid band to spread
+/// across coarse color bins.
 fn end_reel_letterbox(rgb: &RgbImage) -> bool {
     let (w, h) = rgb.dimensions();
     let (gx, gy, gw, gh) = crate::ocr::preprocess::game_rect_16_9(w, h);
@@ -527,7 +541,48 @@ fn end_reel_letterbox(rgb: &RgbImage) -> bool {
     let mid_y = gy + gh * 300 / 1000;
     let mid_h = gh * 400 / 1000;
     let mid_dark = dark_ratio(rgb, gx, mid_y, gw, mid_h);
-    top_dark >= 0.72 && bot_dark >= 0.72 && mid_dark < 0.50
+    top_dark >= 0.72
+        && bot_dark >= 0.72
+        && mid_dark < 0.50
+        && letterbox_mid_is_footage(rgb, gx, mid_y, gw, mid_h)
+}
+
+/// Reject a uniform loading / transition slab. `ENTERING GAME` is a navy
+/// strip with a few white glyphs — one 16-wide RGB bin holds ~90%+ of
+/// mid samples. Real highlight footage (and a noisy synthetic reel)
+/// spreads across bins.
+fn letterbox_mid_is_footage(rgb: &RgbImage, x0: u32, y0: u32, cw: u32, ch: u32) -> bool {
+    mid_dominant_bin_ratio(rgb, x0, y0, cw, ch) < LETTERBOX_FLAT_UI_MAX
+}
+
+const LETTERBOX_FLAT_UI_MAX: f32 = 0.82;
+
+fn mid_dominant_bin_ratio(rgb: &RgbImage, x0: u32, y0: u32, cw: u32, ch: u32) -> f32 {
+    let (w, h) = rgb.dimensions();
+    let x1 = (x0 + cw).min(w);
+    let y1 = (y0 + ch).min(h);
+    if x1 <= x0 || y1 <= y0 {
+        return 1.0;
+    }
+    // 16-wide channel bins (16³). Coarse enough for capture noise, fine
+    // enough that a character + world scene does not collapse to one bin.
+    const BINS: usize = 16 * 16 * 16;
+    let mut counts = [0u32; BINS];
+    let mut total = 0u32;
+    const STRIDE: u32 = 2;
+    for y in (y0..y1).step_by(STRIDE as usize) {
+        for x in (x0..x1).step_by(STRIDE as usize) {
+            let [r, g, b] = rgb.get_pixel(x, y).0;
+            let idx = ((r as usize) >> 4) * 256 + ((g as usize) >> 4) * 16 + ((b as usize) >> 4);
+            counts[idx] += 1;
+            total += 1;
+        }
+    }
+    if total == 0 {
+        return 1.0;
+    }
+    let best = counts.iter().copied().max().unwrap_or(0);
+    best as f32 / total as f32
 }
 
 fn dark_ratio(rgb: &RgbImage, x0: u32, y0: u32, cw: u32, ch: u32) -> f32 {
@@ -686,6 +741,12 @@ fn nameplate_potg_signal(rgb: &RgbImage) -> bool {
     if playfield_hit_ratio(rgb, 0, 0, 1000, 1000, is_potg_orange) > 0.30 {
         return false;
     }
+    // Tab scoreboard: stacked gold team rows (highlighted mustard ≠ a
+    // single battletag). Three or more gold-heavy bands in the lower-left
+    // are a board, not PLAY OF THE GAME + name.
+    if nameplate_gold_row_groups(rgb) >= 3 {
+        return false;
+    }
     let orange = playfield_hit_ratio(
         rgb,
         NAMEPLATE_ORANGE_X_PM,
@@ -702,11 +763,38 @@ fn nameplate_potg_signal(rgb: &RgbImage) -> bool {
         NAMEPLATE_WHITE_H_PM,
         is_title_white,
     );
-    orange >= NAMEPLATE_ORANGE_MIN && white >= NAMEPLATE_WHITE_MIN
+    // Real known-potg-003708 orange ≈ 0.0685 (glyph, not a fill). A gold
+    // scoreboard row painted into this ROI is typically >0.35. Cap sits
+    // above the committed synthetic nameplate (~0.22) and below row fills.
+    orange >= NAMEPLATE_ORANGE_MIN && orange <= NAMEPLATE_ORANGE_MAX && white >= NAMEPLATE_WHITE_MIN
 }
 
 const NAMEPLATE_ORANGE_MIN: f32 = 0.035;
+const NAMEPLATE_ORANGE_MAX: f32 = 0.28;
 const NAMEPLATE_WHITE_MIN: f32 = 0.012;
+
+/// Count contiguous gold-heavy horizontal strips in the lower-left half.
+/// POTG nameplate ≈ 1–2 runs (title stack). Tab gold team ≈ 6 row blocks.
+fn nameplate_gold_row_groups(rgb: &RgbImage) -> u32 {
+    const STRIPS: u32 = 20;
+    const HOT: f32 = 0.20;
+    let mut groups = 0u32;
+    let mut in_run = false;
+    for i in 0..STRIPS {
+        let y_pm = 400 + i * 550 / STRIPS;
+        let h_pm = (550 / STRIPS).max(1);
+        let ratio = playfield_hit_ratio(rgb, 0, y_pm, 500, h_pm, is_potg_orange);
+        if ratio > HOT {
+            if !in_run {
+                groups += 1;
+                in_run = true;
+            }
+        } else {
+            in_run = false;
+        }
+    }
+    groups
+}
 /// Lower-left battletag band (y 66–82%, x 5–45%).
 const NAMEPLATE_ORANGE_X_PM: u32 = 50;
 const NAMEPLATE_ORANGE_Y_PM: u32 = 660;
@@ -1089,8 +1177,7 @@ mod tests {
         assert!(!end_reel_title_match(""));
     }
 
-    fn letterbox_frame(mid: [u8; 3]) -> RgbImage {
-        let mut img = RgbImage::from_pixel(640, 360, Rgb(mid));
+    fn letterbox_bars(img: &mut RgbImage) {
         // 7% of 360 = 25.2 → paint 30px bars so the 70/1000 band is black.
         for y in 0..30 {
             for x in 0..640 {
@@ -1098,12 +1185,91 @@ mod tests {
                 img.put_pixel(x, 359 - y, Rgb([8, 8, 8]));
             }
         }
+    }
+
+    /// Flat mid band — loading / `ENTERING GAME` chrome, not footage.
+    fn letterbox_flat_frame(mid: [u8; 3]) -> RgbImage {
+        let mut img = RgbImage::from_pixel(640, 360, Rgb(mid));
+        letterbox_bars(&mut img);
+        img
+    }
+
+    /// Letterboxed highlight-style mid: spatial color spread so the flat-UI
+    /// veto does not fire.
+    fn letterbox_footage_frame() -> RgbImage {
+        let mut img = RgbImage::from_pixel(640, 360, Rgb([80, 90, 100]));
+        for y in 30..330 {
+            for x in 0..640 {
+                let n = ((x.wrapping_mul(37) ^ y.wrapping_mul(17)) % 50) as u8;
+                let warm = (x / 80) % 3 == 0;
+                let pix = if warm {
+                    Rgb([110 + n / 2, 70 + n / 3, 50 + n / 4])
+                } else {
+                    Rgb([50 + n / 3, 90 + n / 2, 80 + n / 3])
+                };
+                img.put_pixel(x, y, pix);
+            }
+        }
+        // Brighter "character" blob so one bin cannot dominate.
+        for y in 90..250 {
+            for x in 280..480 {
+                img.put_pixel(x, y, Rgb([160, 120, 90]));
+            }
+        }
+        letterbox_bars(&mut img);
+        img
+    }
+
+    fn entering_game_frame() -> RgbImage {
+        let mut img = RgbImage::from_pixel(640, 360, Rgb([0, 0, 0]));
+        for y in 140..220 {
+            for x in 0..640 {
+                img.put_pixel(x, y, Rgb([18, 24, 38]));
+            }
+        }
+        // Centered white "ENTERING GAME" glyphs.
+        for y in 168..192 {
+            for x in 200..440 {
+                if x % 7 < 3 {
+                    img.put_pixel(x, y, Rgb([240, 240, 240]));
+                }
+            }
+        }
+        img
+    }
+
+    fn tab_scoreboard_frame() -> RgbImage {
+        let mut img = RgbImage::from_pixel(640, 360, Rgb([0, 0, 0]));
+        // Purple team (upper).
+        for row in 0..6 {
+            let y0 = 16 + row * 22;
+            for y in y0..y0 + 18 {
+                for x in 40..600 {
+                    img.put_pixel(x, y, Rgb([90, 40, 140]));
+                }
+            }
+        }
+        // Gold team (lower) — mustard fills + white names/stats. This is
+        // the 0.4.10 nameplate FP: orange+white in the lower-left ROI.
+        for row in 0..6 {
+            let y0 = 190 + row * 24;
+            for y in y0..y0 + 20 {
+                for x in 40..600 {
+                    img.put_pixel(x, y, Rgb([188, 146, 0]));
+                }
+                for x in 80..220 {
+                    if x % 5 < 2 {
+                        img.put_pixel(x, y0 + 6, Rgb([235, 235, 235]));
+                    }
+                }
+            }
+        }
         img
     }
 
     #[test]
-    fn end_reel_letterbox_needs_dark_bars_and_lit_middle() {
-        let reel = letterbox_frame([80, 90, 100]);
+    fn end_reel_letterbox_needs_dark_bars_and_lit_footage() {
+        let reel = letterbox_footage_frame();
         assert!(end_reel_letterbox(&reel), "letterboxed reel should wake");
         assert!(
             detect_end_reel(&DynamicImage::ImageRgb8(reel.clone()), &reel),
@@ -1128,6 +1294,90 @@ mod tests {
             !end_reel_letterbox(&gold),
             "victory banner flood is not a letterbox"
         );
+
+        let flat = letterbox_flat_frame([80, 90, 100]);
+        assert!(
+            !end_reel_letterbox(&flat),
+            "uniform mid slab is loading chrome, not a reel"
+        );
+    }
+
+    #[test]
+    fn entering_game_loading_does_not_wake() {
+        let rgb = entering_game_frame();
+        let img = DynamicImage::ImageRgb8(rgb.clone());
+        assert!(
+            !end_reel_letterbox(&rgb),
+            "ENTERING GAME dark bars + navy slab must not letterbox-wake"
+        );
+        assert!(
+            !detect_end_reel(&img, &rgb),
+            "loading transition must not set end-reel wake"
+        );
+        assert!(!super::super::match_start::detect_ban_screen(&img, &rgb));
+    }
+
+    #[test]
+    fn ban_heroes_layout_does_not_wake_end_reel() {
+        // Same layout helper as match_start's hook test — keep the wake
+        // veto in this module so a letterboxed hero grid cannot sneak
+        // through detect_end_reel.
+        use super::super::match_start::detect_ban_screen;
+        let mut img = RgbImage::from_pixel(640, 360, Rgb([12, 16, 28]));
+        for y in 0..40 {
+            for x in 0..640 {
+                img.put_pixel(x, y, Rgb([8, 8, 12]));
+                img.put_pixel(x, 359 - y, Rgb([8, 8, 12]));
+            }
+        }
+        for row in 0..3 {
+            for col in 0..8 {
+                let x0 = 40 + col * 72;
+                let y0 = 70 + row * 70;
+                let color = Rgb([
+                    40 + (col as u8) * 24,
+                    80 + (row as u8) * 40,
+                    160u8.saturating_sub(col as u8 * 12),
+                ]);
+                for y in y0..y0 + 50 {
+                    for x in x0..x0 + 60 {
+                        if x < 640 && y < 360 {
+                            img.put_pixel(x, y, color);
+                        }
+                    }
+                }
+            }
+        }
+        for y in 166..196 {
+            for x in 0..640 {
+                img.put_pixel(x, y, Rgb([180, 28, 32]));
+            }
+        }
+        for y in 8..22 {
+            for x in 250..390 {
+                img.put_pixel(x, y, Rgb([200, 24, 24]));
+            }
+        }
+        let dyn_img = DynamicImage::ImageRgb8(img.clone());
+        assert!(
+            detect_ban_screen(&dyn_img, &img),
+            "Ban Heroes must still be a first-class hook"
+        );
+        assert!(
+            !detect_end_reel(&dyn_img, &img),
+            "ban UI must not set end_reel_wake_until"
+        );
+    }
+
+    #[test]
+    fn tab_scoreboard_does_not_nameplate_wake() {
+        let rgb = tab_scoreboard_frame();
+        let img = DynamicImage::ImageRgb8(rgb.clone());
+        assert!(
+            !nameplate_potg_signal(&rgb),
+            "gold team rows are not a POTG battletag stack"
+        );
+        assert!(!detect_end_reel(&img, &rgb), "Tab scoreboard must not wake");
     }
 
     #[test]
@@ -1191,9 +1441,13 @@ mod tests {
             }
         }
         // Gold battletag at y ~70–75%, sample from the real frame.
+        // Glyph-like gaps: a solid plate trips NAMEPLATE_ORANGE_MAX
+        // (scoreboard row fills). Real known-potg-003708 is ~0.0685.
         for y in 252..272 {
             for x in 40..280 {
-                img.put_pixel(x, y, Rgb([255, 221, 0]));
+                if x % 6 < 3 {
+                    img.put_pixel(x, y, Rgb([255, 221, 0]));
+                }
             }
         }
         img
@@ -1262,7 +1516,9 @@ mod tests {
         let mut orange_only = RgbImage::from_pixel(640, 360, Rgb([40, 40, 40]));
         for y in 252..272 {
             for x in 40..280 {
-                orange_only.put_pixel(x, y, Rgb([255, 221, 0]));
+                if x % 6 < 3 {
+                    orange_only.put_pixel(x, y, Rgb([255, 221, 0]));
+                }
             }
         }
         assert!(

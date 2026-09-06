@@ -100,7 +100,15 @@ impl MatchOutcome {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum GamePhase {
-    MapVote { maps: Vec<String> },
+    MapVote {
+        maps: Vec<String>,
+    },
+    /// Hero ban vote (`BAN HEROES` / `VOTE TO BAN`).
+    ///
+    /// Future product: OCR should register the voted bans (out of scope
+    /// here). [`match_start::detect_ban_screen`] is the cheap layout hook.
+    /// Must not set `end_reel_wake_until` — ban UI is not an outcome-cadence
+    /// wake. The poller already treats this as a match-start phase only.
     HeroBan,
     HeroSelect,
     InGame,

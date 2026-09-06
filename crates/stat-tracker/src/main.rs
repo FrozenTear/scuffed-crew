@@ -1512,6 +1512,9 @@ async fn run_loop(ctx: Arc<DaemonCtx>) -> anyhow::Result<()> {
                             };
                             let phase = detect::match_start::detect_phase_polled(&img, &rgb, &mut stability);
                             // Wake hint only — does not confirm an outcome.
+                            // Ban Heroes is a distinct hook (`detect_ban_screen`)
+                            // and is excluded inside detect_end_reel; do not
+                            // treat GamePhase::HeroBan as end_reel_wake_until.
                             let end_reel = detect::match_end::detect_end_reel(&img, &rgb);
                             if let Some(dir) = &on_hit_dir
                                 && let Some((kind, outcome)) =
