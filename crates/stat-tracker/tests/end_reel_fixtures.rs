@@ -9,6 +9,7 @@
 //! - `entering_game.png` / `ban_heroes.png` / `scoreboard_tab.png` —
 //!   0.4.10 batch false wakes; must **not** wake. Ban Heroes must still
 //!   trip [`stat_tracker::detect::match_start::detect_ban_screen`].
+//!
 //! Missing files skip — CI stays green.
 
 use stat_tracker::detect::match_end::detect_end_reel;

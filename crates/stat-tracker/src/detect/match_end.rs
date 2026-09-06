@@ -548,16 +548,17 @@ fn end_reel_letterbox(rgb: &RgbImage) -> bool {
 }
 
 /// Reject a uniform loading / transition slab. `ENTERING GAME` is a navy
-/// strip with a few white glyphs — one 16-wide RGB bin holds ~90%+ of
-/// mid samples. Real highlight footage (and a noisy synthetic reel)
-/// spreads across bins.
+/// strip with a few white glyphs — among *lit* mid pixels one 16-wide
+/// RGB bin holds ~90%+. Dark padding around that strip is ignored so a
+/// thin chrome band cannot look like mixed footage. Real highlight
+/// footage spreads across bins.
 fn letterbox_mid_is_footage(rgb: &RgbImage, x0: u32, y0: u32, cw: u32, ch: u32) -> bool {
-    mid_dominant_bin_ratio(rgb, x0, y0, cw, ch) < LETTERBOX_FLAT_UI_MAX
+    mid_dominant_lit_bin_ratio(rgb, x0, y0, cw, ch) < LETTERBOX_FLAT_UI_MAX
 }
 
 const LETTERBOX_FLAT_UI_MAX: f32 = 0.82;
 
-fn mid_dominant_bin_ratio(rgb: &RgbImage, x0: u32, y0: u32, cw: u32, ch: u32) -> f32 {
+fn mid_dominant_lit_bin_ratio(rgb: &RgbImage, x0: u32, y0: u32, cw: u32, ch: u32) -> f32 {
     let (w, h) = rgb.dimensions();
     let x1 = (x0 + cw).min(w);
     let y1 = (y0 + ch).min(h);
@@ -573,6 +574,9 @@ fn mid_dominant_bin_ratio(rgb: &RgbImage, x0: u32, y0: u32, cw: u32, ch: u32) ->
     for y in (y0..y1).step_by(STRIDE as usize) {
         for x in (x0..x1).step_by(STRIDE as usize) {
             let [r, g, b] = rgb.get_pixel(x, y).0;
+            if r.max(g).max(b) < 36 {
+                continue;
+            }
             let idx = ((r as usize) >> 4) * 256 + ((g as usize) >> 4) * 16 + ((b as usize) >> 4);
             counts[idx] += 1;
             total += 1;
@@ -766,7 +770,7 @@ fn nameplate_potg_signal(rgb: &RgbImage) -> bool {
     // Real known-potg-003708 orange ≈ 0.0685 (glyph, not a fill). A gold
     // scoreboard row painted into this ROI is typically >0.35. Cap sits
     // above the committed synthetic nameplate (~0.22) and below row fills.
-    orange >= NAMEPLATE_ORANGE_MIN && orange <= NAMEPLATE_ORANGE_MAX && white >= NAMEPLATE_WHITE_MIN
+    (NAMEPLATE_ORANGE_MIN..=NAMEPLATE_ORANGE_MAX).contains(&orange) && white >= NAMEPLATE_WHITE_MIN
 }
 
 const NAMEPLATE_ORANGE_MIN: f32 = 0.035;
@@ -1198,8 +1202,8 @@ mod tests {
     /// veto does not fire.
     fn letterbox_footage_frame() -> RgbImage {
         let mut img = RgbImage::from_pixel(640, 360, Rgb([80, 90, 100]));
-        for y in 30..330 {
-            for x in 0..640 {
+        for y in 30u32..330 {
+            for x in 0u32..640 {
                 let n = ((x.wrapping_mul(37) ^ y.wrapping_mul(17)) % 50) as u8;
                 let warm = (x / 80) % 3 == 0;
                 let pix = if warm {
