@@ -1094,13 +1094,39 @@ struct SessionState {
     end_reel_wake_until: Option<Instant>,
 }
 
+/// Unexpired POTG / end-reel deadline. Exclusive at the instant (`now < until`)
+/// so expiry drops back to mid-match skip / slow cadence on the same tick.
+fn end_reel_wake_active(st: &SessionState, now: Instant) -> bool {
+    st.end_reel_wake_until.is_some_and(|until| now < until)
+}
+
 /// Fresh word-OCR streak or an unexpired end-reel wake — both force full
 /// cadence. One helper so the two wake sources cannot drift.
 fn cadence_wake_active(st: &SessionState, now: Instant) -> bool {
     st.word_outcome_streak
         .as_ref()
         .is_some_and(|(_, t)| now.duration_since(*t) <= OUTCOME_CONFIRM_WINDOW)
-        || st.end_reel_wake_until.is_some_and(|until| now < until)
+        || end_reel_wake_active(st, now)
+}
+
+/// Mid-match, skip the auto-detect poll while Tab scoreboard OCR saturates
+/// the pool. During an active `end_reel_wake_until` the short Victory/Defeat
+/// banner (~3s) can land in that same window — skipping starves the only
+/// outcome path (2026-09-06: Tab held through end-reel, no poll
+/// `result word: VICTORY`, no `poll_confirm_victory_*` dump). Outcome-signal
+/// OCR is small-crop, not the Tab cell pool; see
+/// [`poll_outcome_only_while_tab_busy`].
+fn skip_poll_for_tab_in_flight(tab_in_flight: bool, st: &SessionState, now: Instant) -> bool {
+    tab_in_flight && !end_reel_wake_active(st, now)
+}
+
+/// Cheap outcome-only poll: Tab OCR is in flight **and** end-reel wake is
+/// still hot. Screenshot + `detect_outcome_signal_*` + `detect_end_reel` +
+/// existing confirm/streak / `poll_debug_hit` dumps. Phase and accolade-map
+/// OCR stay off so we do not compete with the Tab cell pool. Mid-match
+/// (no wake) never takes this path — those ticks still skip.
+fn poll_outcome_only_while_tab_busy(tab_in_flight: bool, st: &SessionState, now: Instant) -> bool {
+    tab_in_flight && end_reel_wake_active(st, now)
 }
 
 fn clear_cadence_wakes(st: &mut SessionState) {
@@ -1451,14 +1477,23 @@ async fn run_loop(ctx: Arc<DaemonCtx>) -> anyhow::Result<()> {
                 }
             }
             _ = poll_timer.tick(), if auto_detect.enabled => {
-                // A Tab capture is already saturating the OCR pool — a
-                // full-frame screenshot plus pixel scans now would contend
-                // with it at the worst possible moment (H3). Skip this tick;
-                // the interval fires again shortly and any outcome the frame
-                // carried is recovered by the capture itself.
-                if capture_task.as_ref().is_some_and(|t| !t.is_finished()) {
+                // Mid-match: a Tab capture saturates the OCR pool — skip the
+                // full poll so we do not contend (H3). During end-reel wake
+                // that skip starves the ~3s Victory/Defeat window (2026-09-06:
+                // Tab held, wake set, no poll result word). Run a cheap
+                // outcome-only path instead; do not adopt Tab noscoreboard
+                // Victory here (explicit follow-up).
+                let tab_in_flight = capture_task.as_ref().is_some_and(|t| !t.is_finished());
+                let now = Instant::now();
+                if skip_poll_for_tab_in_flight(tab_in_flight, &st, now) {
                     tracing::debug!("poll tick skipped — Tab capture in flight");
                     continue;
+                }
+                let outcome_only = poll_outcome_only_while_tab_busy(tab_in_flight, &st, now);
+                if outcome_only {
+                    tracing::debug!(
+                        "cheap outcome poll — Tab capture in flight during end-reel wake"
+                    );
                 }
                 if !game_gate.is_running() {
                     clear_cadence_wakes(&mut st);
@@ -1501,16 +1536,28 @@ async fn run_loop(ctx: Arc<DaemonCtx>) -> anyhow::Result<()> {
                             // (one tick later at most).
                             let signal =
                                 detect::match_end::detect_outcome_signal_polled(&img, &rgb, &mut stability);
-                            // The accolade screen also prints the map — read it
-                            // while we're here; it recovers games where the
-                            // in-game top-bar OCR missed all match.
-                            let accolade_map = match &signal {
-                                Some((_, detect::match_end::OutcomeSource::ResultWord)) => {
-                                    detect::match_end::read_accolade_map(&img)
+                            // Cheap wake path: skip phase + accolade-map OCR
+                            // so Tab cell OCR keeps the pool. Outcome signal
+                            // and end-reel refresh still run (same confirm /
+                            // on-hit dump machinery below).
+                            let accolade_map = if outcome_only {
+                                None
+                            } else {
+                                // The accolade screen also prints the map —
+                                // read it while we're here; it recovers games
+                                // where the in-game top-bar OCR missed all match.
+                                match &signal {
+                                    Some((_, detect::match_end::OutcomeSource::ResultWord)) => {
+                                        detect::match_end::read_accolade_map(&img)
+                                    }
+                                    _ => None,
                                 }
-                                _ => None,
                             };
-                            let phase = detect::match_start::detect_phase_polled(&img, &rgb, &mut stability);
+                            let phase = if outcome_only {
+                                detect::GamePhase::Unknown
+                            } else {
+                                detect::match_start::detect_phase_polled(&img, &rgb, &mut stability)
+                            };
                             // Wake hint only — does not confirm an outcome.
                             // Ban Heroes is a distinct hook (`detect_ban_screen`)
                             // and is excluded inside detect_end_reel; do not
@@ -2798,6 +2845,76 @@ mod tests {
         assert!(cadence_wake_active(&st, now));
         st.end_reel_wake_until = Some(now);
         assert!(!cadence_wake_active(&st, now), "deadline is exclusive");
+    }
+
+    #[test]
+    fn skip_poll_for_tab_in_flight_mid_match_but_not_during_end_reel_wake() {
+        let now = test_now();
+        let mut st = session(Some(game(detect::MatchOutcome::Unknown, None, now)), now);
+        assert!(
+            skip_poll_for_tab_in_flight(true, &st, now),
+            "Tab busy, no wake → skip (mid-match GPU/OCR contention)"
+        );
+        assert!(
+            !skip_poll_for_tab_in_flight(false, &st, now),
+            "Tab idle → never skip"
+        );
+
+        st.end_reel_wake_until = Some(now + END_REEL_WAKE);
+        assert!(
+            !skip_poll_for_tab_in_flight(true, &st, now),
+            "wake + Tab busy → do not skip (cheap outcome poll)"
+        );
+        assert!(
+            !skip_poll_for_tab_in_flight(true, &st, now + Duration::from_secs(44)),
+            "still inside the 45s wake"
+        );
+        assert!(
+            skip_poll_for_tab_in_flight(true, &st, now + END_REEL_WAKE),
+            "wake expired → skip again"
+        );
+
+        // Word streak alone is not the Tab-busy exception — mid-match skip
+        // stays unless end-reel wake is hot.
+        st.end_reel_wake_until = None;
+        st.word_outcome_streak =
+            Some((detect::MatchOutcome::Victory, now - Duration::from_secs(1)));
+        assert!(
+            skip_poll_for_tab_in_flight(true, &st, now),
+            "word streak without end-reel wake still skips"
+        );
+    }
+
+    #[test]
+    fn poll_outcome_only_only_when_tab_busy_and_end_reel_wake() {
+        let now = test_now();
+        let mut st = session(Some(game(detect::MatchOutcome::Unknown, None, now)), now);
+        assert!(!poll_outcome_only_while_tab_busy(false, &st, now));
+        assert!(!poll_outcome_only_while_tab_busy(true, &st, now));
+
+        st.end_reel_wake_until = Some(now + END_REEL_WAKE);
+        assert!(
+            poll_outcome_only_while_tab_busy(true, &st, now),
+            "Tab busy + wake → cheap outcome path"
+        );
+        assert!(
+            !poll_outcome_only_while_tab_busy(false, &st, now),
+            "wake but Tab idle → full poll, not the cheap subset"
+        );
+        assert!(
+            !poll_outcome_only_while_tab_busy(true, &st, now + END_REEL_WAKE),
+            "wake expired → not cheap-path"
+        );
+
+        // Mutually exclusive with the skip helper.
+        assert!(!skip_poll_for_tab_in_flight(true, &st, now));
+        assert!(poll_outcome_only_while_tab_busy(true, &st, now));
+        assert!(skip_poll_for_tab_in_flight(true, &st, now + END_REEL_WAKE));
+        assert!(!poll_outcome_only_while_tab_busy(
+            true,
+            &st,
+            now + END_REEL_WAKE
+        ));
     }
 
     #[test]
