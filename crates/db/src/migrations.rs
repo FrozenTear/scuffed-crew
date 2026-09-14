@@ -727,6 +727,26 @@ pub async fn run_migrations(client: &Surreal<Any>) -> DbResult<()> {
         DEFINE INDEX IF NOT EXISTS season_current_idx ON season COLUMNS is_current;
 
         -- ================================================
+        -- Patch notes (strategy public catalog + officer writes)
+        -- Nested hero_updates / sections stay FLEXIBLE objects so the JSON
+        -- Site unwraps from GET /api/strategy/patch-notes does not change.
+        -- `date` is a display string (YYYY-MM-DD), not a Surreal datetime.
+        -- ================================================
+        DEFINE TABLE IF NOT EXISTS patch_note SCHEMAFULL;
+        DEFINE FIELD OVERWRITE version ON patch_note TYPE string;
+        DEFINE FIELD OVERWRITE date ON patch_note TYPE string;
+        DEFINE FIELD OVERWRITE title ON patch_note TYPE option<string>;
+        DEFINE FIELD OVERWRITE url ON patch_note TYPE string;
+        DEFINE FIELD OVERWRITE hero_updates ON patch_note TYPE array DEFAULT [];
+        DEFINE FIELD OVERWRITE hero_updates.* ON patch_note TYPE object FLEXIBLE;
+        DEFINE FIELD OVERWRITE sections ON patch_note TYPE array DEFAULT [];
+        DEFINE FIELD OVERWRITE sections.* ON patch_note TYPE object FLEXIBLE;
+        DEFINE FIELD OVERWRITE created_at ON patch_note TYPE datetime DEFAULT time::now();
+        DEFINE FIELD OVERWRITE updated_at ON patch_note TYPE datetime DEFAULT time::now();
+        DEFINE INDEX IF NOT EXISTS patch_note_version_idx ON patch_note COLUMNS version UNIQUE;
+        DEFINE INDEX IF NOT EXISTS patch_note_date_idx ON patch_note COLUMNS date;
+
+        -- ================================================
         -- First-boot setup lock (F-API-002)
         -- Singleton CAS so concurrent POST /api/auth/setup cannot mint two admins.
         -- ================================================
@@ -743,6 +763,12 @@ pub async fn run_migrations(client: &Surreal<Any>) -> DbResult<()> {
     // Seed default category/board tree and migrate legacy thread.category strings.
     if let Err(e) = crate::queries::forum::ensure_forum_hierarchy(client).await {
         tracing::warn!("forum hierarchy seed/migrate: {e}");
+    }
+
+    // One-shot catalog seed so prod is not empty after the static-catalog drop.
+    // No-op when any patch_note row already exists (officer edits persist).
+    if let Err(e) = crate::queries::patch_notes::ensure_patch_note_catalog(client).await {
+        tracing::warn!("patch_note catalog seed: {e}");
     }
 
     // Unclaimed first-boot sentinel. CREATE only when missing so a claimed lock

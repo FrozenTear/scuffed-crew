@@ -2,16 +2,20 @@ use axum::{
     Json, Router,
     extract::{Path, Query, State},
     http::StatusCode,
-    routing::get,
+    routing::{get, put},
 };
 use axum_extra::extract::cookie::CookieJar;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+use scuffed_auth::server::session::ErrorResponse;
 use scuffed_auth::server::{AuthUser, HasAuth};
+use scuffed_db::{AuditAction, AuditTargetType};
+use scuffed_site_server::extractors::OfficerUser;
+use scuffed_site_server::routes::audit_log::audit;
 use scuffed_site_server::state::AppState;
 use scuffed_types::api::ApiSuccess;
-use scuffed_types::patch_notes::{PatchChange, PatchHeroUpdate, PatchNote, PatchSection};
+use scuffed_types::patch_notes::{CreatePatchNoteRequest, PatchNote, UpdatePatchNoteRequest};
 use scuffed_types::strategy::{
     GameMode, Strategy, StrategyElement, StrategySummary, TimelinePhase, Visibility,
 };
@@ -32,7 +36,14 @@ pub fn strategy_routes(state: AppState) -> Router {
         )
         .route("/api/strategy/heroes", get(list_heroes))
         .route("/api/strategy/meta", get(get_meta))
-        .route("/api/strategy/patch-notes", get(list_patch_notes))
+        .route(
+            "/api/strategy/patch-notes",
+            get(list_patch_notes).post(create_patch_note),
+        )
+        .route(
+            "/api/strategy/patch-notes/{version}",
+            put(update_patch_note).delete(delete_patch_note),
+        )
         .with_state(state)
 }
 
@@ -417,111 +428,164 @@ async fn list_heroes() -> Json<Value> {
 /// GET /api/strategy/patch-notes — public list for the Site Patch Notes page.
 ///
 /// Auth matches other public strategy GETs (`/heroes`, `/strategies`): no login.
-/// Envelope is [`ApiSuccess`] (`{ "data": [...] }`). Content is a static catalog
-/// (no Surreal table yet) shaped for Site's local `Patch` struct.
-async fn list_patch_notes() -> Json<ApiSuccess<Vec<PatchNote>>> {
-    Json(ApiSuccess {
-        data: patch_notes_catalog(),
-    })
+/// Envelope is [`ApiSuccess`] (`{ "data": [...] }`). Field names are frozen in
+/// `scuffed_types::patch_notes` so Site stays valid.
+async fn list_patch_notes(
+    State(state): State<AppState>,
+) -> Result<Json<ApiSuccess<Vec<PatchNote>>>, StatusCode> {
+    let data = state.db.list_patch_notes().await.map_err(|e| {
+        tracing::error!("Failed to list patch notes: {e}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+    Ok(Json(ApiSuccess { data }))
 }
 
-/// Scuffed-native sample catalog so Site can render cards, filters, and search.
-/// Not a live Blizzard scrape and not copied from the older strategy-app.
-fn patch_notes_catalog() -> Vec<PatchNote> {
-    vec![
-        PatchNote {
-            version: "2.18.1".into(),
-            date: "2026-08-20".into(),
-            title: Some("Mid-season balance".into()),
-            url: "https://overwatch.blizzard.com/en-us/news/patch-notes/".into(),
-            hero_updates: vec![
-                PatchHeroUpdate {
-                    hero_id: "ana".into(),
-                    hero_name: "Ana".into(),
-                    change_type: "adjustment".into(),
-                    changes: vec![PatchChange {
-                        ability: Some("Biotic Grenade".into()),
-                        description: "Healing-boost window is a bit shorter.".into(),
-                        change_type: "nerf".into(),
-                    }],
-                    dev_comment: Some(
-                        "Keeping her burst sustain in line with other supports.".into(),
-                    ),
-                },
-                PatchHeroUpdate {
-                    hero_id: "venture".into(),
-                    hero_name: "Venture".into(),
-                    change_type: "buff".into(),
-                    changes: vec![PatchChange {
-                        ability: Some("Drill Dash".into()),
-                        description: "Dash distance increased slightly.".into(),
-                        change_type: "buff".into(),
-                    }],
-                    dev_comment: None,
-                },
-            ],
-            sections: vec![
-                PatchSection {
-                    category: "Competitive".into(),
-                    items: vec!["Placement games now show an expected rank band.".into()],
-                },
-                PatchSection {
-                    category: "Bug Fixes".into(),
-                    items: vec!["Fixed a rare scoreboard freeze after overtime.".into()],
-                },
-            ],
-        },
-        PatchNote {
-            version: "2.18.0".into(),
-            date: "2026-08-11".into(),
-            title: Some("Season 4 launch".into()),
-            url: "https://overwatch.blizzard.com/en-us/news/patch-notes/".into(),
-            hero_updates: vec![PatchHeroUpdate {
-                hero_id: "freja".into(),
-                hero_name: "Freja".into(),
-                change_type: "bugfix".into(),
-                changes: vec![PatchChange {
-                    ability: None,
-                    description: "Fixed an animation hitch when swapping weapons mid-air.".into(),
-                    change_type: "bugfix".into(),
-                }],
-                dev_comment: None,
-            }],
-            sections: vec![
-                PatchSection {
-                    category: "Maps".into(),
-                    items: vec![
-                        "New Clash rotation includes Aatlis.".into(),
-                        "Health pack on New Queen Street mid is easier to contest.".into(),
-                    ],
-                },
-                PatchSection {
-                    category: "General".into(),
-                    items: vec!["Career profile now lists last season's peak.".into()],
-                },
-            ],
-        },
-        PatchNote {
-            version: "2.17.3".into(),
-            date: "2026-07-22".into(),
-            title: Some("Stability hotfix".into()),
-            url: "https://overwatch.blizzard.com/en-us/news/patch-notes/".into(),
-            hero_updates: vec![],
-            sections: vec![
-                PatchSection {
-                    category: "Bug Fixes".into(),
-                    items: vec![
-                        "Fixed a disconnect when rejoining a custom game lobby.".into(),
-                        "Spectator UI no longer duplicates the ultimate bar.".into(),
-                    ],
-                },
-                PatchSection {
-                    category: "Maps".into(),
-                    items: vec!["Closed an out-of-bounds perch on Colosseo.".into()],
-                },
-            ],
-        },
-    ]
+fn patch_note_db_err(e: scuffed_db::DbError) -> (StatusCode, Json<ErrorResponse>) {
+    let status = match &e {
+        scuffed_db::DbError::NotFound(_) => StatusCode::NOT_FOUND,
+        scuffed_db::DbError::Conflict(_) => StatusCode::CONFLICT,
+        _ => StatusCode::INTERNAL_SERVER_ERROR,
+    };
+    let error = match &e {
+        scuffed_db::DbError::Conflict(msg) => msg.clone(),
+        scuffed_db::DbError::NotFound(_) => "Patch note not found".into(),
+        _ => "Internal error".into(),
+    };
+    (status, Json(ErrorResponse { error }))
+}
+
+fn require_patch_note_fields(
+    version: &str,
+    date: &str,
+    url: &str,
+) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
+    if version.trim().is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "version is required".into(),
+            }),
+        ));
+    }
+    if date.trim().is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "date is required".into(),
+            }),
+        ));
+    }
+    if url.trim().is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "url is required".into(),
+            }),
+        ));
+    }
+    Ok(())
+}
+
+/// POST /api/strategy/patch-notes — create a patch note (officer+)
+async fn create_patch_note(
+    State(state): State<AppState>,
+    officer: OfficerUser,
+    Json(mut body): Json<CreatePatchNoteRequest>,
+) -> Result<(StatusCode, Json<PatchNote>), (StatusCode, Json<ErrorResponse>)> {
+    body.version = body.version.trim().to_string();
+    body.date = body.date.trim().to_string();
+    body.url = body.url.trim().to_string();
+    require_patch_note_fields(&body.version, &body.date, &body.url)?;
+
+    let note = state
+        .db
+        .create_patch_note(&body)
+        .await
+        .map_err(patch_note_db_err)?;
+
+    audit(
+        &state.db,
+        &officer.member.id,
+        AuditAction::CreatedPatchNote,
+        AuditTargetType::PatchNote,
+        &note.version,
+        Some(&format!("Created patch note {}", note.version)),
+    )
+    .await;
+
+    Ok((StatusCode::CREATED, Json(note)))
+}
+
+/// PUT /api/strategy/patch-notes/:version — update a patch note (officer+)
+async fn update_patch_note(
+    State(state): State<AppState>,
+    officer: OfficerUser,
+    Path(version): Path<String>,
+    Json(body): Json<UpdatePatchNoteRequest>,
+) -> Result<Json<PatchNote>, (StatusCode, Json<ErrorResponse>)> {
+    if let Some(date) = body.date.as_deref()
+        && date.trim().is_empty()
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "date is required".into(),
+            }),
+        ));
+    }
+    if let Some(url) = body.url.as_deref()
+        && url.trim().is_empty()
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "url is required".into(),
+            }),
+        ));
+    }
+
+    let note = state
+        .db
+        .update_patch_note(&version, &body)
+        .await
+        .map_err(patch_note_db_err)?;
+
+    audit(
+        &state.db,
+        &officer.member.id,
+        AuditAction::UpdatedPatchNote,
+        AuditTargetType::PatchNote,
+        &note.version,
+        None,
+    )
+    .await;
+
+    Ok(Json(note))
+}
+
+/// DELETE /api/strategy/patch-notes/:version — delete a patch note (officer+)
+async fn delete_patch_note(
+    State(state): State<AppState>,
+    officer: OfficerUser,
+    Path(version): Path<String>,
+) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
+    state
+        .db
+        .delete_patch_note(&version)
+        .await
+        .map_err(patch_note_db_err)?;
+
+    audit(
+        &state.db,
+        &officer.member.id,
+        AuditAction::DeletedPatchNote,
+        AuditTargetType::PatchNote,
+        &version,
+        Some(&format!("Deleted patch note {version}")),
+    )
+    .await;
+
+    Ok(StatusCode::OK)
 }
 
 /// GET /api/strategy/meta — global meta data + personal winrates per hero/map.
@@ -640,15 +704,20 @@ mod tests {
     use super::*;
     use axum::Router;
     use axum::body::Body;
-    use axum::http::{Method, Request, StatusCode};
+    use axum::http::{Method, Request, StatusCode, header};
     use http_body_util::BodyExt;
     use scuffed_auth::SessionConfig;
     use scuffed_db::Database;
     use scuffed_db::migrations::run_migrations;
+    use scuffed_db::types::OrgRole;
     use scuffed_site_server::state::OAuthConfig;
+    use serde_json::json;
     use std::path::PathBuf;
     use std::sync::Arc;
     use tower::ServiceExt;
+
+    const OFFICER_TOKEN: &str = "test-officer-token";
+    const MEMBER_TOKEN: &str = "test-member-token";
 
     async fn test_state() -> AppState {
         let db = Database::connect_memory().await.expect("mem db");
@@ -678,46 +747,65 @@ mod tests {
         }
     }
 
-    async fn get_json(app: Router, path: &str) -> (StatusCode, serde_json::Value) {
-        let resp = app
-            .oneshot(
-                Request::builder()
-                    .method(Method::GET)
-                    .uri(path)
-                    .body(Body::empty())
-                    .unwrap(),
-            )
+    async fn seed_role(state: &AppState, username: &str, role: OrgRole, token: &str) {
+        let user = state
+            .db
+            .create_local_user(username, "unused-hash")
             .await
-            .unwrap();
+            .expect("user");
+        state
+            .db
+            .create_member(&user.id, username, role)
+            .await
+            .expect("member");
+        state
+            .db
+            .create_session(&user.id, token, 24)
+            .await
+            .expect("session");
+    }
+
+    async fn call_json(
+        app: Router,
+        method: Method,
+        path: &str,
+        token: Option<&str>,
+        body: Option<serde_json::Value>,
+    ) -> (StatusCode, serde_json::Value) {
+        let mut builder = Request::builder().method(method).uri(path);
+        if let Some(tok) = token {
+            builder = builder.header(header::AUTHORIZATION, format!("Bearer {tok}"));
+        }
+        if body.is_some() {
+            builder = builder.header(header::CONTENT_TYPE, "application/json");
+        }
+        let req_body = body
+            .map(|v| Body::from(serde_json::to_vec(&v).unwrap()))
+            .unwrap_or_else(Body::empty);
+        let resp = app.oneshot(builder.body(req_body).unwrap()).await.unwrap();
         let status = resp.status();
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        let value: serde_json::Value = serde_json::from_slice(&bytes).expect("json body");
+        let value = if bytes.is_empty() {
+            serde_json::Value::Null
+        } else {
+            serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null)
+        };
         (status, value)
     }
 
-    #[test]
-    fn catalog_has_fields_site_renders() {
-        let notes = patch_notes_catalog();
-        assert!(
-            !notes.is_empty(),
-            "empty catalog would show Site empty-state, not cards"
-        );
-        for note in &notes {
-            assert!(!note.version.is_empty());
-            assert!(!note.date.is_empty());
-            assert!(!note.url.is_empty());
-        }
-        assert!(
-            notes.iter().any(|n| !n.hero_updates.is_empty()),
-            "need at least one hero-balance card for the Hero Balance filter"
-        );
-        assert!(
-            notes.iter().any(|n| n
-                .sections
-                .iter()
-                .any(|s| s.category.to_lowercase().contains("bug"))),
-            "need a Bug Fixes section for that filter chip"
-        );
+    async fn get_json(app: Router, path: &str) -> (StatusCode, serde_json::Value) {
+        call_json(app, Method::GET, path, None, None).await
+    }
+
+    fn sample_create(version: &str) -> serde_json::Value {
+        json!({
+            "version": version,
+            "date": "2026-09-14",
+            "title": "Officer write",
+            "url": "https://example.test/notes",
+            "hero_updates": [],
+            "sections": [{ "category": "General", "items": ["Seeded by test"] }]
+        })
     }
 
     #[tokio::test]
@@ -745,16 +833,139 @@ mod tests {
             body.get("strategies").is_none(),
             "must not use a Browse-style strategies key"
         );
+        assert!(
+            !first
+                .as_object()
+                .expect("object")
+                .contains_key("created_at"),
+            "public PatchNote shape must not leak DB timestamps"
+        );
     }
 
     #[tokio::test]
     async fn patch_notes_root_is_object_not_bare_array() {
-        let app = Router::new().route("/api/strategy/patch-notes", get(list_patch_notes));
+        let app = strategy_routes(test_state().await);
         let (status, body) = get_json(app, "/api/strategy/patch-notes").await;
         assert_eq!(status, StatusCode::OK);
         assert!(
             body.is_object(),
             "Site unwraps {{ data }}; a bare array would break Browse-style clients"
         );
+    }
+
+    #[tokio::test]
+    async fn patch_notes_write_requires_officer() {
+        let state = test_state().await;
+        seed_role(&state, "officer", OrgRole::Officer, OFFICER_TOKEN).await;
+        seed_role(&state, "member", OrgRole::Member, MEMBER_TOKEN).await;
+
+        let (status, body) = call_json(
+            strategy_routes(state.clone()),
+            Method::POST,
+            "/api/strategy/patch-notes",
+            None,
+            Some(sample_create("3.0.0")),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+
+        let (status, body) = call_json(
+            strategy_routes(state.clone()),
+            Method::POST,
+            "/api/strategy/patch-notes",
+            Some(MEMBER_TOKEN),
+            Some(sample_create("3.0.0")),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+
+        let (status, body) = call_json(
+            strategy_routes(state.clone()),
+            Method::PUT,
+            "/api/strategy/patch-notes/2.18.1",
+            Some(MEMBER_TOKEN),
+            Some(json!({ "title": "nope" })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+
+        let (status, body) = call_json(
+            strategy_routes(state.clone()),
+            Method::DELETE,
+            "/api/strategy/patch-notes/2.18.1",
+            Some(MEMBER_TOKEN),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+
+        let (status, body) = call_json(
+            strategy_routes(state),
+            Method::POST,
+            "/api/strategy/patch-notes",
+            Some(OFFICER_TOKEN),
+            Some(sample_create("3.0.0")),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        assert_eq!(body["version"], "3.0.0");
+    }
+
+    #[tokio::test]
+    async fn patch_notes_duplicate_version_is_conflict() {
+        let state = test_state().await;
+        seed_role(&state, "officer", OrgRole::Officer, OFFICER_TOKEN).await;
+
+        let (status, body) = call_json(
+            strategy_routes(state),
+            Method::POST,
+            "/api/strategy/patch-notes",
+            Some(OFFICER_TOKEN),
+            Some(sample_create("2.18.1")),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    }
+
+    #[tokio::test]
+    async fn officer_can_update_and_delete_patch_note() {
+        let state = test_state().await;
+        seed_role(&state, "officer", OrgRole::Officer, OFFICER_TOKEN).await;
+
+        let (status, body) = call_json(
+            strategy_routes(state.clone()),
+            Method::POST,
+            "/api/strategy/patch-notes",
+            Some(OFFICER_TOKEN),
+            Some(sample_create("4.0.0")),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+
+        let (status, body) = call_json(
+            strategy_routes(state.clone()),
+            Method::PUT,
+            "/api/strategy/patch-notes/4.0.0",
+            Some(OFFICER_TOKEN),
+            Some(json!({ "title": "Renamed by officer" })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["title"], "Renamed by officer");
+
+        let (status, _body) = call_json(
+            strategy_routes(state.clone()),
+            Method::DELETE,
+            "/api/strategy/patch-notes/4.0.0",
+            Some(OFFICER_TOKEN),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let (status, body) = get_json(strategy_routes(state), "/api/strategy/patch-notes").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let data = body["data"].as_array().expect("data");
+        assert!(data.iter().all(|n| n["version"] != "4.0.0"));
     }
 }

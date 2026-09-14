@@ -15,6 +15,7 @@ pub mod member_settings;
 pub mod members;
 pub mod moderation;
 pub mod nostr_keys;
+pub mod patch_notes;
 pub mod personal_stats;
 pub mod polls;
 pub mod roster;
