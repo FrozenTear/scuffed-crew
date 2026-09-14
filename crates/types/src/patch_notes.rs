@@ -48,6 +48,20 @@ pub struct PatchSection {
     pub items: Vec<String>,
 }
 
+/// Officer POST body. Field names match [`PatchNote`] so Site's JSON stays valid
+/// if the same payload is reused; do not rename these keys.
+pub type CreatePatchNoteRequest = PatchNote;
+
+/// Officer PUT body — every field optional; `version` stays the path key.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct UpdatePatchNoteRequest {
+    pub date: Option<String>,
+    pub title: Option<Option<String>>,
+    pub url: Option<String>,
+    pub hero_updates: Option<Vec<PatchHeroUpdate>>,
+    pub sections: Option<Vec<PatchSection>>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

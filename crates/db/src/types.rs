@@ -689,6 +689,9 @@ pub enum AuditAction {
     NostrKeyExported,
     NostrKeyImported,
     NostrKeyUnlinked,
+    CreatedPatchNote,
+    UpdatedPatchNote,
+    DeletedPatchNote,
 }
 
 impl std::fmt::Display for AuditAction {
@@ -732,6 +735,7 @@ pub enum AuditTargetType {
     ForumBoard,
     Upload,
     Integration,
+    PatchNote,
 }
 
 impl std::fmt::Display for AuditTargetType {
