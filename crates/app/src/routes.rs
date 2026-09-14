@@ -72,6 +72,8 @@ pub enum Route {
         StatsTokens {},
         #[route("/stats/member/:id")]
         StatsMember { id: String },
+        #[route("/patch-notes")]
+        PatchNotes {},
     #[end_layout]
 
     // Admin panel (sidebar layout, auth guarded)
@@ -132,4 +134,27 @@ pub enum Route {
 
     #[route("/:..segments")]
     NotFound { segments: Vec<String> },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Route;
+    use std::str::FromStr;
+
+    #[test]
+    fn patch_notes_has_public_and_strategy_routes() {
+        assert_eq!(
+            Route::from_str("/patch-notes").unwrap(),
+            Route::PatchNotes {}
+        );
+        assert_eq!(
+            Route::from_str("/strategy/patch-notes").unwrap(),
+            Route::StrategyPatchNotes {}
+        );
+        assert_eq!(Route::PatchNotes {}.to_string(), "/patch-notes");
+        assert_eq!(
+            Route::StrategyPatchNotes {}.to_string(),
+            "/strategy/patch-notes"
+        );
+    }
 }
