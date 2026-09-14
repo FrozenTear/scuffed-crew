@@ -377,6 +377,7 @@ const MAPS: &[(&str, &str)] = &[
     ("Midtown", "midtown"),
     ("Numbani", "numbani"),
     ("Paraiso", "paraiso"),
+    ("Paraiso", "paraíso"),
     ("Neon Junction", "neon junction"),
     ("Antarctic Peninsula", "antarctic"),
     ("Busan", "busan"),
@@ -387,6 +388,7 @@ const MAPS: &[(&str, &str)] = &[
     ("Samoa", "samoa"),
     ("Colosseo", "colosseo"),
     ("Esperanca", "esperanca"),
+    ("Esperanca", "esperança"),
     ("New Queen Street", "new queen"),
     ("Runasapi", "runasapi"),
     ("New Junk City", "new junk"),
@@ -535,10 +537,9 @@ mod tests {
     fn implausible_kill_columns_reject_the_row() {
         // A digit bleeding into the elims cell ("118" for a real ~18) must not
         // be recorded; the capture is dropped rather than poisoned.
-        let rows = vec![row(
-            Some("FROZEN"),
-            ["118", "3", "2", "4,316", "1,200", "899"],
-        )];
+        let rows = vec![row(Some("FROZEN"), [
+            "118", "3", "2", "4,316", "1,200", "899",
+        ])];
         assert!(parse_scoreboard_cells(&rows, Some(0), "", "defeat", Some("FROZEN")).is_none());
     }
 
@@ -599,6 +600,24 @@ mod tests {
             Some("Neon Junction")
         );
         assert_eq!(match_map_in_text("AATLIS").as_deref(), Some("Aatlis"));
+    }
+
+    #[test]
+    fn accented_and_unaccented_map_names_canonicalize() {
+        // Live career/OCR names arrive both with and without Portuguese
+        // accents. Canonical store form stays the unaccented MAPS display name.
+        assert_eq!(match_map_in_text("Paraíso").as_deref(), Some("Paraiso"));
+        assert_eq!(match_map_in_text("Paraiso").as_deref(), Some("Paraiso"));
+        assert_eq!(match_map_in_text("Esperança").as_deref(), Some("Esperanca"));
+        assert_eq!(match_map_in_text("Esperanca").as_deref(), Some("Esperanca"));
+        assert_eq!(
+            match_map_in_text("Neon Junction").as_deref(),
+            Some("Neon Junction")
+        );
+        assert_eq!(
+            match_map_in_text("NEON JUNCTION").as_deref(),
+            Some("Neon Junction")
+        );
     }
 
     #[test]

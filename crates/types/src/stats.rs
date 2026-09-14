@@ -201,6 +201,7 @@ pub enum MapName {
     Hollywood,
     KingsRow,
     Midtown,
+    NeonJunction,
     Numbani,
     Paraiso,
 
@@ -246,6 +247,7 @@ impl MapName {
             | Self::Hollywood
             | Self::KingsRow
             | Self::Midtown
+            | Self::NeonJunction
             | Self::Numbani
             | Self::Paraiso => GameMode::Hybrid,
 
@@ -282,6 +284,7 @@ impl MapName {
             Self::Hollywood => "Hollywood",
             Self::KingsRow => "King's Row",
             Self::Midtown => "Midtown",
+            Self::NeonJunction => "Neon Junction",
             Self::Numbani => "Numbani",
             Self::Paraiso => "Paraíso",
             Self::AntarcticPeninsula => "Antarctic Peninsula",
@@ -302,11 +305,109 @@ impl MapName {
             Self::ThroneOfAnubis => "Throne of Anubis",
         }
     }
+
+    /// Maps-tab mode bucket for a stored/OCR map string. Unknown names are
+    /// `"Other"` (the UI catch-all), not a `GameMode` variant.
+    pub fn game_mode_label(name: &str) -> &'static str {
+        match name.parse::<Self>() {
+            Ok(map) => match map.game_mode() {
+                GameMode::Escort => "Escort",
+                GameMode::Hybrid => "Hybrid",
+                GameMode::Control => "Control",
+                GameMode::Push => "Push",
+                GameMode::Flashpoint => "Flashpoint",
+                GameMode::Clash => "Clash",
+                GameMode::PayloadRace => "Payload Race",
+                GameMode::Assault => "Assault",
+            },
+            Err(()) => "Other",
+        }
+    }
 }
 
 impl std::fmt::Display for MapName {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.display_name())
+    }
+}
+
+/// Fold a live/OCR map string to a comparable key: lowercase, strip
+/// combining-style punctuation, and drop Portuguese/Spanish accents so
+/// `"Paraíso"` / `"Paraiso"` and `"Esperança"` / `"Esperanca"` collide.
+fn fold_map_key(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        let mapped = match c {
+            'Á' | 'À' | 'Ã' | 'Â' | 'á' | 'à' | 'ã' | 'â' => 'a',
+            'É' | 'Ê' | 'é' | 'ê' => 'e',
+            'Í' | 'í' => 'i',
+            'Ó' | 'Ô' | 'Õ' | 'ó' | 'ô' | 'õ' => 'o',
+            'Ú' | 'Ü' | 'ú' | 'ü' => 'u',
+            'Ç' | 'ç' => 'c',
+            'Ñ' | 'ñ' => 'n',
+            '\'' => continue,
+            '_' | '-' | ':' => ' ',
+            other => other,
+        };
+        for lower in mapped.to_lowercase() {
+            if lower.is_whitespace() {
+                if !out.is_empty() && !out.ends_with(' ') {
+                    out.push(' ');
+                }
+            } else {
+                out.push(lower);
+            }
+        }
+    }
+    if out.ends_with(' ') {
+        out.pop();
+    }
+    out
+}
+
+impl std::str::FromStr for MapName {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match fold_map_key(s).as_str() {
+            "circuit royal" | "circuitroyal" => Ok(Self::CircuitRoyal),
+            "dorado" => Ok(Self::Dorado),
+            "havana" => Ok(Self::Havana),
+            "junkertown" => Ok(Self::Junkertown),
+            "rialto" => Ok(Self::Rialto),
+            "route 66" | "route66" => Ok(Self::Route66),
+            "shambali monastery" | "shambali" => Ok(Self::ShambaliMonastery),
+            "watchpoint gibraltar" | "watchpointgibraltar" | "watchpoint" => {
+                Ok(Self::WatchpointGibraltar)
+            }
+            "blizzard world" | "blizzardworld" => Ok(Self::BlizzardWorld),
+            "eichenwalde" => Ok(Self::Eichenwalde),
+            "hollywood" => Ok(Self::Hollywood),
+            "kings row" | "kingsrow" => Ok(Self::KingsRow),
+            "midtown" => Ok(Self::Midtown),
+            "neon junction" | "neonjunction" => Ok(Self::NeonJunction),
+            "numbani" => Ok(Self::Numbani),
+            "paraiso" => Ok(Self::Paraiso),
+            "antarctic peninsula" | "antarcticpeninsula" => Ok(Self::AntarcticPeninsula),
+            "busan" => Ok(Self::Busan),
+            "ilios" => Ok(Self::Ilios),
+            "lijiang tower" | "lijang tower" | "lijiangtower" | "lijangtower" | "lijiang" => {
+                Ok(Self::LijangTower)
+            }
+            "nepal" => Ok(Self::Nepal),
+            "oasis" => Ok(Self::Oasis),
+            "samoa" => Ok(Self::Samoa),
+            "colosseo" => Ok(Self::Colosseo),
+            "esperanca" => Ok(Self::Esperanca),
+            "new queen street" | "newqueenstreet" => Ok(Self::NewQueenStreet),
+            "runasapi" => Ok(Self::Runasapi),
+            "aatlis" => Ok(Self::Aatlis),
+            "new junk city" | "newjunkcity" => Ok(Self::NewJunkCity),
+            "suravasa" => Ok(Self::Suravasa),
+            "hanaoka" => Ok(Self::Hanaoka),
+            "throne of anubis" | "throneofanubis" => Ok(Self::ThroneOfAnubis),
+            _ => Err(()),
+        }
     }
 }
 
@@ -324,6 +425,47 @@ impl std::fmt::Display for MatchOutcome {
             Self::Win => write!(f, "Win"),
             Self::Loss => write!(f, "Loss"),
             Self::Draw => write!(f, "Draw"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::str::FromStr;
+
+    /// Live Maps-tab names (accented + unaccented) plus Neon Junction.
+    /// These six strings are the ones that used to land in Other.
+    #[test]
+    fn six_map_string_forms_classify_mode() {
+        let cases = [
+            ("Neon Junction", "Hybrid", MapName::NeonJunction),
+            ("Paraíso", "Hybrid", MapName::Paraiso),
+            ("Paraiso", "Hybrid", MapName::Paraiso),
+            ("Esperança", "Push", MapName::Esperanca),
+            ("Esperanca", "Push", MapName::Esperanca),
+            ("neon junction", "Hybrid", MapName::NeonJunction),
+        ];
+        for (name, mode, parsed) in cases {
+            assert_eq!(
+                MapName::from_str(name),
+                Ok(parsed),
+                "FromStr failed for {name:?}"
+            );
+            assert_eq!(
+                parsed.game_mode(),
+                match mode {
+                    "Hybrid" => GameMode::Hybrid,
+                    "Push" => GameMode::Push,
+                    other => panic!("unexpected mode fixture {other}"),
+                },
+                "game_mode() wrong for {name:?}"
+            );
+            assert_eq!(
+                MapName::game_mode_label(name),
+                mode,
+                "game_mode_label failed for {name:?}"
+            );
         }
     }
 }

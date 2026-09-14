@@ -152,30 +152,10 @@ fn format_date(dt: &DateTime<Utc>) -> String {
 }
 
 /// Shared map → game mode (used by maps tab + overview mode chips).
+/// Delegates to [`scuffed_types::MapName`] so accented/unaccented live names
+/// (Paraíso/Paraiso, Esperança/Esperanca) and Neon Junction bucket correctly.
 pub(super) fn map_game_mode(name: &str) -> &'static str {
-    match name {
-        "Circuit Royal"
-        | "Dorado"
-        | "Havana"
-        | "Junkertown"
-        | "Rialto"
-        | "Route 66"
-        | "Shambali Monastery"
-        | "Watchpoint: Gibraltar" => "Escort",
-        "Blizzard World" | "Eichenwalde" | "Hollywood" | "King's Row" | "Midtown" | "Numbani"
-        | "Paraíso" => "Hybrid",
-        "Antarctic Peninsula"
-        | "Busan"
-        | "Ilios"
-        | "Lijiang Tower"
-        | "Nepal"
-        | "Oasis"
-        | "Samoa" => "Control",
-        "Colosseo" | "Esperança" | "New Queen Street" | "Runasapi" => "Push",
-        "Aatlis" | "New Junk City" | "Suravasa" => "Flashpoint",
-        "Hanaoka" | "Throne of Anubis" => "Clash",
-        _ => "Other",
-    }
+    scuffed_types::MapName::game_mode_label(name)
 }
 
 fn initial_density() -> &'static str {
