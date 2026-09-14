@@ -2,7 +2,32 @@
 
 User-facing notes for `stat-tracker-v*` GitHub Releases. The release workflow
 prepends the section whose heading matches the tag version (for example
-`## 0.4.12` for `stat-tracker-v0.4.12`).
+`## 0.4.13` for `stat-tracker-v0.4.13`).
+
+## 0.4.13
+
+Bucket Neon Junction, Paraiso, and Esperanca by game mode so Maps
+leave OTHER (#91). Neon Junction classifies as Hybrid. Paraiso and
+Esperanca accept both plain and accented live names (Paraíso /
+Esperança) and classify as Hybrid / Push.
+
+0.4.12 shipped cheap outcome-only poll during end_reel_wake (#87).
+Still on prior polish / packaging from 0.4.1–0.4.12.
+
+Daemon OCR / capture / sync / store schema are unchanged. In-app
+Update now (0.4.8), Settings Maps-level polish (0.4.7), Maps-grammar
+Seasons grid (0.4.6), Settings/Maps/Games polish (0.4.5), companion
+overlay hotkey (0.4.4), and packaging hotfixes 0.4.1–0.4.3 are
+unchanged.
+
+### Install
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/FrozenTear/scuffed-crew/main/crates/stat-tracker/dist/bootstrap.sh | bash
+```
+
+Or extract the tarball and run `./install.sh`. Pin with
+`STAT_TRACKER_TAG=stat-tracker-v0.4.13`.
 
 ## 0.4.12
 
