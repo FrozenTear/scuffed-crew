@@ -1,9 +1,15 @@
 //! Admin › Patch Notes — officer CRUD for the Strategy catalog.
 //!
-//! Public `GET /api/strategy/patch-notes` (`{ "data": [...] }`) is unchanged.
-//! Writes use the officer routes from #92 (session cookie, same as other admin
-//! pages). Nested hero/section blobs are structured at the card level; the
-//! per-hero `changes` array is a JSON textarea so the form stays usable.
+//! Frozen write contract: Contabo `6cf6260` / #92. Do not invent routes or
+//! fields. Public `GET /api/strategy/patch-notes` (`{ "data": [PatchNote] }`)
+//! is unchanged. Writes use OfficerUser session cookies:
+//! - POST `/api/strategy/patch-notes` full `PatchNote` → 201; dup version → 409
+//! - PUT `/api/strategy/patch-notes/{version}` partial `UpdatePatchNoteRequest`
+//! - DELETE `/api/strategy/patch-notes/{version}` → 200; missing → 404
+//! - anon → 401; member → 403
+//!
+//! Fields: `version`, `date`, `title`, `url`, `hero_updates`, `sections`.
+//! Nested hero `changes` stay a JSON textarea so the form stays usable.
 
 use dioxus::prelude::*;
 
@@ -107,11 +113,15 @@ fn patch_note_write_path(version: &str) -> String {
     format!("/api/strategy/patch-notes/{}", encode_query(version.trim()))
 }
 
-fn format_save_error(e: &ClientError) -> String {
-    if e.http_status() == Some(409) {
-        "That version already exists (409). Use a different version number.".into()
-    } else {
-        format!("Failed to save: {e}")
+/// Map #92 write statuses to officer-facing copy. 401/403/409/404 are the
+/// live Contabo contract; everything else keeps the raw client message.
+fn format_write_error(verb: &str, e: &ClientError) -> String {
+    match e.http_status() {
+        Some(401) => "Sign in required (401). Officer session expired or missing.".into(),
+        Some(403) => "Officer access required (403). Members cannot write patch notes.".into(),
+        Some(409) => "That version already exists (409). Use a different version number.".into(),
+        Some(404) => "Patch note not found (404). It may have already been deleted.".into(),
+        _ => format!("Failed to {verb}: {e}"),
     }
 }
 
@@ -379,7 +389,7 @@ pub fn AdminPatchNotes() -> Element {
                     notes.refresh += 1;
                 }
                 Err(e) => {
-                    toast.show(Toast::error(format_save_error(&e)));
+                    toast.show(Toast::error(format_write_error("save", &e)));
                 }
             }
         });
@@ -401,7 +411,7 @@ pub fn AdminPatchNotes() -> Element {
                     notes.refresh += 1;
                 }
                 Err(e) => {
-                    toast.show(Toast::error(format!("Failed to delete: {e}")));
+                    toast.show(Toast::error(format_write_error("delete", &e)));
                 }
             }
         });
@@ -850,22 +860,79 @@ mod tests {
         assert_eq!(note.sections[0].items, ["Fixed a tooltip.", "Another fix."]);
     }
 
+    fn http(status: u16, error: &str) -> ClientError {
+        ClientError::Http {
+            status,
+            body: format!(r#"{{"error":"{error}"}}"#),
+        }
+    }
+
     #[test]
-    fn conflict_toast_is_explicit() {
-        let err = ClientError::Http {
-            status: 409,
-            body: r#"{"error":"Patch note version already exists"}"#.into(),
-        };
-        let msg = format_save_error(&err);
+    fn write_toasts_match_live_contract_statuses() {
+        let msg = format_write_error("save", &http(409, "Patch note version already exists"));
         assert!(msg.contains("409"), "{msg}");
         assert!(msg.contains("already exists"), "{msg}");
-        let other = ClientError::Http {
-            status: 400,
-            body: r#"{"error":"date is required"}"#.into(),
-        };
-        let msg = format_save_error(&other);
+        let msg = format_write_error("save", &http(401, "Authentication required"));
+        assert!(msg.contains("401"), "{msg}");
+        let msg = format_write_error("save", &http(403, "Officer access required"));
+        assert!(msg.contains("403"), "{msg}");
+        assert!(msg.contains("Members cannot write"), "{msg}");
+        let msg = format_write_error("delete", &http(404, "Patch note not found"));
+        assert!(msg.contains("404"), "{msg}");
+        let msg = format_write_error("save", &http(400, "date is required"));
         assert!(msg.contains("400"), "{msg}");
         assert!(!msg.contains("already exists"), "{msg}");
+    }
+
+    #[test]
+    fn create_body_is_full_patch_note_contract() {
+        let note = assemble_patch_note(
+            "4.0.0",
+            "2026-09-14",
+            "Launch",
+            "https://x.test/notes",
+            &[],
+            &[],
+        )
+        .expect("ok");
+        let value = serde_json::to_value(&note).expect("json");
+        for key in [
+            "version",
+            "date",
+            "title",
+            "url",
+            "hero_updates",
+            "sections",
+        ] {
+            assert!(value.get(key).is_some(), "missing {key}");
+        }
+        assert!(value.get("created_at").is_none());
+        assert!(value.get("updated_at").is_none());
+        assert_eq!(value["hero_updates"], serde_json::json!([]));
+        assert_eq!(value["sections"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn update_body_is_partial_and_omits_version() {
+        let body = UpdatePatchNoteRequest {
+            date: Some("2026-09-14".into()),
+            title: Some(Some("Renamed".into())),
+            url: None,
+            hero_updates: None,
+            sections: None,
+        };
+        let value = serde_json::to_value(&body).expect("json");
+        assert!(
+            value.get("version").is_none(),
+            "version is the path key, not a PUT field"
+        );
+        assert_eq!(value["date"], "2026-09-14");
+        assert_eq!(value["title"], "Renamed");
+        // Frozen #92 type has no skip_serializing_if; unset Options are JSON null
+        // and deserialize back to None (leave unchanged).
+        assert!(value["url"].is_null());
+        assert!(value["hero_updates"].is_null());
+        assert!(value["sections"].is_null());
     }
 
     #[test]
