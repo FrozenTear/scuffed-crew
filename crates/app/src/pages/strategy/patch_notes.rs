@@ -342,7 +342,7 @@ fn summary_badge_bg(label: &str) -> &'static str {
 
 const PAGE_CSS: &str = r#"
     .patch-page {
-        padding: 1.75rem 1.5rem 3rem;
+        padding: var(--space-6) var(--space-6) var(--space-12);
         max-width: 860px;
         margin: 0 auto;
     }
@@ -372,7 +372,7 @@ const PAGE_CSS: &str = r#"
     }
     .patch-toolbar {
         position: sticky;
-        /* Public site-nav is 48px fixed; stay just under it while scrolling. */
+        /* Public site-nav is 48px fixed. Strategy nav is 50px in-flow, so stick at 0. */
         top: 48px;
         z-index: 8;
         display: flex;
@@ -393,7 +393,7 @@ const PAGE_CSS: &str = r#"
         flex: 1;
         min-width: 0;
         padding: 0.45rem 0.75rem;
-        border-radius: 6px;
+        border-radius: var(--radius-sm);
         border: 1px solid var(--border);
         background: var(--surface);
         color: var(--text);
@@ -430,7 +430,7 @@ const PAGE_CSS: &str = r#"
     }
     .patch-chip {
         padding: 0.28rem 0.65rem;
-        border-radius: 999px;
+        border-radius: var(--radius-pill);
         font-size: 0.7rem;
         font-weight: 600;
         border: 1px solid var(--border);
@@ -472,8 +472,9 @@ const PAGE_CSS: &str = r#"
     }
     .patch-card {
         background: var(--surface);
+        background-image: none;
         border: 1px solid var(--border);
-        border-radius: 8px;
+        border-radius: var(--radius-sm);
         overflow: hidden;
         transition: border-color 0.2s;
     }
@@ -554,7 +555,7 @@ const PAGE_CSS: &str = r#"
         color: var(--text-2);
         background: var(--surface-2);
         padding: 0.08rem 0.4rem;
-        border-radius: 999px;
+        border-radius: var(--radius-pill);
         white-space: nowrap;
     }
     .patch-tag-pills {
@@ -573,7 +574,7 @@ const PAGE_CSS: &str = r#"
     .patch-tag-pill {
         font-size: 0.6rem;
         padding: 0.08rem 0.4rem;
-        border-radius: 999px;
+        border-radius: var(--radius-pill);
         font-weight: 600;
         text-transform: uppercase;
         letter-spacing: 0.03em;
@@ -637,7 +638,7 @@ const PAGE_CSS: &str = r#"
     .patch-hero-card {
         background: var(--surface-2);
         border: 1px solid var(--border);
-        border-radius: 6px;
+        border-radius: var(--radius-sm);
         padding: 0.7rem 0.85rem;
     }
     .patch-hero-card-header {
@@ -655,7 +656,7 @@ const PAGE_CSS: &str = r#"
     .patch-change-badge {
         font-size: 0.6rem;
         padding: 0.1rem 0.45rem;
-        border-radius: 999px;
+        border-radius: var(--radius-pill);
         font-weight: 700;
         text-transform: uppercase;
         letter-spacing: 0.04em;
@@ -747,14 +748,13 @@ const PAGE_CSS: &str = r#"
     }
     @media (max-width: 720px) {
         .patch-page {
-            padding: 1.15rem 1rem 2.5rem;
+            padding: var(--space-4) var(--space-4) var(--space-8);
         }
         .patch-page-title {
             font-size: 1.45rem;
             letter-spacing: 0.08em;
         }
         .patch-toolbar {
-            top: 48px;
             margin-left: -0.15rem;
             margin-right: -0.15rem;
         }
@@ -788,6 +788,10 @@ const PAGE_CSS: &str = r#"
         .patch-card-featured .patch-card-title {
             font-size: 1.05rem;
         }
+    }
+    /* StrategyLayout nav is 50px in document flow (not fixed). */
+    [data-accent="strategy"] .patch-toolbar {
+        top: 0;
     }
 "#;
 
