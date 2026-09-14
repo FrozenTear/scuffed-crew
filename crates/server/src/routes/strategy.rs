@@ -10,6 +10,8 @@ use serde_json::{Value, json};
 
 use scuffed_auth::server::{AuthUser, HasAuth};
 use scuffed_site_server::state::AppState;
+use scuffed_types::api::ApiSuccess;
+use scuffed_types::patch_notes::{PatchChange, PatchHeroUpdate, PatchNote, PatchSection};
 use scuffed_types::strategy::{
     GameMode, Strategy, StrategyElement, StrategySummary, TimelinePhase, Visibility,
 };
@@ -30,6 +32,7 @@ pub fn strategy_routes(state: AppState) -> Router {
         )
         .route("/api/strategy/heroes", get(list_heroes))
         .route("/api/strategy/meta", get(get_meta))
+        .route("/api/strategy/patch-notes", get(list_patch_notes))
         .with_state(state)
 }
 
@@ -411,6 +414,116 @@ async fn list_heroes() -> Json<Value> {
     Json(json!({ "data": [] }))
 }
 
+/// GET /api/strategy/patch-notes — public list for the Site Patch Notes page.
+///
+/// Auth matches other public strategy GETs (`/heroes`, `/strategies`): no login.
+/// Envelope is [`ApiSuccess`] (`{ "data": [...] }`). Content is a static catalog
+/// (no Surreal table yet) shaped for Site's local `Patch` struct.
+async fn list_patch_notes() -> Json<ApiSuccess<Vec<PatchNote>>> {
+    Json(ApiSuccess {
+        data: patch_notes_catalog(),
+    })
+}
+
+/// Scuffed-native sample catalog so Site can render cards, filters, and search.
+/// Not a live Blizzard scrape and not copied from the older strategy-app.
+fn patch_notes_catalog() -> Vec<PatchNote> {
+    vec![
+        PatchNote {
+            version: "2.18.1".into(),
+            date: "2026-08-20".into(),
+            title: Some("Mid-season balance".into()),
+            url: "https://overwatch.blizzard.com/en-us/news/patch-notes/".into(),
+            hero_updates: vec![
+                PatchHeroUpdate {
+                    hero_id: "ana".into(),
+                    hero_name: "Ana".into(),
+                    change_type: "adjustment".into(),
+                    changes: vec![PatchChange {
+                        ability: Some("Biotic Grenade".into()),
+                        description: "Healing-boost window is a bit shorter.".into(),
+                        change_type: "nerf".into(),
+                    }],
+                    dev_comment: Some(
+                        "Keeping her burst sustain in line with other supports.".into(),
+                    ),
+                },
+                PatchHeroUpdate {
+                    hero_id: "venture".into(),
+                    hero_name: "Venture".into(),
+                    change_type: "buff".into(),
+                    changes: vec![PatchChange {
+                        ability: Some("Drill Dash".into()),
+                        description: "Dash distance increased slightly.".into(),
+                        change_type: "buff".into(),
+                    }],
+                    dev_comment: None,
+                },
+            ],
+            sections: vec![
+                PatchSection {
+                    category: "Competitive".into(),
+                    items: vec!["Placement games now show an expected rank band.".into()],
+                },
+                PatchSection {
+                    category: "Bug Fixes".into(),
+                    items: vec!["Fixed a rare scoreboard freeze after overtime.".into()],
+                },
+            ],
+        },
+        PatchNote {
+            version: "2.18.0".into(),
+            date: "2026-08-11".into(),
+            title: Some("Season 4 launch".into()),
+            url: "https://overwatch.blizzard.com/en-us/news/patch-notes/".into(),
+            hero_updates: vec![PatchHeroUpdate {
+                hero_id: "freja".into(),
+                hero_name: "Freja".into(),
+                change_type: "bugfix".into(),
+                changes: vec![PatchChange {
+                    ability: None,
+                    description: "Fixed an animation hitch when swapping weapons mid-air.".into(),
+                    change_type: "bugfix".into(),
+                }],
+                dev_comment: None,
+            }],
+            sections: vec![
+                PatchSection {
+                    category: "Maps".into(),
+                    items: vec![
+                        "New Clash rotation includes Aatlis.".into(),
+                        "Health pack on New Queen Street mid is easier to contest.".into(),
+                    ],
+                },
+                PatchSection {
+                    category: "General".into(),
+                    items: vec!["Career profile now lists last season's peak.".into()],
+                },
+            ],
+        },
+        PatchNote {
+            version: "2.17.3".into(),
+            date: "2026-07-22".into(),
+            title: Some("Stability hotfix".into()),
+            url: "https://overwatch.blizzard.com/en-us/news/patch-notes/".into(),
+            hero_updates: vec![],
+            sections: vec![
+                PatchSection {
+                    category: "Bug Fixes".into(),
+                    items: vec![
+                        "Fixed a disconnect when rejoining a custom game lobby.".into(),
+                        "Spectator UI no longer duplicates the ultimate bar.".into(),
+                    ],
+                },
+                PatchSection {
+                    category: "Maps".into(),
+                    items: vec!["Closed an out-of-bounds perch on Colosseo.".into()],
+                },
+            ],
+        },
+    ]
+}
+
 /// GET /api/strategy/meta — global meta data + personal winrates per hero/map.
 ///
 /// Anonymous: returns the global stub only. Authed org members: also returns
@@ -520,4 +633,128 @@ async fn try_get_user(state: &AppState, jar: &CookieJar) -> Option<scuffed_auth:
     let config = state.session_config();
     let token = jar.get(&config.cookie_name)?.value().to_string();
     state.get_session_user(&token).await.ok().flatten()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::Router;
+    use axum::body::Body;
+    use axum::http::{Method, Request, StatusCode};
+    use http_body_util::BodyExt;
+    use scuffed_auth::SessionConfig;
+    use scuffed_db::Database;
+    use scuffed_db::migrations::run_migrations;
+    use scuffed_site_server::state::OAuthConfig;
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    use tower::ServiceExt;
+
+    async fn test_state() -> AppState {
+        let db = Database::connect_memory().await.expect("mem db");
+        run_migrations(&db.client).await.expect("migrations");
+        AppState {
+            db: Arc::new(db),
+            session_config: SessionConfig::default(),
+            oauth_config: OAuthConfig {
+                discord_client_id: String::new(),
+                discord_client_secret: String::new(),
+                google_client_id: String::new(),
+                google_client_secret: String::new(),
+                redirect_base_url: "http://localhost:3000".into(),
+                allowed_origins: vec!["http://localhost:3000".into()],
+            },
+            upload_dir: PathBuf::from("/tmp/scuffed-test-uploads"),
+            notifier: None,
+            nostr_challenge_key: [0u8; 32],
+            consumed_challenges: scuffed_site_server::challenge_store::ConsumedChallengeStore::new(
+            ),
+            nostr_rate_limiter: scuffed_site_server::nostr_rate_limit::NostrRateLimiter::new(),
+            crypto: None,
+            relay_url: None,
+            dm_events: None,
+            nip05_domain: None,
+            nip05_republish_enabled: false,
+        }
+    }
+
+    async fn get_json(app: Router, path: &str) -> (StatusCode, serde_json::Value) {
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(path)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).expect("json body");
+        (status, value)
+    }
+
+    #[test]
+    fn catalog_has_fields_site_renders() {
+        let notes = patch_notes_catalog();
+        assert!(
+            !notes.is_empty(),
+            "empty catalog would show Site empty-state, not cards"
+        );
+        for note in &notes {
+            assert!(!note.version.is_empty());
+            assert!(!note.date.is_empty());
+            assert!(!note.url.is_empty());
+        }
+        assert!(
+            notes.iter().any(|n| !n.hero_updates.is_empty()),
+            "need at least one hero-balance card for the Hero Balance filter"
+        );
+        assert!(
+            notes.iter().any(|n| n
+                .sections
+                .iter()
+                .any(|s| s.category.to_lowercase().contains("bug"))),
+            "need a Bug Fixes section for that filter chip"
+        );
+    }
+
+    #[tokio::test]
+    async fn patch_notes_is_public_data_envelope() {
+        let app = strategy_routes(test_state().await);
+        let (status, body) = get_json(app, "/api/strategy/patch-notes").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let data = body
+            .get("data")
+            .and_then(|v| v.as_array())
+            .expect("{ data: [...] } envelope");
+        assert!(!data.is_empty());
+        let first = &data[0];
+        assert!(first.get("version").and_then(|v| v.as_str()).is_some());
+        assert!(first.get("date").and_then(|v| v.as_str()).is_some());
+        assert!(first.get("url").and_then(|v| v.as_str()).is_some());
+        assert!(
+            first
+                .get("hero_updates")
+                .and_then(|v| v.as_array())
+                .is_some()
+        );
+        assert!(first.get("sections").and_then(|v| v.as_array()).is_some());
+        assert!(
+            body.get("strategies").is_none(),
+            "must not use a Browse-style strategies key"
+        );
+    }
+
+    #[tokio::test]
+    async fn patch_notes_root_is_object_not_bare_array() {
+        let app = Router::new().route("/api/strategy/patch-notes", get(list_patch_notes));
+        let (status, body) = get_json(app, "/api/strategy/patch-notes").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            body.is_object(),
+            "Site unwraps {{ data }}; a bare array would break Browse-style clients"
+        );
+    }
 }

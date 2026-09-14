@@ -38,6 +38,12 @@ struct PatchSection {
     items: Vec<String>,
 }
 
+/// Server wraps the list in `{ "data": [...] }` (`ApiSuccess`), same as Browse.
+#[derive(Debug, Clone, Deserialize)]
+struct PatchListResponse {
+    data: Vec<Patch>,
+}
+
 // --- Filter categories ---
 
 const FILTER_OPTIONS: [&str; 6] = [
@@ -422,9 +428,10 @@ const PAGE_CSS: &str = r#"
 pub fn StrategyPatchNotes() -> Element {
     let patches_data = use_resource(|| async {
         ApiClient::web()
-            .fetch::<Vec<Patch>>("/api/strategy/patch-notes")
+            .fetch::<PatchListResponse>("/api/strategy/patch-notes")
             .await
             .ok()
+            .map(|body| body.data)
     });
 
     let mut search_query = use_signal(String::new);
