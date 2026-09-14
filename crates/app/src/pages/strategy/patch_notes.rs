@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use dioxus::prelude::*;
 use serde::Deserialize;
 
@@ -50,7 +52,6 @@ struct PatchChange {
     ability: Option<String>,
     description: String,
     #[serde(default)]
-    #[allow(dead_code)]
     change_type: String,
 }
 
@@ -77,6 +78,9 @@ enum CardKind {
 
 /// How many category pills a collapsed archive row may show before `+N`.
 const COLLAPSED_TAG_LIMIT: usize = 2;
+
+/// Sticky hero TOC only appears once an expanded patch has this many heroes.
+const HERO_TOC_THRESHOLD: usize = 12;
 
 /// `use_api` stores failure as `Some(None)` + `error`; still-in-flight is `None`.
 fn classify_patch_fetch<T>(resource: Option<Option<&T>>, error: Option<&str>) -> PatchFetchState {
@@ -271,6 +275,80 @@ fn hero_change_counts(updates: &[HeroUpdate]) -> Vec<(&'static str, usize)> {
     out
 }
 
+fn show_hero_toc(hero_count: usize) -> bool {
+    hero_count >= HERO_TOC_THRESHOLD
+}
+
+/// Featured / newest patch (catalog index 0) starts expanded; archive stays closed.
+fn initial_expanded_patches() -> Vec<usize> {
+    vec![0]
+}
+
+fn toggle_open_hero(current: Option<usize>, clicked: usize) -> Option<usize> {
+    if current == Some(clicked) {
+        None
+    } else {
+        Some(clicked)
+    }
+}
+
+fn apply_hero_toggle(
+    map: &HashMap<usize, usize>,
+    patch_idx: usize,
+    hero_idx: usize,
+) -> HashMap<usize, usize> {
+    let mut next = map.clone();
+    match toggle_open_hero(next.get(&patch_idx).copied(), hero_idx) {
+        Some(open) => {
+            next.insert(patch_idx, open);
+        }
+        None => {
+            next.remove(&patch_idx);
+        }
+    }
+    next
+}
+
+fn change_count_label(n: usize) -> String {
+    if n == 1 {
+        "1 change".to_string()
+    } else {
+        format!("{n} changes")
+    }
+}
+
+fn change_marker(ct: &str) -> &'static str {
+    match ct {
+        "buff" => "\u{25B2}",
+        "nerf" => "\u{25BC}",
+        "adjustment" => "\u{25C6}",
+        _ => "\u{2022}",
+    }
+}
+
+fn filter_chip_compact_label(label: &str) -> &str {
+    match label {
+        "Competitive" => "Comp",
+        _ => label,
+    }
+}
+
+fn hero_dom_id(patch_idx: usize, hero_idx: usize) -> String {
+    format!("patch-{patch_idx}-hero-{hero_idx}")
+}
+
+fn scroll_to_hero_card(dom_id: &str) {
+    #[cfg(target_arch = "wasm32")]
+    if let Some(el) = web_sys::window()
+        .and_then(|w| w.document())
+        .and_then(|d| d.get_element_by_id(dom_id))
+    {
+        el.scroll_into_view();
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    let _ = dom_id;
+}
+
 // --- Change type helpers ---
 
 fn change_type_color(ct: &str) -> &'static str {
@@ -343,7 +421,7 @@ fn summary_badge_bg(label: &str) -> &'static str {
 const PAGE_CSS: &str = r#"
     .patch-page {
         padding: var(--space-6) var(--space-6) var(--space-12);
-        max-width: 860px;
+        max-width: 1200px;
         margin: 0 auto;
     }
     .patch-header {
@@ -630,28 +708,115 @@ const PAGE_CSS: &str = r#"
         letter-spacing: 0.04em;
         margin: 1rem 0 0.5rem;
     }
-    .patch-hero-cards {
+    .patch-hero-layout {
+        display: grid;
+        grid-template-columns: 11rem minmax(0, 1fr);
+        gap: 0.85rem 1rem;
+        align-items: start;
+    }
+    .patch-hero-stack {
+        display: block;
+    }
+    .patch-hero-toc {
+        position: sticky;
+        top: calc(48px + 5.5rem);
         display: flex;
         flex-direction: column;
-        gap: 0.6rem;
+        gap: 0.28rem;
+        max-height: calc(100vh - 8.5rem);
+        overflow-y: auto;
+        padding-right: 0.15rem;
+    }
+    .patch-hero-toc-title {
+        font-family: var(--font-mono);
+        font-size: 0.62rem;
+        font-weight: 600;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+        color: var(--text-3);
+        margin: 0 0 0.15rem;
+    }
+    .patch-hero-toc-item {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 0.35rem;
+        width: 100%;
+        border: 1px solid transparent;
+        border-radius: var(--radius-sm);
+        background: transparent;
+        color: var(--text-2);
+        font: inherit;
+        font-size: 0.75rem;
+        text-align: left;
+        padding: 0.28rem 0.45rem;
+        cursor: pointer;
+    }
+    .patch-hero-toc-item:hover {
+        background: var(--surface-2);
+        color: var(--text);
+    }
+    .patch-hero-toc-item.active {
+        border-color: var(--accent-soft);
+        background: var(--accent-soft);
+        color: var(--accent);
+    }
+    .patch-hero-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(min(340px, 100%), 1fr));
+        gap: 10px;
     }
     .patch-hero-card {
         background: var(--surface-2);
         border: 1px solid var(--border);
         border-radius: var(--radius-sm);
-        padding: 0.7rem 0.85rem;
+        overflow: hidden;
+    }
+    .patch-hero-card.open {
+        grid-column: 1 / -1;
+        border-color: color-mix(in srgb, var(--accent) 28%, var(--border));
     }
     .patch-hero-card-header {
         display: flex;
         align-items: center;
-        gap: 0.55rem;
-        margin-bottom: 0.4rem;
+        gap: 0.5rem;
+        width: 100%;
+        margin: 0;
+        padding: 0.55rem 0.75rem;
+        border: none;
+        background: transparent;
+        color: inherit;
+        font: inherit;
+        text-align: left;
+        cursor: pointer;
+    }
+    .patch-hero-card-header:hover {
+        background: color-mix(in srgb, var(--surface) 55%, var(--surface-2));
     }
     .patch-hero-name {
         font-family: var(--font-head);
         font-weight: 700;
         font-size: 0.88rem;
         color: var(--text);
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+    .patch-hero-meta {
+        margin-left: auto;
+        display: flex;
+        align-items: center;
+        gap: 0.4rem;
+        flex-shrink: 0;
+    }
+    .patch-hero-change-count {
+        font-family: var(--font-mono);
+        font-size: 0.62rem;
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+        color: var(--text-3);
+        white-space: nowrap;
     }
     .patch-change-badge {
         font-size: 0.6rem;
@@ -660,36 +825,45 @@ const PAGE_CSS: &str = r#"
         font-weight: 700;
         text-transform: uppercase;
         letter-spacing: 0.04em;
+        white-space: nowrap;
+    }
+    .patch-hero-details {
+        padding: 0 0.75rem 0.75rem;
+        border-top: 1px solid var(--border);
     }
     .patch-dev-comment {
         font-size: 0.78rem;
         color: var(--text-2);
         font-style: italic;
         padding: 0.45rem 0.7rem;
-        margin: 0.35rem 0 0.5rem;
+        margin: 0.55rem 0 0.5rem;
         border-left: 2px solid var(--border);
         line-height: 1.5;
     }
     .patch-change-list {
         list-style: none;
         padding: 0;
-        margin: 0;
-        display: flex;
-        flex-direction: column;
-        gap: 0.25rem;
+        margin: 0.15rem 0 0;
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(min(280px, 100%), 1fr));
+        gap: 0.35rem 1rem;
     }
     .patch-change-item {
         font-size: 0.8rem;
         color: var(--text);
         line-height: 1.5;
-        padding-left: 0.75rem;
-        position: relative;
+        display: flex;
+        align-items: flex-start;
+        gap: 0.4rem;
     }
-    .patch-change-item::before {
-        content: "\2022";
-        position: absolute;
-        left: 0;
-        color: var(--text-3);
+    .patch-change-marker {
+        flex-shrink: 0;
+        font-size: 0.68rem;
+        line-height: 1.6;
+        font-weight: 700;
+    }
+    .patch-change-copy {
+        min-width: 0;
     }
     .patch-change-ability {
         font-weight: 700;
@@ -699,9 +873,9 @@ const PAGE_CSS: &str = r#"
         list-style: none;
         padding: 0;
         margin: 0;
-        display: flex;
-        flex-direction: column;
-        gap: 0.2rem;
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(min(280px, 100%), 1fr));
+        gap: 0.25rem 1.15rem;
     }
     .patch-section-item {
         font-size: 0.8rem;
@@ -746,6 +920,9 @@ const PAGE_CSS: &str = r#"
     .patch-retry {
         margin-top: 1rem;
     }
+    .patch-chip-short {
+        display: none;
+    }
     @media (max-width: 720px) {
         .patch-page {
             padding: var(--space-4) var(--space-4) var(--space-8);
@@ -771,6 +948,37 @@ const PAGE_CSS: &str = r#"
         .patch-chip {
             flex-shrink: 0;
         }
+        .patch-chip-full {
+            display: none;
+        }
+        .patch-chip-short {
+            display: inline;
+        }
+        .patch-hero-layout {
+            grid-template-columns: 1fr;
+        }
+        .patch-hero-toc {
+            position: static;
+            flex-direction: row;
+            flex-wrap: nowrap;
+            max-height: none;
+            overflow-x: auto;
+            overflow-y: hidden;
+            padding-right: 0;
+            padding-bottom: 0.2rem;
+            -webkit-overflow-scrolling: touch;
+            scrollbar-width: none;
+        }
+        .patch-hero-toc::-webkit-scrollbar {
+            display: none;
+        }
+        .patch-hero-toc-title {
+            display: none;
+        }
+        .patch-hero-toc-item {
+            width: auto;
+            flex-shrink: 0;
+        }
         .patch-card-header {
             grid-template-columns: auto minmax(0, 1fr) auto auto;
         }
@@ -793,6 +1001,9 @@ const PAGE_CSS: &str = r#"
     [data-accent="strategy"] .patch-toolbar {
         top: 0;
     }
+    [data-accent="strategy"] .patch-hero-toc {
+        top: 5.5rem;
+    }
 "#;
 
 // --- Component ---
@@ -805,7 +1016,8 @@ pub fn PatchNotesPage() -> Element {
 
     let mut search_query = use_signal(String::new);
     let mut active_filter = use_signal(|| "All".to_string());
-    let mut expanded: Signal<Vec<usize>> = use_signal(Vec::new);
+    let mut expanded: Signal<Vec<usize>> = use_signal(initial_expanded_patches);
+    let mut open_hero: Signal<HashMap<usize, usize>> = use_signal(HashMap::new);
 
     rsx! {
         style { {PAGE_CSS} }
@@ -957,6 +1169,7 @@ pub fn PatchNotesPage() -> Element {
                                                     expanded_indices.contains(&idx),
                                                     CardKind::Featured,
                                                     &mut expanded,
+                                                    &mut open_hero,
                                                 )}
                                             }
                                         }
@@ -971,6 +1184,7 @@ pub fn PatchNotesPage() -> Element {
                                                             expanded_indices.contains(idx),
                                                             CardKind::Compact,
                                                             &mut expanded,
+                                                            &mut open_hero,
                                                         )}
                                                     }
                                                 }
@@ -1014,13 +1228,16 @@ fn render_filter_chip(label: &str, current: &str, signal: &mut Signal<String>) -
         "patch-chip"
     };
     let label_owned = label.to_string();
+    let compact = filter_chip_compact_label(label).to_string();
     let mut sig = *signal;
 
     rsx! {
         button {
             class: "{class}",
+            title: "{label}",
             onclick: move |_| sig.set(label_owned.clone()),
-            "{label}"
+            span { class: "patch-chip-full", "{label}" }
+            span { class: "patch-chip-short", "{compact}" }
         }
     }
 }
@@ -1031,6 +1248,7 @@ fn render_patch_card(
     is_expanded: bool,
     kind: CardKind,
     expanded_signal: &mut Signal<Vec<usize>>,
+    open_hero: &mut Signal<HashMap<usize, usize>>,
 ) -> Element {
     let title = patch_display_title(patch);
     let hero_count = patch.hero_updates.len();
@@ -1058,7 +1276,9 @@ fn render_patch_card(
     let sections = patch.sections.clone();
     let featured = kind == CardKind::Featured;
     let show_lead_preview = featured && !is_expanded;
+    let open_hero_idx = (*open_hero)().get(&idx).copied();
     let mut sig = *expanded_signal;
+    let mut hero_sig = *open_hero;
 
     rsx! {
         div { class: "{card_class}",
@@ -1128,14 +1348,48 @@ fn render_patch_card(
             if is_expanded {
                 div { class: "patch-card-body",
                     if let Some(lead) = body.as_ref().filter(|s| !s.is_empty()) {
-                        p { class: "patch-body-lead", "{lead}" }
+                        p { class: "patch-body-lead clamp", "{lead}" }
                     }
 
                     if !hero_updates.is_empty() {
                         h3 { class: "patch-section-title", "Hero Balance" }
-                        div { class: "patch-hero-cards",
-                            for hu in hero_updates.iter() {
-                                {render_hero_update(hu)}
+                        {
+                            let toc = show_hero_toc(hero_updates.len());
+                            let layout_class = if toc {
+                                "patch-hero-layout"
+                            } else {
+                                "patch-hero-stack"
+                            };
+                            rsx! {
+                                div { class: "{layout_class}",
+                                    if toc {
+                                        nav {
+                                            class: "patch-hero-toc",
+                                            aria_label: "Heroes in this patch",
+                                            p { class: "patch-hero-toc-title", "Heroes" }
+                                            for (hi, hu) in hero_updates.iter().enumerate() {
+                                                {render_toc_item(
+                                                    idx,
+                                                    hi,
+                                                    hu,
+                                                    open_hero_idx == Some(hi),
+                                                    &mut hero_sig,
+                                                )}
+                                            }
+                                        }
+                                    }
+                                    div { class: "patch-hero-grid",
+                                        for (hi, hu) in hero_updates.iter().enumerate() {
+                                            {render_hero_update(
+                                                idx,
+                                                hi,
+                                                hu,
+                                                open_hero_idx == Some(hi),
+                                                &mut hero_sig,
+                                            )}
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
@@ -1171,29 +1425,103 @@ fn render_tag_pill(category: &str) -> Element {
     }
 }
 
-fn render_hero_update(hu: &HeroUpdate) -> Element {
+fn render_toc_item(
+    patch_idx: usize,
+    hero_idx: usize,
+    hu: &HeroUpdate,
+    is_open: bool,
+    open_hero: &mut Signal<HashMap<usize, usize>>,
+) -> Element {
+    let class = if is_open {
+        "patch-hero-toc-item active"
+    } else {
+        "patch-hero-toc-item"
+    };
+    let name = hu.hero_name.clone();
+    let mut sig = *open_hero;
+
+    rsx! {
+        button {
+            class: "{class}",
+            r#type: "button",
+            aria_current: if is_open { "true" } else { "false" },
+            onclick: move |_| {
+                let opening = (*sig)().get(&patch_idx).copied() != Some(hero_idx);
+                sig.set(apply_hero_toggle(&sig(), patch_idx, hero_idx));
+                if opening {
+                    scroll_to_hero_card(&hero_dom_id(patch_idx, hero_idx));
+                }
+            },
+            "{name}"
+        }
+    }
+}
+
+fn render_hero_update(
+    patch_idx: usize,
+    hero_idx: usize,
+    hu: &HeroUpdate,
+    is_open: bool,
+    open_hero: &mut Signal<HashMap<usize, usize>>,
+) -> Element {
     let ct_color = change_type_color(&hu.change_type);
     let ct_bg = change_type_bg(&hu.change_type);
     let ct_label = change_type_label(&hu.change_type);
+    let count_label = change_count_label(hu.changes.len());
+    let card_class = if is_open {
+        "patch-hero-card open"
+    } else {
+        "patch-hero-card"
+    };
+    let expand_class = if is_open {
+        "patch-expand-icon open"
+    } else {
+        "patch-expand-icon"
+    };
+    let dom_id = hero_dom_id(patch_idx, hero_idx);
+    let hero_name = hu.hero_name.clone();
+    let mut sig = *open_hero;
 
     rsx! {
-        div { class: "patch-hero-card",
-            div { class: "patch-hero-card-header",
-                span { class: "patch-hero-name", "{hu.hero_name}" }
+        div {
+            class: "{card_class}",
+            id: "{dom_id}",
+            button {
+                class: "patch-hero-card-header",
+                r#type: "button",
+                aria_expanded: if is_open { "true" } else { "false" },
+                onclick: move |_| {
+                    let opening = (*sig)().get(&patch_idx).copied() != Some(hero_idx);
+                    sig.set(apply_hero_toggle(&sig(), patch_idx, hero_idx));
+                    if opening {
+                        scroll_to_hero_card(&hero_dom_id(patch_idx, hero_idx));
+                    }
+                },
+                span { class: "patch-hero-name", "{hero_name}" }
                 span {
                     class: "patch-change-badge",
                     style: "color: {ct_color}; background: {ct_bg};",
                     "{ct_label}"
                 }
+                div { class: "patch-hero-meta",
+                    span { class: "patch-hero-change-count", "{count_label}" }
+                    span { class: "{expand_class}", "\u{25bc}" }
+                }
             }
 
-            if let Some(comment) = &hu.dev_comment {
-                p { class: "patch-dev-comment", "\"{comment}\"" }
-            }
+            if is_open {
+                div { class: "patch-hero-details",
+                    if let Some(comment) = &hu.dev_comment {
+                        p { class: "patch-dev-comment", "\"{comment}\"" }
+                    }
 
-            ul { class: "patch-change-list",
-                for change in hu.changes.iter() {
-                    {render_change_item(change)}
+                    if !hu.changes.is_empty() {
+                        ul { class: "patch-change-list",
+                            for change in hu.changes.iter() {
+                                {render_change_item(change)}
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -1201,12 +1529,23 @@ fn render_hero_update(hu: &HeroUpdate) -> Element {
 }
 
 fn render_change_item(change: &PatchChange) -> Element {
+    let marker = change_marker(&change.change_type);
+    let marker_color = change_type_color(&change.change_type);
+
     rsx! {
         li { class: "patch-change-item",
-            if let Some(ability) = &change.ability {
-                span { class: "patch-change-ability", "{ability}: " }
+            span {
+                class: "patch-change-marker",
+                style: "color: {marker_color};",
+                aria_hidden: "true",
+                "{marker}"
             }
-            "{change.description}"
+            span { class: "patch-change-copy",
+                if let Some(ability) = &change.ability {
+                    span { class: "patch-change-ability", "{ability}: " }
+                }
+                "{change.description}"
+            }
         }
     }
 }
@@ -1485,5 +1824,56 @@ mod tests {
             hero_change_counts(&updates),
             [("Buff", 2), ("Nerf", 1), ("Adjustment", 1)]
         );
+    }
+
+    #[test]
+    fn featured_newest_starts_expanded() {
+        assert_eq!(initial_expanded_patches(), vec![0]);
+    }
+
+    #[test]
+    fn hero_toc_only_at_twelve() {
+        assert!(!show_hero_toc(0));
+        assert!(!show_hero_toc(11));
+        assert!(show_hero_toc(12));
+        assert!(show_hero_toc(24));
+    }
+
+    #[test]
+    fn hero_accordion_is_one_at_a_time() {
+        let mut open = HashMap::new();
+        open = apply_hero_toggle(&open, 0, 2);
+        assert_eq!(open.get(&0).copied(), Some(2));
+        open = apply_hero_toggle(&open, 0, 5);
+        assert_eq!(open.get(&0).copied(), Some(5));
+        open = apply_hero_toggle(&open, 0, 5);
+        assert!(open.get(&0).is_none());
+        open = apply_hero_toggle(&open, 0, 1);
+        open = apply_hero_toggle(&open, 3, 4);
+        assert_eq!(open.get(&0).copied(), Some(1));
+        assert_eq!(open.get(&3).copied(), Some(4));
+    }
+
+    #[test]
+    fn change_markers_and_count_labels() {
+        assert_eq!(change_marker("buff"), "\u{25B2}");
+        assert_eq!(change_marker("nerf"), "\u{25BC}");
+        assert_eq!(change_marker("adjustment"), "\u{25C6}");
+        assert_eq!(change_marker("bugfix"), "\u{2022}");
+        assert_eq!(change_count_label(0), "0 changes");
+        assert_eq!(change_count_label(1), "1 change");
+        assert_eq!(change_count_label(4), "4 changes");
+    }
+
+    #[test]
+    fn competitive_chip_compacts_on_mobile_label() {
+        assert_eq!(filter_chip_compact_label("Competitive"), "Comp");
+        assert_eq!(filter_chip_compact_label("Hero Balance"), "Hero Balance");
+        assert_eq!(filter_chip_compact_label("All"), "All");
+    }
+
+    #[test]
+    fn hero_dom_id_is_stable() {
+        assert_eq!(hero_dom_id(0, 3), "patch-0-hero-3");
     }
 }
