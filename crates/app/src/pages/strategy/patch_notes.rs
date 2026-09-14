@@ -762,10 +762,12 @@ const PAGE_CSS: &str = r#"
         background: var(--accent-soft);
         color: var(--accent);
     }
-    .patch-hero-grid {
-        display: grid;
-        grid-template-columns: repeat(auto-fill, minmax(min(340px, 100%), 1fr));
-        gap: 10px;
+    /* Desktop default: single-column accordion. Multi-col grid is only
+       for an *open* hero's change lines and for non-hero sections. */
+    .patch-hero-list {
+        display: flex;
+        flex-direction: column;
+        gap: 0.35rem;
     }
     .patch-hero-card {
         background: var(--surface-2);
@@ -775,7 +777,6 @@ const PAGE_CSS: &str = r#"
         scroll-margin-top: calc(48px + 5.75rem);
     }
     .patch-hero-card.open {
-        grid-column: 1 / -1;
         border-color: color-mix(in srgb, var(--accent) 28%, var(--border));
     }
     .patch-hero-card-header {
@@ -784,7 +785,7 @@ const PAGE_CSS: &str = r#"
         gap: 0.5rem;
         width: 100%;
         margin: 0;
-        padding: 0.55rem 0.75rem;
+        padding: 0.42rem 0.75rem;
         border: none;
         background: transparent;
         color: inherit;
@@ -1383,7 +1384,7 @@ fn render_patch_card(
                                             }
                                         }
                                     }
-                                    div { class: "patch-hero-grid",
+                                    div { class: "patch-hero-list",
                                         for (hi, hu) in hero_updates.iter().enumerate() {
                                             {render_hero_update(
                                                 idx,
