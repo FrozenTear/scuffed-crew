@@ -68,6 +68,8 @@ cd /path/to/scuffed-crew
 
 `update.sh` **appends** missing production keys to an existing `data/secrets.env` (same as re-running `install.sh`): `PRODUCTION`, `SURREALDB_AUTH_MODE`, `SURREALDB_APP_USER`, `SURREALDB_APP_PASSWORD`. It never overwrites existing values and never regenerates `ENCRYPTION_KEY`. If the update script itself changes on pull, it re-execs once so the new logic runs immediately.
 
+On Contabo-style day-2 hosts, if a project Surreal is already Up, `update.sh` recreates site-server with `up -d --no-deps` so `/bin/podman-compose` does not spawn an underscore-named DB twin on the same volume (see Troubleshooting: duplicate Surreal `_` vs `-`).
+
 Override image pin in `data/secrets.env` if needed:
 
 ```bash
@@ -100,6 +102,31 @@ podman compose --env-file data/secrets.env up -d
 ### SurrealDB: `is unhealthy` but logs show “Started web server”
 
 DB is fine; an old healthcheck probe was wrong. Current `compose.yml` does **not** healthcheck Surreal and uses `depends_on: service_started`. Pull latest and `up -d` again.
+
+### SurrealDB: duplicate container (`_` vs `-`) and site-server stuck Created / public 502
+
+On some hosts (notably Contabo with `/bin/podman-compose`), Compose-v2 names the long-lived DB `scuffed-crew-surrealdb-1` (volume `scuffed-crew_surrealdb-data`). A later `compose up -d site-server` that honors `depends_on` can create an underscore twin `scuffed-crew_surrealdb_1` on the **same** RocksDB volume. The twin exits (`Exit 1`); site-server can sit in `Created` and the public site returns 502 until the app is started with `--no-deps` and the duplicate is stopped.
+
+This is **name-skew**, not a `SURREALDB_URL` typo. The compose service remains `surrealdb` (`ws://surrealdb:8000`). Do **not** rename the service or volume key, and do **not** pin `container_name` without a planned cutover.
+
+**Never `podman volume rm` the Surreal data volume for this symptom.** The twins share `scuffed-crew_surrealdb-data`; removing it destroys production data.
+
+`scripts/update.sh` detects a running project Surreal (`${PROJECT_NAME}-surrealdb*`, `${PROJECT_NAME}_surrealdb*`) and starts site-server with `up -d --no-deps` so the existing DB is left alone. Prefer the hyphen name (`…-surrealdb-1`) when both exist. After the app is healthy, the script stops extras and tries `rm -f`; if compose blocks the rm, the duplicate is left `Exited`.
+
+Manual recovery if an older `update.sh` already created the twin:
+
+```bash
+podman ps -a --format '{{.Names}} {{.Status}}' | grep -E 'surrealdb|site-server'
+
+# Stop the underscore twin; keep scuffed-crew-surrealdb-1
+podman stop scuffed-crew_surrealdb_1
+# rm if compose will allow it; otherwise leave Exited
+podman rm -f scuffed-crew_surrealdb_1 || true
+
+# Recreate only the app — do not recreate Surreal
+COMPOSE_PROJECT_NAME=scuffed-crew podman-compose --env-file data/secrets.env up -d --no-deps site-server
+# or: podman compose --env-file data/secrets.env up -d --no-deps site-server
+```
 
 ### Locked out of admin (no actionable admin left)
 
