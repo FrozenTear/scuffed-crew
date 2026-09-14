@@ -6,9 +6,10 @@ use crate::hooks::use_api;
 // --- Types ---
 
 /// `{ "data": [...] }` envelope — same shape as Browse (`StrategyListResponse`).
+/// `data` is required so a bare `[]` / `{}` cannot look like a successful empty list.
 #[derive(Debug, Clone, Deserialize)]
 struct ListResponse {
-    #[serde(default, alias = "patches")]
+    #[serde(alias = "patches")]
     data: Vec<Patch>,
 }
 
@@ -779,10 +780,20 @@ mod tests {
         let aliased: ListResponse = serde_json::from_str(r#"{"patches":[]}"#).unwrap();
         assert!(aliased.data.is_empty());
 
-        let bare_vec: Result<ListResponse, _> = serde_json::from_str("[]");
+        let empty_obj: Result<ListResponse, _> = serde_json::from_str("{}");
+        assert!(empty_obj.is_err(), "missing data key is not an empty list");
+
+        let bare_empty: Result<ListResponse, _> = serde_json::from_str("[]");
         assert!(
-            bare_vec.is_err(),
+            bare_empty.is_err(),
             "GET /api/strategy/patch-notes is the list envelope, not a bare Vec"
+        );
+
+        let bare_items: Result<ListResponse, _> =
+            serde_json::from_str(r#"[{"version":"1","date":"2026-01-01"}]"#);
+        assert!(
+            bare_items.is_err(),
+            "a populated bare Vec must not deserialize as the envelope"
         );
     }
 
