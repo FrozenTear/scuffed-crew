@@ -69,6 +69,15 @@ enum PatchFetchState {
     Ready,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CardKind {
+    Featured,
+    Compact,
+}
+
+/// How many category pills a collapsed archive row may show before `+N`.
+const COLLAPSED_TAG_LIMIT: usize = 2;
+
 /// `use_api` stores failure as `Some(None)` + `error`; still-in-flight is `None`.
 fn classify_patch_fetch<T>(resource: Option<Option<&T>>, error: Option<&str>) -> PatchFetchState {
     match resource {
@@ -146,6 +155,122 @@ fn patch_matches_search(patch: &PatchNote, query: &str) -> bool {
         .any(|h| h.hero_name.to_lowercase().contains(&q))
 }
 
+fn patch_display_title(patch: &PatchNote) -> String {
+    patch.title.clone().unwrap_or_else(|| {
+        if patch.version.is_empty() {
+            "Patch notes".to_string()
+        } else {
+            format!("Patch {}", patch.version)
+        }
+    })
+}
+
+fn patch_category_labels(patch: &PatchNote) -> Vec<String> {
+    let mut categories = Vec::new();
+    if !patch.hero_updates.is_empty() {
+        categories.push("Hero Balance".to_string());
+    }
+    for section in &patch.sections {
+        if !categories.iter().any(|c| c == &section.category) {
+            categories.push(section.category.clone());
+        }
+    }
+    categories
+}
+
+fn take_visible_tags(categories: &[String], limit: usize) -> (Vec<String>, usize) {
+    if categories.len() <= limit {
+        (categories.to_vec(), 0)
+    } else {
+        (categories[..limit].to_vec(), categories.len() - limit)
+    }
+}
+
+fn year_from_date(date: &str) -> Option<&str> {
+    let year = date.get(0..4)?;
+    if year.bytes().all(|b| b.is_ascii_digit()) {
+        Some(year)
+    } else {
+        None
+    }
+}
+
+fn group_by_year<'a>(
+    items: &[(usize, &'a PatchNote)],
+) -> Vec<(String, Vec<(usize, &'a PatchNote)>)> {
+    let mut groups: Vec<(String, Vec<(usize, &'a PatchNote)>)> = Vec::new();
+    for &(idx, patch) in items {
+        let year = year_from_date(&patch.date)
+            .map(|y| y.to_string())
+            .unwrap_or_else(|| "Undated".to_string());
+        match groups.last_mut() {
+            Some((existing, rows)) if *existing == year => rows.push((idx, patch)),
+            _ => groups.push((year, vec![(idx, patch)])),
+        }
+    }
+    groups
+}
+
+fn should_feature_latest(filter: &str, query: &str) -> bool {
+    filter == "All" && query.trim().is_empty()
+}
+
+fn notes_count_label(visible: usize, total: usize, filtered: bool) -> String {
+    if !filtered {
+        if total == 1 {
+            "1 note".to_string()
+        } else {
+            format!("{total} notes")
+        }
+    } else if visible == 1 {
+        format!("1 of {total}")
+    } else {
+        format!("{visible} of {total}")
+    }
+}
+
+fn hero_count_label(n: usize) -> String {
+    if n == 1 {
+        "1 hero".to_string()
+    } else {
+        format!("{n} heroes")
+    }
+}
+
+fn hero_change_counts(updates: &[HeroUpdate]) -> Vec<(&'static str, usize)> {
+    let mut buff = 0;
+    let mut nerf = 0;
+    let mut adj = 0;
+    let mut bug = 0;
+    let mut other = 0;
+    for update in updates {
+        match update.change_type.as_str() {
+            "buff" => buff += 1,
+            "nerf" => nerf += 1,
+            "adjustment" => adj += 1,
+            "bugfix" => bug += 1,
+            _ => other += 1,
+        }
+    }
+    let mut out = Vec::new();
+    if buff > 0 {
+        out.push(("Buff", buff));
+    }
+    if nerf > 0 {
+        out.push(("Nerf", nerf));
+    }
+    if adj > 0 {
+        out.push(("Adjustment", adj));
+    }
+    if bug > 0 {
+        out.push(("Bug Fix", bug));
+    }
+    if other > 0 {
+        out.push(("Other", other));
+    }
+    out
+}
+
 // --- Change type helpers ---
 
 fn change_type_color(ct: &str) -> &'static str {
@@ -193,33 +318,80 @@ fn section_tag_color(category: &str) -> &'static str {
     }
 }
 
+fn summary_badge_color(label: &str) -> &'static str {
+    match label {
+        "Buff" => change_type_color("buff"),
+        "Nerf" => change_type_color("nerf"),
+        "Adjustment" => change_type_color("adjustment"),
+        "Bug Fix" => change_type_color("bugfix"),
+        _ => change_type_color(""),
+    }
+}
+
+fn summary_badge_bg(label: &str) -> &'static str {
+    match label {
+        "Buff" => change_type_bg("buff"),
+        "Nerf" => change_type_bg("nerf"),
+        "Adjustment" => change_type_bg("adjustment"),
+        "Bug Fix" => change_type_bg("bugfix"),
+        _ => change_type_bg(""),
+    }
+}
+
 // --- CSS ---
 
 const PAGE_CSS: &str = r#"
     .patch-page {
-        padding: 2rem;
-        max-width: 900px;
+        padding: 1.75rem 1.5rem 3rem;
+        max-width: 860px;
         margin: 0 auto;
     }
     .patch-header {
         display: flex;
-        align-items: center;
-        gap: 1rem;
-        margin-bottom: 1.5rem;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: 0.75rem;
+        margin-bottom: 0.85rem;
         flex-wrap: wrap;
     }
     .patch-page-title {
         font-family: var(--font-head);
-        font-size: 2.2rem;
+        font-size: 1.85rem;
         color: var(--text);
-        letter-spacing: 2px;
+        letter-spacing: 0.12em;
         text-transform: uppercase;
         margin: 0;
-        flex-shrink: 0;
+        line-height: 1.1;
+    }
+    .patch-count {
+        font-family: var(--font-mono);
+        font-size: 0.7rem;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: var(--text-3);
+    }
+    .patch-toolbar {
+        position: sticky;
+        /* Public site-nav is 48px fixed; stay just under it while scrolling. */
+        top: 48px;
+        z-index: 8;
+        display: flex;
+        flex-direction: column;
+        gap: 0.65rem;
+        margin: 0 -0.35rem 1.15rem;
+        padding: 0.65rem 0.35rem 0.75rem;
+        background: color-mix(in srgb, var(--bg) 88%, transparent);
+        backdrop-filter: blur(14px);
+        border-bottom: 1px solid var(--border);
+    }
+    .patch-toolbar-row {
+        display: flex;
+        align-items: center;
+        gap: 0.65rem;
     }
     .patch-search {
         flex: 1;
-        min-width: 200px;
+        min-width: 0;
         padding: 0.45rem 0.75rem;
         border-radius: 6px;
         border: 1px solid var(--border);
@@ -236,16 +408,30 @@ const PAGE_CSS: &str = r#"
     .patch-search:focus {
         border-color: var(--accent);
     }
+    .patch-text-btn {
+        flex-shrink: 0;
+        border: none;
+        background: none;
+        color: var(--text-3);
+        font-family: var(--font-body);
+        font-size: 0.75rem;
+        cursor: pointer;
+        padding: 0.25rem 0;
+        text-decoration: underline;
+        text-underline-offset: 2px;
+    }
+    .patch-text-btn:hover {
+        color: var(--text);
+    }
     .patch-filters {
         display: flex;
-        gap: 0.5rem;
-        margin-bottom: 1.5rem;
+        gap: 0.4rem;
         flex-wrap: wrap;
     }
     .patch-chip {
-        padding: 0.3rem 0.7rem;
+        padding: 0.28rem 0.65rem;
         border-radius: 999px;
-        font-size: 0.75rem;
+        font-size: 0.7rem;
         font-weight: 600;
         border: 1px solid var(--border);
         background: var(--surface);
@@ -264,10 +450,25 @@ const PAGE_CSS: &str = r#"
         background: var(--accent-soft);
         color: var(--accent);
     }
+    .patch-year-block + .patch-year-block {
+        margin-top: 1.15rem;
+    }
+    .patch-year {
+        font-family: var(--font-mono);
+        font-size: 0.68rem;
+        font-weight: 600;
+        letter-spacing: 0.14em;
+        text-transform: uppercase;
+        color: var(--text-3);
+        margin: 0 0 0.45rem;
+    }
+    .patch-featured-wrap {
+        margin-bottom: 1.35rem;
+    }
     .patch-timeline {
         display: flex;
         flex-direction: column;
-        gap: 1rem;
+        gap: 0.4rem;
     }
     .patch-card {
         background: var(--surface);
@@ -279,23 +480,47 @@ const PAGE_CSS: &str = r#"
     .patch-card:hover {
         border-color: var(--accent-soft);
     }
+    .patch-card-featured {
+        border-color: color-mix(in srgb, var(--accent) 35%, var(--border));
+        background:
+            linear-gradient(
+                180deg,
+                color-mix(in srgb, var(--accent) 7%, var(--surface)) 0%,
+                var(--surface) 42%
+            );
+    }
     .patch-card-header {
-        display: flex;
+        display: grid;
+        grid-template-columns: auto minmax(0, 1fr) auto auto auto;
         align-items: center;
-        gap: 0.75rem;
-        padding: 0.85rem 1.1rem;
+        gap: 0.55rem 0.65rem;
+        width: 100%;
+        padding: 0.55rem 0.85rem;
+        border: none;
+        background: transparent;
+        color: inherit;
+        font: inherit;
+        text-align: left;
         cursor: pointer;
         user-select: none;
-        flex-wrap: wrap;
     }
     .patch-card-header:hover {
         background: var(--surface-2);
     }
+    .patch-card-featured .patch-card-header {
+        grid-template-columns: auto minmax(0, 1fr) auto;
+        align-items: start;
+        padding: 1rem 1.1rem 0.75rem;
+        gap: 0.65rem 0.85rem;
+    }
+    .patch-card-featured .patch-card-header:hover {
+        background: transparent;
+    }
     .patch-version-badge {
         font-family: var(--font-mono);
-        font-size: 0.78rem;
+        font-size: 0.72rem;
         font-weight: 600;
-        padding: 0.15rem 0.55rem;
+        padding: 0.12rem 0.45rem;
         border-radius: 4px;
         background: var(--accent-soft);
         color: var(--accent);
@@ -304,31 +529,46 @@ const PAGE_CSS: &str = r#"
     .patch-card-title {
         font-family: var(--font-head);
         font-weight: 700;
-        font-size: 0.95rem;
+        font-size: 0.9rem;
         color: var(--text);
-        flex: 1;
         min-width: 0;
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: nowrap;
     }
+    .patch-card-featured .patch-card-title {
+        font-size: 1.2rem;
+        letter-spacing: 0.02em;
+        white-space: normal;
+        overflow: visible;
+        line-height: 1.25;
+    }
     .patch-card-date {
-        font-size: 0.75rem;
+        font-family: var(--font-mono);
+        font-size: 0.7rem;
         color: var(--text-3);
-        flex-shrink: 0;
+        white-space: nowrap;
     }
     .patch-hero-count {
-        font-size: 0.7rem;
+        font-size: 0.68rem;
         color: var(--text-2);
         background: var(--surface-2);
-        padding: 0.1rem 0.45rem;
+        padding: 0.08rem 0.4rem;
         border-radius: 999px;
-        flex-shrink: 0;
+        white-space: nowrap;
     }
     .patch-tag-pills {
         display: flex;
-        gap: 0.35rem;
+        gap: 0.3rem;
+        flex-wrap: nowrap;
+        align-items: center;
+        min-width: 0;
+        overflow: hidden;
+    }
+    .patch-card-featured .patch-tag-pills {
         flex-wrap: wrap;
+        overflow: visible;
+        grid-column: 2 / -2;
     }
     .patch-tag-pill {
         font-size: 0.6rem;
@@ -337,15 +577,25 @@ const PAGE_CSS: &str = r#"
         font-weight: 600;
         text-transform: uppercase;
         letter-spacing: 0.03em;
+        white-space: nowrap;
+    }
+    .patch-tag-more {
+        font-family: var(--font-mono);
+        font-size: 0.6rem;
+        color: var(--text-3);
+        white-space: nowrap;
     }
     .patch-expand-icon {
-        font-size: 0.7rem;
+        font-size: 0.65rem;
         color: var(--text-3);
-        flex-shrink: 0;
+        line-height: 1;
         transition: transform 0.2s;
     }
     .patch-expand-icon.open {
         transform: rotate(180deg);
+    }
+    .patch-featured-copy {
+        padding: 0 1.1rem 0.85rem;
     }
     .patch-card-body {
         padding: 0 1.1rem 1.1rem;
@@ -355,38 +605,51 @@ const PAGE_CSS: &str = r#"
         font-size: 0.85rem;
         color: var(--text-2);
         line-height: 1.55;
-        margin: 1rem 0 0.25rem;
+        margin: 0.85rem 0 0.15rem;
+    }
+    .patch-body-lead.clamp {
+        display: -webkit-box;
+        -webkit-line-clamp: 3;
+        -webkit-box-orient: vertical;
+        overflow: hidden;
+        margin: 0;
+    }
+    .patch-change-summary {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.35rem;
+        margin-top: 0.65rem;
     }
     .patch-section-title {
         font-family: var(--font-head);
         font-weight: 700;
-        font-size: 0.85rem;
+        font-size: 0.8rem;
         color: var(--text);
         text-transform: uppercase;
         letter-spacing: 0.04em;
-        margin: 1rem 0 0.6rem;
+        margin: 1rem 0 0.5rem;
     }
     .patch-hero-cards {
         display: flex;
         flex-direction: column;
-        gap: 0.75rem;
+        gap: 0.6rem;
     }
     .patch-hero-card {
         background: var(--surface-2);
         border: 1px solid var(--border);
         border-radius: 6px;
-        padding: 0.85rem 1rem;
+        padding: 0.7rem 0.85rem;
     }
     .patch-hero-card-header {
         display: flex;
         align-items: center;
-        gap: 0.6rem;
-        margin-bottom: 0.5rem;
+        gap: 0.55rem;
+        margin-bottom: 0.4rem;
     }
     .patch-hero-name {
         font-family: var(--font-head);
         font-weight: 700;
-        font-size: 0.9rem;
+        font-size: 0.88rem;
         color: var(--text);
     }
     .patch-change-badge {
@@ -401,8 +664,8 @@ const PAGE_CSS: &str = r#"
         font-size: 0.78rem;
         color: var(--text-2);
         font-style: italic;
-        padding: 0.5rem 0.75rem;
-        margin: 0.4rem 0 0.6rem;
+        padding: 0.45rem 0.7rem;
+        margin: 0.35rem 0 0.5rem;
         border-left: 2px solid var(--border);
         line-height: 1.5;
     }
@@ -412,7 +675,7 @@ const PAGE_CSS: &str = r#"
         margin: 0;
         display: flex;
         flex-direction: column;
-        gap: 0.3rem;
+        gap: 0.25rem;
     }
     .patch-change-item {
         font-size: 0.8rem;
@@ -437,7 +700,7 @@ const PAGE_CSS: &str = r#"
         margin: 0;
         display: flex;
         flex-direction: column;
-        gap: 0.25rem;
+        gap: 0.2rem;
     }
     .patch-section-item {
         font-size: 0.8rem;
@@ -482,6 +745,50 @@ const PAGE_CSS: &str = r#"
     .patch-retry {
         margin-top: 1rem;
     }
+    @media (max-width: 720px) {
+        .patch-page {
+            padding: 1.15rem 1rem 2.5rem;
+        }
+        .patch-page-title {
+            font-size: 1.45rem;
+            letter-spacing: 0.08em;
+        }
+        .patch-toolbar {
+            top: 48px;
+            margin-left: -0.15rem;
+            margin-right: -0.15rem;
+        }
+        .patch-filters {
+            flex-wrap: nowrap;
+            overflow-x: auto;
+            padding-bottom: 0.15rem;
+            -webkit-overflow-scrolling: touch;
+            scrollbar-width: none;
+        }
+        .patch-filters::-webkit-scrollbar {
+            display: none;
+        }
+        .patch-chip {
+            flex-shrink: 0;
+        }
+        .patch-card-header {
+            grid-template-columns: auto minmax(0, 1fr) auto auto;
+        }
+        .patch-card-date,
+        .patch-tag-pills {
+            display: none;
+        }
+        .patch-card-featured .patch-card-header {
+            grid-template-columns: auto minmax(0, 1fr) auto;
+        }
+        .patch-card-featured .patch-card-date,
+        .patch-card-featured .patch-tag-pills {
+            display: flex;
+        }
+        .patch-card-featured .patch-card-title {
+            font-size: 1.05rem;
+        }
+    }
 "#;
 
 // --- Component ---
@@ -494,98 +801,187 @@ pub fn PatchNotesPage() -> Element {
 
     let mut search_query = use_signal(String::new);
     let mut active_filter = use_signal(|| "All".to_string());
-    let mut expanded: Signal<Vec<usize>> = use_signal(|| vec![0]);
+    let mut expanded: Signal<Vec<usize>> = use_signal(Vec::new);
 
     rsx! {
         style { {PAGE_CSS} }
 
         div { class: "patch-page",
-            // Title bar with search
-            div { class: "patch-header",
-                h1 { class: "patch-page-title", "Patch Notes" }
-                input {
-                    class: "patch-search",
-                    placeholder: "Search version, title, or hero...",
-                    value: "{search_query}",
-                    oninput: move |evt| search_query.set(evt.value()),
-                }
-            }
-
-            // Filter chips
-            div { class: "patch-filters",
-                for label in FILTER_OPTIONS {
-                    {render_filter_chip(label, &(active_filter)(), &mut active_filter)}
-                }
-            }
-
             {
                 let data = patches.data.read();
                 let inner = data.as_ref().and_then(|d| d.as_ref());
                 let err = patches.error.read().as_ref().cloned();
                 let state = classify_patch_fetch(data.as_ref().map(|d| d.as_ref()), err.as_deref());
-
-                match (state, inner) {
-                    (PatchFetchState::Loading, _) => rsx! {
-                        p { class: "patch-loading", "Loading patch notes..." }
-                    },
-                    (PatchFetchState::Failed, _) => {
-                        let message = err.unwrap_or_else(|| "Request failed".to_string());
-                        let mut refresh = patches.refresh;
-                        rsx! {
-                            div { class: "patch-empty",
-                                p { class: "patch-error",
-                                    "Failed to load patch notes: {message}"
-                                }
-                                button {
-                                    class: "patch-chip patch-retry",
-                                    onclick: move |_| refresh += 1,
-                                    "Retry"
-                                }
-                            }
-                        }
-                    },
-                    (PatchFetchState::Ready, Some(resp)) if resp.data.is_empty() => rsx! {
-                        div { class: "patch-empty",
-                            p { "No patch notes yet." }
-                            p { class: "patch-empty-hint",
-                                "When the catalog is published they will show up here."
-                            }
-                        }
-                    },
-                    (PatchFetchState::Ready, Some(resp)) => {
-                        let query = (search_query)();
-                        let filter = (active_filter)();
-                        let visible: Vec<(usize, &PatchNote)> = resp.data
+                let total = inner.map(|r| r.data.len()).unwrap_or(0);
+                let query = (search_query)();
+                let filter = (active_filter)();
+                let filtered = filter != "All" || !query.trim().is_empty();
+                let visible_len = inner
+                    .map(|resp| {
+                        resp.data
                             .iter()
-                            .enumerate()
-                            .filter(|(_, p)| patch_matches_search(p, &query) && patch_matches_filter(p, &filter))
-                            .collect();
+                            .filter(|p| patch_matches_search(p, &query) && patch_matches_filter(p, &filter))
+                            .count()
+                    })
+                    .unwrap_or(0);
+                let count_label = notes_count_label(visible_len, total, filtered);
+                let show_toolbar = matches!(state, PatchFetchState::Ready) && total > 0;
 
-                        if visible.is_empty() {
-                            rsx! {
-                                div { class: "patch-empty",
-                                    p { "No patch notes match these filters." }
-                                    p { class: "patch-empty-hint",
-                                        "Try clearing search or switching the category filter."
+                rsx! {
+                    div { class: "patch-header",
+                        h1 { class: "patch-page-title", "Patch Notes" }
+                        if show_toolbar {
+                            span { class: "patch-count", "{count_label}" }
+                        }
+                    }
+
+                    if show_toolbar {
+                        div { class: "patch-toolbar",
+                            div { class: "patch-toolbar-row",
+                                input {
+                                    class: "patch-search",
+                                    r#type: "search",
+                                    placeholder: "Search version, title, or hero...",
+                                    value: "{search_query}",
+                                    oninput: move |evt| search_query.set(evt.value()),
+                                }
+                                if visible_len > 1 {
+                                    {
+                                        let resp_indices: Vec<usize> = inner
+                                            .map(|resp| {
+                                                resp.data
+                                                    .iter()
+                                                    .enumerate()
+                                                    .filter(|(_, p)| {
+                                                        patch_matches_search(p, &query)
+                                                            && patch_matches_filter(p, &filter)
+                                                    })
+                                                    .map(|(i, _)| i)
+                                                    .collect()
+                                            })
+                                            .unwrap_or_default();
+                                        let opened = (expanded)();
+                                        let all_open = !resp_indices.is_empty()
+                                            && resp_indices.iter().all(|i| opened.contains(i));
+                                        let label = if all_open { "Collapse all" } else { "Expand all" };
+                                        rsx! {
+                                            button {
+                                                class: "patch-text-btn",
+                                                onclick: move |_| {
+                                                    let opened_now = (expanded)();
+                                                    if resp_indices.iter().all(|i| opened_now.contains(i)) {
+                                                        expanded.set(Vec::new());
+                                                    } else {
+                                                        expanded.set(resp_indices.clone());
+                                                    }
+                                                },
+                                                "{label}"
+                                            }
+                                        }
                                     }
                                 }
                             }
-                        } else {
-                            let expanded_indices = (expanded)();
-                            rsx! {
-                                div { class: "patch-timeline",
-                                    for (idx, patch) in visible.iter() {
-                                        {render_patch_card(*idx, patch, expanded_indices.contains(idx), &mut expanded)}
-                                    }
+                            div { class: "patch-filters",
+                                for label in FILTER_OPTIONS {
+                                    {render_filter_chip(label, &filter, &mut active_filter)}
                                 }
                             }
                         }
                     }
-                    (PatchFetchState::Ready, None) => rsx! {
-                        div { class: "patch-empty",
-                            p { "No patch notes yet." }
+
+                    {
+                        match (state, inner) {
+                            (PatchFetchState::Loading, _) => rsx! {
+                                p { class: "patch-loading", "Loading patch notes..." }
+                            },
+                            (PatchFetchState::Failed, _) => {
+                                let message = err.unwrap_or_else(|| "Request failed".to_string());
+                                let mut refresh = patches.refresh;
+                                rsx! {
+                                    div { class: "patch-empty",
+                                        p { class: "patch-error",
+                                            "Failed to load patch notes: {message}"
+                                        }
+                                        button {
+                                            class: "patch-chip patch-retry",
+                                            onclick: move |_| refresh += 1,
+                                            "Retry"
+                                        }
+                                    }
+                                }
+                            },
+                            (PatchFetchState::Ready, Some(resp)) if resp.data.is_empty() => rsx! {
+                                div { class: "patch-empty",
+                                    p { "No patch notes yet." }
+                                    p { class: "patch-empty-hint",
+                                        "When the catalog is published they will show up here."
+                                    }
+                                }
+                            },
+                            (PatchFetchState::Ready, Some(resp)) => {
+                                let visible: Vec<(usize, &PatchNote)> = resp.data
+                                    .iter()
+                                    .enumerate()
+                                    .filter(|(_, p)| {
+                                        patch_matches_search(p, &query) && patch_matches_filter(p, &filter)
+                                    })
+                                    .collect();
+
+                                if visible.is_empty() {
+                                    rsx! {
+                                        div { class: "patch-empty",
+                                            p { "No patch notes match these filters." }
+                                            p { class: "patch-empty-hint",
+                                                "Try clearing search or switching the category filter."
+                                            }
+                                        }
+                                    }
+                                } else {
+                                    let expanded_indices = (expanded)();
+                                    let feature = should_feature_latest(&filter, &query);
+                                    let featured = if feature { visible.first().copied() } else { None };
+                                    let archive = if featured.is_some() { &visible[1..] } else { visible.as_slice() };
+                                    let groups = group_by_year(archive);
+
+                                    rsx! {
+                                        if let Some((idx, patch)) = featured {
+                                            div { class: "patch-featured-wrap",
+                                                p { class: "patch-year", "Latest" }
+                                                {render_patch_card(
+                                                    idx,
+                                                    patch,
+                                                    expanded_indices.contains(&idx),
+                                                    CardKind::Featured,
+                                                    &mut expanded,
+                                                )}
+                                            }
+                                        }
+                                        for (year, rows) in groups {
+                                            div { class: "patch-year-block",
+                                                p { class: "patch-year", "{year}" }
+                                                div { class: "patch-timeline",
+                                                    for (idx, patch) in rows.iter() {
+                                                        {render_patch_card(
+                                                            *idx,
+                                                            patch,
+                                                            expanded_indices.contains(idx),
+                                                            CardKind::Compact,
+                                                            &mut expanded,
+                                                        )}
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            (PatchFetchState::Ready, None) => rsx! {
+                                div { class: "patch-empty",
+                                    p { "No patch notes yet." }
+                                }
+                            },
                         }
-                    },
+                    }
                 }
             }
         }
@@ -629,47 +1025,43 @@ fn render_patch_card(
     idx: usize,
     patch: &PatchNote,
     is_expanded: bool,
+    kind: CardKind,
     expanded_signal: &mut Signal<Vec<usize>>,
 ) -> Element {
-    let title = patch.title.clone().unwrap_or_else(|| {
-        if patch.version.is_empty() {
-            "Patch notes".to_string()
-        } else {
-            format!("Patch {}", patch.version)
-        }
-    });
+    let title = patch_display_title(patch);
     let hero_count = patch.hero_updates.len();
     let expand_class = if is_expanded {
         "patch-expand-icon open"
     } else {
         "patch-expand-icon"
     };
-
-    // Collect unique section categories for tag pills
-    let mut categories: Vec<String> = Vec::new();
-    if !patch.hero_updates.is_empty() {
-        categories.push("Hero Balance".to_string());
-    }
-    for s in &patch.sections {
-        if !categories.iter().any(|c| c == &s.category) {
-            categories.push(s.category.clone());
-        }
-    }
-
+    let card_class = match kind {
+        CardKind::Featured => "patch-card patch-card-featured",
+        CardKind::Compact => "patch-card",
+    };
+    let tag_limit = match kind {
+        CardKind::Featured => usize::MAX,
+        CardKind::Compact => COLLAPSED_TAG_LIMIT,
+    };
+    let categories = patch_category_labels(patch);
+    let (visible_tags, overflow) = take_visible_tags(&categories, tag_limit);
+    let change_summary = hero_change_counts(&patch.hero_updates);
     let version = patch.version.clone();
     let date = patch.date.clone();
     let url = patch.url.clone();
     let body = patch.body.clone();
     let hero_updates = patch.hero_updates.clone();
     let sections = patch.sections.clone();
-
+    let featured = kind == CardKind::Featured;
+    let show_lead_preview = featured && !is_expanded;
     let mut sig = *expanded_signal;
 
     rsx! {
-        div { class: "patch-card",
-            // Collapsed header — always visible
-            div {
+        div { class: "{card_class}",
+            button {
                 class: "patch-card-header",
+                r#type: "button",
+                aria_expanded: if is_expanded { "true" } else { "false" },
                 onclick: move |_| {
                     let mut current = sig();
                     if let Some(pos) = current.iter().position(|&i| i == idx) {
@@ -689,27 +1081,52 @@ fn render_patch_card(
                 }
                 if hero_count > 0 {
                     {
-                        let suffix = if hero_count != 1 { "es" } else { "" };
-                        let label = format!("{hero_count} hero{suffix}");
+                        let label = hero_count_label(hero_count);
                         rsx! { span { class: "patch-hero-count", "{label}" } }
                     }
                 }
                 div { class: "patch-tag-pills",
-                    for cat in categories.iter() {
+                    for cat in visible_tags.iter() {
                         {render_tag_pill(cat)}
+                    }
+                    if overflow > 0 {
+                        span { class: "patch-tag-more", "+{overflow}" }
                     }
                 }
                 span { class: "{expand_class}", "\u{25bc}" }
             }
 
-            // Expanded body
+            if show_lead_preview {
+                div { class: "patch-featured-copy",
+                    if let Some(lead) = body.as_ref().filter(|s| !s.is_empty()) {
+                        p { class: "patch-body-lead clamp", "{lead}" }
+                    }
+                    if !change_summary.is_empty() {
+                        div { class: "patch-change-summary",
+                            for (label, count) in change_summary.iter() {
+                                {
+                                    let color = summary_badge_color(label);
+                                    let bg = summary_badge_bg(label);
+                                    rsx! {
+                                        span {
+                                            class: "patch-change-badge",
+                                            style: "color: {color}; background: {bg};",
+                                            "{count} {label}"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
             if is_expanded {
                 div { class: "patch-card-body",
                     if let Some(lead) = body.as_ref().filter(|s| !s.is_empty()) {
                         p { class: "patch-body-lead", "{lead}" }
                     }
 
-                    // Hero balance section
                     if !hero_updates.is_empty() {
                         h3 { class: "patch-section-title", "Hero Balance" }
                         div { class: "patch-hero-cards",
@@ -719,12 +1136,10 @@ fn render_patch_card(
                         }
                     }
 
-                    // Other sections
                     for section in sections.iter() {
                         {render_section(section)}
                     }
 
-                    // External link (omit when the API left url empty)
                     if !url.is_empty() {
                         a {
                             class: "patch-external-link",
@@ -810,6 +1225,34 @@ fn render_section(section: &PatchSection) -> Element {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn note(
+        version: &str,
+        date: &str,
+        title: Option<&str>,
+        heroes: Vec<HeroUpdate>,
+        sections: Vec<PatchSection>,
+    ) -> PatchNote {
+        PatchNote {
+            version: version.into(),
+            date: date.into(),
+            title: title.map(str::to_string),
+            body: None,
+            url: String::new(),
+            hero_updates: heroes,
+            sections,
+        }
+    }
+
+    fn hero(name: &str, change_type: &str) -> HeroUpdate {
+        HeroUpdate {
+            hero_id: name.to_lowercase(),
+            hero_name: name.into(),
+            change_type: change_type.into(),
+            changes: vec![],
+            dev_comment: None,
+        }
+    }
 
     #[test]
     fn failed_fetch_is_not_loading() {
@@ -903,13 +1346,7 @@ mod tests {
             title: None,
             body: Some("Hotfix for console aim assist.".into()),
             url: String::new(),
-            hero_updates: vec![HeroUpdate {
-                hero_id: "ana".into(),
-                hero_name: "Ana".into(),
-                change_type: "buff".into(),
-                changes: vec![],
-                dev_comment: None,
-            }],
+            hero_updates: vec![hero("Ana", "buff")],
             sections: vec![],
         };
         let without = PatchNote {
@@ -961,5 +1398,88 @@ mod tests {
         assert_eq!(resp.data[0].date, "2026-08-12");
         assert_eq!(resp.data[0].title.as_deref(), Some("Hotfix"));
         assert_eq!(resp.data[0].body.as_deref(), Some("Client update."));
+    }
+
+    #[test]
+    fn year_from_date_reads_yyyy_prefix() {
+        assert_eq!(year_from_date("2026-09-01"), Some("2026"));
+        assert_eq!(year_from_date("2025"), Some("2025"));
+        assert_eq!(year_from_date("hotfix"), None);
+        assert_eq!(year_from_date(""), None);
+    }
+
+    #[test]
+    fn group_by_year_keeps_catalog_order() {
+        let a = note("3", "2026-09-01", Some("Sep"), vec![], vec![]);
+        let b = note("2", "2026-01-01", Some("Jan"), vec![], vec![]);
+        let c = note("1", "2025-12-01", Some("Dec"), vec![], vec![]);
+        let items = vec![(0, &a), (1, &b), (2, &c)];
+        let groups = group_by_year(&items);
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].0, "2026");
+        assert_eq!(groups[0].1.len(), 2);
+        assert_eq!(groups[1].0, "2025");
+        assert_eq!(groups[1].1[0].0, 2);
+    }
+
+    #[test]
+    fn collapsed_tags_cap_and_overflow() {
+        let labels = vec![
+            "Hero Balance".into(),
+            "Bug Fixes".into(),
+            "Maps".into(),
+            "Competitive".into(),
+        ];
+        let (shown, extra) = take_visible_tags(&labels, COLLAPSED_TAG_LIMIT);
+        assert_eq!(shown, ["Hero Balance", "Bug Fixes"]);
+        assert_eq!(extra, 2);
+        let (all, none) = take_visible_tags(&labels, usize::MAX);
+        assert_eq!(all.len(), 4);
+        assert_eq!(none, 0);
+    }
+
+    #[test]
+    fn category_labels_include_hero_balance() {
+        let patch = note(
+            "1",
+            "2026-01-01",
+            None,
+            vec![hero("Ana", "buff")],
+            vec![PatchSection {
+                category: "Bug Fixes".into(),
+                items: vec!["fix".into()],
+            }],
+        );
+        assert_eq!(patch_category_labels(&patch), ["Hero Balance", "Bug Fixes"]);
+    }
+
+    #[test]
+    fn feature_latest_only_on_unfiltered_all() {
+        assert!(should_feature_latest("All", ""));
+        assert!(should_feature_latest("All", "   "));
+        assert!(!should_feature_latest("Hero Balance", ""));
+        assert!(!should_feature_latest("All", "ana"));
+    }
+
+    #[test]
+    fn notes_count_label_reports_filter_state() {
+        assert_eq!(notes_count_label(35, 35, false), "35 notes");
+        assert_eq!(notes_count_label(1, 1, false), "1 note");
+        assert_eq!(notes_count_label(4, 35, true), "4 of 35");
+        assert_eq!(notes_count_label(1, 35, true), "1 of 35");
+    }
+
+    #[test]
+    fn hero_change_counts_skips_empty_buckets() {
+        let updates = vec![
+            hero("Ana", "buff"),
+            hero("Cassidy", "buff"),
+            hero("Widow", "nerf"),
+            hero("Mercy", "adjustment"),
+        ];
+        assert_eq!(
+            hero_change_counts(&updates),
+            [("Buff", 2), ("Nerf", 1), ("Adjustment", 1)]
+        );
     }
 }
