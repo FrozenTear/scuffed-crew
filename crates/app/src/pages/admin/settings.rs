@@ -68,7 +68,9 @@ pub fn AdminSettings() -> Element {
                     content_align.set(s.homepage.content_align);
                     homepage.set(s.homepage);
                     let mut n = s.nav;
-                    n.normalize();
+                    // Keep GET payload rows (e.g. live Contabo `patch_notes`).
+                    // `normalize()` would drop ids this WASM catalog does not know.
+                    n.prepare_for_editor();
                     nav.set(n);
                     page_bg_color.set(s.page_bg_color);
                     page_bg_image_url.set(s.page_bg_image_url);
@@ -128,7 +130,7 @@ pub fn AdminSettings() -> Element {
                     content_align.set(s.homepage.content_align);
                     homepage.set(s.homepage);
                     let mut n = s.nav;
-                    n.normalize();
+                    n.prepare_for_editor();
                     nav.set(n);
                     page_bg_color.set(s.page_bg_color);
                     page_bg_image_url.set(s.page_bg_image_url);
@@ -774,14 +776,9 @@ fn NavColumn(
 ) -> Element {
     let items: Vec<(String, String)> = {
         let cfg = nav();
-        cfg.items_in(placement)
+        cfg.editor_items(placement)
             .into_iter()
-            .map(|i| {
-                let label = NavConfig::catalog_label(&i.id)
-                    .unwrap_or(i.id.as_str())
-                    .to_string();
-                (i.id.clone(), label)
-            })
+            .map(|row| (row.id, row.label))
             .collect()
     };
 
@@ -795,9 +792,10 @@ fn NavColumn(
                 ul { style: "list-style:none;margin:0;padding:0;display:flex;flex-direction:column;",
                     for (id, label) in items {
                         li {
-                            key: "{id}",
+                            key: "nav-item-{id}",
                             class: "nav-row",
                             span { class: "nav-row-label", title: "{id}", "{label}" }
+                            span { class: "nav-row-id", "{id}" }
                             select {
                                 class: "form-input",
                                 value: "{placement.as_str()}",
