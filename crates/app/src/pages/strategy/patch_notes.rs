@@ -1847,7 +1847,7 @@ mod tests {
         open = apply_hero_toggle(&open, 0, 5);
         assert_eq!(open.get(&0).copied(), Some(5));
         open = apply_hero_toggle(&open, 0, 5);
-        assert!(open.get(&0).is_none());
+        assert!(!open.contains_key(&0));
         open = apply_hero_toggle(&open, 0, 1);
         open = apply_hero_toggle(&open, 3, 4);
         assert_eq!(open.get(&0).copied(), Some(1));
