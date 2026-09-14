@@ -292,6 +292,21 @@ fn toggle_open_hero(current: Option<usize>, clicked: usize) -> Option<usize> {
     }
 }
 
+/// Expand/Collapse all is **patch**-scoped. Hero accordion state is always
+/// cleared so the control cannot reopen every hero (tall-wall regression).
+fn apply_patch_bulk_toggle(
+    visible: &[usize],
+    currently_expanded: &[usize],
+) -> (Vec<usize>, HashMap<usize, usize>) {
+    let all_open = !visible.is_empty() && visible.iter().all(|i| currently_expanded.contains(i));
+    let patches = if all_open {
+        Vec::new()
+    } else {
+        visible.to_vec()
+    };
+    (patches, HashMap::new())
+}
+
 fn apply_hero_toggle(
     map: &HashMap<usize, usize>,
     patch_idx: usize,
@@ -1090,13 +1105,12 @@ pub fn PatchNotesPage() -> Element {
                                         rsx! {
                                             button {
                                                 class: "patch-text-btn",
+                                                title: "Expand or collapse patches. Heroes stay collapsed.",
                                                 onclick: move |_| {
-                                                    let opened_now = (expanded)();
-                                                    if resp_indices.iter().all(|i| opened_now.contains(i)) {
-                                                        expanded.set(Vec::new());
-                                                    } else {
-                                                        expanded.set(resp_indices.clone());
-                                                    }
+                                                    let (next_patches, next_heroes) =
+                                                        apply_patch_bulk_toggle(&resp_indices, &expanded());
+                                                    expanded.set(next_patches);
+                                                    open_hero.set(next_heroes);
                                                 },
                                                 "{label}"
                                             }
@@ -1844,6 +1858,24 @@ mod tests {
         assert!(!show_hero_toc(11));
         assert!(show_hero_toc(12));
         assert!(show_hero_toc(24));
+    }
+
+    #[test]
+    fn expand_all_opens_patches_not_heroes() {
+        let visible = vec![0, 1, 3];
+        let leftover = apply_hero_toggle(&HashMap::new(), 0, 7);
+        assert_eq!(leftover.get(&0).copied(), Some(7));
+
+        let (opened, heroes) = apply_patch_bulk_toggle(&visible, &[0]);
+        assert_eq!(opened, visible);
+        assert!(
+            heroes.is_empty(),
+            "Expand all must not open hero accordions (tall-wall regression)"
+        );
+
+        let (collapsed, heroes_after) = apply_patch_bulk_toggle(&visible, &opened);
+        assert!(collapsed.is_empty());
+        assert!(heroes_after.is_empty());
     }
 
     #[test]
