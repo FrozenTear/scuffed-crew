@@ -553,7 +553,8 @@ const PAGE_CSS: &str = r#"
         background-image: none;
         border: 1px solid var(--border);
         border-radius: var(--radius-sm);
-        overflow: hidden;
+        /* visible so the 12+ hero TOC can stick; hidden clips position:sticky */
+        overflow: visible;
         transition: border-color 0.2s;
     }
     .patch-card:hover {
@@ -771,6 +772,7 @@ const PAGE_CSS: &str = r#"
         border: 1px solid var(--border);
         border-radius: var(--radius-sm);
         overflow: hidden;
+        scroll-margin-top: calc(48px + 5.75rem);
     }
     .patch-hero-card.open {
         grid-column: 1 / -1;
@@ -1003,6 +1005,9 @@ const PAGE_CSS: &str = r#"
     }
     [data-accent="strategy"] .patch-hero-toc {
         top: 5.5rem;
+    }
+    [data-accent="strategy"] .patch-hero-card {
+        scroll-margin-top: 5.75rem;
     }
 "#;
 
