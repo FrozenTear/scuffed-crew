@@ -1,25 +1,38 @@
 use dioxus::prelude::*;
 use serde::Deserialize;
 
-use scuffed_api_client::ApiClient;
+use crate::hooks::use_api;
 
 // --- Types ---
+
+/// `{ "data": [...] }` envelope — same shape as Browse (`StrategyListResponse`).
+#[derive(Debug, Clone, Deserialize)]
+struct ListResponse {
+    #[serde(default, alias = "patches")]
+    data: Vec<Patch>,
+}
 
 #[derive(Debug, Clone, Deserialize)]
 struct Patch {
     version: String,
     date: String,
     title: Option<String>,
+    #[serde(default)]
     url: String,
+    #[serde(default)]
     hero_updates: Vec<HeroUpdate>,
+    #[serde(default)]
     sections: Vec<PatchSection>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 struct HeroUpdate {
+    #[serde(default)]
     hero_id: String,
     hero_name: String,
+    #[serde(default)]
     change_type: String,
+    #[serde(default)]
     changes: Vec<PatchChange>,
     dev_comment: Option<String>,
 }
@@ -28,6 +41,7 @@ struct HeroUpdate {
 struct PatchChange {
     ability: Option<String>,
     description: String,
+    #[serde(default)]
     #[allow(dead_code)]
     change_type: String,
 }
@@ -35,7 +49,31 @@ struct PatchChange {
 #[derive(Debug, Clone, Deserialize)]
 struct PatchSection {
     category: String,
+    #[serde(default)]
     items: Vec<String>,
+}
+
+/// Distinguishes loading vs failed so a missing API cannot look like loading.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PatchFetchState {
+    Loading,
+    Failed,
+    Ready,
+}
+
+/// `use_api` stores failure as `Some(None)` + `error`; still-in-flight is `None`.
+fn classify_patch_fetch<T>(resource: Option<Option<&T>>, error: Option<&str>) -> PatchFetchState {
+    match resource {
+        None => {
+            if error.is_some() {
+                PatchFetchState::Failed
+            } else {
+                PatchFetchState::Loading
+            }
+        }
+        Some(None) => PatchFetchState::Failed,
+        Some(Some(_)) => PatchFetchState::Ready,
+    }
 }
 
 // --- Filter categories ---
@@ -414,18 +452,23 @@ const PAGE_CSS: &str = r#"
         text-align: center;
         padding: 3rem 0;
     }
+    .patch-error {
+        color: var(--danger);
+        text-align: center;
+        padding: 2rem 1rem 0.75rem;
+    }
+    .patch-error-actions {
+        display: flex;
+        justify-content: center;
+        padding-bottom: 2rem;
+    }
 "#;
 
 // --- Component ---
 
 #[component]
 pub fn StrategyPatchNotes() -> Element {
-    let patches_data = use_resource(|| async {
-        ApiClient::web()
-            .fetch::<Vec<Patch>>("/api/strategy/patch-notes")
-            .await
-            .ok()
-    });
+    let patches = use_api::<ListResponse>("/api/strategy/patch-notes");
 
     let mut search_query = use_signal(String::new);
     let mut active_filter = use_signal(|| "All".to_string());
@@ -454,18 +497,38 @@ pub fn StrategyPatchNotes() -> Element {
             }
 
             {
-                let data = patches_data.read();
-                let data = data.as_ref().and_then(|d| d.as_ref());
+                let data = patches.data.read();
+                let inner = data.as_ref().and_then(|d| d.as_ref());
+                let err = patches.error.read().as_ref().cloned();
+                let state = classify_patch_fetch(data.as_ref().map(|d| d.as_ref()), err.as_deref());
 
-                match data {
-                    None => rsx! { p { class: "patch-loading", "Loading patch notes..." } },
-                    Some(patches) if patches.is_empty() => rsx! {
+                match (state, inner) {
+                    (PatchFetchState::Loading, _) => rsx! {
+                        p { class: "patch-loading", "Loading patch notes..." }
+                    },
+                    (PatchFetchState::Failed, _) => {
+                        let message = err.unwrap_or_else(|| "Request failed".to_string());
+                        let mut refresh = patches.refresh;
+                        rsx! {
+                            p { class: "patch-error",
+                                "Failed to load patch notes: {message}"
+                            }
+                            div { class: "patch-error-actions",
+                                button {
+                                    class: "ui-btn ui-btn--ghost ui-btn--md",
+                                    onclick: move |_| refresh += 1,
+                                    "Retry"
+                                }
+                            }
+                        }
+                    },
+                    (PatchFetchState::Ready, Some(resp)) if resp.data.is_empty() => rsx! {
                         p { class: "patch-empty", "No patch notes available." }
                     },
-                    Some(patches) => {
+                    (PatchFetchState::Ready, Some(resp)) => {
                         let query = (search_query)();
                         let filter = (active_filter)();
-                        let visible: Vec<(usize, &Patch)> = patches
+                        let visible: Vec<(usize, &Patch)> = resp.data
                             .iter()
                             .enumerate()
                             .filter(|(_, p)| patch_matches_search(p, &query) && patch_matches_filter(p, &filter))
@@ -486,6 +549,9 @@ pub fn StrategyPatchNotes() -> Element {
                             }
                         }
                     }
+                    (PatchFetchState::Ready, None) => rsx! {
+                        p { class: "patch-empty", "No patch notes available." }
+                    },
                 }
             }
         }
@@ -600,13 +666,15 @@ fn render_patch_card(
                         {render_section(section)}
                     }
 
-                    // External link
-                    a {
-                        class: "patch-external-link",
-                        href: "{url}",
-                        target: "_blank",
-                        rel: "noopener noreferrer",
-                        "View official patch notes \u{2192}"
+                    // External link (omit when the API left url empty)
+                    if !url.is_empty() {
+                        a {
+                            class: "patch-external-link",
+                            href: "{url}",
+                            target: "_blank",
+                            rel: "noopener noreferrer",
+                            "View official patch notes \u{2192}"
+                        }
                     }
                 }
             }
@@ -678,5 +746,104 @@ fn render_section(section: &PatchSection) -> Element {
                 li { class: "patch-section-item", "{item}" }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn failed_fetch_is_not_loading() {
+        // Old bug: `.ok()` + `None => Loading` treated Err as eternal spinner.
+        assert_eq!(
+            classify_patch_fetch::<ListResponse>(Some(None), Some("HTTP error 404: Not Found")),
+            PatchFetchState::Failed
+        );
+        assert_eq!(
+            classify_patch_fetch::<ListResponse>(None, None),
+            PatchFetchState::Loading
+        );
+        let ready = ListResponse { data: vec![] };
+        assert_eq!(
+            classify_patch_fetch(Some(Some(&ready)), None),
+            PatchFetchState::Ready
+        );
+    }
+
+    #[test]
+    fn list_envelope_unwraps_data_not_bare_vec() {
+        let empty: ListResponse = serde_json::from_str(r#"{"data":[]}"#).unwrap();
+        assert!(empty.data.is_empty());
+
+        let aliased: ListResponse = serde_json::from_str(r#"{"patches":[]}"#).unwrap();
+        assert!(aliased.data.is_empty());
+
+        let bare_vec: Result<ListResponse, _> = serde_json::from_str("[]");
+        assert!(
+            bare_vec.is_err(),
+            "GET /api/strategy/patch-notes is the list envelope, not a bare Vec"
+        );
+    }
+
+    #[test]
+    fn list_envelope_parses_version_title_date_sections() {
+        let json = r#"{
+            "data": [{
+                "version": "2.15",
+                "date": "2026-09-01",
+                "title": "Season 18 Mid-Season",
+                "url": "https://overwatch.blizzard.com/news/patch-notes",
+                "hero_updates": [{
+                    "hero_id": "ana",
+                    "hero_name": "Ana",
+                    "change_type": "buff",
+                    "changes": [{"ability": "Biotic Rifle", "description": "Damage increased"}]
+                }],
+                "sections": [{"category": "Bug Fixes", "items": ["Fixed a crash"]}]
+            }]
+        }"#;
+        let resp: ListResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.data.len(), 1);
+        assert_eq!(resp.data[0].version, "2.15");
+        assert_eq!(resp.data[0].title.as_deref(), Some("Season 18 Mid-Season"));
+        assert_eq!(resp.data[0].date, "2026-09-01");
+        assert_eq!(resp.data[0].hero_updates.len(), 1);
+        assert_eq!(resp.data[0].sections[0].category, "Bug Fixes");
+    }
+
+    #[test]
+    fn missing_optional_collections_default_empty() {
+        let json = r#"{"data":[{"version":"1.0","date":"2026-01-01"}]}"#;
+        let resp: ListResponse = serde_json::from_str(json).unwrap();
+        assert!(resp.data[0].hero_updates.is_empty());
+        assert!(resp.data[0].sections.is_empty());
+        assert!(resp.data[0].url.is_empty());
+    }
+
+    #[test]
+    fn filter_hero_balance_requires_hero_updates() {
+        let with_heroes = Patch {
+            version: "1".into(),
+            date: "2026-01-01".into(),
+            title: None,
+            url: String::new(),
+            hero_updates: vec![HeroUpdate {
+                hero_id: "ana".into(),
+                hero_name: "Ana".into(),
+                change_type: "buff".into(),
+                changes: vec![],
+                dev_comment: None,
+            }],
+            sections: vec![],
+        };
+        let without = Patch {
+            hero_updates: vec![],
+            ..with_heroes.clone()
+        };
+        assert!(patch_matches_filter(&with_heroes, "Hero Balance"));
+        assert!(!patch_matches_filter(&without, "Hero Balance"));
+        assert!(patch_matches_search(&with_heroes, "ana"));
+        assert!(!patch_matches_search(&with_heroes, "junkrat"));
     }
 }
