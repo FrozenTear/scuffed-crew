@@ -537,9 +537,10 @@ mod tests {
     fn implausible_kill_columns_reject_the_row() {
         // A digit bleeding into the elims cell ("118" for a real ~18) must not
         // be recorded; the capture is dropped rather than poisoned.
-        let rows = vec![row(Some("FROZEN"), [
-            "118", "3", "2", "4,316", "1,200", "899",
-        ])];
+        let rows = vec![row(
+            Some("FROZEN"),
+            ["118", "3", "2", "4,316", "1,200", "899"],
+        )];
         assert!(parse_scoreboard_cells(&rows, Some(0), "", "defeat", Some("FROZEN")).is_none());
     }
 
