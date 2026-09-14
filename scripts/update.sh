@@ -354,10 +354,12 @@ fi
 
 CANONICAL_SURREAL_CID=""
 CANONICAL_SURREAL_NAME=""
+used_no_deps=0
 if pick_canonical_up_surreal; then
     echo "Existing Surreal is Up: ${CANONICAL_SURREAL_NAME} (canonical; hyphen preferred when both exist)."
     stop_noncanonical_up_surreal "${CANONICAL_SURREAL_NAME}"
     start_site_server --no-deps
+    used_no_deps=1
 else
     echo "No project Surreal is Up — starting site-server with dependencies (fresh install)."
     start_site_server
@@ -370,6 +372,23 @@ our_container_name() {
     podman ps -a --format '{{.Names}}' 2>/dev/null \
         | grep -E "^${PROJECT_NAME}[-_]site-server([-_][0-9]+)?$" | head -n1
 }
+
+# Day-2 --no-deps: Contabo / podman-compose may leave site-server Created
+# (container exists, not started). Start it before the health loop.
+if [[ "${used_no_deps}" == "1" ]]; then
+    _ss="$(our_container_name)"
+    if [[ -n "${_ss}" ]]; then
+        _st="$(podman inspect -f '{{.State.Status}}' "${_ss}" 2>/dev/null || true)"
+        if [[ "${_st}" == "created" ]]; then
+            echo "site-server ${_ss} is Created after --no-deps — starting it..."
+            if ! podman start "${_ss}"; then
+                if ! COMPOSE_PROJECT_NAME="${PROJECT_NAME}" "${COMPOSE[@]}" --env-file "$SECRETS" start site-server; then
+                    "${COMPOSE[@]}" --env-file "$SECRETS" start site-server
+                fi
+            fi
+        fi
+    fi
+fi
 
 echo "Waiting for site-server health on 127.0.0.1:${HOST_PORT} (up to 60s)..."
 healthy=0
