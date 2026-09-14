@@ -762,12 +762,12 @@ const PAGE_CSS: &str = r#"
         background: var(--accent-soft);
         color: var(--accent);
     }
-    /* Desktop default: single-column accordion. Multi-col grid is only
-       for an *open* hero's change lines and for non-hero sections. */
+    /* Collapsed rows: multi-col on desktop so 24 closed heroes are not a
+       tall wall. Open detail spans the full track (DEV + change grid). */
     .patch-hero-list {
-        display: flex;
-        flex-direction: column;
-        gap: 0.35rem;
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(min(300px, 100%), 1fr));
+        gap: 0.4rem 0.65rem;
     }
     .patch-hero-card {
         background: var(--surface-2);
@@ -777,6 +777,7 @@ const PAGE_CSS: &str = r#"
         scroll-margin-top: calc(48px + 5.75rem);
     }
     .patch-hero-card.open {
+        grid-column: 1 / -1;
         border-color: color-mix(in srgb, var(--accent) 28%, var(--border));
     }
     .patch-hero-card-header {
