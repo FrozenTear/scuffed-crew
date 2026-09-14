@@ -41,10 +41,27 @@ pub struct NavItemConfig {
     pub order: u32,
 }
 
+/// Wire shape for `NavConfig`. Deserialize always runs [`NavConfig::normalize`]
+/// so a stored JSON blob that predates a catalog id still grows that id
+/// (Hidden) before Admin Settings or public chrome see the value.
+#[derive(Debug, Clone, Deserialize)]
+struct NavConfigRaw {
+    items: Vec<NavItemConfig>,
+}
+
 /// Admin-editable public navigation. Unknown ids are dropped when resolved.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "NavConfigRaw")]
 pub struct NavConfig {
     pub items: Vec<NavItemConfig>,
+}
+
+impl From<NavConfigRaw> for NavConfig {
+    fn from(raw: NavConfigRaw) -> Self {
+        let mut cfg = Self { items: raw.items };
+        cfg.normalize();
+        cfg
+    }
 }
 
 /// Static catalog entry — labels/routes live in the app; ids are shared.
@@ -222,25 +239,63 @@ impl NavConfig {
         list
     }
 
+    /// Resolved placement for a catalog id. Missing ids count as Hidden so the
+    /// Admin editor can list every `NAV_CATALOG` entry even when stored JSON
+    /// (or an un-normalized in-memory value) omitted them.
+    pub fn placement_of(&self, id: &str) -> NavPlacement {
+        self.items
+            .iter()
+            .find(|i| i.id == id)
+            .map(|i| i.placement)
+            .unwrap_or(NavPlacement::Hidden)
+    }
+
+    /// Admin Settings buckets: one row per catalog entry in `placement`.
+    /// Source of truth is `NAV_CATALOG`, not the stored `items` vec.
+    pub fn editor_items(&self, placement: NavPlacement) -> Vec<&'static NavCatalogEntry> {
+        let mut rows: Vec<(&NavCatalogEntry, u32)> = NAV_CATALOG
+            .iter()
+            .filter_map(|entry| {
+                let (item_placement, order) = self
+                    .items
+                    .iter()
+                    .find(|i| i.id == entry.id)
+                    .map(|i| (i.placement, i.order))
+                    .unwrap_or((NavPlacement::Hidden, u32::MAX));
+                (item_placement == placement).then_some((entry, order))
+            })
+            .collect();
+        rows.sort_by_key(|(_, order)| *order);
+        rows.into_iter().map(|(entry, _)| entry).collect()
+    }
+
     pub fn catalog_label(id: &str) -> Option<&'static str> {
         NAV_CATALOG.iter().find(|e| e.id == id).map(|e| e.label)
     }
 
-    pub fn set_placement(&mut self, id: &str, placement: NavPlacement) {
-        let Some(idx) = self.items.iter().position(|i| i.id == id) else {
-            return;
-        };
-        if self.items[idx].placement == placement {
-            return;
-        }
-        let next_order = self
-            .items
+    fn next_order(&self, placement: NavPlacement) -> u32 {
+        self.items
             .iter()
             .filter(|i| i.placement == placement)
             .map(|i| i.order)
             .max()
             .map(|o| o.saturating_add(1))
-            .unwrap_or(0);
+            .unwrap_or(0)
+    }
+
+    pub fn set_placement(&mut self, id: &str, placement: NavPlacement) {
+        if !NAV_CATALOG.iter().any(|e| e.id == id) {
+            return;
+        }
+        let Some(idx) = self.items.iter().position(|i| i.id == id) else {
+            let order = self.next_order(placement);
+            self.items.push(item(id, placement, order));
+            return;
+        };
+        if self.items[idx].placement == placement {
+            return;
+        }
+        let next_order = self.next_order(placement);
         self.items[idx].placement = placement;
         self.items[idx].order = next_order;
     }
@@ -365,5 +420,104 @@ mod tests {
                 .any(|i| i.id == "patch_notes" && i.placement == NavPlacement::More)
         );
         assert_eq!(cfg.items.len(), NAV_CATALOG.len());
+    }
+
+    /// Contabo live `site_settings.nav` shape (2026-09-14): custom Primary/More,
+    /// strategy/scrims Hidden, no `patch_notes` row in the stored blob.
+    fn contabo_stored_without_patch_notes() -> NavConfig {
+        NavConfig {
+            items: vec![
+                item("members", NavPlacement::Primary, 0),
+                item("tournaments", NavPlacement::Primary, 1),
+                item("news", NavPlacement::Primary, 2),
+                item("forum", NavPlacement::Primary, 3),
+                item("events", NavPlacement::More, 0),
+                item("stats", NavPlacement::More, 1),
+                item("community", NavPlacement::Hidden, 0),
+                item("feed", NavPlacement::Hidden, 1),
+                item("polls", NavPlacement::Hidden, 2),
+                item("blog", NavPlacement::Hidden, 3),
+                item("wiki", NavPlacement::Hidden, 4),
+                item("strategy", NavPlacement::Hidden, 5),
+                item("scrims", NavPlacement::Hidden, 6),
+                item("chat", NavPlacement::Hidden, 8),
+            ],
+        }
+    }
+
+    #[test]
+    fn editor_items_lists_missing_catalog_id_as_hidden() {
+        let stored = contabo_stored_without_patch_notes();
+        assert!(
+            stored.items.iter().all(|i| i.id != "patch_notes"),
+            "fixture is the pre-merge stored blob"
+        );
+        let hidden: Vec<_> = stored
+            .editor_items(NavPlacement::Hidden)
+            .into_iter()
+            .map(|e| e.id)
+            .collect();
+        assert!(
+            hidden.contains(&"patch_notes"),
+            "Admin Hidden bucket must show catalog ids omitted from stored JSON"
+        );
+        assert!(
+            !stored
+                .editor_items(NavPlacement::Primary)
+                .iter()
+                .any(|e| e.id == "patch_notes")
+        );
+        assert!(
+            !stored
+                .editor_items(NavPlacement::More)
+                .iter()
+                .any(|e| e.id == "patch_notes")
+        );
+        let editor_ids: std::collections::HashSet<_> = [
+            NavPlacement::Primary,
+            NavPlacement::More,
+            NavPlacement::Hidden,
+        ]
+        .into_iter()
+        .flat_map(|p| stored.editor_items(p))
+        .map(|e| e.id)
+        .collect();
+        let catalog_ids: std::collections::HashSet<_> = NAV_CATALOG.iter().map(|e| e.id).collect();
+        assert_eq!(
+            editor_ids, catalog_ids,
+            "every catalog id appears in exactly one Admin bucket"
+        );
+    }
+
+    #[test]
+    fn serde_normalize_merges_patch_notes_on_deserialize() {
+        let stored = contabo_stored_without_patch_notes();
+        let json = serde_json::to_string(&stored).expect("serialize stored items only");
+        assert!(
+            !json.contains("patch_notes"),
+            "serialized fixture must omit the new id"
+        );
+        let parsed: NavConfig = serde_json::from_str(&json).expect("nav json");
+        let added = parsed
+            .items
+            .iter()
+            .find(|i| i.id == "patch_notes")
+            .expect("deserialize runs normalize");
+        assert_eq!(added.placement, NavPlacement::Hidden);
+    }
+
+    #[test]
+    fn set_placement_inserts_missing_catalog_id() {
+        let mut stored = contabo_stored_without_patch_notes();
+        stored.set_placement("patch_notes", NavPlacement::More);
+        assert!(
+            stored
+                .items
+                .iter()
+                .any(|i| i.id == "patch_notes" && i.placement == NavPlacement::More),
+            "moving a catalog id that was never stored must insert it"
+        );
+        stored.set_placement("not_a_real_page", NavPlacement::Primary);
+        assert!(stored.items.iter().all(|i| i.id != "not_a_real_page"));
     }
 }

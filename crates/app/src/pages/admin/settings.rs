@@ -774,14 +774,11 @@ fn NavColumn(
 ) -> Element {
     let items: Vec<(String, String)> = {
         let cfg = nav();
-        cfg.items_in(placement)
+        // Catalog is the source of truth — stored JSON may omit newer ids
+        // (`patch_notes` on existing Contabo nav). `editor_items` still lists them.
+        cfg.editor_items(placement)
             .into_iter()
-            .map(|i| {
-                let label = NavConfig::catalog_label(&i.id)
-                    .unwrap_or(i.id.as_str())
-                    .to_string();
-                (i.id.clone(), label)
-            })
+            .map(|entry| (entry.id.to_string(), entry.label.to_string()))
             .collect()
     };
 
@@ -798,6 +795,7 @@ fn NavColumn(
                             key: "{id}",
                             class: "nav-row",
                             span { class: "nav-row-label", title: "{id}", "{label}" }
+                            span { class: "nav-row-id", "{id}" }
                             select {
                                 class: "form-input",
                                 value: "{placement.as_str()}",
