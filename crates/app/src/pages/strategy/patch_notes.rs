@@ -1,25 +1,46 @@
 use dioxus::prelude::*;
 use serde::Deserialize;
 
-use scuffed_api_client::ApiClient;
+use crate::hooks::use_api;
 
 // --- Types ---
 
+/// `{ "data": [...] }` envelope — same unwrap as Browse (`StrategyListResponse`).
+/// `data` is required so a bare `[]` / `{}` cannot look like a successful empty list.
 #[derive(Debug, Clone, Deserialize)]
-struct Patch {
+struct ListResponse {
+    #[serde(alias = "patches")]
+    data: Vec<PatchNote>,
+}
+
+/// Local card type. Fields default so a thin API payload still deserializes;
+/// unknown keys are ignored. Not a copy of any external patch-notes schema.
+#[derive(Debug, Clone, Deserialize)]
+struct PatchNote {
+    #[serde(default)]
     version: String,
+    #[serde(default, alias = "published_at")]
     date: String,
+    #[serde(default)]
     title: Option<String>,
+    #[serde(default, alias = "summary")]
+    body: Option<String>,
+    #[serde(default)]
     url: String,
+    #[serde(default)]
     hero_updates: Vec<HeroUpdate>,
+    #[serde(default)]
     sections: Vec<PatchSection>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 struct HeroUpdate {
+    #[serde(default)]
     hero_id: String,
     hero_name: String,
+    #[serde(default)]
     change_type: String,
+    #[serde(default)]
     changes: Vec<PatchChange>,
     dev_comment: Option<String>,
 }
@@ -28,6 +49,7 @@ struct HeroUpdate {
 struct PatchChange {
     ability: Option<String>,
     description: String,
+    #[serde(default)]
     #[allow(dead_code)]
     change_type: String,
 }
@@ -35,7 +57,31 @@ struct PatchChange {
 #[derive(Debug, Clone, Deserialize)]
 struct PatchSection {
     category: String,
+    #[serde(default)]
     items: Vec<String>,
+}
+
+/// Distinguishes loading vs failed so a missing API cannot look like loading.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PatchFetchState {
+    Loading,
+    Failed,
+    Ready,
+}
+
+/// `use_api` stores failure as `Some(None)` + `error`; still-in-flight is `None`.
+fn classify_patch_fetch<T>(resource: Option<Option<&T>>, error: Option<&str>) -> PatchFetchState {
+    match resource {
+        None => {
+            if error.is_some() {
+                PatchFetchState::Failed
+            } else {
+                PatchFetchState::Loading
+            }
+        }
+        Some(None) => PatchFetchState::Failed,
+        Some(Some(_)) => PatchFetchState::Ready,
+    }
 }
 
 // --- Filter categories ---
@@ -49,7 +95,7 @@ const FILTER_OPTIONS: [&str; 6] = [
     "General",
 ];
 
-fn patch_matches_filter(patch: &Patch, filter: &str) -> bool {
+fn patch_matches_filter(patch: &PatchNote, filter: &str) -> bool {
     match filter {
         "All" => true,
         "Hero Balance" => !patch.hero_updates.is_empty(),
@@ -76,7 +122,7 @@ fn patch_matches_filter(patch: &Patch, filter: &str) -> bool {
     }
 }
 
-fn patch_matches_search(patch: &Patch, query: &str) -> bool {
+fn patch_matches_search(patch: &PatchNote, query: &str) -> bool {
     if query.is_empty() {
         return true;
     }
@@ -86,6 +132,11 @@ fn patch_matches_search(patch: &Patch, query: &str) -> bool {
     }
     if let Some(title) = &patch.title
         && title.to_lowercase().contains(&q)
+    {
+        return true;
+    }
+    if let Some(body) = &patch.body
+        && body.to_lowercase().contains(&q)
     {
         return true;
     }
@@ -300,6 +351,12 @@ const PAGE_CSS: &str = r#"
         padding: 0 1.1rem 1.1rem;
         border-top: 1px solid var(--border);
     }
+    .patch-body-lead {
+        font-size: 0.85rem;
+        color: var(--text-2);
+        line-height: 1.55;
+        margin: 1rem 0 0.25rem;
+    }
     .patch-section-title {
         font-family: var(--font-head);
         font-weight: 700;
@@ -412,7 +469,18 @@ const PAGE_CSS: &str = r#"
     .patch-loading, .patch-empty {
         color: var(--text-3);
         text-align: center;
-        padding: 3rem 0;
+        padding: 4rem 1rem;
+        font-size: 0.95rem;
+    }
+    .patch-empty-hint {
+        margin-top: 0.5rem;
+        font-size: 0.85rem;
+    }
+    .patch-error {
+        color: var(--danger);
+    }
+    .patch-retry {
+        margin-top: 1rem;
     }
 "#;
 
@@ -420,12 +488,7 @@ const PAGE_CSS: &str = r#"
 
 #[component]
 pub fn StrategyPatchNotes() -> Element {
-    let patches_data = use_resource(|| async {
-        ApiClient::web()
-            .fetch::<Vec<Patch>>("/api/strategy/patch-notes")
-            .await
-            .ok()
-    });
+    let patches = use_api::<ListResponse>("/api/strategy/patch-notes");
 
     let mut search_query = use_signal(String::new);
     let mut active_filter = use_signal(|| "All".to_string());
@@ -454,18 +517,43 @@ pub fn StrategyPatchNotes() -> Element {
             }
 
             {
-                let data = patches_data.read();
-                let data = data.as_ref().and_then(|d| d.as_ref());
+                let data = patches.data.read();
+                let inner = data.as_ref().and_then(|d| d.as_ref());
+                let err = patches.error.read().as_ref().cloned();
+                let state = classify_patch_fetch(data.as_ref().map(|d| d.as_ref()), err.as_deref());
 
-                match data {
-                    None => rsx! { p { class: "patch-loading", "Loading patch notes..." } },
-                    Some(patches) if patches.is_empty() => rsx! {
-                        p { class: "patch-empty", "No patch notes available." }
+                match (state, inner) {
+                    (PatchFetchState::Loading, _) => rsx! {
+                        p { class: "patch-loading", "Loading patch notes..." }
                     },
-                    Some(patches) => {
+                    (PatchFetchState::Failed, _) => {
+                        let message = err.unwrap_or_else(|| "Request failed".to_string());
+                        let mut refresh = patches.refresh;
+                        rsx! {
+                            div { class: "patch-empty",
+                                p { class: "patch-error",
+                                    "Failed to load patch notes: {message}"
+                                }
+                                button {
+                                    class: "patch-chip patch-retry",
+                                    onclick: move |_| refresh += 1,
+                                    "Retry"
+                                }
+                            }
+                        }
+                    },
+                    (PatchFetchState::Ready, Some(resp)) if resp.data.is_empty() => rsx! {
+                        div { class: "patch-empty",
+                            p { "No patch notes yet." }
+                            p { class: "patch-empty-hint",
+                                "When the catalog is published they will show up here."
+                            }
+                        }
+                    },
+                    (PatchFetchState::Ready, Some(resp)) => {
                         let query = (search_query)();
                         let filter = (active_filter)();
-                        let visible: Vec<(usize, &Patch)> = patches
+                        let visible: Vec<(usize, &PatchNote)> = resp.data
                             .iter()
                             .enumerate()
                             .filter(|(_, p)| patch_matches_search(p, &query) && patch_matches_filter(p, &filter))
@@ -473,7 +561,12 @@ pub fn StrategyPatchNotes() -> Element {
 
                         if visible.is_empty() {
                             rsx! {
-                                p { class: "patch-empty", "No patches match your search." }
+                                div { class: "patch-empty",
+                                    p { "No patch notes match these filters." }
+                                    p { class: "patch-empty-hint",
+                                        "Try clearing search or switching the category filter."
+                                    }
+                                }
                             }
                         } else {
                             let expanded_indices = (expanded)();
@@ -486,6 +579,11 @@ pub fn StrategyPatchNotes() -> Element {
                             }
                         }
                     }
+                    (PatchFetchState::Ready, None) => rsx! {
+                        div { class: "patch-empty",
+                            p { "No patch notes yet." }
+                        }
+                    },
                 }
             }
         }
@@ -515,14 +613,17 @@ fn render_filter_chip(label: &str, current: &str, signal: &mut Signal<String>) -
 
 fn render_patch_card(
     idx: usize,
-    patch: &Patch,
+    patch: &PatchNote,
     is_expanded: bool,
     expanded_signal: &mut Signal<Vec<usize>>,
 ) -> Element {
-    let title = patch
-        .title
-        .clone()
-        .unwrap_or_else(|| format!("Patch {}", patch.version));
+    let title = patch.title.clone().unwrap_or_else(|| {
+        if patch.version.is_empty() {
+            "Patch notes".to_string()
+        } else {
+            format!("Patch {}", patch.version)
+        }
+    });
     let hero_count = patch.hero_updates.len();
     let expand_class = if is_expanded {
         "patch-expand-icon open"
@@ -544,6 +645,7 @@ fn render_patch_card(
     let version = patch.version.clone();
     let date = patch.date.clone();
     let url = patch.url.clone();
+    let body = patch.body.clone();
     let hero_updates = patch.hero_updates.clone();
     let sections = patch.sections.clone();
 
@@ -564,9 +666,13 @@ fn render_patch_card(
                     sig.set(current);
                 },
 
-                span { class: "patch-version-badge", "{version}" }
+                if !version.is_empty() {
+                    span { class: "patch-version-badge", "{version}" }
+                }
                 span { class: "patch-card-title", "{title}" }
-                span { class: "patch-card-date", "{date}" }
+                if !date.is_empty() {
+                    span { class: "patch-card-date", "{date}" }
+                }
                 if hero_count > 0 {
                     {
                         let suffix = if hero_count != 1 { "es" } else { "" };
@@ -585,6 +691,10 @@ fn render_patch_card(
             // Expanded body
             if is_expanded {
                 div { class: "patch-card-body",
+                    if let Some(lead) = body.as_ref().filter(|s| !s.is_empty()) {
+                        p { class: "patch-body-lead", "{lead}" }
+                    }
+
                     // Hero balance section
                     if !hero_updates.is_empty() {
                         h3 { class: "patch-section-title", "Hero Balance" }
@@ -600,13 +710,15 @@ fn render_patch_card(
                         {render_section(section)}
                     }
 
-                    // External link
-                    a {
-                        class: "patch-external-link",
-                        href: "{url}",
-                        target: "_blank",
-                        rel: "noopener noreferrer",
-                        "View official patch notes \u{2192}"
+                    // External link (omit when the API left url empty)
+                    if !url.is_empty() {
+                        a {
+                            class: "patch-external-link",
+                            href: "{url}",
+                            target: "_blank",
+                            rel: "noopener noreferrer",
+                            "View official patch notes \u{2192}"
+                        }
                     }
                 }
             }
@@ -678,5 +790,162 @@ fn render_section(section: &PatchSection) -> Element {
                 li { class: "patch-section-item", "{item}" }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn failed_fetch_is_not_loading() {
+        // Old bug: `.ok()` + `None => Loading` treated Err as eternal spinner.
+        assert_eq!(
+            classify_patch_fetch::<ListResponse>(Some(None), Some("HTTP error 404: Not Found")),
+            PatchFetchState::Failed
+        );
+        assert_eq!(
+            classify_patch_fetch::<ListResponse>(None, None),
+            PatchFetchState::Loading
+        );
+        let ready = ListResponse { data: vec![] };
+        assert_eq!(
+            classify_patch_fetch(Some(Some(&ready)), None),
+            PatchFetchState::Ready
+        );
+    }
+
+    #[test]
+    fn list_envelope_unwraps_data_not_bare_vec() {
+        let empty: ListResponse = serde_json::from_str(r#"{"data":[]}"#).unwrap();
+        assert!(empty.data.is_empty());
+
+        let aliased: ListResponse = serde_json::from_str(r#"{"patches":[]}"#).unwrap();
+        assert!(aliased.data.is_empty());
+
+        let empty_obj: Result<ListResponse, _> = serde_json::from_str("{}");
+        assert!(empty_obj.is_err(), "missing data key is not an empty list");
+
+        let bare_empty: Result<ListResponse, _> = serde_json::from_str("[]");
+        assert!(
+            bare_empty.is_err(),
+            "GET /api/strategy/patch-notes is the list envelope, not a bare Vec"
+        );
+
+        let bare_items: Result<ListResponse, _> =
+            serde_json::from_str(r#"[{"version":"1","date":"2026-01-01"}]"#);
+        assert!(
+            bare_items.is_err(),
+            "a populated bare Vec must not deserialize as the envelope"
+        );
+    }
+
+    #[test]
+    fn list_envelope_parses_version_title_date_sections() {
+        let json = r#"{
+            "data": [{
+                "version": "2.15",
+                "date": "2026-09-01",
+                "title": "Season 18 Mid-Season",
+                "body": "This is a mid-season balance update.",
+                "url": "https://overwatch.blizzard.com/news/patch-notes",
+                "hero_updates": [{
+                    "hero_id": "ana",
+                    "hero_name": "Ana",
+                    "change_type": "buff",
+                    "changes": [{"ability": "Biotic Rifle", "description": "Damage increased"}]
+                }],
+                "sections": [{"category": "Bug Fixes", "items": ["Fixed a crash"]}]
+            }]
+        }"#;
+        let resp: ListResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.data.len(), 1);
+        assert_eq!(resp.data[0].version, "2.15");
+        assert_eq!(resp.data[0].title.as_deref(), Some("Season 18 Mid-Season"));
+        assert_eq!(resp.data[0].date, "2026-09-01");
+        assert_eq!(
+            resp.data[0].body.as_deref(),
+            Some("This is a mid-season balance update.")
+        );
+        assert_eq!(resp.data[0].hero_updates.len(), 1);
+        assert_eq!(resp.data[0].sections[0].category, "Bug Fixes");
+    }
+
+    #[test]
+    fn missing_optional_collections_default_empty() {
+        let json = r#"{"data":[{"version":"1.0","date":"2026-01-01"}]}"#;
+        let resp: ListResponse = serde_json::from_str(json).unwrap();
+        assert!(resp.data[0].hero_updates.is_empty());
+        assert!(resp.data[0].sections.is_empty());
+        assert!(resp.data[0].url.is_empty());
+        assert!(resp.data[0].body.is_none());
+    }
+
+    #[test]
+    fn filter_hero_balance_requires_hero_updates() {
+        let with_heroes = PatchNote {
+            version: "1".into(),
+            date: "2026-01-01".into(),
+            title: None,
+            body: Some("Hotfix for console aim assist.".into()),
+            url: String::new(),
+            hero_updates: vec![HeroUpdate {
+                hero_id: "ana".into(),
+                hero_name: "Ana".into(),
+                change_type: "buff".into(),
+                changes: vec![],
+                dev_comment: None,
+            }],
+            sections: vec![],
+        };
+        let without = PatchNote {
+            hero_updates: vec![],
+            ..with_heroes.clone()
+        };
+        assert!(patch_matches_filter(&with_heroes, "Hero Balance"));
+        assert!(!patch_matches_filter(&without, "Hero Balance"));
+        assert!(patch_matches_search(&with_heroes, "ana"));
+        assert!(!patch_matches_search(&with_heroes, "junkrat"));
+        assert!(patch_matches_search(&with_heroes, "console"));
+    }
+
+    #[test]
+    fn summary_alias_fills_body() {
+        let json = r#"{"data":[{"version":"1","date":"2026-08-11","summary":"Season launch."}]}"#;
+        let resp: ListResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.data[0].body.as_deref(), Some("Season launch."));
+    }
+
+    #[test]
+    fn thin_core_fields_deserializes() {
+        let json = r#"{
+            "data": [{
+                "version": "2.18.1",
+                "title": "Mid-season balance",
+                "date": "2026-08-20",
+                "body": "This is a mid-season balance update."
+            }]
+        }"#;
+        let resp: ListResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.data[0].version, "2.18.1");
+        assert_eq!(resp.data[0].title.as_deref(), Some("Mid-season balance"));
+        assert_eq!(resp.data[0].date, "2026-08-20");
+        assert_eq!(
+            resp.data[0].body.as_deref(),
+            Some("This is a mid-season balance update.")
+        );
+        assert!(resp.data[0].hero_updates.is_empty());
+        assert!(resp.data[0].sections.is_empty());
+    }
+
+    #[test]
+    fn missing_version_and_published_at_alias_are_ok() {
+        let json =
+            r#"{"data":[{"title":"Hotfix","published_at":"2026-08-12","body":"Client update."}]}"#;
+        let resp: ListResponse = serde_json::from_str(json).unwrap();
+        assert!(resp.data[0].version.is_empty());
+        assert_eq!(resp.data[0].date, "2026-08-12");
+        assert_eq!(resp.data[0].title.as_deref(), Some("Hotfix"));
+        assert_eq!(resp.data[0].body.as_deref(), Some("Client update."));
     }
 }
