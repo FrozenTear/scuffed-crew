@@ -295,6 +295,7 @@ pub fn AdminLayout() -> Element {
                     Link { to: Route::AdminTournaments {}, onclick: close_nav, "Tournaments" }
                     Link { to: Route::AdminAnnouncements {}, onclick: close_nav, "Announcements" }
                     Link { to: Route::AdminArticles {}, onclick: close_nav, "Articles" }
+                    Link { to: Route::AdminPatchNotes {}, onclick: close_nav, "Patch Notes" }
                     Link { to: Route::AdminForum {}, onclick: close_nav, "Forum" }
                     // Moderation is OfficerUser-gated server-side (list/create), so it is
                     // visible to every officer+ — matching the AdminLayout access tier.

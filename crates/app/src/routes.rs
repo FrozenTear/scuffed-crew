@@ -98,6 +98,8 @@ pub enum Route {
         AdminAnnouncements {},
         #[route("/admin/articles")]
         AdminArticles {},
+        #[route("/admin/patch-notes")]
+        AdminPatchNotes {},
         #[route("/admin/forum")]
         AdminForum {},
         #[route("/admin/audit-log")]
