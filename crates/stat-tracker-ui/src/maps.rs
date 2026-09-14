@@ -38,6 +38,24 @@ pub fn view(app: &TrackerApp, content_width: f32) -> Element<'_, Message> {
 mod tests {
     use super::*;
     use crate::theme::{self, PAGE_PAD_X, PAGE_PAD_Y};
+    use scuffed_types::MapName;
+
+    #[test]
+    fn live_map_strings_bucket_to_game_mode() {
+        // Same six forms the site Maps tab classifies — tracker-ui does not
+        // group by mode today, but the shared MapName table must stay aligned.
+        let cases = [
+            ("Neon Junction", "Hybrid"),
+            ("Paraíso", "Hybrid"),
+            ("Paraiso", "Hybrid"),
+            ("Esperança", "Push"),
+            ("Esperanca", "Push"),
+            ("neon junction", "Hybrid"),
+        ];
+        for (name, mode) in cases {
+            assert_eq!(MapName::game_mode_label(name), mode, "{name:?}");
+        }
+    }
 
     #[test]
     fn empty_copy_stays_user_facing() {
