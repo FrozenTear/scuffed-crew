@@ -41,27 +41,19 @@ pub struct NavItemConfig {
     pub order: u32,
 }
 
-/// Wire shape for `NavConfig`. Deserialize always runs [`NavConfig::normalize`]
-/// so a stored JSON blob that predates a catalog id still grows that id
-/// (Hidden) before Admin Settings or public chrome see the value.
-#[derive(Debug, Clone, Deserialize)]
-struct NavConfigRaw {
-    items: Vec<NavItemConfig>,
-}
-
-/// Admin-editable public navigation. Unknown ids are dropped when resolved.
+/// Admin-editable public navigation. Unknown ids are dropped on
+/// [`NavConfig::normalize`] (save / public persist), not on GET deserialize —
+/// Admin Settings must still *show* every payload row.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(from = "NavConfigRaw")]
 pub struct NavConfig {
     pub items: Vec<NavItemConfig>,
 }
 
-impl From<NavConfigRaw> for NavConfig {
-    fn from(raw: NavConfigRaw) -> Self {
-        let mut cfg = Self { items: raw.items };
-        cfg.normalize();
-        cfg
-    }
+/// One Admin Settings bucket row (catalog label, or the raw id if unknown).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NavEditorRow {
+    pub id: String,
+    pub label: String,
 }
 
 /// Static catalog entry — labels/routes live in the app; ids are shared.
@@ -205,6 +197,10 @@ impl NavConfig {
     }
 
     /// Drop unknown ids, de-dupe, and append any missing catalog entries as Hidden.
+    ///
+    /// This is the **save / persist** path. Do **not** run it on Admin Settings
+    /// load: a GET payload id that the compiled `NAV_CATALOG` does not yet
+    /// know (or a stale WASM catalog) is deleted and vanishes from all buckets.
     pub fn normalize(&mut self) {
         let known: Vec<&str> = NAV_CATALOG.iter().map(|e| e.id).collect();
         let mut seen = std::collections::HashSet::new();
@@ -214,16 +210,23 @@ impl NavConfig {
             }
             seen.insert(it.id.clone())
         });
+        self.merge_missing_catalog();
+    }
+
+    /// Admin Settings load: keep every GET payload row, de-dupe, add missing
+    /// catalog ids as Hidden. Never drops an id the API already returned.
+    pub fn prepare_for_editor(&mut self) {
+        let mut seen = std::collections::HashSet::new();
+        self.items.retain(|it| seen.insert(it.id.clone()));
+        self.merge_missing_catalog();
+    }
+
+    fn merge_missing_catalog(&mut self) {
+        let seen: std::collections::HashSet<String> =
+            self.items.iter().map(|i| i.id.clone()).collect();
         for entry in NAV_CATALOG {
             if !seen.contains(entry.id) {
-                let order = self
-                    .items
-                    .iter()
-                    .filter(|i| i.placement == NavPlacement::Hidden)
-                    .map(|i| i.order)
-                    .max()
-                    .map(|o| o.saturating_add(1))
-                    .unwrap_or(0);
+                let order = self.next_order(NavPlacement::Hidden);
                 self.items.push(item(entry.id, NavPlacement::Hidden, order));
             }
         }
@@ -250,23 +253,48 @@ impl NavConfig {
             .unwrap_or(NavPlacement::Hidden)
     }
 
-    /// Admin Settings buckets: one row per catalog entry in `placement`.
-    /// Source of truth is `NAV_CATALOG`, not the stored `items` vec.
-    pub fn editor_items(&self, placement: NavPlacement) -> Vec<&'static NavCatalogEntry> {
-        let mut rows: Vec<(&NavCatalogEntry, u32)> = NAV_CATALOG
-            .iter()
-            .filter_map(|entry| {
-                let (item_placement, order) = self
-                    .items
-                    .iter()
-                    .find(|i| i.id == entry.id)
-                    .map(|i| (i.placement, i.order))
-                    .unwrap_or((NavPlacement::Hidden, u32::MAX));
-                (item_placement == placement).then_some((entry, order))
-            })
-            .collect();
-        rows.sort_by_key(|(_, order)| *order);
-        rows.into_iter().map(|(entry, _)| entry).collect()
+    /// Admin Settings buckets: `NAV_CATALOG` ∪ GET payload rows in `placement`.
+    /// A payload id is never omitted just because it is missing from the catalog.
+    pub fn editor_items(&self, placement: NavPlacement) -> Vec<NavEditorRow> {
+        let mut seen = std::collections::HashSet::<&str>::new();
+        let mut rows: Vec<(u32, NavEditorRow)> = Vec::new();
+
+        for entry in NAV_CATALOG {
+            let (item_placement, order) = self
+                .items
+                .iter()
+                .find(|i| i.id == entry.id)
+                .map(|i| (i.placement, i.order))
+                .unwrap_or((NavPlacement::Hidden, u32::MAX));
+            if item_placement != placement {
+                continue;
+            }
+            seen.insert(entry.id);
+            rows.push((
+                order,
+                NavEditorRow {
+                    id: entry.id.to_string(),
+                    label: entry.label.to_string(),
+                },
+            ));
+        }
+        for item in &self.items {
+            if item.placement != placement || seen.contains(item.id.as_str()) {
+                continue;
+            }
+            let label = Self::catalog_label(&item.id)
+                .unwrap_or(item.id.as_str())
+                .to_string();
+            rows.push((
+                item.order,
+                NavEditorRow {
+                    id: item.id.clone(),
+                    label,
+                },
+            ));
+        }
+        rows.sort_by_key(|(order, row)| (*order, row.id.clone()));
+        rows.into_iter().map(|(_, row)| row).collect()
     }
 
     pub fn catalog_label(id: &str) -> Option<&'static str> {
@@ -284,7 +312,9 @@ impl NavConfig {
     }
 
     pub fn set_placement(&mut self, id: &str, placement: NavPlacement) {
-        if !NAV_CATALOG.iter().any(|e| e.id == id) {
+        let in_catalog = NAV_CATALOG.iter().any(|e| e.id == id);
+        let in_items = self.items.iter().any(|i| i.id == id);
+        if !in_catalog && !in_items {
             return;
         }
         let Some(idx) = self.items.iter().position(|i| i.id == id) else {
@@ -452,13 +482,13 @@ mod tests {
             stored.items.iter().all(|i| i.id != "patch_notes"),
             "fixture is the pre-merge stored blob"
         );
-        let hidden: Vec<_> = stored
+        let hidden: Vec<String> = stored
             .editor_items(NavPlacement::Hidden)
             .into_iter()
             .map(|e| e.id)
             .collect();
         assert!(
-            hidden.contains(&"patch_notes"),
+            hidden.iter().any(|id| id == "patch_notes"),
             "Admin Hidden bucket must show catalog ids omitted from stored JSON"
         );
         assert!(
@@ -473,7 +503,7 @@ mod tests {
                 .iter()
                 .any(|e| e.id == "patch_notes")
         );
-        let editor_ids: std::collections::HashSet<_> = [
+        let editor_ids: std::collections::HashSet<String> = [
             NavPlacement::Primary,
             NavPlacement::More,
             NavPlacement::Hidden,
@@ -482,28 +512,89 @@ mod tests {
         .flat_map(|p| stored.editor_items(p))
         .map(|e| e.id)
         .collect();
-        let catalog_ids: std::collections::HashSet<_> = NAV_CATALOG.iter().map(|e| e.id).collect();
+        let catalog_ids: std::collections::HashSet<String> =
+            NAV_CATALOG.iter().map(|e| e.id.to_string()).collect();
         assert_eq!(
             editor_ids, catalog_ids,
             "every catalog id appears in exactly one Admin bucket"
         );
     }
 
+    /// Live `GET /api/settings` nav on ow.scuffedcrew.no (2026-09-14).
+    fn live_contabo_get_nav() -> NavConfig {
+        serde_json::from_str(
+            r#"{
+              "items": [
+                {"id":"members","placement":"primary","order":0},
+                {"id":"tournaments","placement":"primary","order":1},
+                {"id":"news","placement":"primary","order":2},
+                {"id":"forum","placement":"primary","order":3},
+                {"id":"events","placement":"more","order":0},
+                {"id":"stats","placement":"more","order":1},
+                {"id":"community","placement":"hidden","order":0},
+                {"id":"feed","placement":"hidden","order":1},
+                {"id":"polls","placement":"hidden","order":2},
+                {"id":"blog","placement":"hidden","order":3},
+                {"id":"wiki","placement":"hidden","order":4},
+                {"id":"strategy","placement":"hidden","order":5},
+                {"id":"scrims","placement":"hidden","order":6},
+                {"id":"patch_notes","placement":"hidden","order":7},
+                {"id":"chat","placement":"hidden","order":8}
+              ]
+            }"#,
+        )
+        .expect("live GET nav JSON")
+    }
+
     #[test]
-    fn serde_normalize_merges_patch_notes_on_deserialize() {
-        let stored = contabo_stored_without_patch_notes();
-        let json = serde_json::to_string(&stored).expect("serialize stored items only");
+    fn live_get_payload_patch_notes_renders_in_hidden() {
+        let parsed = live_contabo_get_nav();
         assert!(
-            !json.contains("patch_notes"),
-            "serialized fixture must omit the new id"
+            parsed
+                .items
+                .iter()
+                .any(|i| i.id == "patch_notes" && i.placement == NavPlacement::Hidden),
+            "GET deserialize must keep the payload row (no drop on parse)"
         );
-        let parsed: NavConfig = serde_json::from_str(&json).expect("nav json");
-        let added = parsed
+        let mut n = parsed;
+        n.prepare_for_editor();
+        let hidden: Vec<String> = n
+            .editor_items(NavPlacement::Hidden)
+            .into_iter()
+            .map(|r| r.id)
+            .collect();
+        assert!(
+            hidden.iter().any(|id| id == "patch_notes"),
+            "Admin Hidden must list the GET payload id"
+        );
+        assert_eq!(hidden.iter().filter(|id| *id == "patch_notes").count(), 1);
+    }
+
+    #[test]
+    fn prepare_for_editor_keeps_payload_ids_normalize_would_drop() {
+        let mut n = live_contabo_get_nav();
+        n.items.push(item("future_page", NavPlacement::Hidden, 99));
+        n.prepare_for_editor();
+        assert!(
+            n.items.iter().any(|i| i.id == "future_page"),
+            "load path must not strip GET ids the local catalog does not know"
+        );
+        assert!(
+            n.editor_items(NavPlacement::Hidden)
+                .iter()
+                .any(|r| r.id == "future_page" && r.label == "future_page")
+        );
+
+        let mut dropped = live_contabo_get_nav();
+        dropped
             .items
-            .iter()
-            .find(|i| i.id == "patch_notes")
-            .expect("deserialize runs normalize");
-        assert_eq!(added.placement, NavPlacement::Hidden);
+            .push(item("future_page", NavPlacement::Hidden, 99));
+        dropped.normalize();
+        assert!(
+            dropped.items.iter().all(|i| i.id != "future_page"),
+            "save-path normalize still drops unknown ids"
+        );
+        assert!(dropped.items.iter().any(|i| i.id == "patch_notes"));
     }
 
     #[test]
