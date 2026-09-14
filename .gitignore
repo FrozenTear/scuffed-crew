@@ -1,6 +1,8 @@
 .playwright-mcp/
 *.png
 !crates/stat-tracker/portraits/*.png
+# Design-review After screenshots (PR #97 Patch Notes)
+!docs/design-review/**/*.png
 # Synthetic (non-capture) end-reel layout for the nameplate POTG wake test.
 !crates/stat-tracker/tests/fixtures/end-reel/*.png
 target/
