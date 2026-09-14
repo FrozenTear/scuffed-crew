@@ -1,5 +1,8 @@
 services:
   surrealdb:
+    # Contabo day-2 / podman-compose: `up site-server` may spawn an underscore
+    # twin on this same volume. scripts/update.sh uses `--no-deps` when a
+    # project Surreal is already Up. Do not rename this service or volume key.
     image: surrealdb/surrealdb:v3.0
     # Image runs as non-root by default; Podman named volumes are root-owned,
     # which causes: Failed to create RocksDB directory: Permission denied.
