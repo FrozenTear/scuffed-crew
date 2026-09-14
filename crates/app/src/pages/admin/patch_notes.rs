@@ -302,7 +302,7 @@ pub fn AdminPatchNotes() -> Element {
     let mut form_heroes = use_signal(Vec::<HeroDraft>::new);
     let mut form_sections = use_signal(Vec::<SectionDraft>::new);
 
-    let reset_form = move || {
+    let mut reset_form = move || {
         form_version.set(String::new());
         form_date.set(String::new());
         form_title.set(String::new());
