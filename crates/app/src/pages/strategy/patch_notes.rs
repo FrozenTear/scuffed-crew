@@ -10,13 +10,18 @@ use crate::hooks::use_api;
 #[derive(Debug, Clone, Deserialize)]
 struct ListResponse {
     #[serde(alias = "patches")]
-    data: Vec<Patch>,
+    data: Vec<PatchNote>,
 }
 
+/// Strategy-app style card. Core fields are flexible so a thin API payload
+/// (`version` / `title` / `date` / `body`) still deserializes; extra keys ignored.
 #[derive(Debug, Clone, Deserialize)]
-struct Patch {
+struct PatchNote {
+    #[serde(default)]
     version: String,
+    #[serde(default, alias = "published_at")]
     date: String,
+    #[serde(default)]
     title: Option<String>,
     /// Optional lead paragraph (OW notes: "This is a hotfix update…").
     #[serde(default, alias = "summary")]
@@ -111,7 +116,7 @@ const FILTER_OPTIONS: [&str; 6] = [
     "General",
 ];
 
-fn patch_matches_filter(patch: &Patch, filter: &str) -> bool {
+fn patch_matches_filter(patch: &PatchNote, filter: &str) -> bool {
     match filter {
         "All" => true,
         "Hero Balance" => !patch.hero_updates.is_empty(),
@@ -138,7 +143,7 @@ fn patch_matches_filter(patch: &Patch, filter: &str) -> bool {
     }
 }
 
-fn patch_matches_search(patch: &Patch, query: &str) -> bool {
+fn patch_matches_search(patch: &PatchNote, query: &str) -> bool {
     if query.is_empty() {
         return true;
     }
@@ -563,7 +568,7 @@ pub fn StrategyPatchNotes() -> Element {
                     (PatchFetchState::Ready, Some(resp)) => {
                         let query = (search_query)();
                         let filter = (active_filter)();
-                        let visible: Vec<(usize, &Patch)> = resp.data
+                        let visible: Vec<(usize, &PatchNote)> = resp.data
                             .iter()
                             .enumerate()
                             .filter(|(_, p)| patch_matches_search(p, &query) && patch_matches_filter(p, &filter))
@@ -616,14 +621,17 @@ fn render_filter_chip(label: &str, current: &str, signal: &mut Signal<String>) -
 
 fn render_patch_card(
     idx: usize,
-    patch: &Patch,
+    patch: &PatchNote,
     is_expanded: bool,
     expanded_signal: &mut Signal<Vec<usize>>,
 ) -> Element {
-    let title = patch
-        .title
-        .clone()
-        .unwrap_or_else(|| format!("Patch {}", patch.version));
+    let title = patch.title.clone().unwrap_or_else(|| {
+        if patch.version.is_empty() {
+            "Patch notes".to_string()
+        } else {
+            format!("Patch {}", patch.version)
+        }
+    });
     let hero_count = patch.hero_updates.len();
     let expand_class = if is_expanded {
         "patch-expand-icon open"
@@ -666,9 +674,13 @@ fn render_patch_card(
                     sig.set(current);
                 },
 
-                span { class: "patch-version-badge", "{version}" }
+                if !version.is_empty() {
+                    span { class: "patch-version-badge", "{version}" }
+                }
                 span { class: "patch-card-title", "{title}" }
-                span { class: "patch-card-date", "{date}" }
+                if !date.is_empty() {
+                    span { class: "patch-card-date", "{date}" }
+                }
                 if hero_count > 0 {
                     {
                         let suffix = if hero_count != 1 { "es" } else { "" };
@@ -879,7 +891,7 @@ mod tests {
 
     #[test]
     fn filter_hero_balance_requires_hero_updates() {
-        let with_heroes = Patch {
+        let with_heroes = PatchNote {
             version: "1".into(),
             date: "2026-01-01".into(),
             title: None,
@@ -894,7 +906,7 @@ mod tests {
             }],
             sections: vec![],
         };
-        let without = Patch {
+        let without = PatchNote {
             hero_updates: vec![],
             ..with_heroes.clone()
         };
@@ -917,5 +929,38 @@ mod tests {
         let json = r#"{"data":[{"version":"1","date":"2026-08-11","summary":"Season launch."}]}"#;
         let resp: ListResponse = serde_json::from_str(json).unwrap();
         assert_eq!(resp.data[0].body.as_deref(), Some("Season launch."));
+    }
+
+    #[test]
+    fn thin_strategy_app_shape_deserializes() {
+        let json = r#"{
+            "data": [{
+                "version": "2.18.1",
+                "title": "Mid-season balance",
+                "date": "2026-08-20",
+                "body": "This is a mid-season balance update."
+            }]
+        }"#;
+        let resp: ListResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.data[0].version, "2.18.1");
+        assert_eq!(resp.data[0].title.as_deref(), Some("Mid-season balance"));
+        assert_eq!(resp.data[0].date, "2026-08-20");
+        assert_eq!(
+            resp.data[0].body.as_deref(),
+            Some("This is a mid-season balance update.")
+        );
+        assert!(resp.data[0].hero_updates.is_empty());
+        assert!(resp.data[0].sections.is_empty());
+    }
+
+    #[test]
+    fn missing_version_and_published_at_alias_are_ok() {
+        let json =
+            r#"{"data":[{"title":"Hotfix","published_at":"2026-08-12","body":"Client update."}]}"#;
+        let resp: ListResponse = serde_json::from_str(json).unwrap();
+        assert!(resp.data[0].version.is_empty());
+        assert_eq!(resp.data[0].date, "2026-08-12");
+        assert_eq!(resp.data[0].title.as_deref(), Some("Hotfix"));
+        assert_eq!(resp.data[0].body.as_deref(), Some("Client update."));
     }
 }
