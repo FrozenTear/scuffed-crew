@@ -5,7 +5,7 @@ use crate::hooks::use_api;
 
 // --- Types ---
 
-/// `{ "data": [...] }` envelope — same shape as Browse (`StrategyListResponse`).
+/// `{ "data": [...] }` envelope — same unwrap as Browse (`StrategyListResponse`).
 /// `data` is required so a bare `[]` / `{}` cannot look like a successful empty list.
 #[derive(Debug, Clone, Deserialize)]
 struct ListResponse {
@@ -13,8 +13,8 @@ struct ListResponse {
     data: Vec<PatchNote>,
 }
 
-/// Strategy-app style card. Core fields are flexible so a thin API payload
-/// (`version` / `title` / `date` / `body`) still deserializes; extra keys ignored.
+/// Local card type. Fields default so a thin API payload still deserializes;
+/// unknown keys are ignored. Not a copy of any external patch-notes schema.
 #[derive(Debug, Clone, Deserialize)]
 struct PatchNote {
     #[serde(default)]
@@ -23,7 +23,6 @@ struct PatchNote {
     date: String,
     #[serde(default)]
     title: Option<String>,
-    /// Optional lead paragraph (OW notes: "This is a hotfix update…").
     #[serde(default, alias = "summary")]
     body: Option<String>,
     #[serde(default)]
@@ -32,26 +31,6 @@ struct PatchNote {
     hero_updates: Vec<HeroUpdate>,
     #[serde(default)]
     sections: Vec<PatchSection>,
-}
-
-/// Official OW notes use a human date (`20 Aug 2026`); API ships `YYYY-MM-DD`.
-fn format_patch_date(raw: &str) -> String {
-    const MONTHS: [&str; 12] = [
-        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
-    ];
-    let parts: Vec<&str> = raw.split('-').collect();
-    if parts.len() == 3
-        && parts[0].len() == 4
-        && parts[1].len() == 2
-        && parts[2].len() == 2
-        && let Ok(month) = parts[1].parse::<u8>()
-        && (1..=12).contains(&month)
-        && let Ok(day) = parts[2].parse::<u8>()
-        && (1..=31).contains(&day)
-    {
-        return format!("{} {} {}", day, MONTHS[month as usize - 1], parts[0]);
-    }
-    raw.to_string()
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -490,17 +469,18 @@ const PAGE_CSS: &str = r#"
     .patch-loading, .patch-empty {
         color: var(--text-3);
         text-align: center;
-        padding: 3rem 0;
+        padding: 4rem 1rem;
+        font-size: 0.95rem;
+    }
+    .patch-empty-hint {
+        margin-top: 0.5rem;
+        font-size: 0.85rem;
     }
     .patch-error {
         color: var(--danger);
-        text-align: center;
-        padding: 2rem 1rem 0.75rem;
     }
-    .patch-error-actions {
-        display: flex;
-        justify-content: center;
-        padding-bottom: 2rem;
+    .patch-retry {
+        margin-top: 1rem;
     }
 "#;
 
@@ -550,12 +530,12 @@ pub fn StrategyPatchNotes() -> Element {
                         let message = err.unwrap_or_else(|| "Request failed".to_string());
                         let mut refresh = patches.refresh;
                         rsx! {
-                            p { class: "patch-error",
-                                "Failed to load patch notes: {message}"
-                            }
-                            div { class: "patch-error-actions",
+                            div { class: "patch-empty",
+                                p { class: "patch-error",
+                                    "Failed to load patch notes: {message}"
+                                }
                                 button {
-                                    class: "ui-btn ui-btn--ghost ui-btn--md",
+                                    class: "patch-chip patch-retry",
                                     onclick: move |_| refresh += 1,
                                     "Retry"
                                 }
@@ -563,7 +543,12 @@ pub fn StrategyPatchNotes() -> Element {
                         }
                     },
                     (PatchFetchState::Ready, Some(resp)) if resp.data.is_empty() => rsx! {
-                        p { class: "patch-empty", "No patch notes available." }
+                        div { class: "patch-empty",
+                            p { "No patch notes yet." }
+                            p { class: "patch-empty-hint",
+                                "When the catalog is published they will show up here."
+                            }
+                        }
                     },
                     (PatchFetchState::Ready, Some(resp)) => {
                         let query = (search_query)();
@@ -576,7 +561,12 @@ pub fn StrategyPatchNotes() -> Element {
 
                         if visible.is_empty() {
                             rsx! {
-                                p { class: "patch-empty", "No patches match your search." }
+                                div { class: "patch-empty",
+                                    p { "No patch notes match these filters." }
+                                    p { class: "patch-empty-hint",
+                                        "Try clearing search or switching the category filter."
+                                    }
+                                }
                             }
                         } else {
                             let expanded_indices = (expanded)();
@@ -590,7 +580,9 @@ pub fn StrategyPatchNotes() -> Element {
                         }
                     }
                     (PatchFetchState::Ready, None) => rsx! {
-                        p { class: "patch-empty", "No patch notes available." }
+                        div { class: "patch-empty",
+                            p { "No patch notes yet." }
+                        }
                     },
                 }
             }
@@ -651,7 +643,7 @@ fn render_patch_card(
     }
 
     let version = patch.version.clone();
-    let date = format_patch_date(&patch.date);
+    let date = patch.date.clone();
     let url = patch.url.clone();
     let body = patch.body.clone();
     let hero_updates = patch.hero_updates.clone();
@@ -918,13 +910,6 @@ mod tests {
     }
 
     #[test]
-    fn iso_date_formats_like_official_notes() {
-        assert_eq!(format_patch_date("2026-08-20"), "20 Aug 2026");
-        assert_eq!(format_patch_date("2026-01-01"), "1 Jan 2026");
-        assert_eq!(format_patch_date("12 August 2026"), "12 August 2026");
-    }
-
-    #[test]
     fn summary_alias_fills_body() {
         let json = r#"{"data":[{"version":"1","date":"2026-08-11","summary":"Season launch."}]}"#;
         let resp: ListResponse = serde_json::from_str(json).unwrap();
@@ -932,7 +917,7 @@ mod tests {
     }
 
     #[test]
-    fn thin_strategy_app_shape_deserializes() {
+    fn thin_core_fields_deserializes() {
         let json = r#"{
             "data": [{
                 "version": "2.18.1",
