@@ -18,12 +18,35 @@ struct Patch {
     version: String,
     date: String,
     title: Option<String>,
+    /// Optional lead paragraph (OW notes: "This is a hotfix update…").
+    #[serde(default, alias = "summary")]
+    body: Option<String>,
     #[serde(default)]
     url: String,
     #[serde(default)]
     hero_updates: Vec<HeroUpdate>,
     #[serde(default)]
     sections: Vec<PatchSection>,
+}
+
+/// Official OW notes use a human date (`20 Aug 2026`); API ships `YYYY-MM-DD`.
+fn format_patch_date(raw: &str) -> String {
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    let parts: Vec<&str> = raw.split('-').collect();
+    if parts.len() == 3
+        && parts[0].len() == 4
+        && parts[1].len() == 2
+        && parts[2].len() == 2
+        && let Ok(month) = parts[1].parse::<u8>()
+        && (1..=12).contains(&month)
+        && let Ok(day) = parts[2].parse::<u8>()
+        && (1..=31).contains(&day)
+    {
+        return format!("{} {} {}", day, MONTHS[month as usize - 1], parts[0]);
+    }
+    raw.to_string()
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -125,6 +148,11 @@ fn patch_matches_search(patch: &Patch, query: &str) -> bool {
     }
     if let Some(title) = &patch.title
         && title.to_lowercase().contains(&q)
+    {
+        return true;
+    }
+    if let Some(body) = &patch.body
+        && body.to_lowercase().contains(&q)
     {
         return true;
     }
@@ -338,6 +366,12 @@ const PAGE_CSS: &str = r#"
     .patch-card-body {
         padding: 0 1.1rem 1.1rem;
         border-top: 1px solid var(--border);
+    }
+    .patch-body-lead {
+        font-size: 0.85rem;
+        color: var(--text-2);
+        line-height: 1.55;
+        margin: 1rem 0 0.25rem;
     }
     .patch-section-title {
         font-family: var(--font-head);
@@ -609,8 +643,9 @@ fn render_patch_card(
     }
 
     let version = patch.version.clone();
-    let date = patch.date.clone();
+    let date = format_patch_date(&patch.date);
     let url = patch.url.clone();
+    let body = patch.body.clone();
     let hero_updates = patch.hero_updates.clone();
     let sections = patch.sections.clone();
 
@@ -652,6 +687,10 @@ fn render_patch_card(
             // Expanded body
             if is_expanded {
                 div { class: "patch-card-body",
+                    if let Some(lead) = body.as_ref().filter(|s| !s.is_empty()) {
+                        p { class: "patch-body-lead", "{lead}" }
+                    }
+
                     // Hero balance section
                     if !hero_updates.is_empty() {
                         h3 { class: "patch-section-title", "Hero Balance" }
@@ -804,6 +843,7 @@ mod tests {
                 "version": "2.15",
                 "date": "2026-09-01",
                 "title": "Season 18 Mid-Season",
+                "body": "This is a mid-season balance update.",
                 "url": "https://overwatch.blizzard.com/news/patch-notes",
                 "hero_updates": [{
                     "hero_id": "ana",
@@ -819,6 +859,10 @@ mod tests {
         assert_eq!(resp.data[0].version, "2.15");
         assert_eq!(resp.data[0].title.as_deref(), Some("Season 18 Mid-Season"));
         assert_eq!(resp.data[0].date, "2026-09-01");
+        assert_eq!(
+            resp.data[0].body.as_deref(),
+            Some("This is a mid-season balance update.")
+        );
         assert_eq!(resp.data[0].hero_updates.len(), 1);
         assert_eq!(resp.data[0].sections[0].category, "Bug Fixes");
     }
@@ -830,6 +874,7 @@ mod tests {
         assert!(resp.data[0].hero_updates.is_empty());
         assert!(resp.data[0].sections.is_empty());
         assert!(resp.data[0].url.is_empty());
+        assert!(resp.data[0].body.is_none());
     }
 
     #[test]
@@ -838,6 +883,7 @@ mod tests {
             version: "1".into(),
             date: "2026-01-01".into(),
             title: None,
+            body: Some("Hotfix for console aim assist.".into()),
             url: String::new(),
             hero_updates: vec![HeroUpdate {
                 hero_id: "ana".into(),
@@ -856,5 +902,20 @@ mod tests {
         assert!(!patch_matches_filter(&without, "Hero Balance"));
         assert!(patch_matches_search(&with_heroes, "ana"));
         assert!(!patch_matches_search(&with_heroes, "junkrat"));
+        assert!(patch_matches_search(&with_heroes, "console"));
+    }
+
+    #[test]
+    fn iso_date_formats_like_official_notes() {
+        assert_eq!(format_patch_date("2026-08-20"), "20 Aug 2026");
+        assert_eq!(format_patch_date("2026-01-01"), "1 Jan 2026");
+        assert_eq!(format_patch_date("12 August 2026"), "12 August 2026");
+    }
+
+    #[test]
+    fn summary_alias_fills_body() {
+        let json = r#"{"data":[{"version":"1","date":"2026-08-11","summary":"Season launch."}]}"#;
+        let resp: ListResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.data[0].body.as_deref(), Some("Season launch."));
     }
 }
