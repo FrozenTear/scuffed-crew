@@ -486,8 +486,10 @@ const PAGE_CSS: &str = r#"
 
 // --- Component ---
 
+/// Shared Patch Notes UI — used by `/patch-notes` (PublicLayout) and
+/// `/strategy/patch-notes` (StrategyLayout). Same fetch + unwrap.
 #[component]
-pub fn StrategyPatchNotes() -> Element {
+pub fn PatchNotesPage() -> Element {
     let patches = use_api::<ListResponse>("/api/strategy/patch-notes");
 
     let mut search_query = use_signal(String::new);
@@ -588,6 +590,18 @@ pub fn StrategyPatchNotes() -> Element {
             }
         }
     }
+}
+
+/// Public-site route (`/patch-notes` under PublicLayout).
+#[component]
+pub fn PatchNotes() -> Element {
+    rsx! { PatchNotesPage {} }
+}
+
+/// Strategy-section route (`/strategy/patch-notes` under StrategyLayout).
+#[component]
+pub fn StrategyPatchNotes() -> Element {
+    rsx! { PatchNotesPage {} }
 }
 
 // --- Render helpers ---

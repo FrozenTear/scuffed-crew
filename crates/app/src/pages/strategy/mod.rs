@@ -10,4 +10,4 @@ pub use editor::{StrategyEditor, StrategyEditorNew};
 pub use heroes::StrategyHeroes;
 pub use meta::StrategyMeta;
 pub use my_strategies::StrategyMy;
-pub use patch_notes::StrategyPatchNotes;
+pub use patch_notes::{PatchNotes, StrategyPatchNotes};

@@ -7,7 +7,7 @@ use crate::state::auth::{AuthState, use_auth};
 use crate::theme::ThemeToggle;
 
 /// Map catalog id → public route. Unknown ids are skipped.
-fn nav_route(id: &str) -> Option<Route> {
+pub(crate) fn nav_route(id: &str) -> Option<Route> {
     Some(match id {
         "members" => Route::Members {},
         "tournaments" => Route::Tournaments {},
@@ -21,6 +21,7 @@ fn nav_route(id: &str) -> Option<Route> {
         "wiki" => Route::Wiki {},
         "stats" => Route::Stats {},
         "strategy" => Route::StrategyBrowse {},
+        "patch_notes" => Route::PatchNotes {},
         "scrims" => Route::Scrims {},
         "chat" => Route::TeamChat {},
         _ => return None,
@@ -682,5 +683,30 @@ pub fn PublicLayout() -> Element {
         footer { class: "site-footer",
             "{footer_text}"
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use scuffed_types::NAV_CATALOG;
+
+    #[test]
+    fn catalog_ids_resolve_to_routes() {
+        for entry in NAV_CATALOG {
+            assert!(
+                nav_route(entry.id).is_some(),
+                "catalog id `{}` must map to a public route so Admin placement works",
+                entry.id
+            );
+        }
+    }
+
+    #[test]
+    fn patch_notes_catalog_id_opens_public_route() {
+        assert_eq!(nav_route("patch_notes"), Some(Route::PatchNotes {}));
+        assert_ne!(nav_route("patch_notes"), Some(Route::StrategyPatchNotes {}));
+        assert_eq!(nav_route("strategy"), Some(Route::StrategyBrowse {}));
+        assert_eq!(nav_route("not_in_catalog"), None);
     }
 }

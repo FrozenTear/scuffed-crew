@@ -118,6 +118,11 @@ pub const NAV_CATALOG: &[NavCatalogEntry] = &[
         description: "Strategy browser",
     },
     NavCatalogEntry {
+        id: "patch_notes",
+        label: "Patch Notes",
+        description: "Game patch notes",
+    },
+    NavCatalogEntry {
         id: "scrims",
         label: "Scrims",
         description: "Scrim finder",
@@ -144,6 +149,7 @@ impl Default for NavConfig {
                 item("tournaments", NavPlacement::More, 1),
                 item("scrims", NavPlacement::More, 2),
                 item("strategy", NavPlacement::More, 3),
+                item("patch_notes", NavPlacement::More, 4),
                 item("community", NavPlacement::Hidden, 0),
                 item("feed", NavPlacement::Hidden, 1),
                 item("polls", NavPlacement::Hidden, 2),
@@ -284,12 +290,22 @@ mod tests {
             .into_iter()
             .map(|i| i.id.as_str())
             .collect();
-        assert_eq!(more, ["news", "tournaments", "scrims", "strategy"]);
+        assert_eq!(
+            more,
+            ["news", "tournaments", "scrims", "strategy", "patch_notes"]
+        );
         assert!(
             cfg.items
                 .iter()
                 .any(|i| i.id == "tournaments" && i.placement == NavPlacement::More)
         );
+        assert!(
+            cfg.items
+                .iter()
+                .any(|i| i.id == "patch_notes" && i.placement == NavPlacement::More),
+            "fresh defaults put Patch Notes in More; Admin can move without a redeploy"
+        );
+        assert_eq!(NavConfig::catalog_label("patch_notes"), Some("Patch Notes"));
         assert!(
             cfg.items
                 .iter()
@@ -309,6 +325,45 @@ mod tests {
             items: vec![item("members", NavPlacement::Primary, 0)],
         };
         cfg.normalize();
+        assert_eq!(cfg.items.len(), NAV_CATALOG.len());
+    }
+
+    #[test]
+    fn normalize_adds_new_catalog_id_as_hidden() {
+        // Existing Contabo `site_settings.nav` JSON predates `patch_notes`.
+        // Unknown ids are dropped; missing catalog ids appear as Hidden so
+        // Admin can place them without a redeploy. Fresh Default stays More.
+        let mut stored = NavConfig {
+            items: vec![
+                item("members", NavPlacement::Primary, 0),
+                item("forum", NavPlacement::Primary, 1),
+                item("news", NavPlacement::More, 0),
+                item("not_a_real_page", NavPlacement::Primary, 9),
+            ],
+        };
+        stored.normalize();
+        assert!(
+            stored.items.iter().all(|i| i.id != "not_a_real_page"),
+            "unknown ids are dropped"
+        );
+        let added = stored
+            .items
+            .iter()
+            .find(|i| i.id == "patch_notes")
+            .expect("new catalog id is merged in");
+        assert_eq!(added.placement, NavPlacement::Hidden);
+        assert_eq!(stored.items.len(), NAV_CATALOG.len());
+    }
+
+    #[test]
+    fn default_survives_normalize_with_patch_notes_in_more() {
+        let mut cfg = NavConfig::default();
+        cfg.normalize();
+        assert!(
+            cfg.items
+                .iter()
+                .any(|i| i.id == "patch_notes" && i.placement == NavPlacement::More)
+        );
         assert_eq!(cfg.items.len(), NAV_CATALOG.len());
     }
 }
