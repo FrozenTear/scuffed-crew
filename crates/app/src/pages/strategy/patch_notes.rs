@@ -82,6 +82,9 @@ const COLLAPSED_TAG_LIMIT: usize = 2;
 /// Sticky hero TOC only appears once an expanded patch has this many heroes.
 const HERO_TOC_THRESHOLD: usize = 12;
 
+/// Visible `<label for>` / input `id` for the sticky toolbar search field.
+const PATCH_SEARCH_ID: &str = "patch-notes-search";
+
 /// `use_api` stores failure as `Some(None)` + `error`; still-in-flight is `None`.
 fn classify_patch_fetch<T>(resource: Option<Option<&T>>, error: Option<&str>) -> PatchFetchState {
     match resource {
@@ -277,6 +280,22 @@ fn hero_change_counts(updates: &[HeroUpdate]) -> Vec<(&'static str, usize)> {
 
 fn show_hero_toc(hero_count: usize) -> bool {
     hero_count >= HERO_TOC_THRESHOLD
+}
+
+/// Split heroes so the open accordion sits *outside* the multi-col grid and
+/// can span the full list column beside the TOC (not one `auto-fill` cell).
+fn hero_open_ranges(
+    count: usize,
+    open: Option<usize>,
+) -> (
+    std::ops::Range<usize>,
+    Option<usize>,
+    std::ops::Range<usize>,
+) {
+    match open {
+        Some(i) if i < count => (0..i, Some(i), i + 1..count),
+        _ => (0..count, None, 0..0),
+    }
 }
 
 /// Featured / newest patch (catalog index 0) starts expanded; archive stays closed.
@@ -481,6 +500,22 @@ const PAGE_CSS: &str = r#"
         display: flex;
         align-items: center;
         gap: 0.65rem;
+    }
+    .patch-search-field {
+        flex: 1;
+        min-width: 0;
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+    }
+    .patch-search-label {
+        flex-shrink: 0;
+        font-family: var(--font-mono);
+        font-size: 0.68rem;
+        font-weight: 600;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: var(--text-3);
     }
     .patch-search {
         flex: 1;
@@ -727,11 +762,27 @@ const PAGE_CSS: &str = r#"
     .patch-hero-layout {
         display: grid;
         grid-template-columns: 11rem minmax(0, 1fr);
+        grid-template-areas: "toc main";
         gap: 0.85rem 1rem;
         align-items: start;
     }
+    .patch-hero-layout > .patch-hero-toc {
+        grid-area: toc;
+    }
+    .patch-hero-layout > .patch-hero-main {
+        grid-area: main;
+    }
     .patch-hero-stack {
         display: block;
+    }
+    /* Dedicated list column so an open accordion cannot become a third
+       implicit track of `.patch-hero-layout` or a single auto-fill cell. */
+    .patch-hero-main {
+        min-width: 0;
+        width: 100%;
+        display: flex;
+        flex-direction: column;
+        gap: 0.4rem;
     }
     .patch-hero-toc {
         position: sticky;
@@ -793,6 +844,9 @@ const PAGE_CSS: &str = r#"
     }
     .patch-hero-card.open {
         grid-column: 1 / -1;
+        width: 100%;
+        max-width: 100%;
+        box-sizing: border-box;
         border-color: color-mix(in srgb, var(--accent) 28%, var(--border));
     }
     .patch-hero-card-header {
@@ -974,7 +1028,10 @@ const PAGE_CSS: &str = r#"
             display: inline;
         }
         .patch-hero-layout {
-            grid-template-columns: 1fr;
+            grid-template-columns: minmax(0, 1fr);
+            grid-template-areas:
+                "toc"
+                "main";
         }
         .patch-hero-toc {
             position: static;
@@ -1076,12 +1133,20 @@ pub fn PatchNotesPage() -> Element {
                     if show_toolbar {
                         div { class: "patch-toolbar",
                             div { class: "patch-toolbar-row",
-                                input {
-                                    class: "patch-search",
-                                    r#type: "search",
-                                    placeholder: "Search version, title, or hero...",
-                                    value: "{search_query}",
-                                    oninput: move |evt| search_query.set(evt.value()),
+                                div { class: "patch-search-field",
+                                    label {
+                                        class: "patch-search-label",
+                                        r#for: PATCH_SEARCH_ID,
+                                        "Search"
+                                    }
+                                    input {
+                                        id: PATCH_SEARCH_ID,
+                                        class: "patch-search",
+                                        r#type: "search",
+                                        placeholder: "Version, title, or hero…",
+                                        value: "{search_query}",
+                                        oninput: move |evt| search_query.set(evt.value()),
+                                    }
                                 }
                                 if visible_len > 1 {
                                     {
@@ -1399,16 +1464,13 @@ fn render_patch_card(
                                             }
                                         }
                                     }
-                                    div { class: "patch-hero-list",
-                                        for (hi, hu) in hero_updates.iter().enumerate() {
-                                            {render_hero_update(
-                                                idx,
-                                                hi,
-                                                hu,
-                                                open_hero_idx == Some(hi),
-                                                &mut hero_sig,
-                                            )}
-                                        }
+                                    div { class: "patch-hero-main",
+                                        {render_hero_column(
+                                            idx,
+                                            &hero_updates,
+                                            open_hero_idx,
+                                            &mut hero_sig,
+                                        )}
                                     }
                                 }
                             }
@@ -1474,6 +1536,53 @@ fn render_toc_item(
                 }
             },
             "{name}"
+        }
+    }
+}
+
+fn render_hero_column(
+    patch_idx: usize,
+    heroes: &[HeroUpdate],
+    open_idx: Option<usize>,
+    open_hero: &mut Signal<HashMap<usize, usize>>,
+) -> Element {
+    let (before, open, after) = hero_open_ranges(heroes.len(), open_idx);
+
+    rsx! {
+        if !before.is_empty() {
+            div { class: "patch-hero-list",
+                for hi in before {
+                    {render_hero_update(
+                        patch_idx,
+                        hi,
+                        &heroes[hi],
+                        false,
+                        open_hero,
+                    )}
+                }
+            }
+        }
+        if let Some(hi) = open {
+            {render_hero_update(
+                patch_idx,
+                hi,
+                &heroes[hi],
+                true,
+                open_hero,
+            )}
+        }
+        if !after.is_empty() {
+            div { class: "patch-hero-list",
+                for hi in after {
+                    {render_hero_update(
+                        patch_idx,
+                        hi,
+                        &heroes[hi],
+                        false,
+                        open_hero,
+                    )}
+                }
+            }
         }
     }
 }
@@ -1858,6 +1967,67 @@ mod tests {
         assert!(!show_hero_toc(11));
         assert!(show_hero_toc(12));
         assert!(show_hero_toc(24));
+    }
+
+    #[test]
+    fn open_hero_is_split_out_of_collapsed_grid() {
+        let (before, open, after) = hero_open_ranges(24, None);
+        assert_eq!(before, 0..24);
+        assert_eq!(open, None);
+        assert!(after.is_empty());
+
+        let (before, open, after) = hero_open_ranges(24, Some(0));
+        assert!(before.is_empty());
+        assert_eq!(open, Some(0));
+        assert_eq!(after, 1..24);
+
+        let (before, open, after) = hero_open_ranges(24, Some(5));
+        assert_eq!(before, 0..5);
+        assert_eq!(open, Some(5));
+        assert_eq!(after, 6..24);
+
+        let (before, open, after) = hero_open_ranges(24, Some(23));
+        assert_eq!(before, 0..23);
+        assert_eq!(open, Some(23));
+        assert!(after.is_empty());
+
+        let (before, open, after) = hero_open_ranges(24, Some(99));
+        assert_eq!(before, 0..24);
+        assert_eq!(open, None);
+        assert!(after.is_empty());
+    }
+
+    #[test]
+    fn search_field_uses_visible_label_for_id() {
+        assert_eq!(PATCH_SEARCH_ID, "patch-notes-search");
+        assert!(
+            PAGE_CSS.contains(".patch-search-label"),
+            "toolbar must style a visible search label, not placeholder-only"
+        );
+        assert!(
+            PAGE_CSS.contains(".patch-search-field"),
+            "label + input stay one sticky-toolbar row"
+        );
+    }
+
+    #[test]
+    fn open_hero_css_owns_the_list_column() {
+        assert!(
+            PAGE_CSS.contains("grid-template-areas: \"toc main\""),
+            "TOC + list must be named tracks so cards cannot become a third column"
+        );
+        assert!(
+            PAGE_CSS.contains(".patch-hero-main"),
+            "open detail lives in a dedicated list column beside the TOC"
+        );
+        assert!(
+            PAGE_CSS.contains(".patch-hero-layout > .patch-hero-main"),
+            "list column is pinned to the named main area"
+        );
+        assert!(
+            PAGE_CSS.contains("grid-column: 1 / -1"),
+            "collapsed-grid leftover still spans if a card stays in the list"
+        );
     }
 
     #[test]
