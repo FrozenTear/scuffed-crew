@@ -1,0 +1,1020 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+<meta charset="utf-8">
+<title>Patch Notes soft fixture — open hero beside TOC</title>
+<style>
+:root {
+  --font-head: 'Space Grotesk', system-ui, sans-serif;
+  --font-body: 'Inter', system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, monospace;
+  --space-4: 16px; --space-6: 24px; --space-8: 32px; --space-12: 48px;
+  --radius-sm: 7px; --radius-pill: 999px;
+}
+[data-theme="light"] {
+  --bg: #f7f7f9; --surface: #ffffff; --surface-2: #f0f0f4; --border: #e3e3e9;
+  --text: #16161c; --text-2: #545462; --text-3: #83838f;
+  --accent: #6d4aff; --accent-fg: #ffffff; --accent-soft: rgba(109,74,255,0.10);
+  --ok: #0ea66e; --warn: #c2830a; --danger: #d63031;
+  --chart-5: #0284c7;
+}
+[data-theme="dark"] {
+  --bg: #17171d; --surface: #1f1f27; --surface-2: #282831; --border: #353541;
+  --text: #f4f4f8; --text-2: #c1c1cd; --text-3: #9696a3;
+  --accent: #8f73ff; --accent-fg: #ffffff; --accent-soft: rgba(143,115,255,0.17);
+  --ok: #46d8a4; --warn: #fbbf24; --danger: #f06a6a;
+  --chart-5: #089fd7;
+}
+html, body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-body);
+}
+
+    .patch-page {
+        padding: var(--space-6) var(--space-6) var(--space-12);
+        max-width: 1200px;
+        margin: 0 auto;
+    }
+    .patch-header {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: 0.75rem;
+        margin-bottom: 0.85rem;
+        flex-wrap: wrap;
+    }
+    .patch-page-title {
+        font-family: var(--font-head);
+        font-size: 1.85rem;
+        color: var(--text);
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+        margin: 0;
+        line-height: 1.1;
+    }
+    .patch-count {
+        font-family: var(--font-mono);
+        font-size: 0.7rem;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: var(--text-3);
+    }
+    .patch-toolbar {
+        position: sticky;
+        /* Public site-nav is 48px fixed. Strategy nav is 50px in-flow, so stick at 0. */
+        top: 48px;
+        z-index: 8;
+        display: flex;
+        flex-direction: column;
+        gap: 0.65rem;
+        margin: 0 -0.35rem 1.15rem;
+        padding: 0.65rem 0.35rem 0.75rem;
+        background: color-mix(in srgb, var(--bg) 88%, transparent);
+        backdrop-filter: blur(14px);
+        border-bottom: 1px solid var(--border);
+    }
+    .patch-toolbar-row {
+        display: flex;
+        align-items: center;
+        gap: 0.65rem;
+    }
+    .patch-search-field {
+        flex: 1;
+        min-width: 0;
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+    }
+    .patch-search-label {
+        flex-shrink: 0;
+        font-family: var(--font-mono);
+        font-size: 0.68rem;
+        font-weight: 600;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: var(--text-3);
+    }
+    .patch-search {
+        flex: 1;
+        min-width: 0;
+        padding: 0.45rem 0.75rem;
+        border-radius: var(--radius-sm);
+        border: 1px solid var(--border);
+        background: var(--surface);
+        color: var(--text);
+        font-size: 0.85rem;
+        font-family: var(--font-body);
+        outline: none;
+        transition: border-color 0.15s;
+    }
+    .patch-search::placeholder {
+        color: var(--text-3);
+    }
+    .patch-search:focus {
+        border-color: var(--accent);
+    }
+    .patch-text-btn {
+        flex-shrink: 0;
+        border: none;
+        background: none;
+        color: var(--text-3);
+        font-family: var(--font-body);
+        font-size: 0.75rem;
+        cursor: pointer;
+        padding: 0.25rem 0;
+        text-decoration: underline;
+        text-underline-offset: 2px;
+    }
+    .patch-text-btn:hover {
+        color: var(--text);
+    }
+    .patch-filters {
+        display: flex;
+        gap: 0.4rem;
+        flex-wrap: wrap;
+    }
+    .patch-chip {
+        padding: 0.28rem 0.65rem;
+        border-radius: var(--radius-pill);
+        font-size: 0.7rem;
+        font-weight: 600;
+        border: 1px solid var(--border);
+        background: var(--surface);
+        color: var(--text-2);
+        cursor: pointer;
+        transition: all 0.15s;
+        text-transform: uppercase;
+        letter-spacing: 0.03em;
+    }
+    .patch-chip:hover {
+        border-color: var(--accent-soft);
+        color: var(--text);
+    }
+    .patch-chip.active {
+        border-color: var(--accent);
+        background: var(--accent-soft);
+        color: var(--accent);
+    }
+    .patch-year-block + .patch-year-block {
+        margin-top: 1.15rem;
+    }
+    .patch-year {
+        font-family: var(--font-mono);
+        font-size: 0.68rem;
+        font-weight: 600;
+        letter-spacing: 0.14em;
+        text-transform: uppercase;
+        color: var(--text-3);
+        margin: 0 0 0.45rem;
+    }
+    .patch-featured-wrap {
+        margin-bottom: 1.35rem;
+    }
+    .patch-timeline {
+        display: flex;
+        flex-direction: column;
+        gap: 0.4rem;
+    }
+    .patch-card {
+        background: var(--surface);
+        background-image: none;
+        border: 1px solid var(--border);
+        border-radius: var(--radius-sm);
+        /* visible so the 12+ hero TOC can stick; hidden clips position:sticky */
+        overflow: visible;
+        transition: border-color 0.2s;
+    }
+    .patch-card:hover {
+        border-color: var(--accent-soft);
+    }
+    .patch-card-featured {
+        border-color: color-mix(in srgb, var(--accent) 35%, var(--border));
+        background:
+            linear-gradient(
+                180deg,
+                color-mix(in srgb, var(--accent) 7%, var(--surface)) 0%,
+                var(--surface) 42%
+            );
+    }
+    .patch-card-header {
+        display: grid;
+        grid-template-columns: auto minmax(0, 1fr) auto auto auto;
+        align-items: center;
+        gap: 0.55rem 0.65rem;
+        width: 100%;
+        padding: 0.55rem 0.85rem;
+        border: none;
+        background: transparent;
+        color: inherit;
+        font: inherit;
+        text-align: left;
+        cursor: pointer;
+        user-select: none;
+    }
+    .patch-card-header:hover {
+        background: var(--surface-2);
+    }
+    .patch-card-featured .patch-card-header {
+        grid-template-columns: auto minmax(0, 1fr) auto;
+        align-items: start;
+        padding: 1rem 1.1rem 0.75rem;
+        gap: 0.65rem 0.85rem;
+    }
+    .patch-card-featured .patch-card-header:hover {
+        background: transparent;
+    }
+    .patch-version-badge {
+        font-family: var(--font-mono);
+        font-size: 0.72rem;
+        font-weight: 600;
+        padding: 0.12rem 0.45rem;
+        border-radius: 4px;
+        background: var(--accent-soft);
+        color: var(--accent);
+        flex-shrink: 0;
+    }
+    .patch-card-title {
+        font-family: var(--font-head);
+        font-weight: 700;
+        font-size: 0.9rem;
+        color: var(--text);
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+    .patch-card-featured .patch-card-title {
+        font-size: 1.2rem;
+        letter-spacing: 0.02em;
+        white-space: normal;
+        overflow: visible;
+        line-height: 1.25;
+    }
+    .patch-card-date {
+        font-family: var(--font-mono);
+        font-size: 0.7rem;
+        color: var(--text-3);
+        white-space: nowrap;
+    }
+    .patch-hero-count {
+        font-size: 0.68rem;
+        color: var(--text-2);
+        background: var(--surface-2);
+        padding: 0.08rem 0.4rem;
+        border-radius: var(--radius-pill);
+        white-space: nowrap;
+    }
+    .patch-tag-pills {
+        display: flex;
+        gap: 0.3rem;
+        flex-wrap: nowrap;
+        align-items: center;
+        min-width: 0;
+        overflow: hidden;
+    }
+    .patch-card-featured .patch-tag-pills {
+        flex-wrap: wrap;
+        overflow: visible;
+        grid-column: 2 / -2;
+    }
+    .patch-tag-pill {
+        font-size: 0.6rem;
+        padding: 0.08rem 0.4rem;
+        border-radius: var(--radius-pill);
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.03em;
+        white-space: nowrap;
+    }
+    .patch-tag-more {
+        font-family: var(--font-mono);
+        font-size: 0.6rem;
+        color: var(--text-3);
+        white-space: nowrap;
+    }
+    .patch-expand-icon {
+        font-size: 0.65rem;
+        color: var(--text-3);
+        line-height: 1;
+        transition: transform 0.2s;
+    }
+    .patch-expand-icon.open {
+        transform: rotate(180deg);
+    }
+    .patch-featured-copy {
+        padding: 0 1.1rem 0.85rem;
+    }
+    .patch-card-body {
+        padding: 0 1.1rem 1.1rem;
+        border-top: 1px solid var(--border);
+    }
+    .patch-body-lead {
+        font-size: 0.85rem;
+        color: var(--text-2);
+        line-height: 1.55;
+        margin: 0.85rem 0 0.15rem;
+    }
+    .patch-body-lead.clamp {
+        display: -webkit-box;
+        -webkit-line-clamp: 3;
+        -webkit-box-orient: vertical;
+        overflow: hidden;
+        margin: 0;
+    }
+    .patch-change-summary {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.35rem;
+        margin-top: 0.65rem;
+    }
+    .patch-section-title {
+        font-family: var(--font-head);
+        font-weight: 700;
+        font-size: 0.8rem;
+        color: var(--text);
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        margin: 1rem 0 0.5rem;
+    }
+    .patch-hero-layout {
+        display: grid;
+        grid-template-columns: 11rem minmax(0, 1fr);
+        grid-template-areas: "toc main";
+        gap: 0.85rem 1rem;
+        align-items: start;
+    }
+    .patch-hero-layout > .patch-hero-toc {
+        grid-area: toc;
+    }
+    .patch-hero-layout > .patch-hero-main {
+        grid-area: main;
+    }
+    .patch-hero-stack {
+        display: block;
+    }
+    /* Dedicated list column so an open accordion cannot become a third
+       implicit track of `.patch-hero-layout` or a single auto-fill cell. */
+    .patch-hero-main {
+        min-width: 0;
+        width: 100%;
+        display: flex;
+        flex-direction: column;
+        gap: 0.4rem;
+    }
+    .patch-hero-toc {
+        position: sticky;
+        top: calc(48px + 5.5rem);
+        display: flex;
+        flex-direction: column;
+        gap: 0.28rem;
+        max-height: calc(100vh - 8.5rem);
+        overflow-y: auto;
+        padding-right: 0.15rem;
+    }
+    .patch-hero-toc-title {
+        font-family: var(--font-mono);
+        font-size: 0.62rem;
+        font-weight: 600;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+        color: var(--text-3);
+        margin: 0 0 0.15rem;
+    }
+    .patch-hero-toc-item {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 0.35rem;
+        width: 100%;
+        border: 1px solid transparent;
+        border-radius: var(--radius-sm);
+        background: transparent;
+        color: var(--text-2);
+        font: inherit;
+        font-size: 0.75rem;
+        text-align: left;
+        padding: 0.28rem 0.45rem;
+        cursor: pointer;
+    }
+    .patch-hero-toc-item:hover {
+        background: var(--surface-2);
+        color: var(--text);
+    }
+    .patch-hero-toc-item.active {
+        border-color: var(--accent-soft);
+        background: var(--accent-soft);
+        color: var(--accent);
+    }
+    /* Collapsed rows: multi-col on desktop so 24 closed heroes are not a
+       tall wall. Open detail spans the full track (DEV + change grid). */
+    .patch-hero-list {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(min(300px, 100%), 1fr));
+        gap: 0.4rem 0.65rem;
+    }
+    .patch-hero-card {
+        background: var(--surface-2);
+        border: 1px solid var(--border);
+        border-radius: var(--radius-sm);
+        overflow: hidden;
+        scroll-margin-top: calc(48px + 5.75rem);
+    }
+    .patch-hero-card.open {
+        grid-column: 1 / -1;
+        width: 100%;
+        max-width: 100%;
+        box-sizing: border-box;
+        border-color: color-mix(in srgb, var(--accent) 28%, var(--border));
+    }
+    .patch-hero-card-header {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        width: 100%;
+        margin: 0;
+        padding: 0.42rem 0.75rem;
+        border: none;
+        background: transparent;
+        color: inherit;
+        font: inherit;
+        text-align: left;
+        cursor: pointer;
+    }
+    .patch-hero-card-header:hover {
+        background: color-mix(in srgb, var(--surface) 55%, var(--surface-2));
+    }
+    .patch-hero-name {
+        font-family: var(--font-head);
+        font-weight: 700;
+        font-size: 0.88rem;
+        color: var(--text);
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+    .patch-hero-meta {
+        margin-left: auto;
+        display: flex;
+        align-items: center;
+        gap: 0.4rem;
+        flex-shrink: 0;
+    }
+    .patch-hero-change-count {
+        font-family: var(--font-mono);
+        font-size: 0.62rem;
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+        color: var(--text-3);
+        white-space: nowrap;
+    }
+    .patch-change-badge {
+        font-size: 0.6rem;
+        padding: 0.1rem 0.45rem;
+        border-radius: var(--radius-pill);
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        white-space: nowrap;
+    }
+    .patch-hero-details {
+        padding: 0 0.75rem 0.75rem;
+        border-top: 1px solid var(--border);
+    }
+    .patch-dev-comment {
+        font-size: 0.78rem;
+        color: var(--text-2);
+        font-style: italic;
+        padding: 0.45rem 0.7rem;
+        margin: 0.55rem 0 0.5rem;
+        border-left: 2px solid var(--border);
+        line-height: 1.5;
+    }
+    .patch-change-list {
+        list-style: none;
+        padding: 0;
+        margin: 0.15rem 0 0;
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(min(280px, 100%), 1fr));
+        gap: 0.35rem 1rem;
+    }
+    .patch-change-item {
+        font-size: 0.8rem;
+        color: var(--text);
+        line-height: 1.5;
+        display: flex;
+        align-items: flex-start;
+        gap: 0.4rem;
+    }
+    .patch-change-marker {
+        flex-shrink: 0;
+        font-size: 0.68rem;
+        line-height: 1.6;
+        font-weight: 700;
+    }
+    .patch-change-copy {
+        min-width: 0;
+    }
+    .patch-change-ability {
+        font-weight: 700;
+        color: var(--text);
+    }
+    .patch-section-items {
+        list-style: none;
+        padding: 0;
+        margin: 0;
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(min(280px, 100%), 1fr));
+        gap: 0.25rem 1.15rem;
+    }
+    .patch-section-item {
+        font-size: 0.8rem;
+        color: var(--text);
+        line-height: 1.5;
+        padding-left: 0.75rem;
+        position: relative;
+    }
+    .patch-section-item::before {
+        content: "\2022";
+        position: absolute;
+        left: 0;
+        color: var(--text-3);
+    }
+    .patch-external-link {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.3rem;
+        font-size: 0.75rem;
+        color: var(--accent);
+        text-decoration: none;
+        margin-top: 0.75rem;
+        transition: opacity 0.15s;
+    }
+    .patch-external-link:hover {
+        opacity: 0.8;
+        text-decoration: underline;
+    }
+    .patch-loading, .patch-empty {
+        color: var(--text-3);
+        text-align: center;
+        padding: 4rem 1rem;
+        font-size: 0.95rem;
+    }
+    .patch-empty-hint {
+        margin-top: 0.5rem;
+        font-size: 0.85rem;
+    }
+    .patch-error {
+        color: var(--danger);
+    }
+    .patch-retry {
+        margin-top: 1rem;
+    }
+    .patch-chip-short {
+        display: none;
+    }
+    @media (max-width: 720px) {
+        .patch-page {
+            padding: var(--space-4) var(--space-4) var(--space-8);
+        }
+        .patch-page-title {
+            font-size: 1.45rem;
+            letter-spacing: 0.08em;
+        }
+        .patch-toolbar {
+            margin-left: -0.15rem;
+            margin-right: -0.15rem;
+        }
+        .patch-filters {
+            flex-wrap: nowrap;
+            overflow-x: auto;
+            padding-bottom: 0.15rem;
+            -webkit-overflow-scrolling: touch;
+            scrollbar-width: none;
+        }
+        .patch-filters::-webkit-scrollbar {
+            display: none;
+        }
+        .patch-chip {
+            flex-shrink: 0;
+        }
+        .patch-chip-full {
+            display: none;
+        }
+        .patch-chip-short {
+            display: inline;
+        }
+        .patch-hero-layout {
+            grid-template-columns: minmax(0, 1fr);
+            grid-template-areas:
+                "toc"
+                "main";
+        }
+        .patch-hero-toc {
+            position: static;
+            flex-direction: row;
+            flex-wrap: nowrap;
+            max-height: none;
+            overflow-x: auto;
+            overflow-y: hidden;
+            padding-right: 0;
+            padding-bottom: 0.2rem;
+            -webkit-overflow-scrolling: touch;
+            scrollbar-width: none;
+        }
+        .patch-hero-toc::-webkit-scrollbar {
+            display: none;
+        }
+        .patch-hero-toc-title {
+            display: none;
+        }
+        .patch-hero-toc-item {
+            width: auto;
+            flex-shrink: 0;
+        }
+        .patch-card-header {
+            grid-template-columns: auto minmax(0, 1fr) auto auto;
+        }
+        .patch-card-date,
+        .patch-tag-pills {
+            display: none;
+        }
+        .patch-card-featured .patch-card-header {
+            grid-template-columns: auto minmax(0, 1fr) auto;
+        }
+        .patch-card-featured .patch-card-date,
+        .patch-card-featured .patch-tag-pills {
+            display: flex;
+        }
+        .patch-card-featured .patch-card-title {
+            font-size: 1.05rem;
+        }
+    }
+    /* StrategyLayout nav is 50px in document flow (not fixed). */
+    [data-accent="strategy"] .patch-toolbar {
+        top: 0;
+    }
+    [data-accent="strategy"] .patch-hero-toc {
+        top: 5.5rem;
+    }
+    [data-accent="strategy"] .patch-hero-card {
+        scroll-margin-top: 5.75rem;
+    }
+
+#measure {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-3);
+  margin: 0 0 12px;
+}
+</style>
+</head>
+<body>
+<div class="patch-page">
+  <div class="patch-header">
+    <h1 class="patch-page-title">Patch Notes</h1>
+    <span class="patch-count">4 notes</span>
+  </div>
+  <div class="patch-toolbar">
+    <div class="patch-toolbar-row">
+      <div class="patch-search-field">
+        <label class="patch-search-label" for="patch-notes-search">Search</label>
+        <input id="patch-notes-search" class="patch-search" type="search" placeholder="Version, title, or hero…">
+      </div>
+      <button class="patch-text-btn" type="button">Expand all</button>
+    </div>
+    <div class="patch-filters">
+      <button class="patch-chip active" type="button"><span class="patch-chip-full">All</span></button>
+      <button class="patch-chip" type="button"><span class="patch-chip-full">Hero Balance</span></button>
+      <button class="patch-chip" type="button"><span class="patch-chip-full">Bug Fixes</span></button>
+    </div>
+  </div>
+  <p id="measure">measuring…</p>
+  <div class="patch-featured-wrap">
+    <p class="patch-year">Latest</p>
+    <div class="patch-card patch-card-featured">
+      <button class="patch-card-header" type="button">
+        <span class="patch-version-badge">2.19.0</span>
+        <span class="patch-card-title">Mid-season balance</span>
+        <span class="patch-card-date">2026-09-14</span>
+        <span class="patch-hero-count">24 heroes</span>
+        <span class="patch-expand-icon open">▼</span>
+      </button>
+      <div class="patch-card-body">
+        <h3 class="patch-section-title">Hero Balance</h3>
+        <div class="patch-hero-layout">
+          <nav class="patch-hero-toc" aria-label="Heroes in this patch">
+            <p class="patch-hero-toc-title">Heroes</p>
+            <button class="patch-hero-toc-item" type="button">Ana</button>
+<button class="patch-hero-toc-item" type="button">Ashe</button>
+<button class="patch-hero-toc-item" type="button">Baptiste</button>
+<button class="patch-hero-toc-item active" type="button">Cassidy</button>
+<button class="patch-hero-toc-item" type="button">D.Va</button>
+<button class="patch-hero-toc-item" type="button">Echo</button>
+<button class="patch-hero-toc-item" type="button">Freja</button>
+<button class="patch-hero-toc-item" type="button">Genji</button>
+<button class="patch-hero-toc-item" type="button">Hanzo</button>
+<button class="patch-hero-toc-item" type="button">Junker Queen</button>
+<button class="patch-hero-toc-item" type="button">Kiriko</button>
+<button class="patch-hero-toc-item" type="button">Lúcio</button>
+<button class="patch-hero-toc-item" type="button">Mercy</button>
+<button class="patch-hero-toc-item" type="button">Moira</button>
+<button class="patch-hero-toc-item" type="button">Orisa</button>
+<button class="patch-hero-toc-item" type="button">Pharah</button>
+<button class="patch-hero-toc-item" type="button">Ramattra</button>
+<button class="patch-hero-toc-item" type="button">Reinhardt</button>
+<button class="patch-hero-toc-item" type="button">Sigma</button>
+<button class="patch-hero-toc-item" type="button">Soldier: 76</button>
+<button class="patch-hero-toc-item" type="button">Sojourn</button>
+<button class="patch-hero-toc-item" type="button">Venture</button>
+<button class="patch-hero-toc-item" type="button">Widowmaker</button>
+<button class="patch-hero-toc-item" type="button">Zenyatta</button>
+          </nav>
+          <div class="patch-hero-main">
+            <div class="patch-hero-list">
+              
+      <div class="patch-hero-card" id="patch-0-hero-0">
+        <button class="patch-hero-card-header" type="button" aria-expanded="false">
+          <span class="patch-hero-name">Ana</span>
+          <span class="patch-change-badge" style="color:var(--ok); background:color-mix(in srgb, var(--ok) 12%, transparent);">Buff</span>
+          <div class="patch-hero-meta">
+            <span class="patch-hero-change-count">1 change</span>
+            <span class="patch-expand-icon">▼</span>
+          </div>
+        </button>
+      </div>
+      <div class="patch-hero-card" id="patch-0-hero-1">
+        <button class="patch-hero-card-header" type="button" aria-expanded="false">
+          <span class="patch-hero-name">Ashe</span>
+          <span class="patch-change-badge" style="color:var(--danger); background:color-mix(in srgb, var(--danger) 12%, transparent);">Nerf</span>
+          <div class="patch-hero-meta">
+            <span class="patch-hero-change-count">1 change</span>
+            <span class="patch-expand-icon">▼</span>
+          </div>
+        </button>
+      </div>
+      <div class="patch-hero-card" id="patch-0-hero-2">
+        <button class="patch-hero-card-header" type="button" aria-expanded="false">
+          <span class="patch-hero-name">Baptiste</span>
+          <span class="patch-change-badge" style="color:var(--warn); background:color-mix(in srgb, var(--warn) 12%, transparent);">Adjustment</span>
+          <div class="patch-hero-meta">
+            <span class="patch-hero-change-count">1 change</span>
+            <span class="patch-expand-icon">▼</span>
+          </div>
+        </button>
+      </div>
+            </div>
+            
+      <div class="patch-hero-card open" id="patch-0-hero-3">
+        <button class="patch-hero-card-header" type="button" aria-expanded="true">
+          <span class="patch-hero-name">Cassidy</span>
+          <span class="patch-change-badge" style="color:var(--danger); background:color-mix(in srgb, var(--danger) 12%, transparent);">Nerf</span>
+          <div class="patch-hero-meta">
+            <span class="patch-hero-change-count">2 changes</span>
+            <span class="patch-expand-icon open">▼</span>
+          </div>
+        </button>
+        <div class="patch-hero-details">
+          <p class="patch-dev-comment">"Peacekeeper range is a bit less forgiving at max distance."</p>
+          <ul class="patch-change-list">
+            <li class="patch-change-item"><span class="patch-change-marker" style="color:var(--danger)">▼</span><span class="patch-change-copy"><span class="patch-change-ability">Peacekeeper: </span>Falloff starts closer.</span></li>
+            <li class="patch-change-item"><span class="patch-change-marker" style="color:var(--danger)">▼</span><span class="patch-change-copy"><span class="patch-change-ability">Combat Roll: </span>Recovery slightly longer.</span></li>
+          </ul>
+        </div>
+      </div>
+            <div class="patch-hero-list">
+              
+      <div class="patch-hero-card" id="patch-0-hero-4">
+        <button class="patch-hero-card-header" type="button" aria-expanded="false">
+          <span class="patch-hero-name">D.Va</span>
+          <span class="patch-change-badge" style="color:var(--ok); background:color-mix(in srgb, var(--ok) 12%, transparent);">Buff</span>
+          <div class="patch-hero-meta">
+            <span class="patch-hero-change-count">1 change</span>
+            <span class="patch-expand-icon">▼</span>
+          </div>
+        </button>
+      </div>
+      <div class="patch-hero-card" id="patch-0-hero-5">
+        <button class="patch-hero-card-header" type="button" aria-expanded="false">
+          <span class="patch-hero-name">Echo</span>
+          <span class="patch-change-badge" style="color:var(--text-3); background:color-mix(in srgb, var(--text-3) 12%, transparent);">Bug Fix</span>
+          <div class="patch-hero-meta">
+            <span class="patch-hero-change-count">1 change</span>
+            <span class="patch-expand-icon">▼</span>
+          </div>
+        </button>
+      </div>
+      <div class="patch-hero-card" id="patch-0-hero-6">
+        <button class="patch-hero-card-header" type="button" aria-expanded="false">
+          <span class="patch-hero-name">Freja</span>
+          <span class="patch-change-badge" style="color:var(--ok); background:color-mix(in srgb, var(--ok) 12%, transparent);">Buff</span>
+          <div class="patch-hero-meta">
+            <span class="patch-hero-change-count">1 change</span>
+            <span class="patch-expand-icon">▼</span>
+          </div>
+        </button>
+      </div>
+      <div class="patch-hero-card" id="patch-0-hero-7">
+        <button class="patch-hero-card-header" type="button" aria-expanded="false">
+          <span class="patch-hero-name">Genji</span>
+          <span class="patch-change-badge" style="color:var(--danger); background:color-mix(in srgb, var(--danger) 12%, transparent);">Nerf</span>
+          <div class="patch-hero-meta">
+            <span class="patch-hero-change-count">1 change</span>
+            <span class="patch-expand-icon">▼</span>
+          </div>
+        </button>
+      </div>
+      <div class="patch-hero-card" id="patch-0-hero-8">
+        <button class="patch-hero-card-header" type="button" aria-expanded="false">
+          <span class="patch-hero-name">Hanzo</span>
+          <span class="patch-change-badge" style="color:var(--warn); background:color-mix(in srgb, var(--warn) 12%, transparent);">Adjustment</span>
+          <div class="patch-hero-meta">
+            <span class="patch-hero-change-count">1 change</span>
+            <span class="patch-expand-icon">▼</span>
+          </div>
+        </button>
+      </div>
+      <div class="patch-hero-card" id="patch-0-hero-9">
+        <button class="patch-hero-card-header" type="button" aria-expanded="false">
+          <span class="patch-hero-name">Junker Queen</span>
+          <span class="patch-change-badge" style="color:var(--ok); background:color-mix(in srgb, var(--ok) 12%, transparent);">Buff</span>
+          <div class="patch-hero-meta">
+            <span class="patch-hero-change-count">1 change</span>
+            <span class="patch-expand-icon">▼</span>
+          </div>
+        </button>
+      </div>
+      <div class="patch-hero-card" id="patch-0-hero-10">
+        <button class="patch-hero-card-header" type="button" aria-expanded="false">
+          <span class="patch-hero-name">Kiriko</span>
+          <span class="patch-change-badge" style="color:var(--danger); background:color-mix(in srgb, var(--danger) 12%, transparent);">Nerf</span>
+          <div class="patch-hero-meta">
+            <span class="patch-hero-change-count">1 change</span>
+            <span class="patch-expand-icon">▼</span>
+          </div>
+        </button>
+      </div>
+      <div class="patch-hero-card" id="patch-0-hero-11">
+        <button class="patch-hero-card-header" type="button" aria-expanded="false">
+          <span class="patch-hero-name">Lúcio</span>
+          <span class="patch-change-badge" style="color:var(--warn); background:color-mix(in srgb, var(--warn) 12%, transparent);">Adjustment</span>
+          <div class="patch-hero-meta">
+            <span class="patch-hero-change-count">1 change</span>
+            <span class="patch-expand-icon">▼</span>
+          </div>
+        </button>
+      </div>
+      <div class="patch-hero-card" id="patch-0-hero-12">
+        <button class="patch-hero-card-header" type="button" aria-expanded="false">
+          <span class="patch-hero-name">Mercy</span>
+          <span class="patch-change-badge" style="color:var(--text-3); background:color-mix(in srgb, var(--text-3) 12%, transparent);">Bug Fix</span>
+          <div class="patch-hero-meta">
+            <span class="patch-hero-change-count">1 change</span>
+            <span class="patch-expand-icon">▼</span>
+          </div>
+        </button>
+      </div>
+      <div class="patch-hero-card" id="patch-0-hero-13">
+        <button class="patch-hero-card-header" type="button" aria-expanded="false">
+          <span class="patch-hero-name">Moira</span>
+          <span class="patch-change-badge" style="color:var(--ok); background:color-mix(in srgb, var(--ok) 12%, transparent);">Buff</span>
+          <div class="patch-hero-meta">
+            <span class="patch-hero-change-count">1 change</span>
+            <span class="patch-expand-icon">▼</span>
+          </div>
+        </button>
+      </div>
+      <div class="patch-hero-card" id="patch-0-hero-14">
+        <button class="patch-hero-card-header" type="button" aria-expanded="false">
+          <span class="patch-hero-name">Orisa</span>
+          <span class="patch-change-badge" style="color:var(--danger); background:color-mix(in srgb, var(--danger) 12%, transparent);">Nerf</span>
+          <div class="patch-hero-meta">
+            <span class="patch-hero-change-count">1 change</span>
+            <span class="patch-expand-icon">▼</span>
+          </div>
+        </button>
+      </div>
+      <div class="patch-hero-card" id="patch-0-hero-15">
+        <button class="patch-hero-card-header" type="button" aria-expanded="false">
+          <span class="patch-hero-name">Pharah</span>
+          <span class="patch-change-badge" style="color:var(--ok); background:color-mix(in srgb, var(--ok) 12%, transparent);">Buff</span>
+          <div class="patch-hero-meta">
+            <span class="patch-hero-change-count">1 change</span>
+            <span class="patch-expand-icon">▼</span>
+          </div>
+        </button>
+      </div>
+      <div class="patch-hero-card" id="patch-0-hero-16">
+        <button class="patch-hero-card-header" type="button" aria-expanded="false">
+          <span class="patch-hero-name">Ramattra</span>
+          <span class="patch-change-badge" style="color:var(--warn); background:color-mix(in srgb, var(--warn) 12%, transparent);">Adjustment</span>
+          <div class="patch-hero-meta">
+            <span class="patch-hero-change-count">1 change</span>
+            <span class="patch-expand-icon">▼</span>
+          </div>
+        </button>
+      </div>
+      <div class="patch-hero-card" id="patch-0-hero-17">
+        <button class="patch-hero-card-header" type="button" aria-expanded="false">
+          <span class="patch-hero-name">Reinhardt</span>
+          <span class="patch-change-badge" style="color:var(--ok); background:color-mix(in srgb, var(--ok) 12%, transparent);">Buff</span>
+          <div class="patch-hero-meta">
+            <span class="patch-hero-change-count">1 change</span>
+            <span class="patch-expand-icon">▼</span>
+          </div>
+        </button>
+      </div>
+      <div class="patch-hero-card" id="patch-0-hero-18">
+        <button class="patch-hero-card-header" type="button" aria-expanded="false">
+          <span class="patch-hero-name">Sigma</span>
+          <span class="patch-change-badge" style="color:var(--danger); background:color-mix(in srgb, var(--danger) 12%, transparent);">Nerf</span>
+          <div class="patch-hero-meta">
+            <span class="patch-hero-change-count">1 change</span>
+            <span class="patch-expand-icon">▼</span>
+          </div>
+        </button>
+      </div>
+      <div class="patch-hero-card" id="patch-0-hero-19">
+        <button class="patch-hero-card-header" type="button" aria-expanded="false">
+          <span class="patch-hero-name">Soldier: 76</span>
+          <span class="patch-change-badge" style="color:var(--text-3); background:color-mix(in srgb, var(--text-3) 12%, transparent);">Bug Fix</span>
+          <div class="patch-hero-meta">
+            <span class="patch-hero-change-count">1 change</span>
+            <span class="patch-expand-icon">▼</span>
+          </div>
+        </button>
+      </div>
+      <div class="patch-hero-card" id="patch-0-hero-20">
+        <button class="patch-hero-card-header" type="button" aria-expanded="false">
+          <span class="patch-hero-name">Sojourn</span>
+          <span class="patch-change-badge" style="color:var(--danger); background:color-mix(in srgb, var(--danger) 12%, transparent);">Nerf</span>
+          <div class="patch-hero-meta">
+            <span class="patch-hero-change-count">1 change</span>
+            <span class="patch-expand-icon">▼</span>
+          </div>
+        </button>
+      </div>
+      <div class="patch-hero-card" id="patch-0-hero-21">
+        <button class="patch-hero-card-header" type="button" aria-expanded="false">
+          <span class="patch-hero-name">Venture</span>
+          <span class="patch-change-badge" style="color:var(--ok); background:color-mix(in srgb, var(--ok) 12%, transparent);">Buff</span>
+          <div class="patch-hero-meta">
+            <span class="patch-hero-change-count">1 change</span>
+            <span class="patch-expand-icon">▼</span>
+          </div>
+        </button>
+      </div>
+      <div class="patch-hero-card" id="patch-0-hero-22">
+        <button class="patch-hero-card-header" type="button" aria-expanded="false">
+          <span class="patch-hero-name">Widowmaker</span>
+          <span class="patch-change-badge" style="color:var(--warn); background:color-mix(in srgb, var(--warn) 12%, transparent);">Adjustment</span>
+          <div class="patch-hero-meta">
+            <span class="patch-hero-change-count">1 change</span>
+            <span class="patch-expand-icon">▼</span>
+          </div>
+        </button>
+      </div>
+      <div class="patch-hero-card" id="patch-0-hero-23">
+        <button class="patch-hero-card-header" type="button" aria-expanded="false">
+          <span class="patch-hero-name">Zenyatta</span>
+          <span class="patch-change-badge" style="color:var(--ok); background:color-mix(in srgb, var(--ok) 12%, transparent);">Buff</span>
+          <div class="patch-hero-meta">
+            <span class="patch-hero-change-count">1 change</span>
+            <span class="patch-expand-icon">▼</span>
+          </div>
+        </button>
+      </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+<script>
+function report() {
+  const main = document.querySelector('.patch-hero-main');
+  const open = document.querySelector('.patch-hero-card.open');
+  const toc = document.querySelector('.patch-hero-toc');
+  const cell = document.querySelector('.patch-hero-list .patch-hero-card');
+  const layout = document.querySelector('.patch-hero-layout');
+  const r = (el) => el.getBoundingClientRect();
+  const mw = r(main).width, ow = r(open).width, tw = r(toc).width, cw = r(cell).width, lw = r(layout).width;
+  const ratio = ow / mw;
+  const ok = ratio >= 0.98 && ow > cw * 1.8;
+  const status = ok ? 'FULL-WIDTH-OK' : 'SQUEEZED';
+  document.getElementById('measure').textContent =
+    'layout=' + lw.toFixed(1) +
+    ' toc=' + tw.toFixed(1) +
+    ' main=' + mw.toFixed(1) +
+    ' open=' + ow.toFixed(1) +
+    ' collapsedCell=' + cw.toFixed(1) +
+    ' open/main=' + ratio.toFixed(3) +
+    ' ' + status;
+}
+requestAnimationFrame(report);
+</script>
+</body>
+</html>
