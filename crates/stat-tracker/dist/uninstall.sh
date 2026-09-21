@@ -14,12 +14,14 @@
 # Env (must match the values used at install time):
 #   PREFIX        default ~/.local
 #   BIN_DIR       default $PREFIX/bin
+#   LIB_DIR       default $PREFIX/lib
 #   DESKTOP_DIR   default ~/.local/share/applications
 #   SYSTEMD_DIR   default ~/.config/systemd/user
 set -euo pipefail
 
 PREFIX="${PREFIX:-$HOME/.local}"
 BIN_DIR="${BIN_DIR:-$PREFIX/bin}"
+LIB_DIR="${LIB_DIR:-$PREFIX/lib}"
 DESKTOP_DIR="${DESKTOP_DIR:-$HOME/.local/share/applications}"
 SYSTEMD_DIR="${SYSTEMD_DIR:-$HOME/.config/systemd/user}"
 # App dirs are $HOME-anchored (dirs::data_dir / dirs::config_dir), not PREFIX.
@@ -27,7 +29,9 @@ DATA_DIR="$HOME/.local/share/scuffed-stat-tracker"
 CONFIG_DIR="$HOME/.config/scuffed-stat-tracker"
 MANIFEST="$PREFIX/share/scuffed-stat-tracker/install-manifest.txt"
 UNIT="scuffed-stat-tracker.service"
+SESSION_UNIT="scuffed-stat-tracker-session.service"
 DESKTOP="scuffed-stat-tracker.desktop"
+SYSTEMCTL_BIN="${SCUFFED_SYSTEMCTL:-systemctl}"
 
 RED='\033[0;31m'
 YLW='\033[1;33m'
@@ -56,8 +60,9 @@ done
 
 # ── Stop / disable the daemon ─────────────────────────────────────────────────
 
-if command -v systemctl &>/dev/null; then
-    systemctl --user disable --now "$UNIT" 2>/dev/null || true
+if [[ -x "$SYSTEMCTL_BIN" ]] || command -v "$SYSTEMCTL_BIN" &>/dev/null; then
+    "$SYSTEMCTL_BIN" --user disable --now "$UNIT" 2>/dev/null || true
+    "$SYSTEMCTL_BIN" --user stop "$SESSION_UNIT" 2>/dev/null || true
 fi
 
 # ── Collect installed files ───────────────────────────────────────────────────
@@ -77,6 +82,8 @@ else
         "$BIN_DIR/scuffed-stat-tracker-uninstall"
         "$DESKTOP_DIR/$DESKTOP"
         "$SYSTEMD_DIR/$UNIT"
+        "$SYSTEMD_DIR/$SESSION_UNIT"
+        "$LIB_DIR/scuffed-stat-tracker/import-session-env.sh"
     )
     warn "Bundled libs in $PREFIX/lib/scuffed-stat-tracker (or leftover"
     warn "v0.4.0 files in $PREFIX/lib) cannot be identified without a"
@@ -98,8 +105,8 @@ rmdir "$PREFIX/lib/scuffed-stat-tracker/ocr" 2>/dev/null || true
 rmdir "$PREFIX/lib/scuffed-stat-tracker/gui" 2>/dev/null || true
 rmdir "$PREFIX/lib/scuffed-stat-tracker" 2>/dev/null || true
 
-if command -v systemctl &>/dev/null; then
-    systemctl --user daemon-reload 2>/dev/null || true
+if [[ -x "$SYSTEMCTL_BIN" ]] || command -v "$SYSTEMCTL_BIN" &>/dev/null; then
+    "$SYSTEMCTL_BIN" --user daemon-reload 2>/dev/null || true
 fi
 if command -v update-desktop-database &>/dev/null; then
     update-desktop-database "$DESKTOP_DIR" 2>/dev/null || true

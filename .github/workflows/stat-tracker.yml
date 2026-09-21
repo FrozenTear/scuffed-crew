@@ -44,6 +44,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Packaging scripts
+        run: |
+          bash dist/test-packaging.sh
+          bash dist/test-desktop-entry.sh
+          bash dist/test-systemd-unit.sh
+
       - name: Install system dependencies
         run: |
           sudo apt-get update

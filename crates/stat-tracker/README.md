@@ -124,6 +124,9 @@ poll-tick frames for diagnosis), `--generate-tessdata`.
 
 A user systemd unit named `scuffed-stat-tracker.service` is recognized by the
 GUI's daemon card (start/stop/autostart route through systemd when installed).
+`install.sh` rewrites `ExecStart` to the absolute `$PREFIX/bin` daemon and
+installs a oneshot that fills the display variables the unit does not
+inherit. See Troubleshooting if capture stays on `CaptureBackend::None`.
 
 ## Config (`~/.config/scuffed-stat-tracker/config.toml`)
 
@@ -199,6 +202,51 @@ or delete the tracker-owned files:
 ```sh
 rm -f ~/.local/lib/libcrypto.so.3 ~/.local/lib/libssl.so.3
 ```
+
+**Daemon runs under systemd but never captures (`CaptureBackend::None`).**
+Wayshot needs `WAYLAND_DISPLAY`, X11 needs `DISPLAY`, and the portal probe
+looks at `XDG_CURRENT_DESKTOP`. A process the GUI spawns itself inherits
+the session. The user unit does not. GNOME and KDE import those variables
+into `systemd --user`; Sway and Hyprland do not, and
+`graphical-session.target` does not either. An import done once at install
+also dies on logout, and the socket name can change the next time the
+compositor starts.
+
+Reinstall so the unit on disk is rewritten, then restart the daemon from
+the GUI (or `systemctl --user restart scuffed-stat-tracker.service`).
+Install does three things:
+
+1. `ExecStart` becomes the absolute `$PREFIX/bin/scuffed-stat-tracker`.
+   A custom prefix used to keep launching `~/.local/bin`.
+2. It imports `WAYLAND_DISPLAY`, `DISPLAY`, `XDG_CURRENT_DESKTOP`, and
+   `XDG_SESSION_TYPE` into the user manager when `systemctl --user` works.
+3. It installs `scuffed-stat-tracker-session.service`, a oneshot that runs
+   before every daemon start. The oneshot reads those variables from the
+   compositor's `/proc/<pid>/environ` (sway and Hyprland first, then other
+   known compositors, then Xorg/Xwayland) and writes
+   `~/.config/scuffed-stat-tracker/session.env`. The daemon unit loads that
+   file, so a later login still has a display socket even though the
+   manager import from step 2 is gone.
+
+The compositor value wins over whatever the user manager already had, so a
+stale `wayland-1` does not hide a new socket. A shell that is not a
+compositor is ignored.
+
+Caveats:
+
+- SSH, or install before the compositor is up, with none of those variables
+  in the environment: the manager import is skipped and `session.env` is
+  empty until a later start while a recognized compositor is running.
+  Start the daemon again after you log in; the oneshot retries.
+- No user bus (`systemctl --user` fails): the unit and `session.env` are
+  still written. The manager import is retried, with a 5 second timeout,
+  each time the daemon starts.
+- A compositor not in the helper's list is invisible. From a terminal in
+  that session run `systemctl --user import-environment WAYLAND_DISPLAY
+  DISPLAY XDG_CURRENT_DESKTOP XDG_SESSION_TYPE` and restart the daemon.
+- Do not install with `sudo`. The helper only reads processes of the
+  installing user. `session.env` is always `~/.config/scuffed-stat-tracker/`
+  (the unit's `%h`), not `$XDG_CONFIG_HOME`.
 
 **Games play but nothing is recorded, and `debug/accepted/` stays empty.**
 The daemon reads Tab presses straight from `/dev/input`. A global-hotkey daemon

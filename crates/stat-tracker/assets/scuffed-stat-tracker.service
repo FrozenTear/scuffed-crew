@@ -1,6 +1,11 @@
 [Unit]
 Description=Scuffed Stat Tracker — OW2 personal stats capture daemon
-After=graphical-session.target
+After=graphical-session.target scuffed-stat-tracker-session.service
+# Soft dependency: a failed session import must not keep the daemon down.
+# graphical-session.target does not put WAYLAND_DISPLAY or DISPLAY on the
+# user manager under Sway/Hyprland. The session oneshot writes session.env
+# before this process is spawned.
+Wants=scuffed-stat-tracker-session.service
 PartOf=graphical-session.target
 # A daemon that fails to start on every attempt (e.g. a broken config or a
 # genuinely-stuck lock) must land in `failed` and stay visible — NOT loop on
@@ -11,7 +16,14 @@ StartLimitBurst=5
 
 [Service]
 Type=simple
+# ExecStart is rewritten at install to the absolute $PREFIX/bin binary.
+# This placeholder matches the default prefix only; a custom PREFIX must
+# go through install.sh or the unit keeps launching ~/.local/bin.
 ExecStart=%h/.local/bin/scuffed-stat-tracker
+# Refreshed by import-session-env.sh on each start. Overrides a stale
+# user-manager import when the compositor socket name changes.
+# The leading '-' means a missing file does not fail the unit.
+EnvironmentFile=-%h/.config/scuffed-stat-tracker/session.env
 Restart=on-failure
 RestartSec=10
 StandardOutput=journal
