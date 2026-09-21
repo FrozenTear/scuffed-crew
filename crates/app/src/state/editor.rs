@@ -747,9 +747,11 @@ mod tests {
         );
         strategy.sub_map_id = Some("  ".to_string());
 
-        let mut canvas = CanvasState::default();
-        canvas.current_map = Some("stale".to_string());
-        canvas.selected_sub_map = Some("stale_sub".to_string());
+        let mut canvas = CanvasState {
+            current_map: Some("stale".to_string()),
+            selected_sub_map: Some("stale_sub".to_string()),
+            ..Default::default()
+        };
         canvas.load_strategy(&strategy);
 
         assert!(canvas.current_map.is_none());
