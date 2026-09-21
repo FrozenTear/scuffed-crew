@@ -28,6 +28,14 @@ struct Ability {
     icon_url: Option<String>,
 }
 
+/// `{ "data": [...] }` envelope — same unwrap as Browse / My Strategies.
+/// `data` is required so a bare `[]` / `{}` cannot look like a successful empty list.
+#[derive(Debug, Clone, Deserialize)]
+struct ListResponse {
+    #[serde(alias = "heroes")]
+    data: Vec<Hero>,
+}
+
 impl Hero {
     fn total_hp(&self) -> u32 {
         self.health + self.armor + self.shields
@@ -162,8 +170,9 @@ pub fn StrategyHeroes() -> Element {
 
     let heroes = use_resource(|| async {
         ApiClient::web()
-            .fetch::<Vec<Hero>>("/api/strategy/heroes")
+            .fetch::<ListResponse>("/api/strategy/heroes")
             .await
+            .map(|resp| resp.data)
     });
 
     rsx! {
@@ -458,5 +467,38 @@ fn render_ability_card(ability: &Ability) -> Element {
                 p { class: "ability-desc", "{ability.description}" }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn list_envelope_unwraps_data_not_bare_vec() {
+        let empty: ListResponse = serde_json::from_str(r#"{"data":[]}"#).unwrap();
+        assert!(empty.data.is_empty());
+
+        let aliased: ListResponse = serde_json::from_str(r#"{"heroes":[]}"#).unwrap();
+        assert!(aliased.data.is_empty());
+
+        let empty_obj: Result<ListResponse, _> = serde_json::from_str("{}");
+        assert!(empty_obj.is_err(), "missing data key is not an empty list");
+
+        let bare_empty: Result<ListResponse, _> = serde_json::from_str("[]");
+        assert!(
+            bare_empty.is_err(),
+            "GET /api/strategy/heroes is the list envelope, not a bare Vec"
+        );
+    }
+
+    #[test]
+    fn bare_vec_cannot_read_server_envelope() {
+        let envelope = r#"{"data":[]}"#;
+        let as_vec: Result<Vec<Hero>, _> = serde_json::from_str(envelope);
+        assert!(
+            as_vec.is_err(),
+            "server wraps the list in {{ data }}; Vec::<Hero> is the old bug"
+        );
     }
 }
