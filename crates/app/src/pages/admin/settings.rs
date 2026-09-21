@@ -36,6 +36,7 @@ pub fn AdminSettings() -> Element {
     let mut page_bg_image_url = use_signal(String::new);
     let mut brand_accent_dark = use_signal(String::new);
     let mut brand_accent_light = use_signal(String::new);
+    let mut strategies_enabled = use_signal(|| true);
     // Selected identity pack id for “Apply pack”.
     let mut homepage_preset_id = use_signal(|| "neutral".to_string());
     let mut apply_suggested_brand = use_signal(|| true);
@@ -76,6 +77,7 @@ pub fn AdminSettings() -> Element {
                     page_bg_image_url.set(s.page_bg_image_url);
                     brand_accent_dark.set(s.brand_accent_dark);
                     brand_accent_light.set(s.brand_accent_light);
+                    strategies_enabled.set(s.strategies_enabled);
                     loaded.set(true);
                     Some(true)
                 }
@@ -101,7 +103,7 @@ pub fn AdminSettings() -> Element {
             org_name: Some(org_name().trim().to_string()),
             site_description: Some(site_description().trim().to_string()),
             recruitment_open: Some(recruitment_open()),
-            strategies_enabled: None,
+            strategies_enabled: Some(strategies_enabled()),
             recruitment_message: Some(recruitment_message().trim().to_string()),
             min_age: Some(age),
             forum_backend: Some(forum_backend()),
@@ -137,6 +139,7 @@ pub fn AdminSettings() -> Element {
                     page_bg_image_url.set(s.page_bg_image_url);
                     brand_accent_dark.set(s.brand_accent_dark);
                     brand_accent_light.set(s.brand_accent_light);
+                    strategies_enabled.set(s.strategies_enabled);
                     toast.show(Toast::success("Settings saved."));
                 }
                 Err(e) => toast.show(Toast::error(format!("Failed to save settings: {e}"))),
@@ -578,6 +581,35 @@ pub fn AdminSettings() -> Element {
             }
 
             div { class: "form-section",
+                h2 { "Features" }
+                p { class: "form-section-lead",
+                    "Turn product areas on or off for this clan. Off hides them from the public site. Patch Notes stay available."
+                }
+                div { class: "form-section-card",
+                    {
+                        let chip_class = if strategies_enabled() {
+                            "section-chip is-on"
+                        } else {
+                            "section-chip"
+                        };
+                        rsx! {
+                            label { class: "{chip_class}", style: "margin-bottom:0.65rem;",
+                                input {
+                                    r#type: "checkbox",
+                                    checked: strategies_enabled(),
+                                    onchange: move |e| strategies_enabled.set(e.checked()),
+                                }
+                                "Strategies"
+                            }
+                        }
+                    }
+                    p { class: "settings-hint",
+                        "On (default): Strategies stays in Primary/More if you placed it there. Off: hide it from the public nav and block /strategy pages. Existing plans are not deleted. Public Patch Notes (/patch-notes) are unchanged."
+                    }
+                }
+            }
+
+            div { class: "form-section",
                 h2 { "Homepage text" }
                 p { class: "form-section-lead",
                     "Fine-tune copy after a pack. Expand a section to edit. List fields: one item per line."
@@ -710,7 +742,11 @@ pub fn AdminSettings() -> Element {
                     }
                 }
                 p { class: "form-section-lead",
-                    "Primary bar, More menu, or hidden. Small-org default: Members, Forum, Events, Stats primary; Tournaments / Scrims / Strategy under More. Hidden routes still work via URL."
+                    if strategies_enabled() {
+                        "Primary bar, More menu, or hidden. Small-org default: Members, Forum, Events, Stats primary; Tournaments / Scrims / Strategy under More. Hidden routes still work via URL."
+                    } else {
+                        "Primary bar, More menu, or hidden. Strategies is off under Features — it will not appear in Primary or More even if placed here, and /strategy URLs are blocked. Patch Notes stay available."
+                    }
                 }
                 NavColumn {
                     title: "Primary bar",
