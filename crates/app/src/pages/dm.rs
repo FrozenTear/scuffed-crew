@@ -99,21 +99,11 @@ pub fn DmThread(peer_pubkey: String) -> Element {
 
 #[component]
 fn DmPageInner(selected_peer: Option<String>) -> Element {
+    // Hooks must run unconditionally. Auth boots as loading → logged-out, then
+    // `/api/auth/me` lands; an early return before these hooks changes the
+    // hook count and panics (same pattern as AdminLayout).
     let auth = use_auth();
     let mut toast = use_toast();
-
-    if !auth().is_logged_in() {
-        return rsx! {
-            style { {PAGE_CSS} }
-            main { class: "dm-page",
-                h1 { class: "dm-page-title", "Direct Messages" }
-                div { class: "dm-login-needed",
-                    "You must be signed in to view direct messages."
-                }
-            }
-        };
-    }
-
     let mut refresh = use_signal(|| 0u64);
     let mut syncing = use_signal(|| false);
     let mut load_state = use_signal(|| LoadState::Loading);
@@ -121,10 +111,20 @@ fn DmPageInner(selected_peer: Option<String>) -> Element {
     let mut compose_open = use_signal(|| false);
     let navigator = use_navigator();
 
-    let me = use_resource(move || async move { ApiClient::web().get_me().await.ok() });
+    let me = use_resource(move || async move {
+        // Read auth so this resource re-runs when the session resolves.
+        if !auth().is_logged_in() {
+            return None;
+        }
+        ApiClient::web().get_me().await.ok()
+    });
 
     let _load_conversations = use_resource(move || async move {
         let _ = refresh();
+        if !auth().is_logged_in() {
+            load_state.set(LoadState::Loading);
+            return;
+        }
         load_state.set(LoadState::Loading);
 
         // Fire sync on mount; ignore failure (will surface via the conversations call).
@@ -157,6 +157,28 @@ fn DmPageInner(selected_peer: Option<String>) -> Element {
             }
         }
     });
+
+    if auth().loading {
+        return rsx! {
+            style { {PAGE_CSS} }
+            main { class: "dm-page",
+                h1 { class: "dm-page-title", "Direct Messages" }
+                p { class: "dm-loading", "Checking session…" }
+            }
+        };
+    }
+
+    if !auth().is_logged_in() {
+        return rsx! {
+            style { {PAGE_CSS} }
+            main { class: "dm-page",
+                h1 { class: "dm-page-title", "Direct Messages" }
+                div { class: "dm-login-needed",
+                    "You must be signed in to view direct messages."
+                }
+            }
+        };
+    }
 
     let on_refresh = move |_| {
         if syncing() {
@@ -277,6 +299,37 @@ fn DmPageInner(selected_peer: Option<String>) -> Element {
                 on_close: on_compose_close,
                 on_sent: on_compose_sent,
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// Source-order guard: auth/session flips must not change the hook count.
+    /// The old `if !auth().is_logged_in() { return }` sat *before* `use_signal` /
+    /// `use_resource` / `use_navigator` and panicked when `/api/auth/me` landed.
+    #[test]
+    fn dm_page_inner_registers_hooks_before_any_return() {
+        let src = include_str!("dm.rs");
+        let start = src.find("fn DmPageInner").expect("DmPageInner component");
+        let body = &src[start..];
+        let first_return = body
+            .find("return rsx!")
+            .expect("expected a post-hooks return rsx!");
+        for hook in [
+            "use_auth()",
+            "use_toast()",
+            "use_signal",
+            "use_navigator()",
+            "use_resource",
+        ] {
+            let pos = body
+                .find(hook)
+                .unwrap_or_else(|| panic!("{hook} should appear in DmPageInner"));
+            assert!(
+                pos < first_return,
+                "{hook} must be registered before the first `return rsx!` (was {pos} >= {first_return})"
+            );
         }
     }
 }

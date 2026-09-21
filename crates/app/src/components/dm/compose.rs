@@ -182,10 +182,9 @@ pub fn DmComposeModal(
     /// cache, etc.
     on_sent: EventHandler<(String, DmMessage)>,
 ) -> Element {
-    if !open {
-        return rsx! {};
-    }
-
+    // Hooks must run even while closed. The parent keeps this component
+    // mounted and toggles `open`; returning before hooks changes the hook
+    // count and panics.
     let mut recipient_input = use_signal(String::new);
     let mut body = use_signal(String::new);
     let mut submitting = use_signal(|| false);
@@ -276,6 +275,10 @@ pub fn DmComposeModal(
             });
         }
     });
+
+    if !open {
+        return rsx! {};
+    }
 
     let recipient_value = recipient_input();
     let recipient_trimmed = recipient_value.trim().to_string();
@@ -455,4 +458,79 @@ fn resolve_recipient(input: &str, members: &[MemberLite]) -> Option<String> {
         return matches[0].nostr_pubkey.clone();
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Source-order guard: the parent keeps this modal mounted and toggles
+    /// `open`. Returning before hooks when closed panics on open/close.
+    #[test]
+    fn compose_modal_registers_hooks_before_closed_return() {
+        let src = include_str!("compose.rs");
+        let start = src
+            .find("pub fn DmComposeModal")
+            .expect("DmComposeModal component");
+        let body = &src[start..];
+        let first_return = body
+            .find("return rsx!")
+            .expect("expected a post-hooks return when closed");
+        for hook in ["use_signal", "use_toast()", "use_resource", "use_callback"] {
+            let pos = body
+                .find(hook)
+                .unwrap_or_else(|| panic!("{hook} should appear in DmComposeModal"));
+            assert!(
+                pos < first_return,
+                "{hook} must be registered before the first `return rsx!` (was {pos} >= {first_return})"
+            );
+        }
+    }
+
+    fn member(name: &str, pk: Option<&str>) -> MemberLite {
+        MemberLite {
+            id: name.to_string(),
+            display_name: name.to_string(),
+            nostr_pubkey: pk.map(str::to_string),
+        }
+    }
+
+    fn hex_pk(byte: u8) -> String {
+        format!("{byte:02x}").repeat(32)
+    }
+
+    #[test]
+    fn resolve_recipient_accepts_hex_and_unique_name() {
+        let alice_pk = hex_pk(0xab);
+        let bob_pk = hex_pk(0xcd);
+        let members = vec![
+            member("Alice", Some(&alice_pk)),
+            member("Bob", Some(&bob_pk)),
+        ];
+        assert_eq!(
+            resolve_recipient(&alice_pk, &members),
+            Some(alice_pk.clone())
+        );
+        assert_eq!(resolve_recipient("Alice", &members), Some(alice_pk.clone()));
+        assert_eq!(resolve_recipient("ali", &members), Some(alice_pk));
+        assert_eq!(resolve_recipient("", &members), None);
+        assert_eq!(resolve_recipient("unknown", &members), None);
+    }
+
+    #[test]
+    fn resolve_recipient_ambiguous_name_stays_none() {
+        let members = vec![
+            member("Alex", Some(&hex_pk(0xaa))),
+            member("Alexander", Some(&hex_pk(0xbb))),
+        ];
+        assert_eq!(resolve_recipient("ale", &members), None);
+        assert_eq!(resolve_recipient("Alex", &members), Some(hex_pk(0xaa)));
+    }
+
+    #[test]
+    fn looks_like_pubkey_hex_and_npub() {
+        assert!(looks_like_pubkey(&hex_pk(0xab)));
+        assert!(looks_like_pubkey("npub1abc"));
+        assert!(!looks_like_pubkey("Alice"));
+    }
 }
