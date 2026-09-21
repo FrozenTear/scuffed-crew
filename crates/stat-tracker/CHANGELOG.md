@@ -2,7 +2,48 @@
 
 User-facing notes for `stat-tracker-v*` GitHub Releases. The release workflow
 prepends the section whose heading matches the tag version (for example
-`## 0.4.13` for `stat-tracker-v0.4.13`).
+`## 0.4.14` for `stat-tracker-v0.4.14`).
+
+## 0.4.14
+
+The systemd user unit now gets a display session (#109). Install
+refreshes Wayland or X11 variables into
+`~/.config/scuffed-stat-tracker/session.env` on each start, so Sway
+and Hyprland autostart can capture. Reinstall so the unit points at
+the installed binary.
+
+Startup with no keyboard (#111) listens for stop while it retries.
+`systemctl --user stop` finishes cleanly. If no keyboard shows up,
+the daemon exits with an error so systemd can try again after you
+join the `input` group or log in again.
+
+GUI stop (#113) waits until the daemon has actually exited before
+another one starts, and it does not delete a newer daemon's pid
+file. A second process cannot open the local stats store at the
+same time.
+
+Sync (#114) does not mark a match uploaded if a newer local write
+landed while the upload was in flight. Shutdown waits for that
+upload to finish before the next one, so a late mark cannot
+overwrite a newer result. Older local rows still load.
+
+0.4.13 shipped mode buckets for Neon Junction, Paraiso, and
+Esperanca (#91). Still on prior polish / packaging from
+0.4.1–0.4.13.
+
+Maps buckets, in-app Update now (0.4.8), Settings Maps-level polish
+(0.4.7), Maps-grammar Seasons grid (0.4.6), Settings/Maps/Games
+polish (0.4.5), companion overlay hotkey (0.4.4), and packaging
+hotfixes 0.4.1–0.4.3 are unchanged.
+
+### Install
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/FrozenTear/scuffed-crew/main/crates/stat-tracker/dist/bootstrap.sh | bash
+```
+
+Or extract the tarball and run `./install.sh`. Pin with
+`STAT_TRACKER_TAG=stat-tracker-v0.4.14`.
 
 ## 0.4.13
 
