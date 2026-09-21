@@ -157,4 +157,10 @@ mod tests {
             "/strategy/patch-notes"
         );
     }
+
+    #[test]
+    fn public_patch_notes_is_not_under_strategy_layout_path() {
+        assert_eq!(Route::PatchNotes {}.to_string(), "/patch-notes");
+        assert!(!Route::PatchNotes {}.to_string().starts_with("/strategy"));
+    }
 }
