@@ -1,0 +1,14 @@
+[Unit]
+Description=Import Wayland/X11 session environment for Scuffed Stat Tracker
+After=graphical-session.target
+Before=scuffed-stat-tracker.service
+# Not enabled on its own. The daemon unit Wants= this oneshot so GUI Start
+# and autostart re-read the compositor before the daemon is spawned.
+# graphical-session.target does not import WAYLAND_DISPLAY or DISPLAY on
+# Sway/Hyprland; this unit does.
+
+[Service]
+Type=oneshot
+# ExecStart is rewritten at install to the absolute helper under $PREFIX.
+# This placeholder matches the default prefix only.
+ExecStart=%h/.local/lib/scuffed-stat-tracker/import-session-env.sh

@@ -2,10 +2,16 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-BIN_DIR="$HOME/.local/bin"
+# Honor PREFIX the same way the tarball installer does. The systemd unit's
+# ExecStart is rewritten to this path; the template's %h/.local/bin is only
+# the default.
+PREFIX="${PREFIX:-$HOME/.local}"
+BIN_DIR="${BIN_DIR:-$PREFIX/bin}"
+LIB_DIR="${LIB_DIR:-$PREFIX/lib}"
 DESKTOP_DIR="$HOME/.local/share/applications"
 SYSTEMD_DIR="$HOME/.config/systemd/user"
 ASSETS="$REPO_ROOT/crates/stat-tracker/assets"
+DIST="$REPO_ROOT/crates/stat-tracker/dist"
 
 RED='\033[0;31m'
 YLW='\033[1;33m'
@@ -81,6 +87,7 @@ refresh_desktop_database() {
 # tests, bootstrap smoke) don't pollute the real $HOME. Unset/empty = full
 # install (default, unchanged).
 SKIP_INTEGRATION="${SKIP_INTEGRATION:-}"
+INSTALLED_UNITS=0
 
 # ── Prerequisites ─────────────────────────────────────────────────────────────
 
@@ -172,7 +179,7 @@ info "OCR will use eng tessdata (default). Koverwatch tessdata can be generated 
 if [[ ":$PATH:" != *":$BIN_DIR:"* ]]; then
     warn "$BIN_DIR is not in your shell PATH."
     warn "Add this to your shell config (~/.bashrc, ~/.zshrc, etc.):"
-    warn "    export PATH=\"\$HOME/.local/bin:\$PATH\""
+    warn "    export PATH=\"$BIN_DIR:\$PATH\""
     warn "App launchers (AerynOS / Cosmic / GNOME) often omit this dir even"
     warn "when a terminal has it — the .desktop Exec is an absolute path so"
     warn "the menu does not depend on session PATH."
@@ -188,14 +195,22 @@ else
     info "Installed desktop entry → $DESKTOP_DIR (Exec=$(absolute_gui_bin))"
 
     # ── systemd user service (installed, NOT enabled) ─────────────────────────
-    mkdir -p "$SYSTEMD_DIR"
-    install -m644 "$ASSETS/scuffed-stat-tracker.service" \
-        "$SYSTEMD_DIR/scuffed-stat-tracker.service"
-
-    if command -v systemctl &>/dev/null; then
-        systemctl --user daemon-reload 2>/dev/null || true
+    # shellcheck source=dist/systemd-unit.sh
+    source "$DIST/systemd-unit.sh"
+    DAEMON_EXEC="$(absolute_install_path "$BIN_DIR/scuffed-stat-tracker")"
+    HELPER_DEST="$(absolute_install_path "$LIB_DIR/scuffed-stat-tracker/import-session-env.sh")"
+    install_user_units "$ASSETS" "$SYSTEMD_DIR" "$DAEMON_EXEC" \
+        "$DIST/import-session-env.sh" "$HELPER_DEST"
+    SYSTEMCTL_BIN="${SCUFFED_SYSTEMCTL:-systemctl}"
+    if [[ -x "$SYSTEMCTL_BIN" ]] || command -v "$SYSTEMCTL_BIN" &>/dev/null; then
+        "$SYSTEMCTL_BIN" --user daemon-reload 2>/dev/null || true
+    fi
+    if ! "$HELPER_DEST"; then
+        warn "session environment was not imported; the oneshot retries when the daemon starts"
     fi
     info "Installed systemd service → $SYSTEMD_DIR (not enabled)"
+    info "ExecStart=$DAEMON_EXEC"
+    INSTALLED_UNITS=1
 fi
 
 # ── Done ──────────────────────────────────────────────────────────────────────
@@ -212,6 +227,13 @@ fi
     echo
     echo "  The GUI Settings page has Start / Stop and Start on login."
     echo "  Autostart (systemd) starts the daemon automatically on login."
+    if [[ "$INSTALLED_UNITS" -eq 1 ]]; then
+        echo "  The user unit loads ~/.config/scuffed-stat-tracker/session.env"
+        echo "  (WAYLAND_DISPLAY, DISPLAY, XDG_CURRENT_DESKTOP, XDG_SESSION_TYPE)."
+        echo "  On Sway/Hyprland those are read from the compositor each start."
+        echo "  If you installed with no graphical session, start the daemon"
+        echo "  again after login — the oneshot retries."
+    fi
     echo
     echo "  First run: open the GUI, go to Settings, paste your server URL"
     echo "  and daemon token (from the web UI under My Stats → Daemon Tokens)."
