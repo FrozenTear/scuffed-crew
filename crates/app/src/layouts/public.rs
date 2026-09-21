@@ -40,9 +40,20 @@ struct NavLink {
     route: Route,
 }
 
-fn resolve_nav(cfg: &NavConfig, placement: NavPlacement) -> Vec<NavLink> {
+/// `strategy` follows `GET /api/settings`.strategies_enabled (default ON).
+/// Patch Notes is never gated here.
+fn nav_id_visible(id: &str, strategies_enabled: bool) -> bool {
+    strategies_enabled || id != "strategy"
+}
+
+fn strategies_enabled_or_default(settings: Option<&SiteSettings>) -> bool {
+    settings.map(|s| s.strategies_enabled).unwrap_or(true)
+}
+
+fn resolve_nav(cfg: &NavConfig, placement: NavPlacement, strategies_enabled: bool) -> Vec<NavLink> {
     cfg.items_in(placement)
         .into_iter()
+        .filter(|item| nav_id_visible(&item.id, strategies_enabled))
         .filter_map(|item| {
             let route = nav_route(&item.id)?;
             Some(NavLink {
@@ -387,8 +398,10 @@ pub fn PublicLayout() -> Element {
             n
         })
         .unwrap_or_default();
-    let primary_links = resolve_nav(&nav_cfg, NavPlacement::Primary);
-    let more_links = resolve_nav(&nav_cfg, NavPlacement::More);
+    let strategies_enabled =
+        strategies_enabled_or_default(site_settings.read().as_ref().and_then(|o| o.as_ref()));
+    let primary_links = resolve_nav(&nav_cfg, NavPlacement::Primary, strategies_enabled);
+    let more_links = resolve_nav(&nav_cfg, NavPlacement::More, strategies_enabled);
 
     let is_logged_in = auth().is_logged_in();
     let is_officer = auth().is_officer_or_above();
@@ -708,5 +721,25 @@ mod tests {
         assert_ne!(nav_route("patch_notes"), Some(Route::StrategyPatchNotes {}));
         assert_eq!(nav_route("strategy"), Some(Route::StrategyBrowse {}));
         assert_eq!(nav_route("not_in_catalog"), None);
+    }
+
+    #[test]
+    fn strategy_nav_follows_feature_flag_patch_notes_does_not() {
+        let cfg = NavConfig::default();
+        let more_off = resolve_nav(&cfg, NavPlacement::More, false);
+        assert!(
+            more_off.iter().all(|l| l.id != "strategy"),
+            "Strategies must leave Primary/More when the flag is off"
+        );
+        assert!(
+            more_off.iter().any(|l| l.id == "patch_notes"),
+            "Patch Notes must stay in nav when Strategies is off"
+        );
+        let more_on = resolve_nav(&cfg, NavPlacement::More, true);
+        assert!(more_on.iter().any(|l| l.id == "strategy"));
+        assert!(more_on.iter().any(|l| l.id == "patch_notes"));
+        assert!(nav_id_visible("strategy", true));
+        assert!(!nav_id_visible("strategy", false));
+        assert!(nav_id_visible("patch_notes", false));
     }
 }
