@@ -332,11 +332,6 @@ mod tests {
             assert_eq!(parsed.display_name(), map.name);
             assert_eq!(parsed.game_mode(), map.game_mode);
             assert_eq!(map_slug(parsed), map.id);
-            assert_eq!(
-                serde_json::to_value(parsed).expect("MapName serializes"),
-                serde_json::Value::String(map.id.to_string()),
-                "slug must match serde snake_case for {parsed:?}"
-            );
         }
         assert_eq!(PICKABLE_MAPS.len(), 32);
     }
@@ -347,6 +342,11 @@ mod tests {
         assert_eq!(by_slug.name, "King's Row");
         let by_name = pickable_map_by_id("King's Row").expect("display");
         assert_eq!(by_name.id, "kings_row");
+        // serde rename of Route66 is "route66"; catalog slug is route_66.
+        assert_eq!(
+            pickable_map_by_id("route66").map(|m| m.id),
+            Some("route_66")
+        );
         assert!(pickable_map_by_id("").is_none());
         assert!(pickable_map_by_id("not_a_real_map").is_none());
     }
