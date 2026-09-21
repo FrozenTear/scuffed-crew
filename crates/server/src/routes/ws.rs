@@ -36,6 +36,11 @@ pub async fn websocket_handler(
     jar: CookieJar,
     headers: HeaderMap,
 ) -> impl IntoResponse {
+    // Same fail-closed gate as strategy REST. Patch notes are not on this path.
+    if let Err(status) = super::strategy::ensure_strategies_enabled(&state.app).await {
+        return status.into_response();
+    }
+
     if !ws_origin_allowed(&state, &headers) {
         tracing::warn!("strategy WS rejected: Origin not allowed");
         return StatusCode::FORBIDDEN.into_response();
@@ -622,5 +627,134 @@ mod origin_tests {
         let allowed = vec!["http://localhost:3000".to_string()];
         assert!(origin_is_allowed(&allowed, None, false));
         assert!(!origin_is_allowed(&allowed, None, true));
+    }
+}
+
+#[cfg(test)]
+mod strategies_gate_tests {
+    use super::*;
+    use axum::Router;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode, header};
+    use axum::routing::get;
+    use scuffed_auth::SessionConfig;
+    use scuffed_db::Database;
+    use scuffed_db::migrations::run_migrations;
+    use scuffed_site_server::state::OAuthConfig;
+    use std::path::PathBuf;
+    use tower::ServiceExt;
+
+    use super::super::strategy::strategies_gate_status;
+
+    async fn test_state() -> AppState {
+        let db = Database::connect_memory().await.expect("mem db");
+        run_migrations(&db.client).await.expect("migrations");
+        AppState {
+            db: Arc::new(db),
+            session_config: SessionConfig::default(),
+            oauth_config: OAuthConfig {
+                discord_client_id: String::new(),
+                discord_client_secret: String::new(),
+                google_client_id: String::new(),
+                google_client_secret: String::new(),
+                redirect_base_url: "http://localhost:3000".into(),
+                allowed_origins: vec!["http://localhost:3000".into()],
+            },
+            upload_dir: PathBuf::from("/tmp/scuffed-test-uploads"),
+            notifier: None,
+            nostr_challenge_key: [0u8; 32],
+            consumed_challenges: scuffed_site_server::challenge_store::ConsumedChallengeStore::new(
+            ),
+            nostr_rate_limiter: scuffed_site_server::nostr_rate_limit::NostrRateLimiter::new(),
+            crypto: None,
+            relay_url: None,
+            dm_events: None,
+            nip05_domain: None,
+            nip05_republish_enabled: false,
+        }
+    }
+
+    async fn set_strategies_enabled(state: &AppState, enabled: bool) {
+        state
+            .db
+            .update_settings(
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(enabled),
+            )
+            .await
+            .expect("update strategies_enabled");
+    }
+
+    fn ws_router(state: AppState) -> Router {
+        let ws_state = WsState {
+            app: state,
+            rooms: Arc::new(RoomManager::new()),
+        };
+        Router::new()
+            .route("/api/strategy/ws", get(websocket_handler))
+            .with_state(ws_state)
+    }
+
+    fn ws_upgrade_request() -> Request<Body> {
+        Request::builder()
+            .uri("/api/strategy/ws")
+            .header(header::CONNECTION, "upgrade")
+            .header(header::UPGRADE, "websocket")
+            .header(header::SEC_WEBSOCKET_VERSION, "13")
+            .header(header::SEC_WEBSOCKET_KEY, "dGhlIHNhbXBsZSBub25jZQ==")
+            .body(Body::empty())
+            .unwrap()
+    }
+
+    #[test]
+    fn gate_status_matches_rest_fail_closed() {
+        assert_eq!(strategies_gate_status(Ok(true)), Ok(()));
+        assert_eq!(
+            strategies_gate_status(Ok(false)),
+            Err(StatusCode::NOT_FOUND)
+        );
+        assert_eq!(
+            strategies_gate_status(Err(())),
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        );
+    }
+
+    #[tokio::test]
+    async fn strategies_disabled_rejects_ws_upgrade() {
+        let state = test_state().await;
+        set_strategies_enabled(&state, false).await;
+
+        let resp = ws_router(state)
+            .oneshot(ws_upgrade_request())
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn strategies_enabled_accepts_ws_upgrade() {
+        let state = test_state().await;
+        set_strategies_enabled(&state, true).await;
+
+        let resp = ws_router(state)
+            .oneshot(ws_upgrade_request())
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::SWITCHING_PROTOCOLS);
     }
 }

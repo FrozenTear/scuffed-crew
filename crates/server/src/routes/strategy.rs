@@ -66,14 +66,30 @@ async fn require_strategies_enabled(
     request: Request,
     next: Next,
 ) -> Result<Response, StatusCode> {
-    let settings = state.db.get_settings().await.map_err(|e| {
-        tracing::error!("strategies gate: failed to load settings: {e}");
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
-    if settings.strategies_enabled {
-        Ok(next.run(request).await)
-    } else {
-        Err(StatusCode::NOT_FOUND)
+    ensure_strategies_enabled(&state).await?;
+    Ok(next.run(request).await)
+}
+
+/// Shared by strategy REST middleware and `/api/strategy/ws`.
+///
+/// Fail closed: a settings read error rejects the request. A disabled flag is
+/// 404, matching the REST routes (the feature is absent, not forbidden).
+pub(crate) async fn ensure_strategies_enabled(state: &AppState) -> Result<(), StatusCode> {
+    let enabled = match state.db.get_settings().await {
+        Ok(settings) => Ok(settings.strategies_enabled),
+        Err(e) => {
+            tracing::error!("strategies gate: failed to load settings: {e}");
+            Err(())
+        }
+    };
+    strategies_gate_status(enabled)
+}
+
+pub(crate) fn strategies_gate_status(enabled: Result<bool, ()>) -> Result<(), StatusCode> {
+    match enabled {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(StatusCode::NOT_FOUND),
+        Err(()) => Err(StatusCode::INTERNAL_SERVER_ERROR),
     }
 }
 
