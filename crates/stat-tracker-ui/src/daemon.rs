@@ -5,6 +5,7 @@
 //! tracker and is never signalled.
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 /// User unit installed by `install.sh` — same name the Dioxus GUI uses.
 pub const SYSTEMD_UNIT: &str = "scuffed-stat-tracker.service";
@@ -195,22 +196,122 @@ async fn start_daemon_checked(data_dir: &Path) -> Result<u32, String> {
     }
 }
 
+/// How long a GUI stop waits for the tracker process to leave `/proc`.
+///
+/// Shutdown drains in-flight Tab OCR before the process exits and releases
+/// the SurrealKV store. systemd's default `TimeoutStopSec` is 90s; match
+/// that so Stop/Restart does not open a second writer early and does not
+/// hang forever if the process never exits.
+pub const STOP_WAIT_TIMEOUT: Duration = Duration::from_secs(90);
+
+const STOP_POLL: Duration = Duration::from_millis(50);
+
+#[derive(Debug)]
+enum StopError {
+    NotRunning,
+    Refused(&'static str),
+    Failed(String),
+}
+
+impl StopError {
+    fn allows_restart(&self) -> bool {
+        matches!(self, StopError::NotRunning | StopError::Refused(_))
+    }
+}
+
+impl std::fmt::Display for StopError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            StopError::NotRunning => f.write_str("Tracker is not running"),
+            StopError::Refused(msg) => f.write_str(msg),
+            StopError::Failed(msg) => f.write_str(msg),
+        }
+    }
+}
+
 /// Stop only a live tracker PID. Never signals a reused / foreign process.
-pub fn stop_daemon(data_dir: &Path) -> Result<(), String> {
-    let pid = read_pid(data_dir).ok_or("Tracker is not running")?;
+///
+/// Does not unlink `daemon.pid`. The daemon removes that file on the way out,
+/// and only when it still names that process. Unlinking here raced a restart:
+/// the new process wrote its pid, then the exiting process deleted it.
+///
+/// Stale pid files are left in place. [`daemon_running`] still clears them
+/// when it refreshes status; this path must not delete a file that a newer
+/// tracker may already own.
+pub async fn stop_daemon(data_dir: &Path) -> Result<(), String> {
+    stop_daemon_result(data_dir)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+async fn stop_daemon_result(data_dir: &Path) -> Result<(), StopError> {
+    let pid = read_pid(data_dir).ok_or(StopError::NotRunning)?;
     if pid == std::process::id() {
-        return Err("Refusing to stop this window's process".into());
+        return Err(StopError::Refused("Refusing to stop this window's process"));
     }
     if !pid_is_live_tracker(pid) {
-        let _ = std::fs::remove_file(pid_file(data_dir));
-        return Err("Saved process id is not the tracker — not stopping it".into());
+        return Err(StopError::Refused(
+            "Saved process id is not the tracker — not stopping it",
+        ));
     }
-    std::process::Command::new("kill")
+    signal_term(pid)?;
+    wait_until_tracker_gone(pid, STOP_WAIT_TIMEOUT, STOP_POLL).await
+}
+
+fn signal_term(pid: u32) -> Result<(), StopError> {
+    let out = std::process::Command::new("kill")
         .arg(pid.to_string())
         .output()
-        .map_err(|e| format!("Could not stop the tracker: {e}"))?;
-    let _ = std::fs::remove_file(pid_file(data_dir));
-    Ok(())
+        .map_err(|e| StopError::Failed(format!("Could not stop the tracker: {e}")))?;
+    if out.status.success() || !pid_is_live_tracker(pid) {
+        return Ok(());
+    }
+    let detail = String::from_utf8_lossy(&out.stderr).trim().to_string();
+    if detail.is_empty() {
+        Err(StopError::Failed(format!(
+            "Could not stop the tracker (kill status {})",
+            out.status
+        )))
+    } else {
+        Err(StopError::Failed(format!(
+            "Could not stop the tracker: {detail}"
+        )))
+    }
+}
+
+/// Poll until `pid` is gone or `/proc/<pid>/comm` is no longer the tracker.
+async fn wait_until_tracker_gone(
+    pid: u32,
+    timeout: Duration,
+    poll: Duration,
+) -> Result<(), StopError> {
+    wait_while(|| pid_is_live_tracker(pid), timeout, poll).await
+}
+
+/// Poll `still_present` until it is false, or `timeout` elapses.
+async fn wait_while(
+    mut still_present: impl FnMut() -> bool,
+    timeout: Duration,
+    poll: Duration,
+) -> Result<(), StopError> {
+    let started = tokio::time::Instant::now();
+    loop {
+        if !still_present() {
+            return Ok(());
+        }
+        if started.elapsed() >= timeout {
+            return Err(StopError::Failed(
+                "Tracker is still shutting down — not starting another copy".into(),
+            ));
+        }
+        let slice = poll.min(timeout.saturating_sub(started.elapsed()));
+        if slice.is_zero() {
+            return Err(StopError::Failed(
+                "Tracker is still shutting down — not starting another copy".into(),
+            ));
+        }
+        tokio::time::sleep(slice).await;
+    }
 }
 
 async fn systemd_action(verb: &str) -> Result<(), String> {
@@ -278,7 +379,7 @@ pub async fn run_verb(
             if service_installed {
                 systemd_action("stop").await?;
             } else {
-                stop_daemon(&data_dir)?;
+                stop_daemon(&data_dir).await?;
             }
             Ok("Tracker stopped".into())
         }
@@ -286,8 +387,14 @@ pub async fn run_verb(
             if service_installed {
                 systemd_action("restart").await?;
             } else {
-                let _ = stop_daemon(&data_dir);
-                tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+                // stop waits until the process is gone (store flock released).
+                // A fixed sleep here used to start a second writer while Tab
+                // OCR was still draining. "Not running" / stale pid still starts.
+                if let Err(e) = stop_daemon_result(&data_dir).await
+                    && !e.allows_restart()
+                {
+                    return Err(e.to_string());
+                }
                 start_daemon_checked(&data_dir).await?;
             }
             Ok("Tracker restarted".into())
@@ -334,25 +441,107 @@ mod tests {
             daemon_running(dir.path()).is_none(),
             "GUI pid in daemon.pid must not count as the tracker"
         );
+        assert!(
+            !pid_file(dir.path()).exists(),
+            "status refresh still clears a stale pid file; stop does not"
+        );
         std::fs::write(pid_file(dir.path()), "4294967295").unwrap();
         assert!(daemon_running(dir.path()).is_none());
+        assert!(!pid_file(dir.path()).exists());
     }
 
-    #[test]
-    fn stop_refuses_foreign_pid() {
+    #[tokio::test]
+    async fn stop_refuses_foreign_pid_and_leaves_the_pid_file() {
         let dir = tempfile::tempdir().expect("tempdir");
-        std::fs::write(pid_file(dir.path()), format!("{}", std::process::id())).unwrap();
-        let err = stop_daemon(dir.path()).expect_err("must refuse");
+        let contents = format!("{}", std::process::id());
+        std::fs::write(pid_file(dir.path()), &contents).unwrap();
+        let err = stop_daemon(dir.path()).await.expect_err("must refuse");
         assert!(
             err.contains("not the tracker") || err.contains("this window"),
             "unexpected refusal: {err}"
         );
+        assert_eq!(
+            std::fs::read_to_string(pid_file(dir.path())).unwrap(),
+            contents,
+            "stop must not unlink a pid file it did not take down"
+        );
+    }
+
+    #[tokio::test]
+    async fn stop_of_stale_pid_does_not_unlink() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(pid_file(dir.path()), "4294967295").unwrap();
+        let err = stop_daemon(dir.path()).await.expect_err("stale");
+        assert!(err.contains("not the tracker"), "{err}");
+        assert_eq!(
+            std::fs::read_to_string(pid_file(dir.path()))
+                .unwrap()
+                .trim(),
+            "4294967295"
+        );
+    }
+
+    #[tokio::test]
+    async fn stop_without_pid_file_is_a_clean_error() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let err = stop_daemon(dir.path()).await.expect_err("no pid");
+        assert!(err.contains("not running"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn wait_returns_immediately_when_pid_is_already_gone() {
+        let started = std::time::Instant::now();
+        wait_until_tracker_gone(u32::MAX, STOP_WAIT_TIMEOUT, STOP_POLL)
+            .await
+            .expect("dead pid is not the tracker");
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "a dead pid must not sit out the shutdown timeout"
+        );
+    }
+
+    #[tokio::test]
+    async fn wait_returns_once_tracker_predicate_clears() {
+        let mut checks = 0u32;
+        wait_while(
+            || {
+                checks += 1;
+                checks < 3
+            },
+            Duration::from_secs(2),
+            Duration::from_millis(10),
+        )
+        .await
+        .expect("cleared");
+        assert!(checks >= 3, "checks={checks}");
+    }
+
+    #[tokio::test]
+    async fn wait_times_out_while_tracker_predicate_stays_set() {
+        let err = wait_while(
+            || true,
+            Duration::from_millis(40),
+            Duration::from_millis(10),
+        )
+        .await
+        .expect_err("must time out");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("still shutting down"),
+            "timeout must refuse to start another copy: {msg}"
+        );
     }
 
     #[test]
-    fn stop_without_pid_file_is_a_clean_error() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let err = stop_daemon(dir.path()).expect_err("no pid");
-        assert!(err.contains("not running"), "{err}");
+    fn restart_proceeds_only_when_nothing_live_was_signalled() {
+        assert!(StopError::NotRunning.allows_restart());
+        assert!(
+            StopError::Refused("Saved process id is not the tracker — not stopping it")
+                .allows_restart()
+        );
+        assert!(
+            !StopError::Failed("Tracker is still shutting down — not starting another copy".into())
+                .allows_restart()
+        );
     }
 }

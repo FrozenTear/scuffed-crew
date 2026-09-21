@@ -71,11 +71,184 @@ const EMPTY_MAP_DUMP_THRESHOLD: usize = 5;
 /// Ring size for the `debug/mapmiss/` map-region dumps.
 const MAPMISS_KEEP: usize = 10;
 
-struct PidGuard(std::path::PathBuf);
+/// Bounded retries when startup finds zero keyboards. A miss is usually
+/// "not in the `input` group" (only a new login's process credentials can
+/// fix that) or `/dev/input` not enumerated yet (a same-process retry can).
+/// Kept short so the pid file is not held while the GUI shows a daemon
+/// that will never capture. After this, the process exits non-zero and
+/// systemd `Restart=on-failure` tries again; a later graphical-session
+/// start covers re-login.
+const KEYBOARD_OPEN_ATTEMPTS: u32 = 3;
+
+/// Gap between [`KEYBOARD_OPEN_ATTEMPTS`]. This wait also polls SIGTERM
+/// and Ctrl+C — without that, `systemctl --user stop` sits until
+/// TimeoutStopSec and SIGKILL while the handler is registered but never
+/// received.
+const KEYBOARD_OPEN_RETRY: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// What to do after a failed keyboard open, before the next attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KeyboardWait {
+    /// Interval elapsed; try `MultiKeyboardStream::open` again.
+    Retry,
+    /// SIGTERM or Ctrl+C. Exit 0 so an explicit stop is not a failure
+    /// (`Restart=on-failure` must not bring the daemon back after stop).
+    Shutdown,
+}
+
+/// Keyboard stream acquired, or a clean shutdown while waiting to retry.
+#[derive(Debug, PartialEq, Eq)]
+enum KeyboardAcquire<T> {
+    Ready(T),
+    Shutdown,
+}
+
+/// Polled between keyboard-open attempts. Production uses signals; tests
+/// script the events.
+trait KeyboardWaiter {
+    fn wait(&mut self) -> impl std::future::Future<Output = anyhow::Result<KeyboardWait>> + '_;
+}
+
+struct SignalKeyboardWaiter<'a> {
+    sigterm: &'a mut tokio::signal::unix::Signal,
+}
+
+impl KeyboardWaiter for SignalKeyboardWaiter<'_> {
+    async fn wait(&mut self) -> anyhow::Result<KeyboardWait> {
+        tokio::select! {
+            biased;
+            r = tokio::signal::ctrl_c() => {
+                r?;
+                tracing::info!("shutting down");
+                Ok(KeyboardWait::Shutdown)
+            }
+            _ = self.sigterm.recv() => {
+                tracing::info!("SIGTERM received — shutting down");
+                Ok(KeyboardWait::Shutdown)
+            }
+            _ = tokio::time::sleep(KEYBOARD_OPEN_RETRY) => Ok(KeyboardWait::Retry),
+        }
+    }
+}
+
+/// Open a keyboard, retrying on failure. `Err` is "still no keyboard" —
+/// callers must propagate it so the process exits non-zero. `Ok(Shutdown)`
+/// is a clean stop during the retry wait.
+async fn acquire_keyboard<T, E, F, W>(
+    mut open_keyboard: F,
+    waiter: &mut W,
+    max_attempts: u32,
+) -> anyhow::Result<KeyboardAcquire<T>>
+where
+    F: FnMut() -> Result<T, E>,
+    E: std::fmt::Display,
+    W: KeyboardWaiter,
+{
+    let mut attempt = 0u32;
+    loop {
+        attempt += 1;
+        match open_keyboard() {
+            Ok(stream) => return Ok(KeyboardAcquire::Ready(stream)),
+            Err(e) => {
+                tracing::error!(
+                    error = %e,
+                    attempt,
+                    max_attempts,
+                    "evdev init failed — no keyboard detected"
+                );
+                if attempt >= max_attempts {
+                    anyhow::bail!(
+                        "no keyboard available after {attempt} attempts ({e}) — \
+                         exiting so systemd can restart once an input device is readable"
+                    );
+                }
+                tracing::info!("retrying keyboard open; SIGTERM or Ctrl+C will quit");
+                if waiter.wait().await? == KeyboardWait::Shutdown {
+                    return Ok(KeyboardAcquire::Shutdown);
+                }
+            }
+        }
+    }
+}
+
+/// Startup keyboard open: retry while `select!`ing SIGTERM and Ctrl+C.
+///
+/// `Ok(None)` means the operator stopped us (exit 0, pid file dropped).
+/// `Err` means no keyboard after the bounded retries (exit non-zero).
+async fn open_keyboard_or_shutdown(
+    sigterm: &mut tokio::signal::unix::Signal,
+) -> anyhow::Result<Option<detect::MultiKeyboardStream>> {
+    let mut waiter = SignalKeyboardWaiter { sigterm };
+    match acquire_keyboard(
+        detect::MultiKeyboardStream::open,
+        &mut waiter,
+        KEYBOARD_OPEN_ATTEMPTS,
+    )
+    .await?
+    {
+        KeyboardAcquire::Ready(stream) => Ok(Some(stream)),
+        KeyboardAcquire::Shutdown => Ok(None),
+    }
+}
+
+struct PidGuard {
+    path: std::path::PathBuf,
+    pid: u32,
+}
+
+/// Remove `path` only when it still contains `owner`.
+///
+/// The GUI used to unlink `daemon.pid` before this process finished shutting
+/// down. A restart could write a new pid, and an unconditional unlink here
+/// deleted that file. Returns whether the file was removed.
+fn unlink_pid_file_if_owner(path: &std::path::Path, owner: u32) -> bool {
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return false,
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                path = %path.display(),
+                "could not read daemon pid file; not removing it"
+            );
+            return false;
+        }
+    };
+    match text.trim().parse::<u32>() {
+        Ok(pid) if pid == owner => match std::fs::remove_file(path) {
+            Ok(()) => true,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    path = %path.display(),
+                    "failed to remove daemon pid file"
+                );
+                false
+            }
+        },
+        Ok(other) => {
+            tracing::warn!(
+                owner,
+                found = other,
+                path = %path.display(),
+                "daemon pid file belongs to another process; not removing it"
+            );
+            false
+        }
+        Err(_) => {
+            tracing::warn!(
+                path = %path.display(),
+                "daemon pid file is not a pid; not removing it"
+            );
+            false
+        }
+    }
+}
 
 impl Drop for PidGuard {
     fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
+        unlink_pid_file_if_owner(&self.path, self.pid);
     }
 }
 
@@ -176,9 +349,11 @@ async fn main() -> anyhow::Result<()> {
         "OCR workers (each holds ~23MB tessdata; set ocr_threads / STAT_TRACKER_OCR_THREADS / --ocr-threads)"
     );
 
-    // Refuse to start alongside a live daemon; the guard removes the pid file
-    // on drop. Held across --vacuum / auto-vacuum so no second instance starts
-    // mid-compaction.
+    // Refuse to start alongside a live daemon. On drop the guard removes
+    // daemon.pid only if the file still names this process. Held across
+    // --vacuum / auto-vacuum so no second instance starts mid-compaction.
+    // The store-directory flock (see LocalStore::open) is the single-writer
+    // lock; this file is how the GUI finds the process.
     let _pid_guard = acquire_pid_guard(&config.data_dir)?;
 
     // Maintenance mode: compact the store and exit (see LocalStore::vacuum).
@@ -342,7 +517,7 @@ async fn fetch_player_name_if_needed(config: &mut config::Config) {
 }
 
 /// Write the pid file (refusing to start if another live daemon already holds
-/// it) and return a guard that removes it on drop.
+/// it) and return a guard that removes it on drop when it still names us.
 fn acquire_pid_guard(data_dir: &std::path::Path) -> anyhow::Result<PidGuard> {
     let pid_path = data_dir.join("daemon.pid");
     if let Ok(existing_pid) = std::fs::read_to_string(&pid_path) {
@@ -354,8 +529,12 @@ fn acquire_pid_guard(data_dir: &std::path::Path) -> anyhow::Result<PidGuard> {
         }
         let _ = std::fs::remove_file(&pid_path);
     }
-    std::fs::write(&pid_path, std::process::id().to_string())?;
-    Ok(PidGuard(pid_path))
+    let pid = std::process::id();
+    std::fs::write(&pid_path, pid.to_string())?;
+    Ok(PidGuard {
+        path: pid_path,
+        pid,
+    })
 }
 
 /// True only if `pid` is alive AND is actually a scuffed-stat-tracker process.
@@ -427,6 +606,10 @@ async fn open_store(data_dir: &std::path::Path) -> anyhow::Result<storage::Local
         .await
         .map_err(anyhow::Error::from_boxed)
         .context("failed to open local store (is another daemon running?)")?;
+    // SurrealKV's flush keeps running after the store handle drops. Hold the
+    // directory flock until this process exits so a second writer cannot open
+    // the same store during that window.
+    store.hold_writer_lock_until_exit();
     let count = store
         .match_count()
         .await
@@ -1165,14 +1348,13 @@ async fn run_loop(ctx: Arc<DaemonCtx>) -> anyhow::Result<()> {
     // The GUI's Stop button (and systemd) send SIGTERM — shut down as
     // gracefully as Ctrl+C, with a final sync.
     let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
-    let mut kbd = match detect::MultiKeyboardStream::open() {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::error!(error = %e, "evdev init failed — no keyboard detected");
-            tracing::info!("press Ctrl+C to quit");
-            tokio::signal::ctrl_c().await?;
-            return Ok(());
-        }
+    // Failed open used to wait only on Ctrl+C. SIGTERM was registered above
+    // and never polled, so `systemctl stop` hit TimeoutStopSec then SIGKILL,
+    // and exit 0 kept Restart=on-failure from trying again. The pid file
+    // (acquired in main) made the GUI show "running" the whole time.
+    let mut kbd = match open_keyboard_or_shutdown(&mut sigterm).await? {
+        Some(stream) => stream,
+        None => return Ok(()),
     };
 
     let poll_interval = tokio::time::Duration::from_secs(auto_detect.poll_interval_secs);
@@ -1339,7 +1521,12 @@ async fn run_loop(ctx: Arc<DaemonCtx>) -> anyhow::Result<()> {
                                 } else {
                                     drain_sync_then(task, || std::future::ready(())).await;
                                 }
-                                return Ok(());
+                                // Exit non-zero so Restart=on-failure starts a
+                                // new process once a device is readable again.
+                                // Exit 0 here looked like a clean stop.
+                                anyhow::bail!(
+                                    "keyboard devices lost and could not be reopened: {e2}"
+                                );
                             }
                         }
                     }
@@ -2773,6 +2960,115 @@ mod tests {
     use super::*;
     use std::time::Duration;
 
+    struct ScriptedWaiter {
+        events: Vec<KeyboardWait>,
+    }
+
+    impl KeyboardWaiter for ScriptedWaiter {
+        async fn wait(&mut self) -> anyhow::Result<KeyboardWait> {
+            if self.events.is_empty() {
+                anyhow::bail!("keyboard wait called more times than the test scripted");
+            }
+            Ok(self.events.remove(0))
+        }
+    }
+
+    #[tokio::test]
+    async fn keyboard_open_retries_then_becomes_ready() {
+        let mut waiter = ScriptedWaiter {
+            events: vec![KeyboardWait::Retry],
+        };
+        let mut opens = vec![Err("no keyboard device found"), Ok("kbd")];
+        let got = acquire_keyboard(|| opens.remove(0), &mut waiter, KEYBOARD_OPEN_ATTEMPTS)
+            .await
+            .expect("retry then success");
+        assert_eq!(got, KeyboardAcquire::Ready("kbd"));
+        assert!(opens.is_empty(), "both open attempts were consumed");
+        assert!(waiter.events.is_empty(), "the retry wait was consumed");
+    }
+
+    #[tokio::test]
+    async fn no_keyboard_is_an_error_after_bounded_retries() {
+        // Old startup path returned Ok(()) after Ctrl+C, so Restart=on-failure
+        // never ran. Give-up must be Err, and it must not wait again after
+        // the last failed open (that wait was the SIGTERM-swallowing hang).
+        let retries = KEYBOARD_OPEN_ATTEMPTS.saturating_sub(1) as usize;
+        let mut waiter = ScriptedWaiter {
+            events: vec![KeyboardWait::Retry; retries],
+        };
+        let err = acquire_keyboard(
+            || Err::<(), _>("no keyboard device found — ensure user is in the 'input' group"),
+            &mut waiter,
+            KEYBOARD_OPEN_ATTEMPTS,
+        )
+        .await
+        .expect_err("exhausted opens must not look like a clean exit");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("no keyboard available"),
+            "give-up is the non-zero exit path, got: {msg}"
+        );
+        assert!(
+            msg.contains("input' group"),
+            "the open error is preserved, got: {msg}"
+        );
+        assert!(
+            waiter.events.is_empty(),
+            "retried exactly {} time(s), then gave up without another wait",
+            retries
+        );
+    }
+
+    #[tokio::test]
+    async fn sigterm_during_keyboard_wait_is_clean_shutdown() {
+        // Stop must stay exit 0. Mapping SIGTERM to Err would make
+        // Restart=on-failure relaunch a daemon the operator just stopped.
+        let mut waiter = ScriptedWaiter {
+            events: vec![KeyboardWait::Shutdown],
+        };
+        let mut opens = 0u32;
+        let got = acquire_keyboard(
+            || {
+                opens += 1;
+                Err::<(), _>("no keyboard device found")
+            },
+            &mut waiter,
+            KEYBOARD_OPEN_ATTEMPTS,
+        )
+        .await
+        .expect("shutdown is Ok, not a failure");
+        assert_eq!(got, KeyboardAcquire::Shutdown);
+        assert_eq!(opens, 1, "do not keep opening after stop is requested");
+        assert!(waiter.events.is_empty());
+    }
+
+    #[tokio::test]
+    async fn signal_waiter_returns_shutdown_on_sigterm() {
+        // The scripted tests cover the attempt policy. This one checks the
+        // production `select!`: a real SIGTERM must complete the wait as
+        // shutdown instead of sitting out `KEYBOARD_OPEN_RETRY`.
+        let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("register SIGTERM");
+        let mut waiter = SignalKeyboardWaiter {
+            sigterm: &mut sigterm,
+        };
+        let pid = std::process::id().to_string();
+        let killer = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(100));
+            std::process::Command::new("kill")
+                .args(["-TERM", &pid])
+                .status()
+                .expect("spawn kill")
+        });
+        let ev = tokio::time::timeout(Duration::from_secs(5), waiter.wait())
+            .await
+            .expect("timed out waiting for SIGTERM")
+            .expect("signal listener");
+        assert_eq!(ev, KeyboardWait::Shutdown);
+        let status = killer.join().expect("killer thread");
+        assert!(status.success(), "kill -TERM failed: {status}");
+    }
+
     #[test]
     fn pid_guard_never_blocks_on_self_or_dead_pid() {
         // Our own pid must never count as "another daemon" (PID reuse of a
@@ -2780,6 +3076,48 @@ mod tests {
         assert!(!pid_is_live_tracker(std::process::id()));
         // A pid with no /proc entry is dead → does not block.
         assert!(!pid_is_live_tracker(u32::MAX));
+    }
+
+    #[test]
+    fn pid_guard_unlinks_only_its_own_pid() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("daemon.pid");
+        let owner = 4242u32;
+
+        std::fs::write(&path, owner.to_string()).unwrap();
+        assert!(unlink_pid_file_if_owner(&path, owner));
+        assert!(!path.exists(), "own pid file should be removed");
+
+        let replacement = 7777u32;
+        std::fs::write(&path, replacement.to_string()).unwrap();
+        assert!(
+            !unlink_pid_file_if_owner(&path, owner),
+            "must not unlink a pid file this process no longer owns"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap().trim(),
+            replacement.to_string(),
+            "a newer pid must survive the exiting process"
+        );
+
+        // Drop uses the same check. A replaced file stays; our own file goes.
+        std::fs::write(&path, "111").unwrap();
+        {
+            let _guard = PidGuard {
+                path: path.clone(),
+                pid: owner,
+            };
+        }
+        assert_eq!(std::fs::read_to_string(&path).unwrap().trim(), "111");
+
+        std::fs::write(&path, owner.to_string()).unwrap();
+        {
+            let _guard = PidGuard {
+                path: path.clone(),
+                pid: owner,
+            };
+        }
+        assert!(!path.exists());
     }
 
     // Tests construct `now` in the future so subtracting ages can't underflow
