@@ -10,6 +10,9 @@ pub struct UpdateSettingsRequest {
     pub site_description: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub recruitment_open: Option<bool>,
+    /// When false, strategy CRUD/helpers 404. Patch Notes stay public.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub strategies_enabled: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub recruitment_message: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

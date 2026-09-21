@@ -3,12 +3,20 @@ use serde::{Deserialize, Serialize};
 
 use super::{HomeShell, HomeSkin, HomepageContent, NavConfig, PublicLayout};
 
+fn default_true() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SiteSettings {
     pub id: String,
     pub org_name: String,
     pub site_description: String,
     pub recruitment_open: bool,
+    /// When false, strategy CRUD/helpers are absent (404). Patch Notes stay public.
+    /// Missing / empty JSON defaults true for existing orgs.
+    #[serde(default = "default_true")]
+    pub strategies_enabled: bool,
     pub recruitment_message: String,
     pub min_age: u32,
     pub forum_backend: String,
@@ -41,4 +49,47 @@ pub struct SiteSettings {
     #[serde(default)]
     pub brand_accent_light: String,
     pub updated_at: DateTime<Utc>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn missing_strategies_enabled_defaults_true() {
+        let settings: SiteSettings = serde_json::from_value(json!({
+            "id": "site",
+            "org_name": "Clan",
+            "site_description": "desc",
+            "recruitment_open": true,
+            "recruitment_message": "msg",
+            "min_age": 16,
+            "forum_backend": "local",
+            "extra_relay_urls": "",
+            "updated_at": "2026-09-21T00:00:00Z"
+        }))
+        .expect("legacy settings JSON without strategies_enabled");
+        assert!(settings.strategies_enabled);
+    }
+
+    #[test]
+    fn strategies_enabled_false_round_trips() {
+        let settings: SiteSettings = serde_json::from_value(json!({
+            "id": "site",
+            "org_name": "Clan",
+            "site_description": "desc",
+            "recruitment_open": true,
+            "strategies_enabled": false,
+            "recruitment_message": "msg",
+            "min_age": 16,
+            "forum_backend": "local",
+            "extra_relay_urls": "",
+            "updated_at": "2026-09-21T00:00:00Z"
+        }))
+        .expect("settings JSON with strategies_enabled=false");
+        assert!(!settings.strategies_enabled);
+        let v = serde_json::to_value(&settings).expect("serialize");
+        assert_eq!(v["strategies_enabled"], false);
+    }
 }

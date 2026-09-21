@@ -1,7 +1,9 @@
 use axum::{
     Json, Router,
-    extract::{Path, Query, State},
+    extract::{Path, Query, Request, State},
     http::StatusCode,
+    middleware::{self, Next},
+    response::Response,
     routing::{get, put},
 };
 use axum_extra::extract::cookie::CookieJar;
@@ -21,8 +23,11 @@ use scuffed_types::strategy::{
 };
 
 /// Strategy API routes — merged into the unified server.
+///
+/// Patch Notes stay ungated. Strategy CRUD/helpers are 404 when
+/// `SiteSettings.strategies_enabled` is false.
 pub fn strategy_routes(state: AppState) -> Router {
-    Router::new()
+    let gated = Router::new()
         .route(
             "/api/strategy/strategies",
             get(list_strategies).post(create_strategy),
@@ -36,6 +41,13 @@ pub fn strategy_routes(state: AppState) -> Router {
         )
         .route("/api/strategy/heroes", get(list_heroes))
         .route("/api/strategy/meta", get(get_meta))
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            require_strategies_enabled,
+        ))
+        .with_state(state.clone());
+
+    let patch_notes = Router::new()
         .route(
             "/api/strategy/patch-notes",
             get(list_patch_notes).post(create_patch_note),
@@ -44,7 +56,25 @@ pub fn strategy_routes(state: AppState) -> Router {
             "/api/strategy/patch-notes/{version}",
             put(update_patch_note).delete(delete_patch_note),
         )
-        .with_state(state)
+        .with_state(state);
+
+    gated.merge(patch_notes)
+}
+
+async fn require_strategies_enabled(
+    State(state): State<AppState>,
+    request: Request,
+    next: Next,
+) -> Result<Response, StatusCode> {
+    let settings = state.db.get_settings().await.map_err(|e| {
+        tracing::error!("strategies gate: failed to load settings: {e}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+    if settings.strategies_enabled {
+        Ok(next.run(request).await)
+    } else {
+        Err(StatusCode::NOT_FOUND)
+    }
 }
 
 // =============================================================================
@@ -967,5 +997,120 @@ mod tests {
         assert_eq!(status, StatusCode::OK, "{body}");
         let data = body["data"].as_array().expect("data");
         assert!(data.iter().all(|n| n["version"] != "4.0.0"));
+    }
+
+    async fn set_strategies_enabled(state: &AppState, enabled: bool) {
+        state
+            .db
+            .update_settings(
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(enabled),
+            )
+            .await
+            .expect("update strategies_enabled");
+    }
+
+    fn sample_strategy() -> serde_json::Value {
+        json!({
+            "name": "Test strat",
+            "map_id": "kings-row",
+            "game_mode": "hybrid",
+            "visibility": "public"
+        })
+    }
+
+    #[tokio::test]
+    async fn strategies_enabled_default_true_keeps_strategy_routes() {
+        let state = test_state().await;
+        seed_role(&state, "member", OrgRole::Member, MEMBER_TOKEN).await;
+        assert!(
+            state
+                .db
+                .get_settings()
+                .await
+                .expect("settings")
+                .strategies_enabled
+        );
+
+        let (status, body) =
+            get_json(strategy_routes(state.clone()), "/api/strategy/strategies").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(body.get("data").and_then(|v| v.as_array()).is_some());
+
+        let (status, body) = call_json(
+            strategy_routes(state.clone()),
+            Method::POST,
+            "/api/strategy/strategies",
+            Some(MEMBER_TOKEN),
+            Some(sample_strategy()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+
+        let (status, body) = get_json(strategy_routes(state), "/api/strategy/heroes").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+    }
+
+    #[tokio::test]
+    async fn strategies_disabled_returns_404_but_patch_notes_stay_public() {
+        let state = test_state().await;
+        seed_role(&state, "member", OrgRole::Member, MEMBER_TOKEN).await;
+        seed_role(&state, "officer", OrgRole::Officer, OFFICER_TOKEN).await;
+        set_strategies_enabled(&state, false).await;
+
+        let (status, body) =
+            get_json(strategy_routes(state.clone()), "/api/strategy/strategies").await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+
+        let (status, body) = call_json(
+            strategy_routes(state.clone()),
+            Method::POST,
+            "/api/strategy/strategies",
+            Some(MEMBER_TOKEN),
+            Some(sample_strategy()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+
+        let (status, body) = get_json(strategy_routes(state.clone()), "/api/strategy/heroes").await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+
+        let (status, body) = get_json(strategy_routes(state.clone()), "/api/strategy/meta").await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+
+        let (status, body) =
+            get_json(strategy_routes(state.clone()), "/api/strategy/patch-notes").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let data = body
+            .get("data")
+            .and_then(|v| v.as_array())
+            .expect("{ data: [...] } envelope");
+        assert!(!data.is_empty());
+
+        let (status, body) = call_json(
+            strategy_routes(state),
+            Method::POST,
+            "/api/strategy/patch-notes",
+            Some(OFFICER_TOKEN),
+            Some(sample_create("5.0.0")),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        assert_eq!(body["version"], "5.0.0");
     }
 }

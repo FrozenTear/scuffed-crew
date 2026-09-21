@@ -272,6 +272,7 @@ pub async fn run_migrations(client: &Surreal<Any>) -> DbResult<()> {
         DEFINE FIELD OVERWRITE org_name ON site_settings TYPE string DEFAULT 'My Clan';
         DEFINE FIELD OVERWRITE site_description ON site_settings TYPE string DEFAULT 'Gaming clan';
         DEFINE FIELD OVERWRITE recruitment_open ON site_settings TYPE bool DEFAULT true;
+        DEFINE FIELD OVERWRITE strategies_enabled ON site_settings TYPE bool DEFAULT true;
         DEFINE FIELD OVERWRITE recruitment_message ON site_settings TYPE string DEFAULT 'Recruitment is closed right now. Check back later.';
         DEFINE FIELD OVERWRITE min_age ON site_settings TYPE int DEFAULT 16;
         DEFINE FIELD OVERWRITE forum_backend ON site_settings TYPE string DEFAULT 'local'

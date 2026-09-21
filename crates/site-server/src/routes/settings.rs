@@ -70,6 +70,7 @@ fn to_api_settings(db: scuffed_db::SiteSettings) -> SiteSettings {
         org_name: db.org_name,
         site_description: db.site_description,
         recruitment_open: db.recruitment_open,
+        strategies_enabled: db.strategies_enabled,
         recruitment_message: db.recruitment_message,
         min_age: db.min_age,
         forum_backend: db.forum_backend,
@@ -186,6 +187,7 @@ pub async fn update_settings(
             brand_accent_light.as_deref(),
             shell_str.as_deref(),
             skin_str.as_deref(),
+            body.strategies_enabled,
         )
         .await
         .map_err(|_e| {
