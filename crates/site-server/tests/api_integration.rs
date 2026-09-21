@@ -1670,6 +1670,152 @@ async fn officer_cannot_access_admin_routes() {
     assert_eq!(resp.status(), StatusCode::FORBIDDEN);
 }
 
+// ─── Settings role gate ─────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn officer_can_toggle_strategies_enabled_only() {
+    let state = test_state().await;
+    seed_all_roles(&state.db).await;
+
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(authed_json_request(
+            Method::PUT,
+            "/api/settings",
+            OFFICER_TOKEN,
+            json!({ "strategies_enabled": false }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    assert_eq!(json["strategies_enabled"], false);
+    assert_eq!(json["org_name"], "My Clan");
+
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(unauthed_request(Method::GET, "/api/settings"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    assert_eq!(json["strategies_enabled"], false);
+
+    let app = create_router(state);
+    let resp = app
+        .oneshot(authed_json_request(
+            Method::PUT,
+            "/api/settings",
+            OFFICER_TOKEN,
+            json!({ "strategies_enabled": true }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    assert_eq!(json["strategies_enabled"], true);
+}
+
+#[tokio::test]
+async fn officer_cannot_update_other_settings_fields() {
+    let state = test_state().await;
+    seed_all_roles(&state.db).await;
+
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(authed_json_request(
+            Method::PUT,
+            "/api/settings",
+            OFFICER_TOKEN,
+            json!({ "org_name": "Hacked Clan" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    let json = body_json(resp).await;
+    assert_eq!(json["error"], "Admin access required");
+
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(authed_json_request(
+            Method::PUT,
+            "/api/settings",
+            OFFICER_TOKEN,
+            json!({ "strategies_enabled": false, "recruitment_open": false }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+    let app = create_router(state);
+    let resp = app
+        .oneshot(unauthed_request(Method::GET, "/api/settings"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    assert_eq!(json["org_name"], "My Clan");
+    assert_eq!(json["recruitment_open"], true);
+    assert_eq!(json["strategies_enabled"], true);
+}
+
+#[tokio::test]
+async fn admin_can_update_full_settings() {
+    let state = test_state().await;
+    seed_all_roles(&state.db).await;
+
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(authed_json_request(
+            Method::PUT,
+            "/api/settings",
+            ADMIN_TOKEN,
+            json!({
+                "org_name": "Admin Clan",
+                "recruitment_open": false,
+                "strategies_enabled": false
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    assert_eq!(json["org_name"], "Admin Clan");
+    assert_eq!(json["recruitment_open"], false);
+    assert_eq!(json["strategies_enabled"], false);
+
+    let app = create_router(state);
+    let resp = app
+        .oneshot(unauthed_request(Method::GET, "/api/settings"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    assert_eq!(json["org_name"], "Admin Clan");
+    assert_eq!(json["recruitment_open"], false);
+    assert_eq!(json["strategies_enabled"], false);
+}
+
+#[tokio::test]
+async fn member_cannot_update_settings() {
+    let state = test_state().await;
+    seed_all_roles(&state.db).await;
+
+    let app = create_router(state);
+    let resp = app
+        .oneshot(authed_json_request(
+            Method::PUT,
+            "/api/settings",
+            MEMBER_TOKEN,
+            json!({ "strategies_enabled": false }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    let json = body_json(resp).await;
+    assert_eq!(json["error"], "Officer access required");
+}
+
 #[tokio::test]
 async fn admin_can_access_all_routes() {
     let state = test_state().await;
