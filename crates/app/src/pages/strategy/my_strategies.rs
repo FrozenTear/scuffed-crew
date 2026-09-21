@@ -22,6 +22,36 @@ struct StrategySummary {
     updated_at: String,
 }
 
+/// `{ "data": [...] }` envelope — same unwrap as Browse (`StrategyListResponse`).
+/// `data` is required so a bare `[]` / `{}` cannot look like a successful empty list.
+#[derive(Debug, Clone, Deserialize)]
+struct ListResponse {
+    #[serde(alias = "strategies")]
+    data: Vec<StrategySummary>,
+}
+
+/// `use_api` stores failure as `Some(None)` + `error`; still-in-flight is `None`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MineFetchState {
+    Loading,
+    Failed,
+    Ready,
+}
+
+fn classify_mine_fetch<T>(resource: Option<Option<&T>>, error: Option<&str>) -> MineFetchState {
+    match resource {
+        None => {
+            if error.is_some() {
+                MineFetchState::Failed
+            } else {
+                MineFetchState::Loading
+            }
+        }
+        Some(None) => MineFetchState::Failed,
+        Some(Some(_)) => MineFetchState::Ready,
+    }
+}
+
 // --- CSS ---
 
 const PAGE_CSS: &str = r#"
@@ -182,6 +212,12 @@ const PAGE_CSS: &str = r#"
         padding: 4rem 1rem;
         font-size: 0.95rem;
     }
+    .my-strategies-error {
+        color: var(--danger);
+        text-align: center;
+        padding: 4rem 1rem;
+        font-size: 0.95rem;
+    }
     .my-strategies-login {
         text-align: center;
         padding: 5rem 2rem;
@@ -220,7 +256,7 @@ const PAGE_CSS: &str = r#"
 pub fn StrategyMy() -> Element {
     let auth = use_auth();
     let mut toast = use_toast();
-    let mut strategies = use_api::<Vec<StrategySummary>>("/api/strategy/strategies/mine");
+    let mut strategies = use_api::<ListResponse>("/api/strategy/strategies/mine");
 
     // Delete confirmation state
     let mut delete_open = use_signal(|| false);
@@ -300,22 +336,37 @@ pub fn StrategyMy() -> Element {
             // List
             {
                 let data = strategies.data.read();
-                let data = data.as_ref().and_then(|d| d.as_ref());
-                match data {
-                    None => rsx! {
+                let err = strategies.error.read().clone();
+                let state = classify_mine_fetch(data.as_ref().map(|d| d.as_ref()), err.as_deref());
+                match state {
+                    MineFetchState::Loading => rsx! {
                         p { class: "my-strategies-loading", "Loading your strategies..." }
                     },
-                    Some(list) if list.is_empty() => rsx! {
-                        div { class: "my-strategies-empty",
-                            p { "No strategies yet \u{2014} create your first!" }
-                            div { style: "margin-top:1rem;",
-                                Link { to: Route::StrategyEditorNew {}, class: "btn-create",
-                                    "+ Create Strategy"
-                                }
+                    MineFetchState::Failed => {
+                        let message = err.unwrap_or_else(|| "Unknown error".into());
+                        rsx! {
+                            p { class: "my-strategies-error",
+                                "Failed to load strategies: {message}"
                             }
                         }
-                    },
-                    Some(list) => rsx! {
+                    }
+                    MineFetchState::Ready => match data.as_ref().and_then(|d| d.as_ref()) {
+                        None => rsx! {
+                            p { class: "my-strategies-error", "Failed to load strategies." }
+                        },
+                        Some(resp) if resp.data.is_empty() => rsx! {
+                            div { class: "my-strategies-empty",
+                                p { "No strategies yet \u{2014} create your first!" }
+                                div { style: "margin-top:1rem;",
+                                    Link { to: Route::StrategyEditorNew {}, class: "btn-create",
+                                        "+ Create Strategy"
+                                    }
+                                }
+                            }
+                        },
+                        Some(resp) => {
+                            let list = &resp.data;
+                            rsx! {
                         div { class: "my-strategy-grid",
                             for strat in list.iter() {
                                 {
@@ -354,6 +405,8 @@ pub fn StrategyMy() -> Element {
                                 }
                             }
                         }
+                            }
+                        }
                     },
                 }
             }
@@ -371,5 +424,82 @@ pub fn StrategyMy() -> Element {
                 on_cancel: on_delete_cancel,
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn failed_fetch_is_not_loading() {
+        // Old bug: `and_then` collapsed Some(None) (deserialize/HTTP error) into
+        // the same None as still-in-flight, so My Strategies spun forever.
+        assert_eq!(
+            classify_mine_fetch::<ListResponse>(Some(None), Some("error decoding response body")),
+            MineFetchState::Failed
+        );
+        assert_eq!(
+            classify_mine_fetch::<ListResponse>(None, None),
+            MineFetchState::Loading
+        );
+        assert_eq!(
+            classify_mine_fetch::<ListResponse>(None, Some("deserialize")),
+            MineFetchState::Failed
+        );
+        let ready = ListResponse { data: vec![] };
+        assert_eq!(
+            classify_mine_fetch(Some(Some(&ready)), None),
+            MineFetchState::Ready
+        );
+    }
+
+    #[test]
+    fn list_envelope_unwraps_data_not_bare_vec() {
+        let empty: ListResponse = serde_json::from_str(r#"{"data":[]}"#).unwrap();
+        assert!(empty.data.is_empty());
+
+        let aliased: ListResponse = serde_json::from_str(r#"{"strategies":[]}"#).unwrap();
+        assert!(aliased.data.is_empty());
+
+        let empty_obj: Result<ListResponse, _> = serde_json::from_str("{}");
+        assert!(empty_obj.is_err(), "missing data key is not an empty list");
+
+        let bare_empty: Result<ListResponse, _> = serde_json::from_str("[]");
+        assert!(
+            bare_empty.is_err(),
+            "GET /api/strategy/strategies/mine is the list envelope, not a bare Vec"
+        );
+    }
+
+    #[test]
+    fn bare_vec_cannot_read_server_envelope() {
+        let envelope = r#"{"data":[]}"#;
+        let as_vec: Result<Vec<StrategySummary>, _> = serde_json::from_str(envelope);
+        assert!(
+            as_vec.is_err(),
+            "server wraps the list in {{ data }}; Vec::<StrategySummary> is the old bug"
+        );
+    }
+
+    #[test]
+    fn mine_payload_deserializes() {
+        let json = r#"{
+            "data": [{
+                "id": "abc",
+                "name": "Attack",
+                "map_id": "circuit-royal",
+                "game_mode": "Escort",
+                "owner_name": "dev",
+                "visibility": "private",
+                "element_count": 3,
+                "updated_at": "2026-09-21T00:00:00Z"
+            }]
+        }"#;
+        let resp: ListResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.data.len(), 1);
+        assert_eq!(resp.data[0].name, "Attack");
+        assert_eq!(resp.data[0].map_id, "circuit-royal");
+        assert_eq!(resp.data[0].element_count, 3);
     }
 }
