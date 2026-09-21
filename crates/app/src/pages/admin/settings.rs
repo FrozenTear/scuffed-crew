@@ -101,6 +101,7 @@ pub fn AdminSettings() -> Element {
             org_name: Some(org_name().trim().to_string()),
             site_description: Some(site_description().trim().to_string()),
             recruitment_open: Some(recruitment_open()),
+            strategies_enabled: None,
             recruitment_message: Some(recruitment_message().trim().to_string()),
             min_age: Some(age),
             forum_backend: Some(forum_backend()),

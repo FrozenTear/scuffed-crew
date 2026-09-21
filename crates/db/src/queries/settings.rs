@@ -15,6 +15,10 @@ struct DbSiteSettings {
     org_name: String,
     site_description: String,
     recruitment_open: bool,
+    /// Older rows may omit this — missing means enabled (back-compat).
+    #[surreal(default)]
+    #[serde(default)]
+    strategies_enabled: Option<bool>,
     recruitment_message: String,
     min_age: u32,
     forum_backend: String,
@@ -93,6 +97,7 @@ fn db_to_settings(db: DbSiteSettings) -> SiteSettings {
         org_name: db.org_name,
         site_description: db.site_description,
         recruitment_open: db.recruitment_open,
+        strategies_enabled: db.strategies_enabled.unwrap_or(true),
         recruitment_message: db.recruitment_message,
         min_age: db.min_age,
         forum_backend: db.forum_backend,
@@ -157,6 +162,7 @@ impl Database {
                 org_name: "My Clan".to_string(),
                 site_description: "Gaming clan".to_string(),
                 recruitment_open: true,
+                strategies_enabled: Some(true),
                 recruitment_message: "Recruitment is closed right now. Check back later."
                     .to_string(),
                 min_age: 16,
@@ -208,6 +214,7 @@ impl Database {
         brand_accent_light: Option<&str>,
         home_shell: Option<&str>,
         home_skin: Option<&str>,
+        strategies_enabled: Option<bool>,
     ) -> DbResult<SiteSettings> {
         with_timeout(async {
             let current = self.get_settings().await?;
@@ -226,6 +233,11 @@ impl Database {
             }
             if let Some(open) = recruitment_open {
                 db.recruitment_open = open;
+            }
+            if let Some(enabled) = strategies_enabled {
+                db.strategies_enabled = Some(enabled);
+            } else if db.strategies_enabled.is_none() {
+                db.strategies_enabled = Some(true);
             }
             if let Some(msg) = recruitment_message {
                 db.recruitment_message = msg.to_string();

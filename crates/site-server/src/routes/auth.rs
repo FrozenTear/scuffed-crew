@@ -690,6 +690,7 @@ pub async fn setup(
                     brand_light.as_deref(),
                     shell.as_deref(),
                     skin.as_deref(),
+                    None,
                 )
                 .await
             {

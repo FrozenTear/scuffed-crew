@@ -871,6 +871,9 @@ pub struct SiteSettings {
     pub org_name: String,
     pub site_description: String,
     pub recruitment_open: bool,
+    /// Missing on older rows — treat as enabled.
+    #[serde(default = "default_strategies_enabled")]
+    pub strategies_enabled: bool,
     pub recruitment_message: String,
     pub min_age: u32,
     pub forum_backend: String,
@@ -905,6 +908,10 @@ pub struct SiteSettings {
 
 fn default_public_layout() -> String {
     "hub".to_string()
+}
+
+fn default_strategies_enabled() -> bool {
+    true
 }
 
 /// An announcement/news post.
