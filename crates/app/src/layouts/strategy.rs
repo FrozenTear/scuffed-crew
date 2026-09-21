@@ -97,7 +97,10 @@ const STRATEGY_CSS: &str = r#"
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum StrategyPathPolicy {
     Open,
+    /// Flag is off and this URL is the strategy alias of public Patch Notes.
     RedirectPatchNotes,
+    /// GET /api/settings is still in flight on that alias. Not the fail-open default.
+    AwaitingSettings,
     Blocked,
 }
 
@@ -105,38 +108,69 @@ fn strategies_enabled_or_default(settings: Option<&SiteSettings>) -> bool {
     settings.map(|s| s.strategies_enabled).unwrap_or(true)
 }
 
-fn strategy_path_policy(path: &str, strategies_enabled: bool) -> StrategyPathPolicy {
-    if strategies_enabled {
-        return StrategyPathPolicy::Open;
+/// `None` while the settings resource has not settled.
+/// `Some` once it has: a missing payload fail-opens, and a missing
+/// `strategies_enabled` field is already `true` via serde before this runs.
+fn strategy_path_policy(path: &str, strategies_enabled: Option<bool>) -> StrategyPathPolicy {
+    match strategies_enabled {
+        None if path == "/strategy/patch-notes" => StrategyPathPolicy::AwaitingSettings,
+        None | Some(true) => StrategyPathPolicy::Open,
+        Some(false) if path == "/strategy/patch-notes" => StrategyPathPolicy::RedirectPatchNotes,
+        Some(false) if path == "/strategy" || path.starts_with("/strategy/") => {
+            StrategyPathPolicy::Blocked
+        }
+        Some(false) => StrategyPathPolicy::Open,
     }
-    if path == "/strategy/patch-notes" {
-        return StrategyPathPolicy::RedirectPatchNotes;
-    }
-    if path == "/strategy" || path.starts_with("/strategy/") {
-        return StrategyPathPolicy::Blocked;
-    }
-    StrategyPathPolicy::Open
+}
+
+/// Outer `None`: resource still pending (do not apply the default).
+/// Inner `None`: settled with no settings payload → default on.
+fn flag_from_loaded_settings(loaded: Option<Option<&SiteSettings>>) -> Option<bool> {
+    loaded.map(|settings| strategies_enabled_or_default(settings))
+}
+
+fn read_strategies_flag(settings: Resource<Option<SiteSettings>>) -> Option<bool> {
+    let loaded = settings.read();
+    flag_from_loaded_settings(loaded.as_ref().map(|payload| payload.as_ref()))
 }
 
 #[component]
 pub fn StrategyLayout() -> Element {
     let navigator = use_navigator();
-    let route = use_route::<Route>();
     let site_settings = use_resource(|| async {
         ApiClient::web()
             .fetch::<SiteSettings>("/api/settings")
             .await
             .ok()
     });
-    let enabled =
-        strategies_enabled_or_default(site_settings.read().as_ref().and_then(|o| o.as_ref()));
-    let surface = strategy_path_policy(&route.to_string(), enabled);
-
+    // Dioxus 0.7 effects re-run only when signals are read *inside* the effect.
+    // `use_route()` is a hook (`use_hook`) and must stay out here; `router().current()`
+    // subscribes this effect to navigation. Reading the resource here subscribes it
+    // to GET /api/settings. A copied `surface` value does neither.
     use_effect(move || {
-        if surface == StrategyPathPolicy::RedirectPatchNotes {
+        let path = router().current::<Route>().to_string();
+        let flag = read_strategies_flag(site_settings);
+        if strategy_path_policy(&path, flag) == StrategyPathPolicy::RedirectPatchNotes {
             navigator.replace(Route::PatchNotes {});
         }
     });
+
+    let path = router().current::<Route>().to_string();
+    let surface = strategy_path_policy(&path, read_strategies_flag(site_settings));
+
+    if matches!(
+        surface,
+        StrategyPathPolicy::RedirectPatchNotes | StrategyPathPolicy::AwaitingSettings
+    ) {
+        let gate = if surface == StrategyPathPolicy::RedirectPatchNotes {
+            "redirect"
+        } else {
+            "pending"
+        };
+        return rsx! {
+            div { "data-accent": "strategy", "data-strategy-gate": "{gate}" }
+        };
+    }
 
     if surface == StrategyPathPolicy::Blocked {
         return rsx! {
@@ -185,11 +219,11 @@ mod tests {
     #[test]
     fn enabled_keeps_planner_and_patch_notes_open() {
         assert_eq!(
-            strategy_path_policy("/strategy", true),
+            strategy_path_policy("/strategy", Some(true)),
             StrategyPathPolicy::Open
         );
         assert_eq!(
-            strategy_path_policy("/strategy/patch-notes", true),
+            strategy_path_policy("/strategy/patch-notes", Some(true)),
             StrategyPathPolicy::Open
         );
     }
@@ -197,24 +231,74 @@ mod tests {
     #[test]
     fn disabled_blocks_planner_keeps_public_patch_notes() {
         assert_eq!(
-            strategy_path_policy("/strategy", false),
+            strategy_path_policy("/strategy", Some(false)),
             StrategyPathPolicy::Blocked
         );
         assert_eq!(
-            strategy_path_policy("/strategy/my", false),
+            strategy_path_policy("/strategy/my", Some(false)),
             StrategyPathPolicy::Blocked
         );
         assert_eq!(
-            strategy_path_policy("/strategy/editor/x", false),
+            strategy_path_policy("/strategy/editor/x", Some(false)),
             StrategyPathPolicy::Blocked
         );
         assert_eq!(
-            strategy_path_policy("/strategy/patch-notes", false),
+            strategy_path_policy("/strategy/patch-notes", Some(false)),
             StrategyPathPolicy::RedirectPatchNotes
         );
         assert_eq!(
-            strategy_path_policy("/patch-notes", false),
+            strategy_path_policy("/patch-notes", Some(false)),
             StrategyPathPolicy::Open
+        );
+    }
+
+    #[test]
+    fn pending_patch_notes_is_not_the_fail_open_default() {
+        assert_eq!(
+            strategy_path_policy("/strategy/patch-notes", None),
+            StrategyPathPolicy::AwaitingSettings
+        );
+        assert_eq!(
+            strategy_path_policy("/strategy/patch-notes", Some(true)),
+            StrategyPathPolicy::Open
+        );
+        assert!(strategies_enabled_or_default(None));
+        assert_eq!(flag_from_loaded_settings(None), None);
+        assert_eq!(flag_from_loaded_settings(Some(None)), Some(true));
+    }
+
+    #[test]
+    fn pending_other_strategy_paths_stay_open() {
+        assert_eq!(
+            strategy_path_policy("/strategy", None),
+            StrategyPathPolicy::Open
+        );
+        assert_eq!(
+            strategy_path_policy("/strategy/my", None),
+            StrategyPathPolicy::Open
+        );
+    }
+
+    /// The redirect bug was the effect closing over a copied policy and never
+    /// reading the settings resource or the route. Policy tests stay green either way.
+    #[test]
+    fn redirect_effect_subscribes_inside_the_effect() {
+        let src = include_str!("strategy.rs");
+        let start = src.find("use_effect(move || {").expect("redirect effect");
+        let body = &src[start..];
+        let end = body.find("});").expect("effect end");
+        let effect = &body[..end];
+        assert!(
+            effect.contains("read_strategies_flag"),
+            "effect must read settings inside so it re-runs when GET /api/settings settles"
+        );
+        assert!(
+            effect.contains("router().current"),
+            "effect must read the current route inside so it re-runs on navigation"
+        );
+        assert!(
+            !effect.contains("surface =="),
+            "copied surface is not a signal; the effect would not re-run"
         );
     }
 }

@@ -4,7 +4,8 @@ use scuffed_api_client::ApiClient;
 use scuffed_types::MeResponse;
 
 use crate::components::dm::{
-    ConversationList, ConversationSummary, DmComposeModal, MessageThread, SyncResponse,
+    ConversationList, ConversationListState, ConversationSummary, DmComposeModal, DmFailureNotice,
+    DmLoadFailure, MessageThread, SyncResponse, classify_dm_client_error,
 };
 use crate::components::{Toast, use_toast};
 use crate::routes::Route;
@@ -49,20 +50,6 @@ const PAGE_CSS: &str = r#"
     padding: 3rem 0;
     font-size: 0.9rem;
 }
-.dm-error {
-    background: color-mix(in srgb, var(--danger) 8%, transparent);
-    border: 1px solid color-mix(in srgb, var(--danger) 40%, transparent);
-    border-radius: 8px;
-    padding: 1rem 1.25rem;
-    color: var(--danger);
-    font-size: 0.85rem;
-    margin-bottom: 1rem;
-}
-.dm-error a {
-    color: var(--danger);
-    font-weight: 600;
-    text-decoration: underline;
-}
 .dm-login-needed {
     background: var(--surface);
     border: 1px solid var(--border);
@@ -79,12 +66,28 @@ const PAGE_CSS: &str = r#"
 }
 "#;
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, PartialEq)]
 enum LoadState {
     Loading,
     Ready,
-    NeedsServerManaged,
-    OtherError,
+    Error(DmLoadFailure),
+}
+
+fn list_state(state: &LoadState) -> ConversationListState {
+    match state {
+        LoadState::Loading => ConversationListState::Loading,
+        LoadState::Ready => ConversationListState::Ready,
+        LoadState::Error(_) => ConversationListState::Failed,
+    }
+}
+
+fn inbox_pane_message(state: &LoadState, conversation_count: usize) -> &'static str {
+    match state {
+        LoadState::Loading => "Loading…",
+        LoadState::Error(_) => "Conversations couldn't be loaded.",
+        LoadState::Ready if conversation_count == 0 => "Select a conversation to start reading.",
+        LoadState::Ready => "Select a conversation from the left.",
+    }
 }
 
 #[component]
@@ -127,10 +130,13 @@ fn DmPageInner(selected_peer: Option<String>) -> Element {
         }
         load_state.set(LoadState::Loading);
 
-        // Fire sync on mount; ignore failure (will surface via the conversations call).
-        let _ = ApiClient::web()
-            .post_json::<_, SyncResponse>("/api/nostr/dm/sync", &serde_json::json!({}))
-            .await;
+        // Sync hits the relay and can hang. Do not await it before the list —
+        // a stuck sync used to leave the inbox on the empty/in-flight state forever.
+        spawn(async move {
+            let _ = ApiClient::web()
+                .post_json::<_, SyncResponse>("/api/nostr/dm/sync", &serde_json::json!({}))
+                .await;
+        });
 
         match ApiClient::web()
             .fetch::<Vec<ConversationSummary>>("/api/nostr/dm/conversations")
@@ -140,20 +146,8 @@ fn DmPageInner(selected_peer: Option<String>) -> Element {
                 conversations.set(list);
                 load_state.set(LoadState::Ready);
             }
-            Err(scuffed_api_client::ClientError::Http { status, body }) => {
-                let needs_managed = status == 400
-                    || status == 403
-                    || status == 409
-                    || status == 412
-                    || body.contains("server_managed");
-                load_state.set(if needs_managed {
-                    LoadState::NeedsServerManaged
-                } else {
-                    LoadState::OtherError
-                });
-            }
-            Err(_) => {
-                load_state.set(LoadState::OtherError);
+            Err(err) => {
+                load_state.set(LoadState::Error(classify_dm_client_error(&err)));
             }
         }
     });
@@ -243,22 +237,14 @@ fn DmPageInner(selected_peer: Option<String>) -> Element {
         main { class: "dm-page",
             h1 { class: "dm-page-title", "Direct Messages" }
 
-            if matches!(load_state(), LoadState::NeedsServerManaged) {
-                div { class: "dm-error",
-                    "Direct messages require a server-managed Nostr identity. "
-                    Link { to: Route::IdentitySettings {}, "Visit identity settings" }
-                    " to enable it."
-                }
-            }
-            if matches!(load_state(), LoadState::OtherError) {
-                div { class: "dm-error",
-                    "Could not load conversations. Try Refresh, or check your connection."
-                }
+            if let LoadState::Error(failure) = load_state() {
+                DmFailureNotice { failure }
             }
 
             div { class: "dm-page-grid",
                 ConversationList {
                     conversations: convs.clone(),
+                    load_state: list_state(&load_state()),
                     selected_peer: selected_peer.clone(),
                     refreshing: syncing(),
                     on_refresh: on_refresh,
@@ -266,13 +252,7 @@ fn DmPageInner(selected_peer: Option<String>) -> Element {
                 }
                 {match selected_peer.as_ref() {
                     None => {
-                        let msg = if matches!(load_state(), LoadState::Loading) {
-                            "Loading…"
-                        } else if convs.is_empty() {
-                            "Select a conversation to start reading."
-                        } else {
-                            "Select a conversation from the left."
-                        };
+                        let msg = inbox_pane_message(&load_state(), convs.len());
                         rsx! {
                             div { class: "dm-page-empty", "{msg}" }
                         }
@@ -305,6 +285,8 @@ fn DmPageInner(selected_peer: Option<String>) -> Element {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     /// Source-order guard: auth/session flips must not change the hook count.
     /// The old `if !auth().is_logged_in() { return }` sat *before* `use_signal` /
     /// `use_resource` / `use_navigator` and panicked when `/api/auth/me` landed.
@@ -331,5 +313,49 @@ mod tests {
                 "{hook} must be registered before the first `return rsx!` (was {pos} >= {first_return})"
             );
         }
+    }
+
+    #[test]
+    fn inbox_pane_hides_empty_copy_until_ready() {
+        assert_eq!(inbox_pane_message(&LoadState::Loading, 0), "Loading…");
+        assert_eq!(
+            inbox_pane_message(&LoadState::Error(DmLoadFailure::Membership), 0),
+            "Conversations couldn't be loaded."
+        );
+        assert_eq!(
+            inbox_pane_message(&LoadState::Error(DmLoadFailure::RelayConfig), 3),
+            "Conversations couldn't be loaded."
+        );
+        assert_eq!(
+            inbox_pane_message(&LoadState::Ready, 0),
+            "Select a conversation to start reading."
+        );
+        assert_eq!(
+            inbox_pane_message(&LoadState::Ready, 2),
+            "Select a conversation from the left."
+        );
+    }
+
+    #[test]
+    fn conversation_fetch_does_not_await_sync() {
+        let src = include_str!("dm.rs");
+        let start = src
+            .find("let _load_conversations")
+            .expect("conversation resource");
+        let body = &src[start..];
+        let fetch_at = body
+            .find("/api/nostr/dm/conversations")
+            .expect("conversations fetch");
+        let before_fetch = &body[..fetch_at];
+        let spawn_at = before_fetch
+            .find("spawn(async")
+            .expect("sync must be spawned so a hung relay does not block the list");
+        let sync_at = before_fetch
+            .find(".post_json::<_, SyncResponse>")
+            .expect("sync still runs");
+        assert!(
+            sync_at > spawn_at,
+            "sync must run inside the spawn, not as an await before the list fetch"
+        );
     }
 }

@@ -103,6 +103,9 @@ pub async fn clear_store(data_dir: std::path::PathBuf) -> Result<String, String>
                 store.clear_all_data().await.map_err(|e| e.to_string())?;
                 stat_tracker::storage::clear_match_log(&data_dir);
             }
+            Err(e) if stat_tracker::storage::is_store_busy(e.as_ref()) => {
+                return Err("Stop the tracker before deleting stored data".into());
+            }
             Err(_) => {
                 stat_tracker::storage::force_clear_data_dir(&data_dir)
                     .map_err(|e| e.to_string())?;
@@ -139,5 +142,26 @@ mod tests {
         let (w, h, rgba) = thumbnail_rgba(&img);
         assert!(w <= 800 && h <= 450, "{w}x{h}");
         assert_eq!(rgba.len(), (w * h * 4) as usize);
+    }
+
+    #[tokio::test]
+    async fn clear_store_does_not_wipe_a_locked_store() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _held = stat_tracker::storage::LocalStore::open(dir.path())
+            .await
+            .expect("open");
+        std::fs::write(dir.path().join("live_snapshot.json"), "{}").unwrap();
+        let err = clear_store(dir.path().to_path_buf())
+            .await
+            .expect_err("locked store");
+        assert!(
+            err.contains("Stop the tracker"),
+            "busy lock must not be treated as a corrupt store: {err}"
+        );
+        assert!(
+            dir.path().join("stats.surrealkv").exists(),
+            "force-clear must not run while the store lock is held"
+        );
+        assert!(dir.path().join("live_snapshot.json").exists());
     }
 }

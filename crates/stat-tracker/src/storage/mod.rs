@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 pub mod maintain;
 
@@ -31,6 +32,15 @@ pub struct PersonalMatch {
     pub played_at: SurrealDatetime,
     #[serde(default)]
     pub synced: bool,
+    /// Payload revision for sync compare-and-swap. Every statement that
+    /// changes an uploaded field bumps this in the same write that sets
+    /// `synced = false`. `mark_synced` stamps a row only when the revision
+    /// still matches the value captured at read time, so a local write during
+    /// the HTTP upload is not marked synced. Missing on legacy rows (treated
+    /// as 0).
+    #[serde(default)]
+    #[surreal(default)]
+    pub sync_rev: u64,
     #[serde(default)]
     pub session_id: String,
 
@@ -97,6 +107,45 @@ pub struct PersonalMatch {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     #[surreal(default)]
     pub segment_resolutions: Vec<SegmentResolution>,
+}
+
+/// Identity and payload revision captured when a row was read for upload.
+///
+/// [`LocalStore::mark_synced`] commits `synced = true` only while `sync_rev`
+/// still equals this value. A local write during the upload bumps `sync_rev`
+/// in the same statement that changes the payload, so the compare-and-swap
+/// misses and the row stays queued.
+#[derive(Debug, Clone)]
+pub struct SyncClaim {
+    pub id: surrealdb_types::RecordId,
+    pub sync_rev: u64,
+    pub session_id: String,
+}
+
+impl SyncClaim {
+    /// Claims for rows that have a store id (fresh parses, which have none,
+    /// cannot be marked).
+    pub fn capture(rows: &[PersonalMatch]) -> Vec<Self> {
+        rows.iter()
+            .filter_map(|m| {
+                m.id.clone().map(|id| SyncClaim {
+                    id,
+                    sync_rev: m.sync_rev,
+                    session_id: m.session_id.clone(),
+                })
+            })
+            .collect()
+    }
+
+    /// Empty `session_id` rows are legacy one-offs: each is its own group so a
+    /// revision miss on one does not unmark the others.
+    fn group_key(&self) -> String {
+        if self.session_id.is_empty() {
+            format!("id:{:?}", self.id)
+        } else {
+            self.session_id.clone()
+        }
+    }
 }
 
 /// Count an unconfirmed hero segment toward the majority (it was a real swap).
@@ -217,12 +266,68 @@ pub struct LocalStore {
     /// Home of the side-channel files (`matches.jsonl`, snapshots) that some
     /// mutations must keep in step with the database.
     data_dir: PathBuf,
+    /// Exclusive `flock` on the `stats.surrealkv` directory. Declared after
+    /// `db` so the handle drops first; the lock releases on the last clone
+    /// unless [`LocalStore::hold_writer_lock_until_exit`] leaked a dup.
+    writer_lock: Arc<StoreDirLock>,
+}
+
+/// Advisory exclusive lock on the store directory inode.
+///
+/// SurrealKV is single-writer. The pid file is not a lock. `flock` does not
+/// block creating files inside the directory; it only conflicts with another
+/// `flock` on this inode, which is what a second `LocalStore::open` takes.
+struct StoreDirLock(std::fs::File);
+
+/// `LocalStore::open` refused because another process (or an earlier open in
+/// this one) still holds the store-directory flock.
+#[derive(Debug)]
+pub struct StoreBusy {
+    path: PathBuf,
+}
+
+impl std::fmt::Display for StoreBusy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "stat store is already open in another process ({})",
+            self.path.display()
+        )
+    }
+}
+
+impl std::error::Error for StoreBusy {}
+
+pub fn is_store_busy(err: &(dyn std::error::Error + Send + Sync + 'static)) -> bool {
+    err.is::<StoreBusy>()
+}
+
+fn lock_store_dir(
+    db_path: &Path,
+) -> Result<StoreDirLock, Box<dyn std::error::Error + Send + Sync>> {
+    let file = std::fs::File::open(db_path)?;
+    match file.try_lock() {
+        Ok(()) => Ok(StoreDirLock(file)),
+        Err(std::fs::TryLockError::WouldBlock) => {
+            tracing::warn!(
+                path = %db_path.display(),
+                "stat store is already open in another process"
+            );
+            Err(StoreBusy {
+                path: db_path.to_path_buf(),
+            }
+            .into())
+        }
+        Err(std::fs::TryLockError::Error(err)) => Err(err.into()),
+    }
 }
 
 impl LocalStore {
     pub async fn open(data_dir: &Path) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let db_path = data_dir.join("stats.surrealkv");
         std::fs::create_dir_all(&db_path)?;
+        // Take the single-writer lock before SurrealKV opens the directory.
+        let writer_lock = Arc::new(lock_store_dir(&db_path)?);
 
         let db =
             Surreal::new::<SurrealKv>(db_path.to_str().ok_or("data_dir path is not valid UTF-8")?)
@@ -248,7 +353,26 @@ impl LocalStore {
         Ok(Self {
             db,
             data_dir: data_dir.to_path_buf(),
+            writer_lock,
         })
+    }
+
+    /// Keep the store-directory flock until this process exits.
+    ///
+    /// Dropping [`LocalStore`] closes its fd before SurrealKV's detached
+    /// memtable flush finishes. `File::try_clone` is a `CLOEXEC` dup: it stays
+    /// open across that window and is not inherited across `exec`. The daemon
+    /// calls this once after the store that must outlive shutdown is open.
+    /// Same-process reopen (vacuum, tests) does not, so it can lock again
+    /// after the handle drops.
+    pub fn hold_writer_lock_until_exit(&self) {
+        match self.writer_lock.0.try_clone() {
+            Ok(dup) => std::mem::forget(dup),
+            Err(e) => tracing::warn!(
+                error = %e,
+                "could not dup store lock; flock ends when the store handle drops"
+            ),
+        }
     }
 
     pub async fn insert_match(
@@ -277,18 +401,70 @@ impl LocalStore {
 
     /// Mark exactly these rows as synced — by identity, not queue position, so
     /// rows inserted while an upload was in flight are never marked by mistake.
+    ///
+    /// Each claim carries the `sync_rev` observed at read time. The update is
+    /// a compare-and-swap: `synced = true` lands only when that revision is
+    /// unchanged. A session is one server row (the newest snapshot). If any
+    /// claimed snapshot in the session changed during the upload, every claim
+    /// in that session is left `synced = false` — marking the unchanged
+    /// siblings would let the next sync upload the changed older snapshot
+    /// alone and last-write the newer stats off the server.
     pub async fn mark_synced(
         &self,
-        ids: Vec<surrealdb_types::RecordId>,
+        claims: &[SyncClaim],
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        if ids.is_empty() {
+        if claims.is_empty() {
             return Ok(());
         }
-        self.db
-            .query("UPDATE $ids SET synced = true")
-            .bind(("ids", ids))
-            .await?;
+        let mut groups: std::collections::HashMap<String, Vec<usize>> =
+            std::collections::HashMap::new();
+        for (i, claim) in claims.iter().enumerate() {
+            groups.entry(claim.group_key()).or_default().push(i);
+        }
+        for idxs in groups.values() {
+            let mut marked: Vec<usize> = Vec::new();
+            let mut all_ok = true;
+            for &i in idxs {
+                if self
+                    .cas_set_synced(&claims[i].id, claims[i].sync_rev, true)
+                    .await?
+                {
+                    marked.push(i);
+                } else {
+                    all_ok = false;
+                }
+            }
+            if !all_ok {
+                tracing::info!(
+                    session_id = %claims[idxs[0]].session_id,
+                    "sync left session unsynced — a snapshot changed during upload"
+                );
+                for i in marked {
+                    self.cas_set_synced(&claims[i].id, claims[i].sync_rev, false)
+                        .await?;
+                }
+            }
+        }
         Ok(())
+    }
+
+    /// Set `synced` only when `sync_rev` is still `rev`. Returns whether this
+    /// call applied the write. A missing `sync_rev` (legacy row) compares as 0.
+    async fn cas_set_synced(
+        &self,
+        id: &surrealdb_types::RecordId,
+        rev: u64,
+        synced: bool,
+    ) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
+        let mut response = self
+            .db
+            .query("UPDATE $id SET synced = $synced WHERE (sync_rev ?? 0) = $rev RETURN AFTER")
+            .bind(("id", id.clone()))
+            .bind(("synced", synced))
+            .bind(("rev", rev))
+            .await?;
+        let updated: Vec<PersonalMatch> = response.take(0)?;
+        Ok(updated.iter().any(|m| m.synced == synced))
     }
 
     pub async fn match_count(&self) -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
@@ -441,7 +617,8 @@ impl LocalStore {
         self.db
             .query(
                 "UPDATE match_session SET hero = $hero, role = $role WHERE session_id = $sid; \
-                 UPDATE personal_match SET hero = $hero, role = $role, synced = false \
+                 UPDATE personal_match SET hero = $hero, role = $role, synced = false, \
+                 sync_rev = (sync_rev ?? 0) + 1 \
                  WHERE session_id = $sid AND (hero != $hero OR role != $role)",
             )
             .bind(("hero", hero.to_string()))
@@ -513,7 +690,10 @@ impl LocalStore {
 
             if requeue {
                 self.db
-                    .query("UPDATE $id SET heroes_played = $hp, synced = false")
+                    .query(
+                        "UPDATE $id SET heroes_played = $hp, synced = false, \
+                         sync_rev = (sync_rev ?? 0) + 1",
+                    )
                     .bind(("id", id))
                     .bind(("hp", segments.clone()))
                     .await?;
@@ -603,7 +783,12 @@ impl LocalStore {
         map: &str,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         self.db
-            .query("UPDATE match_session SET map_name = $map WHERE session_id = $sid; UPDATE personal_match SET map_name = $map, synced = false WHERE session_id = $sid AND map_name != $map")
+            .query(
+                "UPDATE match_session SET map_name = $map WHERE session_id = $sid; \
+                 UPDATE personal_match SET map_name = $map, synced = false, \
+                 sync_rev = (sync_rev ?? 0) + 1 \
+                 WHERE session_id = $sid AND map_name != $map",
+            )
             .bind(("map", map.to_string()))
             .bind(("sid", session_id.to_string()))
             .await?;
@@ -628,7 +813,11 @@ impl LocalStore {
         outcome: &str,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         self.db
-            .query("UPDATE match_session SET final_outcome = $outcome WHERE session_id = $sid; UPDATE personal_match SET outcome = $outcome, synced = false WHERE session_id = $sid")
+            .query(
+                "UPDATE match_session SET final_outcome = $outcome WHERE session_id = $sid; \
+                 UPDATE personal_match SET outcome = $outcome, synced = false, \
+                 sync_rev = (sync_rev ?? 0) + 1 WHERE session_id = $sid",
+            )
             .bind(("outcome", outcome.to_string()))
             .bind(("sid", session_id.to_string()))
             .await?;
@@ -670,7 +859,7 @@ impl LocalStore {
                      corrected_elims = $ce, corrected_deaths = $cd, corrected_assists = $ca, \
                      corrected_damage = $cdmg, corrected_healing = $chl, \
                      corrected_mitigation = $cmit, edited_fields = $ef, edited_at = $ea, \
-                     synced = false",
+                     synced = false, sync_rev = (sync_rev ?? 0) + 1",
                 )
                 .bind(("id", id))
                 .bind(("ch", m.corrected_hero.clone()))
@@ -744,7 +933,8 @@ impl LocalStore {
     /// periodic embedded housekeeping range-scans then spend entire cores
     /// skipping those versions — two threads at 100% around the clock on an
     /// idle daemon (2026-07-15). The daemon must NOT be running (single-
-    /// process lock; the caller checks the pid file).
+    /// writer: `open` flocks the store directory; the caller also checks the
+    /// pid file).
     ///
     /// Returns (matches, sessions, tombstones) copied.
     pub async fn vacuum(
@@ -1397,6 +1587,7 @@ mod tests {
             mitigation: 0,
             played_at: SurrealDatetime::from(Utc::now()),
             synced: false,
+            sync_rev: 0,
             session_id: session_id.into(),
             corrected_hero: None,
             corrected_role: None,
@@ -1413,6 +1604,13 @@ mod tests {
             heroes_played: Vec::new(),
             segment_resolutions: Vec::new(),
         }
+    }
+
+    /// Mark every stored row at its current revision. Test setup for "already
+    /// synced" — nothing else writes between the read and the CAS.
+    async fn mark_current(store: &LocalStore) {
+        let rows = store.get_all_matches().await.unwrap();
+        store.mark_synced(&SyncClaim::capture(&rows)).await.unwrap();
     }
 
     #[test]
@@ -1500,14 +1698,7 @@ mod tests {
             store.insert_match(m).await.unwrap();
         }
         // Everything already synced, as after a normal upload cycle.
-        let ids: Vec<_> = store
-            .get_all_matches()
-            .await
-            .unwrap()
-            .into_iter()
-            .filter_map(|m| m.id)
-            .collect();
-        store.mark_synced(ids).await.unwrap();
+        mark_current(&store).await;
 
         store
             .set_session_hero("s1", "Mizuki", "Support")
@@ -1534,14 +1725,7 @@ mod tests {
             m.map_name = "Ilios".into();
             store.insert_match(m).await.unwrap();
         }
-        let ids: Vec<_> = store
-            .get_all_matches()
-            .await
-            .unwrap()
-            .into_iter()
-            .filter_map(|m| m.id)
-            .collect();
-        store.mark_synced(ids).await.unwrap();
+        mark_current(&store).await;
 
         let edit = MatchEdit {
             elims: Some(30),
@@ -1903,14 +2087,7 @@ mod tests {
             append_match_log(dir.path(), &m);
             store.insert_match(m).await.unwrap();
         }
-        let ids: Vec<_> = store
-            .get_all_matches()
-            .await
-            .unwrap()
-            .into_iter()
-            .filter_map(|m| m.id)
-            .collect();
-        store.mark_synced(ids).await.unwrap();
+        mark_current(&store).await;
 
         store.refresh_session_hero_timeline("s1").await.unwrap();
 
@@ -1955,14 +2132,7 @@ mod tests {
                 .await
                 .unwrap();
         }
-        let ids: Vec<_> = store
-            .get_all_matches()
-            .await
-            .unwrap()
-            .into_iter()
-            .filter_map(|m| m.id)
-            .collect();
-        store.mark_synced(ids).await.unwrap();
+        mark_current(&store).await;
 
         store.refresh_session_hero_timeline("s1").await.unwrap();
         let rows = store.get_session_snapshots("s1").await.unwrap();
@@ -1995,14 +2165,7 @@ mod tests {
             .await
             .unwrap();
         store.refresh_session_hero_timeline("s1").await.unwrap();
-        let ids: Vec<_> = store
-            .get_all_matches()
-            .await
-            .unwrap()
-            .into_iter()
-            .filter_map(|m| m.id)
-            .collect();
-        store.mark_synced(ids).await.unwrap();
+        mark_current(&store).await;
 
         // Flap is unconfirmed → Ana is primary.
         let rows = store.get_session_snapshots("s1").await.unwrap();
@@ -2108,5 +2271,155 @@ mod tests {
         // primary (Ana appears in two 1-snapshot segments → 2 votes vs Genji 1).
         assert_eq!(games[0].hero, "Ana");
         assert_eq!(games[0].display_hero(), "Ana");
+    }
+
+    #[tokio::test]
+    async fn mark_synced_skips_row_revised_during_upload() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = LocalStore::open(dir.path()).await.expect("open store");
+        store.insert_match(snap("s1", 10)).await.unwrap();
+
+        let before = store.get_unsynced().await.unwrap();
+        assert_eq!(before.len(), 1);
+        assert_eq!(before[0].sync_rev, 0);
+        let claims = SyncClaim::capture(&before);
+
+        // Outcome back-fill while the HTTP upload of `claims` is in flight.
+        store.set_session_outcome("s1", "defeat").await.unwrap();
+
+        store.mark_synced(&claims).await.unwrap();
+
+        let rows = store.get_all_matches().await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].outcome, "defeat");
+        assert!(
+            !rows[0].synced,
+            "a row revised during upload must stay queued"
+        );
+        assert!(rows[0].sync_rev > claims[0].sync_rev);
+
+        // The next sync, capturing the new revision, is allowed to commit.
+        let again = SyncClaim::capture(&store.get_unsynced().await.unwrap());
+        assert_eq!(again.len(), 1);
+        assert_eq!(again[0].sync_rev, rows[0].sync_rev);
+        store.mark_synced(&again).await.unwrap();
+        let committed = store.get_all_matches().await.unwrap();
+        assert!(committed[0].synced);
+        assert_eq!(committed[0].outcome, "defeat");
+        assert!(store.get_unsynced().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn mark_synced_commits_unchanged_revision() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = LocalStore::open(dir.path()).await.expect("open store");
+        store.insert_match(snap("s1", 4)).await.unwrap();
+        let claims = SyncClaim::capture(&store.get_unsynced().await.unwrap());
+        store.mark_synced(&claims).await.unwrap();
+        let rows = store.get_all_matches().await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].synced);
+        assert!(store.get_unsynced().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn revised_sibling_keeps_whole_session_unsynced() {
+        // Two snapshots, one session. Map back-fill touches only the older
+        // row (the newer already has the map). Marking the unchanged newer
+        // row synced would let the next upload send the older snapshot alone
+        // and last-write its lower stats over the server row.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = LocalStore::open(dir.path()).await.expect("open store");
+        let mut older = snap("s1", 3);
+        older.map_name = String::new();
+        older.played_at = SurrealDatetime::from(Utc::now() - chrono::Duration::seconds(30));
+        let mut newer = snap("s1", 20);
+        newer.map_name = "Ilios".into();
+        newer.played_at = SurrealDatetime::from(Utc::now());
+        // A second session that did not change must still commit.
+        let mut other = snap("s2", 7);
+        other.map_name = "Busan".into();
+        store.insert_match(older).await.unwrap();
+        store.insert_match(newer).await.unwrap();
+        store.insert_match(other).await.unwrap();
+
+        let claims = SyncClaim::capture(&store.get_unsynced().await.unwrap());
+        assert_eq!(claims.len(), 3);
+        store.set_session_map("s1", "Ilios").await.unwrap();
+        store.mark_synced(&claims).await.unwrap();
+
+        let rows = store.get_all_matches().await.unwrap();
+        let s1: Vec<_> = rows.iter().filter(|m| m.session_id == "s1").collect();
+        let s2: Vec<_> = rows.iter().filter(|m| m.session_id == "s2").collect();
+        assert_eq!(s1.len(), 2);
+        assert!(
+            s1.iter().all(|m| !m.synced && m.map_name == "Ilios"),
+            "changed session stays fully unsynced: {s1:?}"
+        );
+        assert_eq!(s2.len(), 1);
+        assert!(s2[0].synced, "untouched session still commits");
+    }
+
+    #[tokio::test]
+    async fn legacy_row_without_sync_rev_marks_at_revision_zero() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = LocalStore::open(dir.path()).await.expect("open store");
+        store
+            .db
+            .query(
+                "CREATE personal_match SET hero = 'Ana', map_name = 'Busan', game_mode = 'x', \
+                 role = 'Support', outcome = 'victory', elims = 1, deaths = 0, assists = 0, \
+                 damage = 1, healing = 0, mitigation = 0, played_at = time::now(), \
+                 synced = false, session_id = 'legacy'",
+            )
+            .await
+            .unwrap();
+        let rows = store.get_unsynced().await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].sync_rev, 0, "missing sync_rev reads as 0");
+        store.mark_synced(&SyncClaim::capture(&rows)).await.unwrap();
+        let after = store.get_all_matches().await.unwrap();
+        assert!(after[0].synced);
+    }
+
+    fn expect_busy<T>(result: Result<T, Box<dyn std::error::Error + Send + Sync>>, what: &str) {
+        match result {
+            Err(err) => assert!(is_store_busy(err.as_ref()), "{what}: {err}"),
+            Ok(_) => panic!("{what}"),
+        }
+    }
+
+    #[test]
+    fn store_dir_lock_is_exclusive_until_dropped() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let first = lock_store_dir(dir.path()).expect("first lock");
+        expect_busy(lock_store_dir(dir.path()), "second lock must fail");
+        drop(first);
+        let _second = lock_store_dir(dir.path()).expect("lock after release");
+    }
+
+    #[tokio::test]
+    async fn second_store_open_fails_until_the_first_drops() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let first = LocalStore::open(dir.path()).await.expect("open");
+        expect_busy(LocalStore::open(dir.path()).await, "second open must fail");
+        drop(first);
+        // Our directory flock drops with the handle. SurrealKV's own LOCK file
+        // can stay busy while its engine thread shuts down, so this checks the
+        // directory inode directly instead of opening the store again.
+        let db_path = dir.path().join("stats.surrealkv");
+        let _released = lock_store_dir(&db_path).expect("directory flock released with the handle");
+    }
+
+    #[tokio::test]
+    async fn writer_lock_survives_store_drop_until_process_exit() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = LocalStore::open(dir.path()).await.expect("open");
+        store.hold_writer_lock_until_exit();
+        drop(store);
+        expect_busy(
+            LocalStore::open(dir.path()).await,
+            "leaked dup must still hold the flock",
+        );
     }
 }

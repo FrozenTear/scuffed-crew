@@ -2,8 +2,12 @@ use dioxus::prelude::*;
 
 use scuffed_api_client::{ApiClient, ClientError};
 
+use super::failure::DmFailureNotice;
 use super::reply_input::ReplyInput;
-use super::types::{DmMessage, MarkReadBody, relative_time, truncate_pubkey};
+use super::types::{
+    DmLoadFailure, DmMessage, MarkReadBody, classify_dm_client_error, relative_time,
+    truncate_pubkey,
+};
 use crate::util::encode_query;
 
 const MESSAGE_THREAD_CSS: &str = r#"
@@ -125,6 +129,7 @@ pub fn MessageThread(
 
     let mut messages = use_signal::<Vec<DmMessage>>(Vec::new);
     let mut loading_initial = use_signal(|| true);
+    let mut load_error = use_signal(|| None::<DmLoadFailure>);
     let mut loading_older = use_signal(|| false);
     let mut has_more = use_signal(|| true);
     let mut last_marked_until = use_signal(|| None::<String>);
@@ -134,6 +139,7 @@ pub fn MessageThread(
         let peer = peer_for_resource.clone();
         async move {
             loading_initial.set(true);
+            load_error.set(None);
             messages.set(Vec::new());
             has_more.set(true);
             match fetch_thread(&peer, None, 50).await {
@@ -145,6 +151,7 @@ pub fn MessageThread(
                     sorted.sort_by(|a, b| a.created_at.cmp(&b.created_at));
                     let until = sorted.last().map(|m| m.created_at.clone());
                     messages.set(sorted);
+                    load_error.set(None);
                     loading_initial.set(false);
                     if let Some(ts) = until
                         && last_marked_until() != Some(ts.clone())
@@ -153,7 +160,8 @@ pub fn MessageThread(
                         last_marked_until.set(Some(ts));
                     }
                 }
-                Err(_) => {
+                Err(err) => {
+                    load_error.set(Some(classify_dm_client_error(&err)));
                     loading_initial.set(false);
                 }
             }
@@ -202,6 +210,8 @@ pub fn MessageThread(
 
     let msgs = messages();
     let is_loading_initial = loading_initial();
+    let failure = load_error();
+    let show_empty = thread_shows_empty(is_loading_initial, failure.is_some(), msgs.len());
     let reply_to = msgs.last().map(|m| m.gift_wrap_id.clone());
 
     let on_optimistic = move |msg: DmMessage| {
@@ -234,7 +244,9 @@ pub fn MessageThread(
                 }
                 if is_loading_initial {
                     div { class: "dm-thread-loading", "Loading messages…" }
-                } else if msgs.is_empty() {
+                } else if let Some(failure) = failure {
+                    DmFailureNotice { failure }
+                } else if show_empty {
                     div { class: "dm-thread-empty",
                         "No messages with this peer yet."
                     }
@@ -288,6 +300,10 @@ async fn fetch_thread(
     ApiClient::web().fetch::<Vec<DmMessage>>(&url).await
 }
 
+fn thread_shows_empty(loading: bool, failed: bool, len: usize) -> bool {
+    !loading && !failed && len == 0
+}
+
 async fn mark_read(peer: &str, until_ts: &str) {
     let body = MarkReadBody {
         peer_pubkey: peer.to_string(),
@@ -296,4 +312,17 @@ async fn mark_read(peer: &str, until_ts: &str) {
     let _ = ApiClient::web()
         .post_json::<_, serde_json::Value>("/api/nostr/dm/mark-read", &body)
         .await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn empty_thread_copy_only_after_a_successful_load() {
+        assert!(!thread_shows_empty(true, false, 0));
+        assert!(!thread_shows_empty(false, true, 0));
+        assert!(thread_shows_empty(false, false, 0));
+        assert!(!thread_shows_empty(false, false, 1));
+    }
 }

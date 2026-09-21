@@ -5,11 +5,13 @@
 
 mod compose;
 mod conversation_list;
+mod failure;
 mod message_thread;
 mod reply_input;
 pub mod types;
 
 pub use compose::DmComposeModal;
-pub use conversation_list::ConversationList;
+pub use conversation_list::{ConversationList, ConversationListState};
+pub use failure::DmFailureNotice;
 pub use message_thread::MessageThread;
 pub use types::*;

@@ -158,14 +158,28 @@ const CONVERSATION_LIST_CSS: &str = r#"
 .dm-conv-empty-cta:hover { filter: brightness(1.15); }
 "#;
 
+/// Inbox list phase. Empty copy is only for [`ConversationListState::Ready`].
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ConversationListState {
+    Loading,
+    Ready,
+    Failed,
+}
+
+fn shows_empty_inbox(load_state: ConversationListState, len: usize) -> bool {
+    load_state == ConversationListState::Ready && len == 0
+}
+
 #[component]
 pub fn ConversationList(
     conversations: Vec<ConversationSummary>,
+    load_state: ConversationListState,
     selected_peer: Option<String>,
     refreshing: bool,
     on_refresh: EventHandler<()>,
     on_compose: EventHandler<()>,
 ) -> Element {
+    let empty = shows_empty_inbox(load_state, conversations.len());
     // Header and empty-state each own a callback so compose stays available
     // after the first conversation exists. EventHandler is Copy.
     let compose_from_header = on_compose;
@@ -193,14 +207,24 @@ pub fn ConversationList(
                 }
             }
             if conversations.is_empty() {
-                div { class: "dm-conv-empty",
-                    "No conversations yet."
-                    div {
-                        button {
-                            class: "dm-conv-empty-cta",
-                            r#type: "button",
-                            onclick: move |_| compose_from_empty.call(()),
-                            "Start a conversation"
+                if empty {
+                    div { class: "dm-conv-empty",
+                        "No conversations yet."
+                        div {
+                            button {
+                                class: "dm-conv-empty-cta",
+                                r#type: "button",
+                                onclick: move |_| compose_from_empty.call(()),
+                                "Start a conversation"
+                            }
+                        }
+                    }
+                } else {
+                    div { class: "dm-conv-empty",
+                        if load_state == ConversationListState::Loading {
+                            "Loading conversations…"
+                        } else {
+                            "Couldn't load conversations."
                         }
                     }
                 }
@@ -257,6 +281,16 @@ fn render_row(c: &ConversationSummary, selected: Option<&str>) -> Element {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    #[test]
+    fn empty_inbox_copy_only_after_ready() {
+        assert!(!shows_empty_inbox(ConversationListState::Loading, 0));
+        assert!(!shows_empty_inbox(ConversationListState::Failed, 0));
+        assert!(shows_empty_inbox(ConversationListState::Ready, 0));
+        assert!(!shows_empty_inbox(ConversationListState::Ready, 2));
+    }
+
     /// The empty-state CTA used to be the only caller of `on_compose`, so the
     /// New message control disappeared as soon as one conversation existed.
     #[test]
