@@ -33,6 +33,27 @@ const CONVERSATION_LIST_CSS: &str = r#"
     color: var(--text);
     margin: 0;
 }
+.dm-conv-list-actions {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    flex-shrink: 0;
+}
+.dm-conv-list-new {
+    background: var(--accent);
+    color: var(--accent-fg);
+    border: none;
+    border-radius: 6px;
+    font-size: 0.75rem;
+    font-weight: 600;
+    padding: 0.3rem 0.65rem;
+    cursor: pointer;
+}
+.dm-conv-list-new:hover { filter: brightness(1.15); }
+.dm-conv-list-new:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+}
 .dm-conv-list-refresh {
     background: transparent;
     color: var(--text-2);
@@ -145,16 +166,30 @@ pub fn ConversationList(
     on_refresh: EventHandler<()>,
     on_compose: EventHandler<()>,
 ) -> Element {
+    // Header and empty-state each own a callback so compose stays available
+    // after the first conversation exists. EventHandler is Copy.
+    let compose_from_header = on_compose;
+    let compose_from_empty = on_compose;
     rsx! {
         style { {CONVERSATION_LIST_CSS} }
         div { class: "dm-conv-list",
             div { class: "dm-conv-list-header",
                 h2 { class: "dm-conv-list-title", "Messages" }
-                button {
-                    class: "dm-conv-list-refresh",
-                    disabled: refreshing,
-                    onclick: move |_| on_refresh.call(()),
-                    if refreshing { "Syncing…" } else { "Refresh" }
+                div { class: "dm-conv-list-actions",
+                    button {
+                        class: "dm-conv-list-new",
+                        r#type: "button",
+                        "aria-label": "New message",
+                        onclick: move |_| compose_from_header.call(()),
+                        "New"
+                    }
+                    button {
+                        class: "dm-conv-list-refresh",
+                        r#type: "button",
+                        disabled: refreshing,
+                        onclick: move |_| on_refresh.call(()),
+                        if refreshing { "Syncing…" } else { "Refresh" }
+                    }
                 }
             }
             if conversations.is_empty() {
@@ -163,7 +198,8 @@ pub fn ConversationList(
                     div {
                         button {
                             class: "dm-conv-empty-cta",
-                            onclick: move |_| on_compose.call(()),
+                            r#type: "button",
+                            onclick: move |_| compose_from_empty.call(()),
                             "Start a conversation"
                         }
                     }
@@ -216,5 +252,44 @@ fn render_row(c: &ConversationSummary, selected: Option<&str>) -> Element {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// The empty-state CTA used to be the only caller of `on_compose`, so the
+    /// New message control disappeared as soon as one conversation existed.
+    #[test]
+    fn new_message_control_lives_in_the_list_header() {
+        let src = include_str!("conversation_list.rs");
+        let start = src
+            .find("pub fn ConversationList")
+            .expect("ConversationList");
+        let body = &src[start..];
+        let empty_at = body
+            .find("conversations.is_empty()")
+            .expect("empty-state branch");
+        let header = &body[..empty_at];
+        assert!(
+            header.contains("compose_from_header.call"),
+            "header must call on_compose; the empty state must not be the only path"
+        );
+        assert!(
+            header.contains("\"aria-label\": \"New message\""),
+            "compose control needs an accessible name, not an icon alone"
+        );
+        assert!(
+            header.contains("\"New\""),
+            "visible New label must be present in the header"
+        );
+        let empty = &body[empty_at..];
+        assert!(
+            empty.contains("Start a conversation"),
+            "empty state should still offer Start a conversation"
+        );
+        assert!(
+            empty.contains("compose_from_empty.call"),
+            "empty-state CTA should still open compose"
+        );
     }
 }
