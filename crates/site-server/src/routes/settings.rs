@@ -1,12 +1,52 @@
 use axum::{Json, extract::State, http::StatusCode};
 use scuffed_auth::server::session::ErrorResponse;
-use scuffed_db::{AuditAction, AuditTargetType};
+use scuffed_db::{AuditAction, AuditTargetType, OrgRole};
 use scuffed_types::api::UpdateSettingsRequest;
 use scuffed_types::{HomeShell, HomeSkin, HomepageContent, NavConfig, PublicLayout, SiteSettings};
 
-use crate::extractors::AdminUser;
+use crate::extractors::OfficerUser;
 use crate::routes::audit_log::audit;
 use crate::state::AppState;
+
+/// Officer may set `strategies_enabled` only. Any other Some field is admin-only.
+/// Destructure so a new `UpdateSettingsRequest` field fails to compile until classified.
+fn officer_has_admin_only_fields(body: &UpdateSettingsRequest) -> bool {
+    let UpdateSettingsRequest {
+        org_name,
+        site_description,
+        recruitment_open,
+        strategies_enabled: _,
+        recruitment_message,
+        min_age,
+        forum_backend,
+        extra_relay_urls,
+        home_shell,
+        home_skin,
+        public_layout,
+        homepage,
+        nav,
+        page_bg_color,
+        page_bg_image_url,
+        brand_accent_dark,
+        brand_accent_light,
+    } = body;
+    org_name.is_some()
+        || site_description.is_some()
+        || recruitment_open.is_some()
+        || recruitment_message.is_some()
+        || min_age.is_some()
+        || forum_backend.is_some()
+        || extra_relay_urls.is_some()
+        || home_shell.is_some()
+        || home_skin.is_some()
+        || public_layout.is_some()
+        || homepage.is_some()
+        || nav.is_some()
+        || page_bg_color.is_some()
+        || page_bg_image_url.is_some()
+        || brand_accent_dark.is_some()
+        || brand_accent_light.is_some()
+}
 
 /// Accept only safe hex colors (`#rgb`, `#rrggbb`, `#rrggbbaa`) or empty.
 fn sanitize_bg_color(raw: &str) -> Result<String, String> {
@@ -115,12 +155,21 @@ pub async fn get_settings(
         })
 }
 
-/// PUT /api/settings — admin only
+/// PUT /api/settings — Admin: full `UpdateSettingsRequest`.
+/// Officer: `strategies_enabled` only; any other set field is 403.
 pub async fn update_settings(
     State(state): State<AppState>,
-    admin: AdminUser,
+    officer: OfficerUser,
     Json(body): Json<UpdateSettingsRequest>,
 ) -> Result<Json<SiteSettings>, (StatusCode, Json<ErrorResponse>)> {
+    if officer.member.org_role != OrgRole::Admin && officer_has_admin_only_fields(&body) {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(ErrorResponse {
+                error: "Admin access required".into(),
+            }),
+        ));
+    }
     let homepage_json = body.homepage.as_ref().map(|h| h.to_json());
     let nav_json = body.nav.as_ref().map(|n| {
         let mut n = n.clone();
@@ -202,7 +251,7 @@ pub async fn update_settings(
     tracing::info!(
         home_shell = %settings.home_shell,
         home_skin = %settings.home_skin,
-        member = %admin.member.id,
+        member = %officer.member.id,
         "Updated site settings"
     );
 
@@ -212,7 +261,7 @@ pub async fn update_settings(
     ));
     audit(
         &state.db,
-        &admin.member.id,
+        &officer.member.id,
         AuditAction::UpdatedSettings,
         AuditTargetType::Settings,
         &settings.id,
@@ -221,4 +270,44 @@ pub async fn update_settings(
     .await;
 
     Ok(Json(to_api_settings(settings)))
+}
+
+#[cfg(test)]
+mod officer_settings_gate_tests {
+    use super::*;
+
+    #[test]
+    fn officer_strategies_only_is_allowed() {
+        let body = UpdateSettingsRequest {
+            strategies_enabled: Some(false),
+            ..Default::default()
+        };
+        assert!(!officer_has_admin_only_fields(&body));
+    }
+
+    #[test]
+    fn officer_empty_body_is_not_admin_only() {
+        assert!(!officer_has_admin_only_fields(
+            &UpdateSettingsRequest::default()
+        ));
+    }
+
+    #[test]
+    fn officer_org_name_is_admin_only() {
+        let body = UpdateSettingsRequest {
+            org_name: Some("Nope".into()),
+            ..Default::default()
+        };
+        assert!(officer_has_admin_only_fields(&body));
+    }
+
+    #[test]
+    fn officer_mixed_body_is_admin_only() {
+        let body = UpdateSettingsRequest {
+            strategies_enabled: Some(false),
+            recruitment_open: Some(false),
+            ..Default::default()
+        };
+        assert!(officer_has_admin_only_fields(&body));
+    }
 }

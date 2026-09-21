@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::org::{HomeShell, HomeSkin, HomepageContent, NavConfig, PublicLayout};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct UpdateSettingsRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub org_name: Option<String>,
