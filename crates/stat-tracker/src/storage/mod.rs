@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 pub mod maintain;
 
@@ -217,12 +218,68 @@ pub struct LocalStore {
     /// Home of the side-channel files (`matches.jsonl`, snapshots) that some
     /// mutations must keep in step with the database.
     data_dir: PathBuf,
+    /// Exclusive `flock` on the `stats.surrealkv` directory. Declared after
+    /// `db` so the handle drops first; the lock releases on the last clone
+    /// unless [`LocalStore::hold_writer_lock_until_exit`] leaked a dup.
+    writer_lock: Arc<StoreDirLock>,
+}
+
+/// Advisory exclusive lock on the store directory inode.
+///
+/// SurrealKV is single-writer. The pid file is not a lock. `flock` does not
+/// block creating files inside the directory; it only conflicts with another
+/// `flock` on this inode, which is what a second `LocalStore::open` takes.
+struct StoreDirLock(std::fs::File);
+
+/// `LocalStore::open` refused because another process (or an earlier open in
+/// this one) still holds the store-directory flock.
+#[derive(Debug)]
+pub struct StoreBusy {
+    path: PathBuf,
+}
+
+impl std::fmt::Display for StoreBusy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "stat store is already open in another process ({})",
+            self.path.display()
+        )
+    }
+}
+
+impl std::error::Error for StoreBusy {}
+
+pub fn is_store_busy(err: &(dyn std::error::Error + Send + Sync + 'static)) -> bool {
+    err.is::<StoreBusy>()
+}
+
+fn lock_store_dir(
+    db_path: &Path,
+) -> Result<StoreDirLock, Box<dyn std::error::Error + Send + Sync>> {
+    let file = std::fs::File::open(db_path)?;
+    match file.try_lock() {
+        Ok(()) => Ok(StoreDirLock(file)),
+        Err(std::fs::TryLockError::WouldBlock) => {
+            tracing::warn!(
+                path = %db_path.display(),
+                "stat store is already open in another process"
+            );
+            Err(StoreBusy {
+                path: db_path.to_path_buf(),
+            }
+            .into())
+        }
+        Err(std::fs::TryLockError::Error(err)) => Err(err.into()),
+    }
 }
 
 impl LocalStore {
     pub async fn open(data_dir: &Path) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let db_path = data_dir.join("stats.surrealkv");
         std::fs::create_dir_all(&db_path)?;
+        // Take the single-writer lock before SurrealKV opens the directory.
+        let writer_lock = Arc::new(lock_store_dir(&db_path)?);
 
         let db =
             Surreal::new::<SurrealKv>(db_path.to_str().ok_or("data_dir path is not valid UTF-8")?)
@@ -248,7 +305,26 @@ impl LocalStore {
         Ok(Self {
             db,
             data_dir: data_dir.to_path_buf(),
+            writer_lock,
         })
+    }
+
+    /// Keep the store-directory flock until this process exits.
+    ///
+    /// Dropping [`LocalStore`] closes its fd before SurrealKV's detached
+    /// memtable flush finishes. `File::try_clone` is a `CLOEXEC` dup: it stays
+    /// open across that window and is not inherited across `exec`. The daemon
+    /// calls this once after the store that must outlive shutdown is open.
+    /// Same-process reopen (vacuum, tests) does not, so it can lock again
+    /// after the handle drops.
+    pub fn hold_writer_lock_until_exit(&self) {
+        match self.writer_lock.0.try_clone() {
+            Ok(dup) => std::mem::forget(dup),
+            Err(e) => tracing::warn!(
+                error = %e,
+                "could not dup store lock; flock ends when the store handle drops"
+            ),
+        }
     }
 
     pub async fn insert_match(
@@ -744,7 +820,8 @@ impl LocalStore {
     /// periodic embedded housekeeping range-scans then spend entire cores
     /// skipping those versions — two threads at 100% around the clock on an
     /// idle daemon (2026-07-15). The daemon must NOT be running (single-
-    /// process lock; the caller checks the pid file).
+    /// writer: `open` flocks the store directory; the caller also checks the
+    /// pid file).
     ///
     /// Returns (matches, sessions, tombstones) copied.
     pub async fn vacuum(
@@ -2108,5 +2185,46 @@ mod tests {
         // primary (Ana appears in two 1-snapshot segments → 2 votes vs Genji 1).
         assert_eq!(games[0].hero, "Ana");
         assert_eq!(games[0].display_hero(), "Ana");
+    }
+
+    fn expect_busy<T>(result: Result<T, Box<dyn std::error::Error + Send + Sync>>, what: &str) {
+        match result {
+            Err(err) => assert!(is_store_busy(err.as_ref()), "{what}: {err}"),
+            Ok(_) => panic!("{what}"),
+        }
+    }
+
+    #[test]
+    fn store_dir_lock_is_exclusive_until_dropped() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let first = lock_store_dir(dir.path()).expect("first lock");
+        expect_busy(lock_store_dir(dir.path()), "second lock must fail");
+        drop(first);
+        let _second = lock_store_dir(dir.path()).expect("lock after release");
+    }
+
+    #[tokio::test]
+    async fn second_store_open_fails_until_the_first_drops() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let first = LocalStore::open(dir.path()).await.expect("open");
+        expect_busy(LocalStore::open(dir.path()).await, "second open must fail");
+        drop(first);
+        // Our directory flock drops with the handle. SurrealKV's own LOCK file
+        // can stay busy while its engine thread shuts down, so this checks the
+        // directory inode directly instead of opening the store again.
+        let db_path = dir.path().join("stats.surrealkv");
+        let _released = lock_store_dir(&db_path).expect("directory flock released with the handle");
+    }
+
+    #[tokio::test]
+    async fn writer_lock_survives_store_drop_until_process_exit() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = LocalStore::open(dir.path()).await.expect("open");
+        store.hold_writer_lock_until_exit();
+        drop(store);
+        expect_busy(
+            LocalStore::open(dir.path()).await,
+            "leaked dup must still hold the flock",
+        );
     }
 }

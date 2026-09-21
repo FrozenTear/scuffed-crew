@@ -191,11 +191,64 @@ async fn open_keyboard_or_shutdown(
     }
 }
 
-struct PidGuard(std::path::PathBuf);
+struct PidGuard {
+    path: std::path::PathBuf,
+    pid: u32,
+}
+
+/// Remove `path` only when it still contains `owner`.
+///
+/// The GUI used to unlink `daemon.pid` before this process finished shutting
+/// down. A restart could write a new pid, and an unconditional unlink here
+/// deleted that file. Returns whether the file was removed.
+fn unlink_pid_file_if_owner(path: &std::path::Path, owner: u32) -> bool {
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return false,
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                path = %path.display(),
+                "could not read daemon pid file; not removing it"
+            );
+            return false;
+        }
+    };
+    match text.trim().parse::<u32>() {
+        Ok(pid) if pid == owner => match std::fs::remove_file(path) {
+            Ok(()) => true,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    path = %path.display(),
+                    "failed to remove daemon pid file"
+                );
+                false
+            }
+        },
+        Ok(other) => {
+            tracing::warn!(
+                owner,
+                found = other,
+                path = %path.display(),
+                "daemon pid file belongs to another process; not removing it"
+            );
+            false
+        }
+        Err(_) => {
+            tracing::warn!(
+                path = %path.display(),
+                "daemon pid file is not a pid; not removing it"
+            );
+            false
+        }
+    }
+}
 
 impl Drop for PidGuard {
     fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
+        unlink_pid_file_if_owner(&self.path, self.pid);
     }
 }
 
@@ -296,9 +349,11 @@ async fn main() -> anyhow::Result<()> {
         "OCR workers (each holds ~23MB tessdata; set ocr_threads / STAT_TRACKER_OCR_THREADS / --ocr-threads)"
     );
 
-    // Refuse to start alongside a live daemon; the guard removes the pid file
-    // on drop. Held across --vacuum / auto-vacuum so no second instance starts
-    // mid-compaction.
+    // Refuse to start alongside a live daemon. On drop the guard removes
+    // daemon.pid only if the file still names this process. Held across
+    // --vacuum / auto-vacuum so no second instance starts mid-compaction.
+    // The store-directory flock (see LocalStore::open) is the single-writer
+    // lock; this file is how the GUI finds the process.
     let _pid_guard = acquire_pid_guard(&config.data_dir)?;
 
     // Maintenance mode: compact the store and exit (see LocalStore::vacuum).
@@ -462,7 +517,7 @@ async fn fetch_player_name_if_needed(config: &mut config::Config) {
 }
 
 /// Write the pid file (refusing to start if another live daemon already holds
-/// it) and return a guard that removes it on drop.
+/// it) and return a guard that removes it on drop when it still names us.
 fn acquire_pid_guard(data_dir: &std::path::Path) -> anyhow::Result<PidGuard> {
     let pid_path = data_dir.join("daemon.pid");
     if let Ok(existing_pid) = std::fs::read_to_string(&pid_path) {
@@ -474,8 +529,12 @@ fn acquire_pid_guard(data_dir: &std::path::Path) -> anyhow::Result<PidGuard> {
         }
         let _ = std::fs::remove_file(&pid_path);
     }
-    std::fs::write(&pid_path, std::process::id().to_string())?;
-    Ok(PidGuard(pid_path))
+    let pid = std::process::id();
+    std::fs::write(&pid_path, pid.to_string())?;
+    Ok(PidGuard {
+        path: pid_path,
+        pid,
+    })
 }
 
 /// True only if `pid` is alive AND is actually a scuffed-stat-tracker process.
@@ -547,6 +606,10 @@ async fn open_store(data_dir: &std::path::Path) -> anyhow::Result<storage::Local
         .await
         .map_err(anyhow::Error::from_boxed)
         .context("failed to open local store (is another daemon running?)")?;
+    // SurrealKV's flush keeps running after the store handle drops. Hold the
+    // directory flock until this process exits so a second writer cannot open
+    // the same store during that window.
+    store.hold_writer_lock_until_exit();
     let count = store
         .match_count()
         .await
@@ -2953,6 +3016,48 @@ mod tests {
         assert!(!pid_is_live_tracker(std::process::id()));
         // A pid with no /proc entry is dead → does not block.
         assert!(!pid_is_live_tracker(u32::MAX));
+    }
+
+    #[test]
+    fn pid_guard_unlinks_only_its_own_pid() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("daemon.pid");
+        let owner = 4242u32;
+
+        std::fs::write(&path, owner.to_string()).unwrap();
+        assert!(unlink_pid_file_if_owner(&path, owner));
+        assert!(!path.exists(), "own pid file should be removed");
+
+        let replacement = 7777u32;
+        std::fs::write(&path, replacement.to_string()).unwrap();
+        assert!(
+            !unlink_pid_file_if_owner(&path, owner),
+            "must not unlink a pid file this process no longer owns"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap().trim(),
+            replacement.to_string(),
+            "a newer pid must survive the exiting process"
+        );
+
+        // Drop uses the same check. A replaced file stays; our own file goes.
+        std::fs::write(&path, "111").unwrap();
+        {
+            let _guard = PidGuard {
+                path: path.clone(),
+                pid: owner,
+            };
+        }
+        assert_eq!(std::fs::read_to_string(&path).unwrap().trim(), "111");
+
+        std::fs::write(&path, owner.to_string()).unwrap();
+        {
+            let _guard = PidGuard {
+                path: path.clone(),
+                pid: owner,
+            };
+        }
+        assert!(!path.exists());
     }
 
     // Tests construct `now` in the future so subtracting ages can't underflow
