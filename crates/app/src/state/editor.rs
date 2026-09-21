@@ -46,6 +46,32 @@ impl Default for CanvasState {
     }
 }
 
+impl CanvasState {
+    /// Copy map fields from a loaded strategy onto the canvas.
+    ///
+    /// Empty / whitespace `map_id` stays unselected so create cannot POST `""`.
+    pub fn load_strategy(&mut self, strategy: &Strategy) {
+        self.current_map = nonempty_id(&strategy.map_id);
+        self.selected_sub_map = strategy.sub_map_id.as_deref().and_then(nonempty_id);
+    }
+
+    /// Choose a map from the picker. Changing the parent map clears a stale sub-map
+    /// unless the caller passes a new one.
+    pub fn select_map(&mut self, map_id: String, sub_map_id: Option<String>) {
+        self.current_map = nonempty_id(&map_id);
+        self.selected_sub_map = sub_map_id.as_deref().and_then(nonempty_id);
+    }
+}
+
+fn nonempty_id(s: &str) -> Option<String> {
+    let trimmed = s.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
 // =============================================================================
 // Drawing State
 // =============================================================================
@@ -691,5 +717,54 @@ mod tests {
         assert_eq!(state.phases[1].order, 1);
         assert_eq!(state.phases[0].id, p1);
         assert_eq!(state.phases[1].id, p3);
+    }
+
+    #[test]
+    fn canvas_load_strategy_applies_map_and_sub_map() {
+        let mut strategy = Strategy::new(
+            "Attack Kings".to_string(),
+            "kings_row".to_string(),
+            GameMode::Hybrid,
+            "owner-1".to_string(),
+        );
+        strategy.sub_map_id = Some("point_a".to_string());
+
+        let mut canvas = CanvasState::default();
+        assert!(canvas.current_map.is_none());
+        canvas.load_strategy(&strategy);
+
+        assert_eq!(canvas.current_map.as_deref(), Some("kings_row"));
+        assert_eq!(canvas.selected_sub_map.as_deref(), Some("point_a"));
+    }
+
+    #[test]
+    fn canvas_load_strategy_empty_map_id_stays_unselected() {
+        let mut strategy = Strategy::new(
+            "Untitled".to_string(),
+            "   ".to_string(),
+            GameMode::Control,
+            "owner-1".to_string(),
+        );
+        strategy.sub_map_id = Some("  ".to_string());
+
+        let mut canvas = CanvasState::default();
+        canvas.current_map = Some("stale".to_string());
+        canvas.selected_sub_map = Some("stale_sub".to_string());
+        canvas.load_strategy(&strategy);
+
+        assert!(canvas.current_map.is_none());
+        assert!(canvas.selected_sub_map.is_none());
+    }
+
+    #[test]
+    fn canvas_select_map_trims_and_clears_blank_sub_map() {
+        let mut canvas = CanvasState::default();
+        canvas.select_map("  ilios  ".to_string(), Some(" lighthouse ".to_string()));
+        assert_eq!(canvas.current_map.as_deref(), Some("ilios"));
+        assert_eq!(canvas.selected_sub_map.as_deref(), Some("lighthouse"));
+
+        canvas.select_map("busan".to_string(), None);
+        assert_eq!(canvas.current_map.as_deref(), Some("busan"));
+        assert!(canvas.selected_sub_map.is_none());
     }
 }

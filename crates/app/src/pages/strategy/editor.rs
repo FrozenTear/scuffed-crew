@@ -38,8 +38,13 @@ use scuffed_types::strategy::{
 use crate::components::strategy::{
     HeroPicker, HeroWinRate, MapCanvas, PropertiesPanel, TeamPanel, Timeline, Toolbar,
 };
+use crate::components::{Toast, use_toast};
 use crate::keybindings::{self, EditorAction};
 use crate::state::editor::{CanvasState, DrawingState, StrategyState};
+use crate::state::maps::{
+    PICKER_MODE_ORDER, display_map_name, game_mode_api_str, game_mode_for_map, map_id_for_create,
+    maps_for_mode,
+};
 use crate::state::undo::{UndoManager, UndoableAction};
 
 // =============================================================================
@@ -354,6 +359,53 @@ const EDITOR_CSS: &str = r#"
         padding: 1rem;
         overflow-y: auto;
         flex: 1;
+        display: flex;
+        flex-direction: column;
+        gap: 1rem;
+    }
+    .map-picker-error {
+        margin: 0;
+        padding: 0.65rem 0.75rem;
+        border: 1px solid var(--danger);
+        border-radius: 8px;
+        background: color-mix(in srgb, var(--danger) 12%, transparent);
+        color: var(--danger);
+        font-size: 0.85rem;
+    }
+    .map-picker-mode-title {
+        margin: 0 0 0.5rem;
+        color: var(--text-2);
+        font-size: 0.7rem;
+        font-weight: 600;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+    }
+    .map-picker-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+        gap: 0.5rem;
+    }
+    .map-picker-item {
+        padding: 0.55rem 0.65rem;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        background: var(--bg);
+        color: var(--text);
+        font-size: 0.8rem;
+        text-align: left;
+        cursor: pointer;
+        transition: border-color 0.15s, background 0.15s, color 0.15s;
+    }
+    .map-picker-item:hover {
+        border-color: var(--accent);
+        color: var(--text);
+        background: var(--surface-2);
+    }
+    .map-picker-item.selected {
+        border-color: var(--accent);
+        background: var(--accent-soft);
+        color: var(--accent);
+        font-weight: 600;
     }
 
     /* Placeholder sections for components not yet wired */
@@ -421,7 +473,16 @@ fn EditorLayout(initial_strategy: Option<Strategy>) -> Element {
     // =========================================================================
     // All editor state as signals
     // =========================================================================
-    let mut canvas_state = use_signal(CanvasState::default);
+    let mut canvas_state = use_signal({
+        let initial = initial_strategy.clone();
+        move || {
+            let mut canvas = CanvasState::default();
+            if let Some(ref strategy) = initial {
+                canvas.load_strategy(strategy);
+            }
+            canvas
+        }
+    });
     let mut drawing_state = use_signal(DrawingState::default);
     let mut strategy_state = use_signal(|| {
         let mut state = StrategyState::default();
@@ -437,11 +498,18 @@ fn EditorLayout(initial_strategy: Option<Strategy>) -> Element {
     let mut right_open = use_signal(|| true);
     let mut bottom_open = use_signal(|| false);
 
-    // Map picker modal
-    let mut show_map_picker = use_signal(|| false);
+    // Map picker modal — open when creating (or a loaded strategy has no map).
+    let mut show_map_picker = use_signal(|| {
+        initial_strategy
+            .as_ref()
+            .map(|s| s.map_id.trim().is_empty())
+            .unwrap_or(true)
+    });
+    let mut map_picker_error = use_signal(|| None::<String>);
 
     // Save status
     let save_in_progress = use_signal(|| false);
+    let toast = use_toast();
 
     // Personal winrates per hero from /api/strategy/meta — fetched once on mount.
     // None while loading or when the user is not an authed org member.
@@ -663,7 +731,14 @@ fn EditorLayout(initial_strategy: Option<Strategy>) -> Element {
                         // Save
                         EditorAction::Save => {
                             event.prevent_default();
-                            save_strategy(strategy_state, canvas_state, save_in_progress);
+                            save_strategy(
+                                strategy_state,
+                                canvas_state,
+                                save_in_progress,
+                                show_map_picker,
+                                map_picker_error,
+                                toast,
+                            );
                         }
                     }
                 },
@@ -693,7 +768,14 @@ fn EditorLayout(initial_strategy: Option<Strategy>) -> Element {
     let bottom_collapsed = !*bottom_open.read();
 
     // Derive display values
-    let map_display = cs.current_map.as_deref().unwrap_or("None").to_string();
+    let map_display = match (
+        cs.current_map.as_deref(),
+        cs.selected_sub_map.as_deref().filter(|s| !s.is_empty()),
+    ) {
+        (Some(map), Some(sub)) => format!("{} / {sub}", display_map_name(map)),
+        (Some(map), None) => display_map_name(map),
+        (None, _) => "None".to_string(),
+    };
     let element_count = ss.elements.len();
     let tool_display = format!("{}", ds.active_tool);
     let phase_display = {
@@ -910,7 +992,14 @@ fn EditorLayout(initial_strategy: Option<Strategy>) -> Element {
                         },
                         has_unsaved_changes: has_unsaved,
                         on_save: move |_| {
-                            save_strategy(strategy_state, canvas_state, save_in_progress);
+                            save_strategy(
+                                strategy_state,
+                                canvas_state,
+                                save_in_progress,
+                                show_map_picker,
+                                map_picker_error,
+                                toast,
+                            );
                         },
                         saving: saving_val,
                         visibility: visibility_val,
@@ -1295,7 +1384,13 @@ fn EditorLayout(initial_strategy: Option<Strategy>) -> Element {
                         onclick: move |evt| evt.stop_propagation(),
 
                         div { class: "map-picker-header",
-                            h3 { "Change Map" }
+                            h3 {
+                                if canvas_state.read().current_map.is_some() {
+                                    "Change Map"
+                                } else {
+                                    "Select a Map"
+                                }
+                            }
                             button {
                                 class: "map-picker-close",
                                 onclick: move |_| show_map_picker.set(false),
@@ -1303,10 +1398,55 @@ fn EditorLayout(initial_strategy: Option<Strategy>) -> Element {
                             }
                         }
                         div { class: "map-picker-content",
-                            // TODO: Populate with map data from scuffed_types::constants
-                            p {
-                                style: "color: var(--text-3); text-align: center; padding: 2rem;",
-                                "Map picker — will be populated when map constants are available."
+                            if let Some(err) = map_picker_error.read().as_ref() {
+                                p { class: "map-picker-error", "{err}" }
+                            }
+                            for mode in PICKER_MODE_ORDER {
+                                {
+                                    let maps: Vec<_> = maps_for_mode(*mode).collect();
+                                    let mode_label = mode.to_string();
+                                    rsx! {
+                                        if !maps.is_empty() {
+                                            div { class: "map-picker-mode",
+                                                h4 { class: "map-picker-mode-title", "{mode_label}" }
+                                                div { class: "map-picker-grid",
+                                                    for map in maps {
+                                                        {
+                                                            let map_id = map.id;
+                                                            let selected = canvas_state
+                                                                .read()
+                                                                .current_map
+                                                                .as_deref()
+                                                                == Some(map_id);
+                                                            let item_class = if selected {
+                                                                "map-picker-item selected"
+                                                            } else {
+                                                                "map-picker-item"
+                                                            };
+                                                            rsx! {
+                                                                button {
+                                                                    class: "{item_class}",
+                                                                    r#type: "button",
+                                                                    onclick: move |_| {
+                                                                        canvas_state.with_mut(|c| {
+                                                                            c.select_map(map_id.to_string(), None);
+                                                                        });
+                                                                        strategy_state.with_mut(|s| {
+                                                                            s.has_unsaved_changes = true;
+                                                                        });
+                                                                        map_picker_error.set(None);
+                                                                        show_map_picker.set(false);
+                                                                    },
+                                                                    "{map.name}"
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
@@ -1353,16 +1493,34 @@ fn save_strategy(
     mut strategy_state: Signal<StrategyState>,
     canvas_state: Signal<CanvasState>,
     mut save_in_progress: Signal<bool>,
+    mut show_map_picker: Signal<bool>,
+    mut map_picker_error: Signal<Option<String>>,
+    mut toast: crate::components::ToastState,
 ) {
     if *save_in_progress.peek() {
         return;
     }
-    save_in_progress.set(true);
 
     // Snapshot current state for the async save
     let snapshot = strategy_state.read().clone();
-    let map_id = canvas_state.read().current_map.clone().unwrap_or_default();
+    let current_map = canvas_state.read().current_map.clone();
     let sub_map_id = canvas_state.read().selected_sub_map.clone();
+
+    let create_map_id = if snapshot.strategy_id.is_none() {
+        match map_id_for_create(current_map.as_deref()) {
+            Ok(id) => Some(id),
+            Err(msg) => {
+                map_picker_error.set(Some(msg.to_string()));
+                show_map_picker.set(true);
+                toast.show(Toast::error(msg));
+                return;
+            }
+        }
+    } else {
+        None
+    };
+
+    save_in_progress.set(true);
 
     spawn(async move {
         let client = ApiClient::web();
@@ -1379,13 +1537,17 @@ fn save_strategy(
                 .put_json::<_, Strategy>(&format!("/api/strategy/strategies/{id}"), &body)
                 .await
         } else {
-            // Create new strategy
+            let Some(map_id) = create_map_id else {
+                save_in_progress.set(false);
+                return;
+            };
+            let game_mode = game_mode_api_str(game_mode_for_map(&map_id)).to_string();
             let body = CreateStrategyRequest {
                 name: snapshot.name.clone(),
                 description: snapshot.description.clone(),
                 map_id,
                 sub_map_id,
-                game_mode: "control".to_string(),
+                game_mode,
                 team_id: None,
                 visibility: visibility_to_str(snapshot.visibility).to_string(),
             };
@@ -1402,9 +1564,11 @@ fn save_strategy(
                     s.has_unsaved_changes = false;
                 });
                 tracing::info!("Strategy saved successfully");
+                toast.show(Toast::success("Strategy saved."));
             }
             Err(e) => {
                 tracing::error!("Failed to save strategy: {e}");
+                toast.show(Toast::error(format!("Failed to save strategy: {e}")));
             }
         }
         save_in_progress.set(false);
