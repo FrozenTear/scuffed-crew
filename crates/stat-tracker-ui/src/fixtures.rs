@@ -72,6 +72,7 @@ fn pm(
         mitigation,
         played_at,
         synced: false,
+        sync_rev: 0,
         session_id: session_id.into(),
         corrected_hero: None,
         corrected_role: None,
