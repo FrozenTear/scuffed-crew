@@ -634,15 +634,14 @@ mod origin_tests {
 mod strategies_gate_tests {
     use super::*;
     use axum::Router;
-    use axum::body::Body;
-    use axum::http::{Request, StatusCode, header};
+    use axum::http::StatusCode;
     use axum::routing::get;
     use scuffed_auth::SessionConfig;
     use scuffed_db::Database;
     use scuffed_db::migrations::run_migrations;
     use scuffed_site_server::state::OAuthConfig;
     use std::path::PathBuf;
-    use tower::ServiceExt;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     use super::super::strategy::strategies_gate_status;
 
@@ -710,15 +709,45 @@ mod strategies_gate_tests {
             .with_state(ws_state)
     }
 
-    fn ws_upgrade_request() -> Request<Body> {
-        Request::builder()
-            .uri("/api/strategy/ws")
-            .header(header::CONNECTION, "upgrade")
-            .header(header::UPGRADE, "websocket")
-            .header(header::SEC_WEBSOCKET_VERSION, "13")
-            .header(header::SEC_WEBSOCKET_KEY, "dGhlIHNhbXBsZSBub25jZQ==")
-            .body(Body::empty())
-            .unwrap()
+    /// Real TCP handshake. `tower::oneshot` has no `hyper::upgrade::OnUpgrade`,
+    /// so the extractor rejects with 426 before this handler runs.
+    async fn handshake_status(state: AppState) -> StatusCode {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("local addr");
+        let app = ws_router(state).into_make_service();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve");
+        });
+
+        let mut stream = tokio::net::TcpStream::connect(addr).await.expect("connect");
+        let req = format!(
+            "GET /api/strategy/ws HTTP/1.1\r\n\
+             Host: {addr}\r\n\
+             Origin: http://localhost:3000\r\n\
+             Connection: Upgrade\r\n\
+             Upgrade: websocket\r\n\
+             Sec-WebSocket-Version: 13\r\n\
+             Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\
+             \r\n"
+        );
+        stream.write_all(req.as_bytes()).await.expect("write");
+        let mut buf = [0u8; 1024];
+        let n = tokio::time::timeout(std::time::Duration::from_secs(2), stream.read(&mut buf))
+            .await
+            .expect("handshake timed out")
+            .expect("read");
+        server.abort();
+
+        let text = String::from_utf8_lossy(&buf[..n]);
+        let code: u16 = text
+            .lines()
+            .next()
+            .and_then(|line| line.split_whitespace().nth(1))
+            .and_then(|code| code.parse().ok())
+            .unwrap_or_else(|| panic!("no HTTP status in {text:?}"));
+        StatusCode::from_u16(code).unwrap_or_else(|_| panic!("invalid status {code} in {text:?}"))
     }
 
     #[test]
@@ -738,23 +767,16 @@ mod strategies_gate_tests {
     async fn strategies_disabled_rejects_ws_upgrade() {
         let state = test_state().await;
         set_strategies_enabled(&state, false).await;
-
-        let resp = ws_router(state)
-            .oneshot(ws_upgrade_request())
-            .await
-            .expect("response");
-        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        assert_eq!(handshake_status(state).await, StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
     async fn strategies_enabled_accepts_ws_upgrade() {
         let state = test_state().await;
         set_strategies_enabled(&state, true).await;
-
-        let resp = ws_router(state)
-            .oneshot(ws_upgrade_request())
-            .await
-            .expect("response");
-        assert_eq!(resp.status(), StatusCode::SWITCHING_PROTOCOLS);
+        assert_eq!(
+            handshake_status(state).await,
+            StatusCode::SWITCHING_PROTOCOLS
+        );
     }
 }
