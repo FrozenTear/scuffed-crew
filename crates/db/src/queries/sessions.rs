@@ -43,35 +43,64 @@ impl Database {
             self.client
                 .query("DELETE FROM session WHERE user_id = $uid AND expires_at <= time::now()")
                 .bind(("uid", uid.clone()))
-                .await?;
+                .await?
+                .check()?;
 
-            // Cap concurrent live sessions: delete oldest until under limit.
-            loop {
+            // Cap concurrent live sessions so the insert below lands at
+            // MAX_SESSIONS_PER_USER. SurrealDB v3 DELETE accepts WHERE only —
+            // `ORDER BY` / `LIMIT` are a parse error (`Unexpected token ORDER`),
+            // which made the 11th login 500. Select the oldest ids, then delete
+            // those records.
+            #[derive(Deserialize, SurrealValue)]
+            struct CountResult {
+                count: i64,
+            }
+            let mut count_q = self
+                .client
+                .query(
+                    "SELECT count() FROM session WHERE user_id = $uid \
+                     AND expires_at > time::now() GROUP ALL",
+                )
+                .bind(("uid", uid.clone()))
+                .await?
+                .check()?;
+            let counts: Vec<CountResult> = count_q.take(0)?;
+            let n = counts.first().map(|c| c.count).unwrap_or(0);
+            let room = MAX_SESSIONS_PER_USER - 1;
+            if n > room {
+                let excess = n - room;
                 #[derive(Deserialize, SurrealValue)]
-                struct CountResult {
-                    count: i64,
+                struct IdRow {
+                    id: RecordId,
+                    // SurrealDB v3 requires every ORDER BY field in the projection.
+                    #[allow(dead_code)]
+                    created_at: SurrealDatetime,
                 }
-                let mut count_q = self
+                let mut oldest = self
                     .client
                     .query(
-                        "SELECT count() FROM session WHERE user_id = $uid \
-                         AND expires_at > time::now() GROUP ALL",
+                        "SELECT id, created_at FROM session WHERE user_id = $uid \
+                         AND expires_at > time::now() \
+                         ORDER BY created_at ASC LIMIT $excess",
                     )
                     .bind(("uid", uid.clone()))
-                    .await?;
-                let counts: Vec<CountResult> = count_q.take(0)?;
-                let n = counts.first().map(|c| c.count).unwrap_or(0);
-                if n < MAX_SESSIONS_PER_USER {
-                    break;
+                    .bind(("excess", excess))
+                    .await?
+                    .check()?;
+                let rows: Vec<IdRow> = oldest.take(0)?;
+                if rows.is_empty() {
+                    tracing::error!(user_id = %uid, n, "session cap eviction selected no rows");
+                    return Err(crate::DbError::NotFound(
+                        "session cap eviction selected no rows".into(),
+                    ));
                 }
-                // Delete a single oldest live session.
-                self.client
-                    .query(
-                        "DELETE FROM session WHERE user_id = $uid AND expires_at > time::now() \
-                         ORDER BY created_at ASC LIMIT 1",
-                    )
-                    .bind(("uid", uid.clone()))
-                    .await?;
+                for row in rows {
+                    self.client
+                        .query("DELETE $rid")
+                        .bind(("rid", row.id))
+                        .await?
+                        .check()?;
+                }
             }
 
             let token_hash = hash_session_token(raw_token);
@@ -207,5 +236,131 @@ impl Database {
             Ok(count)
         })
         .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::migrations::run_migrations;
+
+    async fn test_db() -> Database {
+        let db = Database::connect_memory().await.expect("mem db");
+        run_migrations(&db.client).await.expect("migrations");
+        db
+    }
+
+    async fn seed_live_session(db: &Database, user_id: &str, raw_token: &str, age_secs: i64) {
+        let session = DbSession {
+            id: None,
+            user_id: user_id.to_string(),
+            token: hash_session_token(raw_token),
+            expires_at: SurrealDatetime::from(Utc::now() + chrono::Duration::hours(48)),
+            created_at: SurrealDatetime::from(Utc::now() - chrono::Duration::seconds(age_secs)),
+        };
+        let created: Option<DbSession> = db
+            .client
+            .create("session")
+            .content(session)
+            .await
+            .expect("seed session");
+        assert!(created.is_some());
+    }
+
+    async fn live_count(db: &Database, user_id: &str) -> i64 {
+        #[derive(Deserialize, SurrealValue)]
+        struct CountResult {
+            count: i64,
+        }
+        let mut q = db
+            .client
+            .query(
+                "SELECT count() FROM session WHERE user_id = $uid \
+                 AND expires_at > time::now() GROUP ALL",
+            )
+            .bind(("uid", user_id.to_string()))
+            .await
+            .expect("count")
+            .check()
+            .expect("count ok");
+        let counts: Vec<CountResult> = q.take(0).expect("take count");
+        counts.first().map(|c| c.count).unwrap_or(0)
+    }
+
+    #[tokio::test]
+    async fn create_session_under_cap_keeps_existing() {
+        let db = test_db().await;
+        for i in 0..9 {
+            seed_live_session(&db, "user-a", &format!("old-{i}"), 30 - i).await;
+        }
+        db.create_session("user-a", "new-tok", 24)
+            .await
+            .expect("under cap");
+        assert_eq!(live_count(&db, "user-a").await, 10);
+        assert_eq!(
+            db.get_session("old-0").await.expect("lookup").as_deref(),
+            Some("user-a")
+        );
+        assert_eq!(
+            db.get_session("new-tok").await.expect("lookup").as_deref(),
+            Some("user-a")
+        );
+    }
+
+    #[tokio::test]
+    async fn create_session_at_cap_evicts_oldest_and_succeeds() {
+        let db = test_db().await;
+        // age_secs 20 is oldest; 11 is newest of the seeded set.
+        for i in 0..10 {
+            seed_live_session(&db, "user-a", &format!("old-{i}"), 20 - i).await;
+        }
+        assert_eq!(live_count(&db, "user-a").await, 10);
+
+        db.create_session("user-a", "new-tok", 24)
+            .await
+            .expect("at cap must not 500");
+
+        assert_eq!(live_count(&db, "user-a").await, 10);
+        assert!(
+            db.get_session("old-0").await.expect("lookup").is_none(),
+            "oldest live session must be evicted"
+        );
+        assert_eq!(
+            db.get_session("old-1").await.expect("lookup").as_deref(),
+            Some("user-a")
+        );
+        assert_eq!(
+            db.get_session("new-tok").await.expect("lookup").as_deref(),
+            Some("user-a")
+        );
+    }
+
+    #[tokio::test]
+    async fn create_session_over_cap_evicts_down_to_limit() {
+        let db = test_db().await;
+        for i in 0..12 {
+            seed_live_session(&db, "user-a", &format!("old-{i}"), 30 - i).await;
+        }
+        db.create_session("user-a", "new-tok", 24)
+            .await
+            .expect("over cap");
+        assert_eq!(live_count(&db, "user-a").await, 10);
+        for i in 0..3 {
+            assert!(
+                db.get_session(&format!("old-{i}"))
+                    .await
+                    .expect("lookup")
+                    .is_none(),
+                "old-{i} should have been evicted"
+            );
+        }
+        assert_eq!(
+            db.get_session("old-3").await.expect("lookup").as_deref(),
+            Some("user-a")
+        );
+        assert_eq!(
+            db.get_session("new-tok").await.expect("lookup").as_deref(),
+            Some("user-a")
+        );
     }
 }
