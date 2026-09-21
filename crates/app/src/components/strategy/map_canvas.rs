@@ -178,6 +178,178 @@ fn get_canvas_ctx(canvas: &HtmlCanvasElement) -> Option<CanvasRenderingContext2d
         .and_then(|ctx| ctx.dyn_into::<CanvasRenderingContext2d>().ok())
 }
 
+/// Generation token for an in-flight map image / tile repaint.
+///
+/// `0` is never current. [`LoadEpoch::invalidate`] bumps the token so a late
+/// `onload` or animation frame from the previous map cannot paint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+struct LoadEpoch(u32);
+
+impl LoadEpoch {
+    fn token(self) -> u32 {
+        self.0
+    }
+
+    fn invalidate(&mut self) -> u32 {
+        self.0 = self.0.wrapping_add(1);
+        if self.0 == 0 {
+            self.0 = 1;
+        }
+        self.0
+    }
+
+    fn is_current(self, token: u32) -> bool {
+        token != 0 && token == self.0
+    }
+}
+
+/// In-flight fallback image and the debounced tile repaint frame.
+///
+/// Handlers stay alive until [`MapImageLoad::abort`] clears them. Dropping a
+/// `Closure` while JS still points at it aborts, so abort detaches `onload` /
+/// `onerror` and cancels the animation frame before dropping the closures.
+#[derive(Default)]
+struct MapImageLoad {
+    img: Option<HtmlImageElement>,
+    onload: Option<Closure<dyn FnMut()>>,
+    onerror: Option<Closure<dyn FnMut()>>,
+    raf_id: Option<i32>,
+    raf_closure: Option<Closure<dyn FnMut()>>,
+    epoch: LoadEpoch,
+}
+
+impl Drop for MapImageLoad {
+    fn drop(&mut self) {
+        self.abort();
+    }
+}
+
+impl MapImageLoad {
+    fn abort(&mut self) {
+        self.detach_image();
+        self.cancel_frame();
+        let _ = self.epoch.invalidate();
+    }
+
+    fn detach_image(&mut self) {
+        if let Some(img) = self.img.take() {
+            img.set_onload(None);
+            img.set_onerror(None);
+            // Changing src cancels the in-flight fetch. `data:,` does not
+            // navigate or hit the map asset path.
+            img.set_src("data:,");
+        }
+        self.onload = None;
+        self.onerror = None;
+    }
+
+    fn cancel_frame(&mut self) {
+        if let Some(id) = self.raf_id.take()
+            && let Some(window) = web_sys::window()
+        {
+            let _ = window.cancel_animation_frame(id);
+        }
+        self.raf_closure = None;
+    }
+}
+
+/// Copy a plain prop into a signal.
+///
+/// Dioxus 0.7 effects re-run only when a signal is read inside the effect.
+/// Props captured by move stay at the value from the run that last subscribed,
+/// so a later parent render updates the component but not the canvas.
+fn sync_signal<T>(value: T) -> Signal<T>
+where
+    T: Clone + PartialEq + 'static,
+{
+    let mut signal = use_hook({
+        let initial = value.clone();
+        move || Signal::new(initial)
+    });
+    if *signal.peek() != value {
+        signal.set(value);
+    }
+    signal
+}
+
+fn schedule_map_repaint(
+    load: &Rc<RefCell<MapImageLoad>>,
+    mut image_version: Signal<u32>,
+    token: u32,
+) {
+    let scheduled = {
+        let guard = load.borrow();
+        !guard.epoch.is_current(token) || guard.raf_id.is_some()
+    };
+    if scheduled {
+        return;
+    }
+
+    let load_cb = load.clone();
+    let closure = Closure::<dyn FnMut()>::new(move || {
+        let still_current = {
+            let mut guard = load_cb.borrow_mut();
+            guard.raf_id = None;
+            guard.epoch.is_current(token)
+        };
+        if still_current {
+            image_version.with_mut(|v| *v = v.wrapping_add(1));
+        }
+    });
+
+    let Some(window) = web_sys::window() else {
+        return;
+    };
+    let Ok(id) = window.request_animation_frame(closure.as_ref().unchecked_ref()) else {
+        return;
+    };
+
+    let mut guard = load.borrow_mut();
+    if !guard.epoch.is_current(token) {
+        let _ = window.cancel_animation_frame(id);
+        return;
+    }
+    guard.raf_id = Some(id);
+    guard.raf_closure = Some(closure);
+}
+
+fn start_map_image_load(
+    load: &Rc<RefCell<MapImageLoad>>,
+    map_image: &Rc<RefCell<Option<HtmlImageElement>>>,
+    image_version: Signal<u32>,
+    map_id: &str,
+    token: u32,
+) {
+    let img = HtmlImageElement::new().expect("failed to create image");
+    let img_for_onload = img.clone();
+    let map_image_cb = map_image.clone();
+    let load_cb = load.clone();
+    let mut iv = image_version;
+
+    let onload = Closure::<dyn FnMut()>::new(move || {
+        if !load_cb.borrow().epoch.is_current(token) {
+            return;
+        }
+        *map_image_cb.borrow_mut() = Some(img_for_onload.clone());
+        iv.with_mut(|v| *v = v.wrapping_add(1));
+    });
+    img.set_onload(Some(onload.as_ref().unchecked_ref()));
+
+    let onerror = Closure::<dyn FnMut()>::new(move || {
+        tracing::error!("Failed to load map image");
+    });
+    img.set_onerror(Some(onerror.as_ref().unchecked_ref()));
+
+    {
+        let mut guard = load.borrow_mut();
+        guard.img = Some(img.clone());
+        guard.onload = Some(onload);
+        guard.onerror = Some(onerror);
+    }
+
+    img.set_src(&format!("/assets/maps/{map_id}/main.png"));
+}
+
 // =============================================================================
 // Component
 // =============================================================================
@@ -249,23 +421,32 @@ pub fn MapCanvas(
 
     // Tile manager
     let tile_manager: SharedTileManager = use_hook(|| create_tile_manager(String::new(), 256));
-    let tile_update_scheduled: Rc<RefCell<bool>> = use_hook(|| Rc::new(RefCell::new(false)));
 
     // Map fallback image
     let map_image: Rc<RefCell<Option<HtmlImageElement>>> = use_hook(|| Rc::new(RefCell::new(None)));
     let current_loaded_map: Rc<RefCell<Option<String>>> = use_hook(|| Rc::new(RefCell::new(None)));
+    let map_load: Rc<RefCell<MapImageLoad>> =
+        use_hook(|| Rc::new(RefCell::new(MapImageLoad::default())));
 
     // Hero portrait cache
     let hero_image_cache: HeroImageCache = use_hook(create_hero_image_cache);
 
-    // Clone non-Copy props for use in multiple closures
-    let current_map_id_1 = current_map_id.clone();
-    let current_map_id_2 = current_map_id.clone();
+    // Props are not signals. Mirror every value a repaint or pointer handler
+    // must observe so effects subscribe and handlers cannot keep the first frame.
+    let zoom_sig = sync_signal(zoom);
+    let pan_sig = sync_signal(pan_offset);
+    let floor_sig = sync_signal(selected_floor);
+    let show_hp_sig = sync_signal(show_health_packs);
+    let metadata_sig = sync_signal(map_metadata);
+    let map_id_sig = sync_signal(current_map_id.clone());
+    let color_sig = sync_signal(draw_color);
+    let opacity_sig = sync_signal(fill_opacity);
+    let drawing_sig = sync_signal(is_drawing);
+    let points_sig = sync_signal(drawing_points);
+    let elements_sig = sync_signal(elements);
+    let selected_sig = sync_signal(selected_element);
+    let phase_sig = sync_signal(selected_phase);
     let current_map_id_rsx = current_map_id;
-    let elements_1 = elements.clone();
-    let elements_2 = elements.clone();
-    let elements_3 = elements.clone();
-    let elements_4 = elements;
 
     // =========================================================================
     // Map loading effect — runs when current_map_id changes
@@ -274,10 +455,10 @@ pub fn MapCanvas(
         let tile_manager = tile_manager.clone();
         let map_image = map_image.clone();
         let current_loaded_map = current_loaded_map.clone();
-        let tile_update_scheduled = tile_update_scheduled.clone();
+        let map_load = map_load.clone();
 
         use_effect(move || {
-            let map_id_val = current_map_id_1.clone();
+            let map_id_val = map_id_sig.read().clone();
 
             // Only reload if the map actually changed
             if map_id_val == *current_loaded_map.borrow() {
@@ -285,53 +466,24 @@ pub fn MapCanvas(
             }
             *current_loaded_map.borrow_mut() = map_id_val.clone();
             *map_image.borrow_mut() = None;
+            map_load.borrow_mut().abort();
+            let token = map_load.borrow().epoch.token();
 
             if let Some(id) = map_id_val {
                 // Update tile manager for new map
                 tile_manager.borrow_mut().set_map(id.clone());
 
-                // Set up tile loaded callback with debouncing via requestAnimationFrame
-                let tile_update_scheduled_cb = tile_update_scheduled.clone();
+                // Debounce tile-load repaints onto one animation frame, and
+                // drop that frame if the map changes before it fires.
+                let load_cb = map_load.clone();
                 let version_signal = image_version;
                 tile_manager
                     .borrow_mut()
                     .set_on_tile_loaded(Rc::new(move || {
-                        if !*tile_update_scheduled_cb.borrow() {
-                            *tile_update_scheduled_cb.borrow_mut() = true;
-                            let scheduled_flag = tile_update_scheduled_cb.clone();
-                            let mut vs = version_signal;
-                            let callback = Closure::once(Box::new(move || {
-                                *scheduled_flag.borrow_mut() = false;
-                                vs.with_mut(|v| *v = v.wrapping_add(1));
-                            })
-                                as Box<dyn FnOnce()>);
-                            let window = web_sys::window().expect("no window");
-                            let _ =
-                                window.request_animation_frame(callback.as_ref().unchecked_ref());
-                            callback.forget();
-                        }
+                        schedule_map_repaint(&load_cb, version_signal, token);
                     }));
 
-                // Load fallback main.png
-                let img = HtmlImageElement::new().expect("failed to create image");
-                let img_clone = img.clone();
-                let map_image_clone = map_image.clone();
-                let mut iv = image_version;
-
-                let onload = Closure::<dyn FnMut()>::new(move || {
-                    *map_image_clone.borrow_mut() = Some(img_clone.clone());
-                    iv.with_mut(|v| *v = v.wrapping_add(1));
-                });
-                img.set_onload(Some(onload.as_ref().unchecked_ref()));
-                onload.forget();
-
-                let onerror = Closure::<dyn Fn()>::new(move || {
-                    tracing::error!("Failed to load map image");
-                });
-                img.set_onerror(Some(onerror.as_ref().unchecked_ref()));
-                onerror.forget();
-
-                img.set_src(&format!("/assets/maps/{}/main.png", id));
+                start_map_image_load(&map_load, &map_image, image_version, &id, token);
             } else {
                 // No map selected — clear
                 tile_manager.borrow_mut().clear();
@@ -347,17 +499,18 @@ pub fn MapCanvas(
         let map_image = map_image.clone();
 
         use_effect(move || {
-            // Subscribe to reactive state
+            // Subscribe to reactive state. Prop mirrors are read here so a
+            // parent update (map pick, zoom, metadata) repaints this layer.
             let _version = *image_version.read();
-            let zoom_val = zoom;
-            let editor_pan = pan_offset;
+            let zoom_val = *zoom_sig.read();
+            let editor_pan = *pan_sig.read();
             let panning = *is_panning.read();
             let panning_local = *local_pan.read();
             let pan = if panning { panning_local } else { editor_pan };
-            let show_hp = show_health_packs;
-            let metadata = map_metadata.clone();
-            let floor = selected_floor.clone();
-            let map_id = current_map_id_2.clone();
+            let show_hp = *show_hp_sig.read();
+            let metadata = metadata_sig.read().clone();
+            let floor = floor_sig.read().clone();
+            let map_id = map_id_sig.read().clone();
 
             // Get canvas element
             let Some(ref mounted) = *bg_canvas.read() else {
@@ -444,13 +597,14 @@ pub fn MapCanvas(
         let hero_image_cache = hero_image_cache.clone();
 
         use_effect(move || {
-            let zoom_val = zoom;
-            let editor_pan = pan_offset;
+            let zoom_val = *zoom_sig.read();
+            let editor_pan = *pan_sig.read();
             let panning = *is_panning.read();
             let panning_local = *local_pan.read();
             let pan = if panning { panning_local } else { editor_pan };
-            let fill_op = fill_opacity;
-            let all_elements = elements_1.clone();
+            let fill_op = *opacity_sig.read();
+            let all_elements = elements_sig.read().clone();
+            let selected_phase = *phase_sig.read();
 
             // Filter to visible elements (phase filtering)
             let visible: Vec<&StrategyElement> = all_elements
@@ -513,19 +667,19 @@ pub fn MapCanvas(
     // LAYER 3: Overlay rendering effect
     // =========================================================================
     use_effect(move || {
-        let zoom_val = zoom;
-        let editor_pan = pan_offset;
+        let zoom_val = *zoom_sig.read();
+        let editor_pan = *pan_sig.read();
         let panning = *is_panning.read();
         let panning_local = *local_pan.read();
         let pan = if panning { panning_local } else { editor_pan };
-        let color = draw_color;
-        let drawing = is_drawing;
-        let points = drawing_points.clone();
+        let color = *color_sig.read();
+        let drawing = *drawing_sig.read();
+        let points = points_sig.read().clone();
         let arrow_s = *arrow_start.read();
         let arrow_e = *arrow_end.read();
-        let sel_id = selected_element;
-        let sel_phase = selected_phase;
-        let all_elements = elements_2.clone();
+        let sel_id = *selected_sig.read();
+        let sel_phase = *phase_sig.read();
+        let all_elements = elements_sig.read().clone();
 
         let Some(ref mounted) = *ov_canvas.read() else {
             return;
@@ -616,7 +770,8 @@ pub fn MapCanvas(
         };
 
         let rect = canvas.get_bounding_client_rect();
-        let pan_val = pan_offset;
+        let pan_val = *pan_sig.read();
+        let zoom = *zoom_sig.read();
 
         // Account for canvas display scaling (internal vs displayed size)
         let scale_x = canvas.width() as f64 / rect.width();
@@ -707,7 +862,7 @@ pub fn MapCanvas(
                     match active_tool {
                         Tool::Pan => {
                             is_panning.set(true);
-                            local_pan.set(pan_offset);
+                            local_pan.set(*pan_sig.read());
                             last_mouse_pos.set(Position::new(
                                 evt.client_coordinates().x,
                                 evt.client_coordinates().y,
@@ -730,9 +885,11 @@ pub fn MapCanvas(
                             arrow_start.set(Some(pos));
                         }
                         Tool::Select => {
+                            let selected_element = *selected_sig.read();
+                            let elements = elements_sig.read();
                             // Check if clicking on already-selected element to start dragging
                             if let Some(sel_id) = selected_element
-                                && let Some(element) = elements_4.iter().find(|e| e.id == sel_id)
+                                && let Some(element) = elements.iter().find(|e| e.id == sel_id)
                                     && crate::state::editor::is_position_near_element(pos, element, 30.0) {
                                         is_dragging.set(true);
                                         drag_start_pos.set(Some((sel_id, element.position)));
@@ -743,7 +900,7 @@ pub fn MapCanvas(
                                         return;
                                     }
                             // Try to select an element at click position
-                            let found = elements_3
+                            let found = elements
                                 .iter()
                                 .rev()
                                 .find(|e| crate::state::editor::is_position_near_element(pos, e, 30.0))
@@ -786,12 +943,12 @@ pub fn MapCanvas(
                             evt.client_coordinates().y,
                         ));
                     } else if *is_dragging.read() {
-                        if let Some(sel_id) = selected_element {
+                        if let Some(sel_id) = *selected_sig.read() {
                             let offset = *drag_offset.read();
                             let new_pos = Position::new(pos.x + offset.x, pos.y + offset.y);
                             on_element_move.call((sel_id, new_pos));
                         }
-                    } else if is_drawing {
+                    } else if *drawing_sig.read() {
                         on_drawing_continue.call(pos);
                     } else if arrow_start.read().is_some() {
                         arrow_end.set(Some(pos));
@@ -851,6 +1008,11 @@ pub fn MapCanvas(
                     let mouse_x = (evt.data().client_coordinates().x - rect.left()) * scale_x;
                     let mouse_y = (evt.data().client_coordinates().y - rect.top()) * scale_y;
 
+                    // Read the live zoom/pan. The listener closure is not itself
+                    // a reactive scope, so a copied prop would stick at mount.
+                    let zoom = *zoom_sig.read();
+                    let pan_offset = *pan_sig.read();
+
                     // Zoom towards mouse position — extract delta_y from WheelDelta enum
                     let delta_y = match evt.data().delta() {
                         dioxus::html::geometry::WheelDelta::Pixels(v) => v.y,
@@ -890,7 +1052,7 @@ pub fn MapCanvas(
                     let key = evt.data().key();
                     match key {
                         Key::Delete | Key::Backspace
-                            if selected_element.is_some() => {
+                            if selected_sig.read().is_some() => {
                                 // Parent handles deletion through element select -> delete flow
                                 on_element_select.call(None);
                             }
@@ -1448,5 +1610,99 @@ fn draw_health_packs(
         ctx.move_to(px, py - cross_size);
         ctx.line_to(px, py + cross_size);
         ctx.stroke();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::Cell;
+
+    use super::{LoadEpoch, sync_signal};
+    use dioxus::prelude::*;
+
+    #[derive(Clone, Copy)]
+    struct ProbeHandles {
+        tick: Signal<i32>,
+        live: Signal<Vec<i32>>,
+        stale: Signal<Vec<i32>>,
+    }
+
+    thread_local! {
+        static PROBE: Cell<Option<ProbeHandles>> = const { Cell::new(None) };
+    }
+
+    /// Root component: `tick` stands in for a parent prop. The live effect reads
+    /// `sync_signal`; the stale effect copies the value the way map canvas used to.
+    fn probe_app() -> Element {
+        let tick = use_signal(|| 0i32);
+        let live = use_signal(Vec::<i32>::new);
+        let stale = use_signal(Vec::<i32>::new);
+        let tick_val = tick();
+        let synced = sync_signal(tick_val);
+        let copied = tick_val;
+
+        let mut live_log = live;
+        use_effect(move || {
+            let seen = *synced.read();
+            live_log.write().push(seen);
+        });
+
+        let mut stale_log = stale;
+        use_effect(move || {
+            stale_log.write().push(copied);
+        });
+
+        PROBE.with(|slot| slot.set(Some(ProbeHandles { tick, live, stale })));
+
+        rsx! { "" }
+    }
+
+    #[test]
+    fn sync_signal_reruns_effect_when_prop_changes() {
+        PROBE.with(|slot| slot.set(None));
+        let mut dom = VirtualDom::new(probe_app);
+        dom.rebuild_in_place();
+        dom.render_immediate_to_vec();
+
+        let mut handles = PROBE.with(|slot| slot.get().expect("probe mounted"));
+        dom.in_runtime(|| {
+            assert_eq!(handles.live.read().as_slice(), &[0]);
+            assert_eq!(handles.stale.read().as_slice(), &[0]);
+            handles.tick.set(1);
+        });
+        // Parent render copies the new value into the signal.
+        dom.render_immediate_to_vec();
+        // That write queues the effect; it runs once no scope is dirty.
+        dom.render_immediate_to_vec();
+
+        dom.in_runtime(|| {
+            assert_eq!(
+                handles.live.read().as_slice(),
+                &[0, 1],
+                "signal-backed prop must repaint after the parent updates"
+            );
+            assert_eq!(
+                handles.stale.read().as_slice(),
+                &[0],
+                "a copied prop must stay stale so this test can fail"
+            );
+        });
+    }
+
+    #[test]
+    fn load_epoch_ignores_callback_from_previous_map() {
+        let mut epoch = LoadEpoch::default();
+        assert!(!epoch.is_current(0));
+        let first = epoch.invalidate();
+        assert!(epoch.is_current(first));
+        let second = epoch.invalidate();
+        assert_ne!(first, second);
+        assert!(!epoch.is_current(first));
+        assert!(epoch.is_current(second));
+
+        epoch.0 = u32::MAX;
+        let wrapped = epoch.invalidate();
+        assert_ne!(wrapped, 0);
+        assert!(epoch.is_current(wrapped));
     }
 }
