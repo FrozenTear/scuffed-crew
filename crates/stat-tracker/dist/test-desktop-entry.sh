@@ -27,11 +27,17 @@ mkdir -p "$PKG/bin" "$PKG/assets" "$HOME_DIR" "$PREFIX"
 printf '%s\n' '#!/bin/sh' 'echo scuffed-stat-tracker 0.4.4' > "$PKG/bin/scuffed-stat-tracker"
 printf '%s\n' '#!/bin/sh' 'echo stat-tracker-gui' > "$PKG/bin/stat-tracker-gui"
 chmod +x "$PKG/bin/scuffed-stat-tracker" "$PKG/bin/stat-tracker-gui"
-cp "$TEMPLATE" "$UNIT" "$PKG/assets/"
+cp "$TEMPLATE" "$UNIT" "$ROOT/assets/scuffed-stat-tracker-session.service" "$PKG/assets/"
 cp "$INSTALL" "$PKG/install.sh"
-chmod +x "$PKG/install.sh"
+cp "$ROOT/dist/systemd-unit.sh" "$ROOT/dist/import-session-env.sh" "$PKG/"
+chmod +x "$PKG/install.sh" "$PKG/import-session-env.sh"
+mkdir -p "$TMP/noproc"
 
-HOME="$HOME_DIR" PREFIX="$PREFIX" bash "$PKG/install.sh"
+# Do not import into the real user manager from this test.
+HOME="$HOME_DIR" PREFIX="$PREFIX" \
+    SCUFFED_SYSTEMCTL=/bin/true \
+    SCUFFED_PROC_ROOT="$TMP/noproc" \
+    bash "$PKG/install.sh"
 
 DESKTOP="$HOME_DIR/.local/share/applications/scuffed-stat-tracker.desktop"
 [[ -f "$DESKTOP" ]] || fail "desktop entry not installed at $DESKTOP"
@@ -61,7 +67,10 @@ REL_HOME="$TMP/home-rel"
 mkdir -p "$REL_HOME"
 (
     cd "$TMP"
-    HOME="$REL_HOME" PREFIX="rel-prefix" bash "$PKG/install.sh"
+    HOME="$REL_HOME" PREFIX="rel-prefix" \
+        SCUFFED_SYSTEMCTL=/bin/true \
+        SCUFFED_PROC_ROOT="$TMP/noproc" \
+        bash "$PKG/install.sh"
 )
 REL_DESKTOP="$REL_HOME/.local/share/applications/scuffed-stat-tracker.desktop"
 rel_abs="$TMP/rel-prefix/bin/stat-tracker-gui"

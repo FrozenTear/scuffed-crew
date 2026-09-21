@@ -138,6 +138,13 @@ systemctl --user start scuffed-stat-tracker.service
 systemctl --user restart scuffed-stat-tracker.service
 ```
 
+Start through the unit does not inherit the GUI's `WAYLAND_DISPLAY` /
+`DISPLAY`. `install.sh` rewrites `ExecStart` to the real `$PREFIX/bin`
+binary and adds `scuffed-stat-tracker-session.service`, which refreshes
+`~/.config/scuffed-stat-tracker/session.env` from the compositor before
+each start. Without that, Sway/Hyprland come up as `CaptureBackend::None`.
+Reinstall if the unit on disk still says `ExecStart=%h/.local/bin/scuffed-stat-tracker`.
+
 ### Companion overlay (P3)
 
 Layer-shell surface (`iced_layershell` 0.19, pinned with Iced 0.14): `Layer::Overlay`, top-right, margins 24, width 360, height to content, `KeyboardInteractivity::None`, exclusive zone 0, output = `capture_output` from config (same monitor the daemon captures). Clicks and keys pass through (`events_transparent`) so fullscreen Overwatch keeps input.

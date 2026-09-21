@@ -11,6 +11,9 @@
 #   tessdata/koverwatch.traineddata (optional — CI-trained game-font model, since v0.3.0)
 #   assets/scuffed-stat-tracker.desktop
 #   assets/scuffed-stat-tracker.service
+#   assets/scuffed-stat-tracker-session.service
+#   import-session-env.sh   (reads compositor environ; installed under PREFIX)
+#   systemd-unit.sh         (sourced; rewrites ExecStart to $PREFIX/bin)
 #   install.sh   (this file)
 #   VERSION      (optional)
 #
@@ -105,6 +108,7 @@ refresh_desktop_database() {
 # tests, bootstrap smoke) don't pollute the real $HOME. Unset/empty = full
 # install (default, unchanged). bootstrap.sh passes this through.
 SKIP_INTEGRATION="${SKIP_INTEGRATION:-}"
+INSTALLED_UNITS=0
 
 # Every file this script installs is recorded here and written to
 # $PREFIX/share/scuffed-stat-tracker/install-manifest.txt so uninstall.sh can
@@ -347,13 +351,39 @@ else
     info "Installed desktop entry → $DESKTOP_DIR (Exec=$(absolute_gui_bin))"
 
     # ── systemd user service (installed, NOT enabled) ─────────────────────────
-    mkdir -p "$SYSTEMD_DIR"
-    install -m644 "$ASSETS_DIR/$UNIT" "$SYSTEMD_DIR/$UNIT"
-    MANIFEST_ENTRIES+=("$SYSTEMD_DIR/$UNIT")
-    if command -v systemctl &>/dev/null; then
-        systemctl --user daemon-reload 2>/dev/null || true
+    # ExecStart is rewritten to the absolute PREFIX binary. The template's
+    # %h/.local/bin path is wrong for any other PREFIX. The session oneshot
+    # imports WAYLAND_DISPLAY / DISPLAY (Sway and Hyprland do not, and
+    # graphical-session.target does not either).
+    UNIT_LIB="$PKG_ROOT/systemd-unit.sh"
+    HELPER_SRC="$PKG_ROOT/import-session-env.sh"
+    SESSION_UNIT="scuffed-stat-tracker-session.service"
+    if [[ ! -f "$UNIT_LIB" || ! -f "$HELPER_SRC" || ! -f "$ASSETS_DIR/$SESSION_UNIT" ]]; then
+        error "missing systemd session files (systemd-unit.sh, import-session-env.sh, assets/$SESSION_UNIT)"
+        exit 1
+    fi
+    # shellcheck source=systemd-unit.sh
+    source "$UNIT_LIB"
+    DAEMON_EXEC="$(absolute_install_path "$BIN_DIR/scuffed-stat-tracker")"
+    HELPER_DEST="$(absolute_install_path "$LIB_DIR/scuffed-stat-tracker/import-session-env.sh")"
+    install_user_units "$ASSETS_DIR" "$SYSTEMD_DIR" "$DAEMON_EXEC" "$HELPER_SRC" "$HELPER_DEST"
+    MANIFEST_ENTRIES+=(
+        "$HELPER_DEST"
+        "$SYSTEMD_DIR/$UNIT"
+        "$SYSTEMD_DIR/$SESSION_UNIT"
+    )
+    SYSTEMCTL_BIN="${SCUFFED_SYSTEMCTL:-systemctl}"
+    if [[ -x "$SYSTEMCTL_BIN" ]] || command -v "$SYSTEMCTL_BIN" &>/dev/null; then
+        "$SYSTEMCTL_BIN" --user daemon-reload 2>/dev/null || true
+    fi
+    # Import into this user manager now, and write session.env for the unit.
+    # Soft-fail: no user bus (SSH, install before login) must not abort.
+    if ! "$HELPER_DEST"; then
+        warn "session environment was not imported; the oneshot retries when the daemon starts"
     fi
     info "Installed systemd service → $SYSTEMD_DIR (not enabled)"
+    info "ExecStart=$DAEMON_EXEC"
+    INSTALLED_UNITS=1
 fi
 
 # ── Install manifest ──────────────────────────────────────────────────────────
@@ -424,6 +454,14 @@ fi
     echo
     echo "  The GUI Settings page has Start / Stop and Start on login."
     echo "  Autostart (systemd) starts the daemon automatically on login."
+    if [[ "$INSTALLED_UNITS" -eq 1 ]]; then
+        echo "  The user unit loads ~/.config/scuffed-stat-tracker/session.env"
+        echo "  (WAYLAND_DISPLAY, DISPLAY, XDG_CURRENT_DESKTOP, XDG_SESSION_TYPE)."
+        echo "  On Sway/Hyprland those are read from the compositor each start."
+        echo "  If you installed with no graphical session, start the daemon"
+        echo "  again after login — the oneshot retries. See the README if"
+        echo "  capture stays on CaptureBackend::None."
+    fi
     echo
     echo "  First run: open the GUI, go to Settings, paste your server URL"
     echo "  and daemon token (from the web UI under My Stats → Daemon Tokens)."

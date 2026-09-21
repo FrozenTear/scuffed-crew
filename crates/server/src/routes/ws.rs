@@ -36,6 +36,11 @@ pub async fn websocket_handler(
     jar: CookieJar,
     headers: HeaderMap,
 ) -> impl IntoResponse {
+    // Same fail-closed gate as strategy REST. Patch notes are not on this path.
+    if let Err(status) = super::strategy::ensure_strategies_enabled(&state.app).await {
+        return status.into_response();
+    }
+
     if !ws_origin_allowed(&state, &headers) {
         tracing::warn!("strategy WS rejected: Origin not allowed");
         return StatusCode::FORBIDDEN.into_response();
@@ -622,5 +627,156 @@ mod origin_tests {
         let allowed = vec!["http://localhost:3000".to_string()];
         assert!(origin_is_allowed(&allowed, None, false));
         assert!(!origin_is_allowed(&allowed, None, true));
+    }
+}
+
+#[cfg(test)]
+mod strategies_gate_tests {
+    use super::*;
+    use axum::Router;
+    use axum::http::StatusCode;
+    use axum::routing::get;
+    use scuffed_auth::SessionConfig;
+    use scuffed_db::Database;
+    use scuffed_db::migrations::run_migrations;
+    use scuffed_site_server::state::OAuthConfig;
+    use std::path::PathBuf;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    use super::super::strategy::strategies_gate_status;
+
+    async fn test_state() -> AppState {
+        let db = Database::connect_memory().await.expect("mem db");
+        run_migrations(&db.client).await.expect("migrations");
+        AppState {
+            db: Arc::new(db),
+            session_config: SessionConfig::default(),
+            oauth_config: OAuthConfig {
+                discord_client_id: String::new(),
+                discord_client_secret: String::new(),
+                google_client_id: String::new(),
+                google_client_secret: String::new(),
+                redirect_base_url: "http://localhost:3000".into(),
+                allowed_origins: vec!["http://localhost:3000".into()],
+            },
+            upload_dir: PathBuf::from("/tmp/scuffed-test-uploads"),
+            notifier: None,
+            nostr_challenge_key: [0u8; 32],
+            consumed_challenges: scuffed_site_server::challenge_store::ConsumedChallengeStore::new(
+            ),
+            nostr_rate_limiter: scuffed_site_server::nostr_rate_limit::NostrRateLimiter::new(),
+            crypto: None,
+            relay_url: None,
+            dm_events: None,
+            nip05_domain: None,
+            nip05_republish_enabled: false,
+        }
+    }
+
+    async fn set_strategies_enabled(state: &AppState, enabled: bool) {
+        state
+            .db
+            .update_settings(
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(enabled),
+            )
+            .await
+            .expect("update strategies_enabled");
+    }
+
+    fn ws_router(state: AppState) -> Router {
+        let ws_state = WsState {
+            app: state,
+            rooms: Arc::new(RoomManager::new()),
+        };
+        Router::new()
+            .route("/api/strategy/ws", get(websocket_handler))
+            .with_state(ws_state)
+    }
+
+    /// Real TCP handshake. `tower::oneshot` has no `hyper::upgrade::OnUpgrade`,
+    /// so the extractor rejects with 426 before this handler runs.
+    async fn handshake_status(state: AppState) -> StatusCode {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("local addr");
+        let app = ws_router(state).into_make_service();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve");
+        });
+
+        let mut stream = tokio::net::TcpStream::connect(addr).await.expect("connect");
+        let req = format!(
+            "GET /api/strategy/ws HTTP/1.1\r\n\
+             Host: {addr}\r\n\
+             Origin: http://localhost:3000\r\n\
+             Connection: Upgrade\r\n\
+             Upgrade: websocket\r\n\
+             Sec-WebSocket-Version: 13\r\n\
+             Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\
+             \r\n"
+        );
+        stream.write_all(req.as_bytes()).await.expect("write");
+        let mut buf = [0u8; 1024];
+        let n = tokio::time::timeout(std::time::Duration::from_secs(2), stream.read(&mut buf))
+            .await
+            .expect("handshake timed out")
+            .expect("read");
+        server.abort();
+
+        let text = String::from_utf8_lossy(&buf[..n]);
+        let code: u16 = text
+            .lines()
+            .next()
+            .and_then(|line| line.split_whitespace().nth(1))
+            .and_then(|code| code.parse().ok())
+            .unwrap_or_else(|| panic!("no HTTP status in {text:?}"));
+        StatusCode::from_u16(code).unwrap_or_else(|_| panic!("invalid status {code} in {text:?}"))
+    }
+
+    #[test]
+    fn gate_status_matches_rest_fail_closed() {
+        assert_eq!(strategies_gate_status(Ok(true)), Ok(()));
+        assert_eq!(
+            strategies_gate_status(Ok(false)),
+            Err(StatusCode::NOT_FOUND)
+        );
+        assert_eq!(
+            strategies_gate_status(Err(())),
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        );
+    }
+
+    #[tokio::test]
+    async fn strategies_disabled_rejects_ws_upgrade() {
+        let state = test_state().await;
+        set_strategies_enabled(&state, false).await;
+        assert_eq!(handshake_status(state).await, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn strategies_enabled_accepts_ws_upgrade() {
+        let state = test_state().await;
+        set_strategies_enabled(&state, true).await;
+        assert_eq!(
+            handshake_status(state).await,
+            StatusCode::SWITCHING_PROTOCOLS
+        );
     }
 }
