@@ -69,6 +69,7 @@ pub fn parse_scoreboard_cells(
         mitigation: stats.mitigation,
         played_at: SurrealDatetime::from(Utc::now()),
         synced: false,
+        sync_rev: 0,
         session_id: String::new(),
         corrected_hero: None,
         corrected_role: None,

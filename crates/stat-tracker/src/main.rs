@@ -1388,8 +1388,9 @@ async fn run_loop(ctx: Arc<DaemonCtx>) -> anyhow::Result<()> {
     // Periodic sync runs as a spawned task so a slow or hung server can't
     // stall Tab capture, polling, or shutdown. Single-flight: while one sync
     // is in the air, the next trigger is skipped (the following one picks up
-    // whatever it missed). Shutdown paths still sync inline — bounded by the
-    // client's HTTP timeout.
+    // whatever it missed). Shutdown joins that task before the final upload
+    // so the two never `mark_synced` the same ids. The client's HTTP timeout
+    // bounds both the in-flight wait and the final upload.
     let mut sync_task: Option<tokio::task::JoinHandle<()>> = None;
 
     // Tab OCR also runs as a spawned task (single-flight), reporting back on
@@ -1514,8 +1515,11 @@ async fn run_loop(ctx: Arc<DaemonCtx>) -> anyhow::Result<()> {
                             Err(e2) => {
                                 tracing::error!(error = %e2, "failed to reopen keyboard — exiting");
                                 drain_capture(capture_task.take()).await;
+                                let task = sync_task.take();
                                 if let Some(client) = sync_client {
-                                    try_sync(store, client, data_dir).await;
+                                    drain_sync_then(task, || try_sync(store, client, data_dir)).await;
+                                } else {
+                                    drain_sync_then(task, || std::future::ready(())).await;
                                 }
                                 // Exit non-zero so Restart=on-failure starts a
                                 // new process once a device is readable again.
@@ -2028,8 +2032,11 @@ async fn run_loop(ctx: Arc<DaemonCtx>) -> anyhow::Result<()> {
             _ = tokio::signal::ctrl_c() => {
                 tracing::info!("shutting down");
                 drain_capture(capture_task.take()).await;
+                let task = sync_task.take();
                 if let Some(client) = sync_client {
-                    try_sync(store, client, data_dir).await;
+                    drain_sync_then(task, || try_sync(store, client, data_dir)).await;
+                } else {
+                    drain_sync_then(task, || std::future::ready(())).await;
                 }
                 flush_snapshot_if_dirty(store, data_dir).await;
                 return Ok(());
@@ -2037,8 +2044,11 @@ async fn run_loop(ctx: Arc<DaemonCtx>) -> anyhow::Result<()> {
             _ = sigterm.recv() => {
                 tracing::info!("SIGTERM received — shutting down");
                 drain_capture(capture_task.take()).await;
+                let task = sync_task.take();
                 if let Some(client) = sync_client {
-                    try_sync(store, client, data_dir).await;
+                    drain_sync_then(task, || try_sync(store, client, data_dir)).await;
+                } else {
+                    drain_sync_then(task, || std::future::ready(())).await;
                 }
                 flush_snapshot_if_dirty(store, data_dir).await;
                 return Ok(());
@@ -2753,6 +2763,35 @@ async fn drain_capture(task: Option<tokio::task::JoinHandle<()>>) {
     }
 }
 
+/// How many shutdown drains are blocked inside the in-flight sync join.
+/// Tests wait on this so "final upload started early" cannot pass by winning
+/// a race against a task that has not been scheduled yet.
+#[cfg(test)]
+static SYNC_DRAIN_WAITING: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Finish `task` (including its `mark_synced`) before `then`. Shutdown must
+/// not start a second upload while the first still holds ids from its read:
+/// both would mark those ids, and the older HTTP body can land on the server
+/// after the newer one. Aborting the task would drop it between the response
+/// and `mark_synced`, so the join waits instead.
+async fn drain_sync_then<F, Fut>(task: Option<tokio::task::JoinHandle<()>>, then: F)
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = ()>,
+{
+    if let Some(t) = task {
+        if !t.is_finished() {
+            tracing::info!("waiting for in-flight sync to finish before final upload");
+        }
+        #[cfg(test)]
+        SYNC_DRAIN_WAITING.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let _ = t.await;
+        #[cfg(test)]
+        SYNC_DRAIN_WAITING.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+    then().await;
+}
+
 /// Minimum gap between full snapshot rewrites (P11). Capture/poll can mark the
 /// export dirty faster than this; the next due flush (or a forced one after
 /// sync / shutdown) actually rewrites the file.
@@ -2827,6 +2866,28 @@ async fn try_sync(
     client: &sync::SyncClient,
     data_dir: &std::path::Path,
 ) {
+    let client = client.clone();
+    try_sync_with(store, data_dir, move |matches, tombstones| {
+        let client = client.clone();
+        async move {
+            client
+                .upload_matches(&matches, &tombstones)
+                .await
+                .map_err(|e| e.to_string())
+        }
+    })
+    .await;
+}
+
+/// Read unsynced rows, upload, then mark synced only where `sync_rev` is
+/// still the revision captured here. `upload` is the HTTP call (or a test
+/// double). It runs after the read and before the mark, which is the window
+/// a local outcome/map/hero/GUI write can revise a row.
+async fn try_sync_with<F, Fut>(store: &storage::LocalStore, data_dir: &std::path::Path, upload: F)
+where
+    F: FnOnce(Vec<storage::PersonalMatch>, Vec<String>) -> Fut,
+    Fut: std::future::Future<Output = Result<scuffed_types::api::StatsUploadResponse, String>>,
+{
     // Errors are stringified immediately: `Box<dyn Error>` isn't `Send`, and
     // this future runs on a spawned task.
     let unsynced = match store.get_unsynced().await.map_err(|e| e.to_string()) {
@@ -2853,24 +2914,23 @@ async fn try_sync(
     }
 
     // The server keeps one row per session, so only the final snapshot of
-    // each session is worth sending — but every fetched row is marked synced
-    // on success (the collapsed ones are represented by the snapshot that
-    // was uploaded).
-    let ids: Vec<_> = unsynced.iter().filter_map(|m| m.id.clone()).collect();
+    // each session is worth sending. Every fetched row is *claimed* at its
+    // current `sync_rev`; `mark_synced` commits a claim only when that
+    // revision is unchanged (a write during `upload` bumps it and stays
+    // queued). Collapsed snapshots are represented by the uploaded one, but
+    // a revision miss on any of them leaves the whole session queued so the
+    // next sync cannot upload an older snapshot by itself.
+    let claims = storage::SyncClaim::capture(&unsynced);
     let mut newest_first = unsynced;
     newest_first.reverse(); // get_unsynced is played_at ASC
     let to_upload = storage::latest_per_game(newest_first);
     tracing::info!(
-        rows = ids.len(),
+        rows = claims.len(),
         games = to_upload.len(),
         tombstones = tombstones.len(),
         "syncing unsynced matches"
     );
-    match client
-        .upload_matches(&to_upload, &tombstones)
-        .await
-        .map_err(|e| e.to_string())
-    {
+    match upload(to_upload, tombstones.clone()).await {
         Ok(resp) => {
             tracing::info!(
                 inserted = resp.inserted,
@@ -2878,7 +2938,7 @@ async fn try_sync(
                 deleted = resp.deleted,
                 "sync complete"
             );
-            if let Err(e) = store.mark_synced(ids).await.map_err(|e| e.to_string()) {
+            if let Err(e) = store.mark_synced(&claims).await.map_err(|e| e.to_string()) {
                 tracing::error!(error = %e, "failed to mark matches as synced");
             }
             if let Err(e) = store
@@ -3839,5 +3899,234 @@ mod tests {
             .map(|e| e.file_name().to_string_lossy().into_owned())
             .collect();
         assert_eq!(names.len(), 2, "names={names:?}");
+    }
+
+    fn upload_ok() -> scuffed_types::api::StatsUploadResponse {
+        scuffed_types::api::StatsUploadResponse {
+            inserted: 1,
+            skipped: 0,
+            deleted: 0,
+        }
+    }
+
+    fn test_match(session_id: &str, outcome: &str) -> storage::PersonalMatch {
+        storage::PersonalMatch {
+            id: None,
+            hero: "Ana".into(),
+            map_name: "Busan".into(),
+            game_mode: String::new(),
+            role: "Support".into(),
+            outcome: outcome.into(),
+            elims: 10,
+            deaths: 2,
+            assists: 5,
+            damage: 4000,
+            healing: 8000,
+            mitigation: 0,
+            played_at: SurrealDatetime::from(Utc::now()),
+            synced: false,
+            sync_rev: 0,
+            session_id: session_id.into(),
+            corrected_hero: None,
+            corrected_role: None,
+            corrected_map_name: None,
+            corrected_outcome: None,
+            corrected_elims: None,
+            corrected_deaths: None,
+            corrected_assists: None,
+            corrected_damage: None,
+            corrected_healing: None,
+            corrected_mitigation: None,
+            edited_fields: Vec::new(),
+            edited_at: None,
+            heroes_played: Vec::new(),
+            segment_resolutions: Vec::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn local_write_during_inflight_upload_stays_unsynced_until_next_sync() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = storage::LocalStore::open(dir.path()).await.unwrap();
+        store
+            .insert_match(test_match("s1", "victory"))
+            .await
+            .unwrap();
+
+        let entered = std::sync::Arc::new(tokio::sync::Notify::new());
+        let release = std::sync::Arc::new(tokio::sync::Notify::new());
+        let uploaded: std::sync::Arc<std::sync::Mutex<Vec<String>>> =
+            std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+
+        let store_bg = store.clone();
+        let dir_bg = dir.path().to_path_buf();
+        let entered_bg = entered.clone();
+        let release_bg = release.clone();
+        let uploaded_bg = uploaded.clone();
+        let sync = tokio::spawn(async move {
+            try_sync_with(&store_bg, &dir_bg, move |matches, _tombstones| {
+                let entered_bg = entered_bg.clone();
+                let release_bg = release_bg.clone();
+                let uploaded_bg = uploaded_bg.clone();
+                async move {
+                    uploaded_bg
+                        .lock()
+                        .unwrap()
+                        .push(matches[0].display_outcome().to_string());
+                    entered_bg.notify_one();
+                    release_bg.notified().await;
+                    Ok(upload_ok())
+                }
+            })
+            .await;
+        });
+
+        entered.notified().await;
+        store.set_session_outcome("s1", "defeat").await.unwrap();
+        release.notify_one();
+        sync.await.unwrap();
+
+        let mid = store.get_all_matches().await.unwrap();
+        assert_eq!(mid[0].outcome, "defeat");
+        assert!(
+            !mid[0].synced,
+            "in-flight mark must not commit the revised row"
+        );
+
+        let uploaded_bg = uploaded.clone();
+        try_sync_with(&store, dir.path(), move |matches, _| {
+            let uploaded_bg = uploaded_bg.clone();
+            async move {
+                uploaded_bg
+                    .lock()
+                    .unwrap()
+                    .push(matches[0].display_outcome().to_string());
+                Ok(upload_ok())
+            }
+        })
+        .await;
+
+        assert_eq!(
+            uploaded.lock().unwrap().as_slice(),
+            ["victory", "defeat"],
+            "the revised payload is what the follow-up sync uploads"
+        );
+        let done = store.get_all_matches().await.unwrap();
+        assert!(done[0].synced);
+        assert_eq!(done[0].outcome, "defeat");
+    }
+
+    #[tokio::test]
+    async fn shutdown_joins_inflight_sync_before_marking() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = storage::LocalStore::open(dir.path()).await.unwrap();
+        store
+            .insert_match(test_match("s1", "victory"))
+            .await
+            .unwrap();
+
+        SYNC_DRAIN_WAITING.store(0, std::sync::atomic::Ordering::SeqCst);
+        let release = std::sync::Arc::new(tokio::sync::Notify::new());
+        let uploads = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let in_upload = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let overlapped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+        let inflight = tokio::spawn({
+            let store = store.clone();
+            let dir = dir.path().to_path_buf();
+            let release = release.clone();
+            let uploads = uploads.clone();
+            let in_upload = in_upload.clone();
+            let overlapped = overlapped.clone();
+            async move {
+                try_sync_with(&store, &dir, move |_matches, _tombstones| {
+                    let release = release.clone();
+                    let uploads = uploads.clone();
+                    let in_upload = in_upload.clone();
+                    let overlapped = overlapped.clone();
+                    async move {
+                        if in_upload.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                            overlapped.store(true, std::sync::atomic::Ordering::SeqCst);
+                        }
+                        uploads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        release.notified().await;
+                        in_upload.store(false, std::sync::atomic::Ordering::SeqCst);
+                        Ok(upload_ok())
+                    }
+                })
+                .await;
+            }
+        });
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while uploads.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+            if std::time::Instant::now() > deadline {
+                panic!("in-flight sync never entered upload");
+            }
+            tokio::task::yield_now().await;
+        }
+
+        let shutdown = tokio::spawn({
+            let store = store.clone();
+            let dir = dir.path().to_path_buf();
+            let uploads = uploads.clone();
+            let in_upload = in_upload.clone();
+            let overlapped = overlapped.clone();
+            async move {
+                drain_sync_then(Some(inflight), || {
+                    let store = store.clone();
+                    let dir = dir.clone();
+                    let uploads = uploads.clone();
+                    let in_upload = in_upload.clone();
+                    let overlapped = overlapped.clone();
+                    async move {
+                        try_sync_with(&store, &dir, move |_matches, _tombstones| {
+                            let uploads = uploads.clone();
+                            let in_upload = in_upload.clone();
+                            let overlapped = overlapped.clone();
+                            async move {
+                                if in_upload.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                                    overlapped.store(true, std::sync::atomic::Ordering::SeqCst);
+                                }
+                                uploads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                                in_upload.store(false, std::sync::atomic::Ordering::SeqCst);
+                                Ok(upload_ok())
+                            }
+                        })
+                        .await;
+                    }
+                })
+                .await;
+            }
+        });
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while SYNC_DRAIN_WAITING.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+            if shutdown.is_finished() {
+                panic!("shutdown finished before joining the in-flight sync");
+            }
+            if std::time::Instant::now() > deadline {
+                panic!("shutdown never blocked in drain_sync_then");
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            uploads.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "final sync uploaded while the in-flight sync was still in flight"
+        );
+        assert!(!overlapped.load(std::sync::atomic::Ordering::SeqCst));
+
+        release.notify_one();
+        shutdown.await.unwrap();
+
+        assert!(!overlapped.load(std::sync::atomic::Ordering::SeqCst));
+        assert_eq!(
+            uploads.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "shutdown sync must not upload rows the in-flight sync already marked"
+        );
+        let rows = store.get_all_matches().await.unwrap();
+        assert!(rows.iter().all(|m| m.synced));
     }
 }
