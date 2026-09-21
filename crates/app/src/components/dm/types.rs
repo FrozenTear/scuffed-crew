@@ -1,5 +1,45 @@
 use bech32::{Bech32, Hrp, primitives::decode::CheckedHrpstring};
+use scuffed_api_client::ClientError;
 use serde::{Deserialize, Serialize};
+
+/// Why a DM list or thread fetch failed. Status mapping is deliberate:
+/// 403 is membership (OrgMember), not the 412 server-managed identity case.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DmLoadFailure {
+    /// 412 — server-managed identity missing or not enabled.
+    IdentitySettings,
+    /// 403 — signed in, but not an active org member.
+    Membership,
+    /// 503 — relay URL is not configured.
+    RelayConfig,
+    /// Any other failure; `message` is the client error string.
+    Other(String),
+}
+
+impl DmLoadFailure {
+    pub fn message(&self) -> String {
+        match self {
+            Self::IdentitySettings => {
+                "Direct messages require a server-managed Nostr identity.".to_string()
+            }
+            Self::Membership => "Direct messages require an active clan membership.".to_string(),
+            Self::RelayConfig => {
+                "Direct messages need a configured chat relay. Ask an admin to set the relay URL."
+                    .to_string()
+            }
+            Self::Other(message) => message.clone(),
+        }
+    }
+}
+
+pub fn classify_dm_client_error(err: &ClientError) -> DmLoadFailure {
+    match err {
+        ClientError::Http { status: 412, .. } => DmLoadFailure::IdentitySettings,
+        ClientError::Http { status: 403, .. } => DmLoadFailure::Membership,
+        ClientError::Http { status: 503, .. } => DmLoadFailure::RelayConfig,
+        other => DmLoadFailure::Other(other.to_string()),
+    }
+}
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct ConversationSummary {
@@ -115,5 +155,69 @@ pub fn relative_time(rfc3339: &str) -> String {
         format!("{}d", secs / 86_400)
     } else {
         rfc3339.chars().take(10).collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dm_errors_map_412_403_503_and_otherwise_keep_the_string() {
+        assert_eq!(
+            classify_dm_client_error(&ClientError::Http {
+                status: 412,
+                body: r#"{"error":"Server-managed Nostr key required for DMs"}"#.into(),
+            }),
+            DmLoadFailure::IdentitySettings
+        );
+
+        let forbidden = classify_dm_client_error(&ClientError::Http {
+            status: 403,
+            body: r#"{"error":"Not an org member"}"#.into(),
+        });
+        assert_eq!(forbidden, DmLoadFailure::Membership);
+        assert!(
+            !forbidden.message().contains("server-managed"),
+            "403 must not use the identity banner"
+        );
+
+        // Old bug: any body mentioning server_managed, including 403, became the identity banner.
+        let forbidden_body = classify_dm_client_error(&ClientError::Http {
+            status: 403,
+            body: "server_managed".into(),
+        });
+        assert_eq!(forbidden_body, DmLoadFailure::Membership);
+
+        assert_eq!(
+            classify_dm_client_error(&ClientError::Http {
+                status: 503,
+                body: r#"{"error":"Relay not configured"}"#.into(),
+            }),
+            DmLoadFailure::RelayConfig
+        );
+        assert!(
+            !DmLoadFailure::RelayConfig
+                .message()
+                .contains("server-managed")
+        );
+
+        let other = classify_dm_client_error(&ClientError::Http {
+            status: 400,
+            body: r#"{"error":"server_managed"}"#.into(),
+        });
+        match other {
+            DmLoadFailure::Other(message) => {
+                assert!(message.contains("server_managed"), "{message}");
+                assert!(message.contains("400"), "{message}");
+            }
+            other => panic!("expected the error string, got {other:?}"),
+        }
+
+        let network = classify_dm_client_error(&ClientError::Network("offline".into()));
+        assert_eq!(
+            network,
+            DmLoadFailure::Other("Network error: offline".into())
+        );
     }
 }
