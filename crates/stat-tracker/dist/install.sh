@@ -47,6 +47,36 @@ info()  { echo -e "${GRN}[install]${NC} $*" >&2; }
 warn()  { echo -e "${YLW}[ warn ]${NC} $*" >&2; }
 error() { echo -e "${RED}[error ]${NC} $*" >&2; }
 
+# >>> atomic_install
+# Write to a temp file in the destination directory, then rename over the
+# target. rename(2) replaces the directory entry, so a crash mid-copy leaves
+# the previous binary intact (no truncated ELF at the live path).
+atomic_install() {
+    local src="$1" dest="$2" mode="${3:-755}"
+    local dir base tmp
+    if [[ ! -f "$src" ]]; then
+        error "atomic_install: not a regular file: $src"
+        return 1
+    fi
+    dir="$(dirname -- "$dest")"
+    base="$(basename -- "$dest")"
+    mkdir -p -- "$dir"
+    tmp="$(mktemp "$dir/.${base}.XXXXXX")"
+    if ! cp -f -- "$src" "$tmp"; then
+        rm -f -- "$tmp"
+        return 1
+    fi
+    if ! chmod "$mode" "$tmp"; then
+        rm -f -- "$tmp"
+        return 1
+    fi
+    if ! mv -f -- "$tmp" "$dest"; then
+        rm -f -- "$tmp"
+        return 1
+    fi
+}
+# <<< atomic_install
+
 # Quote a path for Desktop Entry Exec/TryExec (Freedesktop reserved chars).
 desktop_exec_value() {
     local p="$1"
@@ -199,13 +229,13 @@ fi
 # ── Install binaries ──────────────────────────────────────────────────────────
 
 mkdir -p "$BIN_DIR"
-install -m755 "$DAEMON_BIN" "$BIN_DIR/scuffed-stat-tracker"
-install -m755 "$GUI_BIN"     "$BIN_DIR/stat-tracker-gui"
+atomic_install "$DAEMON_BIN" "$BIN_DIR/scuffed-stat-tracker" 755
+atomic_install "$GUI_BIN" "$BIN_DIR/stat-tracker-gui" 755
 MANIFEST_ENTRIES+=("$BIN_DIR/scuffed-stat-tracker" "$BIN_DIR/stat-tracker-gui")
 info "Installed binaries → $BIN_DIR"
 
 if [[ -f "$PKG_ROOT/uninstall.sh" ]]; then
-    install -m755 "$PKG_ROOT/uninstall.sh" "$BIN_DIR/scuffed-stat-tracker-uninstall"
+    atomic_install "$PKG_ROOT/uninstall.sh" "$BIN_DIR/scuffed-stat-tracker-uninstall" 755
     MANIFEST_ENTRIES+=("$BIN_DIR/scuffed-stat-tracker-uninstall")
     info "Installed uninstaller → $BIN_DIR/scuffed-stat-tracker-uninstall"
 fi
@@ -238,7 +268,7 @@ install_bundled_tree() {
         fi
         dest_file="$dest/$rel"
         mkdir -p "$(dirname "$dest_file")"
-        install -m755 "$f" "$dest_file"
+        atomic_install "$f" "$dest_file" 755
         MANIFEST_ENTRIES+=("$dest_file")
         count=$((count + 1))
     done < <(find "$src" -type f -print0)
@@ -265,7 +295,7 @@ elif [[ -d "$PKG_ROOT/lib" ]] && compgen -G "$PKG_ROOT/lib/*" >/dev/null; then
             warn "skipping bundled OpenSSL $base (host libcrypto/libssl must win)"
             continue
         fi
-        install -m755 "$f" "$BUNDLE_DEST/ocr/$base"
+        atomic_install "$f" "$BUNDLE_DEST/ocr/$base" 755
         MANIFEST_ENTRIES+=("$BUNDLE_DEST/ocr/$base")
         count=$((count + 1))
     done

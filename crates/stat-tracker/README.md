@@ -60,19 +60,29 @@ hangs/segfaults with pango ≥ 1.56.
 curl -fsSL https://raw.githubusercontent.com/FrozenTear/scuffed-crew/main/crates/stat-tracker/dist/bootstrap.sh | bash
 ```
 
-Defaults to the newest **stable** release. If a newer prerelease (RC) exists
-and you're at an interactive terminal, the script asks which one you want
-(stable is the default answer). Skip the question with
-`STAT_TRACKER_CHANNEL=prerelease` (or `=stable`); non-interactive runs always
-get stable.
+That `main` URL is only the stable entrypoint, including for GUIs that already
+have it saved. The script resolves the release tag (newest **stable** by
+default) and runs `bootstrap.sh` from that tag. `install.sh` is the copy
+inside the release tarball, not whatever is currently on `main`.
 
-Pin a tag or change the install prefix:
+If a newer prerelease (RC) exists and you're at an interactive terminal, the
+script asks which one you want (stable is the default answer). Skip the
+question with `STAT_TRACKER_CHANNEL=prerelease` (or `=stable`); non-interactive
+runs always get stable.
+
+Pin a tag by fetching that tag's bootstrap (the assignment has to be on
+`bash`, because `VAR=x curl … | bash` does not pass `VAR` to `bash`):
 
 ```sh
-STAT_TRACKER_TAG=stat-tracker-v0.4.4 \
-STAT_TRACKER_PREFIX=$HOME/.local \
-  bash -c 'curl -fsSL https://raw.githubusercontent.com/FrozenTear/scuffed-crew/main/crates/stat-tracker/dist/bootstrap.sh | bash'
+TAG=stat-tracker-v0.4.14
+curl -fsSL "https://raw.githubusercontent.com/FrozenTear/scuffed-crew/${TAG}/crates/stat-tracker/dist/bootstrap.sh" \
+  | STAT_TRACKER_TAG="$TAG" STAT_TRACKER_PREFIX="$HOME/.local" bash
 ```
+
+The tarball's `.sha256` is checked before extract when that asset is published.
+That digest comes from the same release. With no minisign public key configured,
+the script logs that and stops there. Once a public key is configured, a missing
+or bad `.minisig` refuses the install. It does not fall back to sha256.
 
 **Manual:** download the tarball (+ optional `.sha256`) from the release page,
 extract, then:

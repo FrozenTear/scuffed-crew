@@ -423,11 +423,10 @@ fn daemon_card(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
     }
     body = body.push(actions);
 
-    let install_cmd = app
-        .update
-        .as_ref()
-        .map(|i| update::pinned_install_command(&i.latest))
-        .unwrap_or_else(|| update::UPDATE_CMD.to_string());
+    let install_cmd = update::install_command_for(
+        app.update.as_ref().map(|i| i.latest.as_str()),
+        app.installed_version.as_deref(),
+    );
     body = body.push(
         text("Install / update command")
             .size(SIZE_META)

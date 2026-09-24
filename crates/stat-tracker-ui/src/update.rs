@@ -1,12 +1,16 @@
 //! Update banner: version check, in-app install, and Copy for the bootstrap command.
 //!
 //! Check still uses GitHub Releases (`stat-tracker-v*`). "Update now" downloads
-//! `bootstrap.sh` and runs it with `STAT_TRACKER_TAG` pinned to the advertised
-//! release. If the prefix is not writable or tools are missing, the banner
-//! says so instead of offering a dead button.
+//! `bootstrap.sh` from that release tag (not `main`) and runs it with
+//! `STAT_TRACKER_TAG` pinned to the same tag. `main`'s script stays the
+//! fresh-install entrypoint so older GUIs keep working; it re-execs the tag.
+//! If the prefix is not writable or tools are missing, the banner says so
+//! instead of offering a dead button.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
+
+use crate::daemon::DaemonVerb;
 
 use iced::widget::{button, column, container, row, text};
 use iced::{Element, Fill, Padding};
@@ -18,11 +22,19 @@ use crate::theme::{
 };
 
 const REPO: &str = "FrozenTear/scuffed-crew";
+const BOOTSTRAP_REPO_PATH: &str = "crates/stat-tracker/dist/bootstrap.sh";
 
-/// Installer one-liner surfaced in the banner (matches the website).
+/// Fresh-install one-liner. `bootstrap.sh` on `main` resolves the release and
+/// re-execs that tag's copy. Older installed GUIs hardcode this URL.
 pub const UPDATE_CMD: &str = "curl -fsSL https://raw.githubusercontent.com/FrozenTear/scuffed-crew/main/crates/stat-tracker/dist/bootstrap.sh | bash";
 
+/// Stable raw URL of `bootstrap.sh` on `main`. Not used for a pinned update.
 pub const BOOTSTRAP_URL: &str = "https://raw.githubusercontent.com/FrozenTear/scuffed-crew/main/crates/stat-tracker/dist/bootstrap.sh";
+
+/// Raw GitHub URL of `bootstrap.sh` at `git_ref` (a branch or a release tag).
+pub fn bootstrap_raw_url(git_ref: &str) -> String {
+    format!("https://raw.githubusercontent.com/{REPO}/{git_ref}/{BOOTSTRAP_REPO_PATH}")
+}
 
 const REQUIRED_TOOLS: &[&str] = &["curl", "tar", "bash", "mktemp"];
 
@@ -140,9 +152,29 @@ pub fn release_tag(latest: &str) -> String {
     format!("stat-tracker-v{core}")
 }
 
-/// Command shown in the banner / copied to the clipboard. Pins the advertised tag.
+/// Command shown in the banner / copied to the clipboard.
+///
+/// The tag is assigned on `bash`, not `curl`: `VAR=x curl … | bash` does not
+/// export `VAR` into the shell that runs the script. The script URL is the
+/// release tag, not `main`.
 pub fn pinned_install_command(latest: &str) -> String {
-    format!("STAT_TRACKER_TAG={} {}", release_tag(latest), UPDATE_CMD)
+    let tag = release_tag(latest);
+    format!(
+        "curl -fsSL {} | STAT_TRACKER_TAG={tag} bash",
+        bootstrap_raw_url(&tag)
+    )
+}
+
+/// Settings / Copy. Prefer the advertised release, then the installed version,
+/// and only then the `main` fresh-install entrypoint.
+pub fn install_command_for(advertised: Option<&str>, current: Option<&str>) -> String {
+    for candidate in [advertised, current].into_iter().flatten() {
+        let trimmed = candidate.trim();
+        if !trimmed.is_empty() && parse_semver(trimmed).is_some() {
+            return pinned_install_command(trimmed);
+        }
+    }
+    UPDATE_CMD.to_string()
 }
 
 pub fn bootstrap_env(latest: &str, prefix: &Path) -> Vec<(&'static str, String)> {
@@ -150,7 +182,15 @@ pub fn bootstrap_env(latest: &str, prefix: &Path) -> Vec<(&'static str, String)>
         ("STAT_TRACKER_TAG", release_tag(latest)),
         ("STAT_TRACKER_CHANNEL", "stable".into()),
         ("STAT_TRACKER_PREFIX", prefix.display().to_string()),
+        // The GUI already downloaded this tag's script. Skip the re-exec.
+        ("STAT_TRACKER_BOOTSTRAP_PINNED", "1".into()),
     ]
+}
+
+/// Stop before install. Start again only when install succeeded, so a failed
+/// or partial install is not launched.
+pub fn should_restart_daemon(stop_daemon: bool, install_ok: bool) -> bool {
+    stop_daemon && install_ok
 }
 
 pub fn default_install_prefix() -> PathBuf {
@@ -362,8 +402,47 @@ fn tail_useful(output: &str) -> String {
         .to_string()
 }
 
+trait UpdateIo {
+    async fn control_daemon(&self, data_dir: &Path, verb: DaemonVerb, service_installed: bool);
+    async fn install(
+        &self,
+        url: &str,
+        script: &Path,
+        latest: &str,
+        prefix: &Path,
+        tag: &str,
+    ) -> Result<String, String>;
+}
+
+struct LiveUpdateIo;
+
+impl UpdateIo for LiveUpdateIo {
+    async fn control_daemon(&self, data_dir: &Path, verb: DaemonVerb, service_installed: bool) {
+        let _ = crate::daemon::run_verb(data_dir.to_path_buf(), verb, service_installed).await;
+    }
+
+    async fn install(
+        &self,
+        url: &str,
+        script: &Path,
+        latest: &str,
+        prefix: &Path,
+        tag: &str,
+    ) -> Result<String, String> {
+        download_and_run_bootstrap(url, script, latest, prefix, tag).await
+    }
+}
+
 pub async fn run_in_app_update(req: UpdateRunRequest) -> Result<String, String> {
     let plan = evaluate_plan(&req.latest);
+    run_planned_update(&req, plan, &LiveUpdateIo).await
+}
+
+async fn run_planned_update(
+    req: &UpdateRunRequest,
+    plan: UpdatePlan,
+    io: &impl UpdateIo,
+) -> Result<String, String> {
     let UpdatePlan::Ready { prefix, tag } = plan else {
         let UpdatePlan::Blocked { reason, hint } = plan else {
             unreachable!("evaluate_plan is Ready or Blocked");
@@ -372,12 +451,8 @@ pub async fn run_in_app_update(req: UpdateRunRequest) -> Result<String, String> 
     };
 
     if req.stop_daemon {
-        let _ = crate::daemon::run_verb(
-            req.data_dir.clone(),
-            crate::daemon::DaemonVerb::Stop,
-            req.service_installed,
-        )
-        .await;
+        io.control_daemon(&req.data_dir, DaemonVerb::Stop, req.service_installed)
+            .await;
     }
 
     let work = std::env::temp_dir().join(format!(
@@ -388,24 +463,37 @@ pub async fn run_in_app_update(req: UpdateRunRequest) -> Result<String, String> 
             .map(|d| d.as_millis())
             .unwrap_or(0)
     ));
-    std::fs::create_dir_all(&work)
-        .map_err(|e| format!("Could not create a temp dir for the update: {e}"))?;
-    let script = work.join("bootstrap.sh");
-
-    let install = download_and_run_bootstrap(&script, &req.latest, &prefix, &tag).await;
-    let _ = std::fs::remove_dir_all(&work);
-    if req.stop_daemon {
-        let _ = crate::daemon::run_verb(
-            req.data_dir,
-            crate::daemon::DaemonVerb::Start,
-            req.service_installed,
-        )
-        .await;
+    if let Err(e) = std::fs::create_dir_all(&work) {
+        return note_daemon_left_stopped(
+            req.stop_daemon,
+            Err(format!("Could not create a temp dir for the update: {e}")),
+        );
     }
-    install
+    let script = work.join("bootstrap.sh");
+    let url = bootstrap_raw_url(&tag);
+    let install = io.install(&url, &script, &req.latest, &prefix, &tag).await;
+    let _ = std::fs::remove_dir_all(&work);
+    if should_restart_daemon(req.stop_daemon, install.is_ok()) {
+        io.control_daemon(&req.data_dir, DaemonVerb::Start, req.service_installed)
+            .await;
+    }
+    note_daemon_left_stopped(req.stop_daemon, install)
+}
+
+fn note_daemon_left_stopped(
+    stop_daemon: bool,
+    install: Result<String, String>,
+) -> Result<String, String> {
+    match install {
+        Err(msg) if stop_daemon => Err(format!(
+            "{msg} The tracker service was left stopped so a failed install is not started."
+        )),
+        other => other,
+    }
 }
 
 async fn download_and_run_bootstrap(
+    url: &str,
     script: &Path,
     latest: &str,
     prefix: &Path,
@@ -417,7 +505,7 @@ async fn download_and_run_bootstrap(
         .build()
         .map_err(|e| format!("Could not start the downloader: {e}"))?;
     let response = client
-        .get(BOOTSTRAP_URL)
+        .get(url)
         .send()
         .await
         .map_err(|e| format!("Could not download bootstrap.sh: {e}"))?;
@@ -435,6 +523,7 @@ async fn download_and_run_bootstrap(
 
     let mut cmd = tokio::process::Command::new("bash");
     cmd.arg(script);
+    cmd.env_remove("STAT_TRACKER_BOOTSTRAP_FETCH_CMD");
     for (key, value) in bootstrap_env(latest, prefix) {
         cmd.env(key, value);
     }
@@ -588,6 +677,7 @@ pub fn banner(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::daemon::DaemonVerb;
     use std::path::PathBuf;
 
     #[test]
@@ -651,16 +741,54 @@ mod tests {
     }
 
     #[test]
-    fn release_tag_and_pinned_command_use_stat_tracker_prefix() {
+    fn release_tag_and_pinned_command_fetch_that_tag() {
         assert_eq!(release_tag("0.4.7"), "stat-tracker-v0.4.7");
         assert_eq!(release_tag("v0.4.7"), "stat-tracker-v0.4.7");
         let cmd = pinned_install_command("0.4.7");
-        assert!(
-            cmd.starts_with("STAT_TRACKER_TAG=stat-tracker-v0.4.7 "),
-            "{cmd}"
+        let url = bootstrap_raw_url("stat-tracker-v0.4.7");
+        assert_eq!(
+            url,
+            "https://raw.githubusercontent.com/FrozenTear/scuffed-crew/stat-tracker-v0.4.7/crates/stat-tracker/dist/bootstrap.sh"
         );
-        assert!(cmd.contains(UPDATE_CMD), "{cmd}");
-        assert!(cmd.contains("bootstrap.sh"), "{cmd}");
+        assert_eq!(
+            cmd,
+            format!("curl -fsSL {url} | STAT_TRACKER_TAG=stat-tracker-v0.4.7 bash")
+        );
+        assert!(!cmd.contains("/main/"), "{cmd}");
+        assert_eq!(bootstrap_raw_url("main"), BOOTSTRAP_URL);
+        assert!(UPDATE_CMD.contains(BOOTSTRAP_URL));
+    }
+
+    #[test]
+    fn install_command_pins_advertised_tag_then_current() {
+        let advertised = install_command_for(Some("0.4.15"), Some("0.4.14"));
+        assert!(
+            advertised.contains("/stat-tracker-v0.4.15/"),
+            "{advertised}"
+        );
+        assert!(
+            advertised.contains("STAT_TRACKER_TAG=stat-tracker-v0.4.15 bash"),
+            "{advertised}"
+        );
+        assert!(!advertised.contains("/main/"), "{advertised}");
+
+        let current = install_command_for(None, Some("v0.4.14"));
+        assert!(current.contains("/stat-tracker-v0.4.14/"), "{current}");
+        assert!(
+            current.contains("STAT_TRACKER_TAG=stat-tracker-v0.4.14 bash"),
+            "{current}"
+        );
+
+        assert_eq!(install_command_for(None, None), UPDATE_CMD);
+        assert_eq!(install_command_for(Some("not-a-version"), None), UPDATE_CMD);
+    }
+
+    #[test]
+    fn failed_install_does_not_restart() {
+        assert!(!should_restart_daemon(true, false));
+        assert!(should_restart_daemon(true, true));
+        assert!(!should_restart_daemon(false, true));
+        assert!(!should_restart_daemon(false, false));
     }
 
     #[test]
@@ -683,6 +811,12 @@ mod tests {
                 .find(|(k, _)| *k == "STAT_TRACKER_PREFIX")
                 .map(|(_, v)| v.as_str()),
             Some("/tmp/prefix")
+        );
+        assert_eq!(
+            env.iter()
+                .find(|(k, _)| *k == "STAT_TRACKER_BOOTSTRAP_PINNED")
+                .map(|(_, v)| v.as_str()),
+            Some("1")
         );
     }
 
@@ -800,5 +934,108 @@ mod tests {
             "[bootstrap] Done."
         );
         assert_eq!(strip_ansi("plain"), "plain");
+    }
+
+    struct FakeIo {
+        verbs: std::sync::Mutex<Vec<DaemonVerb>>,
+        urls: std::sync::Mutex<Vec<String>>,
+        install_result: Result<String, String>,
+    }
+
+    impl UpdateIo for FakeIo {
+        async fn control_daemon(
+            &self,
+            _data_dir: &Path,
+            verb: DaemonVerb,
+            _service_installed: bool,
+        ) {
+            self.verbs.lock().expect("verbs").push(verb);
+        }
+
+        async fn install(
+            &self,
+            url: &str,
+            _script: &Path,
+            _latest: &str,
+            _prefix: &Path,
+            _tag: &str,
+        ) -> Result<String, String> {
+            self.urls.lock().expect("urls").push(url.to_string());
+            self.install_result.clone()
+        }
+    }
+
+    fn ready_plan(prefix: &Path) -> UpdatePlan {
+        UpdatePlan::Ready {
+            prefix: prefix.to_path_buf(),
+            tag: release_tag("0.4.15"),
+        }
+    }
+
+    fn run_request(stop_daemon: bool) -> UpdateRunRequest {
+        UpdateRunRequest {
+            latest: "0.4.15".into(),
+            data_dir: PathBuf::from("/tmp/sst-update-test"),
+            stop_daemon,
+            service_installed: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_install_stops_and_does_not_start() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let io = FakeIo {
+            verbs: std::sync::Mutex::new(Vec::new()),
+            urls: std::sync::Mutex::new(Vec::new()),
+            install_result: Err("disk full".into()),
+        };
+        let err = run_planned_update(&run_request(true), ready_plan(dir.path()), &io)
+            .await
+            .expect_err("install failed");
+        assert!(err.contains("disk full"), "{err}");
+        assert!(
+            err.contains("left stopped"),
+            "failed install must not claim the service was restarted: {err}"
+        );
+        assert_eq!(
+            io.verbs.lock().expect("verbs").as_slice(),
+            &[DaemonVerb::Stop]
+        );
+        let urls = io.urls.lock().expect("urls").clone();
+        assert_eq!(urls, vec![bootstrap_raw_url("stat-tracker-v0.4.15")]);
+        assert!(!urls[0].contains("/main/"), "{}", urls[0]);
+    }
+
+    #[tokio::test]
+    async fn successful_install_restarts_from_the_tag_url() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let io = FakeIo {
+            verbs: std::sync::Mutex::new(Vec::new()),
+            urls: std::sync::Mutex::new(Vec::new()),
+            install_result: Ok("installed".into()),
+        };
+        let msg = run_planned_update(&run_request(true), ready_plan(dir.path()), &io)
+            .await
+            .expect("install ok");
+        assert_eq!(msg, "installed");
+        assert_eq!(
+            io.verbs.lock().expect("verbs").as_slice(),
+            &[DaemonVerb::Stop, DaemonVerb::Start]
+        );
+    }
+
+    #[tokio::test]
+    async fn install_without_a_running_daemon_does_not_start_one() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let io = FakeIo {
+            verbs: std::sync::Mutex::new(Vec::new()),
+            urls: std::sync::Mutex::new(Vec::new()),
+            install_result: Err("nope".into()),
+        };
+        let err = run_planned_update(&run_request(false), ready_plan(dir.path()), &io)
+            .await
+            .expect_err("install failed");
+        assert!(!err.contains("left stopped"), "{err}");
+        assert!(io.verbs.lock().expect("verbs").is_empty());
     }
 }
