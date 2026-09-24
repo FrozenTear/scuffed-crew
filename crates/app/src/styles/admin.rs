@@ -153,7 +153,16 @@ pub const CSS: &str = r#"
         font-size: 0.75rem; color: var(--text-3); text-transform: uppercase;
         letter-spacing: 0.05em; margin-top: 0.3rem;
     }
+    /* Dashboard KPI pending: loading and error must not look like a numeric 0. */
+    .summary-card-pending.is-loading { border-style: dashed; }
+    .summary-card-pending.is-error {
+        border-color: color-mix(in srgb, var(--danger) 55%, var(--border));
+    }
+    .summary-card-pending .admin-loading { padding: 0.45rem 0 0; margin: 0; font-size: 0.8rem; }
+    .summary-card-pending .row-btn { margin-top: 0.65rem; }
     .dash-health { margin: 0 0 1.25rem; }
+    .dash-health .admin-loading { padding: 0.25rem 0; }
+    .dash-health .row-btn { margin-top: 0.45rem; }
     .dash-chip {
         display: inline-block; padding: 0.35rem 0.75rem; border-radius: var(--radius-pill);
         font-size: 0.75rem; text-decoration: none; border: 1px solid var(--border);
