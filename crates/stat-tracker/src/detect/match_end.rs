@@ -1555,7 +1555,7 @@ mod tests {
         // Highlighted top row: pink/magenta border (FROZEN), not gold.
         for y in 20..44 {
             for x in 8..632 {
-                if y < 23 || y > 41 || x < 12 || x > 628 {
+                if !(23..=41).contains(&y) || !(12..=628).contains(&x) {
                     img.put_pixel(x, y, Rgb([220, 50, 150]));
                 }
             }

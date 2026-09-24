@@ -332,7 +332,13 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("Scuffed Stat Tracker starting");
     tracing::info!(data_dir = %config.data_dir.display(), "using data directory");
 
-    fetch_player_name_if_needed(&mut config).await;
+    // One client for the whole process. An unsafe URL logs once here and
+    // leaves sync off — including the startup player-name fetch — so the
+    // bearer token is never sent. The daemon keeps running.
+    let sync_client = open_sync_client(config.sync.as_ref());
+    if let Some(client) = &sync_client {
+        fetch_player_name_if_needed(&mut config, client).await;
+    }
 
     std::fs::create_dir_all(&config.data_dir)?;
 
@@ -383,11 +389,6 @@ async fn main() -> anyhow::Result<()> {
     ));
 
     let data_dir = config.data_dir.clone();
-
-    let sync_client = config
-        .sync
-        .as_ref()
-        .map(|s| sync::SyncClient::new(s.clone()));
 
     log_startup_readiness(&config, dump_poll_frames, collect_portraits);
 
@@ -488,14 +489,30 @@ async fn handle_info_flags() -> bool {
     false
 }
 
+/// Build the sync client, or log once and return `None` when the server URL
+/// must not carry the bearer token. Does not panic.
+fn open_sync_client(sync_cfg: Option<&config::SyncConfig>) -> Option<sync::SyncClient> {
+    let sync_cfg = sync_cfg?;
+    match sync::SyncClient::try_new(sync_cfg.clone()) {
+        Ok(client) => Some(client),
+        Err(e) => {
+            tracing::error!(
+                server_url = %sync_cfg.server_url,
+                error = %e,
+                "sync disabled — refusing to send the bearer token over an unsafe server URL"
+            );
+            None
+        }
+    }
+}
+
 /// When `player_name` isn't set locally, fetch it from the server. This is the
 /// "first run via GUI" path: the user set their name in the web UI and launched
 /// the daemon with just a token — no manual config editing needed.
-async fn fetch_player_name_if_needed(config: &mut config::Config) {
-    if config.player_name.is_none()
-        && let Some(sync_cfg) = &config.sync
-    {
-        let client = sync::SyncClient::new(sync_cfg.clone());
+///
+/// `client` is only present when [`open_sync_client`] accepted the URL.
+async fn fetch_player_name_if_needed(config: &mut config::Config, client: &sync::SyncClient) {
+    if config.player_name.is_none() {
         match client.fetch_daemon_config().await {
             Ok(remote) if remote.player_name.is_some() => {
                 tracing::info!(
@@ -1391,7 +1408,13 @@ async fn run_loop(ctx: Arc<DaemonCtx>) -> anyhow::Result<()> {
     // whatever it missed). Shutdown joins that task before the final upload
     // so the two never `mark_synced` the same ids. The client's HTTP timeout
     // bounds both the in-flight wait and the final upload.
+    //
+    // After a server/network failure the next *periodic* trigger waits on
+    // `sync_backoff` (exponential, capped, reset on success). Shutdown does
+    // not consult that clock — it still joins the in-flight task, then uploads
+    // once. `sync_rev` compare-and-swap stays inside `try_sync_with`.
     let mut sync_task: Option<tokio::task::JoinHandle<()>> = None;
+    let sync_backoff = Arc::new(std::sync::Mutex::new(sync::SyncBackoff::default()));
 
     // Tab OCR also runs as a spawned task (single-flight), reporting back on
     // this channel. Awaited inline, one capture starved the poller for a
@@ -1596,16 +1619,14 @@ async fn run_loop(ctx: Arc<DaemonCtx>) -> anyhow::Result<()> {
                             persist_active_game(data_dir, st.active_game.as_ref());
                         }
                         st.capture_count += 1;
-                        if let Some(client) = sync_client
-                            && st.capture_count.is_multiple_of(SYNC_EVERY_N_CAPTURES)
-                            && sync_task.as_ref().is_none_or(|t| t.is_finished()) {
-                                let store = store.clone();
-                                let client = client.clone();
-                                let data_dir = data_dir.to_path_buf();
-                                sync_task = Some(tokio::spawn(async move {
-                                    try_sync(&store, &client, &data_dir).await;
-                                }));
-                            }
+                        maybe_spawn_periodic_sync(
+                            &mut sync_task,
+                            &sync_backoff,
+                            store,
+                            sync_client,
+                            data_dir,
+                            st.capture_count,
+                        );
                         refresh_snapshot(store, data_dir).await;
                     }
                     Ok(report) => {
@@ -1653,16 +1674,14 @@ async fn run_loop(ctx: Arc<DaemonCtx>) -> anyhow::Result<()> {
                             persist_active_game(data_dir, Some(g));
                         }
                         st.capture_count += 1;
-                        if let Some(client) = sync_client
-                            && st.capture_count.is_multiple_of(SYNC_EVERY_N_CAPTURES)
-                            && sync_task.as_ref().is_none_or(|t| t.is_finished()) {
-                                let store = store.clone();
-                                let client = client.clone();
-                                let data_dir = data_dir.to_path_buf();
-                                sync_task = Some(tokio::spawn(async move {
-                                    try_sync(&store, &client, &data_dir).await;
-                                }));
-                            }
+                        maybe_spawn_periodic_sync(
+                            &mut sync_task,
+                            &sync_backoff,
+                            store,
+                            sync_client,
+                            data_dir,
+                            st.capture_count,
+                        );
                         refresh_snapshot(store, data_dir).await;
                     }
                 }
@@ -2777,7 +2796,7 @@ static SYNC_DRAIN_WAITING: std::sync::atomic::AtomicUsize = std::sync::atomic::A
 async fn drain_sync_then<F, Fut>(task: Option<tokio::task::JoinHandle<()>>, then: F)
 where
     F: FnOnce() -> Fut,
-    Fut: std::future::Future<Output = ()>,
+    Fut: std::future::Future,
 {
     if let Some(t) = task {
         if !t.is_finished() {
@@ -2865,28 +2884,92 @@ async fn try_sync(
     store: &storage::LocalStore,
     client: &sync::SyncClient,
     data_dir: &std::path::Path,
-) {
+) -> sync::SyncAttempt {
     let client = client.clone();
     try_sync_with(store, data_dir, move |matches, tombstones| {
         let client = client.clone();
-        async move {
-            client
-                .upload_matches(&matches, &tombstones)
-                .await
-                .map_err(|e| e.to_string())
-        }
+        async move { client.upload_matches(&matches, &tombstones).await }
     })
-    .await;
+    .await
+}
+
+/// True when this capture should start a periodic sync task.
+///
+/// Single-flight (`task_in_flight`) and the backoff window are both gates.
+/// Shutdown does not use this predicate — it joins the in-flight task and
+/// uploads once regardless of the backoff clock.
+fn periodic_sync_due(capture_count: u32, task_in_flight: bool, backoff_allows: bool) -> bool {
+    capture_count.is_multiple_of(SYNC_EVERY_N_CAPTURES) && !task_in_flight && backoff_allows
+}
+
+fn maybe_spawn_periodic_sync(
+    sync_task: &mut Option<tokio::task::JoinHandle<()>>,
+    backoff: &Arc<std::sync::Mutex<sync::SyncBackoff>>,
+    store: &storage::LocalStore,
+    client: Option<&sync::SyncClient>,
+    data_dir: &std::path::Path,
+    capture_count: u32,
+) {
+    let Some(client) = client else {
+        return;
+    };
+    let in_flight = sync_task.as_ref().is_some_and(|t| !t.is_finished());
+    let allow = backoff
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .should_attempt(Instant::now());
+    if !periodic_sync_due(capture_count, in_flight, allow) {
+        if capture_count.is_multiple_of(SYNC_EVERY_N_CAPTURES) && !in_flight && !allow {
+            tracing::debug!("sync skipped — backing off before the next attempt");
+        }
+        return;
+    }
+    let store = store.clone();
+    let client = client.clone();
+    let data_dir = data_dir.to_path_buf();
+    let backoff = Arc::clone(backoff);
+    *sync_task = Some(tokio::spawn(async move {
+        let outcome = try_sync(&store, &client, &data_dir).await;
+        apply_sync_backoff(&backoff, outcome);
+    }));
+}
+
+fn apply_sync_backoff(backoff: &std::sync::Mutex<sync::SyncBackoff>, outcome: sync::SyncAttempt) {
+    let now = Instant::now();
+    let mut clock = backoff.lock().unwrap_or_else(|e| e.into_inner());
+    clock.observe(outcome, now);
+    match outcome {
+        sync::SyncAttempt::ServerError { .. } => {
+            tracing::warn!(
+                failures = clock.failures(),
+                retry_in_secs = clock.retry_after(now).as_secs(),
+                "sync upload failed — backing off so a down server is not hammered"
+            );
+        }
+        sync::SyncAttempt::RateLimited { .. } => {
+            tracing::warn!(
+                retry_in_secs = clock.retry_after(now).as_secs(),
+                "sync rate-limited — backing off before the next upload"
+            );
+        }
+        sync::SyncAttempt::Uploaded | sync::SyncAttempt::NoServerCall => {}
+    }
 }
 
 /// Read unsynced rows, upload, then mark synced only where `sync_rev` is
 /// still the revision captured here. `upload` is the HTTP call (or a test
 /// double). It runs after the read and before the mark, which is the window
 /// a local outcome/map/hero/GUI write can revise a row.
-async fn try_sync_with<F, Fut>(store: &storage::LocalStore, data_dir: &std::path::Path, upload: F)
+async fn try_sync_with<F, Fut>(
+    store: &storage::LocalStore,
+    data_dir: &std::path::Path,
+    upload: F,
+) -> sync::SyncAttempt
 where
     F: FnOnce(Vec<storage::PersonalMatch>, Vec<String>) -> Fut,
-    Fut: std::future::Future<Output = Result<scuffed_types::api::StatsUploadResponse, String>>,
+    Fut: std::future::Future<
+            Output = Result<scuffed_types::api::StatsUploadResponse, sync::SyncUploadError>,
+        >,
 {
     // Errors are stringified immediately: `Box<dyn Error>` isn't `Send`, and
     // this future runs on a spawned task.
@@ -2894,7 +2977,7 @@ where
         Ok(u) => u,
         Err(e) => {
             tracing::error!(error = %e, "failed to query unsynced matches");
-            return;
+            return sync::SyncAttempt::NoServerCall;
         }
     };
     // Locally-deleted sessions whose server rows must go too.
@@ -2910,7 +2993,7 @@ where
         }
     };
     if unsynced.is_empty() && tombstones.is_empty() {
-        return;
+        return sync::SyncAttempt::NoServerCall;
     }
 
     // The server keeps one row per session, so only the final snapshot of
@@ -2950,8 +3033,18 @@ where
             }
             // Sync flips `synced` flags — GUI must see that promptly.
             refresh_snapshot_force(store, data_dir).await;
+            sync::SyncAttempt::Uploaded
         }
-        Err(e) => tracing::error!(error = %e, "sync upload failed"),
+        Err(e) => {
+            let attempt = e.attempt();
+            match attempt {
+                sync::SyncAttempt::RateLimited { .. } => {
+                    tracing::warn!(error = %e, "sync rate-limited — will retry after backoff");
+                }
+                _ => tracing::error!(error = %e, "sync upload failed"),
+            }
+            attempt
+        }
     }
 }
 
@@ -4128,5 +4221,54 @@ mod tests {
         );
         let rows = store.get_all_matches().await.unwrap();
         assert!(rows.iter().all(|m| m.synced));
+    }
+
+    #[test]
+    fn unsafe_sync_url_yields_no_client() {
+        assert!(open_sync_client(None).is_none());
+        let clear = config::SyncConfig {
+            server_url: "http://example.com".into(),
+            token: "secret".into(),
+        };
+        assert!(
+            open_sync_client(Some(&clear)).is_none(),
+            "daemon must not build a client that could send the token"
+        );
+        let https = config::SyncConfig {
+            server_url: "https://crew.example".into(),
+            token: "secret".into(),
+        };
+        assert!(open_sync_client(Some(&https)).is_some());
+        for url in ["http://localhost:3030", "http://127.0.0.1", "http://[::1]"] {
+            let cfg = config::SyncConfig {
+                server_url: url.into(),
+                token: "secret".into(),
+            };
+            assert!(
+                open_sync_client(Some(&cfg)).is_some(),
+                "{url} is the local-dev exception"
+            );
+        }
+    }
+
+    #[test]
+    fn periodic_sync_respects_single_flight_and_backoff() {
+        assert!(
+            !periodic_sync_due(4, false, true),
+            "not yet every N captures"
+        );
+        assert!(periodic_sync_due(5, false, true));
+        assert!(
+            !periodic_sync_due(5, true, true),
+            "single-flight: an in-flight upload blocks the next spawn"
+        );
+        assert!(
+            !periodic_sync_due(10, false, false),
+            "backoff window blocks periodic sync"
+        );
+        assert!(
+            periodic_sync_due(10, false, true),
+            "a reset backoff allows the next periodic sync"
+        );
     }
 }

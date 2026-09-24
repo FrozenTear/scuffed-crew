@@ -74,6 +74,87 @@ pub struct SyncConfig {
     pub token: String,
 }
 
+/// Settings copy and the daemon log share this sentence. Plain `http` to a
+/// public host would put the bearer token on the wire for any network observer.
+pub const SYNC_URL_HTTPS_REQUIRED: &str =
+    "Website URL must use https. Plain http is only allowed for localhost, 127.0.0.1, and [::1].";
+
+pub const SYNC_URL_INVALID: &str = "Website URL is not a valid http(s) address.";
+
+/// Why a server URL must not carry the sync bearer token.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SyncUrlReject {
+    /// `http://` to a host that is not loopback, or a non-http(s) scheme.
+    HttpsRequired,
+    /// Empty, unparseable, or missing a host.
+    Invalid,
+}
+
+impl SyncUrlReject {
+    pub fn message(self) -> &'static str {
+        match self {
+            Self::HttpsRequired => SYNC_URL_HTTPS_REQUIRED,
+            Self::Invalid => SYNC_URL_INVALID,
+        }
+    }
+}
+
+impl std::fmt::Display for SyncUrlReject {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.message())
+    }
+}
+
+impl std::error::Error for SyncUrlReject {}
+
+/// `Ok` only when attaching the bearer token cannot leave the machine in the
+/// clear. `https` is allowed for any host. `http` is allowed only for
+/// loopback (`localhost`, `127.0.0.0/8`, `::1`, and IPv4-mapped loopback),
+/// which covers local dev (`http://localhost`, `http://127.0.0.1`,
+/// `http://[::1]`, any port).
+///
+/// Parsing is the URL standard (via reqwest's `Url`), so `http://127.0.0.1.evil`
+/// and `http://10.0.0.1` are rejected without a DNS lookup. Existing configs
+/// still deserialize; callers refuse to send rather than crash.
+pub fn validate_sync_server_url(raw: &str) -> Result<(), SyncUrlReject> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Err(SyncUrlReject::Invalid);
+    }
+    let parsed = reqwest::Url::parse(raw).map_err(|_| SyncUrlReject::Invalid)?;
+    match parsed.scheme() {
+        "https" if parsed.host_str().is_some_and(|h| !h.is_empty()) => Ok(()),
+        "http" if http_host_is_loopback(&parsed) => Ok(()),
+        _ => Err(SyncUrlReject::HttpsRequired),
+    }
+}
+
+fn http_host_is_loopback(url: &reqwest::Url) -> bool {
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    if host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    // `host_str` wraps IPv6 in brackets (`[::1]`).
+    let bare = host
+        .strip_prefix('[')
+        .and_then(|h| h.strip_suffix(']'))
+        .unwrap_or(host);
+    if let Ok(v4) = bare.parse::<std::net::Ipv4Addr>() {
+        return v4.is_loopback();
+    }
+    if let Ok(v6) = bare.parse::<std::net::Ipv6Addr>() {
+        if v6.is_loopback() {
+            return true;
+        }
+        if let Some(mapped) = v6.to_ipv4_mapped() {
+            return mapped.is_loopback();
+        }
+    }
+    false
+}
+
 impl Config {
     /// Load config from file, then overlay CLI args / env vars.
     ///
@@ -264,5 +345,100 @@ mod tests {
         assert_eq!(c.ocr_threads_resolved(), 8);
         c.ocr_threads = Some(0);
         assert_eq!(c.ocr_threads_resolved(), 1);
+    }
+
+    #[test]
+    fn sync_url_https_is_allowed() {
+        assert!(validate_sync_server_url("https://crew.example").is_ok());
+        assert!(validate_sync_server_url("https://crew.example/stats").is_ok());
+        assert!(validate_sync_server_url("HTTPS://Crew.Example:443").is_ok());
+        assert!(validate_sync_server_url("  https://crew.example  ").is_ok());
+    }
+
+    #[test]
+    fn sync_url_http_non_loopback_is_rejected() {
+        for raw in [
+            "http://crew.example",
+            "http://crew.example:8080/api",
+            "http://10.0.0.5",
+            "http://192.168.1.1:3030",
+            "http://203.0.113.10",
+            "http://[2001:db8::1]",
+            "http://0.0.0.0",
+            "http://127.0.0.1.evil.example",
+            "ftp://localhost",
+            "ws://localhost",
+            "https://",
+            "not a url",
+            "",
+        ] {
+            assert!(
+                validate_sync_server_url(raw).is_err(),
+                "{raw} must not be allowed to carry the token"
+            );
+        }
+        assert_eq!(
+            validate_sync_server_url("http://crew.example"),
+            Err(SyncUrlReject::HttpsRequired)
+        );
+        assert_eq!(
+            validate_sync_server_url("http://crew.example")
+                .unwrap_err()
+                .message(),
+            SYNC_URL_HTTPS_REQUIRED
+        );
+        assert_eq!(
+            validate_sync_server_url("not a url"),
+            Err(SyncUrlReject::Invalid)
+        );
+    }
+
+    #[test]
+    fn sync_url_http_loopback_is_allowed() {
+        for raw in [
+            "http://localhost",
+            "http://localhost:3030",
+            "http://LOCALHOST/api",
+            "http://127.0.0.1",
+            "http://127.0.0.1:3030/api",
+            "http://[::1]",
+            "http://[::1]:3030",
+        ] {
+            assert!(
+                validate_sync_server_url(raw).is_ok(),
+                "{raw} is loopback and must stay available for local dev"
+            );
+        }
+    }
+
+    #[test]
+    fn existing_http_config_still_parses() {
+        // Fail safe at send time. A stored cleartext URL must still load so
+        // the daemon can refuse it without crashing and without dropping the
+        // rest of the file.
+        let raw = r#"
+data_dir = "/tmp/sst-m20"
+capture_output = "DP-1"
+player_name = "Ada"
+session_window_secs = 1800
+debug_ocr = false
+game_process_names = ["Overwatch.exe"]
+
+[auto_detect]
+enabled = true
+poll_interval_secs = 4
+cooldown_secs = 120
+
+[sync]
+server_url = "http://example.com"
+token = "secret"
+"#;
+        let cfg: Config = toml::from_str(raw).expect("existing shape must still parse");
+        let sync = cfg.sync.expect("sync block");
+        assert_eq!(sync.token, "secret");
+        assert_eq!(
+            validate_sync_server_url(&sync.server_url),
+            Err(SyncUrlReject::HttpsRequired)
+        );
     }
 }
