@@ -282,10 +282,10 @@ pub fn Login() -> Element {
                 }
                 Err(e) => {
                     error.set(Some(match e {
-                        // 409 is a conflict (including a taken name). Keep the
-                        // copy generic so the form does not confirm the name exists.
+                        // 409 is a conflict (including a taken name). The copy
+                        // does not say the name is already taken.
                         scuffed_api_client::ClientError::Http { status: 409, .. } => {
-                            "Could not create account".into()
+                            "Could not create account. Try a different username.".into()
                         }
                         scuffed_api_client::ClientError::Http { status: 400, body } => {
                             body_error_or(&body, "Check your input")
