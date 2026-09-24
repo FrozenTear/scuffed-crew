@@ -1,8 +1,12 @@
 use dioxus::prelude::*;
 
+use super::{focus_element, use_document_keydown};
 use crate::routes::Route;
 use crate::state::use_auth;
 use crate::theme::ThemeToggle;
+
+const ADMIN_NAV_TOGGLE_ID: &str = "admin-nav-toggle";
+const ADMIN_NAV_ID: &str = "admin-nav";
 
 const ADMIN_CSS: &str = r#"
     .admin-layout {
@@ -190,6 +194,15 @@ pub fn AdminLayout() -> Element {
     let auth = use_auth();
     let mut nav_open = use_signal(|| false);
 
+    use_document_keydown(move |evt| {
+        if evt.key() != "Escape" || !nav_open() {
+            return;
+        }
+        evt.prevent_default();
+        nav_open.set(false);
+        focus_element(ADMIN_NAV_TOGGLE_ID);
+    });
+
     let is_admin = auth().is_admin();
     let username = auth()
         .user
@@ -244,7 +257,10 @@ pub fn AdminLayout() -> Element {
     };
 
     // Close drawer after navigation (mobile); desktop ignores open state via CSS.
-    let close_nav = move |_| nav_open.set(false);
+    let close_nav = move |_| {
+        nav_open.set(false);
+        focus_element(ADMIN_NAV_TOGGLE_ID);
+    };
 
     rsx! {
         style { {ADMIN_CSS} }
@@ -252,10 +268,12 @@ pub fn AdminLayout() -> Element {
         div { class: "admin-layout",
             div { class: "admin-mobile-bar",
                 button {
+                    id: ADMIN_NAV_TOGGLE_ID,
                     class: "menu-btn",
                     r#type: "button",
                     "aria-label": "Open admin menu",
                     "aria-expanded": if nav_open() { "true" } else { "false" },
+                    "aria-controls": ADMIN_NAV_ID,
                     onclick: move |_| nav_open.set(true),
                     "☰"
                 }
@@ -266,10 +284,10 @@ pub fn AdminLayout() -> Element {
                     class: "admin-nav-overlay",
                     r#type: "button",
                     "aria-label": "Close admin menu",
-                    onclick: move |_| nav_open.set(false),
+                    onclick: close_nav,
                 }
             }
-            aside { class: "{sidebar_class}",
+            aside { id: ADMIN_NAV_ID, class: "{sidebar_class}",
                 div { class: "brand",
                     div { class: "brand-text",
                         h2 { "Scuffed Crew" }
@@ -280,7 +298,7 @@ pub fn AdminLayout() -> Element {
                         class: "admin-sidebar-close",
                         r#type: "button",
                         "aria-label": "Close admin menu",
-                        onclick: move |_| nav_open.set(false),
+                        onclick: close_nav,
                         "×"
                     }
                 }

@@ -2,9 +2,45 @@ use dioxus::prelude::*;
 use scuffed_api_client::ApiClient;
 use scuffed_types::{NavConfig, NavPlacement, SiteSettings};
 
+use super::{focus_element, use_document_keydown};
 use crate::routes::Route;
 use crate::state::auth::{AuthState, use_auth};
 use crate::theme::ThemeToggle;
+
+const NAV_TOGGLE_ID: &str = "site-nav-toggle";
+const NAV_MENU_ID: &str = "site-nav-menu";
+const MORE_TOGGLE_ID: &str = "nav-more-toggle";
+const MORE_MENU_ID: &str = "nav-more-menu";
+const ACCOUNT_TOGGLE_ID: &str = "nav-account-toggle";
+const ACCOUNT_MENU_ID: &str = "nav-account-menu";
+
+/// Which trigger should regain focus when a disclosure closes.
+/// Mobile wins when several are open (resize while a desktop menu is open).
+fn disclosure_focus_id(mobile: bool, more: bool, account: bool) -> Option<&'static str> {
+    if mobile {
+        Some(NAV_TOGGLE_ID)
+    } else if more {
+        Some(MORE_TOGGLE_ID)
+    } else if account {
+        Some(ACCOUNT_TOGGLE_ID)
+    } else {
+        None
+    }
+}
+
+fn close_disclosures(
+    mut mobile_open: Signal<bool>,
+    mut more_open: Signal<bool>,
+    mut account_open: Signal<bool>,
+) {
+    let focus = disclosure_focus_id(mobile_open(), more_open(), account_open());
+    mobile_open.set(false);
+    more_open.set(false);
+    account_open.set(false);
+    if let Some(id) = focus {
+        focus_element(id);
+    }
+}
 
 /// Map catalog id → public route. Unknown ids are skipped.
 pub(crate) fn nav_route(id: &str) -> Option<Route> {
@@ -292,6 +328,29 @@ const NAV_CSS: &str = r#"
         overflow-y: auto;
     }
     .nav-overlay.open { display: flex; }
+    .nav-backdrop {
+        position: absolute;
+        inset: 0;
+        z-index: 0;
+        border: none;
+        margin: 0;
+        padding: 0;
+        background: transparent;
+        cursor: pointer;
+    }
+    .nav-overlay-sheet {
+        position: relative;
+        z-index: 1;
+        display: flex;
+        flex-direction: column;
+        align-items: stretch;
+        gap: 0.15rem;
+    }
+    .nav-dismiss-layer {
+        position: fixed;
+        inset: 0;
+        z-index: 90;
+    }
     .nav-overlay a,
     .nav-overlay button {
         color: var(--text);
@@ -374,6 +433,17 @@ pub fn PublicLayout() -> Element {
     let mut more_open = use_signal(|| false);
     let mut account_open = use_signal(|| false);
     let auth = use_auth();
+
+    use_document_keydown(move |evt| {
+        if evt.key() != "Escape" {
+            return;
+        }
+        if !(mobile_open() || more_open() || account_open()) {
+            return;
+        }
+        evt.prevent_default();
+        close_disclosures(mobile_open, more_open, account_open);
+    });
 
     let site_settings = use_resource(|| async {
         ApiClient::web()
@@ -484,14 +554,23 @@ pub fn PublicLayout() -> Element {
                 if !more_links.is_empty() {
                     li { class: "{more_class}",
                         button {
+                            id: MORE_TOGGLE_ID,
                             class: "nav-linkish",
+                            r#type: "button",
+                            aria_expanded: if more_open() { "true" } else { "false" },
+                            aria_controls: MORE_MENU_ID,
+                            aria_haspopup: "menu",
                             onclick: move |_| {
+                                let closing = more_open();
                                 more_open.toggle();
                                 account_open.set(false);
+                                if closing {
+                                    focus_element(MORE_TOGGLE_ID);
+                                }
                             },
                             "More ▾"
                         }
-                        div { class: "nav-drop-menu left",
+                        div { id: MORE_MENU_ID, class: "nav-drop-menu left",
                             for link in more_links.iter() {
                                 Link {
                                     key: "{link.id}",
@@ -514,15 +593,24 @@ pub fn PublicLayout() -> Element {
                 } else if is_logged_in {
                     li { class: "{account_class}",
                         button {
+                            id: ACCOUNT_TOGGLE_ID,
                             class: "nav-linkish",
+                            r#type: "button",
+                            aria_expanded: if account_open() { "true" } else { "false" },
+                            aria_controls: ACCOUNT_MENU_ID,
+                            aria_haspopup: "menu",
                             onclick: move |_| {
+                                let closing = account_open();
                                 account_open.toggle();
                                 more_open.set(false);
+                                if closing {
+                                    focus_element(ACCOUNT_TOGGLE_ID);
+                                }
                             },
                             span { class: "nav-user-chip", title: "{username}", "{username}" }
                             " ▾"
                         }
-                        div { class: "nav-drop-menu",
+                        div { id: ACCOUNT_MENU_ID, class: "nav-drop-menu",
                             if is_officer {
                                 Link {
                                     to: Route::AdminDashboard {},
@@ -583,12 +671,20 @@ pub fn PublicLayout() -> Element {
             div { class: "nav-mobile-tools",
                 ThemeToggle {}
                 button {
+                    id: NAV_TOGGLE_ID,
                     class: hamburger_class,
-                    aria_label: "Toggle menu",
+                    r#type: "button",
+                    aria_label: if mobile_open() { "Close menu" } else { "Open menu" },
+                    aria_expanded: if mobile_open() { "true" } else { "false" },
+                    aria_controls: NAV_MENU_ID,
                     onclick: move |_| {
+                        let closing = mobile_open();
                         mobile_open.toggle();
                         more_open.set(false);
                         account_open.set(false);
+                        if closing {
+                            focus_element(NAV_TOGGLE_ID);
+                        }
                     },
                     span {}
                     span {}
@@ -599,15 +695,34 @@ pub fn PublicLayout() -> Element {
 
         if more_open() || account_open() {
             div {
-                style: "position:fixed;inset:0;z-index:90;",
+                class: "nav-dismiss-layer",
+                aria_hidden: "true",
                 onclick: move |_| {
+                    let focus = disclosure_focus_id(false, more_open(), account_open());
                     more_open.set(false);
                     account_open.set(false);
-                }
+                    if let Some(id) = focus {
+                        focus_element(id);
+                    }
+                },
             }
         }
 
-        div { class: overlay_class,
+        div {
+            class: overlay_class,
+            id: NAV_MENU_ID,
+            aria_hidden: if mobile_open() { "false" } else { "true" },
+            button {
+                class: "nav-backdrop",
+                r#type: "button",
+                tabindex: "-1",
+                aria_label: "Close menu",
+                onclick: move |_| {
+                    mobile_open.set(false);
+                    focus_element(NAV_TOGGLE_ID);
+                },
+            }
+            div { class: "nav-overlay-sheet",
             for link in primary_links.iter() {
                 Link {
                     key: "m-{link.id}",
@@ -687,6 +802,7 @@ pub fn PublicLayout() -> Element {
                 span { "Theme" }
                 ThemeToggle {}
             }
+            }
         }
 
         main { style: "padding-top: 48px; min-height: 100vh;",
@@ -741,5 +857,20 @@ mod tests {
         assert!(nav_id_visible("strategy", true));
         assert!(!nav_id_visible("strategy", false));
         assert!(nav_id_visible("patch_notes", false));
+    }
+
+    #[test]
+    fn escape_returns_focus_to_the_open_trigger() {
+        assert_eq!(disclosure_focus_id(false, false, false), None);
+        assert_eq!(disclosure_focus_id(true, false, false), Some(NAV_TOGGLE_ID));
+        assert_eq!(
+            disclosure_focus_id(false, true, false),
+            Some(MORE_TOGGLE_ID)
+        );
+        assert_eq!(
+            disclosure_focus_id(false, false, true),
+            Some(ACCOUNT_TOGGLE_ID)
+        );
+        assert_eq!(disclosure_focus_id(true, true, true), Some(NAV_TOGGLE_ID));
     }
 }
