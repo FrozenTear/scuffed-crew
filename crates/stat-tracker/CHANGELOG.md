@@ -2,7 +2,29 @@
 
 User-facing notes for `stat-tracker-v*` GitHub Releases. The release workflow
 prepends the section whose heading matches the tag version (for example
-`## 0.4.14` for `stat-tracker-v0.4.14`).
+`## 0.4.15` for `stat-tracker-v0.4.15`).
+
+## 0.4.15
+
+Overview header (#122): filter chips vs companion switch vs plain
+status (L25).
+
+Updater and Settings install command are pinned to the release tag
+(#125). Optional minisign verification. A failed install leaves the
+daemon stopped. Binary replace is atomic. Tar path and symlink
+hardening (M19).
+
+Sync token is refused over non-loopback HTTP (#126). Sync backs off.
+429 and 503 honor Retry-After (M20).
+
+### Install
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/FrozenTear/scuffed-crew/main/crates/stat-tracker/dist/bootstrap.sh | bash
+```
+
+Or extract the tarball and run `./install.sh`. Pin with
+`STAT_TRACKER_TAG=stat-tracker-v0.4.15`.
 
 ## 0.4.14
 
