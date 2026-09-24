@@ -10,6 +10,13 @@ use scuffed_types::{
     SiteSettings, homepage_preset_by_id, homepage_presets,
 };
 
+/// Admin Settings is the only `PUT /api/settings` in the app, and that page
+/// renders only for admins. Always send the key. `None` would omit it
+/// (`skip_serializing_if`) and leave a stale flag on the server.
+fn admin_settings_officers_flag(enabled: bool) -> Option<bool> {
+    Some(enabled)
+}
+
 #[component]
 pub fn AdminSettings() -> Element {
     let auth = use_auth();
@@ -37,6 +44,7 @@ pub fn AdminSettings() -> Element {
     let mut brand_accent_dark = use_signal(String::new);
     let mut brand_accent_light = use_signal(String::new);
     let mut strategies_enabled = use_signal(|| true);
+    let mut officers_can_edit_teams = use_signal(|| false);
     // Selected identity pack id for “Apply pack”.
     let mut homepage_preset_id = use_signal(|| "neutral".to_string());
     let mut apply_suggested_brand = use_signal(|| true);
@@ -78,6 +86,7 @@ pub fn AdminSettings() -> Element {
                     brand_accent_dark.set(s.brand_accent_dark);
                     brand_accent_light.set(s.brand_accent_light);
                     strategies_enabled.set(s.strategies_enabled);
+                    officers_can_edit_teams.set(s.officers_can_edit_teams);
                     loaded.set(true);
                     Some(true)
                 }
@@ -104,8 +113,7 @@ pub fn AdminSettings() -> Element {
             site_description: Some(site_description().trim().to_string()),
             recruitment_open: Some(recruitment_open()),
             strategies_enabled: Some(strategies_enabled()),
-            // Switch is wired later. Omit so a save of other settings does not clear the flag.
-            officers_can_edit_teams: None,
+            officers_can_edit_teams: admin_settings_officers_flag(officers_can_edit_teams()),
             recruitment_message: Some(recruitment_message().trim().to_string()),
             min_age: Some(age),
             forum_backend: Some(forum_backend()),
@@ -142,6 +150,7 @@ pub fn AdminSettings() -> Element {
                     brand_accent_dark.set(s.brand_accent_dark);
                     brand_accent_light.set(s.brand_accent_light);
                     strategies_enabled.set(s.strategies_enabled);
+                    officers_can_edit_teams.set(s.officers_can_edit_teams);
                     toast.show(Toast::success("Settings saved."));
                 }
                 Err(e) => toast.show(Toast::error(format!("Failed to save settings: {e}"))),
@@ -608,6 +617,26 @@ pub fn AdminSettings() -> Element {
                     p { class: "settings-hint",
                         "On (default): Strategies stays in Primary/More if you placed it there. Off: hide it from the public nav and block /strategy pages. Existing plans are not deleted. Public Patch Notes (/patch-notes) are unchanged."
                     }
+                    {
+                        let chip_class = if officers_can_edit_teams() {
+                            "section-chip is-on"
+                        } else {
+                            "section-chip"
+                        };
+                        rsx! {
+                            label { class: "{chip_class}", style: "margin:0.85rem 0 0.65rem;",
+                                input {
+                                    r#type: "checkbox",
+                                    checked: officers_can_edit_teams(),
+                                    onchange: move |e| officers_can_edit_teams.set(e.checked()),
+                                }
+                                "Officers can edit teams"
+                            }
+                        }
+                    }
+                    p { class: "settings-hint",
+                        "On: Officers can edit team name, game, color, division, and lore quote. Creating teams stays admin-only. Off (default): those edits stay admin-only. Roster changes are not affected."
+                    }
                 }
             }
 
@@ -968,5 +997,83 @@ fn LinesField(
                 },
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn collect_rs_containing(
+        dir: &std::path::Path,
+        root: &std::path::Path,
+        needle: &str,
+        hits: &mut Vec<String>,
+    ) {
+        let entries =
+            std::fs::read_dir(dir).unwrap_or_else(|e| panic!("read {}: {e}", dir.display()));
+        for entry in entries {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                collect_rs_containing(&path, root, needle, hits);
+                continue;
+            }
+            if path.extension().and_then(|ext| ext.to_str()) != Some("rs") {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path).unwrap();
+            if text.contains(needle) {
+                let rel = path.strip_prefix(root).unwrap_or(&path);
+                hits.push(rel.display().to_string().replace('\\', "/"));
+            }
+        }
+    }
+
+    #[test]
+    fn admin_settings_save_includes_officers_can_edit_teams() {
+        for enabled in [false, true] {
+            let body = UpdateSettingsRequest {
+                strategies_enabled: Some(true),
+                officers_can_edit_teams: admin_settings_officers_flag(enabled),
+                ..UpdateSettingsRequest::default()
+            };
+            let value = serde_json::to_value(&body).expect("serialize settings save");
+            assert_eq!(value["officers_can_edit_teams"], enabled);
+            assert!(
+                value.get("officers_can_edit_teams").is_some(),
+                "Some(false) must still send the key"
+            );
+        }
+
+        let omitted = serde_json::to_value(UpdateSettingsRequest::default()).expect("serialize");
+        assert!(
+            omitted.get("officers_can_edit_teams").is_none(),
+            "omitted key is the officer-safe body; the admin save must not use Default for this field"
+        );
+
+        let src = include_str!("settings.rs");
+        let save = src
+            .split("let body = UpdateSettingsRequest")
+            .nth(1)
+            .expect("save body");
+        let body_src = &save[..save.find("};").expect("end of save body")];
+        assert!(
+            body_src.contains("admin_settings_officers_flag(officers_can_edit_teams())"),
+            "admin save must send the switch value"
+        );
+        assert!(
+            !body_src.contains("officers_can_edit_teams: None"),
+            "omitting the key would leave a stale flag on the server"
+        );
+
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut users = Vec::new();
+        collect_rs_containing(&root, &root, "UpdateSettingsRequest", &mut users);
+        users.sort();
+        assert_eq!(
+            users,
+            vec!["pages/admin/settings.rs".to_string()],
+            "only Admin Settings builds a settings PUT, so officers never send this key"
+        );
     }
 }
