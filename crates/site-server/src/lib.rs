@@ -23,15 +23,24 @@ use axum::{
 };
 use tower_governor::{GovernorLayer, governor::GovernorConfigBuilder};
 
+use std::path::PathBuf;
+
 use rate_limit::TrustedProxyIpKeyExtractor;
 use tower_http::cors::CorsLayer;
-use tower_http::services::{ServeDir, ServeFile};
 use tower_http::trace::TraceLayer;
 
 use state::AppState;
 
-/// Build the application router.
+/// Build the application router. Static files come from `dist/`.
 pub fn create_router(state: AppState) -> Router {
+    create_router_with_dist(state, "dist")
+}
+
+/// Same router as [`create_router`], with an explicit Dioxus output directory.
+///
+/// Tests pass a temp dir so cache-header checks do not need a built frontend.
+pub fn create_router_with_dist(state: AppState, dist_dir: impl Into<PathBuf>) -> Router {
+    let dist_dir = dist_dir.into();
     let origins: Vec<HeaderValue> = state
         .oauth_config
         .allowed_origins
@@ -580,15 +589,21 @@ pub fn create_router(state: AppState) -> Router {
             put(routes::leaderboards::admin_update_season)
                 .delete(routes::leaderboards::admin_delete_season),
         )
+        // Crawler files are registered ahead of the SPA catch-all. A missing
+        // route here would return `dist/index.html` as 200 text/html.
+        .route("/robots.txt", get(routes::seo::robots_txt))
+        .route("/sitemap.xml", get(routes::seo::sitemap_xml))
         // Serve uploaded files. Raster images stay inline (avatars, article
         // images). Everything else — including SVG and HTML — is an attachment
         // plus a sandbox CSP. See `uploads::upload_response_headers`.
+        // Cache headers for this tree stay on that router; the static-cache
+        // layer below is only on the SPA fallback.
         .nest(
             "/uploads",
             uploads::uploads_router(state.upload_dir.clone()),
         )
-        // Static files from dist/, falling back to index.html for SPA routing (Dioxus handles all routes)
-        .fallback_service(ServeDir::new("dist").fallback(ServeFile::new("dist/index.html")))
+        // Static files from dist/, falling back to index.html for SPA routing (Dioxus handles all routes).
+        .fallback_service(routes::seo::spa_service(&dist_dir))
         // Allow up to 6 MB so officer image uploads (5 MB cap) fit under Axum's default 2 MB limit
         .layer(DefaultBodyLimit::max(6 * 1024 * 1024))
         .layer(TraceLayer::new_for_http())
