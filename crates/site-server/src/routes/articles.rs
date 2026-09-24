@@ -8,7 +8,7 @@ use serde::Deserialize;
 use scuffed_auth::server::session::ErrorResponse;
 use scuffed_db::{Article, AuditAction, AuditTargetType};
 
-use crate::extractors::{AdminUser, OfficerUser};
+use crate::extractors::{AdminUser, OfficerUser, OptionalOrgMember};
 use crate::routes::audit_log::audit;
 use crate::state::AppState;
 
@@ -65,30 +65,52 @@ pub async fn list_all_articles(
         })
 }
 
-/// GET /api/articles/:slug — get article by slug (public)
+/// GET /api/articles/:slug — published articles are public.
+///
+/// Drafts are returned only to officer+ (the same role as the admin article
+/// routes) so the editor and an authenticated preview can still load them.
+/// Everyone else gets the same 404 as a missing slug.
 pub async fn get_article(
     State(state): State<AppState>,
+    viewer: OptionalOrgMember,
     Path(slug): Path<String>,
 ) -> Result<Json<Article>, (StatusCode, Json<ErrorResponse>)> {
-    state
+    let article = state
         .db
         .get_article_by_slug(&slug)
         .await
-        .map(Json)
         .map_err(|e| match &e {
-            scuffed_db::DbError::NotFound(_) => (
-                StatusCode::NOT_FOUND,
-                Json(ErrorResponse {
-                    error: "Internal error".into(),
-                }),
-            ),
+            scuffed_db::DbError::NotFound(_) => article_not_found(),
             _ => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
                     error: "Internal error".into(),
                 }),
             ),
-        })
+        })?;
+
+    if article.published || viewer_can_read_drafts(&viewer) {
+        Ok(Json(article))
+    } else {
+        Err(article_not_found())
+    }
+}
+
+/// Officer and admin, matching `list_all_articles` / create / update / publish.
+fn viewer_can_read_drafts(viewer: &OptionalOrgMember) -> bool {
+    viewer
+        .0
+        .as_ref()
+        .is_some_and(|member| member.org_role.is_at_least(scuffed_db::OrgRole::Officer))
+}
+
+fn article_not_found() -> (StatusCode, Json<ErrorResponse>) {
+    (
+        StatusCode::NOT_FOUND,
+        Json(ErrorResponse {
+            error: "Internal error".into(),
+        }),
+    )
 }
 
 #[derive(Deserialize)]
