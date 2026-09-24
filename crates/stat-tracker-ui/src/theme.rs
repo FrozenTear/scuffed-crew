@@ -6,7 +6,7 @@
 use iced::border::Radius;
 use iced::font::{Family, Stretch, Style, Weight};
 use iced::gradient::Linear;
-use iced::widget::{button, container};
+use iced::widget::{button, container, toggler};
 use iced::{Background, Border, Color, Degrees, Font, Shadow, Theme, Vector, theme};
 
 use crate::model::{Outcome, Role};
@@ -295,16 +295,25 @@ pub fn chip(selected: bool) -> impl Fn(&Theme, button::Status) -> button::Style 
     }
 }
 
-pub fn role_chip(role: Role, selected: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
-    let accent = role_color(role);
-    move |_theme, _status| {
+/// Header filter segment inside a season or role tray.
+///
+/// Selected treatment is the same shape for every group: a filled pill,
+/// semibold light text. `accent` is the brand accent for season and the
+/// role colour for role. Unselected segments are flat text in the tray,
+/// not a second bordered pill.
+pub fn filter_segment(
+    accent: Color,
+    selected: bool,
+) -> impl Fn(&Theme, button::Status) -> button::Style {
+    move |_theme, status| {
+        let hot = matches!(status, button::Status::Hovered | button::Status::Pressed);
         if selected {
             button::Style {
                 background: Some(Background::Color(accent)),
                 text_color: TEXT,
                 border: Border {
                     color: accent,
-                    width: 1.0,
+                    width: 0.0,
                     radius: RADIUS_CHIP.into(),
                 },
                 shadow: Shadow::default(),
@@ -312,17 +321,46 @@ pub fn role_chip(role: Role, selected: bool) -> impl Fn(&Theme, button::Status) 
             }
         } else {
             button::Style {
-                background: Some(Background::Color(SURFACE)),
-                text_color: TEXT_2,
+                background: hot.then_some(Background::Color(BORDER)),
+                text_color: if hot { TEXT } else { TEXT_2 },
                 border: Border {
-                    color: BORDER,
-                    width: 1.0,
+                    color: Color::TRANSPARENT,
+                    width: 0.0,
                     radius: RADIUS_CHIP.into(),
                 },
                 shadow: Shadow::default(),
                 snap: false,
             }
         }
+    }
+}
+
+/// Companion show/hide switch. Track + knob, not a filter pill.
+pub fn companion_toggle(_theme: &Theme, status: toggler::Status) -> toggler::Style {
+    let (on, hot) = match status {
+        toggler::Status::Active { is_toggled } => (is_toggled, false),
+        toggler::Status::Hovered { is_toggled } => (is_toggled, true),
+        toggler::Status::Disabled { is_toggled } => (is_toggled, false),
+    };
+    let track = if on { ACCENT } else { SURFACE };
+    let track_border = if on {
+        ACCENT
+    } else if hot {
+        TEXT_3
+    } else {
+        BORDER
+    };
+    let knob = if on || hot { TEXT } else { TEXT_2 };
+    toggler::Style {
+        background: Background::Color(track),
+        background_border_width: 1.0,
+        background_border_color: track_border,
+        foreground: Background::Color(knob),
+        foreground_border_width: 0.0,
+        foreground_border_color: Color::TRANSPARENT,
+        text_color: Some(if on { TEXT } else { TEXT_2 }),
+        border_radius: None,
+        padding_ratio: 0.16,
     }
 }
 
@@ -399,5 +437,54 @@ pub fn text_input_style(
         placeholder: TEXT_3,
         value: TEXT,
         selection: ACCENT,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use iced::widget::{button, toggler};
+
+    fn segment(accent: Color, selected: bool, status: button::Status) -> button::Style {
+        filter_segment(accent, selected)(&iced_theme(), status)
+    }
+
+    #[test]
+    fn header_filters_share_one_selected_treatment() {
+        let season = segment(ACCENT, true, button::Status::Active);
+        let role = segment(ROLE_TANK, true, button::Status::Active);
+        assert_eq!(season.text_color, TEXT);
+        assert_eq!(role.text_color, TEXT);
+        assert_eq!(season.border.radius, role.border.radius);
+        assert_eq!(season.border.width, role.border.width);
+        assert_eq!(season.background, Some(Background::Color(ACCENT)));
+        assert_eq!(role.background, Some(Background::Color(ROLE_TANK)));
+        assert_eq!(
+            segment(ROLE_DAMAGE, true, button::Status::Active).background,
+            Some(Background::Color(ROLE_DAMAGE))
+        );
+        assert_eq!(
+            segment(ROLE_SUPPORT, true, button::Status::Active).background,
+            Some(Background::Color(ROLE_SUPPORT))
+        );
+
+        let off = segment(ACCENT, false, button::Status::Active);
+        assert!(off.background.is_none());
+        assert_eq!(off.text_color, TEXT_2);
+        assert_ne!(off.background, season.background);
+    }
+
+    #[test]
+    fn companion_toggle_is_a_switch_not_a_filled_chip() {
+        let on = companion_toggle(&iced_theme(), toggler::Status::Active { is_toggled: true });
+        let off = companion_toggle(&iced_theme(), toggler::Status::Active { is_toggled: false });
+        assert_eq!(on.background, Background::Color(ACCENT));
+        assert_eq!(on.foreground, Background::Color(TEXT));
+        assert_eq!(off.background, Background::Color(SURFACE));
+        assert_eq!(off.background_border_color, BORDER);
+        assert_ne!(off.background, on.background);
+        assert_eq!(on.text_color, Some(TEXT));
+        assert_eq!(off.text_color, Some(TEXT_2));
+        assert!(on.border_radius.is_none(), "switch track stays round");
     }
 }
