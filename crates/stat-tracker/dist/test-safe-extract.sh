@@ -94,15 +94,21 @@ expect_refuse "absolute path" "$TMP/abs.tar.gz" "$TMP/abs-out" "$TMP/canary-abs/
 expect_refuse "dotdot path" "$TMP/dotdot.tar.gz" "$TMP/dot-out" "$TMP/canary-dot/pwn-dot"
 expect_refuse "symlink escape" "$TMP/link.tar.gz" "$TMP/link-out" "$TMP/canary-link/pwn-link"
 
-# Pre-existing symlink in the dest dir. GNU tar writes through it; we must not.
+# Pre-existing symlink in the dest dir. Some GNU tar builds write through it.
+# Others exit with "Invalid cross-device link" and write nothing. Either way
+# our extractor must refuse and must not create the file. Replacing
+# safe_extract with tar xzf fails this: tar's message is not "refusing to
+# extract", and a tar that follows the link leaves the canary behind.
 mkdir -p "$TMP/canary-follow" "$TMP/follow-out"
 ln -s "$TMP/canary-follow" "$TMP/follow-out/out"
-# Prove the fixture is one tar itself would escape, so this test can go red.
 mkdir -p "$TMP/naive"
 ln -s "$TMP/canary-follow" "$TMP/naive/out"
-tar -C "$TMP/naive" -xzf "$TMP/rel.tar.gz"
-[[ -f "$TMP/canary-follow/pwned" ]] || fail "fixture no longer escapes via GNU tar (test would not discriminate)"
-rm -f "$TMP/canary-follow/pwned"
+set +e
+tar -C "$TMP/naive" -xzf "$TMP/rel.tar.gz" >/dev/null 2>&1
+set -e
+if [[ -f "$TMP/canary-follow/pwned" ]]; then
+    rm -f "$TMP/canary-follow/pwned"
+fi
 expect_refuse "pre-existing symlink" "$TMP/rel.tar.gz" "$TMP/follow-out" "$TMP/canary-follow/pwned"
 
 echo "All safe extract checks passed."
