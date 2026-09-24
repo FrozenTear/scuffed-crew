@@ -26,6 +26,9 @@ pub struct AppState {
     /// Per-member token-bucket limiter for the secret-touching Nostr routes
     /// (challenge/verify/export/import/dm-send). See [`crate::nostr_rate_limit`].
     pub nostr_rate_limiter: crate::nostr_rate_limit::NostrRateLimiter,
+    /// Failed password-login backoff, keyed by normalized username.
+    /// Password login only — not bearer tokens or OAuth. See [`crate::login_lockout`].
+    pub login_lockout: crate::login_lockout::LoginLockout,
     /// Shared encryption service (same `Arc` as `db.crypto`).
     /// `None` when `ENCRYPTION_KEY` is not configured.
     pub crypto: Option<Arc<CryptoService>>,

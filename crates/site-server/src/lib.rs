@@ -2,6 +2,7 @@ pub mod calendar;
 pub mod challenge_store;
 pub mod dm_subscriber;
 pub mod extractors;
+pub mod login_lockout;
 pub mod membership_policy;
 pub mod nostr_rate_limit;
 pub mod notifications;

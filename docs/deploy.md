@@ -241,33 +241,58 @@ send enforcing `Content-Security-Policy` instead. `CSP_EXTRA_CONNECT_SRC` and
 >
 > Without the plugin, the governor alone is sufficient for this org's scale.
 
-> **Rate limiting & `X-Forwarded-For`.** The auth and upload rate limiters key
-> off the client IP. To stop an attacker from spraying fresh buckets by rotating
-> `X-Forwarded-For`, forwarded headers are only trusted when the request arrives
-> from a **trusted proxy**. The default trust set is loopback + private ranges,
-> which already covers this deploy (the container sees requests coming from the
-> Podman network gateway, a private address, after host Caddy forwards them), so
-> **no configuration is needed** for the blessed setup. If you front the stack
-> with an additional public proxy/CDN, list every hop's egress IP/CIDR in
-> `TRUSTED_PROXIES` (comma-separated) in `data/secrets.env` so its forwarded
-> client IP is honored; otherwise all traffic through that proxy shares one
-> bucket. Keep the container bound to `127.0.0.1:HOST_PORT` — publishing it on a
-> public interface would let clients connect directly and, because a public peer
-> is untrusted, they'd each be limited by their real socket IP (safe, but the
-> proxy is what terminates TLS).
+> **Rate limiting & `X-Forwarded-For`.** Auth, upload, and public rate
+> limiters key off the client IP. Forwarded headers are trusted only when the
+> TCP peer is loopback, or is listed in `TRUSTED_PROXIES` (comma-separated IPs
+> or CIDRs in `data/secrets.env`). **The default is loopback only.** Private
+> ranges are not trusted, so a LAN client or another container cannot rotate
+> `X-Forwarded-For` into a fresh bucket.
 >
-> **Non-loopback / LAN bind — set `TRUSTED_PROXIES` explicitly.** The default
-> trust set includes the **whole private range** (`10/8`, `172.16/12`,
-> `192.168/16`, link-local). That is safe only because the blessed stack binds
-> `127.0.0.1` and the *sole* private-range peer it ever sees is its own proxy
-> hop. If you bind the server to a **non-loopback** interface (direct public or
-> LAN exposure, or a reverse proxy that is not on a loopback-bound hop), any peer
-> inside those default private ranges — e.g. another host on the same LAN — is
-> trusted and can rotate `X-Forwarded-For` to spray fresh rate-limit buckets,
-> degrading the auth/upload/Nostr limiters. In that case you **must** set
-> `TRUSTED_PROXIES` to the **exact** proxy IP(s)/CIDR(s) so only the real proxy's
-> forwarded headers are honored; every other peer is then keyed by its true
-> socket address.
+> **This deploy's hop.** Host Caddy (`deploy/Caddyfile`) reverse-proxies to
+> `127.0.0.1:HOST_PORT`. Compose publishes that port into `site-server`.
+> Rootful Podman presents the connection *inside* the container as the
+> compose-network **gateway** (the bridge address, commonly `10.89.x.1` — one
+> per attached network), not as the browser and not as `127.0.0.1`. Caddy's
+> `reverse_proxy` sets `X-Forwarded-For` to the real client. `TRUSTED_PROXIES`
+> must be those gateway addresses or every visitor shares one bucket.
+>
+> `scripts/install.sh` and `scripts/update.sh` run
+> `scripts/ensure-trusted-proxies.sh`, which writes the live gateway into
+> `data/secrets.env` when the key is missing or empty. A value you already set
+> is left alone. Loopback stays trusted in addition to whatever you list, so a
+> forwarder that shows up as `127.0.0.1` still works.
+>
+> Keep the publish bound to `127.0.0.1:HOST_PORT`. Do **not** set
+> `TRUSTED_PROXIES` to `10.0.0.0/8` or any whole private range — that trusts
+> every private peer again. An extra public CDN in front of Caddy must be
+> listed by its egress IP as well, or its traffic shares one bucket.
+>
+> **Contabo after this change.** `./scripts/update.sh` discovers the gateway
+> and recreates `site-server` (volumes stay). Then confirm:
+>
+> ```bash
+> cd /root/github/scuffed-crew
+> grep '^TRUSTED_PROXIES=' data/secrets.env
+> # startup log line: rate-limit trusted proxies
+> podman logs --tail 80 "$(podman ps -q --filter name=site-server | head -n1)" | grep 'trusted proxies'
+> ```
+>
+> Manual path, if you are not using the update script — read the gateway, do
+> not guess it:
+>
+> ```bash
+> cd /root/github/scuffed-crew
+> cid=$(podman ps -aq --filter name=site-server | head -n1)
+> podman inspect "$cid" --format '{{range .NetworkSettings.Networks}}{{.Gateway}} {{end}}'
+> # data/secrets.env:
+> #   TRUSTED_PROXIES=<those IPs, comma-separated>
+> podman compose --env-file data/secrets.env up -d --no-deps site-server
+> ```
+>
+> The peer has to match. During
+> `curl -sS -o /dev/null "http://127.0.0.1:${HOST_PORT}/api/health"`,
+> `podman exec <site-server> ss -tn '( sport = :3000 )'` shows the source
+> address. It must be `127.0.0.1` or one of the `TRUSTED_PROXIES` values.
 
 **3. App public URL** (required for cookies / redirects):
 

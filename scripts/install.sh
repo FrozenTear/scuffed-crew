@@ -167,6 +167,20 @@ else
     fi
 fi
 
+# Host Caddy → published port is seen inside the container as the compose
+# gateway. Discover it now that the networks exist, then recreate site-server
+# if we had to write TRUSTED_PROXIES (the first up ran without it).
+tp_out="$(bash "$ROOT/scripts/ensure-trusted-proxies.sh" || true)"
+printf '%s\n' "$tp_out"
+if printf '%s\n' "$tp_out" | grep -q '(wrote)'; then
+    set -a
+    # shellcheck disable=SC1090
+    source "$SECRETS"
+    set +a
+    echo "Recreating site-server so TRUSTED_PROXIES is applied..."
+    "${COMPOSE[@]}" --env-file "$SECRETS" up -d --force-recreate --no-deps site-server
+fi
+
 echo
 echo "Stack starting on 127.0.0.1:${HOST_PORT} (HOST_PORT is persisted in secrets)."
 echo "Image: ${SITE_SERVER_IMAGE}"
