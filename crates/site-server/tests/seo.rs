@@ -37,6 +37,7 @@ impl TempTree {
         .unwrap();
         std::fs::write(root.join("dist/assets/favicon.svg"), "<svg></svg>").unwrap();
         std::fs::write(root.join("dist/assets/plain.js"), "console.log('plain');").unwrap();
+        std::fs::write(root.join("dist/assets/plain.css"), "body{color:red}").unwrap();
         std::fs::write(root.join("dist/assets/app.wasm"), "unhashed-wasm").unwrap();
         std::fs::write(
             root.join("dist/assets/app-dxhabc12345.js"),
@@ -228,6 +229,7 @@ async fn robots_and_sitemap_are_not_the_spa_shell() {
     assert!(!body.contains("<html"));
     assert!(body.contains("Disallow: /admin\n"));
     assert!(body.contains("Disallow: /api/\n"));
+    assert!(body.contains("Disallow: /login\n"));
     assert!(body.contains(&format!("Sitemap: {PUBLIC_BASE}/sitemap.xml\n")));
     assert!(!body.contains("Disallow: /blog"));
     assert!(!body.contains("Disallow: /members"));
@@ -272,6 +274,51 @@ async fn robots_and_sitemap_are_not_the_spa_shell() {
         "inactive member leaked"
     );
     let _ = draft;
+}
+
+#[tokio::test]
+async fn sitemap_strategy_routes_follow_strategies_enabled() {
+    let tree = TempTree::new("strategy-flag");
+    let state = test_state(tree.uploads()).await;
+    let db = state.db.clone();
+    let dist = tree.dist();
+
+    // Default matches the API gate: missing settings are created with the flag on.
+    let app = create_router_with_dist(state.clone(), dist.clone());
+    let (status, _, body) = get(app, "/sitemap.xml").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_strategy_locs(&body, true);
+
+    db.get_settings().await.unwrap();
+    db.client
+        .query("UPDATE site_settings SET strategies_enabled = false")
+        .await
+        .unwrap();
+    assert!(
+        !db.get_settings().await.unwrap().strategies_enabled,
+        "sitemap must read the same flag the strategy API gate uses"
+    );
+
+    let app = create_router_with_dist(state, dist);
+    let (status, _, body) = get(app, "/sitemap.xml").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_strategy_locs(&body, false);
+}
+
+fn assert_strategy_locs(body: &str, enabled: bool) {
+    for path in ["/strategy", "/strategy/heroes", "/strategy/meta"] {
+        let needle = format!("{PUBLIC_BASE}{path}</loc>");
+        if enabled {
+            assert!(body.contains(&needle), "missing {needle}\n{body}");
+        } else {
+            assert!(!body.contains(&needle), "unexpected {needle}\n{body}");
+        }
+    }
+    assert!(
+        !body.contains("/strategy/patch-notes"),
+        "duplicate of /patch-notes must never be listed:\n{body}"
+    );
+    assert!(body.contains(&format!("{PUBLIC_BASE}/patch-notes</loc>")));
 }
 
 #[tokio::test]
@@ -333,12 +380,16 @@ async fn static_cache_headers_follow_asset_class() {
 
     let (status, headers, _) = get(app.clone(), "/assets/plain.js").await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(cache_control(&headers), Some("public, max-age=86400"));
+    assert_eq!(cache_control(&headers), Some("no-cache"));
+
+    let (status, headers, _) = get(app.clone(), "/assets/plain.css").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(cache_control(&headers), Some("no-cache"));
 
     let (status, headers, _) = get(app.clone(), "/assets/app.wasm").await;
     assert_eq!(status, StatusCode::OK);
     let wasm_cache = cache_control(&headers).unwrap();
-    assert_eq!(wasm_cache, "public, max-age=86400");
+    assert_eq!(wasm_cache, "no-cache");
     assert!(!wasm_cache.contains("immutable"));
 
     let (status, headers, _) = get(app.clone(), "/api/health").await;

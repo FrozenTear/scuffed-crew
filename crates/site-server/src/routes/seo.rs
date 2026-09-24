@@ -33,10 +33,12 @@ const FORUM_THREADS_PER_BOARD: u32 = 25;
 
 /// Indexable pages with no id segment. Detail URLs are added from the database.
 ///
-/// Patch notes have no per-item site path: the public pages are the two list
-/// routes below. A patch row's `url` field is an external source link, not a
-/// page on this host. Strategy comps have no public detail route (the editor
-/// is member-only).
+/// Patch notes have no per-item site path: the public page is `/patch-notes`.
+/// A patch row's `url` field is an external source link, not a page on this
+/// host. `/strategy/patch-notes` is the same list and is never emitted.
+/// Strategy comps have no public detail route (the editor is member-only).
+/// `/strategy`, `/strategy/heroes`, and `/strategy/meta` are added only when
+/// `strategies_enabled` is on — see [`push_strategy_routes`].
 const PUBLIC_STATIC_PATHS: &[&str] = &[
     "/",
     "/members",
@@ -51,11 +53,10 @@ const PUBLIC_STATIC_PATHS: &[&str] = &[
     "/community",
     "/feed",
     "/patch-notes",
-    "/strategy",
-    "/strategy/heroes",
-    "/strategy/meta",
-    "/strategy/patch-notes",
 ];
+
+/// Strategy browser routes gated by `SiteSettings.strategies_enabled`.
+const STRATEGY_SITEMAP_PATHS: &[&str] = &["/strategy", "/strategy/heroes", "/strategy/meta"];
 
 /// Path prefixes crawlers must not index.
 ///
@@ -66,6 +67,7 @@ const PUBLIC_STATIC_PATHS: &[&str] = &[
 const PRIVATE_PREFIXES: &[&str] = &[
     "/admin",
     "/api/",
+    "/login",
     "/setup",
     "/identity",
     "/profile/",
@@ -112,16 +114,31 @@ pub(crate) fn render_robots(redirect_base_url: &str) -> String {
 /// HTML (the shell and every client route that falls through to `index.html`)
 /// is `no-cache` so a new deploy is picked up on the next load. Dioxus 0.7
 /// content-hashed files (`{name}-dxh{hash}.js`, and the same marker on `.wasm`
-/// / `.css`) are immutable. Anything else served as a real file — favicon,
-/// unhashed wasm — gets a one-day cache and is never `immutable`.
+/// / `.css`) are immutable. Unhashed `.js`, `.wasm`, and `.css` also
+/// revalidate — a deploy can replace them without a new filename. Other
+/// unhashed files (favicon, images, fonts) get a one-day cache and are never
+/// `immutable`.
 pub(crate) fn cache_control_value(path: &str, content_type: Option<&str>) -> &'static str {
     if response_is_spa_shell(path, content_type) {
         SHELL_CACHE
     } else if is_dioxus_hashed_asset(path) {
         HASHED_ASSET_CACHE
+    } else if is_unhashed_code_asset(path) {
+        SHELL_CACHE
     } else {
         STATIC_ASSET_CACHE
     }
+}
+
+/// Unhashed script, module, and stylesheet files. Hashed `dxh` names are
+/// classified earlier and stay immutable.
+fn is_unhashed_code_asset(path: &str) -> bool {
+    let path = path.split('?').next().unwrap_or(path);
+    let file = path.rsplit('/').next().unwrap_or(path);
+    let Some((_, ext)) = file.rsplit_once('.') else {
+        return false;
+    };
+    matches!(ext.to_ascii_lowercase().as_str(), "js" | "wasm" | "css")
 }
 
 pub(crate) fn is_dioxus_hashed_asset(path: &str) -> bool {
@@ -288,6 +305,7 @@ async fn collect_sitemap(state: &AppState) -> Result<String, scuffed_db::DbError
     for path in PUBLIC_STATIC_PATHS {
         map.push_path(path, None);
     }
+    push_strategy_routes(state, &mut map).await?;
     push_articles(state, &mut map).await?;
     push_members(state, &mut map).await?;
     push_tournaments(state, &mut map).await?;
@@ -296,6 +314,32 @@ async fn collect_sitemap(state: &AppState) -> Result<String, scuffed_db::DbError
     push_wiki(state, &mut map).await?;
     push_forum(state, &mut map).await?;
     Ok(render_xml(&map.entries))
+}
+
+/// `/strategy`, `/strategy/heroes`, `/strategy/meta` when the clan flag is on.
+///
+/// Same read as the strategy API gate (`get_settings().strategies_enabled`).
+/// A missing row is created with the schema default (`true`). A settings read
+/// error fails the sitemap, matching the gate's fail-closed behavior.
+/// `/strategy/patch-notes` is never listed; `/patch-notes` is the public URL.
+async fn push_strategy_routes(
+    state: &AppState,
+    map: &mut Sitemap,
+) -> Result<(), scuffed_db::DbError> {
+    if !map.has_room() {
+        return Ok(());
+    }
+    let settings = state.db.get_settings().await?;
+    if !settings.strategies_enabled {
+        return Ok(());
+    }
+    for path in STRATEGY_SITEMAP_PATHS {
+        if !map.has_room() {
+            break;
+        }
+        map.push_path(path, None);
+    }
+    Ok(())
 }
 
 /// Published blog posts only (`list_published_articles`). Drafts are omitted
@@ -600,6 +644,7 @@ mod tests {
             "/admin/games",
             "/admin/settings",
             "/api/health",
+            "/login",
             "/setup",
             "/identity",
             "/profile/edit",
@@ -669,12 +714,20 @@ mod tests {
             STATIC_ASSET_CACHE
         );
         assert_eq!(
-            cache_control_value("/assets/plain.js", Some("text/javascript")),
+            cache_control_value("/assets/mark.png", Some("image/png")),
             STATIC_ASSET_CACHE
         );
         assert_eq!(
+            cache_control_value("/assets/plain.js", Some("text/javascript")),
+            SHELL_CACHE
+        );
+        assert_eq!(
             cache_control_value("/assets/app.wasm", Some("application/wasm")),
-            STATIC_ASSET_CACHE
+            SHELL_CACHE
+        );
+        assert_eq!(
+            cache_control_value("/assets/plain.css", Some("text/css")),
+            SHELL_CACHE
         );
         assert!(!STATIC_ASSET_CACHE.contains("immutable"));
         assert!(!SHELL_CACHE.contains("immutable"));
