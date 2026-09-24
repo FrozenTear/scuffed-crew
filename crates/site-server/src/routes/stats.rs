@@ -454,3 +454,118 @@ fn generate_token() -> String {
     }
     s
 }
+
+#[cfg(test)]
+mod tests {
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode, header};
+    use chrono::{TimeZone, Utc};
+    use http_body_util::BodyExt;
+    use scuffed_db::OrgRole;
+    use scuffed_types::api::{StatsUploadEntry, StatsUploadRequest, StatsUploadResponse};
+    use tower::ServiceExt;
+
+    use crate::create_router;
+    use crate::test_support::test_state;
+
+    fn upload_body(session_id: &str, elims: u32, outcome: &str) -> StatsUploadRequest {
+        StatsUploadRequest {
+            matches: vec![StatsUploadEntry {
+                session_id: session_id.to_string(),
+                hero: "Ana".into(),
+                map_name: "Oasis".into(),
+                game_mode: "control".into(),
+                role: "Support".into(),
+                outcome: outcome.to_string(),
+                elims,
+                deaths: 1,
+                assists: 2,
+                damage: 1000,
+                healing: 4000,
+                mitigation: 0,
+                played_at: Utc.with_ymd_and_hms(2026, 7, 1, 20, 0, 0).unwrap(),
+                edited: false,
+            }],
+            deleted_sessions: vec![],
+        }
+    }
+
+    async fn post_upload(
+        app: axum::Router,
+        token: &str,
+        body: &StatsUploadRequest,
+    ) -> (StatusCode, StatsUploadResponse) {
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/stats/upload")
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(serde_json::to_vec(body).unwrap()))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        let status = resp.status();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        if !status.is_success() {
+            panic!(
+                "upload failed ({status}): {}",
+                String::from_utf8_lossy(&bytes)
+            );
+        }
+        let parsed = serde_json::from_slice(&bytes)
+            .unwrap_or_else(|e| panic!("upload body was not StatsUploadResponse ({e}): {bytes:?}"));
+        (status, parsed)
+    }
+
+    #[tokio::test]
+    async fn retried_and_concurrent_upload_returns_success_and_one_row() {
+        let state = test_state().await;
+        let member = state
+            .db
+            .create_member("u-m11", "m11player", OrgRole::Member)
+            .await
+            .unwrap();
+        let token = "m11-daemon-token";
+        state
+            .db
+            .create_daemon_token(&member.id, token, "tracker")
+            .await
+            .unwrap();
+
+        let app = create_router(state.clone());
+        let (status, body) =
+            post_upload(app.clone(), token, &upload_body("sess-m11", 4, "victory")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            (body.inserted, body.skipped, body.deleted),
+            (1, 0, 0),
+            "daemon contract is inserted/skipped/deleted"
+        );
+
+        let (status, body) =
+            post_upload(app.clone(), token, &upload_body("sess-m11", 11, "defeat")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!((body.inserted, body.skipped, body.deleted), (1, 0, 0));
+
+        let mut handles = Vec::new();
+        for i in 0..6u32 {
+            let app = app.clone();
+            let token = token.to_string();
+            handles.push(tokio::spawn(async move {
+                post_upload(app, &token, &upload_body("sess-m11", 20 + i, "victory")).await
+            }));
+        }
+        for handle in handles {
+            let (status, body) = handle.await.unwrap();
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!((body.inserted, body.skipped, body.deleted), (1, 0, 0));
+        }
+
+        let rows = state
+            .db
+            .list_personal_matches(&member.id, 10, 0)
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1, "retried uploads of one session stay one row");
+        assert_eq!(rows[0].session_id, "sess-m11");
+    }
+}
