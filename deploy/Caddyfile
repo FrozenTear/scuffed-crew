@@ -18,6 +18,9 @@ ow.scuffedcrew.no {
 	header X-Frame-Options "DENY"
 	header Referrer-Policy "strict-origin-when-cross-origin"
 
-	# Keep compose bound to 127.0.0.1 — only Caddy is public
+	# Keep compose bound to 127.0.0.1 — only Caddy is public.
+	# reverse_proxy sets X-Forwarded-For to the real client. The app trusts
+	# that header only from loopback and from TRUSTED_PROXIES (the Podman
+	# network gateway this hop shows up as inside the container). See docs/deploy.md.
 	reverse_proxy 127.0.0.1:HOST_PORT_HERE
 }

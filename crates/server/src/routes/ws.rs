@@ -665,6 +665,7 @@ mod strategies_gate_tests {
             consumed_challenges: scuffed_site_server::challenge_store::ConsumedChallengeStore::new(
             ),
             nostr_rate_limiter: scuffed_site_server::nostr_rate_limit::NostrRateLimiter::new(),
+            login_lockout: scuffed_site_server::login_lockout::LoginLockout::new(),
             crypto: None,
             relay_url: None,
             dm_events: None,

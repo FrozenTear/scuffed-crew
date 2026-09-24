@@ -319,6 +319,16 @@ start_site_server() {
     "${COMPOSE[@]}" --env-file "$SECRETS" up -d site-server
 }
 
+# Discover the compose-network gateway while site-server still exists, and
+# write TRUSTED_PROXIES if it is missing. Re-source so an empty shell export
+# does not override the value compose reads from --env-file.
+echo "Checking TRUSTED_PROXIES (compose-network gateway)..."
+bash "$ROOT/scripts/ensure-trusted-proxies.sh"
+set -a
+# shellcheck disable=SC1090
+source "$SECRETS"
+set +a
+
 # Avoid --force-recreate: races with the previous container still holding HOST_PORT.
 remove_our_site_server
 
