@@ -201,7 +201,10 @@ impl TrackerApp {
         let health_status = health_status_for(
             &cli.data_dir,
             &games,
-            saved_config.sync.as_ref().map(|s| s.server_url.as_str()),
+            saved_config
+                .sync
+                .as_ref()
+                .map(|s| (s.server_url.as_str(), s.token.as_str())),
         );
         let overlay_hotkey = seasons::load_overlay_hotkey(&cli.data_dir);
         let mut settings = SettingsForm::from_config(&saved_config);
@@ -1038,7 +1041,7 @@ impl TrackerApp {
             self.saved_config
                 .sync
                 .as_ref()
-                .map(|s| s.server_url.as_str()),
+                .map(|s| (s.server_url.as_str(), s.token.as_str())),
         )
     }
 }
@@ -1059,11 +1062,21 @@ fn live_status_for(games: &[Game]) -> String {
     }
 }
 
-fn health_status_for(data_dir: &std::path::Path, games: &[Game], sync_url: Option<&str>) -> String {
-    if let Some(url) = sync_url.map(str::trim).filter(|s| !s.is_empty())
-        && let Err(e) = stat_tracker::config::validate_sync_server_url(url)
-    {
-        return format!("Sync paused — {}", e.message());
+fn health_status_for(
+    data_dir: &std::path::Path,
+    games: &[Game],
+    sync: Option<(&str, &str)>,
+) -> String {
+    if let Some((url, token)) = sync {
+        let url = url.trim();
+        if !url.is_empty()
+            && let Err(e) = stat_tracker::config::validate_sync_server_url(url)
+        {
+            return format!("Sync paused — {}", e.message());
+        }
+        if !url.is_empty() && stat_tracker::sync::auth_pause_matches(data_dir, url, token) {
+            return stat_tracker::sync::SYNC_TOKEN_REJECTED_STATUS.to_string();
+        }
     }
     if data_dir.join("live_snapshot.json").exists() || !games.is_empty() {
         "Ready".into()
@@ -1096,27 +1109,43 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("sst-health-m20-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("live_snapshot.json"), b"{}").unwrap();
-        let paused = super::health_status_for(&dir, &[], Some("http://example.com"));
+        let paused = super::health_status_for(&dir, &[], Some(("http://example.com", "tok")));
         assert!(
             paused.starts_with("Sync paused"),
             "existing cleartext config must be visible in tracker health, got {paused}"
         );
         assert!(paused.contains("https"), "{paused}");
         assert_eq!(
-            super::health_status_for(&dir, &[], Some("https://crew.example")),
+            super::health_status_for(&dir, &[], Some(("https://crew.example", "tok"))),
             "Ready"
         );
         assert_eq!(
-            super::health_status_for(&dir, &[], Some("http://127.0.0.1:3030")),
+            super::health_status_for(&dir, &[], Some(("http://127.0.0.1:3030", "tok"))),
             "Ready"
         );
         assert_eq!(
-            super::health_status_for(&dir, &[], Some("http://localhost")),
+            super::health_status_for(&dir, &[], Some(("http://localhost", "tok"))),
             "Ready"
         );
         assert_eq!(
-            super::health_status_for(&dir, &[], Some("http://[::1]")),
+            super::health_status_for(&dir, &[], Some(("http://[::1]", "tok"))),
             "Ready"
+        );
+        stat_tracker::sync::write_auth_pause(&dir, "https://crew.example", "old-token").unwrap();
+        let rejected =
+            super::health_status_for(&dir, &[], Some(("https://crew.example", "old-token")));
+        assert_eq!(rejected, stat_tracker::sync::SYNC_TOKEN_REJECTED_STATUS);
+        assert!(rejected.contains("Sync token rejected"), "{rejected}");
+        assert!(rejected.contains("Settings"), "{rejected}");
+        assert_eq!(
+            super::health_status_for(&dir, &[], Some(("https://crew.example", "new-token"))),
+            "Ready",
+            "a changed token clears the rejected state"
+        );
+        assert_eq!(
+            super::health_status_for(&dir, &[], Some(("https://other.example", "old-token"))),
+            "Ready",
+            "a changed URL clears the rejected state"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

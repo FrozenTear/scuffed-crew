@@ -26,7 +26,7 @@ const BOOTSTRAP_REPO_PATH: &str = "crates/stat-tracker/dist/bootstrap.sh";
 
 /// Fresh-install one-liner. `bootstrap.sh` on `main` resolves the release and
 /// re-execs that tag's copy. Older installed GUIs hardcode this URL.
-pub const UPDATE_CMD: &str = "curl -fsSL https://raw.githubusercontent.com/FrozenTear/scuffed-crew/main/crates/stat-tracker/dist/bootstrap.sh | bash";
+pub const UPDATE_CMD: &str = "curl --proto '=https' -fsSL https://raw.githubusercontent.com/FrozenTear/scuffed-crew/main/crates/stat-tracker/dist/bootstrap.sh | bash";
 
 /// Stable raw URL of `bootstrap.sh` on `main`. Not used for a pinned update.
 pub const BOOTSTRAP_URL: &str = "https://raw.githubusercontent.com/FrozenTear/scuffed-crew/main/crates/stat-tracker/dist/bootstrap.sh";
@@ -160,7 +160,7 @@ pub fn release_tag(latest: &str) -> String {
 pub fn pinned_install_command(latest: &str) -> String {
     let tag = release_tag(latest);
     format!(
-        "curl -fsSL {} | STAT_TRACKER_TAG={tag} bash",
+        "curl --proto '=https' -fsSL {} | STAT_TRACKER_TAG={tag} bash",
         bootstrap_raw_url(&tag)
     )
 }
@@ -175,6 +175,40 @@ pub fn install_command_for(advertised: Option<&str>, current: Option<&str>) -> S
         }
     }
     UPDATE_CMD.to_string()
+}
+
+/// Test hook `bootstrap.sh` honors. The GUI must not forward it into the
+/// installer, or a developer's shell could redirect the release download.
+pub const BOOTSTRAP_FETCH_HOOK_ENV: &str = "STAT_TRACKER_BOOTSTRAP_FETCH_CMD";
+
+trait InstallerEnv {
+    fn remove_env(&mut self, key: &str);
+    fn set_env(&mut self, key: &str, value: &str);
+}
+
+impl InstallerEnv for std::process::Command {
+    fn remove_env(&mut self, key: &str) {
+        self.env_remove(key);
+    }
+    fn set_env(&mut self, key: &str, value: &str) {
+        self.env(key, value);
+    }
+}
+
+impl InstallerEnv for tokio::process::Command {
+    fn remove_env(&mut self, key: &str) {
+        self.env_remove(key);
+    }
+    fn set_env(&mut self, key: &str, value: &str) {
+        self.env(key, value);
+    }
+}
+
+fn apply_installer_env(cmd: &mut impl InstallerEnv, latest: &str, prefix: &Path) {
+    cmd.remove_env(BOOTSTRAP_FETCH_HOOK_ENV);
+    for (key, value) in bootstrap_env(latest, prefix) {
+        cmd.set_env(key, &value);
+    }
 }
 
 pub fn bootstrap_env(latest: &str, prefix: &Path) -> Vec<(&'static str, String)> {
@@ -523,10 +557,7 @@ async fn download_and_run_bootstrap(
 
     let mut cmd = tokio::process::Command::new("bash");
     cmd.arg(script);
-    cmd.env_remove("STAT_TRACKER_BOOTSTRAP_FETCH_CMD");
-    for (key, value) in bootstrap_env(latest, prefix) {
-        cmd.env(key, value);
-    }
+    apply_installer_env(&mut cmd, latest, prefix);
     let out = cmd
         .output()
         .await
@@ -752,7 +783,9 @@ mod tests {
         );
         assert_eq!(
             cmd,
-            format!("curl -fsSL {url} | STAT_TRACKER_TAG=stat-tracker-v0.4.7 bash")
+            format!(
+                "curl --proto '=https' -fsSL {url} | STAT_TRACKER_TAG=stat-tracker-v0.4.7 bash"
+            )
         );
         assert!(!cmd.contains("/main/"), "{cmd}");
         assert_eq!(bootstrap_raw_url("main"), BOOTSTRAP_URL);
@@ -925,6 +958,29 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn installer_env_strips_the_bootstrap_fetch_hook() {
+        let mut cmd = std::process::Command::new("bash");
+        cmd.arg("-c");
+        cmd.arg(format!(
+            "printf '%s|%s' \"${{{}-unset}}\" \"${{STAT_TRACKER_BOOTSTRAP_PINNED-}}\"",
+            BOOTSTRAP_FETCH_HOOK_ENV
+        ));
+        cmd.env(BOOTSTRAP_FETCH_HOOK_ENV, "/tmp/not-a-real-fetch");
+        apply_installer_env(&mut cmd, "0.4.15", Path::new("/tmp/prefix"));
+        let out = cmd.output().expect("bash");
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout),
+            "unset|1",
+            "the fetch hook must not reach the installer; the pin flag must"
+        );
     }
 
     #[test]

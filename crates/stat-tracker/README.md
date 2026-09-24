@@ -16,10 +16,20 @@ install paths and the `.desktop` entry stay the same).
     Wayland capture is unavailable.
   - Portal remains last-resort on either stack (slower; not ideal for the poller).
 - **Keyboard access via evdev.** Tab detection (daemon) and the companion
-  overlay show/hide shortcut (GUI, default Super+Shift+C) read `/dev/input` —
-  the user must be in the `input` group (`sudo usermod -aG input $USER`,
-  re-login) or have seat `uaccess` on those nodes. No X11 key grab. See
-  `crates/stat-tracker-ui/README.md` (Companion shortcut).
+  overlay show/hide shortcut (GUI, default Super+Shift+C) read `/dev/input`.
+  The user must be in the `input` group, or have seat `uaccess` on those
+  nodes. No X11 key grab.
+
+  Add the group, then log out and back in. A new terminal is not enough —
+  existing sessions keep the old group list until the next login:
+
+  ```sh
+  sudo usermod -aG input "$USER"
+  # log out of the desktop session and log back in
+  groups | grep -qw input && echo "input group is active"
+  ```
+
+  See `crates/stat-tracker-ui/README.md` (Companion shortcut).
 - **Tessdata (`eng.traineddata`).** Looked up in (first hit wins):
   user `~/.local/share/scuffed-stat-tracker/tessdata/`, `TESSDATA_PREFIX`,
   `/usr/share/tessdata`, `/usr/share/tesseract-ocr/*/tessdata` (Debian/Ubuntu),
@@ -57,7 +67,7 @@ hangs/segfaults with pango ≥ 1.56.
 `~/.local`):
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/FrozenTear/scuffed-crew/main/crates/stat-tracker/dist/bootstrap.sh | bash
+curl --proto '=https' -fsSL https://raw.githubusercontent.com/FrozenTear/scuffed-crew/main/crates/stat-tracker/dist/bootstrap.sh | bash
 ```
 
 That `main` URL is only the stable entrypoint, including for GUIs that already
@@ -75,7 +85,7 @@ Pin a tag by fetching that tag's bootstrap (the assignment has to be on
 
 ```sh
 TAG=stat-tracker-v0.4.14
-curl -fsSL "https://raw.githubusercontent.com/FrozenTear/scuffed-crew/${TAG}/crates/stat-tracker/dist/bootstrap.sh" \
+curl --proto '=https' -fsSL "https://raw.githubusercontent.com/FrozenTear/scuffed-crew/${TAG}/crates/stat-tracker/dist/bootstrap.sh" \
   | STAT_TRACKER_TAG="$TAG" STAT_TRACKER_PREFIX="$HOME/.local" bash
 ```
 

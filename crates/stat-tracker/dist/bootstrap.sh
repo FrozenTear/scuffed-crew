@@ -2,7 +2,7 @@
 # Download a prebuilt Linux x86_64 release and run its in-tarball installer.
 #
 # Fresh install (stable entrypoint — older GUIs curl this too):
-#   curl -fsSL https://raw.githubusercontent.com/FrozenTear/scuffed-crew/main/crates/stat-tracker/dist/bootstrap.sh | bash
+#   curl --proto '=https' -fsSL https://raw.githubusercontent.com/FrozenTear/scuffed-crew/main/crates/stat-tracker/dist/bootstrap.sh | bash
 #
 # That `main` copy only resolves the release tag, then re-execs bootstrap.sh
 # from that tag. A later change on main does not become the installer for a
@@ -12,7 +12,7 @@
 # The tag must be assigned on bash, not curl: `VAR=x curl | bash` does not
 # export VAR into bash.
 #   TAG=stat-tracker-v0.4.14
-#   curl -fsSL "https://raw.githubusercontent.com/FrozenTear/scuffed-crew/${TAG}/crates/stat-tracker/dist/bootstrap.sh" \
+#   curl --proto '=https' -fsSL "https://raw.githubusercontent.com/FrozenTear/scuffed-crew/${TAG}/crates/stat-tracker/dist/bootstrap.sh" \
 #     | STAT_TRACKER_TAG="$TAG" bash
 #
 # Env:
@@ -82,13 +82,18 @@ assert_safe_tag() {
     fi
 }
 
+# HTTPS only. --proto '=https' refuses http, file, and a redirect onto them.
+curl_https() {
+    curl --proto '=https' -fsSL "$@"
+}
+
 fetch_to() {
     local url="$1" dest="$2"
     if [[ -n "${STAT_TRACKER_BOOTSTRAP_FETCH_CMD:-}" ]]; then
         "$STAT_TRACKER_BOOTSTRAP_FETCH_CMD" "$url" "$dest"
         return
     fi
-    curl -fsSL -o "$dest" "$url"
+    curl_https -o "$dest" "$url"
 }
 
 # Resolve asset download URL plus optional sha256 and minisign companions.
@@ -96,10 +101,10 @@ resolve_release() {
     local json url tag
     if [[ -n "${STAT_TRACKER_TAG:-}" ]]; then
         info "Fetching release ${STAT_TRACKER_TAG}…"
-        json="$(curl -fsSL "${GH_HEADERS[@]}" "${API}/tags/${STAT_TRACKER_TAG}")"
+        json="$(curl_https "${GH_HEADERS[@]}" "${API}/tags/${STAT_TRACKER_TAG}")"
     else
         info "Fetching latest GitHub releases for ${REPO}…"
-        json="$(curl -fsSL "${GH_HEADERS[@]}" "${API}?per_page=20")"
+        json="$(curl_https "${GH_HEADERS[@]}" "${API}?per_page=20")"
         # Two candidates that ship our asset: the newest stable, and the newest
         # prerelease that is newer than it (list is newest-first; drafts skipped).
         local stable_tag pre_tag chosen channel
@@ -281,7 +286,7 @@ verify_release_signature() {
         printf '%s\n' "$pub" > "$pubfile"
     fi
     info "Verifying minisign signature…"
-    if ! curl -fsSL -o "$sigfile" "$sig_url"; then
+    if ! fetch_to "$sig_url" "$sigfile"; then
         rm -f "$pubfile"
         error "could not download minisign signature"
         exit 1
@@ -293,6 +298,53 @@ verify_release_signature() {
     fi
     rm -f "$pubfile"
     info "minisign ok"
+}
+
+minisign_key_configured() {
+    local pub
+    pub="$(configured_minisign_pub)"
+    [[ -n "${pub//[[:space:]]/}" ]]
+}
+
+# sha256 of the tarball. With a minisign public key configured, a missing
+# .sha256 asset or a missing sha256sum is a hard failure. With no key, both
+# stay warnings (today's same-origin checksum is optional).
+verify_release_checksum() {
+    local asset="$1"
+    local sha_url="${SHA_URL:-}"
+    local dir name sumfile
+    dir="$(cd "$(dirname "$asset")" && pwd)"
+    name="$(basename "$asset")"
+    sumfile="${dir}/${name}.sha256"
+    if minisign_key_configured; then
+        if [[ -z "$sha_url" ]]; then
+            error "A minisign public key is configured, but this release has no .sha256 asset. Refusing to install."
+            exit 1
+        fi
+        if ! command -v sha256sum >/dev/null 2>&1; then
+            error "A minisign public key is configured, but sha256sum is not installed. Refusing to install."
+            exit 1
+        fi
+    elif [[ -z "$sha_url" ]] || ! command -v sha256sum >/dev/null 2>&1; then
+        warn "No .sha256 asset or sha256sum missing — skipping integrity check."
+        return 0
+    fi
+    info "Verifying sha256…"
+    if ! fetch_to "$sha_url" "$sumfile"; then
+        error "could not download .sha256"
+        exit 1
+    fi
+    # File may be either "HASH  name" or just HASH.
+    if ! (cd "$dir" && sha256sum -c "${name}.sha256") 2>/dev/null; then
+        local expected actual
+        expected="$(awk 'NF{print $1; exit}' "$sumfile")"
+        actual="$(sha256sum "$asset" | awk '{print $1}')"
+        if [[ "$expected" != "$actual" ]]; then
+            error "sha256 mismatch (expected $expected, got $actual)"
+            exit 1
+        fi
+    fi
+    info "sha256 ok"
 }
 
 # Reject absolute paths and '..', and do not follow a symlink out of dest.
@@ -495,24 +547,9 @@ trap '[[ $CLEANUP_WORKDIR -eq 1 ]] && rm -rf "$WORKDIR"' EXIT
 mkdir -p "$WORKDIR"
 cd "$WORKDIR"
 info "Downloading ${ASSET_NAME}…"
-curl -fL --progress-bar -o "$ASSET_NAME" "$URL"
+curl_https -o "$ASSET_NAME" "$URL"
 
-if [[ -n "$SHA_URL" ]] && command -v sha256sum &>/dev/null; then
-    info "Verifying sha256…"
-    curl -fsSL -o "${ASSET_NAME}.sha256" "$SHA_URL"
-    # File may be either "HASH  name" or just HASH.
-    if ! sha256sum -c "${ASSET_NAME}.sha256" 2>/dev/null; then
-        expected="$(awk 'NF{print $1; exit}' "${ASSET_NAME}.sha256")"
-        actual="$(sha256sum "$ASSET_NAME" | awk '{print $1}')"
-        if [[ "$expected" != "$actual" ]]; then
-            error "sha256 mismatch (expected $expected, got $actual)"
-            exit 1
-        fi
-    fi
-    info "sha256 ok"
-else
-    warn "No .sha256 asset or sha256sum missing — skipping integrity check."
-fi
+verify_release_checksum "$WORKDIR/$ASSET_NAME"
 
 verify_release_signature "$ASSET_NAME"
 

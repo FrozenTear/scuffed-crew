@@ -304,6 +304,7 @@ fn package_version() -> &'static str {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    lock_down_umask();
     // Handle --version/--help before ANY init: smoke tests (CI clean-room,
     // installer) and humans probe these; unknown flags used to fall through
     // to full daemon startup, which blocks forever on headless machines.
@@ -332,15 +333,25 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("Scuffed Stat Tracker starting");
     tracing::info!(data_dir = %config.data_dir.display(), "using data directory");
 
+    std::fs::create_dir_all(&config.data_dir)?;
+    // Existing installs may have been created with umask 022. Tighten the
+    // tree before the store opens so the DB and command queue are owner-only.
+    stat_tracker::fs_mode::tighten_private_tree(&config.data_dir);
+
     // One client for the whole process. An unsafe URL logs once here and
     // leaves sync off — including the startup player-name fetch — so the
     // bearer token is never sent. The daemon keeps running.
     let sync_client = open_sync_client(config.sync.as_ref());
     if let Some(client) = &sync_client {
-        fetch_player_name_if_needed(&mut config, client).await;
+        let creds = client.credentials();
+        if sync::auth_pause_matches(&config.data_dir, &creds.server_url, &creds.token) {
+            tracing::error!(
+                "sync paused — the server rejected this token. Update the token in Settings, then restart the tracker or save the new URL or token."
+            );
+        } else {
+            fetch_player_name_if_needed(&mut config, client).await;
+        }
     }
-
-    std::fs::create_dir_all(&config.data_dir)?;
 
     // Single wiring point for OCR debug dumps — the lib reads this switch
     // instead of re-loading config on first use; dumps land under data_dir.
@@ -526,6 +537,18 @@ async fn fetch_player_name_if_needed(config: &mut config::Config, client: &sync:
                     "server has no player_name configured — set it in the web UI under My Stats → Settings"
                 );
             }
+            Err(e) if matches!(e.attempt(), sync::SyncAttempt::AuthRejected) => {
+                let creds = client.credentials();
+                if let Err(err) =
+                    sync::write_auth_pause(&config.data_dir, &creds.server_url, &creds.token)
+                {
+                    tracing::warn!(error = %err, "could not record sync auth pause");
+                }
+                tracing::error!(
+                    error = %e,
+                    "sync token rejected by daemon-config — pausing sync until the URL or token changes in Settings"
+                );
+            }
             Err(e) => {
                 tracing::warn!(error = %e, "could not fetch daemon config from server (continuing without player_name)");
             }
@@ -537,40 +560,42 @@ async fn fetch_player_name_if_needed(config: &mut config::Config, client: &sync:
 /// it) and return a guard that removes it on drop when it still names us.
 fn acquire_pid_guard(data_dir: &std::path::Path) -> anyhow::Result<PidGuard> {
     let pid_path = data_dir.join("daemon.pid");
-    if let Ok(existing_pid) = std::fs::read_to_string(&pid_path) {
-        if let Ok(pid) = existing_pid.trim().parse::<u32>()
-            && pid_is_live_tracker(pid)
-        {
-            tracing::error!(pid, "another daemon is already running — stop it first");
-            anyhow::bail!("another daemon is already running (PID {pid})");
-        }
-        let _ = std::fs::remove_file(&pid_path);
+    if let Ok(text) = std::fs::read_to_string(&pid_path)
+        && let Some(existing) = stat_tracker::proc_id::parse_pid_record(&text)
+        && stat_tracker::proc_id::pid_is_live_tracker_started(existing.pid, existing.start_ticks)
+    {
+        tracing::error!(
+            pid = existing.pid,
+            "another daemon is already running — stop it first"
+        );
+        anyhow::bail!("another daemon is already running (PID {})", existing.pid);
     }
+    let _ = std::fs::remove_file(&pid_path);
     let pid = std::process::id();
-    std::fs::write(&pid_path, pid.to_string())?;
+    let body =
+        stat_tracker::proc_id::format_pid_record(pid, stat_tracker::proc_id::proc_start_ticks(pid));
+    std::fs::write(&pid_path, body)?;
+    stat_tracker::fs_mode::tighten_private_file(&pid_path);
     Ok(PidGuard {
         path: pid_path,
         pid,
     })
 }
 
-/// True only if `pid` is alive AND is actually a scuffed-stat-tracker process.
-///
-/// A bare `/proc/{pid}` existence check false-positives on **PID reuse**: after
-/// a daemon dies without cleaning up `daemon.pid`, the kernel can hand that PID
-/// to an unrelated program, and the stale lock would then block every restart
-/// forever behind systemd `Restart=on-failure` — the exact deadlock that ate a
-/// full night of captures. Matching `/proc/{pid}/comm` (world-readable, so no
-/// permission trap) against our binary name rejects the reused-PID case; a
-/// missing entry means the process is dead.
-fn pid_is_live_tracker(pid: u32) -> bool {
-    if pid == std::process::id() {
-        return false; // never deadlock on our own recycled pid
+/// Process umask 077 so the store, pid file, logs, and snapshots are created
+/// owner-only. Linux `mode_t` is a 32-bit unsigned integer.
+fn lock_down_umask() {
+    #[cfg(unix)]
+    // SAFETY: libc `umask` takes a `mode_t` and returns the previous mask.
+    // The declaration matches the Linux signature (`mode_t` is `u32`).
+    unsafe extern "C" {
+        fn umask(mask: u32) -> u32;
     }
-    match std::fs::read_to_string(format!("/proc/{pid}/comm")) {
-        // `comm` is truncated to 15 bytes (TASK_COMM_LEN-1): "scuffed-stat-tr".
-        Ok(comm) => comm.trim().starts_with("scuffed-stat"),
-        Err(_) => false, // no /proc entry → dead
+    #[cfg(unix)]
+    // SAFETY: `umask` is async-signal-safe and only changes this process's
+    // file-creation mask. Called once on the main thread before workers start.
+    unsafe {
+        umask(0o077);
     }
 }
 
@@ -1415,6 +1440,15 @@ async fn run_loop(ctx: Arc<DaemonCtx>) -> anyhow::Result<()> {
     // once. `sync_rev` compare-and-swap stays inside `try_sync_with`.
     let mut sync_task: Option<tokio::task::JoinHandle<()>> = None;
     let sync_backoff = Arc::new(std::sync::Mutex::new(sync::SyncBackoff::default()));
+    if sync_credentials_rejected(data_dir, sync_client) {
+        sync_backoff
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .record_auth_rejected();
+        tracing::error!(
+            "sync paused — token rejected. Update the token in Settings; sync resumes when the URL or token changes."
+        );
+    }
 
     // Tab OCR also runs as a spawned task (single-flight), reporting back on
     // this channel. Awaited inline, one capture starved the poller for a
@@ -1966,6 +2000,7 @@ async fn run_loop(ctx: Arc<DaemonCtx>) -> anyhow::Result<()> {
                 }
             }
             _ = cmd_timer.tick() => {
+                maybe_resume_sync_after_settings_change(sync_client, &sync_backoff, data_dir);
                 // Suspend detection (m4): after a sleep, every Instant-based
                 // window believes no time passed. Treat resume like a daemon
                 // restart — drop the volatile windows and re-admit the active
@@ -2052,11 +2087,7 @@ async fn run_loop(ctx: Arc<DaemonCtx>) -> anyhow::Result<()> {
                 tracing::info!("shutting down");
                 drain_capture(capture_task.take()).await;
                 let task = sync_task.take();
-                if let Some(client) = sync_client {
-                    drain_sync_then(task, || try_sync(store, client, data_dir)).await;
-                } else {
-                    drain_sync_then(task, || std::future::ready(())).await;
-                }
+                finish_sync_on_shutdown(sync_client, &sync_backoff, task, store, data_dir).await;
                 flush_snapshot_if_dirty(store, data_dir).await;
                 return Ok(());
             }
@@ -2064,11 +2095,7 @@ async fn run_loop(ctx: Arc<DaemonCtx>) -> anyhow::Result<()> {
                 tracing::info!("SIGTERM received — shutting down");
                 drain_capture(capture_task.take()).await;
                 let task = sync_task.take();
-                if let Some(client) = sync_client {
-                    drain_sync_then(task, || try_sync(store, client, data_dir)).await;
-                } else {
-                    drain_sync_then(task, || std::future::ready(())).await;
-                }
+                finish_sync_on_shutdown(sync_client, &sync_backoff, task, store, data_dir).await;
                 flush_snapshot_if_dirty(store, data_dir).await;
                 return Ok(());
             }
@@ -2886,11 +2913,21 @@ async fn try_sync(
     data_dir: &std::path::Path,
 ) -> sync::SyncAttempt {
     let client = client.clone();
-    try_sync_with(store, data_dir, move |matches, tombstones| {
+    let outcome = try_sync_with(store, data_dir, {
         let client = client.clone();
-        async move { client.upload_matches(&matches, &tombstones).await }
+        move |matches, tombstones| {
+            let client = client.clone();
+            async move { client.upload_matches(&matches, &tombstones).await }
+        }
     })
-    .await
+    .await;
+    if matches!(outcome, sync::SyncAttempt::AuthRejected) {
+        let creds = client.credentials();
+        if let Err(e) = sync::write_auth_pause(data_dir, &creds.server_url, &creds.token) {
+            tracing::warn!(error = %e, "could not record sync auth pause");
+        }
+    }
+    outcome
 }
 
 /// True when this capture should start a periodic sync task.
@@ -2952,7 +2989,92 @@ fn apply_sync_backoff(backoff: &std::sync::Mutex<sync::SyncBackoff>, outcome: sy
                 "sync rate-limited — backing off before the next upload"
             );
         }
+        sync::SyncAttempt::AuthRejected => {
+            tracing::error!(
+                "sync token rejected — pausing until the server URL or token changes in Settings"
+            );
+        }
         sync::SyncAttempt::Uploaded | sync::SyncAttempt::NoServerCall => {}
+    }
+}
+
+fn sync_credentials_rejected(
+    data_dir: &std::path::Path,
+    client: Option<&sync::SyncClient>,
+) -> bool {
+    let Some(client) = client else {
+        return false;
+    };
+    let creds = client.credentials();
+    sync::auth_pause_matches(data_dir, &creds.server_url, &creds.token)
+}
+
+/// While sync is paused on a rejected token, re-read Settings. A different
+/// URL or token clears the pause and updates the client. The rest of the
+/// config is left alone.
+fn maybe_resume_sync_after_settings_change(
+    client: Option<&sync::SyncClient>,
+    backoff: &std::sync::Mutex<sync::SyncBackoff>,
+    data_dir: &std::path::Path,
+) {
+    let paused = backoff
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .auth_rejected();
+    if !paused {
+        return;
+    }
+    let Ok(cfg) = config::Config::load() else {
+        return;
+    };
+    let Some(sync_cfg) = cfg.sync else {
+        return;
+    };
+    if sync::auth_pause_matches(data_dir, &sync_cfg.server_url, &sync_cfg.token) {
+        return;
+    }
+    let Some(client) = client else {
+        return;
+    };
+    match sync::SyncClient::try_new(sync_cfg) {
+        Ok(fresh) => {
+            client.replace_credentials(fresh.credentials());
+            sync::clear_auth_pause(data_dir);
+            backoff
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clear_auth_rejected();
+            tracing::info!("sync resumed — server URL or token changed");
+        }
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "sync stays paused — the saved server URL is not safe for the token"
+            );
+        }
+    }
+}
+
+async fn finish_sync_on_shutdown(
+    client: Option<&sync::SyncClient>,
+    backoff: &std::sync::Mutex<sync::SyncBackoff>,
+    task: Option<tokio::task::JoinHandle<()>>,
+    store: &storage::LocalStore,
+    data_dir: &std::path::Path,
+) {
+    let rejected = backoff
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .auth_rejected();
+    if rejected {
+        tracing::warn!("sync paused — token rejected; skipping the shutdown upload");
+        drain_sync_then(task, || std::future::ready(())).await;
+        return;
+    }
+    if let Some(client) = client {
+        drain_sync_then(task, || try_sync(store, client, data_dir)).await;
+    } else {
+        drain_sync_then(task, || std::future::ready(())).await;
     }
 }
 
@@ -3040,6 +3162,12 @@ where
             match attempt {
                 sync::SyncAttempt::RateLimited { .. } => {
                     tracing::warn!(error = %e, "sync rate-limited — will retry after backoff");
+                }
+                sync::SyncAttempt::AuthRejected => {
+                    tracing::error!(
+                        error = %e,
+                        "sync token rejected — will not retry until the URL or token changes"
+                    );
                 }
                 _ => tracing::error!(error = %e, "sync upload failed"),
             }
@@ -3166,9 +3294,11 @@ mod tests {
     fn pid_guard_never_blocks_on_self_or_dead_pid() {
         // Our own pid must never count as "another daemon" (PID reuse of a
         // recycled self-pid would otherwise deadlock startup).
-        assert!(!pid_is_live_tracker(std::process::id()));
+        assert!(!stat_tracker::proc_id::pid_is_live_tracker(
+            std::process::id()
+        ));
         // A pid with no /proc entry is dead → does not block.
-        assert!(!pid_is_live_tracker(u32::MAX));
+        assert!(!stat_tracker::proc_id::pid_is_live_tracker(u32::MAX));
     }
 
     #[test]

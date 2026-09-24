@@ -1,8 +1,9 @@
 //! Tracker service control — same systemctl user unit as the Dioxus GUI.
 //!
-//! Status and stop share one PID/`comm` identity check (the daemon's
-//! `pid_is_live_tracker` rule) so a reused PID is never treated as the
-//! tracker and is never signalled.
+//! Status and stop share the daemon's pid-file identity check
+//! (`stat_tracker::proc_id`): `/proc/<pid>/exe` must be the tracker binary,
+//! and the start time must match when the pid file recorded one. A reused
+//! PID is never treated as the tracker and is never signalled.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -13,9 +14,8 @@ pub const SYSTEMD_UNIT: &str = "scuffed-stat-tracker.service";
 /// Daemon binary name (`/proc/<pid>/comm` truncates to 15 bytes).
 pub const DAEMON_BIN: &str = "scuffed-stat-tracker";
 
-/// Shared with the daemon binary's `pid_is_live_tracker`:
-/// `comm` is `scuffed-stat-tracker` or the kernel-truncated `scuffed-stat-tr`.
-pub const TRACKER_COMM_PREFIX: &str = "scuffed-stat";
+/// Kernel-truncated `comm` of [`DAEMON_BIN`]. Exact match only — not a prefix.
+pub const TRACKER_COMM: &str = stat_tracker::proc_id::DAEMON_COMM;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DaemonVerb {
@@ -59,36 +59,35 @@ pub fn daemon_log_path(data_dir: &Path) -> PathBuf {
     data_dir.join("daemon.log")
 }
 
-pub fn read_pid(data_dir: &Path) -> Option<u32> {
+pub fn read_pid_record(data_dir: &Path) -> Option<stat_tracker::proc_id::PidRecord> {
     let text = std::fs::read_to_string(pid_file(data_dir)).ok()?;
-    text.trim().parse().ok()
+    stat_tracker::proc_id::parse_pid_record(&text)
 }
 
-/// True when `/proc/<pid>/comm` is the tracker daemon (not a reused PID).
+pub fn read_pid(data_dir: &Path) -> Option<u32> {
+    read_pid_record(data_dir).map(|rec| rec.pid)
+}
+
+/// Exact `comm` of the tracker daemon (full name or the 15-byte truncation).
 pub fn comm_is_tracker(comm: &str) -> bool {
-    comm.trim().starts_with(TRACKER_COMM_PREFIX)
+    stat_tracker::proc_id::comm_names_daemon(comm)
 }
 
-/// True only if `pid` is alive **and** is actually a scuffed-stat-tracker process.
+/// True only if `pid` is alive and its executable is the tracker daemon.
 ///
-/// A bare `/proc/{pid}` existence check false-positives on PID reuse. Matching
-/// `/proc/{pid}/comm` (world-readable) against our binary name rejects that
-/// case. Never treats this GUI process as the daemon.
+/// Prefers `/proc/<pid>/exe` over `comm`, so a reused PID whose name only
+/// shares a prefix is not the daemon. Never treats this GUI process as it.
 pub fn pid_is_live_tracker(pid: u32) -> bool {
-    if pid == std::process::id() {
-        return false;
-    }
-    match std::fs::read_to_string(format!("/proc/{pid}/comm")) {
-        Ok(comm) => comm_is_tracker(&comm),
-        Err(_) => false,
-    }
+    stat_tracker::proc_id::pid_is_live_tracker(pid)
 }
 
 /// Live tracker PID from `daemon.pid`, or `None` (stale file is removed).
+/// When the file records a start time, a recycled PID of the same binary
+/// does not count.
 pub fn daemon_running(data_dir: &Path) -> Option<u32> {
-    let pid = read_pid(data_dir)?;
-    if pid_is_live_tracker(pid) {
-        Some(pid)
+    let rec = read_pid_record(data_dir)?;
+    if stat_tracker::proc_id::pid_is_live_tracker_started(rec.pid, rec.start_ticks) {
+        Some(rec.pid)
     } else {
         let _ = std::fs::remove_file(pid_file(data_dir));
         None
@@ -421,10 +420,13 @@ mod tests {
         assert!(comm_is_tracker("scuffed-stat-tr"));
         assert!(comm_is_tracker("scuffed-stat-tracker"));
         assert!(comm_is_tracker("scuffed-stat-tr\n"));
+        assert!(!comm_is_tracker("scuffed-station"));
+        assert!(!comm_is_tracker("scuffed-stat-tracker-helper"));
         assert!(!comm_is_tracker("stat-tracker-gu"));
         assert!(!comm_is_tracker("firefox"));
         assert!(!comm_is_tracker(""));
         assert!(!comm_is_tracker("scuffed"));
+        assert_eq!(TRACKER_COMM, "scuffed-stat-tr");
     }
 
     #[test]
