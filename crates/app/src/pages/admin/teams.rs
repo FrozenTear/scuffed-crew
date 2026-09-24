@@ -8,6 +8,60 @@ use crate::hooks::{ModalController, use_api_list};
 use crate::state::use_auth;
 use scuffed_api_client::ApiClient;
 use scuffed_types::api::{AddRosterMemberRequest, CreateTeamRequest, UpdateRosterRoleRequest};
+use scuffed_types::{OrgRole, SiteSettings};
+
+/// Settings slot for the officer team-edit gate.
+/// `Loading` is in flight — officers must not see edit controls yet.
+/// `Loaded(false)` is the default and a failed load.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OfficersEditFlag {
+    Loading,
+    Loaded(bool),
+}
+
+/// Show controls that `PUT /api/teams/{id}`.
+/// Admins always. Officers only after settings load with the flag on.
+/// Members, recruits, and signed-out callers never.
+fn team_edit_allowed(role: Option<OrgRole>, flag: OfficersEditFlag) -> bool {
+    match role {
+        Some(OrgRole::Admin) => true,
+        Some(OrgRole::Officer) => matches!(flag, OfficersEditFlag::Loaded(true)),
+        Some(OrgRole::Member | OrgRole::Recruit) | None => false,
+    }
+}
+
+/// Outer `None`: `GET /api/settings` still in flight.
+/// Inner `None`: settled with no payload — treat the flag as off.
+fn officers_edit_flag(slot: Option<Option<bool>>) -> OfficersEditFlag {
+    match slot {
+        None => OfficersEditFlag::Loading,
+        Some(flag) => OfficersEditFlag::Loaded(flag.unwrap_or(false)),
+    }
+}
+
+fn read_officers_edit_flag(settings: Resource<Option<SiteSettings>>) -> OfficersEditFlag {
+    let loaded = settings.read();
+    let slot = loaded
+        .as_ref()
+        .map(|payload| payload.as_ref().map(|s| s.officers_can_edit_teams));
+    officers_edit_flag(slot)
+}
+
+const OFFICER_TEAM_EDIT_DENIED: &str = "Only admins can edit teams right now.";
+
+/// Officer edit that the server rejected because the flag is off (or turned off
+/// between page load and save). Other 403s keep the generic toast.
+fn team_save_denied_message(
+    editing: bool,
+    is_admin: bool,
+    forbidden: bool,
+) -> Option<&'static str> {
+    if editing && !is_admin && forbidden {
+        Some(OFFICER_TEAM_EDIT_DENIED)
+    } else {
+        None
+    }
+}
 
 // --- Types ---
 // Local response types with API-enriched fields (joined names).
@@ -72,6 +126,29 @@ pub fn AdminTeams() -> Element {
     // Remove member confirm
     let mut remove_modal = ModalController::<RosterEntry>::new();
 
+    // Team-edit gate. Always fetched (hooks stay unconditional). Admins ignore
+    // the flag; officers wait until it settles so Edit does not flash on.
+    let mut settings_refresh = use_signal(|| 0u64);
+    let team_settings = use_resource(move || {
+        let _tick = settings_refresh();
+        async move {
+            ApiClient::web()
+                .fetch::<SiteSettings>("/api/settings")
+                .await
+                .ok()
+        }
+    });
+    // Read the resource inside the effect so it re-runs when settings settle
+    // or refresh after a 403. Closes an open edit if the flag dropped.
+    use_effect(move || {
+        let role = auth().user.as_ref().and_then(|u| u.role);
+        let flag = read_officers_edit_flag(team_settings);
+        let editing = modal.is_open() && modal.get_target().is_some();
+        if editing && !team_edit_allowed(role, flag) {
+            modal.close();
+        }
+    });
+
     // Fetch roster when team selected
     let _roster_loader = use_resource(move || async move {
         let _ = roster_refresh();
@@ -128,6 +205,8 @@ pub fn AdminTeams() -> Element {
             },
         };
         let edit_id = modal.get_target();
+        let editing = edit_id.is_some();
+        let caller_is_admin = auth().is_admin();
         modal.start_submit();
         spawn(async move {
             let client = ApiClient::web();
@@ -147,7 +226,17 @@ pub fn AdminTeams() -> Element {
                     games.refresh += 1;
                     members.refresh += 1;
                 }
-                Err(e) => toast.show(Toast::error(format!("Failed to save team: {e}"))),
+                Err(e) => {
+                    if let Some(msg) =
+                        team_save_denied_message(editing, caller_is_admin, e.is_forbidden())
+                    {
+                        toast.show(Toast::error(msg.to_string()));
+                        modal.close();
+                        settings_refresh += 1;
+                    } else {
+                        toast.show(Toast::error(format!("Failed to save team: {e}")));
+                    }
+                }
             }
         });
     };
@@ -250,6 +339,11 @@ pub fn AdminTeams() -> Element {
         remove_modal.close();
     };
 
+    let can_edit_teams = team_edit_allowed(
+        auth().user.as_ref().and_then(|u| u.role),
+        read_officers_edit_flag(team_settings),
+    );
+
     // --- Render ---
 
     rsx! {
@@ -315,10 +409,12 @@ pub fn AdminTeams() -> Element {
                                         }
                                         td {
                                             div { class: "row-actions",
-                                                button {
-                                                    class: "row-btn",
-                                                    onclick: move |_| open_edit(t_edit.clone()),
-                                                    "Edit"
+                                                if can_edit_teams {
+                                                    button {
+                                                        class: "row-btn",
+                                                        onclick: move |_| open_edit(t_edit.clone()),
+                                                        "Edit"
+                                                    }
                                                 }
                                                 button {
                                                     class: "row-btn primary",
@@ -530,5 +626,91 @@ pub fn AdminTeams() -> Element {
             on_confirm: on_remove_confirm,
             on_cancel: on_remove_cancel,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn admins_always_see_team_edit() {
+        for flag in [
+            OfficersEditFlag::Loading,
+            OfficersEditFlag::Loaded(false),
+            OfficersEditFlag::Loaded(true),
+        ] {
+            assert!(team_edit_allowed(Some(OrgRole::Admin), flag));
+        }
+    }
+
+    #[test]
+    fn officers_see_team_edit_only_after_flag_loads_on() {
+        assert!(!team_edit_allowed(
+            Some(OrgRole::Officer),
+            OfficersEditFlag::Loading
+        ));
+        assert!(!team_edit_allowed(
+            Some(OrgRole::Officer),
+            officers_edit_flag(None)
+        ));
+        assert!(!team_edit_allowed(
+            Some(OrgRole::Officer),
+            OfficersEditFlag::Loaded(false)
+        ));
+        assert!(!team_edit_allowed(
+            Some(OrgRole::Officer),
+            officers_edit_flag(Some(None))
+        ));
+        assert!(!team_edit_allowed(
+            Some(OrgRole::Officer),
+            officers_edit_flag(Some(Some(false)))
+        ));
+        assert!(team_edit_allowed(
+            Some(OrgRole::Officer),
+            OfficersEditFlag::Loaded(true)
+        ));
+        assert!(team_edit_allowed(
+            Some(OrgRole::Officer),
+            officers_edit_flag(Some(Some(true)))
+        ));
+    }
+
+    #[test]
+    fn other_roles_never_see_team_edit() {
+        for role in [None, Some(OrgRole::Member), Some(OrgRole::Recruit)] {
+            assert!(!team_edit_allowed(role, OfficersEditFlag::Loaded(true)));
+            assert!(!team_edit_allowed(role, OfficersEditFlag::Loading));
+        }
+    }
+
+    #[test]
+    fn officer_team_edit_403_uses_specific_copy() {
+        assert_eq!(
+            team_save_denied_message(true, false, true),
+            Some("Only admins can edit teams right now.")
+        );
+        assert_eq!(team_save_denied_message(true, true, true), None);
+        assert_eq!(team_save_denied_message(true, false, false), None);
+        assert_eq!(team_save_denied_message(false, false, true), None);
+    }
+
+    #[test]
+    fn edit_gate_effect_reads_settings_inside_the_effect() {
+        let src = include_str!("teams.rs");
+        let start = src
+            .find("use_effect(move || {")
+            .expect("team edit gate effect");
+        let body = &src[start..];
+        let end = body.find("});").expect("effect end");
+        let effect = &body[..end];
+        assert!(
+            effect.contains("read_officers_edit_flag"),
+            "effect must read settings inside so it re-runs when GET /api/settings settles"
+        );
+        assert!(
+            effect.contains("auth()"),
+            "effect must read auth inside so a role change re-runs the gate"
+        );
     }
 }
