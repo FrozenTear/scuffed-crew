@@ -63,8 +63,8 @@ pub async fn public_member_heroes(
     Query(q): Query<HeroesQuery>,
 ) -> Result<Json<Vec<HeroAgg>>, (StatusCode, Json<ErrorResponse>)> {
     let top = if q.top == 0 { 0 } else { q.top.clamp(1, 50) };
-    // Ensure member exists (safe projection).
-    let exists = state
+    // Same visibility as the public profile: missing and inactive are both 404.
+    let member = state
         .db
         .get_member_safe(&id)
         .await
@@ -76,8 +76,8 @@ pub async fn public_member_heroes(
                 }),
             )
         })?
-        .is_some();
-    if !exists {
+        .filter(|m| m.is_active);
+    if member.is_none() {
         return Err((
             StatusCode::NOT_FOUND,
             Json(ErrorResponse {

@@ -139,6 +139,8 @@ impl Database {
     /// Integrity rules (authoritative here, independent of the route):
     /// - Poll must exist (`NotFound` otherwise) and be active; voting on a
     ///   closed poll (`is_active = false`) returns `Conflict`.
+    /// - A scheduled `close_at` that is at or before now also returns
+    ///   `Conflict`, even while `is_active` is still true.
     /// - Single-choice polls (`allow_multiple = false`) keep at most one vote
     ///   per member: selecting a different option **replaces** the previous
     ///   vote (radio-button semantics — matches the poll UI, which offers no
@@ -162,6 +164,9 @@ impl Database {
             // of what the caller checked. Missing poll → NotFound.
             let poll = self.get_poll(poll_id).await?;
             if !poll.is_active {
+                return Err(crate::DbError::Conflict("Poll is closed".into()));
+            }
+            if poll.close_at.is_some_and(|close_at| close_at <= Utc::now()) {
                 return Err(crate::DbError::Conflict("Poll is closed".into()));
             }
 
@@ -428,6 +433,75 @@ mod tests {
 
         let r = db.get_poll_results(&poll, None).await.unwrap();
         assert_eq!(r.total_votes, 2, "distinct members both count");
+    }
+
+    /// A poll whose `close_at` is at or before now rejects votes even while
+    /// `is_active` is still true.
+    #[tokio::test]
+    async fn vote_rejected_at_or_after_close_at() {
+        let db = test_db().await;
+        let past = chrono::Utc::now() - chrono::Duration::seconds(5);
+        let closed = db
+            .create_poll(
+                "Closed by schedule",
+                None,
+                &["A".into(), "B".into()],
+                Some(past),
+                false,
+                "creator",
+            )
+            .await
+            .unwrap();
+        assert!(
+            closed.is_active,
+            "schedule close must not require is_active=false"
+        );
+        let err = db.vote_poll(&closed.id, "m1", 0).await.unwrap_err();
+        assert!(
+            matches!(err, DbError::Conflict(_)),
+            "vote at/after close_at must be Conflict, got {err:?}"
+        );
+        let r = db.get_poll_results(&closed.id, Some("m1")).await.unwrap();
+        assert_eq!(r.total_votes, 0, "no vote recorded after close_at");
+
+        let future = chrono::Utc::now() + chrono::Duration::hours(1);
+        let open = db
+            .create_poll(
+                "Still open",
+                None,
+                &["A".into(), "B".into()],
+                Some(future),
+                false,
+                "creator",
+            )
+            .await
+            .unwrap();
+        db.vote_poll(&open.id, "m1", 0).await.unwrap();
+        let r = db.get_poll_results(&open.id, Some("m1")).await.unwrap();
+        assert_eq!(r.total_votes, 1);
+    }
+
+    /// Voting exactly on `close_at` is rejected (`close_at <= now`).
+    #[tokio::test]
+    async fn vote_rejected_when_close_at_equals_now() {
+        let db = test_db().await;
+        let id = db
+            .create_poll(
+                "Closing now",
+                None,
+                &["A".into(), "B".into()],
+                Some(chrono::Utc::now()),
+                false,
+                "creator",
+            )
+            .await
+            .unwrap()
+            .id;
+        let err = db.vote_poll(&id, "m1", 0).await.unwrap_err();
+        assert!(
+            matches!(err, DbError::Conflict(_)),
+            "vote at close_at must be Conflict, got {err:?}"
+        );
     }
 
     /// Voting on a poll that does not exist is `NotFound` (→ 404), not 500.

@@ -78,6 +78,14 @@ impl Database {
         .await
     }
 
+    pub async fn get_event(&self, id: &str) -> DbResult<Option<Event>> {
+        with_timeout(async {
+            let db: Option<DbEvent> = self.client.select(("event", id)).await?;
+            Ok(db.map(db_to_event))
+        })
+        .await
+    }
+
     pub async fn list_events(&self) -> DbResult<Vec<Event>> {
         with_timeout(async {
             let mut result = self

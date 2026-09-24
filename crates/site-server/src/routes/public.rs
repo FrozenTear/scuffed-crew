@@ -435,6 +435,17 @@ pub async fn public_member_profile(
             )
         })?;
 
+    // The public list is active-only. A known id must not bring back a
+    // deactivated or banned member's bio, socials, or team links.
+    if !member.is_active {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: "Member not found".into(),
+            }),
+        ));
+    }
+
     // Get all teams to resolve names
     let teams = state.db.list_teams().await.map_err(|_e| {
         (
