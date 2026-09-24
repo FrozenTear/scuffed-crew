@@ -250,7 +250,7 @@ configured_minisign_pub() {
 }
 
 warn_signature_fallback() {
-    warn "Signature check skipped: no published minisign public key and/or no .minisig release asset. Falling back to sha256 from the same GitHub release (not an independent trust root)."
+    warn "Signature check skipped: no published minisign public key. Falling back to sha256 from the same GitHub release (not an independent trust root)."
 }
 
 verify_release_signature() {
@@ -258,12 +258,19 @@ verify_release_signature() {
     local pub sig_url pubfile sigfile
     pub="$(configured_minisign_pub)"
     sig_url="${SIG_URL:-}"
-    if [[ -z "${pub//[[:space:]]/}" || -z "$sig_url" ]]; then
+    # No key configured: sha256 is the only check. A configured key must not
+    # fall back when the .minisig asset is missing — that would let a stripped
+    # signature downgrade the install to a same-origin checksum.
+    if [[ -z "${pub//[[:space:]]/}" ]]; then
         warn_signature_fallback
         return 0
     fi
+    if [[ -z "$sig_url" ]]; then
+        error "A minisign public key is configured, but this release has no .minisig asset. Refusing to install without a signature."
+        exit 1
+    fi
     if ! command -v minisign >/dev/null 2>&1; then
-        error "minisign public key and .minisig asset are both present, but minisign is not installed. Refusing to install without checking the signature."
+        error "minisign public key is configured and a .minisig asset is present, but minisign is not installed. Refusing to install without checking the signature."
         exit 1
     fi
     pubfile="$(mktemp)"

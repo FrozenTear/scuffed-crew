@@ -79,10 +79,10 @@ curl -fsSL "https://raw.githubusercontent.com/FrozenTear/scuffed-crew/${TAG}/cra
   | STAT_TRACKER_TAG="$TAG" STAT_TRACKER_PREFIX="$HOME/.local" bash
 ```
 
-The tarball's `.sha256` asset is checked when it is published. That digest
-comes from the same release. A minisign signature (`.minisig`) is checked only
-when a published public key and that asset both exist; until then the script
-logs that it fell back to sha256.
+The tarball's `.sha256` is checked before extract when that asset is published.
+That digest comes from the same release. With no minisign public key configured,
+the script logs that and stops there. Once a public key is configured, a missing
+or bad `.minisig` refuses the install. It does not fall back to sha256.
 
 **Manual:** download the tarball (+ optional `.sha256`) from the release page,
 extract, then:

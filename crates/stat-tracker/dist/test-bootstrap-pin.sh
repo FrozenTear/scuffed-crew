@@ -85,21 +85,83 @@ unset STAT_TRACKER_MINISIGN_PUB || true
 SIG_URL=""
 fallback="$(verify_release_signature "$TMP/unused" 2>&1)"
 [[ "$fallback" == *"Signature check skipped"* ]] || fail "missing fallback log: $fallback"
+[[ "$fallback" == *"no published minisign public key"* ]] || fail "fallback reason was: $fallback"
 [[ "$fallback" == *"not an independent trust root"* ]] || fail "fallback did not say sha256 is same-origin: $fallback"
-pass "missing key or signature falls back to sha256 with a log line"
+pass "no public key falls back to sha256 with a log line"
 
 set +e
-closed="$(
+missing_sig="$(
     STAT_TRACKER_MINISIGN_PUB='untrusted comment: minisign public key: test
 RWQfakekeynotreal' \
-    SIG_URL='https://example.invalid/scuffed-stat-tracker-linux-x86_64.tar.gz.minisig' \
+    SIG_URL='' \
     verify_release_signature "$TMP/unused" 2>&1
 )"
-closed_code=$?
+missing_sig_code=$?
 set -e
-[[ "$closed_code" -ne 0 ]] || fail "signature inputs were ignored"
-[[ "$closed" == *minisign* ]] || fail "fail-closed message was '$closed'"
-[[ "$closed" != *"Signature check skipped"* ]] || fail "both key and sig still skipped"
-pass "key plus .minisig refuses to skip the check"
+[[ "$missing_sig_code" -ne 0 ]] || fail "key without .minisig was accepted"
+[[ "$missing_sig" == *"no .minisig asset"* ]] || fail "missing-sig error was: $missing_sig"
+[[ "$missing_sig" == *"Refusing to install"* ]] || fail "missing-sig did not refuse: $missing_sig"
+[[ "$missing_sig" != *"Signature check skipped"* ]] || fail "key without .minisig fell back to sha256"
+pass "configured key and missing .minisig refuses to install"
+
+# minisign-not-installed is independent of whether the tool is on the real PATH.
+mkdir -p "$TMP/nopath"
+set +e
+no_tool="$(
+    PATH="$TMP/nopath" \
+    STAT_TRACKER_MINISIGN_PUB='untrusted comment: minisign public key: test
+RWQfakekeynotreal' \
+    SIG_URL='file:///tmp/does-not-matter.minisig' \
+    verify_release_signature "$TMP/unused" 2>&1
+)"
+no_tool_code=$?
+set -e
+[[ "$no_tool_code" -ne 0 ]] || fail "missing minisign binary was accepted"
+[[ "$no_tool" == *"minisign is not installed"* ]] || fail "missing-tool error was: $no_tool"
+[[ "$no_tool" != *"Signature check skipped"* ]] || fail "missing minisign fell back"
+pass "key plus .minisig refuses when minisign is not installed"
+
+if ! command -v minisign >/dev/null 2>&1; then
+    sudo apt-get update -qq
+    sudo apt-get install -y --no-install-recommends minisign
+fi
+command -v minisign >/dev/null 2>&1 || fail "minisign is required to test signature verify"
+
+printf 'payload\n' > "$TMP/payload"
+# -W: empty password, no prompt. The secret key stays in $TMP and is removed
+# with the test directory. Do not commit it.
+minisign -G -p "$TMP/minisign.pub" -s "$TMP/minisign.key" -W >/dev/null
+minisign -S -s "$TMP/minisign.key" -m "$TMP/payload" -x "$TMP/payload.minisig" -W >/dev/null
+
+good="$(
+    STAT_TRACKER_MINISIGN_PUB="$TMP/minisign.pub" \
+    SIG_URL="file://$TMP/payload.minisig" \
+    verify_release_signature "$TMP/payload" 2>&1
+)"
+[[ "$good" == *"minisign ok"* ]] || fail "good signature was not accepted: $good"
+pass "key plus good .minisig verifies"
+
+printf 'tampered\n' > "$TMP/payload"
+set +e
+bad="$(
+    STAT_TRACKER_MINISIGN_PUB="$TMP/minisign.pub" \
+    SIG_URL="file://$TMP/payload.minisig" \
+    verify_release_signature "$TMP/payload" 2>&1
+)"
+bad_code=$?
+set -e
+[[ "$bad_code" -ne 0 ]] || fail "bad signature was accepted"
+[[ "$bad" == *"signature verification failed"* ]] || fail "bad-sig error was: $bad"
+[[ "$bad" != *"Signature check skipped"* ]] || fail "bad signature fell back to sha256"
+pass "key plus bad .minisig refuses to install"
+
+# sha256 verify and the signature check both run before extract.
+sha_line="$(grep -n 'Verifying sha256' "$BOOTSTRAP" | tail -1 | cut -d: -f1)"
+sig_line="$(grep -n 'verify_release_signature "$ASSET_NAME"' "$BOOTSTRAP" | tail -1 | cut -d: -f1)"
+ext_line="$(grep -n 'safe_extract "$WORKDIR/$ASSET_NAME"' "$BOOTSTRAP" | tail -1 | cut -d: -f1)"
+[[ -n "$sha_line" && -n "$sig_line" && -n "$ext_line" ]] || fail "could not find verify/extract calls"
+[[ "$sha_line" -lt "$sig_line" && "$sig_line" -lt "$ext_line" ]] \
+    || fail "integrity checks are not before extract (sha=$sha_line sig=$sig_line extract=$ext_line)"
+pass "sha256 and signature run before extract"
 
 echo "All bootstrap pin checks passed."
