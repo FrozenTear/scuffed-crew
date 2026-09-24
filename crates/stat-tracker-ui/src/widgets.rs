@@ -1,4 +1,7 @@
-use iced::widget::{Row, button, column, container, mouse_area, row, space, text, text_input};
+use iced::Color;
+use iced::widget::{
+    Row, button, column, container, mouse_area, row, space, text, text_input, toggler,
+};
 use iced::{Alignment, Element, Fill, Length, Padding};
 
 use crate::aggregate::{HeroAgg, MapAgg, Record};
@@ -20,23 +23,36 @@ pub fn label_text(s: &str) -> text::Text<'static> {
 }
 
 pub fn app_header(app: &TrackerApp) -> Element<'_, Message> {
-    row![
-        text("Scuffed Tracker")
-            .size(SIZE_FEATURED)
-            .font(FONT_EXTRABOLD)
-            .color(TEXT),
-        space().width(Fill),
-        if crate::seasons::show_season_picker(&app.seasons.seasons) {
-            season_switch(&app.seasons.seasons, &app.season)
-        } else {
-            space().width(0).into()
-        },
-        role_chips(app.roles),
-        overlay_chip(app.overlay_showing(), app.game_running),
-        status_stub(&app.live_status),
+    let title = text("Scuffed Tracker")
+        .size(SIZE_FEATURED)
+        .font(FONT_EXTRABOLD)
+        .color(TEXT);
+
+    // Filters and the companion switch share a wrapping row. Status stays on
+    // the title line so a read-only indicator is not another control in that row.
+    let mut controls = Row::new().spacing(12).align_y(Alignment::Center);
+    if crate::seasons::show_season_picker(&app.seasons.seasons) {
+        controls = controls.push(season_switch(&app.seasons.seasons, &app.season));
+    }
+    controls = controls.push(role_chips(app.roles));
+    controls = controls.push(
+        row![
+            space().width(8),
+            overlay_toggle(app.overlay_showing(), app.game_running),
+        ]
+        .spacing(0)
+        .align_y(Alignment::Center),
+    );
+
+    column![
+        row![title, space().width(Fill), status_stub(&app.live_status)]
+            .spacing(16)
+            .align_y(Alignment::Center)
+            .width(Fill),
+        controls.wrap(),
     ]
-    .spacing(16)
-    .align_y(Alignment::Center)
+    .spacing(12)
+    .width(Fill)
     .into()
 }
 
@@ -60,29 +76,24 @@ pub fn sidebar(current: Screen) -> Element<'static, Message> {
 }
 
 pub fn role_chips(filter: crate::model::RoleFilter) -> Element<'static, Message> {
-    let mut chips = Row::new().spacing(8).align_y(Alignment::Center);
+    let mut chips = Row::new().spacing(2).align_y(Alignment::Center);
     for role in Role::all_playable() {
         let on = filter.is_on(role);
-        chips = chips.push(
-            button(
-                text(role.label())
-                    .size(SIZE_META)
-                    .font(FONT_SEMIBOLD)
-                    .color(if on { TEXT } else { TEXT_2 }),
-            )
-            .padding(Padding::from([6, 14]))
-            .style(theme::role_chip(role, on))
-            .on_press(Message::ToggleRole(role)),
-        );
+        chips = chips.push(segment_chip(
+            role.label().to_string(),
+            on,
+            theme::role_color(role),
+            Message::ToggleRole(role),
+        ));
     }
-    chips.into()
+    filter_tray(chips.into())
 }
 
 pub fn season_switch<'a>(seasons: &'a [Season], selected: &'a SeasonSel) -> Element<'a, Message> {
     if seasons.is_empty() {
         return space().width(0).into();
     }
-    let mut chips = Row::new().spacing(8).align_y(Alignment::Center);
+    let mut chips = Row::new().spacing(2).align_y(Alignment::Center);
     chips = chips.push(season_chip(
         "All time".into(),
         matches!(selected, SeasonSel::AllTime),
@@ -101,39 +112,67 @@ pub fn season_switch<'a>(seasons: &'a [Season], selected: &'a SeasonSel) -> Elem
             Message::SelectSeason(SeasonSel::Season(s.id.clone())),
         ));
     }
-    chips.into()
+    filter_tray(chips.into())
 }
 
 fn season_chip(label: String, selected: bool, msg: Message) -> Element<'static, Message> {
+    segment_chip(label, selected, theme::ACCENT, msg)
+}
+
+/// One filter option. Selected fill uses `accent` (brand accent or role colour).
+fn segment_chip(
+    label: String,
+    selected: bool,
+    accent: Color,
+    msg: Message,
+) -> Element<'static, Message> {
     button(
         text(label)
             .size(SIZE_META)
             .font(FONT_SEMIBOLD)
             .color(if selected { TEXT } else { TEXT_2 }),
     )
-    .padding(Padding::from([6, 14]))
-    .style(theme::chip(selected))
+    .padding(Padding::from([5, 12]))
+    .style(theme::filter_segment(accent, selected))
     .on_press(msg)
     .into()
 }
 
-pub fn overlay_chip(showing: bool, game_running: bool) -> Element<'static, Message> {
-    button(
-        text(crate::overlay::companion_copy(showing, game_running))
-            .size(SIZE_META)
-            .font(FONT_SEMIBOLD)
-            .color(if showing { TEXT } else { TEXT_2 }),
-    )
-    .padding(Padding::from([6, 14]))
-    .style(theme::chip(showing))
-    .on_press(Message::ToggleOverlay)
-    .into()
+/// Season or role options share one tray so they read as a filter group.
+fn filter_tray<'a>(chips: Element<'a, Message>) -> Element<'a, Message> {
+    container(chips)
+        .padding(Padding::from(3))
+        .style(|_t| container::Style {
+            background: Some(iced::Background::Color(theme::SURFACE)),
+            border: iced::Border {
+                color: theme::BORDER,
+                width: 1.0,
+                radius: theme::RADIUS_CHIP.into(),
+            },
+            ..container::Style::default()
+        })
+        .into()
 }
 
+pub fn overlay_toggle(showing: bool, game_running: bool) -> Element<'static, Message> {
+    toggler(showing)
+        .label(crate::overlay::companion_copy(showing, game_running))
+        .on_toggle(|_| Message::ToggleOverlay)
+        .size(20)
+        .text_size(SIZE_META)
+        .font(FONT_SEMIBOLD)
+        .spacing(8)
+        .style(theme::companion_toggle)
+        .into()
+}
+
+/// Read-only capture indicator. Dot + text, no button chrome and no hover.
 pub fn status_stub<'a>(live: &'a str) -> Element<'a, Message> {
-    container(
-        row![
-            container(space().width(8).height(8)).style(|_| container::Style {
+    row![
+        container(space().width(8).height(8))
+            .width(8)
+            .height(8)
+            .style(|_| container::Style {
                 background: Some(iced::Background::Color(theme::OK)),
                 border: iced::Border {
                     radius: 999.0.into(),
@@ -141,21 +180,10 @@ pub fn status_stub<'a>(live: &'a str) -> Element<'a, Message> {
                 },
                 ..container::Style::default()
             }),
-            text(live).size(SIZE_META).font(FONT_MEDIUM).color(TEXT_2),
-        ]
-        .spacing(8)
-        .align_y(Alignment::Center),
-    )
-    .padding(Padding::from([6, 12]))
-    .style(|_t| container::Style {
-        background: Some(iced::Background::Color(theme::SURFACE)),
-        border: iced::Border {
-            color: theme::BORDER,
-            width: 1.0,
-            radius: theme::RADIUS_CHIP.into(),
-        },
-        ..container::Style::default()
-    })
+        text(live).size(SIZE_META).font(FONT_MEDIUM).color(TEXT_2),
+    ]
+    .spacing(8)
+    .align_y(Alignment::Center)
     .into()
 }
 
@@ -468,7 +496,7 @@ pub fn health_panel(
                 .size(SIZE_BODY)
                 .font(FONT_MEDIUM)
                 .color(TEXT_2),
-            overlay_chip(overlay_showing, game_running),
+            overlay_toggle(overlay_showing, game_running),
         ]
         .spacing(8),
     )
