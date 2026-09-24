@@ -2888,12 +2888,7 @@ async fn try_sync(
     let client = client.clone();
     try_sync_with(store, data_dir, move |matches, tombstones| {
         let client = client.clone();
-        async move {
-            client
-                .upload_matches(&matches, &tombstones)
-                .await
-                .map_err(|e| e.to_string())
-        }
+        async move { client.upload_matches(&matches, &tombstones).await }
     })
     .await
 }
@@ -2925,7 +2920,7 @@ fn maybe_spawn_periodic_sync(
         .should_attempt(Instant::now());
     if !periodic_sync_due(capture_count, in_flight, allow) {
         if capture_count.is_multiple_of(SYNC_EVERY_N_CAPTURES) && !in_flight && !allow {
-            tracing::debug!("sync skipped — backing off after a server error");
+            tracing::debug!("sync skipped — backing off before the next attempt");
         }
         return;
     }
@@ -2943,12 +2938,21 @@ fn apply_sync_backoff(backoff: &std::sync::Mutex<sync::SyncBackoff>, outcome: sy
     let now = Instant::now();
     let mut clock = backoff.lock().unwrap_or_else(|e| e.into_inner());
     clock.observe(outcome, now);
-    if outcome == sync::SyncAttempt::ServerError {
-        tracing::warn!(
-            failures = clock.failures(),
-            retry_in_secs = clock.retry_after(now).as_secs(),
-            "sync upload failed — backing off so a down server is not hammered"
-        );
+    match outcome {
+        sync::SyncAttempt::ServerError { .. } => {
+            tracing::warn!(
+                failures = clock.failures(),
+                retry_in_secs = clock.retry_after(now).as_secs(),
+                "sync upload failed — backing off so a down server is not hammered"
+            );
+        }
+        sync::SyncAttempt::RateLimited { .. } => {
+            tracing::warn!(
+                retry_in_secs = clock.retry_after(now).as_secs(),
+                "sync rate-limited — backing off before the next upload"
+            );
+        }
+        sync::SyncAttempt::Uploaded | sync::SyncAttempt::NoServerCall => {}
     }
 }
 
@@ -2963,7 +2967,9 @@ async fn try_sync_with<F, Fut>(
 ) -> sync::SyncAttempt
 where
     F: FnOnce(Vec<storage::PersonalMatch>, Vec<String>) -> Fut,
-    Fut: std::future::Future<Output = Result<scuffed_types::api::StatsUploadResponse, String>>,
+    Fut: std::future::Future<
+            Output = Result<scuffed_types::api::StatsUploadResponse, sync::SyncUploadError>,
+        >,
 {
     // Errors are stringified immediately: `Box<dyn Error>` isn't `Send`, and
     // this future runs on a spawned task.
@@ -3030,8 +3036,14 @@ where
             sync::SyncAttempt::Uploaded
         }
         Err(e) => {
-            tracing::error!(error = %e, "sync upload failed");
-            sync::SyncAttempt::ServerError
+            let attempt = e.attempt();
+            match attempt {
+                sync::SyncAttempt::RateLimited { .. } => {
+                    tracing::warn!(error = %e, "sync rate-limited — will retry after backoff");
+                }
+                _ => tracing::error!(error = %e, "sync upload failed"),
+            }
+            attempt
         }
     }
 }
