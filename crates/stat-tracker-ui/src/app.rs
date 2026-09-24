@@ -194,8 +194,12 @@ impl TrackerApp {
 
         let snapshot_mtime = snapshot::snapshot_mtime(&cli.data_dir);
         let live_status = live_status_for(&games);
-        let health_status = health_status_for(&cli.data_dir, &games);
         let saved_config = Config::load().unwrap_or_default();
+        let health_status = health_status_for(
+            &cli.data_dir,
+            &games,
+            saved_config.sync.as_ref().map(|s| s.server_url.as_str()),
+        );
         let overlay_hotkey = seasons::load_overlay_hotkey(&cli.data_dir);
         let mut settings = SettingsForm::from_config(&saved_config);
         settings.overlay_hotkey = overlay_hotkey.bind.clone();
@@ -424,11 +428,11 @@ impl TrackerApp {
                                 tracing::warn!(error = %e, "failed to write ui_state.json");
                             }
                         }
-                        self.health_status = health_status_for(&self.data_dir, &self.games);
+                        self.health_status = self.health_now();
                     }
                     Err(e) => {
                         tracing::info!(error = %e, "seasons fetch failed; using cache");
-                        self.health_status = health_status_for(&self.data_dir, &self.games);
+                        self.health_status = self.health_now();
                     }
                 }
                 Task::none()
@@ -558,6 +562,13 @@ impl TrackerApp {
                 if self.fixture.is_some() {
                     return Task::none();
                 }
+                // Block the whole save. Writing the form would either store
+                // the cleartext URL or drop the sync block; the file on disk
+                // stays as it is until the URL is https, loopback http, or blank.
+                if let Some(problem) = settings::sync_url_problem(&self.settings.sync_url) {
+                    self.toast = Some(problem.to_string());
+                    return Task::none();
+                }
                 let hotkey = OverlayHotkey::normalized(
                     self.settings.overlay_hotkey_enabled,
                     &self.settings.overlay_hotkey,
@@ -576,6 +587,7 @@ impl TrackerApp {
                                 }
                                 let daemon_up = daemon::is_daemon_running(&self.data_dir);
                                 self.saved_config = config;
+                                self.health_status = self.health_now();
                                 self.overlay_hotkey = hotkey;
                                 self.settings = SettingsForm::from_config(&self.saved_config);
                                 self.settings.overlay_hotkey = self.overlay_hotkey.bind.clone();
@@ -731,7 +743,7 @@ impl TrackerApp {
                 });
                 if ok {
                     self.games.clear();
-                    self.health_status = health_status_for(&self.data_dir, &self.games);
+                    self.health_status = self.health_now();
                 }
                 Task::none()
             }
@@ -839,7 +851,7 @@ impl TrackerApp {
                 let snap = snapshot::load_snapshot(&self.data_dir);
                 self.games = games_from_snapshot(&snap);
                 self.live_status = live_status_for(&self.games);
-                self.health_status = health_status_for(&self.data_dir, &self.games);
+                self.health_status = self.health_now();
                 self.clock = Utc::now();
             }
             self.daemon = daemon::refresh_view(&self.data_dir, &self.daemon);
@@ -1015,6 +1027,17 @@ impl TrackerApp {
             .style(theme::page_background)
             .into()
     }
+
+    fn health_now(&self) -> String {
+        health_status_for(
+            &self.data_dir,
+            &self.games,
+            self.saved_config
+                .sync
+                .as_ref()
+                .map(|s| s.server_url.as_str()),
+        )
+    }
 }
 
 fn fixture_clock(fixture: Option<FixtureKind>, games: &[Game]) -> DateTime<Utc> {
@@ -1033,7 +1056,12 @@ fn live_status_for(games: &[Game]) -> String {
     }
 }
 
-fn health_status_for(data_dir: &std::path::Path, games: &[Game]) -> String {
+fn health_status_for(data_dir: &std::path::Path, games: &[Game], sync_url: Option<&str>) -> String {
+    if let Some(url) = sync_url.map(str::trim).filter(|s| !s.is_empty())
+        && let Err(e) = stat_tracker::config::validate_sync_server_url(url)
+    {
+        return format!("Sync paused — {}", e.message());
+    }
     if data_dir.join("live_snapshot.json").exists() || !games.is_empty() {
         "Ready".into()
     } else {
@@ -1058,5 +1086,35 @@ mod tests {
         let id = window::Id::unique();
         assert_eq!(tray_show_op(None), TrayWindowOp::Open);
         assert_eq!(tray_show_op(Some(id)), TrayWindowOp::Focus(id));
+    }
+
+    #[test]
+    fn health_names_an_insecure_saved_sync_url() {
+        let dir = std::env::temp_dir().join(format!("sst-health-m20-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("live_snapshot.json"), b"{}").unwrap();
+        let paused = super::health_status_for(&dir, &[], Some("http://example.com"));
+        assert!(
+            paused.starts_with("Sync paused"),
+            "existing cleartext config must be visible in tracker health, got {paused}"
+        );
+        assert!(paused.contains("https"), "{paused}");
+        assert_eq!(
+            super::health_status_for(&dir, &[], Some("https://crew.example")),
+            "Ready"
+        );
+        assert_eq!(
+            super::health_status_for(&dir, &[], Some("http://127.0.0.1:3030")),
+            "Ready"
+        );
+        assert_eq!(
+            super::health_status_for(&dir, &[], Some("http://localhost")),
+            "Ready"
+        );
+        assert_eq!(
+            super::health_status_for(&dir, &[], Some("http://[::1]")),
+            "Ready"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -150,10 +150,13 @@ pub fn nonempty(s: &str) -> Option<String> {
 }
 
 /// Both URL and token are required — same as the Dioxus save path.
+/// An unsafe URL yields `None` so a config value cannot carry a token that
+/// the daemon would have to refuse. Save itself is blocked first
+/// ([`sync_url_problem`]) so an existing cleartext URL is not wiped.
 pub fn sync_from_fields(url: &str, token: &str) -> Option<SyncConfig> {
     let server_url = url.trim();
     let token = token.trim();
-    if server_url.is_empty() || token.is_empty() {
+    if server_url.is_empty() || token.is_empty() || sync_url_problem(server_url).is_some() {
         None
     } else {
         Some(SyncConfig {
@@ -161,6 +164,18 @@ pub fn sync_from_fields(url: &str, token: &str) -> Option<SyncConfig> {
             token: token.to_string(),
         })
     }
+}
+
+/// Inline Settings warning. `None` when the field is blank (sync off) or the
+/// URL is safe to save. Save must not persist a URL that returns `Some`.
+pub fn sync_url_problem(url: &str) -> Option<&'static str> {
+    let url = url.trim();
+    if url.is_empty() {
+        return None;
+    }
+    stat_tracker::config::validate_sync_server_url(url)
+        .err()
+        .map(|e| e.message())
 }
 
 pub fn parse_u64(raw: &str, fallback: u64) -> u64 {
@@ -621,27 +636,33 @@ fn auto_detect_card(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
 }
 
 fn sync_card(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
-    let body = column![
-        field_input(
-            "Website URL",
-            "https://your-site.com",
-            &app.settings.sync_url,
-            SettingsField::SyncUrl,
-            false,
-            demo,
-            None,
-        ),
-        field_input(
-            "Account token",
-            "paste the token from the website",
-            &app.settings.sync_token,
-            SettingsField::SyncToken,
-            true,
-            demo,
-            Some("Both needed to upload. Blank either to turn sync off."),
-        ),
-    ]
+    let mut body = column![field_input(
+        "Website URL",
+        "https://your-site.com",
+        &app.settings.sync_url,
+        SettingsField::SyncUrl,
+        false,
+        demo,
+        None,
+    ),]
     .spacing(6);
+    if let Some(warning) = sync_url_problem(&app.settings.sync_url) {
+        body = body.push(
+            text(warning)
+                .size(SIZE_META)
+                .font(FONT_MEDIUM)
+                .color(theme::DANGER),
+        );
+    }
+    body = body.push(field_input(
+        "Account token",
+        "paste the token from the website",
+        &app.settings.sync_token,
+        SettingsField::SyncToken,
+        true,
+        demo,
+        Some("Both needed to upload. Blank either to turn sync off."),
+    ));
     settings_card("Website sync", body.into())
 }
 
@@ -973,6 +994,29 @@ mod tests {
         let s = sync_from_fields(" https://x ", " tok ").unwrap();
         assert_eq!(s.server_url, "https://x");
         assert_eq!(s.token, "tok");
+    }
+
+    #[test]
+    fn sync_url_scheme_blocks_cleartext_and_allows_loopback() {
+        assert!(sync_url_problem("https://crew.example").is_none());
+        assert!(sync_url_problem("http://localhost:3030").is_none());
+        assert!(sync_url_problem("http://127.0.0.1").is_none());
+        assert!(sync_url_problem("http://[::1]:9").is_none());
+        assert!(sync_url_problem("").is_none());
+        assert!(sync_url_problem("   ").is_none());
+        let warn = sync_url_problem("http://crew.example").expect("cleartext warning");
+        assert!(warn.contains("https"), "{warn}");
+        assert!(sync_from_fields("http://crew.example", "tok").is_none());
+        assert!(sync_from_fields("http://127.0.0.1:3030", "tok").is_some());
+        assert!(sync_from_fields("https://crew.example", "tok").is_some());
+
+        let mut form = SettingsForm::from_config(&base());
+        form.sync_url = "http://example.com".into();
+        form.sync_token = "secret".into();
+        assert!(
+            form.to_config(&base()).sync.is_none(),
+            "an unsafe URL must not become a saved sync config"
+        );
     }
 
     #[test]
