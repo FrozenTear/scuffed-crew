@@ -29,8 +29,18 @@ async fn main() {
     // Init-only: root migrations + ensure EDITOR app user, then exit.
     // Use for separate migrate jobs; set SURREALDB_BOOTSTRAP=0 on long-lived app containers.
     if std::env::var("SURREALDB_MIGRATE_ONLY").ok().as_deref() == Some("1") {
-        if std::env::var("SURREALDB_URL").is_err() {
-            panic!("SURREALDB_MIGRATE_ONLY=1 requires SURREALDB_URL (remote DB)");
+        match scuffed_db::resolve_database_boot_mode_from_env() {
+            Ok(scuffed_db::DatabaseBootMode::Remote) => {}
+            Ok(scuffed_db::DatabaseBootMode::InMemoryDev) => {
+                eprintln!(
+                    "error: SURREALDB_MIGRATE_ONLY=1 requires a non-blank SURREALDB_URL (remote DB)"
+                );
+                std::process::exit(1);
+            }
+            Err(err) => {
+                eprintln!("error: {err}");
+                std::process::exit(1);
+            }
         }
         Database::bootstrap_from_env()
             .await
@@ -42,7 +52,9 @@ async fn main() {
     // Connect to SurrealDB (remote or in-memory fallback).
     // Prefer SURREALDB_AUTH_MODE=scoped + non-root user in production.
     // Remote scoped: optional root bootstrap (unless SURREALDB_BOOTSTRAP=0), then EDITOR app user.
-    let is_dev = std::env::var("SURREALDB_URL").is_err();
+    // PRODUCTION with an unset or blank SURREALDB_URL refuses to start (no in-memory DB).
+    let boot_mode = scuffed_db::database_boot_mode_or_exit();
+    let is_dev = boot_mode == scuffed_db::DatabaseBootMode::InMemoryDev;
     let db = if is_dev {
         tracing::info!("No SURREALDB_URL set, using in-memory database");
         let db = Database::connect_memory()

@@ -5,7 +5,10 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
+User=root
+# Root-only env file. It holds RESTIC_REPOSITORY (off-host URL) and
+# RESTIC_PASSWORD_FILE (path to a root-owned mode-600 password file).
+# Do not point this at data/secrets.env — that file is inside the snapshot.
+EnvironmentFile=/etc/scuffed-crew/backup.env
 ExecStart=/opt/scuffed-crew/scripts/backup.sh
-EnvironmentFile=-/opt/scuffed-crew/data/secrets.env
-EnvironmentFile=-/opt/scuffed-crew/.env
 TimeoutStartSec=600

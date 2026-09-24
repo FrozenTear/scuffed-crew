@@ -1,12 +1,16 @@
+use std::collections::HashMap;
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use surrealdb::engine::any::Any;
 use surrealdb::types::Datetime as SurrealDatetime;
+use surrealdb::Surreal;
 use surrealdb_types::{RecordId, SurrealValue};
 
 use crate::types::{
     HeroStats, MapStats, MemberHeroScopedAgg, MemberLeaderboardRow, PersonalMatch, PersonalStats,
 };
-use crate::{with_timeout, Database, DbResult};
+use crate::{with_timeout, Database, DbError, DbResult};
 
 /// Minimum games required for rate metrics (winrate / kd) on public boards.
 const LEADERBOARD_MIN_GAMES: u32 = 5;
@@ -67,9 +71,20 @@ fn db_to_personal_match(db: DbPersonalMatch) -> PersonalMatch {
 /// so a retried legacy upload updates the same row instead of duplicating —
 /// the same dedup the old `(member, hero, map, played_at)` unique index
 /// provided, without its wedge-the-queue failure mode.
-fn legacy_session_id(member_id: &str, m: &crate::types::PersonalMatch) -> String {
+///
+/// Historical rows stored before session ids existed have `session_id = ''`.
+/// Those are not one session: each distinct (hero, map, played_at) is its own
+/// game. The migration assigns this same id before building the unique index
+/// so those games do not collapse onto a single empty key.
+fn legacy_session_id(
+    member_id: &str,
+    hero: &str,
+    map_name: &str,
+    played_at: &DateTime<Utc>,
+) -> String {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    for part in [member_id, &m.hero, &m.map_name, &m.played_at.to_rfc3339()] {
+    let played = played_at.to_rfc3339();
+    for part in [member_id, hero, map_name, played.as_str()] {
         for b in part.as_bytes() {
             h ^= u64::from(*b);
             h = h.wrapping_mul(0x0000_0100_0000_01b3);
@@ -78,6 +93,40 @@ fn legacy_session_id(member_id: &str, m: &crate::types::PersonalMatch) -> String
         h = h.wrapping_mul(0x0000_0100_0000_01b3);
     }
     format!("legacy-{h:016x}")
+}
+
+/// Deterministic `personal_match` record-id key for `(member_id, session_id)`.
+///
+/// The member id is length-prefixed so `("ab","c")` and `("a","bc")` do not
+/// collide. The `pm` prefix forces a string key: a bare hex digit string can
+/// be stored as a numeric record id.
+fn personal_match_record_key(member_id: &str, session_id: &str) -> String {
+    let len = u32::try_from(member_id.len()).unwrap_or(u32::MAX);
+    let mut raw = Vec::with_capacity(4 + member_id.len() + session_id.len());
+    raw.extend_from_slice(&len.to_be_bytes());
+    raw.extend_from_slice(member_id.as_bytes());
+    raw.extend_from_slice(session_id.as_bytes());
+    format!("pm{}", hex::encode(raw))
+}
+
+fn personal_match_rid(member_id: &str, session_id: &str) -> RecordId {
+    let key = personal_match_record_key(member_id, session_id);
+    RecordId::new("personal_match", key.as_str())
+}
+
+fn record_key_of(id: &RecordId) -> String {
+    crate::record_id_key_to_string(id.key.clone())
+}
+
+/// SurrealDB v3 reports a unique-index violation as `IndexExists` /
+/// "already contains", not the word "unique". Matching only "unique" is what
+/// wedged the old content-dedup index (see the `pm_dedup_idx` comment).
+fn session_index_conflict(err: &surrealdb::Error) -> bool {
+    let msg = err.to_string().to_ascii_lowercase();
+    msg.contains("already contains")
+        || msg.contains("indexexists")
+        || msg.contains("index exists")
+        || msg.contains("pm_session_idx")
 }
 
 /// Season window `[starts_at, ends_at)` applied to `played_at`.
@@ -96,6 +145,26 @@ fn season_filter(season: Option<SeasonWindow>) -> &'static str {
     }
 }
 
+const UPSERT_BY_ID_SQL: &str = r#"UPSERT $rid SET
+    member_id = $mid, session_id = $sid,
+    hero = $hero, map_name = $map, game_mode = $mode,
+    role = $role, outcome = $outcome,
+    elims = $elims, deaths = $deaths, assists = $assists,
+    damage = $damage, healing = $healing, mitigation = $mit,
+    edited = $edited,
+    played_at = $played, uploaded_at = time::now()
+    RETURN AFTER"#;
+
+const UPDATE_BY_SESSION_SQL: &str = r#"UPDATE personal_match SET
+    hero = $hero, map_name = $map, game_mode = $mode,
+    role = $role, outcome = $outcome,
+    elims = $elims, deaths = $deaths, assists = $assists,
+    damage = $damage, healing = $healing, mitigation = $mit,
+    edited = $edited,
+    played_at = $played, uploaded_at = time::now()
+    WHERE member_id = $mid AND session_id = $sid
+    RETURN AFTER"#;
+
 impl Database {
     /// Upsert uploaded matches, one server row per (member, session).
     ///
@@ -105,7 +174,13 @@ impl Database {
     /// or how often the client retries. Entries without a session id get a
     /// stable content-derived legacy id (see [`legacy_session_id`]).
     ///
-    /// Returns the number of rows upserted.
+    /// Each row is stored at [`personal_match_record_key`], derived from
+    /// `(member_id, session_id)`. A concurrent insert that loses the unique
+    /// index race is retried as an update of the row that won, so a daemon
+    /// retry does not surface as a 500.
+    ///
+    /// Returns the number of rows upserted. The HTTP layer reports that count
+    /// as `inserted` (updates included) and `skipped = submitted - inserted`.
     pub async fn upsert_personal_matches(
         &self,
         member_id: &str,
@@ -114,46 +189,93 @@ impl Database {
         let mut upserted = 0u32;
         for m in matches {
             let session_id = if m.session_id.is_empty() {
-                legacy_session_id(member_id, m)
+                legacy_session_id(member_id, &m.hero, &m.map_name, &m.played_at)
             } else {
                 m.session_id.clone()
             };
-            with_timeout(async {
-                self.client
-                    .query(
-                        r#"UPSERT personal_match SET
-                               member_id = $mid, session_id = $sid,
-                               hero = $hero, map_name = $map, game_mode = $mode,
-                               role = $role, outcome = $outcome,
-                               elims = $elims, deaths = $deaths, assists = $assists,
-                               damage = $damage, healing = $healing, mitigation = $mit,
-                               edited = $edited,
-                               played_at = $played, uploaded_at = time::now()
-                           WHERE member_id = $mid AND session_id = $sid"#,
-                    )
-                    .bind(("mid", member_id.to_string()))
-                    .bind(("sid", session_id))
-                    .bind(("hero", m.hero.clone()))
-                    .bind(("map", m.map_name.clone()))
-                    .bind(("mode", m.game_mode.clone()))
-                    .bind(("role", m.role.clone()))
-                    .bind(("outcome", m.outcome.clone()))
-                    .bind(("elims", m.elims))
-                    .bind(("deaths", m.deaths))
-                    .bind(("assists", m.assists))
-                    .bind(("damage", m.damage))
-                    .bind(("healing", m.healing))
-                    .bind(("mit", m.mitigation))
-                    .bind(("edited", m.edited))
-                    .bind(("played", SurrealDatetime::from(m.played_at)))
-                    .await?
-                    .check()?;
-                Ok(())
-            })
-            .await?;
+            self.upsert_personal_match(member_id, &session_id, m)
+                .await?;
             upserted += 1;
         }
         Ok(upserted)
+    }
+
+    async fn upsert_personal_match(
+        &self,
+        member_id: &str,
+        session_id: &str,
+        m: &crate::types::PersonalMatch,
+    ) -> DbResult<()> {
+        let mut last_conflict: Option<surrealdb::Error> = None;
+        for _attempt in 0..3 {
+            match self
+                .write_personal_match(true, member_id, session_id, m)
+                .await
+            {
+                Ok(_) => return Ok(()),
+                Err(DbError::Surreal(e)) if session_index_conflict(&e) => {
+                    match self
+                        .write_personal_match(false, member_id, session_id, m)
+                        .await
+                    {
+                        Ok(n) if n > 0 => return Ok(()),
+                        Ok(_) => last_conflict = Some(e),
+                        Err(DbError::Surreal(e2)) if session_index_conflict(&e2) => {
+                            last_conflict = Some(e2);
+                        }
+                        Err(err) => return Err(err),
+                    }
+                }
+                Err(err) => return Err(err),
+            }
+        }
+        Err(last_conflict.map(DbError::Surreal).unwrap_or_else(|| {
+            DbError::Conflict("personal match session upsert conflicted".into())
+        }))
+    }
+
+    /// `by_id` upserts the deterministic record. Otherwise update the existing
+    /// `(member_id, session_id)` row (a random id left over from before the
+    /// migration, or the winner of a concurrent insert).
+    async fn write_personal_match(
+        &self,
+        by_id: bool,
+        member_id: &str,
+        session_id: &str,
+        m: &crate::types::PersonalMatch,
+    ) -> DbResult<u32> {
+        let sql = if by_id {
+            UPSERT_BY_ID_SQL
+        } else {
+            UPDATE_BY_SESSION_SQL
+        };
+        with_timeout(async {
+            let mut q = self.client.query(sql);
+            if by_id {
+                q = q.bind(("rid", personal_match_rid(member_id, session_id)));
+            }
+            let mut res = q
+                .bind(("mid", member_id.to_string()))
+                .bind(("sid", session_id.to_string()))
+                .bind(("hero", m.hero.clone()))
+                .bind(("map", m.map_name.clone()))
+                .bind(("mode", m.game_mode.clone()))
+                .bind(("role", m.role.clone()))
+                .bind(("outcome", m.outcome.clone()))
+                .bind(("elims", m.elims))
+                .bind(("deaths", m.deaths))
+                .bind(("assists", m.assists))
+                .bind(("damage", m.damage))
+                .bind(("healing", m.healing))
+                .bind(("mit", m.mitigation))
+                .bind(("edited", m.edited))
+                .bind(("played", SurrealDatetime::from(m.played_at)))
+                .await?
+                .check()?;
+            let rows: Vec<DbPersonalMatch> = res.take(0)?;
+            Ok(rows.len() as u32)
+        })
+        .await
     }
 
     /// Remove a member's rows for locally-deleted sessions (client tombstones).
@@ -667,8 +789,192 @@ impl Database {
     }
 }
 
+/// Make `(member_id, session_id)` unique without collapsing distinct
+/// pre-session games.
+///
+/// Operator pre-check (read-only). Counts groups that already share a
+/// non-empty session id. Blank ids are excluded: pre-session rows all stored
+/// `''` and are distinct games, not one duplicated session.
+///
+/// ```surql
+/// SELECT count() AS duplicate_groups FROM (
+///     SELECT member_id, session_id, count() AS n
+///     FROM personal_match
+///     WHERE session_id != ''
+///     GROUP BY member_id, session_id
+/// ) WHERE n > 1 GROUP ALL;
+/// ```
+///
+/// Blank rows, counted separately (rewritten to `legacy-*`, not deleted as one
+/// group):
+///
+/// ```surql
+/// SELECT member_id, count() AS blank_session_rows
+/// FROM personal_match
+/// WHERE session_id = '' OR session_id = NONE
+/// GROUP BY member_id;
+/// ```
+///
+/// Idempotent. Order:
+/// 1. Rows with an empty session id get the same `legacy-*` id the write path
+///    uses, so a later content-identical upload matches them and two different
+///    games do not share `''`.
+/// 2. Each `(member_id, session_id)` group keeps the newest `uploaded_at`.
+///    Ties keep the lexicographically greatest record-id key.
+/// 3. The survivor is moved to the deterministic record id when it is not
+///    already there (so the next UPSERT updates it instead of inserting a
+///    second row that the unique index would reject).
+/// 4. `REMOVE INDEX IF EXISTS pm_session_idx` then
+///    `DEFINE INDEX ... UNIQUE`. `DEFINE INDEX IF NOT EXISTS` cannot alter an
+///    existing non-unique index, so the remove is required.
+pub(crate) async fn migrate_personal_match_session_index(client: &Surreal<Any>) -> DbResult<()> {
+    let mut result = client
+        .query("SELECT * FROM personal_match")
+        .await?
+        .check()?;
+    let rows: Vec<DbPersonalMatch> = result.take(0)?;
+
+    struct Planned {
+        effective_sid: String,
+        uploaded_at: DateTime<Utc>,
+        record_key: String,
+        row: DbPersonalMatch,
+    }
+
+    let mut blank_session_ids = 0u64;
+    let mut planned = Vec::with_capacity(rows.len());
+    for row in rows {
+        let uploaded_at: DateTime<Utc> = row.uploaded_at.into();
+        let record_key = row.id.as_ref().map(record_key_of).unwrap_or_default();
+        let effective_sid = if row.session_id.is_empty() {
+            blank_session_ids += 1;
+            let played: DateTime<Utc> = row.played_at.into();
+            legacy_session_id(&row.member_id, &row.hero, &row.map_name, &played)
+        } else {
+            row.session_id.clone()
+        };
+        planned.push(Planned {
+            effective_sid,
+            uploaded_at,
+            record_key,
+            row,
+        });
+    }
+
+    let mut groups: HashMap<(String, String), Vec<Planned>> = HashMap::new();
+    for item in planned {
+        groups
+            .entry((item.row.member_id.clone(), item.effective_sid.clone()))
+            .or_default()
+            .push(item);
+    }
+
+    let mut deleted = 0u64;
+    let mut rekeyed = 0u64;
+    for ((member_id, session_id), mut group) in groups {
+        group.sort_by(|a, b| {
+            b.uploaded_at
+                .cmp(&a.uploaded_at)
+                .then_with(|| b.record_key.cmp(&a.record_key))
+        });
+        let winner = group.swap_remove(0);
+        for loser in group {
+            if let Some(id) = loser.row.id.clone() {
+                delete_personal_match_record(client, id).await?;
+                deleted += 1;
+            }
+        }
+
+        let desired_key = personal_match_record_key(&member_id, &session_id);
+        let desired = personal_match_rid(&member_id, &session_id);
+        if winner.record_key != desired_key {
+            // A loser may already occupy the deterministic id (partial earlier
+            // run). It was deleted above, so this UPSERT recreates the keeper.
+            relocate_personal_match(client, desired, &winner.row, &session_id).await?;
+            if let Some(id) = winner.row.id.clone() {
+                delete_personal_match_record(client, id).await?;
+            }
+            rekeyed += 1;
+        } else if winner.row.session_id != session_id {
+            client
+                .query("UPDATE $rid SET session_id = $sid")
+                .bind(("rid", desired))
+                .bind(("sid", session_id))
+                .await?
+                .check()?;
+        }
+    }
+
+    client
+        .query(
+            r#"
+            REMOVE INDEX IF EXISTS pm_session_idx ON personal_match;
+            DEFINE INDEX pm_session_idx ON personal_match COLUMNS member_id, session_id UNIQUE;
+            "#,
+        )
+        .await?
+        .check()?;
+
+    tracing::info!(
+        deleted,
+        rekeyed,
+        blank_session_ids,
+        "personal_match session index is UNIQUE on (member_id, session_id)"
+    );
+    Ok(())
+}
+
+async fn delete_personal_match_record(client: &Surreal<Any>, rid: RecordId) -> DbResult<()> {
+    client
+        .query("DELETE $rid")
+        .bind(("rid", rid))
+        .await?
+        .check()?;
+    Ok(())
+}
+
+async fn relocate_personal_match(
+    client: &Surreal<Any>,
+    rid: RecordId,
+    row: &DbPersonalMatch,
+    session_id: &str,
+) -> DbResult<()> {
+    client
+        .query(
+            r#"UPSERT $rid SET
+                member_id = $mid, session_id = $sid,
+                hero = $hero, map_name = $map, game_mode = $mode,
+                role = $role, outcome = $outcome,
+                elims = $elims, deaths = $deaths, assists = $assists,
+                damage = $damage, healing = $healing, mitigation = $mit,
+                edited = $edited,
+                played_at = $played, uploaded_at = $uploaded"#,
+        )
+        .bind(("rid", rid))
+        .bind(("mid", row.member_id.clone()))
+        .bind(("sid", session_id.to_string()))
+        .bind(("hero", row.hero.clone()))
+        .bind(("map", row.map_name.clone()))
+        .bind(("mode", row.game_mode.clone()))
+        .bind(("role", row.role.clone()))
+        .bind(("outcome", row.outcome.clone()))
+        .bind(("elims", row.elims))
+        .bind(("deaths", row.deaths))
+        .bind(("assists", row.assists))
+        .bind(("damage", row.damage))
+        .bind(("healing", row.healing))
+        .bind(("mit", row.mitigation))
+        .bind(("edited", row.edited))
+        .bind(("played", row.played_at))
+        .bind(("uploaded", row.uploaded_at))
+        .await?
+        .check()?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
+    use super::{legacy_session_id, personal_match_record_key};
     use crate::migrations::run_migrations;
     use crate::Database;
     use chrono::{TimeZone, Utc};
@@ -719,6 +1025,11 @@ mod tests {
         let rows = db.list_personal_matches("m1", 10, 0).await.unwrap();
         assert_eq!(rows.len(), 1, "one game must be one server row");
         assert_eq!(rows[0].elims, 22, "last snapshot wins");
+        assert_eq!(
+            rows[0].id,
+            personal_match_record_key("m1", "s1"),
+            "row is stored at the deterministic record id"
+        );
         let stats = db.get_personal_stats("m1").await.unwrap();
         assert_eq!((stats.total_matches, stats.wins), (1, 1));
     }
@@ -832,6 +1143,14 @@ mod tests {
 
         let rows = db.list_personal_matches("m1", 10, 0).await.unwrap();
         assert_eq!(rows.len(), 2, "legacy dedup by content, not by batch");
+        assert!(
+            rows.iter().all(|r| r.session_id.starts_with("legacy-")),
+            "empty client session ids are stored as legacy-* ids"
+        );
+        assert_ne!(rows[0].session_id, rows[1].session_id);
+        for r in &rows {
+            assert_eq!(r.id, personal_match_record_key(&r.member_id, &r.session_id));
+        }
     }
 
     #[tokio::test]
@@ -1033,5 +1352,394 @@ mod tests {
         assert!(names.contains(&"Genji") && names.contains(&"Ana"));
         let tops3 = db.top_heroes(mid, 1).await.unwrap();
         assert_eq!(tops3.len(), 1, "non-zero limit still truncates");
+    }
+
+    #[test]
+    fn record_key_does_not_collide_across_splits_or_members() {
+        assert_ne!(
+            personal_match_record_key("ab", "c"),
+            personal_match_record_key("a", "bc")
+        );
+        assert_ne!(
+            personal_match_record_key("m1", "s1"),
+            personal_match_record_key("m2", "s1")
+        );
+        assert!(personal_match_record_key("m1", "s1").starts_with("pm"));
+    }
+
+    async fn insert_raw(
+        db: &Database,
+        id: &str,
+        member_id: &str,
+        session_id: &str,
+        map_name: &str,
+        played_at: chrono::DateTime<Utc>,
+        uploaded_at: chrono::DateTime<Utc>,
+        elims: u32,
+    ) {
+        let rid = surrealdb_types::RecordId::new("personal_match", id);
+        db.client
+            .query(
+                r#"CREATE $rid SET
+                    member_id = $mid,
+                    session_id = $sid,
+                    hero = 'Ana',
+                    map_name = $map,
+                    game_mode = 'control',
+                    role = 'Support',
+                    outcome = 'victory',
+                    elims = $elims,
+                    deaths = 1,
+                    assists = 1,
+                    damage = 1,
+                    healing = 1,
+                    mitigation = 0,
+                    edited = false,
+                    played_at = $played,
+                    uploaded_at = $uploaded"#,
+            )
+            .bind(("rid", rid))
+            .bind(("mid", member_id.to_string()))
+            .bind(("sid", session_id.to_string()))
+            .bind(("map", map_name.to_string()))
+            .bind(("elims", elims))
+            .bind(("played", surrealdb::types::Datetime::from(played_at)))
+            .bind(("uploaded", surrealdb::types::Datetime::from(uploaded_at)))
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+    }
+
+    /// Operator pre-check: non-empty `(member_id, session_id)` groups with
+    /// more than one row. Blank session ids are not counted here.
+    async fn count_duplicate_session_groups(db: &Database) -> u64 {
+        let mut res = db
+            .client
+            .query(
+                r#"SELECT count() AS duplicate_groups FROM (
+                       SELECT member_id, session_id, count() AS n
+                       FROM personal_match
+                       WHERE session_id != ''
+                       GROUP BY member_id, session_id
+                   ) WHERE n > 1 GROUP ALL"#,
+            )
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+        use serde::Deserialize;
+        use surrealdb_types::SurrealValue;
+        #[derive(Deserialize, SurrealValue)]
+        struct Counted {
+            duplicate_groups: u64,
+        }
+        let rows: Vec<Counted> = res.take(0).unwrap();
+        rows.first().map(|c| c.duplicate_groups).unwrap_or(0)
+    }
+
+    async fn drop_session_index(db: &Database) {
+        db.client
+            .query("REMOVE INDEX IF EXISTS pm_session_idx ON personal_match")
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn migration_dedupes_keeps_newest_and_is_rerunnable() {
+        let db = test_db().await;
+        drop_session_index(&db).await;
+
+        let play = Utc.with_ymd_and_hms(2026, 7, 1, 20, 0, 0).unwrap();
+        let older = Utc.with_ymd_and_hms(2026, 7, 4, 1, 0, 0).unwrap();
+        let newer = Utc.with_ymd_and_hms(2026, 7, 4, 2, 0, 0).unwrap();
+        let tied = Utc.with_ymd_and_hms(2026, 7, 4, 3, 0, 0).unwrap();
+
+        insert_raw(
+            &db, "new-old", "keep-new", "sess-new", "Oasis", play, older, 1,
+        )
+        .await;
+        insert_raw(
+            &db, "new-new", "keep-new", "sess-new", "Oasis", play, newer, 9,
+        )
+        .await;
+        // Same uploaded_at: greatest record-id key wins (`id-z` > `id-a`).
+        insert_raw(&db, "id-a", "keep-tie", "sess-tie", "Oasis", play, tied, 1).await;
+        insert_raw(&db, "id-z", "keep-tie", "sess-tie", "Oasis", play, tied, 6).await;
+
+        assert_eq!(
+            count_duplicate_session_groups(&db).await,
+            2,
+            "operator query counts non-empty duplicate groups before migration"
+        );
+
+        run_migrations(&db.client).await.unwrap();
+
+        let newest = db.list_personal_matches("keep-new", 10, 0).await.unwrap();
+        assert_eq!(newest.len(), 1, "duplicate session collapses to one row");
+        assert_eq!(newest[0].elims, 9, "newest uploaded_at is kept");
+        assert_eq!(newest[0].session_id, "sess-new");
+        assert_eq!(
+            newest[0].id,
+            personal_match_record_key("keep-new", "sess-new")
+        );
+
+        let tied_rows = db.list_personal_matches("keep-tie", 10, 0).await.unwrap();
+        assert_eq!(tied_rows.len(), 1);
+        assert_eq!(tied_rows[0].elims, 6, "tie breaks by greatest record id");
+
+        assert_eq!(count_duplicate_session_groups(&db).await, 0);
+
+        // Re-run must not drop the keeper or fail on the already-unique index.
+        run_migrations(&db.client).await.unwrap();
+        let again = db.list_personal_matches("keep-new", 10, 0).await.unwrap();
+        assert_eq!(again.len(), 1);
+        assert_eq!(again[0].elims, 9);
+        assert_eq!(
+            db.list_personal_matches("keep-tie", 10, 0)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+
+        let rejected = db
+            .client
+            .query(
+                r#"CREATE personal_match SET
+                    member_id = 'keep-new',
+                    session_id = 'sess-new',
+                    hero = 'Ana',
+                    map_name = 'Oasis',
+                    game_mode = 'control',
+                    role = 'Support',
+                    outcome = 'victory',
+                    elims = 3,
+                    deaths = 1,
+                    assists = 1,
+                    damage = 1,
+                    healing = 1,
+                    mitigation = 0,
+                    played_at = time::now(),
+                    uploaded_at = time::now()"#,
+            )
+            .await
+            .unwrap()
+            .check();
+        let err = rejected.expect_err("duplicate (member, session) insert must fail");
+        let msg = err.to_string().to_ascii_lowercase();
+        assert!(
+            msg.contains("pm_session_idx")
+                || msg.contains("already contains")
+                || msg.contains("indexexists"),
+            "unique index rejected the duplicate, got {err}"
+        );
+        assert_eq!(
+            db.list_personal_matches("keep-new", 10, 0)
+                .await
+                .unwrap()
+                .len(),
+            1,
+            "failed insert must not leave a second row"
+        );
+    }
+
+    #[tokio::test]
+    async fn migration_rewrites_blank_sessions_without_collapsing_distinct_games() {
+        let db = test_db().await;
+        drop_session_index(&db).await;
+
+        let oasis_at = Utc.with_ymd_and_hms(2026, 6, 1, 18, 0, 0).unwrap();
+        let busan_at = Utc.with_ymd_and_hms(2026, 6, 2, 18, 0, 0).unwrap();
+        let same_at = Utc.with_ymd_and_hms(2026, 6, 3, 18, 0, 0).unwrap();
+        let older = Utc.with_ymd_and_hms(2026, 6, 4, 1, 0, 0).unwrap();
+        let newer = Utc.with_ymd_and_hms(2026, 6, 4, 2, 0, 0).unwrap();
+
+        // Two historical games, both stored with session_id '' (pre-session
+        // daemon). They must both survive the unique index.
+        insert_raw(
+            &db,
+            "blank-oasis",
+            "blank-distinct",
+            "",
+            "Oasis",
+            oasis_at,
+            older,
+            3,
+        )
+        .await;
+        insert_raw(
+            &db,
+            "blank-busan",
+            "blank-distinct",
+            "",
+            "Busan",
+            busan_at,
+            older,
+            4,
+        )
+        .await;
+
+        // Same content uploaded twice with '': keep the newest only.
+        insert_raw(
+            &db,
+            "same-old",
+            "blank-same",
+            "",
+            "Lijiang",
+            same_at,
+            older,
+            2,
+        )
+        .await;
+        insert_raw(
+            &db,
+            "same-new",
+            "blank-same",
+            "",
+            "Lijiang",
+            same_at,
+            newer,
+            8,
+        )
+        .await;
+
+        // A '' row plus a later write that already stored the legacy-* id for
+        // that content. Read back through the same datetime conversion the
+        // migration uses, then insert the legacy twin.
+        insert_raw(
+            &db,
+            "merge-old",
+            "blank-merge",
+            "",
+            "Oasis",
+            oasis_at,
+            older,
+            1,
+        )
+        .await;
+        let stored = db
+            .list_personal_matches("blank-merge", 10, 0)
+            .await
+            .unwrap();
+        assert_eq!(stored.len(), 1);
+        let legacy = legacy_session_id(
+            "blank-merge",
+            &stored[0].hero,
+            &stored[0].map_name,
+            &stored[0].played_at,
+        );
+        insert_raw(
+            &db,
+            "merge-new",
+            "blank-merge",
+            &legacy,
+            "Oasis",
+            oasis_at,
+            newer,
+            42,
+        )
+        .await;
+
+        run_migrations(&db.client).await.unwrap();
+
+        let distinct = db
+            .list_personal_matches("blank-distinct", 10, 0)
+            .await
+            .unwrap();
+        assert_eq!(
+            distinct.len(),
+            2,
+            "distinct blank-session games both survive"
+        );
+        assert!(distinct.iter().all(|r| r.session_id.starts_with("legacy-")));
+        assert_ne!(distinct[0].session_id, distinct[1].session_id);
+        let maps: Vec<_> = distinct.iter().map(|r| r.map_name.as_str()).collect();
+        assert!(maps.contains(&"Oasis") && maps.contains(&"Busan"));
+
+        let same = db.list_personal_matches("blank-same", 10, 0).await.unwrap();
+        assert_eq!(same.len(), 1, "identical blank-session content collapses");
+        assert_eq!(same[0].elims, 8, "newest blank duplicate is kept");
+        assert_eq!(
+            same[0].session_id,
+            legacy_session_id(
+                "blank-same",
+                &same[0].hero,
+                &same[0].map_name,
+                &same[0].played_at
+            ),
+            "blank session id was rewritten to the content-derived legacy id"
+        );
+
+        let merged = db
+            .list_personal_matches("blank-merge", 10, 0)
+            .await
+            .unwrap();
+        assert_eq!(merged.len(), 1, "'' row merges with its legacy-* twin");
+        assert_eq!(merged[0].elims, 42);
+        assert_eq!(merged[0].session_id, legacy);
+
+        run_migrations(&db.client).await.unwrap();
+        assert_eq!(
+            db.list_personal_matches("blank-distinct", 10, 0)
+                .await
+                .unwrap()
+                .len(),
+            2,
+            "re-running the migration must not collapse distinct legacy games"
+        );
+        assert_eq!(
+            db.list_personal_matches("blank-same", 10, 0)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            db.list_personal_matches("blank-merge", 10, 0)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrent_retried_upsert_is_one_row() {
+        let db = std::sync::Arc::new(test_db().await);
+        let mut handles = Vec::new();
+        for i in 0..8u32 {
+            let db = std::sync::Arc::clone(&db);
+            handles.push(tokio::spawn(async move {
+                let mut m = entry("race-1", "victory", i);
+                m.elims = i;
+                db.upsert_personal_matches("m-race", &[m]).await
+            }));
+        }
+        for handle in handles {
+            let upserted = handle.await.unwrap().expect("concurrent upsert succeeds");
+            assert_eq!(upserted, 1);
+        }
+        let rows = db.list_personal_matches("m-race", 10, 0).await.unwrap();
+        assert_eq!(
+            rows.len(),
+            1,
+            "concurrent uploads of one session are one row"
+        );
+        assert!(rows[0].elims < 8);
+        assert_eq!(rows[0].id, personal_match_record_key("m-race", "race-1"));
+
+        // A later retry still succeeds and still does not insert.
+        let again = db
+            .upsert_personal_matches("m-race", &[entry("race-1", "defeat", 40)])
+            .await
+            .unwrap();
+        assert_eq!(again, 1);
+        let rows = db.list_personal_matches("m-race", 10, 0).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].outcome, "defeat");
+        assert_eq!(rows[0].elims, 40);
     }
 }
