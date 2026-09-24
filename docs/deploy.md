@@ -27,6 +27,7 @@ This is the supported path for a **single VPS** with Podman Compose. You do **no
 
 `scripts/install.sh` writes `PRODUCTION=1`, `SURREALDB_AUTH_MODE=scoped`, a random `NOSTR_CHALLENGE_SECRET`, and **distinct** root + app passwords.  
 Remote boot **refuses** if `PRODUCTION` or `ENCRYPTION_KEY` is missing; the server also **refuses to boot** outside dev if `NOSTR_CHALLENGE_SECRET` is missing/empty.  
+When `PRODUCTION` is set, an unset or blank `SURREALDB_URL` is a hard error (exit 1, clear message). The process does not start an in-memory database, does not seed a dev admin, and does not serve `/api/dev/login`. Local dev leaves both `PRODUCTION` and `SURREALDB_URL` unset.  
 In production scoped mode, missing or root-equal `SURREALDB_APP_PASSWORD` is a hard error (no silent fallback).
 
 Never ship with `root`/`root`. Migrations run as root during bootstrap only; the long-lived app uses a database-scoped **EDITOR** user.
@@ -398,19 +399,67 @@ once you are done — leaving it armed serves no purpose.
 
 ## Backups
 
+`scripts/backup.sh` stores the SurrealDB export, data volumes, and
+`data/secrets.env` (including `ENCRYPTION_KEY`) in the **same** restic
+repository. The repository is encrypted with `RESTIC_PASSWORD`. That password
+is not inside the snapshot — keep it off the host (a password manager). One
+password then opens both the database and the key that decrypts Nostr keys,
+OAuth ids, and DMs. That is deliberate: a second store is easy to forget, and
+forgetting it is how a host loss becomes unreadable data.
+
+The backup refuses to run if `ENCRYPTION_KEY` is missing or blank. Each snapshot
+also carries `encryption-key.fingerprint` (a sha256 of the key material, not the
+key) so restore can fail when the host key does not match.
+
 ```bash
 # once
 export RESTIC_REPOSITORY=... RESTIC_PASSWORD=...
 ./scripts/backup-init.sh
 
-# daily (sources data/secrets.env when present)
+# daily (sources data/secrets.env; refuses to run if ENCRYPTION_KEY is blank)
 ./scripts/backup.sh
 ```
+
+Snapshots taken before this change do **not** contain `secrets.env`. After
+deploying these scripts, run `./scripts/backup.sh` once so a snapshot actually
+holds the key. Until that snapshot exists, keep an offline copy of
+`data/secrets.env`.
 
 Systemd units under `deploy/` can load:
 
 ```
 EnvironmentFile=-/opt/scuffed-crew/data/secrets.env
+```
+
+## Restore
+
+Stop the app first. Restore secrets **before** starting it. A fresh
+`install.sh` on a rebuilt host generates a new `ENCRYPTION_KEY`, and that key
+cannot decrypt the restored database.
+
+```bash
+export RESTIC_REPOSITORY=... RESTIC_PASSWORD=...
+./scripts/restore.sh latest
+```
+
+`restore.sh` copies the snapshot's `secrets.env` into `data/secrets.env` when
+the host key is missing or different, then runs `scripts/check-restore-key.sh`.
+That check exits non-zero if `ENCRYPTION_KEY` is missing or its fingerprint
+does not match the snapshot. Do not start the app until it prints
+`encryption key matches`.
+
+Non-interactive install of the backup's secrets file:
+
+```bash
+SCUFFED_RESTORE_INSTALL_SECRETS=1 ./scripts/restore.sh latest
+```
+
+Check an already restored tree yourself:
+
+```bash
+./scripts/check-restore-key.sh \
+  --secrets data/secrets.env \
+  --fingerprint /path/to/restored/encryption-key.fingerprint
 ```
 
 ## Forgot admin password

@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 # Scuffed Crew — Automated backup script
-# Backs up SurrealDB data volume + uploads + logical export using restic.
+# Backs up SurrealDB data volume + uploads + logical export + data/secrets.env
+# (including ENCRYPTION_KEY) using restic.
+#
+# secrets.env goes in the same restic repository. The repo is already encrypted
+# with RESTIC_PASSWORD, and that password is not stored in the snapshot — keep
+# it off the host. A second secret store is how the decryption key gets lost
+# when the host disk is gone. restore.sh checks the key before the app starts.
 #
 # Prerequisites:
 #   - restic installed and repo initialized (see backup-init.sh)
@@ -27,8 +33,12 @@ set -euo pipefail
 # Load secrets if present next to the repo or under /opt
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+# shellcheck source=lib/encryption-key.sh
+source "${SCRIPT_DIR}/lib/encryption-key.sh"
+SECRETS_FILE=""
 for f in "${ROOT}/data/secrets.env" /opt/scuffed-crew/data/secrets.env /opt/scuffed-crew/.env; do
     if [[ -f "$f" ]]; then
+        SECRETS_FILE="$f"
         # shellcheck disable=SC1090
         set -a
         # shellcheck source=/dev/null
@@ -37,6 +47,15 @@ for f in "${ROOT}/data/secrets.env" /opt/scuffed-crew/data/secrets.env /opt/scuf
         break
     fi
 done
+
+# Fail before any export. A snapshot without ENCRYPTION_KEY cannot decrypt
+# Nostr keys, OAuth ids, or DMs after the host is lost.
+if [[ -z "${SECRETS_FILE}" ]] || ! read_encryption_material "${SECRETS_FILE}"; then
+    echo "error: ENCRYPTION_KEY is missing or blank (${SECRETS_FILE:-no secrets file found})" >&2
+    echo "  Refusing to back up data that cannot be decrypted after restore." >&2
+    echo "  data/secrets.env must contain the ENCRYPTION_KEY that sealed the database." >&2
+    exit 1
+fi
 
 SURREAL_URL="${SURREALDB_URL:-http://127.0.0.1:8000}"
 # Compose uses ws:// internally — CLI needs HTTP
@@ -50,7 +69,9 @@ ROOT_PASS="${SURREALDB_ROOT_PASSWORD:-${SURREALDB_PASSWORD:?Set SURREALDB_PASSWO
 HEALTHCHECKS_URL="${HEALTHCHECKS_URL:-}"
 
 EXPORT_DIR="$(mktemp -d)"
-trap 'rm -rf "${EXPORT_DIR}"' EXIT
+SECRETS_STAGE="$(mktemp -d)"
+chmod 700 "${SECRETS_STAGE}"
+trap 'rm -rf "${EXPORT_DIR}" "${SECRETS_STAGE}"' EXIT
 
 ping_hc() {
     if [[ -n "${HEALTHCHECKS_URL}" ]]; then
@@ -140,11 +161,17 @@ if STRFRY_PATH="$(resolve_volume strfry-data)"; then
     echo "Including strfry volume from ${STRFRY_PATH}"
 fi
 
+# 2b. Secrets required to decrypt restored rows. Staged as mode 600, not logged.
+echo "Including secrets.env (encryption key) in the restic snapshot"
+stage_secrets_for_backup "${SECRETS_STAGE}" "${SECRETS_FILE}"
+BACKUP_PATHS+=("${SECRETS_STAGE}")
+
 # 3. Restic backup
 echo "Running restic backup..."
 restic backup \
     --tag scuffed-crew \
     --tag surrealdb \
+    --tag secrets \
     "${BACKUP_PATHS[@]}"
 
 # 4. Prune old snapshots (7 daily, 4 weekly, 6 monthly, 1 yearly)

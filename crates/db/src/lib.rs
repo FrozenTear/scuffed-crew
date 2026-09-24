@@ -9,7 +9,11 @@ pub mod queries;
 pub mod rewrap;
 pub mod types;
 
-pub use client::{Database, DbConfig, SurrealAuthMode};
+pub use client::{
+    database_boot_mode_or_exit, in_memory_dev_from_env, normalize_surrealdb_url,
+    resolve_database_boot_mode, resolve_database_boot_mode_from_env, surrealdb_url_from_env,
+    Database, DatabaseBootMode, DbConfig, SurrealAuthMode, PRODUCTION_WITHOUT_DATABASE_URL,
+};
 pub use rewrap::{rewrap_all_encrypted_fields, RewrapStats};
 pub use scuffed_auth::is_production_env;
 pub use types::*;

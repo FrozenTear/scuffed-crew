@@ -179,9 +179,89 @@ fn resolve_app_credentials(root_pass: &str) -> DbResult<(String, String)> {
     }
 }
 
+/// How the process should obtain its database at startup.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DatabaseBootMode {
+    /// Ephemeral in-memory database. Local dev only — never when production is set.
+    InMemoryDev,
+    /// Remote SurrealDB. `SURREALDB_URL` is non-empty after trimming.
+    Remote,
+}
+
+/// Refusal when production is set and `SURREALDB_URL` is unset or blank.
+pub const PRODUCTION_WITHOUT_DATABASE_URL: &str = "\
+Refusing to start: PRODUCTION is set but SURREALDB_URL is unset or blank. \
+Production must connect to a remote SurrealDB (install.sh sets SURREALDB_URL in data/secrets.env). \
+The in-memory database, seeded dev admin, and /api/dev/login are not available in production. \
+Unset PRODUCTION only for local in-memory development.";
+
+/// `SURREALDB_URL` with surrounding whitespace removed.
+///
+/// Unset, empty, and whitespace-only are all absent. A blank value is not a remote URL.
+pub fn normalize_surrealdb_url(raw: Option<&str>) -> Option<&str> {
+    raw.map(str::trim).filter(|s| !s.is_empty())
+}
+
+/// Choose in-memory dev vs remote, or refuse production with no URL.
+///
+/// `production` must come from [`scuffed_auth::is_production_env`] (not a raw
+/// `PRODUCTION` presence check): empty / `0` / `false` stay non-production.
+pub fn resolve_database_boot_mode(
+    production: bool,
+    surrealdb_url: Option<&str>,
+) -> Result<DatabaseBootMode, &'static str> {
+    match normalize_surrealdb_url(surrealdb_url) {
+        Some(_) => Ok(DatabaseBootMode::Remote),
+        None if production => Err(PRODUCTION_WITHOUT_DATABASE_URL),
+        None => Ok(DatabaseBootMode::InMemoryDev),
+    }
+}
+
+/// Non-blank `SURREALDB_URL` from the environment, if any.
+pub fn surrealdb_url_from_env() -> Option<String> {
+    std::env::var("SURREALDB_URL")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// [`resolve_database_boot_mode`] against the current process environment.
+pub fn resolve_database_boot_mode_from_env() -> Result<DatabaseBootMode, &'static str> {
+    resolve_database_boot_mode(
+        scuffed_auth::is_production_env(),
+        surrealdb_url_from_env().as_deref(),
+    )
+}
+
+/// True only for local in-memory dev. Production, or any non-blank URL, is false.
+///
+/// An error (production with no URL) is false: callers must not seed or register
+/// `/api/dev/login`. The binary exits before serving; this is the second gate.
+pub fn in_memory_dev_from_env() -> bool {
+    matches!(
+        resolve_database_boot_mode_from_env(),
+        Ok(DatabaseBootMode::InMemoryDev)
+    )
+}
+
+/// Startup helper for the server binaries. Prints the refusal and exits 1.
+pub fn database_boot_mode_or_exit() -> DatabaseBootMode {
+    match resolve_database_boot_mode_from_env() {
+        Ok(mode) => mode,
+        Err(err) => {
+            eprintln!("error: {err}");
+            std::process::exit(1);
+        }
+    }
+}
+
 fn remote_url_ns_db_from_env() -> DbResult<(String, String, String, String, String)> {
-    let url = std::env::var("SURREALDB_URL").map_err(|_| {
-        DbError::Config("SURREALDB_URL is required for remote database operations".into())
+    let url = surrealdb_url_from_env().ok_or_else(|| {
+        DbError::Config(
+            "SURREALDB_URL is required for remote database operations \
+             (unset or blank is not a remote URL)."
+                .into(),
+        )
     })?;
     let root_user = std::env::var("SURREALDB_USER").unwrap_or_else(|_| "root".to_string());
     let root_pass = std::env::var("SURREALDB_PASSWORD").unwrap_or_else(|_| "root".to_string());
@@ -493,5 +573,62 @@ mod app_user_tests {
         Database::ensure_database_app_user(&db.client, "scuffed_app", "test-pass-2")
             .await
             .expect("re-define with new password must not error");
+    }
+}
+
+#[cfg(test)]
+mod boot_mode_tests {
+    use super::*;
+
+    #[test]
+    fn production_without_url_refuses_in_memory() {
+        for url in [None, Some(""), Some("   "), Some("\t")] {
+            let err = resolve_database_boot_mode(true, url).expect_err("must refuse");
+            assert_eq!(err, PRODUCTION_WITHOUT_DATABASE_URL);
+            assert!(err.contains("SURREALDB_URL"));
+            assert!(err.contains("/api/dev/login"));
+        }
+    }
+
+    #[test]
+    fn production_with_url_is_remote() {
+        assert_eq!(
+            resolve_database_boot_mode(true, Some("ws://surrealdb:8000")).unwrap(),
+            DatabaseBootMode::Remote
+        );
+        assert_eq!(
+            resolve_database_boot_mode(true, Some("  ws://127.0.0.1:8000  ")).unwrap(),
+            DatabaseBootMode::Remote
+        );
+    }
+
+    #[test]
+    fn local_dev_without_url_stays_in_memory() {
+        for url in [None, Some(""), Some(" ")] {
+            assert_eq!(
+                resolve_database_boot_mode(false, url).unwrap(),
+                DatabaseBootMode::InMemoryDev,
+                "blank URL counts as unset for {url:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn local_dev_with_url_is_remote() {
+        assert_eq!(
+            resolve_database_boot_mode(false, Some("ws://localhost:8000")).unwrap(),
+            DatabaseBootMode::Remote
+        );
+    }
+
+    #[test]
+    fn normalize_treats_blank_as_absent() {
+        assert_eq!(normalize_surrealdb_url(None), None);
+        assert_eq!(normalize_surrealdb_url(Some("")), None);
+        assert_eq!(normalize_surrealdb_url(Some(" \n ")), None);
+        assert_eq!(
+            normalize_surrealdb_url(Some(" ws://db:8000 ")),
+            Some("ws://db:8000")
+        );
     }
 }

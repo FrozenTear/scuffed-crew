@@ -183,8 +183,9 @@ pub fn create_router_with_dist(state: AppState, dist_dir: impl Into<PathBuf>) ->
         .route("/api/auth/providers", get(routes::auth::auth_providers))
         .layer(GovernorLayer::new(public_governor_config));
 
-    // Dev mode mirrors main.rs: in-memory DB when SURREALDB_URL is unset.
-    let dev_mode = std::env::var("SURREALDB_URL").is_err();
+    // Dev login only for local in-memory dev. PRODUCTION, or any non-blank
+    // SURREALDB_URL, leaves the route unregistered (blank URL counts as unset).
+    let dev_mode = scuffed_db::in_memory_dev_from_env();
 
     let mut router = Router::new()
         // Health check. Deliberately the one unauthenticated route with no
