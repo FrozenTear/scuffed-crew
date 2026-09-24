@@ -217,6 +217,13 @@ systemctl reload caddy
 
 Template also lives in repo: `deploy/Caddyfile`.
 
+The app sets `Content-Security-Policy-Report-Only` itself (same-origin scripts,
+Google Fonts, Discord/Google avatar hosts, and `NOSTR_RELAY_URL` for chat
+sockets). Leave CSP off the Caddy block so the two policies do not intersect.
+Set `CSP_ENFORCE=1` in `data/secrets.env` and recreate the app container to
+send enforcing `Content-Security-Policy` instead. `CSP_EXTRA_CONNECT_SRC` and
+`CSP_IMG_SRC` add relay or image origins without a code change.
+
 > **Optional: cache the ICS feeds at the edge.** `/api/calendar/all.ics` and
 > `/api/calendar/team/{id}` run a full event list plus a settings read per hit,
 > and they already send `Cache-Control: public, max-age=3600` — which only does

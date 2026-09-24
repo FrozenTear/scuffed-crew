@@ -579,8 +579,13 @@ pub fn create_router(state: AppState) -> Router {
             put(routes::leaderboards::admin_update_season)
                 .delete(routes::leaderboards::admin_delete_season),
         )
-        // Serve uploaded files
-        .nest_service("/uploads", ServeDir::new(state.upload_dir.clone()))
+        // Serve uploaded files. Raster images stay inline (avatars, article
+        // images). Everything else — including SVG and HTML — is an attachment
+        // plus a sandbox CSP. See `uploads::upload_response_headers`.
+        .nest(
+            "/uploads",
+            uploads::uploads_router(state.upload_dir.clone()),
+        )
         // Static files from dist/, falling back to index.html for SPA routing (Dioxus handles all routes)
         .fallback_service(ServeDir::new("dist").fallback(ServeFile::new("dist/index.html")))
         // Allow up to 6 MB so officer image uploads (5 MB cap) fit under Axum's default 2 MB limit
