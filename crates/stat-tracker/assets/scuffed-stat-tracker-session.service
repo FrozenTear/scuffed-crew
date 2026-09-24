@@ -12,3 +12,14 @@ Type=oneshot
 # ExecStart is rewritten at install to the absolute helper under $PREFIX.
 # This placeholder matches the default prefix only.
 ExecStart=%h/.local/lib/scuffed-stat-tracker/import-session-env.sh
+# Same user-unit sandbox as the daemon, minus the capture exceptions.
+# This oneshot only writes session.env under $HOME and talks to the user
+# bus (%t). It does not open /dev/input or the X11 socket, so PrivateTmp
+# is safe here. PrivateDevices stays off and DeviceAllow stays unset so
+# this unit cannot grow a device policy the daemon unit would inherit
+# by accident — the two units are separate, and the daemon must keep
+# /dev/input.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=-%h/.config/scuffed-stat-tracker %t
+PrivateTmp=yes

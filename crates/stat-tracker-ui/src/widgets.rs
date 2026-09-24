@@ -45,10 +45,17 @@ pub fn app_header(app: &TrackerApp) -> Element<'_, Message> {
     );
 
     column![
-        row![title, space().width(Fill), status_stub(&app.live_status)]
-            .spacing(16)
-            .align_y(Alignment::Center)
-            .width(Fill),
+        row![
+            title,
+            space().width(Fill),
+            status_stub(
+                &app.live_status,
+                header_status_color(header_status_for(app))
+            )
+        ]
+        .spacing(16)
+        .align_y(Alignment::Center)
+        .width(Fill),
         controls.wrap(),
     ]
     .spacing(12)
@@ -166,14 +173,77 @@ pub fn overlay_toggle(showing: bool, game_running: bool) -> Element<'static, Mes
         .into()
 }
 
+/// What the Overview title-row dot is reporting. The label text stays the
+/// capture line (`Last game HH:MM` / `Waiting for a capture`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HeaderStatus {
+    /// Daemon is up and a capture is in progress (manual capture, or a live game).
+    Capturing,
+    /// Idle, or still waiting for the first capture.
+    Waiting,
+    /// Daemon is not running, or the last capture attempt errored.
+    Down,
+    /// Server returned 401/403 for the sync token.
+    TokenRejected,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct HeaderStatusInput {
+    pub demo: bool,
+    pub daemon_running: bool,
+    pub capturing: bool,
+    pub game_running: bool,
+    pub sync_token_rejected: bool,
+    pub capture_error: bool,
+}
+
+pub fn classify_header_status(input: HeaderStatusInput) -> HeaderStatus {
+    if input.sync_token_rejected {
+        return HeaderStatus::TokenRejected;
+    }
+    if input.capture_error || (!input.demo && !input.daemon_running) {
+        return HeaderStatus::Down;
+    }
+    let live = input.capturing || (!input.demo && input.daemon_running && input.game_running);
+    if live {
+        HeaderStatus::Capturing
+    } else {
+        HeaderStatus::Waiting
+    }
+}
+
+pub fn header_status_color(status: HeaderStatus) -> Color {
+    match status {
+        HeaderStatus::Capturing => theme::OK,
+        // Waiting/idle is amber. Token rejection reuses that warning colour.
+        HeaderStatus::Waiting | HeaderStatus::TokenRejected => theme::WARN,
+        HeaderStatus::Down => theme::DANGER,
+    }
+}
+
+fn header_status_for(app: &TrackerApp) -> HeaderStatus {
+    let sync_token_rejected = app.saved_config.sync.as_ref().is_some_and(|sync| {
+        stat_tracker::sync::auth_pause_matches(&app.data_dir, &sync.server_url, &sync.token)
+    });
+    classify_header_status(HeaderStatusInput {
+        demo: app.fixture.is_some(),
+        daemon_running: app.daemon.running(),
+        capturing: app.capturing,
+        game_running: app.game_running,
+        sync_token_rejected,
+        capture_error: app.preview_error.is_some(),
+    })
+}
+
 /// Read-only capture indicator. Dot + text, no button chrome and no hover.
-pub fn status_stub<'a>(live: &'a str) -> Element<'a, Message> {
+/// The text is unchanged; only the dot colour follows [`HeaderStatus`].
+pub fn status_stub<'a>(live: &'a str, dot: Color) -> Element<'a, Message> {
     row![
         container(space().width(8).height(8))
             .width(8)
             .height(8)
-            .style(|_| container::Style {
-                background: Some(iced::Background::Color(theme::OK)),
+            .style(move |_| container::Style {
+                background: Some(iced::Background::Color(dot)),
                 border: iced::Border {
                     radius: 999.0.into(),
                     ..iced::Border::default()
@@ -941,9 +1011,79 @@ fn card_shell(
 
 #[cfg(test)]
 mod tests {
-    use super::{map_stripe_outcome, win_bar_portions};
+    use super::{
+        HeaderStatus, HeaderStatusInput, classify_header_status, header_status_color,
+        map_stripe_outcome, win_bar_portions,
+    };
     use crate::aggregate::Record;
     use crate::model::Outcome;
+    use crate::theme;
+
+    fn input(demo: bool, daemon: bool, capturing: bool, game: bool) -> HeaderStatusInput {
+        HeaderStatusInput {
+            demo,
+            daemon_running: daemon,
+            capturing,
+            game_running: game,
+            sync_token_rejected: false,
+            capture_error: false,
+        }
+    }
+
+    #[test]
+    fn header_dot_follows_capture_state() {
+        assert_eq!(
+            classify_header_status(input(false, true, false, true)),
+            HeaderStatus::Capturing
+        );
+        assert_eq!(
+            classify_header_status(input(false, true, true, false)),
+            HeaderStatus::Capturing
+        );
+        assert_eq!(
+            header_status_color(HeaderStatus::Capturing),
+            theme::OK,
+            "capturing is mint"
+        );
+
+        assert_eq!(
+            classify_header_status(input(false, true, false, false)),
+            HeaderStatus::Waiting,
+            "daemon up, no live game, is idle"
+        );
+        assert_eq!(
+            classify_header_status(input(true, false, false, true)),
+            HeaderStatus::Waiting,
+            "demo mode is not a live capture, even though the fixture reports a game"
+        );
+        assert_eq!(header_status_color(HeaderStatus::Waiting), theme::WARN);
+
+        assert_eq!(
+            classify_header_status(input(false, false, false, false)),
+            HeaderStatus::Down
+        );
+        let mut errored = input(false, true, true, true);
+        errored.capture_error = true;
+        assert_eq!(classify_header_status(errored), HeaderStatus::Down);
+        assert_eq!(header_status_color(HeaderStatus::Down), theme::DANGER);
+
+        let mut rejected = input(false, true, true, true);
+        rejected.sync_token_rejected = true;
+        assert_eq!(
+            classify_header_status(rejected),
+            HeaderStatus::TokenRejected
+        );
+        assert_eq!(
+            header_status_color(HeaderStatus::TokenRejected),
+            theme::WARN,
+            "token rejection reuses the warning colour"
+        );
+        assert_ne!(
+            header_status_color(HeaderStatus::Waiting),
+            theme::OK,
+            "idle must not stay the old always-mint dot"
+        );
+    }
 
     #[test]
     fn win_bar_portions_match_rate() {

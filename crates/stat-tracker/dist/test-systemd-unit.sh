@@ -23,6 +23,41 @@ pass() { echo "PASS: $*" >&2; }
 [[ -f "$INSTALL" && -f "$HELPER" && -f "$UNIT_LIB" ]] || fail "missing installer files"
 [[ -f "$UNIT" && -f "$SESSION_UNIT" && -f "$TEMPLATE" ]] || fail "missing unit templates"
 
+# Sandbox directives live in the templates. install.sh copies them through
+# (it only rewrites ExecStart), so the installed units must match.
+assert_common_sandbox() {
+    local unit="$1"
+    grep -q '^NoNewPrivileges=yes$' "$unit" \
+        || fail "$unit missing NoNewPrivileges=yes"
+    grep -q '^ProtectSystem=strict$' "$unit" \
+        || fail "$unit missing ProtectSystem=strict"
+    grep -q '^ReadWritePaths=' "$unit" \
+        || fail "$unit missing ReadWritePaths="
+    grep -q '%t' "$unit" \
+        || fail "$unit ReadWritePaths does not include the runtime dir (%t)"
+    if grep -q '^PrivateDevices=' "$unit"; then
+        fail "$unit sets PrivateDevices= (evdev /dev/input must stay reachable)"
+    fi
+    if grep -q '^DeviceAllow=' "$unit"; then
+        fail "$unit sets DeviceAllow= (device policy must stay permissive)"
+    fi
+}
+
+assert_common_sandbox "$UNIT"
+grep -q '%h/.local/share/scuffed-stat-tracker' "$UNIT" \
+    || fail "daemon unit ReadWritePaths missing the data dir"
+grep -q '%h/.config/scuffed-stat-tracker' "$UNIT" \
+    || fail "daemon unit ReadWritePaths missing the config/state dir"
+if grep -q '^PrivateTmp=' "$UNIT"; then
+    fail "daemon unit sets PrivateTmp= (that hides /tmp/.X11-unix)"
+fi
+assert_common_sandbox "$SESSION_UNIT"
+grep -q '%h/.config/scuffed-stat-tracker' "$SESSION_UNIT" \
+    || fail "session unit ReadWritePaths missing session.env's directory"
+grep -q '^PrivateTmp=yes$' "$SESSION_UNIT" \
+    || fail "session unit missing PrivateTmp=yes"
+pass "unit templates carry the sandbox"
+
 # ── pure ExecStart quoting ────────────────────────────────────────────────────
 
 # shellcheck source=systemd-unit.sh
@@ -228,6 +263,15 @@ MANIFEST="$PREFIX/share/scuffed-stat-tracker/install-manifest.txt"
 grep -qx "$HELPER_INSTALLED" "$MANIFEST" || fail "helper missing from manifest"
 grep -qx "$DAEMON_UNIT" "$MANIFEST" || fail "daemon unit missing from manifest"
 grep -qx "$SESSION_INSTALLED" "$MANIFEST" || fail "session unit missing from manifest"
+assert_common_sandbox "$DAEMON_UNIT"
+assert_common_sandbox "$SESSION_INSTALLED"
+grep -q '%h/.local/share/scuffed-stat-tracker' "$DAEMON_UNIT" \
+    || fail "installed daemon unit lost the data-dir ReadWritePaths"
+grep -q '^PrivateTmp=yes$' "$SESSION_INSTALLED" \
+    || fail "installed session unit lost PrivateTmp=yes"
+if grep -q '^PrivateTmp=' "$DAEMON_UNIT"; then
+    fail "installed daemon unit gained PrivateTmp="
+fi
 pass "custom PREFIX ExecStart=$DAEMON_BIN"
 
 # Spaced PREFIX is quoted in the unit.
