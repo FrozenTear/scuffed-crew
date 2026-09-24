@@ -86,6 +86,7 @@ async fn test_state(upload_dir: PathBuf) -> AppState {
         nostr_challenge_key: [0u8; 32],
         consumed_challenges: scuffed_site_server::challenge_store::ConsumedChallengeStore::new(),
         nostr_rate_limiter: scuffed_site_server::nostr_rate_limit::NostrRateLimiter::new(),
+        login_lockout: scuffed_site_server::login_lockout::LoginLockout::new(),
         crypto: None,
         relay_url: None,
         dm_events: None,

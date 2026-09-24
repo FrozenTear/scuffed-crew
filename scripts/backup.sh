@@ -1,6 +1,16 @@
 #!/usr/bin/env bash
 # Scuffed Crew — Automated backup script
-# Backs up SurrealDB data volume + uploads + logical export using restic.
+# Backs up SurrealDB data volume + uploads + logical export + data/secrets.env
+# (including ENCRYPTION_KEY) using restic.
+#
+# secrets.env goes in the same restic repository. The repository must live OFF
+# this host. RESTIC_PASSWORD has to be ON the host for the systemd timer: point
+# RESTIC_PASSWORD_FILE at a root-owned mode-600 file outside the repo and
+# outside every path this script snapshots. Do not put RESTIC_PASSWORD in
+# data/secrets.env (that file is copied into the snapshot). Keep a copy of
+# RESTIC_PASSWORD and ENCRYPTION_KEY in a password manager so a lost host is
+# recoverable from the off-host backup plus the password manager.
+# restore.sh checks the encryption key before the app starts.
 #
 # Prerequisites:
 #   - restic installed and repo initialized (see backup-init.sh)
@@ -8,8 +18,11 @@
 #   - Podman with compose volumes
 #
 # Environment (required):
-#   RESTIC_REPOSITORY     Restic repo path/URL
-#   RESTIC_PASSWORD       Restic repo password
+#   RESTIC_REPOSITORY       Off-host restic repo (sftp:, s3:, rest:, …).
+#                           A local path is refused unless BACKUP_ALLOW_LOCAL_REPO=1.
+#   RESTIC_PASSWORD         Restic repo password (interactive runs)
+#     or RESTIC_PASSWORD_FILE
+#                           Root-owned mode-600 file for the timer. Not in the repo.
 #
 # Environment (DB credentials — from data/secrets.env or explicit):
 #   SURREALDB_PASSWORD or SURREALDB_ROOT_PASSWORD
@@ -27,16 +40,63 @@ set -euo pipefail
 # Load secrets if present next to the repo or under /opt
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+# shellcheck source=lib/encryption-key.sh
+source "${SCRIPT_DIR}/lib/encryption-key.sh"
+# shellcheck source=lib/restic-access.sh
+source "${SCRIPT_DIR}/lib/restic-access.sh"
+SECRETS_FILE=""
 for f in "${ROOT}/data/secrets.env" /opt/scuffed-crew/data/secrets.env /opt/scuffed-crew/.env; do
     if [[ -f "$f" ]]; then
-        # shellcheck disable=SC1090
-        set -a
-        # shellcheck source=/dev/null
-        source "$f"
-        set +a
+        SECRETS_FILE="$f"
         break
     fi
 done
+
+# data/secrets.env is copied into the snapshot. A restic password stored there
+# would ship inside the repository it unlocks.
+if [[ -n "${SECRETS_FILE}" ]] && secrets_file_defines_restic_password "${SECRETS_FILE}"; then
+    echo "error: RESTIC_PASSWORD must not be set in ${SECRETS_FILE}." >&2
+    echo "  That file is included in the restic snapshot. Use RESTIC_PASSWORD_FILE" >&2
+    echo "  (root-owned, mode 600, outside the repo) for the timer, and keep a copy" >&2
+    echo "  of the password in a password manager." >&2
+    exit 1
+fi
+
+# The timer exports RESTIC_* before this script runs. Do not let secrets.env
+# overwrite an off-host repository or password-file path.
+_repo_set=${RESTIC_REPOSITORY+y}
+_repo=${RESTIC_REPOSITORY-}
+_pw_set=${RESTIC_PASSWORD+y}
+_pw=${RESTIC_PASSWORD-}
+_pwfile_set=${RESTIC_PASSWORD_FILE+y}
+_pwfile=${RESTIC_PASSWORD_FILE-}
+_allow_set=${BACKUP_ALLOW_LOCAL_REPO+y}
+_allow=${BACKUP_ALLOW_LOCAL_REPO-}
+if [[ -n "${SECRETS_FILE}" ]]; then
+    # shellcheck disable=SC1090
+    set -a
+    # shellcheck source=/dev/null
+    source "${SECRETS_FILE}"
+    set +a
+fi
+[[ -n "${_repo_set}" ]] && RESTIC_REPOSITORY="${_repo}"
+[[ -n "${_pw_set}" ]] && RESTIC_PASSWORD="${_pw}"
+[[ -n "${_pwfile_set}" ]] && RESTIC_PASSWORD_FILE="${_pwfile}"
+[[ -n "${_allow_set}" ]] && BACKUP_ALLOW_LOCAL_REPO="${_allow}"
+unset _repo_set _repo _pw_set _pw _pwfile_set _pwfile _allow_set _allow
+
+if ! load_restic_access; then
+    exit 1
+fi
+
+# Fail before any export. A snapshot without ENCRYPTION_KEY cannot decrypt
+# Nostr keys, OAuth ids, or DMs after the host is lost.
+if [[ -z "${SECRETS_FILE}" ]] || ! read_encryption_material "${SECRETS_FILE}"; then
+    echo "error: ENCRYPTION_KEY is missing or blank (${SECRETS_FILE:-no secrets file found})" >&2
+    echo "  Refusing to back up data that cannot be decrypted after restore." >&2
+    echo "  data/secrets.env must contain the ENCRYPTION_KEY that sealed the database." >&2
+    exit 1
+fi
 
 SURREAL_URL="${SURREALDB_URL:-http://127.0.0.1:8000}"
 # Compose uses ws:// internally — CLI needs HTTP
@@ -50,7 +110,9 @@ ROOT_PASS="${SURREALDB_ROOT_PASSWORD:-${SURREALDB_PASSWORD:?Set SURREALDB_PASSWO
 HEALTHCHECKS_URL="${HEALTHCHECKS_URL:-}"
 
 EXPORT_DIR="$(mktemp -d)"
-trap 'rm -rf "${EXPORT_DIR}"' EXIT
+SECRETS_STAGE="$(mktemp -d)"
+chmod 700 "${SECRETS_STAGE}"
+trap 'rm -rf "${EXPORT_DIR}" "${SECRETS_STAGE}"' EXIT
 
 ping_hc() {
     if [[ -n "${HEALTHCHECKS_URL}" ]]; then
@@ -140,11 +202,22 @@ if STRFRY_PATH="$(resolve_volume strfry-data)"; then
     echo "Including strfry volume from ${STRFRY_PATH}"
 fi
 
+# 2b. Secrets required to decrypt restored rows. Staged as mode 600, not logged.
+echo "Including secrets.env (encryption key) in the restic snapshot"
+stage_secrets_for_backup "${SECRETS_STAGE}" "${SECRETS_FILE}"
+BACKUP_PATHS+=("${SECRETS_STAGE}")
+
+for _backup_path in "${BACKUP_PATHS[@]}"; do
+    restic_password_file_not_inside "${_backup_path}"
+done
+unset _backup_path
+
 # 3. Restic backup
 echo "Running restic backup..."
 restic backup \
     --tag scuffed-crew \
     --tag surrealdb \
+    --tag secrets \
     "${BACKUP_PATHS[@]}"
 
 # 4. Prune old snapshots (7 daily, 4 weekly, 6 monthly, 1 yearly)

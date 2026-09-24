@@ -14,13 +14,15 @@ const DEV_USER_ID: &str = "devadmin";
 /// GET /api/dev/login — ensures the seeded dev session exists, sets the cookie,
 /// and redirects to admin.
 ///
-/// Only available when `SURREALDB_URL` is unset (in-memory / local dev). Logout
-/// deletes the session row; this re-creates it so Dev login keeps working.
+/// Only available for local in-memory dev (`PRODUCTION` off and `SURREALDB_URL`
+/// unset or blank). Logout deletes the session row; this re-creates it so Dev
+/// login keeps working. Production never reaches this handler: the route is not
+/// registered, and the process refuses to boot without a remote URL.
 pub async fn dev_login(State(state): State<AppState>, jar: CookieJar) -> Response {
-    if std::env::var("SURREALDB_URL").is_ok() {
+    if !scuffed_db::in_memory_dev_from_env() {
         return (
             StatusCode::NOT_FOUND,
-            "Dev login is disabled when SURREALDB_URL is set",
+            "Dev login is only available for local in-memory development",
         )
             .into_response();
     }
