@@ -1,9 +1,10 @@
 use dioxus::prelude::*;
 use serde::{Deserialize, Serialize};
 
-use crate::components::{Toast, use_toast};
+use crate::components::{Toast, fetch_error, use_toast};
 use crate::routes::Route;
 use crate::state::auth::use_auth;
+use crate::util::{FetchClass, classify_fetch};
 use scuffed_api_client::ApiClient;
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -129,6 +130,7 @@ const PAGE_CSS: &str = r#"
     .forum-badge-pin { background: color-mix(in srgb, var(--accent) 25%, transparent); color: var(--accent); }
     .forum-badge-lock { background: var(--surface-2); color: var(--text-3); }
     .forum-empty { color: var(--text-3); padding: 2rem; text-align: center; }
+    .forum-loading { color: var(--text-3); padding: 2rem; text-align: center; }
     .forum-compose {
         border: 1px solid var(--border); border-radius: 8px; padding: 1rem;
         margin-bottom: 1rem; background: var(--surface);
@@ -148,11 +150,15 @@ const PAGE_CSS: &str = r#"
 
 #[component]
 pub fn Forum() -> Element {
-    let tree = use_resource(|| async move {
-        ApiClient::web()
-            .fetch::<Vec<ForumCategoryNode>>("/api/forum/tree")
-            .await
-            .ok()
+    let refresh = use_signal(|| 0u32);
+    let tree = use_resource(move || {
+        let _ = refresh();
+        async move {
+            ApiClient::web()
+                .fetch::<Vec<ForumCategoryNode>>("/api/forum/tree")
+                .await
+                .map_err(|e| e.to_string())
+        }
     });
 
     rsx! {
@@ -161,9 +167,27 @@ pub fn Forum() -> Element {
             h1 { class: "forum-page-title", "Forum" }
             p { class: "forum-lead", "Old-school boards — pick a section, then a board (or sub-board)." }
 
-            match tree.value()() {
-                Some(Some(cats)) if !cats.is_empty() => rsx! {
-                    for cat in cats.iter() {
+            {
+                let data = tree.read();
+                match classify_fetch(data.as_ref()) {
+                FetchClass::Loading => rsx! { p { class: "forum-loading", "Loading…" } },
+                FetchClass::Error => {
+                    let err = data
+                        .as_ref()
+                        .and_then(|r| r.as_ref().err())
+                        .map(|e| e.to_string())
+                        .unwrap_or_default();
+                    fetch_error(&format!("Couldn't load the forum. {err}"), refresh)
+                }
+                FetchClass::Ready => {
+                    let cats = data.as_ref().and_then(|r| r.as_ref().ok());
+                    if cats.is_some_and(|list| list.is_empty()) {
+                        rsx! {
+                            p { class: "forum-empty", "No boards yet. An officer can create them in Admin → Forum." }
+                        }
+                    } else {
+                        rsx! {
+                    for cat in cats.into_iter().flat_map(|list| list.iter()) {
                         div { class: "forum-section",
                             h2 { class: "forum-section-title", "{cat.category.name}" }
                             if let Some(desc) = &cat.category.description {
@@ -204,16 +228,10 @@ pub fn Forum() -> Element {
                             }
                         }
                     }
-                },
-                Some(Some(_)) => rsx! {
-                    p { class: "forum-empty", "No boards yet. An officer can create them in Admin → Forum." }
-                },
-                Some(None) => rsx! {
-                    p { class: "forum-empty",
-                        "Couldn't load the forum. Check your connection and try refreshing."
+                        }
                     }
-                },
-                None => rsx! { p { class: "forum-empty", "Loading…" } },
+                }
+                }
             }
         }
     }
@@ -236,16 +254,17 @@ pub fn ForumBoardPage(slug: String) -> Element {
             ApiClient::web()
                 .fetch::<ThreadListResponse>(&format!("/api/forum/threads?board={slug}&limit=50"))
                 .await
-                .ok()
+                .map_err(|e| e.to_string())
         }
     });
 
     let is_member = auth().is_logged_in();
-    let board_locked = list.value()()
-        .flatten()
-        .and_then(|r| r.board.clone())
-        .map(|b| b.is_locked)
-        .unwrap_or(false);
+    let board_locked = list
+        .read()
+        .as_ref()
+        .and_then(|r| r.as_ref().ok())
+        .and_then(|r| r.board.as_ref())
+        .is_some_and(|b| b.is_locked);
 
     rsx! {
         style { {PAGE_CSS} }
@@ -255,8 +274,11 @@ pub fn ForumBoardPage(slug: String) -> Element {
                     Link { to: Route::Forum {}, "Forum" }
                     " / "
                     {
-                        let name = list.value()().flatten()
-                            .and_then(|r| r.board.map(|b| b.name))
+                        let name = list
+                            .read()
+                            .as_ref()
+                            .and_then(|r| r.as_ref().ok())
+                            .and_then(|r| r.board.as_ref().map(|b| b.name.clone()))
                             .unwrap_or_else(|| slug.clone());
                         rsx! { span { "{name}" } }
                     }
@@ -325,14 +347,26 @@ pub fn ForumBoardPage(slug: String) -> Element {
                 }
             }
 
-            match list.value()() {
-                Some(Some(resp)) => {
-                    if resp.threads.is_empty() {
+            {
+                let data = list.read();
+                match classify_fetch(data.as_ref()) {
+                FetchClass::Loading => rsx! { p { class: "forum-loading", "Loading…" } },
+                FetchClass::Error => {
+                    let err = data
+                        .as_ref()
+                        .and_then(|r| r.as_ref().err())
+                        .map(|e| e.to_string())
+                        .unwrap_or_default();
+                    fetch_error(&format!("Couldn't load this board. {err}"), refresh)
+                }
+                FetchClass::Ready => {
+                    let resp = data.as_ref().and_then(|r| r.as_ref().ok());
+                    if resp.is_some_and(|r| r.threads.is_empty()) {
                         rsx! { p { class: "forum-empty", "No threads yet. Start one." } }
                     } else {
                         rsx! {
                             div { class: "forum-thread-list",
-                                for t in resp.threads.iter() {
+                                for t in resp.into_iter().flat_map(|r| r.threads.iter()) {
                                     {
                                         let tid = t.id.clone();
                                         rsx! {
@@ -359,8 +393,7 @@ pub fn ForumBoardPage(slug: String) -> Element {
                         }
                     }
                 }
-                Some(None) => rsx! { p { class: "forum-empty", "Board not found or failed to load." } },
-                None => rsx! { p { class: "forum-empty", "Loading…" } },
+                }
             }
         }
     }

@@ -2,7 +2,8 @@ use dioxus::prelude::*;
 use serde::Deserialize;
 
 use crate::components::{
-    AccessDenied, ConfirmDialog, DataTable, FormModal, StatusPill, Toast, admin_pending, use_toast,
+    AccessDenied, ConfirmDialog, DataTable, FormModal, StatusPill, Toast, admin_pending,
+    list_cap_notice, use_toast,
 };
 use crate::hooks::{ModalController, use_api, use_api_list};
 use crate::state::use_auth;
@@ -221,6 +222,8 @@ pub fn AdminModeration() -> Element {
                 },
             }
         }
+
+        {list_cap_notice(&members, "members")}
 
         FormModal {
             title: "New Moderation Action".to_string(),

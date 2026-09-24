@@ -33,4 +33,51 @@ pub const CSS: &str = r#"
 
     @keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }
     @keyframes slide-up { from { transform: translateY(10px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+
+    .fetch-error-wrap { text-align: center; }
+    .fetch-error {
+        color: var(--danger);
+        text-align: center;
+        padding: 2rem 1rem 0.75rem;
+        margin: 0;
+    }
+    .fetch-error__retry {
+        display: inline-flex;
+        margin: 0.25rem auto 2rem;
+        background: transparent;
+        border: 1px solid var(--border);
+        color: var(--text);
+        border-radius: 6px;
+        padding: 0.35rem 0.8rem;
+        font: inherit;
+        cursor: pointer;
+    }
+
+    .list-cap-notice {
+        color: var(--text-2);
+        font-size: 0.85rem;
+        padding: 0.75rem 0;
+        display: flex;
+        align-items: center;
+        gap: 0.6rem;
+        flex-wrap: wrap;
+    }
+    .list-cap-notice__more {
+        background: transparent;
+        border: 1px solid var(--border);
+        color: var(--text);
+        border-radius: 6px;
+        padding: 0.3rem 0.7rem;
+        font: inherit;
+        cursor: pointer;
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+        *, *::before, *::after {
+            animation-duration: 0.01ms !important;
+            animation-iteration-count: 1 !important;
+            transition-duration: 0.01ms !important;
+            scroll-behavior: auto !important;
+        }
+    }
 "#;

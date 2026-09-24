@@ -2,7 +2,7 @@ use dioxus::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::components::ui::{BtnVariant, Button, Card, Pill, PillTone, Textarea};
-use crate::components::{Toast, use_toast};
+use crate::components::{Toast, list_cap_notice, use_toast};
 use crate::hooks::{use_api, use_api_list};
 use crate::routes::Route;
 use crate::state::auth::use_auth;
@@ -229,6 +229,7 @@ pub fn Apply() -> Element {
                                             }
                                         }
                                     }
+                                    {list_cap_notice(&games, "games")}
                                 }
 
                                 div { class: "apply-field",

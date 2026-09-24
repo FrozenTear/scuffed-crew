@@ -3,7 +3,9 @@ use serde::Deserialize;
 
 use scuffed_api_client::ApiClient;
 
+use crate::components::fetch_error;
 use crate::routes::Route;
+use crate::util::{FetchClass, classify_fetch};
 
 #[derive(Debug, Clone, Deserialize)]
 struct BlogArticle {
@@ -93,11 +95,15 @@ const PAGE_CSS: &str = r#"
 
 #[component]
 pub fn Blog() -> Element {
-    let articles = use_resource(|| async {
-        ApiClient::web()
-            .fetch::<Vec<BlogArticle>>("/api/articles?limit=50")
-            .await
-            .ok()
+    let refresh = use_signal(|| 0u32);
+    let articles = use_resource(move || {
+        let _ = refresh();
+        async move {
+            ApiClient::web()
+                .fetch::<Vec<BlogArticle>>("/api/articles?limit=50")
+                .await
+                .map_err(|e| e.to_string())
+        }
     });
 
     rsx! {
@@ -108,19 +114,30 @@ pub fn Blog() -> Element {
 
             {
                 let data = articles.read();
-                let data = data.as_ref().and_then(|d| d.as_ref());
-                match data {
-                    None => rsx! { p { class: "blog-loading", "Loading..." } },
-                    Some(list) if list.is_empty() => rsx! {
-                        p { class: "blog-empty", "No articles yet." }
-                    },
-                    Some(list) => rsx! {
-                        div { class: "blog-list",
-                            for a in list.iter() {
-                                {render_blog_card(a)}
+                match classify_fetch(data.as_ref()) {
+                    FetchClass::Loading => rsx! { p { class: "blog-loading", "Loading..." } },
+                    FetchClass::Error => {
+                        let err = data
+                            .as_ref()
+                            .and_then(|r| r.as_ref().err())
+                            .map(|e| e.to_string())
+                            .unwrap_or_default();
+                        fetch_error(&format!("Couldn't load the blog. {err}"), refresh)
+                    }
+                    FetchClass::Ready => {
+                        let list = data.as_ref().and_then(|r| r.as_ref().ok());
+                        if list.is_some_and(|items| items.is_empty()) {
+                            rsx! { p { class: "blog-empty", "No articles yet." } }
+                        } else {
+                            rsx! {
+                                div { class: "blog-list",
+                                    for a in list.into_iter().flat_map(|items| items.iter()) {
+                                        {render_blog_card(a)}
+                                    }
+                                }
                             }
                         }
-                    },
+                    }
                 }
             }
         }

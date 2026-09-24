@@ -1,6 +1,6 @@
 use dioxus::prelude::*;
 
-use crate::components::{DataTable, FormModal, Toast, admin_pending, use_toast};
+use crate::components::{DataTable, FormModal, Toast, admin_pending, list_cap_notice, use_toast};
 use crate::hooks::{ModalController, use_api_list};
 use crate::state::use_auth;
 use scuffed_api_client::ApiClient;
@@ -135,6 +135,8 @@ pub fn AdminGames() -> Element {
                 },
             }
         }
+
+        {list_cap_notice(&games, "games")}
 
         FormModal {
             title: if modal.get_target().is_some() { "Edit Game".to_string() } else { "Add Game".to_string() },

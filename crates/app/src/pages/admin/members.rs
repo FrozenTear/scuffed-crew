@@ -4,7 +4,7 @@ use wasm_bindgen::JsCast;
 
 use crate::components::{
     ConfirmDialog, DataTable, FormModal, RolePill, StatusPill, SummaryCard, Toast, admin_pending,
-    use_toast,
+    list_cap_notice, use_toast,
 };
 use crate::hooks::{ModalController, use_api_list, use_api_list_prefer};
 use crate::state::use_auth;
@@ -70,7 +70,7 @@ const ROLES: [&str; 4] = ["recruit", "member", "officer", "admin"];
 
 /// Active-only list — any org member. Do not put `include_inactive` here.
 const ADMIN_MEMBERS_ACTIVE_ONLY: &str = "/api/members";
-/// Officer+ contract from API PR #52. Recruit/member → 403.
+/// Officer+ list. Recruit/member requests get 403 and fall back to active-only.
 const ADMIN_MEMBERS_INCLUDE_INACTIVE: &str = "/api/members?include_inactive=true";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -100,13 +100,17 @@ fn members_list_mode(is_officer: bool, used_forbidden_fallback: bool) -> Members
 fn list_intro_copy(mode: MembersListMode) -> &'static str {
     match mode {
         MembersListMode::IncludeInactive => {
-            "Inactive members stay on this list (dimmed) with Activate. If a deactivated row disappears, it is kept under Recently deactivated until the include_inactive API (#52) is live."
+            "Inactive members stay on this list (dimmed). Activate restores one."
         }
         MembersListMode::FallbackActiveOnly => {
             "Could not load inactive members (officer access required). Showing active members only. Members you deactivate this session stay under Recently deactivated."
         }
         MembersListMode::ActiveOnly => "Active members only.",
     }
+}
+
+fn session_inactive_note() -> &'static str {
+    "These members were deactivated during this session and are not in the list above. Activate still works here."
 }
 
 fn member_row_class(is_active: bool) -> &'static str {
@@ -131,9 +135,9 @@ pub fn AdminMembers() -> Element {
     );
     let mut games = use_api_list::<Game>("/api/games");
     let mut toast = use_toast();
-    // Session fallback: if include_inactive (#52) is not live, a deactivate
-    // drops the row from GET /api/members. Keep those here so Activate still
-    // works. When #52 is live they reappear in `members` and this list hides.
+    // Session fallback: a 403 on the inactive list drops deactivated rows from
+    // the active-only response. Keep those here so Activate still works. When
+    // the inactive list loads, they reappear in `members` and this list hides.
     let mut recently_inactive: Signal<Vec<Member>> = use_signal(Vec::new);
     let list_mode = members_list_mode(auth().is_officer_or_above(), include_inactive_fell_back());
 
@@ -690,7 +694,7 @@ pub fn AdminMembers() -> Element {
                         "Recently deactivated (this session)"
                     }
                     p { class: "empty-state", style: "text-align:left;padding:0 0 0.75rem;margin:0;",
-                        "These members are not in the current API response. Activate still works here. Earlier inactive members appear in the main list when include_inactive (#52) is available."
+                        "{session_inactive_note()}"
                     }
                     DataTable { headers: vec!["Name", "Role", "Status", "Actions"],
                         for member in inactive.iter() {
@@ -716,6 +720,9 @@ pub fn AdminMembers() -> Element {
                 }
             }
         }
+
+        {list_cap_notice(&members, "members")}
+        {list_cap_notice(&games, "games")}
 
         // Role change modal
         FormModal {
@@ -1165,12 +1172,27 @@ mod tests {
     }
 
     #[test]
-    fn intro_copy_mentions_fallback_and_hash_52() {
-        assert!(list_intro_copy(MembersListMode::IncludeInactive).contains("#52"));
+    fn intro_copy_is_user_facing_and_not_a_pr_note() {
+        for mode in [
+            MembersListMode::IncludeInactive,
+            MembersListMode::FallbackActiveOnly,
+            MembersListMode::ActiveOnly,
+        ] {
+            let copy = list_intro_copy(mode);
+            assert!(!copy.contains("#52"), "{copy}");
+            assert!(!copy.contains("include_inactive"), "{copy}");
+        }
+        assert!(list_intro_copy(MembersListMode::IncludeInactive).contains("Inactive members"));
         assert!(
             list_intro_copy(MembersListMode::FallbackActiveOnly)
                 .contains("officer access required")
         );
-        assert!(!list_intro_copy(MembersListMode::ActiveOnly).contains("include_inactive"));
+        assert_eq!(
+            list_intro_copy(MembersListMode::ActiveOnly),
+            "Active members only."
+        );
+        assert!(!session_inactive_note().contains("#52"));
+        assert!(!session_inactive_note().contains("include_inactive"));
+        assert!(session_inactive_note().contains("Activate"));
     }
 }

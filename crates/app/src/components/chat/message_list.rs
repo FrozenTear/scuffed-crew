@@ -2,6 +2,7 @@
 
 use dioxus::prelude::*;
 
+use crate::util::truncate_chars;
 use scuffed_types::nostr::ChatMessage;
 
 const MESSAGE_LIST_CSS: &str = r#"
@@ -167,10 +168,12 @@ pub fn MessageList(messages: Vec<ChatMessage>, #[props(default = false)] loading
 /// A single message bubble.
 #[component]
 fn MessageBubble(message: ChatMessage) -> Element {
-    let display_name = message
-        .display_name
-        .as_deref()
-        .unwrap_or_else(|| &message.pubkey[..8]);
+    // Pubkeys are usually 64 hex chars, but a short or empty sender id must
+    // not panic on a fixed byte slice.
+    let display_name = match message.display_name.as_deref() {
+        Some(name) => name.to_string(),
+        None => truncate_chars(&message.pubkey, 8).to_string(),
+    };
 
     let initials = display_name
         .chars()

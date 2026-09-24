@@ -142,6 +142,11 @@ const PAGE_CSS: &str = r#"
     .tournament-external-link:hover {
         text-decoration: underline;
     }
+    .tournament-external-text {
+        color: var(--text-2);
+        font-size: 0.85rem;
+        word-break: break-all;
+    }
     .tournament-section-title {
         font-family: var(--font-head);
         font-weight: 700;
@@ -280,11 +285,16 @@ pub fn Tournament(id: String) -> Element {
                                     p { class: "tournament-description", "{d}" }
                                 }
                                 if let Some(url) = &ext_url {
-                                    a {
-                                        href: "{url}",
-                                        target: "_blank",
-                                        class: "tournament-external-link",
-                                        "{url}"
+                                    if let Some(href) = crate::util::http_href(url) {
+                                        a {
+                                            href: "{href}",
+                                            target: "_blank",
+                                            rel: "noopener noreferrer",
+                                            class: "tournament-external-link",
+                                            "{href}"
+                                        }
+                                    } else if !url.trim().is_empty() {
+                                        span { class: "tournament-external-text", "{url}" }
                                     }
                                 }
                             }

@@ -3,6 +3,7 @@ pub mod bracket;
 pub mod charts;
 pub mod chat;
 pub mod dm;
+pub mod fetch_state;
 pub mod member_gate;
 pub mod modal;
 pub mod poll;
@@ -13,6 +14,7 @@ pub mod toast;
 pub mod ui;
 
 pub use admin_shared::*;
+pub use fetch_state::fetch_error;
 pub use member_gate::{is_http_status, member_pending};
 // Currently unreferenced (home.rs moved to settings-driven sections) — kept
 // per the pending-wiring convention for other pages to adopt.

@@ -3,7 +3,7 @@
 use dioxus::prelude::*;
 use scuffed_types::{Team, TeamChannel};
 
-use crate::components::member_pending;
+use crate::components::{list_cap_notice, member_pending};
 use crate::hooks::{ApiResource, use_api_list, use_api_with};
 use crate::state::auth::AuthState;
 use crate::state::use_auth;
@@ -130,6 +130,7 @@ pub fn TeamChat() -> Element {
                     {channel_panel(&auth(), selected_team(), &channels)}
                 },
             }}
+            {list_cap_notice(&teams, "teams")}
         }
     }
 }
