@@ -10824,6 +10824,7 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "axum-extra",
+ "base64 0.22.1",
  "blake3",
  "chrono",
  "dashmap",
@@ -10838,6 +10839,7 @@ dependencies = [
  "scuffed-types",
  "serde",
  "serde_json",
+ "sha2",
  "thiserror 2.0.18",
  "tokio",
  "tower",

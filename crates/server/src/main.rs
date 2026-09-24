@@ -2,7 +2,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use axum::extract::DefaultBodyLimit;
-use axum::http::HeaderValue;
 use axum::routing::get;
 use scuffed_auth::SessionConfig;
 use scuffed_db::Database;
@@ -18,47 +17,7 @@ use tracing_subscriber::EnvFilter;
 
 mod collab;
 mod routes;
-
-async fn security_headers(
-    request: axum::extract::Request,
-    next: axum::middleware::Next,
-) -> axum::response::Response {
-    let mut response = next.run(request).await;
-    let headers = response.headers_mut();
-
-    headers.insert(
-        axum::http::header::X_CONTENT_TYPE_OPTIONS,
-        HeaderValue::from_static("nosniff"),
-    );
-    headers.insert(
-        axum::http::header::X_FRAME_OPTIONS,
-        HeaderValue::from_static("DENY"),
-    );
-    // Disable the legacy XSS filter — modern browsers ignore it and it can introduce
-    // vulnerabilities in older ones.
-    headers.insert(
-        axum::http::HeaderName::from_static("x-xss-protection"),
-        HeaderValue::from_static("0"),
-    );
-    headers.insert(
-        axum::http::HeaderName::from_static("referrer-policy"),
-        HeaderValue::from_static("strict-origin-when-cross-origin"),
-    );
-    headers.insert(
-        axum::http::HeaderName::from_static("permissions-policy"),
-        HeaderValue::from_static("camera=(), microphone=(), geolocation=()"),
-    );
-
-    // Only send HSTS in production — prevents breaking local dev over HTTP.
-    if std::env::var("PRODUCTION").is_ok() {
-        headers.insert(
-            axum::http::header::STRICT_TRANSPORT_SECURITY,
-            HeaderValue::from_static("max-age=63072000; includeSubDomains; preload"),
-        );
-    }
-
-    response
-}
+mod security;
 
 const DEV_SESSION_TOKEN: &str = "dev-session-token-do-not-use-in-production";
 
@@ -77,8 +36,18 @@ async fn main() {
     // Init-only: root migrations + ensure EDITOR app user, then exit.
     // Use for separate migrate jobs; set SURREALDB_BOOTSTRAP=0 on long-lived app containers.
     if std::env::var("SURREALDB_MIGRATE_ONLY").ok().as_deref() == Some("1") {
-        if std::env::var("SURREALDB_URL").is_err() {
-            panic!("SURREALDB_MIGRATE_ONLY=1 requires SURREALDB_URL (remote DB)");
+        match scuffed_db::resolve_database_boot_mode_from_env() {
+            Ok(scuffed_db::DatabaseBootMode::Remote) => {}
+            Ok(scuffed_db::DatabaseBootMode::InMemoryDev) => {
+                eprintln!(
+                    "error: SURREALDB_MIGRATE_ONLY=1 requires a non-blank SURREALDB_URL (remote DB)"
+                );
+                std::process::exit(1);
+            }
+            Err(err) => {
+                eprintln!("error: {err}");
+                std::process::exit(1);
+            }
         }
         Database::bootstrap_from_env()
             .await
@@ -90,7 +59,9 @@ async fn main() {
     // Connect to SurrealDB (remote or in-memory fallback).
     // Prefer SURREALDB_AUTH_MODE=scoped + non-root user in production.
     // Remote scoped: optional root bootstrap (unless SURREALDB_BOOTSTRAP=0), then EDITOR app user.
-    let is_dev = std::env::var("SURREALDB_URL").is_err();
+    // PRODUCTION with an unset or blank SURREALDB_URL refuses to start (no in-memory DB).
+    let boot_mode = scuffed_db::database_boot_mode_or_exit();
+    let is_dev = boot_mode == scuffed_db::DatabaseBootMode::InMemoryDev;
     let db = if is_dev {
         tracing::info!("No SURREALDB_URL set, using in-memory database");
         let db = Database::connect_memory()
@@ -201,6 +172,7 @@ async fn main() {
         nostr_challenge_key,
         consumed_challenges: scuffed_site_server::challenge_store::ConsumedChallengeStore::new(),
         nostr_rate_limiter: scuffed_site_server::nostr_rate_limit::NostrRateLimiter::new(),
+        login_lockout: scuffed_site_server::login_lockout::LoginLockout::new(),
         crypto,
         relay_url,
         dm_events,
@@ -232,6 +204,8 @@ async fn main() {
 
     // Build the unified router: existing org routes + strategy routes + chat + WebSocket,
     // then apply production middleware to the combined router.
+    // CSP is report-only unless CSP_ENFORCE=1. See `security`.
+    let csp = security::SecurityPolicy::from_env();
     let app = create_router(state.clone())
         .merge(routes::strategy_routes(state.clone()))
         .route(
@@ -252,7 +226,10 @@ async fn main() {
         )
         .layer(DefaultBodyLimit::max(10 * 1024 * 1024))
         .layer(CompressionLayer::new())
-        .layer(axum::middleware::from_fn(security_headers));
+        .layer(axum::middleware::from_fn(move |req, next| {
+            let csp = csp.clone();
+            async move { security::apply(req, next, csp).await }
+        }));
 
     let port: u16 = std::env::var("PORT")
         .ok()

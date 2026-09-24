@@ -874,6 +874,9 @@ pub struct SiteSettings {
     /// Missing on older rows — treat as enabled.
     #[serde(default = "default_strategies_enabled")]
     pub strategies_enabled: bool,
+    /// Missing on older rows — treat as off (admins only may edit teams).
+    #[serde(default = "default_officers_can_edit_teams")]
+    pub officers_can_edit_teams: bool,
     pub recruitment_message: String,
     pub min_age: u32,
     pub forum_backend: String,
@@ -912,6 +915,10 @@ fn default_public_layout() -> String {
 
 fn default_strategies_enabled() -> bool {
     true
+}
+
+fn default_officers_can_edit_teams() -> bool {
+    false
 }
 
 /// An announcement/news post.

@@ -27,6 +27,7 @@ This is the supported path for a **single VPS** with Podman Compose. You do **no
 
 `scripts/install.sh` writes `PRODUCTION=1`, `SURREALDB_AUTH_MODE=scoped`, a random `NOSTR_CHALLENGE_SECRET`, and **distinct** root + app passwords.  
 Remote boot **refuses** if `PRODUCTION` or `ENCRYPTION_KEY` is missing; the server also **refuses to boot** outside dev if `NOSTR_CHALLENGE_SECRET` is missing/empty.  
+When `PRODUCTION` is set, an unset or blank `SURREALDB_URL` is a hard error (exit 1, clear message). The process does not start an in-memory database, does not seed a dev admin, and does not serve `/api/dev/login`. Local dev leaves both `PRODUCTION` and `SURREALDB_URL` unset.  
 In production scoped mode, missing or root-equal `SURREALDB_APP_PASSWORD` is a hard error (no silent fallback).
 
 Never ship with `root`/`root`. Migrations run as root during bootstrap only; the long-lived app uses a database-scoped **EDITOR** user.
@@ -217,6 +218,13 @@ systemctl reload caddy
 
 Template also lives in repo: `deploy/Caddyfile`.
 
+The app sets `Content-Security-Policy-Report-Only` itself (same-origin scripts,
+Google Fonts, Discord/Google avatar hosts, and `NOSTR_RELAY_URL` for chat
+sockets). Leave CSP off the Caddy block so the two policies do not intersect.
+Set `CSP_ENFORCE=1` in `data/secrets.env` and recreate the app container to
+send enforcing `Content-Security-Policy` instead. `CSP_EXTRA_CONNECT_SRC` and
+`CSP_IMG_SRC` add relay or image origins without a code change.
+
 > **Optional: cache the ICS feeds at the edge.** `/api/calendar/all.ics` and
 > `/api/calendar/team/{id}` run a full event list plus a settings read per hit,
 > and they already send `Cache-Control: public, max-age=3600` — which only does
@@ -234,33 +242,58 @@ Template also lives in repo: `deploy/Caddyfile`.
 >
 > Without the plugin, the governor alone is sufficient for this org's scale.
 
-> **Rate limiting & `X-Forwarded-For`.** The auth and upload rate limiters key
-> off the client IP. To stop an attacker from spraying fresh buckets by rotating
-> `X-Forwarded-For`, forwarded headers are only trusted when the request arrives
-> from a **trusted proxy**. The default trust set is loopback + private ranges,
-> which already covers this deploy (the container sees requests coming from the
-> Podman network gateway, a private address, after host Caddy forwards them), so
-> **no configuration is needed** for the blessed setup. If you front the stack
-> with an additional public proxy/CDN, list every hop's egress IP/CIDR in
-> `TRUSTED_PROXIES` (comma-separated) in `data/secrets.env` so its forwarded
-> client IP is honored; otherwise all traffic through that proxy shares one
-> bucket. Keep the container bound to `127.0.0.1:HOST_PORT` — publishing it on a
-> public interface would let clients connect directly and, because a public peer
-> is untrusted, they'd each be limited by their real socket IP (safe, but the
-> proxy is what terminates TLS).
+> **Rate limiting & `X-Forwarded-For`.** Auth, upload, and public rate
+> limiters key off the client IP. Forwarded headers are trusted only when the
+> TCP peer is loopback, or is listed in `TRUSTED_PROXIES` (comma-separated IPs
+> or CIDRs in `data/secrets.env`). **The default is loopback only.** Private
+> ranges are not trusted, so a LAN client or another container cannot rotate
+> `X-Forwarded-For` into a fresh bucket.
 >
-> **Non-loopback / LAN bind — set `TRUSTED_PROXIES` explicitly.** The default
-> trust set includes the **whole private range** (`10/8`, `172.16/12`,
-> `192.168/16`, link-local). That is safe only because the blessed stack binds
-> `127.0.0.1` and the *sole* private-range peer it ever sees is its own proxy
-> hop. If you bind the server to a **non-loopback** interface (direct public or
-> LAN exposure, or a reverse proxy that is not on a loopback-bound hop), any peer
-> inside those default private ranges — e.g. another host on the same LAN — is
-> trusted and can rotate `X-Forwarded-For` to spray fresh rate-limit buckets,
-> degrading the auth/upload/Nostr limiters. In that case you **must** set
-> `TRUSTED_PROXIES` to the **exact** proxy IP(s)/CIDR(s) so only the real proxy's
-> forwarded headers are honored; every other peer is then keyed by its true
-> socket address.
+> **This deploy's hop.** Host Caddy (`deploy/Caddyfile`) reverse-proxies to
+> `127.0.0.1:HOST_PORT`. Compose publishes that port into `site-server`.
+> Rootful Podman presents the connection *inside* the container as the
+> compose-network **gateway** (the bridge address, commonly `10.89.x.1` — one
+> per attached network), not as the browser and not as `127.0.0.1`. Caddy's
+> `reverse_proxy` sets `X-Forwarded-For` to the real client. `TRUSTED_PROXIES`
+> must be those gateway addresses or every visitor shares one bucket.
+>
+> `scripts/install.sh` and `scripts/update.sh` run
+> `scripts/ensure-trusted-proxies.sh`, which writes the live gateway into
+> `data/secrets.env` when the key is missing or empty. A value you already set
+> is left alone. Loopback stays trusted in addition to whatever you list, so a
+> forwarder that shows up as `127.0.0.1` still works.
+>
+> Keep the publish bound to `127.0.0.1:HOST_PORT`. Do **not** set
+> `TRUSTED_PROXIES` to `10.0.0.0/8` or any whole private range — that trusts
+> every private peer again. An extra public CDN in front of Caddy must be
+> listed by its egress IP as well, or its traffic shares one bucket.
+>
+> **Contabo after this change.** `./scripts/update.sh` discovers the gateway
+> and recreates `site-server` (volumes stay). Then confirm:
+>
+> ```bash
+> cd /root/github/scuffed-crew
+> grep '^TRUSTED_PROXIES=' data/secrets.env
+> # startup log line: rate-limit trusted proxies
+> podman logs --tail 80 "$(podman ps -q --filter name=site-server | head -n1)" | grep 'trusted proxies'
+> ```
+>
+> Manual path, if you are not using the update script — read the gateway, do
+> not guess it:
+>
+> ```bash
+> cd /root/github/scuffed-crew
+> cid=$(podman ps -aq --filter name=site-server | head -n1)
+> podman inspect "$cid" --format '{{range .NetworkSettings.Networks}}{{.Gateway}} {{end}}'
+> # data/secrets.env:
+> #   TRUSTED_PROXIES=<those IPs, comma-separated>
+> podman compose --env-file data/secrets.env up -d --no-deps site-server
+> ```
+>
+> The peer has to match. During
+> `curl -sS -o /dev/null "http://127.0.0.1:${HOST_PORT}/api/health"`,
+> `podman exec <site-server> ss -tn '( sport = :3000 )'` shows the source
+> address. It must be `127.0.0.1` or one of the `TRUSTED_PROXIES` values.
 
 **3. App public URL** (required for cookies / redirects):
 
@@ -366,19 +399,115 @@ once you are done — leaving it armed serves no purpose.
 
 ## Backups
 
+`scripts/backup.sh` stores the SurrealDB export, data volumes, and
+`data/secrets.env` (including `ENCRYPTION_KEY`) in the **same** restic
+repository. One repository password opens both the database and the key that
+decrypts Nostr keys, OAuth ids, and DMs. That is deliberate: a second store for
+`ENCRYPTION_KEY` is easy to forget, and forgetting it is how a host loss becomes
+unreadable data.
+
+Two different secrets, stored in two different places:
+
+| Secret | Where it lives | Why |
+|---|---|---|
+| Restic **repository** | **Off this host** (`sftp:`, `s3:`, `rest:`, or any other restic backend) | A disk on the same machine dies with the host |
+| `RESTIC_PASSWORD` | **On this host**, for the daily timer, in a root-owned mode-600 file **outside** the repo and outside every path restic snapshots. A copy also goes in a password manager | An unattended timer cannot prompt |
+| `ENCRYPTION_KEY` | `data/secrets.env` on the host (mode 600), **and inside the snapshot**, **and** a copy in the same password manager | The snapshot cannot decrypt Nostr keys or DMs without it. The password-manager copy covers a backup that predates this, or a snapshot you cannot open yet |
+
+`backup.sh` refuses a local `RESTIC_REPOSITORY` (`/var/backups/...`, `local:...`, or a relative path) unless `BACKUP_ALLOW_LOCAL_REPO=1`. Do not set that on the production timer. It also refuses to run if `ENCRYPTION_KEY` is missing or blank, or if `RESTIC_PASSWORD` is assigned inside `data/secrets.env` (that file is copied into the snapshot). Each snapshot carries `encryption-key.fingerprint` (a sha256 of the key material, not the key) so restore fails when the host key does not match.
+
+The timer reads `/etc/scuffed-crew/backup.env` (not `data/secrets.env`):
+
+```
+RESTIC_REPOSITORY=sftp:USER@BACKUP-HOST:/srv/restic/scuffed-crew
+RESTIC_PASSWORD_FILE=/etc/scuffed-crew/restic-password
+```
+
+`RESTIC_PASSWORD_FILE` is one line, the password, nothing else. Interactive restores can export `RESTIC_PASSWORD` instead of the file. Set only one of them.
+
+### Enable the daily backup
+
+The repo ships `deploy/scuffed-backup.service` and `deploy/scuffed-backup.timer` (daily, 03:00, with a short random delay). They do nothing until they are installed and restic is pointed at an off-host repository. Pick any restic backend; the URL below is a placeholder.
+
+1. Install restic on the host (`restic version`).
+2. Create a repository on another machine (sftp), an S3-compatible bucket, or a [rest-server](https://github.com/restic/rest-server). You need the URL restic will use.
+3. Put a copy of the repository password **and** of `ENCRYPTION_KEY` (from `data/secrets.env`) in a password manager. A lost host is recoverable from the off-host backup plus those two values.
+4. On the host, as root:
+
 ```bash
-# once
-export RESTIC_REPOSITORY=... RESTIC_PASSWORD=...
+install -d -m 700 /etc/scuffed-crew
+install -m 600 /dev/null /etc/scuffed-crew/restic-password
+# write the password into that file (one line), then:
+chmod 600 /etc/scuffed-crew/restic-password
+chown root:root /etc/scuffed-crew/restic-password
+
+cat > /etc/scuffed-crew/backup.env <<'EOF'
+RESTIC_REPOSITORY=sftp:USER@BACKUP-HOST:/srv/restic/scuffed-crew
+RESTIC_PASSWORD_FILE=/etc/scuffed-crew/restic-password
+EOF
+chmod 600 /etc/scuffed-crew/backup.env
+chown root:root /etc/scuffed-crew/backup.env
+```
+
+Replace the `RESTIC_REPOSITORY` line with the real URL (`sftp:user@host:/path`, `s3:https://s3.example.com/bucket/path`, `rest:https://backup.example:8000/scuffed-crew`, and so on).
+
+5. Initialize the repository once:
+
+```bash
+set -a
+. /etc/scuffed-crew/backup.env
+set +a
 ./scripts/backup-init.sh
-
-# daily (sources data/secrets.env when present)
-./scripts/backup.sh
 ```
 
-Systemd units under `deploy/` can load:
+6. Install and start the timer (paths assume the repo is at `/opt/scuffed-crew`):
 
+```bash
+cp deploy/scuffed-backup.service deploy/scuffed-backup.timer /etc/systemd/system/
+systemctl daemon-reload
+systemctl enable --now scuffed-backup.timer
+systemctl start scuffed-backup.service
+systemctl status scuffed-backup.service
 ```
-EnvironmentFile=-/opt/scuffed-crew/data/secrets.env
+
+7. `systemctl start scuffed-backup.service` must succeed, and `restic snapshots --tag scuffed-crew` on the off-host repo must show a snapshot. Snapshots taken before `secrets.env` was included do **not** contain `ENCRYPTION_KEY`. Keep the password-manager copy until a new snapshot exists.
+
+`BACKUP_ALLOW_LOCAL_REPO=1` is only for a deliberate same-host drill. Leave it unset on the timer.
+
+## Restore
+
+Stop the app first. Restore secrets **before** starting it. A fresh
+`install.sh` on a rebuilt host generates a new `ENCRYPTION_KEY`, and that key
+cannot decrypt the restored database.
+
+On a new host, export `RESTIC_PASSWORD` from the password manager (or recreate
+the mode-600 `RESTIC_PASSWORD_FILE`) and set `RESTIC_REPOSITORY` to the same
+off-host URL:
+
+```bash
+export RESTIC_REPOSITORY='sftp:USER@BACKUP-HOST:/srv/restic/scuffed-crew'
+export RESTIC_PASSWORD='from-the-password-manager'
+./scripts/restore.sh latest
+```
+
+`restore.sh` copies the snapshot's `secrets.env` into `data/secrets.env` when
+the host key is missing or different, then runs `scripts/check-restore-key.sh`.
+That check exits non-zero if `ENCRYPTION_KEY` is missing or its fingerprint
+does not match the snapshot. Do not start the app until it prints
+`encryption key matches`.
+
+Non-interactive install of the backup's secrets file:
+
+```bash
+SCUFFED_RESTORE_INSTALL_SECRETS=1 ./scripts/restore.sh latest
+```
+
+Check an already restored tree yourself:
+
+```bash
+./scripts/check-restore-key.sh \
+  --secrets data/secrets.env \
+  --fingerprint /path/to/restored/encryption-key.fingerprint
 ```
 
 ## Forgot admin password

@@ -16,6 +16,7 @@ fn officer_has_admin_only_fields(body: &UpdateSettingsRequest) -> bool {
         site_description,
         recruitment_open,
         strategies_enabled: _,
+        officers_can_edit_teams,
         recruitment_message,
         min_age,
         forum_backend,
@@ -33,6 +34,7 @@ fn officer_has_admin_only_fields(body: &UpdateSettingsRequest) -> bool {
     org_name.is_some()
         || site_description.is_some()
         || recruitment_open.is_some()
+        || officers_can_edit_teams.is_some()
         || recruitment_message.is_some()
         || min_age.is_some()
         || forum_backend.is_some()
@@ -111,6 +113,7 @@ fn to_api_settings(db: scuffed_db::SiteSettings) -> SiteSettings {
         site_description: db.site_description,
         recruitment_open: db.recruitment_open,
         strategies_enabled: db.strategies_enabled,
+        officers_can_edit_teams: db.officers_can_edit_teams,
         recruitment_message: db.recruitment_message,
         min_age: db.min_age,
         forum_backend: db.forum_backend,
@@ -156,7 +159,8 @@ pub async fn get_settings(
 }
 
 /// PUT /api/settings — Admin: full `UpdateSettingsRequest`.
-/// Officer: `strategies_enabled` only; any other set field is 403.
+/// Officer: `strategies_enabled` only; any other set field, including
+/// `officers_can_edit_teams`, is 403.
 pub async fn update_settings(
     State(state): State<AppState>,
     officer: OfficerUser,
@@ -237,6 +241,7 @@ pub async fn update_settings(
             shell_str.as_deref(),
             skin_str.as_deref(),
             body.strategies_enabled,
+            body.officers_can_edit_teams,
         )
         .await
         .map_err(|_e| {
@@ -306,6 +311,25 @@ mod officer_settings_gate_tests {
         let body = UpdateSettingsRequest {
             strategies_enabled: Some(false),
             recruitment_open: Some(false),
+            ..Default::default()
+        };
+        assert!(officer_has_admin_only_fields(&body));
+    }
+
+    #[test]
+    fn officer_officers_can_edit_teams_is_admin_only() {
+        let body = UpdateSettingsRequest {
+            officers_can_edit_teams: Some(true),
+            ..Default::default()
+        };
+        assert!(officer_has_admin_only_fields(&body));
+    }
+
+    #[test]
+    fn officer_strategies_plus_team_flag_is_admin_only() {
+        let body = UpdateSettingsRequest {
+            strategies_enabled: Some(false),
+            officers_can_edit_teams: Some(true),
             ..Default::default()
         };
         assert!(officer_has_admin_only_fields(&body));

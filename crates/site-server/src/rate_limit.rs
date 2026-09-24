@@ -17,16 +17,16 @@
 //! ## Configuration
 //!
 //! `TRUSTED_PROXIES` — comma-separated list of proxy IPs or CIDRs whose
-//! forwarded headers are trusted (e.g. `127.0.0.1,10.89.0.0/16`). Loopback is
-//! always trusted. When unset, the default trust set is loopback plus the
-//! private / link-local / unique-local ranges — this covers the blessed deploy
-//! (host Caddy → `127.0.0.1:HOST_PORT` → Podman-published container, where the
-//! server sees the request arriving from the container-network gateway, a
-//! private address) while still refusing to trust forwarded headers from a
-//! public peer. In the blessed deploy the container binds `127.0.0.1` only, so a
-//! public peer can only appear if an operator deliberately publishes the port on
-//! a public interface — in which case that attacker's forwarded headers are
-//! correctly ignored and the peer socket is used as the bucket key.
+//! forwarded headers are trusted (e.g. `10.89.0.1`). Loopback is always
+//! trusted. When unset, the trust set is **loopback only**.
+//!
+//! The production hop is host Caddy → `127.0.0.1:HOST_PORT` → the Podman
+//! published port. Inside the container that peer is the compose-network
+//! gateway (a private address), not the browser. Trusting every RFC1918 /
+//! link-local range would let any client on a private network spoof
+//! `X-Forwarded-For` and skip per-IP limits. Set `TRUSTED_PROXIES` to that
+//! gateway (scripts/ensure-trusted-proxies.sh and docs/deploy.md). A public
+//! peer is never trusted: its socket address is the bucket key.
 
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
@@ -48,11 +48,22 @@ pub struct TrustedProxyIpKeyExtractor {
 
 impl TrustedProxyIpKeyExtractor {
     /// Build from the `TRUSTED_PROXIES` env var (see module docs).
+    ///
+    /// Unset or blank means loopback only. Anything else must be listed.
     pub fn from_env() -> Self {
-        let trusted = match std::env::var("TRUSTED_PROXIES") {
-            Ok(v) if !v.trim().is_empty() => parse_trusted_proxies(&v),
-            _ => default_trusted_proxies(),
+        let raw = std::env::var("TRUSTED_PROXIES").unwrap_or_default();
+        let trusted = if raw.trim().is_empty() {
+            tracing::warn!(
+                "TRUSTED_PROXIES is unset; X-Forwarded-For is trusted only from loopback. \
+                 On the Podman deploy, set it to the compose-network gateway or every \
+                 visitor shares one rate-limit bucket (see docs/deploy.md)."
+            );
+            loopback_nets()
+        } else {
+            parse_trusted_proxies(&raw)
         };
+        let rendered: Vec<String> = trusted.iter().map(|net| net.to_string()).collect();
+        tracing::info!(trusted = %rendered.join(","), "rate-limit trusted proxies");
         Self {
             trusted: Arc::new(trusted),
         }
@@ -163,22 +174,6 @@ fn parse_trusted_proxies(raw: &str) -> Vec<IpNet> {
     nets
 }
 
-/// Default trust set: loopback + private + link-local + unique-local ranges.
-fn default_trusted_proxies() -> Vec<IpNet> {
-    let mut nets = loopback_nets();
-    for cidr in [
-        "10.0.0.0/8",
-        "172.16.0.0/12",
-        "192.168.0.0/16",
-        "169.254.0.0/16", // IPv4 link-local
-        "fc00::/7",       // IPv6 unique-local
-        "fe80::/10",      // IPv6 link-local
-    ] {
-        nets.push(cidr.parse().expect("valid default CIDR"));
-    }
-    nets
-}
-
 fn loopback_nets() -> Vec<IpNet> {
     vec![
         "127.0.0.0/8".parse().expect("valid loopback v4"),
@@ -221,9 +216,9 @@ mod tests {
 
     #[test]
     fn untrusted_peer_ignores_forwarded_for() {
-        // Default trust set (loopback + private). A public peer is untrusted, so
-        // a rotating XFF must NOT change the key — it stays the peer IP.
-        let ex = TrustedProxyIpKeyExtractor::with_trusted(default_trusted_proxies());
+        // Default trust is loopback only. A public peer is untrusted, so a
+        // rotating XFF must NOT change the key — it stays the peer IP.
+        let ex = TrustedProxyIpKeyExtractor::with_trusted(loopback_nets());
 
         let k1 = ex.extract(&req("203.0.113.7", Some("1.1.1.1"))).unwrap();
         let k2 = ex.extract(&req("203.0.113.7", Some("2.2.2.2"))).unwrap();
@@ -237,14 +232,39 @@ mod tests {
     }
 
     #[test]
-    fn trusted_proxy_honors_forwarded_for() {
-        // Caddy on the container-network gateway (private, trusted): the client
-        // IP it forwards is honored.
-        let ex = TrustedProxyIpKeyExtractor::with_trusted(default_trusted_proxies());
+    fn default_trust_is_loopback_only() {
+        // A private peer (Podman bridge gateway, LAN host, link-local) must
+        // not be trusted just because TRUSTED_PROXIES is unset. Rotating XFF
+        // stays on the peer bucket.
+        let ex = TrustedProxyIpKeyExtractor::with_trusted(loopback_nets());
+        for peer in ["10.89.0.1", "192.168.1.50", "172.16.0.4", "169.254.1.1"] {
+            let k = ex.extract(&req(peer, Some("198.51.100.23"))).unwrap();
+            assert_eq!(k, ip(peer), "{peer} must not honor XFF by default");
+            let rotated = ex.extract(&req(peer, Some("203.0.113.50"))).unwrap();
+            assert_eq!(rotated, k, "{peer} rotating XFF must not open a new bucket");
+        }
+        // Loopback still honors the header (direct local proxy, or a forwarder
+        // that presents the hop as 127.0.0.1).
+        let via_lo = ex
+            .extract(&req("127.0.0.1", Some("198.51.100.23")))
+            .unwrap();
+        assert_eq!(via_lo, ip("198.51.100.23"));
+    }
+
+    #[test]
+    fn explicit_gateway_trust_honors_client_ip() {
+        // Production: TRUSTED_PROXIES is the compose-network gateway only.
+        // That peer's XFF is the client. Another address on the same subnet
+        // (a sibling container) is not trusted.
+        let ex = TrustedProxyIpKeyExtractor::with_trusted(parse_trusted_proxies("10.89.0.1"));
         let k = ex
             .extract(&req("10.89.0.1", Some("198.51.100.23")))
             .unwrap();
         assert_eq!(k, ip("198.51.100.23"));
+        let other = ex
+            .extract(&req("10.89.0.50", Some("198.51.100.23")))
+            .unwrap();
+        assert_eq!(other, ip("10.89.0.50"));
     }
 
     #[test]
@@ -252,7 +272,7 @@ mod tests {
         // Attacker sends a spoofed XFF; the trusted proxy APPENDS the real peer.
         // Right-to-left resolution must pick the appended real client, not the
         // attacker's leftmost value — and it must not depend on the spoof.
-        let ex = TrustedProxyIpKeyExtractor::with_trusted(default_trusted_proxies());
+        let ex = TrustedProxyIpKeyExtractor::with_trusted(loopback_nets());
 
         let real = ex
             .extract(&req("127.0.0.1", Some("6.6.6.6, 198.51.100.23")))
@@ -287,14 +307,14 @@ mod tests {
 
     #[test]
     fn trusted_proxy_without_xff_falls_back_to_peer() {
-        let ex = TrustedProxyIpKeyExtractor::with_trusted(default_trusted_proxies());
-        let k = ex.extract(&req("10.89.0.1", None)).unwrap();
-        assert_eq!(k, ip("10.89.0.1"));
+        let ex = TrustedProxyIpKeyExtractor::with_trusted(loopback_nets());
+        let k = ex.extract(&req("127.0.0.1", None)).unwrap();
+        assert_eq!(k, ip("127.0.0.1"));
     }
 
     #[test]
     fn missing_connect_info_errors() {
-        let ex = TrustedProxyIpKeyExtractor::with_trusted(default_trusted_proxies());
+        let ex = TrustedProxyIpKeyExtractor::with_trusted(loopback_nets());
         let r: Request<()> = Request::builder().body(()).unwrap();
         assert!(ex.extract(&r).is_err());
     }

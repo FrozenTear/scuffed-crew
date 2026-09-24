@@ -46,6 +46,7 @@ async fn test_state() -> AppState {
         nostr_challenge_key: *blake3::hash(b"test-nostr-challenge-key").as_bytes(),
         consumed_challenges: scuffed_site_server::challenge_store::ConsumedChallengeStore::new(),
         nostr_rate_limiter: scuffed_site_server::nostr_rate_limit::NostrRateLimiter::new(),
+        login_lockout: scuffed_site_server::login_lockout::LoginLockout::new(),
         crypto: None,
         relay_url: None,
         dm_events: None,
@@ -911,16 +912,44 @@ async fn create_team_requires_admin() {
     assert_eq!(json["name"], "New Team");
 }
 
+async fn set_officers_can_edit_teams(db: &Database, allowed: bool) {
+    db.update_settings(
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some(allowed),
+    )
+    .await
+    .expect("set officers_can_edit_teams");
+}
+
 #[tokio::test]
-async fn update_team_requires_officer() {
+async fn update_team_refuses_officer_when_flag_off() {
     let state = test_state().await;
     seed_all_roles(&state.db).await;
     seed_game(&state.db, "ow2", "Overwatch 2").await;
     seed_team(&state.db, "teamalpha", "Alpha Squad", "ow2").await;
 
-    let body = json!({ "name": "Renamed Squad" });
+    let body = json!({ "name": "Renamed Squad", "color": "#112233" });
 
-    // Regular member cannot update
+    // Default is false: a fresh settings row refuses officers.
+    let settings = state.db.get_settings().await.expect("settings");
+    assert!(!settings.officers_can_edit_teams);
+
     let app = create_router(state.clone());
     let resp = app
         .oneshot(authed_json_request(
@@ -933,13 +962,26 @@ async fn update_team_requires_officer() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::FORBIDDEN);
 
-    // Officer can update
-    let app = create_router(state);
+    let app = create_router(state.clone());
     let resp = app
         .oneshot(authed_json_request(
             Method::PUT,
             "/api/teams/teamalpha",
             OFFICER_TOKEN,
+            body.clone(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    let json = body_json(resp).await;
+    assert_eq!(json["error"], "Admin access required");
+
+    let app = create_router(state);
+    let resp = app
+        .oneshot(authed_json_request(
+            Method::PUT,
+            "/api/teams/teamalpha",
+            ADMIN_TOKEN,
             body,
         ))
         .await
@@ -947,6 +989,88 @@ async fn update_team_requires_officer() {
     assert_eq!(resp.status(), StatusCode::OK);
     let json = body_json(resp).await;
     assert_eq!(json["name"], "Renamed Squad");
+    assert_eq!(json["color"], "#112233");
+}
+
+#[tokio::test]
+async fn officer_can_update_team_when_flag_on() {
+    let state = test_state().await;
+    seed_all_roles(&state.db).await;
+    seed_game(&state.db, "ow2", "Overwatch 2").await;
+    seed_team(&state.db, "teamalpha", "Alpha Squad", "ow2").await;
+    set_officers_can_edit_teams(&state.db, true).await;
+
+    let app = create_router(state);
+    let resp = app
+        .oneshot(authed_json_request(
+            Method::PUT,
+            "/api/teams/teamalpha",
+            OFFICER_TOKEN,
+            json!({ "name": "Officer Squad", "color": "#abcdef" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    assert_eq!(json["name"], "Officer Squad");
+    assert_eq!(json["color"], "#abcdef");
+}
+
+#[tokio::test]
+async fn admin_can_update_team_when_flag_on() {
+    let state = test_state().await;
+    seed_all_roles(&state.db).await;
+    seed_game(&state.db, "ow2", "Overwatch 2").await;
+    seed_team(&state.db, "teamalpha", "Alpha Squad", "ow2").await;
+    set_officers_can_edit_teams(&state.db, true).await;
+
+    let app = create_router(state);
+    let resp = app
+        .oneshot(authed_json_request(
+            Method::PUT,
+            "/api/teams/teamalpha",
+            ADMIN_TOKEN,
+            json!({ "name": "Admin Squad" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    assert_eq!(json["name"], "Admin Squad");
+}
+
+#[tokio::test]
+async fn member_and_anonymous_cannot_update_team_in_either_flag_state() {
+    let state = test_state().await;
+    seed_all_roles(&state.db).await;
+    seed_game(&state.db, "ow2", "Overwatch 2").await;
+    seed_team(&state.db, "teamalpha", "Alpha Squad", "ow2").await;
+
+    for allowed in [false, true] {
+        set_officers_can_edit_teams(&state.db, allowed).await;
+
+        let app = create_router(state.clone());
+        let resp = app
+            .oneshot(authed_json_request(
+                Method::PUT,
+                "/api/teams/teamalpha",
+                MEMBER_TOKEN,
+                json!({ "name": "Member Squad" }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN, "flag={allowed}");
+
+        let app = create_router(state.clone());
+        let resp = app
+            .oneshot(unauthed_request(Method::PUT, "/api/teams/teamalpha"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "flag={allowed}");
+    }
+
+    let stored = state.db.get_team("teamalpha").await.unwrap().unwrap();
+    assert_eq!(stored.name, "Alpha Squad");
 }
 
 #[tokio::test]
@@ -1020,6 +1144,9 @@ async fn update_team_backfills_channels_for_existing_team() {
 
     let before = state.db.get_team_channels("teamalpha").await.unwrap();
     assert!(before.is_empty(), "seeded team has no channels yet");
+
+    // Officer update backfill still runs when the admin flag allows team edits.
+    set_officers_can_edit_teams(&state.db, true).await;
 
     let app = create_router(state.clone());
     let resp = app
@@ -1690,6 +1817,7 @@ async fn officer_can_toggle_strategies_enabled_only() {
     assert_eq!(resp.status(), StatusCode::OK);
     let json = body_json(resp).await;
     assert_eq!(json["strategies_enabled"], false);
+    assert_eq!(json["officers_can_edit_teams"], false);
     assert_eq!(json["org_name"], "My Clan");
 
     let app = create_router(state.clone());
@@ -1714,6 +1842,92 @@ async fn officer_can_toggle_strategies_enabled_only() {
     assert_eq!(resp.status(), StatusCode::OK);
     let json = body_json(resp).await;
     assert_eq!(json["strategies_enabled"], true);
+    assert_eq!(json["officers_can_edit_teams"], false);
+}
+
+#[tokio::test]
+async fn get_settings_includes_officers_can_edit_teams_default_false() {
+    let state = test_state().await;
+    let app = create_router(state);
+    let resp = app
+        .oneshot(unauthed_request(Method::GET, "/api/settings"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    assert_eq!(json["officers_can_edit_teams"], false);
+}
+
+#[tokio::test]
+async fn officer_cannot_set_officers_can_edit_teams() {
+    let state = test_state().await;
+    seed_all_roles(&state.db).await;
+
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(authed_json_request(
+            Method::PUT,
+            "/api/settings",
+            OFFICER_TOKEN,
+            json!({ "officers_can_edit_teams": true }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    let json = body_json(resp).await;
+    assert_eq!(json["error"], "Admin access required");
+
+    // A body that also toggles the officer-allowed field must not apply either change.
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(authed_json_request(
+            Method::PUT,
+            "/api/settings",
+            OFFICER_TOKEN,
+            json!({ "strategies_enabled": false, "officers_can_edit_teams": true }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(unauthed_request(Method::GET, "/api/settings"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    assert_eq!(json["officers_can_edit_teams"], false);
+    assert_eq!(json["strategies_enabled"], true);
+
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(authed_json_request(
+            Method::PUT,
+            "/api/settings",
+            ADMIN_TOKEN,
+            json!({ "officers_can_edit_teams": true }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    assert_eq!(json["officers_can_edit_teams"], true);
+
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(authed_json_request(
+            Method::PUT,
+            "/api/settings",
+            OFFICER_TOKEN,
+            json!({ "officers_can_edit_teams": false }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+    let stored = state.db.get_settings().await.expect("settings");
+    assert!(stored.officers_can_edit_teams);
 }
 
 #[tokio::test]
@@ -2914,6 +3128,348 @@ async fn local_login_works_after_setup() {
         .unwrap();
     assert_eq!(res.status(), StatusCode::OK);
     assert!(res.headers().get(header::SET_COOKIE).is_some());
+}
+
+/// One password-login attempt from an untrusted public peer, so each call has
+/// its own per-IP governor bucket. Account lockout still keys on the username.
+fn password_login(peer: [u8; 4], username: &str, password: &str) -> Request<Body> {
+    Request::builder()
+        .method(Method::POST)
+        .uri("/api/auth/local/login")
+        .header(header::CONTENT_TYPE, "application/json")
+        .extension(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+            peer, 41000,
+        ))))
+        .body(Body::from(
+            serde_json::to_vec(&json!({
+                "username": username,
+                "password": password
+            }))
+            .unwrap(),
+        ))
+        .unwrap()
+}
+
+fn assert_retry_after(res: &axum::response::Response) -> u64 {
+    let raw = res
+        .headers()
+        .get(header::RETRY_AFTER)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let secs: u64 = raw
+        .parse()
+        .unwrap_or_else(|_| panic!("Retry-After must be an integer, got {raw:?}"));
+    assert!(secs >= 1, "Retry-After must be at least 1s, got {secs}");
+    secs
+}
+
+/// L15: N failed password logins lock the account with 429 + Retry-After.
+/// The body is the same for a real username and a missing one.
+#[tokio::test]
+async fn password_login_lockout_is_429_and_generic() {
+    use scuffed_site_server::login_lockout::{FIRST_LOCK_AFTER, FIRST_LOCK_SECS, LOCKOUT_MESSAGE};
+
+    let state = test_state().await;
+    let app = create_router(state);
+    let created = app
+        .clone()
+        .oneshot(
+            rate_limit_ip(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/auth/setup")
+                    .header(header::CONTENT_TYPE, "application/json"),
+            )
+            .body(Body::from(
+                serde_json::to_vec(&json!({
+                    "username": "Boss",
+                    "password": "correct-horse-1"
+                }))
+                .unwrap(),
+            ))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(created.status(), StatusCode::OK);
+
+    let mut known_lock_body = None;
+    for i in 0..FIRST_LOCK_AFTER {
+        let res = app
+            .clone()
+            .oneshot(password_login(
+                [203, 0, 113, (i + 2) as u8],
+                if i % 2 == 0 { "BOSS" } else { "boss" },
+                "wrong-password",
+            ))
+            .await
+            .unwrap();
+        if i + 1 < FIRST_LOCK_AFTER {
+            assert_eq!(res.status(), StatusCode::UNAUTHORIZED, "failure {}", i + 1);
+            let json = body_json(res).await;
+            assert_eq!(json["error"], "invalid username or password");
+        } else {
+            assert_eq!(res.status(), StatusCode::TOO_MANY_REQUESTS);
+            assert_eq!(assert_retry_after(&res), FIRST_LOCK_SECS);
+            let json = body_json(res).await;
+            assert_eq!(json["error"], LOCKOUT_MESSAGE);
+            let rendered = json.to_string();
+            assert!(!rendered.to_lowercase().contains("boss"));
+            known_lock_body = Some(json["error"].as_str().unwrap().to_string());
+        }
+    }
+
+    // Still locked, including under another spelling. Does not extend the
+    // message into something that names the account.
+    let again = app
+        .clone()
+        .oneshot(password_login([203, 0, 113, 20], "Boss", "wrong-password"))
+        .await
+        .unwrap();
+    assert_eq!(again.status(), StatusCode::TOO_MANY_REQUESTS);
+    let again_secs = assert_retry_after(&again);
+    assert!(again_secs <= FIRST_LOCK_SECS);
+    let again_json = body_json(again).await;
+    assert_eq!(again_json["error"], LOCKOUT_MESSAGE);
+
+    let mut unknown_lock_body = None;
+    for i in 0..FIRST_LOCK_AFTER {
+        let res = app
+            .clone()
+            .oneshot(password_login(
+                [198, 51, 100, (i + 1) as u8],
+                "nobody-home",
+                "wrong-password",
+            ))
+            .await
+            .unwrap();
+        if i + 1 < FIRST_LOCK_AFTER {
+            assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+            let json = body_json(res).await;
+            assert_eq!(json["error"], "invalid username or password");
+        } else {
+            assert_eq!(res.status(), StatusCode::TOO_MANY_REQUESTS);
+            assert_eq!(assert_retry_after(&res), FIRST_LOCK_SECS);
+            let json = body_json(res).await;
+            assert_eq!(json["error"], LOCKOUT_MESSAGE);
+            let rendered = json.to_string();
+            assert!(!rendered.contains("nobody"));
+            assert!(!rendered.to_lowercase().contains("not found"));
+            unknown_lock_body = Some(json["error"].as_str().unwrap().to_string());
+        }
+    }
+    assert_eq!(known_lock_body, unknown_lock_body);
+}
+
+/// A correct password clears the failure count. The lock is not permanent.
+#[tokio::test]
+async fn password_login_success_resets_lockout() {
+    use scuffed_site_server::login_lockout::FIRST_LOCK_AFTER;
+
+    let state = test_state().await;
+    let app = create_router(state);
+    let created = app
+        .clone()
+        .oneshot(
+            rate_limit_ip(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/auth/setup")
+                    .header(header::CONTENT_TYPE, "application/json"),
+            )
+            .body(Body::from(
+                serde_json::to_vec(&json!({
+                    "username": "resetme",
+                    "password": "correct-horse-1"
+                }))
+                .unwrap(),
+            ))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(created.status(), StatusCode::OK);
+
+    let mut peer = 1u8;
+    for _ in 0..(FIRST_LOCK_AFTER - 1) {
+        let res = app
+            .clone()
+            .oneshot(password_login(
+                [203, 0, 113, peer],
+                "resetme",
+                "wrong-password",
+            ))
+            .await
+            .unwrap();
+        peer += 1;
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+    }
+    let ok = app
+        .clone()
+        .oneshot(password_login(
+            [203, 0, 113, peer],
+            "resetme",
+            "correct-horse-1",
+        ))
+        .await
+        .unwrap();
+    peer += 1;
+    assert_eq!(ok.status(), StatusCode::OK);
+
+    for _ in 0..(FIRST_LOCK_AFTER - 1) {
+        let res = app
+            .clone()
+            .oneshot(password_login(
+                [203, 0, 113, peer],
+                "resetme",
+                "wrong-password",
+            ))
+            .await
+            .unwrap();
+        peer += 1;
+        assert_eq!(
+            res.status(),
+            StatusCode::UNAUTHORIZED,
+            "success must clear the failure count"
+        );
+    }
+    let locked = app
+        .clone()
+        .oneshot(password_login(
+            [203, 0, 113, peer],
+            "resetme",
+            "wrong-password",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(locked.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert!(assert_retry_after(&locked) >= 1);
+}
+
+/// The per-IP auth governor is also 429 with Retry-After (not a 500).
+/// Uses the OAuth redirect route so the burst is not mixed with Argon2 or
+/// the per-account lockout.
+#[tokio::test]
+async fn auth_ip_governor_429_sets_retry_after() {
+    let state = test_state().await;
+    let app = create_router(state);
+    let mut saw_429 = false;
+    for _ in 0..8 {
+        let res = app
+            .clone()
+            .oneshot(
+                rate_limit_ip(
+                    Request::builder()
+                        .method(Method::GET)
+                        .uri("/api/auth/discord/login"),
+                )
+                .body(Body::empty())
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        if res.status() == StatusCode::TOO_MANY_REQUESTS {
+            assert!(assert_retry_after(&res) >= 1);
+            saw_429 = true;
+        } else {
+            assert_eq!(res.status(), StatusCode::SERVICE_UNAVAILABLE);
+        }
+    }
+    assert!(saw_429, "burst past the per-IP auth governor must be 429");
+}
+
+/// L15 must not apply to OAuth or to the stat-tracker daemon bearer token.
+#[tokio::test]
+async fn oauth_and_daemon_token_are_not_login_locked() {
+    use scuffed_site_server::login_lockout::FIRST_LOCK_AFTER;
+
+    let state = test_state().await;
+    seed_user(
+        &state.db,
+        "daemonuser",
+        "daemonmember",
+        "Daemon",
+        "member",
+        "daemon-session",
+    )
+    .await;
+    const DAEMON_TOKEN: &str = "daemon-sync-token";
+    state
+        .db
+        .create_daemon_token("daemonmember", DAEMON_TOKEN, "tracker")
+        .await
+        .expect("seed daemon token");
+    let app = create_router(state);
+    for i in 0..(FIRST_LOCK_AFTER + 2) {
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/auth/discord/login")
+                    .extension(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+                        [203, 0, 113, (i + 1) as u8],
+                        42000,
+                    ))))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            res.status(),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "OAuth must not be account-locked"
+        );
+        assert!(res.headers().get(header::RETRY_AFTER).is_none());
+    }
+
+    // One address for every daemon call, the way a real stat-tracker syncs.
+    // A fresh IP per request would hide a future per-IP limit on /api/stats.
+    const DAEMON_IP: [u8; 4] = [198, 51, 100, 50];
+    let daemon_peer = axum::extract::ConnectInfo(std::net::SocketAddr::from((DAEMON_IP, 42000)));
+
+    for _ in 0..(FIRST_LOCK_AFTER + 2) {
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/stats/upload")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::AUTHORIZATION, "Bearer not-a-daemon-token")
+                    .extension(daemon_peer)
+                    .body(Body::from(b"{}".as_slice()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            res.status(),
+            StatusCode::UNAUTHORIZED,
+            "daemon token auth must not be account-locked"
+        );
+        assert!(res.headers().get(header::RETRY_AFTER).is_none());
+    }
+
+    let cfg = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/stats/daemon-config")
+                .header(header::AUTHORIZATION, format!("Bearer {DAEMON_TOKEN}"))
+                .extension(daemon_peer)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        cfg.status(),
+        StatusCode::OK,
+        "daemon-config from the same IP must succeed, not 429"
+    );
+    assert!(cfg.headers().get(header::RETRY_AFTER).is_none());
 }
 
 #[tokio::test]

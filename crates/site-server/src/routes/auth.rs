@@ -1,7 +1,7 @@
 use axum::{
     Json,
     extract::{Path, Query, State},
-    http::StatusCode,
+    http::{StatusCode, header},
     response::{IntoResponse, Redirect},
 };
 use axum_extra::extract::cookie::CookieJar;
@@ -692,6 +692,7 @@ pub async fn setup(
                     shell.as_deref(),
                     skin.as_deref(),
                     None,
+                    None,
                 )
                 .await
             {
@@ -705,7 +706,24 @@ pub async fn setup(
     (jar.add(session_cookie), Json(OkResponse { ok: true })).into_response()
 }
 
+/// 429 for a password-login lockout. The body is the same whether or not the
+/// username exists; `Retry-After` is the remaining backoff in seconds.
+fn too_many_logins(retry_after_secs: u64) -> axum::response::Response {
+    let secs = retry_after_secs.max(1).to_string();
+    (
+        StatusCode::TOO_MANY_REQUESTS,
+        [(header::RETRY_AFTER, secs)],
+        Json(ErrorResponse {
+            error: crate::login_lockout::LOCKOUT_MESSAGE.into(),
+        }),
+    )
+        .into_response()
+}
+
 /// POST /api/auth/local/login — username/password login for local accounts.
+///
+/// Failed attempts share a per-account backoff ([`crate::login_lockout`]).
+/// Bearer-token and OAuth logins do not.
 pub async fn local_login(
     State(state): State<AppState>,
     jar: CookieJar,
@@ -722,6 +740,12 @@ pub async fn local_login(
             .into_response()
     };
 
+    // Already locked: same 429 for a real account and a missing one. Do not
+    // touch the database, so the response cannot leak which it was.
+    if let Some(secs) = state.login_lockout.retry_after(&username) {
+        return too_many_logins(secs);
+    }
+
     let (user, hash) = match state.db.get_local_user_by_username(&username).await {
         Ok(Some(pair)) => pair,
         Ok(None) => {
@@ -729,8 +753,12 @@ pub async fn local_login(
             // hash so this path costs roughly the same as a real verify. Without
             // it, a missing username returns in sub-ms while an existing one pays
             // the Argon2 cost, leaking username existence via timing
-            // (DR1-AUTH-002).
+            // (DR1-AUTH-002). Count the miss toward the same per-username lock
+            // so the 429 does not reveal that the account is absent.
             verify_dummy(&body.password);
+            if let Some(secs) = state.login_lockout.record_failure(&username) {
+                return too_many_logins(secs);
+            }
             return invalid();
         }
         Err(e) => {
@@ -747,12 +775,22 @@ pub async fn local_login(
 
     match verify_password(&body.password, &hash) {
         Ok(true) => {}
-        Ok(false) => return invalid(),
+        Ok(false) => {
+            if let Some(secs) = state.login_lockout.record_failure(&username) {
+                return too_many_logins(secs);
+            }
+            return invalid();
+        }
         Err(e) => {
             tracing::error!("local_login verify: {e}");
+            if let Some(secs) = state.login_lockout.record_failure(&username) {
+                return too_many_logins(secs);
+            }
             return invalid();
         }
     }
+
+    state.login_lockout.record_success(&username);
 
     let session_token = generate_session_token();
     if let Err(e) = state

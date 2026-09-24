@@ -3,6 +3,19 @@ use surrealdb::Surreal;
 
 use crate::DbResult;
 
+/// Write `officers_can_edit_teams = false` on site_settings rows that omit it.
+///
+/// Idempotent: a stored true or false is kept (`??` replaces only NONE).
+pub(crate) async fn backfill_officers_can_edit_teams(client: &Surreal<Any>) -> DbResult<()> {
+    client
+        .query(
+            "UPDATE site_settings SET officers_can_edit_teams = officers_can_edit_teams ?? false",
+        )
+        .await?
+        .check()?;
+    Ok(())
+}
+
 /// Run all schema migrations. Idempotent — safe to call on every startup.
 pub async fn run_migrations(client: &Surreal<Any>) -> DbResult<()> {
     tracing::info!("Running database migrations...");
@@ -273,6 +286,7 @@ pub async fn run_migrations(client: &Surreal<Any>) -> DbResult<()> {
         DEFINE FIELD OVERWRITE site_description ON site_settings TYPE string DEFAULT 'Gaming clan';
         DEFINE FIELD OVERWRITE recruitment_open ON site_settings TYPE bool DEFAULT true;
         DEFINE FIELD OVERWRITE strategies_enabled ON site_settings TYPE bool DEFAULT true;
+        DEFINE FIELD OVERWRITE officers_can_edit_teams ON site_settings TYPE bool DEFAULT false;
         DEFINE FIELD OVERWRITE recruitment_message ON site_settings TYPE string DEFAULT 'Recruitment is closed right now. Check back later.';
         DEFINE FIELD OVERWRITE min_age ON site_settings TYPE int DEFAULT 16;
         DEFINE FIELD OVERWRITE forum_backend ON site_settings TYPE string DEFAULT 'local'
@@ -607,11 +621,13 @@ pub async fn run_migrations(client: &Surreal<Any>) -> DbResult<()> {
         DEFINE FIELD OVERWRITE mitigation ON personal_match TYPE int DEFAULT 0;
         DEFINE FIELD OVERWRITE played_at ON personal_match TYPE datetime;
         DEFINE FIELD OVERWRITE uploaded_at ON personal_match TYPE datetime DEFAULT time::now();
-        -- Client-generated game session id. Rows are stored under a
-        -- deterministic record id derived from (member_id, session_id), so
-        -- uploads are idempotent upserts: capture snapshots of one game
-        -- collapse to one row, and outcome/map corrections update in place.
-        -- Legacy rows (uploaded before session ids) keep ''.
+        -- Client-generated game session id. Empty client ids are stored as a
+        -- content-derived `legacy-*` id (see `legacy_session_id`), not as ''.
+        -- Pre-session rows that still have '' are rewritten to that id by
+        -- `migrate_personal_match_session_index` so distinct historical games
+        -- do not share one key under the unique index. The record id itself
+        -- is a deterministic encoding of (member_id, session_id); uploads
+        -- UPSERT that id.
         DEFINE FIELD OVERWRITE session_id ON personal_match TYPE string DEFAULT '';
         -- Set when the uploaded values include a manual correction made in the
         -- tracker. The stored numeric/label fields already hold the effective
@@ -621,6 +637,11 @@ pub async fn run_migrations(client: &Surreal<Any>) -> DbResult<()> {
         DEFINE FIELD OVERWRITE edited ON personal_match TYPE bool DEFAULT false;
 
         DEFINE INDEX IF NOT EXISTS pm_member_idx ON personal_match COLUMNS member_id, played_at;
+        -- Non-unique placeholder only. `DEFINE INDEX IF NOT EXISTS` will not
+        -- turn an existing non-unique index into a unique one, and this
+        -- statement runs before duplicate rows are removed. Uniqueness is
+        -- applied afterwards by `migrate_personal_match_session_index`
+        -- (REMOVE INDEX, then DEFINE ... UNIQUE).
         DEFINE INDEX IF NOT EXISTS pm_session_idx ON personal_match COLUMNS member_id, session_id;
         -- Dropped: content-based dedup is obsolete under per-session upserts,
         -- and it wedged the sync queue — the "unique" error-string check that
@@ -761,6 +782,11 @@ pub async fn run_migrations(client: &Surreal<Any>) -> DbResult<()> {
         .await?
         .check()?;
 
+    // Dedupe (member_id, session_id), rewrite blank legacy ids, then replace
+    // pm_session_idx with a UNIQUE index. Must run after the schema statement
+    // above and must fail startup if uniqueness cannot be enforced.
+    crate::queries::personal_stats::migrate_personal_match_session_index(client).await?;
+
     // Seed default category/board tree and migrate legacy thread.category strings.
     if let Err(e) = crate::queries::forum::ensure_forum_hierarchy(client).await {
         tracing::warn!("forum hierarchy seed/migrate: {e}");
@@ -776,6 +802,12 @@ pub async fn run_migrations(client: &Surreal<Any>) -> DbResult<()> {
     // is never reset on restart (do not UPDATE this row from migrations).
     if let Err(e) = crate::queries::members::ensure_bootstrap_lock_sentinel(client).await {
         tracing::warn!("bootstrap_lock sentinel: {e}");
+    }
+
+    // L14: rows created before `officers_can_edit_teams` omit the field.
+    // `??` writes false only when the stored value is NONE, so an admin toggle survives restart.
+    if let Err(e) = backfill_officers_can_edit_teams(client).await {
+        tracing::warn!("officers_can_edit_teams backfill: {e}");
     }
 
     tracing::info!("Database migrations complete");

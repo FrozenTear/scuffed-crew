@@ -20,6 +20,10 @@ jobs:
         run: bash scripts/check-frontend-deps.sh
       - name: Check design tokens (no raw colors / legacy vars in app CSS)
         run: bash scripts/check-design-tokens.sh
+      - name: Backup secret restore checks
+        run: |
+          bash scripts/test-backup-secrets.sh
+          bash scripts/test-restic-access.sh
 
   fmt:
     name: Rustfmt
