@@ -3171,6 +3171,21 @@ async fn oauth_and_daemon_token_are_not_login_locked() {
     use scuffed_site_server::login_lockout::FIRST_LOCK_AFTER;
 
     let state = test_state().await;
+    seed_user(
+        &state.db,
+        "daemonuser",
+        "daemonmember",
+        "Daemon",
+        "member",
+        "daemon-session",
+    )
+    .await;
+    const DAEMON_TOKEN: &str = "daemon-sync-token";
+    state
+        .db
+        .create_daemon_token("daemonmember", DAEMON_TOKEN, "tracker")
+        .await
+        .expect("seed daemon token");
     let app = create_router(state);
     for i in 0..(FIRST_LOCK_AFTER + 2) {
         let res = app
@@ -3195,7 +3210,13 @@ async fn oauth_and_daemon_token_are_not_login_locked() {
         );
         assert!(res.headers().get(header::RETRY_AFTER).is_none());
     }
-    for i in 0..(FIRST_LOCK_AFTER + 2) {
+
+    // One address for every daemon call, the way a real stat-tracker syncs.
+    // A fresh IP per request would hide a future per-IP limit on /api/stats.
+    const DAEMON_IP: [u8; 4] = [198, 51, 100, 50];
+    let daemon_peer = axum::extract::ConnectInfo(std::net::SocketAddr::from((DAEMON_IP, 42000)));
+
+    for _ in 0..(FIRST_LOCK_AFTER + 2) {
         let res = app
             .clone()
             .oneshot(
@@ -3204,10 +3225,7 @@ async fn oauth_and_daemon_token_are_not_login_locked() {
                     .uri("/api/stats/upload")
                     .header(header::CONTENT_TYPE, "application/json")
                     .header(header::AUTHORIZATION, "Bearer not-a-daemon-token")
-                    .extension(axum::extract::ConnectInfo(std::net::SocketAddr::from((
-                        [198, 51, 100, (i + 1) as u8],
-                        42000,
-                    ))))
+                    .extension(daemon_peer)
                     .body(Body::from(b"{}".as_slice()))
                     .unwrap(),
             )
@@ -3220,6 +3238,25 @@ async fn oauth_and_daemon_token_are_not_login_locked() {
         );
         assert!(res.headers().get(header::RETRY_AFTER).is_none());
     }
+
+    let cfg = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/stats/daemon-config")
+                .header(header::AUTHORIZATION, format!("Bearer {DAEMON_TOKEN}"))
+                .extension(daemon_peer)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        cfg.status(),
+        StatusCode::OK,
+        "daemon-config from the same IP must succeed, not 429"
+    );
+    assert!(cfg.headers().get(header::RETRY_AFTER).is_none());
 }
 
 #[tokio::test]
