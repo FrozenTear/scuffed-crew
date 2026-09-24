@@ -1037,6 +1037,7 @@ mod tests {
                 None,
                 None,
                 Some(enabled),
+                None,
             )
             .await
             .expect("update strategies_enabled");

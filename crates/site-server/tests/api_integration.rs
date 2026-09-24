@@ -912,16 +912,44 @@ async fn create_team_requires_admin() {
     assert_eq!(json["name"], "New Team");
 }
 
+async fn set_officers_can_edit_teams(db: &Database, allowed: bool) {
+    db.update_settings(
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some(allowed),
+    )
+    .await
+    .expect("set officers_can_edit_teams");
+}
+
 #[tokio::test]
-async fn update_team_requires_officer() {
+async fn update_team_refuses_officer_when_flag_off() {
     let state = test_state().await;
     seed_all_roles(&state.db).await;
     seed_game(&state.db, "ow2", "Overwatch 2").await;
     seed_team(&state.db, "teamalpha", "Alpha Squad", "ow2").await;
 
-    let body = json!({ "name": "Renamed Squad" });
+    let body = json!({ "name": "Renamed Squad", "color": "#112233" });
 
-    // Regular member cannot update
+    // Default is false: a fresh settings row refuses officers.
+    let settings = state.db.get_settings().await.expect("settings");
+    assert!(!settings.officers_can_edit_teams);
+
     let app = create_router(state.clone());
     let resp = app
         .oneshot(authed_json_request(
@@ -934,13 +962,26 @@ async fn update_team_requires_officer() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::FORBIDDEN);
 
-    // Officer can update
-    let app = create_router(state);
+    let app = create_router(state.clone());
     let resp = app
         .oneshot(authed_json_request(
             Method::PUT,
             "/api/teams/teamalpha",
             OFFICER_TOKEN,
+            body.clone(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    let json = body_json(resp).await;
+    assert_eq!(json["error"], "Admin access required");
+
+    let app = create_router(state);
+    let resp = app
+        .oneshot(authed_json_request(
+            Method::PUT,
+            "/api/teams/teamalpha",
+            ADMIN_TOKEN,
             body,
         ))
         .await
@@ -948,6 +989,88 @@ async fn update_team_requires_officer() {
     assert_eq!(resp.status(), StatusCode::OK);
     let json = body_json(resp).await;
     assert_eq!(json["name"], "Renamed Squad");
+    assert_eq!(json["color"], "#112233");
+}
+
+#[tokio::test]
+async fn officer_can_update_team_when_flag_on() {
+    let state = test_state().await;
+    seed_all_roles(&state.db).await;
+    seed_game(&state.db, "ow2", "Overwatch 2").await;
+    seed_team(&state.db, "teamalpha", "Alpha Squad", "ow2").await;
+    set_officers_can_edit_teams(&state.db, true).await;
+
+    let app = create_router(state);
+    let resp = app
+        .oneshot(authed_json_request(
+            Method::PUT,
+            "/api/teams/teamalpha",
+            OFFICER_TOKEN,
+            json!({ "name": "Officer Squad", "color": "#abcdef" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    assert_eq!(json["name"], "Officer Squad");
+    assert_eq!(json["color"], "#abcdef");
+}
+
+#[tokio::test]
+async fn admin_can_update_team_when_flag_on() {
+    let state = test_state().await;
+    seed_all_roles(&state.db).await;
+    seed_game(&state.db, "ow2", "Overwatch 2").await;
+    seed_team(&state.db, "teamalpha", "Alpha Squad", "ow2").await;
+    set_officers_can_edit_teams(&state.db, true).await;
+
+    let app = create_router(state);
+    let resp = app
+        .oneshot(authed_json_request(
+            Method::PUT,
+            "/api/teams/teamalpha",
+            ADMIN_TOKEN,
+            json!({ "name": "Admin Squad" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    assert_eq!(json["name"], "Admin Squad");
+}
+
+#[tokio::test]
+async fn member_and_anonymous_cannot_update_team_in_either_flag_state() {
+    let state = test_state().await;
+    seed_all_roles(&state.db).await;
+    seed_game(&state.db, "ow2", "Overwatch 2").await;
+    seed_team(&state.db, "teamalpha", "Alpha Squad", "ow2").await;
+
+    for allowed in [false, true] {
+        set_officers_can_edit_teams(&state.db, allowed).await;
+
+        let app = create_router(state.clone());
+        let resp = app
+            .oneshot(authed_json_request(
+                Method::PUT,
+                "/api/teams/teamalpha",
+                MEMBER_TOKEN,
+                json!({ "name": "Member Squad" }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN, "flag={allowed}");
+
+        let app = create_router(state.clone());
+        let resp = app
+            .oneshot(unauthed_request(Method::PUT, "/api/teams/teamalpha"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "flag={allowed}");
+    }
+
+    let stored = state.db.get_team("teamalpha").await.unwrap().unwrap();
+    assert_eq!(stored.name, "Alpha Squad");
 }
 
 #[tokio::test]
@@ -1021,6 +1144,9 @@ async fn update_team_backfills_channels_for_existing_team() {
 
     let before = state.db.get_team_channels("teamalpha").await.unwrap();
     assert!(before.is_empty(), "seeded team has no channels yet");
+
+    // Officer update backfill still runs when the admin flag allows team edits.
+    set_officers_can_edit_teams(&state.db, true).await;
 
     let app = create_router(state.clone());
     let resp = app
@@ -1691,6 +1817,7 @@ async fn officer_can_toggle_strategies_enabled_only() {
     assert_eq!(resp.status(), StatusCode::OK);
     let json = body_json(resp).await;
     assert_eq!(json["strategies_enabled"], false);
+    assert_eq!(json["officers_can_edit_teams"], false);
     assert_eq!(json["org_name"], "My Clan");
 
     let app = create_router(state.clone());
@@ -1715,6 +1842,92 @@ async fn officer_can_toggle_strategies_enabled_only() {
     assert_eq!(resp.status(), StatusCode::OK);
     let json = body_json(resp).await;
     assert_eq!(json["strategies_enabled"], true);
+    assert_eq!(json["officers_can_edit_teams"], false);
+}
+
+#[tokio::test]
+async fn get_settings_includes_officers_can_edit_teams_default_false() {
+    let state = test_state().await;
+    let app = create_router(state);
+    let resp = app
+        .oneshot(unauthed_request(Method::GET, "/api/settings"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    assert_eq!(json["officers_can_edit_teams"], false);
+}
+
+#[tokio::test]
+async fn officer_cannot_set_officers_can_edit_teams() {
+    let state = test_state().await;
+    seed_all_roles(&state.db).await;
+
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(authed_json_request(
+            Method::PUT,
+            "/api/settings",
+            OFFICER_TOKEN,
+            json!({ "officers_can_edit_teams": true }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    let json = body_json(resp).await;
+    assert_eq!(json["error"], "Admin access required");
+
+    // A body that also toggles the officer-allowed field must not apply either change.
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(authed_json_request(
+            Method::PUT,
+            "/api/settings",
+            OFFICER_TOKEN,
+            json!({ "strategies_enabled": false, "officers_can_edit_teams": true }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(unauthed_request(Method::GET, "/api/settings"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    assert_eq!(json["officers_can_edit_teams"], false);
+    assert_eq!(json["strategies_enabled"], true);
+
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(authed_json_request(
+            Method::PUT,
+            "/api/settings",
+            ADMIN_TOKEN,
+            json!({ "officers_can_edit_teams": true }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    assert_eq!(json["officers_can_edit_teams"], true);
+
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(authed_json_request(
+            Method::PUT,
+            "/api/settings",
+            OFFICER_TOKEN,
+            json!({ "officers_can_edit_teams": false }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+    let stored = state.db.get_settings().await.expect("settings");
+    assert!(stored.officers_can_edit_teams);
 }
 
 #[tokio::test]
