@@ -7021,3 +7021,229 @@ async fn seasons_crud_and_stats_season_filter() {
         .unwrap();
     assert_eq!(body_json(resp).await["total_matches"], 2);
 }
+
+// ─── Articles: unpublished reads ────────────────────────────────────────────
+
+async fn article_get(app: &axum::Router, slug: &str, token: Option<&str>) -> (StatusCode, Value) {
+    let req = match token {
+        Some(token) => authed_request(Method::GET, &format!("/api/articles/{slug}"), token),
+        None => unauthed_request(Method::GET, &format!("/api/articles/{slug}")),
+    };
+    let resp = app.clone().oneshot(req).await.unwrap();
+    let status = resp.status();
+    let body = body_json(resp).await;
+    (status, body)
+}
+
+/// Anonymous callers and members get the same 404 as a missing slug for a draft.
+/// Officer and admin (the roles that manage articles) still receive the body.
+#[tokio::test]
+async fn unpublished_article_hidden_from_non_editors() {
+    let state = test_state().await;
+    seed_all_roles(&state.db).await;
+    let app = create_router(state);
+
+    let draft = json!({
+        "slug": "internal-roadmap",
+        "title": "Internal roadmap",
+        "content_markdown": "secret draft body",
+        "summary": "secret summary"
+    });
+    let resp = app
+        .clone()
+        .oneshot(authed_json_request(
+            Method::POST,
+            "/api/articles",
+            OFFICER_TOKEN,
+            draft,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let created = body_json(resp).await;
+    assert_eq!(created["published"], false);
+    assert_eq!(created["content_markdown"], "secret draft body");
+
+    let published = json!({
+        "slug": "public-post",
+        "title": "Public post",
+        "content_markdown": "public body"
+    });
+    let resp = app
+        .clone()
+        .oneshot(authed_json_request(
+            Method::POST,
+            "/api/articles",
+            OFFICER_TOKEN,
+            published,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let resp = app
+        .clone()
+        .oneshot(authed_request(
+            Method::POST,
+            "/api/articles/public-post/publish",
+            OFFICER_TOKEN,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let (missing_status, missing_body) = article_get(&app, "does-not-exist", None).await;
+    assert_eq!(missing_status, StatusCode::NOT_FOUND);
+
+    // Anonymous: published yes, draft indistinguishable from missing.
+    let (status, body) = article_get(&app, "public-post", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["published"], true);
+    assert_eq!(body["content_markdown"], "public body");
+    assert_eq!(body["slug"], "public-post");
+
+    let (status, body) = article_get(&app, "internal-roadmap", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body, missing_body);
+    assert!(body.get("content_markdown").is_none());
+    assert!(body.get("title").is_none());
+    assert!(body.get("published").is_none());
+
+    // Member (no content-editing rights): same split. 404, not 403.
+    let (status, body) = article_get(&app, "public-post", Some(MEMBER_TOKEN)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["content_markdown"], "public body");
+
+    let (status, body) = article_get(&app, "internal-roadmap", Some(MEMBER_TOKEN)).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body, missing_body);
+
+    // Staff who manage articles in admin (officer and admin) still fetch drafts.
+    for token in [OFFICER_TOKEN, ADMIN_TOKEN] {
+        let (status, body) = article_get(&app, "internal-roadmap", Some(token)).await;
+        assert_eq!(status, StatusCode::OK, "staff token {token}");
+        assert_eq!(body["published"], false);
+        assert_eq!(body["content_markdown"], "secret draft body");
+        assert_eq!(body["title"], "Internal roadmap");
+
+        let (status, body) = article_get(&app, "public-post", Some(token)).await;
+        assert_eq!(status, StatusCode::OK, "staff token {token}");
+        assert_eq!(body["content_markdown"], "public body");
+    }
+
+    // Public list and the blog index share list_published_articles.
+    let resp = app
+        .clone()
+        .oneshot(unauthed_request(Method::GET, "/api/articles?limit=50"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let list = body_json(resp).await;
+    let slugs: Vec<_> = list
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| a["slug"].as_str().unwrap())
+        .collect();
+    assert_eq!(slugs, vec!["public-post"]);
+
+    let resp = app
+        .clone()
+        .oneshot(authed_request(
+            Method::GET,
+            "/api/articles?limit=50",
+            MEMBER_TOKEN,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let list = body_json(resp).await;
+    let slugs: Vec<_> = list
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| a["slug"].as_str().unwrap())
+        .collect();
+    assert_eq!(slugs, vec!["public-post"]);
+
+    // Admin editor loads drafts from the officer list, including the body.
+    let resp = app
+        .clone()
+        .oneshot(authed_request(
+            Method::GET,
+            "/api/articles/admin/all?limit=50",
+            OFFICER_TOKEN,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let list = body_json(resp).await;
+    let draft_row = list
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["slug"] == "internal-roadmap")
+        .expect("officer list includes the draft");
+    assert_eq!(draft_row["content_markdown"], "secret draft body");
+
+    let resp = app
+        .clone()
+        .oneshot(authed_request(
+            Method::GET,
+            "/api/articles/admin/all?limit=50",
+            MEMBER_TOKEN,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+    // Editor save path: PUT by slug still updates a draft for an officer.
+    let resp = app
+        .clone()
+        .oneshot(authed_json_request(
+            Method::PUT,
+            "/api/articles/internal-roadmap",
+            OFFICER_TOKEN,
+            json!({ "content_markdown": "revised secret" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(body_json(resp).await["content_markdown"], "revised secret");
+
+    let (status, body) = article_get(&app, "internal-roadmap", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body, missing_body);
+
+    // Unpublish uses the same `published` flag. The public slug must disappear
+    // again for anonymous and member, and stay readable for staff.
+    let resp = app
+        .clone()
+        .oneshot(authed_request(
+            Method::POST,
+            "/api/articles/public-post/unpublish",
+            OFFICER_TOKEN,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let (status, body) = article_get(&app, "public-post", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body, missing_body);
+    let (status, body) = article_get(&app, "public-post", Some(MEMBER_TOKEN)).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body, missing_body);
+    let (status, body) = article_get(&app, "public-post", Some(OFFICER_TOKEN)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["published"], false);
+    assert_eq!(body["content_markdown"], "public body");
+
+    let resp = app
+        .clone()
+        .oneshot(unauthed_request(Method::GET, "/api/articles?limit=50"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let list = body_json(resp).await;
+    assert!(list.as_array().unwrap().is_empty());
+}
