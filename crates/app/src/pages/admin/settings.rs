@@ -104,6 +104,8 @@ pub fn AdminSettings() -> Element {
             site_description: Some(site_description().trim().to_string()),
             recruitment_open: Some(recruitment_open()),
             strategies_enabled: Some(strategies_enabled()),
+            // Switch is wired later. Omit so a save of other settings does not clear the flag.
+            officers_can_edit_teams: None,
             recruitment_message: Some(recruitment_message().trim().to_string()),
             min_age: Some(age),
             forum_backend: Some(forum_backend()),

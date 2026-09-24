@@ -13,6 +13,9 @@ pub struct UpdateSettingsRequest {
     /// When false, strategy CRUD/helpers 404. Patch Notes stay public.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub strategies_enabled: Option<bool>,
+    /// Admin-only. When true, officers may `PUT /api/teams/:id`. Default off.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub officers_can_edit_teams: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub recruitment_message: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

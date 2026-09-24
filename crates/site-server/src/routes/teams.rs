@@ -6,7 +6,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 
 use scuffed_auth::server::session::ErrorResponse;
-use scuffed_db::{AuditAction, AuditTargetType, GroupType, Team, TeamChannel};
+use scuffed_db::{AuditAction, AuditTargetType, GroupType, OrgRole, Team, TeamChannel};
 
 use scuffed_types::api::{CursorResponse, PaginationParams};
 
@@ -123,13 +123,39 @@ pub struct UpdateTeamRequest {
     pub lore_quote: Option<Option<String>>,
 }
 
-/// PUT /api/teams/:id — update team (officer+)
+/// PUT /api/teams/:id — update team name, game, color, division, or lore quote.
+///
+/// Admins always. Officers only when `officers_can_edit_teams` is true (default false).
+/// Members and anonymous callers never reach this handler.
 pub async fn update_team(
     State(state): State<AppState>,
-    _officer: OfficerUser,
+    officer: OfficerUser,
     Path(id): Path<String>,
     Json(body): Json<UpdateTeamRequest>,
 ) -> Result<Json<Team>, (StatusCode, Json<ErrorResponse>)> {
+    if officer.member.org_role != OrgRole::Admin {
+        let allowed = match state.db.get_settings().await {
+            Ok(settings) => settings.officers_can_edit_teams,
+            Err(e) => {
+                tracing::error!(error = %e, "team update: failed to load settings");
+                return Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse {
+                        error: "Internal error".into(),
+                    }),
+                ));
+            }
+        };
+        if !allowed {
+            return Err((
+                StatusCode::FORBIDDEN,
+                Json(ErrorResponse {
+                    error: "Admin access required".into(),
+                }),
+            ));
+        }
+    }
+
     let team = state
         .db
         .update_team(
@@ -152,7 +178,7 @@ pub async fn update_team(
 
     audit(
         &state.db,
-        &_officer.member.id,
+        &officer.member.id,
         AuditAction::UpdatedTeam,
         AuditTargetType::Team,
         &id,

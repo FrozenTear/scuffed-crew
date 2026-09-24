@@ -692,6 +692,7 @@ pub async fn setup(
                     shell.as_deref(),
                     skin.as_deref(),
                     None,
+                    None,
                 )
                 .await
             {

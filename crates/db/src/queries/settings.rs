@@ -19,6 +19,10 @@ struct DbSiteSettings {
     #[surreal(default)]
     #[serde(default)]
     strategies_enabled: Option<bool>,
+    /// Older rows may omit this — missing means officers cannot edit teams.
+    #[surreal(default)]
+    #[serde(default)]
+    officers_can_edit_teams: Option<bool>,
     recruitment_message: String,
     min_age: u32,
     forum_backend: String,
@@ -98,6 +102,7 @@ fn db_to_settings(db: DbSiteSettings) -> SiteSettings {
         site_description: db.site_description,
         recruitment_open: db.recruitment_open,
         strategies_enabled: db.strategies_enabled.unwrap_or(true),
+        officers_can_edit_teams: db.officers_can_edit_teams.unwrap_or(false),
         recruitment_message: db.recruitment_message,
         min_age: db.min_age,
         forum_backend: db.forum_backend,
@@ -163,6 +168,7 @@ impl Database {
                 site_description: "Gaming clan".to_string(),
                 recruitment_open: true,
                 strategies_enabled: Some(true),
+                officers_can_edit_teams: Some(false),
                 recruitment_message: "Recruitment is closed right now. Check back later."
                     .to_string(),
                 min_age: 16,
@@ -215,6 +221,7 @@ impl Database {
         home_shell: Option<&str>,
         home_skin: Option<&str>,
         strategies_enabled: Option<bool>,
+        officers_can_edit_teams: Option<bool>,
     ) -> DbResult<SiteSettings> {
         with_timeout(async {
             let current = self.get_settings().await?;
@@ -238,6 +245,11 @@ impl Database {
                 db.strategies_enabled = Some(enabled);
             } else if db.strategies_enabled.is_none() {
                 db.strategies_enabled = Some(true);
+            }
+            if let Some(allowed) = officers_can_edit_teams {
+                db.officers_can_edit_teams = Some(allowed);
+            } else if db.officers_can_edit_teams.is_none() {
+                db.officers_can_edit_teams = Some(false);
             }
             if let Some(msg) = recruitment_message {
                 db.recruitment_message = msg.to_string();
@@ -298,5 +310,100 @@ impl Database {
             })?))
         })
         .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde::Deserialize;
+    use surrealdb_types::SurrealValue;
+
+    use crate::migrations::{backfill_officers_can_edit_teams, run_migrations};
+    use crate::Database;
+
+    async fn migrated() -> Database {
+        let db = Database::connect_memory().await.expect("mem db");
+        run_migrations(&db.client).await.expect("migrations");
+        db
+    }
+
+    #[derive(Debug, Deserialize, SurrealValue)]
+    struct FlagRow {
+        officers_can_edit_teams: Option<bool>,
+    }
+
+    async fn stored_flag(db: &Database) -> Option<bool> {
+        let mut q = db
+            .client
+            .query("SELECT officers_can_edit_teams FROM site_settings")
+            .await
+            .expect("select flag")
+            .check()
+            .expect("select flag ok");
+        let rows: Vec<FlagRow> = q.take(0).expect("take flag");
+        assert_eq!(rows.len(), 1, "one site_settings row");
+        rows[0].officers_can_edit_teams
+    }
+
+    #[tokio::test]
+    async fn officers_can_edit_teams_defaults_false_on_fresh_db() {
+        let db = migrated().await;
+        let settings = db.get_settings().await.expect("create defaults");
+        assert!(!settings.officers_can_edit_teams);
+        assert_eq!(stored_flag(&db).await, Some(false));
+    }
+
+    #[tokio::test]
+    async fn officers_can_edit_teams_backfills_false_and_keeps_explicit_true() {
+        let db = migrated().await;
+        let created = db.get_settings().await.expect("settings");
+        assert!(!created.officers_can_edit_teams);
+
+        // Drop the column so the existing row looks like a pre-L14 record.
+        db.client
+            .query("REMOVE FIELD IF EXISTS officers_can_edit_teams ON TABLE site_settings")
+            .await
+            .expect("remove field")
+            .check()
+            .expect("remove field ok");
+
+        run_migrations(&db.client).await.expect("re-migrate");
+        assert_eq!(stored_flag(&db).await, Some(false));
+        assert!(
+            !db.get_settings()
+                .await
+                .expect("read")
+                .officers_can_edit_teams
+        );
+
+        db.update_settings(
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(true),
+        )
+        .await
+        .expect("admin sets flag");
+        backfill_officers_can_edit_teams(&db.client)
+            .await
+            .expect("backfill again");
+        run_migrations(&db.client)
+            .await
+            .expect("restart migrations");
+        assert_eq!(stored_flag(&db).await, Some(true));
     }
 }

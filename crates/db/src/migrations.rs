@@ -3,6 +3,19 @@ use surrealdb::Surreal;
 
 use crate::DbResult;
 
+/// Write `officers_can_edit_teams = false` on site_settings rows that omit it.
+///
+/// Idempotent: a stored true or false is kept (`??` replaces only NONE).
+pub(crate) async fn backfill_officers_can_edit_teams(client: &Surreal<Any>) -> DbResult<()> {
+    client
+        .query(
+            "UPDATE site_settings SET officers_can_edit_teams = officers_can_edit_teams ?? false",
+        )
+        .await?
+        .check()?;
+    Ok(())
+}
+
 /// Run all schema migrations. Idempotent — safe to call on every startup.
 pub async fn run_migrations(client: &Surreal<Any>) -> DbResult<()> {
     tracing::info!("Running database migrations...");
@@ -273,6 +286,7 @@ pub async fn run_migrations(client: &Surreal<Any>) -> DbResult<()> {
         DEFINE FIELD OVERWRITE site_description ON site_settings TYPE string DEFAULT 'Gaming clan';
         DEFINE FIELD OVERWRITE recruitment_open ON site_settings TYPE bool DEFAULT true;
         DEFINE FIELD OVERWRITE strategies_enabled ON site_settings TYPE bool DEFAULT true;
+        DEFINE FIELD OVERWRITE officers_can_edit_teams ON site_settings TYPE bool DEFAULT false;
         DEFINE FIELD OVERWRITE recruitment_message ON site_settings TYPE string DEFAULT 'Recruitment is closed right now. Check back later.';
         DEFINE FIELD OVERWRITE min_age ON site_settings TYPE int DEFAULT 16;
         DEFINE FIELD OVERWRITE forum_backend ON site_settings TYPE string DEFAULT 'local'
@@ -776,6 +790,12 @@ pub async fn run_migrations(client: &Surreal<Any>) -> DbResult<()> {
     // is never reset on restart (do not UPDATE this row from migrations).
     if let Err(e) = crate::queries::members::ensure_bootstrap_lock_sentinel(client).await {
         tracing::warn!("bootstrap_lock sentinel: {e}");
+    }
+
+    // L14: rows created before `officers_can_edit_teams` omit the field.
+    // `??` writes false only when the stored value is NONE, so an admin toggle survives restart.
+    if let Err(e) = backfill_officers_can_edit_teams(client).await {
+        tracing::warn!("officers_can_edit_teams backfill: {e}");
     }
 
     tracing::info!("Database migrations complete");
