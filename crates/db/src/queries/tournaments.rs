@@ -336,62 +336,51 @@ impl Database {
     }
 
     /// List tournaments with filters and cursor-based pagination.
+    ///
+    /// `include_drafts` is a trusted flag (officer+ at the HTTP layer). When
+    /// false, `status != 'draft'` is a fixed fragment so anonymous pages do
+    /// not count draft rows toward LIMIT.
     pub async fn list_tournaments_paginated(
         &self,
         status: Option<TournamentStatus>,
         game_id: Option<&str>,
         limit: u32,
         offset: u32,
+        include_drafts: bool,
     ) -> DbResult<Vec<Tournament>> {
         with_timeout(async {
             let fetch = limit + 1;
-            let query = match (status, game_id) {
-                (Some(s), Some(g)) => {
-                    let mut r = self
-                        .client
-                        .query("SELECT * FROM tournament WHERE status = $st AND game_id = $gid ORDER BY created_at DESC LIMIT $lim START $off")
-                        .bind(("st", s.to_string()))
-                        .bind(("gid", g.to_string()))
-                        .bind(("lim", fetch))
-                        .bind(("off", offset))
-                        .await?;
-                    let items: Vec<DbTournament> = r.take(0)?;
-                    items
-                }
-                (Some(s), None) => {
-                    let mut r = self
-                        .client
-                        .query("SELECT * FROM tournament WHERE status = $st ORDER BY created_at DESC LIMIT $lim START $off")
-                        .bind(("st", s.to_string()))
-                        .bind(("lim", fetch))
-                        .bind(("off", offset))
-                        .await?;
-                    let items: Vec<DbTournament> = r.take(0)?;
-                    items
-                }
-                (None, Some(g)) => {
-                    let mut r = self
-                        .client
-                        .query("SELECT * FROM tournament WHERE game_id = $gid ORDER BY created_at DESC LIMIT $lim START $off")
-                        .bind(("gid", g.to_string()))
-                        .bind(("lim", fetch))
-                        .bind(("off", offset))
-                        .await?;
-                    let items: Vec<DbTournament> = r.take(0)?;
-                    items
-                }
-                (None, None) => {
-                    let mut r = self
-                        .client
-                        .query("SELECT * FROM tournament ORDER BY created_at DESC LIMIT $lim START $off")
-                        .bind(("lim", fetch))
-                        .bind(("off", offset))
-                        .await?;
-                    let items: Vec<DbTournament> = r.take(0)?;
-                    items
-                }
+            // Fragments are constants. User values go through `$st` / `$gid` only.
+            let mut filters: Vec<&str> = Vec::new();
+            if status.is_some() {
+                filters.push("status = $st");
+            }
+            if game_id.is_some() {
+                filters.push("game_id = $gid");
+            }
+            if !include_drafts {
+                filters.push("status != 'draft'");
+            }
+            let sql = if filters.is_empty() {
+                "SELECT * FROM tournament ORDER BY created_at DESC LIMIT $lim START $off"
+                    .to_string()
+            } else {
+                format!(
+                    "SELECT * FROM tournament WHERE {} ORDER BY created_at DESC LIMIT $lim START $off",
+                    filters.join(" AND ")
+                )
             };
-            Ok(query.into_iter().map(db_to_tournament).collect())
+            let mut q = self.client.query(&sql);
+            if let Some(s) = status {
+                q = q.bind(("st", s.to_string()));
+            }
+            if let Some(g) = game_id {
+                q = q.bind(("gid", g.to_string()));
+            }
+            q = q.bind(("lim", fetch)).bind(("off", offset));
+            let mut result = q.await?;
+            let items: Vec<DbTournament> = result.take(0)?;
+            Ok(items.into_iter().map(db_to_tournament).collect())
         })
         .await
     }

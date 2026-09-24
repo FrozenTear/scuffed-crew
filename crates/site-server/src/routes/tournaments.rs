@@ -8,12 +8,13 @@ use serde::Deserialize;
 
 use scuffed_auth::server::session::ErrorResponse;
 use scuffed_db::{
-    AuditAction, AuditTargetType, ParticipantStatus, SwissStanding, Tournament, TournamentBracket,
-    TournamentFormat, TournamentMatch, TournamentParticipant, TournamentRound, TournamentStatus,
+    AuditAction, AuditTargetType, Member, OrgRole, ParticipantStatus, SwissStanding, Tournament,
+    TournamentBracket, TournamentFormat, TournamentMatch, TournamentParticipant, TournamentRound,
+    TournamentStatus,
 };
 use scuffed_types::api::{CursorResponse, PaginationParams};
 
-use crate::extractors::OfficerUser;
+use crate::extractors::{OfficerUser, OptionalOrgMember};
 use crate::routes::audit_log::audit;
 use crate::state::AppState;
 
@@ -56,7 +57,28 @@ fn conflict(msg: &str) -> (StatusCode, Json<ErrorResponse>) {
     )
 }
 
-// ─── List & Detail (Public) ───
+// ─── List & Detail ───
+//
+// Anonymous and regular members see non-draft tournaments only. Officers and
+// admins (the people who manage tournaments in admin) still see drafts.
+
+fn manages_tournaments(member: &Option<Member>) -> bool {
+    member
+        .as_ref()
+        .is_some_and(|m| m.org_role.is_at_least(OrgRole::Officer))
+}
+
+/// 404 when this id is a draft the caller is not allowed to see.
+/// A missing row is left to the handler (list endpoints return an empty set).
+async fn reject_hidden_draft(state: &AppState, id: &str, member: &Option<Member>) -> ApiResult<()> {
+    let Some(tournament) = state.db.get_tournament(id).await.map_err(internal_err)? else {
+        return Ok(());
+    };
+    if tournament.status == TournamentStatus::Draft && !manages_tournaments(member) {
+        return Err(not_found("Tournament not found"));
+    }
+    Ok(())
+}
 
 #[derive(Deserialize)]
 pub struct ListTournamentsQuery {
@@ -74,8 +96,10 @@ fn default_pagination_limit() -> u32 {
 /// GET /api/tournaments (cursor-paginated)
 pub async fn list_tournaments(
     State(state): State<AppState>,
+    OptionalOrgMember(member): OptionalOrgMember,
     axum::extract::Query(query): axum::extract::Query<ListTournamentsQuery>,
 ) -> ApiResult<Json<CursorResponse<Tournament>>> {
+    let include_drafts = manages_tournaments(&member);
     let status = query.status.as_deref().and_then(|s| match s {
         "draft" => Some(TournamentStatus::Draft),
         "registration" => Some(TournamentStatus::Registration),
@@ -92,7 +116,13 @@ pub async fn list_tournaments(
     let (limit, offset) = pagination.resolve();
     let items = state
         .db
-        .list_tournaments_paginated(status, query.game_id.as_deref(), limit, offset)
+        .list_tournaments_paginated(
+            status,
+            query.game_id.as_deref(),
+            limit,
+            offset,
+            include_drafts,
+        )
         .await
         .map_err(internal_err)?;
     Ok(Json(CursorResponse::from_oversized(items, limit, offset)))
@@ -101,15 +131,19 @@ pub async fn list_tournaments(
 /// GET /api/tournaments/:id
 pub async fn get_tournament(
     State(state): State<AppState>,
+    OptionalOrgMember(member): OptionalOrgMember,
     Path(id): Path<String>,
 ) -> ApiResult<Json<Tournament>> {
-    state
+    let tournament = state
         .db
         .get_tournament(&id)
         .await
         .map_err(internal_err)?
-        .map(Json)
-        .ok_or_else(|| not_found("Tournament not found"))
+        .ok_or_else(|| not_found("Tournament not found"))?;
+    if tournament.status == TournamentStatus::Draft && !manages_tournaments(&member) {
+        return Err(not_found("Tournament not found"));
+    }
+    Ok(Json(tournament))
 }
 
 // ─── CRUD (Officer+) ───
@@ -330,8 +364,10 @@ pub async fn transition_status(
 /// GET /api/tournaments/:id/bracket
 pub async fn get_bracket(
     State(state): State<AppState>,
+    OptionalOrgMember(member): OptionalOrgMember,
     Path(id): Path<String>,
 ) -> ApiResult<Json<TournamentBracket>> {
+    reject_hidden_draft(&state, &id, &member).await?;
     state
         .db
         .get_tournament_bracket(&id)
@@ -408,8 +444,10 @@ pub async fn generate_bracket(
 /// GET /api/tournaments/:id/participants
 pub async fn list_participants(
     State(state): State<AppState>,
+    OptionalOrgMember(member): OptionalOrgMember,
     Path(id): Path<String>,
 ) -> ApiResult<Json<Vec<TournamentParticipant>>> {
+    reject_hidden_draft(&state, &id, &member).await?;
     state
         .db
         .list_tournament_participants(&id)
@@ -562,8 +600,10 @@ pub async fn remove_participant(
 /// GET /api/tournaments/:id/matches
 pub async fn list_matches(
     State(state): State<AppState>,
+    OptionalOrgMember(member): OptionalOrgMember,
     Path(id): Path<String>,
 ) -> ApiResult<Json<Vec<TournamentMatch>>> {
+    reject_hidden_draft(&state, &id, &member).await?;
     state
         .db
         .list_tournament_matches(&id)
@@ -739,8 +779,10 @@ pub async fn report_match(
 /// GET /api/tournaments/:id/standings
 pub async fn get_standings(
     State(state): State<AppState>,
+    OptionalOrgMember(member): OptionalOrgMember,
     Path(id): Path<String>,
 ) -> ApiResult<Json<Vec<SwissStanding>>> {
+    reject_hidden_draft(&state, &id, &member).await?;
     state
         .db
         .get_swiss_standings(&id)

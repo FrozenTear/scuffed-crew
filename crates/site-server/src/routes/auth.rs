@@ -421,10 +421,11 @@ pub async fn local_register(
     let user = match state.db.create_local_user(&username, &password_hash).await {
         Ok(u) => u,
         Err(e) if e.to_string().contains("already taken") => {
+            // Same blandness as login: do not say whether this username exists.
             return (
                 StatusCode::CONFLICT,
                 Json(ErrorResponse {
-                    error: "username already taken".into(),
+                    error: "could not create account".into(),
                 }),
             )
                 .into_response();

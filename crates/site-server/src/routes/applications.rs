@@ -198,17 +198,52 @@ pub async fn list_applications(
     )))
 }
 
-/// GET /api/applications/mine — own application status (any logged-in)
+/// Applicant-facing application. Officer review fields stay on the admin list.
+#[derive(Serialize)]
+pub struct ApplicantApplication {
+    pub id: String,
+    pub user_id: String,
+    pub status: ApplicationStatus,
+    pub preferred_games: Vec<String>,
+    pub preferred_roles: Vec<String>,
+    pub message: Option<String>,
+    pub trial_started_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub trial_ends_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub mentor_id: Option<String>,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+impl From<Application> for ApplicantApplication {
+    fn from(app: Application) -> Self {
+        Self {
+            id: app.id,
+            user_id: app.user_id,
+            status: app.status,
+            preferred_games: app.preferred_games,
+            preferred_roles: app.preferred_roles,
+            message: app.message,
+            trial_started_at: app.trial_started_at,
+            trial_ends_at: app.trial_ends_at,
+            mentor_id: app.mentor_id,
+            created_at: app.created_at,
+            updated_at: app.updated_at,
+        }
+    }
+}
+
+/// GET /api/applications/mine — own application status (any logged-in).
+/// Omits `review_notes` and `reviewed_by`.
 pub async fn my_application(
     State(state): State<AppState>,
     user: AuthUser<AppState>,
-) -> Result<Json<Option<Application>>, (StatusCode, Json<ErrorResponse>)> {
-    state
+) -> Result<Json<Option<ApplicantApplication>>, (StatusCode, Json<ErrorResponse>)> {
+    let app = state
         .db
         .get_application_by_user(&user.id)
         .await
-        .map(Json)
-        .map_err(|e| internal_err(e, "my_application"))
+        .map_err(|e| internal_err(e, "my_application"))?;
+    Ok(Json(app.map(ApplicantApplication::from)))
 }
 
 /// POST /api/applications/mine/withdraw — applicant self-withdraw (pending/trial only)

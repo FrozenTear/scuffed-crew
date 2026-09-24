@@ -64,12 +64,71 @@ fn default_true() -> bool {
     true
 }
 
+fn bad_request(msg: &str) -> (StatusCode, Json<ErrorResponse>) {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(ErrorResponse {
+            error: msg.to_string(),
+        }),
+    )
+}
+
+/// Reject CR/LF and other controls so a stored event cannot be turned into
+/// extra iCalendar lines later. Does not echo the value.
+fn reject_controls(field: &str, value: &str) -> Result<(), String> {
+    if value
+        .chars()
+        .any(|c| c.is_control() || c == '\u{2028}' || c == '\u{2029}')
+    {
+        return Err(format!(
+            "{field} must not contain line breaks or control characters"
+        ));
+    }
+    Ok(())
+}
+
+/// TZID is interpolated into `DTSTART;TZID=…`. Only an IANA-style token is safe.
+fn validate_timezone(tz: &str) -> Result<(), String> {
+    if tz.is_empty()
+        || tz.len() > 64
+        || !tz
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '_' | '-' | '+'))
+    {
+        return Err("invalid timezone".into());
+    }
+    Ok(())
+}
+
+fn validate_event_text(
+    title: &str,
+    time: &str,
+    timezone: &str,
+    team_id: Option<&str>,
+) -> Result<(), String> {
+    reject_controls("title", title)?;
+    reject_controls("time", time)?;
+    validate_timezone(timezone)?;
+    if let Some(team_id) = team_id {
+        reject_controls("team", team_id)?;
+    }
+    Ok(())
+}
+
 /// POST /api/events — create event (officer+)
 pub async fn create_event(
     State(state): State<AppState>,
     officer: OfficerUser,
     Json(body): Json<CreateEventRequest>,
 ) -> Result<(StatusCode, Json<Event>), (StatusCode, Json<ErrorResponse>)> {
+    validate_event_text(
+        &body.title,
+        &body.time,
+        &body.timezone,
+        body.team_id.as_deref(),
+    )
+    .map_err(|msg| bad_request(&msg))?;
+
     let event = state
         .db
         .create_event(
@@ -124,6 +183,19 @@ pub async fn update_event(
     Path(id): Path<String>,
     Json(body): Json<UpdateEventRequest>,
 ) -> Result<Json<Event>, (StatusCode, Json<ErrorResponse>)> {
+    if let Some(title) = body.title.as_deref() {
+        reject_controls("title", title).map_err(|msg| bad_request(&msg))?;
+    }
+    if let Some(time) = body.time.as_deref() {
+        reject_controls("time", time).map_err(|msg| bad_request(&msg))?;
+    }
+    if let Some(timezone) = body.timezone.as_deref() {
+        validate_timezone(timezone).map_err(|msg| bad_request(&msg))?;
+    }
+    if let Some(Some(team_id)) = body.team_id.as_ref() {
+        reject_controls("team", team_id).map_err(|msg| bad_request(&msg))?;
+    }
+
     let event = state
         .db
         .update_event(
