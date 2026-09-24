@@ -10,9 +10,12 @@
 #   ./scripts/restore.sh [snapshot-id]
 #
 # Environment (required):
-#   RESTIC_REPOSITORY   Restic repo path/URL
-#   RESTIC_PASSWORD     Restic repo password (keep this off the host — it is
-#                       not inside the snapshot)
+#   RESTIC_REPOSITORY       Off-host restic repo (local paths need BACKUP_ALLOW_LOCAL_REPO=1)
+#   RESTIC_PASSWORD         or RESTIC_PASSWORD_FILE (mode 600, outside the repo)
+#
+# The timer keeps RESTIC_PASSWORD on the host. Recovery after the host is gone
+# uses the off-host repository plus the password-manager copies of
+# RESTIC_PASSWORD and ENCRYPTION_KEY.
 #
 # Environment (optional):
 #   SCUFFED_SECRETS_FILE
@@ -27,9 +30,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 # shellcheck source=lib/encryption-key.sh
 source "${SCRIPT_DIR}/lib/encryption-key.sh"
-
-: "${RESTIC_REPOSITORY:?Set RESTIC_REPOSITORY}"
-: "${RESTIC_PASSWORD:?Set RESTIC_PASSWORD}"
+# shellcheck source=lib/restic-access.sh
+source "${SCRIPT_DIR}/lib/restic-access.sh"
+load_restic_access
 
 SECRETS_DEST="${SCUFFED_SECRETS_FILE:-${ROOT}/data/secrets.env}"
 SNAPSHOT="${1:-}"

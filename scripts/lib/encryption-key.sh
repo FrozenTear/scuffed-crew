@@ -100,7 +100,12 @@ stage_secrets_for_backup() {
     fi
     mkdir -p "$dest_dir"
     chmod 700 "$dest_dir"
-    install -m 600 "$secrets_file" "${dest_dir}/secrets.env"
+    # Never copy restic credentials into the snapshot. ENCRYPTION_KEY stays.
+    if ! declare -F filter_secrets_for_snapshot >/dev/null 2>&1; then
+        # shellcheck source=restic-access.sh
+        source "$(dirname "${BASH_SOURCE[0]}")/restic-access.sh"
+    fi
+    filter_secrets_for_snapshot "$secrets_file" "${dest_dir}/secrets.env"
     write_encryption_key_fingerprint "${dest_dir}/encryption-key.fingerprint"
 }
 

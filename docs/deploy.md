@@ -401,35 +401,78 @@ once you are done — leaving it armed serves no purpose.
 
 `scripts/backup.sh` stores the SurrealDB export, data volumes, and
 `data/secrets.env` (including `ENCRYPTION_KEY`) in the **same** restic
-repository. The repository is encrypted with `RESTIC_PASSWORD`. That password
-is not inside the snapshot — keep it off the host (a password manager). One
-password then opens both the database and the key that decrypts Nostr keys,
-OAuth ids, and DMs. That is deliberate: a second store is easy to forget, and
-forgetting it is how a host loss becomes unreadable data.
+repository. One repository password opens both the database and the key that
+decrypts Nostr keys, OAuth ids, and DMs. That is deliberate: a second store for
+`ENCRYPTION_KEY` is easy to forget, and forgetting it is how a host loss becomes
+unreadable data.
 
-The backup refuses to run if `ENCRYPTION_KEY` is missing or blank. Each snapshot
-also carries `encryption-key.fingerprint` (a sha256 of the key material, not the
-key) so restore can fail when the host key does not match.
+Two different secrets, stored in two different places:
+
+| Secret | Where it lives | Why |
+|---|---|---|
+| Restic **repository** | **Off this host** (`sftp:`, `s3:`, `rest:`, or any other restic backend) | A disk on the same machine dies with the host |
+| `RESTIC_PASSWORD` | **On this host**, for the daily timer, in a root-owned mode-600 file **outside** the repo and outside every path restic snapshots. A copy also goes in a password manager | An unattended timer cannot prompt |
+| `ENCRYPTION_KEY` | `data/secrets.env` on the host (mode 600), **and inside the snapshot**, **and** a copy in the same password manager | The snapshot cannot decrypt Nostr keys or DMs without it. The password-manager copy covers a backup that predates this, or a snapshot you cannot open yet |
+
+`backup.sh` refuses a local `RESTIC_REPOSITORY` (`/var/backups/...`, `local:...`, or a relative path) unless `BACKUP_ALLOW_LOCAL_REPO=1`. Do not set that on the production timer. It also refuses to run if `ENCRYPTION_KEY` is missing or blank, or if `RESTIC_PASSWORD` is assigned inside `data/secrets.env` (that file is copied into the snapshot). Each snapshot carries `encryption-key.fingerprint` (a sha256 of the key material, not the key) so restore fails when the host key does not match.
+
+The timer reads `/etc/scuffed-crew/backup.env` (not `data/secrets.env`):
+
+```
+RESTIC_REPOSITORY=sftp:USER@BACKUP-HOST:/srv/restic/scuffed-crew
+RESTIC_PASSWORD_FILE=/etc/scuffed-crew/restic-password
+```
+
+`RESTIC_PASSWORD_FILE` is one line, the password, nothing else. Interactive restores can export `RESTIC_PASSWORD` instead of the file. Set only one of them.
+
+### Enable the daily backup
+
+The repo ships `deploy/scuffed-backup.service` and `deploy/scuffed-backup.timer` (daily, 03:00, with a short random delay). They do nothing until they are installed and restic is pointed at an off-host repository. Pick any restic backend; the URL below is a placeholder.
+
+1. Install restic on the host (`restic version`).
+2. Create a repository on another machine (sftp), an S3-compatible bucket, or a [rest-server](https://github.com/restic/rest-server). You need the URL restic will use.
+3. Put a copy of the repository password **and** of `ENCRYPTION_KEY` (from `data/secrets.env`) in a password manager. A lost host is recoverable from the off-host backup plus those two values.
+4. On the host, as root:
 
 ```bash
-# once
-export RESTIC_REPOSITORY=... RESTIC_PASSWORD=...
+install -d -m 700 /etc/scuffed-crew
+install -m 600 /dev/null /etc/scuffed-crew/restic-password
+# write the password into that file (one line), then:
+chmod 600 /etc/scuffed-crew/restic-password
+chown root:root /etc/scuffed-crew/restic-password
+
+cat > /etc/scuffed-crew/backup.env <<'EOF'
+RESTIC_REPOSITORY=sftp:USER@BACKUP-HOST:/srv/restic/scuffed-crew
+RESTIC_PASSWORD_FILE=/etc/scuffed-crew/restic-password
+EOF
+chmod 600 /etc/scuffed-crew/backup.env
+chown root:root /etc/scuffed-crew/backup.env
+```
+
+Replace the `RESTIC_REPOSITORY` line with the real URL (`sftp:user@host:/path`, `s3:https://s3.example.com/bucket/path`, `rest:https://backup.example:8000/scuffed-crew`, and so on).
+
+5. Initialize the repository once:
+
+```bash
+set -a
+. /etc/scuffed-crew/backup.env
+set +a
 ./scripts/backup-init.sh
-
-# daily (sources data/secrets.env; refuses to run if ENCRYPTION_KEY is blank)
-./scripts/backup.sh
 ```
 
-Snapshots taken before this change do **not** contain `secrets.env`. After
-deploying these scripts, run `./scripts/backup.sh` once so a snapshot actually
-holds the key. Until that snapshot exists, keep an offline copy of
-`data/secrets.env`.
+6. Install and start the timer (paths assume the repo is at `/opt/scuffed-crew`):
 
-Systemd units under `deploy/` can load:
+```bash
+cp deploy/scuffed-backup.service deploy/scuffed-backup.timer /etc/systemd/system/
+systemctl daemon-reload
+systemctl enable --now scuffed-backup.timer
+systemctl start scuffed-backup.service
+systemctl status scuffed-backup.service
+```
 
-```
-EnvironmentFile=-/opt/scuffed-crew/data/secrets.env
-```
+7. `systemctl start scuffed-backup.service` must succeed, and `restic snapshots --tag scuffed-crew` on the off-host repo must show a snapshot. Snapshots taken before `secrets.env` was included do **not** contain `ENCRYPTION_KEY`. Keep the password-manager copy until a new snapshot exists.
+
+`BACKUP_ALLOW_LOCAL_REPO=1` is only for a deliberate same-host drill. Leave it unset on the timer.
 
 ## Restore
 
@@ -437,8 +480,13 @@ Stop the app first. Restore secrets **before** starting it. A fresh
 `install.sh` on a rebuilt host generates a new `ENCRYPTION_KEY`, and that key
 cannot decrypt the restored database.
 
+On a new host, export `RESTIC_PASSWORD` from the password manager (or recreate
+the mode-600 `RESTIC_PASSWORD_FILE`) and set `RESTIC_REPOSITORY` to the same
+off-host URL:
+
 ```bash
-export RESTIC_REPOSITORY=... RESTIC_PASSWORD=...
+export RESTIC_REPOSITORY='sftp:USER@BACKUP-HOST:/srv/restic/scuffed-crew'
+export RESTIC_PASSWORD='from-the-password-manager'
 ./scripts/restore.sh latest
 ```
 

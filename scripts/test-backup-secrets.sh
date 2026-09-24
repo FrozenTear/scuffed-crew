@@ -22,6 +22,8 @@ cat > "${TMP}/secrets.env" <<'EOF'
 SURREALDB_PASSWORD=secret-db
 ENCRYPTION_KEY=abc123key
 ENCRYPTION_KEY_VERSION=1
+RESTIC_PASSWORD=supersecret
+RESTIC_REPOSITORY=/var/restic
 EOF
 
 stage_secrets_for_backup "${TMP}/stage" "${TMP}/secrets.env"
@@ -35,6 +37,15 @@ fi
 
 perm="$(stat -c '%a' "${TMP}/stage/secrets.env")"
 [[ "${perm}" == "600" ]] || fail "staged secrets.env mode is ${perm}, want 600"
+if grep -q 'supersecret' "${TMP}/stage/secrets.env"; then
+    fail "staged secrets.env still contains RESTIC_PASSWORD"
+fi
+if grep -q 'RESTIC_REPOSITORY' "${TMP}/stage/secrets.env"; then
+    fail "staged secrets.env still contains RESTIC_REPOSITORY"
+fi
+if ! grep -q 'ENCRYPTION_KEY=abc123key' "${TMP}/stage/secrets.env"; then
+    fail "staged secrets.env dropped ENCRYPTION_KEY"
+fi
 perm="$(stat -c '%a' "${TMP}/stage/encryption-key.fingerprint")"
 [[ "${perm}" == "600" ]] || fail "fingerprint mode is ${perm}, want 600"
 
