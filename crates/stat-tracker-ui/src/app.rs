@@ -138,6 +138,9 @@ pub struct TrackerApp {
     pub update: Option<UpdateInfo>,
     pub update_progress: UpdateProgress,
     pub update_plan: UpdatePlan,
+    /// Resolved once at startup so Settings can pin a tag without spawning
+    /// the daemon on every frame.
+    pub installed_version: Option<String>,
     pub confirm_clear: bool,
     pub tessdata_busy: bool,
     pub tessdata_installed: bool,
@@ -252,6 +255,7 @@ impl TrackerApp {
             preview: None,
             preview_error: None,
             update: None,
+            installed_version: update::current_version(),
             update_progress: UpdateProgress::Idle,
             update_plan: UpdatePlan::Blocked {
                 reason: String::new(),
@@ -751,11 +755,10 @@ impl TrackerApp {
                 Task::none()
             }
             Message::CopyUpdateCmd => {
-                let cmd = self
-                    .update
-                    .as_ref()
-                    .map(|i| update::pinned_install_command(&i.latest))
-                    .unwrap_or_else(|| update::UPDATE_CMD.to_string());
+                let cmd = update::install_command_for(
+                    self.update.as_ref().map(|i| i.latest.as_str()),
+                    self.installed_version.as_deref(),
+                );
                 match crate::clipboard::copy_text(&cmd) {
                     Ok(backend) => {
                         self.toast =

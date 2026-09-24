@@ -7,6 +7,11 @@ DIST="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BUNDLE="$DIST/bundle-native-libs.sh"
 INSTALL="$DIST/install.sh"
 UNINSTALL="$DIST/uninstall.sh"
+
+# M19 / tracker lows: tag-pinned bootstrap, atomic binary replace, tar extract.
+bash "$DIST/test-bootstrap-pin.sh"
+bash "$DIST/test-atomic-install.sh"
+bash "$DIST/test-safe-extract.sh"
 FAILS=0
 
 pass() { echo "PASS  $*"; }
