@@ -150,6 +150,8 @@ mod tests {
         );
         assert_eq!(http_href("javascript:alert(1)"), None);
         assert_eq!(http_href(" JavaScript:alert(1)"), None);
+        assert_eq!(http_href("vbscript:msgbox"), None);
+        assert_eq!(http_href(" VBScript:msgbox(1)"), None);
         assert_eq!(http_href("data:text/html,hi"), None);
         assert_eq!(http_href("//example.com"), None);
         assert_eq!(http_href("/relative"), None);

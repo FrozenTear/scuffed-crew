@@ -5,6 +5,9 @@ use std::collections::HashMap;
 use crate::components::bracket::{
     BRACKET_STYLES, BracketMatch, BracketRound, BracketView, SwissStanding,
 };
+use crate::components::{fetch_error, is_http_status};
+use crate::routes::Route;
+use crate::util::{FetchClass, classify_fetch};
 use scuffed_api_client::ApiClient;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -158,10 +161,19 @@ const PAGE_CSS: &str = r#"
         padding-top: 1.5rem;
         border-top: 1px solid var(--border);
     }
-    .tournament-loading {
+    .tournament-loading, .tournament-error {
         color: var(--text-3);
         text-align: center;
         padding: 3rem 0;
+    }
+    .tournament-back {
+        display: inline-block;
+        color: var(--text-3);
+        font-size: 0.8rem;
+        text-decoration: none;
+    }
+    .tournament-back:hover {
+        color: var(--text);
     }
     .tournament-no-bracket {
         color: var(--text-3);
@@ -175,16 +187,18 @@ pub fn Tournament(id: String) -> Element {
     let id_for_bracket = id.clone();
     let id_for_standings = id.clone();
 
+    let refresh = use_signal(|| 0u32);
     let bracket_data = use_resource(move || {
         let id = id_for_bracket.clone();
+        let _ = refresh();
         async move {
             if id.is_empty() {
-                return None;
+                return Err("HTTP error: 404".to_string());
             }
             ApiClient::web()
                 .fetch::<BracketData>(&format!("/api/tournaments/{id}/bracket"))
                 .await
-                .ok()
+                .map_err(|e| e.to_string())
         }
     });
 
@@ -222,11 +236,41 @@ pub fn Tournament(id: String) -> Element {
                     .collect();
 
                 let data = bracket_data.read();
-                let data = data.as_ref().and_then(|d| d.as_ref());
-
-                match data {
-                    None => rsx! { p { class: "tournament-loading", "Loading..." } },
-                    Some(data) => {
+                match classify_fetch(data.as_ref()) {
+                    FetchClass::Loading => rsx! { p { class: "tournament-loading", "Loading..." } },
+                    FetchClass::Error => {
+                        let err = data
+                            .as_ref()
+                            .and_then(|r| r.as_ref().err())
+                            .cloned()
+                            .unwrap_or_default();
+                        if is_http_status(&err, 404) {
+                            rsx! {
+                                p { class: "tournament-error", "Tournament not found" }
+                                Link {
+                                    to: Route::Tournaments {},
+                                    class: "tournament-back",
+                                    "← Back to Tournaments"
+                                }
+                            }
+                        } else {
+                            rsx! {
+                                {fetch_error(
+                                    &format!("Couldn't load this tournament. {err}"),
+                                    refresh,
+                                )}
+                                Link {
+                                    to: Route::Tournaments {},
+                                    class: "tournament-back",
+                                    "← Back to Tournaments"
+                                }
+                            }
+                        }
+                    }
+                    FetchClass::Ready => {
+                        let Some(data) = data.as_ref().and_then(|r| r.as_ref().ok()) else {
+                            return rsx! { p { class: "tournament-loading", "Loading..." } };
+                        };
                         let t = &data.tournament;
                         let format_text = format_label(&t.format).to_string();
                         let status_text = status_label(&t.status).to_string();

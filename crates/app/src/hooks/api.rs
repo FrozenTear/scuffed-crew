@@ -193,19 +193,21 @@ pub fn use_api_list<T: DeserializeOwned + 'static>(url: &'static str) -> ApiReso
     let refresh = use_signal(|| 0u64);
     let mut error = use_signal(|| Option::<String>::None);
     let (mut truncated, shown, page_budget) = use_list_cap();
-    let data = use_resource(move || async move {
-        let _ = refresh();
+    let data = use_resource(move || {
         let budget = page_budget();
-        error.set(None);
-        truncated.set(false);
-        match fetch_pages::<T>(url, budget).await {
-            Ok(batch) => {
-                remember_batch(&batch, truncated, shown);
-                Some(batch.items)
-            }
-            Err(e) => {
-                remember_list_failure(truncated, shown, error, e.to_string());
-                None
+        async move {
+            let _ = refresh();
+            error.set(None);
+            truncated.set(false);
+            match fetch_pages::<T>(url, budget).await {
+                Ok(batch) => {
+                    remember_batch(&batch, truncated, shown);
+                    Some(batch.items)
+                }
+                Err(e) => {
+                    remember_list_failure(truncated, shown, error, e.to_string());
+                    None
+                }
             }
         }
     });
