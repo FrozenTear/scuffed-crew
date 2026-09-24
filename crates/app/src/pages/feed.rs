@@ -1,6 +1,8 @@
 use dioxus::prelude::*;
 
+use crate::components::fetch_error;
 use crate::components::post::{FeedPost, PostCard, PostCompose};
+use crate::util::{FetchClass, classify_fetch};
 use scuffed_api_client::ApiClient;
 
 const PAGE_CSS: &str = r#"
@@ -84,11 +86,15 @@ const PAGE_CSS: &str = r#"
 
 #[component]
 pub fn Feed() -> Element {
-    let posts_resource = use_resource(|| async {
-        ApiClient::web()
-            .fetch::<Vec<FeedPost>>("/api/nostr/feed")
-            .await
-            .ok()
+    let refresh = use_signal(|| 0u32);
+    let posts_resource = use_resource(move || {
+        let _ = refresh();
+        async move {
+            ApiClient::web()
+                .fetch::<Vec<FeedPost>>("/api/nostr/feed")
+                .await
+                .map_err(|e| e.to_string())
+        }
     });
 
     let me = use_resource(|| async {
@@ -143,10 +149,36 @@ pub fn Feed() -> Element {
 
             {
                 let data = posts_resource.read();
-                let data = data.as_ref().and_then(|d| d.as_ref());
-                match data {
-                    None => rsx! { p { class: "feed-loading", "Loading posts..." } },
-                    Some(server_posts) => {
+                match classify_fetch(data.as_ref()) {
+                    FetchClass::Loading => rsx! { p { class: "feed-loading", "Loading posts..." } },
+                    FetchClass::Error => {
+                        let err = data
+                            .as_ref()
+                            .and_then(|r| r.as_ref().err())
+                            .map(|e| e.to_string())
+                            .unwrap_or_default();
+                        let optimistic = optimistic_posts();
+                        rsx! {
+                            if !optimistic.is_empty() {
+                                div { class: "feed-list",
+                                    for post in optimistic.iter() {
+                                        PostCard {
+                                            key: "{post.id}",
+                                            post: post.clone(),
+                                            on_tag_click: on_tag_click,
+                                        }
+                                    }
+                                }
+                            }
+                            {fetch_error(&format!("Couldn't load the feed. {err}"), refresh)}
+                        }
+                    }
+                    FetchClass::Ready => {
+                        let server_posts = data
+                            .as_ref()
+                            .and_then(|r| r.as_ref().ok())
+                            .cloned()
+                            .unwrap_or_default();
                         let mut all_posts = optimistic_posts().clone();
                         for sp in server_posts.iter() {
                             if !all_posts.iter().any(|p| p.id == sp.id) {

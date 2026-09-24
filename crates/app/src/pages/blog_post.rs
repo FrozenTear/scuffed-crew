@@ -3,7 +3,9 @@ use serde::Deserialize;
 
 use scuffed_api_client::ApiClient;
 
+use crate::components::is_http_status;
 use crate::routes::Route;
+use crate::util::{FetchClass, classify_fetch};
 
 #[derive(Debug, Clone, Deserialize)]
 struct FullArticle {
@@ -84,14 +86,19 @@ const PAGE_CSS: &str = r#"
 
 #[component]
 pub fn BlogPost(slug: String) -> Element {
+    let mut refresh = use_signal(|| 0u32);
     let slug_owned = slug.clone();
     let article = use_resource(move || {
         let s = slug_owned.clone();
+        let _ = refresh();
         async move {
+            if s.is_empty() {
+                return Err("HTTP error: 404".to_string());
+            }
             ApiClient::web()
                 .fetch::<FullArticle>(&format!("/api/articles/{s}"))
                 .await
-                .ok()
+                .map_err(|e| e.to_string())
         }
     });
 
@@ -105,30 +112,54 @@ pub fn BlogPost(slug: String) -> Element {
 
             {
                 let data = article.read();
-                let data = data.as_ref().and_then(|d| d.as_ref());
-                match data {
-                    None => rsx! { p { class: "blog-post-loading", "Loading..." } },
-                    Some(a) => rsx! {
-                        if let Some(ref cover) = a.cover_image_url {
-                            img {
-                                class: "blog-post-cover",
-                                src: "{cover}",
-                                alt: "{a.title}",
+                match classify_fetch(data.as_ref()) {
+                    FetchClass::Loading => rsx! { p { class: "blog-post-loading", "Loading..." } },
+                    FetchClass::Error => {
+                        let err = data
+                            .as_ref()
+                            .and_then(|r| r.as_ref().err())
+                            .cloned()
+                            .unwrap_or_default();
+                        if is_http_status(&err, 404) {
+                            rsx! { p { class: "blog-post-error", "Post not found" } }
+                        } else {
+                            rsx! {
+                                p { class: "blog-post-error", role: "alert", "Couldn't load this post. {err}" }
+                                button {
+                                    r#type: "button",
+                                    class: "fetch-error__retry",
+                                    onclick: move |_| refresh += 1,
+                                    "Retry"
+                                }
                             }
                         }
-                        h1 { class: "blog-post-title", "{a.title}" }
-                        div { class: "blog-post-meta",
-                            time {
-                                {a.published_at.as_deref()
-                                    .map(|d| d.chars().take(10).collect::<String>())
-                                    .unwrap_or_else(|| "Draft".to_string())}
-                            }
-                            span { "by {a.author_member_id}" }
+                    }
+                    FetchClass::Ready => {
+                        match data.as_ref().and_then(|r| r.as_ref().ok()) {
+                            Some(a) => rsx! {
+                                if let Some(ref cover) = a.cover_image_url {
+                                    img {
+                                        class: "blog-post-cover",
+                                        src: "{cover}",
+                                        alt: "{a.title}",
+                                    }
+                                }
+                                h1 { class: "blog-post-title", "{a.title}" }
+                                div { class: "blog-post-meta",
+                                    time {
+                                        {a.published_at.as_deref()
+                                            .map(|d| d.chars().take(10).collect::<String>())
+                                            .unwrap_or_else(|| "Draft".to_string())}
+                                    }
+                                    span { "by {a.author_member_id}" }
+                                }
+                                div { class: "blog-post-content",
+                                    "{a.content_markdown}"
+                                }
+                            },
+                            None => rsx! { p { class: "blog-post-loading", "Loading..." } },
                         }
-                        div { class: "blog-post-content",
-                            "{a.content_markdown}"
-                        }
-                    },
+                    }
                 }
             }
         }

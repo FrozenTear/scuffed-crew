@@ -1,9 +1,10 @@
 use dioxus::prelude::*;
 use serde::Deserialize;
 
-use crate::components::{Toast, use_toast};
+use crate::components::{Toast, fetch_error, is_http_status, use_toast};
 use crate::routes::Route;
 use crate::state::auth::use_auth;
+use crate::util::{FetchClass, classify_fetch};
 use scuffed_api_client::ApiClient;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -213,34 +214,38 @@ const PAGE_CSS: &str = r#"
 pub fn WikiPage(topic: String) -> Element {
     let auth = use_auth();
     let mut toast = use_toast();
-    let mut page_refresh = use_signal(|| 0u64);
+    let mut page_refresh = use_signal(|| 0u32);
     let topic_clone = topic.clone();
     let page_resource = use_resource(move || {
         let t = topic_clone.clone();
         let _ = page_refresh();
         async move {
+            if t.is_empty() {
+                return Err("HTTP error: 404".to_string());
+            }
             ApiClient::web()
                 .fetch::<WikiPageData>(&format!("/api/wiki/{t}"))
                 .await
-                .ok()
+                .map_err(|e| e.to_string())
         }
     });
 
     let topic_for_revisions = topic.clone();
     let mut show_revisions = use_signal(|| false);
-    let mut rev_refresh = use_signal(|| 0u64);
+    let mut rev_refresh = use_signal(|| 0u32);
     let revisions = use_resource(move || {
         let t = topic_for_revisions.clone();
         let show = show_revisions();
         let _ = rev_refresh();
         async move {
             if !show {
-                return None;
+                return Ok(None);
             }
             ApiClient::web()
                 .fetch::<WikiRevisionsResponse>(&format!("/api/wiki/{t}/revisions"))
                 .await
-                .ok()
+                .map(Some)
+                .map_err(|e| e.to_string())
         }
     });
 
@@ -257,10 +262,24 @@ pub fn WikiPage(topic: String) -> Element {
 
             {
                 let data = page_resource.read();
-                let data = data.as_ref().and_then(|d| d.as_ref());
-                match data {
-                    None => rsx! { p { class: "wiki-loading", "Loading..." } },
-                    Some(page) => {
+                match classify_fetch(data.as_ref()) {
+                    FetchClass::Loading => rsx! { p { class: "wiki-loading", "Loading..." } },
+                    FetchClass::Error => {
+                        let err = data
+                            .as_ref()
+                            .and_then(|r| r.as_ref().err())
+                            .cloned()
+                            .unwrap_or_default();
+                        if is_http_status(&err, 404) {
+                            rsx! { p { class: "wiki-error", "Page not found" } }
+                        } else {
+                            fetch_error(&format!("Couldn't load this page. {err}"), page_refresh)
+                        }
+                    }
+                    FetchClass::Ready => {
+                        let Some(page) = data.as_ref().and_then(|r| r.as_ref().ok()) else {
+                            return rsx! { p { class: "wiki-loading", "Loading..." } };
+                        };
                         let created: String = page.created_at.chars().take(10).collect();
                         let updated: String = page.updated_at.chars().take(10).collect();
                         let content = page.content_markdown.clone();
@@ -380,19 +399,46 @@ pub fn WikiPage(topic: String) -> Element {
                                     h3 { class: "wiki-revisions-title", "Revision History" }
                                     {
                                         let rev_data = revisions.read();
-                                        let rev_data = rev_data.as_ref().and_then(|d| d.as_ref());
-                                        match rev_data {
-                                            None => rsx! { p { class: "wiki-loading", "Loading revisions..." } },
-                                            Some(resp) if resp.data.is_empty() => rsx! {
-                                                p { class: "wiki-loading", "No revisions yet." }
+                                        match classify_fetch(rev_data.as_ref()) {
+                                            FetchClass::Loading => rsx! {
+                                                p { class: "wiki-loading", "Loading revisions..." }
                                             },
-                                            Some(resp) => rsx! {
-                                                div { class: "wiki-revision-list",
-                                                    for rev in resp.data.iter() {
-                                                        {render_revision(rev)}
-                                                    }
+                                            FetchClass::Error => {
+                                                let err = rev_data
+                                                    .as_ref()
+                                                    .and_then(|r| r.as_ref().err())
+                                                    .cloned()
+                                                    .unwrap_or_default();
+                                                if is_http_status(&err, 404) {
+                                                    rsx! { p { class: "wiki-loading", "No revisions yet." } }
+                                                } else {
+                                                    fetch_error(
+                                                        &format!("Couldn't load revisions. {err}"),
+                                                        rev_refresh,
+                                                    )
                                                 }
-                                            },
+                                            }
+                                            FetchClass::Ready => {
+                                                match rev_data
+                                                    .as_ref()
+                                                    .and_then(|r| r.as_ref().ok())
+                                                    .and_then(|page| page.as_ref())
+                                                {
+                                                    None => rsx! {
+                                                        p { class: "wiki-loading", "Loading revisions..." }
+                                                    },
+                                                    Some(resp) if resp.data.is_empty() => rsx! {
+                                                        p { class: "wiki-loading", "No revisions yet." }
+                                                    },
+                                                    Some(resp) => rsx! {
+                                                        div { class: "wiki-revision-list",
+                                                            for rev in resp.data.iter() {
+                                                                {render_revision(rev)}
+                                                            }
+                                                        }
+                                                    },
+                                                }
+                                            }
                                         }
                                     }
                                 }

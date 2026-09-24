@@ -1,6 +1,6 @@
 use dioxus::prelude::*;
 
-use crate::hooks::ApiResource;
+use crate::hooks::{ApiResource, LIST_MAX_PAGES};
 use crate::routes::Route;
 
 /// Shared pending-state renderer for admin list/detail resources.
@@ -30,6 +30,32 @@ pub fn admin_pending<T: 'static>(resource: &ApiResource<T>, label: &str) -> Elem
         }
     } else {
         rsx! { p { class: "admin-loading", "Loading..." } }
+    }
+}
+
+/// Visible cap for a cursor list that stopped with a next cursor still set.
+///
+/// Renders nothing until `truncated` is true, so pages under the page budget
+/// look the same. "Load more" raises the budget by another auto-follow batch.
+/// Call this outside a live `resource.data.read()` guard.
+pub fn list_cap_notice<T: 'static>(resource: &ApiResource<T>, what: &str) -> Element {
+    let truncated = *resource.truncated.read();
+    if !truncated {
+        return rsx! {};
+    }
+    let shown = *resource.shown.read();
+    let what = what.to_string();
+    let mut budget = resource.page_budget;
+    rsx! {
+        p { class: "list-cap-notice", role: "status",
+            "Showing the first {shown} {what}. "
+            button {
+                r#type: "button",
+                class: "list-cap-notice__more",
+                onclick: move |_| budget += LIST_MAX_PAGES,
+                "Load more"
+            }
+        }
     }
 }
 

@@ -1,9 +1,10 @@
 use dioxus::prelude::*;
 use serde::{Deserialize, Serialize};
 
-use crate::components::{Toast, use_toast};
+use crate::components::{Toast, fetch_error, is_http_status, use_toast};
 use crate::routes::Route;
 use crate::state::auth::use_auth;
+use crate::util::{FetchClass, classify_fetch};
 use scuffed_api_client::ApiClient;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -232,7 +233,7 @@ const PAGE_CSS: &str = r#"
 pub fn ForumThread(id: String) -> Element {
     let auth = use_auth();
     let mut toast = use_toast();
-    let mut refresh = use_signal(|| 0u64);
+    let mut refresh = use_signal(|| 0u32);
     let mut reply_content = use_signal(String::new);
     let mut submitting = use_signal(|| false);
 
@@ -241,10 +242,13 @@ pub fn ForumThread(id: String) -> Element {
         let tid = thread_id.clone();
         let _ = refresh();
         async move {
+            if tid.is_empty() {
+                return Err("HTTP error: 404".to_string());
+            }
             ApiClient::web()
                 .fetch::<ThreadDetailResponse>(&format!("/api/forum/threads/{tid}"))
                 .await
-                .ok()
+                .map_err(|e| e.to_string())
         }
     });
 
@@ -254,13 +258,36 @@ pub fn ForumThread(id: String) -> Element {
         main { class: "thread-page",
             {
                 let data = detail.read();
-                let data = data.as_ref().and_then(|d| d.as_ref());
-                match data {
-                    None => rsx! {
+                match classify_fetch(data.as_ref()) {
+                    FetchClass::Loading => rsx! {
                         Link { to: Route::Forum {}, class: "thread-back", "< Back to Forum" }
                         p { class: "thread-loading", "Loading..." }
                     },
-                    Some(resp) => {
+                    FetchClass::Error => {
+                        let err = data
+                            .as_ref()
+                            .and_then(|r| r.as_ref().err())
+                            .cloned()
+                            .unwrap_or_default();
+                        if is_http_status(&err, 404) {
+                            rsx! {
+                                Link { to: Route::Forum {}, class: "thread-back", "< Back to Forum" }
+                                p { class: "thread-error", "Thread not found" }
+                            }
+                        } else {
+                            rsx! {
+                                Link { to: Route::Forum {}, class: "thread-back", "< Back to Forum" }
+                                {fetch_error(&format!("Couldn't load this thread. {err}"), refresh)}
+                            }
+                        }
+                    }
+                    FetchClass::Ready => {
+                        let Some(resp) = data.as_ref().and_then(|r| r.as_ref().ok()) else {
+                            return rsx! {
+                                Link { to: Route::Forum {}, class: "thread-back", "< Back to Forum" }
+                                p { class: "thread-loading", "Loading..." }
+                            };
+                        };
                         let t = &resp.thread;
                         let date: String = t.created_at.chars().take(10).collect();
                         let reply_id = id.clone();

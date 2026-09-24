@@ -283,6 +283,7 @@ pub fn IdentitySettings() -> Element {
             {
                 Ok(resp) => {
                     backup_result.set(Some(resp.ncryptsec));
+                    backup_password.set(String::new());
                     toast.show(Toast::success("Key backup exported. Copy it now!"));
                 }
                 Err(e) => toast.show(Toast::error(format!("Export failed: {e}"))),

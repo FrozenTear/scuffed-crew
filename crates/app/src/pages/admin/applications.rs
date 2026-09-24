@@ -2,7 +2,9 @@ use dioxus::prelude::*;
 use serde::Deserialize;
 
 use crate::components::modal::Modal;
-use crate::components::{ConfirmDialog, DataTable, StatusPill, Toast, admin_pending, use_toast};
+use crate::components::{
+    ConfirmDialog, DataTable, StatusPill, Toast, admin_pending, list_cap_notice, use_toast,
+};
 use crate::hooks::{ModalController, use_api_list};
 use crate::util::format_datetime;
 use scuffed_api_client::ApiClient;
@@ -168,6 +170,8 @@ pub fn AdminApplications() -> Element {
                 },
             }
         }
+
+        {list_cap_notice(&applications, "applications")}
 
         Modal {
             open: view_open,

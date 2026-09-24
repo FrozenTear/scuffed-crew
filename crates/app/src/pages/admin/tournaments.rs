@@ -3,7 +3,8 @@ use serde::Deserialize;
 use std::collections::HashMap;
 
 use crate::components::{
-    ConfirmDialog, DataTable, FormModal, StatusPill, Toast, admin_pending, use_toast,
+    ConfirmDialog, DataTable, FormModal, StatusPill, Toast, admin_pending, list_cap_notice,
+    use_toast,
 };
 use crate::hooks::{ModalController, use_api_list};
 use scuffed_api_client::ApiClient;
@@ -820,6 +821,10 @@ pub fn AdminTournaments() -> Element {
                 }
             }
         }
+
+        {list_cap_notice(&tournaments, "tournaments")}
+        {list_cap_notice(&games, "games")}
+        {list_cap_notice(&members, "members")}
 
         // --- Shared modals (always rendered) ---
 

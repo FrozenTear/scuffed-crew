@@ -1,7 +1,9 @@
 use dioxus::prelude::*;
 use serde::Deserialize;
 
-use crate::components::{ConfirmDialog, DataTable, FormModal, Toast, admin_pending, use_toast};
+use crate::components::{
+    ConfirmDialog, DataTable, FormModal, Toast, admin_pending, list_cap_notice, use_toast,
+};
 use crate::hooks::{ModalController, use_api_list, use_api_with};
 use scuffed_api_client::ApiClient;
 use scuffed_types::api::{AttendanceEntry, BatchAttendanceRequest, CreateEventRequest};
@@ -321,6 +323,10 @@ pub fn AdminSchedule() -> Element {
                 },
             }
         }
+
+        {list_cap_notice(&events, "events")}
+        {list_cap_notice(&teams, "teams")}
+        {list_cap_notice(&members, "members")}
 
         // Create/Edit modal
         FormModal {

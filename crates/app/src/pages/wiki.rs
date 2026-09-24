@@ -1,7 +1,9 @@
 use dioxus::prelude::*;
 use serde::Deserialize;
 
+use crate::components::fetch_error;
 use crate::routes::Route;
+use crate::util::{FetchClass, classify_fetch};
 use scuffed_api_client::ApiClient;
 
 fn encode_uri(s: &str) -> String {
@@ -122,16 +124,21 @@ const PAGE_CSS: &str = r#"
 #[component]
 pub fn Wiki() -> Element {
     let mut search_text = use_signal(String::new);
+    let refresh = use_signal(|| 0u32);
 
     let pages = use_resource(move || {
         let q = search_text();
+        let _ = refresh();
         async move {
             let url = if q.is_empty() {
                 "/api/wiki".to_string()
             } else {
                 format!("/api/wiki?q={}", encode_uri(&q))
             };
-            ApiClient::web().fetch::<WikiListResponse>(&url).await.ok()
+            ApiClient::web()
+                .fetch::<WikiListResponse>(&url)
+                .await
+                .map_err(|e| e.to_string())
         }
     });
 
@@ -155,19 +162,30 @@ pub fn Wiki() -> Element {
             div { style: "margin-top: 1.5rem;",
                 {
                     let data = pages.read();
-                    let data = data.as_ref().and_then(|d| d.as_ref());
-                    match data {
-                        None => rsx! { p { class: "wiki-loading", "Loading..." } },
-                        Some(resp) if resp.data.is_empty() => rsx! {
-                            p { class: "wiki-empty", "No wiki pages found." }
-                        },
-                        Some(resp) => rsx! {
-                            div { class: "wiki-list",
-                                for page in resp.data.iter() {
-                                    {render_wiki_card(page)}
+                    match classify_fetch(data.as_ref()) {
+                        FetchClass::Loading => rsx! { p { class: "wiki-loading", "Loading..." } },
+                        FetchClass::Error => {
+                            let err = data
+                                .as_ref()
+                                .and_then(|r| r.as_ref().err())
+                                .map(|e| e.to_string())
+                                .unwrap_or_default();
+                            fetch_error(&format!("Couldn't load the wiki. {err}"), refresh)
+                        }
+                        FetchClass::Ready => {
+                            let resp = data.as_ref().and_then(|r| r.as_ref().ok());
+                            if resp.is_some_and(|r| r.data.is_empty()) {
+                                rsx! { p { class: "wiki-empty", "No wiki pages found." } }
+                            } else {
+                                rsx! {
+                                    div { class: "wiki-list",
+                                        for page in resp.into_iter().flat_map(|r| r.data.iter()) {
+                                            {render_wiki_card(page)}
+                                        }
+                                    }
                                 }
                             }
-                        },
+                        }
                     }
                 }
             }

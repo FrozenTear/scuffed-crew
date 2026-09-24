@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 
 use scuffed_api_client::ApiClient;
 
-use crate::components::{Toast, member_pending, use_toast};
+use crate::components::{Toast, list_cap_notice, member_pending, use_toast};
 use crate::hooks::use_api_list;
 use crate::state::use_auth;
 
@@ -385,6 +385,9 @@ pub fn Scrims() -> Element {
                     }
                 }
             }}
+            {list_cap_notice(&scrims, "scrims")}
+            {list_cap_notice(&teams, "teams")}
+            {list_cap_notice(&games, "games")}
         }
     }
 }

@@ -1,7 +1,9 @@
 use dioxus::prelude::*;
 use serde::Deserialize;
 
-use crate::components::{ConfirmDialog, DataTable, FormModal, Toast, admin_pending, use_toast};
+use crate::components::{
+    ConfirmDialog, DataTable, FormModal, Toast, admin_pending, list_cap_notice, use_toast,
+};
 use crate::hooks::{ModalController, use_api_list};
 use scuffed_api_client::ApiClient;
 use scuffed_types::api::{CreateAnnouncementRequest, UpdateAnnouncementRequest};
@@ -174,6 +176,8 @@ pub fn AdminAnnouncements() -> Element {
                 },
             }
         }
+
+        {list_cap_notice(&announcements, "announcements")}
 
         FormModal {
             title: if modal.get_target().is_some() { "Edit Announcement".to_string() } else { "New Announcement".to_string() },

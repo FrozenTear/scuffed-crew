@@ -977,6 +977,13 @@ const PAGE_CSS: &str = r#"
         opacity: 0.8;
         text-decoration: underline;
     }
+    .patch-external-text {
+        display: inline-flex;
+        font-size: 0.75rem;
+        color: var(--text-2);
+        margin-top: 0.75rem;
+        word-break: break-all;
+    }
     .patch-loading, .patch-empty {
         color: var(--text-3);
         text-align: center;
@@ -1357,6 +1364,7 @@ fn render_patch_card(
     let version = patch.version.clone();
     let date = patch.date.clone();
     let url = patch.url.clone();
+    let safe_href = crate::util::http_href(&url).map(str::to_string);
     let body = patch.body.clone();
     let hero_updates = patch.hero_updates.clone();
     let sections = patch.sections.clone();
@@ -1481,14 +1489,16 @@ fn render_patch_card(
                         {render_section(section)}
                     }
 
-                    if !url.is_empty() {
+                    if let Some(href) = safe_href {
                         a {
                             class: "patch-external-link",
-                            href: "{url}",
+                            href: "{href}",
                             target: "_blank",
                             rel: "noopener noreferrer",
                             "View official patch notes \u{2192}"
                         }
+                    } else if !url.trim().is_empty() {
+                        span { class: "patch-external-text", "{url}" }
                     }
                 }
             }

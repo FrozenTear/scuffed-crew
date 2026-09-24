@@ -1,7 +1,7 @@
 use dioxus::prelude::*;
 use serde::Deserialize;
 
-use crate::components::{DataTable, FormModal, Toast, admin_pending, use_toast};
+use crate::components::{DataTable, FormModal, Toast, admin_pending, list_cap_notice, use_toast};
 use crate::hooks::{ModalController, use_api_list, use_api_list_with};
 use scuffed_api_client::ApiClient;
 use scuffed_types::api::MatchPayload;
@@ -313,6 +313,9 @@ pub fn AdminMatches() -> Element {
                 }
             }
         }
+
+        {list_cap_notice(&teams, "teams")}
+        {list_cap_notice(&matches, "matches")}
 
         FormModal {
             title: modal_title.to_string(),
