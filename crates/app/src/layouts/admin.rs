@@ -326,7 +326,7 @@ pub fn AdminLayout() -> Element {
                                 .as_ref()
                                 .and_then(|o| o.as_ref())
                                 .map(|s| s.org_name.clone())
-                                .unwrap_or_default()}
+                                .unwrap_or_else(|| "My Clan".into())}
                         }
                         span { "Admin Panel" }
                     }

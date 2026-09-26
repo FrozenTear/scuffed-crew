@@ -74,9 +74,10 @@ pub const CSS: &str = r#"
         cursor: pointer;
     }
 
-    /* One keyboard focus ring for every control; mouse clicks stay clean. */
+    /* One keyboard focus ring for every control; mouse clicks stay clean.
+       --text, not --accent: org accents can sit under 3:1 on the page bg. */
     :where(a, button, input, select, textarea, summary, [tabindex]):focus-visible {
-        outline: 2px solid var(--accent);
+        outline: 2px solid var(--text);
         outline-offset: 2px;
     }
 

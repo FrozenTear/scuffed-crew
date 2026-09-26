@@ -49,7 +49,7 @@ pub fn theme_css(brand: &BrandConfig) -> String {
   --bg: #f7f7f9; --surface: #ffffff; --surface-2: #f0f0f4; --border: #e3e3e9;
   --text: #16161c; --text-2: #545462; --text-3: #696975;
   --accent: {accent_l}; --accent-fg: {fg_l}; --accent-soft: {soft_l};
-  --ok: #3d7a1a; --warn: #c2830a; --danger: #d63031;
+  --ok: #087a50; --warn: #c2830a; --danger: #d63031;
   /* CVD-validated against #ffffff — see docs/notes/stats-ui-w2-validation.md. */
   --chart-1: #6d4aff; --chart-2: #0ea66e; --chart-3: #c2830a; --chart-4: #d63031; --chart-5: #0284c7; --chart-6: #7405c3;
   --chart-wr-up: #0284c7; --chart-wr-down: #843900;
