@@ -4,6 +4,8 @@ use super::{focus_element, use_document_keydown};
 use crate::routes::Route;
 use crate::state::use_auth;
 use crate::theme::ThemeToggle;
+use scuffed_api_client::ApiClient;
+use scuffed_types::SiteSettings;
 
 const ADMIN_NAV_TOGGLE_ID: &str = "admin-nav-toggle";
 const ADMIN_NAV_ID: &str = "admin-nav";
@@ -29,6 +31,8 @@ const ADMIN_CSS: &str = r#"
         height: 100vh;
         z-index: 40;
         overflow-y: auto;
+        scrollbar-width: thin;
+        scrollbar-color: var(--border) transparent;
     }
     .admin-sidebar .brand {
         padding: 0 1.25rem 1.25rem;
@@ -60,7 +64,7 @@ const ADMIN_CSS: &str = r#"
     }
     .admin-sidebar nav a {
         display: block;
-        padding: 0.6rem 1.25rem;
+        padding: 0.4rem 1.25rem;
         color: var(--text-2);
         text-decoration: none;
         font-size: 0.9rem;
@@ -69,6 +73,25 @@ const ADMIN_CSS: &str = r#"
     .admin-sidebar nav a:hover {
         background: var(--surface-2);
         color: var(--text);
+    }
+    .admin-sidebar nav .nav-group {
+        padding: 1rem 1.25rem 0.3rem;
+        font-family: var(--font-mono);
+        font-size: var(--text-xs);
+        letter-spacing: 0.1em;
+        text-transform: uppercase;
+        color: var(--text-3);
+    }
+    .admin-sidebar nav a.nav-view-site {
+        margin-top: 1rem;
+        border-top: 1px solid var(--border);
+        padding-top: 0.9rem;
+    }
+    .admin-sidebar nav a.active {
+        background: var(--accent-soft);
+        color: var(--text);
+        box-shadow: inset 3px 0 0 var(--accent);
+        font-weight: 600;
     }
     .admin-sidebar .user-info {
         padding: 1rem 1.25rem 0;
@@ -193,6 +216,13 @@ const ADMIN_CSS: &str = r#"
 pub fn AdminLayout() -> Element {
     let auth = use_auth();
     let mut nav_open = use_signal(|| false);
+    // Hooks before any early return (auth gate below).
+    let site_settings = use_resource(|| async {
+        ApiClient::web()
+            .fetch::<SiteSettings>("/api/settings")
+            .await
+            .ok()
+    });
 
     use_document_keydown(move |evt| {
         if evt.key() != "Escape" || !nav_open() {
@@ -290,7 +320,14 @@ pub fn AdminLayout() -> Element {
             aside { id: ADMIN_NAV_ID, class: "{sidebar_class}",
                 div { class: "brand",
                     div { class: "brand-text",
-                        h2 { "Scuffed Crew" }
+                        h2 {
+                            {site_settings
+                                .read()
+                                .as_ref()
+                                .and_then(|o| o.as_ref())
+                                .map(|s| s.org_name.clone())
+                                .unwrap_or_else(|| "My Clan".into())}
+                        }
                         span { "Admin Panel" }
                     }
                     ThemeToggle {}
@@ -303,27 +340,34 @@ pub fn AdminLayout() -> Element {
                     }
                 }
                 nav {
-                    Link { to: Route::AdminDashboard {}, onclick: close_nav, "Dashboard" }
-                    Link { to: Route::AdminMembers {}, onclick: close_nav, "Members" }
-                    Link { to: Route::AdminGames {}, onclick: close_nav, "Games" }
-                    Link { to: Route::AdminTeams {}, onclick: close_nav, "Teams" }
-                    Link { to: Route::AdminSchedule {}, onclick: close_nav, "Schedule" }
-                    Link { to: Route::AdminApplications {}, onclick: close_nav, "Applications" }
-                    Link { to: Route::AdminMatches {}, onclick: close_nav, "Matches" }
-                    Link { to: Route::AdminTournaments {}, onclick: close_nav, "Tournaments" }
-                    Link { to: Route::AdminAnnouncements {}, onclick: close_nav, "Announcements" }
-                    Link { to: Route::AdminArticles {}, onclick: close_nav, "Articles" }
-                    Link { to: Route::AdminPatchNotes {}, onclick: close_nav, "Patch Notes" }
-                    Link { to: Route::AdminForum {}, onclick: close_nav, "Forum" }
+                    Link { to: Route::AdminDashboard {}, active_class: "active", onclick: close_nav, "Dashboard" }
+                    span { class: "nav-group", "People" }
+                    Link { to: Route::AdminMembers {}, active_class: "active", onclick: close_nav, "Members" }
+                    Link { to: Route::AdminApplications {}, active_class: "active", onclick: close_nav, "Applications" }
                     // Moderation is OfficerUser-gated server-side (list/create), so it is
                     // visible to every officer+ — matching the AdminLayout access tier.
-                    Link { to: Route::AdminModeration {}, onclick: close_nav, "Moderation" }
+                    Link { to: Route::AdminModeration {}, active_class: "active", onclick: close_nav, "Moderation" }
+                    span { class: "nav-group", "Competitive" }
+                    Link { to: Route::AdminTeams {}, active_class: "active", onclick: close_nav, "Teams" }
+                    Link { to: Route::AdminGames {}, active_class: "active", onclick: close_nav, "Games" }
+                    Link { to: Route::AdminSchedule {}, active_class: "active", onclick: close_nav, "Schedule" }
+                    Link { to: Route::AdminMatches {}, active_class: "active", onclick: close_nav, "Matches" }
+                    Link { to: Route::AdminTournaments {}, active_class: "active", onclick: close_nav, "Tournaments" }
                     if is_admin {
-                        Link { to: Route::AdminSeasons {}, onclick: close_nav, "Seasons" }
-                        Link { to: Route::AdminRelay {}, onclick: close_nav, "Relay" }
-                        Link { to: Route::AdminAuditLog {}, onclick: close_nav, "Audit Log" }
-                        Link { to: Route::AdminSettings {}, onclick: close_nav, "Settings" }
+                        Link { to: Route::AdminSeasons {}, active_class: "active", onclick: close_nav, "Seasons" }
                     }
+                    span { class: "nav-group", "Content" }
+                    Link { to: Route::AdminAnnouncements {}, active_class: "active", onclick: close_nav, "Announcements" }
+                    Link { to: Route::AdminArticles {}, active_class: "active", onclick: close_nav, "Articles" }
+                    Link { to: Route::AdminPatchNotes {}, active_class: "active", onclick: close_nav, "Patch Notes" }
+                    Link { to: Route::AdminForum {}, active_class: "active", onclick: close_nav, "Forum" }
+                    if is_admin {
+                        span { class: "nav-group", "System" }
+                        Link { to: Route::AdminRelay {}, active_class: "active", onclick: close_nav, "Relay" }
+                        Link { to: Route::AdminAuditLog {}, active_class: "active", onclick: close_nav, "Audit Log" }
+                        Link { to: Route::AdminSettings {}, active_class: "active", onclick: close_nav, "Settings" }
+                    }
+                    Link { to: Route::Home {}, class: "nav-view-site", onclick: close_nav, "View site ↗" }
                 }
                 div { class: "user-info",
                     div { class: "name", "{username}" }

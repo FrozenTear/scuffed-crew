@@ -201,7 +201,9 @@ pub fn ConfirmDialog(
 #[component]
 pub fn StatusPill(status: String) -> Element {
     let class = format!("status-pill {status}");
-    rsx! { span { class: "{class}", "{status}" } }
+    // Enum values like `in_progress` read as words; CSS uppercases them.
+    let label = status.replace('_', " ");
+    rsx! { span { class: "{class}", "{label}" } }
 }
 
 #[component]

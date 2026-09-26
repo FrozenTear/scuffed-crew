@@ -82,7 +82,7 @@ const PAGE_CSS: &str = r#"
         padding: 0.55rem 1.3rem;
         border-radius: 6px;
         background: var(--accent);
-        color: white;
+        color: var(--accent-fg);
         border: none;
         font-size: 0.85rem;
         font-weight: 600;
@@ -238,7 +238,7 @@ const PAGE_CSS: &str = r#"
         padding: 0.5rem 1.5rem;
         border-radius: 6px;
         background: var(--accent);
-        color: white;
+        color: var(--accent-fg);
         font-weight: 600;
         font-size: 0.85rem;
         text-decoration: none;

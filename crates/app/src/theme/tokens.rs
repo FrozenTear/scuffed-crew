@@ -41,14 +41,14 @@ pub fn theme_css(brand: &BrandConfig) -> String {
 [data-theme="dark"] {{
   --bg: #17171d; --surface: #1f1f27; --surface-2: #282831; --border: #353541;
   --text: #f4f4f8; --text-2: #c1c1cd; --text-3: #9696a3;
-  --accent: {accent_d}; --accent-fg: #ffffff; --accent-soft: {soft_d};
-  --ok: #46d8a4; --warn: #fbbf24; --danger: #f06a6a;
+  --accent: {accent_d}; --accent-fg: {fg_d}; --accent-soft: {soft_d};
+  --ok: #8fd14f; --warn: #fbbf24; --danger: #f06a6a;
 }}
 
 [data-theme="light"] {{
   --bg: #f7f7f9; --surface: #ffffff; --surface-2: #f0f0f4; --border: #e3e3e9;
   --text: #16161c; --text-2: #545462; --text-3: #696975;
-  --accent: {accent_l}; --accent-fg: #ffffff; --accent-soft: {soft_l};
+  --accent: {accent_l}; --accent-fg: {fg_l}; --accent-soft: {soft_l};
   --ok: #087a50; --warn: #c2830a; --danger: #d63031;
   /* CVD-validated against #ffffff — see docs/notes/stats-ui-w2-validation.md. */
   --chart-1: #6d4aff; --chart-2: #0ea66e; --chart-3: #c2830a; --chart-4: #d63031; --chart-5: #0284c7; --chart-6: #7405c3;
@@ -67,12 +67,14 @@ html, body {{
   font-family: var(--font-body); font-size: var(--text-base);
 }}
 
-[data-accent="strategy"] {{ --accent: #ff7a1a; --accent-soft: rgba(255,122,26,.16); }}
+[data-accent="strategy"] {{ --accent: #ff7a1a; --accent-fg: #17171d; --accent-soft: rgba(255,122,26,.16); }}
 "#,
         accent_d = brand.accent_dark.as_str(),
         accent_l = brand.accent_light.as_str(),
         soft_d = brand.accent_soft_dark.as_str(),
         soft_l = brand.accent_soft_light.as_str(),
+        fg_d = brand.accent_fg_dark.as_str(),
+        fg_l = brand.accent_fg_light.as_str(),
     )
 }
 

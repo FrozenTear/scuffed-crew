@@ -130,15 +130,13 @@ pub const HOME_SHARED_CSS: &str = r#"
         color: var(--text);
         margin: 0;
         text-transform: uppercase;
-        text-shadow: 3px 0 0 color-mix(in srgb, var(--accent) 28%, transparent);
     }
     .home-title em {
         font-style: normal;
         display: block;
         color: var(--accent);
-        text-shadow:
-            0 0 48px color-mix(in srgb, var(--accent) 40%, transparent),
-            -2px 0 0 color-mix(in srgb, var(--accent) 22%, transparent);
+        /* Glow only: offset copies read as a blurry double image at 1x. */
+        text-shadow: 0 0 48px color-mix(in srgb, var(--accent) 40%, transparent);
     }
     .home-sub {
         margin: 1.35rem 0 0;

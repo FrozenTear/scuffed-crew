@@ -979,9 +979,12 @@ pub fn Stats() -> Element {
         .as_ref()
         .and_then(|d| d.as_ref())
         .map(|s| s.total_matches > 0);
-    let slim_tracker = has_matches != Some(false);
+    // Signed-out visitors get the sign-in prompt and the tracker pitch only —
+    // no controls or tabs whose data is certain to fail.
+    let signed_out = !auth().loading && !auth().is_logged_in();
+    let slim_tracker = has_matches != Some(false) && !signed_out;
     let mut setup_open = use_signal(|| false);
-    let show_full_setup = !slim_tracker || setup_open();
+    let show_full_setup = signed_out || !slim_tracker || setup_open();
 
     let tab_body = match tab() {
         StatsTab::Overview => overview::overview_tab(heroes, maps, form_matches),
@@ -1005,6 +1008,7 @@ pub fn Stats() -> Element {
         div { class: "stats-page", "data-density": dens,
             div { class: "stats-header",
                 h1 { "My Stats" }
+                if !signed_out {
                 div { class: "stats-header-actions",
                     SeasonSelect {
                         id: "stats-season".to_string(),
@@ -1031,7 +1035,7 @@ pub fn Stats() -> Element {
                         },
                         if dens == "compact" { "Density: Compact" } else { "Density: Comfortable" }
                     }
-                    Link { to: Route::StatsTokens {}, "Daemon Tokens" }
+                }
                 }
             }
 
@@ -1052,6 +1056,7 @@ pub fn Stats() -> Element {
 
             if show_full_setup {
                 // Daemon settings (collapsible)
+                if !signed_out {
                 details { class: "daemon-settings",
                     summary { "⚙ Daemon Settings" }
                     div { class: "daemon-settings-row",
@@ -1074,6 +1079,7 @@ pub fn Stats() -> Element {
                     p { class: "daemon-settings-hint",
                         "The daemon uses this name to find your row on replay and post-match scoreboards."
                     }
+                }
                 }
 
                 // Tracker download / install
@@ -1140,6 +1146,7 @@ pub fn Stats() -> Element {
             }
 
             // Tabs
+            if !signed_out {
             div { class: "stats-tabs",
                 button {
                     class: if tab() == StatsTab::Overview { "stats-tab active" } else { "stats-tab" },
@@ -1169,6 +1176,7 @@ pub fn Stats() -> Element {
 
             // Tab content
             {tab_body}
+            }
         }
     }
 }

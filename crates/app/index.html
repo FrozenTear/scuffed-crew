@@ -44,14 +44,16 @@
         width: 40px;
         height: 40px;
         border-radius: 8px;
-        background: #8f73ff;
-        color: #fff;
+        /* Neutral: the org accent is only known after /api/settings loads,
+           so a hard-coded brand color here flashes the wrong hue. */
+        background: #282831;
+        border: 1px solid #353541;
+        color: #f4f4f8;
         font-weight: 700;
         font-size: 0.85rem;
         letter-spacing: 0.04em;
         display: grid;
         place-items: center;
-        box-shadow: 0 0 24px rgba(143, 115, 255, 0.35);
       }
       #sc-boot .label {
         font-size: 0.75rem;

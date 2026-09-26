@@ -41,7 +41,7 @@ pub const CSS: &str = r#"
     }
     .row-btn:hover { border-color: var(--accent-soft); color: var(--text); }
     .row-btn.danger:hover { border-color: var(--danger); color: var(--danger); }
-    .row-btn.primary { background: var(--accent); color: white; border-color: var(--accent); }
+    .row-btn.primary { background: var(--accent); color: var(--accent-fg); border-color: var(--accent); }
     .row-btn.primary:hover { filter: brightness(1.15); }
 
     /* Page-level action bar */
@@ -54,7 +54,7 @@ pub const CSS: &str = r#"
     /* Add button */
     .btn-add {
         display: inline-flex; align-items: center; gap: 0.4rem; padding: 0.5rem 1.2rem;
-        border-radius: 6px; background: var(--accent); color: white; border: none;
+        border-radius: 6px; background: var(--accent); color: var(--accent-fg); border: none;
         font-size: 0.85rem; font-weight: 600; cursor: pointer; transition: all 0.2s;
         text-transform: uppercase; letter-spacing: 0.03em;
     }
@@ -89,7 +89,7 @@ pub const CSS: &str = r#"
     .btn-cancel:hover { color: var(--text); }
     .btn-save {
         padding: 0.5rem 1rem; border-radius: 6px; background: var(--accent);
-        border: none; color: white; font-size: 0.85rem; font-weight: 600;
+        border: none; color: var(--accent-fg); font-size: 0.85rem; font-weight: 600;
         cursor: pointer; transition: all 0.15s;
     }
     .btn-save:hover { filter: brightness(1.15); }
@@ -132,6 +132,7 @@ pub const CSS: &str = r#"
 
     /* Summary Cards (dashboard) */
     .summary-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 1rem; margin-bottom: 2rem; }
+    @media (max-width: 640px) { .summary-cards { grid-template-columns: repeat(2, 1fr); gap: 0.6rem; } }
     .summary-card {
         background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
         padding: 1.25rem; text-align: center;

@@ -20,10 +20,12 @@ pub const CSS: &str = r#"
         display: inline-block; padding: 0.15rem 0.5rem; border-radius: 999px;
         font-size: 0.65rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em;
     }
-    .role-pill.admin { background: color-mix(in srgb, var(--danger) 20%, transparent); color: var(--danger); }
-    .role-pill.officer { background: color-mix(in srgb, var(--warn) 20%, transparent); color: var(--warn); }
-    .role-pill.member { background: color-mix(in srgb, var(--accent) 20%, transparent); color: var(--accent); }
-    .role-pill.recruit { background: color-mix(in srgb, var(--text-3) 20%, transparent); color: var(--text-3); }
+    /* Roles are rank, not status: brand/neutral tints, never ok/warn/danger.
+       Text stays --text/--text-2 so it clears AA whatever the org accent is. */
+    .role-pill.admin { background: var(--accent); color: var(--accent-fg); }
+    .role-pill.officer { background: var(--accent-soft); color: var(--text); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 45%, transparent); }
+    .role-pill.member { background: var(--surface-2); color: var(--text-2); box-shadow: inset 0 0 0 1px var(--border); }
+    .role-pill.recruit { background: transparent; color: var(--text-2); box-shadow: inset 0 0 0 1px var(--border); }
 
     /* Empty state */
     .empty-state { color: var(--text-3); text-align: center; padding: 3rem 1rem; font-size: 0.9rem; }
@@ -70,6 +72,13 @@ pub const CSS: &str = r#"
         padding: 0.3rem 0.7rem;
         font: inherit;
         cursor: pointer;
+    }
+
+    /* One keyboard focus ring for every control; mouse clicks stay clean.
+       --text, not --accent: org accents can sit under 3:1 on the page bg. */
+    :where(a, button, input, select, textarea, summary, [tabindex]):focus-visible {
+        outline: 2px solid var(--text);
+        outline-offset: 2px;
     }
 
     @media (prefers-reduced-motion: reduce) {
