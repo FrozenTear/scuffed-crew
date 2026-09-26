@@ -99,7 +99,7 @@ For complex research tasks, use a wave-based approach:
 
 - Product-default accent: `#8f73ff` / light `#6d4aff` (`BrandConfig::product_default`)
 - Historical / marketing purple: `#7c3aed` (same family; docs often still say this)
-- Success / “ok” token: `#46d8a4` (mint) — not the brand accent; do not confuse with Settings brand
+- Success / “ok” token: `#8fd14f` dark / `#3d7a1a` light (yellow-green) — deliberately off the mint hue because the live org accent is mint `#46d8a4` (casual pack). Was `#46d8a4` before 2026-09-26; do not move it back onto the accent hue
 - Live orgs may override accent via **Settings → Brand**; no forced pack apply without USER
 - Age requirement: 16+
 - Tone: direct, no-drama, no politics
