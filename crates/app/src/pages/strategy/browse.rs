@@ -68,7 +68,7 @@ const PAGE_CSS: &str = r#"
         padding: 0.55rem 1.3rem;
         border-radius: 6px;
         background: var(--accent);
-        color: white;
+        color: var(--accent-fg);
         border: none;
         font-size: 0.85rem;
         font-weight: 600;
@@ -134,7 +134,7 @@ const PAGE_CSS: &str = r#"
     .filter-chip.active {
         background: var(--accent);
         border-color: var(--accent);
-        color: white;
+        color: var(--accent-fg);
     }
 
     /* Card grid */

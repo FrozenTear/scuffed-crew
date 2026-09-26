@@ -79,6 +79,16 @@ struct Member {
 }
 
 const FORMATS: [&str; 4] = ["single_elim", "double_elim", "round_robin", "swiss"];
+
+fn format_label(format: &str) -> &str {
+    match format {
+        "single_elim" => "Single elimination",
+        "double_elim" => "Double elimination",
+        "round_robin" => "Round robin",
+        "swiss" => "Swiss",
+        other => other,
+    }
+}
 /// Must match server `TournamentStatus` (no "active" — use `in_progress`).
 const STATUS_FILTERS: [&str; 6] = [
     "all",
@@ -755,7 +765,7 @@ pub fn AdminTournaments() -> Element {
                                             let t_view_id = t.id.clone();
                                             let game_display = t.game_name.clone().unwrap_or_else(|| "\u{2014}".into());
                                             let max_display = t.max_participants.map(|n| n.to_string()).unwrap_or_else(|| "\u{2014}".into());
-                                            let starts_display = t.starts_at.clone().unwrap_or_else(|| "\u{2014}".into());
+                                            let starts_display = t.starts_at.as_deref().map(crate::util::format_datetime).unwrap_or_else(|| "\u{2014}".into());
                                             let tid_reg = t.id.clone();
                                             let tid_active = t.id.clone();
                                             let tid_complete = t.id.clone();
@@ -763,7 +773,7 @@ pub fn AdminTournaments() -> Element {
                                             rsx! {
                                                 tr { key: "{t.id}",
                                                     td { "{t.name}" }
-                                                    td { "{t.format}" }
+                                                    td { {format_label(&t.format)} }
                                                     td { "{game_display}" }
                                                     td { StatusPill { status: t.status.clone() } }
                                                     td { "{max_display}" }
@@ -854,7 +864,7 @@ pub fn AdminTournaments() -> Element {
                         value: "{form_format}",
                         onchange: move |e| form_format.set(e.value()),
                         for f in FORMATS.iter() {
-                            option { value: "{f}", "{f}" }
+                            option { value: "{f}", {format_label(f)} }
                         }
                     }
                 }

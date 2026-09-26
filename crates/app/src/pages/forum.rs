@@ -209,7 +209,7 @@ pub fn Forum() -> Element {
                                                 div { class: "forum-board-desc", "{d}" }
                                             }
                                         }
-                                        div { class: "forum-board-meta", "{node.thread_count} threads" }
+                                        div { class: "forum-board-meta", {if node.thread_count == 1 { "1 thread".to_string() } else { format!("{} threads", node.thread_count) }} }
                                     }
                                     for sub in node.sub_boards.iter() {
                                         Link {

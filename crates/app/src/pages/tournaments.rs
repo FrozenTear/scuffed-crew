@@ -3,6 +3,7 @@ use serde::Deserialize;
 
 use crate::components::bracket::BRACKET_STYLES;
 use crate::routes::Route;
+use crate::state::use_auth;
 use scuffed_api_client::ApiClient;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -138,6 +139,7 @@ const PAGE_CSS: &str = r#"
 
 #[component]
 pub fn Tournaments() -> Element {
+    let auth = use_auth();
     let tournaments = use_resource(|| async {
         ApiClient::web()
             .fetch::<CursorPage<Tournament>>("/api/tournaments")
@@ -167,7 +169,12 @@ pub fn Tournaments() -> Element {
                                 div { class: "tournaments-empty",
                                     p { "No tournaments yet." }
                                     p { style: "margin-top:0.5rem; font-size:0.85rem; color: var(--text-3);",
-                                        "When the org runs a bracket or open cup, it shows up here. Officers add them under Admin → Tournaments."
+                                        "When the org runs a bracket or open cup, it shows up here."
+                                    }
+                                    if auth().is_officer_or_above() {
+                                        p { style: "margin-top:0.5rem; font-size:0.85rem; color: var(--text-3);",
+                                            "Officers add them under Admin → Tournaments."
+                                        }
                                     }
                                 }
                             }

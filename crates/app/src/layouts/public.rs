@@ -187,7 +187,7 @@ const NAV_CSS: &str = r#"
         padding: 0.3rem 0.55rem;
         color: var(--text-2);
         font-family: var(--font-mono, var(--font-head));
-        font-size: 0.68rem;
+        font-size: 0.75rem;
         letter-spacing: 0.08em;
         text-transform: uppercase;
         border-radius: 4px;
@@ -224,6 +224,15 @@ const NAV_CSS: &str = r#"
     }
     .nav-cta:hover {
         filter: brightness(1.1);
+    }
+    .nav-cta-compact {
+        border-radius: var(--radius-sm);
+        font-family: var(--font-mono);
+        font-size: var(--text-xs);
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        text-decoration: none;
+        white-space: nowrap;
     }
     .nav-ghost {
         color: var(--text-3) !important;
@@ -669,6 +678,7 @@ pub fn PublicLayout() -> Element {
             }
 
             div { class: "nav-mobile-tools",
+                Link { to: Route::Apply {}, class: "nav-cta nav-cta-compact", "Apply" }
                 ThemeToggle {}
                 button {
                     id: NAV_TOGGLE_ID,
