@@ -4,6 +4,22 @@ User-facing notes for `stat-tracker-v*` GitHub Releases. The release workflow
 prepends the section whose heading matches the tag version (for example
 `## 0.4.15` for `stat-tracker-v0.4.15`).
 
+## 0.4.16
+
+Game times in the desktop app now show in your local time zone
+(#138). Before, the header "Last game", game cards, the Games list and
+the companion overlay showed UTC, so a game that ended at 00:15 in
+Oslo read as 22:15. Stored data is unchanged.
+
+### Install
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/FrozenTear/scuffed-crew/main/crates/stat-tracker/dist/bootstrap.sh | bash
+```
+
+Or extract the tarball and run `./install.sh`. Pin with
+`STAT_TRACKER_TAG=stat-tracker-v0.4.16`.
+
 ## 0.4.15
 
 Overview header (#122): filter chips vs companion switch vs plain
