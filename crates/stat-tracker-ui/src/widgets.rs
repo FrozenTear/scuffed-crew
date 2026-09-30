@@ -7,7 +7,7 @@ use iced::{Alignment, Element, Fill, Length, Padding};
 use crate::aggregate::{HeroAgg, MapAgg, Record};
 use crate::app::{Message, TrackerApp};
 use crate::model::{
-    EditField, EditForm, Game, Outcome, Role, Screen, SeasonSel, display_hero_name,
+    EditField, EditForm, Game, Outcome, Role, Screen, SeasonSel, display_hero_name, local_hm,
 };
 use crate::theme::{
     self, FONT_BOLD, FONT_EXTRABOLD, FONT_MEDIUM, FONT_SEMIBOLD, GRID_GAP, PAD_INNER, SIZE_BODY,
@@ -223,7 +223,7 @@ pub fn featured_game_card(game: &Game) -> Element<'static, Message> {
         text(format!(
             "{}  ·  {}",
             game.display_hero(),
-            game.played_at.format("%H:%M")
+            local_hm(game.played_at)
         ))
         .size(SIZE_BODY)
         .font(FONT_MEDIUM)
@@ -265,7 +265,7 @@ fn compact_game_card_inner(game: &Game, selected: bool) -> Element<'static, Mess
             .size(SIZE_META)
             .font(FONT_MEDIUM)
             .color(TEXT_2),
-        text(game.played_at.format("%H:%M").to_string())
+        text(local_hm(game.played_at))
             .size(SIZE_META)
             .font(FONT_MEDIUM)
             .color(TEXT_3),
@@ -548,7 +548,7 @@ pub fn expanded_game_card<'a>(
         text(format!(
             "{}  ·  {}",
             game.display_hero(),
-            game.played_at.format("%H:%M")
+            local_hm(game.played_at)
         ))
         .size(SIZE_BODY)
         .font(FONT_MEDIUM)

@@ -1,4 +1,4 @@
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Local, TimeZone, Utc};
 use stat_tracker::detect::MatchOutcome;
 use stat_tracker::storage::{HeroSegment, PersonalMatch};
 
@@ -361,6 +361,19 @@ impl Game {
     }
 }
 
+/// Wall-clock `HH:MM` for a stored UTC timestamp, in the machine's local zone.
+/// Storage is UTC; every user-facing time goes through here.
+pub fn local_hm(at: DateTime<Utc>) -> String {
+    hm_in(at, &Local)
+}
+
+fn hm_in<Tz: TimeZone>(at: DateTime<Utc>, tz: &Tz) -> String
+where
+    Tz::Offset: std::fmt::Display,
+{
+    at.with_timezone(tz).format("%H:%M").to_string()
+}
+
 pub fn display_hero_name(name: &str) -> String {
     let t = name.trim();
     if t.is_empty() || t.eq_ignore_ascii_case("unknown") {
@@ -376,7 +389,17 @@ fn empty_dash(s: String) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::display_hero_name;
+    use super::{display_hero_name, hm_in};
+    use chrono::{DateTime, FixedOffset, Utc};
+
+    #[test]
+    fn clock_time_uses_zone_not_utc() {
+        // The 2026-09-29 Antarctic Peninsula game: 22:15Z is 00:15 in Oslo (CEST).
+        let at: DateTime<Utc> = "2026-09-29T22:15:38Z".parse().unwrap();
+        let cest = FixedOffset::east_opt(2 * 3600).unwrap();
+        assert_eq!(hm_in(at, &cest), "00:15");
+        assert_eq!(hm_in(at, &Utc), "22:15");
+    }
 
     #[test]
     fn unknown_hero_label() {

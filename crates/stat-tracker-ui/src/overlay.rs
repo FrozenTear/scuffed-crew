@@ -331,7 +331,7 @@ pub fn build_model(
 
     let last_tab = last_game
         .as_ref()
-        .map(|g| format!("Last Tab {}", g.played_at.format("%H:%M")))
+        .map(|g| format!("Last Tab {}", crate::model::local_hm(g.played_at)))
         .unwrap_or_else(|| "No Tab yet".into());
 
     OverlayModel {
@@ -606,7 +606,7 @@ fn last_game_card(game: Option<&OverlayLastGame>) -> Element<'_, OverlayViewMess
         text(format!(
             "{}  ·  {}",
             ellipsize(&game.hero, 18),
-            game.played_at.format("%H:%M")
+            crate::model::local_hm(game.played_at)
         ))
         .size(SIZE_META)
         .font(FONT_MEDIUM)
@@ -1153,7 +1153,10 @@ mod tests {
         assert_eq!(model.top_heroes.len(), 3);
         let names: Vec<&str> = model.top_heroes.iter().map(|h| h.hero.as_str()).collect();
         assert_eq!(names, ["Ana", "Ashe", "Junker Queen"]);
-        assert_eq!(model.last_tab, "Last Tab 21:14");
+        // Stored 21:14Z; the strip shows it in the machine's zone.
+        assert_eq!(games[0].played_at.format("%H:%M").to_string(), "21:14");
+        let expected = crate::model::local_hm(games[0].played_at);
+        assert_eq!(model.last_tab, format!("Last Tab {expected}"));
         assert_eq!(model.sync_label, "Sync on");
         assert!(content_height(&model) >= 200);
         assert!(content_height(&model) <= 900);
