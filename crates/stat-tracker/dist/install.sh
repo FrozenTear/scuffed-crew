@@ -189,9 +189,11 @@ fi
 
 if ! groups 2>/dev/null | grep -qw input; then
     warn "You are not in the 'input' group."
-    warn "The daemon reads keyboard events (Tab key) via evdev."
-    warn "Add yourself and re-login:"
+    warn "The daemon reads keyboard events (Tab) from /dev/input, and the"
+    warn "companion shortcut does the same. Add your user to the group:"
     warn "    sudo usermod -aG input \$USER"
+    warn "Then log out of the desktop session and log back in."
+    warn "A new terminal is not enough — open sessions keep the old groups."
     warn "Continuing anyway — you can fix this later."
     echo >&2
 fi
@@ -495,6 +497,11 @@ fi
     echo
     echo "  First run: open the GUI, go to Settings, paste your server URL"
     echo "  and daemon token (from the web UI under My Stats → Daemon Tokens)."
+    echo
+    echo "  Keyboard: Tab capture and the companion shortcut read /dev/input."
+    echo "  Your user must be in the input group:"
+    echo "      sudo usermod -aG input \$USER"
+    echo "  Then log out and back in. A new terminal does not pick up the group."
     echo
     echo "  Uninstall:        scuffed-stat-tracker-uninstall   (--purge removes data/config too)"
     echo

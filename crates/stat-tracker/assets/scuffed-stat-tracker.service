@@ -34,6 +34,21 @@ Nice=10
 CPUWeight=30
 IOSchedulingClass=best-effort
 IOSchedulingPriority=7
+# Sandbox. This is a user unit: ProtectSystem=full is a no-op there, so
+# strict is the setting that actually mounts the tree read-only. User
+# strict still leaves $HOME writable, which is where the default data dir,
+# command queue, and config live. ReadWritePaths repeats those paths (the
+# leading '-' ignores them when they do not exist yet) and opens the
+# session runtime dir. %t is /run/user/$UID — Wayland, X11 display auth,
+# D-Bus, and PipeWire sockets. Without it, strict makes /run read-only
+# and the portal capture cannot connect.
+#
+# PrivateTmp is omitted. It would hide /tmp/.X11-unix and break X11 capture.
+# PrivateDevices is omitted, and DeviceAllow is left unset, so /dev/input
+# stays reachable for evdev hotkeys (the user must be in the input group).
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=-%h/.local/share/scuffed-stat-tracker -%h/.config/scuffed-stat-tracker %t
 
 [Install]
 WantedBy=graphical-session.target
