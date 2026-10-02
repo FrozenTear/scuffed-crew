@@ -23,10 +23,10 @@ services:
     # still get a "healthy" status. Server listens within ~1s of start.
     healthcheck:
       test: ["CMD", "/surreal", "version"]
-      interval: 10s
-      timeout: 5s
+      interval: 60s
+      timeout: 15s
       retries: 3
-      start_period: 5s
+      start_period: 30s
     restart: unless-stopped
 
   strfry:
