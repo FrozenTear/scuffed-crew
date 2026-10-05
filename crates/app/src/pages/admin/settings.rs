@@ -17,6 +17,43 @@ fn admin_settings_officers_flag(enabled: bool) -> Option<bool> {
     Some(enabled)
 }
 
+/// The team form edits name, game, color, and division. It has no lore-quote
+/// field, so this hint must not say the switch edits one.
+fn officers_can_edit_teams_hint() -> &'static str {
+    "On: Officers can edit a team's name, game, color, and division in Admin → Teams. Lore quote is not on that form, so this switch does not change it. Creating teams stays admin-only. Off (default): those edits stay admin-only. Roster changes are not affected."
+}
+
+/// Checkbox values last accepted by the server. A failed save shows these
+/// again, not the draft the request tried to write.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SettingsToggles {
+    recruitment_open: bool,
+    strategies_enabled: bool,
+    officers_can_edit_teams: bool,
+    sections: scuffed_types::HomepageSections,
+}
+
+fn toggles_from_settings(s: &SiteSettings) -> SettingsToggles {
+    SettingsToggles {
+        recruitment_open: s.recruitment_open,
+        strategies_enabled: s.strategies_enabled,
+        officers_can_edit_teams: s.officers_can_edit_teams,
+        sections: s.homepage.sections.clone(),
+    }
+}
+
+fn toggles_shown_after_save(
+    draft: &SettingsToggles,
+    committed: &SettingsToggles,
+    saved: bool,
+) -> SettingsToggles {
+    if saved {
+        draft.clone()
+    } else {
+        committed.clone()
+    }
+}
+
 #[component]
 pub fn AdminSettings() -> Element {
     let auth = use_auth();
@@ -45,6 +82,7 @@ pub fn AdminSettings() -> Element {
     let mut brand_accent_light = use_signal(String::new);
     let mut strategies_enabled = use_signal(|| true);
     let mut officers_can_edit_teams = use_signal(|| false);
+    let mut committed_toggles = use_signal(|| None::<SettingsToggles>);
     // Selected identity pack id for “Apply pack”.
     let mut homepage_preset_id = use_signal(|| "neutral".to_string());
     let mut apply_suggested_brand = use_signal(|| true);
@@ -64,6 +102,7 @@ pub fn AdminSettings() -> Element {
                 .await
             {
                 Ok(s) => {
+                    let committed = toggles_from_settings(&s);
                     org_name.set(s.org_name);
                     site_description.set(s.site_description);
                     recruitment_open.set(s.recruitment_open);
@@ -87,6 +126,7 @@ pub fn AdminSettings() -> Element {
                     brand_accent_light.set(s.brand_accent_light);
                     strategies_enabled.set(s.strategies_enabled);
                     officers_can_edit_teams.set(s.officers_can_edit_teams);
+                    committed_toggles.set(Some(committed));
                     loaded.set(true);
                     Some(true)
                 }
@@ -136,6 +176,7 @@ pub fn AdminSettings() -> Element {
                 .await
             {
                 Ok(s) => {
+                    let committed = toggles_from_settings(&s);
                     // Keep UI in sync with what the server actually stored.
                     public_layout.set(s.public_layout);
                     home_shell.set(s.home_shell);
@@ -151,9 +192,26 @@ pub fn AdminSettings() -> Element {
                     brand_accent_light.set(s.brand_accent_light);
                     strategies_enabled.set(s.strategies_enabled);
                     officers_can_edit_teams.set(s.officers_can_edit_teams);
+                    recruitment_open.set(s.recruitment_open);
+                    committed_toggles.set(Some(committed));
                     toast.show(Toast::success("Settings saved."));
                 }
-                Err(e) => toast.show(Toast::error(format!("Failed to save settings: {e}"))),
+                Err(e) => {
+                    if let Some(committed) = committed_toggles() {
+                        let draft = SettingsToggles {
+                            recruitment_open: recruitment_open(),
+                            strategies_enabled: strategies_enabled(),
+                            officers_can_edit_teams: officers_can_edit_teams(),
+                            sections: homepage().sections.clone(),
+                        };
+                        let shown = toggles_shown_after_save(&draft, &committed, false);
+                        recruitment_open.set(shown.recruitment_open);
+                        strategies_enabled.set(shown.strategies_enabled);
+                        officers_can_edit_teams.set(shown.officers_can_edit_teams);
+                        homepage.with_mut(|hp| hp.sections = shown.sections);
+                    }
+                    toast.show(Toast::error(format!("Failed to save settings: {e}")));
+                }
             }
             saving.set(false);
         });
@@ -560,7 +618,9 @@ pub fn AdminSettings() -> Element {
                 h2 { "Recruitment" }
                 p { class: "form-section-lead", "Public apply pipeline and age gate." }
                 div { class: "form-section-card",
-                    label { class: "section-chip is-on", style: "margin-bottom:0.85rem;",
+                    label {
+                        class: if recruitment_open() { "section-chip is-on" } else { "section-chip" },
+                        style: "margin-bottom:0.85rem;",
                         input {
                             r#type: "checkbox",
                             checked: recruitment_open(),
@@ -635,7 +695,7 @@ pub fn AdminSettings() -> Element {
                         }
                     }
                     p { class: "settings-hint",
-                        "On: Officers can edit team name, game, color, division, and lore quote. Creating teams stays admin-only. Off (default): those edits stay admin-only. Roster changes are not affected."
+                        "{officers_can_edit_teams_hint()}"
                     }
                 }
             }
@@ -1030,6 +1090,32 @@ mod tests {
     }
 
     #[test]
+    fn failed_save_shows_the_committed_toggles() {
+        let committed = SettingsToggles {
+            recruitment_open: false,
+            strategies_enabled: true,
+            officers_can_edit_teams: false,
+            sections: scuffed_types::HomepageSections {
+                news: false,
+                ..scuffed_types::HomepageSections::default()
+            },
+        };
+        let draft = SettingsToggles {
+            recruitment_open: true,
+            strategies_enabled: false,
+            officers_can_edit_teams: true,
+            sections: scuffed_types::HomepageSections::default(),
+        };
+        assert_eq!(
+            toggles_shown_after_save(&draft, &committed, false),
+            committed
+        );
+        assert_eq!(toggles_shown_after_save(&draft, &committed, true), draft);
+        assert_ne!(draft.recruitment_open, committed.recruitment_open);
+        assert_ne!(draft.sections.news, committed.sections.news);
+    }
+
+    #[test]
     fn admin_settings_save_includes_officers_can_edit_teams() {
         for enabled in [false, true] {
             let body = UpdateSettingsRequest {
@@ -1064,6 +1150,34 @@ mod tests {
         assert!(
             !body_src.contains("officers_can_edit_teams: None"),
             "omitting the key would leave a stale flag on the server"
+        );
+
+        let hint = officers_can_edit_teams_hint();
+        for field in ["name", "game", "color", "division"] {
+            assert!(
+                hint.to_lowercase().contains(field),
+                "hint should name the field the team form edits: {field}"
+            );
+        }
+        assert!(
+            hint.contains("not on that form"),
+            "hint must not claim lore quote is editable"
+        );
+        assert!(!hint.contains("and lore quote"));
+        let team_request = include_str!("../../../../types/src/api/teams.rs");
+        let create = team_request
+            .split("struct CreateTeamRequest")
+            .nth(1)
+            .expect("CreateTeamRequest");
+        let create = &create[..create.find('}').expect("end of CreateTeamRequest")];
+        assert!(
+            !create.contains("lore"),
+            "the shared create body has no lore quote; the hint must follow that"
+        );
+        assert!(src.contains("officers_can_edit_teams_hint()"));
+        assert!(
+            src.contains("toggles_shown_after_save"),
+            "a failed save must put the checkboxes back on the last server values"
         );
 
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");

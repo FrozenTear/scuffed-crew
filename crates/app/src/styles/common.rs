@@ -34,6 +34,14 @@ pub const CSS: &str = r#"
     @keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }
     @keyframes slide-up { from { transform: translateY(10px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
 
+    .brand-pending {
+        display: inline-block;
+        width: 5.5rem;
+        height: 0.7rem;
+        border-radius: 4px;
+        background: var(--surface-2);
+        vertical-align: middle;
+    }
     .fetch-error-wrap { text-align: center; }
     .fetch-error {
         color: var(--danger);

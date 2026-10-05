@@ -49,6 +49,41 @@ fn read_officers_edit_flag(settings: Resource<Option<SiteSettings>>) -> Officers
 
 const OFFICER_TEAM_EDIT_DENIED: &str = "Only admins can edit teams right now.";
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RosterPhase {
+    Loading,
+    Ready,
+    Failed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RosterPanel {
+    Loading,
+    Error,
+    Empty,
+    Rows,
+}
+
+/// A failed roster fetch is not an empty roster.
+fn roster_panel(phase: RosterPhase, len: usize) -> RosterPanel {
+    match phase {
+        RosterPhase::Loading => RosterPanel::Loading,
+        RosterPhase::Failed => RosterPanel::Error,
+        RosterPhase::Ready if len == 0 => RosterPanel::Empty,
+        RosterPhase::Ready => RosterPanel::Rows,
+    }
+}
+
+/// Officers who cannot edit team fields still manage rosters. The intro must
+/// not tell them they can edit those fields.
+fn teams_admin_intro(can_edit: bool) -> &'static str {
+    if can_edit {
+        "You can edit team name, game, color, and division, and change the roster. Teams cannot be deleted or archived."
+    } else {
+        "You can change the roster. Team name, game, color, and division are admin-only right now. Teams cannot be deleted or archived."
+    }
+}
+
 /// Officer edit that the server rejected because the flag is off (or turned off
 /// between page load and save). Other 403s keep the generic toast.
 fn team_save_denied_message(
@@ -116,6 +151,7 @@ pub fn AdminTeams() -> Element {
     // Roster modal state
     let mut roster_modal = ModalController::<Team>::new();
     let mut roster_data: Signal<Vec<RosterEntry>> = use_signal(Vec::new);
+    let mut roster_phase = use_signal(|| RosterPhase::Loading);
     let mut roster_refresh = use_signal(|| 0u64);
 
     // Add member to roster form
@@ -149,15 +185,32 @@ pub fn AdminTeams() -> Element {
         }
     });
 
-    // Fetch roster when team selected
+    // Fetch roster when team selected. Failure stays Failed so the modal
+    // does not look like a team with nobody on it.
     let _roster_loader = use_resource(move || async move {
         let _ = roster_refresh();
-        if let Some(team) = roster_modal.get_target()
-            && let Ok(entries) = ApiClient::web()
-                .fetch::<Vec<RosterEntry>>(&format!("/api/teams/{}/roster", team.id))
-                .await
+        let Some(team) = roster_modal.get_target() else {
+            return;
+        };
+        let requested = team.id.clone();
+        roster_phase.set(RosterPhase::Loading);
+        match ApiClient::web()
+            .fetch::<Vec<RosterEntry>>(&format!("/api/teams/{requested}/roster"))
+            .await
         {
-            roster_data.set(entries);
+            Ok(entries) => {
+                let current = roster_modal.get_target().map(|open| open.id);
+                if current.as_deref() == Some(requested.as_str()) {
+                    roster_data.set(entries);
+                    roster_phase.set(RosterPhase::Ready);
+                }
+            }
+            Err(_) => {
+                let current = roster_modal.get_target().map(|open| open.id);
+                if current.as_deref() == Some(requested.as_str()) {
+                    roster_phase.set(RosterPhase::Failed);
+                }
+            }
         }
     });
 
@@ -245,10 +298,11 @@ pub fn AdminTeams() -> Element {
 
     let mut open_roster = move |team: Team| {
         roster_data.set(Vec::new());
+        roster_phase.set(RosterPhase::Loading);
         add_member_id.set(String::new());
         add_member_role.set("player".to_string());
-        roster_refresh += 1;
         roster_modal.show(team);
+        roster_refresh += 1;
     };
 
     let mut on_roster_close = move |_| {
@@ -343,6 +397,7 @@ pub fn AdminTeams() -> Element {
         auth().user.as_ref().and_then(|u| u.role),
         read_officers_edit_flag(team_settings),
     );
+    let roster_view = roster_panel(roster_phase(), roster_data.read().len());
 
     // --- Render ---
 
@@ -355,7 +410,7 @@ pub fn AdminTeams() -> Element {
             }
         }
         p { class: "empty-state", style: "text-align:left;padding:0 0 1rem;margin:0;",
-            "Teams can be edited or have their roster cleared. There is no delete or archive endpoint."
+            "{teams_admin_intro(can_edit_teams)}"
         }
 
         // Teams table
@@ -512,9 +567,28 @@ pub fn AdminTeams() -> Element {
 
                     div { class: "form-modal-body",
                         // Roster table
-                        if roster_data.read().is_empty() {
-                            p { class: "empty-state", "No members on this roster yet." }
-                        } else {
+                        match roster_view {
+                            RosterPanel::Loading => rsx! {
+                                p { class: "empty-state", "Loading roster…" }
+                            },
+                            RosterPanel::Error => rsx! {
+                                div { class: "fetch-error-wrap", role: "alert",
+                                    p { class: "fetch-error", "Couldn't load this roster." }
+                                    button {
+                                        r#type: "button",
+                                        class: "fetch-error__retry",
+                                        onclick: move |_| {
+                                            roster_phase.set(RosterPhase::Loading);
+                                            roster_refresh += 1;
+                                        },
+                                        "Retry"
+                                    }
+                                }
+                            },
+                            RosterPanel::Empty => rsx! {
+                                p { class: "empty-state", "No members on this roster yet." }
+                            },
+                            RosterPanel::Rows => rsx! {
                             table { class: "data-table",
                                 thead {
                                     tr {
@@ -557,6 +631,7 @@ pub fn AdminTeams() -> Element {
                                     }
                                 }
                             }
+                        }
                         }
 
                         // Add member form
@@ -682,6 +757,26 @@ mod tests {
             assert!(!team_edit_allowed(role, OfficersEditFlag::Loaded(true)));
             assert!(!team_edit_allowed(role, OfficersEditFlag::Loading));
         }
+    }
+
+    #[test]
+    fn roster_failure_is_not_an_empty_roster() {
+        assert_eq!(roster_panel(RosterPhase::Failed, 0), RosterPanel::Error);
+        assert_eq!(roster_panel(RosterPhase::Failed, 3), RosterPanel::Error);
+        assert_eq!(roster_panel(RosterPhase::Ready, 0), RosterPanel::Empty);
+        assert_eq!(roster_panel(RosterPhase::Ready, 2), RosterPanel::Rows);
+        assert_eq!(roster_panel(RosterPhase::Loading, 0), RosterPanel::Loading);
+    }
+
+    #[test]
+    fn read_only_intro_does_not_promise_team_edits() {
+        let read_only = teams_admin_intro(false);
+        assert!(!read_only.to_lowercase().contains("you can edit"));
+        assert!(read_only.contains("roster"));
+        assert!(read_only.contains("admin-only"));
+        let editable = teams_admin_intro(true);
+        assert!(editable.contains("edit team name"));
+        assert!(editable.contains("roster"));
     }
 
     #[test]
