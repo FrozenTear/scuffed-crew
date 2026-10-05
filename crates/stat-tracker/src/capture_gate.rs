@@ -96,7 +96,7 @@ pub struct Counters {
 }
 
 impl Counters {
-    fn to_array(self) -> [u32; GATE_COLS] {
+    pub(crate) fn to_array(self) -> [u32; GATE_COLS] {
         [
             self.elims,
             self.assists,
