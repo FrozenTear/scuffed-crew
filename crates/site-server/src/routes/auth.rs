@@ -178,17 +178,19 @@ pub async fn callback(
         }
     };
 
-    // Upsert user in database
-    let user = match state
-        .db
-        .upsert_user_from_oauth(auth_provider, provider_id, username, avatar_url)
-        .await
+    // Existing provider ids may log in while recruitment is closed.
+    // A never-seen id is created only when recruitment_open is true.
+    let user = match upsert_oauth_user_if_allowed(
+        &state.db,
+        auth_provider,
+        provider_id,
+        username,
+        avatar_url,
+    )
+    .await
     {
         Ok(u) => u,
-        Err(e) => {
-            tracing::error!("Failed to upsert user: {e}");
-            return (StatusCode::INTERNAL_SERVER_ERROR, "Database error").into_response();
-        }
+        Err((status, msg)) => return (status, msg).into_response(),
     };
 
     // Create session
@@ -218,6 +220,63 @@ pub async fn callback(
         Redirect::temporary("/"),
     )
         .into_response()
+}
+
+/// Whether an OAuth callback may create or resume an account.
+///
+/// Existing accounts always proceed, even when recruitment is closed or the
+/// settings row could not be read. A never-seen provider id is created only
+/// when `recruitment_open` is `Some(Ok(true))`. `None` and `Err` fail closed
+/// for new accounts (settings not loaded, or the read failed).
+fn oauth_signup_decision(
+    existing_user: bool,
+    recruitment_open: Option<Result<bool, ()>>,
+) -> Result<(), (StatusCode, &'static str)> {
+    if existing_user {
+        return Ok(());
+    }
+    match recruitment_open {
+        Some(Ok(true)) => Ok(()),
+        Some(Ok(false)) => Err((StatusCode::FORBIDDEN, "registration is currently closed")),
+        Some(Err(())) | None => Err((StatusCode::INTERNAL_SERVER_ERROR, "Database error")),
+    }
+}
+
+/// Look up the provider id, refuse a brand-new account when recruitment is
+/// closed, then upsert. The callback uses this instead of upserting directly
+/// so a closed org cannot mint a session for a never-seen Discord/Google id.
+async fn upsert_oauth_user_if_allowed(
+    db: &scuffed_db::Database,
+    provider: AuthProvider,
+    provider_id: String,
+    username: String,
+    avatar_url: Option<String>,
+) -> Result<scuffed_auth::User, (StatusCode, &'static str)> {
+    let existing = match db.get_user_by_provider(provider, &provider_id).await {
+        Ok(user) => user.is_some(),
+        Err(e) => {
+            tracing::error!("oauth callback user lookup: {e}");
+            return Err((StatusCode::INTERNAL_SERVER_ERROR, "Database error"));
+        }
+    };
+    let recruitment = if existing {
+        None
+    } else {
+        match db.get_settings().await {
+            Ok(settings) => Some(Ok(settings.recruitment_open)),
+            Err(e) => {
+                tracing::error!("oauth callback get_settings: {e}");
+                Some(Err(()))
+            }
+        }
+    };
+    oauth_signup_decision(existing, recruitment)?;
+    db.upsert_user_from_oauth(provider, provider_id, username, avatar_url)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to upsert user: {e}");
+            (StatusCode::INTERNAL_SERVER_ERROR, "Database error")
+        })
 }
 
 #[derive(serde::Serialize)]
@@ -1016,4 +1075,120 @@ pub async fn nostr_login_verify(
 
     let session_cookie = build_session_cookie(&state.session_config, session_token);
     (jar.add(session_cookie), Json(OkResponse { ok: true })).into_response()
+}
+
+#[cfg(test)]
+mod oauth_recruitment_tests {
+    use super::{oauth_signup_decision, upsert_oauth_user_if_allowed};
+    use axum::http::StatusCode;
+    use scuffed_auth::AuthProvider;
+
+    #[test]
+    fn new_oauth_identity_refused_when_closed_or_settings_unreadable() {
+        let closed = oauth_signup_decision(false, Some(Ok(false))).unwrap_err();
+        assert_eq!(closed.0, StatusCode::FORBIDDEN);
+        assert_eq!(closed.1, "registration is currently closed");
+
+        let unread = oauth_signup_decision(false, Some(Err(()))).unwrap_err();
+        assert_eq!(unread.0, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(unread.1, "Database error");
+
+        let missing = oauth_signup_decision(false, None).unwrap_err();
+        assert_eq!(missing.0, StatusCode::INTERNAL_SERVER_ERROR);
+
+        assert!(oauth_signup_decision(false, Some(Ok(true))).is_ok());
+    }
+
+    #[test]
+    fn existing_oauth_identity_allowed_when_closed_or_settings_unreadable() {
+        assert!(oauth_signup_decision(true, Some(Ok(false))).is_ok());
+        assert!(oauth_signup_decision(true, Some(Err(()))).is_ok());
+        assert!(oauth_signup_decision(true, None).is_ok());
+    }
+
+    async fn set_recruitment(db: &scuffed_db::Database, open: bool) {
+        db.update_settings(
+            None,
+            None,
+            Some(open),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("update recruitment_open");
+    }
+
+    #[tokio::test]
+    async fn closed_recruitment_refuses_new_oauth_user_and_allows_existing() {
+        let state = crate::test_support::test_state().await;
+        set_recruitment(&state.db, false).await;
+
+        let err = upsert_oauth_user_if_allowed(
+            &state.db,
+            AuthProvider::Discord,
+            "never-seen-discord".into(),
+            "newbie".into(),
+            None,
+        )
+        .await
+        .expect_err("new discord id must be refused");
+        assert_eq!(err.0, StatusCode::FORBIDDEN);
+        assert_eq!(err.1, "registration is currently closed");
+        assert!(
+            state
+                .db
+                .get_user_by_provider(AuthProvider::Discord, "never-seen-discord")
+                .await
+                .expect("lookup")
+                .is_none(),
+            "refused signup must not create a user"
+        );
+
+        let seeded = state
+            .db
+            .upsert_user_from_oauth(
+                AuthProvider::Google,
+                "existing-google".into(),
+                "returning".into(),
+                None,
+            )
+            .await
+            .expect("seed existing oauth user");
+        let logged_in = upsert_oauth_user_if_allowed(
+            &state.db,
+            AuthProvider::Google,
+            "existing-google".into(),
+            "returning".into(),
+            None,
+        )
+        .await
+        .expect("existing google id may log in while closed");
+        assert_eq!(logged_in.id, seeded.id);
+
+        set_recruitment(&state.db, true).await;
+        let created = upsert_oauth_user_if_allowed(
+            &state.db,
+            AuthProvider::Discord,
+            "brand-new-discord".into(),
+            "opened".into(),
+            None,
+        )
+        .await
+        .expect("new discord id allowed when recruitment is open");
+        assert_eq!(created.username, "opened");
+        assert_eq!(created.provider, AuthProvider::Discord);
+    }
 }

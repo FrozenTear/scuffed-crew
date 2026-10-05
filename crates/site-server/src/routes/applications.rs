@@ -44,6 +44,18 @@ fn conflict(msg: &str) -> (StatusCode, Json<ErrorResponse>) {
     )
 }
 
+/// `Ok(true)` is open. `Ok(false)` is 403. A settings read error fails closed
+/// with 500 so a new application is not stored.
+fn application_recruitment_gate(
+    recruitment_open: Result<bool, ()>,
+) -> Result<(), (StatusCode, &'static str)> {
+    match recruitment_open {
+        Ok(true) => Ok(()),
+        Ok(false) => Err((StatusCode::FORBIDDEN, "recruitment is currently closed")),
+        Err(()) => Err((StatusCode::INTERNAL_SERVER_ERROR, "Internal server error")),
+    }
+}
+
 #[derive(Deserialize)]
 pub struct SubmitApplicationRequest {
     pub preferred_games: Vec<String>,
@@ -57,6 +69,17 @@ pub async fn submit_application(
     user: AuthUser<AppState>,
     Json(body): Json<SubmitApplicationRequest>,
 ) -> Result<(StatusCode, Json<Application>), (StatusCode, Json<ErrorResponse>)> {
+    let recruitment = match state.db.get_settings().await {
+        Ok(settings) => Ok(settings.recruitment_open),
+        Err(e) => {
+            tracing::error!(error = %e, "get_settings on submit");
+            Err(())
+        }
+    };
+    if let Err((status, msg)) = application_recruitment_gate(recruitment) {
+        return Err((status, Json(ErrorResponse { error: msg.into() })));
+    }
+
     // Already an active org member → no application needed
     if let Some(m) = state
         .db
@@ -572,6 +595,17 @@ pub async fn expiring_trials(
 mod tests {
     use super::*;
     use scuffed_db::OrgRole;
+
+    #[test]
+    fn application_gate_refuses_closed_and_unreadable_settings() {
+        assert!(application_recruitment_gate(Ok(true)).is_ok());
+        let closed = application_recruitment_gate(Ok(false)).unwrap_err();
+        assert_eq!(closed.0, StatusCode::FORBIDDEN);
+        assert_eq!(closed.1, "recruitment is currently closed");
+        let unread = application_recruitment_gate(Err(())).unwrap_err();
+        assert_eq!(unread.0, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(unread.1, "Internal server error");
+    }
 
     use crate::extractors::OfficerUser;
     use crate::state::AppState;

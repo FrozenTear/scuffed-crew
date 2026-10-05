@@ -3664,6 +3664,103 @@ async fn application_submit_accept_creates_member() {
 }
 
 #[tokio::test]
+async fn application_refused_when_recruitment_closed_and_accepted_when_open() {
+    let state = test_state().await;
+    seed_all_roles(&state.db).await;
+    seed_applicant(&state.db, "appopen", "OpenApplicant", "tok-app-open").await;
+    seed_applicant(&state.db, "appclosed", "ClosedApplicant", "tok-app-closed").await;
+
+    let body = json!({
+        "preferred_games": ["ow2"],
+        "preferred_roles": ["tank"],
+        "message": "hello"
+    });
+
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(authed_json_request(
+            Method::PUT,
+            "/api/settings",
+            ADMIN_TOKEN,
+            json!({ "recruitment_open": true }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(authed_json_request(
+            Method::POST,
+            "/api/applications",
+            "tok-app-open",
+            body.clone(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(authed_json_request(
+            Method::PUT,
+            "/api/settings",
+            ADMIN_TOKEN,
+            json!({ "recruitment_open": false }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(authed_json_request(
+            Method::POST,
+            "/api/applications",
+            "tok-app-closed",
+            body.clone(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    let err = body_json(resp).await;
+    assert_eq!(err["error"], "recruitment is currently closed");
+    assert!(
+        state
+            .db
+            .get_application_by_user("appclosed")
+            .await
+            .unwrap()
+            .is_none(),
+        "closed recruitment must not store an application"
+    );
+
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(authed_json_request(
+            Method::PUT,
+            "/api/settings",
+            ADMIN_TOKEN,
+            json!({ "recruitment_open": true }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(authed_json_request(
+            Method::POST,
+            "/api/applications",
+            "tok-app-closed",
+            body,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+}
+
+#[tokio::test]
 async fn application_trial_then_accept_promotes_to_member() {
     let state = test_state().await;
     seed_all_roles(&state.db).await;

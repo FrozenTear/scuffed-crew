@@ -500,34 +500,62 @@ fn patch_note_db_err(e: scuffed_db::DbError) -> (StatusCode, Json<ErrorResponse>
     (status, Json(ErrorResponse { error }))
 }
 
+const PATCH_NOTE_URL_ERROR: &str = "url must be an absolute http or https URL";
+
+/// True when `url` is an absolute `http` or `https` URL with a host.
+///
+/// Callers trim first. `javascript:`, `data:`, protocol-relative, and
+/// scheme-without-authority forms (`http:javascript:...`) are rejected.
+/// Seeded Blizzard notes use `https://overwatch.blizzard.com/...`.
+fn absolute_http_url(url: &str) -> bool {
+    if url.is_empty()
+        || url
+            .chars()
+            .any(|c| c.is_whitespace() || c.is_control() || c == '\\')
+    {
+        return false;
+    }
+    let has_authority = starts_with_ignore_ascii_case(url, "https://")
+        || starts_with_ignore_ascii_case(url, "http://");
+    if !has_authority {
+        return false;
+    }
+    let Ok(parsed) = url::Url::parse(url) else {
+        return false;
+    };
+    matches!(parsed.scheme(), "http" | "https")
+        && parsed.host_str().is_some_and(|host| !host.is_empty())
+}
+
+fn starts_with_ignore_ascii_case(value: &str, prefix: &str) -> bool {
+    let bytes = value.as_bytes();
+    let prefix = prefix.as_bytes();
+    bytes.len() >= prefix.len() && bytes[..prefix.len()].eq_ignore_ascii_case(prefix)
+}
+
+fn patch_note_bad_request(msg: &str) -> (StatusCode, Json<ErrorResponse>) {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(ErrorResponse { error: msg.into() }),
+    )
+}
+
 fn require_patch_note_fields(
     version: &str,
     date: &str,
     url: &str,
 ) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
     if version.trim().is_empty() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse {
-                error: "version is required".into(),
-            }),
-        ));
+        return Err(patch_note_bad_request("version is required"));
     }
     if date.trim().is_empty() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse {
-                error: "date is required".into(),
-            }),
-        ));
+        return Err(patch_note_bad_request("date is required"));
     }
     if url.trim().is_empty() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse {
-                error: "url is required".into(),
-            }),
-        ));
+        return Err(patch_note_bad_request("url is required"));
+    }
+    if !absolute_http_url(url) {
+        return Err(patch_note_bad_request(PATCH_NOTE_URL_ERROR));
     }
     Ok(())
 }
@@ -567,7 +595,7 @@ async fn update_patch_note(
     State(state): State<AppState>,
     officer: OfficerUser,
     Path(version): Path<String>,
-    Json(body): Json<UpdatePatchNoteRequest>,
+    Json(mut body): Json<UpdatePatchNoteRequest>,
 ) -> Result<Json<PatchNote>, (StatusCode, Json<ErrorResponse>)> {
     if let Some(date) = body.date.as_deref()
         && date.trim().is_empty()
@@ -579,15 +607,14 @@ async fn update_patch_note(
             }),
         ));
     }
-    if let Some(url) = body.url.as_deref()
-        && url.trim().is_empty()
-    {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse {
-                error: "url is required".into(),
-            }),
-        ));
+    if let Some(url) = body.url.as_mut() {
+        *url = url.trim().to_string();
+        if url.is_empty() {
+            return Err(patch_note_bad_request("url is required"));
+        }
+        if !absolute_http_url(url) {
+            return Err(patch_note_bad_request(PATCH_NOTE_URL_ERROR));
+        }
     }
 
     let note = state
@@ -1014,6 +1041,123 @@ mod tests {
         assert_eq!(status, StatusCode::OK, "{body}");
         let data = body["data"].as_array().expect("data");
         assert!(data.iter().all(|n| n["version"] != "4.0.0"));
+    }
+
+    #[test]
+    fn absolute_http_url_accepts_blizzard_and_rejects_script_schemes() {
+        let blizzard = "https://overwatch.blizzard.com/en-us/news/patch-notes/";
+        assert!(absolute_http_url(blizzard));
+        assert!(absolute_http_url(
+            "http://overwatch.blizzard.com/en-us/news/patch-notes/"
+        ));
+        assert!(absolute_http_url(
+            "HTTPS://overwatch.blizzard.com/en-us/news/patch-notes/"
+        ));
+        for note in scuffed_db::queries::patch_notes::initial_patch_note_catalog() {
+            assert!(
+                absolute_http_url(&note.url),
+                "seeded {} url {} must stay valid",
+                note.version,
+                note.url
+            );
+        }
+        for bad in [
+            "javascript:alert(1)",
+            "JavaScript:alert(1)",
+            "data:text/html,hi",
+            "vbscript:msgbox(1)",
+            "//overwatch.blizzard.com/en-us/news/patch-notes/",
+            "/en-us/news/patch-notes/",
+            "https:overwatch.blizzard.com/en-us/news/patch-notes/",
+            "http:javascript:alert(1)",
+            "http://",
+            "https://",
+            "https://exa mple.com",
+            "https://example.com\\@evil.com",
+            "",
+        ] {
+            assert!(!absolute_http_url(bad), "{bad:?} must be rejected");
+        }
+    }
+
+    #[tokio::test]
+    async fn patch_note_url_rejects_javascript_and_accepts_https() {
+        let state = test_state().await;
+        seed_role(&state, "officer", OrgRole::Officer, OFFICER_TOKEN).await;
+
+        let mut javascript = sample_create("9.9.0");
+        javascript["url"] = json!("javascript:alert(1)");
+        let (status, body) = call_json(
+            strategy_routes(state.clone()),
+            Method::POST,
+            "/api/strategy/patch-notes",
+            Some(OFFICER_TOKEN),
+            Some(javascript),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert_eq!(body["error"], PATCH_NOTE_URL_ERROR);
+
+        let mut data_url = sample_create("9.9.1");
+        data_url["url"] = json!("data:text/html,hi");
+        let (status, body) = call_json(
+            strategy_routes(state.clone()),
+            Method::POST,
+            "/api/strategy/patch-notes",
+            Some(OFFICER_TOKEN),
+            Some(data_url),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert_eq!(body["error"], PATCH_NOTE_URL_ERROR);
+
+        let blizzard = "https://overwatch.blizzard.com/en-us/news/patch-notes/";
+        let mut ok = sample_create("9.9.2");
+        ok["url"] = json!(blizzard);
+        let (status, body) = call_json(
+            strategy_routes(state.clone()),
+            Method::POST,
+            "/api/strategy/patch-notes",
+            Some(OFFICER_TOKEN),
+            Some(ok),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        assert_eq!(body["url"], blizzard);
+
+        let (status, body) = call_json(
+            strategy_routes(state.clone()),
+            Method::PUT,
+            "/api/strategy/patch-notes/9.9.2",
+            Some(OFFICER_TOKEN),
+            Some(json!({ "url": "javascript:alert(document.domain)" })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert_eq!(body["error"], PATCH_NOTE_URL_ERROR);
+
+        let (status, body) =
+            get_json(strategy_routes(state.clone()), "/api/strategy/patch-notes").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let stored = body["data"]
+            .as_array()
+            .expect("data")
+            .iter()
+            .find(|n| n["version"] == "9.9.2")
+            .expect("created note still listed");
+        assert_eq!(stored["url"], blizzard, "rejected update must not persist");
+
+        let updated = "https://overwatch.blizzard.com/en-us/news/";
+        let (status, body) = call_json(
+            strategy_routes(state),
+            Method::PUT,
+            "/api/strategy/patch-notes/9.9.2",
+            Some(OFFICER_TOKEN),
+            Some(json!({ "url": format!("  {updated}  ") })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["url"], updated);
     }
 
     async fn set_strategies_enabled(state: &AppState, enabled: bool) {
