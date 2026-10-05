@@ -1056,7 +1056,7 @@ fn fixture_clock(fixture: Option<FixtureKind>, games: &[Game]) -> DateTime<Utc> 
 
 fn live_status_for(games: &[Game]) -> String {
     if let Some(g) = games.first() {
-        format!("Last game {}", g.played_at.format("%H:%M"))
+        format!("Last game {}", crate::model::local_hm(g.played_at))
     } else {
         "Waiting for a capture".into()
     }

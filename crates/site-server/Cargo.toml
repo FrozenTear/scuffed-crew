@@ -25,7 +25,8 @@ serde_json = "1"
 chrono = { version = "0.4", features = ["serde"] }
 reqwest = { version = "0.12", features = ["json"] }
 urlencoding = "2"
-nostr = { version = "0.44", default-features = false, features = ["std"] }
+# Keep in lockstep with scuffed-chat (0.44.2 yanked; fixes land in >=0.44.7).
+nostr = { version = "0.44.8", default-features = false, features = ["std"] }
 blake3 = "1"
 rand = "0.8"
 base64 = "0.22"
