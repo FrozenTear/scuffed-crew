@@ -70,7 +70,7 @@ fn ws_origin_allowed(state: &WsState, headers: &HeaderMap) -> bool {
     origin_is_allowed(
         &state.app.oauth_config.allowed_origins,
         headers.get(header::ORIGIN).and_then(|v| v.to_str().ok()),
-        is_production(),
+        scuffed_auth::is_production_env(),
     )
 }
 
@@ -79,13 +79,6 @@ fn origin_is_allowed(allowed: &[String], origin: Option<&str>, production: bool)
         Some(origin) => allowed.iter().any(|o| o == origin),
         None => !production,
     }
-}
-
-fn is_production() -> bool {
-    matches!(
-        std::env::var("PRODUCTION").ok().as_deref(),
-        Some("1") | Some("true") | Some("TRUE") | Some("yes") | Some("YES")
-    )
 }
 
 /// Extract user info from session cookie
@@ -627,6 +620,50 @@ mod origin_tests {
         let allowed = vec!["http://localhost:3000".to_string()];
         assert!(origin_is_allowed(&allowed, None, false));
         assert!(!origin_is_allowed(&allowed, None, true));
+    }
+
+    // The old WS matcher only accepted 1/true/TRUE/yes/YES. `on`, `True`,
+    // and a padded `yes` are production under `scuffed_auth::is_production_env`
+    // and must require Origin.
+    #[test]
+    fn missing_origin_rejected_for_shared_production_variants() {
+        let allowed = vec!["https://ow.scuffedcrew.no".to_string()];
+        for v in [
+            "1",
+            "true",
+            "TRUE",
+            "True",
+            "yes",
+            "YES",
+            "on",
+            "ON",
+            " yes ",
+            "production",
+        ] {
+            assert!(
+                scuffed_auth::production_value_enabled(v),
+                "{v:?} must count as production"
+            );
+            assert!(
+                !origin_is_allowed(&allowed, None, scuffed_auth::production_value_enabled(v)),
+                "PRODUCTION={v:?} must reject a missing Origin"
+            );
+        }
+    }
+
+    #[test]
+    fn missing_origin_allowed_for_falsy_production_values() {
+        let allowed = vec!["http://localhost:3000".to_string()];
+        for v in ["", " ", "0", "false", "FALSE", "False", "no", "off", "OFF"] {
+            assert!(
+                !scuffed_auth::production_value_enabled(v),
+                "{v:?} must not count as production"
+            );
+            assert!(
+                origin_is_allowed(&allowed, None, scuffed_auth::production_value_enabled(v)),
+                "PRODUCTION={v:?} may omit Origin"
+            );
+        }
     }
 }
 
