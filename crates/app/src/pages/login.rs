@@ -1,3 +1,6 @@
+use std::str::FromStr;
+use std::sync::Mutex;
+
 use dioxus::prelude::*;
 use scuffed_api_client::ApiClient;
 use scuffed_types::{
@@ -191,7 +194,7 @@ fn login_banner_from_search(search: &str) -> Option<&'static str> {
 }
 
 /// Banner for a browser URL in the shape `history.current_route()` returns
-/// (`pathname` + `search` + `hash`). Only `/login` is considered.
+/// (`pathname` + `search` + `hash`). Only the login route is considered.
 ///
 /// Dioxus router 0.7 (`RouterContext::new`) parses that string, then if
 /// `route.to_string()` differs it `history.replace`s the canonical route.
@@ -201,36 +204,86 @@ fn login_banner_from_search(search: &str) -> Option<&'static str> {
 fn login_banner_from_browser_url(url: &str) -> Option<&'static str> {
     let without_hash = url.split_once('#').map(|(path, _)| path).unwrap_or(url);
     let (path, search) = without_hash.split_once('?').unwrap_or((without_hash, ""));
-    let path = path.trim_end_matches('/');
-    let path = if path.is_empty() { "/" } else { path };
-    if path != "/login" {
+    if !is_login_route(path) {
         return None;
     }
     login_banner_from_search(search)
 }
 
-/// Snapshot of the banner taken before the router rewrites the address bar.
-static INITIAL_LOGIN_BANNER: std::sync::OnceLock<Option<&'static str>> = std::sync::OnceLock::new();
-
-/// Read `window.location` once, before [`dioxus::launch`] or before [`crate::routes::Route`]
-/// is mounted. Later calls keep the first snapshot.
-pub(crate) fn capture_initial_login_banner() {
-    let _ = INITIAL_LOGIN_BANNER.get_or_init(read_initial_login_banner);
+/// `Route::Login` after dropping a trailing slash (`/login/`).
+///
+/// Parsing goes through [`Route`] so a query segment added to the login route
+/// stays in one place. The query itself is not part of this check: [`Route`]
+/// ignores undeclared query params, which is the bug this snapshot exists for.
+fn is_login_route(path: &str) -> bool {
+    let trimmed = path.trim_end_matches('/');
+    let path = if trimmed.is_empty() { "/" } else { trimmed };
+    matches!(Route::from_str(path), Ok(Route::Login {}))
 }
 
-fn read_initial_login_banner() -> Option<&'static str> {
+/// Process-wide snapshot of the banner taken before the router rewrites the
+/// address bar. One slot for the whole process: the WASM app is a single page,
+/// so that matches one full load. A server that rendered many documents in one
+/// process would need a per-request slot instead.
+enum LoginBannerSlot {
+    /// [`capture_initial_login_banner`] has not run.
+    Pending,
+    /// Captured, not yet shown.
+    Ready(Option<&'static str>),
+    /// [`Login`] already consumed it. Later mounts in this process see nothing.
+    Taken,
+}
+
+static LOGIN_BANNER: Mutex<LoginBannerSlot> = Mutex::new(LoginBannerSlot::Pending);
+
+fn login_banner_lock() -> std::sync::MutexGuard<'static, LoginBannerSlot> {
+    LOGIN_BANNER.lock().unwrap_or_else(|err| err.into_inner())
+}
+
+/// Read `window.location` once, before [`dioxus::launch`] or before [`crate::routes::Route`]
+/// is mounted. Later calls keep the first snapshot, including after [`Login`] takes it.
+pub(crate) fn capture_initial_login_banner() {
+    capture_login_banner_from_url(&initial_browser_url());
+}
+
+/// Record the banner for `url` (`pathname` + `search` + `hash`). The first call
+/// wins; a later call does not refill the slot after [`take_captured_login_banner`].
+fn capture_login_banner_from_url(url: &str) {
+    let mut slot = login_banner_lock();
+    if !matches!(*slot, LoginBannerSlot::Pending) {
+        return;
+    }
+    *slot = LoginBannerSlot::Ready(login_banner_from_browser_url(url));
+}
+
+fn initial_browser_url() -> String {
     #[cfg(target_arch = "wasm32")]
     {
-        login_banner_from_browser_url(&current_browser_url())
+        current_browser_url()
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
-        None
+        String::new()
     }
 }
 
-fn captured_login_banner() -> Option<&'static str> {
-    INITIAL_LOGIN_BANNER.get().copied().flatten()
+/// Consume the snapshot. The first [`Login`] mount after a full-page load shows
+/// it; every later mount in this process gets `None` until a new page load.
+fn take_captured_login_banner() -> Option<&'static str> {
+    let mut slot = login_banner_lock();
+    debug_assert!(
+        !matches!(*slot, LoginBannerSlot::Pending),
+        "capture_initial_login_banner must run before Login mounts"
+    );
+    match std::mem::replace(&mut *slot, LoginBannerSlot::Taken) {
+        LoginBannerSlot::Ready(banner) => banner,
+        LoginBannerSlot::Taken | LoginBannerSlot::Pending => None,
+    }
+}
+
+#[cfg(test)]
+fn reset_captured_login_banner() {
+    *login_banner_lock() = LoginBannerSlot::Pending;
 }
 
 /// `pathname + search + hash`, matching `dioxus_web::history::WebHistory`.
@@ -253,9 +306,11 @@ pub fn Login() -> Element {
     let mut password2 = use_signal(String::new);
     let mut confirm_age = use_signal(|| false);
     let mut registering = use_signal(|| false);
-    // Filled from the pre-router snapshot. Reading `location.search` here is too
-    // late: the router has already replaced the URL with `/login`.
-    let mut error = use_signal(|| captured_login_banner().map(String::from));
+    // Take once, inside the signal initializer, so a re-render does not consume
+    // it again and a later navigation to plain `/login` does not see it.
+    // Reading `location.search` here is too late: the router has already
+    // replaced the URL with `/login`.
+    let mut error = use_signal(|| take_captured_login_banner().map(String::from));
     let mut submitting = use_signal(|| false);
     let mut auth = use_auth();
     let nav = use_navigator();
@@ -732,12 +787,10 @@ mod tests {
         );
     }
 
-    /// The failure from the live smoke: dioxus-router 0.7 parses `/login` and
-    /// ignores the query, then `RouterContext::new` replaces the browser URL
-    /// with `route.to_string()` (`/login`) before `Login` mounts. The banner
-    /// has to come from the original URL, not from the URL after that replace.
+    /// `Route::Login` has no query segment, so parsing keeps the variant and
+    /// `Display` drops `?error=`. The banner mapping still reads the original URL.
     #[test]
-    fn registration_closed_banner_survives_router_stripping_the_query() {
+    fn route_display_drops_undeclared_login_query() {
         let original = "/login?error=registration_closed";
         let parsed = Route::from_str(original).expect("login matches with an undeclared query");
         assert_eq!(parsed, Route::Login {});
@@ -785,5 +838,120 @@ mod tests {
             login_banner_from_browser_url("/?error=registration_closed"),
             None
         );
+    }
+
+    /// Same `/login` shape as [`crate::routes::Route::Login`]: no query segment,
+    /// so [`dioxus_router::RouterContext`] (via [`Router`]) replaces the history
+    /// with `/login` before [`Login`] mounts. The banner has to come from the
+    /// pre-replace snapshot, and a second mount in this process must not see it.
+    #[derive(Clone, Routable, Debug, PartialEq)]
+    #[rustfmt::skip]
+    enum LoginBannerRoute {
+        #[route("/login")]
+        Login {},
+        #[route("/")]
+        BannerProbeHome {},
+    }
+
+    #[component]
+    fn BannerProbeHome() -> Element {
+        rsx! { "home" }
+    }
+
+    thread_local! {
+        static PROBE_URL: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
+        static PROBE_HISTORY: std::cell::RefCell<Option<std::rc::Rc<dioxus::history::MemoryHistory>>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
+    fn login_banner_probe() -> Element {
+        let history = use_hook(|| {
+            let url = PROBE_URL.with(|slot| slot.borrow().clone());
+            let history = std::rc::Rc::new(dioxus::history::MemoryHistory::with_initial_path(url));
+            // Same function `main` uses, fed the history URL while it still has
+            // the query. RouterContext::new has not replaced it yet.
+            capture_login_banner_from_url(&history.current_route());
+            PROBE_HISTORY.with(|slot| *slot.borrow_mut() = Some(history.clone()));
+            history
+        });
+        let auth = use_signal(crate::state::auth::AuthState::new);
+        use_context_provider(|| auth);
+        rsx! {
+            dioxus::router::components::HistoryProvider {
+                history: move |_| history.clone() as std::rc::Rc<dyn dioxus::history::History>,
+                Router::<LoginBannerRoute> {}
+            }
+        }
+    }
+
+    /// dioxus-ssr escapes `'` as `&#39;`. The banner copy contains one.
+    fn html_has_registration_closed_banner(html: &str) -> bool {
+        let escaped = REGISTRATION_CLOSED_BANNER.replace('\'', "&#39;");
+        html.contains(REGISTRATION_CLOSED_BANNER) || html.contains(&escaped)
+    }
+
+    fn mount_login(url: &str) -> (String, String) {
+        PROBE_URL.with(|slot| *slot.borrow_mut() = url.to_string());
+        PROBE_HISTORY.with(|slot| *slot.borrow_mut() = None);
+        let mut dom = VirtualDom::new(login_banner_probe);
+        // Rebuild only. Polling tasks would run the login page's fetches.
+        dom.rebuild_in_place();
+        let html = dioxus_ssr::render(&dom);
+        let route = PROBE_HISTORY.with(|slot| {
+            slot.borrow()
+                .as_ref()
+                .expect("probe history")
+                .current_route()
+        });
+        (html, route)
+    }
+
+    #[test]
+    fn registration_closed_banner_renders_once_after_router_strips_the_query() {
+        // The slot is process-wide. Hold a separate lock so a parallel test
+        // cannot capture or take it mid-render. Do not hold `LOGIN_BANNER`:
+        // capture and take lock that mutex themselves.
+        static TEST_LOCK: Mutex<()> = Mutex::new(());
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|err| err.into_inner());
+        reset_captured_login_banner();
+
+        let original = "/login?error=registration_closed";
+        let (html, route) = mount_login(original);
+        assert_eq!(
+            route, "/login",
+            "router must replace the undeclared query before Login paints"
+        );
+        assert_ne!(route, original);
+        assert!(
+            html_has_registration_closed_banner(&html),
+            "banner must come from the pre-replace snapshot, html={html}"
+        );
+        assert!(
+            html.contains("Sign in"),
+            "login form should still render, html={html}"
+        );
+
+        // Same process, new Login mount (in-app navigation back to /login).
+        let (again, again_route) = mount_login(original);
+        assert_eq!(again_route, "/login");
+        assert!(
+            !html_has_registration_closed_banner(&again),
+            "the snapshot is read-once, html={again}"
+        );
+        assert!(again.contains("Sign in"), "html={again}");
+
+        reset_captured_login_banner();
+        let (plain, plain_route) = mount_login("/login");
+        assert_eq!(plain_route, "/login");
+        assert!(!html_has_registration_closed_banner(&plain), "html={plain}");
+
+        reset_captured_login_banner();
+        let (unknown, unknown_route) = mount_login("/login?error=nope");
+        assert_eq!(unknown_route, "/login");
+        assert!(
+            !html_has_registration_closed_banner(&unknown),
+            "html={unknown}"
+        );
+        drop(_guard);
     }
 }

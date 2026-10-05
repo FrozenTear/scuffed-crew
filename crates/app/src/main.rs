@@ -25,6 +25,7 @@ use state::AuthState;
 fn main() {
     // The router drops undeclared query params as soon as it mounts. Snapshot
     // `/login?error=registration_closed` while the address bar still has it.
+    // Login consumes that snapshot on its first mount.
     pages::capture_initial_login_banner();
     dioxus::launch(App);
 }
