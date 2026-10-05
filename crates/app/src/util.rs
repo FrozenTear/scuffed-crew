@@ -16,13 +16,20 @@ pub fn truncate_chars(s: &str, max_chars: usize) -> &str {
 
 /// Trimmed `url` when it is safe to place in an `href`.
 ///
-/// Only `http://` and `https://` (any ASCII case) are allowed. Anything else —
-/// `javascript:`, `data:`, protocol-relative, relative, or a value with
-/// whitespace, control characters, or a backslash — is `None`. Callers should
-/// render `None` as plain text or omit it.
+/// Only `http://` and `https://` (any ASCII case) are allowed. `javascript:`,
+/// `data:`, `vbscript:`, mixed-case or whitespace-prefixed variants, leading
+/// C0 controls, protocol-relative URLs, and relative paths are `None`.
+/// Whitespace, a control character, or a backslash anywhere is `None`.
+/// Callers should render `None` as plain text or omit the link.
 pub fn http_href(url: &str) -> Option<&str> {
     let url = url.trim();
     if url.is_empty() {
+        return None;
+    }
+    // Leading C0 (U+0000..=U+001F) is not all whitespace, so `trim` leaves
+    // NUL and similar in place. Browsers drop those bytes before the scheme.
+    // Reject the value; do not strip it and link the remainder.
+    if url.starts_with(is_c0_control) {
         return None;
     }
     let http = starts_with_ignore_ascii_case(url, "http://");
@@ -37,6 +44,11 @@ pub fn http_href(url: &str) -> Option<&str> {
         return None;
     }
     Some(url)
+}
+
+/// U+0000..=U+001F. URL parsers remove these before scheme parsing.
+fn is_c0_control(c: char) -> bool {
+    matches!(c, '\u{0000}'..='\u{001F}')
 }
 
 fn starts_with_ignore_ascii_case(value: &str, prefix: &str) -> bool {
@@ -162,6 +174,47 @@ mod tests {
         assert_eq!(http_href("https://exa mple.com"), None);
         assert_eq!(http_href("https://example.com/a\nb"), None);
         assert_eq!(http_href("https://example.com\\@evil.com"), None);
+    }
+
+    #[test]
+    fn http_href_rejects_script_schemes_with_case_whitespace_and_controls() {
+        assert_eq!(
+            http_href("http://example.com/notes"),
+            Some("http://example.com/notes")
+        );
+        assert_eq!(
+            http_href("https://example.com/notes"),
+            Some("https://example.com/notes")
+        );
+        assert_eq!(
+            http_href("HTTPS://example.com/notes"),
+            Some("HTTPS://example.com/notes")
+        );
+
+        assert_eq!(http_href("javascript:alert(1)"), None);
+        assert_eq!(http_href(" JaVaScRiPt:alert(1)"), None);
+        assert_eq!(http_href("\tJaVaScRiPt:alert(1)"), None);
+        assert_eq!(http_href("\njavascript:alert(1)"), None);
+        assert_eq!(http_href("\r\njavascript:alert(1)"), None);
+        assert_eq!(http_href(" \u{0000}JaVaScRiPt:alert(1)"), None);
+        assert_eq!(http_href("\u{0001}javascript:alert(1)"), None);
+        assert_eq!(http_href("\u{0001}https://example.com"), None);
+        assert_eq!(http_href("java\nscript:alert(1)"), None);
+        assert_eq!(http_href("java\tscript:alert(1)"), None);
+
+        assert_eq!(http_href("data:text/html,hi"), None);
+        assert_eq!(http_href(" DaTa:text/html,hi"), None);
+        assert_eq!(http_href("\u{000B}dAtA:text/html,<script>"), None);
+        assert_eq!(http_href("\u{0001}data:text/html,hi"), None);
+
+        assert_eq!(http_href("vbscript:msgbox(1)"), None);
+        assert_eq!(http_href(" VbScRiPt:msgbox(1)"), None);
+        assert_eq!(http_href("\u{0001}vbscript:msgbox(1)"), None);
+
+        assert_eq!(http_href(""), None);
+        assert_eq!(http_href("   "), None);
+        assert_eq!(http_href("\u{0000}"), None);
+        assert_eq!(http_href("\u{0001}"), None);
     }
 
     #[test]
