@@ -54,25 +54,16 @@ fn App() -> Element {
         }
     });
 
-    // Document title / meta from site settings (product-neutral until loaded).
-    let site_meta = use_resource(|| async {
-        use scuffed_api_client::ApiClient;
-        use scuffed_types::SiteSettings;
-        ApiClient::web()
-            .fetch::<SiteSettings>("/api/settings")
-            .await
-            .ok()
-    });
-    let page_title = site_meta
-        .read()
+    // One settings fetch for the document head and every public consumer.
+    // Title stays blank until the real org name arrives.
+    let site_settings = state::provide_site_settings();
+    let loaded_settings = {
+        let slot = site_settings.resource.read();
+        state::loaded_site_settings(slot.as_ref()).cloned()
+    };
+    let page_title = state::document_title(loaded_settings.as_ref().map(|s| s.org_name.as_str()));
+    let page_description = loaded_settings
         .as_ref()
-        .and_then(|o| o.as_ref())
-        .map(|s| s.org_name.clone())
-        .unwrap_or_else(|| "My Clan".into());
-    let page_description = site_meta
-        .read()
-        .as_ref()
-        .and_then(|o| o.as_ref())
         .map(|s| {
             let d = s.site_description.trim();
             if d.is_empty() {
@@ -84,10 +75,8 @@ fn App() -> Element {
         .unwrap_or_else(|| "Gaming clan platform".into());
     let brand_theme_css = {
         use theme::brand::BrandConfig;
-        let (dark, light) = site_meta
-            .read()
+        let (dark, light) = loaded_settings
             .as_ref()
-            .and_then(|o| o.as_ref())
             .map(|s| (s.brand_accent_dark.clone(), s.brand_accent_light.clone()))
             .unwrap_or_default();
         theme::theme_css(&BrandConfig::from_settings(&dark, &light))

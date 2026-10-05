@@ -170,6 +170,15 @@ fn shows_empty_inbox(load_state: ConversationListState, len: usize) -> bool {
     load_state == ConversationListState::Ready && len == 0
 }
 
+/// Status line for an empty list that is not the ready-empty inbox.
+/// Failure is `None`: the page-level `DmFailureNotice` is the only error copy.
+fn list_pending_copy(load_state: ConversationListState) -> Option<&'static str> {
+    match load_state {
+        ConversationListState::Loading => Some("Loading conversations…"),
+        ConversationListState::Failed | ConversationListState::Ready => None,
+    }
+}
+
 #[component]
 pub fn ConversationList(
     conversations: Vec<ConversationSummary>,
@@ -219,14 +228,10 @@ pub fn ConversationList(
                             }
                         }
                     }
+                } else if let Some(status) = list_pending_copy(load_state) {
+                    div { class: "dm-conv-empty", "{status}" }
                 } else {
-                    div { class: "dm-conv-empty",
-                        if load_state == ConversationListState::Loading {
-                            "Loading conversations…"
-                        } else {
-                            "Couldn't load conversations."
-                        }
-                    }
+                    div { class: "dm-conv-empty", aria_hidden: "true" }
                 }
             } else {
                 for c in conversations.iter() {
@@ -289,6 +294,16 @@ mod tests {
         assert!(!shows_empty_inbox(ConversationListState::Failed, 0));
         assert!(shows_empty_inbox(ConversationListState::Ready, 0));
         assert!(!shows_empty_inbox(ConversationListState::Ready, 2));
+    }
+
+    #[test]
+    fn failed_list_has_no_error_line_of_its_own() {
+        assert_eq!(
+            list_pending_copy(ConversationListState::Loading),
+            Some("Loading conversations…")
+        );
+        assert_eq!(list_pending_copy(ConversationListState::Failed), None);
+        assert_eq!(list_pending_copy(ConversationListState::Ready), None);
     }
 
     /// The empty-state CTA used to be the only caller of `on_compose`, so the

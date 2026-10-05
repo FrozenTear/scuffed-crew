@@ -192,33 +192,24 @@ fn render_tag(tag: String, handler: &Option<EventHandler<String>>) -> Element {
 }
 
 fn linkify_content(content: &str) -> Element {
-    let mut parts: Vec<Element> = Vec::new();
-    let mut last = 0;
-
-    for (start, part) in content.match_indices("http") {
-        if start > last {
-            let text = content[last..start].to_string();
-            parts.push(rsx! { "{text}" });
-        }
-        let end = content[start..]
-            .find(|c: char| c.is_whitespace())
-            .map(|i| start + i)
-            .unwrap_or(content.len());
-        let url = content[start..end].to_string();
-        let url2 = url.clone();
-        parts.push(rsx! { a { href: "{url}", target: "_blank", rel: "noopener", "{url2}" } });
-        last = end;
-        let _ = part;
-    }
-
-    if last < content.len() {
-        let text = content[last..].to_string();
-        parts.push(rsx! { "{text}" });
-    }
-
+    let parts = crate::util::linkify_http_spans(content);
     rsx! {
-        for (i, el) in parts.into_iter().enumerate() {
-            Fragment { key: "{i}", {el} }
+        for (i, part) in parts.into_iter().enumerate() {
+            Fragment { key: "{i}",
+                {match part {
+                    crate::util::TextLink::Text(text) => {
+                        let text = text.to_string();
+                        rsx! { "{text}" }
+                    }
+                    crate::util::TextLink::Href(url) => {
+                        let url = url.to_string();
+                        let label = url.clone();
+                        rsx! {
+                            a { href: "{url}", target: "_blank", rel: "noopener", "{label}" }
+                        }
+                    }
+                }}
+            }
         }
     }
 }

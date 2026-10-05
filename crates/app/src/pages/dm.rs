@@ -81,12 +81,16 @@ fn list_state(state: &LoadState) -> ConversationListState {
     }
 }
 
-fn inbox_pane_message(state: &LoadState, conversation_count: usize) -> &'static str {
+/// Right-pane copy. A load failure is omitted: `DmFailureNotice` above the
+/// grid is the only error line.
+fn inbox_pane_message(state: &LoadState, conversation_count: usize) -> Option<&'static str> {
     match state {
-        LoadState::Loading => "Loading…",
-        LoadState::Error(_) => "Conversations couldn't be loaded.",
-        LoadState::Ready if conversation_count == 0 => "Select a conversation to start reading.",
-        LoadState::Ready => "Select a conversation from the left.",
+        LoadState::Loading => Some("Loading…"),
+        LoadState::Error(_) => None,
+        LoadState::Ready if conversation_count == 0 => {
+            Some("Select a conversation to start reading.")
+        }
+        LoadState::Ready => Some("Select a conversation from the left."),
     }
 }
 
@@ -252,9 +256,14 @@ fn DmPageInner(selected_peer: Option<String>) -> Element {
                 }
                 {match selected_peer.as_ref() {
                     None => {
-                        let msg = inbox_pane_message(&load_state(), convs.len());
-                        rsx! {
-                            div { class: "dm-page-empty", "{msg}" }
+                        if let Some(msg) = inbox_pane_message(&load_state(), convs.len()) {
+                            rsx! {
+                                div { class: "dm-page-empty", "{msg}" }
+                            }
+                        } else {
+                            rsx! {
+                                div { class: "dm-page-empty", aria_hidden: "true" }
+                            }
                         }
                     }
                     Some(peer) => {
@@ -317,22 +326,22 @@ mod tests {
 
     #[test]
     fn inbox_pane_hides_empty_copy_until_ready() {
-        assert_eq!(inbox_pane_message(&LoadState::Loading, 0), "Loading…");
+        assert_eq!(inbox_pane_message(&LoadState::Loading, 0), Some("Loading…"));
         assert_eq!(
             inbox_pane_message(&LoadState::Error(DmLoadFailure::Membership), 0),
-            "Conversations couldn't be loaded."
+            None
         );
         assert_eq!(
             inbox_pane_message(&LoadState::Error(DmLoadFailure::RelayConfig), 3),
-            "Conversations couldn't be loaded."
+            None
         );
         assert_eq!(
             inbox_pane_message(&LoadState::Ready, 0),
-            "Select a conversation to start reading."
+            Some("Select a conversation to start reading.")
         );
         assert_eq!(
             inbox_pane_message(&LoadState::Ready, 2),
-            "Select a conversation from the left."
+            Some("Select a conversation from the left.")
         );
     }
 

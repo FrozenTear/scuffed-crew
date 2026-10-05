@@ -6,9 +6,10 @@ mod data;
 
 use dioxus::prelude::*;
 use scuffed_api_client::ApiClient;
-use scuffed_types::{HomeSectionId, HomeShell, HomeSkin, SiteSettings, org_initials};
+use scuffed_types::{HomeSectionId, HomeShell, HomeSkin, org_initials};
 
 use crate::hooks::CursorPage;
+use crate::state::{loaded_site_settings, use_site_settings};
 use blocks::{
     EthosBlock, HeroBlock, LiveBlock, NewsBlock, RecruitBlock, TeamsBlock, live_panel_flags,
     teams_will_render,
@@ -18,12 +19,11 @@ use data::{Announcement, Event, HomeTournament, Overview};
 
 #[component]
 pub fn Home() -> Element {
-    let settings = use_resource(|| async {
-        ApiClient::web()
-            .fetch::<SiteSettings>("/api/settings")
-            .await
-            .ok()
-    });
+    let site_settings = use_site_settings();
+    let loaded = {
+        let slot = site_settings.resource.read();
+        loaded_site_settings(slot.as_ref()).cloned()
+    };
     let overview = use_resource(|| async {
         ApiClient::web()
             .fetch::<Overview>("/api/public/overview")
@@ -52,37 +52,25 @@ pub fn Home() -> Element {
             .map(|r| r.data)
     });
 
-    let content = settings
-        .read()
+    let content = loaded
         .as_ref()
-        .and_then(|s| s.as_ref())
         .map(|s| s.homepage.clone())
         .unwrap_or_default();
-    let home_shell: HomeShell = settings
-        .read()
+    let home_shell: HomeShell = loaded
         .as_ref()
-        .and_then(|s| s.as_ref())
         .map(|s| s.home_shell)
         .unwrap_or(HomeShell::OpsHub);
-    let home_skin: HomeSkin = settings
-        .read()
+    let home_skin: HomeSkin = loaded
         .as_ref()
-        .and_then(|s| s.as_ref())
         .map(|s| s.home_skin)
         .unwrap_or(HomeSkin::Clean);
-    let org_name = settings
-        .read()
+    // Blank watermark until settings resolve. `org_initials` of an empty
+    // name is "CL", which is still a fake mark.
+    let initials = loaded
         .as_ref()
-        .and_then(|s| s.as_ref())
-        .map(|s| s.org_name.clone())
-        .unwrap_or_else(|| "My Clan".into());
-    let initials = org_initials(&org_name);
-    let recruitment_open = settings
-        .read()
-        .as_ref()
-        .and_then(|s| s.as_ref())
-        .map(|s| s.recruitment_open)
-        .unwrap_or(true);
+        .map(|s| org_initials(&s.org_name))
+        .unwrap_or_default();
+    let recruitment_open = loaded.as_ref().map(|s| s.recruitment_open).unwrap_or(true);
 
     // Resolve list data for blocks (Home owns resources).
     let event_list = events

@@ -3,7 +3,16 @@ use serde::{Deserialize, Serialize};
 
 use crate::components::ui::{BtnVariant, Button};
 use crate::components::{Toast, use_toast};
+use crate::state::{loaded_site_settings, use_site_settings};
 use scuffed_api_client::ApiClient;
+
+/// Intro line. A missing org name stays generic so the page never says "My Clan".
+fn community_intro(org_name: Option<&str>) -> String {
+    match org_name.map(str::trim).filter(|name| !name.is_empty()) {
+        Some(name) => format!("Your {name} account is backed by a Nostr keypair.\n\n"),
+        None => "Your account is backed by a Nostr keypair.\n\n".to_string(),
+    }
+}
 
 #[derive(Debug, Clone, Deserialize)]
 struct PublicOverview {
@@ -215,12 +224,11 @@ pub fn Community() -> Element {
             .ok()
     });
 
-    let settings = use_resource(|| async {
-        ApiClient::web()
-            .fetch::<scuffed_types::SiteSettings>("/api/settings")
-            .await
-            .ok()
-    });
+    let site_settings = use_site_settings();
+    let org_name = {
+        let slot = site_settings.resource.read();
+        loaded_site_settings(slot.as_ref()).map(|s| s.org_name.clone())
+    };
 
     let me = use_resource(|| async {
         ApiClient::web()
@@ -238,13 +246,7 @@ pub fn Community() -> Element {
         .and_then(|m| m.member.as_ref())
         .map(|member| matches!(member.org_role.as_str(), "officer" | "admin"))
         .unwrap_or(false);
-    let org_name = settings
-        .read()
-        .as_ref()
-        .and_then(|o| o.as_ref())
-        .map(|s| s.org_name.clone())
-        .unwrap_or_else(|| "My Clan".into());
-    let banner_label = org_name.to_uppercase();
+    let banner_label = org_name.as_ref().map(|name| name.to_uppercase());
 
     rsx! {
         style { {PAGE_CSS} }
@@ -257,12 +259,20 @@ pub fn Community() -> Element {
 
             div { class: "community-hero",
                 div { class: "community-banner-placeholder",
-                    span { "{banner_label}" }
+                    if let Some(label) = banner_label {
+                        span { "{label}" }
+                    }
                 }
                 div { class: "community-body",
                     span { class: "community-nostr-badge", "Nostr-Native" }
 
-                    h2 { class: "community-name", "{org_name}" }
+                    h2 { class: "community-name",
+                        if let Some(name) = org_name.clone() {
+                            "{name}"
+                        } else {
+                            span { class: "brand-pending", aria_hidden: "true" }
+                        }
+                    }
                     p { class: "community-desc",
                         "A competitive gaming community built on Nostr. No central servers own your identity — your keys, your account, everywhere."
                     }
@@ -285,15 +295,17 @@ pub fn Community() -> Element {
             CommunityFeatures { org_name: org_name.clone() }
 
             if is_officer {
-                OfficerCommunityActions { org_name: org_name.clone() }
+                if let Some(name) = org_name.clone() {
+                    OfficerCommunityActions { org_name: name }
+                }
             }
         }
     }
 }
 
 #[component]
-fn CommunityFeatures(org_name: String) -> Element {
-    let intro = format!("Your {org_name} account is backed by a Nostr keypair.\n\n");
+fn CommunityFeatures(org_name: Option<String>) -> Element {
+    let intro = community_intro(org_name.as_deref());
     rsx! {
         div { class: "community-section",
             h3 { class: "community-section-title", "How It Works" }
@@ -358,5 +370,22 @@ fn OfficerCommunityActions(org_name: String) -> Element {
                 if publishing() { "Publishing..." } else { "Publish Community to Relay" }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn intro_omits_a_name_until_settings_load() {
+        let pending = community_intro(None);
+        assert!(pending.starts_with("Your account is backed"));
+        assert!(!pending.contains("My Clan"));
+        assert_eq!(
+            community_intro(Some("Night Owls")),
+            "Your Night Owls account is backed by a Nostr keypair.\n\n"
+        );
+        assert!(!community_intro(Some("  ")).contains("My Clan"));
     }
 }

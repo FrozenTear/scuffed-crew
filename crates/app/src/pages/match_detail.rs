@@ -5,6 +5,7 @@ use serde::Deserialize;
 
 use crate::components::ui::{Card, Pill, PillTone};
 use crate::routes::Route;
+use crate::util::{StoredUrl, stored_http_url};
 
 use super::public_fetch::{PublicFetch, fetch_public};
 
@@ -195,8 +196,8 @@ fn render_match(m: &MatchDetailData) -> Element {
         .map(|s| s.chars().take(16).collect::<String>().replace('T', " "))
         .unwrap_or_else(|| "TBD".into());
     let game = m.game_name.clone().unwrap_or_default();
-    let has_media = m.vod_url.as_ref().is_some_and(|u| !u.is_empty())
-        || m.replay_code.as_ref().is_some_and(|c| !c.is_empty());
+    let vod = m.vod_url.as_deref().and_then(stored_http_url);
+    let has_media = vod.is_some() || m.replay_code.as_ref().is_some_and(|c| !c.is_empty());
 
     rsx! {
         div { class: "match-header",
@@ -252,16 +253,21 @@ fn render_match(m: &MatchDetailData) -> Element {
             Card {
                 div { class: "match-section match-media",
                     h2 { "Media" }
-                    if let Some(url) = &m.vod_url {
-                        if !url.is_empty() {
-                            p {
-                                a {
-                                    href: "{url}",
-                                    target: "_blank",
-                                    rel: "noopener noreferrer",
-                                    "Watch VOD"
+                    if let Some(vod) = vod {
+                        match vod {
+                            StoredUrl::Link(href) => rsx! {
+                                p {
+                                    a {
+                                        href: "{href}",
+                                        target: "_blank",
+                                        rel: "noopener noreferrer",
+                                        "Watch VOD"
+                                    }
                                 }
-                            }
+                            },
+                            StoredUrl::Plain(text) => rsx! {
+                                p { "VOD: {text}" }
+                            },
                         }
                     }
                     if let Some(code) = &m.replay_code {

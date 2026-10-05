@@ -5,6 +5,7 @@ use scuffed_types::{NavConfig, NavPlacement, SiteSettings};
 use super::{focus_element, use_document_keydown};
 use crate::routes::Route;
 use crate::state::auth::{AuthState, use_auth};
+use crate::state::{loaded_site_settings, use_site_settings};
 use crate::theme::ThemeToggle;
 
 const NAV_TOGGLE_ID: &str = "site-nav-toggle";
@@ -163,6 +164,7 @@ const NAV_CSS: &str = r#"
         color: var(--accent-fg);
         box-shadow: 0 0 12px color-mix(in srgb, var(--accent) 35%, transparent);
     }
+    .nav-icon.is-pending { color: transparent; }
     .nav-mark-text {
         font-family: var(--font-mono, var(--font-head));
         font-size: 0.72rem;
@@ -445,31 +447,25 @@ pub fn PublicLayout() -> Element {
         close_disclosures(mobile_open, more_open, account_open);
     });
 
-    let site_settings = use_resource(|| async {
-        ApiClient::web()
-            .fetch::<SiteSettings>("/api/settings")
-            .await
-            .ok()
-    });
-    let bg_css = site_settings
-        .read()
+    let site_settings = use_site_settings();
+    let loaded_settings = {
+        let slot = site_settings.resource.read();
+        loaded_site_settings(slot.as_ref()).cloned()
+    };
+    let bg_css = loaded_settings
         .as_ref()
-        .and_then(|o| o.as_ref())
         .map(|s| page_bg_css(&s.page_bg_color, &s.page_bg_image_url))
         .unwrap_or_default();
 
-    let nav_cfg = site_settings
-        .read()
+    let nav_cfg = loaded_settings
         .as_ref()
-        .and_then(|o| o.as_ref())
         .map(|s| {
             let mut n = s.nav.clone();
             n.normalize();
             n
         })
         .unwrap_or_default();
-    let strategies_enabled =
-        strategies_enabled_or_default(site_settings.read().as_ref().and_then(|o| o.as_ref()));
+    let strategies_enabled = strategies_enabled_or_default(loaded_settings.as_ref());
     let primary_links = resolve_nav(&nav_cfg, NavPlacement::Primary, strategies_enabled);
     let more_links = resolve_nav(&nav_cfg, NavPlacement::More, strategies_enabled);
 
@@ -482,24 +478,25 @@ pub fn PublicLayout() -> Element {
         .unwrap_or_default();
     let loading = auth().loading;
 
-    let org_name = site_settings
-        .read()
+    let org_name = loaded_settings.as_ref().map(|s| s.org_name.clone());
+    let site_description = loaded_settings
         .as_ref()
-        .and_then(|o| o.as_ref())
-        .map(|s| s.org_name.clone())
-        .unwrap_or_else(|| "My Clan".into());
-    let site_description = site_settings
-        .read()
-        .as_ref()
-        .and_then(|o| o.as_ref())
         .map(|s| s.site_description.trim().to_string())
         .filter(|d| !d.is_empty());
-    let footer_text = match &site_description {
-        Some(desc) => format!("© {org_name} · {desc}"),
-        None => format!("© {org_name}"),
+    let footer_text = org_name.as_ref().map(|name| match &site_description {
+        Some(desc) => format!("© {name} · {desc}"),
+        None => format!("© {name}"),
+    });
+    let mark_label = org_name.clone().unwrap_or_default();
+    let nav_initials = org_name
+        .as_deref()
+        .map(scuffed_types::org_initials)
+        .unwrap_or_default();
+    let nav_icon_class = if nav_initials.is_empty() {
+        "nav-icon is-pending"
+    } else {
+        "nav-icon"
     };
-    let mark_label = org_name.clone();
-    let nav_initials = scuffed_types::org_initials(&org_name);
 
     let more_class = if more_open() {
         "nav-drop open"
@@ -537,11 +534,17 @@ pub fn PublicLayout() -> Element {
                     account_open.set(false);
                 },
                 div {
-                    class: "nav-icon",
+                    class: "{nav_icon_class}",
                     aria_hidden: "true",
                     "{nav_initials}"
                 }
-                span { class: "nav-mark-text", "{mark_label}" }
+                span { class: "nav-mark-text",
+                    if mark_label.is_empty() {
+                        span { class: "brand-pending", aria_hidden: "true" }
+                    } else {
+                        "{mark_label}"
+                    }
+                }
             }
 
             ul { class: "nav-center",
@@ -810,7 +813,12 @@ pub fn PublicLayout() -> Element {
         }
 
         footer { class: "site-footer",
-            "{footer_text}"
+            if let Some(text) = footer_text {
+                "{text}"
+            } else {
+                "© "
+                span { class: "brand-pending", aria_hidden: "true" }
+            }
         }
     }
 }
