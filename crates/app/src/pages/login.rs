@@ -159,6 +159,43 @@ fn body_error_or(body: &str, fallback: &str) -> String {
         .unwrap_or_else(|| fallback.to_string())
 }
 
+/// Shown when OAuth sends a brand-new account to `/login?error=registration_closed`.
+const REGISTRATION_CLOSED_BANNER: &str =
+    "The crew isn't taking new sign-ups right now. Existing members can still sign in.";
+
+/// Map a `/login` `error` query value to banner copy.
+///
+/// Only `registration_closed` is recognized. Any other value, including a
+/// missing parameter, returns `None` so the page stays as it is today.
+fn login_error_banner(code: Option<&str>) -> Option<&'static str> {
+    match code {
+        Some("registration_closed") => Some(REGISTRATION_CLOSED_BANNER),
+        _ => None,
+    }
+}
+
+/// First `error` value in a URL search string (`?error=...` or `error=...`).
+fn login_error_code(search: &str) -> Option<&str> {
+    let query = search.strip_prefix('?').unwrap_or(search);
+    if query.is_empty() {
+        return None;
+    }
+    query.split('&').find_map(|pair| {
+        let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+        (key == "error").then_some(value)
+    })
+}
+
+fn login_banner_from_search(search: &str) -> Option<&'static str> {
+    login_error_banner(login_error_code(search))
+}
+
+fn current_location_search() -> String {
+    web_sys::window()
+        .and_then(|w| w.location().search().ok())
+        .unwrap_or_default()
+}
+
 #[component]
 pub fn Login() -> Element {
     let mut username = use_signal(String::new);
@@ -166,7 +203,10 @@ pub fn Login() -> Element {
     let mut password2 = use_signal(String::new);
     let mut confirm_age = use_signal(|| false);
     let mut registering = use_signal(|| false);
-    let mut error = use_signal(|| Option::<String>::None);
+    // The route does not declare query params. A full-page OAuth redirect is the
+    // only way this code arrives, so read it once when the page loads.
+    let mut error =
+        use_signal(|| login_banner_from_search(&current_location_search()).map(String::from));
     let mut submitting = use_signal(|| false);
     let mut auth = use_auth();
     let nav = use_navigator();
@@ -586,4 +626,59 @@ async fn nostr_login_flow() -> Result<(), String> {
             other => format!("Verification failed: {other}"),
         })?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn registration_closed_maps_to_the_login_banner() {
+        assert_eq!(
+            login_error_banner(Some("registration_closed")),
+            Some(
+                "The crew isn't taking new sign-ups right now. Existing members can still sign in."
+            )
+        );
+    }
+
+    #[test]
+    fn unknown_or_absent_error_codes_show_nothing() {
+        assert_eq!(login_error_banner(None), None);
+        assert_eq!(login_error_banner(Some("")), None);
+        assert_eq!(login_error_banner(Some("invalid")), None);
+        assert_eq!(login_error_banner(Some("access_denied")), None);
+        assert_eq!(login_error_banner(Some("Registration_closed")), None);
+        assert_eq!(login_error_banner(Some("registration_closed ")), None);
+    }
+
+    #[test]
+    fn search_string_uses_only_the_error_parameter() {
+        let banner = Some(
+            "The crew isn't taking new sign-ups right now. Existing members can still sign in.",
+        );
+        assert_eq!(
+            login_banner_from_search("?error=registration_closed"),
+            banner
+        );
+        assert_eq!(
+            login_banner_from_search("?foo=1&error=registration_closed&bar=2"),
+            banner
+        );
+        assert_eq!(
+            login_banner_from_search("error=registration_closed"),
+            banner
+        );
+        assert_eq!(login_banner_from_search(""), None);
+        assert_eq!(login_banner_from_search("?"), None);
+        assert_eq!(login_banner_from_search("?error="), None);
+        assert_eq!(login_banner_from_search("?error"), None);
+        assert_eq!(login_banner_from_search("?error=nope"), None);
+        assert_eq!(login_banner_from_search("?foo=registration_closed"), None);
+        // A later duplicate does not override an earlier unknown code.
+        assert_eq!(
+            login_banner_from_search("?error=nope&error=registration_closed"),
+            None
+        );
+    }
 }
