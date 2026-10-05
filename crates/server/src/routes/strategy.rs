@@ -1160,6 +1160,36 @@ mod tests {
         assert_eq!(body["url"], updated);
     }
 
+    #[tokio::test]
+    async fn patch_note_create_trims_surrounding_whitespace() {
+        let state = test_state().await;
+        seed_role(&state, "officer", OrgRole::Officer, OFFICER_TOKEN).await;
+
+        let trimmed = "https://overwatch.blizzard.com/en-us/news/patch-notes/";
+        let mut body = sample_create("9.9.4");
+        body["url"] = json!(format!(" \n{trimmed}\r\n "));
+        let (status, body) = call_json(
+            strategy_routes(state.clone()),
+            Method::POST,
+            "/api/strategy/patch-notes",
+            Some(OFFICER_TOKEN),
+            Some(body),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        assert_eq!(body["url"], trimmed);
+
+        let (status, listed) = get_json(strategy_routes(state), "/api/strategy/patch-notes").await;
+        assert_eq!(status, StatusCode::OK, "{listed}");
+        let stored = listed["data"]
+            .as_array()
+            .expect("data")
+            .iter()
+            .find(|n| n["version"] == "9.9.4")
+            .expect("created note");
+        assert_eq!(stored["url"], trimmed);
+    }
+
     async fn set_strategies_enabled(state: &AppState, enabled: bool) {
         state
             .db

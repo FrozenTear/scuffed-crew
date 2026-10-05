@@ -2,7 +2,7 @@ use axum::{
     Json,
     extract::{Path, Query, State},
     http::{StatusCode, header},
-    response::{IntoResponse, Redirect},
+    response::{IntoResponse, Redirect, Response},
 };
 use axum_extra::extract::cookie::CookieJar;
 use serde::Deserialize;
@@ -190,7 +190,9 @@ pub async fn callback(
     .await
     {
         Ok(u) => u,
-        Err((status, msg)) => return (status, msg).into_response(),
+        // Closed registration is a browser redirect (no session cookie) so the
+        // login page can show a banner. Other callback failures stay plain text.
+        Err((status, msg)) => return oauth_callback_refusal(status, msg),
     };
 
     // Create session
@@ -222,6 +224,22 @@ pub async fn callback(
         .into_response()
 }
 
+const OAUTH_REGISTRATION_CLOSED: &str = "registration is currently closed";
+const OAUTH_REGISTRATION_CLOSED_LOGIN: &str = "/login?error=registration_closed";
+
+/// Browser response for an OAuth callback that did not establish a session.
+///
+/// A brand-new Discord/Google id refused because `recruitment_open` is false
+/// is a 303 to [`OAUTH_REGISTRATION_CLOSED_LOGIN`] with no `Set-Cookie`.
+/// Database and provider failures stay status + plain text. There is no
+/// existing callback error that already redirects with a query param.
+fn oauth_callback_refusal(status: StatusCode, msg: &'static str) -> Response {
+    if status == StatusCode::FORBIDDEN && msg == OAUTH_REGISTRATION_CLOSED {
+        return Redirect::to(OAUTH_REGISTRATION_CLOSED_LOGIN).into_response();
+    }
+    (status, msg).into_response()
+}
+
 /// Whether an OAuth callback may create or resume an account.
 ///
 /// Existing accounts always proceed, even when recruitment is closed or the
@@ -237,7 +255,7 @@ fn oauth_signup_decision(
     }
     match recruitment_open {
         Some(Ok(true)) => Ok(()),
-        Some(Ok(false)) => Err((StatusCode::FORBIDDEN, "registration is currently closed")),
+        Some(Ok(false)) => Err((StatusCode::FORBIDDEN, OAUTH_REGISTRATION_CLOSED)),
         Some(Err(())) | None => Err((StatusCode::INTERNAL_SERVER_ERROR, "Database error")),
     }
 }
@@ -1082,6 +1100,33 @@ mod oauth_recruitment_tests {
     use super::{oauth_signup_decision, upsert_oauth_user_if_allowed};
     use axum::http::StatusCode;
     use scuffed_auth::AuthProvider;
+
+    #[test]
+    fn closed_registration_callback_redirects_without_session_cookie() {
+        use axum::http::header;
+
+        let response = super::oauth_callback_refusal(
+            StatusCode::FORBIDDEN,
+            "registration is currently closed",
+        );
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::LOCATION)
+                .and_then(|v| v.to_str().ok()),
+            Some("/login?error=registration_closed")
+        );
+        assert!(
+            response.headers().get(header::SET_COOKIE).is_none(),
+            "a refused new OAuth user must not receive a session cookie"
+        );
+
+        let db_err =
+            super::oauth_callback_refusal(StatusCode::INTERNAL_SERVER_ERROR, "Database error");
+        assert_eq!(db_err.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(db_err.headers().get(header::LOCATION).is_none());
+    }
 
     #[test]
     fn new_oauth_identity_refused_when_closed_or_settings_unreadable() {
