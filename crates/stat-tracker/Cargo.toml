@@ -23,7 +23,7 @@ chrono = { version = "0.4", features = ["serde"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 dirs = "6"
-toml = "0.8"
+toml = "1"
 reqwest = { version = "0.12", features = ["json"] }
 libwayshot = "0.7"
 # Task 0 decision (fleet::x11-capture): pure-Rust X11; randr + image helpers.
