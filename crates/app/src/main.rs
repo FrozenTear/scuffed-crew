@@ -23,6 +23,9 @@ use routes::Route;
 use state::AuthState;
 
 fn main() {
+    // The router drops undeclared query params as soon as it mounts. Snapshot
+    // `/login?error=registration_closed` while the address bar still has it.
+    pages::capture_initial_login_banner();
     dioxus::launch(App);
 }
 
@@ -31,6 +34,10 @@ const DESKTOP_CANVAS_JS: &str = include_str!("../assets/desktop_canvas.js");
 
 #[component]
 fn App() -> Element {
+    // No-op when `main` already snapshotted. Still runs before `Router` mounts,
+    // which is the rewrite that clears `?error=`.
+    pages::capture_initial_login_banner();
+
     // Provide auth state to entire app
     let auth = use_signal(AuthState::new);
     use_context_provider(|| auth);

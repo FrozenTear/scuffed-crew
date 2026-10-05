@@ -190,10 +190,60 @@ fn login_banner_from_search(search: &str) -> Option<&'static str> {
     login_error_banner(login_error_code(search))
 }
 
-fn current_location_search() -> String {
-    web_sys::window()
-        .and_then(|w| w.location().search().ok())
-        .unwrap_or_default()
+/// Banner for a browser URL in the shape `history.current_route()` returns
+/// (`pathname` + `search` + `hash`). Only `/login` is considered.
+///
+/// Dioxus router 0.7 (`RouterContext::new`) parses that string, then if
+/// `route.to_string()` differs it `history.replace`s the canonical route.
+/// `/login` declares no query, so `/login?error=registration_closed` becomes
+/// `/login` before [`Login`] mounts. A `location.search` read inside the page
+/// is already empty. Callers must pass the URL from before that replace.
+fn login_banner_from_browser_url(url: &str) -> Option<&'static str> {
+    let without_hash = url.split_once('#').map(|(path, _)| path).unwrap_or(url);
+    let (path, search) = without_hash.split_once('?').unwrap_or((without_hash, ""));
+    let path = path.trim_end_matches('/');
+    let path = if path.is_empty() { "/" } else { path };
+    if path != "/login" {
+        return None;
+    }
+    login_banner_from_search(search)
+}
+
+/// Snapshot of the banner taken before the router rewrites the address bar.
+static INITIAL_LOGIN_BANNER: std::sync::OnceLock<Option<&'static str>> = std::sync::OnceLock::new();
+
+/// Read `window.location` once, before [`dioxus::launch`] or before [`crate::routes::Route`]
+/// is mounted. Later calls keep the first snapshot.
+pub(crate) fn capture_initial_login_banner() {
+    let _ = INITIAL_LOGIN_BANNER.get_or_init(read_initial_login_banner);
+}
+
+fn read_initial_login_banner() -> Option<&'static str> {
+    #[cfg(target_arch = "wasm32")]
+    {
+        login_banner_from_browser_url(&current_browser_url())
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        None
+    }
+}
+
+fn captured_login_banner() -> Option<&'static str> {
+    INITIAL_LOGIN_BANNER.get().copied().flatten()
+}
+
+/// `pathname + search + hash`, matching `dioxus_web::history::WebHistory`.
+#[cfg(target_arch = "wasm32")]
+fn current_browser_url() -> String {
+    let Some(window) = web_sys::window() else {
+        return String::new();
+    };
+    let location = window.location();
+    let path = location.pathname().unwrap_or_default();
+    let search = location.search().unwrap_or_default();
+    let hash = location.hash().unwrap_or_default();
+    format!("{path}{search}{hash}")
 }
 
 #[component]
@@ -203,10 +253,9 @@ pub fn Login() -> Element {
     let mut password2 = use_signal(String::new);
     let mut confirm_age = use_signal(|| false);
     let mut registering = use_signal(|| false);
-    // The route does not declare query params. A full-page OAuth redirect is the
-    // only way this code arrives, so read it once when the page loads.
-    let mut error =
-        use_signal(|| login_banner_from_search(&current_location_search()).map(String::from));
+    // Filled from the pre-router snapshot. Reading `location.search` here is too
+    // late: the router has already replaced the URL with `/login`.
+    let mut error = use_signal(|| captured_login_banner().map(String::from));
     let mut submitting = use_signal(|| false);
     let mut auth = use_auth();
     let nav = use_navigator();
@@ -631,6 +680,7 @@ async fn nostr_login_flow() -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::str::FromStr;
 
     #[test]
     fn registration_closed_maps_to_the_login_banner() {
@@ -678,6 +728,61 @@ mod tests {
         // A later duplicate does not override an earlier unknown code.
         assert_eq!(
             login_banner_from_search("?error=nope&error=registration_closed"),
+            None
+        );
+    }
+
+    /// The failure from the live smoke: dioxus-router 0.7 parses `/login` and
+    /// ignores the query, then `RouterContext::new` replaces the browser URL
+    /// with `route.to_string()` (`/login`) before `Login` mounts. The banner
+    /// has to come from the original URL, not from the URL after that replace.
+    #[test]
+    fn registration_closed_banner_survives_router_stripping_the_query() {
+        let original = "/login?error=registration_closed";
+        let parsed = Route::from_str(original).expect("login matches with an undeclared query");
+        assert_eq!(parsed, Route::Login {});
+        let normalized = parsed.to_string();
+        assert_eq!(normalized, "/login");
+        assert_ne!(normalized, original);
+        assert_eq!(login_banner_from_browser_url(&normalized), None);
+        assert_eq!(
+            login_banner_from_browser_url(original),
+            Some(REGISTRATION_CLOSED_BANNER)
+        );
+        assert_eq!(
+            login_banner_from_browser_url("/login?foo=1&error=registration_closed&bar=2"),
+            Some(REGISTRATION_CLOSED_BANNER)
+        );
+        assert_eq!(
+            login_banner_from_browser_url("/login/?error=registration_closed"),
+            Some(REGISTRATION_CLOSED_BANNER)
+        );
+        assert_eq!(
+            login_banner_from_browser_url("/login?error=registration_closed#gone"),
+            Some(REGISTRATION_CLOSED_BANNER)
+        );
+    }
+
+    #[test]
+    fn initial_url_banner_ignores_plain_login_unknown_codes_and_other_paths() {
+        assert_eq!(login_banner_from_browser_url("/login"), None);
+        assert_eq!(login_banner_from_browser_url("/login?"), None);
+        assert_eq!(login_banner_from_browser_url("/login?error="), None);
+        assert_eq!(login_banner_from_browser_url("/login?error=nope"), None);
+        assert_eq!(
+            login_banner_from_browser_url("/login?error=Registration_closed"),
+            None
+        );
+        assert_eq!(
+            login_banner_from_browser_url("/login?error=registration_closed "),
+            None
+        );
+        assert_eq!(
+            login_banner_from_browser_url("/apply?error=registration_closed"),
+            None
+        );
+        assert_eq!(
+            login_banner_from_browser_url("/?error=registration_closed"),
             None
         );
     }

@@ -48,6 +48,7 @@ pub use home::Home;
 pub use identity::IdentitySettings;
 pub use leaderboards::Leaderboards;
 pub use login::Login;
+pub(crate) use login::capture_initial_login_banner;
 pub use match_detail::MatchDetail;
 pub use member_profile::MemberProfile;
 pub use members::Members;
