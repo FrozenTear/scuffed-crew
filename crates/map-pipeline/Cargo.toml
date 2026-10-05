@@ -16,7 +16,7 @@ find_peaks = "0.1"
 
 # Image processing + tile generation
 image = { version = "0.25", default-features = false, features = ["png", "webp"] }
-fast_image_resize = "5"
+fast_image_resize = "6"
 rayon = "1"
 
 # Edge adjacency
@@ -28,7 +28,7 @@ clap = { version = "4", features = ["derive"] }
 # Config + serialization
 serde = { workspace = true }
 serde_json = { workspace = true }
-toml = "0.8"
+toml = "1"
 
 # Error handling + logging
 anyhow = "1"
