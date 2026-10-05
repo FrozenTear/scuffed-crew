@@ -84,7 +84,7 @@ Pin a tag by fetching that tag's bootstrap (the assignment has to be on
 `bash`, because `VAR=x curl … | bash` does not pass `VAR` to `bash`):
 
 ```sh
-TAG=stat-tracker-v0.4.14
+TAG=stat-tracker-v0.4.17
 curl --proto '=https' -fsSL "https://raw.githubusercontent.com/FrozenTear/scuffed-crew/${TAG}/crates/stat-tracker/dist/bootstrap.sh" \
   | STAT_TRACKER_TAG="$TAG" STAT_TRACKER_PREFIX="$HOME/.local" bash
 ```
@@ -154,7 +154,7 @@ inherit. See Troubleshooting if capture stays on `CaptureBackend::None`.
 |---|---|
 | `player_name` | Scoreboard name used to find your row (fetched from the server if unset) |
 | `capture_output` | Display/output name to capture (`--list-outputs`) |
-| `data_dir` | Store/log/debug location (default `~/.local/share/scuffed-stat-tracker`) |
+| `data_dir` | Store/log/debug location (default `~/.local/share/scuffed-stat-tracker`). Must be absolute. The systemd unit can write this path, the config dir, and the session runtime dir; a custom directory gets a drop-in at install (see below) |
 | `auto_detect.*` | Poll-based match start/end detection (interval, cooldown) |
 | `game_process_names` | Only capture while one of these processes runs (empty disables the gate) |
 | `debug_ocr` | Dump Tab OCR intermediates and poll Victory/Defeat evidence frames (confirm + first streak, not every tick) under `{data_dir}/debug/` (also env `STAT_TRACKER_DEBUG_OCR=1`) |
@@ -167,6 +167,42 @@ ocr_threads = 1
 ```
 
 The daemon reads config once at startup — restart it after changes.
+
+### Where the daemon writes
+
+The user unit sets `ProtectSystem=strict`. When that sandbox is applied,
+only these paths are writable:
+
+| Path | What lands there |
+|---|---|
+| `~/.local/share/scuffed-stat-tracker` | Default data dir. Tessdata always lives at `tessdata/` here, even when `data_dir` is custom |
+| `~/.config/scuffed-stat-tracker` | `config.toml` (mode 0600) and `session.env` |
+| `$XDG_RUNTIME_DIR` (`%t`) | Wayland, X11, D-Bus, and PipeWire sockets |
+
+`{data_dir}` holds `stats.surrealkv`, `commands/`, `debug/` PNGs, portraits,
+`daemon.pid`, `sync_auth.json`, `live_snapshot.json`, `active_game.json`,
+`daemon.log`, and vacuum backups. The default directory is already in the
+table above. An absolute `data_dir` anywhere else — including another
+folder under `$HOME` — is read-only under the sandbox. `install.sh` writes
+`~/.config/systemd/user/scuffed-stat-tracker.service.d/data-dir.conf` for
+that path. Reinstall after you change `data_dir`. If the directory is
+still not writable, the daemon exits and prints the same drop-in. A
+relative `data_dir` is not put in the unit.
+
+`%h` in the unit is `$HOME`. It does not follow `XDG_DATA_HOME` or
+`XDG_CONFIG_HOME`. On a user manager that cannot apply the sandbox, the
+drop-in is unused and the startup check still requires a writable
+`data_dir`.
+
+These writes are not the long-running unit, so they are not in
+`ReadWritePaths`:
+
+- `--generate-tessdata` (CLI or the GUI button) writes
+  `~/.local/share/fonts` and a temp dir, then exits.
+- The GUI updater stages the tarball under `/tmp/sst-gui-update-*`.
+  `PrivateTmp` stays off the daemon so X11's `/tmp/.X11-unix` remains
+  visible. `PrivateDevices` and `DeviceAllow` stay unset so `/dev/input`
+  hotkeys keep working.
 
 ## Data & IPC
 

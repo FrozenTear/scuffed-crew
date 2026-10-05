@@ -203,6 +203,9 @@ else
     HELPER_DEST="$(absolute_install_path "$LIB_DIR/scuffed-stat-tracker/import-session-env.sh")"
     install_user_units "$ASSETS" "$SYSTEMD_DIR" "$DAEMON_EXEC" \
         "$DIST/import-session-env.sh" "$HELPER_DEST"
+    if [[ -n "${DATA_DIR_DROPIN:-}" && -f "$DATA_DIR_DROPIN" ]]; then
+        info "Custom data_dir is outside the unit sandbox — wrote $DATA_DIR_DROPIN"
+    fi
     SYSTEMCTL_BIN="${SCUFFED_SYSTEMCTL:-systemctl}"
     if [[ -x "$SYSTEMCTL_BIN" ]] || command -v "$SYSTEMCTL_BIN" &>/dev/null; then
         "$SYSTEMCTL_BIN" --user daemon-reload 2>/dev/null || true

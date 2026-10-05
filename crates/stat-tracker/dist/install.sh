@@ -404,6 +404,10 @@ else
         "$SYSTEMD_DIR/$UNIT"
         "$SYSTEMD_DIR/$SESSION_UNIT"
     )
+    if [[ -n "${DATA_DIR_DROPIN:-}" && -f "$DATA_DIR_DROPIN" ]]; then
+        MANIFEST_ENTRIES+=("$DATA_DIR_DROPIN")
+        info "Custom data_dir is outside the unit sandbox — wrote $DATA_DIR_DROPIN"
+    fi
     SYSTEMCTL_BIN="${SCUFFED_SYSTEMCTL:-systemctl}"
     if [[ -x "$SYSTEMCTL_BIN" ]] || command -v "$SYSTEMCTL_BIN" &>/dev/null; then
         "$SYSTEMCTL_BIN" --user daemon-reload 2>/dev/null || true

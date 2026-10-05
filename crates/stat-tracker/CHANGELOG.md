@@ -4,6 +4,35 @@ User-facing notes for `stat-tracker-v*` GitHub Releases. The release workflow
 prepends the section whose heading matches the tag version (for example
 `## 0.4.15` for `stat-tracker-v0.4.15`).
 
+## 0.4.17
+
+The user systemd unit now refuses new privileges and mounts the
+filesystem read-only (`ProtectSystem=strict`) except the default data
+dir, the config dir, and the session runtime dir. `/dev/input` stays
+available for hotkeys. A custom `data_dir` outside those three paths
+gets a drop-in (`scuffed-stat-tracker.service.d/data-dir.conf`) at
+install time. If that directory is still not writable, the daemon
+stops and prints the drop-in to add. Reinstall after changing
+`data_dir`.
+
+Match data, the command queue, and config are owner-only (directories
+0700, files 0600). The daemon only treats a pid as its own when the
+process image is `scuffed-stat-tracker`. A rejected sync token (HTTP
+401 or 403) pauses sync until the URL or token changes. The Overview
+title-row dot follows capture state.
+
+Hotkeys need the `input` group. Log out of the desktop and back in
+after `usermod`; a new terminal is not enough.
+
+### Install
+
+```sh
+curl --proto '=https' -fsSL https://raw.githubusercontent.com/FrozenTear/scuffed-crew/main/crates/stat-tracker/dist/bootstrap.sh | bash
+```
+
+Or extract the tarball and run `./install.sh`. Pin with
+`STAT_TRACKER_TAG=stat-tracker-v0.4.17`.
+
 ## 0.4.16
 
 Game times in the desktop app now show in your local time zone

@@ -333,7 +333,10 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("Scuffed Stat Tracker starting");
     tracing::info!(data_dir = %config.data_dir.display(), "using data directory");
 
-    std::fs::create_dir_all(&config.data_dir)?;
+    // ProtectSystem=strict (when the user manager can apply it) makes a
+    // custom data_dir read-only. Fail here with the drop-in to add, instead
+    // of dying later inside the store.
+    stat_tracker::sandbox::ensure_data_dir_writable(&config.data_dir)?;
     // Existing installs may have been created with umask 022. Tighten the
     // tree before the store opens so the DB and command queue are owner-only.
     stat_tracker::fs_mode::tighten_private_tree(&config.data_dir);
