@@ -283,6 +283,9 @@ struct CaptureRequest {
     create_session: bool,
     game_outcome: detect::MatchOutcome,
     session_map: Option<String>,
+    /// Where [`Self::session_map`] was read. The board case of a different-map
+    /// Tab trusts the top bar and the accolade only.
+    session_map_source: Option<boundary::MapSource>,
     map_candidates: Vec<String>,
     allow_banner_recovery: bool,
     /// The session's per-cell capture-gate state (last accepted + last raw
@@ -744,7 +747,11 @@ struct ActiveGame {
     outcome: detect::MatchOutcome,
     /// The map actually being played, once a trusted read confirms it
     /// (top-bar label, accolade screen). Never set from the map vote.
+    /// [`Self::map_source`] says which read stored it. A full-board text
+    /// fallback is recorded and is not trusted for a later different-map split.
     map: Option<String>,
+    /// Where [`Self::map`] was read. Absent until a read stores the map.
+    map_source: Option<boundary::MapSource>,
     /// Canonicalized names seen on the map-vote screen. The winner is
     /// unknowable at vote time, so these are CANDIDATES only — they constrain
     /// later OCR reads (a read that isn't one of them is a misread) but are
@@ -773,19 +780,23 @@ struct ActiveGame {
     /// CG-4 C: portrait confirm-not-switch + career-ever-ok for this game.
     hero_auth: HeroAuthState,
     /// Result word seen for this session. An unconfirmed hint stays sealable
-    /// until a progressed board is accepted after it. A confirmed result's
-    /// grace starts when it is recorded, not when the word was first sighted.
+    /// until a second progressed board, or one progressed board after an arm.
+    /// A confirmed result's grace starts when it is recorded, not when the
+    /// word was first sighted.
     result_mark: Option<ResultMark>,
     /// Hero select after a board-followed hint. The first reset signal.
-    /// The next fresh board splits and seals. A progressed board drops the hint.
+    /// The next fresh board splits and seals. A second progressed board, or
+    /// one after this arm, drops the hint.
     pending_boundary: bool,
     /// Opened by a start screen; the first board has not been accepted.
     awaiting_first_board: bool,
     /// Consecutive fresh-match boards already seen. One is not a new game.
-    /// Any stored board that is not itself fresh clears this.
+    /// A refresh, or counted progress, clears this. An unidentified or
+    /// implausible row leaves it.
     reset_streak: u32,
-    /// Counters frozen when a fresh-match drop started. Absent until the
-    /// first such read; a garbage row must not replace it.
+    /// Counters the reset is measured from. Set when the first fresh-match
+    /// board is held. A refresh replaces them with the accepted gate. An
+    /// unidentified or implausible row leaves them.
     reset_baseline: Option<GateState>,
     /// Player row that owns [`Self::reset_baseline`]. A later board counts
     /// as a fresh reset only on this same row.
@@ -826,6 +837,7 @@ impl ActiveGame {
             outcome_recorded_at: (outcome != detect::MatchOutcome::Unknown).then_some(now),
             outcome,
             map: None,
+            map_source: None,
             map_candidates,
             session_created: false,
             opened_at: now,
@@ -917,7 +929,7 @@ impl ActiveGame {
     /// Remember a result word. A repeat of the same outcome keeps the first
     /// sighting. The post-match grace is [`Self::outcome_recorded_at`],
     /// stamped when the result is recorded. The hint stays sealable until a
-    /// progressed board arrives after it.
+    /// second progressed board, or one progressed board after an arm.
     fn note_result(&mut self, outcome: detect::MatchOutcome, confirmed: bool) {
         if !outcome.is_decided() {
             return;
@@ -949,6 +961,8 @@ struct PersistedGame {
     outcome: detect::MatchOutcome,
     #[serde(default)]
     map: Option<String>,
+    #[serde(default)]
+    map_source: Option<boundary::MapSource>,
     #[serde(default)]
     map_candidates: Vec<String>,
     session_created: bool,
@@ -1145,6 +1159,11 @@ async fn apply_poll_decision(
         retire_active_game(st, store, data_dir, closed.seal, closed.reason.log()).await;
         let mut g = ActiveGame::open_at(new_id, state.outcome, candidates, now);
         g.apply_boundary_state(&state);
+        // A different-map end screen is an accolade read. That is the new
+        // session's map, and it is trusted for a later board-case split.
+        if g.map.is_some() {
+            g.map_source = Some(boundary::MapSource::Accolade);
+        }
         // The deferred board belongs to the session being opened. The fresh
         // state has none; put it back so the next stored capture writes it.
         if let Some((counters, hero, at)) = carried_deferred {
@@ -1189,6 +1208,7 @@ async fn apply_poll_decision(
                 "accolade map is not a vote candidate"
             );
         }
+        g.map_source = Some(boundary::MapSource::Accolade);
         tracing::info!(
             map = %map,
             session_id = %g.session_id,
@@ -1222,6 +1242,7 @@ fn persist_active_game(data_dir: &std::path::Path, game: Option<&ActiveGame>) {
         session_id: g.session_id.clone(),
         outcome: g.outcome,
         map: g.map.clone(),
+        map_source: g.map_source,
         map_candidates: g.map_candidates.clone(),
         session_created: g.session_created,
         opened_at: to_wall(g.opened_at),
@@ -1279,6 +1300,7 @@ fn recover_active_game(data_dir: &std::path::Path) -> Option<ActiveGame> {
         session_id: p.session_id,
         outcome: p.outcome,
         map: p.map,
+        map_source: p.map_source,
         map_candidates: p.map_candidates,
         session_created: p.session_created,
         opened_at: to_instant(p.opened_at)?,
@@ -1635,14 +1657,30 @@ fn take_fresh_pending(
 /// wrong ~2/3 of the time with 2+ candidates) — but when candidates are known
 /// they veto OCR reads that aren't among them: the played map must be one of
 /// the voted maps, so a read outside the set is a misread.
+#[cfg(test)]
 fn resolve_map(
     session_map: Option<&str>,
     panel_read: Option<&str>,
     text_read: &str,
     candidates: &[String],
 ) -> String {
+    resolved_map(session_map, panel_read, text_read, candidates).0
+}
+
+/// The map to store, and which read supplied it when the session had none.
+///
+/// A session map is returned with no source: the caller already recorded
+/// where it came from. A top-bar label is [`MapSource::TopBar`]. The
+/// full-board text is [`MapSource::TextFallback`] and is not trusted for a
+/// later different-map split.
+fn resolved_map(
+    session_map: Option<&str>,
+    panel_read: Option<&str>,
+    text_read: &str,
+    candidates: &[String],
+) -> (String, Option<boundary::MapSource>) {
     if let Some(map) = session_map {
-        return map.to_string();
+        return (map.to_string(), None);
     }
     let plausible = |m: &&str| candidates.is_empty() || candidates.iter().any(|c| c == m);
     let dropped = |m: &&str| {
@@ -1654,17 +1692,87 @@ fn resolve_map(
             );
         }
     };
-    panel_read
+    if let Some(panel) = panel_read.inspect(dropped).filter(plausible) {
+        return (panel.to_string(), Some(boundary::MapSource::TopBar));
+    }
+    if let Some(text) = Some(text_read)
+        .filter(|m| !m.is_empty())
         .inspect(dropped)
         .filter(plausible)
-        .or_else(|| {
-            Some(text_read)
-                .filter(|m| !m.is_empty())
-                .inspect(dropped)
-                .filter(plausible)
-        })
-        .unwrap_or_default()
-        .to_string()
+    {
+        return (text.to_string(), Some(boundary::MapSource::TextFallback));
+    }
+    (String::new(), None)
+}
+
+/// What [`stage_capture`] decided to write. Production and the night harness
+/// both store from this, so the gate, the map source, and a carried board
+/// cannot drift between them.
+struct StagedCapture {
+    target_session: String,
+    create_session: bool,
+    map_name: String,
+    map_source: Option<boundary::MapSource>,
+    outcome: detect::MatchOutcome,
+    outcome_label: String,
+    gate: capture_gate::GateOutcome,
+    carried: Option<Counters>,
+    carried_hero: Option<String>,
+    carried_at: chrono::DateTime<Utc>,
+    split: bool,
+    /// Empty when no map was read. Callers store `None`, not `"Unknown"`.
+    recorded_map: Option<String>,
+}
+
+/// Gate, map, and carried-board decisions for one planned capture.
+///
+/// `plan.skip_store` is the hold path and is not staged: nothing is written.
+fn stage_capture(
+    req: &CaptureRequest,
+    plan: &boundary::CapturePlan,
+    raw: Counters,
+    suspect: [bool; capture_gate::GATE_COLS],
+    map_from_panel: Option<&str>,
+    parsed_map: &str,
+    captured_at: chrono::DateTime<Utc>,
+) -> StagedCapture {
+    let split = plan.split;
+    let outcome = plan.stored_outcome;
+    let target_session = if split {
+        format!("{:016x}", rand_id())
+    } else {
+        req.session_id.clone()
+    };
+    let gate_prev = gate_prev_for_store(req.prev_gate, req.awaiting_first_board);
+    let gate = capture_gate::apply_gate(gate_prev, raw, suspect, split);
+    let (map_name, map_source) = if split {
+        resolved_map(None, map_from_panel, parsed_map, &[])
+    } else {
+        resolved_map(
+            req.session_map.as_deref(),
+            map_from_panel,
+            parsed_map,
+            &req.map_candidates,
+        )
+    };
+    let carried = carried_counters_to_write(req.carried_deferred, split, req.deferred_imported);
+    let carried_at = req
+        .carried_deferred_at
+        .unwrap_or(captured_at - chrono::Duration::seconds(1));
+    StagedCapture {
+        target_session,
+        create_session: split || req.create_session,
+        recorded_map: (!map_name.is_empty()).then(|| map_name.clone()),
+        map_name,
+        map_source,
+        outcome,
+        outcome_label: outcome.to_string(),
+        gate,
+        carried,
+        carried_hero: req.carried_deferred_hero.clone(),
+        carried_at,
+        split,
+    }
 }
 
 /// Everything the blocking vision/OCR pass extracts from one Tab frame.
@@ -1718,6 +1826,8 @@ struct CaptureReport {
     /// Map stored on the snapshot, if one was read — the caller adopts the
     /// first discovery onto the active game so the whole session shares it.
     map: Option<String>,
+    /// Set when `map` is a new read. None when the session already had a map.
+    map_source: Option<boundary::MapSource>,
     /// The session the snapshot was actually written to. Differs from the
     /// requested session when a stat regression split off a new game.
     session_id: String,
@@ -1731,8 +1841,8 @@ struct CaptureReport {
     armed_reset: bool,
     /// The hold path. `plan_capture` does not return this for a stored row.
     ignore_row: bool,
-    /// Fresh-match streak to keep when `split` is false. A stored board that
-    /// is not itself fresh sets this to zero.
+    /// Fresh-match streak to keep when `split` is false. A refresh or counted
+    /// progress sets this to zero. An unidentified or implausible row leaves it.
     reset_streak: u32,
     /// Baseline to keep when `split` is false and `refresh_baseline` is false.
     reset_baseline: Option<GateState>,
@@ -1747,7 +1857,7 @@ struct CaptureReport {
     count_progress: bool,
     /// This capture's hero came from the career panel.
     career_panel: bool,
-    /// Counters of a deferred post-result board, stored on the new session
+    /// Counters of a deferred fresh-match board, stored on the new session
     /// when the reset commits.
     held_counters: Option<Counters>,
     held_hero: Option<String>,
@@ -1852,13 +1962,6 @@ fn clear_cadence_wakes(st: &mut SessionState) {
     st.end_reel_wake_until = None;
 }
 
-/// PR-B: whether the poller sits mid-match with nothing imminent — a mature
-/// open game, outcome still unknown, and no cadence wake (fresh word-OCR
-/// streak or POTG / end-reel deadline). Every end-of-match signal path
-/// already drops this back to full cadence through existing state: a banner
-/// records the outcome (`finished()`), a word read sets `word_outcome_streak`,
-/// an end-reel / POTG hit sets `end_reel_wake_until`, and a detected start
-/// phase opens a new game (resetting `last_game_open`).
 /// The Tab request the capture task runs. Ages are measured from `now`,
 /// which is [`Instant::now`] in the daemon and the injected clock in tests.
 fn build_capture_request(g: &ActiveGame, opened_by_this_tab: bool, now: Instant) -> CaptureRequest {
@@ -1875,6 +1978,7 @@ fn build_capture_request(g: &ActiveGame, opened_by_this_tab: bool, now: Instant)
         create_session: !g.session_created,
         game_outcome: g.outcome,
         session_map: g.map.clone(),
+        session_map_source: g.map_source,
         map_candidates: g.map_candidates.clone(),
         allow_banner_recovery: banner_ok,
         prev_gate,
@@ -1936,6 +2040,12 @@ async fn open_fresh_if_tab_starts_one(
 }
 
 /// The previous game is not a latch for a session that has no board yet.
+///
+/// Guard. [`build_capture_request`] already omits a gate this session does
+/// not have, so production passes `None` while awaiting the first board.
+/// The filter stays so a caller that still holds the previous game's gate
+/// cannot latch this row to it. [`gate_prev_for_store`] is what both the
+/// daemon and the night harness apply.
 fn gate_prev_for_store(
     prev: Option<(GateState, std::time::Duration)>,
     awaiting_first_board: bool,
@@ -2034,6 +2144,7 @@ fn plan_from_board(req: &CaptureRequest, facts: &BoardFacts<'_>) -> boundary::Ca
         baseline_age: req.baseline_age,
         progressed_boards: req.progressed_boards,
         session_map: req.session_map.as_deref(),
+        session_map_source: req.session_map_source,
         incoming_map,
     })
 }
@@ -2131,6 +2242,7 @@ async fn apply_capture_report(
                     report.map.clone(),
                     now,
                 );
+                g.map_source = report.map_source;
                 g.baseline_row = report.baseline_row;
                 tracing::info!(
                     old_session = %sid,
@@ -2179,6 +2291,7 @@ async fn apply_capture_report(
                     && let Some(map) = &report.map
                 {
                     g.map = Some(map.clone());
+                    g.map_source = report.map_source;
                     if let Err(e) = store.set_session_map(&g.session_id, map).await {
                         tracing::warn!(error = %e, "failed to set session map");
                     }
@@ -2206,6 +2319,13 @@ async fn apply_capture_report(
     }
 }
 
+/// PR-B: whether the poller sits mid-match with nothing imminent — a mature
+/// open game, outcome still unknown, and no cadence wake (fresh word-OCR
+/// streak or POTG / end-reel deadline). Every end-of-match signal path
+/// already drops this back to full cadence through existing state: a banner
+/// records the outcome (`finished()`), a word read sets `word_outcome_streak`,
+/// an end-reel / POTG hit sets `end_reel_wake_until`, and a detected start
+/// phase opens a new game (resetting `last_game_open`).
 fn poll_slow_mode(st: &SessionState, now: Instant) -> bool {
     let hint_open = st.active_game.as_ref().is_some_and(|g| {
         g.pending_boundary
@@ -2218,6 +2338,29 @@ fn poll_slow_mode(st: &SessionState, now: Instant) -> bool {
             .is_none_or(|t| now.duration_since(t) >= SLOW_AFTER_GAME_OPEN)
         && !cadence_wake_active(st, now)
         && !hint_open
+}
+
+/// Session state at process start, and again after a suspend.
+///
+/// `opened_at` is the instant the session opened, which is also when
+/// `last_game_open` was set. Restoring it keeps the debounce across a
+/// restart so the first ban or select does not split a session that is
+/// still inside it.
+fn startup_session(data_dir: &std::path::Path) -> SessionState {
+    let active_game = recover_active_game(data_dir);
+    let last_game_open = active_game.as_ref().map(|g| g.opened_at);
+    SessionState {
+        capture_count: 0,
+        last_game_open,
+        last_tab_capture: None,
+        active_game,
+        pending_outcome: None,
+        word_outcome_streak: None,
+        suspend_probe: (Instant::now(), Utc::now()),
+        ocr_stability: detect::stability::FrameStability::default(),
+        poll_ticks_skipped: 0,
+        end_reel_wake_until: None,
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2253,23 +2396,7 @@ async fn run_loop(ctx: Arc<DaemonCtx>) -> anyhow::Result<()> {
     // value instead of a fistful of parallel `let mut`s (QUAL-004). Field
     // meanings/rationale are documented on `SessionState`. `active_game` is
     // recovered from the previous run when the daemon restarted mid-game.
-    let mut st = SessionState {
-        capture_count: 0,
-        last_game_open: None,
-        last_tab_capture: None,
-        active_game: recover_active_game(data_dir),
-        pending_outcome: None,
-        word_outcome_streak: None,
-        suspend_probe: (Instant::now(), Utc::now()),
-        ocr_stability: detect::stability::FrameStability::default(),
-        poll_ticks_skipped: 0,
-        end_reel_wake_until: None,
-    };
-    // `opened_at` is the instant the session opened, which is also when
-    // `last_game_open` was set. Restoring it keeps the debounce across a
-    // restart so the first ban or select does not split a session that is
-    // still inside it.
-    st.last_game_open = st.active_game.as_ref().map(|g| g.opened_at);
+    let mut st = startup_session(data_dir);
     if let Some(g) = &st.active_game {
         tracing::info!(
             session_id = %g.session_id,
@@ -2647,9 +2774,13 @@ async fn run_loop(ctx: Arc<DaemonCtx>) -> anyhow::Result<()> {
                     );
                     st.pending_outcome = None;
                     clear_cadence_wakes(&mut st);
-                    st.last_game_open = None;
                     st.last_tab_capture = None;
-                    st.active_game = recover_active_game(data_dir);
+                    // Same recovery as startup: `opened_at` is when
+                    // `last_game_open` was set, so a ban right after resume
+                    // stays inside the debounce.
+                    let recovered = startup_session(data_dir);
+                    st.last_game_open = recovered.last_game_open;
+                    st.active_game = recovered.active_game;
                     if st.active_game.is_none() {
                         persist_active_game(data_dir, None);
                     }
@@ -2965,10 +3096,8 @@ async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<
     let collect_portraits = ctx.collect_portraits;
     let data_dir: &std::path::Path = &ctx.data_dir;
     let session_id: &str = &req.session_id;
-    let create_session = req.create_session;
     let game_outcome = req.game_outcome;
     let session_map = req.session_map.as_deref();
-    let map_candidates: &[String] = &req.map_candidates;
     let allow_banner_recovery = req.allow_banner_recovery;
 
     tracing::info!("Tab detected — capturing screen (hold Tab to keep scoreboard visible)");
@@ -3008,6 +3137,7 @@ async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<
                 recorded: false,
                 outcome,
                 map: None,
+                map_source: None,
                 session_id: session_id.to_string(),
                 split: false,
                 armed_reset: false,
@@ -3105,6 +3235,7 @@ async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<
             recorded: false,
             outcome,
             map: None,
+            map_source: None,
             session_id: session_id.to_string(),
             split: false,
             armed_reset: false,
@@ -3266,6 +3397,7 @@ async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<
                 recorded: false,
                 outcome: game_outcome,
                 map: None,
+                map_source: None,
                 session_id: session_id.to_string(),
                 split: false,
                 armed_reset: plan.defer,
@@ -3286,15 +3418,25 @@ async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<
                 held_at: plan.defer.then_some(captured_at),
             });
         }
-        let split = plan.split;
-        outcome = plan.stored_outcome;
-        outcome_label = outcome.to_string();
+        let staged = stage_capture(
+            &req,
+            &plan,
+            raw_counters,
+            suspect,
+            map_from_panel.as_deref(),
+            &parsed.map_name,
+            captured_at,
+        );
+        let split = staged.split;
+        outcome = staged.outcome;
+        outcome_label = staged.outcome_label.clone();
         parsed.outcome = outcome_label.clone();
-        let (target_session, mut target_create) = if split {
-            let fresh = format!("{:016x}", rand_id());
+        let target_session = staged.target_session.clone();
+        let mut target_create = staged.create_session;
+        if split {
             tracing::info!(
                 old_session = %session_id,
-                new_session = %fresh,
+                new_session = %target_session,
                 elims = parsed.elims,
                 deaths = parsed.deaths,
                 damage = parsed.damage,
@@ -3302,21 +3444,8 @@ async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<
                 reset_streak = plan.reset_streak,
                 "player stats regressed — previous game never closed; splitting into a new session"
             );
-            (fresh, true)
-        } else {
-            (session_id.to_string(), create_session)
-        };
-
-        // Per-cell capture gate: within a game, cumulative counters never
-        // decrease and never jump beyond a plausible rate. Hold a single cell
-        // that violates that (misread collapse, or ghost-9 inflation) to its
-        // last accepted value while keeping every genuinely-advancing cell.
-        // Skipped on a split — a real new game legitimately resets every
-        // counter, so the raw read seeds the fresh session's gate state.
-        // A session a start screen just opened has no board of its own.
-        // Latching this row to the previous game would store the old counters.
-        let gate_prev = gate_prev_for_store(req.prev_gate, req.awaiting_first_board);
-        let gate = capture_gate::apply_gate(gate_prev, raw_counters, suspect, split);
+        }
+        let gate = &staged.gate;
         // CG-4 B3: always surface the per-column suspect mask on the accept
         // path so a latched inflation can be diagnosed as flagged vs clean
         // (the 07-22 HLG 22994 case was undiagnosable without this).
@@ -3362,18 +3491,7 @@ async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<
         parsed.healing = gate.accepted.healing;
         parsed.mitigation = gate.accepted.mitigation;
 
-        parsed.map_name = if split {
-            // The old session's confirmed map and vote candidates belong to
-            // the previous game — resolve this frame's reads on their own.
-            resolve_map(None, map_from_panel.as_deref(), &parsed.map_name, &[])
-        } else {
-            resolve_map(
-                session_map,
-                map_from_panel.as_deref(),
-                &parsed.map_name,
-                map_candidates,
-            )
-        };
+        parsed.map_name = staged.map_name.clone();
 
         // The session is owned by the active game (map-vote → accolade). The
         // first capture creates the session row; later captures (including hero
@@ -3381,13 +3499,10 @@ async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<
         parsed.session_id = target_session.clone();
         // A board deferred on this same session is dropped when the capture
         // stays. A split, or a board carried in from the session that closed,
-        // is written onto the session this row lands on.
-        if let Some(counters) =
-            carried_counters_to_write(req.carried_deferred, split, req.deferred_imported)
-        {
-            let played_at = req
-                .carried_deferred_at
-                .unwrap_or(captured_at - chrono::Duration::seconds(1));
+        // is written onto the session this row lands on. The decision is
+        // [`stage_capture`], shared with the night harness.
+        if let Some(counters) = staged.carried {
+            let played_at = staged.carried_at;
             if target_create {
                 let session = storage::MatchSession {
                     session_id: target_session.clone(),
@@ -3409,8 +3524,8 @@ async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<
                     .context("session create failed")?;
                 target_create = false;
             }
-            let hero = req
-                .carried_deferred_hero
+            let hero = staged
+                .carried_hero
                 .clone()
                 .unwrap_or_else(|| parsed.hero.clone());
             store_held_board(
@@ -3460,7 +3575,7 @@ async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<
             deaths = parsed.deaths,
             "parsed scoreboard"
         );
-        let recorded_map = (!parsed.map_name.is_empty()).then(|| parsed.map_name.clone());
+        let recorded_map = staged.recorded_map.clone();
         storage::append_match_log(data_dir, &parsed);
         store
             .insert_match(parsed)
@@ -3511,6 +3626,7 @@ async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<
             recorded: true,
             outcome,
             map: recorded_map,
+            map_source: staged.map_source,
             session_id: target_session,
             split,
             armed_reset: false,
@@ -3524,7 +3640,7 @@ async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<
             career_panel: matches!(source, HeroSource::CareerPanel),
             held_counters: None,
             held_hero: None,
-            gate_state: Some(gate.state),
+            gate_state: Some(staged.gate.state),
             hero_auth,
             seal: plan.seal,
             close_reason: plan.close_reason,
@@ -3543,6 +3659,7 @@ async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<
             recorded: false,
             outcome,
             map: None,
+            map_source: None,
             session_id: session_id.to_string(),
             split: false,
             armed_reset: false,
@@ -4231,6 +4348,7 @@ mod tests {
             session_id: "test".into(),
             outcome,
             map: None,
+            map_source: None,
             map_candidates: Vec::new(),
             session_created: true,
             outcome_recorded_at: recorded_secs_ago.map(|s| now - Duration::from_secs(s)),
@@ -4698,6 +4816,7 @@ mod tests {
         );
         g.session_created = true;
         g.map = Some("Oasis".into());
+        g.map_source = Some(boundary::MapSource::TopBar);
         let gate_state = GateState {
             accepted: Counters {
                 elims: 12,
@@ -4741,6 +4860,7 @@ mod tests {
         assert_eq!(r.session_id, "abc123");
         assert_eq!(r.outcome, detect::MatchOutcome::Unknown);
         assert_eq!(r.map.as_deref(), Some("Oasis"));
+        assert_eq!(r.map_source, Some(boundary::MapSource::TopBar));
         assert_eq!(
             r.map_candidates,
             vec!["Oasis".to_string(), "Busan".to_string()]
@@ -5072,6 +5192,7 @@ mod tests {
             session_id: "old".into(),
             outcome: detect::MatchOutcome::Unknown,
             map: None,
+            map_source: None,
             map_candidates: Vec::new(),
             session_created: true,
             opened_at: Utc::now() - chrono::Duration::hours(9),
@@ -5103,6 +5224,81 @@ mod tests {
         assert!(
             recover_active_game(dir.path()).is_none(),
             "yesterday's unfinished game must not swallow today's captures"
+        );
+    }
+
+    #[test]
+    fn awaiting_first_board_does_not_latch_a_carried_gate() {
+        let carried = (GateState::default(), Duration::from_secs(40));
+        assert!(
+            gate_prev_for_store(Some(carried), true).is_none(),
+            "a session with no board of its own does not latch the previous game"
+        );
+        let own = (GateState::default(), Duration::from_secs(40));
+        assert!(gate_prev_for_store(Some(own), false).is_some());
+    }
+
+    #[test]
+    fn a_recovered_awaiting_session_keeps_the_debounce() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut g = ActiveGame::open_now(
+            "await".into(),
+            detect::MatchOutcome::Unknown,
+            vec!["Busan".into()],
+        );
+        g.awaiting_first_board = true;
+        persist_active_game(dir.path(), Some(&g));
+        let st = startup_session(dir.path());
+        let opened = st
+            .last_game_open
+            .expect("startup restores the debounce from opened_at");
+        assert_eq!(opened, st.active_game.as_ref().unwrap().opened_at);
+        let screen = boundary::StartScreen::HeroBan;
+        let debounce = Duration::from_secs(120);
+        let now = opened + Duration::from_secs(30);
+        assert!(
+            start_screen_blocked(
+                st.active_game.as_ref(),
+                Some(opened),
+                now,
+                debounce,
+                &screen
+            ),
+            "a ban inside the restored debounce does not split the awaiting session"
+        );
+        let mut resumed = startup_session(dir.path());
+        resumed.last_game_open = None;
+        let recovered = startup_session(dir.path());
+        resumed.last_game_open = recovered.last_game_open;
+        resumed.active_game = recovered.active_game;
+        assert!(start_screen_blocked(
+            resumed.active_game.as_ref(),
+            resumed.last_game_open,
+            now,
+            debounce,
+            &screen,
+        ));
+        let game = resumed.active_game.as_ref().unwrap();
+        let decision = boundary::decide_poll(&boundary::PollInput {
+            outcome: game.outcome,
+            result: game.result_mark,
+            pending_boundary: game.pending_boundary,
+            awaiting_first_board: game.awaiting_first_board,
+            has_board: game.gate.is_some(),
+            reset_streak: game.reset_streak,
+            map: game.map.as_deref(),
+            hero: game.hero_auth.accepted_hero.as_deref(),
+            signal: None,
+            signal_confirmed: false,
+            accolade_map: None,
+            start_screen: Some(screen),
+            block_map_vote: true,
+            deferred: game.deferred.is_some(),
+            now,
+        });
+        assert!(
+            !matches!(decision, boundary::PollDecision::Open(_)),
+            "the recovered session stays through the ban"
         );
     }
 
@@ -5805,6 +6001,7 @@ mod tests {
                 self.now,
             );
             g.map = Some(map.to_string());
+            g.map_source = Some(boundary::MapSource::TopBar);
             g.hero_auth.accepted_hero = Some(hero.to_string());
             self.st.active_game = Some(g);
             self.st.last_game_open = Some(self.now);
@@ -5869,15 +6066,24 @@ mod tests {
             }
         }
 
-        async fn word_tick(
-            &mut self,
-            outcome: detect::MatchOutcome,
-            confirmed: bool,
-            map: Option<&str>,
-        ) {
+        /// One result-word tick. Confirmation is the second agreeing read
+        /// inside the window, the same rule [`poll_debug_hit`] uses.
+        async fn word_tick(&mut self, outcome: detect::MatchOutcome, map: Option<&str>) {
             let Some(g) = self.st.active_game.as_ref() else {
                 return;
             };
+            let prior = self
+                .st
+                .word_outcome_streak
+                .map(|(prev, at)| (prev, self.now.saturating_duration_since(at)));
+            let confirmed = matches!(
+                poll_debug_hit(
+                    Some((outcome, detect::match_end::OutcomeSource::ResultWord)),
+                    prior,
+                    OUTCOME_CONFIRM_WINDOW,
+                ),
+                Some((PollDebugHit::Confirm, _))
+            );
             let decision = boundary::decide_poll(&boundary::PollInput {
                 outcome: g.outcome,
                 result: g.result_mark,
@@ -5903,23 +6109,13 @@ mod tests {
                 self.now,
             )
             .await;
+            self.st.word_outcome_streak = Some((outcome, self.now));
         }
 
         /// A result word held across several ticks. The second agreeing tick confirms.
         async fn word(&mut self, outcome: detect::MatchOutcome, map: Option<&str>) {
             for i in 0..NIGHT_TICKS {
-                let prior = self
-                    .st
-                    .word_outcome_streak
-                    .map(|(prev, at)| (prev, self.now.saturating_duration_since(at)));
-                let hit = poll_debug_hit(
-                    Some((outcome, detect::match_end::OutcomeSource::ResultWord)),
-                    prior,
-                    OUTCOME_CONFIRM_WINDOW,
-                );
-                let confirmed = matches!(hit, Some((PollDebugHit::Confirm, _)));
-                self.word_tick(outcome, confirmed, map).await;
-                self.st.word_outcome_streak = Some((outcome, self.now));
+                self.word_tick(outcome, map).await;
                 if i + 1 != NIGHT_TICKS {
                     self.advance(night_tick());
                 }
@@ -5928,8 +6124,40 @@ mod tests {
 
         /// One unconfirmed read. Production has not seen the agreeing tick yet.
         async fn word_once(&mut self, outcome: detect::MatchOutcome) {
-            self.word_tick(outcome, false, None).await;
-            self.st.word_outcome_streak = Some((outcome, self.now));
+            self.word_tick(outcome, None).await;
+        }
+
+        /// A banner confirms on one tick and has no accolade map. Production
+        /// reads the map crop only on result-word ticks.
+        async fn banner(&mut self, outcome: detect::MatchOutcome) {
+            let Some(g) = self.st.active_game.as_ref() else {
+                return;
+            };
+            let decision = boundary::decide_poll(&boundary::PollInput {
+                outcome: g.outcome,
+                result: g.result_mark,
+                pending_boundary: g.pending_boundary,
+                awaiting_first_board: g.awaiting_first_board,
+                has_board: g.gate.is_some(),
+                reset_streak: g.reset_streak,
+                map: g.map.as_deref(),
+                hero: g.hero_auth.accepted_hero.as_deref(),
+                signal: Some(outcome),
+                signal_confirmed: true,
+                accolade_map: None,
+                start_screen: None,
+                block_map_vote: false,
+                deferred: g.deferred.is_some(),
+                now: self.now,
+            });
+            apply_poll_decision(
+                &mut self.st,
+                &self.store,
+                self.dir.path(),
+                decision,
+                self.now,
+            )
+            .await;
         }
 
         async fn tab_once(
@@ -5940,26 +6168,62 @@ mod tests {
             map: Option<&str>,
             suspect: [bool; stat_tracker::capture_gate::GATE_COLS],
         ) {
-            self.tab_read(cur, hero, row, map, suspect, detect::MatchOutcome::Unknown)
-                .await;
+            self.tab_read(
+                cur,
+                hero,
+                row,
+                (map, map.unwrap_or("")),
+                suspect,
+                detect::MatchOutcome::Unknown,
+            )
+            .await;
         }
 
-        /// One Tab through the production request, plan, gate, and report.
-        /// `frame` is the header on this board. Unknown is a board with none.
+        /// The map came from full-board text. There is no top-bar label.
+        async fn tab_text(
+            &mut self,
+            cur: Counters,
+            hero: &str,
+            row: Option<u32>,
+            text_map: &str,
+            suspect: [bool; stat_tracker::capture_gate::GATE_COLS],
+        ) {
+            self.tab_read(
+                cur,
+                hero,
+                row,
+                (None, text_map),
+                suspect,
+                detect::MatchOutcome::Unknown,
+            )
+            .await;
+        }
+
+        /// One Tab through the production request, plan, [`stage_capture`], and report.
+        /// `maps` is the top-bar label and the full-board fallback. `frame` is
+        /// the header on this board. Unknown is a board with none.
         async fn tab_read(
             &mut self,
             cur: Counters,
             hero: &str,
             row: Option<u32>,
-            map: Option<&str>,
+            maps: (Option<&str>, &str),
             suspect: [bool; stat_tracker::capture_gate::GATE_COLS],
             frame: detect::MatchOutcome,
         ) {
+            let (panel, text_map) = maps;
             let opened =
                 open_fresh_if_tab_starts_one(&mut self.st, &self.store, self.dir.path(), self.now)
                     .await;
             let req = build_capture_request(self.game(), opened, self.now);
-            let parsed_map = map.unwrap_or("");
+            let (hero_resolved, source, hero_auth) = hero_auth::resolve_hero(
+                Some(hero),
+                None,
+                hero,
+                &req.hero_auth,
+                parse::canonical_hero,
+            );
+            let career_panel = matches!(source, HeroSource::CareerPanel);
             let plan = plan_from_board(
                 &req,
                 &BoardFacts {
@@ -5967,40 +6231,37 @@ mod tests {
                     suspect,
                     row_counts: row.is_some(),
                     row_id: row,
-                    hero,
-                    map_from_panel: map,
-                    parsed_map,
+                    hero: &hero_resolved,
+                    map_from_panel: panel,
+                    parsed_map: text_map,
                     frame_outcome: frame,
                 },
             );
-            let gate_prev = gate_prev_for_store(req.prev_gate, req.awaiting_first_board);
-            let gated = capture_gate::apply_gate(gate_prev, cur, suspect, plan.split);
-            let carried =
-                carried_counters_to_write(req.carried_deferred, plan.split, req.deferred_imported);
             let sid = req.session_id.clone();
-            if plan.defer {
+            if plan.skip_store {
                 let report = CaptureReport {
                     recorded: false,
                     outcome: plan.stored_outcome,
                     map: None,
+                    map_source: None,
                     session_id: sid.clone(),
                     split: false,
-                    armed_reset: true,
-                    ignore_row: false,
+                    armed_reset: plan.defer,
+                    ignore_row: plan.ignore_row,
                     reset_streak: plan.reset_streak,
                     reset_baseline: plan.reset_baseline,
                     baseline_row: plan.baseline_row,
                     refresh_baseline: false,
                     clear_hint: false,
                     count_progress: false,
-                    career_panel: false,
+                    career_panel,
                     held_counters: plan.deferred_counters,
-                    held_hero: Some(hero.to_string()),
+                    held_hero: plan.defer.then(|| hero_resolved.clone()),
                     gate_state: None,
-                    hero_auth: req.hero_auth.clone(),
+                    hero_auth,
                     seal: None,
                     close_reason: None,
-                    held_at: Some(self.wall),
+                    held_at: plan.defer.then_some(self.wall),
                 };
                 apply_capture_report(
                     &mut self.st,
@@ -6013,64 +6274,58 @@ mod tests {
                 .await;
                 return;
             }
-            if plan.skip_store {
-                return;
-            }
-            let map_name = {
-                let resolved = if plan.split {
-                    resolve_map(None, map, parsed_map, &[])
-                } else {
-                    resolve_map(
-                        req.session_map.as_deref(),
-                        map,
-                        parsed_map,
-                        &req.map_candidates,
-                    )
-                };
-                if resolved.is_empty() {
-                    "Unknown".to_string()
-                } else {
-                    resolved
-                }
-            };
-            let outcome = plan.stored_outcome;
-            let outcome_label = outcome.to_string();
-            let target = if plan.split {
-                format!("{:016x}", rand_id())
-            } else {
-                sid.clone()
-            };
-            let create = plan.split || req.create_session;
-            if create {
-                self.ensure_row(&target, hero, &map_name, &outcome_label)
-                    .await;
-            }
-            if let Some(held) = carried {
-                let hero_held = req
-                    .carried_deferred_hero
+            let staged = stage_capture(&req, &plan, cur, suspect, panel, text_map, self.wall);
+            let mut create = staged.create_session;
+            if let Some(held) = staged.carried {
+                let hero_held = staged
+                    .carried_hero
                     .clone()
-                    .unwrap_or_else(|| hero.to_string());
-                let at = req
-                    .carried_deferred_at
-                    .unwrap_or(self.wall - chrono::Duration::seconds(1));
-                self.write_board(&target, &hero_held, &map_name, &outcome_label, held, at)
+                    .unwrap_or_else(|| hero_resolved.clone());
+                if create {
+                    self.ensure_row(
+                        &staged.target_session,
+                        &hero_held,
+                        &staged.map_name,
+                        &staged.outcome_label,
+                    )
                     .await;
+                    create = false;
+                }
+                self.write_board(
+                    &staged.target_session,
+                    &hero_held,
+                    &staged.map_name,
+                    &staged.outcome_label,
+                    held,
+                    staged.carried_at,
+                )
+                .await;
+            }
+            if create {
+                self.ensure_row(
+                    &staged.target_session,
+                    &hero_resolved,
+                    &staged.map_name,
+                    &staged.outcome_label,
+                )
+                .await;
             }
             self.write_board(
-                &target,
-                hero,
-                &map_name,
-                &outcome_label,
-                gated.state.accepted,
+                &staged.target_session,
+                &hero_resolved,
+                &staged.map_name,
+                &staged.outcome_label,
+                staged.gate.accepted,
                 self.wall,
             )
             .await;
             let report = CaptureReport {
                 recorded: true,
-                outcome,
-                map: Some(map_name),
-                session_id: target,
-                split: plan.split,
+                outcome: staged.outcome,
+                map: staged.recorded_map,
+                map_source: staged.map_source,
+                session_id: staged.target_session,
+                split: staged.split,
                 armed_reset: false,
                 ignore_row: plan.ignore_row,
                 reset_streak: plan.reset_streak,
@@ -6079,14 +6334,11 @@ mod tests {
                 refresh_baseline: plan.refresh_baseline,
                 clear_hint: plan.clear_hint,
                 count_progress: plan.count_progress,
-                career_panel: false,
+                career_panel,
                 held_counters: None,
                 held_hero: None,
-                gate_state: Some(gated.state),
-                hero_auth: HeroAuthState {
-                    accepted_hero: Some(hero.to_string()),
-                    ..HeroAuthState::default()
-                },
+                gate_state: Some(staged.gate.state),
+                hero_auth,
                 seal: plan.seal,
                 close_reason: plan.close_reason,
                 held_at: None,
@@ -6102,9 +6354,6 @@ mod tests {
             .await;
         }
 
-        /// The same scoreboard captured on several ticks, the way a held Tab
-        /// is sampled. A fresh board uses [`Self::tab_once`]: a second sample
-        /// inside 45 seconds is not a second reset signal.
         async fn ensure_row(&self, id: &str, hero: &str, map: &str, outcome: &str) {
             self.store
                 .create_session(&storage::MatchSession {
@@ -6144,6 +6393,9 @@ mod tests {
             .unwrap();
         }
 
+        /// The same scoreboard captured on several ticks, the way a held Tab
+        /// is sampled. A fresh board uses [`Self::tab_once`]: a second sample
+        /// inside 45 seconds is not a second reset signal.
         async fn tab_held(
             &mut self,
             cur: Counters,
@@ -6987,9 +7239,7 @@ mod tests {
         assert_eq!(night.elims(&id).await, vec![14]);
     }
 
-    #[tokio::test]
-    async fn an_armed_different_map_end_screen_seals_the_old_hint() {
-        let mut night = Night::new().await;
+    async fn arm_busan_defeat(night: &mut Night) -> String {
         night.begin_on("Busan", "Zenyatta");
         night
             .tab_once(
@@ -7004,13 +7254,23 @@ mod tests {
         night.word_once(detect::MatchOutcome::Defeat).await;
         night.screen(boundary::StartScreen::HeroSelect).await;
         assert!(night.game().pending_boundary);
-        let busan = night.id();
+        night.id()
+    }
+
+    #[tokio::test]
+    async fn an_armed_different_map_end_screen_seals_the_old_hint() {
+        let mut night = Night::new().await;
+        let busan = arm_busan_defeat(&mut night).await;
         night.advance(Duration::from_secs(20));
+        // Two agreeing word reads, the way the poller confirms. The first
+        // must not replace Busan's hint.
         night
-            .word_tick(detect::MatchOutcome::Victory, true, Some("Junkertown"))
+            .word(detect::MatchOutcome::Victory, Some("Junkertown"))
             .await;
         assert_ne!(night.id(), busan);
         assert_eq!(night.game().outcome, detect::MatchOutcome::Victory);
+        assert_eq!(night.game().map.as_deref(), Some("Junkertown"));
+        assert_eq!(night.game().map_source, Some(boundary::MapSource::Accolade));
         let snaps = night.store.get_session_snapshots(&busan).await.unwrap();
         assert!(
             snaps.iter().all(|row| row.outcome == "defeat"),
@@ -7019,6 +7279,303 @@ mod tests {
                 .iter()
                 .map(|row| row.outcome.clone())
                 .collect::<Vec<_>>()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_single_different_map_word_does_not_replace_the_hint_before_a_vote() {
+        let mut night = Night::new().await;
+        let busan = arm_busan_defeat(&mut night).await;
+        night
+            .word_tick(detect::MatchOutcome::Victory, Some("Junkertown"))
+            .await;
+        assert_eq!(night.id(), busan);
+        assert_eq!(
+            night.game().result_mark.map(|mark| mark.outcome),
+            Some(detect::MatchOutcome::Defeat),
+            "one unconfirmed word on the next map leaves A's hint"
+        );
+        night.advance(Duration::from_secs(150));
+        night
+            .screen(boundary::StartScreen::MapVote {
+                candidates: vec!["Junkertown".into(), "Ilios".into()],
+            })
+            .await;
+        assert_ne!(night.id(), busan);
+        assert_eq!(night.game().outcome, detect::MatchOutcome::Unknown);
+        let snaps = night.store.get_session_snapshots(&busan).await.unwrap();
+        assert!(
+            snaps.iter().all(|row| row.outcome == "defeat"),
+            "C's vote seals A's defeat, got {:?}",
+            snaps
+                .iter()
+                .map(|row| row.outcome.clone())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[tokio::test]
+    async fn an_armed_banner_has_no_map_and_seals_onto_the_open_session() {
+        let mut night = Night::new().await;
+        let busan = arm_busan_defeat(&mut night).await;
+        night.banner(detect::MatchOutcome::Victory).await;
+        assert_eq!(night.id(), busan);
+        assert_eq!(
+            night.game().outcome,
+            detect::MatchOutcome::Victory,
+            "a banner carries no accolade map, so it still seals onto A"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_different_map_inside_the_gap_stays_one_game() {
+        let mut night = Night::new().await;
+        night.begin_on("Busan", "Zenyatta");
+        night
+            .tab_once(
+                night_counters(14, 22, 6, 2400, 9800, 400),
+                "Zenyatta",
+                Some(2),
+                Some("Busan"),
+                NIGHT_CLEAN,
+            )
+            .await;
+        night.word_once(detect::MatchOutcome::Defeat).await;
+        let id = night.id();
+        night.advance(Duration::from_secs(60));
+        night
+            .tab_once(
+                night_counters(16, 23, 7, 2800, 10000, 500),
+                "Zenyatta",
+                Some(2),
+                Some("Junkertown"),
+                NIGHT_CLEAN,
+            )
+            .await;
+        assert_eq!(night.id(), id, "inside 120s a different top bar stays");
+    }
+
+    #[tokio::test]
+    async fn a_same_map_tab_after_the_gap_stays_one_game() {
+        let mut night = Night::new().await;
+        night.begin_on("Busan", "Zenyatta");
+        night
+            .tab_once(
+                night_counters(14, 22, 6, 2400, 9800, 400),
+                "Zenyatta",
+                Some(2),
+                Some("Busan"),
+                NIGHT_CLEAN,
+            )
+            .await;
+        night.word_once(detect::MatchOutcome::Defeat).await;
+        let id = night.id();
+        night.advance(Duration::from_secs(150));
+        night
+            .tab_once(
+                night_counters(16, 23, 7, 2800, 10000, 500),
+                "Zenyatta",
+                Some(2),
+                Some("Busan"),
+                NIGHT_CLEAN,
+            )
+            .await;
+        assert_eq!(night.id(), id);
+    }
+
+    #[tokio::test]
+    async fn a_text_fallback_map_does_not_split_on_a_later_top_bar() {
+        let mut night = Night::new().await;
+        let mut g = ActiveGame::open_at(
+            format!("{:016x}", rand_id()),
+            detect::MatchOutcome::Unknown,
+            Vec::new(),
+            night.now,
+        );
+        g.hero_auth.accepted_hero = Some("Zenyatta".into());
+        night.st.active_game = Some(g);
+        night.st.last_game_open = Some(night.now);
+        night
+            .tab_text(
+                night_counters(14, 22, 6, 2400, 9800, 400),
+                "Zenyatta",
+                Some(2),
+                "Dorado",
+                NIGHT_CLEAN,
+            )
+            .await;
+        assert_eq!(night.game().map.as_deref(), Some("Dorado"));
+        assert_eq!(
+            night.game().map_source,
+            Some(boundary::MapSource::TextFallback)
+        );
+        night.word_once(detect::MatchOutcome::Defeat).await;
+        let id = night.id();
+        night.advance(Duration::from_secs(150));
+        night
+            .tab_once(
+                night_counters(16, 23, 7, 2800, 10000, 500),
+                "Zenyatta",
+                Some(2),
+                Some("Busan"),
+                NIGHT_CLEAN,
+            )
+            .await;
+        assert_eq!(
+            night.id(),
+            id,
+            "a text-fallback map does not make the post-match Tab a new game"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unidentified_row_leaves_the_held_board_for_the_split() {
+        let mut night = Night::new().await;
+        night.begin_on("Busan", "Zenyatta");
+        night
+            .tab_once(
+                night_counters(14, 22, 6, 2400, 9800, 400),
+                "Zenyatta",
+                Some(2),
+                Some("Busan"),
+                NIGHT_CLEAN,
+            )
+            .await;
+        night.advance(Duration::from_secs(60));
+        night
+            .tab_once(
+                night_counters(2, 1, 0, 200, 40, 80),
+                "Zenyatta",
+                Some(2),
+                Some("Busan"),
+                NIGHT_CLEAN,
+            )
+            .await;
+        assert_eq!(night.game().deferred.map(|c| c.elims), Some(2));
+        assert!(night.game().reset_streak >= 1);
+        night.advance(Duration::from_secs(10));
+        night
+            .tab_once(
+                night_counters(9, 4, 3, 1500, 400, 200),
+                "Zenyatta",
+                None,
+                Some("Busan"),
+                NIGHT_CLEAN,
+            )
+            .await;
+        assert_eq!(
+            night.game().deferred.map(|c| c.elims),
+            Some(2),
+            "an unidentified row leaves the held board"
+        );
+        assert!(night.game().reset_streak >= 1);
+        let finished = night.id();
+        night.advance(Duration::from_secs(60));
+        night
+            .tab_once(
+                night_counters(1, 0, 0, 80, 10, 20),
+                "Zenyatta",
+                Some(2),
+                Some("Busan"),
+                NIGHT_CLEAN,
+            )
+            .await;
+        assert_ne!(night.id(), finished);
+        let elims = night.elims(&night.id()).await;
+        assert!(
+            elims.contains(&2),
+            "the split writes the held board onto the new session, got {elims:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_held_board_is_written_on_a_tab_opened_session() {
+        let mut night = Night::new().await;
+        night.begin_on("Busan", "Zenyatta");
+        night
+            .tab_once(
+                night_counters(14, 22, 6, 2400, 9800, 400),
+                "Zenyatta",
+                Some(2),
+                Some("Busan"),
+                NIGHT_CLEAN,
+            )
+            .await;
+        night
+            .word(detect::MatchOutcome::Victory, Some("Busan"))
+            .await;
+        night.advance(Duration::from_secs(60));
+        night
+            .tab_once(
+                night_counters(2, 1, 0, 200, 40, 80),
+                "Zenyatta",
+                Some(2),
+                Some("Busan"),
+                NIGHT_CLEAN,
+            )
+            .await;
+        assert!(night.game().deferred.is_some());
+        let finished = night.id();
+        night.advance(Duration::from_secs(80));
+        night
+            .tab_once(
+                night_counters(4, 2, 1, 900, 100, 200),
+                "Ana",
+                Some(0),
+                Some("Ilios"),
+                NIGHT_CLEAN,
+            )
+            .await;
+        assert_ne!(night.id(), finished);
+        let elims = night.elims(&night.id()).await;
+        assert!(
+            elims.contains(&2),
+            "grace opens a session and writes the held board, got {elims:?}"
+        );
+        assert!(!night.elims(&finished).await.contains(&2));
+    }
+
+    #[tokio::test]
+    async fn a_rejected_frame_adopts_the_outcome_and_clears_the_arm() {
+        let mut night = Night::new().await;
+        let busan = arm_busan_defeat(&mut night).await;
+        let report = CaptureReport {
+            recorded: false,
+            outcome: detect::MatchOutcome::Victory,
+            map: None,
+            map_source: None,
+            session_id: busan.clone(),
+            split: false,
+            armed_reset: false,
+            ignore_row: true,
+            reset_streak: night.game().reset_streak,
+            reset_baseline: night.game().reset_baseline,
+            baseline_row: night.game().baseline_row,
+            refresh_baseline: false,
+            clear_hint: false,
+            count_progress: false,
+            career_panel: false,
+            held_counters: None,
+            held_hero: None,
+            gate_state: None,
+            hero_auth: night.game().hero_auth.clone(),
+            seal: None,
+            close_reason: None,
+            held_at: None,
+        };
+        apply_capture_report(
+            &mut night.st,
+            &night.store,
+            night.dir.path(),
+            &busan,
+            Ok(report),
+            night.now,
+        )
+        .await;
+        assert_eq!(night.game().outcome, detect::MatchOutcome::Victory);
+        assert!(
+            !night.game().pending_boundary,
+            "adopting the rejected frame's outcome clears the armed boundary"
         );
     }
 

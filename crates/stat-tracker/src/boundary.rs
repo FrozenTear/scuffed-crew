@@ -7,7 +7,9 @@
 //! 23/5/9, 6792/1463/3006) must not land on the Busan session.
 //!
 //! A hint stays sealable until a second board with progressed stats is
-//! accepted after it, or until a reset, a gap, or an unblocked map vote or
+//! accepted after it, or one progressed board after a hero select has armed
+//! a boundary, or until a reset, a gap, a Tab that names a different map,
+//! an armed end screen on a different map, or an unblocked map vote or
 //! hero ban seals it onto this session. The first progressed board keeps
 //! the hint. "Progressed" is measured from the reset baseline: a counter
 //! moved forward, the totals are not the same, the frame is not a decided
@@ -55,19 +57,19 @@
 //! |---|---|---|
 //! | Idle, LiveMatch | confirmed word | Seal. Grace starts now. |
 //! | Idle, LiveMatch | unconfirmed word | Remember the hint. Enter PostResultStreak. |
-//! | LiveMatch | map vote, not blocked | Split. No seal. The same-map guard and the debounce are the caller's block. |
+//! | Idle, LiveMatch | map vote, not blocked | Split. No seal. The same-map-plus-hero guard and the debounce are the caller's block. |
 //! | Idle, LiveMatch | hero ban, no deferred board | Split at once. No seal. |
 //! | Idle, LiveMatch | hero ban after a deferred board | Ignore. One misread plus a ban is not a split. |
 //! | Idle, LiveMatch | hero select, no deferred board | Prime the reset streak. Do not split. |
 //! | Idle, LiveMatch | hero select after a deferred board | Ignore. |
 //! | Idle | scoreboard | Append. There is no mature board to reset from. |
-//! | LiveMatch | fresh-match board, streak already primed | Split. Seal a hint when one is open. New outcome is Unknown. |
+//! | LiveMatch | fresh-match board, streak already primed | Split. New outcome is Unknown. LiveMatch has no hint to seal. |
 //! | LiveMatch | fresh-match board, streak clear | Defer the first. Split on the second fresh board. |
-//! | LiveMatch | other scoreboard | Append. An unidentified or implausible row leaves a held board and the streak. A plausible same-row board refreshes the baseline. |
+//! | LiveMatch | other scoreboard | Append. An unidentified or implausible row leaves a held board and the streak. A plausible same-row board refreshes the baseline. A different row that is not fresh-shaped re-anchors it. |
 //! | Idle | 120s gap | Not applicable. Ignore. |
-//! | LiveMatch | 120s gap | Split. The new session keeps this frame's header. Same-map suppression is the caller's. |
+//! | LiveMatch | 120s gap | Split. The new session keeps this frame's header. The caller's guard is the same map plus the same hero. |
 //! | Idle | end screen, different map | Not applicable. Ignore. |
-//! | LiveMatch | end screen, different map, not armed | Seal, and adopt the map when this session has none. |
+//! | LiveMatch | end screen, different map, not armed | Seal. The session already has a map, which is what made this a different map. |
 //! | LiveMatch | end screen, different map, armed | Split. Seal the old hint. The new session takes the end-screen outcome. |
 //! | PostResultStreak | confirmed word | Seal that word. Do not split. Grace starts now. |
 //! | PostResultStreak | unconfirmed word | Newest word replaces the hint. Do not split. |
@@ -80,7 +82,7 @@
 //! | PostResultStreak | fresh-match board | Defer, then split on the next fresh board. The split seals the hint. An armed streak splits on this board. |
 //! | PostResultStreak | 120s gap | Split. Seal the hint. Keep this frame's header. |
 //! | PostResultStreak | end screen, different map, not armed | Seal the word. Do not split on the map. |
-//! | PostResultStreak | end screen, different map, armed | Split. Seal the old hint. The new session takes the end-screen outcome. A single unconfirmed word on the same map still replaces the hint. |
+//! | PostResultStreak | end screen, different map, armed | Split. Seal the old hint. The new session takes the end-screen outcome and the accolade map. An unconfirmed word replaces the hint only when its accolade map is missing or the same. While armed, an unconfirmed word on a different accolade map is ignored. A banner has no map, so a banner-only confirmation still seals onto this session. |
 //! | PostMatch | word | Ignore the outcome. Adopt an accolade map when this session has none. |
 //! | PostMatch | start screen, not blocked | Split. No seal. The new session is Unknown and has no grace. |
 //! | PostMatch | scoreboard, not a fresh-match reset | Append. A confirmed mark is not cleared. |
@@ -128,10 +130,15 @@ impl CloseReason {
 /// End-screen evidence kept on the session until a progressed board after it,
 /// or until a confirmed read replaces it.
 ///
-/// `confirmed == false` is a hint. It stays sealable until a progressed board
-/// clears it, or a reset, a gap, an armed different-map end screen, or a
-/// no-board start screen seals it. A newer unconfirmed word on the same map
-/// replaces it. An idle close does not seal it.
+/// `confirmed == false` is a hint. It stays sealable until a second
+/// progressed board, or one progressed board after an arm, clears it, or a
+/// reset, a gap, a different-map Tab, an armed different-map end screen, or
+/// a no-board start screen seals it. An unconfirmed word replaces it when
+/// the accolade map is missing or matches this session. While a boundary is
+/// armed, an unconfirmed word whose accolade map differs is left alone, so
+/// the confirming read seals this hint and the new session takes the new
+/// word. A banner carries no accolade map, so a banner-only confirmation
+/// still seals onto this session. An idle close does not seal the hint.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ResultMark {
     pub outcome: MatchOutcome,
@@ -166,11 +173,12 @@ pub enum StartScreen {
 pub struct PollInput<'a> {
     pub outcome: MatchOutcome,
     pub result: Option<ResultMark>,
-    /// A start screen after a board-followed hint is waiting for the next board.
+    /// A hero select after a board-followed hint is waiting for the next board.
+    /// A vote or a ban does not arm; only a hero select does.
     pub pending_boundary: bool,
     /// The session was opened by a start screen and has no board yet.
     pub awaiting_first_board: bool,
-    /// A scoreboard has been accepted. A start screen then arms instead of sealing.
+    /// A scoreboard has been accepted. A hero select then arms instead of sealing.
     pub has_board: bool,
     /// Consecutive fresh-match boards already deferred.
     pub reset_streak: u32,
@@ -229,7 +237,8 @@ pub enum PollDecision {
 }
 
 /// What one observation does. Every poll tick and every Tab goes through
-/// [`transition`]; the wrappers only pack and apply this.
+/// [`transition`], including a hinted Tab whose map differs. The wrappers
+/// only pack and apply this.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Effect {
     Ignore,
@@ -303,6 +312,28 @@ pub enum Obs<'a> {
         outcome: MatchOutcome,
         map: &'a str,
     },
+    /// A hinted session's Tab named a different map. [`plan_capture`] only
+    /// builds this after [`hinted_different_map`] accepts the pair.
+    HintedDifferentMap {
+        frame_outcome: MatchOutcome,
+    },
+}
+
+/// Where a stored map name was read. The board case of a different-map Tab
+/// trusts the top bar and the accolade. A full-board text fallback does not
+/// name the match.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum MapSource {
+    TopBar,
+    Accolade,
+    TextFallback,
+}
+
+impl MapSource {
+    /// A map this reliable may close the session when a later Tab disagrees.
+    pub fn trusted_for_board_split(self) -> bool {
+        matches!(self, Self::TopBar | Self::Accolade)
+    }
 }
 
 /// Whether `cur` is a real, sharp fall from the accepted counter: under half,
@@ -352,7 +383,9 @@ pub fn post_result_stat_reset(
 /// open session and the frame; tests call [`plan_capture`] with the same struct.
 pub struct CapturePlanInput<'a> {
     pub prev_gate: Option<&'a GateState>,
-    /// Frozen counters from before a pending fresh-match drop.
+    /// Counters the reset is measured from. Set when the first fresh-match
+    /// board is held. A refresh replaces them. An unidentified or implausible
+    /// row leaves them.
     pub baseline: Option<&'a GateState>,
     pub streak: u32,
     pub cur: Counters,
@@ -387,14 +420,18 @@ pub struct CapturePlanInput<'a> {
     pub baseline_age: Option<Duration>,
     /// Progressed boards already accepted since the current hint.
     pub progressed_boards: u8,
-    /// Start screen armed after a board-followed hint.
+    /// A hero select armed a boundary after a board-followed hint.
     pub pending_boundary: bool,
     /// Opened by a start screen; the first board has not been accepted.
     pub awaiting_first_board: bool,
     /// Map already stored on the session.
     pub session_map: Option<&'a str>,
+    /// Where `session_map` was read. The board case of a different-map split
+    /// runs only for [`MapSource::TopBar`] and [`MapSource::Accolade`].
+    pub session_map_source: Option<MapSource>,
     /// Map read on this Tab. A confident difference from `session_map` on a
-    /// hinted, board-less session seals the hint.
+    /// hinted session seals the hint: on the first board when the session
+    /// has none yet, and after the gap when the stored map is trusted.
     pub incoming_map: Option<&'a str>,
 }
 
@@ -436,17 +473,25 @@ fn named_map(map: Option<&str>) -> Option<&str> {
 
 /// A hinted session whose Tab names a different map is the next game.
 ///
-/// A session with no board of its own splits on that first board. A session
-/// that already has a board waits out the gap window, so a mid-match map
-/// misread stays. The same map does not split: a late Tab of this match
-/// names the map already stored.
+/// A session with no board of its own splits on that first board. Its map
+/// came from the accolade on the hint tick; without that read there is no
+/// stored map to differ from. A session that already has a board waits out
+/// the gap, and only when the stored map was the top bar or the accolade.
+/// A full-board text fallback is not that map. The same map does not split:
+/// a late Tab of this match names the map already stored.
 fn hinted_different_map(input: &CapturePlanInput<'_>) -> bool {
     if input.confirmed_end || input.hint.filter(|outcome| outcome.is_decided()).is_none() {
         return false;
     }
     match (named_map(input.session_map), named_map(input.incoming_map)) {
         (Some(session), Some(incoming)) if !session.eq_ignore_ascii_case(incoming) => {
-            input.prev_gate.is_none() || input.age.is_some_and(|age| age >= input.min_gap)
+            if input.prev_gate.is_none() {
+                return true;
+            }
+            input
+                .session_map_source
+                .is_some_and(MapSource::trusted_for_board_split)
+                && input.age.is_some_and(|age| age >= input.min_gap)
         }
         _ => false,
     }
@@ -478,21 +523,17 @@ pub fn plan_capture(input: &CapturePlanInput<'_>) -> CapturePlan {
     // The first Tab of a hinted session that names a different map is the
     // next game. A late Tab of the same match names the same map and stays.
     // A session that already has a board uses the same rule only after the
-    // gap window, so a mid-match map misread does not split.
+    // gap, and only when its stored map came from the top bar or the accolade.
     if hinted_different_map(input) {
-        return plan_from_effect(
-            input,
-            &Effect::Split {
-                reason: CloseReason::StatRegression,
-                seal: input.hint.filter(|outcome| outcome.is_decided()),
-                new_outcome: if input.frame_outcome.is_decided() {
-                    input.frame_outcome
-                } else {
-                    MatchOutcome::Unknown
-                },
+        let decided = transition(
+            &state,
+            &Obs::HintedDifferentMap {
+                frame_outcome: input.frame_outcome,
             },
-            false,
         );
+        if let Effect::Split { .. } = &decided.effect {
+            return plan_from_effect(input, &decided.effect, false);
+        }
     }
 
     // A session a start screen just opened has no board of its own. The
@@ -838,6 +879,8 @@ pub fn transition(state: &BoundaryState, obs: &Obs<'_>) -> Transition {
         Obs::Board(board) => board_effect(state, phase, board),
         Obs::Gap { frame_outcome } => gap_effect(state, phase, *frame_outcome),
         Obs::EndScreenDifferentMap { outcome, .. } => end_screen(state, phase, *outcome),
+        // Same close as a gap: seal the hint, keep this frame's header.
+        Obs::HintedDifferentMap { frame_outcome } => gap_effect(state, phase, *frame_outcome),
     };
     Transition { effect, phase }
 }
@@ -936,9 +979,11 @@ fn gap_effect(state: &BoundaryState, phase: Phase, frame_outcome: MatchOutcome) 
 fn end_screen(state: &BoundaryState, phase: Phase, outcome: MatchOutcome) -> Effect {
     match phase {
         Phase::PostMatch | Phase::Idle | Phase::NewGameStarting => Effect::Ignore,
-        // Armed by a hero select: the next match's result must not overwrite
-        // this one. A single unconfirmed read on the same map still replaces
-        // the hint; that read is not an end screen for a different map.
+        // Armed by a hero select: the next match's confirmed word on a
+        // different accolade map must not overwrite this hint. An unconfirmed
+        // word on that map is ignored in `decide_poll` before it can replace
+        // the hint. A banner has no accolade map, so it is a confirmed word
+        // and still seals onto this session.
         Phase::LiveMatch | Phase::PostResultStreak if state.pending_boundary => Effect::Split {
             reason: CloseReason::StatRegression,
             seal: sealable_hint(state),
@@ -1181,6 +1226,11 @@ pub fn decide_poll(input: &PollInput<'_>) -> PollDecision {
                 outcome: signal,
                 map: input.accolade_map.unwrap_or(""),
             }
+        } else if input.pending_boundary && map_differs {
+            // The first read of the next game's word. Confirmation is the
+            // second agreeing read, which is the end-screen split above.
+            // Replacing the hint here would seal the next game onto this one.
+            return PollDecision::Keep;
         } else if input.signal_confirmed {
             Obs::ConfirmedWord { outcome: signal }
         } else {
@@ -1303,11 +1353,17 @@ pub fn decide_poll(input: &PollInput<'_>) -> PollDecision {
             } else {
                 (reason, Vec::new())
             };
+            let new_map = match &obs {
+                Obs::EndScreenDifferentMap { map, .. } => {
+                    confident_map(Some(map)).map(str::to_string)
+                }
+                _ => None,
+            };
             PollDecision::Open(OpenNew {
                 reason,
                 seal_outcome: seal,
                 new_outcome,
-                new_map: None,
+                new_map,
                 candidates,
                 new_result: None,
             })
@@ -1395,9 +1451,9 @@ mod tests {
             awaiting_first_board: false,
             baseline_age: None,
             progressed_boards: 0,
-
             session_map: None,
             incoming_map: None,
+            session_map_source: None,
         })
     }
 
@@ -1533,6 +1589,7 @@ mod tests {
                 progressed_boards: sess.state.progressed_boards,
                 session_map: sess.state.map.as_deref(),
                 incoming_map: sess.state.map.as_deref(),
+                session_map_source: None,
             });
             if plan.split {
                 let held = sess.state.deferred;
@@ -2043,9 +2100,9 @@ mod tests {
             awaiting_first_board: false,
             baseline_age: None,
             progressed_boards: 0,
-
             session_map: None,
             incoming_map: None,
+            session_map_source: None,
         });
         assert!(second.split, "the second consecutive drop splits");
         assert_eq!(
@@ -2227,9 +2284,9 @@ mod tests {
             awaiting_first_board: false,
             baseline_age: None,
             progressed_boards: 0,
-
             session_map: None,
             incoming_map: None,
+            session_map_source: None,
         });
         assert!(
             !mixed.ignore_row && !mixed.skip_store,
@@ -2261,9 +2318,9 @@ mod tests {
             awaiting_first_board: false,
             baseline_age: None,
             progressed_boards: 0,
-
             session_map: None,
             incoming_map: None,
+            session_map_source: None,
         });
         assert!(!follow.split);
         assert_eq!(follow.reset_streak, 0);
@@ -2292,9 +2349,9 @@ mod tests {
             awaiting_first_board: false,
             baseline_age: None,
             progressed_boards: 0,
-
             session_map: None,
             incoming_map: None,
+            session_map_source: None,
         });
         assert!(
             !moved.split && !moved.defer,
@@ -2327,9 +2384,9 @@ mod tests {
             awaiting_first_board: false,
             baseline_age: None,
             progressed_boards: 0,
-
             session_map: None,
             incoming_map: None,
+            session_map_source: None,
         });
         assert!(
             !moved_again.split && !moved_again.defer,
@@ -2371,9 +2428,9 @@ mod tests {
             awaiting_first_board: false,
             baseline_age: None,
             progressed_boards: 0,
-
             session_map: None,
             incoming_map: None,
+            session_map_source: None,
         });
         assert!(later.defer, "the real drop after garbage only arms");
         assert!(!later.split, "one capture later is not a new session");
@@ -2564,9 +2621,9 @@ mod tests {
             awaiting_first_board: false,
             baseline_age: None,
             progressed_boards: 0,
-
             session_map: None,
             incoming_map: None,
+            session_map_source: None,
         });
         assert!(
             plan.split,
@@ -2861,6 +2918,31 @@ mod tests {
                 "append",
             ),
             ("starting gap", starting_state(), &gap, "ignore"),
+            (
+                "streak vote after a board seals the hint",
+                streak_state(),
+                &map_vote,
+                "split:unknown:defeat",
+            ),
+            (
+                "streak ban after a board seals the hint",
+                streak_state(),
+                &hero_ban,
+                "split:unknown:defeat",
+            ),
+            (
+                "streak vote blocked",
+                streak_state(),
+                &map_blocked,
+                "ignore",
+            ),
+            ("post vote blocked", post_state(), &map_blocked, "ignore"),
+            (
+                "starting ban",
+                starting_state(),
+                &hero_ban,
+                "split:unknown:-",
+            ),
             ("idle gap", idle_state(), &gap, "ignore"),
             ("idle end screen", idle_state(), &end, "ignore"),
             (
@@ -2938,6 +3020,33 @@ mod tests {
             &pending,
             &Obs::Board(reset),
             "split:unknown:defeat",
+        );
+        let mut live_primed = live_state();
+        live_primed.reset_streak = 1;
+        expect_transition(
+            "live second fresh board",
+            &live_primed,
+            &Obs::Board(reset),
+            "split:unknown:-",
+        );
+        let hinted = Obs::HintedDifferentMap {
+            frame_outcome: MatchOutcome::Victory,
+        };
+        expect_transition(
+            "hinted different map seals the hint",
+            &streak_state(),
+            &hinted,
+            "split:victory:defeat",
+        );
+        let starting_ban_blocked = Obs::StartScreen {
+            screen: &ban,
+            block_map_vote: true,
+        };
+        expect_transition(
+            "starting ban inside the debounce",
+            &starting_state(),
+            &starting_ban_blocked,
+            "ignore",
         );
     }
 
@@ -3043,9 +3152,9 @@ mod tests {
             awaiting_first_board: false,
             baseline_age: None,
             progressed_boards: 0,
-
             session_map: None,
             incoming_map: None,
+            session_map_source: None,
         });
         assert!(!ignored.ignore_row);
         assert!(!ignored.skip_store);
@@ -3075,9 +3184,9 @@ mod tests {
             awaiting_first_board: false,
             baseline_age: None,
             progressed_boards: 0,
-
             session_map: None,
             incoming_map: None,
+            session_map_source: None,
         });
         assert!(
             !follow.split,
@@ -3113,9 +3222,9 @@ mod tests {
             awaiting_first_board: false,
             baseline_age: Some(Duration::from_secs(30)),
             progressed_boards: 0,
-
             session_map: None,
             incoming_map: None,
+            session_map_source: None,
         });
         assert!(!plan.ignore_row && !plan.skip_store && !plan.split);
         assert!(
@@ -3146,9 +3255,9 @@ mod tests {
             awaiting_first_board: false,
             baseline_age: None,
             progressed_boards: 0,
-
             session_map: None,
             incoming_map: None,
+            session_map_source: None,
         });
         assert!(
             uneven.refresh_baseline,
@@ -3182,9 +3291,9 @@ mod tests {
             awaiting_first_board: false,
             baseline_age: None,
             progressed_boards: 0,
-
             session_map: None,
             incoming_map: None,
+            session_map_source: None,
         });
         assert!(plan.split);
         assert_eq!(plan.stored_outcome, MatchOutcome::Defeat);
@@ -3216,9 +3325,9 @@ mod tests {
             awaiting_first_board: false,
             baseline_age: None,
             progressed_boards: 0,
-
             session_map: None,
             incoming_map: None,
+            session_map_source: None,
         });
         assert!(!plan.split);
         assert_eq!(plan.stored_outcome, MatchOutcome::Defeat);
@@ -3250,9 +3359,9 @@ mod tests {
             awaiting_first_board: false,
             baseline_age: None,
             progressed_boards: 0,
-
             session_map: None,
             incoming_map: None,
+            session_map_source: None,
         });
         assert!(!plan.split);
         assert!(!plan.ignore_row);
@@ -3316,9 +3425,9 @@ mod tests {
             awaiting_first_board: false,
             baseline_age: None,
             progressed_boards: 0,
-
             session_map: None,
             incoming_map: None,
+            session_map_source: None,
         });
         assert!(!plan.split && !plan.defer && !plan.skip_store);
         assert!(plan.refresh_baseline);
@@ -3414,9 +3523,9 @@ mod tests {
             awaiting_first_board: false,
             baseline_age: None,
             progressed_boards: 0,
-
             session_map: None,
             incoming_map: None,
+            session_map_source: None,
         });
         assert!(!unidentified.defer && !unidentified.split);
         assert!(!unidentified.refresh_baseline);
@@ -3487,9 +3596,9 @@ mod tests {
             awaiting_first_board: false,
             baseline_age: None,
             progressed_boards: 0,
-
             session_map: None,
             incoming_map: None,
+            session_map_source: None,
         });
         assert!(plan.split);
         assert_eq!(plan.seal, Some(MatchOutcome::Defeat));
@@ -3529,7 +3638,7 @@ mod tests {
     }
 
     #[test]
-    fn new_game_starting_exits_on_a_word_a_start_screen_and_a_gap() {
+    fn new_game_starting_exits_on_a_word_and_a_start_screen_and_ignores_a_gap() {
         let now = t0();
         let mut state = starting_state();
         let decision = decide_poll(&PollInput {
@@ -3576,6 +3685,111 @@ mod tests {
         );
     }
 
+    fn hinted_map_plan(source: Option<MapSource>, age_secs: u64, incoming: &str) -> CapturePlan {
+        let prev = gate(counters(14, 22, 6, 2400, 9800, 400));
+        plan_capture(&CapturePlanInput {
+            prev_gate: Some(&prev),
+            baseline: Some(&prev),
+            streak: 0,
+            cur: counters(16, 23, 6, 2600, 9900, 500),
+            suspect: CLEAN,
+            create_session: false,
+            suppress_same_unfinished: false,
+            age: Some(Duration::from_secs(age_secs)),
+            min_gap: Duration::from_secs(120),
+            classic_regressed: false,
+            row_counts: true,
+            row_id: Some(2),
+            baseline_row: Some(2),
+            confirmed_end: false,
+            inherited_outcome: MatchOutcome::Unknown,
+            frame_outcome: MatchOutcome::Unknown,
+            session_hero: Some("Zenyatta"),
+            hint: Some(MatchOutcome::Defeat),
+            pending_boundary: false,
+            awaiting_first_board: false,
+            baseline_age: Some(Duration::from_secs(age_secs)),
+            progressed_boards: 0,
+            session_map: Some("Busan"),
+            session_map_source: source,
+            incoming_map: Some(incoming),
+        })
+    }
+
+    #[test]
+    fn a_trusted_map_splits_after_the_gap_and_a_text_fallback_does_not() {
+        assert!(
+            hinted_map_plan(Some(MapSource::TopBar), 150, "Junkertown").split,
+            "a top-bar map and a later different Tab close the hinted session"
+        );
+        assert!(
+            hinted_map_plan(Some(MapSource::Accolade), 150, "Junkertown").split,
+            "an accolade map is the same kind of read"
+        );
+        assert!(
+            !hinted_map_plan(Some(MapSource::TextFallback), 150, "Junkertown").split,
+            "a full-board text fallback is not the match's map"
+        );
+        assert!(
+            !hinted_map_plan(Some(MapSource::TopBar), 30, "Junkertown").split,
+            "inside the gap a different top-bar read stays this match"
+        );
+        assert!(
+            !hinted_map_plan(Some(MapSource::TopBar), 150, "Busan").split,
+            "the same map after the gap is still this match"
+        );
+    }
+
+    #[test]
+    fn an_armed_unconfirmed_word_on_a_different_map_keeps_the_hint() {
+        let now = t0();
+        let mut state = streak_state();
+        state.pending_boundary = true;
+        let decision = decide_poll(&PollInput {
+            outcome: MatchOutcome::Unknown,
+            result: state.result,
+            pending_boundary: true,
+            awaiting_first_board: false,
+            has_board: true,
+            reset_streak: 0,
+            map: Some("Busan"),
+            hero: Some("Zenyatta"),
+            signal: Some(MatchOutcome::Victory),
+            signal_confirmed: false,
+            accolade_map: Some("Junkertown"),
+            start_screen: None,
+            block_map_vote: false,
+            deferred: false,
+            now,
+        });
+        assert_eq!(decision, PollDecision::Keep);
+        let confirmed = decide_poll(&PollInput {
+            outcome: MatchOutcome::Unknown,
+            result: state.result,
+            pending_boundary: true,
+            awaiting_first_board: false,
+            has_board: true,
+            reset_streak: 0,
+            map: Some("Busan"),
+            hero: Some("Zenyatta"),
+            signal: Some(MatchOutcome::Victory),
+            signal_confirmed: true,
+            accolade_map: Some("Junkertown"),
+            start_screen: None,
+            block_map_vote: false,
+            deferred: false,
+            now,
+        });
+        match confirmed {
+            PollDecision::Open(open) => {
+                assert_eq!(open.seal_outcome, Some(MatchOutcome::Defeat));
+                assert_eq!(open.new_outcome, MatchOutcome::Victory);
+                assert_eq!(open.new_map.as_deref(), Some("Junkertown"));
+            }
+            other => panic!("expected the confirming read to split, got {other:?}"),
+        }
+    }
+
     #[test]
     fn awaiting_first_board_keeps_its_first_tab() {
         let prev = gate(counters(14, 22, 6, 2400, 9800, 400));
@@ -3602,9 +3816,9 @@ mod tests {
             awaiting_first_board: true,
             baseline_age: Some(Duration::from_secs(130)),
             progressed_boards: 0,
-
             session_map: None,
             incoming_map: None,
+            session_map_source: None,
         });
         assert!(
             !plan.split,
@@ -3642,9 +3856,9 @@ mod tests {
             awaiting_first_board: false,
             baseline_age: Some(Duration::from_secs(60)),
             progressed_boards: 0,
-
             session_map: None,
             incoming_map: None,
+            session_map_source: None,
         });
         assert!(
             !flagged.defer && !flagged.split,
@@ -3673,9 +3887,9 @@ mod tests {
             awaiting_first_board: false,
             baseline_age: Some(Duration::from_secs(60)),
             progressed_boards: 0,
-
             session_map: None,
             incoming_map: None,
+            session_map_source: None,
         });
         assert!(
             !other_row.defer && !other_row.split,

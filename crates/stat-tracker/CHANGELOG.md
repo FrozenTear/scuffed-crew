@@ -7,14 +7,15 @@ prepends the section whose heading matches the tag version (for example
 ## 0.4.18
 
 Boundaries are one board-order state machine. A result hint stays sealable
-until a second board with progressed stats is accepted after it, or until
-a reset, a gap, or an unblocked map vote or hero ban seals it. The first
-progressed board keeps the hint. A hero select that armed a pending
-boundary drops the hint on the next progressed board. Progressed means a
-counter moved forward from the reset baseline: not the same totals, not a
-decided result header, and not an implausible jump. There is no 60-second
-hint timer. The 75-second grace starts when the result is recorded, not
-when the word was first seen.
+until a second board with progressed stats is accepted after it, or one
+progressed board after a hero select has armed a boundary, or until a
+reset, a gap, a Tab that names a different map, an armed end screen on a
+different map, or an unblocked map vote or hero ban seals it. The first
+progressed board keeps the hint. Progressed means a counter moved forward
+from the reset baseline: not the same totals, not a decided result header,
+and not an implausible jump. There is no 60-second hint timer. The
+75-second grace starts when the result is recorded, not when the word was
+first seen.
 
 Wall-clock time is the 75-second grace, the 120-second stat gap, the
 45-second wait before the first fresh-match board counts, the 20-minute
@@ -25,16 +26,20 @@ reset baseline, not the last stored row. The 2x–4x all-increase band
 applies within 60s of the baseline.
 
 A map vote that is not blocked, or a hero ban, after a hint that already
-has a board splits and seals the hint. A ban splits at once. A hero
-select after that board only arms a pending boundary, and a select after
-a held fresh-match board does not split. The next fresh-match board then
-splits and seals. A hero select when no board has been stored yet seals
+has a board splits and seals the hint. A ban with no held board splits
+at once. A ban after a held fresh-match board does not. A hero select
+after that board only arms a pending boundary, and a select after a held
+fresh-match board does not split. The next fresh-match board then splits
+and seals. A hero select when no board has been stored yet seals
 immediately, except on the session a start screen just opened: a swap
 before that session's first Tab stays, including after the debounce.
 The session a vote opens keeps that vote's candidates and its first Tab.
-A hero select during a live match primes a reset and does not split. A
-hero ban, or a map vote past the debounce, closes an unfinished session
-without sealing a result. The same-map guard covers votes. The
+That is the trade-off: a vote session with no board and no result word
+absorbs a following select-only game until the 20-minute idle bound, and
+its old candidates veto that game's top-bar reads until an accolade fills
+the map in. A hero select during a live match primes a reset and does not
+split. A hero ban, or a map vote past the debounce, closes an unfinished
+session without sealing a result. The same-map guard covers votes. The
 same-map-plus-hero guard still suppresses a gap split of an unfinished
 match.
 
@@ -50,20 +55,31 @@ implausible row is stored and leaves the held board and the streak. A
 plausible continuation, or counted progress, clears them. A hero
 change by itself is not a split. A different row never counts as a reset.
 A row with no id never counts. The new session's outcome is Unknown
-unless the split is the 120-second gap, which keeps that frame's header.
+unless the split is the 120-second gap or a different-map Tab, which
+keeps that frame's header. An armed end screen on a different map gives
+the new session that screen's result.
 A reset or a gap after a hint seals the hint on the old session. An
 implausible jump is still stored, and it does not become the reset
 baseline. One misread stat cell is still held. A long post-match screen
 does not split on the gap.
 
 A hinted session whose next Tab names a different map splits and seals
-the hint. With no board of its own, that first Tab is enough. A session
-that already has a board waits out the 120-second gap, so a mid-match map
-misread stays. A late Tab of the same map does not split. A single
-unconfirmed word on the same map can still replace the hint; that read
-is not an end screen for a different map. While a hero select has armed
-a boundary, an end screen that names a different map splits and seals
-the old hint, and the new session takes the end-screen result.
+the hint. The session has to already have a map. With no board of its
+own, that map is the accolade read on the hint tick, and the first
+different Tab is enough. Without that accolade there is nothing to
+differ from, and the limitation is unchanged. A session that already
+has a board waits out the 120-second gap, and only when the stored map
+came from the top bar or the accolade. A full-board text fallback is
+stored and does not split a later Tab. A late Tab of the same map does
+not split. A read inside the gap does not split.
+
+An unconfirmed word replaces the hint when its accolade map is missing
+or matches the session. While a hero select has armed a boundary, an
+unconfirmed word whose accolade map differs is ignored, and the second
+agreeing read splits: the old hint stays on this session, and the new
+session takes the new word and that map. A word on the same map, or
+with no map, still replaces the hint. A banner has no accolade map, so
+a banner-only confirmation still seals onto the open session.
 
 ### Install
 
