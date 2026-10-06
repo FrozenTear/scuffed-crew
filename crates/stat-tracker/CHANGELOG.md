@@ -9,13 +9,33 @@ prepends the section whose heading matches the tag version (for example
 Requeueing into the next match no longer merges into the game that just
 ended. After a confirmed Victory, Defeat, or Draw, a hero-select,
 hero-ban, or map-vote screen starts a new session and keeps that result.
-One unconfirmed result word does not finish a match; a confirmed read
-replaces it. That word is stored only when one of those start screens
-closes the session. A later confirmed result opens a session only after
-a scoreboard capture, not because the cards stayed up. A stat reset
-opens a session on the second accepted capture that still shows the drop.
-The new session does not keep the previous outcome. One misread stat cell is
-still held. A Play of the Game wake does not split a session by itself.
+The 75-second grace starts when the result is recorded, not when the
+word was first seen.
+
+One unconfirmed result word is a hint. It expires after 60 seconds, a
+newer word replaces it, and the live scoreboard clears it when the match
+continues. It is stored only when a hero-select, hero-ban, or map-vote
+screen comes after a hint that itself came after the live scoreboard. A
+stray word during a match plus one of those screens does not split. An
+unconfirmed word never overrides a confirmed result.
+
+A stat reset after a confirmed result takes two consecutive validated
+captures of the same identified player row, both below the frozen
+baseline. The first is not written onto the finished game. The second
+opens a new session with no outcome, so the header on the old board is
+not copied across. A garbage row and a different player's row do not
+move that baseline or finish the streak. A session that only has a hint
+still splits on the 120-second stat gap. One misread stat cell is still
+held. A Play of the Game wake does not split a session by itself.
+
+### Install
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/FrozenTear/scuffed-crew/main/crates/stat-tracker/dist/bootstrap.sh | bash
+```
+
+Or extract the tarball and run `./install.sh`. Pin with
+`STAT_TRACKER_TAG=stat-tracker-v0.4.18`.
 
 
 ## 0.4.17

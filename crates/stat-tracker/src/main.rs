@@ -300,6 +300,8 @@ struct CaptureRequest {
     reset_streak: u32,
     /// See [`ActiveGame::reset_baseline`].
     reset_baseline: Option<GateState>,
+    /// Player row that owns the reset baseline.
+    baseline_row: Option<u32>,
 }
 
 /// Package version shown by `--version` / `--help`.
@@ -754,11 +756,12 @@ struct ActiveGame {
     last_stats_at: Option<Instant>,
     /// CG-4 C: portrait confirm-not-switch + career-ever-ok for this game.
     hero_auth: HeroAuthState,
-    /// Result word seen for this session (streak or confirm). Survives past
-    /// the poller's confirm window so a fast requeue can still close the game.
+    /// Result word seen for this session. An unconfirmed hint expires after
+    /// [`boundary::HINT_TTL`]. A confirmed result's grace starts when it is
+    /// recorded, not when the word was first sighted.
     result_mark: Option<ResultMark>,
-    /// A scoreboard capture was stored after [`Self::result_mark`] (or after
-    /// the outcome). That is a gap for a later, contradictory result word.
+    /// A scoreboard was stored after the result mark. Kept for restart
+    /// recovery. It is not a new-game boundary.
     intervening_since_result: bool,
     /// Consecutive accepted captures that are still a sharp drop against
     /// [`Self::reset_baseline`]. One is not a new game.
@@ -766,6 +769,10 @@ struct ActiveGame {
     /// Counters frozen when a post-result drop started. Absent until the
     /// first sharp read; a garbage row must not replace it.
     reset_baseline: Option<GateState>,
+    /// Player row that owns [`Self::reset_baseline`].
+    baseline_row: Option<u32>,
+    /// Scoreboard time when the current hint was stored.
+    board_at_hint: Option<Instant>,
 }
 
 impl ActiveGame {
@@ -791,6 +798,8 @@ impl ActiveGame {
             intervening_since_result: false,
             reset_streak: 0,
             reset_baseline: None,
+            baseline_row: None,
+            board_at_hint: None,
         }
     }
 
@@ -803,6 +812,9 @@ impl ActiveGame {
             intervening_since_result: self.intervening_since_result,
             reset_streak: self.reset_streak,
             reset_baseline: self.reset_baseline,
+            baseline_row: self.baseline_row,
+            last_board_at: self.last_stats_at,
+            board_at_hint: self.board_at_hint,
             gate: self.gate,
         }
     }
@@ -815,11 +827,16 @@ impl ActiveGame {
         self.intervening_since_result = state.intervening_since_result;
         self.reset_streak = state.reset_streak;
         self.reset_baseline = state.reset_baseline;
+        self.baseline_row = state.baseline_row;
+        self.board_at_hint = state.board_at_hint;
+        if state.last_board_at.is_some() {
+            self.last_stats_at = state.last_board_at;
+        }
         self.gate = state.gate;
     }
 
     fn has_post_result(&self) -> bool {
-        boundary::has_post_result(self.outcome, self.result_mark)
+        boundary::has_post_result(self.outcome, self.result_mark, Instant::now())
     }
 
     fn finished(&self) -> bool {
@@ -837,8 +854,8 @@ impl ActiveGame {
     }
 
     /// Remember a result word. A repeat of the same outcome keeps the first
-    /// sighting's timestamp so the new-game gap is measured from the streak,
-    /// not from the later confirm.
+    /// sighting so the hint TTL does not refresh. The post-match grace is
+    /// [`Self::outcome_recorded_at`], stamped when the result is recorded.
     fn note_result(&mut self, outcome: detect::MatchOutcome, confirmed: bool) {
         if !outcome.is_decided() {
             return;
@@ -897,6 +914,10 @@ struct PersistedGame {
     reset_streak: u32,
     #[serde(default)]
     reset_baseline: Option<GateState>,
+    #[serde(default)]
+    baseline_row: Option<u32>,
+    #[serde(default)]
+    board_at_hint: Option<chrono::DateTime<Utc>>,
 }
 
 fn active_game_path(data_dir: &std::path::Path) -> std::path::PathBuf {
@@ -946,11 +967,11 @@ fn note_unrecorded_game(data_dir: &std::path::Path, g: &ActiveGame, reason: &str
 
 /// Close the in-memory session because a new game is starting.
 ///
-/// A confirmed outcome is already in the store. A result streak that never
-/// got its agreeing read is sealed now — the boundary is what makes that
-/// single word the match result — and written like any other finished game
-/// so the next sync uploads it. A session with no Tab captures is logged to
-/// `debug/unrecorded_games.jsonl` (same path as a missed map vote).
+/// A confirmed outcome is already in the store. A provisional hint is written
+/// only when `seal` is set, which is a hero-select, hero-ban, or map-vote
+/// screen that came after a post-match hint. An idle Tab and a stat split
+/// pass no seal, so one unconfirmed word is not stored as the result. A
+/// session with no Tab captures is logged to `debug/unrecorded_games.jsonl`.
 async fn retire_active_game(
     st: &mut SessionState,
     store: &storage::LocalStore,
@@ -1010,7 +1031,7 @@ async fn apply_poll_decision(
             kept = %kept,
             ignored = %ignored,
             session_id = st.active_game.as_ref().map(|g| g.session_id.as_str()),
-            "result word ignored — session already has an outcome and no new-game gap"
+            "result word ignored — it does not override the open session"
         );
     }
     let Some(current) = st.active_game.as_ref() else {
@@ -1022,7 +1043,7 @@ async fn apply_poll_decision(
         boundary::PollDecision::Open(open) => open.candidates.clone(),
         _ => Vec::new(),
     };
-    let commit = boundary::commit_poll(&mut state, decision);
+    let commit = boundary::commit_poll(&mut state, decision, Instant::now());
     if let Some(closed) = commit.closed {
         let new_id = format!("{:016x}", rand_id());
         match closed.reason {
@@ -1144,6 +1165,8 @@ fn persist_active_game(data_dir: &std::path::Path, game: Option<&ActiveGame>) {
         intervening_since_result: g.intervening_since_result,
         reset_streak: g.reset_streak,
         reset_baseline: g.reset_baseline,
+        baseline_row: g.baseline_row,
+        board_at_hint: g.board_at_hint.map(to_wall),
     };
     let write = || -> std::io::Result<()> {
         let tmp = path.with_extension("json.tmp");
@@ -1191,6 +1214,8 @@ fn recover_active_game(data_dir: &std::path::Path) -> Option<ActiveGame> {
         intervening_since_result: p.intervening_since_result,
         reset_streak: p.reset_streak,
         reset_baseline: p.reset_baseline,
+        baseline_row: p.baseline_row,
+        board_at_hint: p.board_at_hint.and_then(to_instant),
     })
 }
 
@@ -1557,10 +1582,17 @@ struct CaptureReport {
     /// capture — a new game was detected and written to a fresh session; the
     /// caller must replace its active game to match.
     split: bool,
+    /// First validated drop after a confirmed result. Not written to the
+    /// current session. The streak and baseline are what the next Tab uses.
+    armed_reset: bool,
+    /// Garbage or unidentified row. The caller must not move the gate.
+    ignore_row: bool,
     /// Post-result drop streak to keep when `split` is false.
     reset_streak: u32,
     /// Baseline to keep when `split` is false and `refresh_baseline` is false.
     reset_baseline: Option<GateState>,
+    /// Player row that owns `reset_baseline`.
+    baseline_row: Option<u32>,
     /// This capture's accepted gate becomes the reset baseline.
     refresh_baseline: bool,
     /// The per-cell capture-gate state after this capture (accepted + raw
@@ -1818,7 +1850,7 @@ async fn run_loop(ctx: Arc<DaemonCtx>) -> anyhow::Result<()> {
                             persist_active_game(data_dir, st.active_game.as_ref());
                         }
 
-                        let (sid, create, outcome, session_map, candidates, banner_ok, prev_gate, hero_auth, after_end_screen, reset_streak, reset_baseline) = {
+                        let (sid, create, outcome, session_map, candidates, banner_ok, prev_gate, hero_auth, after_end_screen, reset_streak, reset_baseline, baseline_row) = {
                             let g = st.active_game.as_ref().expect("active_game set above");
                             // A banner-color outcome off a Tab frame is only
                             // plausible when the daemon just joined mid/post
@@ -1844,6 +1876,7 @@ async fn run_loop(ctx: Arc<DaemonCtx>) -> anyhow::Result<()> {
                                 g.has_post_result(),
                                 g.reset_streak,
                                 g.reset_baseline,
+                                g.baseline_row,
                             )
                         };
 
@@ -1861,6 +1894,7 @@ async fn run_loop(ctx: Arc<DaemonCtx>) -> anyhow::Result<()> {
                             after_end_screen,
                             reset_streak,
                             reset_baseline,
+                            baseline_row,
                         };
                         capture_task = Some(tokio::spawn(async move {
                             // Wait for the game to render the scoreboard
@@ -1912,6 +1946,31 @@ async fn run_loop(ctx: Arc<DaemonCtx>) -> anyhow::Result<()> {
                     // like the recorded path does; without this the outcome
                     // detected on the Tab path was silently dropped
                     // (fleet::tracker-wl ET-2).
+                    Ok(report) if report.armed_reset => {
+                        // First validated drop after a confirmed result. The
+                        // board was not inserted. Remember the streak so the
+                        // next same-row drop can open a new session.
+                        if let Some(g) = st.active_game.as_mut().filter(|g| g.session_id == sid) {
+                            let mut state = g.boundary_state();
+                            boundary::note_accepted_capture(
+                                &mut state,
+                                &boundary::CapturePlan {
+                                    split: false,
+                                    defer: true,
+                                    ignore_row: false,
+                                    reset_streak: report.reset_streak,
+                                    reset_baseline: report.reset_baseline,
+                                    baseline_row: report.baseline_row,
+                                    refresh_baseline: false,
+                                    stored_outcome: g.outcome,
+                                },
+                                GateState::default(),
+                                Instant::now(),
+                            );
+                            g.apply_boundary_state(&state);
+                            persist_active_game(data_dir, Some(g));
+                        }
+                    }
                     Ok(report) if !report.recorded => {
                         if !matches!(report.outcome, detect::MatchOutcome::Unknown)
                             && let Some(g) = st.active_game.as_mut().filter(|g| g.session_id == sid)
@@ -1953,7 +2012,7 @@ async fn run_loop(ctx: Arc<DaemonCtx>) -> anyhow::Result<()> {
                             retire_active_game(&mut st, store, data_dir, None, reason).await;
                             // Frame outcome only. The previous defeat, hint, and
                             // grace stay on the session `retire_active_game` closed.
-                            let fresh = boundary::fresh_split_session(report.outcome, Instant::now());
+                            let fresh = boundary::fresh_split_session();
                             let mut g = ActiveGame::open_now(
                                 report.session_id.clone(),
                                 fresh.outcome,
@@ -2004,15 +2063,21 @@ async fn run_loop(ctx: Arc<DaemonCtx>) -> anyhow::Result<()> {
                                     &mut state,
                                     &boundary::CapturePlan {
                                         split: false,
+                                        defer: false,
+                                        ignore_row: report.ignore_row,
                                         reset_streak: report.reset_streak,
                                         reset_baseline: report.reset_baseline,
+                                        baseline_row: report.baseline_row,
                                         refresh_baseline: report.refresh_baseline,
                                         stored_outcome: report.outcome,
                                     },
                                     accepted,
+                                    Instant::now(),
                                 );
                                 g.apply_boundary_state(&state);
-                                g.last_stats_at = Some(Instant::now());
+                                if !report.ignore_row {
+                                    g.last_stats_at = Some(Instant::now());
+                                }
                             }
                             g.hero_auth = report.hero_auth.clone();
                             // First trusted map discovery propagates
@@ -2206,10 +2271,11 @@ async fn run_loop(ctx: Arc<DaemonCtx>) -> anyhow::Result<()> {
                             None => None,
                         };
 
-                        // Boundaries (hero select / ban, map vote, a later result,
-                        // an accolade map that belongs to the next match) live in
-                        // `boundary::decide_poll`. A result streak arms those
-                        // screens; it does not finish the match by itself. The
+                        // Boundaries (hero select / ban, map vote) live in
+                        // `boundary::decide_poll`. A confirmed result closes on
+                        // those screens. A hint closes on them only when it was
+                        // seen after the live scoreboard. A later result word
+                        // does not open a second session by itself. The
                         // 2026-10-05 requeue left the game in one second, so the
                         // agreeing read never arrived and Victory landed on Busan.
                         let start_screen = match &phase {
@@ -2230,7 +2296,7 @@ async fn run_loop(ctx: Arc<DaemonCtx>) -> anyhow::Result<()> {
                                 outcome: g.outcome,
                                 outcome_at: g.outcome_recorded_at,
                                 result: g.result_mark,
-                                intervening_scoreboard: g.intervening_since_result,
+                                board_at_hint: g.board_at_hint,
                                 map: g.map.as_deref(),
                                 signal: signal
                                     .map(|(outcome, _)| outcome)
@@ -2238,7 +2304,6 @@ async fn run_loop(ctx: Arc<DaemonCtx>) -> anyhow::Result<()> {
                                 signal_confirmed: confirmed.is_some(),
                                 accolade_map: accolade_map.as_deref(),
                                 start_screen: start_screen.clone(),
-                                end_reel,
                                 now,
                             })
                         });
@@ -2617,8 +2682,11 @@ async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<
                 map: None,
                 session_id: session_id.to_string(),
                 split: false,
+                armed_reset: false,
+                ignore_row: false,
                 reset_streak: req.reset_streak,
                 reset_baseline: req.reset_baseline,
+                baseline_row: req.baseline_row,
                 refresh_baseline: false,
                 gate_state: None,
                 hero_auth: req.hero_auth.clone(),
@@ -2703,8 +2771,11 @@ async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<
             map: None,
             session_id: session_id.to_string(),
             split: false,
+            armed_reset: false,
+            ignore_row: false,
             reset_streak: req.reset_streak,
             reset_baseline: req.reset_baseline,
+            baseline_row: req.baseline_row,
             refresh_baseline: false,
             gate_state: None,
             hero_auth: req.hero_auth.clone(),
@@ -2879,11 +2950,37 @@ async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<
             age: gate_age,
             min_gap: STAT_SPLIT_MIN_GAP,
             classic_regressed,
-            row_counts: true,
-            start_screen_armed: false,
+            row_counts: parse::row_counts(&rows, player_row_idx),
+            row_id: player_row_idx.map(|idx| idx as u32),
+            baseline_row: req.baseline_row,
+            confirmed_end: game_outcome.is_decided(),
             inherited_outcome: game_outcome,
             frame_outcome,
         });
+        if plan.defer {
+            tracing::info!(
+                session_id = %session_id,
+                elims = parsed.elims,
+                deaths = parsed.deaths,
+                damage = parsed.damage,
+                "post-result stat drop armed — not written onto the finished game"
+            );
+            return Ok(CaptureReport {
+                recorded: false,
+                outcome: game_outcome,
+                map: None,
+                session_id: session_id.to_string(),
+                split: false,
+                armed_reset: true,
+                ignore_row: false,
+                reset_streak: plan.reset_streak,
+                reset_baseline: plan.reset_baseline,
+                baseline_row: plan.baseline_row,
+                refresh_baseline: false,
+                gate_state: None,
+                hero_auth,
+            });
+        }
         let split = plan.split;
         outcome = plan.stored_outcome;
         outcome_label = outcome.to_string();
@@ -3065,8 +3162,11 @@ async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<
             map: recorded_map,
             session_id: target_session,
             split,
+            armed_reset: false,
+            ignore_row: plan.ignore_row,
             reset_streak: plan.reset_streak,
             reset_baseline: plan.reset_baseline,
+            baseline_row: plan.baseline_row,
             refresh_baseline: plan.refresh_baseline,
             gate_state: Some(gate.state),
             hero_auth,
@@ -3086,8 +3186,11 @@ async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<
             map: None,
             session_id: session_id.to_string(),
             split: false,
+            armed_reset: false,
+            ignore_row: true,
             reset_streak: req.reset_streak,
             reset_baseline: req.reset_baseline,
+            baseline_row: req.baseline_row,
             refresh_baseline: false,
             gate_state: None,
             hero_auth,
@@ -3773,6 +3876,8 @@ mod tests {
             intervening_since_result: false,
             reset_streak: 0,
             reset_baseline: None,
+            baseline_row: None,
+            board_at_hint: None,
         }
     }
 
@@ -4181,7 +4286,7 @@ mod tests {
     #[test]
     fn split_session_does_not_inherit_post_match_grace() {
         let now = test_now();
-        let fresh = boundary::fresh_split_session(detect::MatchOutcome::Unknown, now);
+        let fresh = boundary::fresh_split_session();
         let mut opened = game(fresh.outcome, None, now);
         opened.outcome_recorded_at = fresh.outcome_at;
         assert!(!opened.finished());
@@ -4194,6 +4299,124 @@ mod tests {
         assert!(
             !should_start_fresh_session(Some(&inherited), now),
             "a defeat stamped now would swallow the next tab"
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_poll_decision_stamps_grace_at_confirm_and_writes_the_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = storage::LocalStore::open(dir.path()).await.unwrap();
+        store
+            .insert_match(test_match("sess-grace", "unknown"))
+            .await
+            .unwrap();
+        let sighting = Instant::now() - Duration::from_secs(200);
+        let mut g = game(detect::MatchOutcome::Unknown, None, Instant::now());
+        g.session_id = "sess-grace".into();
+        g.session_created = true;
+        g.result_mark = Some(ResultMark {
+            outcome: detect::MatchOutcome::Defeat,
+            confirmed: false,
+            seen_at: sighting,
+        });
+        g.board_at_hint = Some(sighting - Duration::from_secs(30));
+        let mut st = session(Some(g), Instant::now());
+        let decision = {
+            let g = st.active_game.as_ref().unwrap();
+            boundary::decide_poll(&boundary::PollInput {
+                outcome: g.outcome,
+                outcome_at: g.outcome_recorded_at,
+                result: g.result_mark,
+                board_at_hint: g.board_at_hint,
+                map: g.map.as_deref(),
+                signal: Some(detect::MatchOutcome::Defeat),
+                signal_confirmed: true,
+                accolade_map: None,
+                start_screen: None,
+                now: Instant::now(),
+            })
+        };
+        apply_poll_decision(&mut st, &store, dir.path(), decision).await;
+        let g = st.active_game.expect("the confirm stays on this session");
+        assert_eq!(g.outcome, detect::MatchOutcome::Defeat);
+        let stamped = g.outcome_recorded_at.expect("grace is stamped");
+        assert!(
+            stamped.saturating_duration_since(sighting) > Duration::from_secs(150),
+            "grace is not the word's first sighting"
+        );
+        assert!(
+            stamped.elapsed() < Duration::from_secs(5),
+            "grace starts when apply_poll_decision records the result"
+        );
+        assert!(!should_start_fresh_session(
+            Some(&g),
+            stamped + Duration::from_secs(10)
+        ));
+        assert!(should_start_fresh_session(
+            Some(&g),
+            stamped + POST_MATCH_GRACE + Duration::from_secs(1)
+        ));
+        let snaps = store.get_session_snapshots("sess-grace").await.unwrap();
+        assert_eq!(snaps.len(), 1);
+        assert_eq!(snaps[0].outcome, "defeat");
+    }
+
+    #[tokio::test]
+    async fn retire_active_game_writes_a_seal_and_leaves_an_unsealed_hint() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = storage::LocalStore::open(dir.path()).await.unwrap();
+        store
+            .insert_match(test_match("sess-seal", "unknown"))
+            .await
+            .unwrap();
+        store
+            .insert_match(test_match("sess-hint", "unknown"))
+            .await
+            .unwrap();
+
+        let mut sealed = game(detect::MatchOutcome::Unknown, None, Instant::now());
+        sealed.session_id = "sess-seal".into();
+        sealed.session_created = true;
+        sealed.result_mark = Some(ResultMark {
+            outcome: detect::MatchOutcome::Defeat,
+            confirmed: false,
+            seen_at: Instant::now() - Duration::from_secs(20),
+        });
+        let mut st = session(Some(sealed), Instant::now());
+        retire_active_game(
+            &mut st,
+            &store,
+            dir.path(),
+            Some(detect::MatchOutcome::Defeat),
+            "superseded by hero select/ban",
+        )
+        .await;
+        assert!(st.active_game.is_none());
+        let snaps = store.get_session_snapshots("sess-seal").await.unwrap();
+        assert_eq!(snaps[0].outcome, "defeat");
+
+        let mut hinted = game(detect::MatchOutcome::Unknown, None, Instant::now());
+        hinted.session_id = "sess-hint".into();
+        hinted.session_created = true;
+        hinted.result_mark = Some(ResultMark {
+            outcome: detect::MatchOutcome::Victory,
+            confirmed: false,
+            seen_at: Instant::now() - Duration::from_secs(10),
+        });
+        let mut st = session(Some(hinted), Instant::now());
+        retire_active_game(
+            &mut st,
+            &store,
+            dir.path(),
+            None,
+            "superseded by stat reset",
+        )
+        .await;
+        assert!(st.active_game.is_none());
+        let snaps = store.get_session_snapshots("sess-hint").await.unwrap();
+        assert_eq!(
+            snaps[0].outcome, "unknown",
+            "a stat split passes no seal, so the hint is not stored"
         );
     }
 
@@ -4218,6 +4441,8 @@ mod tests {
             intervening_since_result: false,
             reset_streak: 0,
             reset_baseline: None,
+            baseline_row: None,
+            board_at_hint: None,
         };
         std::fs::write(
             active_game_path(dir.path()),
