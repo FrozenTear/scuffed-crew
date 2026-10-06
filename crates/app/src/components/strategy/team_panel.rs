@@ -184,6 +184,7 @@ fn hero_name(id: &str) -> &'static str {
         "ana" => "Ana",
         "baptiste" => "Baptiste",
         "brigitte" => "Brigitte",
+        "doctrine" => "Doctrine",
         "illari" => "Illari",
         "juno" => "Juno",
         "kiriko" => "Kiriko",
@@ -201,8 +202,8 @@ fn hero_role(id: &str) -> HeroRole {
     match id {
         "dva" | "doomfist" | "junker-queen" | "mauga" | "orisa" | "ramattra" | "reinhardt"
         | "roadhog" | "sigma" | "winston" | "wrecking-ball" | "zarya" | "hazard" => HeroRole::Tank,
-        "ana" | "baptiste" | "brigitte" | "illari" | "juno" | "kiriko" | "lifeweaver" | "lucio"
-        | "mercy" | "moira" | "zenyatta" => HeroRole::Support,
+        "ana" | "baptiste" | "brigitte" | "doctrine" | "illari" | "juno" | "kiriko"
+        | "lifeweaver" | "lucio" | "mercy" | "moira" | "sombra" | "zenyatta" => HeroRole::Support,
         _ => HeroRole::Damage,
     }
 }

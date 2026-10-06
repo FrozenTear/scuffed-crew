@@ -531,6 +531,9 @@ pub fn portrait_reference_path(portraits_dir: &Path, hero_name: &str) -> PathBuf
 
 /// Save a portrait crop as a reference image.
 /// The filename is the hero name (lowercase, no spaces).
+///
+/// Always overwrites. Callers that must keep a real crop or a user-supplied
+/// file use [`save_captured_portrait`].
 pub fn save_portrait_reference(
     portraits_dir: &Path,
     hero_name: &str,
@@ -539,9 +542,75 @@ pub fn save_portrait_reference(
     std::fs::create_dir_all(portraits_dir)?;
     let path = portrait_reference_path(portraits_dir, hero_name);
     let resized = crop.resize_exact(PORTRAIT_SIZE, PORTRAIT_SIZE, FilterType::Lanczos3);
-    resized.save(&path)?;
+    let bytes = png_bytes(&resized)?;
+    write_bytes_atomic(&path, &bytes)?;
     tracing::info!(hero = hero_name, path = %path.display(), "saved portrait reference");
     Ok(path)
+}
+
+/// Write `bytes` via a temp file in the same directory, then rename.
+/// Rename on one filesystem is atomic, so a crash cannot leave a half-written
+/// portrait in the slot the matcher will load.
+fn write_bytes_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let file_name = path.file_name().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "portrait path has no file name",
+        )
+    })?;
+    let tmp_path = path.with_file_name(format!(
+        ".{}.{}.tmp",
+        file_name.to_string_lossy(),
+        std::process::id()
+    ));
+    if let Err(e) = std::fs::write(&tmp_path, bytes) {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(e);
+    }
+    if let Err(e) = std::fs::rename(&tmp_path, path) {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(e);
+    }
+    Ok(())
+}
+
+fn png_bytes(img: &DynamicImage) -> Result<Vec<u8>, image::ImageError> {
+    let mut buf = std::io::Cursor::new(Vec::new());
+    img.write_to(&mut buf, image::ImageFormat::Png)?;
+    Ok(buf.into_inner())
+}
+
+/// Whether this capture may write a portrait reference.
+///
+/// A save needs an identified player row (row 0 belongs to someone else when
+/// the row was not found), a slot that is empty or still a provisional
+/// stand-in, and either the career panel or `--collect-portraits`.
+pub fn should_save_portrait_crop(
+    career_panel: bool,
+    collect_portraits: bool,
+    slot_replaceable: bool,
+    player_row_known: bool,
+) -> bool {
+    player_row_known && slot_replaceable && (collect_portraits || career_panel)
+}
+
+/// Write `crop` only when the slot is empty or still holds a provisional
+/// stand-in. Returns `Ok(None)` when an existing file has any other bytes.
+pub fn save_captured_portrait(
+    portraits_dir: &Path,
+    hero_name: &str,
+    crop: &DynamicImage,
+) -> Result<Option<PathBuf>, Box<dyn std::error::Error>> {
+    let path = portrait_reference_path(portraits_dir, hero_name);
+    if !portrait_slot_is_replaceable(&path) {
+        tracing::debug!(
+            hero = hero_name,
+            path = %path.display(),
+            "portrait reference kept (bytes differ from the provisional stand-in)"
+        );
+        return Ok(None);
+    }
+    save_portrait_reference(portraits_dir, hero_name, crop).map(Some)
 }
 
 /// Get the portraits directory path within the data dir.
@@ -549,8 +618,63 @@ pub fn portraits_dir(data_dir: &Path) -> PathBuf {
     data_dir.join("portraits")
 }
 
-/// Unpack bundled portraits to the data directory if they don't already exist.
-/// User-provided portraits in the directory take precedence (not overwritten).
+/// Bundled stand-in portraits the tracker may replace.
+///
+/// Each entry is `(file stem, sha256 hex of a bundled PNG)`. A stem may
+/// appear more than once. Never remove a hash that has shipped: an older
+/// install still has those bytes on disk, and dropping the digest would make
+/// the tracker treat that stand-in as a real crop and keep it forever.
+/// Append the new digest instead.
+///
+/// An on-disk file whose bytes hash to any listed digest for its stem is
+/// treated as missing, so the first real in-game crop overwrites it. Any
+/// other bytes — a real crop, or a file the user placed there — are left
+/// alone.
+///
+/// Doctrine's stand-in is Blizzard Entertainment artwork, sourced via the
+/// Overwatch wiki. `doctrine_provisional_hash_matches_bundled_png` checks
+/// this digest against the bytes `build.rs` embeds.
+const PROVISIONAL_PORTRAITS: &[(&str, &str)] = &[(
+    "doctrine",
+    "6dd3449514c8b0a657c5ca07f2f89e97820ce76a608684029e36300cc7a862cb",
+)];
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::Digest;
+    let digest = sha2::Sha256::digest(bytes);
+    format!("{digest:x}")
+}
+
+fn digest_matches_provisional(table: &[(&str, &str)], stem: &str, digest: &str) -> bool {
+    table
+        .iter()
+        .any(|(name, hash)| *name == stem && *hash == digest)
+}
+
+fn bytes_match_provisional(stem: &str, bytes: &[u8]) -> bool {
+    digest_matches_provisional(PROVISIONAL_PORTRAITS, stem, &sha256_hex(bytes))
+}
+
+/// True when `path` is absent, or its bytes are a known provisional stand-in.
+/// A file with any other bytes is not replaceable.
+pub fn portrait_slot_is_replaceable(path: &Path) -> bool {
+    if !path.exists() {
+        return true;
+    }
+    let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+        return false;
+    };
+    match std::fs::read(path) {
+        Ok(bytes) => bytes_match_provisional(stem, &bytes),
+        Err(_) => false,
+    }
+}
+
+/// Unpack bundled portraits into the data directory.
+///
+/// Missing files are written. A file whose bytes match a
+/// [`PROVISIONAL_PORTRAITS`] digest is treated as missing (rewriting the same
+/// stand-in is a no-op). A file with any other bytes is left alone.
 fn unpack_bundled(portraits_dir: &Path) {
     let bundled = bundled_portraits();
     if bundled.is_empty() {
@@ -565,12 +689,16 @@ fn unpack_bundled(portraits_dir: &Path) {
     let mut unpacked = 0;
     for (name, data) in bundled {
         let path = portraits_dir.join(format!("{name}.png"));
-        if !path.exists() {
-            if let Err(e) = std::fs::write(&path, data) {
-                tracing::warn!(hero = name, error = %e, "failed to unpack bundled portrait");
-            } else {
-                unpacked += 1;
-            }
+        if !portrait_slot_is_replaceable(&path) {
+            continue;
+        }
+        if std::fs::read(&path).ok().as_deref() == Some(data) {
+            continue;
+        }
+        if let Err(e) = write_bytes_atomic(&path, data) {
+            tracing::warn!(hero = name, error = %e, "failed to unpack bundled portrait");
+        } else {
+            unpacked += 1;
         }
     }
 
@@ -635,5 +763,148 @@ mod reference_path_tests {
             portrait_reference_path(dir, "Wrecking Ball"),
             dir.join("wrecking_ball.png")
         );
+        assert_eq!(
+            portrait_reference_path(dir, "Doctrine"),
+            dir.join("doctrine.png")
+        );
+    }
+}
+
+#[cfg(test)]
+mod bundled_portrait_tests {
+    use super::bundled_portraits;
+
+    /// `build.rs` bundles every `portraits/*.png` under its file stem.
+    /// Doctrine's stem is `doctrine` (`portrait_reference_path("Doctrine")`).
+    #[test]
+    fn bundled_set_includes_doctrine() {
+        let bytes = bundled_portraits()
+            .iter()
+            .find(|(name, _)| *name == "doctrine")
+            .map(|(_, bytes)| *bytes)
+            .expect("bundled portraits include doctrine");
+        assert!(!bytes.is_empty());
+        let img = image::load_from_memory(bytes).expect("doctrine.png decodes");
+        assert_eq!((img.width(), img.height()), (32, 32));
+        assert!(matches!(img, image::DynamicImage::ImageRgba8(_)));
+    }
+
+    /// The digest in [`PROVISIONAL_PORTRAITS`] is the sha256 of the PNG
+    /// `build.rs` embeds, so a replaced stand-in still matches this const.
+    #[test]
+    fn doctrine_provisional_hash_matches_bundled_png() {
+        let bytes = bundled_portraits()
+            .iter()
+            .find(|(name, _)| *name == "doctrine")
+            .map(|(_, bytes)| *bytes)
+            .expect("bundled portraits include doctrine");
+        assert!(super::digest_matches_provisional(
+            super::PROVISIONAL_PORTRAITS,
+            "doctrine",
+            &super::sha256_hex(bytes),
+        ));
+    }
+}
+
+#[cfg(test)]
+mod provisional_portrait_tests {
+    use super::{
+        bundled_portraits, digest_matches_provisional, portrait_slot_is_replaceable,
+        save_captured_portrait, should_save_portrait_crop, unpack_bundled,
+    };
+    use image::{DynamicImage, Rgba, RgbaImage};
+
+    fn solid(color: Rgba<u8>) -> DynamicImage {
+        DynamicImage::ImageRgba8(RgbaImage::from_pixel(8, 8, color))
+    }
+
+    #[test]
+    fn capture_replaces_provisional_stand_in() {
+        let dir = tempfile::tempdir().unwrap();
+        let bundled = bundled_portraits()
+            .iter()
+            .find(|(name, _)| *name == "doctrine")
+            .map(|(_, bytes)| *bytes)
+            .unwrap();
+        let path = dir.path().join("doctrine.png");
+        std::fs::write(&path, bundled).unwrap();
+        assert!(portrait_slot_is_replaceable(&path));
+
+        let saved =
+            save_captured_portrait(dir.path(), "Doctrine", &solid(Rgba([0, 255, 0, 255]))).unwrap();
+        assert!(saved.is_some());
+        let after = std::fs::read(&path).unwrap();
+        assert_ne!(after, bundled);
+        assert!(!portrait_slot_is_replaceable(&path));
+    }
+
+    #[test]
+    fn capture_and_unpack_leave_non_provisional_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("doctrine.png");
+        solid(Rgba([255, 0, 0, 255]))
+            .save(&path)
+            .expect("write user portrait");
+        let before = std::fs::read(&path).unwrap();
+        assert!(!portrait_slot_is_replaceable(&path));
+
+        let saved =
+            save_captured_portrait(dir.path(), "Doctrine", &solid(Rgba([0, 0, 255, 255]))).unwrap();
+        assert!(saved.is_none());
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+
+        unpack_bundled(dir.path());
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn unpack_writes_missing_files() {
+        let dir = tempfile::tempdir().unwrap();
+        unpack_bundled(dir.path());
+        let bundled = bundled_portraits()
+            .iter()
+            .find(|(name, _)| *name == "doctrine")
+            .map(|(_, bytes)| *bytes)
+            .unwrap();
+        let path = dir.path().join("doctrine.png");
+        assert_eq!(std::fs::read(&path).unwrap(), bundled);
+        assert!(portrait_slot_is_replaceable(&path));
+        assert!(dir.path().read_dir().unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .ends_with(".tmp")
+        }));
+    }
+
+    /// A stem may list several shipped digests. `.any` keeps every one of
+    /// them replaceable; stopping at the first row would freeze the older file.
+    #[test]
+    fn a_stem_matches_every_listed_hash() {
+        let table = &[("doctrine", "aaa"), ("doctrine", "bbb"), ("ana", "ccc")];
+        assert!(digest_matches_provisional(table, "doctrine", "aaa"));
+        assert!(digest_matches_provisional(table, "doctrine", "bbb"));
+        assert!(!digest_matches_provisional(table, "doctrine", "ccc"));
+        assert!(!digest_matches_provisional(table, "ana", "aaa"));
+    }
+
+    #[test]
+    fn capture_decision_needs_a_known_row_and_a_replaceable_slot() {
+        // Career panel, empty-or-stand-in slot, identified row.
+        assert!(should_save_portrait_crop(true, false, true, true));
+        // Row not identified: do not crop row 0, even with --collect-portraits.
+        assert!(!should_save_portrait_crop(true, true, true, false));
+        // Portrait/held/text guess, collection off.
+        assert!(!should_save_portrait_crop(false, false, true, true));
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("doctrine.png");
+        solid(Rgba([255, 0, 0, 255]))
+            .save(&path)
+            .expect("write real portrait");
+        let replaceable = portrait_slot_is_replaceable(&path);
+        assert!(!replaceable);
+        assert!(!should_save_portrait_crop(true, true, replaceable, true));
     }
 }

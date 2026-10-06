@@ -21,7 +21,7 @@ pub enum Hero {
     WreckingBall,
     Zarya,
 
-    // Damage (23)
+    // Damage (22)
     Anran,
     Ashe,
     Bastion,
@@ -38,7 +38,6 @@ pub enum Hero {
     Sierra,
     Sojourn,
     Soldier76,
-    Sombra,
     Symmetra,
     Torbjorn,
     Tracer,
@@ -46,10 +45,11 @@ pub enum Hero {
     Venture,
     Widowmaker,
 
-    // Support (13)
+    // Support (15)
     Ana,
     Baptiste,
     Brigitte,
+    Doctrine,
     Illari,
     Juno,
     Kiriko,
@@ -58,6 +58,7 @@ pub enum Hero {
     Mercy,
     Mizuki,
     Moira,
+    Sombra,
     Wuyang,
     Zenyatta,
 }
@@ -96,7 +97,6 @@ impl Hero {
             | Self::Sierra
             | Self::Sojourn
             | Self::Soldier76
-            | Self::Sombra
             | Self::Symmetra
             | Self::Torbjorn
             | Self::Tracer
@@ -107,6 +107,7 @@ impl Hero {
             Self::Ana
             | Self::Baptiste
             | Self::Brigitte
+            | Self::Doctrine
             | Self::Illari
             | Self::Juno
             | Self::Kiriko
@@ -115,6 +116,7 @@ impl Hero {
             | Self::Mercy
             | Self::Mizuki
             | Self::Moira
+            | Self::Sombra
             | Self::Wuyang
             | Self::Zenyatta => HeroRole::Support,
         }
@@ -152,7 +154,6 @@ impl Hero {
             Self::Sierra => "Sierra",
             Self::Sojourn => "Sojourn",
             Self::Soldier76 => "Soldier: 76",
-            Self::Sombra => "Sombra",
             Self::Symmetra => "Symmetra",
             Self::Torbjorn => "Torbjörn",
             Self::Tracer => "Tracer",
@@ -162,6 +163,7 @@ impl Hero {
             Self::Ana => "Ana",
             Self::Baptiste => "Baptiste",
             Self::Brigitte => "Brigitte",
+            Self::Doctrine => "Doctrine",
             Self::Illari => "Illari",
             Self::Juno => "Juno",
             Self::Kiriko => "Kiriko",
@@ -170,6 +172,7 @@ impl Hero {
             Self::Mercy => "Mercy",
             Self::Mizuki => "Mizuki",
             Self::Moira => "Moira",
+            Self::Sombra => "Sombra",
             Self::Wuyang => "Wuyang",
             Self::Zenyatta => "Zenyatta",
         }
@@ -230,7 +233,59 @@ pub enum MapName {
     ThroneOfAnubis,
 }
 
+macro_rules! map_name_all {
+    ($($variant:ident),* $(,)?) => {
+        /// Every map variant, in enum order. Callers that used to copy display
+        /// names by hand (OCR collision checks) iterate this instead.
+        ///
+        /// [`_map_name_all_exhaustive`] matches the same variants with no
+        /// wildcard, so a new `MapName` fails to compile until it is added here.
+        pub const ALL: &[MapName] = &[$(MapName::$variant),*];
+
+        const fn _map_name_all_exhaustive(map: MapName) {
+            match map {
+                $(MapName::$variant => {}),*
+            }
+        }
+    };
+}
+
 impl MapName {
+    map_name_all! {
+        CircuitRoyal,
+        Dorado,
+        Havana,
+        Junkertown,
+        Rialto,
+        Route66,
+        ShambaliMonastery,
+        WatchpointGibraltar,
+        BlizzardWorld,
+        Eichenwalde,
+        Hollywood,
+        KingsRow,
+        Midtown,
+        NeonJunction,
+        Numbani,
+        Paraiso,
+        AntarcticPeninsula,
+        Busan,
+        Ilios,
+        LijangTower,
+        Nepal,
+        Oasis,
+        Samoa,
+        Colosseo,
+        Esperanca,
+        NewQueenStreet,
+        Runasapi,
+        Aatlis,
+        NewJunkCity,
+        Suravasa,
+        Hanaoka,
+        ThroneOfAnubis,
+    }
+
     pub fn game_mode(&self) -> GameMode {
         match self {
             Self::CircuitRoyal
@@ -434,6 +489,19 @@ mod tests {
     use super::*;
     use std::str::FromStr;
 
+    #[test]
+    fn all_covers_every_map_and_display_names_round_trip() {
+        assert_eq!(MapName::ALL.len(), 32);
+        let mut names: Vec<&str> = MapName::ALL.iter().map(|m| m.display_name()).collect();
+        let n = names.len();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), n, "display names must be unique");
+        for map in MapName::ALL {
+            assert_eq!(map.display_name().parse::<MapName>().unwrap(), *map);
+        }
+    }
+
     /// Live Maps-tab names (accented + unaccented) plus Neon Junction.
     /// These six strings are the ones that used to land in Other.
     #[test]
@@ -467,5 +535,28 @@ mod tests {
                 "game_mode_label failed for {name:?}"
             );
         }
+    }
+
+    /// Season 5: Doctrine is Support; Sombra moved Damage → Support.
+    /// Serde names stay snake_case (`doctrine`, `sombra`). Roadhog's rework
+    /// did not change his role.
+    #[test]
+    fn season5_doctrine_and_sombra_are_support() {
+        assert_eq!(Hero::Doctrine.role(), HeroRole::Support);
+        assert_eq!(Hero::Sombra.role(), HeroRole::Support);
+        assert_eq!(Hero::Roadhog.role(), HeroRole::Tank);
+        assert_eq!(Hero::Doctrine.display_name(), "Doctrine");
+        assert_eq!(Hero::Doctrine.to_string(), "Doctrine");
+        assert_eq!(Hero::Sombra.to_string(), "Sombra");
+
+        let doctrine: Hero = serde_json::from_str("\"doctrine\"").unwrap();
+        assert_eq!(doctrine, Hero::Doctrine);
+        assert_eq!(
+            serde_json::to_string(&Hero::Doctrine).unwrap(),
+            "\"doctrine\""
+        );
+        let sombra: Hero = serde_json::from_str("\"sombra\"").unwrap();
+        assert_eq!(sombra, Hero::Sombra);
+        assert_eq!(serde_json::to_string(&Hero::Sombra).unwrap(), "\"sombra\"");
     }
 }

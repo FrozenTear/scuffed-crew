@@ -18,6 +18,7 @@ pub const HEROES: &[&str] = &[
     "Cassidy",
     "D.Mon",
     "D.Va",
+    "Doctrine",
     "Domina",
     "Doomfist",
     "Echo",
@@ -156,8 +157,14 @@ pub fn find_hero(lines: &[&str]) -> Option<String> {
 
 const FUZZY_HERO_THRESHOLD: f64 = 0.75;
 
+/// Tokenizer [`fuzzy_match_hero`] actually scores. Collision tests must use
+/// this, not a second splitter.
+fn fuzzy_tokens(text: &str) -> impl Iterator<Item = &str> {
+    text.split_whitespace()
+}
+
 fn fuzzy_match_hero(text: &str) -> Option<String> {
-    let words: Vec<&str> = text.split_whitespace().collect();
+    let words: Vec<&str> = fuzzy_tokens(text).collect();
 
     let mut best_hero: Option<&str> = None;
     let mut best_score: f64 = 0.0;
@@ -253,6 +260,14 @@ mod tests {
         );
         assert_eq!(resolve_hero_query(Some("d.va")), Ok(Some("D.Va")));
         assert!(resolve_hero_query(Some("NotAHero")).is_err());
+        // Season 5. Unknown names 400 on ?hero= (leaderboards and public members).
+        assert_eq!(resolve_hero_query(Some("doctrine")), Ok(Some("Doctrine")));
+        assert_eq!(resolve_hero_query(Some("Doctrine")), Ok(Some("Doctrine")));
+        assert_eq!(resolve_hero_query(Some("DOCTRINE")), Ok(Some("Doctrine")));
+        assert_eq!(
+            resolve_hero_query(Some("  doctrine  ")),
+            Ok(Some("Doctrine"))
+        );
     }
 
     #[test]
@@ -298,5 +313,106 @@ mod tests {
         v.sort();
         v.dedup();
         assert_eq!(v.len(), HEROES.len());
+    }
+
+    /// Season 5 Support hero (2026-10-06). Alphabetical in [`HEROES`]. Fuzzy
+    /// score against every other hero token, map token, and common scoreboard
+    /// word stays under the fuzzy threshold.
+    #[test]
+    fn doctrine_matches_and_does_not_fuzzy_collide() {
+        assert_eq!(match_hero_in_text("DOCTRINE").as_deref(), Some("Doctrine"));
+        assert_eq!(match_hero_in_text("Doctrine").as_deref(), Some("Doctrine"));
+        assert_eq!(canonical_hero("doctrine"), "Doctrine");
+        assert_eq!(resolve_hero_query(Some("doctrine")), Ok(Some("Doctrine")));
+
+        let pos = HEROES
+            .iter()
+            .position(|h| *h == "Doctrine")
+            .expect("Doctrine is listed");
+        assert!(pos > 0 && HEROES[pos - 1] < "Doctrine");
+        assert!(pos + 1 < HEROES.len() && HEROES[pos + 1] > "Doctrine");
+
+        // One-edit OCR misses still land on Doctrine, not Domina / Doomfist.
+        assert_eq!(match_hero_in_text("DOCTRIN").as_deref(), Some("Doctrine"));
+        assert_eq!(match_hero_in_text("DOCTRNE").as_deref(), Some("Doctrine"));
+
+        let mut words: Vec<String> = Vec::new();
+        for &hero in HEROES {
+            if hero.eq_ignore_ascii_case("Doctrine") {
+                continue;
+            }
+            for token in fuzzy_tokens(hero) {
+                words.push(token.to_lowercase());
+            }
+        }
+        assert!(!crate::stats::MapName::ALL.is_empty());
+        for map in crate::stats::MapName::ALL {
+            let name = map.display_name();
+            assert_ne!(
+                match_hero_in_text(name).as_deref(),
+                Some("Doctrine"),
+                "{name:?} matched Doctrine"
+            );
+            for token in fuzzy_tokens(name) {
+                words.push(token.to_lowercase());
+            }
+        }
+        for word in [
+            "eliminations",
+            "assists",
+            "deaths",
+            "damage",
+            "healing",
+            "mitigation",
+            "victory",
+            "defeat",
+            "draw",
+            "accuracy",
+            "critical",
+            "weapon",
+            "kills",
+            "elims",
+            "objective",
+            "contesting",
+            "eliminated",
+            "final",
+            "blow",
+            "card",
+            "player",
+            "hero",
+            "role",
+            "score",
+            "time",
+            "support",
+            "tank",
+            "payload",
+            "overtime",
+            "round",
+            "attack",
+            "defense",
+            "escort",
+            "hybrid",
+            "control",
+            "push",
+            "flashpoint",
+            "clash",
+        ] {
+            for token in fuzzy_tokens(word) {
+                words.push(token.to_lowercase());
+            }
+        }
+
+        for word in words {
+            let score = normalized_levenshtein(&word, "doctrine");
+            assert!(
+                score < FUZZY_HERO_THRESHOLD,
+                "{word:?} scores {score} against doctrine (threshold {FUZZY_HERO_THRESHOLD})"
+            );
+            assert_ne!(
+                match_hero_in_text(&word).as_deref(),
+                Some("Doctrine"),
+                "{word:?} matched Doctrine"
+            );
+        }
     }
 }

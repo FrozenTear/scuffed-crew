@@ -4,6 +4,29 @@ User-facing notes for `stat-tracker-v*` GitHub Releases. The release workflow
 prepends the section whose heading matches the tag version (for example
 `## 0.4.15` for `stat-tracker-v0.4.15`).
 
+## 0.4.18
+
+Season 5 ([patch notes](https://overwatch.blizzard.com/en-us/news/patch-notes/)):
+new captures recognize the Support hero Doctrine, and read Sombra as
+Support. Games already stored keep the role they were captured with.
+Roadhog's rework does not change his role.
+
+Doctrine ships with stand-in wiki art (Blizzard Entertainment artwork,
+sourced via the Overwatch wiki). The tracker replaces that file
+automatically with a real in-game crop the first time you play Doctrine.
+
+`--collect-portraits` now only fills missing portraits and the Doctrine
+stand-in; it never overwrites an existing reference.
+
+### Install
+
+```sh
+curl --proto '=https' -fsSL https://raw.githubusercontent.com/FrozenTear/scuffed-crew/main/crates/stat-tracker/dist/bootstrap.sh | bash
+```
+
+Or extract the tarball and run `./install.sh`. Pin with
+`STAT_TRACKER_TAG=stat-tracker-v0.4.18`.
+
 ## 0.4.17
 
 The user systemd unit now refuses new privileges and mounts the

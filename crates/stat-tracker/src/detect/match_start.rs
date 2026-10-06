@@ -539,7 +539,7 @@ mod tests {
     #[test]
     fn vote_reader_ignores_non_map_text() {
         // Header words and hero names on the vote screen must not read as maps.
-        let maps = extract_map_names("VOTE FOR A MAP  REAPER  SOMBRA");
+        let maps = extract_map_names("VOTE FOR A MAP  REAPER  SOMBRA  DOCTRINE");
         assert!(maps.is_empty(), "unexpected maps: {maps:?}");
     }
 

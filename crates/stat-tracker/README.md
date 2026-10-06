@@ -84,7 +84,7 @@ Pin a tag by fetching that tag's bootstrap (the assignment has to be on
 `bash`, because `VAR=x curl … | bash` does not pass `VAR` to `bash`):
 
 ```sh
-TAG=stat-tracker-v0.4.17
+TAG=stat-tracker-v0.4.18
 curl --proto '=https' -fsSL "https://raw.githubusercontent.com/FrozenTear/scuffed-crew/${TAG}/crates/stat-tracker/dist/bootstrap.sh" \
   | STAT_TRACKER_TAG="$TAG" STAT_TRACKER_PREFIX="$HOME/.local" bash
 ```
@@ -138,9 +138,10 @@ https://…` writes `~/.config/scuffed-stat-tracker/config.toml` (chmod 600 —
 it holds the bearer token). Tokens are minted in the site under
 My Stats → Settings.
 
-Useful flags: `--list-outputs`, `--collect-portraits` (build hero-portrait
-references from your own captures), `--dump-poll-frames` (ring buffer of
-poll-tick frames for diagnosis), `--generate-tessdata`.
+Useful flags: `--list-outputs`, `--collect-portraits` (now only fills missing
+portraits and the Doctrine stand-in; it never overwrites an existing
+reference), `--dump-poll-frames` (ring buffer of poll-tick frames for
+diagnosis), `--generate-tessdata`.
 
 A user systemd unit named `scuffed-stat-tracker.service` is recognized by the
 GUI's daemon card (start/stop/autostart route through systemd when installed).

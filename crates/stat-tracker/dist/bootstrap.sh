@@ -11,7 +11,7 @@
 # Pin the script URL itself (what the GUI copies when it knows the version).
 # The tag must be assigned on bash, not curl: `VAR=x curl | bash` does not
 # export VAR into bash.
-#   TAG=stat-tracker-v0.4.17
+#   TAG=stat-tracker-v0.4.18
 #   curl --proto '=https' -fsSL "https://raw.githubusercontent.com/FrozenTear/scuffed-crew/${TAG}/crates/stat-tracker/dist/bootstrap.sh" \
 #     | STAT_TRACKER_TAG="$TAG" bash
 #

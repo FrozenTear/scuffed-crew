@@ -10915,7 +10915,7 @@ dependencies = [
 
 [[package]]
 name = "scuffed-stat-tracker"
-version = "0.4.17"
+version = "0.4.18"
 dependencies = [
  "anyhow",
  "ashpd",
@@ -10930,6 +10930,7 @@ dependencies = [
  "scuffed-types",
  "serde",
  "serde_json",
+ "sha2",
  "strsim",
  "surrealdb",
  "surrealdb-types",
