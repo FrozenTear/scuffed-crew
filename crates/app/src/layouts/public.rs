@@ -87,6 +87,22 @@ fn strategies_enabled_or_default(settings: Option<&SiteSettings>) -> bool {
     settings.map(|s| s.strategies_enabled).unwrap_or(true)
 }
 
+/// Pending settings show no catalog rows. A settled failure with nothing
+/// painted uses the product default. A loaded org uses its own nav.
+fn nav_for_resolved(resolved: Option<&Result<SiteSettings, String>>) -> NavConfig {
+    if resolved.is_none() {
+        return NavConfig { items: Vec::new() };
+    }
+    match loaded_site_settings(resolved) {
+        Some(settings) => {
+            let mut nav = settings.nav.clone();
+            nav.normalize();
+            nav
+        }
+        None => NavConfig::default(),
+    }
+}
+
 fn resolve_nav(cfg: &NavConfig, placement: NavPlacement, strategies_enabled: bool) -> Vec<NavLink> {
     cfg.items_in(placement)
         .into_iter()
@@ -464,14 +480,7 @@ pub fn PublicLayout() -> Element {
         .map(|s| page_bg_css(&s.page_bg_color, &s.page_bg_image_url))
         .unwrap_or_default();
 
-    let nav_cfg = loaded_settings
-        .as_ref()
-        .map(|s| {
-            let mut n = s.nav.clone();
-            n.normalize();
-            n
-        })
-        .unwrap_or_default();
+    let nav_cfg = nav_for_resolved(resolved.as_ref());
     let strategies_enabled = strategies_enabled_or_default(loaded_settings);
     let primary_links = resolve_nav(&nav_cfg, NavPlacement::Primary, strategies_enabled);
     let more_links = resolve_nav(&nav_cfg, NavPlacement::More, strategies_enabled);
@@ -834,6 +843,24 @@ pub fn PublicLayout() -> Element {
 mod tests {
     use super::*;
     use scuffed_types::NAV_CATALOG;
+
+    #[test]
+    fn pending_nav_is_empty_and_the_default_contains_members() {
+        assert!(nav_for_resolved(None).items.is_empty());
+        assert!(
+            NavConfig::default()
+                .items
+                .iter()
+                .any(|item| item.id == "members")
+        );
+        let failed: Option<Result<SiteSettings, String>> = Some(Err("offline".into()));
+        assert!(
+            nav_for_resolved(failed.as_ref())
+                .items
+                .iter()
+                .any(|item| item.id == "members")
+        );
+    }
 
     #[test]
     fn catalog_ids_resolve_to_routes() {

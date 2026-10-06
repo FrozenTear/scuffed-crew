@@ -27,6 +27,7 @@ fn main() {
     // `/login?error=registration_closed` while the address bar still has it.
     // Login consumes that snapshot on its first mount. One process-wide slot;
     // see `LoginBannerSlot`.
+    // Untested call site: login tests cover the probe harness, not `main`.
     pages::capture_initial_login_banner();
     dioxus::launch(App);
 }
@@ -39,6 +40,7 @@ fn App() -> Element {
     // Once per App mount, before `Router` rewrites the URL. `main` already
     // snapshotted on a normal boot, so this is a no-op then. A re-render must
     // not take the lock again. Same `LoginBannerSlot` as `main`.
+    // Untested call site: login tests cover the probe harness, not `App`.
     use_hook(|| {
         pages::capture_initial_login_banner();
     });
@@ -67,36 +69,41 @@ fn App() -> Element {
     });
 
     // One settings fetch for the document head and every public consumer.
-    // Title stays blank until the real org name arrives.
+    // `document::Title` updates the existing `<title>` once a real org name
+    // exists. Description and Open Graph tags stay in index.html: `document::Meta`
+    // would append a second copy and ignore later prop changes.
     let site_settings = state::provide_site_settings();
     let resolved = site_settings.resolved();
     let loaded_settings = state::loaded_site_settings(resolved.as_ref());
-    // Leave the server-written <title>, og:title, and description alone until
-    // real settings exist. An empty title would wipe the clan name, and a
-    // synthesized "gaming clan" blurb is a template default.
     let page_title = loaded_settings.and_then(|s| {
         let title = state::document_title(Some(&s.org_name));
         if title.is_empty() { None } else { Some(title) }
     });
-    let page_description = loaded_settings.and_then(|s| {
-        let description = s.site_description.trim();
-        if description.is_empty() {
-            None
-        } else {
-            Some(description.to_string())
-        }
+    // Update the one `<link rel="icon">` from index.html. Pending leaves that
+    // static href. A non-empty org name gets a data URI, including initials CL.
+    // `document::Link` appends and then ignores href changes, so this effect
+    // writes the existing element. Crawlers still see the shell's single tag.
+    use_effect(move || {
+        let resolved = site_settings.resolved();
+        let settled_name = match resolved.as_ref() {
+            None => None,
+            Some(Ok(settings)) => Some(settings.org_name.clone()),
+            Some(Err(_)) => Some(String::new()),
+        };
+        let Some(href) = theme::brand::runtime_favicon_href(settled_name.as_deref()) else {
+            return;
+        };
+        let Some(window) = web_sys::window() else {
+            return;
+        };
+        let Some(document) = window.document() else {
+            return;
+        };
+        let Ok(Some(link)) = document.query_selector("link[rel='icon']") else {
+            return;
+        };
+        let _ = link.set_attribute("href", &href);
     });
-    let icon_href = match loaded_settings {
-        Some(settings) if !settings.org_name.trim().is_empty() => {
-            let initials = scuffed_types::org_initials(&settings.org_name);
-            if initials == "CL" {
-                asset!("/assets/favicon.svg").to_string()
-            } else {
-                theme::brand::org_favicon_data_uri(&initials)
-            }
-        }
-        _ => asset!("/assets/favicon.svg").to_string(),
-    };
     // Unknown settings use a gray accent. Product purple is a real brand and
     // must not paint before the embedded block or `/api/settings` says so.
     let brand_theme_css = {
@@ -118,34 +125,21 @@ fn App() -> Element {
     }
 
     rsx! {
-        // Runtime head. index.html already has one title, one og:title, and
-        // one description for the server to fill. Update them only after
-        // settings exist.
+        // index.html owns description, og:title, og:description, and og:site_name
+        // so the server can fill the one copy of each. Title is the exception:
+        // `document::Title` replaces the text of the existing element.
         if let Some(title) = page_title.as_ref() {
             document::Title { "{title}" }
-            document::Meta {
-                property: "og:title",
-                content: "{title}",
-            }
-        }
-        if let Some(desc) = page_description.as_ref() {
-            document::Meta {
-                name: "description",
-                content: "{desc}",
-            }
-            document::Meta {
-                property: "og:description",
-                content: "{desc}",
-            }
         }
         document::Meta {
             name: "theme-color",
             content: "{theme::tokens::THEME_COLOR}",
         }
+        // Preload in index.html starts the download without blocking boot paint.
+        // Applying it here avoids an inline onload, which script-src would block.
         document::Link {
-            rel: "icon",
-            href: "{icon_href}",
-            r#type: "image/svg+xml",
+            rel: "stylesheet",
+            href: "https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&family=JetBrains+Mono:wght@500&display=swap",
         }
         document::Stylesheet {
             href: asset!("/assets/tailwind.css")

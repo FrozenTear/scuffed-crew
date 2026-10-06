@@ -69,32 +69,62 @@ fn pending_home(body: HomeBody, refresh: Signal<u32>) -> Element {
 #[component]
 pub fn Home() -> Element {
     let site_settings = use_site_settings();
-    let overview = use_resource(|| async {
-        ApiClient::web()
-            .fetch::<Overview>("/api/public/overview")
-            .await
-            .ok()
+    // Refresh ticks are read in the sync part of each resource, not inside the
+    // future, so Retry restarts that fetch without subscribing to its result.
+    let mut overview_refresh = use_signal(|| 0u32);
+    let overview = use_resource(move || {
+        let _tick = overview_refresh();
+        async move {
+            ApiClient::web()
+                .fetch::<Overview>("/api/public/overview")
+                .await
+                .ok()
+        }
     });
-    let announcements = use_resource(|| async {
-        ApiClient::web()
-            .fetch::<CursorPage<Announcement>>("/api/announcements")
-            .await
-            .ok()
-            .map(|r| r.data)
+    let mut announcements_refresh = use_signal(|| 0u32);
+    let announcements = use_resource(move || {
+        let _tick = announcements_refresh();
+        async move {
+            ApiClient::web()
+                .fetch::<CursorPage<Announcement>>("/api/announcements")
+                .await
+                .ok()
+                .map(|r| r.data)
+        }
     });
-    let tournaments_res = use_resource(|| async {
-        ApiClient::web()
-            .fetch::<CursorPage<HomeTournament>>("/api/tournaments")
-            .await
-            .ok()
-            .map(|r| r.data)
+    let mut tournaments_refresh = use_signal(|| 0u32);
+    let tournaments_res = use_resource(move || {
+        let _tick = tournaments_refresh();
+        async move {
+            ApiClient::web()
+                .fetch::<CursorPage<HomeTournament>>("/api/tournaments")
+                .await
+                .ok()
+                .map(|r| r.data)
+        }
     });
-    let events = use_resource(|| async {
-        ApiClient::web()
-            .fetch::<CursorPage<Event>>("/api/events")
-            .await
-            .ok()
-            .map(|r| r.data)
+    let mut events_refresh = use_signal(|| 0u32);
+    let events = use_resource(move || {
+        let _tick = events_refresh();
+        async move {
+            ApiClient::web()
+                .fetch::<CursorPage<Event>>("/api/events")
+                .await
+                .ok()
+                .map(|r| r.data)
+        }
+    });
+    let retry_overview = Callback::new(move |_| {
+        overview_refresh += 1;
+    });
+    let retry_news = Callback::new(move |_| {
+        announcements_refresh += 1;
+    });
+    let retry_tourneys = Callback::new(move |_| {
+        tournaments_refresh += 1;
+    });
+    let retry_events = Callback::new(move |_| {
+        events_refresh += 1;
     });
 
     let resolved = site_settings.resolved();
@@ -118,8 +148,8 @@ pub fn Home() -> Element {
     let recruitment_open = settings.recruitment_open;
 
     // Resolve list data for blocks (Home owns resources).
-    // Pending is an empty vec for visibility, but the phase stays Pending so
-    // shells that show empty sections paint "Loading…" instead of empty copy.
+    // Pending keeps a section mounted (loading / skeleton) even when the shell
+    // hides empty lists, so the page does not grow when the fetch lands.
     let events_phase = resource_list_phase(events.read().as_ref());
     let event_list = events
         .read()
@@ -168,28 +198,39 @@ pub fn Home() -> Element {
         .map(|o| o.teams.is_empty())
         .unwrap_or(true);
 
+    let live_keep_empty = home_shell.show_when_empty(HomeSectionId::Live);
     let (show_schedule, show_tourneys) = live_panel_flags(
-        home_shell.show_when_empty(HomeSectionId::Live),
+        live_keep_empty,
         content.sections.schedule,
         content.sections.tournaments,
+        events_phase,
         has_events,
+        tourneys_phase,
         has_tourneys,
     );
-    // Match widgets show when we have data (or shell keeps empty Live sections).
-    let live_keep_empty = home_shell.show_when_empty(HomeSectionId::Live);
-    let show_next_match = has_upcoming || (live_keep_empty && content.sections.schedule);
-    let show_results = has_results;
+    let show_next_match = content.sections.schedule
+        && blocks::keep_section(upcoming_phase, has_upcoming, live_keep_empty);
+    // The ticker is reserved while overview is in flight, then hidden when the
+    // list is empty or the fetch failed.
+    let show_results = blocks::keep_section(upcoming_phase, has_results, false);
 
     let show_teams = teams_will_render(
         content.sections.teams,
+        upcoming_phase,
         teams_empty,
         home_shell.show_when_empty(HomeSectionId::Teams),
     );
-    // Secondary CTA only when Teams block will render.
+    // Secondary CTA only when Teams block will render, including while that
+    // list is still loading so the button does not pop in later.
     let show_secondary_cta = show_teams;
 
     let show_news = content.sections.news
-        && (!news_list.is_empty() || home_shell.show_when_empty(HomeSectionId::News));
+        && blocks::keep_section(
+            news_phase,
+            !news_list.is_empty(),
+            home_shell.show_when_empty(HomeSectionId::News),
+        );
+    let metrics_pending = upcoming_phase == ListPhase::Pending;
 
     let (metric_squads, metric_members, metric_games) = {
         match overview_data.as_ref() {
@@ -238,6 +279,7 @@ pub fn Home() -> Element {
                 metric_squads,
                 metric_members,
                 metric_games,
+                metrics_pending,
             }
             div { class: "{home_class}",
                 for id in section_order.iter().copied() {
@@ -263,6 +305,9 @@ pub fn Home() -> Element {
                                         show_tourneys,
                                         show_next_match,
                                         show_results,
+                                        retry_events,
+                                        retry_tourneys,
+                                        retry_overview,
                                     }
                                 }
                             },
@@ -272,6 +317,7 @@ pub fn Home() -> Element {
                                     overview: overview_data.clone(),
                                     phase: upcoming_phase,
                                     presentation: teams_presentation,
+                                    retry: retry_overview,
                                 }
                             },
                             HomeSectionId::News if show_news => rsx! {
@@ -279,6 +325,7 @@ pub fn Home() -> Element {
                                     content: content.clone(),
                                     announcements: news_list.clone(),
                                     phase: news_phase,
+                                    retry: retry_news,
                                 }
                             },
                             HomeSectionId::Recruit if content.sections.recruit && recruitment_open => rsx! {
@@ -299,9 +346,11 @@ pub fn Home() -> Element {
 
 /// Textless hero. Bars use the loaded hero's type scale.
 ///
-/// The parent `.home-wrap` must set `data-home-shell` and `data-home-skin`
-/// (see `pending_home`). Column width is documented next to `.home-skel` in css.rs.
-/// `aria-busy` is omitted: it suppresses the `role="status"` announcement.
+/// The parent `.home-wrap` sets `data-home-shell` so the rail width matches the
+/// loaded page (`pending_home` uses the default shell). `data-home-skin` is set
+/// for consistency; no skin rule affects this skeleton. Width numbers live next
+/// to `.home-skel` in css.rs. `aria-busy` is omitted: it suppresses the
+/// `role="status"` announcement.
 #[component]
 fn HeroSkeleton() -> Element {
     rsx! {

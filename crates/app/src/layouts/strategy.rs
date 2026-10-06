@@ -93,7 +93,8 @@ const STRATEGY_CSS: &str = r#"
     }
 "#;
 
-/// Site-side gate. Reads `strategies_enabled` from GET /api/settings (default ON).
+/// Site-side gate. Uses the shared settings slot, including a `#sc-settings` seed.
+/// A missing payload fail-opens.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum StrategyPathPolicy {
     Open,
@@ -102,10 +103,6 @@ enum StrategyPathPolicy {
     /// GET /api/settings is still in flight on that alias. Not the fail-open default.
     AwaitingSettings,
     Blocked,
-}
-
-fn strategies_enabled_or_default(settings: Option<&SiteSettings>) -> bool {
-    settings.map(|s| s.strategies_enabled).unwrap_or(true)
 }
 
 /// `None` while the settings resource has not settled.
@@ -123,15 +120,8 @@ fn strategy_path_policy(path: &str, strategies_enabled: Option<bool>) -> Strateg
     }
 }
 
-/// Outer `None`: resource still pending (do not apply the default).
-/// Inner `None`: settled with no settings payload → default on.
-fn flag_from_loaded_settings(loaded: Option<Option<&SiteSettings>>) -> Option<bool> {
-    loaded.map(|settings| strategies_enabled_or_default(settings))
-}
-
 /// `None` while settings are still unknown. A seed or a successful fetch is
-/// `Ok`. A failed fetch with nothing painted fail-opens, matching
-/// [`flag_from_loaded_settings`]`(Some(None))`.
+/// `Ok`. A failed fetch with nothing painted fail-opens (`Some(true)`).
 fn flag_from_resolved(resolved: Option<&Result<SiteSettings, String>>) -> Option<bool> {
     match resolved {
         None => None,
@@ -144,22 +134,21 @@ fn flag_from_resolved(resolved: Option<&Result<SiteSettings, String>>) -> Option
 pub fn StrategyLayout() -> Element {
     let navigator = use_navigator();
     let site_settings = use_site_settings();
-    // Dioxus 0.7 effects re-run only when signals are read *inside* the effect.
-    // `use_route()` is a hook (`use_hook`) and must stay out here; `router().current()`
-    // subscribes this effect to navigation. `resolved()` reads the shared settings
-    // signals, including a `#sc-settings` seed, so a seeded flag is ready immediately.
+    // The memo reads `resolved()` once per settings change. Dioxus 0.7 effects
+    // re-run only when signals are read *inside* the effect, so the effect
+    // reads `flag()` (Copy) and `router().current()`. `use_route()` is a hook
+    // and stays outside.
+    let flag = use_memo(move || flag_from_resolved(site_settings.resolved().as_ref()));
     use_effect(move || {
         let path = router().current::<Route>().to_string();
-        let resolved = site_settings.resolved();
-        let flag = flag_from_resolved(resolved.as_ref());
-        if strategy_path_policy(&path, flag) == StrategyPathPolicy::RedirectPatchNotes {
+        let enabled = flag();
+        if strategy_path_policy(&path, enabled) == StrategyPathPolicy::RedirectPatchNotes {
             navigator.replace(Route::PatchNotes {});
         }
     });
 
     let path = router().current::<Route>().to_string();
-    let resolved = site_settings.resolved();
-    let surface = strategy_path_policy(&path, flag_from_resolved(resolved.as_ref()));
+    let surface = strategy_path_policy(&path, flag());
 
     if matches!(
         surface,
@@ -218,6 +207,16 @@ pub fn StrategyLayout() -> Element {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn strategies_enabled_or_default(settings: Option<&SiteSettings>) -> bool {
+        settings.map(|s| s.strategies_enabled).unwrap_or(true)
+    }
+
+    /// Outer `None`: resource still pending (do not apply the default).
+    /// Inner `None`: settled with no settings payload → default on.
+    fn flag_from_loaded_settings(loaded: Option<Option<&SiteSettings>>) -> Option<bool> {
+        loaded.map(|settings| strategies_enabled_or_default(settings))
+    }
 
     #[test]
     fn enabled_keeps_planner_and_patch_notes_open() {
@@ -312,17 +311,23 @@ mod tests {
     #[test]
     fn redirect_effect_subscribes_inside_the_effect() {
         let src = include_str!("strategy.rs");
+        let memo_at = src.find("use_memo(move ||").expect("flag memo");
+        let memo = &src[memo_at..memo_at + 120];
+        assert!(
+            memo.contains("resolved()") && memo.contains("flag_from_resolved"),
+            "memo must read the shared settings slot, including an embedded seed"
+        );
         let start = src.find("use_effect(move || {").expect("redirect effect");
         let body = &src[start..];
         let end = body.find("});").expect("effect end");
         let effect = &body[..end];
         assert!(
-            effect.contains("flag_from_resolved"),
-            "effect must read settings inside so it re-runs when GET /api/settings settles"
+            effect.contains("flag()"),
+            "effect must read the memo so it re-runs when settings settle"
         );
         assert!(
-            effect.contains("resolved()"),
-            "effect must read the shared settings slot, including an embedded seed"
+            !effect.contains("resolved()"),
+            "resolved() belongs in the memo so StrategyLayout does not clone settings twice"
         );
         assert!(
             effect.contains("router().current"),

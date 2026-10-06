@@ -14,7 +14,9 @@ cd "$ROOT"
 rm -rf dist
 cp -r target/dx/scuffed-app/release/web/public dist
 
-# Ensure favicon is available at a stable URL if the asset pipeline hashes it
+# index.html links this stable path (`/assets/favicon.svg`). The server treats
+# the unhashed file as a one-day asset, not an immutable hashed one. Keep the
+# copy so that link does not fall through to the SPA shell.
 if [[ ! -f dist/assets/favicon.svg ]] && [[ -f crates/app/assets/favicon.svg ]]; then
   mkdir -p dist/assets
   cp crates/app/assets/favicon.svg dist/assets/favicon.svg

@@ -101,9 +101,11 @@ impl SecurityPolicy {
             connect.push(format!("wss://{host}"));
         }
         connect.extend(self.connect_extras.iter().cloned());
-        // `document::Link rel=preconnect` to Google Fonts is a connection hint.
-        // Chrome checks preconnect against connect-src. The stylesheet itself
-        // is style-src; the font files are font-src.
+        // Preconnect hints in `crates/app/index.html` are connection hints.
+        // Chrome checks preconnect against connect-src. The stylesheet is
+        // applied from `document::Link` in `crates/app/src/main.rs` (index.html
+        // only preloads it). style-src allows the stylesheet host; font files
+        // are font-src.
         connect.push("https://fonts.googleapis.com".to_string());
         connect.push("https://fonts.gstatic.com".to_string());
         dedupe(&mut connect);
@@ -131,8 +133,9 @@ impl SecurityPolicy {
         // 'unsafe-inline' then. Do not add it to script-src.
         //
         // https://fonts.googleapis.com is the Inter / Space Grotesk / JetBrains
-        // Mono stylesheet (`crates/app/src/main.rs`). Font files load from
-        // fonts.gstatic.com (font-src below).
+        // Mono stylesheet. `index.html` preloads it; `crates/app/src/main.rs`
+        // applies it with `document::Link`. Preconnect in index.html is only a
+        // connection hint. Font files load from fonts.gstatic.com (font-src below).
         let script_src = script.join(" ");
         let img_src = img.join(" ");
         let connect_src = connect.join(" ");

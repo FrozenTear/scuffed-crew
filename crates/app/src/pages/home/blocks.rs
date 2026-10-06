@@ -19,9 +19,37 @@ pub enum ListPhase {
     Ready,
 }
 
-/// True only when the fetch settled on an empty list. Pending and failed stay quiet.
+/// True only when the fetch settled on an empty list.
+/// Pending paints a loading line. Failed paints an error and Retry.
 pub fn shows_empty_copy(phase: ListPhase, is_empty: bool) -> bool {
     phase == ListPhase::Ready && is_empty
+}
+
+/// Pending sections stay mounted so the layout does not jump when the list lands.
+/// Ready follows the data (or the shell's empty policy). Failed follows that policy.
+pub fn keep_section(phase: ListPhase, has_items: bool, show_when_empty: bool) -> bool {
+    match phase {
+        ListPhase::Pending => true,
+        ListPhase::Ready => has_items || show_when_empty,
+        ListPhase::Failed => show_when_empty,
+    }
+}
+
+fn list_fallback(phase: ListPhase, failed: &str, retry: Callback<()>) -> Element {
+    if phase == ListPhase::Failed {
+        let failed = failed.to_string();
+        rsx! {
+            p { class: "muted", "{failed}" }
+            button {
+                r#type: "button",
+                class: "fetch-error__retry",
+                onclick: move |_| retry.call(()),
+                "Retry"
+            }
+        }
+    } else {
+        rsx! { p { class: "muted", "Loading…" } }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -39,6 +67,8 @@ pub fn HeroBlock(
     metric_squads: Option<usize>,
     metric_members: Option<usize>,
     metric_games: Option<usize>,
+    /// Overview is still in flight. Reserve the metrics row at the loaded height.
+    metrics_pending: bool,
 ) -> Element {
     let show_metrics =
         metric_squads.is_some() || metric_members.is_some() || metric_games.is_some();
@@ -67,7 +97,18 @@ pub fn HeroBlock(
                             a { href: "{secondary_href}", class: "btn btn-outline", "{content.cta_secondary}" }
                         }
                     }
-                    if show_metrics {
+                    if metrics_pending {
+                        div { class: "home-metrics",
+                            for label in ["Active squads", "Members", "Games"] {
+                                div { class: "home-metric",
+                                    strong {
+                                        span { class: "home-skel home-skel-metric", aria_hidden: "true" }
+                                    }
+                                    span { "{label}" }
+                                }
+                            }
+                        }
+                    } else if show_metrics {
                         div { class: "home-metrics",
                             if let Some(n) = metric_squads {
                                 div { class: "home-metric",
@@ -141,6 +182,9 @@ pub fn LiveBlock(
     show_tourneys: bool,
     show_next_match: bool,
     show_results: bool,
+    retry_events: Callback<()>,
+    retry_tourneys: Callback<()>,
+    retry_overview: Callback<()>,
 ) -> Element {
     if !show_schedule && !show_tourneys && !show_next_match && !show_results {
         return rsx! {};
@@ -161,12 +205,21 @@ pub fn LiveBlock(
 
     rsx! {
         section { class: "home-block",
-            if show_results && has_results {
+            if show_results && upcoming_phase == ListPhase::Pending {
+                div { class: "results-ticker", "aria-label": "Recent results",
+                    span { class: "results-ticker-label", "Results" }
+                    p { class: "muted", "Loading…" }
+                }
+            } else if show_results && has_results {
                 ResultsTicker { results: recent_results.clone() }
             }
             div { class: "{grid_class}",
                 if show_next_match {
-                    NextMatchPanel { upcoming: next, phase: upcoming_phase }
+                    NextMatchPanel {
+                        upcoming: next,
+                        phase: upcoming_phase,
+                        retry: retry_overview,
+                    }
                 }
                 if show_schedule {
                     div { class: "live-panel",
@@ -190,7 +243,7 @@ pub fn LiveBlock(
                             }
                             a { href: "/api/calendar/all.ics", class: "home-link", "{content.calendar_cta}" }
                         } else {
-                            p { class: "muted", "Loading…" }
+                            {list_fallback(events_phase, "Couldn't load the schedule.", retry_events)}
                         }
                     }
                 }
@@ -223,7 +276,11 @@ pub fn LiveBlock(
                                 "{content.tournaments_view_all}"
                             }
                         } else {
-                            p { class: "muted", "Loading…" }
+                            {list_fallback(
+                                tourneys_phase,
+                                "Couldn't load tournaments.",
+                                retry_tourneys,
+                            )}
                         }
                     }
                 }
@@ -233,7 +290,11 @@ pub fn LiveBlock(
 }
 
 #[component]
-fn NextMatchPanel(upcoming: Option<UpcomingMatch>, phase: ListPhase) -> Element {
+fn NextMatchPanel(
+    upcoming: Option<UpcomingMatch>,
+    phase: ListPhase,
+    retry: Callback<()>,
+) -> Element {
     rsx! {
         div { class: "live-panel next-match",
             div { class: "home-kicker", "Next match" }
@@ -262,7 +323,7 @@ fn NextMatchPanel(upcoming: Option<UpcomingMatch>, phase: ListPhase) -> Element 
             } else if shows_empty_copy(phase, true) {
                 p { class: "muted", "No public fixtures scheduled." }
             } else {
-                p { class: "muted", "Loading…" }
+                {list_fallback(phase, "Couldn't load the next match.", retry)}
             }
         }
     }
@@ -306,6 +367,7 @@ pub fn TeamsBlock(
     overview: Option<Overview>,
     phase: ListPhase,
     presentation: TeamsPresentation,
+    retry: Callback<()>,
 ) -> Element {
     rsx! {
         section { id: "squads", class: "home-block",
@@ -353,7 +415,7 @@ pub fn TeamsBlock(
                     Some(_) if shows_empty_copy(phase, true) => {
                         rsx! { p { class: "muted", "{content.teams_empty}" } }
                     }
-                    _ => rsx! { p { class: "muted", "Loading…" } },
+                    _ => list_fallback(phase, "Couldn't load teams.", retry),
                 }
             }
         }
@@ -469,6 +531,7 @@ pub fn NewsBlock(
     content: HomepageContent,
     announcements: Vec<Announcement>,
     phase: ListPhase,
+    retry: Callback<()>,
 ) -> Element {
     rsx! {
         section { class: "home-block",
@@ -477,7 +540,7 @@ pub fn NewsBlock(
             if shows_empty_copy(phase, announcements.is_empty()) {
                 p { class: "muted", "{content.news_empty}" }
             } else if phase != ListPhase::Ready {
-                p { class: "muted", "Loading…" }
+                {list_fallback(phase, "Couldn't load news.", retry)}
             } else {
                 div { class: "news-rows",
                     for a in announcements.iter().take(4) {
@@ -551,26 +614,29 @@ pub fn RecruitBlock(content: HomepageContent) -> Element {
 }
 
 /// Whether the Teams block will render (for secondary CTA targeting).
-pub fn teams_will_render(sections_teams: bool, teams_empty: bool, show_when_empty: bool) -> bool {
-    if !sections_teams {
-        return false;
-    }
-    if !teams_empty {
-        return true;
-    }
-    show_when_empty
+pub fn teams_will_render(
+    sections_teams: bool,
+    phase: ListPhase,
+    teams_empty: bool,
+    show_when_empty: bool,
+) -> bool {
+    sections_teams && keep_section(phase, !teams_empty, show_when_empty)
 }
 
-/// Live panel visibility from shell empty-policy + section flags + data.
+/// Live panel visibility from shell empty-policy + section flags + list phase.
 pub fn live_panel_flags(
     shell_show_empty: bool,
     sections_schedule: bool,
     sections_tournaments: bool,
+    events_phase: ListPhase,
     has_events: bool,
+    tourneys_phase: ListPhase,
     has_tourneys: bool,
 ) -> (bool, bool) {
-    let show_schedule = sections_schedule && (has_events || shell_show_empty);
-    let show_tourneys = sections_tournaments && (has_tourneys || shell_show_empty);
+    let show_schedule =
+        sections_schedule && keep_section(events_phase, has_events, shell_show_empty);
+    let show_tourneys =
+        sections_tournaments && keep_section(tourneys_phase, has_tourneys, shell_show_empty);
     (show_schedule, show_tourneys)
 }
 
@@ -622,6 +688,7 @@ mod tests {
                     overview: None,
                     phase: ListPhase::Pending,
                     presentation: TeamsPresentation::Table,
+                    retry: Callback::new(|_| {}),
                 }
             }
         }
@@ -632,6 +699,7 @@ mod tests {
                     overview: Some(empty_overview()),
                     phase: ListPhase::Ready,
                     presentation: TeamsPresentation::Table,
+                    retry: Callback::new(|_| {}),
                 }
             }
         }
@@ -651,6 +719,7 @@ mod tests {
                     content: HomepageContent::default(),
                     announcements: Vec::new(),
                     phase: ListPhase::Pending,
+                    retry: Callback::new(|_| {}),
                 }
             }
         }
@@ -658,5 +727,150 @@ mod tests {
         let html = render(pending);
         assert!(html.contains("Loading"), "{html}");
         assert!(!html.contains(&empty), "{html}");
+    }
+
+    fn noop() -> Callback<()> {
+        Callback::new(|_| {})
+    }
+
+    #[test]
+    fn failed_lists_show_an_error_and_retry() {
+        fn teams() -> Element {
+            rsx! {
+                TeamsBlock {
+                    content: HomepageContent::default(),
+                    overview: None,
+                    phase: ListPhase::Failed,
+                    presentation: TeamsPresentation::Table,
+                    retry: noop(),
+                }
+            }
+        }
+        fn news() -> Element {
+            rsx! {
+                NewsBlock {
+                    content: HomepageContent::default(),
+                    announcements: Vec::new(),
+                    phase: ListPhase::Failed,
+                    retry: noop(),
+                }
+            }
+        }
+        fn live() -> Element {
+            rsx! {
+                LiveBlock {
+                    content: HomepageContent::default(),
+                    events: Vec::new(),
+                    events_phase: ListPhase::Failed,
+                    live_tournaments: Vec::new(),
+                    tourneys_phase: ListPhase::Failed,
+                    upcoming_matches: Vec::new(),
+                    upcoming_phase: ListPhase::Failed,
+                    recent_results: Vec::new(),
+                    show_schedule: true,
+                    show_tourneys: true,
+                    show_next_match: true,
+                    show_results: false,
+                    retry_events: noop(),
+                    retry_tourneys: noop(),
+                    retry_overview: noop(),
+                }
+            }
+        }
+        let teams_html = render(teams);
+        assert!(teams_html.contains("load teams."), "{teams_html}");
+        assert!(teams_html.contains("fetch-error__retry"), "{teams_html}");
+        assert!(teams_html.contains("Retry"), "{teams_html}");
+        assert!(!teams_html.contains("Loading"), "{teams_html}");
+        let news_html = render(news);
+        assert!(news_html.contains("load news."), "{news_html}");
+        assert!(news_html.contains("Retry"), "{news_html}");
+        let live_html = render(live);
+        assert!(live_html.contains("load the schedule."), "{live_html}");
+        assert!(live_html.contains("load tournaments."), "{live_html}");
+        assert!(live_html.contains("load the next match."), "{live_html}");
+        assert!(!live_html.contains("results-ticker"), "{live_html}");
+    }
+
+    #[test]
+    fn pending_overview_reserves_metrics_and_the_results_ticker() {
+        fn hero() -> Element {
+            rsx! {
+                HeroBlock {
+                    content: HomepageContent::default(),
+                    initials: "SO".to_string(),
+                    recruitment_open: false,
+                    show_secondary_cta: true,
+                    secondary_href: "#squads".to_string(),
+                    metric_squads: None,
+                    metric_members: None,
+                    metric_games: None,
+                    metrics_pending: true,
+                }
+            }
+        }
+        fn live() -> Element {
+            rsx! {
+                LiveBlock {
+                    content: HomepageContent::default(),
+                    events: Vec::new(),
+                    events_phase: ListPhase::Pending,
+                    live_tournaments: Vec::new(),
+                    tourneys_phase: ListPhase::Pending,
+                    upcoming_matches: Vec::new(),
+                    upcoming_phase: ListPhase::Pending,
+                    recent_results: Vec::new(),
+                    show_schedule: false,
+                    show_tourneys: false,
+                    show_next_match: false,
+                    show_results: true,
+                    retry_events: noop(),
+                    retry_tourneys: noop(),
+                    retry_overview: noop(),
+                }
+            }
+        }
+        let hero_html = render(hero);
+        assert!(hero_html.contains("home-metrics"), "{hero_html}");
+        assert!(
+            hero_html.contains("home-skel home-skel-metric"),
+            "{hero_html}"
+        );
+        let live_html = render(live);
+        assert!(live_html.contains("results-ticker"), "{live_html}");
+        assert!(live_html.contains("Results"), "{live_html}");
+        assert!(live_html.contains("Loading"), "{live_html}");
+    }
+
+    #[test]
+    fn pending_sections_stay_and_failed_sections_follow_the_shell() {
+        assert!(keep_section(ListPhase::Pending, false, false));
+        assert!(!keep_section(ListPhase::Failed, false, false));
+        assert!(keep_section(ListPhase::Failed, false, true));
+        assert!(!keep_section(ListPhase::Ready, false, false));
+        assert!(keep_section(ListPhase::Ready, true, false));
+        let (schedule, tourneys) = live_panel_flags(
+            false,
+            true,
+            true,
+            ListPhase::Pending,
+            false,
+            ListPhase::Pending,
+            false,
+        );
+        assert!(schedule && tourneys);
+        let (schedule, tourneys) = live_panel_flags(
+            false,
+            true,
+            true,
+            ListPhase::Failed,
+            false,
+            ListPhase::Failed,
+            false,
+        );
+        assert!(!schedule && !tourneys);
+        assert!(teams_will_render(true, ListPhase::Pending, true, false));
+        assert!(!teams_will_render(true, ListPhase::Failed, true, false));
+        assert!(teams_will_render(true, ListPhase::Failed, true, true));
     }
 }

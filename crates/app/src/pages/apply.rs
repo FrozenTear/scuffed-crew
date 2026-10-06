@@ -92,7 +92,7 @@ pub fn Apply() -> Element {
     let resolved = settings.resolved();
     let settings_phase = classify_fetch(resolved.as_ref());
     let s = loaded_site_settings(resolved.as_ref());
-    let games = use_api_list::<Game>("/api/games");
+    let mut games = use_api_list::<Game>("/api/games");
     let mut my_app = use_api::<Option<Application>>("/api/applications/mine");
 
     let mut selected_games = use_signal(Vec::<String>::new);
@@ -102,6 +102,20 @@ pub fn Apply() -> Element {
     let loading = auth().loading;
     let screen = apply_screen(loading, settings_phase);
     let org_name = s.as_ref().map(|x| x.org_name.clone());
+    let mine_data = my_app.data.read();
+    let mine_error = my_app.error.read();
+    let mine = mine_view(
+        mine_data
+            .as_ref()
+            .map(|outer| outer.as_ref().map(|inner| inner.as_ref())),
+        mine_error.as_deref(),
+    );
+    let status_app = mine_data
+        .as_ref()
+        .and_then(|outer| outer.as_ref())
+        .and_then(|inner| inner.as_ref())
+        .filter(|_| mine == MineView::Status)
+        .cloned();
 
     rsx! {
         style { {APPLY_CSS} }
@@ -146,21 +160,7 @@ pub fn Apply() -> Element {
                                 }
                             }
                         }
-                    } else if mine_view(
-                        my_app.data.read().as_ref().map(|outer| {
-                            outer.as_ref().map(|inner| inner.as_ref())
-                        }),
-                        my_app.error.read().as_deref(),
-                    ) == MineView::Status
-                    {
-                        let app = my_app
-                            .data
-                            .read()
-                            .as_ref()
-                            .and_then(|a| a.as_ref())
-                            .and_then(|a| a.as_ref())
-                            .unwrap()
-                            .clone();
+                    } else if let Some(app) = status_app.clone() {
                         let status_tone = match app.status.as_str() {
                             "pending" => PillTone::Warn,
                             "trial" => PillTone::Accent,
@@ -235,16 +235,9 @@ pub fn Apply() -> Element {
                                 }
                             }
                         }
-                    } else {
-                        let mine = mine_view(
-                            my_app.data.read().as_ref().map(|outer| {
-                                outer.as_ref().map(|inner| inner.as_ref())
-                            }),
-                            my_app.error.read().as_deref(),
-                        );
-                        if mine == MineView::Pending {
-                            rsx! { p { class: "apply-loading", "Loading..." } }
-                        } else if mine == MineView::Failed {
+                    } else if mine == MineView::Pending {
+                        rsx! { p { class: "apply-loading", "Loading..." } }
+                    } else if mine == MineView::Failed {
                             rsx! {
                                 div { class: "fetch-error-wrap", role: "alert",
                                     p { class: "fetch-error", "Couldn't load your application." }
@@ -256,12 +249,13 @@ pub fn Apply() -> Element {
                                     }
                                 }
                             }
-                        } else {
-                        let games_pending = games.data.read().as_ref().is_none()
-                            && games.error.read().is_none();
-                        let game_list = games
-                            .data
-                            .read()
+                    } else {
+                        let games_state = games.data.read();
+                        let games_error = games.error.read();
+                        let games_pending =
+                            games_state.as_ref().is_none() && games_error.is_none();
+                        let games_failed = games_error.is_some();
+                        let game_list = games_state
                             .as_ref()
                             .and_then(|g| g.as_ref())
                             .cloned()
@@ -276,6 +270,14 @@ pub fn Apply() -> Element {
                                     label { class: "apply-label", "Games" }
                                     if games_pending {
                                         p { class: "apply-loading", "Loading..." }
+                                    } else if games_failed {
+                                        p { class: "muted", "Couldn't load games." }
+                                        button {
+                                            r#type: "button",
+                                            class: "fetch-error__retry",
+                                            onclick: move |_| games.refresh += 1,
+                                            "Retry"
+                                        }
                                     } else {
                                     div { class: "apply-game-grid",
                                         for g in game_list.iter() {
@@ -358,7 +360,6 @@ pub fn Apply() -> Element {
                                     }
                                 }
                             }
-                        }
                         }
                     }
                 }

@@ -38,10 +38,11 @@ impl BrandConfig {
     ///
     /// The product purple is a real brand. Painting it before settings arrive
     /// flashes the wrong accent on orgs that chose something else. This gray
-    /// stays at least 3:1 against both theme backgrounds. The boot mark in
-    /// `index.html` uses the same hex.
+    /// stays at least 3:1 against both theme backgrounds and against the dark
+    /// `--border` used by a focused field. The boot mark in `index.html`,
+    /// `assets/favicon.svg`, and [`org_favicon_data_uri`] use the same hex.
     pub fn pending() -> Self {
-        Self::from_accents("#7a7a88", "#7a7a88")
+        Self::from_accents("#808088", "#808088")
     }
 
     /// Resolve settings fields: empty → product default.
@@ -74,9 +75,23 @@ pub fn org_favicon_data_uri(initials: &str) -> String {
         .take(2)
         .collect();
     let svg = format!(
-        "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='6' fill='%237a7a88'/><text x='16' y='22' text-anchor='middle' font-family='system-ui,sans-serif' font-size='14' font-weight='700' fill='%23ffffff'>{letters}</text></svg>"
+        "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='6' fill='%23808088'/><text x='16' y='22' text-anchor='middle' font-family='system-ui,sans-serif' font-size='14' font-weight='700' fill='%23ffffff'>{letters}</text></svg>"
     );
     format!("data:image/svg+xml,{svg}")
+}
+
+/// `None` leaves the shell's static icon (settings still unknown).
+/// A non-empty org name always gets a data-URI mark, even when the initials
+/// are `CL`. A settled blank name keeps the neutral asset.
+pub fn runtime_favicon_href(settled_org_name: Option<&str>) -> Option<String> {
+    match settled_org_name
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+    {
+        None if settled_org_name.is_none() => None,
+        None => Some("/assets/favicon.svg".to_string()),
+        Some(name) => Some(org_favicon_data_uri(&scuffed_types::org_initials(name))),
+    }
 }
 
 /// Accept `#rgb` / `#rrggbb` / bare hex → lowercase `#rrggbb`.
@@ -142,54 +157,63 @@ mod tests {
 
     #[test]
     fn pending_accent_meets_ui_contrast_on_both_themes() {
+        use crate::theme::tokens::{contrast_ratio, scope_decls};
         let pending = BrandConfig::pending();
-        let on_dark = contrast_ratio(&pending.accent_dark, crate::theme::tokens::BG_DARK);
-        let on_light = contrast_ratio(&pending.accent_light, "#f7f7f9");
+        let css = crate::theme::theme_css(&pending);
+        let dark = scope_decls(&css, "[data-theme=\"dark\"]");
+        let light = scope_decls(&css, "[data-theme=\"light\"]");
+        let accent = pending.accent_dark.as_str();
+        for (scope, name) in [
+            (&dark, "--bg"),
+            (&dark, "--surface"),
+            (&dark, "--surface-2"),
+            (&dark, "--border"),
+            (&light, "--bg"),
+            (&light, "--surface"),
+            (&light, "--surface-2"),
+        ] {
+            let bg = scope.get(name).unwrap_or_else(|| panic!("missing {name}"));
+            let ratio = contrast_ratio(accent, bg);
+            assert!(ratio >= 3.0, "{accent} on {name} {bg} = {ratio:.2}");
+        }
+        let white_on_pending = contrast_ratio("#ffffff", accent);
         assert!(
-            on_dark >= 3.0,
-            "{} on dark = {on_dark:.2}",
-            pending.accent_dark
-        );
-        assert!(
-            on_light >= 3.0,
-            "{} on light = {on_light:.2}",
-            pending.accent_light
+            white_on_pending >= 3.0,
+            "white on {accent} = {white_on_pending:.2}"
         );
         let boot = include_str!("../../index.html");
         assert!(
-            boot.contains(&pending.accent_dark),
+            boot.contains(accent),
             "boot mark must use the same gray as BrandConfig::pending"
         );
-        let white_on_pending = contrast_ratio("#ffffff", &pending.accent_dark);
+    }
+
+    #[test]
+    fn favicon_assets_use_the_pending_gray_including_cl_initials() {
+        let pending = BrandConfig::pending();
+        let svg = include_str!("../../assets/favicon.svg");
         assert!(
-            white_on_pending >= 3.0,
-            "white on {} = {white_on_pending:.2}",
-            pending.accent_dark
+            svg.contains(pending.accent_dark.as_str()),
+            "favicon.svg fill must match BrandConfig::pending"
         );
-    }
-
-    fn contrast_ratio(fg: &str, bg: &str) -> f64 {
-        let l1 = relative_luminance(fg);
-        let l2 = relative_luminance(bg);
-        let (hi, lo) = if l1 > l2 { (l1, l2) } else { (l2, l1) };
-        (hi + 0.05) / (lo + 0.05)
-    }
-
-    fn relative_luminance(hex: &str) -> f64 {
-        let hex = hex.trim().trim_start_matches('#');
-        let n = u32::from_str_radix(hex, 16).unwrap();
-        let lin = |c: u8| {
-            let c = f64::from(c) / 255.0;
-            if c <= 0.04045 {
-                c / 12.92
-            } else {
-                ((c + 0.055) / 1.055).powf(2.4)
-            }
-        };
-        let r = lin(((n >> 16) & 0xff) as u8);
-        let g = lin(((n >> 8) & 0xff) as u8);
-        let b = lin((n & 0xff) as u8);
-        0.2126 * r + 0.7152 * g + 0.0722 * b
+        let encoded = pending.accent_dark.replacen('#', "%23", 1);
+        let marked = org_favicon_data_uri("CL");
+        assert!(marked.contains(&encoded), "{marked}");
+        assert!(runtime_favicon_href(None).is_none());
+        assert_eq!(
+            runtime_favicon_href(Some("")),
+            Some("/assets/favicon.svg".to_string())
+        );
+        assert_eq!(
+            runtime_favicon_href(Some("   ")),
+            Some("/assets/favicon.svg".to_string())
+        );
+        let clan = runtime_favicon_href(Some("Clan League")).expect("mark");
+        assert!(clan.starts_with("data:image/svg+xml,"), "{clan}");
+        assert!(clan.contains(&encoded), "{clan}");
+        assert!(clan.contains("CL"), "{clan}");
+        let bangs = runtime_favicon_href(Some("!!!")).expect("punctuation still has a name");
+        assert!(bangs.starts_with("data:image/svg+xml,"), "{bangs}");
     }
 
     #[test]
