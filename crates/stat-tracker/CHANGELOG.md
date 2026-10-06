@@ -7,31 +7,35 @@ prepends the section whose heading matches the tag version (for example
 ## 0.4.18
 
 Requeueing into the next match no longer merges into the game that just
-ended. After a confirmed Victory, Defeat, or Draw, a hero-select,
-hero-ban, or map-vote screen starts a new session and keeps that result.
-The 75-second grace starts when the result is recorded, not when the
-word was first seen.
+ended. Boundaries are one board-order state machine. A result hint stays
+sealable until a clean live board is accepted after it. There is no 60-second
+hint timer and no 8-second window around a Tab. The 75-second grace starts
+when the result is recorded, not when the word was first seen. Wall-clock
+time is used only for that grace and for the 120-second stat gap.
 
-One unconfirmed result word is a hint. It expires after 60 seconds, a
-newer word replaces it, and the live scoreboard clears it when the match
-continues. It is stored only when a hero-select, hero-ban, or map-vote
-screen comes after a hint that itself came after the live scoreboard. A
-stray word during a match plus one of those screens does not split. An
-unconfirmed word never overrides a confirmed result.
+A hero-select, hero-ban, or map-vote screen after a sealable hint closes
+the session and keeps the hint, even when the screen is more than a minute
+later. The same screen during a match that already continued (a clean board
+after the word, including a hero swap whose stats are still climbing) does
+not split. An unconfirmed word never overrides a confirmed result, and a
+long post-match screen does not open a second session. A Play of the Game
+wake does not split a session by itself.
 
-A stat reset after a confirmed result takes two consecutive validated
-captures of the same identified player row, both below the frozen
-baseline. The first is not written onto the finished game. The second
-opens a new session with no outcome, so the header on the old board is
-not copied across. A garbage row and a different player's row do not
-move that baseline or finish the streak. A session that only has a hint
-still splits on the 120-second stat gap. One misread stat cell is still
-held. A Play of the Game wake does not split a session by itself.
+A stat reset after a result takes two clean boards when the hero stays the
+same. The first is held off the finished game and written onto the new
+session when the second board commits. A hero change together with that
+reset splits on the first board, with no map vote. The new session's
+outcome is Unknown. The old session keeps its hero and its last board. A
+changed player row re-anchors the baseline; it does not freeze the capture
+gate. An all-increase or mixed garbage row is not a baseline and is not
+stored on a finished game. The 120-second gap still splits an unfinished
+session, including when the row id changed, and the new session keeps that
+frame's own header result. One misread stat cell is still held.
 
 ### Install
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/FrozenTear/scuffed-crew/main/crates/stat-tracker/dist/bootstrap.sh | bash
+curl --proto '=https' -fsSL https://raw.githubusercontent.com/FrozenTear/scuffed-crew/main/crates/stat-tracker/dist/bootstrap.sh | bash
 ```
 
 Or extract the tarball and run `./install.sh`. Pin with
