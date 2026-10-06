@@ -275,8 +275,12 @@ fn inline_script_hashes(html: &str) -> Vec<String> {
     hashes
 }
 
-/// Missing `type`, or a JavaScript / module type. JSON, import maps, and
-/// other data blocks are not executable scripts.
+/// Missing `type`, or a JavaScript / module type.
+///
+/// `type="application/json"` (the settings data block from
+/// `load_anonymous_settings` / `serde_json`) is not an executable script, so
+/// it is not hashed into `script-src`. External module tags are skipped by
+/// `open_tag_has_src`; Dioxus 0.7's loader is one of those, not an import map.
 fn script_type_is_executable(open_tag: &str) -> bool {
     let Some(raw) = open_tag.split_whitespace().find_map(|part| {
         let part = part.trim_end_matches(['>', '/']);

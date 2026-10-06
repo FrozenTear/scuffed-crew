@@ -99,8 +99,22 @@ async fn test_state(upload_dir: PathBuf) -> AppState {
 }
 
 async fn get(app: axum::Router, uri: &str) -> (StatusCode, axum::http::HeaderMap, String) {
+    exchange(app, Method::GET, uri).await
+}
+
+async fn exchange(
+    app: axum::Router,
+    method: Method,
+    uri: &str,
+) -> (StatusCode, axum::http::HeaderMap, String) {
     let response = app
-        .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+        .oneshot(
+            Request::builder()
+                .method(method)
+                .uri(uri)
+                .body(Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
     let status = response.status();
@@ -422,9 +436,13 @@ async fn missing_static_files_404_and_client_routes_stay_shell() {
         "/assets/missing-favicon.svg",
         "/assets/missing-dxhabc12345.js",
         "/assets/nope.json",
+        "/assets/hero.gif",
+        "/assets/hero.avif",
         "/outside.wasm",
         "/fonts/missing.woff2",
         "/bundle.mjs",
+        "/pic.gif",
+        "/photo.avif",
     ] {
         let (status, headers, body) = get(app.clone(), uri).await;
         assert_eq!(status, StatusCode::NOT_FOUND, "{uri}");
@@ -436,14 +454,16 @@ async fn missing_static_files_404_and_client_routes_stay_shell() {
             content_type(&headers)
         );
         let cache = cache_control(&headers).unwrap_or("");
-        assert!(
-            cache == "no-store" || cache == "no-cache",
-            "{uri} cache {cache}"
-        );
-        assert!(!cache.contains("immutable"), "{uri} cache {cache}");
+        assert_eq!(cache, "no-store", "{uri} cache {cache}");
     }
 
-    for uri in ["/strategies/foo", "/admin/settings", "/blog/hello"] {
+    for uri in [
+        "/strategies/foo",
+        "/admin/settings",
+        "/blog/hello",
+        "/wiki/foo.bar",
+        "/articles/v1.2-notes",
+    ] {
         let (status, headers, body) = get(app.clone(), uri).await;
         assert_eq!(status, StatusCode::OK, "{uri}");
         assert!(body.contains(SHELL), "{uri}");
@@ -573,23 +593,35 @@ async fn settings_embed_escapes_script_breakout() {
     let api: serde_json::Value = serde_json::from_str(&api_body).unwrap();
     assert_eq!(api["site_description"], payload);
 
-    let (status, _, body) = get(app, "/").await;
+    let (status, _, first) = get(app.clone(), "/").await;
     assert_eq!(status, StatusCode::OK);
-    let json = settings_json_before_head(&body);
-    assert!(json.contains("\\u003c/script\\u003e"), "{json}");
-    assert!(json.contains("\\u003cscript\\u003e"), "{json}");
-    assert!(json.contains("\\u2028"), "{json}");
-    assert!(json.contains("\\u2029"), "{json}");
-    assert!(json.contains("\\u0026"), "{json}");
-    assert!(!json.contains('\u{2028}'));
-    assert!(!json.contains('\u{2029}'));
-    assert!(
-        !json.contains("</script>"),
-        "raw script close leaked into the JSON: {json}"
+    let (status, _, second) = get(app, "/strategies/foo").await;
+    assert_eq!(status, StatusCode::OK);
+    for body in [&first, &second] {
+        let json = settings_json_before_head(body);
+        assert!(json.contains("\\u003c/script\\u003e"), "{json}");
+        assert!(json.contains("\\u003cscript\\u003e"), "{json}");
+        assert!(json.contains("\\u2028"), "{json}");
+        assert!(json.contains("\\u2029"), "{json}");
+        assert!(json.contains("\\u0026"), "{json}");
+        assert!(
+            !json.contains('\u{2028}'),
+            "cached page reintroduced U+2028"
+        );
+        assert!(!json.contains('\u{2029}'));
+        assert!(
+            !json.contains("</script>"),
+            "raw script close leaked into the JSON: {json}"
+        );
+        let parsed: serde_json::Value = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed, api);
+        assert_eq!(parsed["site_description"], payload);
+    }
+    assert_eq!(
+        settings_json_before_head(&first),
+        settings_json_before_head(&second),
+        "a cache hit must keep the escaped JSON"
     );
-    let parsed: serde_json::Value = serde_json::from_str(json).unwrap();
-    assert_eq!(parsed, api);
-    assert_eq!(parsed["site_description"], payload);
 }
 
 #[tokio::test]
@@ -647,29 +679,189 @@ async fn settings_embed_cache_invalidates_after_update() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK, "PUT /api/settings");
 
-    let (_, _, body) = get(app, "/admin/settings").await;
+    let (_, _, body) = get(app.clone(), "/admin/settings").await;
     let after_put: serde_json::Value =
         serde_json::from_str(settings_json_before_head(&body)).unwrap();
     assert_eq!(after_put["org_name"], "Fresh Clan");
+
+    write_settings(&state.db, Some("After Reject"), None).await;
+    let (_, _, body) = get(app.clone(), "/").await;
+    let still_fresh: serde_json::Value =
+        serde_json::from_str(settings_json_before_head(&body)).unwrap();
+    assert_eq!(still_fresh["org_name"], "Fresh Clan");
+
+    let rejected = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/api/settings")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::COOKIE, "sc_session=embed-admin-token")
+                .body(Body::from(r#"{"page_bg_color":"not-a-color"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(rejected.status(), StatusCode::BAD_REQUEST);
+
+    let (_, _, body) = get(app, "/").await;
+    let after_reject: serde_json::Value =
+        serde_json::from_str(settings_json_before_head(&body)).unwrap();
+    assert_eq!(
+        after_reject["org_name"], "After Reject",
+        "a failed PUT must still drop the fresh cache"
+    );
 }
 
 #[tokio::test]
-async fn settings_read_failure_omits_embed_and_still_serves_shell() {
-    let tree = TempTree::new("embed-fail");
+async fn head_on_shell_matches_get_headers_and_has_no_body() {
+    let tree = TempTree::new("embed-head");
     let state = test_state(tree.uploads()).await;
-    state.public_settings.set_fail_loads(true);
+    let payload = "</script><script>alert(1)</script>";
+    write_settings(&state.db, None, Some(payload)).await;
     let app = create_router_with_dist(state, tree.dist());
 
-    for uri in ["/", "/strategies/foo"] {
-        let (status, headers, body) = get(app.clone(), uri).await;
-        assert_eq!(status, StatusCode::OK, "{uri}");
-        assert_eq!(cache_control(&headers), Some("no-cache"), "{uri}");
-        assert!(body.contains(SHELL), "{uri}");
-        assert!(
-            !body.contains("sc-settings"),
-            "failed settings read must omit the block: {body}"
-        );
-    }
+    let (get_status, get_headers, get_body) =
+        exchange(app.clone(), Method::GET, "/wiki/foo.bar").await;
+    let (head_status, head_headers, head_body) = exchange(app, Method::HEAD, "/wiki/foo.bar").await;
+
+    assert_eq!(get_status, StatusCode::OK);
+    assert_eq!(head_status, StatusCode::OK);
+    assert!(
+        head_body.is_empty(),
+        "HEAD body must be empty, got {head_body}"
+    );
+    assert!(get_body.contains("\\u003c/script\\u003e"));
+    assert_eq!(content_type(&get_headers), content_type(&head_headers));
+    assert_eq!(cache_control(&get_headers), cache_control(&head_headers));
+    assert_eq!(cache_control(&head_headers), Some("no-cache"));
+    assert_eq!(
+        get_headers.get(header::CONTENT_LENGTH),
+        head_headers.get(header::CONTENT_LENGTH)
+    );
+    let len = get_headers
+        .get(header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<usize>().ok())
+        .expect("content-length");
+    assert_eq!(len, get_body.len());
+}
+
+#[tokio::test]
+async fn setup_invalidation_shows_new_org_on_next_shell() {
+    let tree = TempTree::new("embed-setup");
+    let state = test_state(tree.uploads()).await;
+    let app = create_router_with_dist(state, tree.dist());
+
+    let (_, _, body) = get(app.clone(), "/").await;
+    let first: serde_json::Value = serde_json::from_str(settings_json_before_head(&body)).unwrap();
+    assert_eq!(first["org_name"], "My Clan");
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/auth/setup")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header("x-forwarded-for", "127.0.0.1")
+                .extension(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+                    [127, 0, 0, 1],
+                    40000,
+                ))))
+                .body(Body::from(
+                    r#"{"username":"firstadmin","password":"a-strong-password","org_name":"Boot Clan"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK, "POST /api/auth/setup");
+
+    let (_, _, body) = get(app, "/").await;
+    let after: serde_json::Value = serde_json::from_str(settings_json_before_head(&body)).unwrap();
+    assert_eq!(after["org_name"], "Boot Clan");
+}
+
+const BRANDED_SHELL: &str = r#"<!DOCTYPE html><html><head>
+<title>The Scuffed Crew</title>
+<meta name="description" content="The Scuffed Crew — fallback">
+<meta property="og:title" content="The Scuffed Crew" />
+<meta content="The Scuffed Crew" property="og:site_name">
+<meta property="og:description" content="fallback tagline">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+</head><body>SPA-SHELL-MARKER</body></html>"#;
+
+#[tokio::test]
+async fn shell_rewrites_title_and_meta_and_escapes_clan_name() {
+    let tree = TempTree::new("embed-title");
+    std::fs::write(tree.dist().join("index.html"), BRANDED_SHELL).unwrap();
+    let state = test_state(tree.uploads()).await;
+    let org_name = r#"</title><script>alert(1)</script>" onload="alert(1)"#;
+    let description = r#"<img src=x onerror=alert(1)> & "quotes""#;
+    write_settings(&state.db, Some(org_name), Some(description)).await;
+    let app = create_router_with_dist(state, tree.dist());
+
+    let (_, _, body) = get(app, "/").await;
+    assert!(body.contains("SPA-SHELL-MARKER"));
+    assert!(!body.contains("<script>alert"));
+    assert!(!body.contains("onload=\"alert"));
+    assert!(
+        body.contains("<title>&lt;/title&gt;&lt;script&gt;alert(1)&lt;/script&gt;&quot; onload=")
+    );
+    assert!(body.contains("property=\"og:title\" content=\"&lt;/title&gt;"));
+    assert!(
+        body.contains(
+            "content=\"&lt;/title&gt;&lt;script&gt;alert(1)&lt;/script&gt;&quot; onload="
+        )
+    );
+    assert!(body.contains("property=\"og:site_name\""));
+    assert!(body.contains("&lt;img src=x onerror=alert(1)&gt;"));
+    assert!(body.contains("&amp;"));
+    assert!(!body.contains("The Scuffed Crew"));
+    assert!(!body.contains("fallback tagline"));
+    assert!(body.contains("width=device-width"));
+    let json = settings_json_before_head(&body);
+    let parsed: serde_json::Value = serde_json::from_str(json).unwrap();
+    assert_eq!(parsed["org_name"], org_name);
+    assert_eq!(parsed["site_description"], description);
+}
+
+#[tokio::test]
+async fn template_read_error_retries_on_the_next_shell() {
+    let root = std::env::temp_dir().join(format!("scuffed-seo-retry-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(root.join("dist/index.html")).unwrap();
+    std::fs::create_dir_all(root.join("uploads")).unwrap();
+    let state = test_state(root.join("uploads")).await;
+    let app = create_router_with_dist(state, root.join("dist"));
+
+    let broken = app
+        .clone()
+        .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_ne!(broken.status(), StatusCode::OK);
+    let broken_body = match broken.into_body().collect().await {
+        Ok(collected) => String::from_utf8_lossy(&collected.to_bytes()).into_owned(),
+        Err(_) => String::new(),
+    };
+    assert!(!broken_body.contains("sc-settings"));
+    assert!(!broken_body.contains(SHELL));
+
+    std::fs::remove_dir_all(root.join("dist/index.html")).unwrap();
+    std::fs::write(
+        root.join("dist/index.html"),
+        "<!DOCTYPE html><html><head><title>The Scuffed Crew</title></head><body>SPA-SHELL-MARKER</body></html>",
+    )
+    .unwrap();
+
+    let (status, _, body) = get(app, "/wiki/foo.bar").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains(SHELL));
+    assert!(body.contains("sc-settings"));
+    assert!(body.contains("<title>My Clan</title>"));
+    let _ = std::fs::remove_dir_all(root);
 }
 
 #[tokio::test]

@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+#[cfg(test)]
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -55,36 +56,68 @@ pub struct AppState {
     /// behalf, so it takes an explicit operator action to even become callable
     /// — see `routes::members::republish_profiles`.
     pub nip05_republish_enabled: bool,
-    /// In-memory copy of the anonymous `GET /api/settings` JSON embedded in
-    /// the SPA shell. Write paths call [`PublicSettingsCache::invalidate`].
+    /// In-memory copy of the anonymous settings embedded in the SPA shell.
+    /// Write paths call [`PublicSettingsCache::invalidate`]. Per process:
+    /// a restart clears it, and it is not shared across instances.
     pub public_settings: PublicSettingsCache,
 }
 
 /// How long a cached public-settings blob may be served before a re-read.
 ///
 /// Writes invalidate immediately. The TTL only covers a missed invalidation.
-const PUBLIC_SETTINGS_TTL: Duration = Duration::from_secs(10);
+pub(crate) const PUBLIC_SETTINGS_TTL: Duration = Duration::from_secs(10);
+
+/// After a failed refresh, further misses serve the stale blob instead of
+/// each starting their own read. An invalidation clears this by moving
+/// `generation`.
+const EMBED_REFRESH_BACKOFF: Duration = Duration::from_secs(1);
+
+/// DB-outage warnings for the shell embed, at most once per interval.
+const SETTINGS_WARN_INTERVAL: Duration = Duration::from_secs(60);
+
+/// Anonymous settings already escaped for the HTML shell.
+///
+/// `escaped_json` and `script_block` are produced once, when the blob is
+/// stored, so a cache hit does not escape again.
+#[derive(Clone, Debug)]
+pub(crate) struct CachedPublicSettings {
+    pub escaped_json: String,
+    pub script_block: String,
+    pub org_name: String,
+    pub site_description: String,
+}
 
 #[derive(Debug)]
 struct PublicSettingsEntry {
-    json: String,
+    payload: Arc<CachedPublicSettings>,
     stored_at: Instant,
+    generation: u64,
 }
 
 #[derive(Debug)]
 struct PublicSettingsInner {
     generation: u64,
     entry: Option<PublicSettingsEntry>,
+    /// `(generation, when)` of the last failed refresh for that generation.
+    refresh_failed: Option<(u64, Instant)>,
 }
 
-/// Process-local cache of the anonymous settings JSON.
+/// Process-local cache of the anonymous settings embed.
 ///
 /// Shared across `AppState` clones (the router and the SPA fallback hold the
 /// same `Arc`). A settings write bumps `generation` so an in-flight read
-/// cannot store a stale blob over the invalidation.
+/// cannot store a stale blob over the invalidation. The previous blob is kept
+/// so a timed-out re-read can still be served (stale-on-error).
 #[derive(Clone, Debug)]
 pub struct PublicSettingsCache {
     inner: Arc<Mutex<PublicSettingsInner>>,
+    /// One settings read at a time. Concurrent misses wait on this instead of
+    /// each querying the database.
+    refresh: Arc<tokio::sync::Mutex<()>>,
+    last_warn: Arc<Mutex<Option<Instant>>>,
+    /// Test-only. Compiled out of release builds so the shell cannot be
+    /// told to skip the database in production.
+    #[cfg(test)]
     fail_loads: Arc<AtomicBool>,
 }
 
@@ -100,50 +133,123 @@ impl PublicSettingsCache {
             inner: Arc::new(Mutex::new(PublicSettingsInner {
                 generation: 0,
                 entry: None,
+                refresh_failed: None,
             })),
+            refresh: Arc::new(tokio::sync::Mutex::new(())),
+            last_warn: Arc::new(Mutex::new(None)),
+            #[cfg(test)]
             fail_loads: Arc::new(AtomicBool::new(false)),
         }
     }
 
-    /// Drop the cached blob. The next shell render reads settings again.
+    /// Mark the cached blob stale. The next shell render reads settings again.
+    ///
+    /// The last blob stays available for stale-on-error. Callers invoke this
+    /// on a write attempt, including when the write then fails.
     pub fn invalidate(&self) {
         let mut guard = self.lock();
         guard.generation = guard.generation.wrapping_add(1);
-        guard.entry = None;
+        guard.refresh_failed = None;
     }
 
-    /// `(generation, fresh JSON)`. `None` means the caller should read the DB.
-    pub(crate) fn fresh(&self) -> (u64, Option<String>) {
+    pub(crate) fn generation(&self) -> u64 {
+        self.lock().generation
+    }
+
+    /// Fresh blob, if one was stored for the current generation inside the TTL.
+    pub(crate) fn fresh(&self) -> Option<Arc<CachedPublicSettings>> {
         let guard = self.lock();
-        let json = guard.entry.as_ref().and_then(|entry| {
-            if entry.stored_at.elapsed() < PUBLIC_SETTINGS_TTL {
-                Some(entry.json.clone())
-            } else {
-                None
-            }
-        });
-        (guard.generation, json)
+        let entry = guard.entry.as_ref()?;
+        if entry.generation != guard.generation {
+            return None;
+        }
+        if entry.stored_at.elapsed() >= PUBLIC_SETTINGS_TTL {
+            return None;
+        }
+        Some(Arc::clone(&entry.payload))
     }
 
-    /// Store `json` only if no invalidation landed since `generation` was read.
-    pub(crate) fn store(&self, generation: u64, json: String) {
+    /// Last blob, including after TTL expiry or invalidation.
+    pub(crate) fn stale(&self) -> Option<Arc<CachedPublicSettings>> {
+        self.lock()
+            .entry
+            .as_ref()
+            .map(|entry| Arc::clone(&entry.payload))
+    }
+
+    /// Store `payload` only if no invalidation landed since `generation`.
+    ///
+    /// Returns whether the cache accepted the write.
+    pub(crate) fn store(&self, generation: u64, payload: CachedPublicSettings) -> bool {
         let mut guard = self.lock();
-        if guard.generation == generation {
-            guard.entry = Some(PublicSettingsEntry {
-                json,
-                stored_at: Instant::now(),
-            });
+        if guard.generation != generation {
+            return false;
+        }
+        guard.refresh_failed = None;
+        guard.entry = Some(PublicSettingsEntry {
+            payload: Arc::new(payload),
+            stored_at: Instant::now(),
+            generation,
+        });
+        true
+    }
+
+    /// `true` when a refresh for this generation just failed and callers
+    /// should serve [`Self::stale`] instead of starting another read.
+    pub(crate) fn refresh_suppressed(&self) -> bool {
+        let guard = self.lock();
+        match guard.refresh_failed {
+            Some((generation, at)) => {
+                generation == guard.generation && at.elapsed() < EMBED_REFRESH_BACKOFF
+            }
+            None => false,
         }
     }
 
+    pub(crate) fn note_refresh_failure(&self, generation: u64) {
+        let mut guard = self.lock();
+        if guard.generation == generation {
+            guard.refresh_failed = Some((generation, Instant::now()));
+        }
+    }
+
+    pub(crate) async fn refresh_lock(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.refresh.lock().await
+    }
+
+    /// Log `message` at most once per [`SETTINGS_WARN_INTERVAL`].
+    pub(crate) fn note_embed_failure(&self, message: &str) -> bool {
+        let mut slot = self.last_warn.lock().unwrap_or_else(|err| err.into_inner());
+        let now = Instant::now();
+        if slot.is_some_and(|prev| now.saturating_duration_since(prev) < SETTINGS_WARN_INTERVAL) {
+            return false;
+        }
+        *slot = Some(now);
+        tracing::warn!("{message}");
+        true
+    }
+
+    #[cfg(test)]
     pub(crate) fn fail_loads(&self) -> bool {
         self.fail_loads.load(Ordering::Relaxed)
     }
 
-    /// When set, the SPA shell omits `#sc-settings` instead of reading the DB.
-    /// Integration tests use this to cover the settings-read failure path.
-    pub fn set_fail_loads(&self, fail: bool) {
+    /// When set, the SPA shell treats the settings read as failed.
+    /// Unit tests use this for the omit-the-block path. Not in release builds.
+    #[cfg(test)]
+    pub(crate) fn set_fail_loads(&self, fail: bool) {
         self.fail_loads.store(fail, Ordering::Relaxed);
+    }
+
+    /// Push the stored blob past the TTL without sleeping.
+    #[cfg(test)]
+    pub(crate) fn expire_for_test(&self) {
+        let mut guard = self.lock();
+        if let Some(entry) = guard.entry.as_mut() {
+            entry.stored_at = Instant::now()
+                .checked_sub(PUBLIC_SETTINGS_TTL + Duration::from_secs(1))
+                .unwrap_or_else(Instant::now);
+        }
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, PublicSettingsInner> {
@@ -436,6 +542,79 @@ mod tests {
         assert_eq!(nip05_identifier("Frozen Tear", None), None);
         // Name that normalizes to nothing → no identifier.
         assert_eq!(nip05_identifier("!!!", Some("ow.scuffedcrew.no")), None);
+    }
+}
+
+#[cfg(test)]
+mod public_settings_cache_tests {
+    use super::{CachedPublicSettings, PublicSettingsCache};
+
+    fn payload(name: &str) -> CachedPublicSettings {
+        CachedPublicSettings {
+            escaped_json: format!(r#"{{"org_name":"{name}"}}"#),
+            script_block: format!(
+                "<script id=\"sc-settings\" type=\"application/json\">{{\"org_name\":\"{name}\"}}</script>"
+            ),
+            org_name: name.to_string(),
+            site_description: "tagline".into(),
+        }
+    }
+
+    #[test]
+    fn stale_writer_cannot_overwrite_a_newer_invalidation() {
+        let cache = PublicSettingsCache::new();
+        let generation = cache.generation();
+        assert!(cache.store(generation, payload("First")));
+        assert_eq!(cache.fresh().unwrap().org_name, "First");
+
+        cache.invalidate();
+        assert!(cache.fresh().is_none());
+        assert!(
+            !cache.store(generation, payload("Stale")),
+            "a read that started before invalidation must not store"
+        );
+        assert_eq!(cache.stale().unwrap().org_name, "First");
+
+        let next = cache.generation();
+        assert_ne!(next, generation);
+        assert!(cache.store(next, payload("Fresh")));
+        assert_eq!(cache.fresh().unwrap().org_name, "Fresh");
+        assert!(cache.fresh().unwrap().script_block.contains("Fresh"));
+    }
+
+    #[test]
+    fn ttl_expiry_keeps_the_blob_for_stale_on_error() {
+        let cache = PublicSettingsCache::new();
+        assert!(cache.store(cache.generation(), payload("Cached")));
+        assert!(cache.fresh().is_some());
+        cache.expire_for_test();
+        assert!(
+            cache.fresh().is_none(),
+            "an expired blob is not a fresh hit"
+        );
+        assert_eq!(cache.stale().unwrap().org_name, "Cached");
+        assert_eq!(
+            cache.stale().unwrap().escaped_json,
+            r#"{"org_name":"Cached"}"#
+        );
+    }
+
+    #[test]
+    fn embed_failure_warning_is_rate_limited() {
+        let cache = PublicSettingsCache::new();
+        assert!(cache.note_embed_failure("settings read failed"));
+        assert!(!cache.note_embed_failure("settings read failed again"));
+    }
+
+    #[test]
+    fn failed_refresh_suppresses_a_second_read_until_invalidate() {
+        let cache = PublicSettingsCache::new();
+        let generation = cache.generation();
+        assert!(!cache.refresh_suppressed());
+        cache.note_refresh_failure(generation);
+        assert!(cache.refresh_suppressed());
+        cache.invalidate();
+        assert!(!cache.refresh_suppressed());
     }
 }
 

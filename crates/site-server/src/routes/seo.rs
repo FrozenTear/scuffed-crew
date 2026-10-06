@@ -19,16 +19,23 @@
 //! through `serde_json` — the same mapping and serializer as that route, so
 //! the embed cannot grow a private field the public GET does not return.
 //! `<`, `>`, `&`, U+2028, and U+2029 are written as `\u003c`, `\u003e`,
-//! `\u0026`, `\u2028`, and `\u2029`. The shell stays `Cache-Control: no-cache`.
-//! A settings read failure omits the tag and still serves the page. The tag
-//! is a data block (`type="application/json"`), not an executed script.
+//! `\u0026`, `\u2028`, and `\u2029`. The escaped JSON and the script block are
+//! cached together. The shell stays `Cache-Control: no-cache`.
+//!
+//! A cache miss waits at most [`EMBED_SETTINGS_TIMEOUT`]. On timeout or error
+//! the last blob is served if one exists (stale-on-error); otherwise the tag
+//! is omitted and the page is still served. The same successful read rewrites
+//! `<title>` and the `og:title`, `og:site_name`, description, and
+//! `og:description` meta contents from `org_name` and `site_description`.
+//! The tag is a data block (`type="application/json"`), not an executed script.
 
 use std::collections::HashSet;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
+use std::time::{Duration, Instant};
 
 use axum::body::Body;
 use axum::extract::State;
@@ -39,7 +46,7 @@ use scuffed_db::{ForumBoard, ForumBoardNode, ForumCategoryNode, MatchType, Tourn
 use tower::Service;
 use tower_http::services::ServeDir;
 
-use crate::state::AppState;
+use crate::state::{AppState, CachedPublicSettings};
 
 const SETTINGS_SCRIPT_OPEN: &str = "<script id=\"sc-settings\" type=\"application/json\">";
 
@@ -203,42 +210,129 @@ fn looks_like_static_asset(path: &str) -> bool {
     )
 }
 
+/// How long a shell waits for the settings read before serving stale or
+/// omitting the block. Named so a slow database cannot hold the page open
+/// for the query timeout.
+const EMBED_SETTINGS_TIMEOUT: Duration = Duration::from_millis(300);
+
+/// Missing-file extensions that are real static assets. A client-route slug
+/// that merely contains a dot (for example `/wiki/foo.bar`) is not in this
+/// list and still receives the shell.
+const STATIC_EXTENSIONS: &[&str] = &[
+    "js", "mjs", "css", "wasm", "map", "svg", "png", "jpg", "jpeg", "webp", "gif", "avif", "ico",
+    "woff", "woff2", "ttf", "json",
+];
+
 /// `dist/` with an in-memory `index.html` shell, plus cache headers.
 ///
-/// The template is read once at router build. A new deploy replaces the
-/// process, so the file is not watched. Missing `index.html` keeps the old
-/// behaviour: real files are served, everything else is 404 (no embed).
+/// The template is read when the router is built. `</head>` is located then.
+/// A missing file stays a 404. Any other read error is retried on the next
+/// shell request and, until that succeeds, the request falls through to the
+/// raw file. A new deploy replaces the process.
 ///
-/// A missing file under `/assets/`, or any missing path with a static
-/// extension (`.js`, `.css`, `.wasm`, images, fonts, …), is a plain 404 with
-/// `Cache-Control: no-store`. Extension-less client routes still get the shell.
+/// A missing file under `/assets/`, or a missing path whose extension is in
+/// [`STATIC_EXTENSIONS`], is a plain 404 with `Cache-Control: no-store`.
+/// Extension-less client routes, and dotted slugs that are not those
+/// extensions, still get the shell.
+///
+/// The `dist/` root is canonicalized once here. Per-request lookups do not
+/// canonicalize ordinary files.
 ///
 /// A hand-rolled service (rather than `middleware::from_fn`) so the future
 /// stays `Send`. Axum's function middleware around `ServeDir` does not.
 pub(crate) fn spa_service(dist_dir: &Path, state: AppState) -> SpaService {
-    let index_html = read_index_template(dist_dir);
+    let dist_root = dist_dir
+        .canonicalize()
+        .unwrap_or_else(|_| dist_dir.to_path_buf());
+    let index = Arc::new(Mutex::new(IndexSlot::load(dist_dir)));
     let files = ServeDir::new(dist_dir);
     SpaService {
-        dist_dir: dist_dir.to_path_buf(),
-        index_html,
+        dist_root,
+        index,
         files,
         state,
     }
 }
 
-fn read_index_template(dist_dir: &Path) -> Option<Arc<str>> {
+#[derive(Clone)]
+struct ShellTemplate {
+    html: Arc<str>,
+    /// Byte index of `</head>` in `html`, located when the template is loaded.
+    head_close: Option<usize>,
+}
+
+enum IndexState {
+    Ready(ShellTemplate),
+    /// `index.html` was not found. Client routes 404.
+    Missing,
+    /// The read failed for another reason. The next shell request tries again.
+    Unreadable,
+}
+
+struct IndexSlot {
+    state: IndexState,
+    last_warn: Option<Instant>,
+}
+
+enum TemplateRead {
+    Ready(ShellTemplate),
+    Missing,
+    Failed(std::io::Error),
+}
+
+enum ShellMiss {
+    Missing,
+    Unreadable,
+}
+
+impl IndexSlot {
+    fn load(dist_dir: &Path) -> Self {
+        match read_index_template(dist_dir) {
+            TemplateRead::Ready(template) => Self {
+                state: IndexState::Ready(template),
+                last_warn: None,
+            },
+            TemplateRead::Missing => Self {
+                state: IndexState::Missing,
+                last_warn: None,
+            },
+            TemplateRead::Failed(err) => {
+                tracing::warn!(
+                    error = %err,
+                    "could not preload dist/index.html; the next shell request will retry"
+                );
+                Self {
+                    state: IndexState::Unreadable,
+                    last_warn: Some(Instant::now()),
+                }
+            }
+        }
+    }
+
+    fn can_serve_shell(&self) -> bool {
+        !matches!(self.state, IndexState::Missing)
+    }
+}
+
+fn read_index_template(dist_dir: &Path) -> TemplateRead {
     let path = dist_dir.join("index.html");
     match std::fs::read_to_string(&path) {
-        Ok(html) => Some(Arc::from(html)),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
-        Err(err) => {
-            tracing::warn!(
-                error = %err,
-                path = %path.display(),
-                "could not preload dist/index.html; SPA shell embed disabled"
-            );
-            None
-        }
+        Ok(html) => TemplateRead::Ready(prepare_shell_template(html)),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => TemplateRead::Missing,
+        Err(err) => TemplateRead::Failed(err),
+    }
+}
+
+/// Locate `</head>` once. A template without it is still served; the embed
+/// and the title rewrite are skipped, and the warning is this load only.
+fn prepare_shell_template(html: String) -> ShellTemplate {
+    let head_close = find_head_close(&html);
+    if head_close.is_none() {
+        tracing::warn!("SPA shell has no </head>; omitting sc-settings embed");
+    }
+    ShellTemplate {
+        html: Arc::from(html),
+        head_close,
     }
 }
 
@@ -262,25 +356,249 @@ pub(crate) fn escape_json_for_html(json: &str) -> String {
     out
 }
 
-/// Insert the settings data block immediately before `</head>`.
+fn cached_settings(json: &str, org_name: &str, site_description: &str) -> CachedPublicSettings {
+    let escaped_json = escape_json_for_html(json);
+    let mut script_block =
+        String::with_capacity(SETTINGS_SCRIPT_OPEN.len() + escaped_json.len() + "</script>".len());
+    script_block.push_str(SETTINGS_SCRIPT_OPEN);
+    script_block.push_str(&escaped_json);
+    script_block.push_str("</script>");
+    CachedPublicSettings {
+        escaped_json,
+        script_block,
+        org_name: org_name.to_string(),
+        site_description: site_description.to_string(),
+    }
+}
+
+/// Shell HTML for one response.
 ///
-/// `escaped_json` is already escaped by [`escape_json_for_html`]. `None` (the
-/// settings read failed) returns `html` unchanged.
-pub(crate) fn inject_settings_script(html: &str, escaped_json: Option<&str>) -> String {
-    let Some(json) = escaped_json else {
-        return html.to_string();
+/// Without settings, the template is returned untouched (title and meta stay
+/// as built). With settings, `<title>` and the matching meta contents in the
+/// head are replaced, then the already-rendered script block is inserted at
+/// the `</head>` index captured when the template was loaded.
+fn render_shell(template: &ShellTemplate, embed: Option<&CachedPublicSettings>) -> String {
+    let Some(embed) = embed else {
+        return template.html.to_string();
     };
-    let Some(idx) = find_head_close(html) else {
-        tracing::warn!("SPA shell has no </head>; omitting sc-settings embed");
-        return html.to_string();
+    let Some(idx) = template.head_close else {
+        return template.html.to_string();
     };
-    let mut out = String::with_capacity(html.len() + SETTINGS_SCRIPT_OPEN.len() + json.len() + 9);
-    out.push_str(&html[..idx]);
-    out.push_str(SETTINGS_SCRIPT_OPEN);
-    out.push_str(json);
-    out.push_str("</script>");
-    out.push_str(&html[idx..]);
+    let head = rewrite_document_head(
+        &template.html[..idx],
+        &embed.org_name,
+        &embed.site_description,
+    );
+    // Hit path: serve the cached block. `escaped_json` is the same payload
+    // already inside it, kept so a hit does not escape again.
+    let block_len = embed.script_block.len().max(embed.escaped_json.len());
+    let mut out = String::with_capacity(head.len() + block_len + template.html.len() - idx);
+    out.push_str(&head);
+    out.push_str(&embed.script_block);
+    out.push_str(&template.html[idx..]);
     out
+}
+
+fn escape_html_text(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
+/// Replace `<title>` text and the meta contents the anonymous settings can
+/// fill. Attribute order and incidental whitespace do not matter. Tags that
+/// are absent stay absent.
+fn rewrite_document_head(head: &str, org_name: &str, site_description: &str) -> String {
+    let with_title = replace_title_text(head, org_name);
+    replace_meta_contents(&with_title, org_name, site_description)
+}
+
+fn replace_title_text(head: &str, org_name: &str) -> String {
+    let lower = head.to_ascii_lowercase();
+    let escaped = escape_html_text(org_name);
+    let mut out = String::with_capacity(head.len() + escaped.len());
+    let mut i = 0;
+    while let Some(rel) = lower[i..].find("<title") {
+        let start = i + rel;
+        let after = start + "<title".len();
+        if !tag_name_ends(head, after) {
+            out.push_str(&head[i..after]);
+            i = after;
+            continue;
+        }
+        let Some(gt_rel) = head[after..].find('>') else {
+            break;
+        };
+        let content_start = after + gt_rel + 1;
+        let Some(close_rel) = lower[content_start..].find("</title") else {
+            break;
+        };
+        let content_end = content_start + close_rel;
+        out.push_str(&head[i..content_start]);
+        out.push_str(&escaped);
+        i = content_end;
+    }
+    out.push_str(&head[i..]);
+    out
+}
+
+fn replace_meta_contents(head: &str, org_name: &str, site_description: &str) -> String {
+    let lower = head.to_ascii_lowercase();
+    let mut out = String::with_capacity(head.len());
+    let mut i = 0;
+    while let Some(rel) = lower[i..].find("<meta") {
+        let start = i + rel;
+        let after = start + "<meta".len();
+        if !tag_name_ends(head, after) {
+            out.push_str(&head[i..after]);
+            i = after;
+            continue;
+        }
+        let Some(gt_rel) = head[after..].find('>') else {
+            break;
+        };
+        let end = after + gt_rel + 1;
+        out.push_str(&head[i..start]);
+        out.push_str(&rewrite_meta_tag(
+            &head[start..end],
+            org_name,
+            site_description,
+        ));
+        i = end;
+    }
+    out.push_str(&head[i..]);
+    out
+}
+
+fn tag_name_ends(html: &str, after_name: usize) -> bool {
+    match html.as_bytes().get(after_name).copied() {
+        None => true,
+        Some(b) => b.is_ascii_whitespace() || b == b'>' || b == b'/',
+    }
+}
+
+struct ScannedAttr {
+    name: String,
+    value: String,
+    /// Byte range of the attribute value inside `tag`, excluding quotes.
+    value_range: std::ops::Range<usize>,
+}
+
+fn rewrite_meta_tag(tag: &str, org_name: &str, site_description: &str) -> String {
+    let attrs = scan_attrs(tag);
+    let attr_value = |name: &str| {
+        attrs
+            .iter()
+            .find(|attr| attr.name.eq_ignore_ascii_case(name))
+            .map(|attr| attr.value.as_str())
+    };
+    let replacement = if let Some(property) = attr_value("property") {
+        match property.to_ascii_lowercase().as_str() {
+            "og:title" | "og:site_name" => Some(org_name),
+            "og:description" => Some(site_description),
+            _ => None,
+        }
+    } else if attr_value("name").is_some_and(|name| name.eq_ignore_ascii_case("description")) {
+        Some(site_description)
+    } else {
+        None
+    };
+    let Some(new_value) = replacement else {
+        return tag.to_string();
+    };
+    let Some(content) = attrs
+        .iter()
+        .find(|attr| attr.name.eq_ignore_ascii_case("content"))
+    else {
+        return tag.to_string();
+    };
+    let escaped = escape_html_text(new_value);
+    let mut out = String::with_capacity(tag.len() + escaped.len());
+    out.push_str(&tag[..content.value_range.start]);
+    out.push_str(&escaped);
+    out.push_str(&tag[content.value_range.end..]);
+    out
+}
+
+fn scan_attrs(tag: &str) -> Vec<ScannedAttr> {
+    let bytes = tag.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() && !bytes[i].is_ascii_whitespace() && bytes[i] != b'>' {
+        i += 1;
+    }
+    let mut attrs = Vec::new();
+    while i < bytes.len() {
+        while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        if i >= bytes.len() || bytes[i] == b'>' || bytes[i] == b'/' {
+            break;
+        }
+        let name_start = i;
+        while i < bytes.len()
+            && bytes[i] != b'='
+            && bytes[i] != b'>'
+            && bytes[i] != b'/'
+            && !bytes[i].is_ascii_whitespace()
+        {
+            i += 1;
+        }
+        let name = tag[name_start..i].to_string();
+        if name.is_empty() {
+            i += 1;
+            continue;
+        }
+        while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        if i >= bytes.len() || bytes[i] != b'=' {
+            continue;
+        }
+        i += 1;
+        while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        if i >= bytes.len() {
+            break;
+        }
+        if bytes[i] == b'"' || bytes[i] == b'\'' {
+            let quote = bytes[i];
+            let start = i + 1;
+            i = start;
+            while i < bytes.len() && bytes[i] != quote {
+                i += 1;
+            }
+            let end = i;
+            if i < bytes.len() {
+                i += 1;
+            }
+            attrs.push(ScannedAttr {
+                name,
+                value: tag[start..end].to_string(),
+                value_range: start..end,
+            });
+        } else {
+            let start = i;
+            while i < bytes.len() && !bytes[i].is_ascii_whitespace() && bytes[i] != b'>' {
+                i += 1;
+            }
+            attrs.push(ScannedAttr {
+                name,
+                value: tag[start..i].to_string(),
+                value_range: start..i,
+            });
+        }
+    }
+    attrs
 }
 
 fn find_head_close(html: &str) -> Option<usize> {
@@ -290,25 +608,67 @@ fn find_head_close(html: &str) -> Option<usize> {
         .position(|window| window.eq_ignore_ascii_case(needle))
 }
 
-async fn load_embed_json(state: &AppState) -> Option<String> {
+async fn load_embed(state: &AppState) -> Option<Arc<CachedPublicSettings>> {
+    if let Some(hit) = state.public_settings.fresh() {
+        return Some(hit);
+    }
+    // One reader. Waiters observe that reader's result instead of each
+    // hitting the database.
+    let _flight = state.public_settings.refresh_lock().await;
+    if let Some(hit) = state.public_settings.fresh() {
+        return Some(hit);
+    }
+    if state.public_settings.refresh_suppressed() {
+        return state.public_settings.stale();
+    }
+    #[cfg(test)]
     if state.public_settings.fail_loads() {
-        tracing::warn!("SPA shell settings embed skipped");
-        return None;
+        state
+            .public_settings
+            .note_embed_failure("SPA shell settings embed skipped");
+        return state.public_settings.stale();
     }
-    let (generation, cached) = state.public_settings.fresh();
-    if let Some(json) = cached {
-        return Some(escape_json_for_html(&json));
-    }
-    match crate::routes::settings::anonymous_settings_json(&state.db).await {
-        Ok(json) => {
-            state.public_settings.store(generation, json.clone());
-            Some(escape_json_for_html(&json))
+    let generation = state.public_settings.generation();
+    let read = read_public_settings(&state.db);
+    match tokio::time::timeout(EMBED_SETTINGS_TIMEOUT, read).await {
+        Ok(Ok(payload)) => {
+            let cached = Arc::new(payload);
+            // `store` drops the blob when an invalidation landed during the
+            // read. Prefer whatever is fresh for the newer generation.
+            state
+                .public_settings
+                .store(generation, CachedPublicSettings::clone(&cached));
+            Some(
+                state
+                    .public_settings
+                    .fresh()
+                    .unwrap_or_else(|| Arc::clone(&cached)),
+            )
         }
-        Err(err) => {
-            tracing::warn!(error = %err, "SPA shell settings embed skipped");
-            None
+        Ok(Err(err)) => {
+            state.public_settings.note_refresh_failure(generation);
+            state
+                .public_settings
+                .note_embed_failure(&format!("SPA shell settings embed skipped: {err}"));
+            state.public_settings.stale()
+        }
+        Err(_elapsed) => {
+            state.public_settings.note_refresh_failure(generation);
+            state
+                .public_settings
+                .note_embed_failure("SPA shell settings embed timed out");
+            state.public_settings.stale()
         }
     }
+}
+
+async fn read_public_settings(db: &scuffed_db::Database) -> Result<CachedPublicSettings, String> {
+    let settings = crate::routes::settings::anonymous_settings_json(db).await?;
+    Ok(cached_settings(
+        &settings.json,
+        &settings.org_name,
+        &settings.site_description,
+    ))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -328,8 +688,8 @@ enum DistLookup {
     Rejected,
 }
 
-fn classify_spa_route(dist: &Path, url_path: &str, have_index: bool) -> SpaRoute {
-    match dist_lookup(dist, url_path) {
+fn classify_spa_route(dist_root: &Path, url_path: &str, have_index: bool) -> SpaRoute {
+    match dist_lookup(dist_root, url_path) {
         DistLookup::Index => {
             if have_index {
                 SpaRoute::Shell
@@ -339,8 +699,8 @@ fn classify_spa_route(dist: &Path, url_path: &str, have_index: bool) -> SpaRoute
         }
         DistLookup::File => SpaRoute::File,
         DistLookup::Missing => {
-            // Client routes (no static extension, not under /assets/) still
-            // get the shell. A missing stylesheet or script must not.
+            // Client routes still get the shell. A missing stylesheet, script,
+            // or anything under /assets/ must not.
             if have_index && !is_static_miss_path(url_path) {
                 SpaRoute::Shell
             } else {
@@ -351,8 +711,11 @@ fn classify_spa_route(dist: &Path, url_path: &str, have_index: bool) -> SpaRoute
     }
 }
 
-/// Missing files under `/assets/`, or any missing path with a static
+/// Missing files under `/assets/`, or a missing path with a real static
 /// extension, must 404 instead of falling through to `index.html`.
+///
+/// Wiki and article slugs that contain a dot stay on the shell unless the
+/// final extension is in [`STATIC_EXTENSIONS`].
 fn is_static_miss_path(url_path: &str) -> bool {
     let path = url_path.split('?').next().unwrap_or(url_path);
     let decoded = urlencoding::decode(path).unwrap_or(std::borrow::Cow::Borrowed(path));
@@ -367,26 +730,16 @@ fn is_static_miss_path(url_path: &str) -> bool {
     if ext.is_empty() {
         return false;
     }
-    matches!(
-        ext.to_ascii_lowercase().as_str(),
-        "js" | "mjs"
-            | "css"
-            | "wasm"
-            | "map"
-            | "svg"
-            | "png"
-            | "jpg"
-            | "jpeg"
-            | "webp"
-            | "ico"
-            | "woff"
-            | "woff2"
-            | "ttf"
-            | "json"
-    )
+    let ext = ext.to_ascii_lowercase();
+    STATIC_EXTENSIONS.iter().any(|known| *known == ext)
 }
 
-fn dist_lookup(dist: &Path, url_path: &str) -> DistLookup {
+/// Resolve `url_path` under the already-canonical `dist_root`.
+///
+/// `dist_root` was canonicalized once at startup. Ordinary files are
+/// `symlink_metadata` only. `canonicalize` runs only for a path component
+/// that is itself a symlink, so a link cannot point outside `dist/`.
+fn dist_lookup(dist_root: &Path, url_path: &str) -> DistLookup {
     let path = url_path.split('?').next().unwrap_or(url_path);
     let decoded = match urlencoding::decode(path) {
         Ok(value) => value.into_owned(),
@@ -399,17 +752,32 @@ fn dist_lookup(dist: &Path, url_path: &str) -> DistLookup {
     if rel.is_empty() || rel == "index.html" {
         return DistLookup::Index;
     }
-    let candidate = dist.join(rel);
-    let Ok(canon) = candidate.canonicalize() else {
-        return DistLookup::Missing;
-    };
-    let Ok(dist_canon) = dist.canonicalize() else {
-        return DistLookup::Missing;
-    };
-    if !canon.starts_with(&dist_canon) {
-        return DistLookup::Rejected;
+    let mut cursor = dist_root.to_path_buf();
+    let mut last_is_file = false;
+    for component in Path::new(rel).components() {
+        let std::path::Component::Normal(segment) = component else {
+            return DistLookup::Rejected;
+        };
+        cursor.push(segment);
+        if !cursor.starts_with(dist_root) {
+            return DistLookup::Rejected;
+        }
+        match cursor.symlink_metadata() {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                let Ok(canon) = cursor.canonicalize() else {
+                    return DistLookup::Missing;
+                };
+                if !canon.starts_with(dist_root) {
+                    return DistLookup::Rejected;
+                }
+                last_is_file = canon.is_file();
+                cursor = canon;
+            }
+            Ok(meta) => last_is_file = meta.is_file(),
+            Err(_) => return DistLookup::Missing,
+        }
     }
-    if canon.is_file() {
+    if last_is_file {
         DistLookup::File
     } else {
         // A directory (for example `/assets`) is not a file. The shell covers
@@ -419,7 +787,11 @@ fn dist_lookup(dist: &Path, url_path: &str) -> DistLookup {
 }
 
 fn shell_response(html: String, head_only: bool) -> Response<Body> {
-    let len = html.len();
+    raw_shell_response(html.into_bytes(), head_only)
+}
+
+fn raw_shell_response(bytes: Vec<u8>, head_only: bool) -> Response<Body> {
+    let len = bytes.len();
     Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
@@ -428,7 +800,7 @@ fn shell_response(html: String, head_only: bool) -> Response<Body> {
         .body(if head_only {
             Body::empty()
         } else {
-            Body::from(html)
+            Body::from(bytes)
         })
         .expect("shell response headers are valid")
 }
@@ -444,8 +816,9 @@ fn plain_not_found() -> Response<Body> {
 
 #[derive(Clone)]
 pub(crate) struct SpaService {
-    dist_dir: PathBuf,
-    index_html: Option<Arc<str>>,
+    /// Canonical `dist/` directory, computed once when the router is built.
+    dist_root: PathBuf,
+    index: Arc<Mutex<IndexSlot>>,
     files: ServeDir,
     state: AppState,
 }
@@ -467,46 +840,140 @@ where
         let method = req.method().clone();
         let shell_method = method == Method::GET || method == Method::HEAD;
         let route = if shell_method {
-            classify_spa_route(&self.dist_dir, &path, self.index_html.is_some())
+            let have_index = self
+                .index
+                .lock()
+                .unwrap_or_else(|err| err.into_inner())
+                .can_serve_shell();
+            classify_spa_route(&self.dist_root, &path, have_index)
         } else {
             SpaRoute::File
         };
         let state = self.state.clone();
-        let index_html = self.index_html.clone();
+        let index = Arc::clone(&self.index);
+        let dist_root = self.dist_root.clone();
         match route {
             SpaRoute::Shell => Box::pin(async move {
-                let Some(template) = index_html else {
-                    return Ok(plain_not_found());
-                };
-                let embed = load_embed_json(&state).await;
-                let html = inject_settings_script(template.as_ref(), embed.as_deref());
-                Ok(shell_response(html, method == Method::HEAD))
+                match shell_html(&index, &dist_root, &state).await {
+                    Ok(html) => Ok(shell_response(html, method == Method::HEAD)),
+                    Err(ShellMiss::Missing) => Ok(plain_not_found()),
+                    Err(ShellMiss::Unreadable) => {
+                        // Preload failed. Serve the raw file for this request
+                        // (no embed) and leave the slot retryable. An
+                        // unreadable path, including a directory, is a plain
+                        // 404 rather than a stuck shell.
+                        let dist = dist_root.clone();
+                        let head_only = method == Method::HEAD;
+                        let raw = tokio::task::spawn_blocking(move || {
+                            std::fs::read(dist.join("index.html"))
+                        })
+                        .await;
+                        match raw {
+                            Ok(Ok(bytes)) => Ok(raw_shell_response(bytes, head_only)),
+                            _ => Ok(plain_not_found()),
+                        }
+                    }
+                }
             }),
             SpaRoute::NotFound => Box::pin(async { Ok(plain_not_found()) }),
             SpaRoute::File => {
-                let clone = self.files.clone();
-                let mut files = std::mem::replace(&mut self.files, clone);
-                Box::pin(async move {
-                    let mut response = files.call(req).await?;
-                    let cache = if response.status() == StatusCode::NOT_FOUND {
-                        // A 404 must never be immutable, even for a dxh-looking path.
-                        "no-store"
-                    } else {
-                        let content_type = response
-                            .headers()
-                            .get(header::CONTENT_TYPE)
-                            .and_then(|value| value.to_str().ok())
-                            .map(str::to_owned);
-                        cache_control_value(&path, content_type.as_deref())
-                    };
-                    response
-                        .headers_mut()
-                        .insert(header::CACHE_CONTROL, HeaderValue::from_static(cache));
-                    Ok(response.map(Body::new))
-                })
+                let files = self.files.clone();
+                Box::pin(async move { Ok(serve_dist(files, req, path).await) })
             }
         }
     }
+}
+
+async fn shell_html(
+    index: &Mutex<IndexSlot>,
+    dist_root: &Path,
+    state: &AppState,
+) -> Result<String, ShellMiss> {
+    let ready = {
+        let guard = index.lock().unwrap_or_else(|err| err.into_inner());
+        match &guard.state {
+            IndexState::Ready(template) => Some(template.clone()),
+            IndexState::Missing => None,
+            IndexState::Unreadable => None,
+        }
+    };
+    if let Some(template) = ready {
+        let embed = load_embed(state).await;
+        return Ok(render_shell(&template, embed.as_deref()));
+    }
+    let missing = {
+        let guard = index.lock().unwrap_or_else(|err| err.into_inner());
+        matches!(guard.state, IndexState::Missing)
+    };
+    if missing {
+        return Err(ShellMiss::Missing);
+    }
+    let dist_root = dist_root.to_path_buf();
+    let read = tokio::task::spawn_blocking(move || read_index_template(&dist_root))
+        .await
+        .unwrap_or_else(|_| {
+            TemplateRead::Failed(std::io::Error::other("index.html read task failed"))
+        });
+    let loaded = {
+        let mut guard = index.lock().unwrap_or_else(|err| err.into_inner());
+        match read {
+            TemplateRead::Ready(template) => {
+                guard.state = IndexState::Ready(template.clone());
+                Ok(template)
+            }
+            TemplateRead::Missing => {
+                guard.state = IndexState::Missing;
+                Err(ShellMiss::Missing)
+            }
+            TemplateRead::Failed(err) => {
+                guard.state = IndexState::Unreadable;
+                let now = Instant::now();
+                let due = guard.last_warn.is_none_or(|prev| {
+                    now.saturating_duration_since(prev) >= Duration::from_secs(60)
+                });
+                if due {
+                    guard.last_warn = Some(now);
+                    tracing::warn!(
+                        error = %err,
+                        "could not read dist/index.html; serving the raw file if it is readable"
+                    );
+                }
+                Err(ShellMiss::Unreadable)
+            }
+        }
+    };
+    let template = loaded?;
+    let embed = load_embed(state).await;
+    Ok(render_shell(&template, embed.as_deref()))
+}
+
+async fn serve_dist<ReqBody>(
+    mut files: ServeDir,
+    req: Request<ReqBody>,
+    path: String,
+) -> Response<Body>
+where
+    ReqBody: Send + 'static,
+{
+    let mut response = match files.call(req).await {
+        Ok(response) => response,
+        Err(err) => match err {},
+    };
+    let cache = if response.status() == StatusCode::NOT_FOUND {
+        // A 404 must never be immutable, even for a dxh-looking path.
+        "no-store"
+    } else {
+        let content_type = response
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
+        cache_control_value(&path, content_type.as_deref())
+    };
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static(cache));
+    response.map(Body::new)
 }
 
 /// GET /robots.txt
@@ -1038,12 +1505,17 @@ mod tests {
         ] {
             assert!(is_static_miss_path(path), "{path}");
         }
+        for path in ["/pic.gif", "/photo.AVIF", "/assets/hero.gif"] {
+            assert!(is_static_miss_path(path), "{path}");
+        }
         for path in [
             "/",
             "/index.html",
             "/strategies/foo",
             "/admin/settings",
             "/blog/hello",
+            "/wiki/foo.bar",
+            "/articles/v1.2-notes",
             "/robots.txt",
         ] {
             assert!(!is_static_miss_path(path), "{path}");
@@ -1071,21 +1543,107 @@ mod tests {
         );
     }
 
+    fn template_with(html: &str) -> ShellTemplate {
+        prepare_shell_template(html.to_string())
+    }
+
+    fn embed(org_name: &str, site_description: &str, json: &str) -> CachedPublicSettings {
+        cached_settings(json, org_name, site_description)
+    }
+
     #[test]
-    fn inject_settings_script_sits_immediately_before_head() {
-        let html = "<html><head><title>x</title></HEAD><body></body></html>";
-        let out = inject_settings_script(html, Some(r#"{"a":1}"#));
+    fn render_shell_inserts_cached_block_immediately_before_head() {
+        let template = template_with("<html><head><title>x</title></HEAD><body></body></html>");
+        let settings = embed("Clan", "tag", r#"{"a":1}"#);
+        let out = render_shell(&template, Some(&settings));
         assert_eq!(
             out,
-            "<html><head><title>x</title><script id=\"sc-settings\" type=\"application/json\">{\"a\":1}</script></HEAD><body></body></html>"
+            "<html><head><title>Clan</title><script id=\"sc-settings\" type=\"application/json\">{\"a\":1}</script></HEAD><body></body></html>"
+        );
+        assert!(template.head_close.is_some());
+    }
+
+    #[test]
+    fn render_shell_leaves_template_when_settings_or_head_are_missing() {
+        let html = "<html><head><title>The Scuffed Crew</title></head><body>SPA-SHELL-MARKER</body></html>";
+        let template = template_with(html);
+        assert_eq!(render_shell(&template, None), html);
+        let no_head = template_with("<html><body>SPA-SHELL-MARKER</body></html>");
+        assert!(no_head.head_close.is_none());
+        let settings = embed("Clan", "tag", "{}");
+        assert_eq!(
+            render_shell(&no_head, Some(&settings)),
+            "<html><body>SPA-SHELL-MARKER</body></html>"
         );
     }
 
     #[test]
-    fn inject_settings_script_omits_block_without_json_or_head() {
-        let html = "<html><head></head><body>SPA-SHELL-MARKER</body></html>";
-        assert_eq!(inject_settings_script(html, None), html);
-        let no_head = "<html><body>SPA-SHELL-MARKER</body></html>";
-        assert_eq!(inject_settings_script(no_head, Some("{}")), no_head);
+    fn head_rewrite_escapes_clan_name_and_ignores_attribute_order() {
+        let head = "\
+<head>
+<title>The Scuffed Crew</title>
+<meta
+  name=\"description\"
+  content=\"The Scuffed Crew — fallback\">
+<meta property=\"og:title\" content=\"The Scuffed Crew\" />
+<meta content=\"The Scuffed Crew\" property=\"og:site_name\">
+<meta property=\"og:description\" content=\"fallback tagline\">
+<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">
+</head>";
+        let org_name = r#"</title><script>alert(1)</script>" onload="alert(1)"#;
+        let description = r#"<img src=x onerror=alert(1)> & "quotes""#;
+        let out = rewrite_document_head(head, org_name, description);
+        assert!(!out.contains("<script>alert"));
+        assert!(!out.contains("onload=\"alert"));
+        assert!(out.contains("&lt;/title&gt;&lt;script&gt;alert(1)&lt;/script&gt;"));
+        assert!(out.contains("&quot; onload=&quot;alert(1)"));
+        assert!(out.contains("&lt;img src=x onerror=alert(1)&gt; &amp; &quot;quotes&quot;"));
+        assert!(!out.contains("The Scuffed Crew"));
+        assert!(!out.contains("fallback tagline"));
+        assert!(out.contains("content=\"width=device-width, initial-scale=1\""));
+        assert!(out.contains("property=\"og:site_name\""));
+    }
+
+    #[test]
+    fn cached_settings_escape_json_once() {
+        let raw = r#"{"site_description":"</script>&"}"#;
+        let cached = cached_settings(raw, "Clan", "</script>&");
+        assert!(cached.escaped_json.contains("\\u003c/script\\u003e"));
+        assert!(cached.script_block.contains(&cached.escaped_json));
+        assert!(!cached.script_block.contains("</script>&"));
+        let again = cached_settings(raw, "Clan", "</script>&");
+        assert_eq!(cached.script_block, again.script_block);
+    }
+
+    #[tokio::test]
+    async fn settings_read_failure_omits_embed_and_leaves_template_title() {
+        let root =
+            std::env::temp_dir().join(format!("scuffed-seo-unit-fail-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(root.join("dist")).unwrap();
+        let html = "<!DOCTYPE html><html><head><title>The Scuffed Crew</title><meta property=\"og:title\" content=\"The Scuffed Crew\"></head><body>SPA-SHELL-MARKER</body></html>";
+        std::fs::write(root.join("dist/index.html"), html).unwrap();
+        let state = crate::test_support::test_state().await;
+        state.public_settings.set_fail_loads(true);
+        let app = crate::create_router_with_dist(state, root.join("dist"));
+        let response = tower::ServiceExt::oneshot(
+            app,
+            axum::http::Request::builder()
+                .uri("/")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let bytes = http_body_util::BodyExt::collect(response.into_body())
+            .await
+            .unwrap()
+            .to_bytes();
+        let body = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(body.contains("SPA-SHELL-MARKER"));
+        assert!(!body.contains("sc-settings"), "{body}");
+        assert!(body.contains("<title>The Scuffed Crew</title>"), "{body}");
+        assert!(body.contains("content=\"The Scuffed Crew\""), "{body}");
+        let _ = std::fs::remove_dir_all(root);
     }
 }

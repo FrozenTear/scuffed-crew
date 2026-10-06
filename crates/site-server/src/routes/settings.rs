@@ -144,11 +144,27 @@ pub(crate) async fn load_anonymous_settings(
 
 /// Serialized body of [`load_anonymous_settings`], using `serde_json` the same
 /// way Axum's [`Json`] response does (`serde_json::to_vec` / `to_string`).
-pub(crate) async fn anonymous_settings_json(db: &scuffed_db::Database) -> Result<String, String> {
+///
+/// `org_name` and `site_description` are the fields the shell writes into
+/// `<title>` and the description / Open Graph meta tags.
+pub(crate) struct AnonymousSettingsJson {
+    pub json: String,
+    pub org_name: String,
+    pub site_description: String,
+}
+
+pub(crate) async fn anonymous_settings_json(
+    db: &scuffed_db::Database,
+) -> Result<AnonymousSettingsJson, String> {
     let settings = load_anonymous_settings(db)
         .await
         .map_err(|e| e.to_string())?;
-    serde_json::to_string(&settings).map_err(|e| e.to_string())
+    let json = serde_json::to_string(&settings).map_err(|e| e.to_string())?;
+    Ok(AnonymousSettingsJson {
+        json,
+        org_name: settings.org_name,
+        site_description: settings.site_description,
+    })
 }
 
 /// GET /api/settings — public (anonymous and signed-in callers share this body)
@@ -192,6 +208,11 @@ pub async fn update_settings(
             }),
         ));
     }
+    // Invalidate on the write attempt itself, including a body that fails
+    // validation or a database update that errors. A rejected attempt must
+    // not keep serving a fresh cached blob until the TTL.
+    state.public_settings.invalidate();
+
     let homepage_json = body.homepage.as_ref().map(|h| h.to_json());
     let nav_json = body.nav.as_ref().map(|n| {
         let mut n = n.clone();
@@ -270,8 +291,6 @@ pub async fn update_settings(
                 }),
             )
         })?;
-
-    state.public_settings.invalidate();
 
     tracing::info!(
         home_shell = %settings.home_shell,
