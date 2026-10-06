@@ -4,11 +4,12 @@ User-facing notes for `stat-tracker-v*` GitHub Releases. The release workflow
 prepends the section whose heading matches the tag version (for example
 `## 0.4.15` for `stat-tracker-v0.4.15`).
 
-## 0.4.20
+## 0.4.18
 
-Season 5 (A Grim Doctrine): new captures recognize the Support hero
-Doctrine, and read Sombra as Support. Games already stored keep the
-role they were captured with. Roadhog's rework does not change his role.
+Season 5 ([A Grim Doctrine](https://overwatch.blizzard.com/en-us/news/24303008/feed-your-hunger-in-reign-of-talon-season-5-a-grim-doctrine/)):
+new captures recognize the Support hero Doctrine, and read Sombra as
+Support. Games already stored keep the role they were captured with.
+Roadhog's rework does not change his role.
 
 The bundle includes a provisional Doctrine portrait cropped from the
 public wiki icon. An in-game crop collected with `--collect-portraits`
@@ -21,7 +22,7 @@ curl --proto '=https' -fsSL https://raw.githubusercontent.com/FrozenTear/scuffed
 ```
 
 Or extract the tarball and run `./install.sh`. Pin with
-`STAT_TRACKER_TAG=stat-tracker-v0.4.20`.
+`STAT_TRACKER_TAG=stat-tracker-v0.4.18`.
 
 ## 0.4.17
 

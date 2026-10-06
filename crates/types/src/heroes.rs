@@ -254,6 +254,14 @@ mod tests {
         );
         assert_eq!(resolve_hero_query(Some("d.va")), Ok(Some("D.Va")));
         assert!(resolve_hero_query(Some("NotAHero")).is_err());
+        // Season 5. Unknown names 400 on ?hero= (leaderboards and public members).
+        assert_eq!(resolve_hero_query(Some("doctrine")), Ok(Some("Doctrine")));
+        assert_eq!(resolve_hero_query(Some("Doctrine")), Ok(Some("Doctrine")));
+        assert_eq!(resolve_hero_query(Some("DOCTRINE")), Ok(Some("Doctrine")));
+        assert_eq!(
+            resolve_hero_query(Some("  doctrine  ")),
+            Ok(Some("Doctrine"))
+        );
     }
 
     #[test]
