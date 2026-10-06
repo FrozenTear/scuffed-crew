@@ -334,7 +334,9 @@ pub fn match_map_in_text(text: &str) -> Option<String> {
 /// Exact substring match only. The accolade crop uses this so a fuzzy
 /// near-miss in the gameplay HUD cannot become the session map.
 pub fn exact_map_in_text(text: &str) -> Option<String> {
-    let text = normalize_ocr_glyphs(&text.to_lowercase());
+    // Join wrapped lines first. "New Junk\nCity" is one map name.
+    let joined = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let text = normalize_ocr_glyphs(&joined.to_lowercase());
     for &(display_name, pattern) in MAPS {
         if text.contains(&normalize_ocr_glyphs(pattern)) {
             return Some(display_name.to_string());
@@ -531,6 +533,16 @@ mod tests {
 
     fn garbage_row() -> RowOcrResult {
         row(None, ["", "x", "", "", "9o", ""])
+    }
+
+    #[test]
+    fn exact_map_joins_wrapped_lines() {
+        assert_eq!(
+            exact_map_in_text("New Junk\nCity").as_deref(),
+            Some("New Junk City")
+        );
+        assert_eq!(exact_map_in_text("BUSAN").as_deref(), Some("Busan"));
+        assert!(exact_map_in_text("not a map").is_none());
     }
 
     #[test]

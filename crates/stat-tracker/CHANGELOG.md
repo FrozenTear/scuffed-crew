@@ -22,19 +22,21 @@ bound on an unfinished session, the map-vote debounce, and the rate
 ceilings: elims, assists, and deaths `elapsed / 5 + 8`, and damage,
 healing, and mitigation `elapsed * 80 + 2500`. The rate clock is the
 reset baseline, not the last stored row. The 2x–4x all-increase band
-applies only inside the first minute.
+applies within 60s of the baseline.
 
 A map vote that is not blocked, or a hero ban, after a hint that already
-has a board splits and seals the hint. A hero select after that board
-only arms a pending boundary. The next fresh-match board then splits and
-seals. A hero select when no board has been stored yet seals immediately.
-A start screen that is still inside the debounce does not open another
-session, and the vote candidates stay on the one just opened. A hero
-select during a live match primes a reset and does not split. A hero ban,
-or a map vote past the debounce, closes an unfinished session without
-sealing a result when it is not the same map. That guard is same-map
-only. The same-map-plus-hero guard still suppresses a gap split of an
-unfinished match.
+has a board splits and seals the hint. A ban splits at once. A hero
+select after that board only arms a pending boundary, and a select after
+a held fresh-match board does not split. The next fresh-match board then
+splits and seals. A hero select when no board has been stored yet seals
+immediately, except on the session a start screen just opened: a swap
+before that session's first Tab stays, including after the debounce.
+The session a vote opens keeps that vote's candidates and its first Tab.
+A hero select during a live match primes a reset and does not split. A
+hero ban, or a map vote past the debounce, closes an unfinished session
+without sealing a result. The same-map guard covers votes. The
+same-map-plus-hero guard still suppresses a gap split of an unfinished
+match.
 
 A fresh-match reset is the same identified row, with clean elims, deaths,
 and damage, at or under elims max(2, previous/4), deaths max(1,
@@ -42,8 +44,10 @@ previous/4), and damage previous/4, versus a mature board, and the first
 is at least 45 seconds later. The first is held off the current session
 and written onto the new one, at that capture's own time, when a second
 fresh board commits. A hero select or ban before that board is the other
-signal. A select after the held board does not split by itself. A stored
-board that is not fresh drops the held board and the streak. A hero
+signal. A select after the held board does not split by itself. A ban
+after that held board does not split either. An unidentified or
+implausible row is stored and leaves the held board and the streak. A
+plausible continuation, or counted progress, clears them. A hero
 change by itself is not a split. A different row never counts as a reset.
 A row with no id never counts. The new session's outcome is Unknown
 unless the split is the 120-second gap, which keeps that frame's header.
@@ -52,9 +56,14 @@ implausible jump is still stored, and it does not become the reset
 baseline. One misread stat cell is still held. A long post-match screen
 does not split on the gap.
 
-A single Defeat read with no scoreboard and no start screen, followed by
-another map's tabs, is not split. That read cannot be told apart from a
-late first Tab of the same match.
+A hinted session whose next Tab names a different map splits and seals
+the hint. With no board of its own, that first Tab is enough. A session
+that already has a board waits out the 120-second gap, so a mid-match map
+misread stays. A late Tab of the same map does not split. A single
+unconfirmed word on the same map can still replace the hint; that read
+is not an end screen for a different map. While a hero select has armed
+a boundary, an end screen that names a different map splits and seals
+the old hint, and the new session takes the end-screen result.
 
 ### Install
 
