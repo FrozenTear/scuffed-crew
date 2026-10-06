@@ -16,13 +16,20 @@ pub fn truncate_chars(s: &str, max_chars: usize) -> &str {
 
 /// Trimmed `url` when it is safe to place in an `href`.
 ///
-/// Only `http://` and `https://` (any ASCII case) are allowed. Anything else —
-/// `javascript:`, `data:`, protocol-relative, relative, or a value with
-/// whitespace, control characters, or a backslash — is `None`. Callers should
-/// render `None` as plain text or omit it.
+/// Only `http://` and `https://` (any ASCII case) are allowed. `javascript:`,
+/// `data:`, `vbscript:`, mixed-case or whitespace-prefixed variants, leading
+/// C0 controls, protocol-relative URLs, and relative paths are `None`.
+/// Whitespace, a control character, or a backslash anywhere is `None`.
+/// Callers should render `None` as plain text or omit the link.
 pub fn http_href(url: &str) -> Option<&str> {
     let url = url.trim();
     if url.is_empty() {
+        return None;
+    }
+    // Leading C0 (U+0000..=U+001F) is not all whitespace, so `trim` leaves
+    // NUL and similar in place. Browsers drop those bytes before the scheme.
+    // Reject the value; do not strip it and link the remainder.
+    if url.starts_with(is_c0_control) {
         return None;
     }
     let http = starts_with_ignore_ascii_case(url, "http://");
@@ -39,10 +46,107 @@ pub fn http_href(url: &str) -> Option<&str> {
     Some(url)
 }
 
+/// U+0000..=U+001F. URL parsers remove these before scheme parsing.
+fn is_c0_control(c: char) -> bool {
+    matches!(c, '\u{0000}'..='\u{001F}')
+}
+
 fn starts_with_ignore_ascii_case(value: &str, prefix: &str) -> bool {
     let bytes = value.as_bytes();
     let prefix = prefix.as_bytes();
     bytes.len() >= prefix.len() && bytes[..prefix.len()].eq_ignore_ascii_case(prefix)
+}
+
+/// A slice of user-authored text, with real `http://` / `https://` URLs split out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TextLink<'a> {
+    Text(&'a str),
+    Href(&'a str),
+}
+
+/// Split `content` into plain text and linkable URLs.
+///
+/// Only a token that is itself an `http://` or `https://` URL (any ASCII case)
+/// becomes [`TextLink::Href`]. A substring that merely contains `http`,
+/// including `http:javascript:alert(1)`, stays text. The scheme must sit at
+/// the start of the string or after a non-alphanumeric character.
+pub fn linkify_http_spans(content: &str) -> Vec<TextLink<'_>> {
+    let mut parts = Vec::new();
+    let mut text_start = 0;
+    let mut i = 0;
+    while i < content.len() {
+        if http_url_at(content, i) {
+            if text_start < i {
+                parts.push(TextLink::Text(&content[text_start..i]));
+            }
+            let rest = &content[i..];
+            let end_rel = rest.find(char::is_whitespace).unwrap_or(rest.len());
+            let token = &content[i..i + end_rel];
+            let (url, trailing) = split_trailing_url_punctuation(token);
+            match http_href(url) {
+                Some(href) => parts.push(TextLink::Href(href)),
+                None => parts.push(TextLink::Text(url)),
+            }
+            if !trailing.is_empty() {
+                parts.push(TextLink::Text(trailing));
+            }
+            i += end_rel;
+            text_start = i;
+            continue;
+        }
+        let Some(ch) = content[i..].chars().next() else {
+            break;
+        };
+        i += ch.len_utf8();
+    }
+    if text_start < content.len() {
+        parts.push(TextLink::Text(&content[text_start..]));
+    }
+    parts
+}
+
+/// Sentence punctuation stuck to a URL stays text (`https://example.com).`).
+fn split_trailing_url_punctuation(token: &str) -> (&str, &str) {
+    let trimmed = token.trim_end_matches(|c: char| {
+        matches!(
+            c,
+            '.' | ',' | ';' | ':' | '!' | '?' | ')' | ']' | '}' | '>' | '\'' | '"'
+        )
+    });
+    (trimmed, &token[trimmed.len()..])
+}
+
+fn http_url_at(content: &str, index: usize) -> bool {
+    if index > 0
+        && let Some(prev) = content[..index].chars().next_back()
+        && prev.is_ascii_alphanumeric()
+    {
+        return false;
+    }
+    let rest = &content[index..];
+    starts_with_ignore_ascii_case(rest, "https://")
+        || starts_with_ignore_ascii_case(rest, "http://")
+}
+
+/// How to render a URL that was stored earlier and is not re-checked server-side.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StoredUrl<'a> {
+    /// Safe to place in an `href`.
+    Link(&'a str),
+    /// Non-empty, but not `http://` or `https://`. Render as text, not a link.
+    Plain(&'a str),
+}
+
+/// `None` when `url` is empty. Otherwise a link only if [`http_href`] accepts it.
+pub fn stored_http_url(url: &str) -> Option<StoredUrl<'_>> {
+    let trimmed = url.trim();
+    if trimmed.is_empty() {
+        None
+    } else if let Some(href) = http_href(trimmed) {
+        Some(StoredUrl::Link(href))
+    } else {
+        Some(StoredUrl::Plain(trimmed))
+    }
 }
 
 /// How a `use_resource` slot that stores `Result` should be shown.
@@ -162,6 +266,135 @@ mod tests {
         assert_eq!(http_href("https://exa mple.com"), None);
         assert_eq!(http_href("https://example.com/a\nb"), None);
         assert_eq!(http_href("https://example.com\\@evil.com"), None);
+    }
+
+    #[test]
+    fn http_href_rejects_script_schemes_with_case_whitespace_and_controls() {
+        assert_eq!(
+            http_href("http://example.com/notes"),
+            Some("http://example.com/notes")
+        );
+        assert_eq!(
+            http_href("https://example.com/notes"),
+            Some("https://example.com/notes")
+        );
+        assert_eq!(
+            http_href("HTTPS://example.com/notes"),
+            Some("HTTPS://example.com/notes")
+        );
+
+        assert_eq!(http_href("javascript:alert(1)"), None);
+        assert_eq!(http_href(" JaVaScRiPt:alert(1)"), None);
+        assert_eq!(http_href("\tJaVaScRiPt:alert(1)"), None);
+        assert_eq!(http_href("\njavascript:alert(1)"), None);
+        assert_eq!(http_href("\r\njavascript:alert(1)"), None);
+        assert_eq!(http_href(" \u{0000}JaVaScRiPt:alert(1)"), None);
+        assert_eq!(http_href("\u{0001}javascript:alert(1)"), None);
+        assert_eq!(http_href("\u{0001}https://example.com"), None);
+        assert_eq!(http_href("java\nscript:alert(1)"), None);
+        assert_eq!(http_href("java\tscript:alert(1)"), None);
+
+        assert_eq!(http_href("data:text/html,hi"), None);
+        assert_eq!(http_href(" DaTa:text/html,hi"), None);
+        assert_eq!(http_href("\u{000B}dAtA:text/html,<script>"), None);
+        assert_eq!(http_href("\u{0001}data:text/html,hi"), None);
+
+        assert_eq!(http_href("vbscript:msgbox(1)"), None);
+        assert_eq!(http_href(" VbScRiPt:msgbox(1)"), None);
+        assert_eq!(http_href("\u{0001}vbscript:msgbox(1)"), None);
+
+        assert_eq!(http_href(""), None);
+        assert_eq!(http_href("   "), None);
+        assert_eq!(http_href("\u{0000}"), None);
+        assert_eq!(http_href("\u{0001}"), None);
+    }
+
+    #[test]
+    fn linkify_http_spans_only_links_real_http_urls() {
+        assert_eq!(
+            linkify_http_spans("http:javascript:alert(1)"),
+            vec![TextLink::Text("http:javascript:alert(1)")]
+        );
+        assert_eq!(
+            linkify_http_spans("javascript:alert(1)"),
+            vec![TextLink::Text("javascript:alert(1)")]
+        );
+        assert_eq!(
+            linkify_http_spans("prefixhttps://example.com"),
+            vec![TextLink::Text("prefixhttps://example.com")]
+        );
+        assert_eq!(
+            linkify_http_spans("see https://example.com/notes now"),
+            vec![
+                TextLink::Text("see "),
+                TextLink::Href("https://example.com/notes"),
+                TextLink::Text(" now"),
+            ]
+        );
+        assert_eq!(
+            linkify_http_spans("HTTP://example.com/x"),
+            vec![TextLink::Href("HTTP://example.com/x")]
+        );
+        assert_eq!(
+            linkify_http_spans("(https://example.com)"),
+            vec![
+                TextLink::Text("("),
+                TextLink::Href("https://example.com"),
+                TextLink::Text(")"),
+            ]
+        );
+        assert_eq!(
+            linkify_http_spans("https://example.com\\@evil.com"),
+            vec![TextLink::Text("https://example.com\\@evil.com")]
+        );
+        assert!(linkify_http_spans("").is_empty());
+        let linked = linkify_http_spans("a https://ok.example b http://also.example");
+        assert!(linked.contains(&TextLink::Href("https://ok.example")));
+        assert!(linked.contains(&TextLink::Href("http://also.example")));
+        assert!(
+            !linked
+                .iter()
+                .any(|part| matches!(part, TextLink::Href(href) if !href.contains("://")))
+        );
+    }
+
+    #[test]
+    fn stored_http_url_links_only_http_and_https() {
+        assert_eq!(stored_http_url("   "), None);
+        assert_eq!(stored_http_url(""), None);
+        assert_eq!(
+            stored_http_url("  https://vod.example/a  "),
+            Some(StoredUrl::Link("https://vod.example/a"))
+        );
+        assert_eq!(
+            stored_http_url("javascript:alert(1)"),
+            Some(StoredUrl::Plain("javascript:alert(1)"))
+        );
+        assert_eq!(
+            stored_http_url("http:javascript:alert(1)"),
+            Some(StoredUrl::Plain("http:javascript:alert(1)"))
+        );
+        assert_eq!(
+            stored_http_url("data:text/html,hi"),
+            Some(StoredUrl::Plain("data:text/html,hi"))
+        );
+    }
+
+    #[test]
+    fn match_detail_and_posts_use_the_stored_url_helpers() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let match_detail = std::fs::read_to_string(root.join("pages/match_detail.rs")).unwrap();
+        assert!(match_detail.contains("stored_http_url"));
+        assert!(
+            !match_detail.contains("href: \"{url}\""),
+            "vod_url must not be copied straight into an href"
+        );
+        let card = std::fs::read_to_string(root.join("components/post/card.rs")).unwrap();
+        assert!(card.contains("linkify_http_spans"));
+        assert!(
+            !card.contains("match_indices(\"http\")"),
+            "substring matching on http links javascript payloads"
+        );
     }
 
     #[test]

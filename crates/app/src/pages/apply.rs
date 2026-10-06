@@ -6,8 +6,30 @@ use crate::components::{Toast, list_cap_notice, use_toast};
 use crate::hooks::{use_api, use_api_list};
 use crate::routes::Route;
 use crate::state::auth::use_auth;
+use crate::state::{loaded_site_settings, use_site_settings};
+use crate::util::{FetchClass, classify_fetch};
 use scuffed_api_client::ApiClient;
-use scuffed_types::{Game, SiteSettings};
+use scuffed_types::Game;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ApplyScreen {
+    Loading,
+    Error,
+    Ready,
+}
+
+/// Auth still booting, or settings still in flight, stays on the loading line.
+/// A failed settings load is its own screen so `/apply` cannot sit on
+/// "Loading..." after the request has already failed.
+fn apply_screen(auth_loading: bool, phase: FetchClass) -> ApplyScreen {
+    if auth_loading || phase == FetchClass::Loading {
+        ApplyScreen::Loading
+    } else if phase == FetchClass::Error {
+        ApplyScreen::Error
+    } else {
+        ApplyScreen::Ready
+    }
+}
 
 // Local minimal type for checking existing application status.
 #[derive(Debug, Clone, Deserialize)]
@@ -47,7 +69,13 @@ pub fn Apply() -> Element {
     let auth = use_auth();
     let mut toast = use_toast();
 
-    let settings = use_api::<SiteSettings>("/api/settings");
+    let mut settings = use_site_settings();
+    let (settings_phase, s) = {
+        let slot = settings.resource.read();
+        let phase = classify_fetch(slot.as_ref());
+        let loaded = loaded_site_settings(slot.as_ref()).cloned();
+        (phase, loaded)
+    };
     let games = use_api_list::<Game>("/api/games");
     let mut my_app = use_api::<Option<Application>>("/api/applications/mine");
 
@@ -56,27 +84,24 @@ pub fn Apply() -> Element {
     let mut submitting = use_signal(|| false);
 
     let loading = auth().loading;
-    let s = settings
-        .data
-        .read()
-        .as_ref()
-        .and_then(|s| s.as_ref())
-        .cloned();
-    let org_name = s
-        .as_ref()
-        .map(|x| x.org_name.clone())
-        .unwrap_or_else(|| "The Scuffed Crew".into());
+    let screen = apply_screen(loading, settings_phase);
+    let org_name = s.as_ref().map(|x| x.org_name.clone());
 
     rsx! {
         style { {APPLY_CSS} }
         div { class: "apply-page",
-            h1 { class: "apply-title", "Join {org_name}" }
+            h1 { class: "apply-title",
+                if let Some(name) = org_name {
+                    "Join {name}"
+                } else {
+                    "Join"
+                }
+            }
 
-            if loading || s.is_none() {
+            if screen == ApplyScreen::Loading {
                 p { class: "apply-loading", "Loading..." }
-            } else {
+            } else if let Some(s) = s.clone() {
                 {
-                    let s = s.unwrap();
                     let org_name = s.org_name.clone();
 
                     if !s.recruitment_open {
@@ -285,7 +310,34 @@ pub fn Apply() -> Element {
                         }
                     }
                 }
+            } else {
+                div { class: "fetch-error-wrap", role: "alert",
+                    p { class: "fetch-error", "Couldn't load site settings." }
+                    button {
+                        r#type: "button",
+                        class: "fetch-error__retry",
+                        onclick: move |_| settings.refresh += 1,
+                        "Retry"
+                    }
+                }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn settings_failure_is_not_an_endless_loading_state() {
+        assert_eq!(apply_screen(false, FetchClass::Error), ApplyScreen::Error);
+        assert_eq!(
+            apply_screen(false, FetchClass::Loading),
+            ApplyScreen::Loading
+        );
+        assert_eq!(apply_screen(true, FetchClass::Ready), ApplyScreen::Loading);
+        assert_eq!(apply_screen(false, FetchClass::Ready), ApplyScreen::Ready);
+        assert_ne!(apply_screen(false, FetchClass::Error), ApplyScreen::Loading);
     }
 }
