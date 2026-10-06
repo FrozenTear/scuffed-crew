@@ -260,61 +260,8 @@ pub fn role_for_hero_name(name: &str) -> Option<crate::strategy::HeroRole> {
 }
 
 fn catalog_hero(key: &str) -> Option<crate::stats::Hero> {
-    use crate::stats::Hero;
-    const ALL: &[Hero] = &[
-        Hero::DVa,
-        Hero::Domina,
-        Hero::Doomfist,
-        Hero::Hazard,
-        Hero::JunkerQueen,
-        Hero::Mauga,
-        Hero::Orisa,
-        Hero::Ramattra,
-        Hero::Reinhardt,
-        Hero::Roadhog,
-        Hero::Sigma,
-        Hero::Winston,
-        Hero::WreckingBall,
-        Hero::Zarya,
-        Hero::Anran,
-        Hero::Ashe,
-        Hero::Bastion,
-        Hero::Cassidy,
-        Hero::Echo,
-        Hero::Emre,
-        Hero::Freja,
-        Hero::Genji,
-        Hero::Hanzo,
-        Hero::Junkrat,
-        Hero::Mei,
-        Hero::Pharah,
-        Hero::Reaper,
-        Hero::Sierra,
-        Hero::Sojourn,
-        Hero::Soldier76,
-        Hero::Symmetra,
-        Hero::Torbjorn,
-        Hero::Tracer,
-        Hero::Vendetta,
-        Hero::Venture,
-        Hero::Widowmaker,
-        Hero::Ana,
-        Hero::Baptiste,
-        Hero::Brigitte,
-        Hero::Doctrine,
-        Hero::Illari,
-        Hero::Juno,
-        Hero::Kiriko,
-        Hero::Lifeweaver,
-        Hero::Lucio,
-        Hero::Mercy,
-        Hero::Mizuki,
-        Hero::Moira,
-        Hero::Sombra,
-        Hero::Wuyang,
-        Hero::Zenyatta,
-    ];
-    ALL.iter()
+    crate::stats::Hero::ALL
+        .iter()
         .copied()
         .find(|hero| fold_hero_key(hero.display_name()) == key)
 }
