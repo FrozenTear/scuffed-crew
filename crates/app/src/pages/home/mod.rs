@@ -13,8 +13,8 @@ use crate::hooks::CursorPage;
 use crate::state::{loaded_site_settings, use_site_settings};
 use crate::util::{FetchClass, classify_fetch};
 use blocks::{
-    EthosBlock, HeroBlock, LiveBlock, NewsBlock, RecruitBlock, TeamsBlock, live_panel_flags,
-    teams_will_render,
+    EthosBlock, HeroBlock, ListPhase, LiveBlock, NewsBlock, RecruitBlock, TeamsBlock,
+    live_panel_flags, teams_will_render,
 };
 use css::home_css_layers;
 use data::{Announcement, Event, HomeTournament, Overview};
@@ -33,6 +33,36 @@ fn home_body(phase: FetchClass) -> HomeBody {
         FetchClass::Loading => HomeBody::Skeleton,
         FetchClass::Error => HomeBody::Error,
         FetchClass::Ready => HomeBody::Ready,
+    }
+}
+
+/// `None` is still in flight. `Some(None)` is a failed `.ok()`. `Some(Some)` settled.
+fn resource_list_phase<T>(slot: Option<&Option<T>>) -> ListPhase {
+    match slot {
+        None => ListPhase::Pending,
+        Some(None) => ListPhase::Failed,
+        Some(Some(_)) => ListPhase::Ready,
+    }
+}
+
+/// Pending and error share one wrapper so the error branch can be mounted in tests.
+/// Default shell and skin match a fresh install. The 128px rail note lives in `css.rs`.
+fn pending_home(body: HomeBody, refresh: Signal<u32>) -> Element {
+    let shell_attr = HomeShell::default().as_str();
+    let skin_attr = HomeSkin::default().as_str();
+    let css = home_css_layers();
+    rsx! {
+        style { "{css}" }
+        div {
+            class: "home-wrap",
+            "data-home-shell": "{shell_attr}",
+            "data-home-skin": "{skin_attr}",
+            if body == HomeBody::Error {
+                HeroSettingsError { refresh }
+            } else {
+                HeroSkeleton {}
+            }
+        }
     }
 }
 
@@ -67,39 +97,18 @@ pub fn Home() -> Element {
             .map(|r| r.data)
     });
 
-    let (settings_fetch, loaded) = {
-        let slot = site_settings.resource.read();
-        (
-            classify_fetch(slot.as_ref()),
-            loaded_site_settings(slot.as_ref()).cloned(),
-        )
-    };
+    let resolved = site_settings.resolved();
+    let settings_fetch = classify_fetch(resolved.as_ref());
+    let loaded = loaded_site_settings(resolved.as_ref());
 
-    // Default homepage copy ("Your Clan", "Gaming clan", …) is a template for
-    // new installs. Painting it before settings arrive flashes that template,
-    // then swaps in the real org. Pending stays a textless skeleton. A failed
-    // load stays an error, not the template.
+    // Default homepage copy is a template for new installs. Painting it before
+    // settings arrive flashes that template, then swaps in the real org.
+    // Pending stays a textless skeleton. A failed load stays an error.
     let body = home_body(settings_fetch);
     let Some(settings) = loaded.filter(|_| body == HomeBody::Ready) else {
-        // Defaults match a fresh install (`ops_hub` is 80rem). Omitting them
-        // leaves the 72rem base, so the rail grows 128px at 1280px when the
-        // real shell arrives.
-        let shell_attr = HomeShell::default().as_str();
-        let skin_attr = HomeSkin::default().as_str();
-        let css = home_css_layers();
-        return rsx! {
-            style { "{css}" }
-            div {
-                class: "home-wrap",
-                "data-home-shell": "{shell_attr}",
-                "data-home-skin": "{skin_attr}",
-                if body == HomeBody::Error {
-                    HeroSettingsError { refresh: site_settings.refresh }
-                } else {
-                    HeroSkeleton {}
-                }
-            }
-        };
+        // A parsed `#sc-settings` block is Ready above and uses that org's
+        // shell and skin. Width numbers for this default wrapper are in css.rs.
+        return pending_home(body, site_settings.refresh);
     };
 
     let content = settings.homepage.clone();
@@ -109,12 +118,16 @@ pub fn Home() -> Element {
     let recruitment_open = settings.recruitment_open;
 
     // Resolve list data for blocks (Home owns resources).
+    // Pending is an empty vec for visibility, but the phase stays Pending so
+    // shells that show empty sections paint "Loading…" instead of empty copy.
+    let events_phase = resource_list_phase(events.read().as_ref());
     let event_list = events
         .read()
         .as_ref()
         .and_then(|e| e.as_ref())
         .cloned()
         .unwrap_or_default();
+    let tourneys_phase = resource_list_phase(tournaments_res.read().as_ref());
     let tourney_list = tournaments_res
         .read()
         .as_ref()
@@ -127,12 +140,14 @@ pub fn Home() -> Element {
         .take(5)
         .cloned()
         .collect();
+    let news_phase = resource_list_phase(announcements.read().as_ref());
     let news_list = announcements
         .read()
         .as_ref()
         .and_then(|a| a.as_ref())
         .cloned()
         .unwrap_or_default();
+    let upcoming_phase = resource_list_phase(overview.read().as_ref());
     let overview_data = overview.read().as_ref().and_then(|o| o.as_ref()).cloned();
 
     let upcoming_matches = overview_data
@@ -238,8 +253,11 @@ pub fn Home() -> Element {
                                     LiveBlock {
                                         content: content.clone(),
                                         events: event_list.clone(),
+                                        events_phase,
                                         live_tournaments: live_tournaments.clone(),
+                                        tourneys_phase,
                                         upcoming_matches: upcoming_matches.clone(),
+                                        upcoming_phase,
                                         recent_results: recent_results.clone(),
                                         show_schedule,
                                         show_tourneys,
@@ -252,6 +270,7 @@ pub fn Home() -> Element {
                                 TeamsBlock {
                                     content: content.clone(),
                                     overview: overview_data.clone(),
+                                    phase: upcoming_phase,
                                     presentation: teams_presentation,
                                 }
                             },
@@ -259,6 +278,7 @@ pub fn Home() -> Element {
                                 NewsBlock {
                                     content: content.clone(),
                                     announcements: news_list.clone(),
+                                    phase: news_phase,
                                 }
                             },
                             HomeSectionId::Recruit if content.sections.recruit && recruitment_open => rsx! {
@@ -279,16 +299,14 @@ pub fn Home() -> Element {
 
 /// Textless hero. Bars use the loaded hero's type scale.
 ///
-/// The parent `.home-wrap` must set `data-home-shell` and `data-home-skin`.
-/// The pending wrapper uses the defaults (`ops_hub`, `clean`). `ops_hub` sets
-/// `--home-max` to 80rem; without it the base stays 72rem, so at 1280px the
-/// rail grows 128px and the text shifts 64px when settings arrive.
+/// The parent `.home-wrap` must set `data-home-shell` and `data-home-skin`
+/// (see `pending_home`). Column width is documented next to `.home-skel` in css.rs.
+/// `aria-busy` is omitted: it suppresses the `role="status"` announcement.
 #[component]
 fn HeroSkeleton() -> Element {
     rsx! {
         header {
             class: "home-hero",
-            aria_busy: "true",
             span { class: "home-skel-status", role: "status", "Loading…" }
             div { class: "home-hero-rail",
                 div { class: "home-hero-inner",
@@ -334,14 +352,14 @@ mod tests {
     }
 
     fn assert_no_template_copy(html: &str) {
+        let template = scuffed_types::HomepageContent::default();
         for needle in [
-            "My Clan",
-            "Your",
-            "Clan",
-            "Gaming clan",
-            "Edit this copy",
-            "Apply to join",
-            "How we play",
+            template.hero_badge.as_str(),
+            template.hero_title.as_str(),
+            template.hero_title_accent.as_str(),
+            template.hero_sub.as_str(),
+            template.ethos_title.as_str(),
+            template.cta_primary.as_str(),
         ] {
             assert!(!html.contains(needle), "{needle} in {html}");
         }
@@ -351,8 +369,12 @@ mod tests {
     fn pending_hero_is_a_textless_skeleton() {
         let html = render(HeroSkeleton);
         assert!(html.contains("home-hero"), "{html}");
+        assert!(
+            html.contains("class=\"home-skel home-skel-badge\""),
+            "{html}"
+        );
         assert!(html.contains("home-skel-title"), "{html}");
-        assert!(html.contains("aria-busy"), "{html}");
+        assert!(!html.contains("aria-busy"), "{html}");
         assert!(html.contains("role=\"status\""), "{html}");
         assert!(html.contains("Loading…"), "{html}");
         assert!(!html.contains("aria-label"), "{html}");
@@ -379,18 +401,45 @@ mod tests {
             ),
             "{html}"
         );
-        assert!(html.contains("home-skel"), "{html}");
+        assert!(
+            html.contains("class=\"home-skel home-skel-badge\""),
+            "{html}"
+        );
         assert!(html.contains("Loading…"), "{html}");
-        for needle in [
-            "YOUR CLAN",
-            "Your",
-            "Clan",
-            "How we play",
-            "Edit this copy in Settings",
-            "Edit this copy",
-        ] {
-            assert!(!html.contains(needle), "{needle} in {html}");
+        assert!(!html.contains("aria-busy"), "{html}");
+        assert_no_template_copy(&html);
+    }
+
+    #[test]
+    fn error_home_mounts_the_error_branch_not_the_template() {
+        fn view() -> Element {
+            let refresh = use_signal(|| 0u32);
+            pending_home(HomeBody::Error, refresh)
         }
+        let html = render(view);
+        assert!(
+            html.contains(
+                "class=\"home-wrap\" data-home-shell=\"ops_hub\" data-home-skin=\"clean\""
+            ),
+            "{html}"
+        );
+        assert!(
+            html.contains("load this page") && html.contains("try again"),
+            "{html}"
+        );
+        assert!(html.contains("Retry"), "{html}");
+        assert!(
+            !html.contains("class=\"home-skel home-skel-badge\""),
+            "{html}"
+        );
+        assert_no_template_copy(&html);
+    }
+
+    #[test]
+    fn list_phase_distinguishes_pending_failure_and_ready() {
+        assert_eq!(resource_list_phase(None::<&Option<()>>), ListPhase::Pending);
+        assert_eq!(resource_list_phase(Some(&None::<()>)), ListPhase::Failed);
+        assert_eq!(resource_list_phase(Some(&Some(()))), ListPhase::Ready);
     }
 
     #[test]

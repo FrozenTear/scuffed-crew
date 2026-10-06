@@ -4,11 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
-    # `main`, plus this follow-up branch so the stacked no-default-flash PR
-    # (its base is this branch, not main) runs the same checks.
-    branches:
-      - main
-      - cursor/site-146-followup-nits-9602
+    branches: [main]
 
 env:
   CARGO_TERM_COLOR: always

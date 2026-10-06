@@ -225,10 +225,8 @@ pub fn Community() -> Element {
     });
 
     let site_settings = use_site_settings();
-    let org_name = {
-        let slot = site_settings.resource.read();
-        loaded_site_settings(slot.as_ref()).map(|s| s.org_name.clone())
-    };
+    let resolved = site_settings.resolved();
+    let org_name = loaded_site_settings(resolved.as_ref()).map(|s| s.org_name.clone());
 
     let me = use_resource(|| async {
         ApiClient::web()

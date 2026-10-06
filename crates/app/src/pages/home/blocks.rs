@@ -11,6 +11,19 @@ use super::data::{
 };
 use crate::routes::Route;
 
+/// Whether a homepage list has finished. Empty copy is only for [`ListPhase::Ready`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ListPhase {
+    Pending,
+    Failed,
+    Ready,
+}
+
+/// True only when the fetch settled on an empty list. Pending and failed stay quiet.
+pub fn shows_empty_copy(phase: ListPhase, is_empty: bool) -> bool {
+    phase == ListPhase::Ready && is_empty
+}
+
 // ---------------------------------------------------------------------------
 // Hero
 // ---------------------------------------------------------------------------
@@ -118,8 +131,11 @@ pub fn EthosBlock(content: HomepageContent) -> Element {
 pub fn LiveBlock(
     content: HomepageContent,
     events: Vec<Event>,
+    events_phase: ListPhase,
     live_tournaments: Vec<HomeTournament>,
+    tourneys_phase: ListPhase,
     upcoming_matches: Vec<UpcomingMatch>,
+    upcoming_phase: ListPhase,
     recent_results: Vec<RecentResult>,
     show_schedule: bool,
     show_tourneys: bool,
@@ -150,13 +166,15 @@ pub fn LiveBlock(
             }
             div { class: "{grid_class}",
                 if show_next_match {
-                    NextMatchPanel { upcoming: next }
+                    NextMatchPanel { upcoming: next, phase: upcoming_phase }
                 }
                 if show_schedule {
                     div { class: "live-panel",
                         div { class: "home-kicker", "{content.schedule_kicker}" }
                         h2 { class: "home-heading", "{content.schedule_title}" }
-                        if has_events {
+                        if shows_empty_copy(events_phase, !has_events) {
+                            p { class: "muted", "{content.schedule_empty}" }
+                        } else if events_phase == ListPhase::Ready && has_events {
                             ul { class: "live-list",
                                 for e in events.iter() {
                                     {
@@ -172,7 +190,7 @@ pub fn LiveBlock(
                             }
                             a { href: "/api/calendar/all.ics", class: "home-link", "{content.calendar_cta}" }
                         } else {
-                            p { class: "muted", "{content.schedule_empty}" }
+                            p { class: "muted", "Loading…" }
                         }
                     }
                 }
@@ -180,7 +198,9 @@ pub fn LiveBlock(
                     div { class: "live-panel compete",
                         div { class: "home-kicker compete", "{content.tournaments_kicker}" }
                         h2 { class: "home-heading", "{content.tournaments_title}" }
-                        if has_tourneys {
+                        if shows_empty_copy(tourneys_phase, !has_tourneys) {
+                            p { class: "muted", "{content.tournaments_empty}" }
+                        } else if tourneys_phase == ListPhase::Ready && has_tourneys {
                             ul { class: "live-list",
                                 for t in live_tournaments.iter() {
                                     {
@@ -203,7 +223,7 @@ pub fn LiveBlock(
                                 "{content.tournaments_view_all}"
                             }
                         } else {
-                            p { class: "muted", "{content.tournaments_empty}" }
+                            p { class: "muted", "Loading…" }
                         }
                     }
                 }
@@ -213,7 +233,7 @@ pub fn LiveBlock(
 }
 
 #[component]
-fn NextMatchPanel(upcoming: Option<UpcomingMatch>) -> Element {
+fn NextMatchPanel(upcoming: Option<UpcomingMatch>, phase: ListPhase) -> Element {
     rsx! {
         div { class: "live-panel next-match",
             div { class: "home-kicker", "Next match" }
@@ -239,8 +259,10 @@ fn NextMatchPanel(upcoming: Option<UpcomingMatch>) -> Element {
                         }
                     }
                 }
-            } else {
+            } else if shows_empty_copy(phase, true) {
                 p { class: "muted", "No public fixtures scheduled." }
+            } else {
+                p { class: "muted", "Loading…" }
             }
         }
     }
@@ -282,6 +304,7 @@ fn ResultsTicker(results: Vec<RecentResult>) -> Element {
 pub fn TeamsBlock(
     content: HomepageContent,
     overview: Option<Overview>,
+    phase: ListPhase,
     presentation: TeamsPresentation,
 ) -> Element {
     rsx! {
@@ -327,8 +350,10 @@ pub fn TeamsBlock(
                             },
                         }
                     }
-                    Some(_) => rsx! { p { class: "muted", "{content.teams_empty}" } },
-                    None => rsx! { p { class: "muted", "Loading squads…" } },
+                    Some(_) if shows_empty_copy(phase, true) => {
+                        rsx! { p { class: "muted", "{content.teams_empty}" } }
+                    }
+                    _ => rsx! { p { class: "muted", "Loading…" } },
                 }
             }
         }
@@ -440,13 +465,19 @@ fn render_team_chip(team: &OverviewTeam, game_map: &HashMap<String, String>) -> 
 // ---------------------------------------------------------------------------
 
 #[component]
-pub fn NewsBlock(content: HomepageContent, announcements: Vec<Announcement>) -> Element {
+pub fn NewsBlock(
+    content: HomepageContent,
+    announcements: Vec<Announcement>,
+    phase: ListPhase,
+) -> Element {
     rsx! {
         section { class: "home-block",
             div { class: "home-kicker", "{content.news_kicker}" }
             h2 { class: "home-heading", "{content.news_title}" }
-            if announcements.is_empty() {
+            if shows_empty_copy(phase, announcements.is_empty()) {
                 p { class: "muted", "{content.news_empty}" }
+            } else if phase != ListPhase::Ready {
+                p { class: "muted", "Loading…" }
             } else {
                 div { class: "news-rows",
                     for a in announcements.iter().take(4) {
@@ -551,5 +582,81 @@ pub fn _section_id_for_debug(id: HomeSectionId) -> &'static str {
         HomeSectionId::Teams => "teams",
         HomeSectionId::News => "news",
         HomeSectionId::Recruit => "recruit",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn render(root: fn() -> Element) -> String {
+        let mut dom = VirtualDom::new(root);
+        dom.rebuild_in_place();
+        dioxus_ssr::render(&dom)
+    }
+
+    fn empty_overview() -> Overview {
+        Overview {
+            teams: vec![],
+            games: vec![],
+            member_count: 0,
+            upcoming_matches: vec![],
+            recent_results: vec![],
+        }
+    }
+
+    #[test]
+    fn empty_copy_only_after_a_ready_empty_list() {
+        assert!(!shows_empty_copy(ListPhase::Pending, true));
+        assert!(!shows_empty_copy(ListPhase::Failed, true));
+        assert!(!shows_empty_copy(ListPhase::Ready, false));
+        assert!(shows_empty_copy(ListPhase::Ready, true));
+    }
+
+    #[test]
+    fn teams_pending_is_loading_and_ready_empty_uses_the_empty_string() {
+        fn pending() -> Element {
+            rsx! {
+                TeamsBlock {
+                    content: HomepageContent::default(),
+                    overview: None,
+                    phase: ListPhase::Pending,
+                    presentation: TeamsPresentation::Table,
+                }
+            }
+        }
+        fn ready_empty() -> Element {
+            rsx! {
+                TeamsBlock {
+                    content: HomepageContent::default(),
+                    overview: Some(empty_overview()),
+                    phase: ListPhase::Ready,
+                    presentation: TeamsPresentation::Table,
+                }
+            }
+        }
+        let empty = HomepageContent::default().teams_empty;
+        let pending_html = render(pending);
+        assert!(pending_html.contains("Loading"), "{pending_html}");
+        assert!(!pending_html.contains(&empty), "{pending_html}");
+        let ready_html = render(ready_empty);
+        assert!(ready_html.contains(&empty), "{ready_html}");
+    }
+
+    #[test]
+    fn news_pending_does_not_use_the_empty_string() {
+        fn pending() -> Element {
+            rsx! {
+                NewsBlock {
+                    content: HomepageContent::default(),
+                    announcements: Vec::new(),
+                    phase: ListPhase::Pending,
+                }
+            }
+        }
+        let empty = HomepageContent::default().news_empty;
+        let html = render(pending);
+        assert!(html.contains("Loading"), "{html}");
+        assert!(!html.contains(&empty), "{html}");
     }
 }

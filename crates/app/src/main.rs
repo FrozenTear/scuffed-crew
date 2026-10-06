@@ -69,29 +69,45 @@ fn App() -> Element {
     // One settings fetch for the document head and every public consumer.
     // Title stays blank until the real org name arrives.
     let site_settings = state::provide_site_settings();
-    let loaded_settings = {
-        let slot = site_settings.resource.read();
-        state::loaded_site_settings(slot.as_ref()).cloned()
-    };
-    let page_title = state::document_title(loaded_settings.as_ref().map(|s| s.org_name.as_str()));
-    let page_description = loaded_settings
-        .as_ref()
-        .map(|s| {
-            let d = s.site_description.trim();
-            if d.is_empty() {
-                format!("{} — gaming clan", s.org_name)
+    let resolved = site_settings.resolved();
+    let loaded_settings = state::loaded_site_settings(resolved.as_ref());
+    // Leave the server-written <title>, og:title, and description alone until
+    // real settings exist. An empty title would wipe the clan name, and a
+    // synthesized "gaming clan" blurb is a template default.
+    let page_title = loaded_settings.and_then(|s| {
+        let title = state::document_title(Some(&s.org_name));
+        if title.is_empty() { None } else { Some(title) }
+    });
+    let page_description = loaded_settings.and_then(|s| {
+        let description = s.site_description.trim();
+        if description.is_empty() {
+            None
+        } else {
+            Some(description.to_string())
+        }
+    });
+    let icon_href = match loaded_settings {
+        Some(settings) if !settings.org_name.trim().is_empty() => {
+            let initials = scuffed_types::org_initials(&settings.org_name);
+            if initials == "CL" {
+                asset!("/assets/favicon.svg").to_string()
             } else {
-                d.to_string()
+                theme::brand::org_favicon_data_uri(&initials)
             }
-        })
-        .unwrap_or_else(|| "Gaming clan platform".into());
+        }
+        _ => asset!("/assets/favicon.svg").to_string(),
+    };
+    // Unknown settings use a gray accent. Product purple is a real brand and
+    // must not paint before the embedded block or `/api/settings` says so.
     let brand_theme_css = {
         use theme::brand::BrandConfig;
-        let (dark, light) = loaded_settings
-            .as_ref()
-            .map(|s| (s.brand_accent_dark.clone(), s.brand_accent_light.clone()))
-            .unwrap_or_default();
-        theme::theme_css(&BrandConfig::from_settings(&dark, &light))
+        match loaded_settings.as_ref() {
+            Some(s) => theme::theme_css(&BrandConfig::from_settings(
+                &s.brand_accent_dark,
+                &s.brand_accent_light,
+            )),
+            None => theme::theme_css(&BrandConfig::pending()),
+        }
     };
 
     #[cfg(feature = "desktop")]
@@ -102,19 +118,25 @@ fn App() -> Element {
     }
 
     rsx! {
-        // Runtime head — org name from settings once loaded
-        document::Title { "{page_title}" }
-        document::Meta {
-            name: "description",
-            content: "{page_description}",
+        // Runtime head. index.html already has one title, one og:title, and
+        // one description for the server to fill. Update them only after
+        // settings exist.
+        if let Some(title) = page_title.as_ref() {
+            document::Title { "{title}" }
+            document::Meta {
+                property: "og:title",
+                content: "{title}",
+            }
         }
-        document::Meta {
-            property: "og:title",
-            content: "{page_title}",
-        }
-        document::Meta {
-            property: "og:description",
-            content: "{page_description}",
+        if let Some(desc) = page_description.as_ref() {
+            document::Meta {
+                name: "description",
+                content: "{desc}",
+            }
+            document::Meta {
+                property: "og:description",
+                content: "{desc}",
+            }
         }
         document::Meta {
             name: "theme-color",
@@ -122,24 +144,11 @@ fn App() -> Element {
         }
         document::Link {
             rel: "icon",
-            href: asset!("/assets/favicon.svg"),
+            href: "{icon_href}",
             r#type: "image/svg+xml",
         }
         document::Stylesheet {
             href: asset!("/assets/tailwind.css")
-        }
-        document::Link {
-            rel: "preconnect",
-            href: "https://fonts.googleapis.com",
-        }
-        document::Link {
-            rel: "preconnect",
-            href: "https://fonts.gstatic.com",
-            crossorigin: "anonymous",
-        }
-        document::Link {
-            rel: "stylesheet",
-            href: "https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&family=JetBrains+Mono:wght@500&display=swap",
         }
         style { "{brand_theme_css}" }
         style { {styles::common::CSS} }

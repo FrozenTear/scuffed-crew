@@ -31,6 +31,25 @@ fn apply_screen(auth_loading: bool, phase: FetchClass) -> ApplyScreen {
     }
 }
 
+/// Logged-in application slot. Outer `None` is still in flight. The middle
+/// `None` is a failed fetch. The inner `None` is a successful "no application".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MineView {
+    Pending,
+    Failed,
+    Form,
+    Status,
+}
+
+fn mine_view<T>(data: Option<Option<Option<&T>>>, error: Option<&str>) -> MineView {
+    match data {
+        None if error.is_none() => MineView::Pending,
+        Some(Some(Some(_))) => MineView::Status,
+        Some(Some(None)) if error.is_none() => MineView::Form,
+        _ => MineView::Failed,
+    }
+}
+
 // Local minimal type for checking existing application status.
 #[derive(Debug, Clone, Deserialize)]
 struct Application {
@@ -70,12 +89,9 @@ pub fn Apply() -> Element {
     let mut toast = use_toast();
 
     let mut settings = use_site_settings();
-    let (settings_phase, s) = {
-        let slot = settings.resource.read();
-        let phase = classify_fetch(slot.as_ref());
-        let loaded = loaded_site_settings(slot.as_ref()).cloned();
-        (phase, loaded)
-    };
+    let resolved = settings.resolved();
+    let settings_phase = classify_fetch(resolved.as_ref());
+    let s = loaded_site_settings(resolved.as_ref());
     let games = use_api_list::<Game>("/api/games");
     let mut my_app = use_api::<Option<Application>>("/api/applications/mine");
 
@@ -100,7 +116,7 @@ pub fn Apply() -> Element {
 
             if screen == ApplyScreen::Loading {
                 p { class: "apply-loading", "Loading..." }
-            } else if let Some(s) = s.clone() {
+            } else if let Some(s) = s {
                 {
                     let org_name = s.org_name.clone();
 
@@ -130,13 +146,21 @@ pub fn Apply() -> Element {
                                 }
                             }
                         }
-                    } else if let Some(app) = my_app
-                        .data
-                        .read()
-                        .as_ref()
-                        .and_then(|a| a.as_ref())
-                        .and_then(|a| a.as_ref())
+                    } else if mine_view(
+                        my_app.data.read().as_ref().map(|outer| {
+                            outer.as_ref().map(|inner| inner.as_ref())
+                        }),
+                        my_app.error.read().as_deref(),
+                    ) == MineView::Status
                     {
+                        let app = my_app
+                            .data
+                            .read()
+                            .as_ref()
+                            .and_then(|a| a.as_ref())
+                            .and_then(|a| a.as_ref())
+                            .unwrap()
+                            .clone();
                         let status_tone = match app.status.as_str() {
                             "pending" => PillTone::Warn,
                             "trial" => PillTone::Accent,
@@ -212,6 +236,29 @@ pub fn Apply() -> Element {
                             }
                         }
                     } else {
+                        let mine = mine_view(
+                            my_app.data.read().as_ref().map(|outer| {
+                                outer.as_ref().map(|inner| inner.as_ref())
+                            }),
+                            my_app.error.read().as_deref(),
+                        );
+                        if mine == MineView::Pending {
+                            rsx! { p { class: "apply-loading", "Loading..." } }
+                        } else if mine == MineView::Failed {
+                            rsx! {
+                                div { class: "fetch-error-wrap", role: "alert",
+                                    p { class: "fetch-error", "Couldn't load your application." }
+                                    button {
+                                        r#type: "button",
+                                        class: "fetch-error__retry",
+                                        onclick: move |_| my_app.refresh += 1,
+                                        "Retry"
+                                    }
+                                }
+                            }
+                        } else {
+                        let games_pending = games.data.read().as_ref().is_none()
+                            && games.error.read().is_none();
                         let game_list = games
                             .data
                             .read()
@@ -227,6 +274,9 @@ pub fn Apply() -> Element {
 
                                 div { class: "apply-field",
                                     label { class: "apply-label", "Games" }
+                                    if games_pending {
+                                        p { class: "apply-loading", "Loading..." }
+                                    } else {
                                     div { class: "apply-game-grid",
                                         for g in game_list.iter() {
                                             {
@@ -253,6 +303,7 @@ pub fn Apply() -> Element {
                                                 }
                                             }
                                         }
+                                    }
                                     }
                                     {list_cap_notice(&games, "games")}
                                 }
@@ -308,6 +359,7 @@ pub fn Apply() -> Element {
                                 }
                             }
                         }
+                        }
                     }
                 }
             } else {
@@ -339,5 +391,20 @@ mod tests {
         assert_eq!(apply_screen(true, FetchClass::Ready), ApplyScreen::Loading);
         assert_eq!(apply_screen(false, FetchClass::Ready), ApplyScreen::Ready);
         assert_ne!(apply_screen(false, FetchClass::Error), ApplyScreen::Loading);
+    }
+
+    #[test]
+    fn logged_in_apply_waits_for_the_existing_application() {
+        assert_eq!(
+            mine_view(None::<Option<Option<&()>>>, None),
+            MineView::Pending
+        );
+        assert_eq!(
+            mine_view(Some(None::<Option<&()>>), Some("offline")),
+            MineView::Failed
+        );
+        assert_eq!(mine_view(Some(Some(None::<&()>)), None), MineView::Form);
+        assert_eq!(mine_view(Some(Some(Some(&()))), None), MineView::Status);
+        assert_ne!(mine_view(None::<Option<Option<&()>>>, None), MineView::Form);
     }
 }

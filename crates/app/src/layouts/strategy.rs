@@ -1,8 +1,8 @@
 use dioxus::prelude::*;
-use scuffed_api_client::ApiClient;
 use scuffed_types::SiteSettings;
 
 use crate::routes::Route;
+use crate::state::use_site_settings;
 
 const STRATEGY_CSS: &str = r#"
     .strategy-nav {
@@ -129,34 +129,37 @@ fn flag_from_loaded_settings(loaded: Option<Option<&SiteSettings>>) -> Option<bo
     loaded.map(|settings| strategies_enabled_or_default(settings))
 }
 
-fn read_strategies_flag(settings: Resource<Option<SiteSettings>>) -> Option<bool> {
-    let loaded = settings.read();
-    flag_from_loaded_settings(loaded.as_ref().map(|payload| payload.as_ref()))
+/// `None` while settings are still unknown. A seed or a successful fetch is
+/// `Ok`. A failed fetch with nothing painted fail-opens, matching
+/// [`flag_from_loaded_settings`]`(Some(None))`.
+fn flag_from_resolved(resolved: Option<&Result<SiteSettings, String>>) -> Option<bool> {
+    match resolved {
+        None => None,
+        Some(Ok(settings)) => Some(settings.strategies_enabled),
+        Some(Err(_)) => Some(true),
+    }
 }
 
 #[component]
 pub fn StrategyLayout() -> Element {
     let navigator = use_navigator();
-    let site_settings = use_resource(|| async {
-        ApiClient::web()
-            .fetch::<SiteSettings>("/api/settings")
-            .await
-            .ok()
-    });
+    let site_settings = use_site_settings();
     // Dioxus 0.7 effects re-run only when signals are read *inside* the effect.
     // `use_route()` is a hook (`use_hook`) and must stay out here; `router().current()`
-    // subscribes this effect to navigation. Reading the resource here subscribes it
-    // to GET /api/settings. A copied `surface` value does neither.
+    // subscribes this effect to navigation. `resolved()` reads the shared settings
+    // signals, including a `#sc-settings` seed, so a seeded flag is ready immediately.
     use_effect(move || {
         let path = router().current::<Route>().to_string();
-        let flag = read_strategies_flag(site_settings);
+        let resolved = site_settings.resolved();
+        let flag = flag_from_resolved(resolved.as_ref());
         if strategy_path_policy(&path, flag) == StrategyPathPolicy::RedirectPatchNotes {
             navigator.replace(Route::PatchNotes {});
         }
     });
 
     let path = router().current::<Route>().to_string();
-    let surface = strategy_path_policy(&path, read_strategies_flag(site_settings));
+    let resolved = site_settings.resolved();
+    let surface = strategy_path_policy(&path, flag_from_resolved(resolved.as_ref()));
 
     if matches!(
         surface,
@@ -265,6 +268,31 @@ mod tests {
         assert!(strategies_enabled_or_default(None));
         assert_eq!(flag_from_loaded_settings(None), None);
         assert_eq!(flag_from_loaded_settings(Some(None)), Some(true));
+        assert_eq!(flag_from_resolved(None), None);
+        assert_eq!(flag_from_resolved(Some(&Err("offline".into()))), Some(true));
+    }
+
+    #[test]
+    fn resolved_seed_uses_strategies_enabled() {
+        let off = settings_with_flag(false);
+        let on = settings_with_flag(true);
+        assert_eq!(flag_from_resolved(Some(&Ok(off))), Some(false));
+        assert_eq!(flag_from_resolved(Some(&Ok(on))), Some(true));
+        assert_eq!(
+            strategy_path_policy(
+                "/strategy/patch-notes",
+                flag_from_resolved(Some(&Ok(settings_with_flag(false))))
+            ),
+            StrategyPathPolicy::RedirectPatchNotes
+        );
+    }
+
+    fn settings_with_flag(enabled: bool) -> SiteSettings {
+        let flag = if enabled { "true" } else { "false" };
+        let raw = format!(
+            r#"{{"id":"site","org_name":"Org","site_description":"d","recruitment_open":true,"recruitment_message":"m","min_age":16,"forum_backend":"local","extra_relay_urls":"","strategies_enabled":{flag},"updated_at":"2026-10-06T00:00:00Z"}}"#
+        );
+        serde_json::from_str(&raw).expect("settings fixture")
     }
 
     #[test]
@@ -289,8 +317,12 @@ mod tests {
         let end = body.find("});").expect("effect end");
         let effect = &body[..end];
         assert!(
-            effect.contains("read_strategies_flag"),
+            effect.contains("flag_from_resolved"),
             "effect must read settings inside so it re-runs when GET /api/settings settles"
+        );
+        assert!(
+            effect.contains("resolved()"),
+            "effect must read the shared settings slot, including an embedded seed"
         );
         assert!(
             effect.contains("router().current"),

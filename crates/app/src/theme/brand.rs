@@ -34,6 +34,16 @@ impl BrandConfig {
         }
     }
 
+    /// Neutral accent while public settings are still unknown.
+    ///
+    /// The product purple is a real brand. Painting it before settings arrive
+    /// flashes the wrong accent on orgs that chose something else. This gray
+    /// stays at least 3:1 against both theme backgrounds. The boot mark in
+    /// `index.html` uses the same hex.
+    pub fn pending() -> Self {
+        Self::from_accents("#7a7a88", "#7a7a88")
+    }
+
     /// Resolve settings fields: empty → product default.
     pub fn from_settings(accent_dark: &str, accent_light: &str) -> Self {
         let d = accent_dark.trim();
@@ -47,9 +57,26 @@ impl BrandConfig {
     }
 }
 
-/// Active brand when settings are not loaded yet.
+/// Product-default purple for callers that are not the public boot path.
+///
+/// Unloaded public settings use [`BrandConfig::pending`], not this. This is
+/// the installed accent, not a placeholder.
 pub fn current() -> BrandConfig {
     BrandConfig::product_default()
+}
+
+/// SVG favicon for one org. Letters come from the org name; the fill is the
+/// pending gray so every clan does not share the same mark color and initials.
+pub fn org_favicon_data_uri(initials: &str) -> String {
+    let letters: String = initials
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .take(2)
+        .collect();
+    let svg = format!(
+        "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='6' fill='%237a7a88'/><text x='16' y='22' text-anchor='middle' font-family='system-ui,sans-serif' font-size='14' font-weight='700' fill='%23ffffff'>{letters}</text></svg>"
+    );
+    format!("data:image/svg+xml,{svg}")
 }
 
 /// Accept `#rgb` / `#rrggbb` / bare hex → lowercase `#rrggbb`.
@@ -100,6 +127,69 @@ mod tests {
     fn from_settings_empty_uses_product_default() {
         let b = BrandConfig::from_settings("", "");
         assert_eq!(b.accent_dark, "#8f73ff");
+    }
+
+    #[test]
+    fn pending_accent_is_not_the_product_purple() {
+        let pending = BrandConfig::pending();
+        let product = BrandConfig::product_default();
+        assert_ne!(pending.accent_dark, product.accent_dark);
+        assert_ne!(pending.accent_light, product.accent_light);
+        assert_ne!(pending.accent_dark, "#8f73ff");
+        assert_ne!(pending.accent_light, "#6d4aff");
+        assert_eq!(pending.accent_dark, pending.accent_light);
+    }
+
+    #[test]
+    fn pending_accent_meets_ui_contrast_on_both_themes() {
+        let pending = BrandConfig::pending();
+        let on_dark = contrast_ratio(&pending.accent_dark, crate::theme::tokens::BG_DARK);
+        let on_light = contrast_ratio(&pending.accent_light, "#f7f7f9");
+        assert!(
+            on_dark >= 3.0,
+            "{} on dark = {on_dark:.2}",
+            pending.accent_dark
+        );
+        assert!(
+            on_light >= 3.0,
+            "{} on light = {on_light:.2}",
+            pending.accent_light
+        );
+        let boot = include_str!("../../index.html");
+        assert!(
+            boot.contains(&pending.accent_dark),
+            "boot mark must use the same gray as BrandConfig::pending"
+        );
+        let white_on_pending = contrast_ratio("#ffffff", &pending.accent_dark);
+        assert!(
+            white_on_pending >= 3.0,
+            "white on {} = {white_on_pending:.2}",
+            pending.accent_dark
+        );
+    }
+
+    fn contrast_ratio(fg: &str, bg: &str) -> f64 {
+        let l1 = relative_luminance(fg);
+        let l2 = relative_luminance(bg);
+        let (hi, lo) = if l1 > l2 { (l1, l2) } else { (l2, l1) };
+        (hi + 0.05) / (lo + 0.05)
+    }
+
+    fn relative_luminance(hex: &str) -> f64 {
+        let hex = hex.trim().trim_start_matches('#');
+        let n = u32::from_str_radix(hex, 16).unwrap();
+        let lin = |c: u8| {
+            let c = f64::from(c) / 255.0;
+            if c <= 0.04045 {
+                c / 12.92
+            } else {
+                ((c + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        let r = lin(((n >> 16) & 0xff) as u8);
+        let g = lin(((n >> 8) & 0xff) as u8);
+        let b = lin((n & 0xff) as u8);
+        0.2126 * r + 0.7152 * g + 0.0722 * b
     }
 
     #[test]

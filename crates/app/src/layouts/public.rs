@@ -164,13 +164,20 @@ const NAV_CSS: &str = r#"
         color: var(--accent-fg);
         box-shadow: 0 0 12px color-mix(in srgb, var(--accent) 35%, transparent);
     }
-    .nav-icon.is-pending { color: transparent; }
+    .nav-icon.is-pending {
+        color: transparent;
+        background: var(--surface-2);
+        box-shadow: none;
+    }
     .nav-mark-text {
         font-family: var(--font-mono, var(--font-head));
         font-size: 0.72rem;
         letter-spacing: 0.12em;
         text-transform: uppercase;
         white-space: nowrap;
+        /* Holds short and medium org names so `.nav-center` does not jump
+           when the pending bar is replaced. The icon is already 26px. */
+        min-width: 9rem;
     }
     .nav-center {
         display: flex;
@@ -436,7 +443,8 @@ pub fn PublicLayout() -> Element {
     let mut account_open = use_signal(|| false);
     let auth = use_auth();
 
-    // Off wasm this listener is a no-op, so Escape does nothing on desktop builds.
+    // Off wasm, `Closure::wrap` aborts before this listener is installed.
+    // Desktop still has a window; the non-wasm stub is what skips the handler.
     use_document_keydown(move |evt| {
         if evt.key() != "Escape" {
             return;
@@ -449,10 +457,8 @@ pub fn PublicLayout() -> Element {
     });
 
     let site_settings = use_site_settings();
-    let loaded_settings = {
-        let slot = site_settings.resource.read();
-        loaded_site_settings(slot.as_ref()).cloned()
-    };
+    let resolved = site_settings.resolved();
+    let loaded_settings = loaded_site_settings(resolved.as_ref());
     let bg_css = loaded_settings
         .as_ref()
         .map(|s| page_bg_css(&s.page_bg_color, &s.page_bg_image_url))
@@ -466,7 +472,7 @@ pub fn PublicLayout() -> Element {
             n
         })
         .unwrap_or_default();
-    let strategies_enabled = strategies_enabled_or_default(loaded_settings.as_ref());
+    let strategies_enabled = strategies_enabled_or_default(loaded_settings);
     let primary_links = resolve_nav(&nav_cfg, NavPlacement::Primary, strategies_enabled);
     let more_links = resolve_nav(&nav_cfg, NavPlacement::More, strategies_enabled);
 
