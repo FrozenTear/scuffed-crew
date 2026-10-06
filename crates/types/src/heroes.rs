@@ -157,8 +157,14 @@ pub fn find_hero(lines: &[&str]) -> Option<String> {
 
 const FUZZY_HERO_THRESHOLD: f64 = 0.75;
 
+/// Tokenizer [`fuzzy_match_hero`] actually scores. Collision tests must use
+/// this, not a second splitter.
+fn fuzzy_tokens(text: &str) -> impl Iterator<Item = &str> {
+    text.split_whitespace()
+}
+
 fn fuzzy_match_hero(text: &str) -> Option<String> {
-    let words: Vec<&str> = text.split_whitespace().collect();
+    let words: Vec<&str> = fuzzy_tokens(text).collect();
 
     let mut best_hero: Option<&str> = None;
     let mut best_score: f64 = 0.0;
@@ -335,45 +341,21 @@ mod tests {
             if hero.eq_ignore_ascii_case("Doctrine") {
                 continue;
             }
-            push_tokens(&mut words, hero);
+            for token in fuzzy_tokens(hero) {
+                words.push(token.to_lowercase());
+            }
         }
-        for map in [
-            "King's Row",
-            "Circuit Royal",
-            "Dorado",
-            "Havana",
-            "Junkertown",
-            "Rialto",
-            "Route 66",
-            "Shambali Monastery",
-            "Watchpoint: Gibraltar",
-            "Blizzard World",
-            "Eichenwalde",
-            "Hollywood",
-            "Midtown",
-            "Numbani",
-            "Paraiso",
-            "Paraíso",
-            "Neon Junction",
-            "Antarctic Peninsula",
-            "Busan",
-            "Ilios",
-            "Lijiang Tower",
-            "Nepal",
-            "Oasis",
-            "Samoa",
-            "Colosseo",
-            "Esperanca",
-            "Esperança",
-            "New Queen Street",
-            "Runasapi",
-            "New Junk City",
-            "Suravasa",
-            "Aatlis",
-            "Hanaoka",
-            "Throne of Anubis",
-        ] {
-            push_tokens(&mut words, map);
+        assert!(!crate::stats::MapName::ALL.is_empty());
+        for map in crate::stats::MapName::ALL {
+            let name = map.display_name();
+            assert_ne!(
+                match_hero_in_text(name).as_deref(),
+                Some("Doctrine"),
+                "{name:?} matched Doctrine"
+            );
+            for token in fuzzy_tokens(name) {
+                words.push(token.to_lowercase());
+            }
         }
         for word in [
             "eliminations",
@@ -415,7 +397,9 @@ mod tests {
             "flashpoint",
             "clash",
         ] {
-            words.push(word.to_string());
+            for token in fuzzy_tokens(word) {
+                words.push(token.to_lowercase());
+            }
         }
 
         for word in words {
@@ -429,14 +413,6 @@ mod tests {
                 Some("Doctrine"),
                 "{word:?} matched Doctrine"
             );
-        }
-    }
-
-    fn push_tokens(out: &mut Vec<String>, text: &str) {
-        for part in text.split(|c: char| !c.is_alphanumeric()) {
-            if !part.is_empty() {
-                out.push(part.to_lowercase());
-            }
         }
     }
 }

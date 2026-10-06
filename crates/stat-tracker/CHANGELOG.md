@@ -6,14 +6,14 @@ prepends the section whose heading matches the tag version (for example
 
 ## 0.4.18
 
-Season 5 ([A Grim Doctrine](https://overwatch.blizzard.com/en-us/news/24303008/feed-your-hunger-in-reign-of-talon-season-5-a-grim-doctrine/)):
+Season 5 ([patch notes](https://overwatch.blizzard.com/en-us/news/patch-notes/)):
 new captures recognize the Support hero Doctrine, and read Sombra as
 Support. Games already stored keep the role they were captured with.
 Roadhog's rework does not change his role.
 
-The bundle includes a provisional Doctrine portrait cropped from the
-public wiki icon. An in-game crop collected with `--collect-portraits`
-is more accurate and replaces that file.
+Doctrine ships with stand-in wiki art (Blizzard Entertainment artwork,
+sourced via the Overwatch wiki). The tracker replaces that file
+automatically with a real in-game crop the first time Doctrine is seen.
 
 ### Install
 

@@ -10930,6 +10930,7 @@ dependencies = [
  "scuffed-types",
  "serde",
  "serde_json",
+ "sha2",
  "strsim",
  "surrealdb",
  "surrealdb-types",

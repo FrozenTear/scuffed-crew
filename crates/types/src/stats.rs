@@ -234,6 +234,43 @@ pub enum MapName {
 }
 
 impl MapName {
+    /// Every map variant, in enum order. Callers that used to copy display
+    /// names by hand (OCR collision checks) iterate this instead.
+    pub const ALL: &[MapName] = &[
+        Self::CircuitRoyal,
+        Self::Dorado,
+        Self::Havana,
+        Self::Junkertown,
+        Self::Rialto,
+        Self::Route66,
+        Self::ShambaliMonastery,
+        Self::WatchpointGibraltar,
+        Self::BlizzardWorld,
+        Self::Eichenwalde,
+        Self::Hollywood,
+        Self::KingsRow,
+        Self::Midtown,
+        Self::NeonJunction,
+        Self::Numbani,
+        Self::Paraiso,
+        Self::AntarcticPeninsula,
+        Self::Busan,
+        Self::Ilios,
+        Self::LijangTower,
+        Self::Nepal,
+        Self::Oasis,
+        Self::Samoa,
+        Self::Colosseo,
+        Self::Esperanca,
+        Self::NewQueenStreet,
+        Self::Runasapi,
+        Self::Aatlis,
+        Self::NewJunkCity,
+        Self::Suravasa,
+        Self::Hanaoka,
+        Self::ThroneOfAnubis,
+    ];
+
     pub fn game_mode(&self) -> GameMode {
         match self {
             Self::CircuitRoyal
@@ -436,6 +473,19 @@ impl std::fmt::Display for MatchOutcome {
 mod tests {
     use super::*;
     use std::str::FromStr;
+
+    #[test]
+    fn all_covers_every_map_and_display_names_round_trip() {
+        assert_eq!(MapName::ALL.len(), 32);
+        let mut names: Vec<&str> = MapName::ALL.iter().map(|m| m.display_name()).collect();
+        let n = names.len();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), n, "display names must be unique");
+        for map in MapName::ALL {
+            assert_eq!(map.display_name().parse::<MapName>().unwrap(), *map);
+        }
+    }
 
     /// Live Maps-tab names (accented + unaccented) plus Neon Junction.
     /// These six strings are the ones that used to land in Other.

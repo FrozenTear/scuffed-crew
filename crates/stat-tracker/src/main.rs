@@ -2409,20 +2409,26 @@ async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<
 
         // Auto-collect a portrait reference when the hero is identified and
         // collection is enabled — or, always, when the career panel (the
-        // authoritative OCR read) names a hero that has no reference on disk
-        // yet. New heroes ship faster than bundled portraits (D.Mon, WL-5):
-        // the first game on one seeds its reference here, and the matcher
-        // picks it up on the next daemon start. Only the career-panel source
-        // may seed (a portrait/held/text guess must not template itself).
+        // authoritative OCR read) names a hero whose reference is missing.
+        // A bundled stand-in (PROVISIONAL_PORTRAITS: Blizzard Entertainment
+        // artwork sourced via the Overwatch wiki, for Doctrine) counts as
+        // missing, so the first career-panel crop replaces it. A file with
+        // any other bytes is a real crop or a user file and is never
+        // overwritten. New heroes ship faster than bundled portraits
+        // (D.Mon, WL-5): the first game on one seeds its reference here, and
+        // the matcher picks it up on the next daemon start. Only the
+        // career-panel source may seed (a portrait/held/text guess must not
+        // template itself).
         let portraits_path = detect::hero_portrait::portraits_dir(data_dir);
-        let seed_missing = matches!(source, HeroSource::CareerPanel)
-            && parsed.hero != "Unknown"
-            && !detect::hero_portrait::portrait_reference_path(&portraits_path, &parsed.hero)
-                .exists();
+        let reference_path =
+            detect::hero_portrait::portrait_reference_path(&portraits_path, &parsed.hero);
+        let slot_replaceable = parsed.hero != "Unknown"
+            && detect::hero_portrait::portrait_slot_is_replaceable(&reference_path);
+        let seed_missing = matches!(source, HeroSource::CareerPanel) && slot_replaceable;
         if seed_missing {
-            tracing::info!(hero = %parsed.hero, "no portrait reference for career-panel hero — seeding one from this capture");
+            tracing::info!(hero = %parsed.hero, "no real portrait reference for career-panel hero — seeding one from this capture");
         }
-        if (collect_portraits || seed_missing) && parsed.hero != "Unknown" {
+        if (collect_portraits || seed_missing) && slot_replaceable {
             // Shared geometry (5v5/6v6 + team gap) — an inlined 5v5-only copy
             // here used to mis-crop 6v6/team-2 references into the template
             // library.
@@ -2431,7 +2437,7 @@ async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<
                 detect::hero_portrait::portrait_rect(dims, player_row_idx.unwrap_or(0), team_size)
             {
                 let crop = scoreboard_img.crop_imm(r.x, r.y, r.w, r.h);
-                if let Err(e) = detect::hero_portrait::save_portrait_reference(
+                if let Err(e) = detect::hero_portrait::save_captured_portrait(
                     &portraits_path,
                     &parsed.hero,
                     &crop,

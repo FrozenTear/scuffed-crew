@@ -523,17 +523,23 @@ fn run_with_timeout(
     }
 }
 
-fn generate_tessdata_legacy(dir: &Path) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    tracing::info!("using legacy Tesseract 3.x training pipeline as fallback");
-
-    let legacy_text = format!(
+/// Word list the legacy trainer renders. Tests assert whole tokens against
+/// this string, which is what `text2image` actually sees.
+fn legacy_training_text() -> String {
+    format!(
         "{}\n{}\n{}\n{}\n{}",
         TRAINING_DIGITS,
         TRAINING_DIGITS_COMMAS,
         TRAINING_HEROES_1,
         TRAINING_HEROES_2,
         TRAINING_MIXED,
-    );
+    )
+}
+
+fn generate_tessdata_legacy(dir: &Path) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    tracing::info!("using legacy Tesseract 3.x training pipeline as fallback");
+
+    let legacy_text = legacy_training_text();
     let training_txt = dir.join("training_text.txt");
     std::fs::write(&training_txt, &legacy_text)?;
 
@@ -647,16 +653,33 @@ fn generate_tessdata_legacy(dir: &Path) -> Result<(), Box<dyn std::error::Error 
 
 #[cfg(test)]
 mod training_heroes_tests {
-    use super::{TRAINING_HEROES_1, TRAINING_HEROES_2};
+    use super::{TRAINING_HEROES_1, TRAINING_HEROES_2, TRAINING_PAGES, legacy_training_text};
+
+    fn assert_whole_word(text: &str, word: &str) {
+        assert!(
+            text.split_whitespace().any(|token| token == word),
+            "{word} missing as a whole word in {text:?}"
+        );
+    }
 
     #[test]
-    fn training_word_list_includes_doctrine() {
-        let text = format!("{TRAINING_HEROES_1}\n{TRAINING_HEROES_2}");
-        assert!(
-            text.contains("Doctrine"),
-            "Doctrine missing from OCR training words"
-        );
-        assert!(text.contains("Sombra"));
-        assert!(text.contains("Roadhog"));
+    fn training_word_list_includes_doctrine_and_sombra() {
+        let heroes = format!("{TRAINING_HEROES_1}\n{TRAINING_HEROES_2}");
+        assert_whole_word(&heroes, "Doctrine");
+        assert_whole_word(&heroes, "Sombra");
+        assert_whole_word(TRAINING_HEROES_1, "Doctrine");
+        assert_whole_word(TRAINING_HEROES_2, "Sombra");
+
+        let generated = legacy_training_text();
+        assert_whole_word(&generated, "Doctrine");
+        assert_whole_word(&generated, "Sombra");
+
+        let pages = TRAINING_PAGES
+            .iter()
+            .map(|page| page.text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_whole_word(&pages, "Doctrine");
+        assert_whole_word(&pages, "Sombra");
     }
 }
