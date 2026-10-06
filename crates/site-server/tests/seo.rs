@@ -102,11 +102,11 @@ async fn get(app: axum::Router, uri: &str) -> (StatusCode, axum::http::HeaderMap
     exchange(app, Method::GET, uri).await
 }
 
-async fn exchange(
+async fn exchange_bytes(
     app: axum::Router,
     method: Method,
     uri: &str,
-) -> (StatusCode, axum::http::HeaderMap, String) {
+) -> (StatusCode, axum::http::HeaderMap, Vec<u8>) {
     let response = app
         .oneshot(
             Request::builder()
@@ -120,6 +120,15 @@ async fn exchange(
     let status = response.status();
     let headers = response.headers().clone();
     let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    (status, headers, bytes.to_vec())
+}
+
+async fn exchange(
+    app: axum::Router,
+    method: Method,
+    uri: &str,
+) -> (StatusCode, axum::http::HeaderMap, String) {
+    let (status, headers, bytes) = exchange_bytes(app, method, uri).await;
     let body = String::from_utf8_lossy(&bytes).into_owned();
     (status, headers, body)
 }
@@ -439,10 +448,10 @@ async fn missing_static_files_404_and_client_routes_stay_shell() {
         "/assets/hero.gif",
         "/assets/hero.avif",
         "/outside.wasm",
-        "/fonts/missing.woff2",
         "/bundle.mjs",
         "/pic.gif",
         "/photo.avif",
+        "/favicon.ico",
     ] {
         let (status, headers, body) = get(app.clone(), uri).await;
         assert_eq!(status, StatusCode::NOT_FOUND, "{uri}");
@@ -463,6 +472,10 @@ async fn missing_static_files_404_and_client_routes_stay_shell() {
         "/blog/hello",
         "/wiki/foo.bar",
         "/articles/v1.2-notes",
+        "/fonts/missing.woff2",
+        "/wiki/config.json",
+        "/blog/foo.png",
+        "/articles/v1.2.png",
     ] {
         let (status, headers, body) = get(app.clone(), uri).await;
         assert_eq!(status, StatusCode::OK, "{uri}");
@@ -722,16 +735,16 @@ async fn head_on_shell_matches_get_headers_and_has_no_body() {
     write_settings(&state.db, None, Some(payload)).await;
     let app = create_router_with_dist(state, tree.dist());
 
-    let (get_status, get_headers, get_body) =
-        exchange(app.clone(), Method::GET, "/wiki/foo.bar").await;
-    let (head_status, head_headers, head_body) = exchange(app, Method::HEAD, "/wiki/foo.bar").await;
+    let (get_status, get_headers, get_bytes) =
+        exchange_bytes(app.clone(), Method::GET, "/wiki/foo.bar").await;
+    let (head_status, head_headers, head_bytes) =
+        exchange_bytes(app, Method::HEAD, "/wiki/foo.bar").await;
 
     assert_eq!(get_status, StatusCode::OK);
     assert_eq!(head_status, StatusCode::OK);
-    assert!(
-        head_body.is_empty(),
-        "HEAD body must be empty, got {head_body}"
-    );
+    assert_eq!(head_bytes.len(), 0);
+    assert!(!get_bytes.is_empty());
+    let get_body = String::from_utf8_lossy(&get_bytes);
     assert!(get_body.contains("\\u003c/script\\u003e"));
     assert_eq!(content_type(&get_headers), content_type(&head_headers));
     assert_eq!(cache_control(&get_headers), cache_control(&head_headers));
@@ -745,7 +758,7 @@ async fn head_on_shell_matches_get_headers_and_has_no_body() {
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.parse::<usize>().ok())
         .expect("content-length");
-    assert_eq!(len, get_body.len());
+    assert_eq!(len, get_bytes.len());
 }
 
 #[tokio::test]

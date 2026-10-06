@@ -749,10 +749,10 @@ pub async fn setup(
                 } else {
                     (None::<String>, None, None, None, None, None)
                 };
-            // Invalidate even if the settings write fails, so the shell does
-            // not keep a fresh pre-setup blob.
+            // Invalidate before the write and again after it returns, so a
+            // shell read during setup cannot keep the pre-setup row.
             state.public_settings.invalidate();
-            if let Err(e) = state
+            let write = state
                 .db
                 .update_settings(
                     org.as_deref(),
@@ -774,8 +774,9 @@ pub async fn setup(
                     None,
                     None,
                 )
-                .await
-            {
+                .await;
+            state.public_settings.invalidate();
+            if let Err(e) = write {
                 tracing::warn!("setup: failed to apply org/template settings: {e}");
             }
         }

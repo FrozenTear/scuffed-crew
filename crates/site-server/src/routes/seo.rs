@@ -22,12 +22,16 @@
 //! `\u0026`, `\u2028`, and `\u2029`. The escaped JSON and the script block are
 //! cached together. The shell stays `Cache-Control: no-cache`.
 //!
-//! A cache miss waits at most [`EMBED_SETTINGS_TIMEOUT`]. On timeout or error
-//! the last blob is served if one exists (stale-on-error); otherwise the tag
-//! is omitted and the page is still served. The same successful read rewrites
-//! `<title>` and the `og:title`, `og:site_name`, description, and
-//! `og:description` meta contents from `org_name` and `site_description`.
-//! The tag is a data block (`type="application/json"`), not an executed script.
+//! A cache miss waits at most [`EMBED_SETTINGS_TIMEOUT`], including time spent
+//! waiting on another in-flight read. On timeout or error the last blob from
+//! the current generation is served if one exists (stale-on-error). A settings
+//! write drops that blob, so a row from before the save is not a fallback.
+//! Otherwise the tag is omitted and the page is still served. The same
+//! successful read rewrites `<title>` and the `og:title`, `og:site_name`,
+//! description, and `og:description` meta contents from the trimmed
+//! `org_name` and `site_description`. A value that is empty after trimming
+//! leaves its own tags as built. The tag is a data block
+//! (`type="application/json"`), not an executed script.
 
 use std::collections::HashSet;
 use std::future::Future;
@@ -230,10 +234,11 @@ const STATIC_EXTENSIONS: &[&str] = &[
 /// shell request and, until that succeeds, the request falls through to the
 /// raw file. A new deploy replaces the process.
 ///
-/// A missing file under `/assets/`, or a missing path whose extension is in
-/// [`STATIC_EXTENSIONS`], is a plain 404 with `Cache-Control: no-store`.
-/// Extension-less client routes, and dotted slugs that are not those
-/// extensions, still get the shell.
+/// A missing file under `/assets/`, or a missing top-level file (one path
+/// segment) whose extension is in [`STATIC_EXTENSIONS`], is a plain 404 with
+/// `Cache-Control: no-store`. A multi-segment path outside `/assets/`
+/// (`/wiki/config.json`, `/blog/foo.png`) still gets the shell, as do
+/// extension-less client routes.
 ///
 /// The `dist/` root is canonicalized once here. Per-request lookups do not
 /// canonicalize ordinary files.
@@ -425,13 +430,14 @@ fn rewrite_document_head(head: &str, org_name: &str, site_description: &str) -> 
     replace_meta_contents(&with_title, org_name, site_description)
 }
 
-/// `None` when `value` is empty or only whitespace. The original text is
-/// kept so a non-blank name is not trimmed on the way into the tag.
+/// `None` when `value` is empty or only whitespace. Otherwise the trimmed
+/// text, which is what gets written into the tag.
 fn filled_setting(value: &str) -> Option<&str> {
-    if value.trim().is_empty() {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
         None
     } else {
-        Some(value)
+        Some(trimmed)
     }
 }
 
@@ -628,47 +634,13 @@ async fn load_embed(state: &AppState) -> Option<Arc<CachedPublicSettings>> {
     if let Some(hit) = state.public_settings.fresh() {
         return Some(hit);
     }
-    // One reader. Waiters observe that reader's result instead of each
-    // hitting the database.
-    let _flight = state.public_settings.refresh_lock().await;
-    if let Some(hit) = state.public_settings.fresh() {
-        return Some(hit);
-    }
-    if state.public_settings.refresh_suppressed() {
-        return state.public_settings.stale();
-    }
-    #[cfg(test)]
-    if state.public_settings.fail_loads() {
-        state
-            .public_settings
-            .note_embed_failure("SPA shell settings embed skipped");
-        return state.public_settings.stale();
-    }
-    let generation = state.public_settings.generation();
-    let read = read_public_settings(&state.db);
-    match tokio::time::timeout(EMBED_SETTINGS_TIMEOUT, read).await {
-        Ok(Ok(payload)) => {
-            let cached = Arc::new(payload);
-            // `store` drops the blob when an invalidation landed during the
-            // read. Prefer whatever is fresh for the newer generation.
-            state
-                .public_settings
-                .store(generation, CachedPublicSettings::clone(&cached));
-            Some(
-                state
-                    .public_settings
-                    .fresh()
-                    .unwrap_or_else(|| Arc::clone(&cached)),
-            )
-        }
-        Ok(Err(err)) => {
-            state.public_settings.note_refresh_failure(generation);
-            state
-                .public_settings
-                .note_embed_failure(&format!("SPA shell settings embed skipped: {err}"));
-            state.public_settings.stale()
-        }
+    // The cap covers waiting for the single in-flight read and the read
+    // itself. A request queued behind a slow leader falls back here instead
+    // of blocking until that leader finishes.
+    match tokio::time::timeout(EMBED_SETTINGS_TIMEOUT, load_embed_locked(state)).await {
+        Ok(ready) => ready,
         Err(_elapsed) => {
+            let generation = state.public_settings.generation();
             state.public_settings.note_refresh_failure(generation);
             state
                 .public_settings
@@ -676,6 +648,53 @@ async fn load_embed(state: &AppState) -> Option<Arc<CachedPublicSettings>> {
             state.public_settings.stale()
         }
     }
+}
+
+async fn load_embed_locked(state: &AppState) -> Option<Arc<CachedPublicSettings>> {
+    // One reader. Waiters observe that reader's result instead of each
+    // hitting the database. This wait sits inside [`EMBED_SETTINGS_TIMEOUT`].
+    let _flight = state.public_settings.refresh_lock().await;
+    if let Some(hit) = state.public_settings.fresh() {
+        return Some(hit);
+    }
+    if state.public_settings.refresh_suppressed() {
+        return state.public_settings.stale();
+    }
+    let generation = state.public_settings.generation();
+    match embed_read(state).await {
+        Ok(payload) => {
+            let cached = Arc::new(payload);
+            if state
+                .public_settings
+                .store(generation, CachedPublicSettings::clone(&cached))
+            {
+                Some(cached)
+            } else {
+                // A save bumped the generation while this read was in flight.
+                // Do not serve the rejected blob; it may be the pre-save row.
+                state.public_settings.fresh()
+            }
+        }
+        Err(err) => {
+            state.public_settings.note_refresh_failure(generation);
+            state
+                .public_settings
+                .note_embed_failure(&format!("SPA shell settings embed skipped: {err}"));
+            state.public_settings.stale()
+        }
+    }
+}
+
+fn embed_read<'a>(
+    state: &'a AppState,
+) -> std::pin::Pin<
+    Box<dyn std::future::Future<Output = Result<CachedPublicSettings, String>> + Send + 'a>,
+> {
+    #[cfg(test)]
+    if let Some(loader) = state.public_settings.loader() {
+        return loader();
+    }
+    Box::pin(read_public_settings(&state.db))
 }
 
 async fn read_public_settings(db: &scuffed_db::Database) -> Result<CachedPublicSettings, String> {
@@ -727,11 +746,11 @@ fn classify_spa_route(dist_root: &Path, url_path: &str, have_index: bool) -> Spa
     }
 }
 
-/// Missing files under `/assets/`, or a missing path with a real static
-/// extension, must 404 instead of falling through to `index.html`.
+/// Missing files under `/assets/`, or a missing top-level file with a real
+/// static extension, must 404 instead of falling through to `index.html`.
 ///
-/// Wiki and article slugs that contain a dot stay on the shell unless the
-/// final extension is in [`STATIC_EXTENSIONS`].
+/// A multi-segment path outside `/assets/` is a client route even when the
+/// last segment looks like a file (`/wiki/config.json`, `/blog/foo.png`).
 fn is_static_miss_path(url_path: &str) -> bool {
     let path = url_path.split('?').next().unwrap_or(url_path);
     let decoded = urlencoding::decode(path).unwrap_or(std::borrow::Cow::Borrowed(path));
@@ -739,8 +758,11 @@ fn is_static_miss_path(url_path: &str) -> bool {
     if path == "/assets" || path.starts_with("/assets/") {
         return true;
     }
-    let file = path.rsplit('/').next().unwrap_or(path);
-    let Some((_, ext)) = file.rsplit_once('.') else {
+    let rel = path.trim_start_matches('/');
+    if rel.is_empty() || rel.contains('/') {
+        return false;
+    }
+    let Some((_, ext)) = rel.rsplit_once('.') else {
         return false;
     };
     if ext.is_empty() {
@@ -1507,21 +1529,21 @@ mod tests {
     }
 
     #[test]
-    fn static_miss_paths_are_assets_or_known_extensions() {
+    fn static_miss_paths_are_assets_or_top_level_files() {
         for path in [
             "/assets/tailwind.css",
             "/assets/favicon.svg",
             "/assets/missing-dxhabc12345.js",
             "/assets",
             "/assets/",
+            "/assets/hero.gif",
             "/nope.wasm",
-            "/dir/app.MJS",
-            "/notes/data.json",
-            "/font/face.woff2",
+            "/outside.wasm",
+            "/bundle.mjs",
+            "/favicon.ico",
+            "/pic.gif",
+            "/photo.AVIF",
         ] {
-            assert!(is_static_miss_path(path), "{path}");
-        }
-        for path in ["/pic.gif", "/photo.AVIF", "/assets/hero.gif"] {
             assert!(is_static_miss_path(path), "{path}");
         }
         for path in [
@@ -1532,6 +1554,13 @@ mod tests {
             "/blog/hello",
             "/wiki/foo.bar",
             "/articles/v1.2-notes",
+            "/dir/app.MJS",
+            "/notes/data.json",
+            "/font/face.woff2",
+            "/fonts/missing.woff2",
+            "/wiki/config.json",
+            "/blog/foo.png",
+            "/articles/v1.2.png",
             "/robots.txt",
         ] {
             assert!(!is_static_miss_path(path), "{path}");
@@ -1628,13 +1657,16 @@ mod tests {
 <meta property=\"og:title\" content=\"The Scuffed Crew\">
 <meta property=\"og:site_name\" content=\"The Scuffed Crew\">
 <meta property=\"og:description\" content=\"fallback tagline\">";
-        let out = rewrite_document_head(head, "Boot Clan", " \n\t ");
-        assert!(out.contains("<title>Boot Clan</title>"));
-        assert!(out.contains("property=\"og:title\" content=\"Boot Clan\""));
-        assert!(out.contains("property=\"og:site_name\" content=\"Boot Clan\""));
-        assert!(out.contains("content=\"fallback description\""));
-        assert!(out.contains("content=\"fallback tagline\""));
-        assert!(!out.contains("content=\"\""));
+        let out = rewrite_document_head(head, "  Boot Clan  ", " \n\t ");
+        assert_eq!(
+            out,
+            "\
+<title>Boot Clan</title>
+<meta name=\"description\" content=\"fallback description\">
+<meta property=\"og:title\" content=\"Boot Clan\">
+<meta property=\"og:site_name\" content=\"Boot Clan\">
+<meta property=\"og:description\" content=\"fallback tagline\">"
+        );
     }
 
     #[test]
@@ -1645,14 +1677,16 @@ mod tests {
 <meta content=\"The Scuffed Crew\" property=\"og:site_name\">
 <meta name=\"description\" content=\"fallback description\">
 <meta property=\"og:description\" content=\"fallback tagline\">";
-        let out = rewrite_document_head(head, "   ", "A real tagline");
-        assert!(out.contains("<title>The Scuffed Crew</title>"));
-        assert!(out.contains("property=\"og:title\" content=\"The Scuffed Crew\""));
-        assert!(out.contains("content=\"The Scuffed Crew\" property=\"og:site_name\""));
-        assert!(out.contains("content=\"A real tagline\""));
-        assert_eq!(out.matches("content=\"A real tagline\"").count(), 2);
-        assert!(!out.contains("<title></title>"));
-        assert!(!out.contains("content=\"\""));
+        let out = rewrite_document_head(head, "   ", "  A real tagline  ");
+        assert_eq!(
+            out,
+            "\
+<title>The Scuffed Crew</title>
+<meta property=\"og:title\" content=\"The Scuffed Crew\">
+<meta content=\"The Scuffed Crew\" property=\"og:site_name\">
+<meta name=\"description\" content=\"A real tagline\">
+<meta property=\"og:description\" content=\"A real tagline\">"
+        );
     }
 
     #[test]
@@ -1660,14 +1694,16 @@ mod tests {
         // Same shape as the frontend shell: property and content on their
         // own lines, content not sharing a line with the tag name.
         let head = "\
+<meta property=\"og:site_name\" content=\"The Scuffed Crew\">
 <meta
       property=\"og:description\"
       content=\"Multi-game EMEA gaming org. Small teams, real structure, scheduled play nights.\"
     />";
-        let out = rewrite_document_head(head, "Clan", "Scheduled nights");
+        let out = rewrite_document_head(head, "  Clan  ", "Scheduled nights");
         assert_eq!(
             out,
             "\
+<meta property=\"og:site_name\" content=\"Clan\">
 <meta
       property=\"og:description\"
       content=\"Scheduled nights\"
@@ -1686,35 +1722,405 @@ mod tests {
         assert_eq!(cached.script_block, again.script_block);
     }
 
-    #[tokio::test]
-    async fn settings_read_failure_omits_embed_and_leaves_template_title() {
-        let root =
-            std::env::temp_dir().join(format!("scuffed-seo-unit-fail-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(root.join("dist")).unwrap();
-        let html = "<!DOCTYPE html><html><head><title>The Scuffed Crew</title><meta property=\"og:title\" content=\"The Scuffed Crew\"></head><body>SPA-SHELL-MARKER</body></html>";
-        std::fs::write(root.join("dist/index.html"), html).unwrap();
-        let state = crate::test_support::test_state().await;
-        state.public_settings.set_fail_loads(true);
-        let app = crate::create_router_with_dist(state, root.join("dist"));
+    fn shell_html() -> &'static str {
+        "<!DOCTYPE html><html><head><title>The Scuffed Crew</title>\
+<meta name=\"description\" content=\"fallback description\">\
+<meta property=\"og:title\" content=\"The Scuffed Crew\">\
+<meta property=\"og:site_name\" content=\"The Scuffed Crew\">\
+<meta property=\"og:description\" content=\"fallback tagline\">\
+</head><body>SPA-SHELL-MARKER</body></html>"
+    }
+
+    struct ShellFixture {
+        root: std::path::PathBuf,
+    }
+
+    impl ShellFixture {
+        async fn new(label: &str) -> (Self, crate::state::AppState, axum::Router) {
+            let root =
+                std::env::temp_dir().join(format!("scuffed-seo-{label}-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(root.join("dist")).unwrap();
+            std::fs::write(root.join("dist/index.html"), shell_html()).unwrap();
+            let state = crate::test_support::test_state().await;
+            let app = crate::create_router_with_dist(state.clone(), root.join("dist"));
+            (Self { root }, state, app)
+        }
+    }
+
+    impl Drop for ShellFixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    fn named_settings(org: &str) -> CachedPublicSettings {
+        cached_settings(&format!(r#"{{"org_name":"{org}"}}"#), org, "tagline")
+    }
+
+    async fn body_of(app: axum::Router, method: Method, uri: &str) -> (StatusCode, Vec<u8>) {
         let response = tower::ServiceExt::oneshot(
             app,
-            axum::http::Request::builder()
-                .uri("/")
-                .body(axum::body::Body::empty())
+            Request::builder()
+                .method(method)
+                .uri(uri)
+                .body(Body::empty())
                 .unwrap(),
         )
         .await
         .unwrap();
-        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let status = response.status();
         let bytes = http_body_util::BodyExt::collect(response.into_body())
             .await
             .unwrap()
             .to_bytes();
-        let body = String::from_utf8(bytes.to_vec()).unwrap();
-        assert!(body.contains("SPA-SHELL-MARKER"));
+        (status, bytes.to_vec())
+    }
+
+    async fn shell_text(app: axum::Router, uri: &str) -> String {
+        let (status, bytes) = body_of(app, Method::GET, uri).await;
+        assert_eq!(status, StatusCode::OK);
+        String::from_utf8(bytes).unwrap()
+    }
+
+    /// Poll a spawned shell request until it finishes.
+    ///
+    /// One yield is not enough: the request awaits the lock and the loader.
+    /// Stop after a bounded number of turns so a missed timeout fails the
+    /// test instead of parking it.
+    async fn drive<T>(task: &mut tokio::task::JoinHandle<T>) {
+        for _ in 0..64 {
+            if task.is_finished() {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    }
+
+    fn counting_loader(
+        calls: &Arc<std::sync::atomic::AtomicUsize>,
+        result: Result<CachedPublicSettings, String>,
+    ) -> crate::state::EmbedLoader {
+        let calls = Arc::clone(calls);
+        Arc::new(move || {
+            let calls = Arc::clone(&calls);
+            let result = result.clone();
+            Box::pin(async move {
+                calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                result
+            })
+        })
+    }
+
+    #[tokio::test]
+    async fn slow_loader_serves_stale_within_the_cap() {
+        let (_tree, state, app) = ShellFixture::new("slow-loader").await;
+        assert!(state.public_settings.store(
+            state.public_settings.generation(),
+            named_settings("Kept Clan"),
+        ));
+        state.public_settings.expire_for_test();
+        state.public_settings.set_loader(Some(Arc::new(|| {
+            Box::pin(async {
+                tokio::time::sleep(Duration::from_secs(30)).await;
+                Ok(named_settings("Slow Clan"))
+            })
+        })));
+        tokio::time::pause();
+        let mut task = tokio::spawn(shell_text(app, "/"));
+        // `sleep` while paused auto-advances and runs timers in order.
+        // `advance` alone can move the clock before this request arms its cap.
+        tokio::time::sleep(EMBED_SETTINGS_TIMEOUT).await;
+        drive(&mut task).await;
+        assert!(
+            task.is_finished(),
+            "a loader slower than the cap must not hold the shell open"
+        );
+        let body = task.await.unwrap();
+        assert!(body.contains("Kept Clan"), "{body}");
+        assert!(body.contains("sc-settings"), "{body}");
+        assert!(!body.contains("Slow Clan"), "{body}");
+    }
+
+    #[tokio::test]
+    async fn loader_error_serves_the_stale_blob() {
+        let (_tree, state, app) = ShellFixture::new("err-stale").await;
+        assert!(state.public_settings.store(
+            state.public_settings.generation(),
+            named_settings("Kept Clan"),
+        ));
+        state.public_settings.expire_for_test();
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        state
+            .public_settings
+            .set_loader(Some(counting_loader(&calls, Err("db down".into()))));
+        let body = shell_text(app, "/").await;
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(body.contains("Kept Clan"), "{body}");
+        assert!(body.contains("sc-settings"), "{body}");
+    }
+
+    #[tokio::test]
+    async fn loader_error_without_stale_omits_the_embed() {
+        let (_tree, state, app) = ShellFixture::new("err-empty").await;
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        state
+            .public_settings
+            .set_loader(Some(counting_loader(&calls, Err("db down".into()))));
+        let body = shell_text(app, "/").await;
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(body.contains("SPA-SHELL-MARKER"), "{body}");
         assert!(!body.contains("sc-settings"), "{body}");
         assert!(body.contains("<title>The Scuffed Crew</title>"), "{body}");
         assert!(body.contains("content=\"The Scuffed Crew\""), "{body}");
-        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn concurrent_misses_call_the_loader_once() {
+        let (_tree, state, app) = ShellFixture::new("singleflight").await;
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (release_tx, release_rx) = tokio::sync::watch::channel(false);
+        let release_rx = Arc::new(tokio::sync::Mutex::new(release_rx));
+        let calls_loader = Arc::clone(&calls);
+        state.public_settings.set_loader(Some(Arc::new(move || {
+            let calls_loader = Arc::clone(&calls_loader);
+            let release_rx = Arc::clone(&release_rx);
+            Box::pin(async move {
+                calls_loader.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let mut rx = release_rx.lock().await;
+                let _ = rx.wait_for(|go| *go).await;
+                Ok(named_settings("Once Clan"))
+            })
+        })));
+        let mut tasks = Vec::new();
+        for _ in 0..8 {
+            tasks.push(tokio::spawn(shell_text(app.clone(), "/")));
+        }
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while calls.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("loader was not entered");
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "concurrent misses must share one read"
+        );
+        release_tx.send(true).unwrap();
+        for task in tasks {
+            let body = task.await.unwrap();
+            assert!(body.contains("Once Clan"), "{body}");
+        }
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn refresh_backoff_suppresses_reads_until_it_elapses() {
+        let (_tree, state, app) = ShellFixture::new("backoff").await;
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mode = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let calls_loader = Arc::clone(&calls);
+        let mode_loader = Arc::clone(&mode);
+        state.public_settings.set_loader(Some(Arc::new(move || {
+            let calls_loader = Arc::clone(&calls_loader);
+            let mode_loader = Arc::clone(&mode_loader);
+            Box::pin(async move {
+                calls_loader.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if mode_loader.load(std::sync::atomic::Ordering::SeqCst) {
+                    Ok(named_settings("Recovered Clan"))
+                } else {
+                    Err("db down".into())
+                }
+            })
+        })));
+        tokio::time::pause();
+        let mut first = tokio::spawn(shell_text(app.clone(), "/"));
+        drive(&mut first).await;
+        assert!(first.is_finished());
+        let first_body = first.await.unwrap();
+        assert!(!first_body.contains("sc-settings"), "{first_body}");
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        let mut second = tokio::spawn(shell_text(app.clone(), "/"));
+        drive(&mut second).await;
+        assert!(second.is_finished());
+        let second_body = second.await.unwrap();
+        assert!(!second_body.contains("sc-settings"), "{second_body}");
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "backoff must skip another read"
+        );
+
+        tokio::time::advance(crate::state::EMBED_REFRESH_BACKOFF).await;
+        mode.store(true, std::sync::atomic::Ordering::SeqCst);
+        let mut third = tokio::spawn(shell_text(app, "/"));
+        drive(&mut third).await;
+        assert!(third.is_finished());
+        let third_body = third.await.unwrap();
+        assert!(third_body.contains("Recovered Clan"), "{third_body}");
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn queued_read_falls_back_within_the_cap() {
+        let (_tree, state, app) = ShellFixture::new("queued-cap").await;
+        assert!(state.public_settings.store(
+            state.public_settings.generation(),
+            named_settings("Kept Clan"),
+        ));
+        state.public_settings.expire_for_test();
+        let _guard = state.public_settings.refresh_lock().await;
+        tokio::time::pause();
+        let mut task = tokio::spawn(shell_text(app, "/wiki/config.json"));
+        tokio::time::sleep(EMBED_SETTINGS_TIMEOUT).await;
+        drive(&mut task).await;
+        assert!(
+            task.is_finished(),
+            "a request waiting on the refresh lock must fall back within the cap"
+        );
+        let body = task.await.unwrap();
+        assert!(body.contains("Kept Clan"), "{body}");
+        assert!(body.contains("sc-settings"), "{body}");
+    }
+
+    #[tokio::test]
+    async fn read_during_save_does_not_keep_the_pre_save_blob() {
+        let (_tree, state, app) = ShellFixture::new("save-race").await;
+        let user = state
+            .db
+            .create_local_user("embed-admin", "unused-hash")
+            .await
+            .unwrap();
+        state
+            .db
+            .create_member(&user.id, "Embed Admin", scuffed_db::OrgRole::Admin)
+            .await
+            .unwrap();
+        state
+            .db
+            .create_session(&user.id, "embed-admin-token", 24)
+            .await
+            .unwrap();
+
+        let primed = shell_text(app.clone(), "/").await;
+        assert!(primed.contains("My Clan"), "{primed}");
+
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        state
+            .public_settings
+            .set_loader(Some(counting_loader(&calls, Ok(named_settings("My Clan")))));
+        let app_for_hook = app.clone();
+        let cache = state.public_settings.clone();
+        state.public_settings.set_write_hook(Some(Arc::new(move || {
+            let app_for_hook = app_for_hook.clone();
+            let cache = cache.clone();
+            Box::pin(async move {
+                let body = shell_text(app_for_hook, "/").await;
+                assert!(
+                    body.contains("My Clan"),
+                    "the in-flight read still sees the pre-save row: {body}"
+                );
+                assert_eq!(
+                    cache.fresh().map(|blob| blob.org_name.clone()),
+                    Some("My Clan".to_string()),
+                    "the racing read must land in the cache before the write returns"
+                );
+            })
+        })));
+
+        let response = tower::ServiceExt::oneshot(
+            app.clone(),
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/api/settings")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::COOKIE, "sc_session=embed-admin-token")
+                .body(Body::from(r#"{"org_name":"New Clan"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(
+            state
+                .public_settings
+                .fresh()
+                .map(|blob| blob.org_name != "My Clan")
+                .unwrap_or(true),
+            "old settings must not stay fresh after the save"
+        );
+        assert!(
+            state.public_settings.stale().is_none(),
+            "a pre-save blob must not remain as the stale fallback"
+        );
+
+        state
+            .public_settings
+            .set_loader(Some(counting_loader(&calls, Err("db down".into()))));
+        let failed = shell_text(app.clone(), "/").await;
+        assert!(
+            !failed.contains("My Clan"),
+            "stale-on-error must not serve the pre-save row: {failed}"
+        );
+        assert!(!failed.contains("sc-settings"), "{failed}");
+
+        state.public_settings.set_loader(None);
+        state.public_settings.invalidate();
+        let saved = shell_text(app, "/").await;
+        assert!(saved.contains("New Clan"), "{saved}");
+        assert!(!saved.contains("My Clan"), "{saved}");
+    }
+
+    #[tokio::test]
+    async fn head_on_the_shell_service_has_an_empty_body() {
+        // Axum's router clears every HEAD body, so a check through the router
+        // cannot see a shell that forgot to send an empty body. Call the
+        // service itself and read the bytes.
+        let (tree, state, _app) = ShellFixture::new("head-bytes").await;
+        let files = spa_service(&tree.root.join("dist"), state);
+        let head_response = tower::ServiceExt::oneshot(
+            files.clone(),
+            Request::builder()
+                .method(Method::HEAD)
+                .uri("/wiki/foo.bar")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+        let get_response = tower::ServiceExt::oneshot(
+            files,
+            Request::builder()
+                .method(Method::GET)
+                .uri("/wiki/foo.bar")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(head_response.status(), StatusCode::OK);
+        assert_eq!(get_response.status(), StatusCode::OK);
+        let content_length = get_response
+            .headers()
+            .get(header::CONTENT_LENGTH)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse::<usize>().ok());
+        let head_bytes = http_body_util::BodyExt::collect(head_response.into_body())
+            .await
+            .unwrap()
+            .to_bytes();
+        let get_bytes = http_body_util::BodyExt::collect(get_response.into_body())
+            .await
+            .unwrap()
+            .to_bytes();
+        assert_eq!(head_bytes.len(), 0);
+        assert!(!get_bytes.is_empty());
+        assert_eq!(content_length, Some(get_bytes.len()));
     }
 }

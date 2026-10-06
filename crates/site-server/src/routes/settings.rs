@@ -208,10 +208,15 @@ pub async fn update_settings(
             }),
         ));
     }
-    // Invalidate on the write attempt itself, including a body that fails
-    // validation or a database update that errors. A rejected attempt must
-    // not keep serving a fresh cached blob until the TTL.
+    // Invalidate on the attempt, then again when this handler returns
+    // (success, validation error, or a failed database update). The second
+    // bump drops anything a shell read cached while the save was in flight.
     state.public_settings.invalidate();
+    let _invalidate_after_write = state.public_settings.invalidate_on_drop();
+    // The hook sits in the window a shell read can re-cache the pre-write row.
+    // The drop guard above runs after this function returns and drops that row.
+    #[cfg(test)]
+    state.public_settings.run_write_hook().await;
 
     let homepage_json = body.homepage.as_ref().map(|h| h.to_json());
     let nav_json = body.nav.as_ref().map(|n| {

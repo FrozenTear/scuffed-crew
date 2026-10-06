@@ -1,8 +1,11 @@
+#[cfg(test)]
+use std::future::Future;
 use std::path::PathBuf;
 #[cfg(test)]
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::pin::Pin;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use tokio::time::Instant;
 
 use scuffed_auth::crypto::CryptoService;
 use scuffed_auth::server::HasAuth;
@@ -70,7 +73,7 @@ pub(crate) const PUBLIC_SETTINGS_TTL: Duration = Duration::from_secs(10);
 /// After a failed refresh, further misses serve the stale blob instead of
 /// each starting their own read. An invalidation clears this by moving
 /// `generation`.
-const EMBED_REFRESH_BACKOFF: Duration = Duration::from_secs(1);
+pub(crate) const EMBED_REFRESH_BACKOFF: Duration = Duration::from_secs(1);
 
 /// DB-outage warnings for the shell embed, at most once per interval.
 const SETTINGS_WARN_INTERVAL: Duration = Duration::from_secs(60);
@@ -102,12 +105,43 @@ struct PublicSettingsInner {
     refresh_failed: Option<(u64, Instant)>,
 }
 
+/// Test-only stand-in for the settings read, invoked at the real load point
+/// (inside the refresh lock and the embed timeout). Not in release builds.
+#[cfg(test)]
+pub(crate) type EmbedLoader = Arc<
+    dyn Fn() -> Pin<Box<dyn Future<Output = Result<CachedPublicSettings, String>> + Send>>
+        + Send
+        + Sync,
+>;
+
+/// Test-only hook that runs after the early settings invalidation and before
+/// the database write, so a test can finish an in-flight read in that window.
+#[cfg(test)]
+pub(crate) type SettingsWriteHook =
+    Arc<dyn Fn() -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
+
+/// Loader and write hook. Manual `Debug` because the trait objects are not.
+#[cfg(test)]
+#[derive(Default)]
+struct SettingsTestHooks {
+    loader: Mutex<Option<EmbedLoader>>,
+    write_hook: Mutex<Option<SettingsWriteHook>>,
+}
+
+#[cfg(test)]
+impl std::fmt::Debug for SettingsTestHooks {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("SettingsTestHooks")
+    }
+}
+
 /// Process-local cache of the anonymous settings embed.
 ///
 /// Shared across `AppState` clones (the router and the SPA fallback hold the
-/// same `Arc`). A settings write bumps `generation` so an in-flight read
-/// cannot store a stale blob over the invalidation. The previous blob is kept
-/// so a timed-out re-read can still be served (stale-on-error).
+/// same `Arc`). A settings write bumps `generation` and drops any blob stored
+/// before that bump, so an in-flight read cannot store or later serve a
+/// pre-write row. A blob that is merely past the TTL stays available for
+/// stale-on-error.
 #[derive(Clone, Debug)]
 pub struct PublicSettingsCache {
     inner: Arc<Mutex<PublicSettingsInner>>,
@@ -115,10 +149,8 @@ pub struct PublicSettingsCache {
     /// each querying the database.
     refresh: Arc<tokio::sync::Mutex<()>>,
     last_warn: Arc<Mutex<Option<Instant>>>,
-    /// Test-only. Compiled out of release builds so the shell cannot be
-    /// told to skip the database in production.
     #[cfg(test)]
-    fail_loads: Arc<AtomicBool>,
+    hooks: Arc<SettingsTestHooks>,
 }
 
 impl Default for PublicSettingsCache {
@@ -138,18 +170,29 @@ impl PublicSettingsCache {
             refresh: Arc::new(tokio::sync::Mutex::new(())),
             last_warn: Arc::new(Mutex::new(None)),
             #[cfg(test)]
-            fail_loads: Arc::new(AtomicBool::new(false)),
+            hooks: Arc::new(SettingsTestHooks::default()),
         }
     }
 
-    /// Mark the cached blob stale. The next shell render reads settings again.
+    /// Bump the generation and drop every blob stored before this call.
     ///
-    /// The last blob stays available for stale-on-error. Callers invoke this
-    /// on a write attempt, including when the write then fails.
+    /// Settings writes call this before the database update and again when
+    /// that update returns, success or error. The second bump discards a
+    /// read that re-cached the pre-write row, so that row cannot stay fresh
+    /// or be served later as the stale-on-error fallback.
     pub fn invalidate(&self) {
         let mut guard = self.lock();
         guard.generation = guard.generation.wrapping_add(1);
         guard.refresh_failed = None;
+        guard.entry = None;
+    }
+
+    /// Second [`Self::invalidate`] when the guard drops.
+    ///
+    /// Held across the write so every return path, including a validation
+    /// error, bumps the generation again after the attempt.
+    pub fn invalidate_on_drop(&self) -> InvalidateOnDrop<'_> {
+        InvalidateOnDrop(self)
     }
 
     pub(crate) fn generation(&self) -> u64 {
@@ -169,12 +212,17 @@ impl PublicSettingsCache {
         Some(Arc::clone(&entry.payload))
     }
 
-    /// Last blob, including after TTL expiry or invalidation.
+    /// Last blob from the current generation, including after the TTL.
+    ///
+    /// A blob stored before the latest [`Self::invalidate`] is not a fallback,
+    /// whether the bump dropped it or a rejected store left it behind.
     pub(crate) fn stale(&self) -> Option<Arc<CachedPublicSettings>> {
-        self.lock()
-            .entry
-            .as_ref()
-            .map(|entry| Arc::clone(&entry.payload))
+        let guard = self.lock();
+        let entry = guard.entry.as_ref()?;
+        if entry.generation != guard.generation {
+            return None;
+        }
+        Some(Arc::clone(&entry.payload))
     }
 
     /// Store `payload` only if no invalidation landed since `generation`.
@@ -230,15 +278,45 @@ impl PublicSettingsCache {
     }
 
     #[cfg(test)]
-    pub(crate) fn fail_loads(&self) -> bool {
-        self.fail_loads.load(Ordering::Relaxed)
+    pub(crate) fn set_loader(&self, loader: Option<EmbedLoader>) {
+        *self
+            .hooks
+            .loader
+            .lock()
+            .unwrap_or_else(|err| err.into_inner()) = loader;
     }
 
-    /// When set, the SPA shell treats the settings read as failed.
-    /// Unit tests use this for the omit-the-block path. Not in release builds.
     #[cfg(test)]
-    pub(crate) fn set_fail_loads(&self, fail: bool) {
-        self.fail_loads.store(fail, Ordering::Relaxed);
+    pub(crate) fn loader(&self) -> Option<EmbedLoader> {
+        self.hooks
+            .loader
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .clone()
+    }
+
+    /// Install a hook for the next settings write. The handler takes it once.
+    #[cfg(test)]
+    pub(crate) fn set_write_hook(&self, hook: Option<SettingsWriteHook>) {
+        *self
+            .hooks
+            .write_hook
+            .lock()
+            .unwrap_or_else(|err| err.into_inner()) = hook;
+    }
+
+    /// Run and clear the write hook, if a test installed one.
+    #[cfg(test)]
+    pub(crate) async fn run_write_hook(&self) {
+        let hook = self
+            .hooks
+            .write_hook
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .take();
+        if let Some(hook) = hook {
+            hook().await;
+        }
     }
 
     /// Push the stored blob past the TTL without sleeping.
@@ -246,14 +324,21 @@ impl PublicSettingsCache {
     pub(crate) fn expire_for_test(&self) {
         let mut guard = self.lock();
         if let Some(entry) = guard.entry.as_mut() {
-            entry.stored_at = Instant::now()
-                .checked_sub(PUBLIC_SETTINGS_TTL + Duration::from_secs(1))
-                .unwrap_or_else(Instant::now);
+            entry.stored_at = Instant::now() - (PUBLIC_SETTINGS_TTL + Duration::from_secs(1));
         }
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, PublicSettingsInner> {
         self.inner.lock().unwrap_or_else(|err| err.into_inner())
+    }
+}
+
+/// Calls [`PublicSettingsCache::invalidate`] when dropped.
+pub struct InvalidateOnDrop<'a>(&'a PublicSettingsCache);
+
+impl Drop for InvalidateOnDrop<'_> {
+    fn drop(&mut self) {
+        self.0.invalidate();
     }
 }
 
@@ -560,8 +645,8 @@ mod public_settings_cache_tests {
         }
     }
 
-    #[test]
-    fn stale_writer_cannot_overwrite_a_newer_invalidation() {
+    #[tokio::test]
+    async fn stale_writer_cannot_overwrite_a_newer_invalidation() {
         let cache = PublicSettingsCache::new();
         let generation = cache.generation();
         assert!(cache.store(generation, payload("First")));
@@ -570,10 +655,14 @@ mod public_settings_cache_tests {
         cache.invalidate();
         assert!(cache.fresh().is_none());
         assert!(
+            cache.stale().is_none(),
+            "invalidate drops blobs stored before the bump"
+        );
+        assert!(
             !cache.store(generation, payload("Stale")),
             "a read that started before invalidation must not store"
         );
-        assert_eq!(cache.stale().unwrap().org_name, "First");
+        assert!(cache.stale().is_none());
 
         let next = cache.generation();
         assert_ne!(next, generation);
@@ -582,8 +671,8 @@ mod public_settings_cache_tests {
         assert!(cache.fresh().unwrap().script_block.contains("Fresh"));
     }
 
-    #[test]
-    fn ttl_expiry_keeps_the_blob_for_stale_on_error() {
+    #[tokio::test]
+    async fn ttl_expiry_keeps_the_blob_for_stale_on_error() {
         let cache = PublicSettingsCache::new();
         assert!(cache.store(cache.generation(), payload("Cached")));
         assert!(cache.fresh().is_some());
@@ -599,15 +688,15 @@ mod public_settings_cache_tests {
         );
     }
 
-    #[test]
-    fn embed_failure_warning_is_rate_limited() {
+    #[tokio::test]
+    async fn embed_failure_warning_is_rate_limited() {
         let cache = PublicSettingsCache::new();
         assert!(cache.note_embed_failure("settings read failed"));
         assert!(!cache.note_embed_failure("settings read failed again"));
     }
 
-    #[test]
-    fn failed_refresh_suppresses_a_second_read_until_invalidate() {
+    #[tokio::test]
+    async fn failed_refresh_suppresses_a_second_read_until_invalidate() {
         let cache = PublicSettingsCache::new();
         let generation = cache.generation();
         assert!(!cache.refresh_suppressed());
