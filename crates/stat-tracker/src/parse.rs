@@ -351,10 +351,9 @@ fn guess_role(hero: &str) -> String {
         "d.mon" | "dmon" | "d.va" | "dva" | "doomfist" | "domina" | "junker queen"
         | "junker_queen" | "mauga" | "orisa" | "ramattra" | "reinhardt" | "roadhog" | "sigma"
         | "winston" | "wrecking ball" | "wrecking_ball" | "zarya" | "hazard" => "Tank".to_string(),
-        "ana" | "baptiste" | "brigitte" | "illari" | "jetpack cat" | "juno" | "kiriko"
-        | "lifeweaver" | "lucio" | "mercy" | "mizuki" | "moira" | "wuyang" | "zenyatta" => {
-            "Support".to_string()
-        }
+        "ana" | "baptiste" | "brigitte" | "doctrine" | "illari" | "jetpack cat" | "juno"
+        | "kiriko" | "lifeweaver" | "lucio" | "mercy" | "mizuki" | "moira" | "sombra"
+        | "wuyang" | "zenyatta" => "Support".to_string(),
         _ => "Damage".to_string(),
     }
 }
@@ -593,6 +592,19 @@ mod tests {
         assert_eq!(guess_role("D.Va"), "Tank");
     }
 
+    /// Season 5 (2026-10-06): Doctrine is Support, Sombra moved to Support.
+    /// An unknown name still falls through to Damage. Roadhog stays Tank.
+    #[test]
+    fn season5_roles_and_damage_fallback() {
+        assert_eq!(guess_role("Doctrine"), "Support");
+        assert_eq!(guess_role("doctrine"), "Support");
+        assert_eq!(guess_role("Sombra"), "Support");
+        assert_eq!(guess_role("sombra"), "Support");
+        assert_eq!(guess_role("Roadhog"), "Tank");
+        assert_eq!(guess_role("NotAHero"), "Damage");
+        assert_eq!(guess_role(""), "Damage");
+    }
+
     #[test]
     fn recent_maps_are_detected() {
         // Neon Junction (Hybrid, S3) and Aatlis (Flashpoint, S17) — both were
@@ -716,6 +728,7 @@ mod hero_map_name_tests {
         // looser short-name threshold.
         assert_eq!(match_map_in_text("REAPER"), None);
         assert_eq!(match_map_in_text("SOMBRA"), None);
+        assert_eq!(match_map_in_text("DOCTRINE"), None);
         assert_eq!(match_map_in_text("WIDOWMAKER"), None);
         assert_eq!(match_map_in_text("xXGamerTagXx"), None);
         assert_eq!(match_map_in_text("FR0ZEN"), None);

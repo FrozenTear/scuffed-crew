@@ -109,7 +109,7 @@ const TRAINING_DIGITS_COMMAS: &str = "\
 
 const TRAINING_HEROES_1: &str = "\
 Ana Anran Ashe Baptiste Bastion\n\
-Brigitte Cassidy D.Va Domina Doomfist\n\
+Brigitte Cassidy D.Va Doctrine Domina Doomfist\n\
 Echo Emre Freja Genji Hanzo\n\
 Hazard Illari Junker Queen Junkrat Juno\n\
 Kiriko Lifeweaver Lucio Mauga Mei\n";
@@ -643,4 +643,20 @@ fn generate_tessdata_legacy(dir: &Path) -> Result<(), Box<dyn std::error::Error 
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod training_heroes_tests {
+    use super::{TRAINING_HEROES_1, TRAINING_HEROES_2};
+
+    #[test]
+    fn training_word_list_includes_doctrine() {
+        let text = format!("{TRAINING_HEROES_1}\n{TRAINING_HEROES_2}");
+        assert!(
+            text.contains("Doctrine"),
+            "Doctrine missing from OCR training words"
+        );
+        assert!(text.contains("Sombra"));
+        assert!(text.contains("Roadhog"));
+    }
 }

@@ -18,6 +18,7 @@ pub const HEROES: &[&str] = &[
     "Cassidy",
     "D.Mon",
     "D.Va",
+    "Doctrine",
     "Domina",
     "Doomfist",
     "Echo",
@@ -298,5 +299,136 @@ mod tests {
         v.sort();
         v.dedup();
         assert_eq!(v.len(), HEROES.len());
+    }
+
+    /// Season 5 Support hero (2026-10-06). Alphabetical in [`HEROES`]. Fuzzy
+    /// score against every other hero token, map token, and common scoreboard
+    /// word stays under the fuzzy threshold.
+    #[test]
+    fn doctrine_matches_and_does_not_fuzzy_collide() {
+        assert_eq!(match_hero_in_text("DOCTRINE").as_deref(), Some("Doctrine"));
+        assert_eq!(match_hero_in_text("Doctrine").as_deref(), Some("Doctrine"));
+        assert_eq!(canonical_hero("doctrine"), "Doctrine");
+        assert_eq!(resolve_hero_query(Some("doctrine")), Ok(Some("Doctrine")));
+
+        let pos = HEROES
+            .iter()
+            .position(|h| *h == "Doctrine")
+            .expect("Doctrine is listed");
+        assert!(pos > 0 && HEROES[pos - 1] < "Doctrine");
+        assert!(pos + 1 < HEROES.len() && HEROES[pos + 1] > "Doctrine");
+
+        // One-edit OCR misses still land on Doctrine, not Domina / Doomfist.
+        assert_eq!(match_hero_in_text("DOCTRIN").as_deref(), Some("Doctrine"));
+        assert_eq!(match_hero_in_text("DOCTRNE").as_deref(), Some("Doctrine"));
+
+        let mut words: Vec<String> = Vec::new();
+        for &hero in HEROES {
+            if hero.eq_ignore_ascii_case("Doctrine") {
+                continue;
+            }
+            push_tokens(&mut words, hero);
+        }
+        for map in [
+            "King's Row",
+            "Circuit Royal",
+            "Dorado",
+            "Havana",
+            "Junkertown",
+            "Rialto",
+            "Route 66",
+            "Shambali Monastery",
+            "Watchpoint: Gibraltar",
+            "Blizzard World",
+            "Eichenwalde",
+            "Hollywood",
+            "Midtown",
+            "Numbani",
+            "Paraiso",
+            "Paraíso",
+            "Neon Junction",
+            "Antarctic Peninsula",
+            "Busan",
+            "Ilios",
+            "Lijiang Tower",
+            "Nepal",
+            "Oasis",
+            "Samoa",
+            "Colosseo",
+            "Esperanca",
+            "Esperança",
+            "New Queen Street",
+            "Runasapi",
+            "New Junk City",
+            "Suravasa",
+            "Aatlis",
+            "Hanaoka",
+            "Throne of Anubis",
+        ] {
+            push_tokens(&mut words, map);
+        }
+        for word in [
+            "eliminations",
+            "assists",
+            "deaths",
+            "damage",
+            "healing",
+            "mitigation",
+            "victory",
+            "defeat",
+            "draw",
+            "accuracy",
+            "critical",
+            "weapon",
+            "kills",
+            "elims",
+            "objective",
+            "contesting",
+            "eliminated",
+            "final",
+            "blow",
+            "card",
+            "player",
+            "hero",
+            "role",
+            "score",
+            "time",
+            "support",
+            "tank",
+            "payload",
+            "overtime",
+            "round",
+            "attack",
+            "defense",
+            "escort",
+            "hybrid",
+            "control",
+            "push",
+            "flashpoint",
+            "clash",
+        ] {
+            words.push(word.to_string());
+        }
+
+        for word in words {
+            let score = normalized_levenshtein(&word, "doctrine");
+            assert!(
+                score < FUZZY_HERO_THRESHOLD,
+                "{word:?} scores {score} against doctrine (threshold {FUZZY_HERO_THRESHOLD})"
+            );
+            assert_ne!(
+                match_hero_in_text(&word).as_deref(),
+                Some("Doctrine"),
+                "{word:?} matched Doctrine"
+            );
+        }
+    }
+
+    fn push_tokens(out: &mut Vec<String>, text: &str) {
+        for part in text.split(|c: char| !c.is_alphanumeric()) {
+            if !part.is_empty() {
+                out.push(part.to_lowercase());
+            }
+        }
     }
 }

@@ -71,13 +71,19 @@ impl RoleAgg {
     }
 }
 
+/// Display-time role bucket from the hero **name**. Ignores the role stored
+/// on the match. Sombra is left in the Damage fallback on purpose: historical
+/// games were captured as Damage, and moving this arm would rebucket them.
+/// Doctrine has no stored history, so it is listed under Support.
 pub(super) fn hero_to_role(name: &str) -> &'static str {
     match name {
         "D.Mon" | "D.Va" | "Domina" | "Doomfist" | "Hazard" | "Junker Queen" | "Mauga"
         | "Orisa" | "Ramattra" | "Reinhardt" | "Roadhog" | "Sigma" | "Winston"
         | "Wrecking Ball" | "Zarya" => "Tank",
-        "Ana" | "Baptiste" | "Brigitte" | "Illari" | "Juno" | "Kiriko" | "Lifeweaver" | "Lúcio"
-        | "Mercy" | "Mizuki" | "Moira" | "Wuyang" | "Zenyatta" => "Support",
+        "Ana" | "Baptiste" | "Brigitte" | "Doctrine" | "Illari" | "Juno" | "Kiriko"
+        | "Lifeweaver" | "Lúcio" | "Mercy" | "Mizuki" | "Moira" | "Wuyang" | "Zenyatta" => {
+            "Support"
+        }
         _ => "Damage",
     }
 }
@@ -332,5 +338,21 @@ pub(super) fn overview_tab(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::hero_to_role;
+
+    /// Doctrine is new in Season 5, so listing it here does not move stored
+    /// games. Sombra stays in the Damage fallback so this display map does
+    /// not rebucket historical captures.
+    #[test]
+    fn doctrine_is_support_sombra_stays_damage_bucket() {
+        assert_eq!(hero_to_role("Doctrine"), "Support");
+        assert_eq!(hero_to_role("Sombra"), "Damage");
+        assert_eq!(hero_to_role("Roadhog"), "Tank");
+        assert_eq!(hero_to_role("NotAHero"), "Damage");
     }
 }

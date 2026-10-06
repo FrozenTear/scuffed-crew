@@ -21,7 +21,7 @@ pub enum Hero {
     WreckingBall,
     Zarya,
 
-    // Damage (23)
+    // Damage (22)
     Anran,
     Ashe,
     Bastion,
@@ -38,7 +38,6 @@ pub enum Hero {
     Sierra,
     Sojourn,
     Soldier76,
-    Sombra,
     Symmetra,
     Torbjorn,
     Tracer,
@@ -46,10 +45,11 @@ pub enum Hero {
     Venture,
     Widowmaker,
 
-    // Support (13)
+    // Support (15)
     Ana,
     Baptiste,
     Brigitte,
+    Doctrine,
     Illari,
     Juno,
     Kiriko,
@@ -58,6 +58,7 @@ pub enum Hero {
     Mercy,
     Mizuki,
     Moira,
+    Sombra,
     Wuyang,
     Zenyatta,
 }
@@ -96,7 +97,6 @@ impl Hero {
             | Self::Sierra
             | Self::Sojourn
             | Self::Soldier76
-            | Self::Sombra
             | Self::Symmetra
             | Self::Torbjorn
             | Self::Tracer
@@ -107,6 +107,7 @@ impl Hero {
             Self::Ana
             | Self::Baptiste
             | Self::Brigitte
+            | Self::Doctrine
             | Self::Illari
             | Self::Juno
             | Self::Kiriko
@@ -115,6 +116,7 @@ impl Hero {
             | Self::Mercy
             | Self::Mizuki
             | Self::Moira
+            | Self::Sombra
             | Self::Wuyang
             | Self::Zenyatta => HeroRole::Support,
         }
@@ -152,7 +154,6 @@ impl Hero {
             Self::Sierra => "Sierra",
             Self::Sojourn => "Sojourn",
             Self::Soldier76 => "Soldier: 76",
-            Self::Sombra => "Sombra",
             Self::Symmetra => "Symmetra",
             Self::Torbjorn => "Torbjörn",
             Self::Tracer => "Tracer",
@@ -162,6 +163,7 @@ impl Hero {
             Self::Ana => "Ana",
             Self::Baptiste => "Baptiste",
             Self::Brigitte => "Brigitte",
+            Self::Doctrine => "Doctrine",
             Self::Illari => "Illari",
             Self::Juno => "Juno",
             Self::Kiriko => "Kiriko",
@@ -170,6 +172,7 @@ impl Hero {
             Self::Mercy => "Mercy",
             Self::Mizuki => "Mizuki",
             Self::Moira => "Moira",
+            Self::Sombra => "Sombra",
             Self::Wuyang => "Wuyang",
             Self::Zenyatta => "Zenyatta",
         }
@@ -467,5 +470,28 @@ mod tests {
                 "game_mode_label failed for {name:?}"
             );
         }
+    }
+
+    /// Season 5: Doctrine is Support; Sombra moved Damage → Support.
+    /// Serde names stay snake_case (`doctrine`, `sombra`). Roadhog's rework
+    /// did not change his role.
+    #[test]
+    fn season5_doctrine_and_sombra_are_support() {
+        assert_eq!(Hero::Doctrine.role(), HeroRole::Support);
+        assert_eq!(Hero::Sombra.role(), HeroRole::Support);
+        assert_eq!(Hero::Roadhog.role(), HeroRole::Tank);
+        assert_eq!(Hero::Doctrine.display_name(), "Doctrine");
+        assert_eq!(Hero::Doctrine.to_string(), "Doctrine");
+        assert_eq!(Hero::Sombra.to_string(), "Sombra");
+
+        let doctrine: Hero = serde_json::from_str("\"doctrine\"").unwrap();
+        assert_eq!(doctrine, Hero::Doctrine);
+        assert_eq!(
+            serde_json::to_string(&Hero::Doctrine).unwrap(),
+            "\"doctrine\""
+        );
+        let sombra: Hero = serde_json::from_str("\"sombra\"").unwrap();
+        assert_eq!(sombra, Hero::Sombra);
+        assert_eq!(serde_json::to_string(&Hero::Sombra).unwrap(), "\"sombra\"");
     }
 }
