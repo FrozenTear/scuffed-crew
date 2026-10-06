@@ -1840,15 +1840,15 @@ mod tests {
         let played =
             |day: u32, month: u32| Utc.with_ymd_and_hms(2026, month, day, 20, 0, 0).unwrap();
         let game = |sid: &str,
-                        hero: &str,
-                        role: &str,
-                        outcome: &str,
-                        day: u32,
-                        month: u32,
-                        elims: u32,
-                        deaths: u32,
-                        damage: u32,
-                        healing: u32| {
+                    hero: &str,
+                    role: &str,
+                    outcome: &str,
+                    day: u32,
+                    month: u32,
+                    elims: u32,
+                    deaths: u32,
+                    damage: u32,
+                    healing: u32| {
             let mut m = entry(sid, outcome, elims);
             m.hero = hero.into();
             m.role = role.into();
