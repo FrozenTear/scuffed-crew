@@ -228,7 +228,13 @@ Template also lives in repo: `deploy/Caddyfile`.
 <script id="sc-settings" type="application/json">{"id":"…","org_name":"…"}</script>
 ```
 
-That object is the body of anonymous `GET /api/settings` (same `SiteSettings` mapping and `serde_json` serializer). `<`, `>`, `&`, U+2028, and U+2029 are escaped as `\u003c`, `\u003e`, `\u0026`, `\u2028`, and `\u2029`, so a settings string cannot close the script element. The shell response stays `Cache-Control: no-cache`. If the settings read fails, the tag is omitted and the HTML is still served. `type="application/json"` is not executed, so it does not change the CSP script hashes.
+That object is the body of anonymous `GET /api/settings` (`load_anonymous_settings` mapped with `to_api_settings`, then `serde_json` — the same serializer as the JSON response). `<`, `>`, `&`, U+2028, and U+2029 are escaped as `\u003c`, `\u003e`, `\u0026`, `\u2028`, and `\u2029`, so a settings string cannot close the script element. The escaped JSON is cached with the script block. The shell response stays `Cache-Control: no-cache`. `type="application/json"` is not executed (`script_type_is_executable` skips it), so it does not change the CSP script hashes.
+
+The same rewrite fills `<title>`, `og:title`, and `og:site_name` from `org_name`, and the description / `og:description` meta tags from `site_description`, when those tags are already in `index.html`. Values are HTML-escaped. If settings are unavailable the template text is left as built.
+
+The blob lives in memory on each server process for 10 seconds (`PUBLIC_SETTINGS_TTL` in `crates/site-server`). A `PUT /api/settings` or first-boot setup write drops that freshness immediately, including when the write fails. The last blob is kept so a timed-out re-read can still be served. The embed read waits at most 300 milliseconds (`EMBED_SETTINGS_TIMEOUT`); on timeout or error the page is still served, with the stale blob if one exists and without the `sc-settings` block otherwise. The cache is per process: a restart clears it, and two app instances do not share it.
+
+A missing file under `/assets/`, or a missing path whose extension is a real static type (`js`, `mjs`, `css`, `wasm`, `map`, `svg`, `png`, `jpg`, `jpeg`, `webp`, `gif`, `avif`, `ico`, `woff`, `woff2`, `ttf`, `json`), is `404` with `Cache-Control: no-store` and a plain-text body. Client routes, including wiki and article slugs that contain a dot (`/wiki/foo.bar`, `/articles/v1.2-notes`), still receive the HTML shell.
 
 The app sets `Content-Security-Policy-Report-Only` itself (same-origin scripts,
 Google Fonts, Discord/Google avatar hosts, and `NOSTR_RELAY_URL` for chat
