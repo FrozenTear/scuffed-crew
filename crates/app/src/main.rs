@@ -25,12 +25,8 @@ use state::AuthState;
 fn main() {
     // The router drops undeclared query params as soon as it mounts. Snapshot
     // `/login?error=registration_closed` while the address bar still has it.
-    // Login consumes that snapshot on its first mount.
-    //
-    // The slot is process-wide (one static for the whole process). That matches
-    // a single WASM page load. An SSR server rendering many documents in one
-    // process would need a per-request slot instead — the first render would
-    // otherwise consume the banner for every later request.
+    // Login consumes that snapshot on its first mount. One process-wide slot;
+    // see `LoginBannerSlot`.
     pages::capture_initial_login_banner();
     dioxus::launch(App);
 }
@@ -42,7 +38,7 @@ const DESKTOP_CANVAS_JS: &str = include_str!("../assets/desktop_canvas.js");
 fn App() -> Element {
     // Once per App mount, before `Router` rewrites the URL. `main` already
     // snapshotted on a normal boot, so this is a no-op then. A re-render must
-    // not take the lock again. Same process-wide slot as `main` (see above).
+    // not take the lock again. Same `LoginBannerSlot` as `main`.
     use_hook(|| {
         pages::capture_initial_login_banner();
     });

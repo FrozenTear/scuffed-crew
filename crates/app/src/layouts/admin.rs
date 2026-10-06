@@ -194,6 +194,7 @@ pub fn AdminLayout() -> Element {
     let auth = use_auth();
     let mut nav_open = use_signal(|| false);
 
+    // Off wasm this listener is a no-op, so Escape does nothing on desktop builds.
     use_document_keydown(move |evt| {
         if evt.key() != "Escape" || !nav_open() {
             return;

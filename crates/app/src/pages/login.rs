@@ -240,10 +240,7 @@ fn login_banner_lock() -> std::sync::MutexGuard<'static, LoginBannerSlot> {
 
 /// Read `window.location` once, before [`dioxus::launch`] or before [`crate::routes::Route`]
 /// is mounted. Later calls keep the first snapshot, including after [`Login`] takes it.
-///
-/// Process-wide: one static for the whole process. That is one WASM page load.
-/// SSR would need a per-request slot; this static would let the first document
-/// consume the banner for every later render in the process.
+/// The slot is [`LoginBannerSlot`].
 pub(crate) fn capture_initial_login_banner() {
     capture_login_banner_from_url(&initial_browser_url());
 }
@@ -813,6 +810,11 @@ mod tests {
             Some(REGISTRATION_CLOSED_BANNER)
         );
         assert_eq!(
+            login_banner_from_browser_url("/login//?error=registration_closed"),
+            None,
+            "an extra slash is not the login route"
+        );
+        assert_eq!(
             login_banner_from_browser_url("/login?error=registration_closed#gone"),
             Some(REGISTRATION_CLOSED_BANNER)
         );
@@ -861,10 +863,12 @@ mod tests {
         let history = use_hook(|| {
             let url = PROBE_URL.with(|slot| slot.borrow().clone());
             let history = std::rc::Rc::new(dioxus::history::MemoryHistory::with_initial_path(url));
-            // Not `capture_initial_login_banner`: that reads `window.location`,
-            // which is empty in this native test. `current_route()` is still the
-            // initial path, query included. `Router::<Route>` has not mounted,
-            // so it has not replaced the history with the canonical route yet.
+            // This native test has no `window.location`, so it cannot call
+            // `capture_initial_login_banner`. The memory history still holds the
+            // initial path, query included, until the child `Router` mounts and
+            // replaces it with `/login`. Capture from `current_route()` now,
+            // before that replace. The route this test reads afterwards is the
+            // replaced one.
             capture_login_banner_from_url(&history.current_route());
             PROBE_HISTORY.with(|slot| *slot.borrow_mut() = Some(history.clone()));
             history

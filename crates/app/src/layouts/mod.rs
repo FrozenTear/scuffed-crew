@@ -39,18 +39,15 @@ fn use_document_keydown(on_key: impl FnMut(web_sys::KeyboardEvent) + 'static) {
                 // `Event` named "keydown". The closure type does not check
                 // `instanceof KeyboardEvent`, and `key()` is a non-catch import:
                 // a missing `key` string is `console.error`'d as
-                // "expected a string argument". Ignore those events.
-                if !evt.is_instance_of::<web_sys::KeyboardEvent>() {
+                // "expected a string argument". `dyn_ref` confirms the event;
+                // `key()` is then a string, and an empty one is not a shortcut.
+                let Some(keyboard) = evt.dyn_ref::<web_sys::KeyboardEvent>() else {
+                    return;
+                };
+                if keyboard.key().is_empty() {
                     return;
                 }
-                let key_ok =
-                    js_sys::Reflect::get(evt.as_ref(), &wasm_bindgen::JsValue::from_str("key"))
-                        .ok()
-                        .and_then(|value| value.as_string())
-                        .is_some();
-                if key_ok {
-                    on_key(evt);
-                }
+                on_key(evt);
             })
                 as Box<dyn FnMut(web_sys::KeyboardEvent)>));
         if let Some(window) = web_sys::window() {
@@ -66,6 +63,8 @@ fn use_document_keydown(on_key: impl FnMut(web_sys::KeyboardEvent) + 'static) {
     });
 }
 
+/// Desktop and other non-wasm builds have no `window`. Document `keydown`,
+/// including the Escape handlers in the public and admin layouts, is a no-op.
 #[cfg(not(target_arch = "wasm32"))]
 fn use_document_keydown(_on_key: impl FnMut(web_sys::KeyboardEvent) + 'static) {}
 
