@@ -23,9 +23,12 @@
 //! The rewritten head prefix is filled once for that blob and reused. The
 //! shell stays `Cache-Control: no-cache`.
 //!
-//! A cache miss waits at most [`EMBED_SETTINGS_TIMEOUT`], including time spent
-//! waiting on another in-flight read. That read keeps running after the cap
-//! and can still store for the generation it started with. On timeout or error
+//! A cache miss waits at most [`EMBED_SETTINGS_TIMEOUT`]. That includes waiting
+//! on an in-flight read that has not yet passed the cap. Once that read is
+//! past the cap, or refreshes are backing off, the miss returns immediately
+//! with the stale blob or with no embed. The in-flight read keeps running
+//! after the cap and can still store for the generation it started with. The
+//! cache TTL is measured from when that read started. On timeout or error
 //! the last blob from the current generation is served if one exists
 //! (stale-on-error). A timeout records its backoff against that starting
 //! generation, so a save during the wait does not suppress the next one. A
@@ -394,8 +397,7 @@ fn render_shell(template: &ShellTemplate, embed: Option<&CachedPublicSettings>) 
     let Some(idx) = template.head_close else {
         return template.html.to_string();
     };
-    let template_key = Arc::as_ptr(&template.html) as *const () as usize;
-    let head = embed.rendered_head(template_key, || {
+    let head = embed.rendered_head(&template.html, || {
         rewrite_document_head(
             &template.html[..idx],
             &embed.org_name,
@@ -455,12 +457,12 @@ fn replace_title_text(head: &str, org_name: &str) -> String {
     let mut out = String::with_capacity(head.len() + escaped.len());
     let mut i = 0;
     while let Some(start) = find_tag(head, i, "<title") {
-        let after = start + "<title".len();
-        let Some(gt_rel) = head[after..].find('>') else {
+        let Some(content_start) = tag_gt_end(head.as_bytes(), start) else {
             break;
         };
-        let content_start = after + gt_rel + 1;
-        let Some(content_end) = find_tag(head, content_start, "</title") else {
+        // Title text is not scanned for comments or scripts. A `<!--` or
+        // `<script` in the text must not hide the real `</title>`.
+        let Some(content_end) = find_title_close(head, content_start) else {
             break;
         };
         out.push_str(&head[i..content_start]);
@@ -475,11 +477,9 @@ fn replace_meta_contents(head: &str, org_name: &str, site_description: &str) -> 
     let mut out = String::with_capacity(head.len());
     let mut i = 0;
     while let Some(start) = find_tag(head, i, "<meta") {
-        let after = start + "<meta".len();
-        let Some(gt_rel) = head[after..].find('>') else {
+        let Some(end) = tag_gt_end(head.as_bytes(), start) else {
             break;
         };
-        let end = after + gt_rel + 1;
         out.push_str(&head[i..start]);
         out.push_str(&rewrite_meta_tag(
             &head[start..end],
@@ -629,6 +629,10 @@ fn find_tag(html: &str, from: usize, needle: &str) -> Option<usize> {
     let needle = needle.as_bytes();
     let mut i = from;
     while i < bytes.len() {
+        if bytes[i] != b'<' {
+            i += 1;
+            continue;
+        }
         if let Some(next) = skip_raw_region(bytes, i) {
             i = next;
             continue;
@@ -636,6 +640,45 @@ fn find_tag(html: &str, from: usize, needle: &str) -> Option<usize> {
         if eq_ignore_ascii_case_at(bytes, i, needle)
             && (needle.ends_with(b">") || tag_name_ends_at(bytes, i + needle.len()))
         {
+            return Some(i);
+        }
+        // Skip the rest of this tag, including quoted attribute values, so
+        // `<!--` or `<script` inside quotes is not treated as markup.
+        i = tag_gt_end(bytes, i).unwrap_or(i + 1);
+    }
+    None
+}
+
+/// Index just past the `>` that ends the tag whose `<` is at `open`.
+/// Quoted attribute values are skipped, so a `>` inside them does not end the tag.
+fn tag_gt_end(bytes: &[u8], open: usize) -> Option<usize> {
+    let mut i = open + 1;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'"' | b'\'' => {
+                let quote = bytes[i];
+                i += 1;
+                while i < bytes.len() && bytes[i] != quote {
+                    i += 1;
+                }
+                if i < bytes.len() {
+                    i += 1;
+                }
+            }
+            b'>' => return Some(i + 1),
+            _ => i += 1,
+        }
+    }
+    None
+}
+
+/// `</title` in title text. Does not skip comments or raw elements.
+fn find_title_close(html: &str, from: usize) -> Option<usize> {
+    let bytes = html.as_bytes();
+    let needle = b"</title";
+    let mut i = from;
+    while i < bytes.len() {
+        if eq_ignore_ascii_case_at(bytes, i, needle) && tag_name_ends_at(bytes, i + needle.len()) {
             return Some(i);
         }
         i += 1;
@@ -660,8 +703,7 @@ fn tag_name_ends_at(bytes: &[u8], after_name: usize) -> bool {
 /// past that region. Unclosed regions run to the end of the document.
 fn skip_raw_region(bytes: &[u8], i: usize) -> Option<usize> {
     if eq_ignore_ascii_case_at(bytes, i, b"<!--") {
-        let end = find_bytes_ci(bytes, i + 4, b"-->").map(|at| at + 3);
-        return Some(end.unwrap_or(bytes.len()));
+        return Some(skip_comment(bytes, i));
     }
     let name = if is_raw_open(bytes, i, b"script") {
         "script"
@@ -670,12 +712,25 @@ fn skip_raw_region(bytes: &[u8], i: usize) -> Option<usize> {
     } else {
         return None;
     };
-    let after_open = bytes[i..]
-        .iter()
-        .position(|b| *b == b'>')
-        .map(|rel| i + rel + 1)
-        .unwrap_or(bytes.len());
+    let after_open = tag_gt_end(bytes, i).unwrap_or(bytes.len());
     Some(find_close_tag(bytes, after_open, name).unwrap_or(bytes.len()))
+}
+
+/// Index just past a comment that starts at `i` (`<!--`).
+///
+/// `<!-->` and `<!--->` are complete empty comments. Anything else runs until
+/// `-->`, or to the end of the document when the comment is unclosed.
+fn skip_comment(bytes: &[u8], i: usize) -> usize {
+    let after = i + 4;
+    if bytes.get(after) == Some(&b'>') {
+        return after + 1;
+    }
+    if bytes.get(after) == Some(&b'-') && bytes.get(after + 1) == Some(&b'>') {
+        return after + 2;
+    }
+    find_bytes_ci(bytes, after, b"-->")
+        .map(|at| at + 3)
+        .unwrap_or(bytes.len())
 }
 
 fn is_raw_open(bytes: &[u8], i: usize, name: &[u8]) -> bool {
@@ -697,9 +752,7 @@ fn find_close_tag(bytes: &[u8], from: usize, name: &str) -> Option<usize> {
     let mut i = from;
     while i < bytes.len() {
         if eq_ignore_ascii_case_at(bytes, i, open) && tag_name_ends_at(bytes, i + open.len()) {
-            let after = i + open.len();
-            let gt = bytes[after..].iter().position(|b| *b == b'>')?;
-            return Some(after + gt + 1);
+            return tag_gt_end(bytes, i);
         }
         i += 1;
     }
@@ -710,14 +763,19 @@ async fn load_embed(state: &AppState) -> Option<Arc<CachedPublicSettings>> {
     if let Some(hit) = state.public_settings.fresh() {
         return Some(hit);
     }
+    // A leader that already ran past the cap still holds the refresh lock and
+    // has recorded backoff. The same is true while refreshes are suppressed
+    // after an error. Waiting on that lock would cost every miss the full cap.
+    if state.public_settings.refresh_suppressed() {
+        return state.public_settings.stale();
+    }
     // Recorded before the wait. A save that bumps the generation while this
     // request is in flight must not inherit the timeout backoff.
     let generation = state.public_settings.generation();
-    // The cap covers waiting for the single in-flight read and the read
-    // itself. A request queued behind a slow leader falls back here instead
-    // of blocking until that leader finishes. Dropping this wait does not
-    // cancel the leader: that read holds an owned lock in its own task and
-    // can still store when it finishes.
+    // The cap covers waiting for an in-flight read that has not yet passed it,
+    // and the read itself. Dropping this wait does not cancel the leader: that
+    // read holds an owned lock in its own task and can still store when it
+    // finishes.
     match tokio::time::timeout(EMBED_SETTINGS_TIMEOUT, load_embed_locked(state)).await {
         Ok(ready) => ready,
         Err(_elapsed) => {
@@ -744,15 +802,19 @@ async fn load_embed_locked(state: &AppState) -> Option<Arc<CachedPublicSettings>
     let task_state = state.clone();
     let task = tokio::spawn(async move {
         let _flight = flight;
+        // TTL starts here, when the read starts, not when it stores.
+        let started = tokio::time::Instant::now();
         match embed_read(&task_state).await {
             Ok(payload) => {
                 let cached = Arc::new(payload);
                 // A rejected store still returns this row for the response
                 // that waited. It is not cached, so a later request cannot
                 // keep a pre-save row.
-                let _stored = task_state
-                    .public_settings
-                    .store(generation, CachedPublicSettings::clone(&cached));
+                let _stored = task_state.public_settings.store(
+                    generation,
+                    CachedPublicSettings::clone(&cached),
+                    started,
+                );
                 Some(cached)
             }
             Err(err) => {
@@ -1805,18 +1867,73 @@ mod tests {
     }
 
     #[test]
+    fn quoted_markup_and_empty_comments_do_not_hide_the_head() {
+        let html = "\
+<meta name=\"description\" content=\"a <!-- b <script> <style> c\">
+<meta property=\"og:title\" content='keep > this'>
+<title>Plain</title>
+</head><body>after";
+        let close = find_head_close(html).unwrap();
+        assert!(html[close..].starts_with("</head><body>"));
+        let head = &html[..close];
+        let out = rewrite_document_head(head, "Boot", "Desc");
+        assert!(out.contains("content=\"Desc\""));
+        assert!(out.contains("content='Boot'"));
+        assert!(out.contains("<title>Boot</title>"));
+        assert_eq!(out.matches("<title>Boot</title>").count(), 1);
+        assert!(!out.contains("<title>Plain"));
+        assert!(!head.contains("</head>"));
+
+        // Title text is not a raw region. `<!--` and `<script` there must not
+        // hide the real `</title>`.
+        let titled = "<title>See <!-- not a comment <script> x</title>";
+        assert_eq!(
+            rewrite_document_head(titled, "Boot", ""),
+            "<title>Boot</title>"
+        );
+
+        for prefix in ["<!-->", "<!--->"] {
+            let marked = format!("{prefix}<title>The Scuffed Crew</title></head>");
+            let end = find_head_close(&marked).unwrap();
+            assert!(
+                marked[end..].starts_with("</head>"),
+                "{prefix} must not swallow the head"
+            );
+            let rewritten = rewrite_document_head(&marked[..end], "Boot", "");
+            assert!(
+                rewritten.contains("<title>Boot</title>"),
+                "{prefix} hid the title: {rewritten}"
+            );
+            assert!(rewritten.starts_with(prefix), "{rewritten}");
+        }
+    }
+
+    /// Rewrite the repo `crates/app/index.html`, and an optional second file.
+    ///
+    /// `SCUFFED_EXTRA_INDEX`, when set, is a path to another `index.html`
+    /// (for example Site PR #150) checked with the same rules.
+    /// `SCUFFED_REQUIRE_OG_SITE_NAME=1` requires that extra file to contain
+    /// `og:site_name` exactly once. Any file that already contains the tag
+    /// must have it exactly once either way; more than one copy fails. This
+    /// branch's template has no `og:site_name` yet, so the bundled file stays
+    /// green without the variable.
+    #[test]
     fn real_app_index_rewrite_fills_each_present_tag_once() {
         let html = include_str!("../../../app/index.html");
-        assert_real_index_rewrite(html);
+        assert_real_index_rewrite(html, false);
         if let Ok(path) = std::env::var("SCUFFED_EXTRA_INDEX") {
             let extra = std::fs::read_to_string(&path).unwrap_or_else(|err| {
                 panic!("read {path}: {err}");
             });
-            assert_real_index_rewrite(&extra);
+            let require_og_site_name = std::env::var("SCUFFED_REQUIRE_OG_SITE_NAME")
+                .ok()
+                .as_deref()
+                == Some("1");
+            assert_real_index_rewrite(&extra, require_og_site_name);
         }
     }
 
-    fn assert_real_index_rewrite(html: &str) {
+    fn assert_real_index_rewrite(html: &str, require_og_site_name: bool) {
         let org = "Boot <Clan> & \"Q\"";
         let desc = "Tag <line> & \"Q\"";
         let escaped_org = escape_html_text(org);
@@ -1839,15 +1956,25 @@ mod tests {
         );
         assert!(!out.contains("{app_title}"));
         assert!(!out.contains("<title>The Scuffed Crew</title>"));
-        assert_replaced(html, &out, MetaKind::Name("description"), &escaped_desc);
-        assert_replaced(html, &out, MetaKind::Property("og:title"), &escaped_org);
-        assert_replaced(
+        assert_present_once(html, &out, MetaKind::Name("description"), &escaped_desc);
+        assert_present_once(html, &out, MetaKind::Property("og:title"), &escaped_org);
+        assert_present_once(
             html,
             &out,
             MetaKind::Property("og:description"),
             &escaped_desc,
         );
-        assert_replaced(html, &out, MetaKind::Property("og:site_name"), &escaped_org);
+        let site_names = meta_values(html, MetaKind::Property("og:site_name"));
+        if require_og_site_name || !site_names.is_empty() {
+            assert_eq!(site_names.len(), 1, "og:site_name must appear exactly once");
+            assert_eq!(
+                meta_values(&out, MetaKind::Property("og:site_name")),
+                vec![escaped_org.clone()]
+            );
+        } else {
+            assert!(site_names.is_empty());
+            assert!(meta_values(&out, MetaKind::Property("og:site_name")).is_empty());
+        }
         assert_eq!(
             meta_values(html, MetaKind::Property("og:type")),
             meta_values(&out, MetaKind::Property("og:type"))
@@ -1868,24 +1995,23 @@ mod tests {
         Property(&'static str),
     }
 
-    fn assert_replaced(source: &str, out: &str, kind: MetaKind, expected: &str) {
+    fn assert_present_once(source: &str, out: &str, kind: MetaKind, expected: &str) {
         let before = meta_values(source, kind);
-        let after = meta_values(out, kind);
-        if before.is_empty() {
-            assert!(after.is_empty());
-        } else {
-            assert_eq!(after, vec![expected.to_string()]);
-        }
+        assert_eq!(
+            before.len(),
+            1,
+            "template must contain this meta exactly once"
+        );
+        assert_eq!(meta_values(out, kind), vec![expected.to_string()]);
     }
 
     fn meta_values(html: &str, kind: MetaKind) -> Vec<String> {
         let mut values = Vec::new();
         let mut i = 0;
         while let Some(start) = find_tag(html, i, "<meta") {
-            let Some(gt) = html[start..].find('>') else {
+            let Some(end) = tag_gt_end(html.as_bytes(), start) else {
                 break;
             };
-            let end = start + gt + 1;
             let attrs = scan_attrs(&html[start..end]);
             let matches = match kind {
                 MetaKind::Name(name) => attrs.iter().any(|attr| {
@@ -1933,12 +2059,19 @@ mod tests {
     #[test]
     fn rendered_head_is_reused_for_the_same_template() {
         let cached = cached_settings(r#"{"org_name":"Boot"}"#, "Boot", "Desc");
-        let head = "<title>Old</title><meta name=\"description\" content=\"Old\">";
-        let first = cached.rendered_head(1, || rewrite_document_head(head, "Boot", "Desc"));
-        let second = cached.rendered_head(1, || panic!("rebuilt the cached head"));
+        let head: Arc<str> =
+            Arc::from("<title>Old</title><meta name=\"description\" content=\"Old\">");
+        let other: Arc<str> =
+            Arc::from("<title>Other</title><meta name=\"description\" content=\"Other\">");
+        let first = cached.rendered_head(&head, || rewrite_document_head(&head, "Boot", "Desc"));
+        let second = cached.rendered_head(&head, || panic!("rebuilt the cached head"));
         assert!(std::sync::Arc::ptr_eq(&first, &second));
         assert!(first.contains("<title>Boot</title>"));
         assert!(first.contains("content=\"Desc\""));
+        let third = cached.rendered_head(&other, || rewrite_document_head(&other, "Boot", "Desc"));
+        assert!(third.contains("<title>Boot</title>"));
+        assert!(third.contains("content=\"Desc\""));
+        assert!(!std::sync::Arc::ptr_eq(&first, &third));
     }
 
     #[test]
@@ -2085,6 +2218,7 @@ mod tests {
         assert!(state.public_settings.store(
             state.public_settings.generation(),
             named_settings("Kept Clan"),
+            tokio::time::Instant::now(),
         ));
         state.public_settings.expire_for_test();
         state.public_settings.set_loader(Some(Arc::new(|| {
@@ -2116,11 +2250,55 @@ mod tests {
         assert_eq!(
             state
                 .public_settings
-                .fresh()
+                .stale()
                 .map(|blob| blob.org_name.clone()),
             Some("Slow Clan".to_string()),
             "a read that outlives the cap must still fill the cache"
         );
+        assert!(
+            state.public_settings.fresh().is_none(),
+            "the TTL starts when the read starts, so a 30s read is already stale"
+        );
+    }
+
+    #[tokio::test]
+    async fn miss_during_slow_leader_returns_without_waiting_the_cap() {
+        let (_tree, state, app) = ShellFixture::new("slow-miss").await;
+        assert!(state.public_settings.store(
+            state.public_settings.generation(),
+            named_settings("Kept Clan"),
+            tokio::time::Instant::now(),
+        ));
+        state.public_settings.expire_for_test();
+        state.public_settings.set_loader(Some(Arc::new(|| {
+            Box::pin(async {
+                tokio::time::sleep(Duration::from_secs(30)).await;
+                Ok(named_settings("Slow Clan"))
+            })
+        })));
+        tokio::time::pause();
+        let mut first = tokio::spawn(shell_text(app.clone(), "/"));
+        tokio::time::sleep(EMBED_SETTINGS_TIMEOUT).await;
+        drive(&mut first).await;
+        assert!(first.is_finished());
+        let _ = first.await.unwrap();
+        assert!(
+            state.public_settings.refresh_suppressed(),
+            "the timed-out leader must record backoff before the next miss"
+        );
+
+        let mut second = tokio::spawn(shell_text(app, "/"));
+        // No clock advance. A miss that waits on the lock would still be inside
+        // the cap and this drive would leave it unfinished.
+        drive(&mut second).await;
+        assert!(
+            second.is_finished(),
+            "a miss during a read that already passed the cap must not wait out the cap"
+        );
+        let body = second.await.unwrap();
+        assert!(body.contains("Kept Clan"), "{body}");
+        assert!(body.contains("sc-settings"), "{body}");
+        assert!(!body.contains("Slow Clan"), "{body}");
     }
 
     #[tokio::test]
@@ -2129,6 +2307,7 @@ mod tests {
         assert!(state.public_settings.store(
             state.public_settings.generation(),
             named_settings("Kept Clan"),
+            tokio::time::Instant::now(),
         ));
         state.public_settings.expire_for_test();
         let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -2261,6 +2440,7 @@ mod tests {
         assert!(state.public_settings.store(
             state.public_settings.generation(),
             named_settings("Kept Clan"),
+            tokio::time::Instant::now(),
         ));
         state.public_settings.expire_for_test();
         let _guard = state.public_settings.refresh_lock().await;
