@@ -19,6 +19,23 @@ use blocks::{
 use css::home_css_layers;
 use data::{Announcement, Event, HomeTournament, Overview};
 
+/// What `Home` paints from the settings fetch. Pending is a textless skeleton,
+/// not the template homepage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HomeBody {
+    Skeleton,
+    Error,
+    Ready,
+}
+
+fn home_body(phase: FetchClass) -> HomeBody {
+    match phase {
+        FetchClass::Loading => HomeBody::Skeleton,
+        FetchClass::Error => HomeBody::Error,
+        FetchClass::Ready => HomeBody::Ready,
+    }
+}
+
 #[component]
 pub fn Home() -> Element {
     let site_settings = use_site_settings();
@@ -62,12 +79,21 @@ pub fn Home() -> Element {
     // new installs. Painting it before settings arrive flashes that template,
     // then swaps in the real org. Pending stays a textless skeleton. A failed
     // load stays an error, not the template.
-    let Some(settings) = loaded else {
+    let body = home_body(settings_fetch);
+    let Some(settings) = loaded.filter(|_| body == HomeBody::Ready) else {
+        // Defaults match a fresh install (`ops_hub` is 80rem). Omitting them
+        // leaves the 72rem base, so the rail grows 128px at 1280px when the
+        // real shell arrives.
+        let shell_attr = HomeShell::default().as_str();
+        let skin_attr = HomeSkin::default().as_str();
         let css = home_css_layers();
         return rsx! {
             style { "{css}" }
-            div { class: "home-wrap",
-                if settings_fetch == FetchClass::Error {
+            div {
+                class: "home-wrap",
+                "data-home-shell": "{shell_attr}",
+                "data-home-skin": "{skin_attr}",
+                if body == HomeBody::Error {
                     HeroSettingsError { refresh: site_settings.refresh }
                 } else {
                     HeroSkeleton {}
@@ -79,7 +105,6 @@ pub fn Home() -> Element {
     let content = settings.homepage.clone();
     let home_shell: HomeShell = settings.home_shell;
     let home_skin: HomeSkin = settings.home_skin;
-    // `org_initials` of an empty name is "CL", which is still a fake mark.
     let initials = org_initials(&settings.org_name);
     let recruitment_open = settings.recruitment_open;
 
@@ -252,14 +277,19 @@ pub fn Home() -> Element {
     }
 }
 
-/// Textless hero. Bars use the loaded hero's type scale so the swap keeps the rail.
+/// Textless hero. Bars use the loaded hero's type scale.
+///
+/// The parent `.home-wrap` must set `data-home-shell` and `data-home-skin`.
+/// The pending wrapper uses the defaults (`ops_hub`, `clean`). `ops_hub` sets
+/// `--home-max` to 80rem; without it the base stays 72rem, so at 1280px the
+/// rail grows 128px and the text shifts 64px when settings arrive.
 #[component]
 fn HeroSkeleton() -> Element {
     rsx! {
         header {
             class: "home-hero",
             aria_busy: "true",
-            aria_label: "Loading",
+            span { class: "home-skel-status", role: "status", "Loading…" }
             div { class: "home-hero-rail",
                 div { class: "home-hero-inner",
                     div { class: "home-skel home-skel-badge", aria_hidden: "true" }
@@ -323,7 +353,44 @@ mod tests {
         assert!(html.contains("home-hero"), "{html}");
         assert!(html.contains("home-skel-title"), "{html}");
         assert!(html.contains("aria-busy"), "{html}");
+        assert!(html.contains("role=\"status\""), "{html}");
+        assert!(html.contains("Loading…"), "{html}");
+        assert!(!html.contains("aria-label"), "{html}");
         assert_no_template_copy(&html);
+    }
+
+    #[test]
+    fn home_body_follows_the_settings_phase() {
+        assert_eq!(home_body(FetchClass::Loading), HomeBody::Skeleton);
+        assert_eq!(home_body(FetchClass::Error), HomeBody::Error);
+        assert_eq!(home_body(FetchClass::Ready), HomeBody::Ready);
+    }
+
+    #[test]
+    fn loading_home_mounts_without_template_copy() {
+        fn view() -> Element {
+            crate::state::provide_site_settings();
+            rsx! { Home {} }
+        }
+        let html = render(view);
+        assert!(
+            html.contains(
+                "class=\"home-wrap\" data-home-shell=\"ops_hub\" data-home-skin=\"clean\""
+            ),
+            "{html}"
+        );
+        assert!(html.contains("home-skel"), "{html}");
+        assert!(html.contains("Loading…"), "{html}");
+        for needle in [
+            "YOUR CLAN",
+            "Your",
+            "Clan",
+            "How we play",
+            "Edit this copy in Settings",
+            "Edit this copy",
+        ] {
+            assert!(!html.contains(needle), "{needle} in {html}");
+        }
     }
 
     #[test]
@@ -333,7 +400,6 @@ mod tests {
             rsx! { HeroSettingsError { refresh } }
         }
         let html = render(view);
-        // dioxus-ssr escapes the apostrophe in "Couldn't".
         assert!(
             html.contains("load this page") && html.contains("try again"),
             "{html}"

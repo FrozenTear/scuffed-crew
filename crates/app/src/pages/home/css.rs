@@ -94,8 +94,22 @@ pub const HOME_SHARED_CSS: &str = r#"
         z-index: 2;
         max-width: min(40rem, 100%);
     }
-    /* Neutral stand-in for the hero copy. Same rail and title scale as the
-       loaded hero so the swap does not move the page. No readable text. */
+    /* Neutral stand-in for the hero copy. Same type scale as the loaded hero.
+       Column width comes from `.home-wrap[data-home-shell]`: default `ops_hub`
+       is 80rem and the unset base is 72rem. A pending wrapper without that
+       attribute grows the rail by 8rem (128px) at 1280px and the text shifts
+       64px. No readable text except the visually hidden status. */
+    .home-skel-status {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        padding: 0;
+        margin: -1px;
+        overflow: hidden;
+        clip: rect(0, 0, 0, 0);
+        white-space: nowrap;
+        border: 0;
+    }
     .home-skel {
         border-radius: 6px;
         background: color-mix(in srgb, var(--text) 12%, var(--surface-2));
