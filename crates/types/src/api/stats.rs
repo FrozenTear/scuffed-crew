@@ -94,8 +94,8 @@ pub struct DaemonConfigResponse {
 /// `GET /api/stats/member/{id}/roles`.
 ///
 /// Same counters as the hero aggregate, with `role` instead of `hero`.
-/// Rows are grouped by the `role` stored on each `personal_match`. That
-/// column already holds the tracker's corrected value when `edited` is true.
+/// Rows are grouped by the role the tracker uploaded: its manual correction
+/// if made, else the detected role.
 /// `""` is its own row. Order is matches descending, then role ascending.
 /// Defined here so the WASM app can deserialize the response; `scuffed_db`
 /// re-exports it next to `HeroStats`.

@@ -8055,36 +8055,7 @@ async fn role_stats_endpoints_match_heroes_auth_and_group_stored_role() {
 
     // A session for a user with no member row is 403, same as /heroes.
     let nomember_token = "test-nomember-token";
-    let nomember_hash = hash_session_token(nomember_token);
-    let pid_hash = hash_session_token("nomemberuser-provider-id");
-    state
-        .db
-        .client
-        .query(format!(
-            r#"CREATE user:nomemberuser SET
-                provider = 'discord',
-                username = 'NoMember',
-                avatar_url = NONE,
-                provider_id = 'nomemberuser-provider-id',
-                provider_id_hash = '{pid_hash}',
-                provider_id_encrypted = NONE,
-                created_at = time::now()"#
-        ))
-        .await
-        .expect("seed user without member");
-    state
-        .db
-        .client
-        .query(
-            r#"CREATE session:sess_nomember SET
-                user_id = 'nomemberuser',
-                token = $tok,
-                expires_at = time::now() + 365d,
-                created_at = time::now()"#,
-        )
-        .bind(("tok", nomember_hash))
-        .await
-        .expect("seed session without member");
+    seed_applicant(&state.db, "nomemberuser", "NoMember", nomember_token).await;
     let (rs, rb) = get_json(&state, "/api/stats/me/roles", Some(nomember_token)).await;
     let (hs, hb) = get_json(&state, "/api/stats/me/heroes", Some(nomember_token)).await;
     assert_eq!(rs, StatusCode::FORBIDDEN);

@@ -508,9 +508,10 @@ impl Database {
     /// Per-role aggregates from the stored `role` column only.
     ///
     /// One `GROUP BY role` over `personal_match` for this member. The column
-    /// already holds the tracker's corrected role when `edited` is true. The
-    /// schema type is `string` (a `NONE` write is rejected), so an empty role
-    /// is `""` and is its own group — the value is not defaulted in serde.
+    /// is the role the tracker uploaded: its manual correction if made, else
+    /// the detected role. The schema type is `string` (a `NONE` write is
+    /// rejected), so an empty role is `""` and is its own group — the value
+    /// is not defaulted when decoding via SurrealValue.
     /// Optional season window matches [`Self::get_hero_stats_in`]
     /// (`played_at >= start AND played_at < end`). Order: `matches`
     /// descending, then `role` ascending.
@@ -1958,6 +1959,7 @@ mod tests {
         let db = test_db().await;
         let start = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
         let end = Utc.with_ymd_and_hms(2026, 6, 1, 0, 0, 0).unwrap();
+        let just_before_start = start - chrono::Duration::seconds(1);
         let just_inside_end = end - chrono::Duration::seconds(1);
 
         let row = |sid: &str, at: chrono::DateTime<Utc>, elims: u32| {
@@ -1970,6 +1972,7 @@ mod tests {
         db.upsert_personal_matches(
             "bounds",
             &[
+                row("before-start", just_before_start, 100),
                 row("at-start", start, 8),
                 row("inside", start + chrono::Duration::hours(1), 9),
                 row("before-end", just_inside_end, 9),
@@ -1986,7 +1989,7 @@ mod tests {
         assert_eq!(roles[0].role, "Tank");
         assert_eq!(
             roles[0].matches, 3,
-            "start is included; end and after are not"
+            "start is included; one second before start, end, and after are not"
         );
         close(roles[0].avg_elims, 26.0 / 3.0);
 
@@ -1996,19 +1999,20 @@ mod tests {
     }
 
     /// `personal_match.role` is `TYPE string`. NONE is not a stored value, so
-    /// the aggregate must not paper over a missing role with a serde default.
+    /// the aggregate must not paper over a missing role when decoding via
+    /// SurrealValue. The same insert with `role = ''` succeeds.
     #[tokio::test]
     async fn role_none_is_rejected_and_empty_string_still_groups() {
         let db = test_db().await;
-        let none_error = match db
-            .client
-            .query(
+
+        async fn insert_role(db: &crate::Database, role_expr: &str) -> Result<(), String> {
+            let sql = format!(
                 r#"CREATE personal_match SET
                     member_id = 'none-probe',
                     hero = 'Sombra',
                     map_name = 'Oasis',
                     game_mode = 'control',
-                    role = NONE,
+                    role = {role_expr},
                     outcome = 'victory',
                     elims = 1,
                     deaths = 0,
@@ -2019,32 +2023,23 @@ mod tests {
                     played_at = d'2026-03-01T00:00:00Z',
                     uploaded_at = time::now(),
                     session_id = 'none-probe-sid',
-                    edited = false"#,
-            )
+                    edited = false"#
+            );
+            match db.client.query(sql).await {
+                Ok(response) => response.check().map(|_| ()).map_err(|err| err.to_string()),
+                Err(err) => Err(err.to_string()),
+            }
+        }
+
+        let none_error = insert_role(&db, "NONE").await.expect_err("role = NONE");
+        insert_role(&db, "''")
             .await
-        {
-            Ok(response) => response
-                .check()
-                .err()
-                .map(|err| err.to_string())
-                .unwrap_or_default(),
-            Err(err) => err.to_string(),
-        };
-        let none_error_l = none_error.to_ascii_lowercase();
+            .expect("the same insert with role = '' succeeds");
         assert!(
-            none_error_l.contains("role")
-                && (none_error_l.contains("none")
-                    || none_error_l.contains("null")
-                    || none_error_l.contains("type")
-                    || none_error_l.contains("string")),
-            "schema must reject role = NONE, got: {none_error}"
+            !none_error.is_empty(),
+            "NONE rejection should carry a database error"
         );
 
-        let mut blank = entry("blank-role", "victory", 3);
-        blank.role = String::new();
-        db.upsert_personal_matches("none-probe", &[blank])
-            .await
-            .unwrap();
         let roles = db.get_role_stats("none-probe").await.unwrap();
         assert_eq!(roles.len(), 1);
         assert_eq!(roles[0].role, "");
