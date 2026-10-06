@@ -415,14 +415,30 @@ fn escape_html_text(value: &str) -> String {
 }
 
 /// Replace `<title>` text and the meta contents the anonymous settings can
-/// fill. Attribute order and incidental whitespace do not matter. Tags that
-/// are absent stay absent.
+/// fill. A value that is empty after trimming leaves its own tags alone:
+/// `org_name` covers `<title>`, `og:title`, and `og:site_name`;
+/// `site_description` covers the description and `og:description` metas.
+/// The two checks are independent. Attribute order and incidental whitespace
+/// do not matter. Tags that are absent stay absent.
 fn rewrite_document_head(head: &str, org_name: &str, site_description: &str) -> String {
     let with_title = replace_title_text(head, org_name);
     replace_meta_contents(&with_title, org_name, site_description)
 }
 
+/// `None` when `value` is empty or only whitespace. The original text is
+/// kept so a non-blank name is not trimmed on the way into the tag.
+fn filled_setting(value: &str) -> Option<&str> {
+    if value.trim().is_empty() {
+        None
+    } else {
+        Some(value)
+    }
+}
+
 fn replace_title_text(head: &str, org_name: &str) -> String {
+    let Some(org_name) = filled_setting(org_name) else {
+        return head.to_string();
+    };
     let lower = head.to_ascii_lowercase();
     let escaped = escape_html_text(org_name);
     let mut out = String::with_capacity(head.len() + escaped.len());
@@ -503,12 +519,12 @@ fn rewrite_meta_tag(tag: &str, org_name: &str, site_description: &str) -> String
     };
     let replacement = if let Some(property) = attr_value("property") {
         match property.to_ascii_lowercase().as_str() {
-            "og:title" | "og:site_name" => Some(org_name),
-            "og:description" => Some(site_description),
+            "og:title" | "og:site_name" => filled_setting(org_name),
+            "og:description" => filled_setting(site_description),
             _ => None,
         }
     } else if attr_value("name").is_some_and(|name| name.eq_ignore_ascii_case("description")) {
-        Some(site_description)
+        filled_setting(site_description)
     } else {
         None
     };
@@ -1602,6 +1618,61 @@ mod tests {
         assert!(!out.contains("fallback tagline"));
         assert!(out.contains("content=\"width=device-width, initial-scale=1\""));
         assert!(out.contains("property=\"og:site_name\""));
+    }
+
+    #[test]
+    fn blank_description_keeps_template_copy_while_title_is_rewritten() {
+        let head = "\
+<title>The Scuffed Crew</title>
+<meta name=\"description\" content=\"fallback description\">
+<meta property=\"og:title\" content=\"The Scuffed Crew\">
+<meta property=\"og:site_name\" content=\"The Scuffed Crew\">
+<meta property=\"og:description\" content=\"fallback tagline\">";
+        let out = rewrite_document_head(head, "Boot Clan", " \n\t ");
+        assert!(out.contains("<title>Boot Clan</title>"));
+        assert!(out.contains("property=\"og:title\" content=\"Boot Clan\""));
+        assert!(out.contains("property=\"og:site_name\" content=\"Boot Clan\""));
+        assert!(out.contains("content=\"fallback description\""));
+        assert!(out.contains("content=\"fallback tagline\""));
+        assert!(!out.contains("content=\"\""));
+    }
+
+    #[test]
+    fn blank_org_name_keeps_template_title() {
+        let head = "\
+<title>The Scuffed Crew</title>
+<meta property=\"og:title\" content=\"The Scuffed Crew\">
+<meta content=\"The Scuffed Crew\" property=\"og:site_name\">
+<meta name=\"description\" content=\"fallback description\">
+<meta property=\"og:description\" content=\"fallback tagline\">";
+        let out = rewrite_document_head(head, "   ", "A real tagline");
+        assert!(out.contains("<title>The Scuffed Crew</title>"));
+        assert!(out.contains("property=\"og:title\" content=\"The Scuffed Crew\""));
+        assert!(out.contains("content=\"The Scuffed Crew\" property=\"og:site_name\""));
+        assert!(out.contains("content=\"A real tagline\""));
+        assert_eq!(out.matches("content=\"A real tagline\"").count(), 2);
+        assert!(!out.contains("<title></title>"));
+        assert!(!out.contains("content=\"\""));
+    }
+
+    #[test]
+    fn multiline_og_description_with_content_on_its_own_line_is_rewritten() {
+        // Same shape as the frontend shell: property and content on their
+        // own lines, content not sharing a line with the tag name.
+        let head = "\
+<meta
+      property=\"og:description\"
+      content=\"Multi-game EMEA gaming org. Small teams, real structure, scheduled play nights.\"
+    />";
+        let out = rewrite_document_head(head, "Clan", "Scheduled nights");
+        assert_eq!(
+            out,
+            "\
+<meta
+      property=\"og:description\"
+      content=\"Scheduled nights\"
+    />"
+        );
     }
 
     #[test]
