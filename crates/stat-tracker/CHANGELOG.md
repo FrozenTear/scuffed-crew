@@ -73,13 +73,21 @@ came from the top bar or the accolade. A full-board text fallback is
 stored and does not split a later Tab. A late Tab of the same map does
 not split. A read inside the gap does not split.
 
-An unconfirmed word replaces the hint when its accolade map is missing
-or matches the session. While a hero select has armed a boundary, an
-unconfirmed word whose accolade map differs is ignored, and the second
-agreeing read splits: the old hint stays on this session, and the new
-session takes the new word and that map. A word on the same map, or
-with no map, still replaces the hint. A banner has no accolade map, so
-a banner-only confirmation still seals onto the open session.
+An unconfirmed word replaces the hint when its map matches the session,
+or when the boundary is not armed and the read has no map. A different
+map never replaces the hint. While a hero select has armed a boundary,
+a word with no map does not replace the hint either. The second agreeing
+read splits when the maps differ: the old hint stays on this session, and
+the new session takes the new word and that map. The confirming read uses
+a map carried from the first agreeing word when this tick has none. A
+banner has no map, so a banner-only confirmation still seals onto the
+open session.
+
+A full-board text fallback is not a map for poll decisions or for the
+board-case split. An accolade can replace it. A later top-bar or accolade
+read that names the same map upgrades the stored source, and a different
+map after that can split. A skeleton written before 0.4.18 has no source;
+a map on that file is treated as untrusted text.
 
 ### Install
 

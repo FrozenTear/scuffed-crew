@@ -56,7 +56,7 @@
 //! | State | Input | Effect |
 //! |---|---|---|
 //! | Idle, LiveMatch | confirmed word | Seal. Grace starts now. |
-//! | Idle, LiveMatch | unconfirmed word | Remember the hint. Enter PostResultStreak. |
+//! | Idle, LiveMatch | unconfirmed word | Remember the hint when the map matches, or when the boundary is not armed and the read has no map. A different map is ignored. |
 //! | Idle, LiveMatch | map vote, not blocked | Split. No seal. The same-map-plus-hero guard and the debounce are the caller's block. |
 //! | Idle, LiveMatch | hero ban, no deferred board | Split at once. No seal. |
 //! | Idle, LiveMatch | hero ban after a deferred board | Ignore. One misread plus a ban is not a split. |
@@ -72,7 +72,7 @@
 //! | LiveMatch | end screen, different map, not armed | Seal. The session already has a map, which is what made this a different map. |
 //! | LiveMatch | end screen, different map, armed | Split. Seal the old hint. The new session takes the end-screen outcome. |
 //! | PostResultStreak | confirmed word | Seal that word. Do not split. Grace starts now. |
-//! | PostResultStreak | unconfirmed word | Newest word replaces the hint. Do not split. |
+//! | PostResultStreak | unconfirmed word | Replaces the hint when the map matches, or when the boundary is not armed and the read has no map. A different map does not replace the hint. While armed, a word with no map does not replace the hint. |
 //! | PostResultStreak | map vote, not blocked, or hero ban | Split and seal the hint. |
 //! | PostResultStreak | hero select, no board yet | Seal the hint and split. |
 //! | PostResultStreak | hero select after a board | Arm a pending boundary. That arm is the first reset signal. |
@@ -82,7 +82,8 @@
 //! | PostResultStreak | fresh-match board | Defer, then split on the next fresh board. The split seals the hint. An armed streak splits on this board. |
 //! | PostResultStreak | 120s gap | Split. Seal the hint. Keep this frame's header. |
 //! | PostResultStreak | end screen, different map, not armed | Seal the word. Do not split on the map. |
-//! | PostResultStreak | end screen, different map, armed | Split. Seal the old hint. The new session takes the end-screen outcome and the accolade map. An unconfirmed word replaces the hint only when its accolade map is missing or the same. While armed, an unconfirmed word on a different accolade map is ignored. A banner has no map, so a banner-only confirmation still seals onto this session. |
+//! | PostResultStreak | end screen, different map, armed | Split. Seal the old hint. The new session takes the end-screen outcome and the map on this read, including a map the caller carried from the previous agreeing word. An unconfirmed word on a different map does not replace the hint. While armed, a word with no map does not replace it either. A banner has no map, so a banner-only confirmation still seals onto this session. |
+//! | PostResultStreak | hinted Tab, different map | Split. Seal the hint. The new session keeps this frame's header. [`plan_capture`] builds [`Obs::HintedDifferentMap`] only when the stored map is the top bar or the accolade and the gap has elapsed, or when the session has no board yet. A text-fallback map does not build it. |
 //! | PostMatch | word | Ignore the outcome. Adopt an accolade map when this session has none. |
 //! | PostMatch | start screen, not blocked | Split. No seal. The new session is Unknown and has no grace. |
 //! | PostMatch | scoreboard, not a fresh-match reset | Append. A confirmed mark is not cleared. |
@@ -127,18 +128,20 @@ impl CloseReason {
     }
 }
 
-/// End-screen evidence kept on the session until a progressed board after it,
-/// or until a confirmed read replaces it.
+/// End-screen evidence kept on the session until a second progressed board
+/// clears it, or one progressed board after an arm, or a confirmed read
+/// seals it.
 ///
-/// `confirmed == false` is a hint. It stays sealable until a second
-/// progressed board, or one progressed board after an arm, clears it, or a
-/// reset, a gap, a different-map Tab, an armed different-map end screen, or
-/// a no-board start screen seals it. An unconfirmed word replaces it when
-/// the accolade map is missing or matches this session. While a boundary is
-/// armed, an unconfirmed word whose accolade map differs is left alone, so
-/// the confirming read seals this hint and the new session takes the new
-/// word. A banner carries no accolade map, so a banner-only confirmation
-/// still seals onto this session. An idle close does not seal the hint.
+/// `confirmed == false` is a hint. A reset, a gap, a different-map Tab, an
+/// armed different-map end screen, or a no-board start screen seals it. An
+/// unconfirmed word replaces it when the maps match, or when the boundary
+/// is not armed and the read has no map. A different map never replaces it.
+/// While a boundary is armed, a word with no map does not replace it, so
+/// the confirming read can seal this hint and open the next session. A
+/// banner carries no map, so a banner-only confirmation still seals onto
+/// this session. An idle close does not seal the hint. A full-board text
+/// fallback is not a map here: the poll treats it as absent, an accolade
+/// can replace it, and a different-map split does not use it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ResultMark {
     pub outcome: MatchOutcome,
@@ -183,6 +186,11 @@ pub struct PollInput<'a> {
     /// Consecutive fresh-match boards already deferred.
     pub reset_streak: u32,
     pub map: Option<&'a str>,
+    /// False when `map` is a full-board text fallback, or a pre-0.4.18
+    /// skeleton that had a map and no source. [`decide_poll`] treats that
+    /// map as absent: a different accolade does not split, and an accolade
+    /// can replace the stored name.
+    pub map_trusted: bool,
     pub hero: Option<&'a str>,
     pub signal: Option<MatchOutcome>,
     /// Banner, or the second agreeing word inside the confirm window.
@@ -236,9 +244,10 @@ pub enum PollDecision {
     Open(OpenNew),
 }
 
-/// What one observation does. Every poll tick and every Tab goes through
-/// [`transition`], including a hinted Tab whose map differs. The wrappers
-/// only pack and apply this.
+/// What one observation does. Every word, start screen, and Tab goes through
+/// [`transition`], including an armed word whose map does not match and a
+/// hinted Tab whose map differs. A tick with no word and no start screen
+/// adopts a map or keeps the session. The wrappers only pack and apply this.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Effect {
     Ignore,
@@ -250,7 +259,8 @@ pub enum Effect {
     RememberHint {
         outcome: MatchOutcome,
     },
-    /// A progressed board arrived after the hint. The match continued.
+    /// The second progressed board after a hint, or the first after an arm.
+    /// The match continued.
     ClearHintAndAppend,
     /// First fresh-match board. Not appended to the current session.
     Defer,
@@ -298,6 +308,9 @@ pub enum Obs<'a> {
     },
     UnconfirmedWord {
         outcome: MatchOutcome,
+        /// How this read's map sits against the session map. A text-fallback
+        /// session map is [`MapRelation::Absent`].
+        relation: MapRelation,
     },
     StartScreen {
         screen: &'a StartScreen,
@@ -319,9 +332,22 @@ pub enum Obs<'a> {
     },
 }
 
+/// How an accolade map sits against the session map. Empty and `unknown`
+/// are not names. A text-fallback session map is not compared.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MapRelation {
+    /// Both sides name a map, and the names agree.
+    Matches,
+    /// Both sides name a map, and the names differ.
+    Differs,
+    /// One side has no name. While a boundary is armed this does not replace
+    /// the hint. While it is not, a mapless word still replaces the hint.
+    Absent,
+}
+
 /// Where a stored map name was read. The board case of a different-map Tab
 /// trusts the top bar and the accolade. A full-board text fallback does not
-/// name the match.
+/// name the match, and the poll path treats it as no map.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum MapSource {
     TopBar,
@@ -871,7 +897,9 @@ pub fn transition(state: &BoundaryState, obs: &Obs<'_>) -> Transition {
     let phase = phase_of(state);
     let effect = match obs {
         Obs::ConfirmedWord { outcome } => confirmed_word(phase, *outcome),
-        Obs::UnconfirmedWord { outcome } => unconfirmed_word(phase, *outcome),
+        Obs::UnconfirmedWord { outcome, relation } => {
+            unconfirmed_word(state, phase, *outcome, *relation)
+        }
         Obs::StartScreen {
             screen,
             block_map_vote,
@@ -901,7 +929,26 @@ fn confirmed_word(phase: Phase, outcome: MatchOutcome) -> Effect {
     }
 }
 
-fn unconfirmed_word(phase: Phase, outcome: MatchOutcome) -> Effect {
+/// An unconfirmed word replaces the hint when the maps match, or when the
+/// boundary is not armed and the read has no map. A different map never
+/// replaces it.
+fn unconfirmed_replaces(pending_boundary: bool, relation: MapRelation) -> bool {
+    match relation {
+        MapRelation::Matches => true,
+        MapRelation::Differs => false,
+        MapRelation::Absent => !pending_boundary,
+    }
+}
+
+fn unconfirmed_word(
+    state: &BoundaryState,
+    phase: Phase,
+    outcome: MatchOutcome,
+    relation: MapRelation,
+) -> Effect {
+    if !unconfirmed_replaces(state.pending_boundary, relation) {
+        return Effect::Ignore;
+    }
     match phase {
         Phase::PostMatch => Effect::Ignore,
         Phase::Idle | Phase::LiveMatch | Phase::PostResultStreak | Phase::NewGameStarting => {
@@ -980,10 +1027,10 @@ fn end_screen(state: &BoundaryState, phase: Phase, outcome: MatchOutcome) -> Eff
     match phase {
         Phase::PostMatch | Phase::Idle | Phase::NewGameStarting => Effect::Ignore,
         // Armed by a hero select: the next match's confirmed word on a
-        // different accolade map must not overwrite this hint. An unconfirmed
-        // word on that map is ignored in `decide_poll` before it can replace
-        // the hint. A banner has no accolade map, so it is a confirmed word
-        // and still seals onto this session.
+        // different map must not overwrite this hint. An unconfirmed word
+        // that does not match is [`Effect::Ignore`] from [`unconfirmed_word`].
+        // A banner has no map, so it is a confirmed word and still seals
+        // onto this session.
         Phase::LiveMatch | Phase::PostResultStreak if state.pending_boundary => Effect::Split {
             reason: CloseReason::StatRegression,
             seal: sealable_hint(state),
@@ -1079,7 +1126,10 @@ pub fn commit_poll(state: &mut BoundaryState, decision: PollDecision, now: Insta
                 state.pending_boundary = false;
                 state.awaiting_first_board = false;
             }
-            let adopted = update.adopt_map.filter(|_| state.map.is_none());
+            // `adopt_map` is set only when the caller treats the stored map as
+            // absent. That includes an untrusted text fallback, so the
+            // accolade replaces it.
+            let adopted = update.adopt_map.clone();
             if let Some(map) = adopted.clone() {
                 state.map = Some(map);
             }
@@ -1174,6 +1224,24 @@ fn confident_map(map: Option<&str>) -> Option<&str> {
     map.map(str::trim).filter(|s| !s.is_empty())
 }
 
+/// Compare two map reads. Empty and `unknown` are not names, so a missing
+/// accolade is [`MapRelation::Absent`] rather than a different map.
+fn map_relation(session: Option<&str>, accolade: Option<&str>) -> MapRelation {
+    match (named_map(session), named_map(accolade)) {
+        (Some(session), Some(accolade)) if session.eq_ignore_ascii_case(accolade) => {
+            MapRelation::Matches
+        }
+        (Some(_), Some(_)) => MapRelation::Differs,
+        _ => MapRelation::Absent,
+    }
+}
+
+/// The session map [`decide_poll`] is allowed to compare. A text fallback
+/// is absent.
+fn trusted_session_map<'a>(input: &'a PollInput<'a>) -> Option<&'a str> {
+    input.map.filter(|_| input.map_trusted)
+}
+
 fn screen_reason(screen: &StartScreen) -> (CloseReason, Vec<String>) {
     match screen {
         StartScreen::MapVote { candidates } => (CloseReason::MapVote, candidates.clone()),
@@ -1213,31 +1281,23 @@ pub fn decide_poll(input: &PollInput<'_>) -> PollDecision {
             block_map_vote: input.block_map_vote,
         }
     } else if let Some(signal) = input.signal.filter(|outcome| outcome.is_decided()) {
-        let map_differs = input.map.is_some()
-            && input
-                .accolade_map
-                .is_some_and(|accolade| confident_map(Some(accolade)).is_some())
-            && !input
-                .map
-                .unwrap_or("")
-                .eq_ignore_ascii_case(input.accolade_map.unwrap_or(""));
-        if map_differs && input.signal_confirmed {
+        let session_map = trusted_session_map(input);
+        let relation = map_relation(session_map, input.accolade_map);
+        if relation == MapRelation::Differs && input.signal_confirmed {
             Obs::EndScreenDifferentMap {
                 outcome: signal,
-                map: input.accolade_map.unwrap_or(""),
+                map: named_map(input.accolade_map).unwrap_or(""),
             }
-        } else if input.pending_boundary && map_differs {
-            // The first read of the next game's word. Confirmation is the
-            // second agreeing read, which is the end-screen split above.
-            // Replacing the hint here would seal the next game onto this one.
-            return PollDecision::Keep;
         } else if input.signal_confirmed {
             Obs::ConfirmedWord { outcome: signal }
         } else {
-            Obs::UnconfirmedWord { outcome: signal }
+            Obs::UnconfirmedWord {
+                outcome: signal,
+                relation,
+            }
         }
     } else {
-        let adopt = adopt_map(input.map, input.accolade_map);
+        let adopt = adopt_map(trusted_session_map(input), input.accolade_map);
         return if let Some(map) = adopt {
             PollDecision::Update(UpdateCurrent {
                 record_outcome: None,
@@ -1256,7 +1316,15 @@ pub fn decide_poll(input: &PollInput<'_>) -> PollDecision {
     let decided = transition(&state, &obs);
     match decided.effect {
         Effect::Ignore => {
-            if let Some(map) = adopt_map(input.map, input.accolade_map) {
+            // An unconfirmed word that must not replace the hint. This is
+            // [`PollDecision::Keep`], reached through [`transition`], so the
+            // next game's word is not sealed onto this session.
+            if let Obs::UnconfirmedWord { relation, .. } = &obs
+                && !unconfirmed_replaces(input.pending_boundary, *relation)
+            {
+                return PollDecision::Keep;
+            }
+            if let Some(map) = adopt_map(trusted_session_map(input), input.accolade_map) {
                 return PollDecision::Update(UpdateCurrent {
                     record_outcome: None,
                     adopt_map: Some(map),
@@ -1291,7 +1359,7 @@ pub fn decide_poll(input: &PollInput<'_>) -> PollDecision {
         }
         Effect::Seal { outcome } => PollDecision::Update(UpdateCurrent {
             record_outcome: Some(outcome),
-            adopt_map: adopt_map(input.map, input.accolade_map),
+            adopt_map: adopt_map(trusted_session_map(input), input.accolade_map),
             result: Some(confirmed_mark(input, outcome)),
             clear_hint: false,
             arm_pending: false,
@@ -1314,7 +1382,7 @@ pub fn decide_poll(input: &PollInput<'_>) -> PollDecision {
             } else {
                 PollDecision::Update(UpdateCurrent {
                     record_outcome: None,
-                    adopt_map: adopt_map(input.map, input.accolade_map),
+                    adopt_map: adopt_map(trusted_session_map(input), input.accolade_map),
                     result: Some(result),
                     clear_hint: false,
                     arm_pending: false,
@@ -1677,6 +1745,7 @@ mod tests {
             has_board: s.gate.is_some(),
             reset_streak: s.reset_streak,
             map: s.map.as_deref(),
+            map_trusted: true,
             hero: s.hero.as_deref(),
             signal: None,
             signal_confirmed: false,
@@ -2131,6 +2200,7 @@ mod tests {
             block_map_vote: false,
             awaiting_first_board: false,
             map: None,
+            map_trusted: false,
             hero: None,
             signal: Some(MatchOutcome::Defeat),
             signal_confirmed: true,
@@ -2577,6 +2647,7 @@ mod tests {
             block_map_vote: false,
             awaiting_first_board: false,
             map: Some("Busan"),
+            map_trusted: true,
             hero: None,
             signal: Some(MatchOutcome::Defeat),
             signal_confirmed: true,
@@ -2745,6 +2816,7 @@ mod tests {
         let confirmed = Obs::ConfirmedWord { outcome: word };
         let unconfirmed = Obs::UnconfirmedWord {
             outcome: MatchOutcome::Victory,
+            relation: MapRelation::Absent,
         };
         let hero_select = Obs::StartScreen {
             screen: &hero,
@@ -2825,6 +2897,15 @@ mod tests {
                 streak_state(),
                 &unconfirmed,
                 "hint:victory",
+            ),
+            (
+                "streak unarmed different map",
+                streak_state(),
+                &Obs::UnconfirmedWord {
+                    outcome: MatchOutcome::Victory,
+                    relation: MapRelation::Differs,
+                },
+                "ignore",
             ),
             (
                 "streak start after a board",
@@ -3037,6 +3118,24 @@ mod tests {
             &streak_state(),
             &hinted,
             "split:victory:defeat",
+        );
+        expect_transition(
+            "armed word with no map keeps the hint",
+            &pending,
+            &Obs::UnconfirmedWord {
+                outcome: MatchOutcome::Victory,
+                relation: MapRelation::Absent,
+            },
+            "ignore",
+        );
+        expect_transition(
+            "armed word on a different map keeps the hint",
+            &pending,
+            &Obs::UnconfirmedWord {
+                outcome: MatchOutcome::Victory,
+                relation: MapRelation::Differs,
+            },
+            "ignore",
         );
         let starting_ban_blocked = Obs::StartScreen {
             screen: &ban,
@@ -3620,6 +3719,7 @@ mod tests {
             has_board: true,
             reset_streak: 0,
             map: None,
+            map_trusted: false,
             hero: None,
             signal: Some(MatchOutcome::Victory),
             signal_confirmed: false,
@@ -3649,6 +3749,7 @@ mod tests {
             has_board: false,
             reset_streak: 0,
             map: None,
+            map_trusted: false,
             hero: None,
             signal: Some(MatchOutcome::Defeat),
             signal_confirmed: true,
@@ -3753,6 +3854,7 @@ mod tests {
             has_board: true,
             reset_streak: 0,
             map: Some("Busan"),
+            map_trusted: true,
             hero: Some("Zenyatta"),
             signal: Some(MatchOutcome::Victory),
             signal_confirmed: false,
@@ -3771,6 +3873,7 @@ mod tests {
             has_board: true,
             reset_streak: 0,
             map: Some("Busan"),
+            map_trusted: true,
             hero: Some("Zenyatta"),
             signal: Some(MatchOutcome::Victory),
             signal_confirmed: true,
@@ -3788,6 +3891,148 @@ mod tests {
             }
             other => panic!("expected the confirming read to split, got {other:?}"),
         }
+    }
+
+    fn armed_busan_word(accolade: Option<&str>, confirmed: bool) -> PollDecision {
+        let now = t0();
+        decide_poll(&PollInput {
+            outcome: MatchOutcome::Unknown,
+            result: Some(ResultMark {
+                outcome: MatchOutcome::Defeat,
+                confirmed: false,
+                seen_at: now,
+            }),
+            pending_boundary: true,
+            awaiting_first_board: false,
+            has_board: true,
+            reset_streak: 0,
+            map: Some("Busan"),
+            map_trusted: true,
+            hero: Some("Zenyatta"),
+            signal: Some(MatchOutcome::Victory),
+            signal_confirmed: confirmed,
+            accolade_map: accolade,
+            start_screen: None,
+            block_map_vote: false,
+            deferred: false,
+            now,
+        })
+    }
+
+    #[test]
+    fn an_armed_word_with_no_map_keeps_the_hint() {
+        assert_eq!(
+            armed_busan_word(None, false),
+            PollDecision::Keep,
+            "an end title before the accolade must not replace A's hint"
+        );
+        assert_eq!(
+            armed_busan_word(Some("unknown"), false),
+            PollDecision::Keep,
+            "an unnamed accolade is not a different map and does not replace the hint while armed"
+        );
+    }
+
+    #[test]
+    fn an_unarmed_different_map_word_does_not_replace_the_hint() {
+        let now = t0();
+        let hint = Some(ResultMark {
+            outcome: MatchOutcome::Defeat,
+            confirmed: false,
+            seen_at: now,
+        });
+        let word = |accolade: Option<&str>| {
+            decide_poll(&PollInput {
+                outcome: MatchOutcome::Unknown,
+                result: hint,
+                pending_boundary: false,
+                awaiting_first_board: false,
+                has_board: true,
+                reset_streak: 0,
+                map: Some("Busan"),
+                map_trusted: true,
+                hero: Some("Zenyatta"),
+                signal: Some(MatchOutcome::Victory),
+                signal_confirmed: false,
+                accolade_map: accolade,
+                start_screen: None,
+                block_map_vote: false,
+                deferred: false,
+                now,
+            })
+        };
+        assert_eq!(
+            word(Some("Junkertown")),
+            PollDecision::Keep,
+            "a different map does not replace the hint, armed or not"
+        );
+        match word(Some("Busan")) {
+            PollDecision::Update(update) => {
+                assert_eq!(
+                    update.result.map(|mark| mark.outcome),
+                    Some(MatchOutcome::Victory),
+                    "the same map still replaces the hint"
+                );
+            }
+            other => panic!("expected the same map to replace the hint, got {other:?}"),
+        }
+        match word(None) {
+            PollDecision::Update(update) => {
+                assert_eq!(
+                    update.result.map(|mark| mark.outcome),
+                    Some(MatchOutcome::Victory),
+                    "an unarmed word with no map still replaces the hint"
+                );
+            }
+            other => panic!("expected a mapless word to replace the hint, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_untrusted_text_map_is_absent_on_the_poll_path() {
+        let now = t0();
+        let mut state = BoundaryState::new(Some("Dorado".into()));
+        state.result = Some(ResultMark {
+            outcome: MatchOutcome::Defeat,
+            confirmed: false,
+            seen_at: now,
+        });
+        let decision = decide_poll(&PollInput {
+            outcome: MatchOutcome::Unknown,
+            result: state.result,
+            pending_boundary: false,
+            awaiting_first_board: false,
+            has_board: true,
+            reset_streak: 0,
+            map: Some("Dorado"),
+            map_trusted: false,
+            hero: None,
+            signal: Some(MatchOutcome::Victory),
+            signal_confirmed: true,
+            accolade_map: Some("Junkertown"),
+            start_screen: None,
+            block_map_vote: false,
+            deferred: false,
+            now,
+        });
+        match &decision {
+            PollDecision::Open(_) => {
+                panic!("an untrusted map must not split on a different accolade")
+            }
+            PollDecision::Update(update) => {
+                assert_eq!(update.record_outcome, Some(MatchOutcome::Victory));
+                assert_eq!(
+                    update.adopt_map.as_deref(),
+                    Some("Junkertown"),
+                    "an accolade replaces a text-fallback map"
+                );
+            }
+            other => panic!("expected the word to seal and adopt the accolade, got {other:?}"),
+        }
+        let commit = commit_poll(&mut state, decision, now);
+        assert_eq!(commit.adopted_map.as_deref(), Some("Junkertown"));
+        assert_eq!(state.map.as_deref(), Some("Junkertown"));
+        assert_eq!(state.outcome, MatchOutcome::Victory);
     }
 
     #[test]
