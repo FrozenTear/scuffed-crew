@@ -67,7 +67,7 @@ macro_rules! hero_all {
     ($($variant:ident),* $(,)?) => {
         /// Every `Hero` variant, in enum order.
         ///
-        /// [`_hero_all_exhaustive`] matches the same variants with no wildcard,
+        /// `_hero_all_exhaustive` matches the same variants with no wildcard,
         /// so a new `Hero` fails to compile until it is added here. A repeated
         /// entry is an unreachable pattern.
         pub const ALL: &'static [Hero] = &[$(Hero::$variant),*];

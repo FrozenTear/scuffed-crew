@@ -147,24 +147,25 @@ const TEAM_PANEL_CSS: &str = r#"
     }
 "#;
 
-/// Display name for an asset id. Unknown ids stay "Unknown".
-fn hero_name(id: &str) -> &'static str {
-    super::hero_catalog::hero_by_id(id)
-        .map(|hero| hero.name)
-        .unwrap_or("Unknown")
-}
-
-/// Role for an asset id, from the shared hero list. Unknown ids are Damage,
-/// matching the previous catch-all.
-fn hero_role(id: &str) -> HeroRole {
-    super::hero_catalog::hero_by_id(id)
-        .map(|hero| hero.role)
-        .unwrap_or(HeroRole::Damage)
+/// Name and role for a filled slot. The role comes from `role_for_hero_name`,
+/// the lookup `tracker_stamped_roles` and `role_for_hero_name_matches_guess_role`
+/// pin. Unknown ids stay "Unknown" and count as Damage.
+fn assigned_hero(id: &str) -> (&'static str, HeroRole) {
+    match super::hero_catalog::hero_by_id(id) {
+        Some(hero) => (
+            hero.name,
+            scuffed_types::role_for_hero_name(hero.name).unwrap_or(HeroRole::Damage),
+        ),
+        None => ("Unknown", HeroRole::Damage),
+    }
 }
 
 /// 6v6 slots accept any role. 5v5 slots accept only the slot's required role.
-fn slot_accepts_hero(is_6v6: bool, hero_id: &str, slot: TeamSlot) -> bool {
-    is_6v6 || hero_role(hero_id) == slot.required_role()
+/// The role is `role_for_hero_name`, same as a filled slot.
+fn slot_accepts(hero: &super::hero_catalog::CatalogHero, is_6v6: bool, slot: TeamSlot) -> bool {
+    is_6v6
+        || scuffed_types::role_for_hero_name(hero.name).unwrap_or(HeroRole::Damage)
+            == slot.required_role()
 }
 
 #[component]
@@ -248,10 +249,7 @@ pub fn TeamPanel(
                                     Some(sel) => {
                                         {
                                             let hid = &sel.hero_id;
-                                            let (hname, hrole) = match super::hero_catalog::hero_by_id(hid) {
-                                                Some(hero) => (hero.name, hero.role),
-                                                None => ("Unknown", HeroRole::Damage),
-                                            };
+                                            let (hname, hrole) = assigned_hero(hid);
                                             let role_color = hrole.color_hex();
                                             let icon_path = super::hero_catalog::icon_path(hid);
 
@@ -284,7 +282,7 @@ pub fn TeamPanel(
                                         // Offer one-click assignment when a hero is picked and
                                         // its role fits this slot (6v6 slots accept any role).
                                         let assignable_hero = picked
-                                            .filter(|hero| is_6v6 || hero.role == slot.required_role());
+                                            .filter(|hero| slot_accepts(hero, is_6v6, slot));
                                         match assignable_hero {
                                             Some(hero) => {
                                                 let hname = hero.name;
@@ -325,33 +323,59 @@ pub fn TeamPanel(
 mod tests {
     use super::*;
 
+    fn accepts(id: &str, is_6v6: bool, slot: TeamSlot) -> bool {
+        super::super::hero_catalog::hero_by_id(id)
+            .is_some_and(|hero| slot_accepts(hero, is_6v6, slot))
+    }
+
     #[test]
     fn five_v_five_checks_the_shared_role() {
-        assert!(slot_accepts_hero(false, "domina", TeamSlot::Tank1));
-        assert!(!slot_accepts_hero(false, "sombra", TeamSlot::Tank1));
-        assert!(slot_accepts_hero(false, "sombra", TeamSlot::Support1));
-        assert!(slot_accepts_hero(false, "mizuki", TeamSlot::Support1));
-        assert!(slot_accepts_hero(false, "wuyang", TeamSlot::Support2));
-        assert!(!slot_accepts_hero(false, "mizuki", TeamSlot::Dps1));
-        assert!(!slot_accepts_hero(false, "domina", TeamSlot::Dps1));
+        assert!(accepts("domina", false, TeamSlot::Tank1));
+        assert!(accepts("dmon", false, TeamSlot::Tank1));
+        assert!(!accepts("sombra", false, TeamSlot::Tank1));
+        assert!(accepts("sombra", false, TeamSlot::Support1));
+        assert!(accepts("doctrine", false, TeamSlot::Support1));
+        assert!(accepts("jetpack-cat", false, TeamSlot::Support2));
+        assert!(accepts("mizuki", false, TeamSlot::Support1));
+        assert!(accepts("wuyang", false, TeamSlot::Support2));
+        assert!(!accepts("mizuki", false, TeamSlot::Dps1));
+        assert!(!accepts("domina", false, TeamSlot::Dps1));
+        assert!(!accepts("jetpack-cat", false, TeamSlot::Dps1));
     }
 
     #[test]
     fn six_v_six_accepts_any_role() {
-        assert!(slot_accepts_hero(true, "sombra", TeamSlot::Tank1));
-        assert!(slot_accepts_hero(true, "domina", TeamSlot::Dps1));
-        assert!(slot_accepts_hero(true, "wuyang", TeamSlot::Tank2));
+        assert!(accepts("sombra", true, TeamSlot::Tank1));
+        assert!(accepts("domina", true, TeamSlot::Dps1));
+        assert!(accepts("wuyang", true, TeamSlot::Tank2));
+        assert!(accepts("dmon", true, TeamSlot::Support1));
     }
 
     #[test]
-    fn names_and_roles_come_from_the_shared_list() {
-        assert_eq!(hero_name("domina"), "Domina");
-        assert_eq!(hero_name("mizuki"), "Mizuki");
-        assert_eq!(hero_name("wuyang"), "Wuyang");
-        assert_eq!(hero_role("domina"), HeroRole::Tank);
-        assert_eq!(hero_role("mizuki"), HeroRole::Support);
-        assert_eq!(hero_role("wuyang"), HeroRole::Support);
-        assert_eq!(hero_name("not-a-hero"), "Unknown");
-        assert_eq!(hero_role("not-a-hero"), HeroRole::Damage);
+    fn filled_slots_use_role_for_hero_name() {
+        for id in [
+            "domina",
+            "dmon",
+            "sombra",
+            "doctrine",
+            "jetpack-cat",
+            "mizuki",
+            "wuyang",
+        ] {
+            let (name, role) = assigned_hero(id);
+            assert_eq!(
+                role,
+                scuffed_types::role_for_hero_name(name).unwrap(),
+                "{id}"
+            );
+        }
+        assert_eq!(assigned_hero("dmon"), ("D.Mon", HeroRole::Tank));
+        assert_eq!(assigned_hero("sombra"), ("Sombra", HeroRole::Support));
+        assert_eq!(assigned_hero("doctrine"), ("Doctrine", HeroRole::Support));
+        assert_eq!(
+            assigned_hero("jetpack-cat"),
+            ("Jetpack Cat", HeroRole::Support)
+        );
+        assert_eq!(assigned_hero("not-a-hero"), ("Unknown", HeroRole::Damage));
     }
 }

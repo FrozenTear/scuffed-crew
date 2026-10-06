@@ -179,7 +179,7 @@ const HERO_PICKER_CSS: &str = r##"
 /// Hero definition for the picker UI.
 #[derive(Clone, PartialEq)]
 struct HeroDef {
-    id: String,
+    id: &'static str,
     name: &'static str,
     role: HeroRole,
     icon_path: String,
@@ -194,12 +194,12 @@ struct AbilityDef {
     cooldown: Option<f32>,
 }
 
-impl From<&super::hero_catalog::CatalogHero> for HeroDef {
-    fn from(hero: &super::hero_catalog::CatalogHero) -> Self {
+impl From<&'static super::hero_catalog::CatalogHero> for HeroDef {
+    fn from(hero: &'static super::hero_catalog::CatalogHero) -> Self {
         HeroDef {
-            id: hero.id.clone(),
+            id: hero.id.as_str(),
             name: hero.name,
-            role: hero.role,
+            role: scuffed_types::role_for_hero_name(hero.name).unwrap_or(HeroRole::Damage),
             icon_path: super::hero_catalog::icon_path(&hero.id),
             abilities: Vec::new(),
         }
@@ -280,17 +280,15 @@ pub fn HeroPicker(
                         if is_expanded {
                             div { class: "hero-grid",
                                 {heroes.iter().map(|hero| {
-                                    let hero_id = hero.id.clone();
-                                    let hero_id_click = hero_id.clone();
+                                    let hero_id = hero.id;
                                     let hero_name = hero.name;
                                     let icon = hero.icon_path.clone();
-                                    let is_selected = selected_hero.as_deref() == Some(hero.id.as_str());
+                                    let is_selected = selected_hero.as_deref() == Some(hero_id);
                                     let btn_cls = if is_selected { "hero-btn selected" } else { "hero-btn" };
 
                                     let wr = hero_winrates.as_ref().and_then(|rates| {
-                                        let norm_id = hero.id.as_str();
                                         rates.iter().find(|r| {
-                                            super::hero_catalog::hero_id(&r.hero_name) == norm_id
+                                            super::hero_catalog::hero_id(&r.hero_name) == hero_id
                                         })
                                     });
 
@@ -298,7 +296,7 @@ pub fn HeroPicker(
                                         button {
                                             class: "{btn_cls}",
                                             title: "{hero_name}",
-                                            onclick: move |_| on_select.call(hero_id_click.clone()),
+                                            onclick: move |_| on_select.call(hero_id.to_string()),
                                             img {
                                                 class: "hero-icon",
                                                 src: "{icon}",

@@ -146,12 +146,12 @@ const PRESET_COLORS: [(Color, &str); 5] = [
 ];
 
 /// Shared roster, grouped Tank then Damage then Support.
-fn all_heroes() -> Vec<(String, &'static str)> {
+fn all_heroes() -> Vec<(&'static str, &'static str)> {
     HeroRole::ALL
         .iter()
         .copied()
         .flat_map(super::hero_catalog::heroes_for_role)
-        .map(|hero| (hero.id.clone(), hero.name))
+        .map(|hero| (hero.id.as_str(), hero.name))
         .collect()
 }
 
@@ -338,10 +338,11 @@ mod tests {
     fn dropdown_lists_the_shared_roster_in_role_order() {
         let heroes = all_heroes();
         assert_eq!(heroes.len(), scuffed_types::HEROES.len());
-        let rank = |role: HeroRole| match role {
-            HeroRole::Tank => 0,
-            HeroRole::Damage => 1,
-            HeroRole::Support => 2,
+        let rank = |role: HeroRole| {
+            HeroRole::ALL
+                .iter()
+                .position(|candidate| *candidate == role)
+                .unwrap()
         };
         let roles: Vec<HeroRole> = heroes
             .iter()
@@ -359,7 +360,7 @@ mod tests {
             "jetpack-cat",
         ] {
             assert!(
-                heroes.iter().any(|(hid, _)| hid == id),
+                heroes.iter().any(|(hid, _)| *hid == id),
                 "{id} is missing from the dropdown"
             );
         }
