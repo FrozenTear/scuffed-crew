@@ -818,7 +818,7 @@ struct ActiveGame {
     /// next stored board does not split.
     deferred_imported: bool,
     /// A different result replaced the hint. The confirming accolade must
-    /// not rewrite a text-fallback map after that.
+    /// not rewrite a text-fallback map after that. Cleared with the hint.
     text_fallback_locked: bool,
 }
 
@@ -1860,9 +1860,11 @@ struct CaptureReport {
     /// Map stored on the snapshot, if one was read — the caller adopts the
     /// first discovery onto the active game so the whole session shares it.
     map: Option<String>,
-    /// Where `map` was read. Also set when a later top bar agrees with a
-    /// text fallback and upgrades it. None when this capture did not read
-    /// a map, including when the session already had a trusted one.
+    /// Where `map` was read. [`resolved_map`] returns
+    /// [`boundary::MapSource::TopBar`] whenever the top bar agrees with the
+    /// stored name, trusted or not.
+    /// `None` while `map` still holds the kept session map: the top bar was
+    /// missing or disagreed, so this capture did not adopt a new source.
     map_source: Option<boundary::MapSource>,
     /// The session the snapshot was actually written to. Differs from the
     /// requested session when a stat regression split off a new game.
@@ -2509,6 +2511,60 @@ fn poll_input_from_game<'a>(
     }
 }
 
+/// One poll tick after the word is resolved. [`run_loop`] and the night
+/// harness both call this, so the post-tick glue cannot drift: the
+/// start-screen block, [`poll_input_from_game`] (including the carried
+/// accolade map), [`apply_poll_decision`], a confirmed word with no game
+/// open, and [`open_detected_game`].
+async fn apply_poll_tick(
+    st: &mut SessionState,
+    store: &storage::LocalStore,
+    data_dir: &std::path::Path,
+    tick: &ResolvedWordTick,
+    start_screen: Option<boundary::StartScreen>,
+    now: Instant,
+    debounce: std::time::Duration,
+) {
+    let block_map_vote = start_screen.as_ref().is_some_and(|screen| {
+        start_screen_blocked(
+            st.active_game.as_ref(),
+            st.last_game_open,
+            now,
+            debounce,
+            screen,
+        )
+    });
+    let decision = st.active_game.as_ref().map(|g| {
+        boundary::decide_poll(&poll_input_from_game(
+            g,
+            tick.signal,
+            tick.signal_confirmed,
+            tick.accolade_map.as_deref(),
+            start_screen.clone(),
+            block_map_vote,
+            now,
+        ))
+    });
+    let opened = matches!(decision, Some(boundary::PollDecision::Open(_)));
+    if let Some(decision) = decision {
+        apply_poll_decision(st, store, data_dir, decision, now).await;
+    } else if tick.signal_confirmed
+        && let Some(outcome) = tick.signal
+    {
+        // No game open yet — applies to the next session if one opens
+        // within the TTL.
+        st.pending_outcome = Some((outcome, now));
+    }
+    // An open session is only closed by `decide_poll`. This arm starts a
+    // session when nothing is active yet.
+    if !opened
+        && st.active_game.is_none()
+        && let Some(screen) = &start_screen
+    {
+        open_detected_game(st, data_dir, screen, now, debounce);
+    }
+}
+
 /// Session state at process start, and again after a suspend.
 ///
 /// `opened_at` is the instant the session opened, which is also when
@@ -2796,9 +2852,10 @@ async fn run_loop(ctx: Arc<DaemonCtx>) -> anyhow::Result<()> {
                                 // seal onto the open session.
                                 None
                             } else {
-                                // The accolade and rank screens print the map.
-                                // A banner tick is the gameplay HUD under a
-                                // result flash, so that crop is not a map.
+                                // Only a result-word tick reads the map. The
+                                // rank screen does not. A banner tick is the
+                                // gameplay HUD under a result flash, so that
+                                // crop is not a map.
                                 match &signal {
                                     Some((_, detect::match_end::OutcomeSource::ResultWord)) => {
                                         detect::match_end::read_accolade_map(&img)
@@ -2880,47 +2937,16 @@ async fn run_loop(ctx: Arc<DaemonCtx>) -> anyhow::Result<()> {
                             detect::GamePhase::HeroBan => Some(boundary::StartScreen::HeroBan),
                             _ => None,
                         };
-                        let block_map_vote = start_screen
-                            .as_ref()
-                            .is_some_and(|screen| {
-                                start_screen_blocked(
-                                    st.active_game.as_ref(),
-                                    st.last_game_open,
-                                    now,
-                                    new_game_debounce,
-                                    screen,
-                                )
-                            });
-                        let decision = st.active_game.as_ref().map(|g| {
-                            boundary::decide_poll(&poll_input_from_game(
-                                g,
-                                tick.signal,
-                                tick.signal_confirmed,
-                                tick.accolade_map.as_deref(),
-                                start_screen.clone(),
-                                block_map_vote,
-                                now,
-                            ))
-                        });
-                        let opened = matches!(decision, Some(boundary::PollDecision::Open(_)));
-                        if let Some(decision) = decision {
-                            apply_poll_decision(&mut st, store, data_dir, decision, now).await;
-                        } else if tick.signal_confirmed
-                            && let Some(outcome) = tick.signal
-                        {
-                            // No game open yet — applies to the next session
-                            // if one opens within the TTL.
-                            st.pending_outcome = Some((outcome, now));
-                        }
-
-                        // An open session is only closed by `decide_poll`. This
-                        // arm starts a session when nothing is active yet.
-                        if !opened
-                            && st.active_game.is_none()
-                            && let Some(screen) = &start_screen
-                        {
-                            open_detected_game(&mut st, data_dir, screen, now, new_game_debounce);
-                        }
+                        apply_poll_tick(
+                            &mut st,
+                            store,
+                            data_dir,
+                            &tick,
+                            start_screen,
+                            now,
+                            new_game_debounce,
+                        )
+                        .await;
                     }
                     Err(e) => {
                         tracing::trace!(error = %e, "poll capture failed (game may not be running)");
@@ -5561,7 +5587,7 @@ mod tests {
     }
 
     #[test]
-    fn a_pre_0_4_18_skeleton_with_a_map_is_untrusted_text() {
+    fn a_pre_0_4_19_skeleton_with_a_map_is_untrusted_text() {
         let dir = tempfile::tempdir().expect("tempdir");
         let mut g = ActiveGame::open_now("old".into(), detect::MatchOutcome::Unknown, Vec::new());
         g.map = Some("Busan".into());
@@ -5593,6 +5619,65 @@ mod tests {
             recovered.map_source.is_none(),
             "a skeleton with no map stays unsourced"
         );
+    }
+
+    #[test]
+    fn a_persisted_text_fallback_lock_survives_recovery() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut g =
+            ActiveGame::open_now("locked".into(), detect::MatchOutcome::Unknown, Vec::new());
+        g.map = Some("Dorado".into());
+        g.map_source = Some(boundary::MapSource::TextFallback);
+        g.text_fallback_locked = true;
+        persist_active_game(dir.path(), Some(&g));
+        let recovered = recover_active_game(dir.path()).expect("recent skeleton recovers");
+        assert!(
+            recovered.text_fallback_locked,
+            "a lock written to disk must still be set after recovery"
+        );
+        assert_eq!(recovered.map.as_deref(), Some("Dorado"));
+    }
+
+    #[test]
+    fn a_main_0_4_18_skeleton_recovers_as_untrusted_unlocked_text() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let now = Utc::now().to_rfc3339();
+        // The eleven keys a 0.4.18 skeleton actually stored. Later fields
+        // stay absent so a missing default fails this load.
+        let skeleton = serde_json::json!({
+            "session_id": "old",
+            "outcome": "unknown",
+            "map": "Busan",
+            "map_candidates": [],
+            "session_created": false,
+            "opened_at": now,
+            "last_activity": now,
+            "outcome_recorded_at": null,
+            "gate": null,
+            "last_stats_at": null,
+            "hero_auth": {}
+        });
+        assert_eq!(
+            skeleton.as_object().expect("object").len(),
+            11,
+            "a 0.4.18 skeleton has these eleven keys and no later fields"
+        );
+        std::fs::write(
+            active_game_path(dir.path()),
+            serde_json::to_vec(&skeleton).unwrap(),
+        )
+        .unwrap();
+        let recovered = recover_active_game(dir.path()).expect("a 0.4.18 skeleton recovers");
+        assert_eq!(recovered.map.as_deref(), Some("Busan"));
+        assert_eq!(
+            recovered.map_source,
+            Some(boundary::MapSource::TextFallback),
+            "a map with no source is untrusted text"
+        );
+        assert!(!recovered.text_fallback_locked);
+        assert!(recovered.result_mark.is_none());
+        assert!(!recovered.pending_boundary);
+        assert!(!recovered.awaiting_first_board);
     }
 
     #[test]
@@ -5719,6 +5804,36 @@ mod tests {
             )
             .is_none(),
             "a map older than the confirm window is not carried"
+        );
+        let mut edge = None;
+        note_word_streak(
+            &mut edge,
+            detect::MatchOutcome::Victory,
+            now,
+            Some("Junkertown".into()),
+        );
+        assert_eq!(
+            note_word_streak(
+                &mut edge,
+                detect::MatchOutcome::Victory,
+                now + OUTCOME_CONFIRM_WINDOW,
+                None,
+            )
+            .as_deref(),
+            Some("Junkertown"),
+            "a map exactly as old as the confirm window is still carried"
+        );
+        assert_eq!(
+            poll_debug_hit(
+                Some((
+                    detect::MatchOutcome::Victory,
+                    detect::match_end::OutcomeSource::ResultWord,
+                )),
+                Some((detect::MatchOutcome::Victory, OUTCOME_CONFIRM_WINDOW)),
+                OUTCOME_CONFIRM_WINDOW,
+            ),
+            Some((PollDebugHit::Confirm, detect::MatchOutcome::Victory)),
+            "the confirm window's exact edge agrees with the carried map"
         );
     }
 
@@ -6469,60 +6584,24 @@ mod tests {
             .await;
         }
 
-        /// Apply one resolved poll tick the way [`run_loop`] does, including
-        /// a streak noted while no game is open.
+        /// Apply one resolved poll tick through [`apply_poll_tick`], the
+        /// same function [`run_loop`] calls, including a streak noted while
+        /// no game is open.
         async fn apply_resolved_tick(
             &mut self,
             tick: ResolvedWordTick,
             start_screen: Option<boundary::StartScreen>,
         ) {
-            let block_map_vote = start_screen.as_ref().is_some_and(|screen| {
-                start_screen_blocked(
-                    self.st.active_game.as_ref(),
-                    self.st.last_game_open,
-                    self.now,
-                    night_debounce(),
-                    screen,
-                )
-            });
-            let decision = self.st.active_game.as_ref().map(|g| {
-                boundary::decide_poll(&poll_input_from_game(
-                    g,
-                    tick.signal,
-                    tick.signal_confirmed,
-                    tick.accolade_map.as_deref(),
-                    start_screen.clone(),
-                    block_map_vote,
-                    self.now,
-                ))
-            });
-            let opened = matches!(decision, Some(boundary::PollDecision::Open(_)));
-            if let Some(decision) = decision {
-                apply_poll_decision(
-                    &mut self.st,
-                    &self.store,
-                    self.dir.path(),
-                    decision,
-                    self.now,
-                )
-                .await;
-            } else if tick.signal_confirmed
-                && let Some(outcome) = tick.signal
-            {
-                self.st.pending_outcome = Some((outcome, self.now));
-            }
-            if !opened
-                && self.st.active_game.is_none()
-                && let Some(screen) = &start_screen
-            {
-                open_detected_game(
-                    &mut self.st,
-                    self.dir.path(),
-                    screen,
-                    self.now,
-                    night_debounce(),
-                );
-            }
+            apply_poll_tick(
+                &mut self.st,
+                &self.store,
+                self.dir.path(),
+                &tick,
+                start_screen,
+                self.now,
+                night_debounce(),
+            )
+            .await;
         }
 
         /// Several consecutive ticks of one stable screen.
@@ -7747,7 +7826,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn probe_u2_trusted_different_maps_split_and_a_missing_name_seals() {
+    async fn an_unarmed_trusted_difference_splits_and_a_missing_name_seals() {
         let mut split = Night::new().await;
         split.begin_on("Busan", "Zenyatta");
         split
@@ -7823,6 +7902,54 @@ mod tests {
             Some(boundary::MapSource::TextFallback)
         );
         night.id()
+    }
+
+    #[tokio::test]
+    async fn a_text_fallback_sessions_own_accolade_replaces_the_map() {
+        let mut night = Night::new().await;
+        let mut g = ActiveGame::open_at(
+            format!("{:016x}", rand_id()),
+            detect::MatchOutcome::Unknown,
+            Vec::new(),
+            night.now,
+        );
+        g.hero_auth.accepted_hero = Some("Zenyatta".into());
+        night.st.active_game = Some(g);
+        night.st.last_game_open = Some(night.now);
+        night
+            .tab_text(
+                night_counters(14, 22, 6, 2400, 9800, 400),
+                "Zenyatta",
+                Some(2),
+                "Dorado",
+                NIGHT_CLEAN,
+            )
+            .await;
+        let dorado = night.id();
+        assert_eq!(night.game().map.as_deref(), Some("Dorado"));
+        assert_eq!(
+            night.game().map_source,
+            Some(boundary::MapSource::TextFallback)
+        );
+        night
+            .word_tick(detect::MatchOutcome::Victory, Some("Busan"))
+            .await;
+        assert_eq!(
+            night.id(),
+            dorado,
+            "this session's own accolade does not split"
+        );
+        assert_eq!(night.game().map.as_deref(), Some("Busan"));
+        assert_eq!(night.game().map_source, Some(boundary::MapSource::Accolade));
+        let snaps = night.store.get_session_snapshots(&dorado).await.unwrap();
+        assert!(
+            !snaps.is_empty() && snaps.iter().all(|row| row.map_name == "Busan"),
+            "the adopted accolade rewrites the snapshots, got {:?}",
+            snaps
+                .iter()
+                .map(|row| row.map_name.clone())
+                .collect::<Vec<_>>()
+        );
     }
 
     #[tokio::test]
