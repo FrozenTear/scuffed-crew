@@ -50,6 +50,27 @@ fn mine_view<T>(data: Option<Option<Option<&T>>>, error: Option<&str>) -> MineVi
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SlotPhase {
+    Loading,
+    Failed,
+    Ready,
+}
+
+/// A refetch is loading while the resource is `Pending`, including when the
+/// last value was a failure (`Some(None)` with the error already cleared).
+/// Otherwise an empty slot with no error is the first load, and a settled
+/// error is the failure screen.
+fn apply_fetch_phase(state: UseResourceState, slot_absent: bool, error: bool) -> SlotPhase {
+    if state == UseResourceState::Pending || (slot_absent && !error) {
+        SlotPhase::Loading
+    } else if error {
+        SlotPhase::Failed
+    } else {
+        SlotPhase::Ready
+    }
+}
+
 // Local minimal type for checking existing application status.
 #[derive(Debug, Clone, Deserialize)]
 struct Application {
@@ -104,12 +125,17 @@ pub fn Apply() -> Element {
     let org_name = s.as_ref().map(|x| x.org_name.clone());
     let mine_data = my_app.data.read();
     let mine_error = my_app.error.read();
-    let mine = mine_view(
+    let mine_settled = mine_view(
         mine_data
             .as_ref()
             .map(|outer| outer.as_ref().map(|inner| inner.as_ref())),
         mine_error.as_deref(),
     );
+    let mine = if my_app.data.state()() == UseResourceState::Pending {
+        MineView::Pending
+    } else {
+        mine_settled
+    };
     let status_app = mine_data
         .as_ref()
         .and_then(|outer| outer.as_ref())
@@ -177,16 +203,26 @@ pub fn Apply() -> Element {
                             _ => &app.status,
                         };
                         let desc = match app.status.as_str() {
-                            "pending" => "Your application is being reviewed. We'll get back to you soon.".to_string(),
-                            "trial" => "You're in your trial period. Show up, have fun, and be yourself.".to_string(),
+                            "pending" => {
+                                "Your application is being reviewed. We'll get back to you soon."
+                                    .to_string()
+                            }
+                            "trial" => {
+                                "You're in your trial period. Show up, have fun, and be yourself."
+                                    .to_string()
+                            }
                             "accepted" => format!("Welcome aboard! You're a member of {org_name}."),
-                            "rejected" => "Unfortunately your application was not accepted at this time.".to_string(),
-                            "withdrawn" => "You withdrew this application. You can re-apply later if recruitment is open.".to_string(),
+                            "rejected" => {
+                                "Unfortunately your application was not accepted at this time."
+                                    .to_string()
+                            }
+                            "withdrawn" => {
+                                "You withdrew this application. You can re-apply later if recruitment is open."
+                                    .to_string()
+                            }
                             _ => String::new(),
                         };
-                        let can_withdraw =
-                            app.status == "pending" || app.status == "trial";
-
+                        let can_withdraw = app.status == "pending" || app.status == "trial";
                         rsx! {
                             Card {
                                 h2 { class: "apply-card-title", "Application Status" }
@@ -229,38 +265,46 @@ pub fn Apply() -> Element {
                                                     submitting.set(false);
                                                 });
                                             },
-                                            if submitting() { "Withdrawing..." } else { "Withdraw application" }
+                                            if submitting() {
+                                                "Withdrawing..."
+                                            } else {
+                                                "Withdraw application"
+                                            }
                                         }
                                     }
                                 }
                             }
                         }
-                    } else if mine == MineView::Pending {
-                        rsx! { p { class: "apply-loading", "Loading..." } }
-                    } else if mine == MineView::Failed {
-                            rsx! {
-                                div { class: "fetch-error-wrap", role: "alert",
+                    } else if mine == MineView::Pending || mine == MineView::Failed {
+                        rsx! {
+                            div { role: "status",
+                                if mine == MineView::Pending {
+                                    p { class: "apply-loading", "Loading..." }
+                                } else {
                                     p { class: "fetch-error", "Couldn't load your application." }
                                     button {
                                         r#type: "button",
                                         class: "fetch-error__retry",
+                                        aria_label: "Retry loading your application",
                                         onclick: move |_| my_app.refresh += 1,
                                         "Retry"
                                     }
                                 }
                             }
+                        }
                     } else {
                         let games_state = games.data.read();
                         let games_error = games.error.read();
-                        let games_pending =
-                            games_state.as_ref().is_none() && games_error.is_none();
-                        let games_failed = games_error.is_some();
+                        let games_phase = apply_fetch_phase(
+                            games.data.state()(),
+                            games_state.as_ref().is_none(),
+                            games_error.is_some(),
+                        );
                         let game_list = games_state
                             .as_ref()
                             .and_then(|g| g.as_ref())
                             .cloned()
                             .unwrap_or_default();
-
                         rsx! {
                             Card {
                                 h2 { class: "apply-card-title", "Apply" }
@@ -268,16 +312,19 @@ pub fn Apply() -> Element {
 
                                 div { class: "apply-field",
                                     label { class: "apply-label", "Games" }
-                                    if games_pending {
-                                        p { class: "apply-loading", "Loading..." }
-                                    } else if games_failed {
-                                        div { role: "status", aria_label: "Retry loading games",
-                                            p { class: "muted", "Couldn't load games." }
-                                            button {
-                                                r#type: "button",
-                                                class: "fetch-error__retry is-compact",
-                                                onclick: move |_| games.refresh += 1,
-                                                "Retry"
+                                    if games_phase == SlotPhase::Loading || games_phase == SlotPhase::Failed {
+                                        div { role: "status",
+                                            if games_phase == SlotPhase::Loading {
+                                                p { class: "apply-loading", "Loading..." }
+                                            } else {
+                                                p { class: "muted", "Couldn't load games." }
+                                                button {
+                                                    r#type: "button",
+                                                    class: "fetch-error__retry is-compact",
+                                                    aria_label: "Retry loading games",
+                                                    onclick: move |_| games.refresh += 1,
+                                                    "Retry"
+                                                }
                                             }
                                         }
                                     } else {
@@ -337,16 +384,9 @@ pub fn Apply() -> Element {
                                                 let body = ApplyBody {
                                                     preferred_games: games,
                                                     preferred_roles: vec![],
-                                                    message: if msg.trim().is_empty() {
-                                                        None
-                                                    } else {
-                                                        Some(msg)
-                                                    },
+                                                    message: if msg.trim().is_empty() { None } else { Some(msg) },
                                                 };
-                                                match ApiClient::web()
-                                                    .post_json_empty("/api/applications", &body)
-                                                    .await
-                                                {
+                                                match ApiClient::web().post_json_empty("/api/applications", &body).await {
                                                     Ok(_) => {
                                                         toast.show(Toast::success("Application submitted!"));
                                                         my_app.refresh += 1;
@@ -358,7 +398,11 @@ pub fn Apply() -> Element {
                                                 submitting.set(false);
                                             });
                                         },
-                                        if submitting() { "Submitting..." } else { "Submit Application" }
+                                        if submitting() {
+                                            "Submitting..."
+                                        } else {
+                                            "Submit Application"
+                                        }
                                     }
                                 }
                             }
@@ -371,6 +415,7 @@ pub fn Apply() -> Element {
                     button {
                         r#type: "button",
                         class: "fetch-error__retry",
+                        aria_label: "Retry loading site settings",
                         onclick: move |_| settings.refresh += 1,
                         "Retry"
                     }
@@ -409,5 +454,31 @@ mod tests {
         assert_eq!(mine_view(Some(Some(None::<&()>)), None), MineView::Form);
         assert_eq!(mine_view(Some(Some(Some(&()))), None), MineView::Status);
         assert_ne!(mine_view(None::<Option<Option<&()>>>, None), MineView::Form);
+    }
+
+    #[test]
+    fn retry_in_flight_stays_loading_when_the_last_value_failed() {
+        // `use_api_list` clears the error when a refetch starts and leaves
+        // `Some(None)` in the slot. That used to paint an empty games grid.
+        assert_eq!(
+            apply_fetch_phase(UseResourceState::Pending, false, false),
+            SlotPhase::Loading
+        );
+        assert_eq!(
+            apply_fetch_phase(UseResourceState::Pending, false, true),
+            SlotPhase::Loading
+        );
+        assert_eq!(
+            apply_fetch_phase(UseResourceState::Ready, false, true),
+            SlotPhase::Failed
+        );
+        assert_eq!(
+            apply_fetch_phase(UseResourceState::Ready, true, false),
+            SlotPhase::Loading
+        );
+        assert_eq!(
+            apply_fetch_phase(UseResourceState::Ready, false, false),
+            SlotPhase::Ready
+        );
     }
 }

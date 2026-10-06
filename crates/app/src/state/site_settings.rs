@@ -107,10 +107,11 @@ async fn load_public_settings() -> Result<SiteSettings, String> {
     if let Some(mock) = TEST_SETTINGS_FETCH.with(|slot| slot.borrow().clone()) {
         let n = mock.hits.get() + 1;
         mock.hits.set(n);
-        // A second hit in the same burst is a refetch loop. Fail it immediately
-        // so the test returns instead of spinning inside `render_immediate`.
+        // A second hit in the same burst is a refetch loop. An immediate `Err`
+        // still lets a failure-path write restart the resource inside one
+        // `render_immediate`. Parking the future stops that chain.
         if n > 1 {
-            return Err("settings fetch restarted".into());
+            std::future::pending::<()>().await;
         }
         return match mock.body.borrow().clone() {
             Some(json) => serde_json::from_str(&json).map_err(|err| err.to_string()),
@@ -345,8 +346,33 @@ mod tests {
         assert!(!html.contains("Gaming clan"), "{html}");
     }
 
+    /// If a refetch loop never returns from `render_immediate`, abort the
+    /// process. A panicked test thread would leave the stuck render running
+    /// and the suite would hang until the CI job timeout.
+    struct AbortOnTimeout {
+        done: std::sync::mpsc::Sender<()>,
+    }
+
+    impl Drop for AbortOnTimeout {
+        fn drop(&mut self) {
+            let _ = self.done.send(());
+        }
+    }
+
+    fn abort_on_timeout(limit: std::time::Duration) -> AbortOnTimeout {
+        let (done, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            if rx.recv_timeout(limit).is_err() {
+                eprintln!("settings fetch test exceeded {limit:?}");
+                std::process::exit(101);
+            }
+        });
+        AbortOnTimeout { done }
+    }
+
     #[test]
     fn settings_fetch_runs_once_and_replaces_the_seed() {
+        let _timeout = abort_on_timeout(std::time::Duration::from_secs(8));
         let _clear = ClearSettingsHooks;
         let hits = std::rc::Rc::new(std::cell::Cell::new(0u32));
         let body = std::rc::Rc::new(std::cell::RefCell::new(Some(fixture(

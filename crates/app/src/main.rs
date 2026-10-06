@@ -168,3 +168,29 @@ fn App() -> Element {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    /// #152 rewrites these tags. Its test still passes if one is missing from
+    /// both the shell and the output, so the shell itself has to require them.
+    #[test]
+    fn index_html_has_one_of_each_rewritten_head_tag() {
+        let html = include_str!("../index.html");
+        for needle in [
+            "<title>",
+            "name=\"description\"",
+            "property=\"og:title\"",
+            "property=\"og:description\"",
+            "property=\"og:site_name\"",
+        ] {
+            let count = html.matches(needle).count();
+            assert_eq!(count, 1, "{needle} appears {count} times");
+        }
+        // dx injects a loader at every `</body>`, including one inside a comment.
+        assert_eq!(
+            html.matches("</body>").count(),
+            1,
+            "index.html must not mention the closing body tag except the real one"
+        );
+    }
+}

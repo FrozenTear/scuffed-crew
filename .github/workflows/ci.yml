@@ -14,6 +14,7 @@ jobs:
   dep-guardrails:
     name: Dependency Guardrails
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - name: Check for non-standard frontend deps
@@ -28,6 +29,7 @@ jobs:
   fmt:
     name: Rustfmt
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -38,6 +40,7 @@ jobs:
   clippy:
     name: Clippy
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
@@ -76,6 +79,7 @@ jobs:
   build-and-test:
     name: Build & Test
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     env:
       # Debuginfo dominates target/ size; without it the workspace build fits
       # the hosted runner's disk alongside the restored cache. Backtraces in CI
@@ -131,6 +135,7 @@ jobs:
   app-build:
     name: App Build (Dioxus)
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 

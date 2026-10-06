@@ -542,6 +542,9 @@ mod tests {
             lean.schedule
         ));
         assert!(show_next_match_panel(ListPhase::Ready, false, true, true));
+        // Ready, empty, shell keeps empty Live sections, Schedule off.
+        // Dropping `&& schedule_on` makes this true.
+        assert!(!show_next_match_panel(ListPhase::Ready, false, true, false));
     }
 
     #[test]

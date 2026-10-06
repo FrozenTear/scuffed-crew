@@ -14,12 +14,11 @@ cd "$ROOT"
 rm -rf dist
 cp -r target/dx/scuffed-app/release/web/public dist
 
-# index.html links this stable path (`/assets/favicon.svg`). The server treats
-# the unhashed file as a one-day asset, not an immutable hashed one. Keep the
-# copy so that link does not fall through to the SPA shell.
-if [[ ! -f dist/assets/favicon.svg ]] && [[ -f crates/app/assets/favicon.svg ]]; then
-  mkdir -p dist/assets
-  cp crates/app/assets/favicon.svg dist/assets/favicon.svg
+# index.html links this stable path. dx copies it because the app references
+# the unhashed asset. Do not paper over a missing file; the image would 404.
+if [[ ! -f dist/assets/favicon.svg ]]; then
+  echo "error: dist/assets/favicon.svg missing after dx build" >&2
+  exit 1
 fi
 
 # Safety: never ship the default Dioxus CLI title

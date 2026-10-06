@@ -97,8 +97,6 @@ pub const BG_DARK: &str = "#17171d";
 /// Product-default brand accents (matches `BrandConfig::product_default`).
 pub const BRAND_ACCENT_DARK: &str = "#8f73ff";
 pub const BRAND_ACCENT_LIGHT: &str = "#6d4aff";
-/// Browser chrome `theme-color` meta (dark shell).
-pub const THEME_COLOR: &str = BG_DARK;
 
 /// Convenience for the app root.
 pub fn theme_css_current() -> String {
