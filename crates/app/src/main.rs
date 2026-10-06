@@ -171,9 +171,8 @@ fn App() -> Element {
 
 #[cfg(test)]
 mod tests {
-    /// The site-server rewriter fills these tags. Its test still passes if one
-    /// is missing from both the shell and the output, so the shell has to
-    /// require them.
+    /// PR 152 requires title, description, og:title, and og:description exactly
+    /// once, and og:site_name once when this shell includes it.
     #[test]
     fn index_html_has_one_of_each_rewritten_head_tag() {
         let html = include_str!("../index.html");
