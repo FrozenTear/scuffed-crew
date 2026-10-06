@@ -145,72 +145,12 @@ const PRESET_COLORS: [(Color, &str); 5] = [
     (Color::SUPPORT, "Support"),
 ];
 
-/// Known heroes for the dropdown.
-const HEROES: &[(HeroRole, &[(&str, &str)])] = &[
-    (
-        HeroRole::Tank,
-        &[
-            ("dva", "D.Va"),
-            ("doomfist", "Doomfist"),
-            ("junker-queen", "Junker Queen"),
-            ("mauga", "Mauga"),
-            ("orisa", "Orisa"),
-            ("ramattra", "Ramattra"),
-            ("reinhardt", "Reinhardt"),
-            ("roadhog", "Roadhog"),
-            ("sigma", "Sigma"),
-            ("winston", "Winston"),
-            ("wrecking-ball", "Wrecking Ball"),
-            ("zarya", "Zarya"),
-            ("hazard", "Hazard"),
-        ],
-    ),
-    (
-        HeroRole::Damage,
-        &[
-            ("ashe", "Ashe"),
-            ("bastion", "Bastion"),
-            ("cassidy", "Cassidy"),
-            ("echo", "Echo"),
-            ("genji", "Genji"),
-            ("hanzo", "Hanzo"),
-            ("junkrat", "Junkrat"),
-            ("mei", "Mei"),
-            ("pharah", "Pharah"),
-            ("reaper", "Reaper"),
-            ("sojourn", "Sojourn"),
-            ("soldier-76", "Soldier: 76"),
-            ("symmetra", "Symmetra"),
-            ("torbjorn", "Torbjorn"),
-            ("tracer", "Tracer"),
-            ("venture", "Venture"),
-            ("widowmaker", "Widowmaker"),
-        ],
-    ),
-    (
-        HeroRole::Support,
-        &[
-            ("ana", "Ana"),
-            ("baptiste", "Baptiste"),
-            ("brigitte", "Brigitte"),
-            ("doctrine", "Doctrine"),
-            ("illari", "Illari"),
-            ("juno", "Juno"),
-            ("kiriko", "Kiriko"),
-            ("lifeweaver", "Lifeweaver"),
-            ("lucio", "Lucio"),
-            ("mercy", "Mercy"),
-            ("moira", "Moira"),
-            ("sombra", "Sombra"),
-            ("zenyatta", "Zenyatta"),
-        ],
-    ),
-];
-
-fn all_heroes() -> Vec<(&'static str, &'static str)> {
-    HEROES
-        .iter()
-        .flat_map(|(_, heroes)| heroes.iter().copied())
+/// Shared roster, grouped Tank then Damage then Support.
+fn all_heroes() -> Vec<(String, &'static str)> {
+    [HeroRole::Tank, HeroRole::Damage, HeroRole::Support]
+        .into_iter()
+        .flat_map(super::hero_catalog::heroes_for_role)
+        .map(|hero| (hero.id, hero.name))
         .collect()
 }
 

@@ -238,6 +238,108 @@ pub fn resolve_hero_query(raw: Option<&str>) -> Result<Option<&'static str>, ()>
     Err(())
 }
 
+/// Current-season role for a hero name on [`HEROES`].
+///
+/// Names that match [`crate::stats::Hero`] use that variant's role. Three
+/// names are on this list and not on that enum yet: D.Mon (Tank), Shion
+/// (Damage), Jetpack Cat (Support).
+pub fn role_for_hero_name(name: &str) -> Option<crate::strategy::HeroRole> {
+    let key = fold_hero_key(name);
+    if key.is_empty() {
+        return None;
+    }
+    if let Some(hero) = catalog_hero(&key) {
+        return Some(hero.role());
+    }
+    match key.as_str() {
+        "dmon" => Some(crate::strategy::HeroRole::Tank),
+        "shion" => Some(crate::strategy::HeroRole::Damage),
+        "jetpackcat" => Some(crate::strategy::HeroRole::Support),
+        _ => None,
+    }
+}
+
+fn catalog_hero(key: &str) -> Option<crate::stats::Hero> {
+    use crate::stats::Hero;
+    const ALL: &[Hero] = &[
+        Hero::DVa,
+        Hero::Domina,
+        Hero::Doomfist,
+        Hero::Hazard,
+        Hero::JunkerQueen,
+        Hero::Mauga,
+        Hero::Orisa,
+        Hero::Ramattra,
+        Hero::Reinhardt,
+        Hero::Roadhog,
+        Hero::Sigma,
+        Hero::Winston,
+        Hero::WreckingBall,
+        Hero::Zarya,
+        Hero::Anran,
+        Hero::Ashe,
+        Hero::Bastion,
+        Hero::Cassidy,
+        Hero::Echo,
+        Hero::Emre,
+        Hero::Freja,
+        Hero::Genji,
+        Hero::Hanzo,
+        Hero::Junkrat,
+        Hero::Mei,
+        Hero::Pharah,
+        Hero::Reaper,
+        Hero::Sierra,
+        Hero::Sojourn,
+        Hero::Soldier76,
+        Hero::Symmetra,
+        Hero::Torbjorn,
+        Hero::Tracer,
+        Hero::Vendetta,
+        Hero::Venture,
+        Hero::Widowmaker,
+        Hero::Ana,
+        Hero::Baptiste,
+        Hero::Brigitte,
+        Hero::Doctrine,
+        Hero::Illari,
+        Hero::Juno,
+        Hero::Kiriko,
+        Hero::Lifeweaver,
+        Hero::Lucio,
+        Hero::Mercy,
+        Hero::Mizuki,
+        Hero::Moira,
+        Hero::Sombra,
+        Hero::Wuyang,
+        Hero::Zenyatta,
+    ];
+    ALL.iter()
+        .copied()
+        .find(|hero| fold_hero_key(hero.display_name()) == key)
+}
+
+fn fold_hero_key(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        for c in c.to_lowercase() {
+            let mapped = match c {
+                'á' | 'à' | 'ã' | 'â' | 'ä' => 'a',
+                'é' | 'è' | 'ê' | 'ë' => 'e',
+                'í' | 'ì' | 'î' | 'ï' => 'i',
+                'ó' | 'ò' | 'õ' | 'ô' | 'ö' => 'o',
+                'ú' | 'ù' | 'û' | 'ü' => 'u',
+                'ç' => 'c',
+                'ñ' => 'n',
+                other if other.is_ascii_alphanumeric() => other,
+                _ => continue,
+            };
+            out.push(mapped);
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -430,6 +532,25 @@ mod tests {
                 "{word:?} matched Doctrine"
             );
         }
+    }
+
+    #[test]
+    fn every_shared_hero_name_has_a_role() {
+        use crate::strategy::HeroRole;
+        for name in HEROES {
+            assert!(role_for_hero_name(name).is_some(), "{name} has no role");
+        }
+        assert_eq!(role_for_hero_name("Domina"), Some(HeroRole::Tank));
+        assert_eq!(role_for_hero_name("Mizuki"), Some(HeroRole::Support));
+        assert_eq!(role_for_hero_name("Wuyang"), Some(HeroRole::Support));
+        assert_eq!(role_for_hero_name("Sombra"), Some(HeroRole::Support));
+        assert_eq!(role_for_hero_name("Doctrine"), Some(HeroRole::Support));
+        assert_eq!(role_for_hero_name("D.Mon"), Some(HeroRole::Tank));
+        assert_eq!(role_for_hero_name("Shion"), Some(HeroRole::Damage));
+        assert_eq!(role_for_hero_name("Jetpack Cat"), Some(HeroRole::Support));
+        assert_eq!(role_for_hero_name("Lucio"), Some(HeroRole::Support));
+        assert_eq!(role_for_hero_name("Lúcio"), Some(HeroRole::Support));
+        assert_eq!(role_for_hero_name("NotAHero"), None);
     }
 
     fn push_tokens(out: &mut Vec<String>, text: &str) {

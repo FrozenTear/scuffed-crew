@@ -147,65 +147,24 @@ const TEAM_PANEL_CSS: &str = r#"
     }
 "#;
 
-/// Hero name lookup by ID (minimal inline table).
-fn hero_name(id: &str) -> &'static str {
-    match id {
-        "dva" => "D.Va",
-        "doomfist" => "Doomfist",
-        "junker-queen" => "Junker Queen",
-        "mauga" => "Mauga",
-        "orisa" => "Orisa",
-        "ramattra" => "Ramattra",
-        "reinhardt" => "Reinhardt",
-        "roadhog" => "Roadhog",
-        "sigma" => "Sigma",
-        "winston" => "Winston",
-        "wrecking-ball" => "Wrecking Ball",
-        "zarya" => "Zarya",
-        "hazard" => "Hazard",
-        "ashe" => "Ashe",
-        "bastion" => "Bastion",
-        "cassidy" => "Cassidy",
-        "echo" => "Echo",
-        "genji" => "Genji",
-        "hanzo" => "Hanzo",
-        "junkrat" => "Junkrat",
-        "mei" => "Mei",
-        "pharah" => "Pharah",
-        "reaper" => "Reaper",
-        "sojourn" => "Sojourn",
-        "soldier-76" => "Soldier: 76",
-        "sombra" => "Sombra",
-        "symmetra" => "Symmetra",
-        "torbjorn" => "Torbjorn",
-        "tracer" => "Tracer",
-        "venture" => "Venture",
-        "widowmaker" => "Widowmaker",
-        "ana" => "Ana",
-        "baptiste" => "Baptiste",
-        "brigitte" => "Brigitte",
-        "doctrine" => "Doctrine",
-        "illari" => "Illari",
-        "juno" => "Juno",
-        "kiriko" => "Kiriko",
-        "lifeweaver" => "Lifeweaver",
-        "lucio" => "Lucio",
-        "mercy" => "Mercy",
-        "moira" => "Moira",
-        "zenyatta" => "Zenyatta",
-        _ => "Unknown",
-    }
+/// Display name for an asset id. Unknown ids stay "Unknown".
+fn hero_name(id: &str) -> String {
+    super::hero_catalog::hero_by_id(id)
+        .map(|hero| hero.name.to_string())
+        .unwrap_or_else(|| "Unknown".to_string())
 }
 
-/// Hero role lookup by ID.
+/// Role for an asset id, from the shared hero list. Unknown ids are Damage,
+/// matching the previous catch-all.
 fn hero_role(id: &str) -> HeroRole {
-    match id {
-        "dva" | "doomfist" | "junker-queen" | "mauga" | "orisa" | "ramattra" | "reinhardt"
-        | "roadhog" | "sigma" | "winston" | "wrecking-ball" | "zarya" | "hazard" => HeroRole::Tank,
-        "ana" | "baptiste" | "brigitte" | "doctrine" | "illari" | "juno" | "kiriko"
-        | "lifeweaver" | "lucio" | "mercy" | "moira" | "sombra" | "zenyatta" => HeroRole::Support,
-        _ => HeroRole::Damage,
-    }
+    super::hero_catalog::hero_by_id(id)
+        .map(|hero| hero.role)
+        .unwrap_or(HeroRole::Damage)
+}
+
+/// 6v6 slots accept any role. 5v5 slots accept only the slot's required role.
+fn slot_accepts_hero(is_6v6: bool, hero_id: &str, slot: TeamSlot) -> bool {
+    is_6v6 || hero_role(hero_id) == slot.required_role()
 }
 
 #[component]
@@ -289,7 +248,7 @@ pub fn TeamPanel(
                                             let hname = hero_name(hid);
                                             let hrole = hero_role(hid);
                                             let role_color = hrole.color_hex();
-                                            let icon_path = format!("/assets/heroes/{hid}/icon.webp");
+                                            let icon_path = super::hero_catalog::icon_path(hid);
 
                                             rsx! {
                                                 div { class: "assigned-hero",
@@ -320,7 +279,7 @@ pub fn TeamPanel(
                                         // Offer one-click assignment when a hero is picked and
                                         // its role fits this slot (6v6 slots accept any role).
                                         let assignable_hero = selected_hero.as_ref().filter(|h| {
-                                            is_6v6 || hero_role(h) == slot.required_role()
+                                            slot_accepts_hero(is_6v6, h, slot)
                                         });
                                         match assignable_hero {
                                             Some(hid) => {
@@ -355,5 +314,40 @@ pub fn TeamPanel(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn five_v_five_checks_the_shared_role() {
+        assert!(slot_accepts_hero(false, "domina", TeamSlot::Tank1));
+        assert!(!slot_accepts_hero(false, "sombra", TeamSlot::Tank1));
+        assert!(slot_accepts_hero(false, "sombra", TeamSlot::Support1));
+        assert!(slot_accepts_hero(false, "mizuki", TeamSlot::Support1));
+        assert!(slot_accepts_hero(false, "wuyang", TeamSlot::Support2));
+        assert!(!slot_accepts_hero(false, "mizuki", TeamSlot::Dps1));
+        assert!(!slot_accepts_hero(false, "domina", TeamSlot::Dps1));
+    }
+
+    #[test]
+    fn six_v_six_accepts_any_role() {
+        assert!(slot_accepts_hero(true, "sombra", TeamSlot::Tank1));
+        assert!(slot_accepts_hero(true, "domina", TeamSlot::Dps1));
+        assert!(slot_accepts_hero(true, "wuyang", TeamSlot::Tank2));
+    }
+
+    #[test]
+    fn names_and_roles_come_from_the_shared_list() {
+        assert_eq!(hero_name("domina"), "Domina");
+        assert_eq!(hero_name("mizuki"), "Mizuki");
+        assert_eq!(hero_name("wuyang"), "Wuyang");
+        assert_eq!(hero_role("domina"), HeroRole::Tank);
+        assert_eq!(hero_role("mizuki"), HeroRole::Support);
+        assert_eq!(hero_role("wuyang"), HeroRole::Support);
+        assert_eq!(hero_name("not-a-hero"), "Unknown");
+        assert_eq!(hero_role("not-a-hero"), HeroRole::Damage);
     }
 }
