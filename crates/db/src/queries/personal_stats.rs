@@ -2005,7 +2005,7 @@ mod tests {
     async fn role_none_is_rejected_and_empty_string_still_groups() {
         let db = test_db().await;
 
-        async fn insert_role(db: &crate::Database, role_expr: &str) -> Result<(), String> {
+        async fn insert_role(db: &Database, role_expr: &str) -> Result<(), String> {
             let sql = format!(
                 r#"CREATE personal_match SET
                     member_id = 'none-probe',
@@ -2036,8 +2036,8 @@ mod tests {
             .await
             .expect("the same insert with role = '' succeeds");
         assert!(
-            !none_error.is_empty(),
-            "NONE rejection should carry a database error"
+            none_error.to_lowercase().contains("role"),
+            "NONE rejection should name the role field: {none_error}"
         );
 
         let roles = db.get_role_stats("none-probe").await.unwrap();
