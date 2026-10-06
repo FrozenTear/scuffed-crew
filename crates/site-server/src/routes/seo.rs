@@ -209,6 +209,10 @@ fn looks_like_static_asset(path: &str) -> bool {
 /// process, so the file is not watched. Missing `index.html` keeps the old
 /// behaviour: real files are served, everything else is 404 (no embed).
 ///
+/// A missing file under `/assets/`, or any missing path with a static
+/// extension (`.js`, `.css`, `.wasm`, images, fonts, …), is a plain 404 with
+/// `Cache-Control: no-store`. Extension-less client routes still get the shell.
+///
 /// A hand-rolled service (rather than `middleware::from_fn`) so the future
 /// stays `Send`. Axum's function middleware around `ServeDir` does not.
 pub(crate) fn spa_service(dist_dir: &Path, state: AppState) -> SpaService {
@@ -335,7 +339,9 @@ fn classify_spa_route(dist: &Path, url_path: &str, have_index: bool) -> SpaRoute
         }
         DistLookup::File => SpaRoute::File,
         DistLookup::Missing => {
-            if have_index {
+            // Client routes (no static extension, not under /assets/) still
+            // get the shell. A missing stylesheet or script must not.
+            if have_index && !is_static_miss_path(url_path) {
                 SpaRoute::Shell
             } else {
                 SpaRoute::NotFound
@@ -343,6 +349,41 @@ fn classify_spa_route(dist: &Path, url_path: &str, have_index: bool) -> SpaRoute
         }
         DistLookup::Rejected => SpaRoute::NotFound,
     }
+}
+
+/// Missing files under `/assets/`, or any missing path with a static
+/// extension, must 404 instead of falling through to `index.html`.
+fn is_static_miss_path(url_path: &str) -> bool {
+    let path = url_path.split('?').next().unwrap_or(url_path);
+    let decoded = urlencoding::decode(path).unwrap_or(std::borrow::Cow::Borrowed(path));
+    let path = decoded.as_ref();
+    if path == "/assets" || path.starts_with("/assets/") {
+        return true;
+    }
+    let file = path.rsplit('/').next().unwrap_or(path);
+    let Some((_, ext)) = file.rsplit_once('.') else {
+        return false;
+    };
+    if ext.is_empty() {
+        return false;
+    }
+    matches!(
+        ext.to_ascii_lowercase().as_str(),
+        "js" | "mjs"
+            | "css"
+            | "wasm"
+            | "map"
+            | "svg"
+            | "png"
+            | "jpg"
+            | "jpeg"
+            | "webp"
+            | "ico"
+            | "woff"
+            | "woff2"
+            | "ttf"
+            | "json"
+    )
 }
 
 fn dist_lookup(dist: &Path, url_path: &str) -> DistLookup {
@@ -447,15 +488,20 @@ where
                 let mut files = std::mem::replace(&mut self.files, clone);
                 Box::pin(async move {
                     let mut response = files.call(req).await?;
-                    let content_type = response
-                        .headers()
-                        .get(header::CONTENT_TYPE)
-                        .and_then(|value| value.to_str().ok())
-                        .map(str::to_owned);
-                    let value = cache_control_value(&path, content_type.as_deref());
+                    let cache = if response.status() == StatusCode::NOT_FOUND {
+                        // A 404 must never be immutable, even for a dxh-looking path.
+                        "no-store"
+                    } else {
+                        let content_type = response
+                            .headers()
+                            .get(header::CONTENT_TYPE)
+                            .and_then(|value| value.to_str().ok())
+                            .map(str::to_owned);
+                        cache_control_value(&path, content_type.as_deref())
+                    };
                     response
                         .headers_mut()
-                        .insert(header::CACHE_CONTROL, HeaderValue::from_static(value));
+                        .insert(header::CACHE_CONTROL, HeaderValue::from_static(cache));
                     Ok(response.map(Body::new))
                 })
             }
@@ -925,7 +971,7 @@ mod tests {
             cache_control_value("/assets/tailwind-dxhdeadbeef.css", Some("text/css")),
             HASHED_ASSET_CACHE
         );
-        // A missing hashed file that falls through to index.html must not be frozen.
+        // If a hashed path were ever served as HTML, it still must not be frozen.
         assert_eq!(
             cache_control_value(
                 "/assets/missing-dxhabc12345.js",
@@ -975,6 +1021,33 @@ mod tests {
 
     fn path_disallowed(path: &str, rules: &[&str]) -> bool {
         rules.iter().any(|rule| path.starts_with(rule))
+    }
+
+    #[test]
+    fn static_miss_paths_are_assets_or_known_extensions() {
+        for path in [
+            "/assets/tailwind.css",
+            "/assets/favicon.svg",
+            "/assets/missing-dxhabc12345.js",
+            "/assets",
+            "/assets/",
+            "/nope.wasm",
+            "/dir/app.MJS",
+            "/notes/data.json",
+            "/font/face.woff2",
+        ] {
+            assert!(is_static_miss_path(path), "{path}");
+        }
+        for path in [
+            "/",
+            "/index.html",
+            "/strategies/foo",
+            "/admin/settings",
+            "/blog/hello",
+            "/robots.txt",
+        ] {
+            assert!(!is_static_miss_path(path), "{path}");
+        }
     }
 
     #[test]

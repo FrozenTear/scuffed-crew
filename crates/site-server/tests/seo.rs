@@ -343,16 +343,13 @@ async fn static_cache_headers_follow_asset_class() {
     assert_eq!(cache_control(&headers), Some("no-cache"));
 
     let (status, headers, body) = get(app.clone(), "/assets/missing-dxhabc12345.js").await;
-    assert_eq!(status, StatusCode::OK);
+    assert_eq!(status, StatusCode::NOT_FOUND);
     assert!(
-        body.contains(SHELL),
-        "missing hashed file must fall back to the shell"
+        !body.contains(SHELL),
+        "missing hashed file must not fall back to the shell"
     );
-    assert_eq!(
-        cache_control(&headers),
-        Some("no-cache"),
-        "html fallback must not be immutable"
-    );
+    assert_eq!(cache_control(&headers), Some("no-store"));
+    assert!(!body.contains("<html"));
 
     let (status, headers, body) = get(app.clone(), "/assets/app-dxhabc12345.js").await;
     assert_eq!(status, StatusCode::OK);
@@ -412,6 +409,65 @@ async fn static_cache_headers_follow_asset_class() {
         "uploads cache header must stay untouched, got {:?}",
         cache_control(&headers)
     );
+}
+
+#[tokio::test]
+async fn missing_static_files_404_and_client_routes_stay_shell() {
+    let tree = TempTree::new("static-404");
+    let state = test_state(tree.uploads()).await;
+    let app = create_router_with_dist(state, tree.dist());
+
+    for uri in [
+        "/assets/tailwind.css",
+        "/assets/missing-favicon.svg",
+        "/assets/missing-dxhabc12345.js",
+        "/assets/nope.json",
+        "/outside.wasm",
+        "/fonts/missing.woff2",
+        "/bundle.mjs",
+    ] {
+        let (status, headers, body) = get(app.clone(), uri).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{uri}");
+        assert!(!body.contains(SHELL), "{uri} returned the shell");
+        assert!(!body.contains("sc-settings"), "{uri}");
+        assert!(
+            content_type(&headers).starts_with("text/plain"),
+            "{uri} content-type {}",
+            content_type(&headers)
+        );
+        let cache = cache_control(&headers).unwrap_or("");
+        assert!(
+            cache == "no-store" || cache == "no-cache",
+            "{uri} cache {cache}"
+        );
+        assert!(!cache.contains("immutable"), "{uri} cache {cache}");
+    }
+
+    for uri in ["/strategies/foo", "/admin/settings", "/blog/hello"] {
+        let (status, headers, body) = get(app.clone(), uri).await;
+        assert_eq!(status, StatusCode::OK, "{uri}");
+        assert!(body.contains(SHELL), "{uri}");
+        assert!(body.contains("sc-settings"), "{uri}");
+        assert_eq!(cache_control(&headers), Some("no-cache"), "{uri}");
+    }
+
+    let (status, headers, body) = get(app.clone(), "/assets/plain.js").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("plain"));
+    assert_eq!(cache_control(&headers), Some("no-cache"));
+
+    let (status, headers, body) = get(app.clone(), "/assets/app-dxhabc12345.js").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("hashed"));
+    assert_eq!(
+        cache_control(&headers),
+        Some("public, max-age=31536000, immutable")
+    );
+
+    let (status, headers, body) = get(app, "/assets/favicon.svg").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("<svg"));
+    assert_eq!(cache_control(&headers), Some("public, max-age=86400"));
 }
 
 const SETTINGS_OPEN: &str = "<script id=\"sc-settings\" type=\"application/json\">";
