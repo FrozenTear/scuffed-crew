@@ -1,8 +1,11 @@
-//! Canonical Overwatch hero list + OCR name matching shared by the
-//! stat-tracker daemon and the site (leaderboard / roster hero filters).
+//! Canonical Overwatch hero list, role lookup, and OCR name matching shared
+//! by the stat-tracker daemon and the site (leaderboard / roster hero filters,
+//! and the strategy editor).
 //!
 //! Promoted from `scuffed-stat-tracker::parse` (hero-stats W1 / L1). The
 //! daemon re-exports these symbols so existing `parse::…` call sites stay.
+
+use crate::strategy::HeroRole;
 
 use strsim::normalized_levenshtein;
 
@@ -244,12 +247,14 @@ pub fn resolve_hero_query(raw: Option<&str>) -> Result<Option<&'static str>, ()>
     Err(())
 }
 
-/// Current-season role for a hero name on [`HEROES`].
+/// Current-season role for a hero name.
 ///
+/// Matching folds case, spaces, punctuation, and common Latin accents, so
+/// `Lucio` / `Lúcio`, `Torbjorn` / `Torbjörn`, and `soldier-76` all hit.
 /// Names that match [`crate::stats::Hero`] use that variant's role. Three
-/// names are on this list and not on that enum yet: D.Mon (Tank), Shion
-/// (Damage), Jetpack Cat (Support).
-pub fn role_for_hero_name(name: &str) -> Option<crate::strategy::HeroRole> {
+/// names are on [`HEROES`] and not on that enum yet: D.Mon (Tank), Shion
+/// (Damage), Jetpack Cat (Support). An empty or blank name is `None`.
+pub fn role_for_hero_name(name: &str) -> Option<HeroRole> {
     let key = fold_hero_key(name);
     if key.is_empty() {
         return None;
@@ -258,9 +263,9 @@ pub fn role_for_hero_name(name: &str) -> Option<crate::strategy::HeroRole> {
         return Some(hero.role());
     }
     match key.as_str() {
-        "dmon" => Some(crate::strategy::HeroRole::Tank),
-        "shion" => Some(crate::strategy::HeroRole::Damage),
-        "jetpackcat" => Some(crate::strategy::HeroRole::Support),
+        "dmon" => Some(HeroRole::Tank),
+        "shion" => Some(HeroRole::Damage),
+        "jetpackcat" => Some(HeroRole::Support),
         _ => None,
     }
 }
@@ -467,7 +472,6 @@ mod tests {
 
     #[test]
     fn every_shared_hero_name_has_a_role() {
-        use crate::strategy::HeroRole;
         for name in HEROES {
             assert!(role_for_hero_name(name).is_some(), "{name} has no role");
         }
@@ -482,5 +486,57 @@ mod tests {
         assert_eq!(role_for_hero_name("Lucio"), Some(HeroRole::Support));
         assert_eq!(role_for_hero_name("Lúcio"), Some(HeroRole::Support));
         assert_eq!(role_for_hero_name("NotAHero"), None);
+        assert_eq!(role_for_hero_name(""), None);
+        assert_eq!(role_for_hero_name("   "), None);
+        assert_eq!(role_for_hero_name("SOMBRA"), Some(HeroRole::Support));
+        assert_eq!(role_for_hero_name("  sombra "), Some(HeroRole::Support));
+        assert_eq!(role_for_hero_name("Torbjörn"), Some(HeroRole::Damage));
+        assert_eq!(role_for_hero_name("soldier-76"), Some(HeroRole::Damage));
+    }
+
+    /// Pins the roles the tracker stamps on a game. A stored role is whatever
+    /// was captured at the time, so this is the current roster, not a rewrite
+    /// of older Sombra games.
+    #[test]
+    fn tracker_stamped_roles() {
+        let cases = [
+            ("D.Mon", HeroRole::Tank),
+            ("d.mon", HeroRole::Tank),
+            ("dmon", HeroRole::Tank),
+            ("Jetpack Cat", HeroRole::Support),
+            ("Doctrine", HeroRole::Support),
+            ("Sombra", HeroRole::Support),
+        ];
+        for (name, role) in cases {
+            assert_eq!(role_for_hero_name(name), Some(role), "{name}");
+        }
+    }
+
+    /// Each enum variant folds to exactly one shared name, and the shared
+    /// names with no variant are exactly the three tracker-only heroes.
+    #[test]
+    fn hero_variants_and_shared_names_cover_each_other() {
+        use crate::stats::Hero;
+        for hero in Hero::ALL {
+            let key = fold_hero_key(hero.display_name());
+            let hits: Vec<_> = HEROES
+                .iter()
+                .copied()
+                .filter(|name| fold_hero_key(name) == key)
+                .collect();
+            assert_eq!(
+                hits.len(),
+                1,
+                "{} folded to {key} and matched {hits:?}",
+                hero.display_name()
+            );
+        }
+        let mut unresolved: Vec<&str> = HEROES
+            .iter()
+            .copied()
+            .filter(|name| catalog_hero(&fold_hero_key(name)).is_none())
+            .collect();
+        unresolved.sort_unstable();
+        assert_eq!(unresolved, ["D.Mon", "Jetpack Cat", "Shion"]);
     }
 }

@@ -194,32 +194,23 @@ struct AbilityDef {
     cooldown: Option<f32>,
 }
 
+impl From<&super::hero_catalog::CatalogHero> for HeroDef {
+    fn from(hero: &super::hero_catalog::CatalogHero) -> Self {
+        HeroDef {
+            id: hero.id.clone(),
+            name: hero.name,
+            role: hero.role,
+            icon_path: super::hero_catalog::icon_path(&hero.id),
+            abilities: Vec::new(),
+        }
+    }
+}
+
 /// Returns the shared hero roster for one role.
 fn heroes_by_role(role: HeroRole) -> Vec<HeroDef> {
     super::hero_catalog::heroes_for_role(role)
-        .into_iter()
-        .map(|hero| {
-            let icon_path = super::hero_catalog::icon_path(&hero.id);
-            HeroDef {
-                id: hero.id,
-                name: hero.name,
-                role: hero.role,
-                icon_path,
-                abilities: Vec::new(),
-            }
-        })
+        .map(HeroDef::from)
         .collect()
-}
-
-/// Returns the full hero definition with abilities for the info panel.
-fn hero_by_id(id: &str) -> Option<HeroDef> {
-    // Walk all roles to find the hero
-    for role in [HeroRole::Tank, HeroRole::Damage, HeroRole::Support] {
-        if let Some(hero) = heroes_by_role(role).into_iter().find(|h| h.id == id) {
-            return Some(hero);
-        }
-    }
-    None
 }
 
 /// Hero winrate entry for display in the picker.
@@ -227,10 +218,6 @@ fn hero_by_id(id: &str) -> Option<HeroDef> {
 pub struct HeroWinRate {
     pub hero_name: String,
     pub winrate: f64,
-}
-
-fn normalize_hero_id(name: &str) -> String {
-    super::hero_catalog::hero_id(name)
 }
 
 fn wr_badge_class(pct: f64) -> &'static str {
@@ -264,7 +251,7 @@ pub fn HeroPicker(
             h3 { class: "panel-title", "Heroes" }
 
             // Role sections
-            {[HeroRole::Tank, HeroRole::Damage, HeroRole::Support].iter().map(|role| {
+            {HeroRole::ALL.iter().map(|role| {
                 let role = *role;
                 let heroes = heroes_by_role(role);
                 let hero_count = heroes.len();
@@ -293,7 +280,7 @@ pub fn HeroPicker(
                         if is_expanded {
                             div { class: "hero-grid",
                                 {heroes.iter().map(|hero| {
-                                    let hero_id = hero.id.to_string();
+                                    let hero_id = hero.id.clone();
                                     let hero_id_click = hero_id.clone();
                                     let hero_name = hero.name;
                                     let icon = hero.icon_path.clone();
@@ -302,7 +289,9 @@ pub fn HeroPicker(
 
                                     let wr = hero_winrates.as_ref().and_then(|rates| {
                                         let norm_id = hero.id.as_str();
-                                        rates.iter().find(|r| normalize_hero_id(&r.hero_name) == norm_id)
+                                        rates.iter().find(|r| {
+                                            super::hero_catalog::hero_id(&r.hero_name) == norm_id
+                                        })
                                     });
 
                                     rsx! {
@@ -336,7 +325,7 @@ pub fn HeroPicker(
 
             // Selected hero info panel
             if let Some(ref hero_id) = selected_hero {
-                if let Some(hero) = hero_by_id(hero_id) {
+                if let Some(hero) = super::hero_catalog::hero_by_id(hero_id).map(HeroDef::from) {
                     div { class: "selected-hero-info",
                         div { class: "hero-details",
                             img {
@@ -379,6 +368,7 @@ pub fn HeroPicker(
 
 #[cfg(test)]
 mod tests {
+    use super::super::hero_catalog::hero_id;
     use super::*;
 
     #[test]
@@ -386,7 +376,7 @@ mod tests {
         for name in scuffed_types::HEROES {
             let role = scuffed_types::role_for_hero_name(name)
                 .unwrap_or_else(|| panic!("{name} has no role"));
-            let id = super::super::hero_catalog::hero_id(name);
+            let id = hero_id(name);
             let found = heroes_by_role(role)
                 .into_iter()
                 .find(|hero| hero.id == id)
@@ -394,12 +384,12 @@ mod tests {
             assert_eq!(found.name, *name);
             assert_eq!(found.role, role);
             assert_eq!(found.icon_path, format!("/assets/heroes/{id}/icon.webp"));
-            for other in [HeroRole::Tank, HeroRole::Damage, HeroRole::Support] {
-                if other == role {
+            for other in HeroRole::ALL {
+                if *other == role {
                     continue;
                 }
                 assert!(
-                    heroes_by_role(other).iter().all(|hero| hero.id != id),
+                    heroes_by_role(*other).iter().all(|hero| hero.id != id),
                     "{name} also appears under {other}"
                 );
             }

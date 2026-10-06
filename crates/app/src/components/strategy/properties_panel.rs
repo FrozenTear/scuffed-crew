@@ -147,10 +147,11 @@ const PRESET_COLORS: [(Color, &str); 5] = [
 
 /// Shared roster, grouped Tank then Damage then Support.
 fn all_heroes() -> Vec<(String, &'static str)> {
-    [HeroRole::Tank, HeroRole::Damage, HeroRole::Support]
-        .into_iter()
+    HeroRole::ALL
+        .iter()
+        .copied()
         .flat_map(super::hero_catalog::heroes_for_role)
-        .map(|hero| (hero.id, hero.name))
+        .map(|hero| (hero.id.clone(), hero.name))
         .collect()
 }
 
@@ -325,6 +326,42 @@ pub fn PropertiesPanel(
                     }
                 },
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dropdown_lists_the_shared_roster_in_role_order() {
+        let heroes = all_heroes();
+        assert_eq!(heroes.len(), scuffed_types::HEROES.len());
+        let rank = |role: HeroRole| match role {
+            HeroRole::Tank => 0,
+            HeroRole::Damage => 1,
+            HeroRole::Support => 2,
+        };
+        let roles: Vec<HeroRole> = heroes
+            .iter()
+            .map(|(_, name)| scuffed_types::role_for_hero_name(name).unwrap())
+            .collect();
+        assert!(roles.windows(2).all(|pair| rank(pair[0]) <= rank(pair[1])));
+        for id in [
+            "dva",
+            "junker-queen",
+            "wrecking-ball",
+            "soldier-76",
+            "torbjorn",
+            "lucio",
+            "dmon",
+            "jetpack-cat",
+        ] {
+            assert!(
+                heroes.iter().any(|(hid, _)| hid == id),
+                "{id} is missing from the dropdown"
+            );
         }
     }
 }

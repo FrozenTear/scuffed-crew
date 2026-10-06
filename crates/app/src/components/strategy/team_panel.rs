@@ -148,10 +148,10 @@ const TEAM_PANEL_CSS: &str = r#"
 "#;
 
 /// Display name for an asset id. Unknown ids stay "Unknown".
-fn hero_name(id: &str) -> String {
+fn hero_name(id: &str) -> &'static str {
     super::hero_catalog::hero_by_id(id)
-        .map(|hero| hero.name.to_string())
-        .unwrap_or_else(|| "Unknown".to_string())
+        .map(|hero| hero.name)
+        .unwrap_or("Unknown")
 }
 
 /// Role for an asset id, from the shared hero list. Unknown ids are Damage,
@@ -189,6 +189,9 @@ pub fn TeamPanel(
 ) -> Element {
     let slots = team_format.slots();
     let is_6v6 = team_format == TeamFormat::SixVSix;
+    let picked = selected_hero
+        .as_deref()
+        .and_then(super::hero_catalog::hero_by_id);
 
     rsx! {
         style { {TEAM_PANEL_CSS} }
@@ -245,8 +248,10 @@ pub fn TeamPanel(
                                     Some(sel) => {
                                         {
                                             let hid = &sel.hero_id;
-                                            let hname = hero_name(hid);
-                                            let hrole = hero_role(hid);
+                                            let (hname, hrole) = match super::hero_catalog::hero_by_id(hid) {
+                                                Some(hero) => (hero.name, hero.role),
+                                                None => ("Unknown", HeroRole::Damage),
+                                            };
                                             let role_color = hrole.color_hex();
                                             let icon_path = super::hero_catalog::icon_path(hid);
 
@@ -278,12 +283,11 @@ pub fn TeamPanel(
                                     None => {
                                         // Offer one-click assignment when a hero is picked and
                                         // its role fits this slot (6v6 slots accept any role).
-                                        let assignable_hero = selected_hero.as_ref().filter(|h| {
-                                            slot_accepts_hero(is_6v6, h, slot)
-                                        });
+                                        let assignable_hero = picked
+                                            .filter(|hero| is_6v6 || hero.role == slot.required_role());
                                         match assignable_hero {
-                                            Some(hid) => {
-                                                let hname = hero_name(hid);
+                                            Some(hero) => {
+                                                let hname = hero.name;
                                                 rsx! {
                                                     button {
                                                         class: "slot-assign-btn",

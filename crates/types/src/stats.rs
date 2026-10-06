@@ -63,62 +63,77 @@ pub enum Hero {
     Zenyatta,
 }
 
+macro_rules! hero_all {
+    ($($variant:ident),* $(,)?) => {
+        /// Every `Hero` variant, in enum order.
+        ///
+        /// [`_hero_all_exhaustive`] matches the same variants with no wildcard,
+        /// so a new `Hero` fails to compile until it is added here. A repeated
+        /// entry is an unreachable pattern.
+        pub const ALL: &'static [Hero] = &[$(Hero::$variant),*];
+
+        const fn _hero_all_exhaustive(hero: Hero) {
+            match hero {
+                $(Hero::$variant => {}),*
+            }
+        }
+    };
+}
+
 impl Hero {
-    /// Every variant. Adding a hero to the enum without listing it here fails
-    /// `hero_all_covers_every_variant` at compile time.
-    pub const ALL: &'static [Hero] = &[
-        Hero::DVa,
-        Hero::Domina,
-        Hero::Doomfist,
-        Hero::Hazard,
-        Hero::JunkerQueen,
-        Hero::Mauga,
-        Hero::Orisa,
-        Hero::Ramattra,
-        Hero::Reinhardt,
-        Hero::Roadhog,
-        Hero::Sigma,
-        Hero::Winston,
-        Hero::WreckingBall,
-        Hero::Zarya,
-        Hero::Anran,
-        Hero::Ashe,
-        Hero::Bastion,
-        Hero::Cassidy,
-        Hero::Echo,
-        Hero::Emre,
-        Hero::Freja,
-        Hero::Genji,
-        Hero::Hanzo,
-        Hero::Junkrat,
-        Hero::Mei,
-        Hero::Pharah,
-        Hero::Reaper,
-        Hero::Sierra,
-        Hero::Sojourn,
-        Hero::Soldier76,
-        Hero::Symmetra,
-        Hero::Torbjorn,
-        Hero::Tracer,
-        Hero::Vendetta,
-        Hero::Venture,
-        Hero::Widowmaker,
-        Hero::Ana,
-        Hero::Baptiste,
-        Hero::Brigitte,
-        Hero::Doctrine,
-        Hero::Illari,
-        Hero::Juno,
-        Hero::Kiriko,
-        Hero::Lifeweaver,
-        Hero::Lucio,
-        Hero::Mercy,
-        Hero::Mizuki,
-        Hero::Moira,
-        Hero::Sombra,
-        Hero::Wuyang,
-        Hero::Zenyatta,
-    ];
+    hero_all! {
+        DVa,
+        Domina,
+        Doomfist,
+        Hazard,
+        JunkerQueen,
+        Mauga,
+        Orisa,
+        Ramattra,
+        Reinhardt,
+        Roadhog,
+        Sigma,
+        Winston,
+        WreckingBall,
+        Zarya,
+        Anran,
+        Ashe,
+        Bastion,
+        Cassidy,
+        Echo,
+        Emre,
+        Freja,
+        Genji,
+        Hanzo,
+        Junkrat,
+        Mei,
+        Pharah,
+        Reaper,
+        Sierra,
+        Sojourn,
+        Soldier76,
+        Symmetra,
+        Torbjorn,
+        Tracer,
+        Vendetta,
+        Venture,
+        Widowmaker,
+        Ana,
+        Baptiste,
+        Brigitte,
+        Doctrine,
+        Illari,
+        Juno,
+        Kiriko,
+        Lifeweaver,
+        Lucio,
+        Mercy,
+        Mizuki,
+        Moira,
+        Sombra,
+        Wuyang,
+        Zenyatta,
+    }
 
     pub fn role(&self) -> HeroRole {
         match self {
@@ -545,91 +560,13 @@ mod tests {
     use super::*;
     use std::str::FromStr;
 
-    /// Index of every variant. No wildcard: a new `Hero` variant fails to
-    /// compile until it is numbered here and listed in [`Hero::ALL`].
-    const fn hero_variant_index(hero: Hero) -> usize {
-        match hero {
-            Hero::DVa => 0,
-            Hero::Domina => 1,
-            Hero::Doomfist => 2,
-            Hero::Hazard => 3,
-            Hero::JunkerQueen => 4,
-            Hero::Mauga => 5,
-            Hero::Orisa => 6,
-            Hero::Ramattra => 7,
-            Hero::Reinhardt => 8,
-            Hero::Roadhog => 9,
-            Hero::Sigma => 10,
-            Hero::Winston => 11,
-            Hero::WreckingBall => 12,
-            Hero::Zarya => 13,
-            Hero::Anran => 14,
-            Hero::Ashe => 15,
-            Hero::Bastion => 16,
-            Hero::Cassidy => 17,
-            Hero::Echo => 18,
-            Hero::Emre => 19,
-            Hero::Freja => 20,
-            Hero::Genji => 21,
-            Hero::Hanzo => 22,
-            Hero::Junkrat => 23,
-            Hero::Mei => 24,
-            Hero::Pharah => 25,
-            Hero::Reaper => 26,
-            Hero::Sierra => 27,
-            Hero::Sojourn => 28,
-            Hero::Soldier76 => 29,
-            Hero::Symmetra => 30,
-            Hero::Torbjorn => 31,
-            Hero::Tracer => 32,
-            Hero::Vendetta => 33,
-            Hero::Venture => 34,
-            Hero::Widowmaker => 35,
-            Hero::Ana => 36,
-            Hero::Baptiste => 37,
-            Hero::Brigitte => 38,
-            Hero::Doctrine => 39,
-            Hero::Illari => 40,
-            Hero::Juno => 41,
-            Hero::Kiriko => 42,
-            Hero::Lifeweaver => 43,
-            Hero::Lucio => 44,
-            Hero::Mercy => 45,
-            Hero::Mizuki => 46,
-            Hero::Moira => 47,
-            Hero::Sombra => 48,
-            Hero::Wuyang => 49,
-            Hero::Zenyatta => 50,
-        }
-    }
-
-    const fn all_covers_every_variant() -> bool {
-        const N: usize = 51;
-        let mut hit = [false; N];
-        let mut i = 0;
-        while i < Hero::ALL.len() {
-            let idx = hero_variant_index(Hero::ALL[i]);
-            if idx >= N {
-                return false;
-            }
-            hit[idx] = true;
-            i += 1;
-        }
-        i = 0;
-        while i < N {
-            if !hit[i] {
-                return false;
-            }
-            i += 1;
-        }
-        true
-    }
-
-    const _: () = assert!(all_covers_every_variant());
-
     #[test]
-    fn hero_all_covers_every_variant() {
-        assert!(all_covers_every_variant());
+    fn hero_all_display_names_are_unique() {
+        let mut names: Vec<&str> = Hero::ALL.iter().map(|hero| hero.display_name()).collect();
+        let n = names.len();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), n, "display names must be unique");
         assert_eq!(Hero::ALL.len(), 51);
     }
 

@@ -605,6 +605,37 @@ mod tests {
         assert_eq!(guess_role(""), "Damage");
     }
 
+    /// Site role lookup and the role stamped on a captured game stay aligned.
+    /// A stored game keeps whatever was captured, including pre-Season 5 Sombra
+    /// games that were Damage.
+    #[test]
+    fn role_for_hero_name_matches_guess_role() {
+        let pins = [
+            ("D.Mon", "Tank"),
+            ("d.mon", "Tank"),
+            ("dmon", "Tank"),
+            ("Jetpack Cat", "Support"),
+            ("Doctrine", "Support"),
+            ("Sombra", "Support"),
+        ];
+        for (name, role) in pins {
+            assert_eq!(guess_role(name), role, "tracker {name}");
+            assert_eq!(
+                scuffed_types::role_for_hero_name(name)
+                    .map(|r| r.to_string())
+                    .as_deref(),
+                Some(role),
+                "site {name}"
+            );
+        }
+        for name in scuffed_types::HEROES {
+            let site = scuffed_types::role_for_hero_name(name)
+                .map(|role| role.to_string())
+                .unwrap_or_else(|| panic!("{name} has no site role"));
+            assert_eq!(site, guess_role(name), "{name}");
+        }
+    }
+
     #[test]
     fn recent_maps_are_detected() {
         // Neon Junction (Hybrid, S3) and Aatlis (Flashpoint, S17) — both were
