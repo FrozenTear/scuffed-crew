@@ -331,6 +331,18 @@ pub fn match_map_in_text(text: &str) -> Option<String> {
     find_map(&lines)
 }
 
+/// Exact substring match only. The accolade crop uses this so a fuzzy
+/// near-miss in the gameplay HUD cannot become the session map.
+pub fn exact_map_in_text(text: &str) -> Option<String> {
+    let text = normalize_ocr_glyphs(&text.to_lowercase());
+    for &(display_name, pattern) in MAPS {
+        if text.contains(&normalize_ocr_glyphs(pattern)) {
+            return Some(display_name.to_string());
+        }
+    }
+    None
+}
+
 /// Result word printed as the header of the scoreboard region itself, read
 /// from the full-board OCR text a Tab capture already paid for. Only the
 /// first two non-empty lines count — that is where a header lives; player

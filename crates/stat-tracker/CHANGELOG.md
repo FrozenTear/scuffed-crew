@@ -4,41 +4,57 @@ User-facing notes for `stat-tracker-v*` GitHub Releases. The release workflow
 prepends the section whose heading matches the tag version (for example
 `## 0.4.15` for `stat-tracker-v0.4.15`).
 
-## 0.4.18 (unreleased; bump after #133 merges)
+## 0.4.18
 
 Boundaries are one board-order state machine. A result hint stays sealable
-until a board with progressed stats is accepted after it. Progressed means
-a counter moved forward: not the same totals, not a decided result header,
-and not an implausible jump. There is no 60-second hint timer. The
-75-second grace starts when the result is recorded, not when the word was
-first seen.
+until a second board with progressed stats is accepted after it, or until
+a reset, a gap, or an unblocked map vote or hero ban seals it. The first
+progressed board keeps the hint. A hero select that armed a pending
+boundary drops the hint on the next progressed board. Progressed means a
+counter moved forward from the reset baseline: not the same totals, not a
+decided result header, and not an implausible jump. There is no 60-second
+hint timer. The 75-second grace starts when the result is recorded, not
+when the word was first seen.
 
 Wall-clock time is the 75-second grace, the 120-second stat gap, the
 45-second wait before the first fresh-match board counts, the 20-minute
-bound on an unfinished session, and the map-vote debounce.
+bound on an unfinished session, the map-vote debounce, and the rate
+ceilings: elims, assists, and deaths `elapsed / 5 + 8`, and damage,
+healing, and mitigation `elapsed * 80 + 2500`. The rate clock is the
+reset baseline, not the last stored row. The 2x–4x all-increase band
+applies only inside the first minute.
 
-A start screen after a hint that already has a board arms a pending
-boundary. The next fresh-match board seals the hint on the old session. A
-progressed board drops the hint. A start screen when no board has been
-stored yet seals the hint immediately. A hero select during a live match
-does not split. A hero ban, or a map vote that is not the same map and
-hero and is past the debounce, closes an unfinished session without
-sealing a result. The same-map-plus-hero guard still suppresses a gap
-split of an unfinished match.
+A map vote that is not blocked, or a hero ban, after a hint that already
+has a board splits and seals the hint. A hero select after that board
+only arms a pending boundary. The next fresh-match board then splits and
+seals. A hero select when no board has been stored yet seals immediately.
+A start screen that is still inside the debounce does not open another
+session, and the vote candidates stay on the one just opened. A hero
+select during a live match primes a reset and does not split. A hero ban,
+or a map vote past the debounce, closes an unfinished session without
+sealing a result when it is not the same map. That guard is same-map
+only. The same-map-plus-hero guard still suppresses a gap split of an
+unfinished match.
 
-A fresh-match reset is two identified boards, each at or under elims
-max(2, previous/4), deaths max(1, previous/4), and damage previous/4,
-versus a mature board, and the first is at least 45 seconds later. The
-first is held off the current session and written onto the new one, at
-that capture's own time, when the second board or a following hero
-select/ban commits. A hero change by itself is not a split. A row from a
-different slot counts only when it meets those thresholds. A row with no
-id never counts. The new session's outcome is Unknown unless the split is
-the 120-second gap, which keeps that frame's header. A reset or a gap
-after a hint seals the hint on the old session. An implausible jump is
-still stored, and it does not become the reset baseline. That includes a
-row whose mature columns all grew by 2x to 4x. One misread stat
-cell is still held. A long post-match screen does not split on the gap.
+A fresh-match reset is the same identified row, with clean elims, deaths,
+and damage, at or under elims max(2, previous/4), deaths max(1,
+previous/4), and damage previous/4, versus a mature board, and the first
+is at least 45 seconds later. The first is held off the current session
+and written onto the new one, at that capture's own time, when a second
+fresh board commits. A hero select or ban before that board is the other
+signal. A select after the held board does not split by itself. A stored
+board that is not fresh drops the held board and the streak. A hero
+change by itself is not a split. A different row never counts as a reset.
+A row with no id never counts. The new session's outcome is Unknown
+unless the split is the 120-second gap, which keeps that frame's header.
+A reset or a gap after a hint seals the hint on the old session. An
+implausible jump is still stored, and it does not become the reset
+baseline. One misread stat cell is still held. A long post-match screen
+does not split on the gap.
+
+A single Defeat read with no scoreboard and no start screen, followed by
+another map's tabs, is not split. That read cannot be told apart from a
+late first Tab of the same match.
 
 ### Install
 
