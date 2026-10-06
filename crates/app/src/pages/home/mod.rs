@@ -8,8 +8,10 @@ use dioxus::prelude::*;
 use scuffed_api_client::ApiClient;
 use scuffed_types::{HomeSectionId, HomeShell, HomeSkin, org_initials};
 
+use crate::components::fetch_error;
 use crate::hooks::CursorPage;
 use crate::state::{loaded_site_settings, use_site_settings};
+use crate::util::{FetchClass, classify_fetch};
 use blocks::{
     EthosBlock, HeroBlock, LiveBlock, NewsBlock, RecruitBlock, TeamsBlock, live_panel_flags,
     teams_will_render,
@@ -20,10 +22,6 @@ use data::{Announcement, Event, HomeTournament, Overview};
 #[component]
 pub fn Home() -> Element {
     let site_settings = use_site_settings();
-    let loaded = {
-        let slot = site_settings.resource.read();
-        loaded_site_settings(slot.as_ref()).cloned()
-    };
     let overview = use_resource(|| async {
         ApiClient::web()
             .fetch::<Overview>("/api/public/overview")
@@ -52,25 +50,38 @@ pub fn Home() -> Element {
             .map(|r| r.data)
     });
 
-    let content = loaded
-        .as_ref()
-        .map(|s| s.homepage.clone())
-        .unwrap_or_default();
-    let home_shell: HomeShell = loaded
-        .as_ref()
-        .map(|s| s.home_shell)
-        .unwrap_or(HomeShell::OpsHub);
-    let home_skin: HomeSkin = loaded
-        .as_ref()
-        .map(|s| s.home_skin)
-        .unwrap_or(HomeSkin::Clean);
-    // Blank watermark until settings resolve. `org_initials` of an empty
-    // name is "CL", which is still a fake mark.
-    let initials = loaded
-        .as_ref()
-        .map(|s| org_initials(&s.org_name))
-        .unwrap_or_default();
-    let recruitment_open = loaded.as_ref().map(|s| s.recruitment_open).unwrap_or(true);
+    let (settings_fetch, loaded) = {
+        let slot = site_settings.resource.read();
+        (
+            classify_fetch(slot.as_ref()),
+            loaded_site_settings(slot.as_ref()).cloned(),
+        )
+    };
+
+    // Default homepage copy ("Your Clan", "Gaming clan", …) is a template for
+    // new installs. Painting it before settings arrive flashes that template,
+    // then swaps in the real org. Pending stays a textless skeleton. A failed
+    // load stays an error, not the template.
+    let Some(settings) = loaded else {
+        let css = home_css_layers();
+        return rsx! {
+            style { "{css}" }
+            div { class: "home-wrap",
+                if settings_fetch == FetchClass::Error {
+                    HeroSettingsError { refresh: site_settings.refresh }
+                } else {
+                    HeroSkeleton {}
+                }
+            }
+        };
+    };
+
+    let content = settings.homepage.clone();
+    let home_shell: HomeShell = settings.home_shell;
+    let home_skin: HomeSkin = settings.home_skin;
+    // `org_initials` of an empty name is "CL", which is still a fake mark.
+    let initials = org_initials(&settings.org_name);
+    let recruitment_open = settings.recruitment_open;
 
     // Resolve list data for blocks (Home owns resources).
     let event_list = events
@@ -238,5 +249,96 @@ pub fn Home() -> Element {
                 }
             }
         }
+    }
+}
+
+/// Textless hero. Bars use the loaded hero's type scale so the swap keeps the rail.
+#[component]
+fn HeroSkeleton() -> Element {
+    rsx! {
+        header {
+            class: "home-hero",
+            aria_busy: "true",
+            aria_label: "Loading",
+            div { class: "home-hero-rail",
+                div { class: "home-hero-inner",
+                    div { class: "home-skel home-skel-badge", aria_hidden: "true" }
+                    div { class: "home-skel home-skel-title", aria_hidden: "true" }
+                    div { class: "home-skel home-skel-title home-skel-title-short", aria_hidden: "true" }
+                    div { class: "home-skel home-skel-sub", aria_hidden: "true" }
+                    div { class: "home-skel-actions", aria_hidden: "true",
+                        div { class: "home-skel home-skel-btn" }
+                        div { class: "home-skel home-skel-btn" }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Settings failed. Same hero chrome, no template copy, retry refetches settings.
+#[component]
+fn HeroSettingsError(refresh: Signal<u32>) -> Element {
+    rsx! {
+        header { class: "home-hero",
+            div { class: "home-hero-rail",
+                div { class: "home-hero-inner",
+                    {fetch_error(
+                        "Couldn't load this page. Check your connection and try again.",
+                        refresh,
+                    )}
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn render(root: fn() -> Element) -> String {
+        let mut dom = VirtualDom::new(root);
+        dom.rebuild_in_place();
+        dioxus_ssr::render(&dom)
+    }
+
+    fn assert_no_template_copy(html: &str) {
+        for needle in [
+            "My Clan",
+            "Your",
+            "Clan",
+            "Gaming clan",
+            "Edit this copy",
+            "Apply to join",
+            "How we play",
+        ] {
+            assert!(!html.contains(needle), "{needle} in {html}");
+        }
+    }
+
+    #[test]
+    fn pending_hero_is_a_textless_skeleton() {
+        let html = render(HeroSkeleton);
+        assert!(html.contains("home-hero"), "{html}");
+        assert!(html.contains("home-skel-title"), "{html}");
+        assert!(html.contains("aria-busy"), "{html}");
+        assert_no_template_copy(&html);
+    }
+
+    #[test]
+    fn failed_settings_hero_is_an_error_not_the_template() {
+        fn view() -> Element {
+            let refresh = use_signal(|| 0u32);
+            rsx! { HeroSettingsError { refresh } }
+        }
+        let html = render(view);
+        // dioxus-ssr escapes the apostrophe in "Couldn't".
+        assert!(
+            html.contains("load this page") && html.contains("try again"),
+            "{html}"
+        );
+        assert!(html.contains("Retry"), "{html}");
+        assert_no_template_copy(&html);
     }
 }

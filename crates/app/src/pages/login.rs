@@ -210,14 +210,12 @@ fn login_banner_from_browser_url(url: &str) -> Option<&'static str> {
     login_banner_from_search(search)
 }
 
-/// `Route::Login` after dropping a trailing slash (`/login/`).
+/// `Route::Login`, as [`Route::from_str`] decides it.
 ///
-/// Parsing goes through [`Route`] so a query segment added to the login route
-/// stays in one place. The query itself is not part of this check: [`Route`]
-/// ignores undeclared query params, which is the bug this snapshot exists for.
+/// Trailing slashes and a future query segment on the login route stay in the
+/// router. [`Route`] ignores undeclared query params, which is the bug this
+/// snapshot exists for, so the path checked here has the search string removed.
 fn is_login_route(path: &str) -> bool {
-    let trimmed = path.trim_end_matches('/');
-    let path = if trimmed.is_empty() { "/" } else { trimmed };
     matches!(Route::from_str(path), Ok(Route::Login {}))
 }
 
@@ -242,6 +240,10 @@ fn login_banner_lock() -> std::sync::MutexGuard<'static, LoginBannerSlot> {
 
 /// Read `window.location` once, before [`dioxus::launch`] or before [`crate::routes::Route`]
 /// is mounted. Later calls keep the first snapshot, including after [`Login`] takes it.
+///
+/// Process-wide: one static for the whole process. That is one WASM page load.
+/// SSR would need a per-request slot; this static would let the first document
+/// consume the banner for every later render in the process.
 pub(crate) fn capture_initial_login_banner() {
     capture_login_banner_from_url(&initial_browser_url());
 }
@@ -840,22 +842,13 @@ mod tests {
         );
     }
 
-    /// Same `/login` shape as [`crate::routes::Route::Login`]: no query segment,
-    /// so [`dioxus_router::RouterContext`] (via [`Router`]) replaces the history
-    /// with `/login` before [`Login`] mounts. The banner has to come from the
-    /// pre-replace snapshot, and a second mount in this process must not see it.
-    #[derive(Clone, Routable, Debug, PartialEq)]
-    #[rustfmt::skip]
-    enum LoginBannerRoute {
-        #[route("/login")]
-        Login {},
-        #[route("/")]
-        BannerProbeHome {},
-    }
+    /// Tests that reset or consume the process-wide banner slot must hold this
+    /// for the whole sequence. `LOGIN_BANNER` only makes one lock acquisition
+    /// atomic; a reset on another thread can still land between capture and take.
+    static BANNER_TESTS: Mutex<()> = Mutex::new(());
 
-    #[component]
-    fn BannerProbeHome() -> Element {
-        rsx! { "home" }
+    fn banner_test_guard() -> std::sync::MutexGuard<'static, ()> {
+        BANNER_TESTS.lock().unwrap_or_else(|err| err.into_inner())
     }
 
     thread_local! {
@@ -868,18 +861,23 @@ mod tests {
         let history = use_hook(|| {
             let url = PROBE_URL.with(|slot| slot.borrow().clone());
             let history = std::rc::Rc::new(dioxus::history::MemoryHistory::with_initial_path(url));
-            // Same function `main` uses, fed the history URL while it still has
-            // the query. RouterContext::new has not replaced it yet.
+            // Not `capture_initial_login_banner`: that reads `window.location`,
+            // which is empty in this native test. `current_route()` is still the
+            // initial path, query included. `Router::<Route>` has not mounted,
+            // so it has not replaced the history with the canonical route yet.
             capture_login_banner_from_url(&history.current_route());
             PROBE_HISTORY.with(|slot| *slot.borrow_mut() = Some(history.clone()));
             history
         });
         let auth = use_signal(crate::state::auth::AuthState::new);
         use_context_provider(|| auth);
+        crate::state::provide_site_settings();
         rsx! {
-            dioxus::router::components::HistoryProvider {
-                history: move |_| history.clone() as std::rc::Rc<dyn dioxus::history::History>,
-                Router::<LoginBannerRoute> {}
+            crate::theme::ThemeProvider {
+                dioxus::router::components::HistoryProvider {
+                    history: move |_| history.clone() as std::rc::Rc<dyn dioxus::history::History>,
+                    Router::<crate::routes::Route> {}
+                }
             }
         }
     }
@@ -908,11 +906,9 @@ mod tests {
 
     #[test]
     fn registration_closed_banner_renders_once_after_router_strips_the_query() {
-        // The slot is process-wide. Hold a separate lock so a parallel test
-        // cannot capture or take it mid-render. Do not hold `LOGIN_BANNER`:
-        // capture and take lock that mutex themselves.
-        static TEST_LOCK: Mutex<()> = Mutex::new(());
-        let _guard = TEST_LOCK.lock().unwrap_or_else(|err| err.into_inner());
+        // Do not hold `LOGIN_BANNER` across the render: capture and take lock
+        // that mutex on this thread. `BANNER_TESTS` is the shared lock.
+        let _guard = banner_test_guard();
         reset_captured_login_banner();
 
         let original = "/login?error=registration_closed";
