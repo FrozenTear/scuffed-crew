@@ -97,7 +97,7 @@ jobs:
           workspaces: crates/stat-tracker
 
       - name: Clippy
-        run: cargo clippy -- -D warnings
+        run: cargo clippy --all-targets -- -D warnings
 
   ui-overview:
     # Iced desktop GUI (scuffed-stat-tracker-ui). Depends on the tracker lib.

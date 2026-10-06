@@ -289,7 +289,59 @@ pub enum MapName {
     ThroneOfAnubis,
 }
 
+macro_rules! map_name_all {
+    ($($variant:ident),* $(,)?) => {
+        /// Every map variant, in enum order. Callers that used to copy display
+        /// names by hand (OCR collision checks) iterate this instead.
+        ///
+        /// [`_map_name_all_exhaustive`] matches the same variants with no
+        /// wildcard, so a new `MapName` fails to compile until it is added here.
+        pub const ALL: &[MapName] = &[$(MapName::$variant),*];
+
+        const fn _map_name_all_exhaustive(map: MapName) {
+            match map {
+                $(MapName::$variant => {}),*
+            }
+        }
+    };
+}
+
 impl MapName {
+    map_name_all! {
+        CircuitRoyal,
+        Dorado,
+        Havana,
+        Junkertown,
+        Rialto,
+        Route66,
+        ShambaliMonastery,
+        WatchpointGibraltar,
+        BlizzardWorld,
+        Eichenwalde,
+        Hollywood,
+        KingsRow,
+        Midtown,
+        NeonJunction,
+        Numbani,
+        Paraiso,
+        AntarcticPeninsula,
+        Busan,
+        Ilios,
+        LijangTower,
+        Nepal,
+        Oasis,
+        Samoa,
+        Colosseo,
+        Esperanca,
+        NewQueenStreet,
+        Runasapi,
+        Aatlis,
+        NewJunkCity,
+        Suravasa,
+        Hanaoka,
+        ThroneOfAnubis,
+    }
+
     pub fn game_mode(&self) -> GameMode {
         match self {
             Self::CircuitRoyal
@@ -579,6 +631,19 @@ mod tests {
     fn hero_all_covers_every_variant() {
         assert!(all_covers_every_variant());
         assert_eq!(Hero::ALL.len(), 51);
+    }
+
+    #[test]
+    fn all_covers_every_map_and_display_names_round_trip() {
+        assert_eq!(MapName::ALL.len(), 32);
+        let mut names: Vec<&str> = MapName::ALL.iter().map(|m| m.display_name()).collect();
+        let n = names.len();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), n, "display names must be unique");
+        for map in MapName::ALL {
+            assert_eq!(map.display_name().parse::<MapName>().unwrap(), *map);
+        }
     }
 
     /// Live Maps-tab names (accented + unaccented) plus Neon Junction.

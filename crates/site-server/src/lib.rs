@@ -345,11 +345,16 @@ pub fn create_router_with_dist(state: AppState, dist_dir: impl Into<PathBuf>) ->
         .route("/api/stats/me", get(routes::stats::my_stats))
         .route("/api/stats/me/matches", get(routes::stats::my_matches))
         .route("/api/stats/me/heroes", get(routes::stats::my_hero_stats))
+        .route("/api/stats/me/roles", get(routes::stats::my_role_stats))
         .route("/api/stats/me/maps", get(routes::stats::my_map_stats))
         .route("/api/stats/member/{id}", get(routes::stats::member_stats))
         .route(
             "/api/stats/member/{id}/heroes",
             get(routes::stats::member_hero_stats),
+        )
+        .route(
+            "/api/stats/member/{id}/roles",
+            get(routes::stats::member_role_stats),
         )
         .route(
             "/api/stats/member/{id}/maps",

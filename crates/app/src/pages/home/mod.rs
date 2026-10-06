@@ -8,8 +8,10 @@ use dioxus::prelude::*;
 use scuffed_api_client::ApiClient;
 use scuffed_types::{HomeSectionId, HomeShell, HomeSkin, org_initials};
 
+use crate::components::fetch_error;
 use crate::hooks::CursorPage;
 use crate::state::{loaded_site_settings, use_site_settings};
+use crate::util::{FetchClass, classify_fetch};
 use blocks::{
     EthosBlock, HeroBlock, LiveBlock, NewsBlock, RecruitBlock, TeamsBlock, live_panel_flags,
     teams_will_render,
@@ -17,13 +19,26 @@ use blocks::{
 use css::home_css_layers;
 use data::{Announcement, Event, HomeTournament, Overview};
 
+/// What `Home` paints from the settings fetch. Pending is a textless skeleton,
+/// not the template homepage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HomeBody {
+    Skeleton,
+    Error,
+    Ready,
+}
+
+fn home_body(phase: FetchClass) -> HomeBody {
+    match phase {
+        FetchClass::Loading => HomeBody::Skeleton,
+        FetchClass::Error => HomeBody::Error,
+        FetchClass::Ready => HomeBody::Ready,
+    }
+}
+
 #[component]
 pub fn Home() -> Element {
     let site_settings = use_site_settings();
-    let loaded = {
-        let slot = site_settings.resource.read();
-        loaded_site_settings(slot.as_ref()).cloned()
-    };
     let overview = use_resource(|| async {
         ApiClient::web()
             .fetch::<Overview>("/api/public/overview")
@@ -52,25 +67,46 @@ pub fn Home() -> Element {
             .map(|r| r.data)
     });
 
-    let content = loaded
-        .as_ref()
-        .map(|s| s.homepage.clone())
-        .unwrap_or_default();
-    let home_shell: HomeShell = loaded
-        .as_ref()
-        .map(|s| s.home_shell)
-        .unwrap_or(HomeShell::OpsHub);
-    let home_skin: HomeSkin = loaded
-        .as_ref()
-        .map(|s| s.home_skin)
-        .unwrap_or(HomeSkin::Clean);
-    // Blank watermark until settings resolve. `org_initials` of an empty
-    // name is "CL", which is still a fake mark.
-    let initials = loaded
-        .as_ref()
-        .map(|s| org_initials(&s.org_name))
-        .unwrap_or_default();
-    let recruitment_open = loaded.as_ref().map(|s| s.recruitment_open).unwrap_or(true);
+    let (settings_fetch, loaded) = {
+        let slot = site_settings.resource.read();
+        (
+            classify_fetch(slot.as_ref()),
+            loaded_site_settings(slot.as_ref()).cloned(),
+        )
+    };
+
+    // Default homepage copy ("Your Clan", "Gaming clan", …) is a template for
+    // new installs. Painting it before settings arrive flashes that template,
+    // then swaps in the real org. Pending stays a textless skeleton. A failed
+    // load stays an error, not the template.
+    let body = home_body(settings_fetch);
+    let Some(settings) = loaded.filter(|_| body == HomeBody::Ready) else {
+        // Defaults match a fresh install (`ops_hub` is 80rem). Omitting them
+        // leaves the 72rem base, so the rail grows 128px at 1280px when the
+        // real shell arrives.
+        let shell_attr = HomeShell::default().as_str();
+        let skin_attr = HomeSkin::default().as_str();
+        let css = home_css_layers();
+        return rsx! {
+            style { "{css}" }
+            div {
+                class: "home-wrap",
+                "data-home-shell": "{shell_attr}",
+                "data-home-skin": "{skin_attr}",
+                if body == HomeBody::Error {
+                    HeroSettingsError { refresh: site_settings.refresh }
+                } else {
+                    HeroSkeleton {}
+                }
+            }
+        };
+    };
+
+    let content = settings.homepage.clone();
+    let home_shell: HomeShell = settings.home_shell;
+    let home_skin: HomeSkin = settings.home_skin;
+    let initials = org_initials(&settings.org_name);
+    let recruitment_open = settings.recruitment_open;
 
     // Resolve list data for blocks (Home owns resources).
     let event_list = events
@@ -238,5 +274,137 @@ pub fn Home() -> Element {
                 }
             }
         }
+    }
+}
+
+/// Textless hero. Bars use the loaded hero's type scale.
+///
+/// The parent `.home-wrap` must set `data-home-shell` and `data-home-skin`.
+/// The pending wrapper uses the defaults (`ops_hub`, `clean`). `ops_hub` sets
+/// `--home-max` to 80rem; without it the base stays 72rem, so at 1280px the
+/// rail grows 128px and the text shifts 64px when settings arrive.
+#[component]
+fn HeroSkeleton() -> Element {
+    rsx! {
+        header {
+            class: "home-hero",
+            aria_busy: "true",
+            span { class: "home-skel-status", role: "status", "Loading…" }
+            div { class: "home-hero-rail",
+                div { class: "home-hero-inner",
+                    div { class: "home-skel home-skel-badge", aria_hidden: "true" }
+                    div { class: "home-skel home-skel-title", aria_hidden: "true" }
+                    div { class: "home-skel home-skel-title home-skel-title-short", aria_hidden: "true" }
+                    div { class: "home-skel home-skel-sub", aria_hidden: "true" }
+                    div { class: "home-skel-actions", aria_hidden: "true",
+                        div { class: "home-skel home-skel-btn" }
+                        div { class: "home-skel home-skel-btn" }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Settings failed. Same hero chrome, no template copy, retry refetches settings.
+#[component]
+fn HeroSettingsError(refresh: Signal<u32>) -> Element {
+    rsx! {
+        header { class: "home-hero",
+            div { class: "home-hero-rail",
+                div { class: "home-hero-inner",
+                    {fetch_error(
+                        "Couldn't load this page. Check your connection and try again.",
+                        refresh,
+                    )}
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn render(root: fn() -> Element) -> String {
+        let mut dom = VirtualDom::new(root);
+        dom.rebuild_in_place();
+        dioxus_ssr::render(&dom)
+    }
+
+    fn assert_no_template_copy(html: &str) {
+        for needle in [
+            "My Clan",
+            "Your",
+            "Clan",
+            "Gaming clan",
+            "Edit this copy",
+            "Apply to join",
+            "How we play",
+        ] {
+            assert!(!html.contains(needle), "{needle} in {html}");
+        }
+    }
+
+    #[test]
+    fn pending_hero_is_a_textless_skeleton() {
+        let html = render(HeroSkeleton);
+        assert!(html.contains("home-hero"), "{html}");
+        assert!(html.contains("home-skel-title"), "{html}");
+        assert!(html.contains("aria-busy"), "{html}");
+        assert!(html.contains("role=\"status\""), "{html}");
+        assert!(html.contains("Loading…"), "{html}");
+        assert!(!html.contains("aria-label"), "{html}");
+        assert_no_template_copy(&html);
+    }
+
+    #[test]
+    fn home_body_follows_the_settings_phase() {
+        assert_eq!(home_body(FetchClass::Loading), HomeBody::Skeleton);
+        assert_eq!(home_body(FetchClass::Error), HomeBody::Error);
+        assert_eq!(home_body(FetchClass::Ready), HomeBody::Ready);
+    }
+
+    #[test]
+    fn loading_home_mounts_without_template_copy() {
+        fn view() -> Element {
+            crate::state::provide_site_settings();
+            rsx! { Home {} }
+        }
+        let html = render(view);
+        assert!(
+            html.contains(
+                "class=\"home-wrap\" data-home-shell=\"ops_hub\" data-home-skin=\"clean\""
+            ),
+            "{html}"
+        );
+        assert!(html.contains("home-skel"), "{html}");
+        assert!(html.contains("Loading…"), "{html}");
+        for needle in [
+            "YOUR CLAN",
+            "Your",
+            "Clan",
+            "How we play",
+            "Edit this copy in Settings",
+            "Edit this copy",
+        ] {
+            assert!(!html.contains(needle), "{needle} in {html}");
+        }
+    }
+
+    #[test]
+    fn failed_settings_hero_is_an_error_not_the_template() {
+        fn view() -> Element {
+            let refresh = use_signal(|| 0u32);
+            rsx! { HeroSettingsError { refresh } }
+        }
+        let html = render(view);
+        assert!(
+            html.contains("load this page") && html.contains("try again"),
+            "{html}"
+        );
+        assert!(html.contains("Retry"), "{html}");
+        assert_no_template_copy(&html);
     }
 }

@@ -74,6 +74,8 @@ impl RoleAgg {
 /// Display-time role bucket from the hero **name**. Ignores the role stored
 /// on the match. Sombra is left in the Damage fallback on purpose: historical
 /// games were captured as Damage, and moving this arm would rebucket them.
+/// New Support-Sombra games show as Damage on the stats pages until Site
+/// PR 154 lands.
 /// Doctrine has no stored history, so it is listed under Support.
 pub(super) fn hero_to_role(name: &str) -> &'static str {
     match name {

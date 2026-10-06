@@ -37,6 +37,7 @@ surrealdb-types = "3"
 tempfile = "3"
 strsim = "0.11"
 rayon = "1"
+sha2 = "0.10"
 
 [lib]
 name = "stat_tracker"

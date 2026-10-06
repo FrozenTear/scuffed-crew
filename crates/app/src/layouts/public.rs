@@ -436,6 +436,7 @@ pub fn PublicLayout() -> Element {
     let mut account_open = use_signal(|| false);
     let auth = use_auth();
 
+    // Off wasm this listener is a no-op, so Escape does nothing on desktop builds.
     use_document_keydown(move |evt| {
         if evt.key() != "Escape" {
             return;

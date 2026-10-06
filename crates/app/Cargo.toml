@@ -51,4 +51,4 @@ web = ["dioxus/web", "scuffed-api-client/web", "dep:gloo-timers"]
 desktop = ["dioxus/desktop", "scuffed-api-client/native", "dep:tokio"]
 
 [dev-dependencies]
-dioxus-ssr = "=0.7.9"
+dioxus-ssr = { workspace = true }

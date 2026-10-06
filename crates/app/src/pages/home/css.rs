@@ -94,6 +94,50 @@ pub const HOME_SHARED_CSS: &str = r#"
         z-index: 2;
         max-width: min(40rem, 100%);
     }
+    /* Neutral stand-in for the hero copy. Same type scale as the loaded hero.
+       Column width comes from `.home-wrap[data-home-shell]`: default `ops_hub`
+       is 80rem and the unset base is 72rem. A pending wrapper without that
+       attribute grows the rail by 8rem (128px) at 1280px and the text shifts
+       64px. No readable text except the visually hidden status. */
+    .home-skel-status {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        padding: 0;
+        margin: -1px;
+        overflow: hidden;
+        clip: rect(0, 0, 0, 0);
+        white-space: nowrap;
+        border: 0;
+    }
+    .home-skel {
+        border-radius: 6px;
+        background: color-mix(in srgb, var(--text) 12%, var(--surface-2));
+    }
+    .home-skel-badge {
+        width: 9.5rem;
+        height: 1.65rem;
+        margin-bottom: 1.1rem;
+    }
+    .home-skel-title {
+        height: 0.92em;
+        font-size: clamp(2.85rem, 9.5vw, 5.5rem);
+        width: min(18rem, 78%);
+        margin: 0 0 0.08em;
+    }
+    .home-skel-title-short { width: min(12rem, 52%); margin-bottom: 0; }
+    .home-skel-sub {
+        height: 1.55rem;
+        width: min(28rem, 86%);
+        margin-top: 1.35rem;
+    }
+    .home-skel-actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.65rem;
+        margin-top: 1.85rem;
+    }
+    .home-skel-btn { width: 8.75rem; height: 2.35rem; }
     .home-badge {
         display: inline-flex;
         align-items: center;
