@@ -82,4 +82,93 @@ install_user_units() {
     install_systemd_unit "$assets_dir/$unit" "$systemd_dir/$unit" "$daemon_bin"
     install_systemd_unit \
         "$assets_dir/$session_unit" "$systemd_dir/$session_unit" "$helper_dest"
+    # Sets DATA_DIR_DROPIN to the drop-in path when a custom data_dir needs one.
+    install_data_dir_dropin "$systemd_dir" "${HOME:-}"
+}
+
+# Absolute data_dir from config.toml, or empty. Relative paths are skipped:
+# the unit cannot name them.
+data_dir_from_config() {
+    local cfg="$1"
+    [[ -f "$cfg" ]] || return 1
+    python3 - "$cfg" <<'PY'
+import sys
+try:
+    import tomllib
+except ImportError:
+    sys.exit(2)
+with open(sys.argv[1], "rb") as fh:
+    cfg = tomllib.load(fh)
+raw = cfg.get("data_dir")
+if isinstance(raw, str) and raw.startswith("/") and "\n" not in raw and "\0" not in raw:
+    while len(raw) > 1 and raw.endswith("/"):
+        raw = raw[:-1]
+    print(raw)
+    sys.exit(0)
+sys.exit(1)
+PY
+}
+
+# True when the unit's ReadWritePaths already covers this absolute path.
+data_dir_covered_by_unit() {
+    local path="$1" home="$2" runtime="${XDG_RUNTIME_DIR:-}" root
+    for root in \
+        "$home/.local/share/scuffed-stat-tracker" \
+        "$home/.config/scuffed-stat-tracker" \
+        ${runtime:+"$runtime"}
+    do
+        [[ -n "$root" ]] || continue
+        if [[ "$path" == "$root" || "$path" == "$root"/* ]]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+# systemd ReadWritePaths token. Keep in step with sandbox::read_write_paths_token.
+systemd_read_write_token() {
+    local p="$1"
+    p="${p//%/%%}"
+    if [[ "$p" == *[[:space:]\\'"']* ]]; then
+        p="${p//\\/\\\\}"
+        p="${p//\"/\\\"}"
+        printf '"-%s"' "$p"
+    else
+        printf -- '-%s' "$p"
+    fi
+}
+
+# Write or remove ~/.config/systemd/user/scuffed-stat-tracker.service.d/data-dir.conf
+# from the current config. Only a file this installer wrote (marker line) is
+# replaced or removed. DATA_DIR_DROPIN is the path when a drop-in is left in place.
+install_data_dir_dropin() {
+    local systemd_dir="$1" home="$2"
+    local cfg="${SCUFFED_CONFIG_FILE:-$home/.config/scuffed-stat-tracker/config.toml}"
+    local dropdir="$systemd_dir/scuffed-stat-tracker.service.d"
+    local drop="$dropdir/data-dir.conf"
+    local data_dir token
+    DATA_DIR_DROPIN=""
+    if [[ -z "$home" ]]; then
+        return 0
+    fi
+    if [[ -f "$drop" ]] && ! grep -q 'scuffed-stat-tracker data_dir drop-in' "$drop"; then
+        echo "leaving $drop alone (not written by this installer)" >&2
+        return 0
+    fi
+    if ! data_dir="$(data_dir_from_config "$cfg")" || data_dir_covered_by_unit "$data_dir" "$home"; then
+        rm -f "$drop"
+        rmdir "$dropdir" 2>/dev/null || true
+        return 0
+    fi
+    token="$(systemd_read_write_token "$data_dir")"
+    mkdir -p "$dropdir"
+    cat > "$drop" <<EOF
+# scuffed-stat-tracker data_dir drop-in
+# ProtectSystem=strict only writes the default data dir, the config dir,
+# and the session runtime dir. This path is outside those.
+[Service]
+ReadWritePaths=$token
+EOF
+    chmod 644 "$drop"
+    DATA_DIR_DROPIN="$drop"
 }

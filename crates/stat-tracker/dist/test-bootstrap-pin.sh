@@ -131,11 +131,19 @@ printf 'payload\n' > "$TMP/payload"
 # -W: empty password, no prompt. The secret key stays in $TMP and is removed
 # with the test directory. Do not commit it.
 minisign -G -p "$TMP/minisign.pub" -s "$TMP/minisign.key" -W >/dev/null
-minisign -S -s "$TMP/minisign.key" -m "$TMP/payload" -x "$TMP/payload.minisig" -W >/dev/null
+# Distinct from ${asset}.minisig, which is where verify_release_signature
+# writes the downloaded signature. Copying a file onto itself fails.
+minisign -S -s "$TMP/minisign.key" -m "$TMP/payload" -x "$TMP/good.minisig" -W >/dev/null
 
+cat > "$TMP/fetch-sig" << EOF
+#!/bin/bash
+cp "$TMP/good.minisig" "\$2"
+EOF
+chmod +x "$TMP/fetch-sig"
 good="$(
+    STAT_TRACKER_BOOTSTRAP_FETCH_CMD="$TMP/fetch-sig" \
     STAT_TRACKER_MINISIGN_PUB="$TMP/minisign.pub" \
-    SIG_URL="file://$TMP/payload.minisig" \
+    SIG_URL="https://example.invalid/payload.minisig" \
     verify_release_signature "$TMP/payload" 2>&1
 )"
 [[ "$good" == *"minisign ok"* ]] || fail "good signature was not accepted: $good"
@@ -144,8 +152,9 @@ pass "key plus good .minisig verifies"
 printf 'tampered\n' > "$TMP/payload"
 set +e
 bad="$(
+    STAT_TRACKER_BOOTSTRAP_FETCH_CMD="$TMP/fetch-sig" \
     STAT_TRACKER_MINISIGN_PUB="$TMP/minisign.pub" \
-    SIG_URL="file://$TMP/payload.minisig" \
+    SIG_URL="https://example.invalid/payload.minisig" \
     verify_release_signature "$TMP/payload" 2>&1
 )"
 bad_code=$?
@@ -163,5 +172,68 @@ ext_line="$(grep -n 'safe_extract "$WORKDIR/$ASSET_NAME"' "$BOOTSTRAP" | tail -1
 [[ "$sha_line" -lt "$sig_line" && "$sig_line" -lt "$ext_line" ]] \
     || fail "integrity checks are not before extract (sha=$sha_line sig=$sig_line extract=$ext_line)"
 pass "sha256 and signature run before extract"
+
+# Every real curl invocation pins https. Comments are not invocations.
+while IFS= read -r line; do
+    case "$line" in
+        *"curl --proto '=https'"*|*"curl_https"*) ;;
+        *) fail "curl call is not https-pinned: $line" ;;
+    esac
+done < <(grep -E '^[[:space:]]*curl ' "$BOOTSTRAP" || true)
+grep -q "curl --proto '=https' -fsSL" "$BOOTSTRAP" \
+    || fail "curl helper is missing --proto '=https' -fsSL"
+grep -q 'curl_https -o "$ASSET_NAME"' "$BOOTSTRAP" \
+    || fail "tarball download does not go through the https curl helper"
+if grep -q -- '-fL --progress-bar' "$BOOTSTRAP"; then
+    fail "tarball fetch still uses -fL --progress-bar without -fsSL"
+fi
+pass "curl calls are https-only and the tarball fetch is -fsSL"
+
+unset STAT_TRACKER_MINISIGN_PUB || true
+SHA_URL=""
+skip_sum="$(verify_release_checksum "$TMP/payload" 2>&1)"
+[[ "$skip_sum" == *skipping* ]] || fail "no-key missing sha256 did not warn: $skip_sum"
+pass "no key and missing .sha256 stays a warning"
+
+set +e
+miss_sum="$(
+    STAT_TRACKER_MINISIGN_PUB='untrusted comment: minisign public key: test
+RWQfakekeynotreal' \
+    SHA_URL='' \
+    verify_release_checksum "$TMP/payload" 2>&1
+)"
+miss_sum_code=$?
+set -e
+[[ "$miss_sum_code" -ne 0 ]] || fail "key without .sha256 was accepted"
+[[ "$miss_sum" == *"no .sha256 asset"* ]] || fail "missing-sha256 error was: $miss_sum"
+[[ "$miss_sum" == *"Refusing to install"* ]] || fail "missing-sha256 did not refuse: $miss_sum"
+pass "configured key and missing .sha256 refuses to install"
+
+set +e
+no_sum_tool="$(
+    PATH="$TMP/nopath" \
+    STAT_TRACKER_MINISIGN_PUB='untrusted comment: minisign public key: test
+RWQfakekeynotreal' \
+    SHA_URL='https://example.invalid/asset.sha256' \
+    verify_release_checksum "$TMP/payload" 2>&1
+)"
+no_sum_tool_code=$?
+set -e
+[[ "$no_sum_tool_code" -ne 0 ]] || fail "key without sha256sum was accepted"
+[[ "$no_sum_tool" == *"sha256sum is not installed"* ]] || fail "missing-sha256sum error was: $no_sum_tool"
+pass "configured key and missing sha256sum refuses to install"
+
+set +e
+warn_tool="$(
+    PATH="$TMP/nopath" \
+    STAT_TRACKER_MINISIGN_PUB='' \
+    SHA_URL='https://example.invalid/asset.sha256' \
+    verify_release_checksum "$TMP/payload" 2>&1
+)"
+warn_tool_code=$?
+set -e
+[[ "$warn_tool_code" -eq 0 ]] || fail "no-key missing sha256sum failed closed: $warn_tool"
+[[ "$warn_tool" == *skipping* ]] || fail "no-key missing sha256sum did not warn: $warn_tool"
+pass "no key and missing sha256sum stays a warning"
 
 echo "All bootstrap pin checks passed."
