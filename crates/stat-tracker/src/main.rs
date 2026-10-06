@@ -443,7 +443,7 @@ fn handle_preinit_flags() -> bool {
              \x20 --generate-tessdata   build the game-font tessdata model and exit\n\
              \x20 --vacuum              compact the local stats DB and exit\n\
              \x20                       (daemon also auto-vacuums at start if store is bloated)\n\
-             \x20 --collect-portraits   dev: save hero portrait crops while running\n\
+             \x20 --collect-portraits   now only fills missing portraits and the Doctrine stand-in; it never overwrites an existing reference\n\
              \x20 --dump-poll-frames    dev: save every polled frame while running\n\
              \x20 --ocr-threads N       OCR workers 1..=8 (RAM vs speed; also config/env)\n\n\
              With no flags, runs the capture daemon (see README).",
@@ -702,7 +702,7 @@ fn log_startup_readiness(config: &config::Config, dump_poll_frames: bool, collec
 
     if collect_portraits {
         tracing::info!(
-            "portrait collection mode enabled — will save portrait references when OCR identifies heroes"
+            "portrait collection mode enabled — now only fills missing portraits and the Doctrine stand-in; it never overwrites an existing reference"
         );
     }
 }
@@ -2414,7 +2414,9 @@ async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<
         // artwork sourced via the Overwatch wiki, for Doctrine) counts as
         // missing, so the first career-panel crop replaces it. A file with
         // any other bytes is a real crop or a user file and is never
-        // overwritten. New heroes ship faster than bundled portraits
+        // overwritten. The player's row must be known: cropping row 0 when
+        // the row was not identified would store someone else's hero and
+        // then stick. New heroes ship faster than bundled portraits
         // (D.Mon, WL-5): the first game on one seeds its reference here, and
         // the matcher picks it up on the next daemon start. Only the
         // career-panel source may seed (a portrait/held/text guess must not
@@ -2424,25 +2426,30 @@ async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<
             detect::hero_portrait::portrait_reference_path(&portraits_path, &parsed.hero);
         let slot_replaceable = parsed.hero != "Unknown"
             && detect::hero_portrait::portrait_slot_is_replaceable(&reference_path);
-        let seed_missing = matches!(source, HeroSource::CareerPanel) && slot_replaceable;
-        if seed_missing {
+        let career_panel = matches!(source, HeroSource::CareerPanel);
+        let save_portrait = detect::hero_portrait::should_save_portrait_crop(
+            career_panel,
+            collect_portraits,
+            slot_replaceable,
+            player_row_idx.is_some(),
+        );
+        if save_portrait && career_panel {
             tracing::info!(hero = %parsed.hero, "no real portrait reference for career-panel hero — seeding one from this capture");
         }
-        if (collect_portraits || seed_missing) && slot_replaceable {
+        if save_portrait {
+            let row = player_row_idx.expect("portrait save requires an identified player row");
             // Shared geometry (5v5/6v6 + team gap) — an inlined 5v5-only copy
             // here used to mis-crop 6v6/team-2 references into the template
             // library.
             let dims = (scoreboard_img.width(), scoreboard_img.height());
-            if let Some(r) =
-                detect::hero_portrait::portrait_rect(dims, player_row_idx.unwrap_or(0), team_size)
-            {
+            if let Some(r) = detect::hero_portrait::portrait_rect(dims, row, team_size) {
                 let crop = scoreboard_img.crop_imm(r.x, r.y, r.w, r.h);
                 if let Err(e) = detect::hero_portrait::save_captured_portrait(
                     &portraits_path,
                     &parsed.hero,
                     &crop,
                 ) {
-                    tracing::debug!(error = %e, "portrait save failed (non-fatal)");
+                    tracing::warn!(error = %e, hero = %parsed.hero, "portrait save failed");
                 }
             }
         }

@@ -13,7 +13,10 @@ Roadhog's rework does not change his role.
 
 Doctrine ships with stand-in wiki art (Blizzard Entertainment artwork,
 sourced via the Overwatch wiki). The tracker replaces that file
-automatically with a real in-game crop the first time Doctrine is seen.
+automatically with a real in-game crop the first time you play Doctrine.
+
+`--collect-portraits` now only fills missing portraits and the Doctrine
+stand-in; it never overwrites an existing reference.
 
 ### Install
 

@@ -16,11 +16,18 @@ const TESSDATA_BEST_ENG_URL: &str = "https://github.com/tesseract-ocr/tessdata_b
 /// text does not fit its --ysize — it is not slow, it never finishes, so the
 /// timeout is a backstop for that spin, not a render budget. Reproduced on
 /// Debian bookworm (pango 1.50) 2026-07-22; the 2026-07-21 "killed mid-render"
-/// reading was this same spin. Page geometry below must keep every page
-/// comfortably taller than its text (~60px per line at the default 12pt/300dpi
-/// plus margin). On pango >= 1.56 hosts text2image also hangs/segfaults
-/// regardless of geometry — releases ship a CI-trained koverwatch.traineddata
-/// so end-user machines never run this pipeline.
+/// reading was this same spin. At the default 12pt/300dpi a line is ~60px,
+/// and each page below keeps one extra line of margin
+/// ([`TEXT2IMAGE_PX_PER_LINE`] + [`TEXT2IMAGE_MARGIN_PX`]). On pango >= 1.56
+/// hosts text2image also hangs/segfaults regardless of geometry — releases
+/// ship a CI-trained koverwatch.traineddata so end-user machines never run
+/// this pipeline.
+///
+/// Height budget for [`TRAINING_PAGES`]. text2image's default 12pt at 300dpi
+/// is about 60px per line; pages keep one extra line so the render stays
+/// inside `--ysize`.
+const TEXT2IMAGE_PX_PER_LINE: u32 = 60;
+const TEXT2IMAGE_MARGIN_PX: u32 = 60;
 const TEXT2IMAGE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
 
 const TRAINING_PAGES: &[TrainingPage] = &[
@@ -109,15 +116,15 @@ const TRAINING_DIGITS_COMMAS: &str = "\
 
 const TRAINING_HEROES_1: &str = "\
 Ana Anran Ashe Baptiste Bastion\n\
-Brigitte Cassidy D.Va Doctrine Domina Doomfist\n\
+Brigitte Cassidy D.Mon D.Va Doctrine Domina Doomfist\n\
 Echo Emre Freja Genji Hanzo\n\
-Hazard Illari Junker Queen Junkrat Juno\n\
+Hazard Illari Jetpack Cat Junker Queen Junkrat Juno\n\
 Kiriko Lifeweaver Lucio Mauga Mei\n";
 
 const TRAINING_HEROES_2: &str = "\
 Mercy Mizuki Moira Orisa Pharah\n\
 Ramattra Reaper Reinhardt Roadhog Sierra\n\
-Sigma Sojourn Soldier: 76 Sombra Symmetra\n\
+Sigma Shion Sojourn Soldier: 76 Sombra Symmetra\n\
 Torbjorn Tracer Vendetta Venture Widowmaker\n\
 Winston Wrecking Ball Wuyang Zarya Zenyatta\n";
 
@@ -357,6 +364,13 @@ fn generate_tessdata_lstm(dir: &Path) -> Result<(), Box<dyn std::error::Error + 
     let mut lstmf_files = Vec::new();
 
     for (i, page) in TRAINING_PAGES.iter().enumerate() {
+        if !training_page_within_ysize(page) {
+            return Err(format!(
+                "training page {i} does not fit text2image --ysize {}",
+                page.ysize
+            )
+            .into());
+        }
         let page_name = format!("koverwatch_page{:02}", i);
         let training_txt = dir.join(format!("{page_name}.txt"));
         std::fs::write(&training_txt, page.text)?;
@@ -523,6 +537,13 @@ fn run_with_timeout(
     }
 }
 
+/// True when `page` stays inside the `--ysize` text2image was given.
+/// A page that runs past that height makes text2image busy-spin forever.
+fn training_page_within_ysize(page: &TrainingPage) -> bool {
+    let lines = page.text.lines().filter(|line| !line.is_empty()).count() as u32;
+    lines * TEXT2IMAGE_PX_PER_LINE + TEXT2IMAGE_MARGIN_PX <= page.ysize
+}
+
 /// Word list the legacy trainer renders. Tests assert whole tokens against
 /// this string, which is what `text2image` actually sees.
 fn legacy_training_text() -> String {
@@ -653,33 +674,53 @@ fn generate_tessdata_legacy(dir: &Path) -> Result<(), Box<dyn std::error::Error 
 
 #[cfg(test)]
 mod training_heroes_tests {
-    use super::{TRAINING_HEROES_1, TRAINING_HEROES_2, TRAINING_PAGES, legacy_training_text};
+    use super::{
+        TRAINING_HEROES_1, TRAINING_HEROES_2, TRAINING_PAGES, legacy_training_text,
+        training_page_within_ysize,
+    };
+    use scuffed_types::HEROES;
 
-    fn assert_whole_word(text: &str, word: &str) {
-        assert!(
-            text.split_whitespace().any(|token| token == word),
-            "{word} missing as a whole word in {text:?}"
-        );
+    fn contains_phrase(text: &str, phrase: &str) -> bool {
+        let words: Vec<&str> = text.split_whitespace().collect();
+        let parts: Vec<&str> = phrase.split_whitespace().collect();
+        words
+            .windows(parts.len())
+            .any(|window| window == parts.as_slice())
     }
 
     #[test]
-    fn training_word_list_includes_doctrine_and_sombra() {
+    fn training_words_include_every_hero() {
         let heroes = format!("{TRAINING_HEROES_1}\n{TRAINING_HEROES_2}");
-        assert_whole_word(&heroes, "Doctrine");
-        assert_whole_word(&heroes, "Sombra");
-        assert_whole_word(TRAINING_HEROES_1, "Doctrine");
-        assert_whole_word(TRAINING_HEROES_2, "Sombra");
-
         let generated = legacy_training_text();
-        assert_whole_word(&generated, "Doctrine");
-        assert_whole_word(&generated, "Sombra");
-
         let pages = TRAINING_PAGES
             .iter()
             .map(|page| page.text)
             .collect::<Vec<_>>()
             .join("\n");
-        assert_whole_word(&pages, "Doctrine");
-        assert_whole_word(&pages, "Sombra");
+        for hero in HEROES {
+            assert!(
+                contains_phrase(&heroes, hero),
+                "{hero} missing from TRAINING_HEROES"
+            );
+            assert!(
+                contains_phrase(&generated, hero),
+                "{hero} missing from the legacy training word list"
+            );
+            assert!(
+                contains_phrase(&pages, hero),
+                "{hero} missing from a text2image training page"
+            );
+        }
+    }
+
+    #[test]
+    fn training_pages_fit_text2image_ysize() {
+        for (i, page) in TRAINING_PAGES.iter().enumerate() {
+            assert!(
+                training_page_within_ysize(page),
+                "training page {i} exceeds text2image --ysize {}",
+                page.ysize
+            );
+        }
     }
 }

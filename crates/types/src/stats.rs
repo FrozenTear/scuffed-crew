@@ -233,43 +233,58 @@ pub enum MapName {
     ThroneOfAnubis,
 }
 
+macro_rules! map_name_all {
+    ($($variant:ident),* $(,)?) => {
+        /// Every map variant, in enum order. Callers that used to copy display
+        /// names by hand (OCR collision checks) iterate this instead.
+        ///
+        /// [`_map_name_all_exhaustive`] matches the same variants with no
+        /// wildcard, so a new `MapName` fails to compile until it is added here.
+        pub const ALL: &[MapName] = &[$(MapName::$variant),*];
+
+        const fn _map_name_all_exhaustive(map: MapName) {
+            match map {
+                $(MapName::$variant => {}),*
+            }
+        }
+    };
+}
+
 impl MapName {
-    /// Every map variant, in enum order. Callers that used to copy display
-    /// names by hand (OCR collision checks) iterate this instead.
-    pub const ALL: &[MapName] = &[
-        Self::CircuitRoyal,
-        Self::Dorado,
-        Self::Havana,
-        Self::Junkertown,
-        Self::Rialto,
-        Self::Route66,
-        Self::ShambaliMonastery,
-        Self::WatchpointGibraltar,
-        Self::BlizzardWorld,
-        Self::Eichenwalde,
-        Self::Hollywood,
-        Self::KingsRow,
-        Self::Midtown,
-        Self::NeonJunction,
-        Self::Numbani,
-        Self::Paraiso,
-        Self::AntarcticPeninsula,
-        Self::Busan,
-        Self::Ilios,
-        Self::LijangTower,
-        Self::Nepal,
-        Self::Oasis,
-        Self::Samoa,
-        Self::Colosseo,
-        Self::Esperanca,
-        Self::NewQueenStreet,
-        Self::Runasapi,
-        Self::Aatlis,
-        Self::NewJunkCity,
-        Self::Suravasa,
-        Self::Hanaoka,
-        Self::ThroneOfAnubis,
-    ];
+    map_name_all! {
+        CircuitRoyal,
+        Dorado,
+        Havana,
+        Junkertown,
+        Rialto,
+        Route66,
+        ShambaliMonastery,
+        WatchpointGibraltar,
+        BlizzardWorld,
+        Eichenwalde,
+        Hollywood,
+        KingsRow,
+        Midtown,
+        NeonJunction,
+        Numbani,
+        Paraiso,
+        AntarcticPeninsula,
+        Busan,
+        Ilios,
+        LijangTower,
+        Nepal,
+        Oasis,
+        Samoa,
+        Colosseo,
+        Esperanca,
+        NewQueenStreet,
+        Runasapi,
+        Aatlis,
+        NewJunkCity,
+        Suravasa,
+        Hanaoka,
+        ThroneOfAnubis,
+    }
 
     pub fn game_mode(&self) -> GameMode {
         match self {
