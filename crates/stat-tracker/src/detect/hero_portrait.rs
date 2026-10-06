@@ -635,5 +635,29 @@ mod reference_path_tests {
             portrait_reference_path(dir, "Wrecking Ball"),
             dir.join("wrecking_ball.png")
         );
+        assert_eq!(
+            portrait_reference_path(dir, "Doctrine"),
+            dir.join("doctrine.png")
+        );
+    }
+}
+
+#[cfg(test)]
+mod bundled_portrait_tests {
+    use super::bundled_portraits;
+
+    /// `build.rs` bundles every `portraits/*.png` under its file stem.
+    /// Doctrine's stem is `doctrine` (`portrait_reference_path("Doctrine")`).
+    #[test]
+    fn bundled_set_includes_doctrine() {
+        let bytes = bundled_portraits()
+            .iter()
+            .find(|(name, _)| *name == "doctrine")
+            .map(|(_, bytes)| *bytes)
+            .expect("bundled portraits include doctrine");
+        assert!(!bytes.is_empty());
+        let img = image::load_from_memory(bytes).expect("doctrine.png decodes");
+        assert_eq!((img.width(), img.height()), (32, 32));
+        assert!(matches!(img, image::DynamicImage::ImageRgba8(_)));
     }
 }

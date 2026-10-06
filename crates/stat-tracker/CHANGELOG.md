@@ -10,6 +10,10 @@ Season 5 (A Grim Doctrine): new captures recognize the Support hero
 Doctrine, and read Sombra as Support. Games already stored keep the
 role they were captured with. Roadhog's rework does not change his role.
 
+The bundle includes a provisional Doctrine portrait cropped from the
+public wiki icon. An in-game crop collected with `--collect-portraits`
+is more accurate and replaces that file.
+
 ### Install
 
 ```sh
