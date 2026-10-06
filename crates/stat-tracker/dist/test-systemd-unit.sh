@@ -23,6 +23,41 @@ pass() { echo "PASS: $*" >&2; }
 [[ -f "$INSTALL" && -f "$HELPER" && -f "$UNIT_LIB" ]] || fail "missing installer files"
 [[ -f "$UNIT" && -f "$SESSION_UNIT" && -f "$TEMPLATE" ]] || fail "missing unit templates"
 
+# Sandbox directives live in the templates. install.sh copies them through
+# (it only rewrites ExecStart), so the installed units must match.
+assert_common_sandbox() {
+    local unit="$1"
+    grep -q '^NoNewPrivileges=yes$' "$unit" \
+        || fail "$unit missing NoNewPrivileges=yes"
+    grep -q '^ProtectSystem=strict$' "$unit" \
+        || fail "$unit missing ProtectSystem=strict"
+    grep -q '^ReadWritePaths=' "$unit" \
+        || fail "$unit missing ReadWritePaths="
+    grep -q '%t' "$unit" \
+        || fail "$unit ReadWritePaths does not include the runtime dir (%t)"
+    if grep -q '^PrivateDevices=' "$unit"; then
+        fail "$unit sets PrivateDevices= (evdev /dev/input must stay reachable)"
+    fi
+    if grep -q '^DeviceAllow=' "$unit"; then
+        fail "$unit sets DeviceAllow= (device policy must stay permissive)"
+    fi
+}
+
+assert_common_sandbox "$UNIT"
+grep -q '%h/.local/share/scuffed-stat-tracker' "$UNIT" \
+    || fail "daemon unit ReadWritePaths missing the data dir"
+grep -q '%h/.config/scuffed-stat-tracker' "$UNIT" \
+    || fail "daemon unit ReadWritePaths missing the config/state dir"
+if grep -q '^PrivateTmp=' "$UNIT"; then
+    fail "daemon unit sets PrivateTmp= (that hides /tmp/.X11-unix)"
+fi
+assert_common_sandbox "$SESSION_UNIT"
+grep -q '%h/.config/scuffed-stat-tracker' "$SESSION_UNIT" \
+    || fail "session unit ReadWritePaths missing session.env's directory"
+grep -q '^PrivateTmp=yes$' "$SESSION_UNIT" \
+    || fail "session unit missing PrivateTmp=yes"
+pass "unit templates carry the sandbox"
+
 # ── pure ExecStart quoting ────────────────────────────────────────────────────
 
 # shellcheck source=systemd-unit.sh
@@ -33,6 +68,12 @@ bare="$(systemd_exec_token "/home/user/.local/bin/scuffed-stat-tracker")"
 quoted="$(systemd_exec_token "/home/user/my prefix/bin/scuffed-stat-tracker")"
 [[ "$quoted" == '"/home/user/my prefix/bin/scuffed-stat-tracker"' ]] \
     || fail "spaced path not quoted: $quoted"
+pct="$(systemd_read_write_token "/var/lib/scuffed%stats")"
+[[ "$pct" == "-/var/lib/scuffed%%stats" ]] \
+    || fail "percent was not escaped: $pct"
+space_tok="$(systemd_read_write_token "/var/lib/scuffed stats")"
+[[ "$space_tok" == '"-/var/lib/scuffed stats"' ]] \
+    || fail "spaced data_dir token not quoted: $space_tok"
 pass "systemd ExecStart quoting"
 
 # ── helper: compositor environ beats a stale process environment ─────────────
@@ -178,6 +219,7 @@ run_install() {
     local home="$1" prefix="$2"
     rm -f "$LOG"
     env -u WAYLAND_DISPLAY -u DISPLAY -u XDG_CURRENT_DESKTOP -u XDG_SESSION_TYPE \
+        -u XDG_RUNTIME_DIR \
         HOME="$home" \
         PREFIX="$prefix" \
         SCUFFED_PROC_ROOT="$PROC" \
@@ -228,6 +270,17 @@ MANIFEST="$PREFIX/share/scuffed-stat-tracker/install-manifest.txt"
 grep -qx "$HELPER_INSTALLED" "$MANIFEST" || fail "helper missing from manifest"
 grep -qx "$DAEMON_UNIT" "$MANIFEST" || fail "daemon unit missing from manifest"
 grep -qx "$SESSION_INSTALLED" "$MANIFEST" || fail "session unit missing from manifest"
+assert_common_sandbox "$DAEMON_UNIT"
+assert_common_sandbox "$SESSION_INSTALLED"
+grep -q '%h/.local/share/scuffed-stat-tracker' "$DAEMON_UNIT" \
+    || fail "installed daemon unit lost the data-dir ReadWritePaths"
+grep -q '^PrivateTmp=yes$' "$SESSION_INSTALLED" \
+    || fail "installed session unit lost PrivateTmp=yes"
+if grep -q '^PrivateTmp=' "$DAEMON_UNIT"; then
+    fail "installed daemon unit gained PrivateTmp="
+fi
+[[ ! -e "$HOME_DIR/.config/systemd/user/scuffed-stat-tracker.service.d/data-dir.conf" ]] \
+    || fail "install with no config.toml wrote a data_dir drop-in"
 pass "custom PREFIX ExecStart=$DAEMON_BIN"
 
 # Spaced PREFIX is quoted in the unit.
@@ -292,5 +345,78 @@ env -u WAYLAND_DISPLAY -u DISPLAY -u XDG_CURRENT_DESKTOP -u XDG_SESSION_TYPE \
     || fail "SKIP_INTEGRATION installed the helper"
 [[ ! -e "$LOG" ]] || fail "SKIP_INTEGRATION invoked systemctl: $(cat "$LOG")"
 pass "SKIP_INTEGRATION leaves systemd alone"
+
+# Custom data_dir outside the three ReadWritePaths gets a drop-in, and
+# uninstall removes it via the manifest. A path the unit already covers
+# does not. A hand-edited drop-in (no marker) is left alone.
+DROP_HOME="$TMP/home-drop"
+DROP_PREFIX="$TMP/prefix-drop"
+mkdir -p "$DROP_HOME/.config/scuffed-stat-tracker"
+printf '%s\n' 'data_dir = "/var/lib/scuffed-outside"' \
+    > "$DROP_HOME/.config/scuffed-stat-tracker/config.toml"
+run_install "$DROP_HOME" "$DROP_PREFIX"
+DROP="$DROP_HOME/.config/systemd/user/scuffed-stat-tracker.service.d/data-dir.conf"
+[[ -f "$DROP" ]] || fail "custom data_dir did not write a drop-in"
+grep -q 'scuffed-stat-tracker data_dir drop-in' "$DROP" \
+    || fail "drop-in marker missing: $(cat "$DROP")"
+grep -qx 'ReadWritePaths=-/var/lib/scuffed-outside' "$DROP" \
+    || fail "drop-in token wrong: $(cat "$DROP")"
+DROP_UNIT="$DROP_HOME/.config/systemd/user/scuffed-stat-tracker.service"
+if grep -q '^PrivateDevices=' "$DROP_UNIT" || grep -q '^DeviceAllow=' "$DROP_UNIT"; then
+    fail "data_dir install added a device policy"
+fi
+DROP_MANIFEST="$DROP_PREFIX/share/scuffed-stat-tracker/install-manifest.txt"
+grep -qx "$DROP" "$DROP_MANIFEST" || fail "drop-in missing from manifest: $(cat "$DROP_MANIFEST")"
+env -u WAYLAND_DISPLAY \
+    HOME="$DROP_HOME" \
+    PREFIX="$DROP_PREFIX" \
+    SCUFFED_SYSTEMCTL="$FAKE_CTL" \
+    bash "$PKG/uninstall.sh" --yes
+[[ ! -e "$DROP" ]] || fail "drop-in survived uninstall"
+pass "custom data_dir drop-in is installed and uninstalled"
+
+SPACE_HOME="$TMP/home-spacedir"
+SPACE_PREFIX="$TMP/prefix-spacedir"
+mkdir -p "$SPACE_HOME/.config/scuffed-stat-tracker"
+printf '%s\n' 'data_dir = "/var/lib/scuffed stats"' \
+    > "$SPACE_HOME/.config/scuffed-stat-tracker/config.toml"
+run_install "$SPACE_HOME" "$SPACE_PREFIX"
+SPACE_DROP="$SPACE_HOME/.config/systemd/user/scuffed-stat-tracker.service.d/data-dir.conf"
+grep -qx 'ReadWritePaths="-/var/lib/scuffed stats"' "$SPACE_DROP" \
+    || fail "spaced data_dir drop-in not quoted: $(cat "$SPACE_DROP")"
+pass "spaced data_dir drop-in is quoted"
+
+COV_HOME="$TMP/home-covered"
+COV_PREFIX="$TMP/prefix-covered"
+mkdir -p "$COV_HOME/.config/scuffed-stat-tracker"
+printf 'data_dir = "%s/.local/share/scuffed-stat-tracker/extra"\n' "$COV_HOME" \
+    > "$COV_HOME/.config/scuffed-stat-tracker/config.toml"
+run_install "$COV_HOME" "$COV_PREFIX"
+[[ ! -e "$COV_HOME/.config/systemd/user/scuffed-stat-tracker.service.d/data-dir.conf" ]] \
+    || fail "covered data_dir still wrote a drop-in"
+pass "covered data_dir does not get a drop-in"
+
+REL_CFG_HOME="$TMP/home-relcfg"
+REL_CFG_PREFIX="$TMP/prefix-relcfg"
+mkdir -p "$REL_CFG_HOME/.config/scuffed-stat-tracker"
+printf '%s\n' 'data_dir = "relative/stats"' \
+    > "$REL_CFG_HOME/.config/scuffed-stat-tracker/config.toml"
+run_install "$REL_CFG_HOME" "$REL_CFG_PREFIX"
+[[ ! -e "$REL_CFG_HOME/.config/systemd/user/scuffed-stat-tracker.service.d/data-dir.conf" ]] \
+    || fail "relative data_dir wrote a drop-in"
+pass "relative data_dir is not written into the unit"
+
+FOREIGN="$TMP/foreign-systemd"
+FOREIGN_HOME="$TMP/foreign-home"
+mkdir -p "$FOREIGN/scuffed-stat-tracker.service.d" \
+    "$FOREIGN_HOME/.config/scuffed-stat-tracker"
+FOREIGN_DROP="$FOREIGN/scuffed-stat-tracker.service.d/data-dir.conf"
+printf '%s\n' '# hand edited' '[Service]' 'ReadWritePaths=-/keep/me' > "$FOREIGN_DROP"
+printf '%s\n' 'data_dir = "/var/lib/scuffed-outside"' \
+    > "$FOREIGN_HOME/.config/scuffed-stat-tracker/config.toml"
+install_data_dir_dropin "$FOREIGN" "$FOREIGN_HOME"
+grep -qx 'ReadWritePaths=-/keep/me' "$FOREIGN_DROP" \
+    || fail "hand-edited drop-in was replaced: $(cat "$FOREIGN_DROP")"
+pass "hand-edited data_dir drop-in is left alone"
 
 echo "all systemd session-env checks passed"

@@ -326,6 +326,7 @@ impl LocalStore {
     pub async fn open(data_dir: &Path) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let db_path = data_dir.join("stats.surrealkv");
         std::fs::create_dir_all(&db_path)?;
+        crate::fs_mode::tighten_private_dir(&db_path);
         // Take the single-writer lock before SurrealKV opens the directory.
         let writer_lock = Arc::new(lock_store_dir(&db_path)?);
 
@@ -1297,14 +1298,19 @@ pub fn queue_command(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let dir = commands_dir(data_dir);
     std::fs::create_dir_all(&dir)?;
+    crate::fs_mode::tighten_private_dir(data_dir);
+    crate::fs_mode::tighten_private_dir(&dir);
     let name = format!(
         "cmd_{}_{}.json",
         chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default(),
         std::process::id()
     );
     let tmp = dir.join(format!("{name}.tmp"));
+    let dest = dir.join(&name);
     std::fs::write(&tmp, serde_json::to_vec(cmd)?)?;
-    std::fs::rename(&tmp, dir.join(name))?;
+    crate::fs_mode::tighten_private_file(&tmp);
+    std::fs::rename(&tmp, &dest)?;
+    crate::fs_mode::tighten_private_file(&dest);
     Ok(())
 }
 
@@ -1652,6 +1658,32 @@ mod tests {
             remove_command_file(path);
         }
         assert!(read_commands(dir.path()).is_empty());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let dir_mode = std::fs::metadata(dir.path().join("commands"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(dir_mode, 0o700, "command queue dir must be owner-only");
+            // Files are removed after the roundtrip; write one more and check it.
+            queue_command(
+                dir.path(),
+                &StoreCommand::DeleteSession {
+                    session_id: "perm".into(),
+                },
+            )
+            .unwrap();
+            let queued = read_commands(dir.path());
+            assert_eq!(queued.len(), 1);
+            let file_mode = std::fs::metadata(&queued[0].0)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(file_mode, 0o600, "command queue files must be owner-only");
+        }
     }
 
     #[tokio::test]

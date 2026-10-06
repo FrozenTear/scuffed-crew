@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct Config {
     pub data_dir: PathBuf,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -45,7 +45,7 @@ fn default_game_process_names() -> Vec<String> {
     vec!["Overwatch.exe".to_string()]
 }
 
-#[derive(Debug, Clone, Copy, Deserialize, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize, Serialize)]
 pub struct AutoDetectConfig {
     pub enabled: bool,
     pub poll_interval_secs: u64,
@@ -68,7 +68,7 @@ impl Default for AutoDetectConfig {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct SyncConfig {
     pub server_url: String,
     pub token: String,
@@ -439,6 +439,73 @@ token = "secret"
         assert_eq!(
             validate_sync_server_url(&sync.server_url),
             Err(SyncUrlReject::HttpsRequired)
+        );
+    }
+
+    fn sample(full: bool) -> Config {
+        Config {
+            data_dir: PathBuf::from("/var/lib/scuffed-outside"),
+            capture_output: full.then(|| "DP-1".to_string()),
+            player_name: full.then(|| "Ada".to_string()),
+            sync: full.then(|| SyncConfig {
+                server_url: "https://crew.example".to_string(),
+                token: "super-secret-token".to_string(),
+            }),
+            auto_detect: AutoDetectConfig {
+                enabled: false,
+                poll_interval_secs: 8,
+                cooldown_secs: 30,
+            },
+            session_window_secs: 900,
+            game_process_names: if full {
+                vec!["Overwatch.exe".into(), "wine".into()]
+            } else {
+                Vec::new()
+            },
+            debug_ocr: full,
+            ocr_threads: full.then_some(2),
+        }
+    }
+
+    #[test]
+    fn toml_save_format_roundtrips_optional_fields_set_and_unset() {
+        for full in [true, false] {
+            let cfg = sample(full);
+            let raw = toml::to_string_pretty(&cfg).expect("toml 1 must serialize Config");
+            if full {
+                assert!(raw.contains("capture_output"), "{raw}");
+                assert!(raw.contains("player_name"), "{raw}");
+                assert!(raw.contains("[sync]"), "{raw}");
+                assert!(raw.contains("ocr_threads"), "{raw}");
+            } else {
+                assert!(!raw.contains("capture_output"), "{raw}");
+                assert!(!raw.contains("player_name"), "{raw}");
+                assert!(!raw.contains("[sync]"), "{raw}");
+                assert!(!raw.contains("ocr_threads"), "{raw}");
+            }
+            let back: Config = toml::from_str(&raw).expect("toml 1 output must parse");
+            assert_eq!(back, cfg);
+        }
+    }
+
+    #[test]
+    fn readme_and_bootstrap_examples_pin_this_crate_version() {
+        let tag = format!("stat-tracker-v{}", env!("CARGO_PKG_VERSION"));
+        let readme = include_str!("../README.md");
+        let bootstrap = include_str!("../dist/bootstrap.sh");
+        assert!(
+            readme.contains(&format!("TAG={tag}")),
+            "README pin example is stale; want TAG={tag}"
+        );
+        assert!(
+            bootstrap.contains(&format!("TAG={tag}")),
+            "bootstrap.sh pin example is stale; want TAG={tag}"
+        );
+        let changelog = include_str!("../CHANGELOG.md");
+        let version = env!("CARGO_PKG_VERSION");
+        assert!(
+            changelog.contains(&format!("## {version}")),
+            "CHANGELOG is missing a section for {version}"
         );
     }
 }

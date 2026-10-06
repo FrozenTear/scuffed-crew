@@ -189,9 +189,11 @@ fi
 
 if ! groups 2>/dev/null | grep -qw input; then
     warn "You are not in the 'input' group."
-    warn "The daemon reads keyboard events (Tab key) via evdev."
-    warn "Add yourself and re-login:"
+    warn "The daemon reads keyboard events (Tab) from /dev/input, and the"
+    warn "companion shortcut does the same. Add your user to the group:"
     warn "    sudo usermod -aG input \$USER"
+    warn "Then log out of the desktop session and log back in."
+    warn "A new terminal is not enough — open sessions keep the old groups."
     warn "Continuing anyway — you can fix this later."
     echo >&2
 fi
@@ -402,6 +404,10 @@ else
         "$SYSTEMD_DIR/$UNIT"
         "$SYSTEMD_DIR/$SESSION_UNIT"
     )
+    if [[ -n "${DATA_DIR_DROPIN:-}" && -f "$DATA_DIR_DROPIN" ]]; then
+        MANIFEST_ENTRIES+=("$DATA_DIR_DROPIN")
+        info "Custom data_dir is outside the unit sandbox — wrote $DATA_DIR_DROPIN"
+    fi
     SYSTEMCTL_BIN="${SCUFFED_SYSTEMCTL:-systemctl}"
     if [[ -x "$SYSTEMCTL_BIN" ]] || command -v "$SYSTEMCTL_BIN" &>/dev/null; then
         "$SYSTEMCTL_BIN" --user daemon-reload 2>/dev/null || true
@@ -495,6 +501,11 @@ fi
     echo
     echo "  First run: open the GUI, go to Settings, paste your server URL"
     echo "  and daemon token (from the web UI under My Stats → Daemon Tokens)."
+    echo
+    echo "  Keyboard: Tab capture and the companion shortcut read /dev/input."
+    echo "  Your user must be in the input group:"
+    echo "      sudo usermod -aG input \$USER"
+    echo "  Then log out and back in. A new terminal does not pick up the group."
     echo
     echo "  Uninstall:        scuffed-stat-tracker-uninstall   (--purge removes data/config too)"
     echo

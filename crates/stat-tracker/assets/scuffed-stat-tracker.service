@@ -34,6 +34,31 @@ Nice=10
 CPUWeight=30
 IOSchedulingClass=best-effort
 IOSchedulingPriority=7
+# Sandbox. ProtectSystem=full is a no-op on user services, so this unit
+# uses strict. When the user manager applies that mount namespace, the
+# tree is read-only except ReadWritePaths (a leading '-' ignores a path
+# that does not exist yet):
+#   %h/.local/share/scuffed-stat-tracker  default data dir and tessdata
+#   %h/.config/scuffed-stat-tracker       config.toml and session.env
+#   %t                                    /run/user/$UID (Wayland, X11
+#                                         display auth, D-Bus, PipeWire)
+#
+# PrivateTmp is omitted. It would hide /tmp/.X11-unix and break X11 capture.
+# PrivateDevices is omitted, and DeviceAllow is left unset, so /dev/input
+# stays reachable for evdev hotkeys (the user must be in the input group).
+#
+# A data_dir outside those three paths is not writable when the sandbox
+# applies, including a custom directory under $HOME. install.sh writes
+# scuffed-stat-tracker.service.d/data-dir.conf from an absolute data_dir
+# in config.toml. Reinstall after changing it. If the directory is still
+# not writable, the daemon logs the same drop-in and exits.
+# Tessdata stays under the default data dir, not under a custom data_dir.
+# --generate-tessdata (CLI or GUI, not this unit) also writes
+# ~/.local/share/fonts. The GUI updater stages under /tmp and is not
+# this unit. %h does not follow XDG_DATA_HOME or XDG_CONFIG_HOME.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=-%h/.local/share/scuffed-stat-tracker -%h/.config/scuffed-stat-tracker %t
 
 [Install]
 WantedBy=graphical-session.target
