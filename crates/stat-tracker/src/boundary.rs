@@ -193,7 +193,7 @@ pub struct PollInput<'a> {
     /// Consecutive fresh-match boards already deferred.
     pub reset_streak: u32,
     pub map: Option<&'a str>,
-    /// False when `map` is a full-board text fallback, or a pre-0.4.18
+    /// False when `map` is a full-board text fallback, or a pre-0.4.19
     /// skeleton that had a map and no source. [`decide_poll`] treats that
     /// map as absent, so a different accolade does not split. An accolade
     /// may replace the stored name only while [`Self::text_fallback_locked`]

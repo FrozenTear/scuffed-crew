@@ -4,7 +4,7 @@ User-facing notes for `stat-tracker-v*` GitHub Releases. The release workflow
 prepends the section whose heading matches the tag version (for example
 `## 0.4.15` for `stat-tracker-v0.4.15`).
 
-## 0.4.18
+## 0.4.19
 
 Boundaries are one board-order state machine. A result hint stays sealable
 until a second board with progressed stats is accepted after it, or one
@@ -109,11 +109,11 @@ accolade replaces it only on this session's own end screen: before an
 arm, a start screen, a held reset, or a hint of a different result, and
 before the outcome is recorded. Replacing that hint does not open the
 window again, so the confirming read cannot relabel the map. A carry
-older than the confirm window
-is dropped, so it cannot relabel the session. After any of those
+older than the confirm window is dropped, so it cannot relabel the
+session. After any of those
 signals, the accolade must not rewrite the map or its snapshots. A
 later top bar that names the same map still upgrades the source. A
-skeleton written before 0.4.18 has no source; a map on that file is
+skeleton written before 0.4.19 has no source; a map on that file is
 untrusted text.
 
 ### Install
@@ -123,8 +123,30 @@ curl --proto '=https' -fsSL https://raw.githubusercontent.com/FrozenTear/scuffed
 ```
 
 Or extract the tarball and run `./install.sh`. Pin with
-`STAT_TRACKER_TAG=stat-tracker-v0.4.18`.
+`STAT_TRACKER_TAG=stat-tracker-v0.4.19`.
 
+## 0.4.18
+
+Season 5 ([patch notes](https://overwatch.blizzard.com/en-us/news/patch-notes/)):
+new captures recognize the Support hero Doctrine, and read Sombra as
+Support. Games already stored keep the role they were captured with.
+Roadhog's rework does not change his role.
+
+Doctrine ships with stand-in wiki art (Blizzard Entertainment artwork,
+sourced via the Overwatch wiki). The tracker replaces that file
+automatically with a real in-game crop the first time you play Doctrine.
+
+`--collect-portraits` only fills missing portraits and the Doctrine
+stand-in; it never overwrites an existing reference.
+
+### Install
+
+```sh
+curl --proto '=https' -fsSL https://raw.githubusercontent.com/FrozenTear/scuffed-crew/main/crates/stat-tracker/dist/bootstrap.sh | bash
+```
+
+Or extract the tarball and run `./install.sh`. Pin with
+`STAT_TRACKER_TAG=stat-tracker-v0.4.18`.
 
 ## 0.4.17
 

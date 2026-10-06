@@ -473,7 +473,7 @@ fn handle_preinit_flags() -> bool {
              \x20 --generate-tessdata   build the game-font tessdata model and exit\n\
              \x20 --vacuum              compact the local stats DB and exit\n\
              \x20                       (daemon also auto-vacuums at start if store is bloated)\n\
-             \x20 --collect-portraits   now only fills missing portraits and the Doctrine stand-in; it never overwrites an existing reference\n\
+             \x20 --collect-portraits   only fills missing portraits and the Doctrine stand-in; it never overwrites an existing reference\n\
              \x20 --dump-poll-frames    dev: save every polled frame while running\n\
              \x20 --ocr-threads N       OCR workers 1..=8 (RAM vs speed; also config/env)\n\n\
              With no flags, runs the capture daemon (see README).",
@@ -732,7 +732,7 @@ fn log_startup_readiness(config: &config::Config, dump_poll_frames: bool, collec
 
     if collect_portraits {
         tracing::info!(
-            "portrait collection mode enabled — now only fills missing portraits and the Doctrine stand-in; it never overwrites an existing reference"
+            "portrait collection mode enabled — only fills missing portraits and the Doctrine stand-in; it never overwrites an existing reference"
         );
     }
 }
@@ -752,7 +752,7 @@ struct ActiveGame {
     /// agrees with it.
     map: Option<String>,
     /// Where [`Self::map`] was read. Absent until a read stores the map.
-    /// A skeleton from before 0.4.18 has no source; recovery treats a map
+    /// A skeleton from before 0.4.19 has no source; recovery treats a map
     /// on that file as untrusted text.
     map_source: Option<boundary::MapSource>,
     /// Canonicalized names seen on the map-vote screen. The winner is
@@ -976,7 +976,7 @@ struct PersistedGame {
     outcome: detect::MatchOutcome,
     #[serde(default)]
     map: Option<String>,
-    /// Missing on skeletons written before 0.4.18. Recovery treats a map
+    /// Missing on skeletons written before 0.4.19. Recovery treats a map
     /// with no source as untrusted text ([`boundary::MapSource::TextFallback`]).
     /// A file with no map keeps `None`.
     #[serde(default)]
@@ -3604,8 +3604,7 @@ async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<
         if save_portrait && career_panel {
             tracing::info!(hero = %parsed.hero, "no real portrait reference for career-panel hero — seeding one from this capture");
         }
-        if save_portrait {
-            let row = player_row_idx.expect("portrait save requires an identified player row");
+        if save_portrait && let Some(row) = player_row_idx {
             // Shared geometry (5v5/6v6 + team gap) — an inlined 5v5-only copy
             // here used to mis-crop 6v6/team-2 references into the template
             // library.
