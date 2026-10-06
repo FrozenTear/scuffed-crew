@@ -7,7 +7,7 @@ pub enum ThemeMode {
 }
 
 impl ThemeMode {
-    #[cfg_attr(not(feature = "web"), allow(dead_code))]
+    #[cfg_attr(not(all(feature = "web", target_arch = "wasm32")), allow(dead_code))]
     fn as_attr(self) -> &'static str {
         match self {
             ThemeMode::Light => "light",
@@ -23,7 +23,7 @@ pub struct ThemeCtx {
 
 /// Read persisted choice from localStorage, else fall back to prefers-color-scheme.
 fn initial_mode() -> ThemeMode {
-    #[cfg(feature = "web")]
+    #[cfg(all(feature = "web", target_arch = "wasm32"))]
     {
         if let Some(win) = web_sys::window() {
             if let Ok(Some(storage)) = win.local_storage()
@@ -46,7 +46,7 @@ fn initial_mode() -> ThemeMode {
 }
 
 fn apply(mode: ThemeMode) {
-    #[cfg(feature = "web")]
+    #[cfg(all(feature = "web", target_arch = "wasm32"))]
     if let Some(win) = web_sys::window() {
         if let Some(el) = win.document().and_then(|d| d.document_element()) {
             let _ = el.set_attribute("data-theme", mode.as_attr());
@@ -55,7 +55,7 @@ fn apply(mode: ThemeMode) {
             let _ = storage.set_item("sc-theme", mode.as_attr());
         }
     }
-    #[cfg(not(feature = "web"))]
+    #[cfg(not(all(feature = "web", target_arch = "wasm32")))]
     let _ = mode;
 }
 
