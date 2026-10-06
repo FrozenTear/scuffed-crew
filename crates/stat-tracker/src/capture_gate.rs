@@ -135,7 +135,7 @@ impl Counters {
 /// a pre-un-latch build deserializes cleanly (missing → zero/false, i.e. no
 /// streak in progress, previous raw treated as clean). Do not rename or drop the
 /// existing fields — that would silently discard recovered in-game state.
-#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GateState {
     pub accepted: Counters,
     pub last_raw: Counters,

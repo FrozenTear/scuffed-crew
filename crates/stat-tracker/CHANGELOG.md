@@ -4,16 +4,18 @@ User-facing notes for `stat-tracker-v*` GitHub Releases. The release workflow
 prepends the section whose heading matches the tag version (for example
 `## 0.4.15` for `stat-tracker-v0.4.15`).
 
-## Unreleased
+## 0.4.18
 
 Requeueing into the next match no longer merges into the game that just
-ended. After a Victory, Defeat, or Draw screen — a confirmed read, or a
-single result streak — a hero-select, hero-ban, or map-vote screen starts
-a new session. So does a later result screen, a confident accolade-map
-change, or a sharp drop across several scoreboard columns. The earlier
-game keeps its own outcome. One misread stat cell in the middle of a
-match is still held. A Play of the Game / end-reel wake does not split
-a session by itself.
+ended. After a confirmed Victory, Defeat, or Draw, a hero-select,
+hero-ban, or map-vote screen starts a new session and keeps that result.
+One unconfirmed result word does not finish a match; a confirmed read
+replaces it. That word is stored only when one of those start screens
+closes the session. A later confirmed result opens a session only after
+a scoreboard capture, not because the cards stayed up. A stat reset
+opens a session on the second accepted capture that still shows the drop.
+The new session does not keep the previous outcome. One misread stat cell is
+still held. A Play of the Game wake does not split a session by itself.
 
 
 ## 0.4.17
