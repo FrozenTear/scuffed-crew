@@ -248,3 +248,111 @@ async fn main() {
     .await
     .unwrap();
 }
+
+#[cfg(test)]
+mod compression_shell {
+    use std::io::Read;
+
+    use axum::body::Body;
+    use axum::http::{Method, Request, StatusCode, header};
+    use http_body_util::BodyExt;
+    use scuffed_auth::SessionConfig;
+    use scuffed_db::migrations::run_migrations;
+    use scuffed_site_server::create_router_with_dist;
+    use scuffed_site_server::state::{AppState, OAuthConfig};
+    use tower::ServiceExt;
+    use tower_http::compression::CompressionLayer;
+
+    #[tokio::test]
+    async fn get_and_head_shell_round_trip_through_compression() {
+        let root = std::env::temp_dir().join(format!("scuffed-compress-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(root.join("dist")).unwrap();
+        std::fs::create_dir_all(root.join("uploads")).unwrap();
+        std::fs::write(
+            root.join("dist/index.html"),
+            "<!DOCTYPE html><html><head><title>The Scuffed Crew</title></head><body>SPA-SHELL-MARKER</body></html>",
+        )
+        .unwrap();
+        let db = scuffed_db::Database::connect_memory()
+            .await
+            .expect("in-memory DB");
+        run_migrations(&db.client).await.expect("migrations");
+        let state = AppState {
+            db: std::sync::Arc::new(db),
+            session_config: SessionConfig::default(),
+            oauth_config: OAuthConfig {
+                discord_client_id: String::new(),
+                discord_client_secret: String::new(),
+                google_client_id: String::new(),
+                google_client_secret: String::new(),
+                redirect_base_url: "https://crew.example.test".into(),
+                allowed_origins: vec!["https://crew.example.test".into()],
+            },
+            upload_dir: root.join("uploads"),
+            notifier: None,
+            nostr_challenge_key: [0u8; 32],
+            consumed_challenges: scuffed_site_server::challenge_store::ConsumedChallengeStore::new(
+            ),
+            nostr_rate_limiter: scuffed_site_server::nostr_rate_limit::NostrRateLimiter::new(),
+            login_lockout: scuffed_site_server::login_lockout::LoginLockout::new(),
+            crypto: None,
+            relay_url: None,
+            dm_events: None,
+            nip05_domain: None,
+            nip05_republish_enabled: false,
+            public_settings: scuffed_site_server::state::PublicSettingsCache::new(),
+        };
+        // Same layer `main` puts around the router (`CompressionLayer::new()`).
+        let app = create_router_with_dist(state, root.join("dist")).layer(CompressionLayer::new());
+
+        let get_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/")
+                    .header(header::ACCEPT_ENCODING, "gzip")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(get_response.status(), StatusCode::OK);
+        assert_eq!(
+            get_response
+                .headers()
+                .get(header::CONTENT_ENCODING)
+                .and_then(|value| value.to_str().ok()),
+            Some("gzip")
+        );
+        let compressed = get_response.into_body().collect().await.unwrap().to_bytes();
+        let mut decoded = String::new();
+        flate2::read::GzDecoder::new(compressed.as_ref())
+            .read_to_string(&mut decoded)
+            .expect("gzip shell");
+        assert!(decoded.contains("sc-settings"), "{decoded}");
+        assert!(decoded.contains("SPA-SHELL-MARKER"), "{decoded}");
+
+        let head_response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::HEAD)
+                    .uri("/")
+                    .header(header::ACCEPT_ENCODING, "gzip")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(head_response.status(), StatusCode::OK);
+        let head_bytes = head_response
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes();
+        assert_eq!(head_bytes.len(), 0);
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+}

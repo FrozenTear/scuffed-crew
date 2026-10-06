@@ -263,7 +263,7 @@ pub async fn update_settings(
         None => None,
     };
 
-    let settings = state
+    let written = state
         .db
         .update_settings(
             body.org_name.as_deref(),
@@ -287,15 +287,20 @@ pub async fn update_settings(
             body.strategies_enabled,
             body.officers_can_edit_teams,
         )
-        .await
-        .map_err(|_e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: "Internal error".into(),
-                }),
-            )
-        })?;
+        .await;
+    // After the write returns, still before this handler returns. The drop
+    // guard above has not run yet, so a read released here can store, and
+    // that store is cleared when the guard drops.
+    #[cfg(test)]
+    state.public_settings.run_after_write_hook().await;
+    let settings = written.map_err(|_e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: "Internal error".into(),
+            }),
+        )
+    })?;
 
     tracing::info!(
         home_shell = %settings.home_shell,

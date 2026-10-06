@@ -749,9 +749,13 @@ pub async fn setup(
                 } else {
                     (None::<String>, None, None, None, None, None)
                 };
-            // Invalidate before the write and again after it returns, so a
-            // shell read during setup cannot keep the pre-setup row.
+            // Invalidate before the write and again when this scope ends,
+            // including when the request is dropped. A shell read during
+            // setup cannot keep the pre-setup row.
             state.public_settings.invalidate();
+            let _invalidate_after_write = state.public_settings.invalidate_on_drop();
+            #[cfg(test)]
+            state.public_settings.run_write_hook().await;
             let write = state
                 .db
                 .update_settings(
@@ -775,7 +779,8 @@ pub async fn setup(
                     None,
                 )
                 .await;
-            state.public_settings.invalidate();
+            #[cfg(test)]
+            state.public_settings.run_after_write_hook().await;
             if let Err(e) = write {
                 tracing::warn!("setup: failed to apply org/template settings: {e}");
             }

@@ -41,7 +41,7 @@ Production = `scuffed-server` serving `dist/` (built by `dx build` from crates/a
 
 - `SURREALDB_URL` unset or blank, and `PRODUCTION` not set → in-memory database with auto-seeded dev data (user=devadmin, role=admin). `/api/dev/login` is registered only in this mode.
 - `PRODUCTION` set (truthy) with `SURREALDB_URL` unset or blank → the server exits 1. It does not boot an in-memory database, seed a dev admin, or serve `/api/dev/login`.
-- Run app: `cd crates/app && dx serve` (or `dx build` then serve `dist/` via the server)
+- Run app: `cd crates/app && dx serve` (or `dx build` then serve `dist/` via the server). Restart the server after `dx build`; `index.html` is served from memory.
 - Run server: `PORT=3030 cargo run -p scuffed-server`
 
 ## Production / VPS

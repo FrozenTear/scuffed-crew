@@ -78,16 +78,56 @@ pub(crate) const EMBED_REFRESH_BACKOFF: Duration = Duration::from_secs(1);
 /// DB-outage warnings for the shell embed, at most once per interval.
 const SETTINGS_WARN_INTERVAL: Duration = Duration::from_secs(60);
 
-/// Anonymous settings already escaped for the HTML shell.
+/// Cached rewritten head for one template: `(template pointer, head prefix)`.
+type RenderedHead = std::sync::Arc<Mutex<Option<(usize, std::sync::Arc<str>)>>>;
+
+/// Anonymous settings already rendered for the HTML shell.
 ///
-/// `escaped_json` and `script_block` are produced once, when the blob is
-/// stored, so a cache hit does not escape again.
+/// `script_block` is produced once, when the blob is stored. The rewritten
+/// head prefix is filled on the first response that uses this blob and reused
+/// after that, so a hit does not scan the template again.
 #[derive(Clone, Debug)]
 pub(crate) struct CachedPublicSettings {
-    pub escaped_json: String,
     pub script_block: String,
     pub org_name: String,
     pub site_description: String,
+    /// Rewritten head prefix for the template this blob was last rendered with.
+    rendered_head: RenderedHead,
+}
+
+impl CachedPublicSettings {
+    pub(crate) fn from_parts(
+        script_block: String,
+        org_name: String,
+        site_description: String,
+    ) -> Self {
+        Self {
+            script_block,
+            org_name,
+            site_description,
+            rendered_head: std::sync::Arc::new(Mutex::new(None)),
+        }
+    }
+
+    /// Rewritten head prefix for `template`, computed once for this blob.
+    pub(crate) fn rendered_head(
+        &self,
+        template_key: usize,
+        build: impl FnOnce() -> String,
+    ) -> std::sync::Arc<str> {
+        let mut slot = self
+            .rendered_head
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        if let Some((key, head)) = slot.as_ref()
+            && *key == template_key
+        {
+            return std::sync::Arc::clone(head);
+        }
+        let head: std::sync::Arc<str> = std::sync::Arc::from(build());
+        *slot = Some((template_key, std::sync::Arc::clone(&head)));
+        head
+    }
 }
 
 #[derive(Debug)]
@@ -126,6 +166,7 @@ pub(crate) type SettingsWriteHook =
 struct SettingsTestHooks {
     loader: Mutex<Option<EmbedLoader>>,
     write_hook: Mutex<Option<SettingsWriteHook>>,
+    after_write_hook: Mutex<Option<SettingsWriteHook>>,
 }
 
 #[cfg(test)]
@@ -190,8 +231,9 @@ impl PublicSettingsCache {
     /// Second [`Self::invalidate`] when the guard drops.
     ///
     /// Held across the write so every return path, including a validation
-    /// error, bumps the generation again after the attempt.
-    pub fn invalidate_on_drop(&self) -> InvalidateOnDrop<'_> {
+    /// error or a dropped request, bumps the generation again after the attempt.
+    #[must_use = "bind it so it drops after the write"]
+    pub(crate) fn invalidate_on_drop(&self) -> InvalidateOnDrop<'_> {
         InvalidateOnDrop(self)
     }
 
@@ -214,8 +256,10 @@ impl PublicSettingsCache {
 
     /// Last blob from the current generation, including after the TTL.
     ///
-    /// A blob stored before the latest [`Self::invalidate`] is not a fallback,
-    /// whether the bump dropped it or a rejected store left it behind.
+    /// [`Self::store`] writes nothing when the generation has moved, and
+    /// [`Self::invalidate`] clears the entry. The generation check is only a
+    /// safety net for a blob that is still in the slot after a bump that did
+    /// not clear it.
     pub(crate) fn stale(&self) -> Option<Arc<CachedPublicSettings>> {
         let guard = self.lock();
         let entry = guard.entry.as_ref()?;
@@ -261,8 +305,14 @@ impl PublicSettingsCache {
         }
     }
 
+    #[cfg(test)]
     pub(crate) async fn refresh_lock(&self) -> tokio::sync::MutexGuard<'_, ()> {
         self.refresh.lock().await
+    }
+
+    /// Owned guard so a settings read can outlive the request that started it.
+    pub(crate) async fn refresh_lock_owned(&self) -> tokio::sync::OwnedMutexGuard<()> {
+        Arc::clone(&self.refresh).lock_owned().await
     }
 
     /// Log `message` at most once per [`SETTINGS_WARN_INTERVAL`].
@@ -295,7 +345,8 @@ impl PublicSettingsCache {
             .clone()
     }
 
-    /// Install a hook for the next settings write. The handler takes it once.
+    /// Install a hook for the next settings write. The handler takes it once,
+    /// before the database update.
     #[cfg(test)]
     pub(crate) fn set_write_hook(&self, hook: Option<SettingsWriteHook>) {
         *self
@@ -305,15 +356,31 @@ impl PublicSettingsCache {
             .unwrap_or_else(|err| err.into_inner()) = hook;
     }
 
+    /// Hook that runs after `update_settings` returns and before the handler does.
+    #[cfg(test)]
+    pub(crate) fn set_after_write_hook(&self, hook: Option<SettingsWriteHook>) {
+        *self
+            .hooks
+            .after_write_hook
+            .lock()
+            .unwrap_or_else(|err| err.into_inner()) = hook;
+    }
+
     /// Run and clear the write hook, if a test installed one.
     #[cfg(test)]
     pub(crate) async fn run_write_hook(&self) {
-        let hook = self
-            .hooks
-            .write_hook
-            .lock()
-            .unwrap_or_else(|err| err.into_inner())
-            .take();
+        Self::take_hook(&self.hooks.write_hook).await;
+    }
+
+    /// Run and clear the post-write hook, if a test installed one.
+    #[cfg(test)]
+    pub(crate) async fn run_after_write_hook(&self) {
+        Self::take_hook(&self.hooks.after_write_hook).await;
+    }
+
+    #[cfg(test)]
+    async fn take_hook(slot: &Mutex<Option<SettingsWriteHook>>) {
+        let hook = slot.lock().unwrap_or_else(|err| err.into_inner()).take();
         if let Some(hook) = hook {
             hook().await;
         }
@@ -635,14 +702,13 @@ mod public_settings_cache_tests {
     use super::{CachedPublicSettings, PublicSettingsCache};
 
     fn payload(name: &str) -> CachedPublicSettings {
-        CachedPublicSettings {
-            escaped_json: format!(r#"{{"org_name":"{name}"}}"#),
-            script_block: format!(
+        CachedPublicSettings::from_parts(
+            format!(
                 "<script id=\"sc-settings\" type=\"application/json\">{{\"org_name\":\"{name}\"}}</script>"
             ),
-            org_name: name.to_string(),
-            site_description: "tagline".into(),
-        }
+            name.to_string(),
+            "tagline".into(),
+        )
     }
 
     #[tokio::test]
@@ -682,9 +748,12 @@ mod public_settings_cache_tests {
             "an expired blob is not a fresh hit"
         );
         assert_eq!(cache.stale().unwrap().org_name, "Cached");
-        assert_eq!(
-            cache.stale().unwrap().escaped_json,
-            r#"{"org_name":"Cached"}"#
+        assert!(
+            cache
+                .stale()
+                .unwrap()
+                .script_block
+                .contains(r#"{"org_name":"Cached"}"#)
         );
     }
 

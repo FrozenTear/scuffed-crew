@@ -842,6 +842,111 @@ async fn shell_rewrites_title_and_meta_and_escapes_clan_name() {
 }
 
 #[tokio::test]
+async fn blank_settings_keep_template_title_and_meta_and_still_embed_json() {
+    let tree = TempTree::new("embed-blank");
+    std::fs::write(tree.dist().join("index.html"), BRANDED_SHELL).unwrap();
+    let state = test_state(tree.uploads()).await;
+    write_settings(&state.db, Some(""), Some("")).await;
+    let app = create_router_with_dist(state, tree.dist());
+
+    let (_, _, body) = get(app, "/").await;
+    assert!(body.contains("<title>The Scuffed Crew</title>"), "{body}");
+    assert!(
+        body.contains("name=\"description\" content=\"The Scuffed Crew — fallback\""),
+        "{body}"
+    );
+    assert!(
+        body.contains("property=\"og:title\" content=\"The Scuffed Crew\""),
+        "{body}"
+    );
+    assert!(
+        body.contains("content=\"The Scuffed Crew\" property=\"og:site_name\""),
+        "{body}"
+    );
+    assert!(
+        body.contains("property=\"og:description\" content=\"fallback tagline\""),
+        "{body}"
+    );
+    let parsed: serde_json::Value = serde_json::from_str(settings_json_before_head(&body)).unwrap();
+    assert_eq!(parsed["org_name"], "");
+    assert_eq!(parsed["site_description"], "");
+}
+
+#[tokio::test]
+async fn officer_strategies_update_reaches_the_shell_and_forbidden_org_name_keeps_the_cache() {
+    let tree = TempTree::new("embed-officer");
+    let state = test_state(tree.uploads()).await;
+    let app = create_router_with_dist(state.clone(), tree.dist());
+
+    let (_, _, body) = get(app.clone(), "/").await;
+    let first: serde_json::Value = serde_json::from_str(settings_json_before_head(&body)).unwrap();
+    assert_eq!(first["org_name"], "My Clan");
+    assert_eq!(first["strategies_enabled"], true);
+
+    let user = state
+        .db
+        .create_local_user("embed-officer", "unused-hash")
+        .await
+        .unwrap();
+    state
+        .db
+        .create_member(&user.id, "Embed Officer", OrgRole::Officer)
+        .await
+        .unwrap();
+    state
+        .db
+        .create_session(&user.id, "embed-officer-token", 24)
+        .await
+        .unwrap();
+
+    let updated = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/api/settings")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::COOKIE, "sc_session=embed-officer-token")
+                .body(Body::from(r#"{"strategies_enabled":false}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(updated.status(), StatusCode::OK);
+
+    let (_, _, body) = get(app.clone(), "/").await;
+    let after_officer: serde_json::Value =
+        serde_json::from_str(settings_json_before_head(&body)).unwrap();
+    assert_eq!(after_officer["strategies_enabled"], false);
+    assert_eq!(after_officer["org_name"], "My Clan");
+
+    let forbidden = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/api/settings")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::COOKIE, "sc_session=embed-officer-token")
+                .body(Body::from(r#"{"org_name":"Nope Clan"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(forbidden.status(), StatusCode::FORBIDDEN);
+
+    write_settings(&state.db, Some("Direct Clan"), None).await;
+    let (_, _, body) = get(app, "/").await;
+    let still_cached: serde_json::Value =
+        serde_json::from_str(settings_json_before_head(&body)).unwrap();
+    assert_eq!(
+        still_cached["org_name"], "My Clan",
+        "a 403 must not drop the cache; a direct DB write would show up if it had"
+    );
+    assert_eq!(still_cached["strategies_enabled"], false);
+}
+
+#[tokio::test]
 async fn template_read_error_retries_on_the_next_shell() {
     let root = std::env::temp_dir().join(format!("scuffed-seo-retry-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(root.join("dist/index.html")).unwrap();

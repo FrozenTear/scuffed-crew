@@ -19,14 +19,20 @@
 //! through `serde_json` — the same mapping and serializer as that route, so
 //! the embed cannot grow a private field the public GET does not return.
 //! `<`, `>`, `&`, U+2028, and U+2029 are written as `\u003c`, `\u003e`,
-//! `\u0026`, `\u2028`, and `\u2029`. The escaped JSON and the script block are
-//! cached together. The shell stays `Cache-Control: no-cache`.
+//! `\u0026`, `\u2028`, and `\u2029`. The script block is cached with the blob.
+//! The rewritten head prefix is filled once for that blob and reused. The
+//! shell stays `Cache-Control: no-cache`.
 //!
 //! A cache miss waits at most [`EMBED_SETTINGS_TIMEOUT`], including time spent
-//! waiting on another in-flight read. On timeout or error the last blob from
-//! the current generation is served if one exists (stale-on-error). A settings
-//! write drops that blob, so a row from before the save is not a fallback.
-//! Otherwise the tag is omitted and the page is still served. The same
+//! waiting on another in-flight read. That read keeps running after the cap
+//! and can still store for the generation it started with. On timeout or error
+//! the last blob from the current generation is served if one exists
+//! (stale-on-error). A timeout records its backoff against that starting
+//! generation, so a save during the wait does not suppress the next one. A
+//! settings write drops the blob and drops it again when the write returns.
+//! The response that overlapped the write may include the row it just read;
+//! that row is not kept for a later request. Otherwise the tag is omitted and
+//! the page is still served. The same
 //! successful read rewrites `<title>` and the `og:title`, `og:site_name`,
 //! description, and `og:description` meta contents from the trimmed
 //! `org_name` and `site_description`. A value that is empty after trimming
@@ -368,12 +374,11 @@ fn cached_settings(json: &str, org_name: &str, site_description: &str) -> Cached
     script_block.push_str(SETTINGS_SCRIPT_OPEN);
     script_block.push_str(&escaped_json);
     script_block.push_str("</script>");
-    CachedPublicSettings {
-        escaped_json,
+    CachedPublicSettings::from_parts(
         script_block,
-        org_name: org_name.to_string(),
-        site_description: site_description.to_string(),
-    }
+        org_name.to_string(),
+        site_description.to_string(),
+    )
 }
 
 /// Shell HTML for one response.
@@ -389,15 +394,16 @@ fn render_shell(template: &ShellTemplate, embed: Option<&CachedPublicSettings>) 
     let Some(idx) = template.head_close else {
         return template.html.to_string();
     };
-    let head = rewrite_document_head(
-        &template.html[..idx],
-        &embed.org_name,
-        &embed.site_description,
-    );
-    // Hit path: serve the cached block. `escaped_json` is the same payload
-    // already inside it, kept so a hit does not escape again.
-    let block_len = embed.script_block.len().max(embed.escaped_json.len());
-    let mut out = String::with_capacity(head.len() + block_len + template.html.len() - idx);
+    let template_key = Arc::as_ptr(&template.html) as *const () as usize;
+    let head = embed.rendered_head(template_key, || {
+        rewrite_document_head(
+            &template.html[..idx],
+            &embed.org_name,
+            &embed.site_description,
+        )
+    });
+    let mut out =
+        String::with_capacity(head.len() + embed.script_block.len() + template.html.len() - idx);
     out.push_str(&head);
     out.push_str(&embed.script_block);
     out.push_str(&template.html[idx..]);
@@ -445,26 +451,18 @@ fn replace_title_text(head: &str, org_name: &str) -> String {
     let Some(org_name) = filled_setting(org_name) else {
         return head.to_string();
     };
-    let lower = head.to_ascii_lowercase();
     let escaped = escape_html_text(org_name);
     let mut out = String::with_capacity(head.len() + escaped.len());
     let mut i = 0;
-    while let Some(rel) = lower[i..].find("<title") {
-        let start = i + rel;
+    while let Some(start) = find_tag(head, i, "<title") {
         let after = start + "<title".len();
-        if !tag_name_ends(head, after) {
-            out.push_str(&head[i..after]);
-            i = after;
-            continue;
-        }
         let Some(gt_rel) = head[after..].find('>') else {
             break;
         };
         let content_start = after + gt_rel + 1;
-        let Some(close_rel) = lower[content_start..].find("</title") else {
+        let Some(content_end) = find_tag(head, content_start, "</title") else {
             break;
         };
-        let content_end = content_start + close_rel;
         out.push_str(&head[i..content_start]);
         out.push_str(&escaped);
         i = content_end;
@@ -474,17 +472,10 @@ fn replace_title_text(head: &str, org_name: &str) -> String {
 }
 
 fn replace_meta_contents(head: &str, org_name: &str, site_description: &str) -> String {
-    let lower = head.to_ascii_lowercase();
     let mut out = String::with_capacity(head.len());
     let mut i = 0;
-    while let Some(rel) = lower[i..].find("<meta") {
-        let start = i + rel;
+    while let Some(start) = find_tag(head, i, "<meta") {
         let after = start + "<meta".len();
-        if !tag_name_ends(head, after) {
-            out.push_str(&head[i..after]);
-            i = after;
-            continue;
-        }
         let Some(gt_rel) = head[after..].find('>') else {
             break;
         };
@@ -501,18 +492,12 @@ fn replace_meta_contents(head: &str, org_name: &str, site_description: &str) -> 
     out
 }
 
-fn tag_name_ends(html: &str, after_name: usize) -> bool {
-    match html.as_bytes().get(after_name).copied() {
-        None => true,
-        Some(b) => b.is_ascii_whitespace() || b == b'>' || b == b'/',
-    }
-}
-
 struct ScannedAttr {
     name: String,
     value: String,
     /// Byte range of the attribute value inside `tag`, excluding quotes.
     value_range: std::ops::Range<usize>,
+    quoted: bool,
 }
 
 fn rewrite_meta_tag(tag: &str, org_name: &str, site_description: &str) -> String {
@@ -544,9 +529,16 @@ fn rewrite_meta_tag(tag: &str, org_name: &str, site_description: &str) -> String
         return tag.to_string();
     };
     let escaped = escape_html_text(new_value);
-    let mut out = String::with_capacity(tag.len() + escaped.len());
+    let mut out = String::with_capacity(tag.len() + escaped.len() + 2);
     out.push_str(&tag[..content.value_range.start]);
-    out.push_str(&escaped);
+    if content.quoted {
+        out.push_str(&escaped);
+    } else {
+        // An unquoted value cannot safely hold the replacement. Quote it.
+        out.push('"');
+        out.push_str(&escaped);
+        out.push('"');
+    }
     out.push_str(&tag[content.value_range.end..]);
     out
 }
@@ -607,6 +599,7 @@ fn scan_attrs(tag: &str) -> Vec<ScannedAttr> {
                 name,
                 value: tag[start..end].to_string(),
                 value_range: start..end,
+                quoted: true,
             });
         } else {
             let start = i;
@@ -617,6 +610,7 @@ fn scan_attrs(tag: &str) -> Vec<ScannedAttr> {
                 name,
                 value: tag[start..i].to_string(),
                 value_range: start..i,
+                quoted: false,
             });
         }
     }
@@ -624,23 +618,109 @@ fn scan_attrs(tag: &str) -> Vec<ScannedAttr> {
 }
 
 fn find_head_close(html: &str) -> Option<usize> {
-    let needle = b"</head>";
-    html.as_bytes()
-        .windows(needle.len())
+    find_tag(html, 0, "</head>")
+}
+
+/// Next `needle` that is a real tag, skipping comments and the contents of
+/// `<script>` and `<style>`. `needle` includes the leading `<` (`<title`,
+/// `<meta`, `</head>`, `</title>`).
+fn find_tag(html: &str, from: usize, needle: &str) -> Option<usize> {
+    let bytes = html.as_bytes();
+    let needle = needle.as_bytes();
+    let mut i = from;
+    while i < bytes.len() {
+        if let Some(next) = skip_raw_region(bytes, i) {
+            i = next;
+            continue;
+        }
+        if eq_ignore_ascii_case_at(bytes, i, needle)
+            && (needle.ends_with(b">") || tag_name_ends_at(bytes, i + needle.len()))
+        {
+            return Some(i);
+        }
+        i += 1;
+    }
+    None
+}
+
+fn eq_ignore_ascii_case_at(bytes: &[u8], i: usize, needle: &[u8]) -> bool {
+    bytes
+        .get(i..i + needle.len())
+        .is_some_and(|window| window.eq_ignore_ascii_case(needle))
+}
+
+fn tag_name_ends_at(bytes: &[u8], after_name: usize) -> bool {
+    match bytes.get(after_name).copied() {
+        None => true,
+        Some(b) => b.is_ascii_whitespace() || b == b'>' || b == b'/',
+    }
+}
+
+/// If `i` is the start of a comment, `<script>`, or `<style>`, the index just
+/// past that region. Unclosed regions run to the end of the document.
+fn skip_raw_region(bytes: &[u8], i: usize) -> Option<usize> {
+    if eq_ignore_ascii_case_at(bytes, i, b"<!--") {
+        let end = find_bytes_ci(bytes, i + 4, b"-->").map(|at| at + 3);
+        return Some(end.unwrap_or(bytes.len()));
+    }
+    let name = if is_raw_open(bytes, i, b"script") {
+        "script"
+    } else if is_raw_open(bytes, i, b"style") {
+        "style"
+    } else {
+        return None;
+    };
+    let after_open = bytes[i..]
+        .iter()
+        .position(|b| *b == b'>')
+        .map(|rel| i + rel + 1)
+        .unwrap_or(bytes.len());
+    Some(find_close_tag(bytes, after_open, name).unwrap_or(bytes.len()))
+}
+
+fn is_raw_open(bytes: &[u8], i: usize, name: &[u8]) -> bool {
+    bytes.get(i) == Some(&b'<')
+        && eq_ignore_ascii_case_at(bytes, i + 1, name)
+        && tag_name_ends_at(bytes, i + 1 + name.len())
+}
+
+fn find_bytes_ci(bytes: &[u8], from: usize, needle: &[u8]) -> Option<usize> {
+    let rest = bytes.get(from..)?;
+    rest.windows(needle.len())
         .position(|window| window.eq_ignore_ascii_case(needle))
+        .map(|rel| from + rel)
+}
+
+fn find_close_tag(bytes: &[u8], from: usize, name: &str) -> Option<usize> {
+    let open = format!("</{name}");
+    let open = open.as_bytes();
+    let mut i = from;
+    while i < bytes.len() {
+        if eq_ignore_ascii_case_at(bytes, i, open) && tag_name_ends_at(bytes, i + open.len()) {
+            let after = i + open.len();
+            let gt = bytes[after..].iter().position(|b| *b == b'>')?;
+            return Some(after + gt + 1);
+        }
+        i += 1;
+    }
+    None
 }
 
 async fn load_embed(state: &AppState) -> Option<Arc<CachedPublicSettings>> {
     if let Some(hit) = state.public_settings.fresh() {
         return Some(hit);
     }
+    // Recorded before the wait. A save that bumps the generation while this
+    // request is in flight must not inherit the timeout backoff.
+    let generation = state.public_settings.generation();
     // The cap covers waiting for the single in-flight read and the read
     // itself. A request queued behind a slow leader falls back here instead
-    // of blocking until that leader finishes.
+    // of blocking until that leader finishes. Dropping this wait does not
+    // cancel the leader: that read holds an owned lock in its own task and
+    // can still store when it finishes.
     match tokio::time::timeout(EMBED_SETTINGS_TIMEOUT, load_embed_locked(state)).await {
         Ok(ready) => ready,
         Err(_elapsed) => {
-            let generation = state.public_settings.generation();
             state.public_settings.note_refresh_failure(generation);
             state
                 .public_settings
@@ -653,7 +733,7 @@ async fn load_embed(state: &AppState) -> Option<Arc<CachedPublicSettings>> {
 async fn load_embed_locked(state: &AppState) -> Option<Arc<CachedPublicSettings>> {
     // One reader. Waiters observe that reader's result instead of each
     // hitting the database. This wait sits inside [`EMBED_SETTINGS_TIMEOUT`].
-    let _flight = state.public_settings.refresh_lock().await;
+    let flight = state.public_settings.refresh_lock_owned().await;
     if let Some(hit) = state.public_settings.fresh() {
         return Some(hit);
     }
@@ -661,35 +741,38 @@ async fn load_embed_locked(state: &AppState) -> Option<Arc<CachedPublicSettings>
         return state.public_settings.stale();
     }
     let generation = state.public_settings.generation();
-    match embed_read(state).await {
-        Ok(payload) => {
-            let cached = Arc::new(payload);
-            if state
-                .public_settings
-                .store(generation, CachedPublicSettings::clone(&cached))
-            {
+    let task_state = state.clone();
+    let task = tokio::spawn(async move {
+        let _flight = flight;
+        match embed_read(&task_state).await {
+            Ok(payload) => {
+                let cached = Arc::new(payload);
+                // A rejected store still returns this row for the response
+                // that waited. It is not cached, so a later request cannot
+                // keep a pre-save row.
+                let _stored = task_state
+                    .public_settings
+                    .store(generation, CachedPublicSettings::clone(&cached));
                 Some(cached)
-            } else {
-                // A save bumped the generation while this read was in flight.
-                // Do not serve the rejected blob; it may be the pre-save row.
-                state.public_settings.fresh()
+            }
+            Err(err) => {
+                task_state.public_settings.note_refresh_failure(generation);
+                task_state
+                    .public_settings
+                    .note_embed_failure(&format!("SPA shell settings embed skipped: {err}"));
+                task_state.public_settings.stale()
             }
         }
-        Err(err) => {
-            state.public_settings.note_refresh_failure(generation);
-            state
-                .public_settings
-                .note_embed_failure(&format!("SPA shell settings embed skipped: {err}"));
-            state.public_settings.stale()
-        }
+    });
+    match task.await {
+        Ok(value) => value,
+        Err(_) => state.public_settings.stale(),
     }
 }
 
 fn embed_read<'a>(
     state: &'a AppState,
-) -> std::pin::Pin<
-    Box<dyn std::future::Future<Output = Result<CachedPublicSettings, String>> + Send + 'a>,
-> {
+) -> Pin<Box<dyn Future<Output = Result<CachedPublicSettings, String>> + Send + 'a>> {
     #[cfg(test)]
     if let Some(loader) = state.public_settings.loader() {
         return loader();
@@ -1687,6 +1770,142 @@ mod tests {
 <meta name=\"description\" content=\"A real tagline\">
 <meta property=\"og:description\" content=\"A real tagline\">"
         );
+        assert_eq!(rewrite_document_head(head, "", ""), head);
+    }
+
+    #[test]
+    fn unquoted_content_is_rewritten_as_a_quoted_value() {
+        let head = "<meta property=og:title content=Old>";
+        let out = rewrite_document_head(head, "Boot <Clan> & \"Q\"", "");
+        assert_eq!(
+            out,
+            "<meta property=og:title content=\"Boot &lt;Clan&gt; &amp; &quot;Q&quot;\">"
+        );
+    }
+
+    #[test]
+    fn comments_scripts_and_styles_are_not_scanned() {
+        let html = "\
+<!-- <title>Hidden</title> </head> -->
+<script>var t = \"<title>Nope</title></head>\";</script>
+<style>/* </head> <title>Nope</title> */</style>
+<title>The Scuffed Crew</title>
+<meta property=\"og:title\" content=\"The Scuffed Crew\">
+</head><body>after</body>";
+        let close = find_head_close(html).unwrap();
+        assert!(html[close..].starts_with("</head><body>"));
+        let head = &html[..close];
+        let out = rewrite_document_head(head, "Boot", "Desc");
+        assert!(out.contains("<title>Hidden</title>"));
+        assert!(out.contains("<title>Nope</title>"));
+        assert!(out.contains("<title>Boot</title>"));
+        assert_eq!(out.matches("<title>Boot</title>").count(), 1);
+        assert!(out.contains("property=\"og:title\" content=\"Boot\""));
+        assert!(!out.contains("content=\"The Scuffed Crew\""));
+    }
+
+    #[test]
+    fn real_app_index_rewrite_fills_each_present_tag_once() {
+        let html = include_str!("../../../app/index.html");
+        assert_real_index_rewrite(html);
+        if let Ok(path) = std::env::var("SCUFFED_EXTRA_INDEX") {
+            let extra = std::fs::read_to_string(&path).unwrap_or_else(|err| {
+                panic!("read {path}: {err}");
+            });
+            assert_real_index_rewrite(&extra);
+        }
+    }
+
+    fn assert_real_index_rewrite(html: &str) {
+        let org = "Boot <Clan> & \"Q\"";
+        let desc = "Tag <line> & \"Q\"";
+        let escaped_org = escape_html_text(org);
+        let escaped_desc = escape_html_text(desc);
+        let template = prepare_shell_template(html.to_string());
+        let source_head = find_head_close(html).expect("index has </head>");
+        let embed = cached_settings(r#"{"org_name":"x"}"#, org, desc);
+        let out = render_shell(&template, Some(&embed));
+        let head_at = find_head_close(&out).expect("rewritten index has </head>");
+        assert_eq!(
+            &out[head_at - embed.script_block.len()..head_at],
+            embed.script_block.as_str()
+        );
+        assert!(out[head_at..].starts_with("</head>"));
+        assert_eq!(&out[head_at..], &html[source_head..]);
+        assert_eq!(
+            out.matches(&format!("<title>{escaped_org}</title>"))
+                .count(),
+            1
+        );
+        assert!(!out.contains("{app_title}"));
+        assert!(!out.contains("<title>The Scuffed Crew</title>"));
+        assert_replaced(html, &out, MetaKind::Name("description"), &escaped_desc);
+        assert_replaced(html, &out, MetaKind::Property("og:title"), &escaped_org);
+        assert_replaced(
+            html,
+            &out,
+            MetaKind::Property("og:description"),
+            &escaped_desc,
+        );
+        assert_replaced(html, &out, MetaKind::Property("og:site_name"), &escaped_org);
+        assert_eq!(
+            meta_values(html, MetaKind::Property("og:type")),
+            meta_values(&out, MetaKind::Property("og:type"))
+        );
+        assert_eq!(
+            meta_values(html, MetaKind::Name("theme-color")),
+            meta_values(&out, MetaKind::Name("theme-color"))
+        );
+        assert_eq!(
+            meta_values(html, MetaKind::Name("viewport")),
+            meta_values(&out, MetaKind::Name("viewport"))
+        );
+    }
+
+    #[derive(Clone, Copy)]
+    enum MetaKind {
+        Name(&'static str),
+        Property(&'static str),
+    }
+
+    fn assert_replaced(source: &str, out: &str, kind: MetaKind, expected: &str) {
+        let before = meta_values(source, kind);
+        let after = meta_values(out, kind);
+        if before.is_empty() {
+            assert!(after.is_empty());
+        } else {
+            assert_eq!(after, vec![expected.to_string()]);
+        }
+    }
+
+    fn meta_values(html: &str, kind: MetaKind) -> Vec<String> {
+        let mut values = Vec::new();
+        let mut i = 0;
+        while let Some(start) = find_tag(html, i, "<meta") {
+            let Some(gt) = html[start..].find('>') else {
+                break;
+            };
+            let end = start + gt + 1;
+            let attrs = scan_attrs(&html[start..end]);
+            let matches = match kind {
+                MetaKind::Name(name) => attrs.iter().any(|attr| {
+                    attr.name.eq_ignore_ascii_case("name") && attr.value.eq_ignore_ascii_case(name)
+                }),
+                MetaKind::Property(name) => attrs.iter().any(|attr| {
+                    attr.name.eq_ignore_ascii_case("property")
+                        && attr.value.eq_ignore_ascii_case(name)
+                }),
+            };
+            if matches
+                && let Some(content) = attrs
+                    .iter()
+                    .find(|attr| attr.name.eq_ignore_ascii_case("content"))
+            {
+                values.push(content.value.clone());
+            }
+            i = end;
+        }
+        values
     }
 
     #[test]
@@ -1712,11 +1931,21 @@ mod tests {
     }
 
     #[test]
+    fn rendered_head_is_reused_for_the_same_template() {
+        let cached = cached_settings(r#"{"org_name":"Boot"}"#, "Boot", "Desc");
+        let head = "<title>Old</title><meta name=\"description\" content=\"Old\">";
+        let first = cached.rendered_head(1, || rewrite_document_head(head, "Boot", "Desc"));
+        let second = cached.rendered_head(1, || panic!("rebuilt the cached head"));
+        assert!(std::sync::Arc::ptr_eq(&first, &second));
+        assert!(first.contains("<title>Boot</title>"));
+        assert!(first.contains("content=\"Desc\""));
+    }
+
+    #[test]
     fn cached_settings_escape_json_once() {
         let raw = r#"{"site_description":"</script>&"}"#;
         let cached = cached_settings(raw, "Clan", "</script>&");
-        assert!(cached.escaped_json.contains("\\u003c/script\\u003e"));
-        assert!(cached.script_block.contains(&cached.escaped_json));
+        assert!(cached.script_block.contains("\\u003c/script\\u003e"));
         assert!(!cached.script_block.contains("</script>&"));
         let again = cached_settings(raw, "Clan", "</script>&");
         assert_eq!(cached.script_block, again.script_block);
@@ -1796,6 +2025,45 @@ mod tests {
         }
     }
 
+    /// Sender that releases a pre-save read. Taken once by the write hook.
+    type ReleaseSender = Arc<Mutex<Option<tokio::sync::oneshot::Sender<()>>>>;
+
+    /// Pre-save row that signals when the read has started, then waits.
+    ///
+    /// The returned sender releases that wait. Both ends live behind a mutex
+    /// so the loader (an `Fn`) and the write hooks can each take them once.
+    fn blocking_pre_save_loader(
+        state: &crate::state::AppState,
+        calls: &Arc<std::sync::atomic::AtomicUsize>,
+    ) -> (tokio::sync::oneshot::Receiver<()>, ReleaseSender) {
+        let calls = Arc::clone(calls);
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let entered_tx = Arc::new(std::sync::Mutex::new(Some(entered_tx)));
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let release_tx = Arc::new(std::sync::Mutex::new(Some(release_tx)));
+        let release_rx = Arc::new(tokio::sync::Mutex::new(Some(release_rx)));
+        state.public_settings.set_loader(Some(Arc::new(move || {
+            let calls = Arc::clone(&calls);
+            let entered_tx = Arc::clone(&entered_tx);
+            let release_rx = Arc::clone(&release_rx);
+            Box::pin(async move {
+                calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if let Some(tx) = entered_tx
+                    .lock()
+                    .unwrap_or_else(|err| err.into_inner())
+                    .take()
+                {
+                    let _ = tx.send(());
+                }
+                if let Some(rx) = release_rx.lock().await.take() {
+                    let _ = rx.await;
+                }
+                Ok(named_settings("My Clan"))
+            })
+        })));
+        (entered_rx, release_tx)
+    }
+
     fn counting_loader(
         calls: &Arc<std::sync::atomic::AtomicUsize>,
         result: Result<CachedPublicSettings, String>,
@@ -1839,6 +2107,20 @@ mod tests {
         assert!(body.contains("Kept Clan"), "{body}");
         assert!(body.contains("sc-settings"), "{body}");
         assert!(!body.contains("Slow Clan"), "{body}");
+        // The request already returned. The leader still holds the refresh
+        // lock and can store when its read finishes.
+        tokio::time::sleep(Duration::from_secs(30)).await;
+        for _ in 0..64 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            state
+                .public_settings
+                .fresh()
+                .map(|blob| blob.org_name.clone()),
+            Some("Slow Clan".to_string()),
+            "a read that outlives the cap must still fill the cache"
+        );
     }
 
     #[tokio::test]
@@ -1891,17 +2173,17 @@ mod tests {
                 Ok(named_settings("Once Clan"))
             })
         })));
+        tokio::time::pause();
         let mut tasks = Vec::new();
         for _ in 0..8 {
             tasks.push(tokio::spawn(shell_text(app.clone(), "/")));
         }
-        tokio::time::timeout(Duration::from_secs(5), async {
-            while calls.load(std::sync::atomic::Ordering::SeqCst) == 0 {
-                tokio::task::yield_now().await;
+        for _ in 0..64 {
+            if calls.load(std::sync::atomic::Ordering::SeqCst) > 0 {
+                break;
             }
-        })
-        .await
-        .expect("loader was not entered");
+            tokio::task::yield_now().await;
+        }
         for _ in 0..8 {
             tokio::task::yield_now().await;
         }
@@ -1911,6 +2193,13 @@ mod tests {
             "concurrent misses must share one read"
         );
         release_tx.send(true).unwrap();
+        for task in &mut tasks {
+            drive(task).await;
+            assert!(
+                task.is_finished(),
+                "shared read did not finish while paused"
+            );
+        }
         for task in tasks {
             let body = task.await.unwrap();
             assert!(body.contains("Once Clan"), "{body}");
@@ -2011,27 +2300,60 @@ mod tests {
         assert!(primed.contains("My Clan"), "{primed}");
 
         let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        state
-            .public_settings
-            .set_loader(Some(counting_loader(&calls, Ok(named_settings("My Clan")))));
-        let app_for_hook = app.clone();
-        let cache = state.public_settings.clone();
+        let (entered_rx, release_tx) = blocking_pre_save_loader(&state, &calls);
+        let entered_rx = Arc::new(tokio::sync::Mutex::new(Some(entered_rx)));
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+        let done_tx = Arc::new(std::sync::Mutex::new(Some(done_tx)));
+        let done_rx = Arc::new(tokio::sync::Mutex::new(Some(done_rx)));
+        let app_for_read = app.clone();
         state.public_settings.set_write_hook(Some(Arc::new(move || {
-            let app_for_hook = app_for_hook.clone();
-            let cache = cache.clone();
+            let entered_rx = Arc::clone(&entered_rx);
+            let done_tx = Arc::clone(&done_tx);
+            let app_for_read = app_for_read.clone();
             Box::pin(async move {
-                let body = shell_text(app_for_hook, "/").await;
-                assert!(
-                    body.contains("My Clan"),
-                    "the in-flight read still sees the pre-save row: {body}"
-                );
-                assert_eq!(
-                    cache.fresh().map(|blob| blob.org_name.clone()),
-                    Some("My Clan".to_string()),
-                    "the racing read must land in the cache before the write returns"
-                );
+                tokio::spawn(async move {
+                    let body = shell_text(app_for_read, "/").await;
+                    if let Some(tx) = done_tx.lock().unwrap_or_else(|err| err.into_inner()).take() {
+                        let _ = tx.send(body);
+                    }
+                });
+                let rx = entered_rx.lock().await.take().expect("entered receiver");
+                tokio::time::timeout(Duration::from_secs(5), rx)
+                    .await
+                    .expect("loader entered")
+                    .expect("entered channel");
             })
         })));
+        let cache = state.public_settings.clone();
+        state
+            .public_settings
+            .set_after_write_hook(Some(Arc::new(move || {
+                let release_tx = Arc::clone(&release_tx);
+                let done_rx = Arc::clone(&done_rx);
+                let cache = cache.clone();
+                Box::pin(async move {
+                    let tx = release_tx
+                        .lock()
+                        .unwrap_or_else(|err| err.into_inner())
+                        .take()
+                        .expect("release sender");
+                    tx.send(()).expect("release the racing read");
+                    let rx = done_rx.lock().await.take().expect("done receiver");
+                    let body = tokio::time::timeout(Duration::from_secs(5), rx)
+                        .await
+                        .expect("racing read finished")
+                        .expect("racing read channel");
+                    assert!(
+                        body.contains("sc-settings") && body.contains("My Clan"),
+                        "the overlapping response still includes the row it read: {body}"
+                    );
+                    assert_eq!(
+                        cache.fresh().map(|blob| blob.org_name.clone()),
+                        Some("My Clan".to_string()),
+                        "the read must store after the write returns and before the handler returns"
+                    );
+                })
+            })));
 
         let response = tower::ServiceExt::oneshot(
             app.clone(),
@@ -2075,6 +2397,250 @@ mod tests {
         let saved = shell_text(app, "/").await;
         assert!(saved.contains("New Clan"), "{saved}");
         assert!(!saved.contains("My Clan"), "{saved}");
+    }
+
+    #[tokio::test]
+    async fn overlapping_read_serves_its_row_without_storing_it() {
+        let (_tree, state, app) = ShellFixture::new("save-reject").await;
+        let user = state
+            .db
+            .create_local_user("embed-admin", "unused-hash")
+            .await
+            .unwrap();
+        state
+            .db
+            .create_member(&user.id, "Embed Admin", scuffed_db::OrgRole::Admin)
+            .await
+            .unwrap();
+        state
+            .db
+            .create_session(&user.id, "embed-reject-token", 24)
+            .await
+            .unwrap();
+
+        let primed = shell_text(app.clone(), "/").await;
+        assert!(primed.contains("My Clan"), "{primed}");
+
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (entered_rx, release_tx) = blocking_pre_save_loader(&state, &calls);
+        let entered_rx = Arc::new(tokio::sync::Mutex::new(Some(entered_rx)));
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+        let done_tx = Arc::new(std::sync::Mutex::new(Some(done_tx)));
+        let done_rx = Arc::new(tokio::sync::Mutex::new(Some(done_rx)));
+        let app_for_read = app.clone();
+        let cache = state.public_settings.clone();
+        state.public_settings.set_write_hook(Some(Arc::new(move || {
+            let entered_rx = Arc::clone(&entered_rx);
+            let release_tx = Arc::clone(&release_tx);
+            let done_tx = Arc::clone(&done_tx);
+            let done_rx = Arc::clone(&done_rx);
+            let app_for_read = app_for_read.clone();
+            let cache = cache.clone();
+            Box::pin(async move {
+                tokio::spawn(async move {
+                    let body = shell_text(app_for_read, "/").await;
+                    if let Some(tx) = done_tx.lock().unwrap_or_else(|err| err.into_inner()).take() {
+                        let _ = tx.send(body);
+                    }
+                });
+                let rx = entered_rx.lock().await.take().expect("entered receiver");
+                tokio::time::timeout(Duration::from_secs(5), rx)
+                    .await
+                    .expect("loader entered")
+                    .expect("entered channel");
+                // The in-flight read already snapshotted the previous generation.
+                cache.invalidate();
+                let tx = release_tx
+                    .lock()
+                    .unwrap_or_else(|err| err.into_inner())
+                    .take()
+                    .expect("release sender");
+                tx.send(()).expect("release the racing read");
+                let rx = done_rx.lock().await.take().expect("done receiver");
+                let body = tokio::time::timeout(Duration::from_secs(5), rx)
+                    .await
+                    .expect("racing read finished")
+                    .expect("racing read channel");
+                assert!(
+                    body.contains("sc-settings") && body.contains("My Clan"),
+                    "a rejected store still returns the row for that response: {body}"
+                );
+                assert!(
+                    cache.fresh().is_none(),
+                    "the rejected row must not be cached"
+                );
+            })
+        })));
+
+        let response = tower::ServiceExt::oneshot(
+            app.clone(),
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/api/settings")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::COOKIE, "sc_session=embed-reject-token")
+                .body(Body::from(r#"{"org_name":"New Clan"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(state.public_settings.fresh().is_none());
+        assert!(state.public_settings.stale().is_none());
+
+        state
+            .public_settings
+            .set_loader(Some(counting_loader(&calls, Err("db down".into()))));
+        let failed = shell_text(app, "/").await;
+        assert!(!failed.contains("My Clan"), "{failed}");
+        assert!(!failed.contains("sc-settings"), "{failed}");
+    }
+
+    #[tokio::test]
+    async fn setup_read_during_save_does_not_keep_the_pre_setup_blob() {
+        let (_tree, state, app) = ShellFixture::new("setup-race").await;
+        let primed = shell_text(app.clone(), "/").await;
+        assert!(primed.contains("My Clan"), "{primed}");
+
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (entered_rx, release_tx) = blocking_pre_save_loader(&state, &calls);
+        let entered_rx = Arc::new(tokio::sync::Mutex::new(Some(entered_rx)));
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+        let done_tx = Arc::new(std::sync::Mutex::new(Some(done_tx)));
+        let done_rx = Arc::new(tokio::sync::Mutex::new(Some(done_rx)));
+        let app_for_read = app.clone();
+        state.public_settings.set_write_hook(Some(Arc::new(move || {
+            let entered_rx = Arc::clone(&entered_rx);
+            let done_tx = Arc::clone(&done_tx);
+            let app_for_read = app_for_read.clone();
+            Box::pin(async move {
+                tokio::spawn(async move {
+                    let body = shell_text(app_for_read, "/").await;
+                    if let Some(tx) = done_tx.lock().unwrap_or_else(|err| err.into_inner()).take() {
+                        let _ = tx.send(body);
+                    }
+                });
+                let rx = entered_rx.lock().await.take().expect("entered receiver");
+                tokio::time::timeout(Duration::from_secs(5), rx)
+                    .await
+                    .expect("loader entered")
+                    .expect("entered channel");
+            })
+        })));
+        let cache = state.public_settings.clone();
+        state
+            .public_settings
+            .set_after_write_hook(Some(Arc::new(move || {
+                let release_tx = Arc::clone(&release_tx);
+                let done_rx = Arc::clone(&done_rx);
+                let cache = cache.clone();
+                Box::pin(async move {
+                    let tx = release_tx
+                        .lock()
+                        .unwrap_or_else(|err| err.into_inner())
+                        .take()
+                        .expect("release sender");
+                    tx.send(()).expect("release the racing read");
+                    let rx = done_rx.lock().await.take().expect("done receiver");
+                    let body = tokio::time::timeout(Duration::from_secs(5), rx)
+                        .await
+                        .expect("racing read finished")
+                        .expect("racing read channel");
+                    assert!(
+                        body.contains("sc-settings") && body.contains("My Clan"),
+                        "the overlapping setup response still includes the row it read: {body}"
+                    );
+                    assert_eq!(
+                        cache.fresh().map(|blob| blob.org_name.clone()),
+                        Some("My Clan".to_string()),
+                        "the read must store after setup's write returns and before the handler returns"
+                    );
+                })
+            })));
+
+        let response = tower::ServiceExt::oneshot(
+            app.clone(),
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/auth/setup")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header("x-forwarded-for", "127.0.0.1")
+                .extension(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+                    [127, 0, 0, 1],
+                    40000,
+                ))))
+                .body(Body::from(
+                    r#"{"username":"firstadmin","password":"a-strong-password","org_name":"Boot Clan"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "POST /api/auth/setup");
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(
+            state
+                .public_settings
+                .fresh()
+                .map(|blob| blob.org_name != "My Clan")
+                .unwrap_or(true),
+            "old settings must not stay fresh after setup"
+        );
+        assert!(
+            state.public_settings.stale().is_none(),
+            "a pre-setup blob must not remain as the stale fallback"
+        );
+
+        state.public_settings.set_loader(None);
+        state.public_settings.invalidate();
+        let saved = shell_text(app, "/").await;
+        assert!(saved.contains("Boot Clan"), "{saved}");
+        assert!(!saved.contains("My Clan"), "{saved}");
+    }
+
+    #[tokio::test]
+    async fn timeout_records_backoff_against_the_generation_at_read_start() {
+        let (_tree, state, app) = ShellFixture::new("timeout-gen").await;
+        let entered = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let entered_loader = Arc::clone(&entered);
+        state.public_settings.set_loader(Some(Arc::new(move || {
+            let entered_loader = Arc::clone(&entered_loader);
+            Box::pin(async move {
+                entered_loader.store(true, std::sync::atomic::Ordering::SeqCst);
+                tokio::time::sleep(Duration::from_secs(30)).await;
+                Ok(named_settings("Late Clan"))
+            })
+        })));
+        tokio::time::pause();
+        let mut task = tokio::spawn(shell_text(app, "/"));
+        for _ in 0..64 {
+            if entered.load(std::sync::atomic::Ordering::SeqCst) {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            entered.load(std::sync::atomic::Ordering::SeqCst),
+            "loader did not start before the generation moved"
+        );
+        assert!(
+            !task.is_finished(),
+            "the read timed out before the generation moved"
+        );
+        state.public_settings.invalidate();
+        tokio::time::sleep(EMBED_SETTINGS_TIMEOUT).await;
+        drive(&mut task).await;
+        assert!(
+            task.is_finished(),
+            "the shell must still return when the read outlives the cap"
+        );
+        let body = task.await.unwrap();
+        assert!(!body.contains("Late Clan"), "{body}");
+        assert!(
+            !state.public_settings.refresh_suppressed(),
+            "backoff must be recorded against the generation captured at read start"
+        );
     }
 
     #[tokio::test]
