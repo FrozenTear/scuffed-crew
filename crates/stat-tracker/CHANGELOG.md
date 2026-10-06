@@ -4,6 +4,28 @@ User-facing notes for `stat-tracker-v*` GitHub Releases. The release workflow
 prepends the section whose heading matches the tag version (for example
 `## 0.4.15` for `stat-tracker-v0.4.15`).
 
+## 0.4.20
+
+The last game of the night now uploads by itself about 3 minutes after
+the result screen. Before this, that game stayed open until the next
+Tab or a clean shutdown, so it could sit unsynced for hours. A Tab
+still belongs to the finished game for 75 seconds after the result.
+After that, if nothing new is captured for about 3 minutes, the daemon
+closes the game and uploads it. Those 3 minutes start from the last
+capture, and they are never shorter than the 75-second grace. A game
+that never got a result, and then sits idle for 20 minutes, is closed
+too, with outcome Unknown. Restarting the daemon no longer drops a
+stale open game without uploading its rows.
+
+### Install
+
+```sh
+curl --proto '=https' -fsSL https://raw.githubusercontent.com/FrozenTear/scuffed-crew/main/crates/stat-tracker/dist/bootstrap.sh | bash
+```
+
+Or extract the tarball and run `./install.sh`. Pin with
+`STAT_TRACKER_TAG=stat-tracker-v0.4.20`.
+
 ## 0.4.19
 
 Boundaries are one board-order state machine. A result hint stays sealable

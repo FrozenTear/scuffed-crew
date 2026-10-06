@@ -133,6 +133,7 @@ impl SettingsForm {
                 cooldown_secs: parse_u64(&self.cooldown_secs, 120),
             },
             session_window_secs: parse_u64(&self.session_window_secs, 1800),
+            finished_game_close_secs: base.finished_game_close_secs,
             game_process_names: parse_process_names(&self.game_process_names),
             debug_ocr: self.debug_ocr,
             ocr_threads: base.ocr_threads,
@@ -1060,6 +1061,7 @@ mod tests {
             cooldown_secs: 60,
         };
         base.session_window_secs = 900;
+        base.finished_game_close_secs = 240;
         base.game_process_names = vec!["Overwatch.exe".into()];
         base.debug_ocr = true;
         let form = SettingsForm::from_config(&base);
@@ -1072,6 +1074,7 @@ mod tests {
         );
         assert_eq!(out.auto_detect.poll_interval_secs, 8);
         assert_eq!(out.session_window_secs, 900);
+        assert_eq!(out.finished_game_close_secs, 240);
         assert_eq!(out.game_process_names, vec!["Overwatch.exe"]);
         assert!(out.debug_ocr);
         assert_eq!(out.ocr_threads, Some(2));

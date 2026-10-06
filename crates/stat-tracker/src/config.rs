@@ -15,6 +15,12 @@ pub struct Config {
     pub auto_detect: AutoDetectConfig,
     #[serde(default = "default_session_window_secs")]
     pub session_window_secs: u64,
+    /// Quiet time after the last capture before a finished game is closed
+    /// and uploaded. The daemon clamps this to the 75-second post-match
+    /// grace, so a shorter setting still waits that grace out. Missing
+    /// means [`FINISHED_GAME_CLOSE_DEFAULT_SECS`].
+    #[serde(default = "default_finished_game_close_secs")]
+    pub finished_game_close_secs: u64,
     /// Process names (as they appear in /proc/<pid>/comm) that must be running
     /// for captures and auto-detect polling to fire. Prevents Tab presses on the
     /// desktop / in other apps from recording garbage frames. Empty list
@@ -39,6 +45,14 @@ pub struct Config {
 
 fn default_session_window_secs() -> u64 {
     1800
+}
+
+/// Default quiet period before the last finished game of a session is
+/// closed and uploaded, counted from the last capture.
+pub const FINISHED_GAME_CLOSE_DEFAULT_SECS: u64 = 180;
+
+fn default_finished_game_close_secs() -> u64 {
+    FINISHED_GAME_CLOSE_DEFAULT_SECS
 }
 
 fn default_game_process_names() -> Vec<String> {
@@ -319,6 +333,7 @@ impl Default for Config {
             sync: None,
             auto_detect: AutoDetectConfig::default(),
             session_window_secs: default_session_window_secs(),
+            finished_game_close_secs: default_finished_game_close_secs(),
             game_process_names: default_game_process_names(),
             debug_ocr: false,
             ocr_threads: None,
@@ -434,6 +449,10 @@ server_url = "http://example.com"
 token = "secret"
 "#;
         let cfg: Config = toml::from_str(raw).expect("existing shape must still parse");
+        assert_eq!(
+            cfg.finished_game_close_secs, FINISHED_GAME_CLOSE_DEFAULT_SECS,
+            "an older config file has no quiet-close setting"
+        );
         let sync = cfg.sync.expect("sync block");
         assert_eq!(sync.token, "secret");
         assert_eq!(
@@ -457,6 +476,7 @@ token = "secret"
                 cooldown_secs: 30,
             },
             session_window_secs: 900,
+            finished_game_close_secs: 240,
             game_process_names: if full {
                 vec!["Overwatch.exe".into(), "wine".into()]
             } else {
