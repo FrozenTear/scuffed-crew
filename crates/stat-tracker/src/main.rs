@@ -1315,7 +1315,7 @@ fn recover_active_game(data_dir: &std::path::Path) -> Option<ActiveGame> {
         reset_streak: p.reset_streak,
         reset_baseline: p.reset_baseline,
         baseline_row: p.baseline_row,
-        baseline_at: p.baseline_at.and_then(&to_instant),
+        baseline_at: p.baseline_at.and_then(to_instant),
         progressed_boards: p.progressed_boards,
         deferred: p.deferred,
         deferred_hero: p.deferred_hero,
@@ -3319,10 +3319,11 @@ async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<
         // last accepted value while keeping every genuinely-advancing cell.
         // Skipped on a split — a real new game legitimately resets every
         // counter, so the raw read seeds the fresh session's gate state.
-        // That is also why a missed boundary made the scoreboard look slow:
-        // the new game's low reads were held at the previous game's counters
-        // until three clean tabs un-latched them.
-        let gate = capture_gate::apply_gate(req.prev_gate, raw_counters, suspect, split);
+        // A session a start screen just opened has no board of its own. The
+        // previous game is only the gap anchor, and latching this row to it
+        // would store the old counters on the new game.
+        let gate_prev = req.prev_gate.filter(|_| !req.awaiting_first_board);
+        let gate = capture_gate::apply_gate(gate_prev, raw_counters, suspect, split);
         // CG-4 B3: always surface the per-column suspect mask on the accept
         // path so a latched inflation can be diagnosed as flagged vs clean
         // (the 07-22 HLG 22994 case was undiagnosable without this).
@@ -6042,16 +6043,13 @@ mod tests {
             let plan = self.plan_board(cur, suspect, row, hero, map);
             let (prev, age, map_name, write_held, held_hero, held_at, id, created, mut state) = {
                 let g = self.game();
-                let prev = if g.gate.is_some() {
-                    g.gate
-                } else if g.awaiting_first_board {
-                    g.gap_anchor
-                } else {
-                    None
-                };
+                // The gap anchor is for the planner only. This session's first
+                // board is stored raw; latching it to the previous game would
+                // write the old counters here.
+                let prev = g.gate.filter(|_| !g.awaiting_first_board);
                 let age = g
                     .last_stats_at
-                    .or(g.gap_anchor_at)
+                    .filter(|_| prev.is_some())
                     .map(|at| self.now.saturating_duration_since(at))
                     .unwrap_or(Duration::ZERO);
                 let map_name = map
@@ -6081,6 +6079,9 @@ mod tests {
                 g.deferred_hero = Some(hero.to_string());
                 g.deferred_at = Some(self.wall);
                 g.deferred_imported = false;
+                return;
+            }
+            if plan.skip_store {
                 return;
             }
             if plan.split {
@@ -6314,6 +6315,9 @@ mod tests {
     async fn a_tab_on_b_does_not_move_bs_board_onto_c() {
         let mut night = Night::new().await;
         night.begin_on("Busan", "Zenyatta");
+        // The debounce runs from when the session opened, the gap from the
+        // last board. Open long enough for the vote, then take A's board.
+        night.advance(Duration::from_secs(130));
         night
             .tab_once(
                 night_counters(14, 22, 6, 2400, 9800, 400),
@@ -6323,10 +6327,10 @@ mod tests {
                 NIGHT_CLEAN,
             )
             .await;
-        night.advance(Duration::from_secs(8 * 60));
+        night.advance(Duration::from_secs(20));
         night.word_once(detect::MatchOutcome::Defeat).await;
         let a = night.id();
-        night.advance(Duration::from_secs(30));
+        night.advance(Duration::from_secs(20));
         night.screen(vote(&["Junkertown"])).await;
         let b = night.id();
         night.advance(Duration::from_secs(20));
@@ -6425,11 +6429,13 @@ mod tests {
             Some(9),
             "a long-age 2-4x row becomes the baseline"
         );
-        // Fresh session for the baseline clock. A short 2-4x row keeps the
-        // baseline. A spike at 6:00 is stored and still is not the baseline.
-        // E17 twenty seconds later is ordinary growth from that baseline.
+        // Fresh session for the baseline clock. The first Tab is past the gap,
+        // so the gate accepts the raw row instead of latching it to the
+        // previous game. A short 2-4x row keeps the baseline. A spike at
+        // 6:00 is stored and still is not the baseline. E17 twenty seconds
+        // later is ordinary growth from that baseline.
         night.screen(vote(&["Ilios"])).await;
-        night.advance(Duration::from_secs(10));
+        night.advance(Duration::from_secs(130));
         night
             .tab_once(
                 night_counters(4, 3, 2, 1500, 400, 300),

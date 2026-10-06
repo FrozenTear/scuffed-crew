@@ -500,7 +500,17 @@ fn plan_from_effect(
         seal: None,
         close_reason: None,
     };
-    let refresh = input.row_id.is_some() && input.row_counts && !implausible;
+    let anchor = input.baseline.or(input.prev_gate);
+    let fresh_shaped = anchor.is_some_and(|gate| under_fresh_match(&gate.accepted, &input.cur));
+    let same_or_unset =
+        input.baseline_row.is_none() || same_baseline_row(input.baseline_row, input.row_id);
+    // A different row re-anchors only when the stats continue. A low-total
+    // teammate row is fresh-shaped: it is stored, and it neither replaces
+    // the baseline nor counts toward the reset streak.
+    let refresh = input.row_id.is_some()
+        && input.row_counts
+        && !implausible
+        && (same_or_unset || !fresh_shaped);
     match effect {
         Effect::Ignore
         | Effect::Seal { .. }
@@ -2085,9 +2095,10 @@ mod tests {
             MatchOutcome::Defeat,
         );
         assert!(!ignored.split);
+        assert!(!ignored.defer);
         assert_eq!(
-            ignored.reset_streak, 1,
-            "a non-counting row leaves the streak alone"
+            ignored.reset_streak, 0,
+            "a stored board that is not a fresh reset ends the streak"
         );
         let one = plan_at(
             &prev,
@@ -2162,8 +2173,8 @@ mod tests {
         });
         assert!(!follow.split);
         assert_eq!(follow.reset_streak, 0);
-        // A clean sharp row on a different slot still counts. The row id
-        // re-anchors; it does not freeze the gate or swallow the gap.
+        // A low-total teammate row is a different slot. It is stored, it does
+        // not count as a fresh reset, and it does not replace the baseline.
         let moved = plan_capture(&CapturePlanInput {
             prev_gate: Some(&prev),
             baseline: Some(&prev),
@@ -2189,12 +2200,13 @@ mod tests {
             progressed_boards: 0,
         });
         assert!(
-            !moved.split,
-            "the first sharp row only arms, whatever its slot"
+            !moved.split && !moved.defer,
+            "a different row is not a fresh reset"
         );
-        assert!(moved.defer);
+        assert!(!moved.refresh_baseline);
+        assert_eq!(moved.baseline_row, Some(0));
         assert!(!moved.ignore_row);
-        assert_eq!(moved.reset_streak, 1);
+        assert_eq!(moved.reset_streak, 0);
         let moved_again = plan_capture(&CapturePlanInput {
             prev_gate: Some(&prev),
             baseline: Some(&prev),
@@ -2220,10 +2232,11 @@ mod tests {
             progressed_boards: 0,
         });
         assert!(
-            moved_again.split,
-            "a row change across the reset still splits"
+            !moved_again.split && !moved_again.defer,
+            "a second read of a different row is still not a reset"
         );
-        assert_eq!(moved_again.stored_outcome, MatchOutcome::Unknown);
+        assert_eq!(moved_again.baseline_row, Some(0));
+        assert_eq!(moved_again.stored_outcome, MatchOutcome::Defeat);
         // The garbage row must not become the baseline, so the next real
         // drop is the first of the pair, not a split one capture later.
         let mut state = BoundaryState::new(Some("Busan".into()));
