@@ -35,16 +35,22 @@ pub fn keep_section(phase: ListPhase, has_items: bool, show_when_empty: bool) ->
     }
 }
 
-fn list_fallback(phase: ListPhase, failed: &str, retry: Callback<()>) -> Element {
+fn list_fallback(
+    phase: ListPhase,
+    failed: &'static str,
+    retry_label: &'static str,
+    mut retry: Signal<u32>,
+) -> Element {
     if phase == ListPhase::Failed {
-        let failed = failed.to_string();
         rsx! {
-            p { class: "muted", "{failed}" }
-            button {
-                r#type: "button",
-                class: "fetch-error__retry",
-                onclick: move |_| retry.call(()),
-                "Retry"
+            div { role: "status", aria_label: "{retry_label}",
+                p { class: "muted", "{failed}" }
+                button {
+                    r#type: "button",
+                    class: "fetch-error__retry is-compact",
+                    onclick: move |_| retry += 1,
+                    "Retry"
+                }
             }
         }
     } else {
@@ -182,9 +188,9 @@ pub fn LiveBlock(
     show_tourneys: bool,
     show_next_match: bool,
     show_results: bool,
-    retry_events: Callback<()>,
-    retry_tourneys: Callback<()>,
-    retry_overview: Callback<()>,
+    retry_events: Signal<u32>,
+    retry_tourneys: Signal<u32>,
+    retry_overview: Signal<u32>,
 ) -> Element {
     if !show_schedule && !show_tourneys && !show_next_match && !show_results {
         return rsx! {};
@@ -206,7 +212,7 @@ pub fn LiveBlock(
     rsx! {
         section { class: "home-block",
             if show_results && upcoming_phase == ListPhase::Pending {
-                div { class: "results-ticker", "aria-label": "Recent results",
+                div { class: "results-ticker", role: "region", "aria-label": "Recent results",
                     span { class: "results-ticker-label", "Results" }
                     p { class: "muted", "Loading…" }
                 }
@@ -243,7 +249,12 @@ pub fn LiveBlock(
                             }
                             a { href: "/api/calendar/all.ics", class: "home-link", "{content.calendar_cta}" }
                         } else {
-                            {list_fallback(events_phase, "Couldn't load the schedule.", retry_events)}
+                            {list_fallback(
+                                events_phase,
+                                "Couldn't load the schedule.",
+                                "Retry loading the schedule",
+                                retry_events,
+                            )}
                         }
                     }
                 }
@@ -279,6 +290,7 @@ pub fn LiveBlock(
                             {list_fallback(
                                 tourneys_phase,
                                 "Couldn't load tournaments.",
+                                "Retry loading tournaments",
                                 retry_tourneys,
                             )}
                         }
@@ -293,7 +305,7 @@ pub fn LiveBlock(
 fn NextMatchPanel(
     upcoming: Option<UpcomingMatch>,
     phase: ListPhase,
-    retry: Callback<()>,
+    retry: Signal<u32>,
 ) -> Element {
     rsx! {
         div { class: "live-panel next-match",
@@ -323,7 +335,12 @@ fn NextMatchPanel(
             } else if shows_empty_copy(phase, true) {
                 p { class: "muted", "No public fixtures scheduled." }
             } else {
-                {list_fallback(phase, "Couldn't load the next match.", retry)}
+                {list_fallback(
+                    phase,
+                    "Couldn't load the next match.",
+                    "Retry loading the next match",
+                    retry,
+                )}
             }
         }
     }
@@ -332,7 +349,7 @@ fn NextMatchPanel(
 #[component]
 fn ResultsTicker(results: Vec<RecentResult>) -> Element {
     rsx! {
-        div { class: "results-ticker", "aria-label": "Recent results",
+        div { class: "results-ticker", role: "region", "aria-label": "Recent results",
             span { class: "results-ticker-label", "Results" }
             div { class: "results-ticker-track",
                 for r in results.iter() {
@@ -367,7 +384,7 @@ pub fn TeamsBlock(
     overview: Option<Overview>,
     phase: ListPhase,
     presentation: TeamsPresentation,
-    retry: Callback<()>,
+    retry: Signal<u32>,
 ) -> Element {
     rsx! {
         section { id: "squads", class: "home-block",
@@ -415,7 +432,7 @@ pub fn TeamsBlock(
                     Some(_) if shows_empty_copy(phase, true) => {
                         rsx! { p { class: "muted", "{content.teams_empty}" } }
                     }
-                    _ => list_fallback(phase, "Couldn't load teams.", retry),
+                    _ => list_fallback(phase, "Couldn't load teams.", "Retry loading teams", retry),
                 }
             }
         }
@@ -531,7 +548,7 @@ pub fn NewsBlock(
     content: HomepageContent,
     announcements: Vec<Announcement>,
     phase: ListPhase,
-    retry: Callback<()>,
+    retry: Signal<u32>,
 ) -> Element {
     rsx! {
         section { class: "home-block",
@@ -540,7 +557,7 @@ pub fn NewsBlock(
             if shows_empty_copy(phase, announcements.is_empty()) {
                 p { class: "muted", "{content.news_empty}" }
             } else if phase != ListPhase::Ready {
-                {list_fallback(phase, "Couldn't load news.", retry)}
+                {list_fallback(phase, "Couldn't load news.", "Retry loading news", retry)}
             } else {
                 div { class: "news-rows",
                     for a in announcements.iter().take(4) {
@@ -688,7 +705,7 @@ mod tests {
                     overview: None,
                     phase: ListPhase::Pending,
                     presentation: TeamsPresentation::Table,
-                    retry: Callback::new(|_| {}),
+                    retry: use_signal(|| 0u32),
                 }
             }
         }
@@ -699,7 +716,7 @@ mod tests {
                     overview: Some(empty_overview()),
                     phase: ListPhase::Ready,
                     presentation: TeamsPresentation::Table,
-                    retry: Callback::new(|_| {}),
+                    retry: use_signal(|| 0u32),
                 }
             }
         }
@@ -719,7 +736,7 @@ mod tests {
                     content: HomepageContent::default(),
                     announcements: Vec::new(),
                     phase: ListPhase::Pending,
-                    retry: Callback::new(|_| {}),
+                    retry: use_signal(|| 0u32),
                 }
             }
         }
@@ -729,8 +746,8 @@ mod tests {
         assert!(!html.contains(&empty), "{html}");
     }
 
-    fn noop() -> Callback<()> {
-        Callback::new(|_| {})
+    fn noop() -> Signal<u32> {
+        use_signal(|| 0u32)
     }
 
     #[test]
@@ -770,7 +787,7 @@ mod tests {
                     show_schedule: true,
                     show_tourneys: true,
                     show_next_match: true,
-                    show_results: false,
+                    show_results: true,
                     retry_events: noop(),
                     retry_tourneys: noop(),
                     retry_overview: noop(),

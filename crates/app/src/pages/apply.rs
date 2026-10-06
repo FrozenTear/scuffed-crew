@@ -89,7 +89,7 @@ pub fn Apply() -> Element {
     let mut toast = use_toast();
 
     let mut settings = use_site_settings();
-    let resolved = settings.resolved();
+    let resolved = settings.resolved.read();
     let settings_phase = classify_fetch(resolved.as_ref());
     let s = loaded_site_settings(resolved.as_ref());
     let mut games = use_api_list::<Game>("/api/games");
@@ -271,41 +271,43 @@ pub fn Apply() -> Element {
                                     if games_pending {
                                         p { class: "apply-loading", "Loading..." }
                                     } else if games_failed {
-                                        p { class: "muted", "Couldn't load games." }
-                                        button {
-                                            r#type: "button",
-                                            class: "fetch-error__retry",
-                                            onclick: move |_| games.refresh += 1,
-                                            "Retry"
+                                        div { role: "status", aria_label: "Retry loading games",
+                                            p { class: "muted", "Couldn't load games." }
+                                            button {
+                                                r#type: "button",
+                                                class: "fetch-error__retry is-compact",
+                                                onclick: move |_| games.refresh += 1,
+                                                "Retry"
+                                            }
                                         }
                                     } else {
-                                    div { class: "apply-game-grid",
-                                        for g in game_list.iter() {
-                                            {
-                                                let gid = g.id.clone();
-                                                let gid2 = g.id.clone();
-                                                let is_selected = selected_games().contains(&gid);
-                                                let btn_class = if is_selected {
-                                                    "apply-game-btn selected"
-                                                } else {
-                                                    "apply-game-btn"
-                                                };
-                                                rsx! {
-                                                    button {
-                                                        class: "{btn_class}",
-                                                        onclick: move |_| {
-                                                            let gid = gid2.clone();
-                                                            selected_games.write().retain(|x| x != &gid);
-                                                            if !is_selected {
-                                                                selected_games.write().push(gid);
-                                                            }
-                                                        },
-                                                        "{g.name}"
+                                        div { class: "apply-game-grid",
+                                            for g in game_list.iter() {
+                                                {
+                                                    let gid = g.id.clone();
+                                                    let gid2 = g.id.clone();
+                                                    let is_selected = selected_games().contains(&gid);
+                                                    let btn_class = if is_selected {
+                                                        "apply-game-btn selected"
+                                                    } else {
+                                                        "apply-game-btn"
+                                                    };
+                                                    rsx! {
+                                                        button {
+                                                            class: "{btn_class}",
+                                                            onclick: move |_| {
+                                                                let gid = gid2.clone();
+                                                                selected_games.write().retain(|x| x != &gid);
+                                                                if !is_selected {
+                                                                    selected_games.write().push(gid);
+                                                                }
+                                                            },
+                                                            "{g.name}"
+                                                        }
                                                     }
                                                 }
                                             }
                                         }
-                                    }
                                     }
                                     {list_cap_notice(&games, "games")}
                                 }

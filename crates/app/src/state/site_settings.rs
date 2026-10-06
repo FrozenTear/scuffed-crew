@@ -23,10 +23,10 @@ pub const EMBEDDED_SETTINGS_ID: &str = "sc-settings";
 
 #[derive(Clone, Copy)]
 pub struct SiteSettingsState {
-    resource: Resource<Result<SiteSettings, String>>,
     pub refresh: Signal<u32>,
-    /// Last settings safe to paint: the embedded block, then each successful fetch.
-    last_good: Signal<Option<SiteSettings>>,
+    /// One cached classification. Consumers borrow it with `.read()` so a
+    /// render does not clone `SiteSettings` once per call.
+    pub resolved: Memo<Option<Result<SiteSettings, String>>>,
 }
 
 /// Call once from the root `App` component.
@@ -50,23 +50,14 @@ pub fn provide_site_settings() -> SiteSettingsState {
             }
         }
     });
-    let state = SiteSettingsState {
-        resource,
-        refresh,
-        last_good,
-    };
+    let resolved = use_memo(move || {
+        let fetched = resource.read();
+        let embedded = last_good.read();
+        resolve_settings(fetched.as_ref(), embedded.as_ref())
+    });
+    let state = SiteSettingsState { refresh, resolved };
     use_context_provider(|| state);
     state
-}
-
-impl SiteSettingsState {
-    /// Slot callers should classify. Embedded (or last successful) settings
-    /// count as ready while a fetch is in flight or has failed.
-    pub fn resolved(&self) -> Option<Result<SiteSettings, String>> {
-        let fetched = self.resource.read();
-        let embedded = self.last_good.read();
-        resolve_settings(fetched.as_ref(), embedded.as_ref())
-    }
 }
 
 /// Parse the text of `#sc-settings`. `None`, blank, and invalid JSON are absent.
@@ -81,17 +72,6 @@ pub fn parse_embedded_settings(json: Option<&str>) -> Option<SiteSettings> {
             warn_embedded_parse_once(&err);
             None
         }
-    }
-}
-
-/// A successful fetch replaces the painted settings. A failure leaves them.
-fn commit_fetch(
-    previous: Option<SiteSettings>,
-    fetched: Result<SiteSettings, String>,
-) -> (Option<SiteSettings>, Result<SiteSettings, String>) {
-    match fetched {
-        Ok(settings) => (Some(settings.clone()), Ok(settings)),
-        Err(err) => (previous, Err(err)),
     }
 }
 
@@ -124,9 +104,18 @@ fn read_embedded_settings() -> Option<SiteSettings> {
 
 async fn load_public_settings() -> Result<SiteSettings, String> {
     #[cfg(test)]
-    if let Some((hits, body)) = TEST_SETTINGS_FETCH.with(|slot| slot.borrow().clone()) {
-        hits.set(hits.get() + 1);
-        return serde_json::from_str(&body).map_err(|err| err.to_string());
+    if let Some(mock) = TEST_SETTINGS_FETCH.with(|slot| slot.borrow().clone()) {
+        let n = mock.hits.get() + 1;
+        mock.hits.set(n);
+        // A second hit in the same burst is a refetch loop. Fail it immediately
+        // so the test returns instead of spinning inside `render_immediate`.
+        if n > 1 {
+            return Err("settings fetch restarted".into());
+        }
+        return match mock.body.borrow().clone() {
+            Some(json) => serde_json::from_str(&json).map_err(|err| err.to_string()),
+            None => Err("offline".into()),
+        };
     }
     ApiClient::web()
         .fetch::<SiteSettings>("/api/settings")
@@ -135,12 +124,20 @@ async fn load_public_settings() -> Result<SiteSettings, String> {
 }
 
 #[cfg(test)]
+#[derive(Clone)]
+struct SettingsFetchMock {
+    hits: std::rc::Rc<std::cell::Cell<u32>>,
+    /// `Some` is a successful JSON body. `None` fails the fetch.
+    body: std::rc::Rc<std::cell::RefCell<Option<String>>>,
+}
+
+#[cfg(test)]
 thread_local! {
     static TEST_EMBEDDED_JSON: std::cell::RefCell<Option<String>> =
         const { std::cell::RefCell::new(None) };
-    static TEST_SETTINGS_FETCH: std::cell::RefCell<
-        Option<(std::rc::Rc<std::cell::Cell<u32>>, String)>,
-    > = const { std::cell::RefCell::new(None) };
+    static TEST_SETTINGS_FETCH: std::cell::RefCell<Option<SettingsFetchMock>> =
+        const { std::cell::RefCell::new(None) };
+    static TEST_REFRESH: std::cell::Cell<Option<Signal<u32>>> = const { std::cell::Cell::new(None) };
 }
 
 #[cfg(test)]
@@ -149,7 +146,7 @@ fn set_test_embedded_json(json: Option<String>) {
 }
 
 #[cfg(test)]
-fn set_test_settings_fetch(mock: Option<(std::rc::Rc<std::cell::Cell<u32>>, String)>) {
+fn set_test_settings_fetch(mock: Option<SettingsFetchMock>) {
     TEST_SETTINGS_FETCH.with(|slot| *slot.borrow_mut() = mock);
 }
 
@@ -294,13 +291,6 @@ mod tests {
                 .unwrap()
                 .is_err()
         );
-
-        let (stored, result) = commit_fetch(Some(embedded.clone()), Ok(fetched.clone()));
-        assert_eq!(stored.unwrap().org_name, "Fetched Org");
-        assert_eq!(result.unwrap().org_name, "Fetched Org");
-        let (kept, failed) = commit_fetch(Some(embedded), Err("offline".into()));
-        assert_eq!(kept.unwrap().org_name, "Embedded Org");
-        assert!(failed.is_err());
     }
 
     struct ClearSettingsHooks;
@@ -309,6 +299,7 @@ mod tests {
         fn drop(&mut self) {
             set_test_embedded_json(None);
             set_test_settings_fetch(None);
+            TEST_REFRESH.with(|slot| slot.set(None));
         }
     }
 
@@ -343,9 +334,9 @@ mod tests {
         let html = mount_seeded_home();
         assert!(html.contains("Play"), "{html}");
         assert!(html.contains("data-home-shell=\"manifesto\""), "{html}");
-        assert!(html.contains("SO"), "{html}");
+        assert!(html.contains(">SO</div>"), "{html}");
         assert!(html.contains("Seeded Org"), "{html}");
-        assert!(html.contains("©"), "{html}");
+        assert!(html.contains("© Seeded Org · desc"), "{html}");
         assert!(
             !html.contains("class=\"home-skel home-skel-badge\""),
             "{html}"
@@ -358,12 +349,20 @@ mod tests {
     fn settings_fetch_runs_once_and_replaces_the_seed() {
         let _clear = ClearSettingsHooks;
         let hits = std::rc::Rc::new(std::cell::Cell::new(0u32));
+        let body = std::rc::Rc::new(std::cell::RefCell::new(Some(fixture(
+            "Fetched Org",
+            "Night",
+        ))));
         set_test_embedded_json(Some(fixture("Seeded Org", "Play")));
-        set_test_settings_fetch(Some((hits.clone(), fixture("Fetched Org", "Night"))));
+        set_test_settings_fetch(Some(SettingsFetchMock {
+            hits: hits.clone(),
+            body: body.clone(),
+        }));
 
         fn view() -> Element {
             let state = provide_site_settings();
-            let resolved = state.resolved();
+            TEST_REFRESH.with(|slot| slot.set(Some(state.refresh)));
+            let resolved = state.resolved.read();
             let name = loaded_site_settings(resolved.as_ref())
                 .map(|settings| settings.org_name.clone())
                 .unwrap_or_default();
@@ -381,6 +380,20 @@ mod tests {
         assert_eq!(hits.get(), 1);
         assert!(html.contains("Fetched Org"), "{html}");
         assert!(!html.contains("Seeded Org"), "{html}");
+
+        // A failed revalidation must keep the last successful org. Deleting the
+        // `last_good` write leaves the seed in place and this assertion fails.
+        *body.borrow_mut() = None;
+        hits.set(0);
+        let mut refresh = TEST_REFRESH.with(|slot| slot.get().expect("refresh signal"));
+        refresh += 1;
+        for _ in 0..12 {
+            dom.render_immediate(&mut dioxus::dioxus_core::NoOpMutations);
+        }
+        let after = dioxus_ssr::render(&dom);
+        assert_eq!(hits.get(), 1);
+        assert!(after.contains("Fetched Org"), "{after}");
+        assert!(!after.contains("Seeded Org"), "{after}");
     }
 
     #[test]

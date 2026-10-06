@@ -36,13 +36,30 @@ fn home_body(phase: FetchClass) -> HomeBody {
     }
 }
 
-/// `None` is still in flight. `Some(None)` is a failed `.ok()`. `Some(Some)` settled.
-fn resource_list_phase<T>(slot: Option<&Option<T>>) -> ListPhase {
+/// `UseResourceState::Pending` stays pending even when the previous value is
+/// still `Some(None)`, so Retry shows "Loading…" instead of the error.
+/// Otherwise `None` is still in flight, `Some(None)` failed, and `Some(Some)` settled.
+fn resource_list_phase<T>(state: UseResourceState, slot: Option<&Option<T>>) -> ListPhase {
+    if state == UseResourceState::Pending {
+        return ListPhase::Pending;
+    }
     match slot {
         None => ListPhase::Pending,
         Some(None) => ListPhase::Failed,
         Some(Some(_)) => ListPhase::Ready,
     }
+}
+
+/// Upcoming fixtures stay visible with Schedule off when the list has rows.
+/// The empty panel is kept while loading, and after that only when the shell
+/// keeps empty Live sections and Schedule itself is on.
+fn show_next_match_panel(
+    phase: ListPhase,
+    has_upcoming: bool,
+    live_keep_empty: bool,
+    schedule_on: bool,
+) -> bool {
+    blocks::keep_section(phase, has_upcoming, live_keep_empty && schedule_on)
 }
 
 /// Pending and error share one wrapper so the error branch can be mounted in tests.
@@ -71,7 +88,7 @@ pub fn Home() -> Element {
     let site_settings = use_site_settings();
     // Refresh ticks are read in the sync part of each resource, not inside the
     // future, so Retry restarts that fetch without subscribing to its result.
-    let mut overview_refresh = use_signal(|| 0u32);
+    let overview_refresh = use_signal(|| 0u32);
     let overview = use_resource(move || {
         let _tick = overview_refresh();
         async move {
@@ -81,7 +98,7 @@ pub fn Home() -> Element {
                 .ok()
         }
     });
-    let mut announcements_refresh = use_signal(|| 0u32);
+    let announcements_refresh = use_signal(|| 0u32);
     let announcements = use_resource(move || {
         let _tick = announcements_refresh();
         async move {
@@ -92,7 +109,7 @@ pub fn Home() -> Element {
                 .map(|r| r.data)
         }
     });
-    let mut tournaments_refresh = use_signal(|| 0u32);
+    let tournaments_refresh = use_signal(|| 0u32);
     let tournaments_res = use_resource(move || {
         let _tick = tournaments_refresh();
         async move {
@@ -103,7 +120,7 @@ pub fn Home() -> Element {
                 .map(|r| r.data)
         }
     });
-    let mut events_refresh = use_signal(|| 0u32);
+    let events_refresh = use_signal(|| 0u32);
     let events = use_resource(move || {
         let _tick = events_refresh();
         async move {
@@ -114,20 +131,7 @@ pub fn Home() -> Element {
                 .map(|r| r.data)
         }
     });
-    let retry_overview = Callback::new(move |_| {
-        overview_refresh += 1;
-    });
-    let retry_news = Callback::new(move |_| {
-        announcements_refresh += 1;
-    });
-    let retry_tourneys = Callback::new(move |_| {
-        tournaments_refresh += 1;
-    });
-    let retry_events = Callback::new(move |_| {
-        events_refresh += 1;
-    });
-
-    let resolved = site_settings.resolved();
+    let resolved = site_settings.resolved.read();
     let settings_fetch = classify_fetch(resolved.as_ref());
     let loaded = loaded_site_settings(resolved.as_ref());
 
@@ -150,14 +154,15 @@ pub fn Home() -> Element {
     // Resolve list data for blocks (Home owns resources).
     // Pending keeps a section mounted (loading / skeleton) even when the shell
     // hides empty lists, so the page does not grow when the fetch lands.
-    let events_phase = resource_list_phase(events.read().as_ref());
+    let events_phase = resource_list_phase(events.state()(), events.read().as_ref());
     let event_list = events
         .read()
         .as_ref()
         .and_then(|e| e.as_ref())
         .cloned()
         .unwrap_or_default();
-    let tourneys_phase = resource_list_phase(tournaments_res.read().as_ref());
+    let tourneys_phase =
+        resource_list_phase(tournaments_res.state()(), tournaments_res.read().as_ref());
     let tourney_list = tournaments_res
         .read()
         .as_ref()
@@ -170,14 +175,14 @@ pub fn Home() -> Element {
         .take(5)
         .cloned()
         .collect();
-    let news_phase = resource_list_phase(announcements.read().as_ref());
+    let news_phase = resource_list_phase(announcements.state()(), announcements.read().as_ref());
     let news_list = announcements
         .read()
         .as_ref()
         .and_then(|a| a.as_ref())
         .cloned()
         .unwrap_or_default();
-    let upcoming_phase = resource_list_phase(overview.read().as_ref());
+    let upcoming_phase = resource_list_phase(overview.state()(), overview.read().as_ref());
     let overview_data = overview.read().as_ref().and_then(|o| o.as_ref()).cloned();
 
     let upcoming_matches = overview_data
@@ -208,8 +213,12 @@ pub fn Home() -> Element {
         tourneys_phase,
         has_tourneys,
     );
-    let show_next_match = content.sections.schedule
-        && blocks::keep_section(upcoming_phase, has_upcoming, live_keep_empty);
+    let show_next_match = show_next_match_panel(
+        upcoming_phase,
+        has_upcoming,
+        live_keep_empty,
+        content.sections.schedule,
+    );
     // The ticker is reserved while overview is in flight, then hidden when the
     // list is empty or the fetch failed.
     let show_results = blocks::keep_section(upcoming_phase, has_results, false);
@@ -305,9 +314,9 @@ pub fn Home() -> Element {
                                         show_tourneys,
                                         show_next_match,
                                         show_results,
-                                        retry_events,
-                                        retry_tourneys,
-                                        retry_overview,
+                                        retry_events: events_refresh,
+                                        retry_tourneys: tournaments_refresh,
+                                        retry_overview: overview_refresh,
                                     }
                                 }
                             },
@@ -317,7 +326,7 @@ pub fn Home() -> Element {
                                     overview: overview_data.clone(),
                                     phase: upcoming_phase,
                                     presentation: teams_presentation,
-                                    retry: retry_overview,
+                                    retry: overview_refresh,
                                 }
                             },
                             HomeSectionId::News if show_news => rsx! {
@@ -325,7 +334,7 @@ pub fn Home() -> Element {
                                     content: content.clone(),
                                     announcements: news_list.clone(),
                                     phase: news_phase,
-                                    retry: retry_news,
+                                    retry: announcements_refresh,
                                 }
                             },
                             HomeSectionId::Recruit if content.sections.recruit && recruitment_open => rsx! {
@@ -486,9 +495,53 @@ mod tests {
 
     #[test]
     fn list_phase_distinguishes_pending_failure_and_ready() {
-        assert_eq!(resource_list_phase(None::<&Option<()>>), ListPhase::Pending);
-        assert_eq!(resource_list_phase(Some(&None::<()>)), ListPhase::Failed);
-        assert_eq!(resource_list_phase(Some(&Some(()))), ListPhase::Ready);
+        assert_eq!(
+            resource_list_phase(UseResourceState::Pending, None::<&Option<()>>),
+            ListPhase::Pending
+        );
+        assert_eq!(
+            resource_list_phase(UseResourceState::Pending, Some(&None::<()>)),
+            ListPhase::Pending
+        );
+        assert_eq!(
+            resource_list_phase(UseResourceState::Ready, Some(&None::<()>)),
+            ListPhase::Failed
+        );
+        assert_eq!(
+            resource_list_phase(UseResourceState::Ready, Some(&Some(()))),
+            ListPhase::Ready
+        );
+    }
+
+    #[test]
+    fn next_match_stays_visible_when_schedule_is_off() {
+        let lean = scuffed_types::HomepageSections::lean();
+        assert!(!lean.schedule);
+        assert!(show_next_match_panel(
+            ListPhase::Ready,
+            true,
+            false,
+            lean.schedule
+        ));
+        assert!(show_next_match_panel(
+            ListPhase::Pending,
+            false,
+            false,
+            lean.schedule
+        ));
+        assert!(!show_next_match_panel(
+            ListPhase::Ready,
+            false,
+            false,
+            lean.schedule
+        ));
+        assert!(!show_next_match_panel(
+            ListPhase::Failed,
+            false,
+            false,
+            lean.schedule
+        ));
+        assert!(show_next_match_panel(ListPhase::Ready, false, true, true));
     }
 
     #[test]

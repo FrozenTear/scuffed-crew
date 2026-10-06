@@ -473,7 +473,7 @@ pub fn PublicLayout() -> Element {
     });
 
     let site_settings = use_site_settings();
-    let resolved = site_settings.resolved();
+    let resolved = site_settings.resolved.read();
     let loaded_settings = loaded_site_settings(resolved.as_ref());
     let bg_css = loaded_settings
         .as_ref()

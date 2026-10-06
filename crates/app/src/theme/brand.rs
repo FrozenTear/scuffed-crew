@@ -162,7 +162,6 @@ mod tests {
         let css = crate::theme::theme_css(&pending);
         let dark = scope_decls(&css, "[data-theme=\"dark\"]");
         let light = scope_decls(&css, "[data-theme=\"light\"]");
-        let accent = pending.accent_dark.as_str();
         for (scope, name) in [
             (&dark, "--bg"),
             (&dark, "--surface"),
@@ -171,11 +170,16 @@ mod tests {
             (&light, "--bg"),
             (&light, "--surface"),
             (&light, "--surface-2"),
+            (&light, "--border"),
         ] {
+            let accent = scope
+                .get("--accent")
+                .unwrap_or_else(|| panic!("missing --accent"));
             let bg = scope.get(name).unwrap_or_else(|| panic!("missing {name}"));
             let ratio = contrast_ratio(accent, bg);
             assert!(ratio >= 3.0, "{accent} on {name} {bg} = {ratio:.2}");
         }
+        let accent = pending.accent_dark.as_str();
         let white_on_pending = contrast_ratio("#ffffff", accent);
         assert!(
             white_on_pending >= 3.0,

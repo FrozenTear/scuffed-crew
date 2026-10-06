@@ -225,7 +225,7 @@ pub fn Community() -> Element {
     });
 
     let site_settings = use_site_settings();
-    let resolved = site_settings.resolved();
+    let resolved = site_settings.resolved.read();
     let org_name = loaded_site_settings(resolved.as_ref()).map(|s| s.org_name.clone());
 
     let me = use_resource(|| async {

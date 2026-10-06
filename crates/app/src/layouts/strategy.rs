@@ -134,11 +134,11 @@ fn flag_from_resolved(resolved: Option<&Result<SiteSettings, String>>) -> Option
 pub fn StrategyLayout() -> Element {
     let navigator = use_navigator();
     let site_settings = use_site_settings();
-    // The memo reads `resolved()` once per settings change. Dioxus 0.7 effects
-    // re-run only when signals are read *inside* the effect, so the effect
-    // reads `flag()` (Copy) and `router().current()`. `use_route()` is a hook
-    // and stays outside.
-    let flag = use_memo(move || flag_from_resolved(site_settings.resolved().as_ref()));
+    // `resolved` is already memoized on the settings context. This memo reads
+    // that slot once per change. Dioxus 0.7 effects re-run only when signals
+    // are read *inside* the effect, so the effect reads `flag()` (Copy) and
+    // `router().current()`. `use_route()` is a hook and stays outside.
+    let flag = use_memo(move || flag_from_resolved(site_settings.resolved.read().as_ref()));
     use_effect(move || {
         let path = router().current::<Route>().to_string();
         let enabled = flag();
@@ -208,16 +208,6 @@ pub fn StrategyLayout() -> Element {
 mod tests {
     use super::*;
 
-    fn strategies_enabled_or_default(settings: Option<&SiteSettings>) -> bool {
-        settings.map(|s| s.strategies_enabled).unwrap_or(true)
-    }
-
-    /// Outer `None`: resource still pending (do not apply the default).
-    /// Inner `None`: settled with no settings payload → default on.
-    fn flag_from_loaded_settings(loaded: Option<Option<&SiteSettings>>) -> Option<bool> {
-        loaded.map(|settings| strategies_enabled_or_default(settings))
-    }
-
     #[test]
     fn enabled_keeps_planner_and_patch_notes_open() {
         assert_eq!(
@@ -264,9 +254,6 @@ mod tests {
             strategy_path_policy("/strategy/patch-notes", Some(true)),
             StrategyPathPolicy::Open
         );
-        assert!(strategies_enabled_or_default(None));
-        assert_eq!(flag_from_loaded_settings(None), None);
-        assert_eq!(flag_from_loaded_settings(Some(None)), Some(true));
         assert_eq!(flag_from_resolved(None), None);
         assert_eq!(flag_from_resolved(Some(&Err("offline".into()))), Some(true));
     }
@@ -314,7 +301,7 @@ mod tests {
         let memo_at = src.find("use_memo(move ||").expect("flag memo");
         let memo = &src[memo_at..memo_at + 120];
         assert!(
-            memo.contains("resolved()") && memo.contains("flag_from_resolved"),
+            memo.contains("resolved.read()") && memo.contains("flag_from_resolved"),
             "memo must read the shared settings slot, including an embedded seed"
         );
         let start = src.find("use_effect(move || {").expect("redirect effect");
