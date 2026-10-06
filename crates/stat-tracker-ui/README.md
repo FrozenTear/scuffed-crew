@@ -69,7 +69,12 @@ Acceptance: for a **synced** account, season totals on this screen equal My Stat
    # session cookie required:
    curl -sS "$SCUFFED_SERVER/api/stats/me?season=$SEASON_ID"
    # or /api/stats/member/$MEMBER_ID?season=$SEASON_ID
+   # stored-role aggregates (same session auth and ?season= window as /heroes):
+   curl -sS "$SCUFFED_SERVER/api/stats/me/roles?season=$SEASON_ID"
+   # or /api/stats/member/$MEMBER_ID/roles?season=$SEASON_ID
    ```
+
+   `/roles` returns a JSON array of `{ role, matches, wins, losses, draws, avg_elims, avg_deaths, avg_damage, avg_healing }`. `role` is the string stored on each uploaded match (`Tank` / `Damage` / `Support`, or `""` when the row has no role). It is not derived from the hero name.
 
 4. Compare **games** (`total_matches`), **wins**, **losses**, **draws** to the Seasons-screen row. A game on `ends_at` belongs to the *next* season (half-open).
 5. **Win rate:** the site shows `wins / total_matches`. This GUI uses `wins / (wins + losses + draws)` (unknown outcomes do not dilute — P0/P1). They match when every counted game has a decided outcome. The Seasons row appends `· N undecided` when the counts differ so the percentage is readable. **Robert to decide** whether the site should switch to decided-only (recommended by the P2 review) before P5.

@@ -7,6 +7,7 @@ use axum::{
 use scuffed_auth::server::session::ErrorResponse;
 use scuffed_db::{
     AuditAction, AuditTargetType, DaemonToken, HeroStats, MapStats, PersonalMatch, PersonalStats,
+    RoleStats,
 };
 use scuffed_types::api::{
     CreateDaemonTokenRequest, CreateDaemonTokenResponse, CursorResponse, DaemonConfigResponse,
@@ -185,6 +186,40 @@ pub async fn my_hero_stats(
         })
 }
 
+/// GET /api/stats/me/roles — per-role stats from the stored match role (session auth).
+///
+/// Query: `?season=<id>`, the same window as [`my_hero_stats`] (omitted or blank
+/// is all time; an unknown id is 404). No other filters.
+///
+/// Response: a JSON array of [`RoleStats`] (`role`, `matches`, `wins`, `losses`,
+/// `draws`, `avg_elims`, `avg_deaths`, `avg_damage`, `avg_healing`). Grouped by
+/// the `personal_match.role` column only — never derived from the hero name.
+/// An empty stored role is its own row (`"role": ""`). Ordered by `matches`
+/// descending, then `role` ascending.
+///
+/// Auth matches [`my_hero_stats`]: a session is required (401 when anonymous or
+/// the bearer is not a session). Inactive or suspended members are 403.
+pub async fn my_role_stats(
+    State(state): State<AppState>,
+    member: OrgMember,
+    Query(sq): Query<SeasonQuery>,
+) -> Result<Json<Vec<RoleStats>>, (StatusCode, Json<ErrorResponse>)> {
+    let season = resolve_season_window(&state, sq.season.as_deref()).await?;
+    state
+        .db
+        .get_role_stats_in(&member.member.id, season)
+        .await
+        .map(Json)
+        .map_err(|_e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: "Internal error".into(),
+                }),
+            )
+        })
+}
+
 /// GET /api/stats/me/maps — per-map stats (session auth)
 pub async fn my_map_stats(
     State(state): State<AppState>,
@@ -241,6 +276,34 @@ pub async fn member_hero_stats(
     state
         .db
         .get_hero_stats_in(&member_id, season)
+        .await
+        .map(Json)
+        .map_err(|_e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: "Internal error".into(),
+                }),
+            )
+        })
+}
+
+/// GET /api/stats/member/:id/roles — another member's per-role stats (session auth).
+///
+/// Same query, [`RoleStats`] shape, and ordering as [`my_role_stats`].
+/// Visibility matches [`member_hero_stats`]: any active org member may read any
+/// member id. There is no per-member privacy flag. A missing id returns `[]`.
+/// Anonymous requests are 401; inactive or suspended callers are 403.
+pub async fn member_role_stats(
+    State(state): State<AppState>,
+    _member: OrgMember,
+    Path(member_id): Path<String>,
+    Query(sq): Query<SeasonQuery>,
+) -> Result<Json<Vec<RoleStats>>, (StatusCode, Json<ErrorResponse>)> {
+    let season = resolve_season_window(&state, sq.season.as_deref()).await?;
+    state
+        .db
+        .get_role_stats_in(&member_id, season)
         .await
         .map(Json)
         .map_err(|_e| {

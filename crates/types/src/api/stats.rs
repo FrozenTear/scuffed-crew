@@ -89,3 +89,25 @@ pub struct UpdateMemberSettingsRequest {
 pub struct DaemonConfigResponse {
     pub player_name: Option<String>,
 }
+
+/// Per-role aggregate for `GET /api/stats/me/roles` and
+/// `GET /api/stats/member/{id}/roles`.
+///
+/// Same counters as the hero aggregate, with `role` instead of `hero`.
+/// `role` is the string stored on each `personal_match` (for example
+/// `"Tank"`, `"Damage"`, `"Support"`). `""` is its own group for rows that
+/// have no role recorded — callers must not guess a role from the hero name.
+/// Defined here so the WASM app can deserialize the response; `scuffed_db`
+/// re-exports it next to `HeroStats`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RoleStats {
+    pub role: String,
+    pub matches: u32,
+    pub wins: u32,
+    pub losses: u32,
+    pub draws: u32,
+    pub avg_elims: f64,
+    pub avg_deaths: f64,
+    pub avg_damage: f64,
+    pub avg_healing: f64,
+}
