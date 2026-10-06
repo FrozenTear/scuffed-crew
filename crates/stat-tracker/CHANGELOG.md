@@ -74,20 +74,47 @@ stored and does not split a later Tab. A late Tab of the same map does
 not split. A read inside the gap does not split.
 
 An unconfirmed word replaces the hint when its map matches the session,
-or when the boundary is not armed and the read has no map. A different
-map never replaces the hint. While a hero select has armed a boundary,
-a word with no map does not replace the hint either. The second agreeing
-read splits when the maps differ: the old hint stays on this session, and
-the new session takes the new word and that map. The confirming read uses
-a map carried from the first agreeing word when this tick has none. A
-banner has no map, so a banner-only confirmation still seals onto the
-open session.
+or when the boundary is not armed and either side has no trusted name.
+A different map never replaces the hint. While a hero select has armed
+a boundary, a word where either side has no trusted name does not
+replace the hint either. That unarmed exception is the cost of still
+taking a rank screen or an end title that prints no map: a mapless
+misread can replace the hint, and a second mapless read then seals it
+onto this session.
 
-A full-board text fallback is not a map for poll decisions or for the
-board-case split. An accolade can replace it. A later top-bar or accolade
-read that names the same map upgrades the stored source, and a different
-map after that can split. A skeleton written before 0.4.18 has no source;
-a map on that file is treated as untrusted text.
+The second agreeing read opens a new session when both the session map
+and the word's map are trusted (top bar or accolade) and they differ,
+whether or not a boundary is armed. The old hint stays on this session.
+The new session takes the new word and that map. The confirming read
+uses a map carried from the first agreeing word when this tick has none,
+and only while that first read is still inside the 60-second confirm
+window. If either side has no trusted name, the confirming read seals
+onto the open session. A banner has no map, so a banner-only
+confirmation still seals onto the open session.
+
+Two mapless reads confirm each other and seal onto the open session.
+The same happens when a Tab capture is in flight: the cheap outcome
+poll skips the accolade crop, so those ticks have no map and cannot
+open the next session. The cost is the next game's result landing on
+this one. It happens when the end screen never prints a map, or the
+only confirming ticks fall during that Tab.
+
+A trusted top bar and a trusted accolade that disagree inside one
+match open a new session and seal this session's hint. The cost is
+this match's real result leaving with that split when the two reads
+simply disagree, before the player has queued again.
+
+A full-board text fallback is not a map for a different-map split. An
+accolade replaces it only on this session's own end screen: before an
+arm, a start screen, a held reset, or a hint of a different result, and
+before the outcome is recorded. Replacing that hint does not open the
+window again, so the confirming read cannot relabel the map. A carry
+older than the confirm window
+is dropped, so it cannot relabel the session. After any of those
+signals, the accolade must not rewrite the map or its snapshots. A
+later top bar that names the same map still upgrades the source. A
+skeleton written before 0.4.18 has no source; a map on that file is
+untrusted text.
 
 ### Install
 

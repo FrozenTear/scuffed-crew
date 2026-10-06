@@ -9,7 +9,7 @@
 //! A hint stays sealable until a second board with progressed stats is
 //! accepted after it, or one progressed board after a hero select has armed
 //! a boundary, or until a reset, a gap, a Tab that names a different map,
-//! an armed end screen on a different map, or an unblocked map vote or
+//! an end screen whose trusted map differs, or an unblocked map vote or
 //! hero ban seals it onto this session. The first progressed board keeps
 //! the hint. "Progressed" is measured from the reset baseline: a counter
 //! moved forward, the totals are not the same, the frame is not a decided
@@ -56,7 +56,7 @@
 //! | State | Input | Effect |
 //! |---|---|---|
 //! | Idle, LiveMatch | confirmed word | Seal. Grace starts now. |
-//! | Idle, LiveMatch | unconfirmed word | Remember the hint when the map matches, or when the boundary is not armed and the read has no map. A different map is ignored. |
+//! | Idle, LiveMatch | unconfirmed word | Remember the hint when the maps match, or when the boundary is not armed and either side has no trusted name. A different map is ignored. |
 //! | Idle, LiveMatch | map vote, not blocked | Split. No seal. The same-map-plus-hero guard and the debounce are the caller's block. |
 //! | Idle, LiveMatch | hero ban, no deferred board | Split at once. No seal. |
 //! | Idle, LiveMatch | hero ban after a deferred board | Ignore. One misread plus a ban is not a split. |
@@ -69,10 +69,9 @@
 //! | Idle | 120s gap | Not applicable. Ignore. |
 //! | LiveMatch | 120s gap | Split. The new session keeps this frame's header. The caller's guard is the same map plus the same hero. |
 //! | Idle | end screen, different map | Not applicable. Ignore. |
-//! | LiveMatch | end screen, different map, not armed | Seal. The session already has a map, which is what made this a different map. |
-//! | LiveMatch | end screen, different map, armed | Split. Seal the old hint. The new session takes the end-screen outcome. |
+//! | LiveMatch | end screen, both maps trusted and different | Split, armed or not. The new session takes the end-screen outcome. If either side has no trusted name, this is a confirmed word and it seals onto this session. |
 //! | PostResultStreak | confirmed word | Seal that word. Do not split. Grace starts now. |
-//! | PostResultStreak | unconfirmed word | Replaces the hint when the map matches, or when the boundary is not armed and the read has no map. A different map does not replace the hint. While armed, a word with no map does not replace the hint. |
+//! | PostResultStreak | unconfirmed word | Replaces the hint when the maps match, or when the boundary is not armed and either side has no trusted name. A different map does not replace the hint. While armed, a word where either side has no trusted name does not replace the hint. |
 //! | PostResultStreak | map vote, not blocked, or hero ban | Split and seal the hint. |
 //! | PostResultStreak | hero select, no board yet | Seal the hint and split. |
 //! | PostResultStreak | hero select after a board | Arm a pending boundary. That arm is the first reset signal. |
@@ -81,10 +80,9 @@
 //! | PostResultStreak | same totals, or a decided header | Append. The hint stays. |
 //! | PostResultStreak | fresh-match board | Defer, then split on the next fresh board. The split seals the hint. An armed streak splits on this board. |
 //! | PostResultStreak | 120s gap | Split. Seal the hint. Keep this frame's header. |
-//! | PostResultStreak | end screen, different map, not armed | Seal the word. Do not split on the map. |
-//! | PostResultStreak | end screen, different map, armed | Split. Seal the old hint. The new session takes the end-screen outcome and the map on this read, including a map the caller carried from the previous agreeing word. An unconfirmed word on a different map does not replace the hint. While armed, a word with no map does not replace it either. A banner has no map, so a banner-only confirmation still seals onto this session. |
+//! | PostResultStreak | end screen, both maps trusted and different | Split, armed or not. Seal the old hint. The new session takes the end-screen outcome and that map, including a map carried from the previous agreeing word inside the confirm window. If either side has no trusted name, the word seals onto this session. A banner has no map, so a banner-only confirmation still seals onto this session. |
 //! | PostResultStreak | hinted Tab, different map | Split. Seal the hint. The new session keeps this frame's header. [`plan_capture`] builds [`Obs::HintedDifferentMap`] only when the stored map is the top bar or the accolade and the gap has elapsed, or when the session has no board yet. A text-fallback map does not build it. |
-//! | PostMatch | word | Ignore the outcome. Adopt an accolade map when this session has none. |
+//! | PostMatch | word | Ignore the outcome. Adopt an accolade map when this session has none. Do not rewrite a text-fallback map once the outcome is recorded. |
 //! | PostMatch | start screen, not blocked | Split. No seal. The new session is Unknown and has no grace. |
 //! | PostMatch | scoreboard, not a fresh-match reset | Append. A confirmed mark is not cleared. |
 //! | PostMatch | fresh-match board | Defer, then split. The deferred board is stored on the new session. |
@@ -132,16 +130,25 @@ impl CloseReason {
 /// clears it, or one progressed board after an arm, or a confirmed read
 /// seals it.
 ///
-/// `confirmed == false` is a hint. A reset, a gap, a different-map Tab, an
-/// armed different-map end screen, or a no-board start screen seals it. An
-/// unconfirmed word replaces it when the maps match, or when the boundary
-/// is not armed and the read has no map. A different map never replaces it.
-/// While a boundary is armed, a word with no map does not replace it, so
-/// the confirming read can seal this hint and open the next session. A
-/// banner carries no map, so a banner-only confirmation still seals onto
-/// this session. An idle close does not seal the hint. A full-board text
-/// fallback is not a map here: the poll treats it as absent, an accolade
-/// can replace it, and a different-map split does not use it.
+/// `confirmed == false` is a hint. A reset, a gap, a different-map Tab, a
+/// trusted different-map end screen, or a no-board start screen seals it.
+/// An unconfirmed word replaces it when the maps match, or when the
+/// boundary is not armed and either side has no trusted name. That unarmed
+/// exception lets a rank screen or an end title with no map replace the
+/// hint, and a second such read then seals it onto this session. A
+/// different map never replaces the hint. While a boundary is armed, a
+/// word where either side has no trusted name does not replace it. A
+/// confirming read whose map and the session map are both trusted and
+/// differ opens the next session, armed or not. A banner carries no map,
+/// so a banner-only confirmation still seals onto this session. Two
+/// mapless reads do the same, including when a Tab capture is in flight
+/// and the accolade crop is skipped. An idle close does not seal the
+/// hint. A full-board text fallback is not a map for the split. An
+/// accolade replaces it only on this session's own end screen, before an
+/// arm, a start screen, a held reset, a hint of a different result, or a
+/// recorded outcome. Replacing that hint does not open the window again.
+/// A disagreement between a trusted top bar and a trusted accolade inside
+/// one match opens a new session.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ResultMark {
     pub outcome: MatchOutcome,
@@ -188,8 +195,9 @@ pub struct PollInput<'a> {
     pub map: Option<&'a str>,
     /// False when `map` is a full-board text fallback, or a pre-0.4.18
     /// skeleton that had a map and no source. [`decide_poll`] treats that
-    /// map as absent: a different accolade does not split, and an accolade
-    /// can replace the stored name.
+    /// map as absent, so a different accolade does not split. An accolade
+    /// may replace the stored name only while [`Self::text_fallback_locked`]
+    /// is false and the accolade is still this session's own end screen.
     pub map_trusted: bool,
     pub hero: Option<&'a str>,
     pub signal: Option<MatchOutcome>,
@@ -202,6 +210,10 @@ pub struct PollInput<'a> {
     /// A fresh-match board is held off this session. The poll path has to
     /// say so: `start_screen` ignores a ban or select after that hold.
     pub deferred: bool,
+    /// A different result already replaced the hint. The accolade that came
+    /// with that result must not rewrite a text-fallback map on the
+    /// confirming tick, after the hint no longer shows the disagreement.
+    pub text_fallback_locked: bool,
     pub now: Instant,
 }
 
@@ -849,6 +861,9 @@ pub struct BoundaryState {
     /// First fresh-match board, held off the current session.
     pub deferred: Option<Counters>,
     pub gate: Option<GateState>,
+    /// A different result replaced the hint. Stays set so the confirming
+    /// read cannot relabel a text-fallback map.
+    pub text_fallback_locked: bool,
 }
 
 impl BoundaryState {
@@ -869,6 +884,7 @@ impl BoundaryState {
             hero: None,
             deferred: None,
             gate: None,
+            text_fallback_locked: false,
         }
     }
 }
@@ -930,8 +946,8 @@ fn confirmed_word(phase: Phase, outcome: MatchOutcome) -> Effect {
 }
 
 /// An unconfirmed word replaces the hint when the maps match, or when the
-/// boundary is not armed and the read has no map. A different map never
-/// replaces it.
+/// boundary is not armed and either side has no trusted name. A different
+/// map never replaces it.
 fn unconfirmed_replaces(pending_boundary: bool, relation: MapRelation) -> bool {
     match relation {
         MapRelation::Matches => true,
@@ -1026,17 +1042,14 @@ fn gap_effect(state: &BoundaryState, phase: Phase, frame_outcome: MatchOutcome) 
 fn end_screen(state: &BoundaryState, phase: Phase, outcome: MatchOutcome) -> Effect {
     match phase {
         Phase::PostMatch | Phase::Idle | Phase::NewGameStarting => Effect::Ignore,
-        // Armed by a hero select: the next match's confirmed word on a
-        // different map must not overwrite this hint. An unconfirmed word
-        // that does not match is [`Effect::Ignore`] from [`unconfirmed_word`].
-        // A banner has no map, so it is a confirmed word and still seals
-        // onto this session.
-        Phase::LiveMatch | Phase::PostResultStreak if state.pending_boundary => Effect::Split {
+        // Both names are trusted and they differ. Armed or not, this word
+        // belongs to the next session. A banner, or a word with no trusted
+        // name, never reaches here: it is a confirmed word and seals here.
+        Phase::LiveMatch | Phase::PostResultStreak => Effect::Split {
             reason: CloseReason::StatRegression,
             seal: sealable_hint(state),
             new_outcome: outcome,
         },
-        Phase::LiveMatch | Phase::PostResultStreak => Effect::Seal { outcome },
     }
 }
 
@@ -1107,6 +1120,15 @@ pub fn commit_poll(state: &mut BoundaryState, decision: PollDecision, now: Insta
                 state.awaiting_first_board = false;
             }
             if let Some(mark) = update.result {
+                // The hint that was replaced was a different result. The
+                // accolade belongs to the next game, and the new hint must
+                // not reopen the text-fallback window on the confirming tick.
+                if state
+                    .result
+                    .is_some_and(|prev| prev.outcome.is_decided() && prev.outcome != mark.outcome)
+                {
+                    state.text_fallback_locked = true;
+                }
                 let replaced = state.result.is_none_or(|prev| {
                     prev.outcome != mark.outcome || prev.confirmed != mark.confirmed
                 });
@@ -1126,9 +1148,8 @@ pub fn commit_poll(state: &mut BoundaryState, decision: PollDecision, now: Insta
                 state.pending_boundary = false;
                 state.awaiting_first_board = false;
             }
-            // `adopt_map` is set only when the caller treats the stored map as
-            // absent. That includes an untrusted text fallback, so the
-            // accolade replaces it.
+            // `adopt_map` is set when the session has no map, or when a
+            // text-fallback name is still this session's own end screen.
             let adopted = update.adopt_map.clone();
             if let Some(map) = adopted.clone() {
                 state.map = Some(map);
@@ -1213,15 +1234,44 @@ pub fn has_post_result(outcome: MatchOutcome, result: Option<ResultMark>) -> boo
     outcome.is_decided() || result.is_some_and(|mark| mark.outcome.is_decided())
 }
 
-fn adopt_map(session_map: Option<&str>, accolade: Option<&str>) -> Option<String> {
-    if confident_map(session_map).is_some() {
+/// One map filter for the relation and for adopt: [`named_map`]. Empty and
+/// `unknown` are not names. A looser trim-only check used to accept
+/// `unknown`, which let a non-name block a real accolade or get stored.
+fn adopt_map(input: &PollInput<'_>) -> Option<String> {
+    let accolade = named_map(input.accolade_map)?;
+    if named_map(trusted_session_map(input)).is_some() {
         return None;
     }
-    confident_map(accolade).map(str::to_string)
+    if input.map.is_some() && !text_fallback_open_for_accolade(input) {
+        return None;
+    }
+    Some(accolade.to_string())
 }
 
-fn confident_map(map: Option<&str>) -> Option<&str> {
-    map.map(str::trim).filter(|s| !s.is_empty())
+/// A text-fallback name may be replaced only while this accolade is still
+/// this session's own end screen. An arm, a start screen, a held reset, a
+/// recorded outcome, or a hint of a different result means the accolade
+/// can belong to the next game, and it must not rewrite this map.
+fn text_fallback_open_for_accolade(input: &PollInput<'_>) -> bool {
+    if input.text_fallback_locked
+        || input.pending_boundary
+        || input.start_screen.is_some()
+        || input.deferred
+        || input.reset_streak > 0
+        || input.outcome.is_decided()
+    {
+        return false;
+    }
+    if let (Some(hint), Some(signal)) = (
+        input
+            .result
+            .filter(|mark| !mark.confirmed && mark.outcome.is_decided()),
+        input.signal.filter(|outcome| outcome.is_decided()),
+    ) && hint.outcome != signal
+    {
+        return false;
+    }
+    true
 }
 
 /// Compare two map reads. Empty and `unknown` are not names, so a missing
@@ -1297,7 +1347,7 @@ pub fn decide_poll(input: &PollInput<'_>) -> PollDecision {
             }
         }
     } else {
-        let adopt = adopt_map(trusted_session_map(input), input.accolade_map);
+        let adopt = adopt_map(input);
         return if let Some(map) = adopt {
             PollDecision::Update(UpdateCurrent {
                 record_outcome: None,
@@ -1324,7 +1374,7 @@ pub fn decide_poll(input: &PollInput<'_>) -> PollDecision {
             {
                 return PollDecision::Keep;
             }
-            if let Some(map) = adopt_map(trusted_session_map(input), input.accolade_map) {
+            if let Some(map) = adopt_map(input) {
                 return PollDecision::Update(UpdateCurrent {
                     record_outcome: None,
                     adopt_map: Some(map),
@@ -1359,7 +1409,7 @@ pub fn decide_poll(input: &PollInput<'_>) -> PollDecision {
         }
         Effect::Seal { outcome } => PollDecision::Update(UpdateCurrent {
             record_outcome: Some(outcome),
-            adopt_map: adopt_map(trusted_session_map(input), input.accolade_map),
+            adopt_map: adopt_map(input),
             result: Some(confirmed_mark(input, outcome)),
             clear_hint: false,
             arm_pending: false,
@@ -1382,7 +1432,7 @@ pub fn decide_poll(input: &PollInput<'_>) -> PollDecision {
             } else {
                 PollDecision::Update(UpdateCurrent {
                     record_outcome: None,
-                    adopt_map: adopt_map(trusted_session_map(input), input.accolade_map),
+                    adopt_map: adopt_map(input),
                     result: Some(result),
                     clear_hint: false,
                     arm_pending: false,
@@ -1422,9 +1472,7 @@ pub fn decide_poll(input: &PollInput<'_>) -> PollDecision {
                 (reason, Vec::new())
             };
             let new_map = match &obs {
-                Obs::EndScreenDifferentMap { map, .. } => {
-                    confident_map(Some(map)).map(str::to_string)
-                }
+                Obs::EndScreenDifferentMap { map, .. } => named_map(Some(map)).map(str::to_string),
                 _ => None,
             };
             PollDecision::Open(OpenNew {
@@ -1753,6 +1801,7 @@ mod tests {
             start_screen: None,
             block_map_vote: false,
             deferred: s.deferred.is_some(),
+            text_fallback_locked: s.text_fallback_locked,
             now,
         }
     }
@@ -2209,6 +2258,7 @@ mod tests {
             now,
 
             deferred: false,
+            text_fallback_locked: false,
         });
         match decision {
             PollDecision::Update(u) => {
@@ -2242,7 +2292,7 @@ mod tests {
     }
 
     #[test]
-    fn hint_plus_later_result_does_not_finish_two_sessions() {
+    fn an_unarmed_trusted_different_map_confirmation_splits() {
         let now = t0();
         let mut m = Machine::new("Busan");
         m.capture(counters(10, 4, 3, 3000, 1000, 0), now);
@@ -2263,11 +2313,15 @@ mod tests {
             i.accolade_map = Some("Junkertown");
             i
         });
-        assert!(
-            m.closed.is_empty(),
-            "a confirmed read wins in place; it does not seal the hint onto a second session"
+        assert_eq!(
+            m.closed.len(),
+            1,
+            "both names are trusted and they differ, so this is a boundary even with no arm"
         );
+        assert_eq!(m.closed[0].sess.outcome(), MatchOutcome::Defeat);
+        assert_eq!(m.closed[0].sess.map(), Some("Busan"));
         assert_eq!(m.active().outcome(), MatchOutcome::Victory);
+        assert_eq!(m.active().map(), Some("Junkertown"));
     }
 
     #[test]
@@ -2656,6 +2710,7 @@ mod tests {
             now,
 
             deferred: false,
+            text_fallback_locked: false,
         });
         let commit = commit_poll(&mut state, decision, now);
         assert_eq!(commit.recorded_outcome, Some(MatchOutcome::Defeat));
@@ -2885,7 +2940,7 @@ mod tests {
                 "defer",
             ),
             ("live gap", live_state(), &gap, "split:defeat:-"),
-            ("live end screen", live_state(), &end, "seal:defeat"),
+            ("live end screen", live_state(), &end, "split:defeat:-"),
             (
                 "streak confirmed",
                 streak_state(),
@@ -2955,7 +3010,12 @@ mod tests {
                 &gap,
                 "split:defeat:defeat",
             ),
-            ("streak end screen", streak_state(), &end, "seal:defeat"),
+            (
+                "streak end screen",
+                streak_state(),
+                &end,
+                "split:defeat:defeat",
+            ),
             ("post confirmed", post_state(), &confirmed, "ignore"),
             ("post unconfirmed", post_state(), &unconfirmed, "ignore"),
             ("post start", post_state(), &hero_select, "split:unknown:-"),
@@ -3729,6 +3789,7 @@ mod tests {
             now,
 
             deferred: false,
+            text_fallback_locked: false,
         });
         let commit = commit_poll(&mut state, decision, now);
         assert!(commit.recorded_outcome.is_none());
@@ -3759,6 +3820,7 @@ mod tests {
             now,
 
             deferred: false,
+            text_fallback_locked: false,
         });
         commit_poll(&mut state, decision, now);
         assert_eq!(state.outcome, MatchOutcome::Defeat);
@@ -3862,6 +3924,7 @@ mod tests {
             start_screen: None,
             block_map_vote: false,
             deferred: false,
+            text_fallback_locked: false,
             now,
         });
         assert_eq!(decision, PollDecision::Keep);
@@ -3881,6 +3944,7 @@ mod tests {
             start_screen: None,
             block_map_vote: false,
             deferred: false,
+            text_fallback_locked: false,
             now,
         });
         match confirmed {
@@ -3915,6 +3979,7 @@ mod tests {
             start_screen: None,
             block_map_vote: false,
             deferred: false,
+            text_fallback_locked: false,
             now,
         })
     }
@@ -3958,6 +4023,7 @@ mod tests {
                 start_screen: None,
                 block_map_vote: false,
                 deferred: false,
+                text_fallback_locked: false,
                 now,
             })
         };
@@ -4013,6 +4079,7 @@ mod tests {
             start_screen: None,
             block_map_vote: false,
             deferred: false,
+            text_fallback_locked: false,
             now,
         });
         match &decision {
@@ -4021,17 +4088,154 @@ mod tests {
             }
             PollDecision::Update(update) => {
                 assert_eq!(update.record_outcome, Some(MatchOutcome::Victory));
-                assert_eq!(
-                    update.adopt_map.as_deref(),
-                    Some("Junkertown"),
-                    "an accolade replaces a text-fallback map"
+                assert!(
+                    update.adopt_map.is_none(),
+                    "a different result is the next game, so the accolade must not relabel the text map"
                 );
             }
-            other => panic!("expected the word to seal and adopt the accolade, got {other:?}"),
+            other => panic!("expected the word to seal without a new map, got {other:?}"),
         }
         let commit = commit_poll(&mut state, decision, now);
-        assert_eq!(commit.adopted_map.as_deref(), Some("Junkertown"));
-        assert_eq!(state.map.as_deref(), Some("Junkertown"));
+        assert!(commit.adopted_map.is_none());
+        assert_eq!(state.map.as_deref(), Some("Dorado"));
+        assert_eq!(state.outcome, MatchOutcome::Victory);
+    }
+
+    #[test]
+    fn a_text_fallback_is_replaced_only_on_this_sessions_end_screen() {
+        let now = t0();
+        let open = decide_poll(&PollInput {
+            outcome: MatchOutcome::Unknown,
+            result: None,
+            pending_boundary: false,
+            awaiting_first_board: false,
+            has_board: true,
+            reset_streak: 0,
+            map: Some("Dorado"),
+            map_trusted: false,
+            hero: None,
+            signal: Some(MatchOutcome::Defeat),
+            signal_confirmed: false,
+            accolade_map: Some("Busan"),
+            start_screen: None,
+            block_map_vote: false,
+            deferred: false,
+            text_fallback_locked: false,
+            now,
+        });
+        match open {
+            PollDecision::Update(update) => {
+                assert_eq!(update.adopt_map.as_deref(), Some("Busan"));
+            }
+            other => panic!("expected this session's end screen to adopt, got {other:?}"),
+        }
+        let armed = decide_poll(&PollInput {
+            outcome: MatchOutcome::Unknown,
+            result: None,
+            pending_boundary: true,
+            awaiting_first_board: false,
+            has_board: true,
+            reset_streak: 0,
+            map: Some("Dorado"),
+            map_trusted: false,
+            hero: None,
+            signal: Some(MatchOutcome::Defeat),
+            signal_confirmed: false,
+            accolade_map: Some("Busan"),
+            start_screen: None,
+            block_map_vote: false,
+            deferred: false,
+            text_fallback_locked: false,
+            now,
+        });
+        match &armed {
+            PollDecision::Keep => {}
+            PollDecision::Update(update) if update.adopt_map.is_none() => {}
+            other => panic!("an armed boundary must not relabel the text map, got {other:?}"),
+        }
+        let finished = decide_poll(&PollInput {
+            outcome: MatchOutcome::Victory,
+            result: None,
+            pending_boundary: false,
+            awaiting_first_board: false,
+            has_board: true,
+            reset_streak: 0,
+            map: Some("Dorado"),
+            map_trusted: false,
+            hero: None,
+            signal: Some(MatchOutcome::Defeat),
+            signal_confirmed: false,
+            accolade_map: Some("Junkertown"),
+            start_screen: None,
+            block_map_vote: false,
+            deferred: false,
+            text_fallback_locked: false,
+            now,
+        });
+        match finished {
+            PollDecision::Keep | PollDecision::IgnoreContradictory { .. } => {}
+            PollDecision::Update(update) => assert!(update.adopt_map.is_none()),
+            other => panic!("a recorded outcome must not take the next map, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_replaced_hint_keeps_the_text_fallback_locked() {
+        let now = t0();
+        let mut state = BoundaryState::new(Some("Busan".into()));
+        state.result = Some(ResultMark {
+            outcome: MatchOutcome::Defeat,
+            confirmed: false,
+            seen_at: now,
+        });
+        state.gate = Some(gate(counters(14, 22, 6, 2400, 9800, 400)));
+        fn input<'a>(state: &'a BoundaryState, confirmed: bool, now: Instant) -> PollInput<'a> {
+            PollInput {
+                outcome: state.outcome,
+                result: state.result,
+                pending_boundary: state.pending_boundary,
+                awaiting_first_board: false,
+                has_board: state.gate.is_some(),
+                reset_streak: state.reset_streak,
+                map: state.map.as_deref(),
+                map_trusted: false,
+                hero: None,
+                signal: Some(MatchOutcome::Victory),
+                signal_confirmed: confirmed,
+                accolade_map: Some("Junkertown"),
+                start_screen: None,
+                block_map_vote: false,
+                deferred: false,
+                text_fallback_locked: state.text_fallback_locked,
+                now,
+            }
+        }
+        let first = decide_poll(&input(&state, false, now));
+        let commit = commit_poll(&mut state, first, now);
+        assert!(commit.adopted_map.is_none());
+        assert!(
+            state.text_fallback_locked,
+            "replacing the hint must keep the text-fallback window shut"
+        );
+        assert_eq!(
+            state.result.map(|mark| mark.outcome),
+            Some(MatchOutcome::Victory)
+        );
+        let second = decide_poll(&input(&state, true, now));
+        match &second {
+            PollDecision::Update(update) => {
+                assert_eq!(update.record_outcome, Some(MatchOutcome::Victory));
+                assert!(
+                    update.adopt_map.is_none(),
+                    "the confirming read must not relabel the text map"
+                );
+            }
+            other => {
+                panic!("expected the confirming read to seal without a new map, got {other:?}")
+            }
+        }
+        commit_poll(&mut state, second, now);
+        assert_eq!(state.map.as_deref(), Some("Busan"));
         assert_eq!(state.outcome, MatchOutcome::Victory);
     }
 
