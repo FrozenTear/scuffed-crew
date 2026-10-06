@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use axum::body::Body;
-use axum::http::{Request, StatusCode, header};
+use axum::http::{Method, Request, StatusCode, header};
 use http_body_util::BodyExt;
 use tower::ServiceExt;
 
@@ -96,8 +96,22 @@ async fn test_state(upload_dir: PathBuf) -> AppState {
 }
 
 async fn get(app: axum::Router, uri: &str) -> (StatusCode, axum::http::HeaderMap, String) {
+    call(app, Method::GET, uri).await
+}
+
+async fn call(
+    app: axum::Router,
+    method: Method,
+    uri: &str,
+) -> (StatusCode, axum::http::HeaderMap, String) {
     let response = app
-        .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+        .oneshot(
+            Request::builder()
+                .method(method)
+                .uri(uri)
+                .body(Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
     let status = response.status();
@@ -409,4 +423,98 @@ async fn static_cache_headers_follow_asset_class() {
         "uploads cache header must stay untouched, got {:?}",
         cache_control(&headers)
     );
+}
+
+#[tokio::test]
+async fn unmatched_api_paths_are_json_404_and_client_routes_stay_the_shell() {
+    let tree = TempTree::new("api-404");
+    let state = test_state(tree.uploads()).await;
+    // A route merged after `create_router` must still win over the API 404.
+    // `scuffed-server` registers strategy and chat this way.
+    let app = create_router_with_dist(state, tree.dist()).route(
+        "/api/merged-probe",
+        axum::routing::get(|| async { "merged-ok" }),
+    );
+
+    for method in [
+        Method::GET,
+        Method::POST,
+        Method::PUT,
+        Method::PATCH,
+        Method::DELETE,
+    ] {
+        let (status, headers, body) = call(app.clone(), method.clone(), "/api/nope").await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{method}");
+        assert_json_not_found(&headers, &body, method.as_str());
+    }
+
+    let (status, headers, body) = call(app.clone(), Method::HEAD, "/api/nope").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(content_type(&headers), "application/json");
+    assert_eq!(cache_control(&headers), Some("no-store"));
+    assert!(
+        body.is_empty(),
+        "HEAD must not include a body, got {body:?}"
+    );
+
+    let (status, headers, body) = call(app.clone(), Method::GET, "/api/stats/me/roles").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_json_not_found(&headers, &body, "stats roles");
+
+    let (status, headers, body) = call(app.clone(), Method::GET, "/api").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_json_not_found(&headers, &body, "exact /api");
+
+    let (status, headers, body) = call(app.clone(), Method::POST, "/api/nope?x=1").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_json_not_found(&headers, &body, "query string");
+
+    let (status, _, body) = call(app.clone(), Method::GET, "/api/health").await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "known GET must not become the API 404"
+    );
+    assert!(!body.contains(SHELL));
+
+    let (status, _, body) = call(app.clone(), Method::POST, "/api/health").await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
+    assert!(!body.contains(SHELL));
+    assert!(!body.contains("\"error\""));
+
+    let (status, _, body) = call(app.clone(), Method::GET, "/api/merged-probe").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, "merged-ok");
+
+    for path in [
+        "/",
+        "/wiki/some-page",
+        "/strategy/x",
+        "/apiary",
+        "/api-docs",
+    ] {
+        let (status, headers, body) = get(app.clone(), path).await;
+        assert_eq!(status, StatusCode::OK, "{path}");
+        assert!(
+            content_type(&headers).starts_with("text/html"),
+            "{path} content-type {}",
+            content_type(&headers)
+        );
+        assert!(body.contains(SHELL), "{path} must be the SPA shell");
+        assert_eq!(cache_control(&headers), Some("no-cache"), "{path}");
+    }
+
+    let (status, headers, body) = get(app, "/assets/favicon.svg").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("<svg"));
+    assert_eq!(cache_control(&headers), Some("public, max-age=86400"));
+}
+
+fn assert_json_not_found(headers: &axum::http::HeaderMap, body: &str, label: &str) {
+    assert_eq!(content_type(headers), "application/json", "{label}");
+    assert_eq!(cache_control(headers), Some("no-store"), "{label}");
+    let value: serde_json::Value = serde_json::from_str(body).unwrap_or_else(|err| {
+        panic!("{label}: body is not JSON ({err}): {body}");
+    });
+    assert_eq!(value, serde_json::json!({"error": "Not found"}), "{label}");
 }

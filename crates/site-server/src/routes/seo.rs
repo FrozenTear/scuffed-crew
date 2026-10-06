@@ -2,20 +2,24 @@
 //!
 //! `/robots.txt` and `/sitemap.xml` are explicit routes so they win over the
 //! `dist/` catch-all (which would otherwise return `index.html` as 200 HTML).
-//! Cache headers are applied only to that catch-all, never to `/api/*` or
-//! `/uploads`.
+//! Unmatched `/api` and `/api/*` requests get the JSON error envelope instead
+//! of that shell. Cache headers are applied only to the SPA catch-all, never
+//! to `/api/*` or `/uploads`.
 
 use std::collections::HashSet;
+use std::convert::Infallible;
 use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
+use axum::body::Body;
 use axum::extract::State;
-use axum::http::{HeaderValue, Request, StatusCode, header};
+use axum::http::{HeaderValue, Method, Request, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use chrono::{DateTime, SecondsFormat, Utc};
+use scuffed_auth::server::session::ErrorResponse;
 use scuffed_db::{ForumBoard, ForumBoardNode, ForumCategoryNode, MatchType, TournamentStatus};
-use tower::Service;
+use tower::{Service, ServiceExt};
 use tower_http::services::{ServeDir, ServeFile};
 
 use crate::state::AppState;
@@ -188,6 +192,90 @@ pub(crate) fn spa_service(dist_dir: &std::path::Path) -> WithStaticCache<ServeDi
     let index = dist_dir.join("index.html");
     let files = ServeDir::new(dist_dir).fallback(ServeFile::new(index));
     WithStaticCache { inner: files }
+}
+
+/// `/api` and `/api/...`. `/apiary` and `/api-docs` are ordinary client paths.
+pub(crate) fn is_api_path(path: &str) -> bool {
+    path == "/api" || path.starts_with("/api/")
+}
+
+/// Router fallback: JSON 404 for unmatched API paths, SPA shell otherwise.
+///
+/// Registered routes are tried first, so a known `/api` path with the wrong
+/// method stays 405 and never reaches this service. `scuffed-server` merges
+/// strategy and chat routes onto the router from [`crate::create_router`];
+/// those stay registered routes too. A nested `/api` router with its own
+/// fallback would own the whole prefix and reject that merge.
+///
+/// The prefix check stays outside [`spa_service`], so the static-cache layer
+/// still applies only to the shell and to files under `dist/`.
+pub(crate) fn spa_or_api_not_found(
+    dist_dir: &std::path::Path,
+) -> SpaOrApiNotFound<WithStaticCache<ServeDir<ServeFile>>> {
+    SpaOrApiNotFound {
+        spa: spa_service(dist_dir),
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct SpaOrApiNotFound<S> {
+    spa: S,
+}
+
+fn unmatched_api_response(method: &Method) -> Response {
+    let json = serde_json::to_vec(&ErrorResponse {
+        error: "Not found".to_string(),
+    })
+    .unwrap_or_else(|_| br#"{"error":"Not found"}"#.to_vec());
+    // HEAD carries the same status and headers as GET, with an empty body.
+    let body = if *method == Method::HEAD {
+        Body::empty()
+    } else {
+        Body::from(json)
+    };
+    Response::builder()
+        .status(StatusCode::NOT_FOUND)
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::CACHE_CONTROL, "no-store")
+        .body(body)
+        .expect("unmatched api response")
+}
+
+impl<S, ReqBody, ResBody> Service<Request<ReqBody>> for SpaOrApiNotFound<S>
+where
+    S: Service<Request<ReqBody>, Response = axum::http::Response<ResBody>, Error = Infallible>
+        + Clone
+        + Send
+        + 'static,
+    S::Future: Send + 'static,
+    ReqBody: Send + 'static,
+    ResBody: axum::body::HttpBody<Data = axum::body::Bytes> + Send + 'static,
+    ResBody::Error: Into<axum::BoxError>,
+{
+    type Response = Response;
+    type Error = Infallible;
+    type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
+
+    fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, req: Request<ReqBody>) -> Self::Future {
+        let path = req.uri().path().to_owned();
+        let method = req.method().clone();
+        if is_api_path(&path) {
+            let response = unmatched_api_response(&method);
+            return Box::pin(std::future::ready(Ok(response)));
+        }
+        let spa = self.spa.clone();
+        Box::pin(async move {
+            let response = match spa.oneshot(req).await {
+                Ok(response) => response,
+                Err(err) => match err {},
+            };
+            Ok(response.map(Body::new))
+        })
+    }
 }
 
 #[derive(Clone)]
@@ -731,6 +819,19 @@ mod tests {
         );
         assert!(!STATIC_ASSET_CACHE.contains("immutable"));
         assert!(!SHELL_CACHE.contains("immutable"));
+    }
+
+    #[test]
+    fn api_path_requires_the_api_segment() {
+        assert!(is_api_path("/api"));
+        assert!(is_api_path("/api/"));
+        assert!(is_api_path("/api/nope"));
+        assert!(is_api_path("/api/stats/me/roles"));
+        assert!(!is_api_path("/apiary"));
+        assert!(!is_api_path("/api-docs"));
+        assert!(!is_api_path("/"));
+        assert!(!is_api_path("/wiki/foo"));
+        assert!(!is_api_path("/assets/app.js"));
     }
 
     fn disallow_rules(body: &str) -> Vec<&str> {
