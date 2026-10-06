@@ -171,8 +171,9 @@ fn App() -> Element {
 
 #[cfg(test)]
 mod tests {
-    /// #152 rewrites these tags. Its test still passes if one is missing from
-    /// both the shell and the output, so the shell itself has to require them.
+    /// The site-server rewriter fills these tags. Its test still passes if one
+    /// is missing from both the shell and the output, so the shell has to
+    /// require them.
     #[test]
     fn index_html_has_one_of_each_rewritten_head_tag() {
         let html = include_str!("../index.html");
