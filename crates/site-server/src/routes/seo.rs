@@ -4,21 +4,44 @@
 //! `dist/` catch-all (which would otherwise return `index.html` as 200 HTML).
 //! Cache headers are applied only to that catch-all, never to `/api/*` or
 //! `/uploads`.
+//!
+//! # `sc-settings` embed
+//!
+//! Every HTML shell (`/`, `/index.html`, and any client route that serves
+//! `index.html`) includes the anonymous `GET /api/settings` JSON immediately
+//! before `</head>`:
+//!
+//! ```html
+//! <script id="sc-settings" type="application/json">{...}</script>
+//! ```
+//!
+//! The object is [`crate::routes::settings::load_anonymous_settings`] run
+//! through `serde_json` — the same mapping and serializer as that route, so
+//! the embed cannot grow a private field the public GET does not return.
+//! `<`, `>`, `&`, U+2028, and U+2029 are written as `\u003c`, `\u003e`,
+//! `\u0026`, `\u2028`, and `\u2029`. The shell stays `Cache-Control: no-cache`.
+//! A settings read failure omits the tag and still serves the page. The tag
+//! is a data block (`type="application/json"`), not an executed script.
 
 use std::collections::HashSet;
 use std::future::Future;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
+use std::sync::Arc;
 use std::task::{Context, Poll};
 
+use axum::body::Body;
 use axum::extract::State;
-use axum::http::{HeaderValue, Request, StatusCode, header};
+use axum::http::{HeaderValue, Method, Request, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use chrono::{DateTime, SecondsFormat, Utc};
 use scuffed_db::{ForumBoard, ForumBoardNode, ForumCategoryNode, MatchType, TournamentStatus};
 use tower::Service;
-use tower_http::services::{ServeDir, ServeFile};
+use tower_http::services::ServeDir;
 
 use crate::state::AppState;
+
+const SETTINGS_SCRIPT_OPEN: &str = "<script id=\"sc-settings\" type=\"application/json\">";
 
 /// Hard cap so a large forum or member table cannot produce an unbounded document.
 const SITEMAP_URL_CAP: usize = 2_000;
@@ -180,53 +203,263 @@ fn looks_like_static_asset(path: &str) -> bool {
     )
 }
 
-/// `dist/` with an `index.html` fallback, plus cache headers.
+/// `dist/` with an in-memory `index.html` shell, plus cache headers.
+///
+/// The template is read once at router build. A new deploy replaces the
+/// process, so the file is not watched. Missing `index.html` keeps the old
+/// behaviour: real files are served, everything else is 404 (no embed).
 ///
 /// A hand-rolled service (rather than `middleware::from_fn`) so the future
 /// stays `Send`. Axum's function middleware around `ServeDir` does not.
-pub(crate) fn spa_service(dist_dir: &std::path::Path) -> WithStaticCache<ServeDir<ServeFile>> {
-    let index = dist_dir.join("index.html");
-    let files = ServeDir::new(dist_dir).fallback(ServeFile::new(index));
-    WithStaticCache { inner: files }
+pub(crate) fn spa_service(dist_dir: &Path, state: AppState) -> SpaService {
+    let index_html = read_index_template(dist_dir);
+    let files = ServeDir::new(dist_dir);
+    SpaService {
+        dist_dir: dist_dir.to_path_buf(),
+        index_html,
+        files,
+        state,
+    }
+}
+
+fn read_index_template(dist_dir: &Path) -> Option<Arc<str>> {
+    let path = dist_dir.join("index.html");
+    match std::fs::read_to_string(&path) {
+        Ok(html) => Some(Arc::from(html)),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
+        Err(err) => {
+            tracing::warn!(
+                error = %err,
+                path = %path.display(),
+                "could not preload dist/index.html; SPA shell embed disabled"
+            );
+            None
+        }
+    }
+}
+
+/// Escape a JSON text so it can sit inside `<script type="application/json">`.
+///
+/// `serde_json` leaves `<`, `>`, `&`, U+2028, and U+2029 raw. Any of those can
+/// close the script element or break an HTML parser. The escapes are valid
+/// JSON, so `JSON.parse` of the element text still yields the original value.
+pub(crate) fn escape_json_for_html(json: &str) -> String {
+    let mut out = String::with_capacity(json.len());
+    for ch in json.chars() {
+        match ch {
+            '<' => out.push_str("\\u003c"),
+            '>' => out.push_str("\\u003e"),
+            '&' => out.push_str("\\u0026"),
+            '\u{2028}' => out.push_str("\\u2028"),
+            '\u{2029}' => out.push_str("\\u2029"),
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
+/// Insert the settings data block immediately before `</head>`.
+///
+/// `escaped_json` is already escaped by [`escape_json_for_html`]. `None` (the
+/// settings read failed) returns `html` unchanged.
+pub(crate) fn inject_settings_script(html: &str, escaped_json: Option<&str>) -> String {
+    let Some(json) = escaped_json else {
+        return html.to_string();
+    };
+    let Some(idx) = find_head_close(html) else {
+        tracing::warn!("SPA shell has no </head>; omitting sc-settings embed");
+        return html.to_string();
+    };
+    let mut out = String::with_capacity(html.len() + SETTINGS_SCRIPT_OPEN.len() + json.len() + 9);
+    out.push_str(&html[..idx]);
+    out.push_str(SETTINGS_SCRIPT_OPEN);
+    out.push_str(json);
+    out.push_str("</script>");
+    out.push_str(&html[idx..]);
+    out
+}
+
+fn find_head_close(html: &str) -> Option<usize> {
+    let needle = b"</head>";
+    html.as_bytes()
+        .windows(needle.len())
+        .position(|window| window.eq_ignore_ascii_case(needle))
+}
+
+async fn load_embed_json(state: &AppState) -> Option<String> {
+    if state.public_settings.fail_loads() {
+        tracing::warn!("SPA shell settings embed skipped");
+        return None;
+    }
+    let (generation, cached) = state.public_settings.fresh();
+    if let Some(json) = cached {
+        return Some(escape_json_for_html(&json));
+    }
+    match crate::routes::settings::anonymous_settings_json(&state.db).await {
+        Ok(json) => {
+            state.public_settings.store(generation, json.clone());
+            Some(escape_json_for_html(&json))
+        }
+        Err(err) => {
+            tracing::warn!(error = %err, "SPA shell settings embed skipped");
+            None
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SpaRoute {
+    /// Serve the preloaded `index.html` with the settings embed.
+    Shell,
+    /// An existing file under `dist/` (not the root index). `ServeDir` serves it.
+    File,
+    /// Do not serve the shell.
+    NotFound,
+}
+
+enum DistLookup {
+    Index,
+    File,
+    Missing,
+    Rejected,
+}
+
+fn classify_spa_route(dist: &Path, url_path: &str, have_index: bool) -> SpaRoute {
+    match dist_lookup(dist, url_path) {
+        DistLookup::Index => {
+            if have_index {
+                SpaRoute::Shell
+            } else {
+                SpaRoute::NotFound
+            }
+        }
+        DistLookup::File => SpaRoute::File,
+        DistLookup::Missing => {
+            if have_index {
+                SpaRoute::Shell
+            } else {
+                SpaRoute::NotFound
+            }
+        }
+        DistLookup::Rejected => SpaRoute::NotFound,
+    }
+}
+
+fn dist_lookup(dist: &Path, url_path: &str) -> DistLookup {
+    let path = url_path.split('?').next().unwrap_or(url_path);
+    let decoded = match urlencoding::decode(path) {
+        Ok(value) => value.into_owned(),
+        Err(_) => return DistLookup::Rejected,
+    };
+    let rel = decoded.trim_start_matches('/');
+    if rel.contains('\0') || rel.split('/').any(|seg| seg == ".." || seg == ".") {
+        return DistLookup::Rejected;
+    }
+    if rel.is_empty() || rel == "index.html" {
+        return DistLookup::Index;
+    }
+    let candidate = dist.join(rel);
+    let Ok(canon) = candidate.canonicalize() else {
+        return DistLookup::Missing;
+    };
+    let Ok(dist_canon) = dist.canonicalize() else {
+        return DistLookup::Missing;
+    };
+    if !canon.starts_with(&dist_canon) {
+        return DistLookup::Rejected;
+    }
+    if canon.is_file() {
+        DistLookup::File
+    } else {
+        // A directory (for example `/assets`) is not a file. The shell covers
+        // it until a later check turns missing static paths into 404s.
+        DistLookup::Missing
+    }
+}
+
+fn shell_response(html: String, head_only: bool) -> Response<Body> {
+    let len = html.len();
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
+        .header(header::CACHE_CONTROL, HeaderValue::from_static(SHELL_CACHE))
+        .header(header::CONTENT_LENGTH, len.to_string())
+        .body(if head_only {
+            Body::empty()
+        } else {
+            Body::from(html)
+        })
+        .expect("shell response headers are valid")
+}
+
+fn plain_not_found() -> Response<Body> {
+    Response::builder()
+        .status(StatusCode::NOT_FOUND)
+        .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
+        .header(header::CACHE_CONTROL, HeaderValue::from_static("no-store"))
+        .body(Body::from("not found"))
+        .expect("not-found response headers are valid")
 }
 
 #[derive(Clone)]
-pub(crate) struct WithStaticCache<S> {
-    inner: S,
+pub(crate) struct SpaService {
+    dist_dir: PathBuf,
+    index_html: Option<Arc<str>>,
+    files: ServeDir,
+    state: AppState,
 }
 
-impl<S, ReqBody, ResBody> Service<Request<ReqBody>> for WithStaticCache<S>
+impl<ReqBody> Service<Request<ReqBody>> for SpaService
 where
-    S: Service<Request<ReqBody>, Response = axum::http::Response<ResBody>> + Clone + Send + 'static,
-    S::Error: Send,
-    S::Future: Send + 'static,
     ReqBody: Send + 'static,
-    ResBody: Send + 'static,
 {
-    type Response = axum::http::Response<ResBody>;
-    type Error = S::Error;
+    type Response = Response<Body>;
+    type Error = std::convert::Infallible;
     type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
 
     fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        self.inner.poll_ready(cx)
+        Service::<Request<ReqBody>>::poll_ready(&mut self.files, cx)
     }
 
     fn call(&mut self, req: Request<ReqBody>) -> Self::Future {
         let path = req.uri().path().to_owned();
-        let fut = self.inner.call(req);
-        Box::pin(async move {
-            let mut response = fut.await?;
-            let content_type = response
-                .headers()
-                .get(header::CONTENT_TYPE)
-                .and_then(|value| value.to_str().ok())
-                .map(str::to_owned);
-            let value = cache_control_value(&path, content_type.as_deref());
-            response
-                .headers_mut()
-                .insert(header::CACHE_CONTROL, HeaderValue::from_static(value));
-            Ok(response)
-        })
+        let method = req.method().clone();
+        let shell_method = method == Method::GET || method == Method::HEAD;
+        let route = if shell_method {
+            classify_spa_route(&self.dist_dir, &path, self.index_html.is_some())
+        } else {
+            SpaRoute::File
+        };
+        let state = self.state.clone();
+        let index_html = self.index_html.clone();
+        match route {
+            SpaRoute::Shell => Box::pin(async move {
+                let Some(template) = index_html else {
+                    return Ok(plain_not_found());
+                };
+                let embed = load_embed_json(&state).await;
+                let html = inject_settings_script(template.as_ref(), embed.as_deref());
+                Ok(shell_response(html, method == Method::HEAD))
+            }),
+            SpaRoute::NotFound => Box::pin(async { Ok(plain_not_found()) }),
+            SpaRoute::File => {
+                let clone = self.files.clone();
+                let mut files = std::mem::replace(&mut self.files, clone);
+                Box::pin(async move {
+                    let mut response = files.call(req).await?;
+                    let content_type = response
+                        .headers()
+                        .get(header::CONTENT_TYPE)
+                        .and_then(|value| value.to_str().ok())
+                        .map(str::to_owned);
+                    let value = cache_control_value(&path, content_type.as_deref());
+                    response
+                        .headers_mut()
+                        .insert(header::CACHE_CONTROL, HeaderValue::from_static(value));
+                    Ok(response.map(Body::new))
+                })
+            }
+        }
     }
 }
 
@@ -742,5 +975,44 @@ mod tests {
 
     fn path_disallowed(path: &str, rules: &[&str]) -> bool {
         rules.iter().any(|rule| path.starts_with(rule))
+    }
+
+    #[test]
+    fn escape_json_for_html_keeps_json_and_blocks_script_breakout() {
+        let raw = "{\"d\":\"</script><script>alert(1)</script>\u{2028}&\u{2029}>\"}";
+        let escaped = escape_json_for_html(raw);
+        assert!(!escaped.contains('<'));
+        assert!(!escaped.contains('>'));
+        assert!(!escaped.contains('&'));
+        assert!(!escaped.contains('\u{2028}'));
+        assert!(!escaped.contains('\u{2029}'));
+        assert!(escaped.contains("\\u003c"));
+        assert!(escaped.contains("\\u003e"));
+        assert!(escaped.contains("\\u0026"));
+        assert!(escaped.contains("\\u2028"));
+        assert!(escaped.contains("\\u2029"));
+        let parsed: serde_json::Value = serde_json::from_str(&escaped).unwrap();
+        assert_eq!(
+            parsed["d"],
+            "</script><script>alert(1)</script>\u{2028}&\u{2029}>"
+        );
+    }
+
+    #[test]
+    fn inject_settings_script_sits_immediately_before_head() {
+        let html = "<html><head><title>x</title></HEAD><body></body></html>";
+        let out = inject_settings_script(html, Some(r#"{"a":1}"#));
+        assert_eq!(
+            out,
+            "<html><head><title>x</title><script id=\"sc-settings\" type=\"application/json\">{\"a\":1}</script></HEAD><body></body></html>"
+        );
+    }
+
+    #[test]
+    fn inject_settings_script_omits_block_without_json_or_head() {
+        let html = "<html><head></head><body>SPA-SHELL-MARKER</body></html>";
+        assert_eq!(inject_settings_script(html, None), html);
+        let no_head = "<html><body>SPA-SHELL-MARKER</body></html>";
+        assert_eq!(inject_settings_script(no_head, Some("{}")), no_head);
     }
 }

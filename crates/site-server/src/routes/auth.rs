@@ -749,7 +749,7 @@ pub async fn setup(
                 } else {
                     (None::<String>, None, None, None, None, None)
                 };
-            if let Err(e) = state
+            match state
                 .db
                 .update_settings(
                     org.as_deref(),
@@ -773,7 +773,8 @@ pub async fn setup(
                 )
                 .await
             {
-                tracing::warn!("setup: failed to apply org/template settings: {e}");
+                Ok(_) => state.public_settings.invalidate(),
+                Err(e) => tracing::warn!("setup: failed to apply org/template settings: {e}"),
             }
         }
     }

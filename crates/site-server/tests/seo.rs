@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use axum::body::Body;
-use axum::http::{Request, StatusCode, header};
+use axum::http::{Method, Request, StatusCode, header};
 use http_body_util::BodyExt;
 use tower::ServiceExt;
 
@@ -32,7 +32,9 @@ impl TempTree {
         std::fs::create_dir_all(root.join("uploads")).unwrap();
         std::fs::write(
             root.join("dist/index.html"),
-            format!("<!DOCTYPE html><html><body>{SHELL}</body></html>"),
+            format!(
+                "<!DOCTYPE html><html><head><meta charset=\"utf-8\"></head><body>{SHELL}</body></html>"
+            ),
         )
         .unwrap();
         std::fs::write(root.join("dist/assets/favicon.svg"), "<svg></svg>").unwrap();
@@ -92,6 +94,7 @@ async fn test_state(upload_dir: PathBuf) -> AppState {
         dm_events: None,
         nip05_domain: None,
         nip05_republish_enabled: false,
+        public_settings: scuffed_site_server::state::PublicSettingsCache::new(),
     }
 }
 
@@ -409,4 +412,227 @@ async fn static_cache_headers_follow_asset_class() {
         "uploads cache header must stay untouched, got {:?}",
         cache_control(&headers)
     );
+}
+
+const SETTINGS_OPEN: &str = "<script id=\"sc-settings\" type=\"application/json\">";
+
+/// JSON text of `#sc-settings`, which must sit immediately before `</head>`.
+fn settings_json_before_head(html: &str) -> &str {
+    let head = html.find("</head>").expect("</head>");
+    let start = html.find(SETTINGS_OPEN).expect("sc-settings open tag");
+    assert!(start < head, "settings block must be inside <head>");
+    let json_at = start + SETTINGS_OPEN.len();
+    let close = html[json_at..head]
+        .find("</script>")
+        .expect("settings script close");
+    assert_eq!(
+        &html[json_at + close..head],
+        "</script>",
+        "settings script must be immediately before </head>"
+    );
+    &html[json_at..json_at + close]
+}
+
+async fn write_settings(
+    db: &scuffed_db::Database,
+    org_name: Option<&str>,
+    site_description: Option<&str>,
+) {
+    db.update_settings(
+        org_name,
+        site_description,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await
+    .expect("update settings");
+}
+
+#[tokio::test]
+async fn shell_embeds_anonymous_settings_before_head() {
+    let tree = TempTree::new("embed");
+    let state = test_state(tree.uploads()).await;
+    let app = create_router_with_dist(state, tree.dist());
+
+    let (api_status, _, api_body) = get(app.clone(), "/api/settings").await;
+    assert_eq!(api_status, StatusCode::OK);
+    let api: serde_json::Value = serde_json::from_str(&api_body).expect("api settings");
+
+    for uri in ["/", "/index.html", "/strategies/foo", "/admin/settings"] {
+        let (status, headers, body) = get(app.clone(), uri).await;
+        assert_eq!(status, StatusCode::OK, "{uri}");
+        assert!(
+            content_type(&headers).eq_ignore_ascii_case("text/html; charset=utf-8"),
+            "{uri} content-type {}",
+            content_type(&headers)
+        );
+        assert_eq!(cache_control(&headers), Some("no-cache"), "{uri}");
+        assert!(body.contains(SHELL), "{uri}");
+        let json = settings_json_before_head(&body);
+        assert_eq!(
+            json, api_body,
+            "{uri} must match the anonymous settings body"
+        );
+        let parsed: serde_json::Value = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed, api, "{uri}");
+    }
+
+    let (_, _, robots) = get(app.clone(), "/robots.txt").await;
+    assert!(!robots.contains("sc-settings"));
+    let (_, _, sitemap) = get(app.clone(), "/sitemap.xml").await;
+    assert!(!sitemap.contains("sc-settings"));
+    let (status, _, svg) = get(app.clone(), "/assets/favicon.svg").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(svg.contains("<svg"));
+    assert!(!svg.contains("sc-settings"));
+    let (status, headers, _) = get(app, "/api/health").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(cache_control(&headers).is_none());
+}
+
+#[tokio::test]
+async fn settings_embed_escapes_script_breakout() {
+    let tree = TempTree::new("embed-escape");
+    let state = test_state(tree.uploads()).await;
+    let payload = "</script><script>alert(1)</script>\u{2028}&\u{2029}";
+    write_settings(&state.db, None, Some(payload)).await;
+    let app = create_router_with_dist(state, tree.dist());
+
+    let (api_status, _, api_body) = get(app.clone(), "/api/settings").await;
+    assert_eq!(api_status, StatusCode::OK);
+    let api: serde_json::Value = serde_json::from_str(&api_body).unwrap();
+    assert_eq!(api["site_description"], payload);
+
+    let (status, _, body) = get(app, "/").await;
+    assert_eq!(status, StatusCode::OK);
+    let json = settings_json_before_head(&body);
+    assert!(json.contains("\\u003c/script\\u003e"), "{json}");
+    assert!(json.contains("\\u003cscript\\u003e"), "{json}");
+    assert!(json.contains("\\u2028"), "{json}");
+    assert!(json.contains("\\u2029"), "{json}");
+    assert!(json.contains("\\u0026"), "{json}");
+    assert!(!json.contains('\u{2028}'));
+    assert!(!json.contains('\u{2029}'));
+    assert!(
+        !json.contains("</script>"),
+        "raw script close leaked into the JSON: {json}"
+    );
+    let parsed: serde_json::Value = serde_json::from_str(json).unwrap();
+    assert_eq!(parsed, api);
+    assert_eq!(parsed["site_description"], payload);
+}
+
+#[tokio::test]
+async fn settings_embed_cache_invalidates_after_update() {
+    let tree = TempTree::new("embed-cache");
+    let state = test_state(tree.uploads()).await;
+    let app = create_router_with_dist(state.clone(), tree.dist());
+
+    let (status, _, body) = get(app.clone(), "/").await;
+    assert_eq!(status, StatusCode::OK);
+    let first: serde_json::Value = serde_json::from_str(settings_json_before_head(&body)).unwrap();
+    assert_eq!(first["org_name"], "My Clan");
+
+    write_settings(&state.db, Some("Stale Clan"), None).await;
+    let (_, _, body) = get(app.clone(), "/strategies/foo").await;
+    let cached: serde_json::Value = serde_json::from_str(settings_json_before_head(&body)).unwrap();
+    assert_eq!(
+        cached["org_name"], "My Clan",
+        "a DB write that skips invalidation must keep serving the cached embed"
+    );
+
+    state.public_settings.invalidate();
+    let (_, _, body) = get(app.clone(), "/").await;
+    let refreshed: serde_json::Value =
+        serde_json::from_str(settings_json_before_head(&body)).unwrap();
+    assert_eq!(refreshed["org_name"], "Stale Clan");
+
+    let user = state
+        .db
+        .create_local_user("embed-admin", "unused-hash")
+        .await
+        .unwrap();
+    state
+        .db
+        .create_member(&user.id, "Embed Admin", OrgRole::Admin)
+        .await
+        .unwrap();
+    state
+        .db
+        .create_session(&user.id, "embed-admin-token", 24)
+        .await
+        .unwrap();
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/api/settings")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::COOKIE, "sc_session=embed-admin-token")
+                .body(Body::from(r#"{"org_name":"Fresh Clan"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK, "PUT /api/settings");
+
+    let (_, _, body) = get(app, "/admin/settings").await;
+    let after_put: serde_json::Value =
+        serde_json::from_str(settings_json_before_head(&body)).unwrap();
+    assert_eq!(after_put["org_name"], "Fresh Clan");
+}
+
+#[tokio::test]
+async fn settings_read_failure_omits_embed_and_still_serves_shell() {
+    let tree = TempTree::new("embed-fail");
+    let state = test_state(tree.uploads()).await;
+    state.public_settings.set_fail_loads(true);
+    let app = create_router_with_dist(state, tree.dist());
+
+    for uri in ["/", "/strategies/foo"] {
+        let (status, headers, body) = get(app.clone(), uri).await;
+        assert_eq!(status, StatusCode::OK, "{uri}");
+        assert_eq!(cache_control(&headers), Some("no-cache"), "{uri}");
+        assert!(body.contains(SHELL), "{uri}");
+        assert!(
+            !body.contains("sc-settings"),
+            "failed settings read must omit the block: {body}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn missing_index_html_does_not_500() {
+    let root = std::env::temp_dir().join(format!("scuffed-seo-noindex-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(root.join("dist/assets")).unwrap();
+    std::fs::create_dir_all(root.join("uploads")).unwrap();
+    std::fs::write(root.join("dist/assets/plain.js"), "console.log(1);").unwrap();
+    let state = test_state(root.join("uploads")).await;
+    let app = create_router_with_dist(state, root.join("dist"));
+
+    let (status, _, body) = get(app.clone(), "/").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert!(!body.contains("sc-settings"));
+    assert!(!body.contains(SHELL));
+
+    let (status, headers, body) = get(app, "/assets/plain.js").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("console.log"));
+    assert_eq!(cache_control(&headers), Some("no-cache"));
+    let _ = std::fs::remove_dir_all(root);
 }

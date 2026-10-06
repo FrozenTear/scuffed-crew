@@ -1,5 +1,7 @@
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use scuffed_auth::crypto::CryptoService;
 use scuffed_auth::server::HasAuth;
@@ -53,6 +55,100 @@ pub struct AppState {
     /// behalf, so it takes an explicit operator action to even become callable
     /// — see `routes::members::republish_profiles`.
     pub nip05_republish_enabled: bool,
+    /// In-memory copy of the anonymous `GET /api/settings` JSON embedded in
+    /// the SPA shell. Write paths call [`PublicSettingsCache::invalidate`].
+    pub public_settings: PublicSettingsCache,
+}
+
+/// How long a cached public-settings blob may be served before a re-read.
+///
+/// Writes invalidate immediately. The TTL only covers a missed invalidation.
+const PUBLIC_SETTINGS_TTL: Duration = Duration::from_secs(10);
+
+#[derive(Debug)]
+struct PublicSettingsEntry {
+    json: String,
+    stored_at: Instant,
+}
+
+#[derive(Debug)]
+struct PublicSettingsInner {
+    generation: u64,
+    entry: Option<PublicSettingsEntry>,
+}
+
+/// Process-local cache of the anonymous settings JSON.
+///
+/// Shared across `AppState` clones (the router and the SPA fallback hold the
+/// same `Arc`). A settings write bumps `generation` so an in-flight read
+/// cannot store a stale blob over the invalidation.
+#[derive(Clone, Debug)]
+pub struct PublicSettingsCache {
+    inner: Arc<Mutex<PublicSettingsInner>>,
+    fail_loads: Arc<AtomicBool>,
+}
+
+impl Default for PublicSettingsCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl PublicSettingsCache {
+    pub fn new() -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(PublicSettingsInner {
+                generation: 0,
+                entry: None,
+            })),
+            fail_loads: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    /// Drop the cached blob. The next shell render reads settings again.
+    pub fn invalidate(&self) {
+        let mut guard = self.lock();
+        guard.generation = guard.generation.wrapping_add(1);
+        guard.entry = None;
+    }
+
+    /// `(generation, fresh JSON)`. `None` means the caller should read the DB.
+    pub(crate) fn fresh(&self) -> (u64, Option<String>) {
+        let guard = self.lock();
+        let json = guard.entry.as_ref().and_then(|entry| {
+            if entry.stored_at.elapsed() < PUBLIC_SETTINGS_TTL {
+                Some(entry.json.clone())
+            } else {
+                None
+            }
+        });
+        (guard.generation, json)
+    }
+
+    /// Store `json` only if no invalidation landed since `generation` was read.
+    pub(crate) fn store(&self, generation: u64, json: String) {
+        let mut guard = self.lock();
+        if guard.generation == generation {
+            guard.entry = Some(PublicSettingsEntry {
+                json,
+                stored_at: Instant::now(),
+            });
+        }
+    }
+
+    pub(crate) fn fail_loads(&self) -> bool {
+        self.fail_loads.load(Ordering::Relaxed)
+    }
+
+    /// When set, the SPA shell omits `#sc-settings` instead of reading the DB.
+    /// Integration tests use this to cover the settings-read failure path.
+    pub fn set_fail_loads(&self, fail: bool) {
+        self.fail_loads.store(fail, Ordering::Relaxed);
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, PublicSettingsInner> {
+        self.inner.lock().unwrap_or_else(|err| err.into_inner())
+    }
 }
 
 /// Treat blank/whitespace as unset so `NOSTR_RELAY_URL=""` does not report

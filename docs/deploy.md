@@ -218,6 +218,16 @@ systemctl reload caddy
 
 Template also lives in repo: `deploy/Caddyfile`.
 
+### Public settings in the HTML shell
+
+`GET /`, `GET /index.html`, and every client route that serves the SPA shell (`/strategies/foo`, `/admin/settings`, …) include the anonymous settings JSON immediately before `</head>`:
+
+```html
+<script id="sc-settings" type="application/json">{"id":"…","org_name":"…"}</script>
+```
+
+That object is the body of anonymous `GET /api/settings` (same `SiteSettings` mapping and `serde_json` serializer). `<`, `>`, `&`, U+2028, and U+2029 are escaped as `\u003c`, `\u003e`, `\u0026`, `\u2028`, and `\u2029`, so a settings string cannot close the script element. The shell response stays `Cache-Control: no-cache`. If the settings read fails, the tag is omitted and the HTML is still served. `type="application/json"` is not executed, so it does not change the CSP script hashes.
+
 The app sets `Content-Security-Policy-Report-Only` itself (same-origin scripts,
 Google Fonts, Discord/Google avatar hosts, and `NOSTR_RELAY_URL` for chat
 sockets). Leave CSP off the Caddy block so the two policies do not intersect.

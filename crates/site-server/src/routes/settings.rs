@@ -131,31 +131,49 @@ fn to_api_settings(db: scuffed_db::SiteSettings) -> SiteSettings {
     }
 }
 
-/// GET /api/settings — public
+/// Anonymous `GET /api/settings` value.
+///
+/// The handler takes no session extractor. Officers and anonymous callers
+/// both receive [`to_api_settings`] — there is no second field list. The SPA
+/// shell embeds the JSON from this same mapping.
+pub(crate) async fn load_anonymous_settings(
+    db: &scuffed_db::Database,
+) -> Result<SiteSettings, scuffed_db::DbError> {
+    db.get_settings().await.map(to_api_settings)
+}
+
+/// Serialized body of [`load_anonymous_settings`], using `serde_json` the same
+/// way Axum's [`Json`] response does (`serde_json::to_vec` / `to_string`).
+pub(crate) async fn anonymous_settings_json(db: &scuffed_db::Database) -> Result<String, String> {
+    let settings = load_anonymous_settings(db)
+        .await
+        .map_err(|e| e.to_string())?;
+    serde_json::to_string(&settings).map_err(|e| e.to_string())
+}
+
+/// GET /api/settings — public (anonymous and signed-in callers share this body)
 pub async fn get_settings(
     State(state): State<AppState>,
 ) -> Result<Json<SiteSettings>, (StatusCode, Json<ErrorResponse>)> {
-    state
-        .db
-        .get_settings()
-        .await
-        .map(|s| {
+    match load_anonymous_settings(&state.db).await {
+        Ok(settings) => {
             tracing::debug!(
-                home_shell = %s.home_shell,
-                home_skin = %s.home_skin,
+                home_shell = %settings.home_shell,
+                home_skin = %settings.home_skin,
                 "GET /api/settings"
             );
-            Json(to_api_settings(s))
-        })
-        .map_err(|e| {
+            Ok(Json(settings))
+        }
+        Err(e) => {
             tracing::error!(error = %e, "GET /api/settings failed");
-            (
+            Err((
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
                     error: "Internal error".into(),
                 }),
-            )
-        })
+            ))
+        }
+    }
 }
 
 /// PUT /api/settings — Admin: full `UpdateSettingsRequest`.
@@ -252,6 +270,8 @@ pub async fn update_settings(
                 }),
             )
         })?;
+
+    state.public_settings.invalidate();
 
     tracing::info!(
         home_shell = %settings.home_shell,
