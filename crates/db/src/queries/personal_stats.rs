@@ -507,10 +507,13 @@ impl Database {
 
     /// Per-role aggregates from the stored `role` column only.
     ///
-    /// One `GROUP BY role` over `personal_match` for this member. The role is
-    /// never derived from `hero`. Rows with an empty role are their own group
-    /// (`role == ""`). Optional season window matches [`Self::get_hero_stats_in`].
-    /// Order: `matches` descending, then `role` ascending.
+    /// One `GROUP BY role` over `personal_match` for this member. The column
+    /// already holds the tracker's corrected role when `edited` is true. The
+    /// schema type is `string` (a `NONE` write is rejected), so an empty role
+    /// is `""` and is its own group — the value is not defaulted in serde.
+    /// Optional season window matches [`Self::get_hero_stats_in`]
+    /// (`played_at >= start AND played_at < end`). Order: `matches`
+    /// descending, then `role` ascending.
     pub async fn get_role_stats_in(
         &self,
         member_id: &str,
@@ -519,8 +522,6 @@ impl Database {
         with_timeout(async {
             #[derive(Deserialize, SurrealValue)]
             struct RoleRow {
-                #[serde(default)]
-                #[surreal(default)]
                 role: String,
                 matches: u32,
                 wins: u32,
@@ -1945,5 +1946,108 @@ mod tests {
         assert_eq!(other_roles.len(), 1);
         assert_eq!(other_roles[0].role, "Support");
         assert_eq!(other_roles[0].matches, 1);
+
+        // All-time Support is three games whose elims are 4 + 2 + 20 = 26.
+        close(support.avg_elims, 26.0 / 3.0);
+    }
+
+    /// Half-open season window `[start, end)`, same predicate as hero stats.
+    /// Three in-window games have elims 8 + 9 + 9 = 26.
+    #[tokio::test]
+    async fn role_stats_fractional_mean_and_season_bounds() {
+        let db = test_db().await;
+        let start = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+        let end = Utc.with_ymd_and_hms(2026, 6, 1, 0, 0, 0).unwrap();
+        let just_inside_end = end - chrono::Duration::seconds(1);
+
+        let row = |sid: &str, at: chrono::DateTime<Utc>, elims: u32| {
+            let mut m = entry(sid, "victory", elims);
+            m.hero = "Boundary".into();
+            m.role = "Tank".into();
+            m.played_at = at;
+            m
+        };
+        db.upsert_personal_matches(
+            "bounds",
+            &[
+                row("at-start", start, 8),
+                row("inside", start + chrono::Duration::hours(1), 9),
+                row("before-end", just_inside_end, 9),
+                row("at-end", end, 100),
+                row("after-end", end + chrono::Duration::seconds(1), 100),
+            ],
+        )
+        .await
+        .unwrap();
+
+        let window = Some((start, end));
+        let roles = db.get_role_stats_in("bounds", window).await.unwrap();
+        assert_eq!(roles.len(), 1);
+        assert_eq!(roles[0].role, "Tank");
+        assert_eq!(
+            roles[0].matches, 3,
+            "start is included; end and after are not"
+        );
+        close(roles[0].avg_elims, 26.0 / 3.0);
+
+        let heroes = db.get_hero_stats_in("bounds", window).await.unwrap();
+        assert_eq!(heroes.len(), 1);
+        assert_eq!(heroes[0].matches, 3, "role window matches the hero window");
+    }
+
+    /// `personal_match.role` is `TYPE string`. NONE is not a stored value, so
+    /// the aggregate must not paper over a missing role with a serde default.
+    #[tokio::test]
+    async fn role_none_is_rejected_and_empty_string_still_groups() {
+        let db = test_db().await;
+        let none_error = match db
+            .client
+            .query(
+                r#"CREATE personal_match SET
+                    member_id = 'none-probe',
+                    hero = 'Sombra',
+                    map_name = 'Oasis',
+                    game_mode = 'control',
+                    role = NONE,
+                    outcome = 'victory',
+                    elims = 1,
+                    deaths = 0,
+                    assists = 0,
+                    damage = 0,
+                    healing = 0,
+                    mitigation = 0,
+                    played_at = d'2026-03-01T00:00:00Z',
+                    uploaded_at = time::now(),
+                    session_id = 'none-probe-sid',
+                    edited = false"#,
+            )
+            .await
+        {
+            Ok(response) => response
+                .check()
+                .err()
+                .map(|err| err.to_string())
+                .unwrap_or_default(),
+            Err(err) => err.to_string(),
+        };
+        let none_error_l = none_error.to_ascii_lowercase();
+        assert!(
+            none_error_l.contains("role")
+                && (none_error_l.contains("none")
+                    || none_error_l.contains("null")
+                    || none_error_l.contains("type")
+                    || none_error_l.contains("string")),
+            "schema must reject role = NONE, got: {none_error}"
+        );
+
+        let mut blank = entry("blank-role", "victory", 3);
+        blank.role = String::new();
+        db.upsert_personal_matches("none-probe", &[blank])
+            .await
+            .unwrap();
+        let roles = db.get_role_stats("none-probe").await.unwrap();
+        assert_eq!(roles.len(), 1);
+        assert_eq!(roles[0].role, "");
+        assert_eq!(roles[0].matches, 1);
     }
 }

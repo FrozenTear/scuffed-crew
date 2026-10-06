@@ -7684,6 +7684,12 @@ fn approx_stat(v: &Value, expected: f64) {
     assert!((n - expected).abs() < 1e-6, "{n} != {expected}");
 }
 
+fn sum_role_matches(rows: &[Value]) -> u64 {
+    rows.iter()
+        .map(|r| r["matches"].as_u64().expect("matches"))
+        .sum()
+}
+
 fn role_row<'a>(rows: &'a [Value], role: &str) -> &'a Value {
     rows.iter()
         .find(|r| r["role"].as_str() == Some(role))
@@ -7922,6 +7928,8 @@ async fn role_stats_endpoints_match_heroes_auth_and_group_stored_role() {
     assert_eq!(support["wins"], 2);
     assert_eq!(support["losses"], 0);
     assert_eq!(support["draws"], 1);
+    // 4 + 2 + 20 elims across the three Support games.
+    approx_stat(&support["avg_elims"], 26.0 / 3.0);
     let damage = role_row(rows, "Damage");
     assert_eq!(damage["matches"], 2, "Sombra Support is not Damage");
     assert_eq!(damage["wins"], 1);
@@ -8005,6 +8013,84 @@ async fn role_stats_endpoints_match_heroes_auth_and_group_stored_role() {
         3,
         "blank season is all time"
     );
+
+    // Per-role matches sum to the same total the overview reports.
+    let (status, overview) = get_json(&state, "/api/stats/me", Some(MEMBER_TOKEN)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        sum_role_matches(rows),
+        overview["total_matches"].as_u64().unwrap()
+    );
+    let (status, season_overview) = get_json(
+        &state,
+        &format!("/api/stats/me?season={season_id}"),
+        Some(MEMBER_TOKEN),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        sum_role_matches(season_rows),
+        season_overview["total_matches"].as_u64().unwrap()
+    );
+    let (status, member_overview) = get_json(
+        &state,
+        &format!("/api/stats/member/membermember?season={season_id}"),
+        Some(OFFICER_TOKEN),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        sum_role_matches(season_rows),
+        member_overview["total_matches"].as_u64().unwrap()
+    );
+
+    let (status, unknown) = get_json(
+        &state,
+        "/api/stats/member/no-such-member/roles",
+        Some(OFFICER_TOKEN),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(unknown, json!([]));
+
+    // A session for a user with no member row is 403, same as /heroes.
+    let nomember_token = "test-nomember-token";
+    let nomember_hash = hash_session_token(nomember_token);
+    let pid_hash = hash_session_token("nomemberuser-provider-id");
+    state
+        .db
+        .client
+        .query(format!(
+            r#"CREATE user:nomemberuser SET
+                provider = 'discord',
+                username = 'NoMember',
+                avatar_url = NONE,
+                provider_id = 'nomemberuser-provider-id',
+                provider_id_hash = '{pid_hash}',
+                provider_id_encrypted = NONE,
+                created_at = time::now()"#
+        ))
+        .await
+        .expect("seed user without member");
+    state
+        .db
+        .client
+        .query(
+            r#"CREATE session:sess_nomember SET
+                user_id = 'nomemberuser',
+                token = $tok,
+                expires_at = time::now() + 365d,
+                created_at = time::now()"#,
+        )
+        .bind(("tok", nomember_hash))
+        .await
+        .expect("seed session without member");
+    let (rs, rb) = get_json(&state, "/api/stats/me/roles", Some(nomember_token)).await;
+    let (hs, hb) = get_json(&state, "/api/stats/me/heroes", Some(nomember_token)).await;
+    assert_eq!(rs, StatusCode::FORBIDDEN);
+    assert_eq!(hs, rs);
+    assert_eq!(rb["error"], "Not an org member");
+    assert_eq!(rb["error"], hb["error"]);
 
     let (rs, _) = get_json(
         &state,
