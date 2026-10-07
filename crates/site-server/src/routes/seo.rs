@@ -2012,15 +2012,40 @@ mod tests {
         );
     }
 
+    #[test]
+    fn stray_lt_and_unquoted_apostrophe_still_rewrite_description() {
+        // Outside `<title>`. A bare `<` must not open a tag, or the scan
+        // from that `<` runs through the meta's `>` and the description is lost.
+        let bare = "a < b<meta name=\"description\" content=\"Old\">";
+        let bare_out = rewrite_document_head(bare, "", "New");
+        assert!(
+            bare_out.contains("content=\"New\""),
+            "bare < swallowed the description: {bare_out}"
+        );
+        assert!(!bare_out.contains("content=\"Old\""), "{bare_out}");
+
+        // A `'` opens a value only after `=`. Otherwise `Bob's` runs until
+        // `it's` and the description meta in between is never a tag.
+        let apostrophe = "<meta content=Bob's name=x><meta name=\"description\" content=\"Old\"><meta content=it's name=y>";
+        let apostrophe_out = rewrite_document_head(apostrophe, "", "New");
+        assert!(
+            apostrophe_out.contains("content=\"New\""),
+            "unquoted apostrophe swallowed the description: {apostrophe_out}"
+        );
+        assert!(
+            !apostrophe_out.contains("content=\"Old\""),
+            "{apostrophe_out}"
+        );
+    }
+
     /// Rewrite the repo `crates/app/index.html`, and an optional second file.
     ///
     /// `SCUFFED_EXTRA_INDEX`, when set, is a path to another `index.html`
     /// (for example Site PR #150) checked with the same rules.
-    /// `SCUFFED_REQUIRE_OG_SITE_NAME=1` requires that extra file to contain
-    /// `og:site_name` exactly once. Any file that already contains the tag
-    /// must have it exactly once either way; more than one copy fails. This
-    /// branch's template has no `og:site_name` yet, so the bundled file stays
-    /// green without the variable.
+    /// `og:site_name` is required exactly once only when that template already
+    /// contains the tag, or when `SCUFFED_REQUIRE_OG_SITE_NAME=1` (the flag
+    /// applies to the extra file). More than one copy fails. PR #156 will
+    /// make the check unconditional.
     #[test]
     fn real_app_index_rewrite_fills_each_present_tag_once() {
         let html = include_str!("../../../app/index.html");
@@ -2460,6 +2485,63 @@ mod tests {
         assert!(body.contains("Kept Clan"), "{body}");
         assert!(body.contains("sc-settings"), "{body}");
         assert!(!body.contains("Slow Clan"), "{body}");
+    }
+
+    #[tokio::test]
+    async fn miss_during_backoff_returns_while_the_leader_is_under_the_cap() {
+        let (_tree, state, app) = ShellFixture::new("backoff-under-cap").await;
+        assert!(state.public_settings.store(
+            state.public_settings.generation(),
+            named_settings("Kept Clan"),
+            tokio::time::Instant::now(),
+        ));
+        state.public_settings.expire_for_test();
+        let started = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let started_loader = Arc::clone(&started);
+        state.public_settings.set_loader(Some(Arc::new(move || {
+            let started_loader = Arc::clone(&started_loader);
+            Box::pin(async move {
+                started_loader.store(true, std::sync::atomic::Ordering::SeqCst);
+                tokio::time::sleep(Duration::from_secs(30)).await;
+                Ok(named_settings("Slow Clan"))
+            })
+        })));
+        tokio::time::pause();
+        let first = tokio::spawn(shell_text(app.clone(), "/"));
+        for _ in 0..64 {
+            if started.load(std::sync::atomic::Ordering::SeqCst) {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            started.load(std::sync::atomic::Ordering::SeqCst),
+            "the leader must have started before backoff is recorded"
+        );
+        assert!(
+            !state
+                .public_settings
+                .refresh_in_flight_older_than(EMBED_SETTINGS_TIMEOUT),
+            "backoff is recorded while the leader is still under the cap"
+        );
+        state
+            .public_settings
+            .note_refresh_failure(state.public_settings.generation());
+        assert!(state.public_settings.refresh_suppressed());
+
+        let mut second = tokio::spawn(shell_text(app, "/"));
+        // No clock advance. Without the backoff return this miss waits on the
+        // lock inside the cap and stays unfinished.
+        drive(&mut second).await;
+        assert!(
+            second.is_finished(),
+            "backoff must return stale() while the in-flight read is still under the cap"
+        );
+        let body = second.await.unwrap();
+        assert!(body.contains("Kept Clan"), "{body}");
+        assert!(body.contains("sc-settings"), "{body}");
+        assert!(!body.contains("Slow Clan"), "{body}");
+        drop(first);
     }
 
     #[tokio::test]
