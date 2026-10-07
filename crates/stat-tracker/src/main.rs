@@ -1153,9 +1153,13 @@ async fn apply_poll_decision(
     let carried_deferred = current
         .deferred
         .map(|counters| (counters, current.deferred_hero.clone(), current.deferred_at));
-    let candidates = match &decision {
-        boundary::PollDecision::Open(open) => open.candidates.clone(),
-        _ => Vec::new(),
+    let (candidates, end_screen) = match &decision {
+        boundary::PollDecision::Open(open) => {
+            let detail = (open.reason == boundary::CloseReason::EndScreenMap)
+                .then_some((current.pending_boundary, open.new_map.clone()));
+            (open.candidates.clone(), detail)
+        }
+        _ => (Vec::new(), None),
     };
     let commit = boundary::commit_poll(&mut state, decision, now);
     if let Some(closed) = commit.closed {
@@ -1172,6 +1176,17 @@ async fn apply_poll_decision(
                 tracing::info!(
                     session_id = %new_id,
                     "auto-detect: hero select/ban — new game (map vote missed)"
+                );
+            }
+            boundary::CloseReason::EndScreenMap => {
+                let (armed, accolade_map) = end_screen.unwrap_or((false, None));
+                tracing::info!(
+                    reason = closed.reason.log(),
+                    session_id = %new_id,
+                    armed,
+                    sealed_hint = ?closed.seal,
+                    accolade_map = accolade_map.as_deref().unwrap_or("none"),
+                    "auto-detect: new game boundary"
                 );
             }
             other => {
@@ -5641,26 +5656,59 @@ mod tests {
     #[test]
     fn a_main_0_4_18_skeleton_recovers_as_untrusted_unlocked_text() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let now = Utc::now().to_rfc3339();
-        // The eleven keys a 0.4.18 skeleton actually stored. Later fields
-        // stay absent so a missing default fails this load.
+        let now = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        assert!(
+            now.ends_with('Z'),
+            "a 0.4.18 timestamp ends in Z, got {now}"
+        );
+        // The eleven keys a 0.4.18 skeleton actually stored, with a mid-match
+        // gate and the three hero-authority keys. Later fields stay absent so
+        // a missing default fails this load.
         let skeleton = serde_json::json!({
             "session_id": "old",
             "outcome": "unknown",
             "map": "Busan",
             "map_candidates": [],
-            "session_created": false,
+            "session_created": true,
             "opened_at": now,
             "last_activity": now,
             "outcome_recorded_at": null,
-            "gate": null,
-            "last_stats_at": null,
-            "hero_auth": {}
+            "gate": {
+                "accepted": {
+                    "elims": 14,
+                    "assists": 22,
+                    "deaths": 6,
+                    "damage": 2400,
+                    "healing": 9800,
+                    "mitigation": 400
+                },
+                "last_raw": {
+                    "elims": 14,
+                    "assists": 22,
+                    "deaths": 6,
+                    "damage": 2400,
+                    "healing": 9800,
+                    "mitigation": 400
+                },
+                "down_streak_len": [0, 0, 0, 0, 0, 0],
+                "down_streak_last": [0, 0, 0, 0, 0, 0],
+                "last_raw_suspect": [false, false, false, false, false, false]
+            },
+            "last_stats_at": now,
+            "hero_auth": {
+                "career_ever_ok": true,
+                "accepted_hero": "Zenyatta",
+                "portrait_pending": null
+            }
         });
         assert_eq!(
             skeleton.as_object().expect("object").len(),
             11,
             "a 0.4.18 skeleton has these eleven keys and no later fields"
+        );
+        assert_eq!(
+            skeleton["hero_auth"].as_object().expect("hero_auth").len(),
+            3
         );
         std::fs::write(
             active_game_path(dir.path()),
@@ -5678,6 +5726,15 @@ mod tests {
         assert!(recovered.result_mark.is_none());
         assert!(!recovered.pending_boundary);
         assert!(!recovered.awaiting_first_board);
+        assert!(recovered.session_created);
+        assert!(recovered.last_stats_at.is_some());
+        assert_eq!(recovered.gate.map(|gate| gate.accepted.elims), Some(14));
+        assert!(recovered.hero_auth.career_ever_ok);
+        assert_eq!(
+            recovered.hero_auth.accepted_hero.as_deref(),
+            Some("Zenyatta")
+        );
+        assert!(recovered.hero_auth.portrait_pending.is_none());
     }
 
     #[test]
@@ -6585,8 +6642,9 @@ mod tests {
         }
 
         /// Apply one resolved poll tick through [`apply_poll_tick`], the
-        /// same function [`run_loop`] calls, including a streak noted while
-        /// no game is open.
+        /// same function [`run_loop`] calls. [`resolve_word_tick`] has
+        /// already noted the streak. When no game is open, this records a
+        /// confirmed word as the pending outcome.
         async fn apply_resolved_tick(
             &mut self,
             tick: ResolvedWordTick,
@@ -6634,6 +6692,19 @@ mod tests {
                     self.advance(night_tick());
                 }
             }
+        }
+
+        /// A poll tick with no result word and no start screen.
+        async fn no_signal_tick(&mut self) {
+            self.apply_resolved_tick(
+                ResolvedWordTick {
+                    signal: None,
+                    signal_confirmed: false,
+                    accolade_map: None,
+                },
+                None,
+            )
+            .await;
         }
 
         /// One unconfirmed read. Production has not seen the agreeing tick yet.
@@ -7878,7 +7949,7 @@ mod tests {
         assert_eq!(seal.game().outcome, detect::MatchOutcome::Victory);
     }
 
-    async fn text_busan(night: &mut Night) -> String {
+    async fn text_fallback(night: &mut Night, map: &str) -> String {
         let mut g = ActiveGame::open_at(
             format!("{:016x}", rand_id()),
             detect::MatchOutcome::Unknown,
@@ -7893,10 +7964,11 @@ mod tests {
                 night_counters(14, 22, 6, 2400, 9800, 400),
                 "Zenyatta",
                 Some(2),
-                "Busan",
+                map,
                 NIGHT_CLEAN,
             )
             .await;
+        assert_eq!(night.game().map.as_deref(), Some(map));
         assert_eq!(
             night.game().map_source,
             Some(boundary::MapSource::TextFallback)
@@ -7907,30 +7979,7 @@ mod tests {
     #[tokio::test]
     async fn a_text_fallback_sessions_own_accolade_replaces_the_map() {
         let mut night = Night::new().await;
-        let mut g = ActiveGame::open_at(
-            format!("{:016x}", rand_id()),
-            detect::MatchOutcome::Unknown,
-            Vec::new(),
-            night.now,
-        );
-        g.hero_auth.accepted_hero = Some("Zenyatta".into());
-        night.st.active_game = Some(g);
-        night.st.last_game_open = Some(night.now);
-        night
-            .tab_text(
-                night_counters(14, 22, 6, 2400, 9800, 400),
-                "Zenyatta",
-                Some(2),
-                "Dorado",
-                NIGHT_CLEAN,
-            )
-            .await;
-        let dorado = night.id();
-        assert_eq!(night.game().map.as_deref(), Some("Dorado"));
-        assert_eq!(
-            night.game().map_source,
-            Some(boundary::MapSource::TextFallback)
-        );
+        let dorado = text_fallback(&mut night, "Dorado").await;
         night
             .word_tick(detect::MatchOutcome::Victory, Some("Busan"))
             .await;
@@ -7955,7 +8004,7 @@ mod tests {
     #[tokio::test]
     async fn an_armed_text_fallback_is_not_relabelled_by_the_next_map() {
         let mut night = Night::new().await;
-        let busan = text_busan(&mut night).await;
+        let busan = text_fallback(&mut night, "Busan").await;
         night.word_once(detect::MatchOutcome::Defeat).await;
         night.screen(boundary::StartScreen::HeroSelect).await;
         assert!(night.game().pending_boundary);
@@ -7978,8 +8027,19 @@ mod tests {
     #[tokio::test]
     async fn a_text_fallback_hint_is_not_relabelled_by_the_next_result() {
         let mut night = Night::new().await;
-        let busan = text_busan(&mut night).await;
+        let busan = text_fallback(&mut night, "Busan").await;
         night.word_once(detect::MatchOutcome::Defeat).await;
+        night
+            .word_tick(detect::MatchOutcome::Victory, Some("Junkertown"))
+            .await;
+        assert!(night.game().text_fallback_locked);
+        night.advance(Duration::from_secs(4));
+        night.no_signal_tick().await;
+        assert!(
+            night.game().text_fallback_locked,
+            "a tick with no result word keeps the text-fallback lock"
+        );
+        night.advance(Duration::from_secs(4));
         night
             .word(detect::MatchOutcome::Victory, Some("Junkertown"))
             .await;
@@ -7990,9 +8050,76 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn progressed_boards_clear_the_lock_so_the_accolade_can_correct_the_map() {
+        let mut night = Night::new().await;
+        let dorado = text_fallback(&mut night, "Dorado").await;
+        night.word_once(detect::MatchOutcome::Defeat).await;
+        night.word_once(detect::MatchOutcome::Victory).await;
+        assert!(
+            night.game().text_fallback_locked,
+            "a different result replaces the hint and locks the text map"
+        );
+        night.advance(Duration::from_secs(70));
+        night
+            .tab_text(
+                night_counters(16, 24, 7, 2800, 10400, 500),
+                "Zenyatta",
+                Some(2),
+                "Dorado",
+                NIGHT_CLEAN,
+            )
+            .await;
+        assert!(
+            night.game().result_mark.is_some(),
+            "the first progressed board keeps the hint"
+        );
+        assert!(night.game().text_fallback_locked);
+        night.advance(Duration::from_secs(60));
+        night
+            .tab_text(
+                night_counters(18, 26, 8, 3200, 11000, 600),
+                "Zenyatta",
+                Some(2),
+                "Dorado",
+                NIGHT_CLEAN,
+            )
+            .await;
+        assert!(
+            night.game().result_mark.is_none(),
+            "the second progressed board clears the hint"
+        );
+        assert!(
+            !night.game().text_fallback_locked,
+            "clearing the hint clears the text-fallback lock"
+        );
+        night.advance(Duration::from_secs(5 * 60));
+        night
+            .word(detect::MatchOutcome::Victory, Some("Busan"))
+            .await;
+        assert_eq!(night.id(), dorado);
+        assert_eq!(night.game().outcome, detect::MatchOutcome::Victory);
+        assert_eq!(night.game().map.as_deref(), Some("Busan"));
+        assert_eq!(night.game().map_source, Some(boundary::MapSource::Accolade));
+        let snaps = night.store.get_session_snapshots(&dorado).await.unwrap();
+        assert_eq!(
+            snaps.len(),
+            3,
+            "the opening board and both progressed boards"
+        );
+        assert!(
+            snaps.iter().all(|row| row.map_name == "Busan"),
+            "the corrected accolade rewrites every snapshot, got {:?}",
+            snaps
+                .iter()
+                .map(|row| row.map_name.clone())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[tokio::test]
     async fn a_finished_text_fallback_session_keeps_its_map() {
         let mut night = Night::new().await;
-        let busan = text_busan(&mut night).await;
+        let busan = text_fallback(&mut night, "Busan").await;
         night.banner(detect::MatchOutcome::Victory).await;
         assert_eq!(night.game().outcome, detect::MatchOutcome::Victory);
         assert_eq!(night.game().map.as_deref(), Some("Busan"));

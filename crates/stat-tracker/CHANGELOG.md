@@ -10,13 +10,12 @@ Boundaries are one board-order state machine. A result hint stays sealable
 until a second board with progressed stats is accepted after it, or one
 progressed board after a hero select has armed a boundary, or until a
 reset, a gap, a Tab that names a different map, an end screen whose map
-and the session map are both trusted and differ, or an unblocked map
-vote or hero ban seals it. The first
-progressed board keeps the hint. Progressed means a counter moved forward
-from the reset baseline: not the same totals, not a decided result header,
-and not an implausible jump. There is no 60-second hint timer. The
-75-second grace starts when the result is recorded, not when the word was
-first seen.
+and the session map are both trusted and differ, or an unblocked map vote
+or hero ban seals it. The first progressed board keeps the hint.
+Progressed means a counter moved forward from the reset baseline: not
+the same totals, not a decided result header, and not an implausible
+jump. There is no 60-second hint timer. The 75-second grace starts
+when the result is recorded, not when the word was first seen.
 
 Wall-clock time is the 75-second grace, the 120-second stat gap, the
 45-second wait before the first fresh-match board counts, the 20-minute
@@ -93,7 +92,8 @@ The new session takes the new word and that map. When this tick has no
 map of its own, it uses the map from the previous read of the same
 outcome. That map is stored again on every read, so reads under 60
 seconds apart can pass it along, and a read exactly 60 seconds later
-still carries it. A read older than that window is dropped. This is
+still carries it. A carried map older than that window is dropped. The
+late read still counts as a new unconfirmed word. This is
 harmless for the confirm itself, because the second read already
 agrees; the carried name is what the split uses when this tick has
 none. If either side has no trusted name, the confirming read seals
@@ -112,22 +112,25 @@ A trusted top bar and a trusted accolade that disagree inside one
 match open a new session and seal this session's hint. The cost is
 this match's real result leaving with that split when the two reads
 simply disagree, before the player has queued again. That close is
-logged as an end-screen map, not as a stat regression, so it can be
-counted on its own. A gap and a hinted Tab stay a stat regression.
+logged as an end-screen map, counted apart from a stat regression.
+The log also records whether a boundary was armed, the sealed hint, and
+the accolade map, so a disagreement can be told from a real requeue.
+A gap and a hinted Tab stay a stat regression.
 
 A full-board text fallback is not a map for a different-map split. An
 accolade replaces that name only while no boundary signal has been seen
-yet: no arm, no start screen, no held reset, the outcome not yet
-recorded, and no hint of a different result. After any of those
+yet: no arm, no start screen, no primed or held reset, the outcome not
+yet recorded, and no hint of a different result. After any of those
 signals, the accolade must not rewrite the map or its snapshots. The
 tracker cannot tell that the accolade is this session's own end screen
 beyond those signals. A hint that matches the next result, or a session
 with no hint, can still take the next game's accolade. Replacing a
-hint of a different result closes the window until the hint is cleared,
-so the confirming read cannot relabel the map. A misread end title that
-sets the lock still blocks this session's own accolade until that hint
-is cleared, and an arm blocks the same correction until the hint is
-cleared. A progressed board that clears the hint also clears the lock.
+hint of a different result closes the window, so the confirming read
+cannot relabel the map. A misread end title that sets the lock, and an
+arm, keep the text name. The confirming read records the result in that
+same tick, so the hint is not cleared and the text name stays. The text
+name changes only when progressed boards clear the hint before that end
+screen. Those boards also clear the lock.
 A carry older than the confirm window is dropped, so it cannot relabel
 the session. A later top bar that names the same map still upgrades the
 source. A skeleton written before 0.4.19 has no source; a map on that
