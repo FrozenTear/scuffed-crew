@@ -153,7 +153,8 @@ fn format_date(dt: &DateTime<Utc>) -> String {
 
 /// Shared map → game mode (used by maps tab + overview mode chips).
 /// Delegates to [`scuffed_types::MapName`] so accented/unaccented live names
-/// (Paraíso/Paraiso, Esperança/Esperanca) and Neon Junction bucket correctly.
+/// (Paraíso/Paraiso, Esperança/Esperanca, Watchpoint: Grímsvötn/Grimsvotn)
+/// and Neon Junction bucket correctly.
 pub(super) fn map_game_mode(name: &str) -> &'static str {
     scuffed_types::MapName::game_mode_label(name)
 }
@@ -1170,5 +1171,33 @@ pub fn Stats() -> Element {
             // Tab content
             {tab_body}
         }
+    }
+}
+
+#[cfg(test)]
+mod map_mode_tests {
+    use super::map_game_mode;
+
+    #[test]
+    fn grimsvotn_variants_bucket_as_escort() {
+        for name in [
+            "Watchpoint: Grímsvötn",
+            "Watchpoint: Grimsvotn",
+            "Watchpoint: Grímsvotn",
+            "Watchpoint: Grimsvötn",
+            "WATCHPOINT: grímsvötn",
+            "watchpoint grimsvotn",
+            "watchpointgrimsvotn",
+            "grimsvotn",
+            "grímsvötn",
+            "grimsvötn",
+            "grímsvotn",
+        ] {
+            assert_eq!(map_game_mode(name), "Escort", "{name}");
+        }
+        assert_eq!(map_game_mode("Watchpoint: Gibraltar"), "Escort");
+        assert_eq!(map_game_mode("Watchpoint"), "Escort");
+        assert_eq!(map_game_mode("gibraltar"), "Escort");
+        assert_eq!(map_game_mode("not a map"), "Other");
     }
 }
