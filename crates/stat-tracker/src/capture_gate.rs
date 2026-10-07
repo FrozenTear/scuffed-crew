@@ -96,7 +96,7 @@ pub struct Counters {
 }
 
 impl Counters {
-    fn to_array(self) -> [u32; GATE_COLS] {
+    pub(crate) fn to_array(self) -> [u32; GATE_COLS] {
         [
             self.elims,
             self.assists,
@@ -135,7 +135,7 @@ impl Counters {
 /// a pre-un-latch build deserializes cleanly (missing → zero/false, i.e. no
 /// streak in progress, previous raw treated as clean). Do not rename or drop the
 /// existing fields — that would silently discard recovered in-game state.
-#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GateState {
     pub accepted: Counters,
     pub last_raw: Counters,
@@ -210,8 +210,8 @@ const KILL_COLS: [usize; 3] = [0, 1, 2];
 /// so a genuine stomp is never rejected (E climbs 22→28 in ~90s = +6, cap ≥ 26;
 /// 15→22 in ~41s = +7, cap ≥ 16) while the 9X ghost sits far above it
 /// (E 9→91 in 75s: cap = 75/5 + 8 = 23, held).
-const KILL_RATE_DIVISOR_SECS: u64 = 5;
-const KILL_RATE_SLACK: u32 = 8;
+pub(crate) const KILL_RATE_DIVISOR_SECS: u64 = 5;
+pub(crate) const KILL_RATE_SLACK: u32 = 8;
 
 /// Wide-column (DMG/HLG/MIT) rate ceiling applied **only when the current read
 /// is edge-ink suspect** (CG-4 B1). Clean wide advances stay uncapped so a real
@@ -222,8 +222,8 @@ const KILL_RATE_SLACK: u32 = 8;
 /// - Antarctic clean climb 6810→10311 in 60s (+3501) must pass if ever suspect
 /// - Antarctic inject 3235→35031 in 20s (+31796) must hold when suspect
 /// - Field HLG 2782→22994 (any short gap) must hold when suspect
-const WIDE_RATE_PER_SEC: u32 = 80;
-const WIDE_RATE_SLACK: u32 = 2500;
+pub(crate) const WIDE_RATE_PER_SEC: u32 = 80;
+pub(crate) const WIDE_RATE_SLACK: u32 = 2500;
 
 /// Absolute floor of the corroboration band; the effective band is
 /// `max(CORROBORATION_ABS, level/10)` so a repeated high read still corroborates

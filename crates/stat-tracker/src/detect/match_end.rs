@@ -1055,7 +1055,7 @@ pub fn read_accolade_map(img: &DynamicImage) -> Option<String> {
     let prepared = crate::ocr::preprocess::prepare_title(&crop);
     // PSM 6 (block): the crop holds two short lines (map, match time).
     let text = crate::ocr::recognize_prepared(&prepared, "6", None).ok()?;
-    let map = crate::parse::match_map_in_text(&text);
+    let map = crate::parse::exact_map_in_text(&text);
     if let Some(m) = &map {
         tracing::info!(map = %m, raw = %text.trim(), "map read from accolade screen");
     }
