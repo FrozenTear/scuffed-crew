@@ -2036,6 +2036,10 @@ mod tests {
             !apostrophe_out.contains("content=\"Old\""),
             "{apostrophe_out}"
         );
+        assert_eq!(
+            rewrite_document_head("<meta name=\"description\" content = \"a>b\">", "", "New"),
+            "<meta name=\"description\" content = \"New\">"
+        );
     }
 
     /// Rewrite the repo `crates/app/index.html`, and an optional second file.
