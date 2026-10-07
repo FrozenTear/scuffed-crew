@@ -73,4 +73,20 @@ mod tests {
             assert_eq!(found.name, name);
         }
     }
+
+    /// The panel and picker read `CatalogHero::role`. That field is
+    /// `role_for_hero_name` for every shared name, which the tracker test
+    /// `role_for_hero_name_matches_guess_role` compares to `guess_role`.
+    #[test]
+    fn catalog_roles_match_role_for_hero_name() {
+        assert_eq!(ROSTER.len(), scuffed_types::HEROES.len());
+        for name in scuffed_types::HEROES {
+            let hero = hero_by_id(&hero_id(name)).unwrap_or_else(|| panic!("{name}"));
+            assert_eq!(
+                hero.role,
+                scuffed_types::role_for_hero_name(name).unwrap(),
+                "{name}"
+            );
+        }
+    }
 }

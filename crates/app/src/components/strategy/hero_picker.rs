@@ -199,7 +199,7 @@ impl From<&'static super::hero_catalog::CatalogHero> for HeroDef {
         HeroDef {
             id: hero.id.as_str(),
             name: hero.name,
-            role: scuffed_types::role_for_hero_name(hero.name).unwrap_or(HeroRole::Damage),
+            role: hero.role,
             icon_path: super::hero_catalog::icon_path(&hero.id),
             abilities: Vec::new(),
         }

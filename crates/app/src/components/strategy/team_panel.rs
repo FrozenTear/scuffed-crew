@@ -147,25 +147,20 @@ const TEAM_PANEL_CSS: &str = r#"
     }
 "#;
 
-/// Name and role for a filled slot. The role comes from `role_for_hero_name`,
-/// the lookup `tracker_stamped_roles` and `role_for_hero_name_matches_guess_role`
-/// pin. Unknown ids stay "Unknown" and count as Damage.
+/// Name and role for a filled slot. The role is the catalog's `role`, which
+/// the roster sets from `role_for_hero_name`. Unknown ids stay "Unknown" and
+/// count as Damage.
 fn assigned_hero(id: &str) -> (&'static str, HeroRole) {
     match super::hero_catalog::hero_by_id(id) {
-        Some(hero) => (
-            hero.name,
-            scuffed_types::role_for_hero_name(hero.name).unwrap_or(HeroRole::Damage),
-        ),
+        Some(hero) => (hero.name, hero.role),
         None => ("Unknown", HeroRole::Damage),
     }
 }
 
 /// 6v6 slots accept any role. 5v5 slots accept only the slot's required role.
-/// The role is `role_for_hero_name`, same as a filled slot.
+/// The role is the catalog's `role`, same as a filled slot.
 fn slot_accepts(hero: &super::hero_catalog::CatalogHero, is_6v6: bool, slot: TeamSlot) -> bool {
-    is_6v6
-        || scuffed_types::role_for_hero_name(hero.name).unwrap_or(HeroRole::Damage)
-            == slot.required_role()
+    is_6v6 || hero.role == slot.required_role()
 }
 
 #[component]
@@ -353,20 +348,14 @@ mod tests {
 
     #[test]
     fn filled_slots_use_role_for_hero_name() {
-        for id in [
-            "domina",
-            "dmon",
-            "sombra",
-            "doctrine",
-            "jetpack-cat",
-            "mizuki",
-            "wuyang",
-        ] {
-            let (name, role) = assigned_hero(id);
+        for name in scuffed_types::HEROES {
+            let id = super::super::hero_catalog::hero_id(name);
+            let (shown, role) = assigned_hero(&id);
+            assert_eq!(shown, *name, "{name}");
             assert_eq!(
                 role,
                 scuffed_types::role_for_hero_name(name).unwrap(),
-                "{id}"
+                "{name}"
             );
         }
         assert_eq!(assigned_hero("dmon"), ("D.Mon", HeroRole::Tank));
