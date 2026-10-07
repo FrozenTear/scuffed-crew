@@ -59,7 +59,7 @@ use scuffed_db::{ForumBoard, ForumBoardNode, ForumCategoryNode, MatchType, Tourn
 use tower::Service;
 use tower_http::services::ServeDir;
 
-use crate::state::{AppState, CachedPublicSettings};
+use crate::state::{AppState, CachedPublicSettings, PublicSettingsCache};
 
 const SETTINGS_SCRIPT_OPEN: &str = "<script id=\"sc-settings\" type=\"application/json\">";
 
@@ -453,6 +453,11 @@ fn replace_title_text(head: &str, org_name: &str) -> String {
     let Some(org_name) = filled_setting(org_name) else {
         return head.to_string();
     };
+    // Zero titles stay absent. More than one is left untouched, same as a
+    // template the real-index check rejects.
+    if title_start_count(head) != 1 {
+        return head.to_string();
+    }
     let escaped = escape_html_text(org_name);
     let mut out = String::with_capacity(head.len() + escaped.len());
     let mut i = 0;
@@ -633,6 +638,12 @@ fn find_tag(html: &str, from: usize, needle: &str) -> Option<usize> {
             i += 1;
             continue;
         }
+        // A bare `<` in text (`< B's`) is not a tag. Only `<` followed by a
+        // letter, `/`, `!`, or `?` starts one.
+        if !lt_opens_tag(bytes, i) {
+            i += 1;
+            continue;
+        }
         if let Some(next) = skip_raw_region(bytes, i) {
             i = next;
             continue;
@@ -642,6 +653,13 @@ fn find_tag(html: &str, from: usize, needle: &str) -> Option<usize> {
         {
             return Some(i);
         }
+        // Title text is not scanned. `<!--` or `<script` inside it must not
+        // hide a later `</head>`. Resume at `</title` so that closer is visible.
+        if eq_ignore_ascii_case_at(bytes, i, b"<title") && tag_name_ends_at(bytes, i + 6) {
+            let content_start = tag_gt_end(bytes, i).unwrap_or(bytes.len());
+            i = find_title_close(html, content_start).unwrap_or(bytes.len());
+            continue;
+        }
         // Skip the rest of this tag, including quoted attribute values, so
         // `<!--` or `<script` inside quotes is not treated as markup.
         i = tag_gt_end(bytes, i).unwrap_or(i + 1);
@@ -649,25 +667,58 @@ fn find_tag(html: &str, from: usize, needle: &str) -> Option<usize> {
     None
 }
 
+/// `<` at `i` opens a tag when the next byte is an ASCII letter, `/`, `!`, or `?`.
+fn lt_opens_tag(bytes: &[u8], i: usize) -> bool {
+    matches!(
+        bytes.get(i + 1).copied(),
+        Some(b) if b.is_ascii_alphabetic() || b == b'/' || b == b'!' || b == b'?'
+    )
+}
+
+/// How many `<title` start tags `find_tag` sees. Case and attributes count.
+fn title_start_count(html: &str) -> usize {
+    let bytes = html.as_bytes();
+    let mut count = 0;
+    let mut i = 0;
+    while let Some(at) = find_tag(html, i, "<title") {
+        count += 1;
+        let content = tag_gt_end(bytes, at).unwrap_or(html.len());
+        let close = find_title_close(html, content).unwrap_or(html.len());
+        i = tag_gt_end(bytes, close).unwrap_or(html.len());
+    }
+    count
+}
+
 /// Index just past the `>` that ends the tag whose `<` is at `open`.
-/// Quoted attribute values are skipped, so a `>` inside them does not end the tag.
+/// A quoted run starts only after `=`, so an apostrophe in text or in an
+/// unquoted value does not swallow the rest of the tag. A `>` inside a real
+/// attribute value does not end the tag.
 fn tag_gt_end(bytes: &[u8], open: usize) -> Option<usize> {
     let mut i = open + 1;
+    let mut after_eq = false;
     while i < bytes.len() {
-        match bytes[i] {
-            b'"' | b'\'' => {
-                let quote = bytes[i];
+        let b = bytes[i];
+        if after_eq && (b == b'"' || b == b'\'') {
+            let quote = b;
+            i += 1;
+            while i < bytes.len() && bytes[i] != quote {
                 i += 1;
-                while i < bytes.len() && bytes[i] != quote {
-                    i += 1;
-                }
-                if i < bytes.len() {
-                    i += 1;
-                }
             }
-            b'>' => return Some(i + 1),
-            _ => i += 1,
+            if i < bytes.len() {
+                i += 1;
+            }
+            after_eq = false;
+            continue;
         }
+        if b == b'>' {
+            return Some(i + 1);
+        }
+        if b == b'=' {
+            after_eq = true;
+        } else if !b.is_ascii_whitespace() {
+            after_eq = false;
+        }
+        i += 1;
     }
     None
 }
@@ -759,14 +810,30 @@ fn find_close_tag(bytes: &[u8], from: usize, name: &str) -> Option<usize> {
     None
 }
 
+/// Holds the refresh lock for a spawned read and clears its start time on drop.
+struct InFlightRefresh {
+    cache: PublicSettingsCache,
+    _flight: tokio::sync::OwnedMutexGuard<()>,
+}
+
+impl Drop for InFlightRefresh {
+    fn drop(&mut self) {
+        self.cache.clear_refresh_started();
+    }
+}
+
 async fn load_embed(state: &AppState) -> Option<Arc<CachedPublicSettings>> {
     if let Some(hit) = state.public_settings.fresh() {
         return Some(hit);
     }
-    // A leader that already ran past the cap still holds the refresh lock and
-    // has recorded backoff. The same is true while refreshes are suppressed
-    // after an error. Waiting on that lock would cost every miss the full cap.
-    if state.public_settings.refresh_suppressed() {
+    // A leader that is already older than the cap still holds the refresh
+    // lock. Backoff covers the same miss for one second after a timeout or
+    // error. Either way, waiting on that lock would cost every miss the cap.
+    if state.public_settings.refresh_suppressed()
+        || state
+            .public_settings
+            .refresh_in_flight_older_than(EMBED_SETTINGS_TIMEOUT)
+    {
         return state.public_settings.stale();
     }
     // Recorded before the wait. A save that bumps the generation while this
@@ -801,9 +868,14 @@ async fn load_embed_locked(state: &AppState) -> Option<Arc<CachedPublicSettings>
     let generation = state.public_settings.generation();
     let task_state = state.clone();
     let task = tokio::spawn(async move {
-        let _flight = flight;
         // TTL starts here, when the read starts, not when it stores.
+        // The wrapper clears that mark when the lock drops, including on panic.
         let started = tokio::time::Instant::now();
+        let _flight = InFlightRefresh {
+            cache: task_state.public_settings.clone(),
+            _flight: flight,
+        };
+        task_state.public_settings.note_refresh_started(started);
         match embed_read(&task_state).await {
             Ok(payload) => {
                 let cached = Arc::new(payload);
@@ -1885,10 +1957,21 @@ mod tests {
         assert!(!head.contains("</head>"));
 
         // Title text is not a raw region. `<!--` and `<script` there must not
-        // hide the real `</title>`.
-        let titled = "<title>See <!-- not a comment <script> x</title>";
+        // hide the real `</title>` or the following `</head>`.
+        let titled = "<title>See <!-- not a comment <script> x</title></head>";
+        let titled_end = find_head_close(titled).expect("title text must not hide </head>");
+        assert!(titled[titled_end..].starts_with("</head>"));
         assert_eq!(
             rewrite_document_head(titled, "Boot", ""),
+            "<title>Boot</title></head>"
+        );
+
+        // A bare `<` and apostrophes in text are not markup.
+        let stray = "<title>A < B's</title></head><body><p>it's</p>";
+        let stray_end = find_head_close(stray).expect("B's and it's must not hide </head>");
+        assert!(stray[stray_end..].starts_with("</head><body><p>it's</p>"));
+        assert_eq!(
+            rewrite_document_head(&stray[..stray_end], "Boot", ""),
             "<title>Boot</title>"
         );
 
@@ -1906,6 +1989,27 @@ mod tests {
             );
             assert!(rewritten.starts_with(prefix), "{rewritten}");
         }
+    }
+
+    #[test]
+    fn title_rewrite_requires_exactly_one_start_tag() {
+        let none = "<meta name=\"description\" content=\"Old\">";
+        assert_eq!(title_start_count(none), 0);
+        assert_eq!(
+            rewrite_document_head(none, "Boot", "Desc"),
+            "<meta name=\"description\" content=\"Desc\">"
+        );
+
+        let two = "<title>One</title><TITLE lang=\"en\">Two</title>";
+        assert_eq!(title_start_count(two), 2);
+        assert_eq!(rewrite_document_head(two, "Boot", ""), two);
+
+        let one = "<title lang=\"en\">One</title>";
+        assert_eq!(title_start_count(one), 1);
+        assert_eq!(
+            rewrite_document_head(one, "Boot", ""),
+            "<title lang=\"en\">Boot</title>"
+        );
     }
 
     /// Rewrite the repo `crates/app/index.html`, and an optional second file.
@@ -1949,6 +2053,16 @@ mod tests {
         );
         assert!(out[head_at..].starts_with("</head>"));
         assert_eq!(&out[head_at..], &html[source_head..]);
+        assert_eq!(
+            title_start_count(html),
+            1,
+            "template must contain exactly one <title"
+        );
+        assert_eq!(
+            title_start_count(&out),
+            1,
+            "rewritten shell must contain exactly one <title"
+        );
         assert_eq!(
             out.matches(&format!("<title>{escaped_org}</title>"))
                 .count(),
@@ -2294,6 +2408,53 @@ mod tests {
         assert!(
             second.is_finished(),
             "a miss during a read that already passed the cap must not wait out the cap"
+        );
+        let body = second.await.unwrap();
+        assert!(body.contains("Kept Clan"), "{body}");
+        assert!(body.contains("sc-settings"), "{body}");
+        assert!(!body.contains("Slow Clan"), "{body}");
+    }
+
+    #[tokio::test]
+    async fn miss_after_backoff_returns_while_the_leader_is_still_past_the_cap() {
+        let (_tree, state, app) = ShellFixture::new("slow-after-backoff").await;
+        assert!(state.public_settings.store(
+            state.public_settings.generation(),
+            named_settings("Kept Clan"),
+            tokio::time::Instant::now(),
+        ));
+        state.public_settings.expire_for_test();
+        state.public_settings.set_loader(Some(Arc::new(|| {
+            Box::pin(async {
+                tokio::time::sleep(Duration::from_secs(30)).await;
+                Ok(named_settings("Slow Clan"))
+            })
+        })));
+        tokio::time::pause();
+        let mut first = tokio::spawn(shell_text(app.clone(), "/"));
+        tokio::time::sleep(EMBED_SETTINGS_TIMEOUT).await;
+        drive(&mut first).await;
+        assert!(first.is_finished());
+        let _ = first.await.unwrap();
+
+        tokio::time::sleep(crate::state::EMBED_REFRESH_BACKOFF).await;
+        assert!(
+            !state.public_settings.refresh_suppressed(),
+            "backoff must have elapsed while the leader is still reading"
+        );
+        assert!(
+            state
+                .public_settings
+                .refresh_in_flight_older_than(EMBED_SETTINGS_TIMEOUT),
+            "the leader must still be in flight past the cap"
+        );
+
+        let mut second = tokio::spawn(shell_text(app, "/"));
+        // No further clock advance. Waiting on the lock would leave this inside the cap.
+        drive(&mut second).await;
+        assert!(
+            second.is_finished(),
+            "a miss must not wait the cap while the in-flight read is still past it"
         );
         let body = second.await.unwrap();
         assert!(body.contains("Kept Clan"), "{body}");

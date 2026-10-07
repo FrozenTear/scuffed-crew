@@ -71,9 +71,10 @@ pub struct AppState {
 pub(crate) const PUBLIC_SETTINGS_TTL: Duration = Duration::from_secs(10);
 
 /// After a failed or timed-out refresh, further misses serve the stale blob
-/// immediately. They do not wait on a read that is already past the cap, and
-/// they do not start their own. An invalidation clears this by moving
-/// `generation`.
+/// immediately for this long instead of starting another read. An invalidation
+/// clears this by moving `generation`. A spawned read that is still in flight
+/// and older than the embed cap is also served stale, until that read drops
+/// its lock. See [`PublicSettingsCache::refresh_in_flight_older_than`].
 pub(crate) const EMBED_REFRESH_BACKOFF: Duration = Duration::from_secs(1);
 
 /// DB-outage warnings for the shell embed, at most once per interval.
@@ -150,6 +151,9 @@ struct PublicSettingsInner {
     entry: Option<PublicSettingsEntry>,
     /// `(generation, when)` of the last failed refresh for that generation.
     refresh_failed: Option<(u64, Instant)>,
+    /// When the spawned read holding `refresh` started. Cleared when that
+    /// lock drops.
+    refresh_started: Option<Instant>,
 }
 
 /// Test-only stand-in for the settings read, invoked at the real load point
@@ -219,6 +223,7 @@ impl PublicSettingsCache {
                 generation: 0,
                 entry: None,
                 refresh_failed: None,
+                refresh_started: None,
             })),
             refresh: Arc::new(tokio::sync::Mutex::new(())),
             last_warn: Arc::new(Mutex::new(None)),
@@ -303,6 +308,26 @@ impl PublicSettingsCache {
             generation,
         });
         true
+    }
+
+    /// Record that the spawned read holding the refresh lock started at `started`.
+    pub(crate) fn note_refresh_started(&self, started: Instant) {
+        self.lock().refresh_started = Some(started);
+    }
+
+    /// Clear the in-flight start. Called when that read drops the refresh lock.
+    pub(crate) fn clear_refresh_started(&self) {
+        self.lock().refresh_started = None;
+    }
+
+    /// `true` when a spawned read is still in flight and started more than `cap` ago.
+    ///
+    /// Callers should serve [`Self::stale`] immediately instead of waiting on
+    /// that read's lock.
+    pub(crate) fn refresh_in_flight_older_than(&self, cap: Duration) -> bool {
+        self.lock()
+            .refresh_started
+            .is_some_and(|started| started.elapsed() > cap)
     }
 
     /// `true` when a refresh for this generation just failed and callers
@@ -779,8 +804,8 @@ mod public_settings_cache_tests {
     #[tokio::test]
     async fn ttl_is_measured_from_when_the_read_started() {
         let cache = PublicSettingsCache::new();
-        let started = Instant::now();
         tokio::time::pause();
+        let started = Instant::now();
         tokio::time::advance(super::PUBLIC_SETTINGS_TTL - std::time::Duration::from_secs(1)).await;
         assert!(cache.store(cache.generation(), payload("Late"), started));
         assert!(
