@@ -325,6 +325,16 @@ fn recognize_cell_with_whitelist(
     let binary = preprocess::prepare_cell_binary(img);
     let suspect = preprocess::has_edge_ink(&binary, EDGE_INK_COLS, EDGE_INK_THRESHOLD);
     if prepared_ink_pixels(&binary) < MIN_CELL_INK_PIXELS {
+        // A dim 0 never clears the HSV mask, so the cell is empty and the
+        // row used to be thrown away. Recover that glyph as 0. Anything
+        // else with no bright ink stays empty — a blank cell is not a zero.
+        if preprocess::dim_zero_glyph(img) {
+            return Ok(CellOcrResult {
+                value: "0".to_string(),
+                confidence: 60,
+                suspect: false,
+            });
+        }
         return Ok(CellOcrResult {
             value: String::new(),
             confidence: 0,
@@ -889,6 +899,32 @@ fn run_ocr(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dim_zero_cell_reads_as_zero() {
+        // The primary mask erases this glyph (ink under the empty-cell
+        // skip). It must still come back as 0, or an early-game row with a
+        // 0 in E/A/D is rejected whole.
+        let img = preprocess::dim_zero_fixtures::dim_zero_cell();
+        let binary = preprocess::prepare_cell_binary(&img);
+        let ink = binary.pixels().filter(|p| p.0[0] < 128).count();
+        assert!(
+            ink < 20,
+            "fixture must be a zero the HSV mask drops, ink={ink}"
+        );
+        let cell = recognize_cell(&img).expect("dim zero cell");
+        assert_eq!(cell.value, "0");
+        assert!(!cell.suspect);
+
+        let stroke =
+            recognize_cell(&preprocess::dim_zero_fixtures::dim_stroke_cell()).expect("dim stroke");
+        assert_eq!(stroke.value, "", "a dim 1 must not be invented as 0");
+        let blank = recognize_cell(&DynamicImage::ImageRgb8(
+            preprocess::dim_zero_fixtures::cell(48, 56),
+        ))
+        .expect("blank");
+        assert_eq!(blank.value, "");
+    }
 
     #[test]
     fn kill_columns_reject_wide_and_multidigit_reads() {

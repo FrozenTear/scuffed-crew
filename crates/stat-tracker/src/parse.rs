@@ -30,19 +30,53 @@ pub fn parse_scoreboard_cells(
     outcome: &str,
     player_name: Option<&str>,
 ) -> Option<PersonalMatch> {
-    let stats = player_row_index
+    read_scoreboard(rows, player_row_index, raw_text, outcome, player_name)
+        .ok()
+        .map(|read| read.matched)
+}
+
+/// Why [`read_scoreboard`] refused a frame. The two cases used to share one
+/// log line ("player row not identified"), so an early-game row whose dim
+/// zeros came back empty looked the same as a frame with no row at all.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScoreboardMiss {
+    /// No highlighted row and the configured name is not in the raw text.
+    PlayerRowNotFound,
+    /// The row was found, but its cells did not parse and the text fallback
+    /// did not yield six in-range stats.
+    CellsUnreadable,
+}
+
+/// One accepted scoreboard read.
+#[derive(Debug)]
+pub struct ScoreboardRead {
+    pub matched: PersonalMatch,
+    /// `false` when the six stats came from the raw-text fallback. The
+    /// capture gate treats that latch as low-trust.
+    pub trusted_cells: bool,
+}
+
+/// Same inputs as [`parse_scoreboard_cells`], plus which path produced the
+/// stats and why a refusal happened.
+pub fn read_scoreboard(
+    rows: &[RowOcrResult],
+    player_row_index: Option<usize>,
+    raw_text: &str,
+    outcome: &str,
+    player_name: Option<&str>,
+) -> Result<ScoreboardRead, ScoreboardMiss> {
+    let from_cells = player_row_index
         .and_then(|idx| rows.get(idx))
-        .and_then(stats_from_row)
-        .or_else(|| {
-            let lines: Vec<&str> = raw_text
-                .lines()
-                .map(|l| l.trim())
-                .filter(|l| !l.is_empty())
-                .collect();
-            player_name
-                .and_then(|name| find_player_row(&lines, name))
-                .and_then(extract_row_stats)
-        })?;
+        .and_then(stats_from_row);
+    let (stats, trusted_cells) = if let Some(stats) = from_cells {
+        (stats, true)
+    } else if let Some(stats) = text_fallback_stats(raw_text, player_name) {
+        (stats, false)
+    } else if player_row_index.is_some() || name_in_raw_text(raw_text, player_name) {
+        return Err(ScoreboardMiss::CellsUnreadable);
+    } else {
+        return Err(ScoreboardMiss::PlayerRowNotFound);
+    };
 
     let lines: Vec<&str> = raw_text
         .lines()
@@ -55,37 +89,40 @@ pub fn parse_scoreboard_cells(
     let map_name = find_map(&lines).unwrap_or_default();
     let game_mode = map_mode(&map_name).unwrap_or("").to_string();
 
-    Some(PersonalMatch {
-        id: None,
-        hero,
-        map_name,
-        game_mode,
-        role,
-        outcome: outcome.to_string(),
-        elims: stats.elims,
-        deaths: stats.deaths,
-        assists: stats.assists,
-        damage: stats.damage,
-        healing: stats.healing,
-        mitigation: stats.mitigation,
-        played_at: SurrealDatetime::from(Utc::now()),
-        synced: false,
-        sync_rev: 0,
-        session_id: String::new(),
-        corrected_hero: None,
-        corrected_role: None,
-        corrected_map_name: None,
-        corrected_outcome: None,
-        corrected_elims: None,
-        corrected_deaths: None,
-        corrected_assists: None,
-        corrected_damage: None,
-        corrected_healing: None,
-        corrected_mitigation: None,
-        edited_fields: Vec::new(),
-        edited_at: None,
-        heroes_played: Vec::new(),
-        segment_resolutions: Vec::new(),
+    Ok(ScoreboardRead {
+        trusted_cells,
+        matched: PersonalMatch {
+            id: None,
+            hero,
+            map_name,
+            game_mode,
+            role,
+            outcome: outcome.to_string(),
+            elims: stats.elims,
+            deaths: stats.deaths,
+            assists: stats.assists,
+            damage: stats.damage,
+            healing: stats.healing,
+            mitigation: stats.mitigation,
+            played_at: SurrealDatetime::from(Utc::now()),
+            synced: false,
+            sync_rev: 0,
+            session_id: String::new(),
+            corrected_hero: None,
+            corrected_role: None,
+            corrected_map_name: None,
+            corrected_outcome: None,
+            corrected_elims: None,
+            corrected_deaths: None,
+            corrected_assists: None,
+            corrected_damage: None,
+            corrected_healing: None,
+            corrected_mitigation: None,
+            edited_fields: Vec::new(),
+            edited_at: None,
+            heroes_played: Vec::new(),
+            segment_resolutions: Vec::new(),
+        },
     })
 }
 
@@ -150,8 +187,9 @@ fn stats_from_row(row: &RowOcrResult) -> Option<PlayerStats> {
     // Sanity gate: eliminations/assists/deaths are small two-digit figures in
     // OW2 (extreme games top out around 70 elims / 30 deaths). A larger value
     // means a neighboring column or badge digit bled into the cell — observed
-    // misreads: 110, 118, 311 slipping past the old 200 cap.
-    if stats.elims > 99 || stats.assists > 99 || stats.deaths > 50 {
+    // misreads: 110, 118, 311 slipping past the old 200 cap. The text fallback
+    // and the capture gate use the same ceilings.
+    if kill_columns_implausible(stats.elims, stats.assists, stats.deaths) {
         tracing::debug!(
             elims = stats.elims,
             assists = stats.assists,
@@ -189,6 +227,12 @@ pub fn player_row_suspect_mask(
     mask
 }
 
+/// E/A above 99 or D above 50 is a column bleed, not a real scoreboard.
+/// Shared with the text fallback and the capture gate's first-capture check.
+pub(crate) fn kill_columns_implausible(elims: u32, assists: u32, deaths: u32) -> bool {
+    elims > 99 || assists > 99 || deaths > 50
+}
+
 fn parse_cell_number(s: &str) -> Option<u32> {
     let cleaned: String = s.chars().filter(|c| c.is_ascii_digit()).collect();
     if cleaned.is_empty() {
@@ -207,6 +251,14 @@ struct PlayerStats {
     mitigation: u32,
 }
 
+fn name_in_raw_text(raw_text: &str, player_name: Option<&str>) -> bool {
+    let Some(name) = player_name else {
+        return false;
+    };
+    let name_lower = name.to_lowercase();
+    raw_text.to_lowercase().contains(&name_lower)
+}
+
 fn find_player_row<'a>(lines: &[&'a str], player_name: &str) -> Option<&'a str> {
     let name_lower = player_name.to_lowercase();
     lines
@@ -218,27 +270,127 @@ fn find_player_row<'a>(lines: &[&'a str], player_name: &str) -> Option<&'a str> 
         .copied()
 }
 
-fn extract_row_stats(line: &str) -> Option<PlayerStats> {
-    let numbers = extract_numbers(line);
-    stats_from_numbers(&numbers)
-}
-
-// OW2 scoreboard stat columns: E, A, D, DMG, HLG, MIT
-fn stats_from_numbers(numbers: &[u32]) -> Option<PlayerStats> {
-    if numbers.len() < 6 {
+/// Stats from the full-board text line that contains the player name.
+///
+/// The per-cell path is positional. This one is not, and the line for row 0
+/// also picks up the hero panel's objective timer (`00:02`), which sits at
+/// the same height. Taking the last six numbers then slid the columns:
+/// `2 0 0 1,105 259 450 00:02` became elims 0, assists 1105, deaths 259.
+/// Rank badges sit *before* the name, so the numbers after the name are the
+/// stats. A clock token is removed first. Anything other than exactly six
+/// numbers after that is contamination (a dropped digit, a timer the clock
+/// strip missed) and the fallback is refused — a dropped capture is
+/// recoverable, a shifted row is not. The six still have to pass the same
+/// kill-column ceilings as [`stats_from_row`].
+fn text_fallback_stats(raw_text: &str, player_name: Option<&str>) -> Option<PlayerStats> {
+    let name = player_name?;
+    let lines: Vec<&str> = raw_text
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
+    let line = find_player_row(&lines, name)?;
+    let suffix = suffix_after_name(line, name)?;
+    let suffix = strip_clock_tokens(suffix);
+    let numbers = extract_numbers(&suffix);
+    if numbers.len() != 6 {
+        tracing::debug!(
+            n = numbers.len(),
+            "rejecting text fallback: not exactly six stats after the player name"
+        );
         return None;
     }
+    let stats = PlayerStats {
+        elims: numbers[0],
+        assists: numbers[1],
+        deaths: numbers[2],
+        damage: numbers[3],
+        healing: numbers[4],
+        mitigation: numbers[5],
+    };
+    if kill_columns_implausible(stats.elims, stats.assists, stats.deaths) {
+        tracing::debug!(
+            elims = stats.elims,
+            assists = stats.assists,
+            deaths = stats.deaths,
+            "rejecting text fallback: kill-column value out of plausible range"
+        );
+        return None;
+    }
+    Some(stats)
+}
 
-    // Take the last 6 numbers — earlier tokens may be from player name/rank OCR artifacts
-    let offset = numbers.len() - 6;
-    Some(PlayerStats {
-        elims: numbers[offset],
-        assists: numbers[offset + 1],
-        deaths: numbers[offset + 2],
-        damage: numbers[offset + 3],
-        healing: numbers[offset + 4],
-        mitigation: numbers[offset + 5],
-    })
+/// Text after the first case-insensitive occurrence of `player_name`.
+fn suffix_after_name<'a>(line: &'a str, player_name: &str) -> Option<&'a str> {
+    let name_lower = player_name.to_lowercase();
+    let line_lower = line.to_lowercase();
+    let start = line_lower.find(&name_lower)?;
+    let end = start + name_lower.len();
+    // ASCII names (the scoreboard case) keep byte indexes aligned. A
+    // lowercasing that changes width is walked so the slice stays on a
+    // char boundary.
+    if line_lower.len() == line.len() {
+        return line.get(end..);
+    }
+    let mut byte = 0;
+    let mut low_byte = 0;
+    for ch in line.chars() {
+        let low: String = ch.to_lowercase().collect();
+        if low_byte >= end {
+            return Some(&line[byte..]);
+        }
+        low_byte += low.len();
+        byte += ch.len_utf8();
+    }
+    if low_byte >= end { Some("") } else { None }
+}
+
+/// Drop `MM:SS` / `M:SS` tokens. The hero-panel objective timer is the one
+/// that lands on the player's OCR line; stat columns do not contain a colon.
+fn strip_clock_tokens(s: &str) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    let mut out = String::with_capacity(s.len());
+    let mut i = 0;
+    while i < chars.len() {
+        if let Some(len) = clock_token_len(&chars, i) {
+            i += len;
+            out.push(' ');
+            continue;
+        }
+        out.push(chars[i]);
+        i += 1;
+    }
+    out
+}
+
+fn clock_token_len(chars: &[char], i: usize) -> Option<usize> {
+    if i > 0 && chars[i - 1].is_ascii_digit() {
+        return None;
+    }
+    let mut j = i;
+    let mut hour = 0;
+    while j < chars.len() && chars[j].is_ascii_digit() {
+        hour += 1;
+        j += 1;
+        if hour > 2 {
+            return None;
+        }
+    }
+    if !(1..=2).contains(&hour) || j >= chars.len() || chars[j] != ':' {
+        return None;
+    }
+    j += 1;
+    let sec_at = j;
+    while j < chars.len() && chars[j].is_ascii_digit() {
+        j += 1;
+        if j - sec_at > 2 {
+            return None;
+        }
+    }
+    if j - sec_at != 2 || (j < chars.len() && chars[j].is_ascii_digit()) {
+        return None;
+    }
+    Some(j - i)
 }
 
 fn extract_numbers(s: &str) -> Vec<u32> {
@@ -662,9 +814,80 @@ mod tests {
         // No per-cell row index, but the player's line is present in the
         // full-image OCR text → stats come from that line, not an arbitrary one.
         let raw = "SOMEONE 9 9 9 9999 9999 9999\nFROZEN 7 1 3 5,155 1,326 3,316";
-        let parsed = parse_scoreboard_cells(&[], None, raw, "defeat", Some("FROZEN")).unwrap();
-        assert_eq!(parsed.elims, 7);
-        assert_eq!(parsed.mitigation, 3316);
+        let read = read_scoreboard(&[], None, raw, "defeat", Some("FROZEN")).unwrap();
+        assert!(!read.trusted_cells);
+        assert_eq!(read.matched.elims, 7);
+        assert_eq!(read.matched.mitigation, 3316);
+    }
+
+    #[test]
+    fn timer_on_the_player_line_does_not_shift_columns() {
+        // Row 0 sits at the same height as the hero panel's OBJ CONTEST TIME.
+        // The old last-6 window turned
+        // "2 0 0 1,105 259 450 ... 00:02" into E 0, A 1105, D 259, DMG 450.
+        let raw = "74 FROZEN Giant Troll 2 0 0 1,105 259 450 00:02";
+        let read = read_scoreboard(&[], None, raw, "unknown", Some("FROZEN")).unwrap();
+        assert!(!read.trusted_cells);
+        let p = &read.matched;
+        assert_eq!(
+            (
+                p.elims,
+                p.assists,
+                p.deaths,
+                p.damage,
+                p.healing,
+                p.mitigation
+            ),
+            (2, 0, 0, 1105, 259, 450)
+        );
+        assert_ne!((p.assists, p.deaths), (1105, 259));
+    }
+
+    #[test]
+    fn shifted_fallback_numbers_are_rejected() {
+        // The six numbers the old window emitted, with the name in front.
+        // Assists 1105 and deaths 259 are not a scoreboard.
+        let raw = "FROZEN 0 1105 259 450 0 2";
+        assert_eq!(
+            read_scoreboard(&[], None, raw, "unknown", Some("FROZEN")).unwrap_err(),
+            ScoreboardMiss::CellsUnreadable
+        );
+        // A dropped zero plus the timer is not six stats. Do not slide.
+        let dropped = "FROZEN 2 1,105 259 450 00:02";
+        assert_eq!(
+            read_scoreboard(&[], None, dropped, "unknown", Some("FROZEN")).unwrap_err(),
+            ScoreboardMiss::CellsUnreadable
+        );
+    }
+
+    #[test]
+    fn identified_row_with_an_empty_cell_is_unreadable_not_missing() {
+        let rows = vec![row(Some("FROZEN"), ["2", "", "0", "1105", "259", "450"])];
+        assert_eq!(
+            read_scoreboard(&rows, Some(0), "", "unknown", Some("FROZEN")).unwrap_err(),
+            ScoreboardMiss::CellsUnreadable
+        );
+        assert_eq!(
+            read_scoreboard(
+                &[],
+                None,
+                "no name on this frame",
+                "unknown",
+                Some("FROZEN")
+            )
+            .unwrap_err(),
+            ScoreboardMiss::PlayerRowNotFound
+        );
+    }
+
+    #[test]
+    fn explicit_zero_cells_are_a_trusted_read() {
+        let rows = vec![row(Some("FROZEN"), ["0", "0", "0", "0", "0", "0"])];
+        let read = read_scoreboard(&rows, Some(0), "", "unknown", Some("FROZEN")).unwrap();
+        assert!(read.trusted_cells);
+        assert_eq!(read.matched.elims, 0);
+        assert_eq!(read.matched.assists, 0);
+        assert_eq!(read.matched.deaths, 0);
     }
 
     #[test]

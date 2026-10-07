@@ -1933,6 +1933,7 @@ struct StagedCapture {
 /// Gate, map, and carried-board decisions for one planned capture.
 ///
 /// `plan.skip_store` is the hold path and is not staged: nothing is written.
+#[allow(clippy::too_many_arguments)]
 fn stage_capture(
     req: &CaptureRequest,
     plan: &boundary::CapturePlan,
@@ -1941,6 +1942,7 @@ fn stage_capture(
     map_from_panel: Option<&str>,
     parsed_map: &str,
     captured_at: chrono::DateTime<Utc>,
+    trusted_cells: bool,
 ) -> StagedCapture {
     let split = plan.split;
     let outcome = plan.stored_outcome;
@@ -1950,7 +1952,7 @@ fn stage_capture(
         req.session_id.clone()
     };
     let gate_prev = gate_prev_for_store(req.prev_gate, req.awaiting_first_board);
-    let gate = capture_gate::apply_gate(gate_prev, raw, suspect, split);
+    let gate = capture_gate::apply_gate_with_trust(gate_prev, raw, suspect, split, trusted_cells);
     let (map_name, map_source) = if split {
         resolved_map(None, map_from_panel, parsed_map, &[])
     } else {
@@ -3829,13 +3831,27 @@ async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<
     // CG-4 C: mutates across this capture; carried back on CaptureReport.
     let mut hero_auth = req.hero_auth.clone();
 
-    if let Some(mut parsed) = parse::parse_scoreboard_cells(
+    let scoreboard_read = parse::read_scoreboard(
         &rows,
         player_row_idx,
         &ocr_result.raw_text,
         &outcome_label,
         player_name,
-    ) {
+    );
+    if let Ok(parsed_read) = &scoreboard_read {
+        let mut parsed = parsed_read.matched.clone();
+        let trusted_cells = parsed_read.trusted_cells;
+        if !trusted_cells {
+            tracing::warn!(
+                elims = parsed.elims,
+                assists = parsed.assists,
+                deaths = parsed.deaths,
+                damage = parsed.damage,
+                healing = parsed.healing,
+                mitigation = parsed.mitigation,
+                "player row found but stat cells unreadable — using raw-text fallback (low trust)"
+            );
+        }
         // Hero authority (CG-4 C): career-panel always wins; portrait may
         // confirm current hero but may only switch if career never succeeded
         // this game and ≥2 consecutive matches ≥0.85. See hero_auth::resolve_hero.
@@ -3977,6 +3993,7 @@ async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<
             map_from_panel.as_deref(),
             &parsed.map_name,
             captured_at,
+            trusted_cells,
         );
         let split = staged.split;
         outcome = staged.outcome;
@@ -4134,14 +4151,27 @@ async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<
             held_at: None,
         })
     } else {
-        // Scoreboard-shaped frame, but the player's row couldn't be positively
-        // identified (no name match, no highlighted row) — recording another
-        // row's stats would be worse than recording nothing.
-        tracing::warn!(
-            "capture rejected — player row not identified (saved to debug/rejected; \
-             set player_name in config.toml if it is missing)"
-        );
-        save_rejected_frame(data_dir, frame_img, "noplayerrow");
+        // Recording another row's stats would be worse than recording nothing.
+        // A found row whose cells did not parse is not the same failure as a
+        // frame where the row itself is missing.
+        let miss = scoreboard_read.unwrap_err();
+        let reason = match miss {
+            parse::ScoreboardMiss::PlayerRowNotFound => {
+                tracing::warn!(
+                    "capture rejected — player row not found (saved to debug/rejected; \
+                     set player_name in config.toml if it is missing)"
+                );
+                "noplayerrow"
+            }
+            parse::ScoreboardMiss::CellsUnreadable => {
+                tracing::warn!(
+                    "capture rejected — player row found but stat cells unreadable \
+                     (saved to debug/rejected)"
+                );
+                "unreadable"
+            }
+        };
+        save_rejected_frame(data_dir, frame_img, reason);
         Ok(CaptureReport {
             recorded: false,
             outcome,
@@ -7295,7 +7325,7 @@ mod tests {
                 .await;
                 return;
             }
-            let staged = stage_capture(&req, &plan, cur, suspect, panel, text_map, self.wall);
+            let staged = stage_capture(&req, &plan, cur, suspect, panel, text_map, self.wall, true);
             write_staged_rows(
                 &self.store,
                 self.dir.path(),

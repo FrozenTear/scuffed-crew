@@ -4,6 +4,34 @@ User-facing notes for `stat-tracker-v*` GitHub Releases. The release workflow
 prepends the section whose heading matches the tag version (for example
 `## 0.4.15` for `stat-tracker-v0.4.15`).
 
+## 0.4.21
+
+A zero on the scoreboard is drawn fainter than the other digits. The
+cell reader was dropping those cells, and one empty cell threw away the
+whole row, so an early Tab with a 0 in elims, assists, or deaths was
+not saved. Those zeros now read as 0. A row that is on screen but whose
+cells still cannot be read is logged separately from a frame where the
+player row was not found.
+
+The text fallback no longer takes the last six numbers on the player's
+line. That line also contains the hero panel's objective timer, and a
+trailing `00:02` shifted the columns (assists and deaths became the
+damage and healing figures). The fallback now ignores a clock, keeps a
+line only when six numbers sit after the name, and uses the same
+elims, assists, and deaths ceilings as the cell reader. Numbers from
+that fallback are low-trust: the first capture is checked too, and one
+clean cell read replaces them. A trusted cell read still has to agree
+three times before a confirmed value moves down.
+
+### Install
+
+```sh
+curl --proto '=https' -fsSL https://raw.githubusercontent.com/FrozenTear/scuffed-crew/main/crates/stat-tracker/dist/bootstrap.sh | bash
+```
+
+Or extract the tarball and run `./install.sh`. Pin with
+`STAT_TRACKER_TAG=stat-tracker-v0.4.21`.
+
 ## 0.4.20
 
 The last game of the night now uploads by itself about 3 minutes after

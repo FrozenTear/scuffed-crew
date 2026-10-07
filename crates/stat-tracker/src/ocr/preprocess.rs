@@ -138,6 +138,184 @@ const CELL_UPSCALE_TARGET_H: u32 = 64;
 /// oversmooth thin digits into empty reads.
 const CELL_UPSCALE_MAX_FACTOR: f64 = 3.0;
 
+/// Gray value band of a dim `0`. OW2 draws zero fainter than the other
+/// digits. [`hsv_white_mask`]'s hard floor is 150, and a glyph near 122 is
+/// weighted under the binary cut in [`prepare_cell_binary`], so the cell
+/// comes back empty and the whole row is dropped. Bright digits stay above
+/// this ceiling and keep the Tesseract path. Saturated row-fill fails the
+/// saturation cap and is not ink.
+const DIM_ZERO_V_MIN: u8 = 96;
+const DIM_ZERO_V_MAX: u8 = 148;
+const DIM_ZERO_SAT_MAX: u8 = 80;
+
+/// Whether `img` is a single dim `0`: a gray ring the primary cell mask
+/// erases, with one hole sitting in the middle of the glyph.
+///
+/// Called only after that mask found almost no ink. A `6` or `9` also has
+/// one hole, but the hole sits in the lower or upper half; a `1` has none;
+/// an `8` has two. Those stay unread so a failed cell is still rejected
+/// instead of being invented as zero.
+pub fn dim_zero_glyph(img: &DynamicImage) -> bool {
+    let rgb = img.to_rgb8();
+    let (w, h) = rgb.dimensions();
+    if w < 12 || h < 16 || w > 400 || h > 400 {
+        return false;
+    }
+    let n = (w * h) as usize;
+    let mut ink = vec![false; n];
+    let (mut min_x, mut min_y, mut max_x, mut max_y) = (w, h, 0u32, 0u32);
+    let mut ink_count = 0u32;
+    for y in 0..h {
+        for x in 0..w {
+            let [r, g, b] = rgb.get_pixel(x, y).0;
+            let v = r.max(g).max(b);
+            let min_c = r.min(g).min(b);
+            let sat = if v == 0 {
+                0
+            } else {
+                ((u16::from(v - min_c) * 255) / u16::from(v)) as u8
+            };
+            if !(DIM_ZERO_V_MIN..=DIM_ZERO_V_MAX).contains(&v) || sat > DIM_ZERO_SAT_MAX {
+                continue;
+            }
+            ink[(y * w + x) as usize] = true;
+            ink_count += 1;
+            min_x = min_x.min(x);
+            min_y = min_y.min(y);
+            max_x = max_x.max(x);
+            max_y = max_y.max(y);
+        }
+    }
+    // A zero stroke is a thin ring, not a speck and not a filled blob.
+    if ink_count < 24 {
+        return false;
+    }
+    let bw = max_x - min_x + 1;
+    let bh = max_y - min_y + 1;
+    if bw < 6 || bh < 10 {
+        return false;
+    }
+    let aspect = bw as f32 / bh as f32;
+    if !(0.35..=1.05).contains(&aspect) {
+        return false;
+    }
+    let bbox_area = bw * bh;
+    let fill = ink_count * 100 / bbox_area;
+    if !(15..=75).contains(&fill) {
+        return false;
+    }
+
+    // Non-ink pixels connected to the crop border are the background. What
+    // remains inside the ring is the hole.
+    let mut exterior = vec![false; n];
+    let mut stack = Vec::new();
+    {
+        let mut seed = |x: u32, y: u32| {
+            let i = (y * w + x) as usize;
+            if !ink[i] && !exterior[i] {
+                exterior[i] = true;
+                stack.push((x, y));
+            }
+        };
+        for x in 0..w {
+            seed(x, 0);
+            seed(x, h - 1);
+        }
+        for y in 0..h {
+            seed(0, y);
+            seed(w - 1, y);
+        }
+    }
+    while let Some((x, y)) = stack.pop() {
+        let mut step = |nx: u32, ny: u32| {
+            let i = (ny * w + nx) as usize;
+            if !ink[i] && !exterior[i] {
+                exterior[i] = true;
+                stack.push((nx, ny));
+            }
+        };
+        if x > 0 {
+            step(x - 1, y);
+        }
+        if x + 1 < w {
+            step(x + 1, y);
+        }
+        if y > 0 {
+            step(x, y - 1);
+        }
+        if y + 1 < h {
+            step(x, y + 1);
+        }
+    }
+
+    let mut hole = vec![false; n];
+    let mut hole_count = 0u32;
+    for y in min_y..=max_y {
+        for x in min_x..=max_x {
+            let i = (y * w + x) as usize;
+            if !ink[i] && !exterior[i] {
+                hole[i] = true;
+                hole_count += 1;
+            }
+        }
+    }
+    // One enclosed hole, large enough to be the counter of a zero and not
+    // most of the glyph.
+    if hole_count < 8 || hole_count * 100 / bbox_area > 55 {
+        return false;
+    }
+    let mut components = 0u32;
+    let mut sum_x = 0u64;
+    let mut sum_y = 0u64;
+    let mut seen = vec![false; n];
+    for y in min_y..=max_y {
+        for x in min_x..=max_x {
+            let start = (y * w + x) as usize;
+            if !hole[start] || seen[start] {
+                continue;
+            }
+            components += 1;
+            if components > 1 {
+                return false;
+            }
+            let mut q = vec![(x, y)];
+            seen[start] = true;
+            while let Some((cx, cy)) = q.pop() {
+                sum_x += u64::from(cx);
+                sum_y += u64::from(cy);
+                let mut visit = |nx: u32, ny: u32| {
+                    let i = (ny * w + nx) as usize;
+                    if hole[i] && !seen[i] {
+                        seen[i] = true;
+                        q.push((nx, ny));
+                    }
+                };
+                if cx > min_x {
+                    visit(cx - 1, cy);
+                }
+                if cx < max_x {
+                    visit(cx + 1, cy);
+                }
+                if cy > min_y {
+                    visit(cx, cy - 1);
+                }
+                if cy < max_y {
+                    visit(cx, cy + 1);
+                }
+            }
+        }
+    }
+    if components != 1 {
+        return false;
+    }
+    let hx = sum_x as f32 / hole_count as f32;
+    let hy = sum_y as f32 / hole_count as f32;
+    let cx = (min_x + max_x) as f32 / 2.0;
+    let cy = (min_y + max_y) as f32 / 2.0;
+    // A 6's hole sits low and a 9's sits high. A zero's hole is centered.
+    (hx - cx).abs() <= bw as f32 * 0.22 && (hy - cy).abs() <= bh as f32 * 0.22
+}
+
 /// Binarized cell WITHOUT the OCR white border: foreground ink = 0 (black),
 /// background = 255. This is the image [`prepare_cell`] borders for Tesseract;
 /// the edge-ink suspect check ([`edge_ink_fraction`]) runs on the *borderless*
@@ -1507,6 +1685,101 @@ mod prepare_title_chroma_tests {
         assert!(
             tall_ink_columns(&trimmed) >= 30,
             "trimmed image has no magenta title ink"
+        );
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod dim_zero_fixtures {
+    use super::*;
+
+    const BG: Rgb<u8> = Rgb([72, 28, 112]);
+    /// Gray just under the HSV soft-weight binary cut (value ~122).
+    const DIM: Rgb<u8> = Rgb([122, 122, 122]);
+
+    pub(crate) fn cell(w: u32, h: u32) -> RgbImage {
+        RgbImage::from_pixel(w, h, BG)
+    }
+
+    pub(crate) fn paint_ring(
+        img: &mut RgbImage,
+        cx: f32,
+        cy: f32,
+        rx: f32,
+        ry: f32,
+        thickness: f32,
+        color: Rgb<u8>,
+    ) {
+        let (w, h) = img.dimensions();
+        let norm = thickness / rx.min(ry);
+        for y in 0..h {
+            for x in 0..w {
+                let dx = (x as f32 + 0.5 - cx) / rx;
+                let dy = (y as f32 + 0.5 - cy) / ry;
+                let d = dx.mul_add(dx, dy * dy).sqrt();
+                if d <= 1.0 && d >= 1.0 - norm {
+                    img.put_pixel(x, y, color);
+                }
+            }
+        }
+    }
+
+    /// Native-height kill cell whose only glyph is a dim zero. The primary
+    /// mask drops it (see the OCR test); this is the shape `dim_zero_glyph`
+    /// has to accept.
+    pub(crate) fn dim_zero_cell() -> DynamicImage {
+        let mut img = cell(48, 56);
+        paint_ring(&mut img, 24.0, 28.0, 8.0, 14.0, 3.0, DIM);
+        DynamicImage::ImageRgb8(img)
+    }
+
+    pub(crate) fn dim_stroke_cell() -> DynamicImage {
+        let mut img = cell(48, 56);
+        for y in 12..44 {
+            for x in 22..27 {
+                img.put_pixel(x, y, DIM);
+            }
+        }
+        DynamicImage::ImageRgb8(img)
+    }
+
+    /// A dim 6: bowl low, stem up the left. The hole is in the lower half of
+    /// the glyph, so it must not be called a zero.
+    pub(crate) fn dim_six_cell() -> DynamicImage {
+        let mut img = cell(48, 56);
+        paint_ring(&mut img, 24.0, 40.0, 8.0, 9.0, 2.5, DIM);
+        for y in 8..40 {
+            for x in 16..20 {
+                img.put_pixel(x, y, DIM);
+            }
+        }
+        DynamicImage::ImageRgb8(img)
+    }
+
+    #[test]
+    fn a_dim_ring_is_a_zero_and_a_stroke_is_not() {
+        assert!(
+            dim_zero_glyph(&dim_zero_cell()),
+            "centered dim ring must read as 0"
+        );
+        assert!(
+            !dim_zero_glyph(&dim_stroke_cell()),
+            "a dim 1 has no hole and must stay unread"
+        );
+        assert!(
+            !dim_zero_glyph(&dim_six_cell()),
+            "a low hole is a 6, not a 0"
+        );
+        assert!(!dim_zero_glyph(&DynamicImage::ImageRgb8(cell(48, 56))));
+    }
+
+    #[test]
+    fn a_bright_ring_is_not_the_dim_zero_path() {
+        let mut img = cell(48, 56);
+        paint_ring(&mut img, 24.0, 28.0, 8.0, 14.0, 3.0, Rgb([236, 236, 236]));
+        assert!(
+            !dim_zero_glyph(&DynamicImage::ImageRgb8(img)),
+            "a bright digit stays on the Tesseract path"
         );
     }
 }

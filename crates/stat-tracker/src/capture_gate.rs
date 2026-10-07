@@ -149,6 +149,16 @@ pub struct GateState {
     /// must never corroborate the current capture's upward jump (C).
     #[serde(default)]
     pub last_raw_suspect: [bool; GATE_COLS],
+    /// The latched counters are not confirmed by a clean per-cell read.
+    ///
+    /// Set when they came from the raw-text fallback, or when a kill column
+    /// is above the same ceilings the parser uses (elims/assists above 99,
+    /// deaths above 50) — including the first capture of a game, which
+    /// otherwise accepts the raw read verbatim. One later clean per-cell
+    /// read replaces the latch. Missing on a pre-0.4.21 `active_game.json`
+    /// means already trusted.
+    #[serde(default)]
+    pub low_trust: bool,
 }
 
 /// Why a cell was held, for per-capture observability logging.
@@ -340,25 +350,84 @@ fn downstreak_continues(streak_last: u32, cur: u32) -> bool {
 /// beyond the plausible rate is held unless a clean previous raw read
 /// corroborates it (C / CG-4 B1 for suspect wide cols); an advance within rate
 /// passes through unchanged.
+///
+/// [`apply_gate_with_trust`] is this function with the fallback bit set.
+/// `apply_gate` is the trusted per-cell path.
 pub fn apply_gate(
     prev: Option<(GateState, Duration)>,
     raw: Counters,
     suspect: [bool; GATE_COLS],
     split: bool,
 ) -> GateOutcome {
+    apply_gate_with_trust(prev, raw, suspect, split, true)
+}
+
+/// Same ceilings as `parse::kill_columns_implausible`. A kill column past
+/// these is a shifted read (damage or a timer digit in E/A/D), not a stomp.
+fn implausible_kills(c: Counters) -> bool {
+    c.elims > 99 || c.assists > 99 || c.deaths > 50
+}
+
+fn fresh_state(raw: Counters, suspect: [bool; GATE_COLS], trusted: bool) -> GateState {
+    GateState {
+        accepted: raw,
+        last_raw: raw,
+        last_raw_suspect: suspect,
+        low_trust: !trusted || implausible_kills(raw),
+        ..Default::default()
+    }
+}
+
+/// [`apply_gate`] with an explicit trust bit.
+///
+/// `trusted` is false when the six stats came from the raw-text fallback.
+/// That latch is `low_trust` even when every column is in range, and so is
+/// a first capture whose kill columns are implausible — the first capture
+/// used to be stored as the baseline with no check, which is how a shifted
+/// assists/deaths pair locked for the rest of the match. A later read that
+/// is trusted and has no edge-ink suspect column replaces the latch on this
+/// capture. A trusted decrease against a trusted latch still waits for
+/// [`UNLATCH_STREAK`] clean reads.
+pub fn apply_gate_with_trust(
+    prev: Option<(GateState, Duration)>,
+    raw: Counters,
+    suspect: [bool; GATE_COLS],
+    split: bool,
+    trusted: bool,
+) -> GateOutcome {
     let Some((state, elapsed)) = prev.filter(|_| !split) else {
         return GateOutcome {
             accepted: raw,
-            state: GateState {
-                accepted: raw,
-                last_raw: raw,
-                last_raw_suspect: suspect,
-                ..Default::default()
-            },
+            state: fresh_state(raw, suspect, trusted),
             holds: Vec::new(),
             unlatches: Vec::new(),
         };
     };
+
+    // A clean per-cell read replaces a fallback (or otherwise unconfirmed)
+    // latch immediately, including when the clean numbers are lower. A
+    // suspect column is not clean — fall through to the per-cell rules and
+    // keep the low-trust flag until a fully clean read arrives.
+    if state.low_trust && trusted && !suspect.iter().any(|&s| s) {
+        let prev_acc = state.accepted.to_array();
+        let cur = raw.to_array();
+        let mut unlatches = Vec::new();
+        for col in 0..GATE_COLS {
+            if cur[col] < prev_acc[col] {
+                unlatches.push(Unlatch {
+                    col,
+                    raw: cur[col],
+                    revised_from: prev_acc[col],
+                });
+            }
+        }
+        return GateOutcome {
+            accepted: raw,
+            state: fresh_state(raw, suspect, true),
+            holds: Vec::new(),
+            unlatches,
+        };
+    }
 
     let prev_acc = state.accepted.to_array();
     let prev_raw = state.last_raw.to_array();
@@ -452,6 +521,12 @@ pub fn apply_gate(
     }
 
     let accepted = Counters::from_array(out);
+    // Adopting a fallback number, or keeping an unconfirmed latch, stays
+    // low-trust. A trusted in-range latch does not become low-trust just
+    // because this capture's raw read was a fallback that the gate held.
+    let took_untrusted =
+        !trusted && (0..GATE_COLS).any(|col| out[col] == cur[col] && out[col] != prev_acc[col]);
+    let low_trust = state.low_trust || took_untrusted || implausible_kills(accepted);
     GateOutcome {
         accepted,
         state: GateState {
@@ -460,6 +535,7 @@ pub fn apply_gate(
             down_streak_len: down_len,
             down_streak_last: down_last,
             last_raw_suspect: suspect,
+            low_trust,
         },
         holds,
         unlatches,
@@ -505,6 +581,90 @@ mod tests {
         let out = apply_gate(None, c(5, 3, 2, 4316, 1200, 899), CLEAN, false);
         assert_eq!(out.accepted, c(5, 3, 2, 4316, 1200, 899));
         assert!(out.holds.is_empty());
+        assert!(!out.state.low_trust);
+    }
+
+    #[test]
+    fn fallback_latch_yields_to_one_clean_lower_read() {
+        // In-range but wrong assists/deaths from the text fallback. A clean
+        // per-cell read replaces them on the next capture. The un-latch
+        // streak of 3 must not keep the junk.
+        let first = apply_gate_with_trust(None, c(2, 40, 18, 450, 0, 2), CLEAN, false, false);
+        assert!(first.state.low_trust);
+        assert_eq!(first.accepted.assists, 40);
+        let second = apply_gate_with_trust(
+            Some((first.state, secs(20))),
+            c(2, 0, 0, 1105, 259, 450),
+            CLEAN,
+            false,
+            true,
+        );
+        assert_eq!(second.accepted, c(2, 0, 0, 1105, 259, 450));
+        assert!(!second.state.low_trust);
+        assert!(
+            second
+                .unlatches
+                .iter()
+                .any(|u| u.col == 1 && u.raw == 0 && u.revised_from == 40)
+        );
+        assert!(
+            second
+                .unlatches
+                .iter()
+                .any(|u| u.col == 2 && u.raw == 0 && u.revised_from == 18)
+        );
+    }
+
+    #[test]
+    fn implausible_first_capture_does_not_lock() {
+        // Shifted timer digits: A 1105, D 259 on the first capture of the
+        // game. That used to become the baseline. One clean per-cell read
+        // replaces it, trusted source or not.
+        let shifted = c(0, 1105, 259, 450, 0, 2);
+        for trusted in [false, true] {
+            let first = apply_gate_with_trust(None, shifted, CLEAN, false, trusted);
+            assert!(first.state.low_trust, "trusted={trusted}");
+            let second = apply_gate_with_trust(
+                Some((first.state, secs(30))),
+                c(8, 1, 2, 3993, 989, 1583),
+                CLEAN,
+                false,
+                true,
+            );
+            assert_eq!(second.accepted, c(8, 1, 2, 3993, 989, 1583));
+            assert!(!second.state.low_trust);
+        }
+    }
+
+    #[test]
+    fn another_fallback_does_not_replace_a_low_trust_latch() {
+        let first = apply_gate_with_trust(None, c(2, 40, 18, 450, 0, 2), CLEAN, false, false);
+        let second = apply_gate_with_trust(
+            Some((first.state, secs(10))),
+            c(2, 1, 2, 500, 10, 10),
+            CLEAN,
+            false,
+            false,
+        );
+        assert_eq!(second.accepted.assists, 40);
+        assert_eq!(second.accepted.deaths, 18);
+        assert!(second.state.low_trust);
+    }
+
+    #[test]
+    fn a_suspect_read_does_not_clear_a_low_trust_latch() {
+        let first = apply_gate_with_trust(None, c(2, 40, 18, 450, 0, 2), CLEAN, false, false);
+        let mut suspect = CLEAN;
+        suspect[1] = true;
+        let second = apply_gate_with_trust(
+            Some((first.state, secs(10))),
+            c(2, 1, 2, 500, 10, 10),
+            suspect,
+            false,
+            true,
+        );
+        assert_eq!(second.accepted.assists, 40, "suspect assists stays held");
+        assert!(second.state.low_trust);
     }
 
     #[test]
