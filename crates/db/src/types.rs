@@ -564,6 +564,13 @@ pub struct HeroStats {
     pub avg_healing: f64,
 }
 
+/// Per-role aggregate (`GET /api/stats/me/roles`, `GET /api/stats/member/{id}/roles`).
+///
+/// Canonical definition is [`scuffed_types::RoleStats`] so the WASM app can
+/// deserialize it. Re-exported here beside [`HeroStats`]. `role` is the stored
+/// `personal_match.role` string, including `""` when the row has no role.
+pub use scuffed_types::RoleStats;
+
 /// Competitive season — shared with the app via `scuffed_types`.
 pub use scuffed_types::Season;
 

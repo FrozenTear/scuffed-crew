@@ -87,6 +87,22 @@ fn strategies_enabled_or_default(settings: Option<&SiteSettings>) -> bool {
     settings.map(|s| s.strategies_enabled).unwrap_or(true)
 }
 
+/// Pending settings show no catalog rows. A settled failure with nothing
+/// painted uses the product default. A loaded org uses its own nav.
+fn nav_for_resolved(resolved: Option<&Result<SiteSettings, String>>) -> NavConfig {
+    if resolved.is_none() {
+        return NavConfig { items: Vec::new() };
+    }
+    match loaded_site_settings(resolved) {
+        Some(settings) => {
+            let mut nav = settings.nav.clone();
+            nav.normalize();
+            nav
+        }
+        None => NavConfig::default(),
+    }
+}
+
 fn resolve_nav(cfg: &NavConfig, placement: NavPlacement, strategies_enabled: bool) -> Vec<NavLink> {
     cfg.items_in(placement)
         .into_iter()
@@ -164,13 +180,20 @@ const NAV_CSS: &str = r#"
         color: var(--accent-fg);
         box-shadow: 0 0 12px color-mix(in srgb, var(--accent) 35%, transparent);
     }
-    .nav-icon.is-pending { color: transparent; }
+    .nav-icon.is-pending {
+        color: transparent;
+        background: var(--surface-2);
+        box-shadow: none;
+    }
     .nav-mark-text {
         font-family: var(--font-mono, var(--font-head));
         font-size: 0.72rem;
         letter-spacing: 0.12em;
         text-transform: uppercase;
         white-space: nowrap;
+        /* Holds short and medium org names so `.nav-center` does not jump
+           when the pending bar is replaced. The icon is already 26px. */
+        min-width: 9rem;
     }
     .nav-center {
         display: flex;
@@ -436,7 +459,8 @@ pub fn PublicLayout() -> Element {
     let mut account_open = use_signal(|| false);
     let auth = use_auth();
 
-    // Off wasm this listener is a no-op, so Escape does nothing on desktop builds.
+    // Off wasm, `Closure::wrap` aborts before this listener is installed.
+    // Desktop still has a window; the non-wasm stub is what skips the handler.
     use_document_keydown(move |evt| {
         if evt.key() != "Escape" {
             return;
@@ -449,24 +473,15 @@ pub fn PublicLayout() -> Element {
     });
 
     let site_settings = use_site_settings();
-    let loaded_settings = {
-        let slot = site_settings.resource.read();
-        loaded_site_settings(slot.as_ref()).cloned()
-    };
+    let resolved = site_settings.resolved.read();
+    let loaded_settings = loaded_site_settings(resolved.as_ref());
     let bg_css = loaded_settings
         .as_ref()
         .map(|s| page_bg_css(&s.page_bg_color, &s.page_bg_image_url))
         .unwrap_or_default();
 
-    let nav_cfg = loaded_settings
-        .as_ref()
-        .map(|s| {
-            let mut n = s.nav.clone();
-            n.normalize();
-            n
-        })
-        .unwrap_or_default();
-    let strategies_enabled = strategies_enabled_or_default(loaded_settings.as_ref());
+    let nav_cfg = nav_for_resolved(resolved.as_ref());
+    let strategies_enabled = strategies_enabled_or_default(loaded_settings);
     let primary_links = resolve_nav(&nav_cfg, NavPlacement::Primary, strategies_enabled);
     let more_links = resolve_nav(&nav_cfg, NavPlacement::More, strategies_enabled);
 
@@ -828,6 +843,24 @@ pub fn PublicLayout() -> Element {
 mod tests {
     use super::*;
     use scuffed_types::NAV_CATALOG;
+
+    #[test]
+    fn pending_nav_is_empty_and_the_default_contains_members() {
+        assert!(nav_for_resolved(None).items.is_empty());
+        assert!(
+            NavConfig::default()
+                .items
+                .iter()
+                .any(|item| item.id == "members")
+        );
+        let failed: Option<Result<SiteSettings, String>> = Some(Err("offline".into()));
+        assert!(
+            nav_for_resolved(failed.as_ref())
+                .items
+                .iter()
+                .any(|item| item.id == "members")
+        );
+    }
 
     #[test]
     fn catalog_ids_resolve_to_routes() {

@@ -345,11 +345,16 @@ pub fn create_router_with_dist(state: AppState, dist_dir: impl Into<PathBuf>) ->
         .route("/api/stats/me", get(routes::stats::my_stats))
         .route("/api/stats/me/matches", get(routes::stats::my_matches))
         .route("/api/stats/me/heroes", get(routes::stats::my_hero_stats))
+        .route("/api/stats/me/roles", get(routes::stats::my_role_stats))
         .route("/api/stats/me/maps", get(routes::stats::my_map_stats))
         .route("/api/stats/member/{id}", get(routes::stats::member_stats))
         .route(
             "/api/stats/member/{id}/heroes",
             get(routes::stats::member_hero_stats),
+        )
+        .route(
+            "/api/stats/member/{id}/roles",
+            get(routes::stats::member_role_stats),
         )
         .route(
             "/api/stats/member/{id}/maps",
@@ -603,11 +608,11 @@ pub fn create_router_with_dist(state: AppState, dist_dir: impl Into<PathBuf>) ->
             "/uploads",
             uploads::uploads_router(state.upload_dir.clone()),
         )
-        // Unmatched `/api` and `/api/*` are a JSON 404. Every other unmatched
-        // path is the SPA shell (`dist/` + `index.html`). Known routes,
-        // including a wrong method on a known path, are resolved before this
-        // fallback. See `routes::seo::spa_or_api_not_found`.
-        .fallback_service(routes::seo::spa_or_api_not_found(&dist_dir))
+        // Unmatched `/api` and `/api/*` are a JSON 404 inside the SPA service.
+        // Every other unmatched path is the shell or a static file. Known
+        // routes, including a wrong method on a known path, are resolved
+        // before this fallback.
+        .fallback_service(routes::seo::spa_service(&dist_dir, state.clone()))
         // Allow up to 6 MB so officer image uploads (5 MB cap) fit under Axum's default 2 MB limit
         .layer(DefaultBodyLimit::max(6 * 1024 * 1024))
         .layer(TraceLayer::new_for_http())

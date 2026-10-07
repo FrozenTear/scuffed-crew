@@ -21,7 +21,7 @@ pub enum Hero {
     WreckingBall,
     Zarya,
 
-    // Damage (23)
+    // Damage (22)
     Anran,
     Ashe,
     Bastion,
@@ -38,7 +38,6 @@ pub enum Hero {
     Sierra,
     Sojourn,
     Soldier76,
-    Sombra,
     Symmetra,
     Torbjorn,
     Tracer,
@@ -46,10 +45,11 @@ pub enum Hero {
     Venture,
     Widowmaker,
 
-    // Support (13)
+    // Support (15)
     Ana,
     Baptiste,
     Brigitte,
+    Doctrine,
     Illari,
     Juno,
     Kiriko,
@@ -58,6 +58,7 @@ pub enum Hero {
     Mercy,
     Mizuki,
     Moira,
+    Sombra,
     Wuyang,
     Zenyatta,
 }
@@ -96,7 +97,6 @@ impl Hero {
             | Self::Sierra
             | Self::Sojourn
             | Self::Soldier76
-            | Self::Sombra
             | Self::Symmetra
             | Self::Torbjorn
             | Self::Tracer
@@ -107,6 +107,7 @@ impl Hero {
             Self::Ana
             | Self::Baptiste
             | Self::Brigitte
+            | Self::Doctrine
             | Self::Illari
             | Self::Juno
             | Self::Kiriko
@@ -115,6 +116,7 @@ impl Hero {
             | Self::Mercy
             | Self::Mizuki
             | Self::Moira
+            | Self::Sombra
             | Self::Wuyang
             | Self::Zenyatta => HeroRole::Support,
         }
@@ -152,7 +154,6 @@ impl Hero {
             Self::Sierra => "Sierra",
             Self::Sojourn => "Sojourn",
             Self::Soldier76 => "Soldier: 76",
-            Self::Sombra => "Sombra",
             Self::Symmetra => "Symmetra",
             Self::Torbjorn => "Torbjörn",
             Self::Tracer => "Tracer",
@@ -162,6 +163,7 @@ impl Hero {
             Self::Ana => "Ana",
             Self::Baptiste => "Baptiste",
             Self::Brigitte => "Brigitte",
+            Self::Doctrine => "Doctrine",
             Self::Illari => "Illari",
             Self::Juno => "Juno",
             Self::Kiriko => "Kiriko",
@@ -170,6 +172,7 @@ impl Hero {
             Self::Mercy => "Mercy",
             Self::Mizuki => "Mizuki",
             Self::Moira => "Moira",
+            Self::Sombra => "Sombra",
             Self::Wuyang => "Wuyang",
             Self::Zenyatta => "Zenyatta",
         }
@@ -194,6 +197,7 @@ pub enum MapName {
     Route66,
     ShambaliMonastery,
     WatchpointGibraltar,
+    WatchpointGrimsvotn,
 
     // Hybrid
     BlizzardWorld,
@@ -230,7 +234,60 @@ pub enum MapName {
     ThroneOfAnubis,
 }
 
+macro_rules! map_name_all {
+    ($($variant:ident),* $(,)?) => {
+        /// Every map variant, in enum order. Callers that used to copy display
+        /// names by hand (OCR collision checks) iterate this instead.
+        ///
+        /// [`_map_name_all_exhaustive`] matches the same variants with no
+        /// wildcard, so a new `MapName` fails to compile until it is added here.
+        pub const ALL: &[MapName] = &[$(MapName::$variant),*];
+
+        const fn _map_name_all_exhaustive(map: MapName) {
+            match map {
+                $(MapName::$variant => {}),*
+            }
+        }
+    };
+}
+
 impl MapName {
+    map_name_all! {
+        CircuitRoyal,
+        Dorado,
+        Havana,
+        Junkertown,
+        Rialto,
+        Route66,
+        ShambaliMonastery,
+        WatchpointGibraltar,
+        WatchpointGrimsvotn,
+        BlizzardWorld,
+        Eichenwalde,
+        Hollywood,
+        KingsRow,
+        Midtown,
+        NeonJunction,
+        Numbani,
+        Paraiso,
+        AntarcticPeninsula,
+        Busan,
+        Ilios,
+        LijangTower,
+        Nepal,
+        Oasis,
+        Samoa,
+        Colosseo,
+        Esperanca,
+        NewQueenStreet,
+        Runasapi,
+        Aatlis,
+        NewJunkCity,
+        Suravasa,
+        Hanaoka,
+        ThroneOfAnubis,
+    }
+
     pub fn game_mode(&self) -> GameMode {
         match self {
             Self::CircuitRoyal
@@ -240,7 +297,8 @@ impl MapName {
             | Self::Rialto
             | Self::Route66
             | Self::ShambaliMonastery
-            | Self::WatchpointGibraltar => GameMode::Escort,
+            | Self::WatchpointGibraltar
+            | Self::WatchpointGrimsvotn => GameMode::Escort,
 
             Self::BlizzardWorld
             | Self::Eichenwalde
@@ -279,6 +337,7 @@ impl MapName {
             Self::Route66 => "Route 66",
             Self::ShambaliMonastery => "Shambali Monastery",
             Self::WatchpointGibraltar => "Watchpoint: Gibraltar",
+            Self::WatchpointGrimsvotn => "Watchpoint: Grímsvötn",
             Self::BlizzardWorld => "Blizzard World",
             Self::Eichenwalde => "Eichenwalde",
             Self::Hollywood => "Hollywood",
@@ -332,8 +391,10 @@ impl std::fmt::Display for MapName {
 }
 
 /// Fold a live/OCR map string to a comparable key: lowercase, strip
-/// combining-style punctuation, and drop Portuguese/Spanish accents so
-/// `"Paraíso"` / `"Paraiso"` and `"Esperança"` / `"Esperanca"` collide.
+/// combining-style punctuation, and drop accents so `"Paraíso"` / `"Paraiso"`,
+/// `"Esperança"` / `"Esperanca"`, and `"Watchpoint: Grímsvötn"` /
+/// `"Watchpoint: Grimsvotn"` (also `Grímsvotn` / `Grimsvötn`) collide.
+/// `ö`/`Ö` fold to `o` the same way `í` folds to `i`.
 fn fold_map_key(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
@@ -341,7 +402,7 @@ fn fold_map_key(s: &str) -> String {
             'Á' | 'À' | 'Ã' | 'Â' | 'á' | 'à' | 'ã' | 'â' => 'a',
             'É' | 'Ê' | 'é' | 'ê' => 'e',
             'Í' | 'í' => 'i',
-            'Ó' | 'Ô' | 'Õ' | 'ó' | 'ô' | 'õ' => 'o',
+            'Ó' | 'Ô' | 'Õ' | 'Ö' | 'ó' | 'ô' | 'õ' | 'ö' => 'o',
             'Ú' | 'Ü' | 'ú' | 'ü' => 'u',
             'Ç' | 'ç' => 'c',
             'Ñ' | 'ñ' => 'n',
@@ -377,8 +438,16 @@ impl std::str::FromStr for MapName {
             "rialto" => Ok(Self::Rialto),
             "route 66" | "route66" => Ok(Self::Route66),
             "shambali monastery" | "shambali" => Ok(Self::ShambaliMonastery),
-            "watchpoint gibraltar" | "watchpointgibraltar" | "watchpoint" => {
+            // Bare "watchpoint" stays Gibraltar so legacy rows do not move.
+            // Bare "gibraltar" matches the tracker alias for the same map.
+            "watchpoint gibraltar" | "watchpointgibraltar" | "watchpoint" | "gibraltar" => {
                 Ok(Self::WatchpointGibraltar)
+            }
+            // Distinctive word, with or without the Watchpoint prefix, and the
+            // no-space form. Diacritics fold to this key (grímsvötn, grimsvötn,
+            // grímsvotn, grimsvotn).
+            "watchpoint grimsvotn" | "watchpointgrimsvotn" | "grimsvotn" => {
+                Ok(Self::WatchpointGrimsvotn)
             }
             "blizzard world" | "blizzardworld" => Ok(Self::BlizzardWorld),
             "eichenwalde" => Ok(Self::Eichenwalde),
@@ -434,10 +503,24 @@ mod tests {
     use super::*;
     use std::str::FromStr;
 
-    /// Live Maps-tab names (accented + unaccented) plus Neon Junction.
-    /// These six strings are the ones that used to land in Other.
     #[test]
-    fn six_map_string_forms_classify_mode() {
+    fn all_covers_every_map_and_display_names_round_trip() {
+        assert_eq!(MapName::ALL.len(), 33);
+        let mut names: Vec<&str> = MapName::ALL.iter().map(|m| m.display_name()).collect();
+        let n = names.len();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), n, "display names must be unique");
+        for map in MapName::ALL {
+            assert_eq!(map.display_name().parse::<MapName>().unwrap(), *map);
+        }
+    }
+
+    /// Live Maps-tab names (accented + unaccented) plus Neon Junction.
+    /// The first six strings are the ones that used to land in Other.
+    /// Grímsvötn rows are the canonical name and the ASCII/diacritic folds.
+    #[test]
+    fn map_string_forms_classify_mode() {
         let cases = [
             ("Neon Junction", "Hybrid", MapName::NeonJunction),
             ("Paraíso", "Hybrid", MapName::Paraiso),
@@ -445,6 +528,48 @@ mod tests {
             ("Esperança", "Push", MapName::Esperanca),
             ("Esperanca", "Push", MapName::Esperanca),
             ("neon junction", "Hybrid", MapName::NeonJunction),
+            (
+                "Watchpoint: Grímsvötn",
+                "Escort",
+                MapName::WatchpointGrimsvotn,
+            ),
+            (
+                "Watchpoint: Grimsvotn",
+                "Escort",
+                MapName::WatchpointGrimsvotn,
+            ),
+            (
+                "Watchpoint: Grímsvotn",
+                "Escort",
+                MapName::WatchpointGrimsvotn,
+            ),
+            (
+                "Watchpoint: Grimsvötn",
+                "Escort",
+                MapName::WatchpointGrimsvotn,
+            ),
+            (
+                "WATCHPOINT: GRÍMSVÖTN",
+                "Escort",
+                MapName::WatchpointGrimsvotn,
+            ),
+            ("grimsvotn", "Escort", MapName::WatchpointGrimsvotn),
+            ("grímsvötn", "Escort", MapName::WatchpointGrimsvotn),
+            ("grimsvötn", "Escort", MapName::WatchpointGrimsvotn),
+            ("grímsvotn", "Escort", MapName::WatchpointGrimsvotn),
+            (
+                "watchpoint grimsvotn",
+                "Escort",
+                MapName::WatchpointGrimsvotn,
+            ),
+            (
+                "watchpointgrimsvotn",
+                "Escort",
+                MapName::WatchpointGrimsvotn,
+            ),
+            ("gibraltar", "Escort", MapName::WatchpointGibraltar),
+            ("Gibraltar", "Escort", MapName::WatchpointGibraltar),
+            ("Watchpoint", "Escort", MapName::WatchpointGibraltar),
         ];
         for (name, mode, parsed) in cases {
             assert_eq!(
@@ -457,6 +582,7 @@ mod tests {
                 match mode {
                     "Hybrid" => GameMode::Hybrid,
                     "Push" => GameMode::Push,
+                    "Escort" => GameMode::Escort,
                     other => panic!("unexpected mode fixture {other}"),
                 },
                 "game_mode() wrong for {name:?}"
@@ -467,5 +593,98 @@ mod tests {
                 "game_mode_label failed for {name:?}"
             );
         }
+    }
+
+    /// Gibraltar strings stay Gibraltar. Grímsvötn strings stay Grímsvötn.
+    /// A bare `Watchpoint` is the Gibraltar alias and must not become Grímsvötn.
+    /// Bare `gibraltar` is the tracker alias for Gibraltar. Bare `grimsvotn`
+    /// (any diacritic fold) is Grímsvötn.
+    #[test]
+    fn watchpoint_grimsvotn_does_not_collide_with_gibraltar() {
+        assert_eq!(
+            MapName::WatchpointGrimsvotn.display_name(),
+            "Watchpoint: Grímsvötn"
+        );
+        // Legacy rows that stored a bare "watchpoint" stay Gibraltar.
+        assert_eq!(
+            "watchpoint".parse::<MapName>(),
+            Ok(MapName::WatchpointGibraltar)
+        );
+        assert_ne!(
+            "watchpoint".parse::<MapName>(),
+            Ok(MapName::WatchpointGrimsvotn)
+        );
+        // The prefixed phrase is Grímsvötn, not Gibraltar.
+        assert_eq!(
+            "watchpoint grimsvotn".parse::<MapName>(),
+            Ok(MapName::WatchpointGrimsvotn)
+        );
+        assert_ne!(
+            "watchpoint grimsvotn".parse::<MapName>(),
+            Ok(MapName::WatchpointGibraltar)
+        );
+        let grimsvotn = [
+            "Watchpoint: Grímsvötn",
+            "Watchpoint: Grimsvotn",
+            "Watchpoint: Grímsvotn",
+            "Watchpoint: Grimsvötn",
+            "watchpoint: grímsvötn",
+            "watchpoint grimsvotn",
+            "watchpointgrimsvotn",
+            "watchpointgrímsvötn",
+            "watchpoint_grimsvotn",
+            "grimsvotn",
+            "grímsvötn",
+            "grimsvötn",
+            "grímsvotn",
+            "GRÍMSVÖTN",
+            "Grimsvotn",
+        ];
+        let gibraltar = [
+            "Watchpoint: Gibraltar",
+            "watchpoint gibraltar",
+            "watchpointgibraltar",
+            "Watchpoint",
+            "watchpoint",
+            "WATCHPOINT",
+            "watchpoint_gibraltar",
+            "Watchpoint: gibraltar",
+            "gibraltar",
+            "Gibraltar",
+            "GIBRALTAR",
+        ];
+        for name in grimsvotn {
+            let parsed = MapName::from_str(name);
+            assert_eq!(parsed, Ok(MapName::WatchpointGrimsvotn), "{name:?}");
+            assert_ne!(parsed, Ok(MapName::WatchpointGibraltar), "{name:?}");
+        }
+        for name in gibraltar {
+            let parsed = MapName::from_str(name);
+            assert_eq!(parsed, Ok(MapName::WatchpointGibraltar), "{name:?}");
+            assert_ne!(parsed, Ok(MapName::WatchpointGrimsvotn), "{name:?}");
+        }
+    }
+
+    /// Season 5: Doctrine is Support; Sombra moved Damage → Support.
+    /// Serde names stay snake_case (`doctrine`, `sombra`). Roadhog's rework
+    /// did not change his role.
+    #[test]
+    fn season5_doctrine_and_sombra_are_support() {
+        assert_eq!(Hero::Doctrine.role(), HeroRole::Support);
+        assert_eq!(Hero::Sombra.role(), HeroRole::Support);
+        assert_eq!(Hero::Roadhog.role(), HeroRole::Tank);
+        assert_eq!(Hero::Doctrine.display_name(), "Doctrine");
+        assert_eq!(Hero::Doctrine.to_string(), "Doctrine");
+        assert_eq!(Hero::Sombra.to_string(), "Sombra");
+
+        let doctrine: Hero = serde_json::from_str("\"doctrine\"").unwrap();
+        assert_eq!(doctrine, Hero::Doctrine);
+        assert_eq!(
+            serde_json::to_string(&Hero::Doctrine).unwrap(),
+            "\"doctrine\""
+        );
+        let sombra: Hero = serde_json::from_str("\"sombra\"").unwrap();
+        assert_eq!(sombra, Hero::Sombra);
+        assert_eq!(serde_json::to_string(&Hero::Sombra).unwrap(), "\"sombra\"");
     }
 }

@@ -1,3 +1,4 @@
+pub mod boundary;
 pub mod capture;
 pub mod capture_gate;
 pub mod config;

@@ -16,8 +16,10 @@ COPY crates/ crates/
 # Build the Dioxus app bundle (Dioxus.toml at monorepo root supplies title/meta)
 RUN cd crates/app && dx build --release
 
-# Stage the web bundle where the server's SPA fallback expects it
-RUN cp -r target/dx/scuffed-app/release/web/public dist
+# Stage the web bundle where the server's SPA fallback expects it.
+# index.html links /assets/favicon.svg; the dx bundle must already contain it.
+RUN cp -r target/dx/scuffed-app/release/web/public dist \
+ && test -f dist/assets/favicon.svg
 
 # Build the unified server binary (REST + strategy WebSocket + chat)
 RUN cargo build --release -p scuffed-server

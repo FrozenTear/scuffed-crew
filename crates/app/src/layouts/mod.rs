@@ -63,8 +63,9 @@ fn use_document_keydown(on_key: impl FnMut(web_sys::KeyboardEvent) + 'static) {
     });
 }
 
-/// Desktop and other non-wasm builds have no `window`. Document `keydown`,
-/// including the Escape handlers in the public and admin layouts, is a no-op.
+/// `Closure::wrap` aborts off wasm32, so the listener is not installed.
+/// Desktop still has a window; this stub is the non-wasm build, not a missing window.
+/// Escape handlers in the public and admin layouts therefore do not run here.
 #[cfg(not(target_arch = "wasm32"))]
 fn use_document_keydown(_on_key: impl FnMut(web_sys::KeyboardEvent) + 'static) {}
 
@@ -84,6 +85,8 @@ fn focus_element(id: &str) {
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
+        // Desktop still has a window. This build skips `HtmlElement::focus`
+        // because that call lives in the wasm branch above.
         let _ = id;
     }
 }

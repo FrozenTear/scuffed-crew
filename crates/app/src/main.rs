@@ -22,11 +22,22 @@ use components::ToastProvider;
 use routes::Route;
 use state::AuthState;
 
+/// `index.html` links this stable path. dx only copies assets Rust references,
+/// and a hashed name would not match that href. The Containerfile ships the
+/// dx output, so this is what puts the file in the image. `#[used]` keeps the
+/// reference when nothing reads the static.
+#[used]
+static SITE_FAVICON: manganis::Asset = asset!(
+    "/assets/favicon.svg",
+    manganis::AssetOptions::builder().with_hash_suffix(false)
+);
+
 fn main() {
     // The router drops undeclared query params as soon as it mounts. Snapshot
     // `/login?error=registration_closed` while the address bar still has it.
     // Login consumes that snapshot on its first mount. One process-wide slot;
     // see `LoginBannerSlot`.
+    // Untested call site: login tests cover the probe harness, not `main`.
     pages::capture_initial_login_banner();
     dioxus::launch(App);
 }
@@ -39,6 +50,7 @@ fn App() -> Element {
     // Once per App mount, before `Router` rewrites the URL. `main` already
     // snapshotted on a normal boot, so this is a no-op then. A re-render must
     // not take the lock again. Same `LoginBannerSlot` as `main`.
+    // Untested call site: login tests cover the probe harness, not `App`.
     use_hook(|| {
         pages::capture_initial_login_banner();
     });
@@ -67,31 +79,60 @@ fn App() -> Element {
     });
 
     // One settings fetch for the document head and every public consumer.
-    // Title stays blank until the real org name arrives.
+    // `document::Title` updates the existing `<title>` once a real org name
+    // exists. Description and Open Graph tags stay in index.html: `document::Meta`
+    // would append a second copy and ignore later prop changes.
     let site_settings = state::provide_site_settings();
-    let loaded_settings = {
-        let slot = site_settings.resource.read();
-        state::loaded_site_settings(slot.as_ref()).cloned()
-    };
-    let page_title = state::document_title(loaded_settings.as_ref().map(|s| s.org_name.as_str()));
-    let page_description = loaded_settings
-        .as_ref()
-        .map(|s| {
-            let d = s.site_description.trim();
-            if d.is_empty() {
-                format!("{} — gaming clan", s.org_name)
-            } else {
-                d.to_string()
-            }
-        })
-        .unwrap_or_else(|| "Gaming clan platform".into());
+    let resolved = site_settings.resolved.read();
+    let loaded_settings = state::loaded_site_settings(resolved.as_ref());
+    let page_title = loaded_settings.and_then(|s| {
+        let title = state::document_title(Some(&s.org_name));
+        if title.is_empty() { None } else { Some(title) }
+    });
+    // Update the one `<link rel="icon">` from index.html. Pending leaves that
+    // static href. A non-empty org name gets a data URI, including initials CL.
+    // `document::Link` appends and then ignores href changes, so this effect
+    // writes the existing element. Crawlers still see the shell's single tag.
+    use_effect(move || {
+        let resolved = site_settings.resolved.read();
+        let settled_name = match resolved.as_ref() {
+            None => None,
+            Some(Ok(settings)) => Some(settings.org_name.clone()),
+            Some(Err(_)) => Some(String::new()),
+        };
+        let Some(href) = theme::brand::runtime_favicon_href(settled_name.as_deref()) else {
+            return;
+        };
+        // `web_sys::window()` panics off wasm. Desktop has no document to update.
+        #[cfg(all(feature = "web", target_arch = "wasm32"))]
+        {
+            let Some(window) = web_sys::window() else {
+                return;
+            };
+            let Some(document) = window.document() else {
+                return;
+            };
+            let Ok(Some(link)) = document.query_selector("link[rel='icon']") else {
+                return;
+            };
+            let _ = link.set_attribute("href", &href);
+        }
+        #[cfg(not(all(feature = "web", target_arch = "wasm32")))]
+        {
+            let _ = href;
+        }
+    });
+    // Unknown settings use a gray accent. Product purple is a real brand and
+    // must not paint before the embedded block or `/api/settings` says so.
     let brand_theme_css = {
         use theme::brand::BrandConfig;
-        let (dark, light) = loaded_settings
-            .as_ref()
-            .map(|s| (s.brand_accent_dark.clone(), s.brand_accent_light.clone()))
-            .unwrap_or_default();
-        theme::theme_css(&BrandConfig::from_settings(&dark, &light))
+        match loaded_settings.as_ref() {
+            Some(s) => theme::theme_css(&BrandConfig::from_settings(
+                &s.brand_accent_dark,
+                &s.brand_accent_light,
+            )),
+            None => theme::theme_css(&BrandConfig::pending()),
+        }
     };
 
     #[cfg(feature = "desktop")]
@@ -102,44 +143,20 @@ fn App() -> Element {
     }
 
     rsx! {
-        // Runtime head — org name from settings once loaded
-        document::Title { "{page_title}" }
-        document::Meta {
-            name: "description",
-            content: "{page_description}",
+        // index.html owns description, og:title, og:description, and og:site_name
+        // so the server can fill the one copy of each. Title is the exception:
+        // `document::Title` replaces the text of the existing element.
+        if let Some(title) = page_title.as_ref() {
+            document::Title { "{title}" }
         }
-        document::Meta {
-            property: "og:title",
-            content: "{page_title}",
-        }
-        document::Meta {
-            property: "og:description",
-            content: "{page_description}",
-        }
-        document::Meta {
-            name: "theme-color",
-            content: "{theme::tokens::THEME_COLOR}",
-        }
-        document::Link {
-            rel: "icon",
-            href: asset!("/assets/favicon.svg"),
-            r#type: "image/svg+xml",
-        }
-        document::Stylesheet {
-            href: asset!("/assets/tailwind.css")
-        }
-        document::Link {
-            rel: "preconnect",
-            href: "https://fonts.googleapis.com",
-        }
-        document::Link {
-            rel: "preconnect",
-            href: "https://fonts.gstatic.com",
-            crossorigin: "anonymous",
-        }
+        // Preload in index.html starts the download without blocking boot paint.
+        // Applying it here avoids an inline onload, which script-src would block.
         document::Link {
             rel: "stylesheet",
             href: "https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&family=JetBrains+Mono:wght@500&display=swap",
+        }
+        document::Stylesheet {
+            href: asset!("/assets/tailwind.css")
         }
         style { "{brand_theme_css}" }
         style { {styles::common::CSS} }
@@ -149,5 +166,57 @@ fn App() -> Element {
                 Router::<Route> {}
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// The live shell must contain exactly one of each rewritten head tag,
+    /// including `og:site_name`. Comments are removed before those counts.
+    #[test]
+    fn index_html_has_one_of_each_rewritten_head_tag() {
+        let html = include_str!("../index.html");
+        let visible = strip_html_comments(html);
+        for needle in [
+            "<title>",
+            "name=\"description\"",
+            "property=\"og:title\"",
+            "property=\"og:description\"",
+            "property=\"og:site_name\"",
+        ] {
+            let count = visible.matches(needle).count();
+            assert_eq!(count, 1, "{needle} appears {count} times");
+        }
+        // dx injects a loader at every `</body>`, including one inside a comment.
+        assert_eq!(
+            html.matches("</body>").count(),
+            1,
+            "index.html must not mention the closing body tag except the real one"
+        );
+        // `<!-->` and `<!--->` are empty comments. They must not swallow the
+        // following text the way a scan for `-->` would.
+        assert_eq!(strip_html_comments("a<!-->b<!--->c<!--x-->d"), "abcd");
+    }
+
+    /// dx still sees a closing body tag inside a comment, so that count stays
+    /// on the raw file. Head-tag counts use the stripped text.
+    fn strip_html_comments(html: &str) -> String {
+        let mut out = String::with_capacity(html.len());
+        let mut rest = html;
+        while let Some(start) = rest.find("<!--") {
+            out.push_str(&rest[..start]);
+            rest = &rest[start + 4..];
+            // Empty comments close immediately. A later `-->` is a different comment.
+            if let Some(tail) = rest.strip_prefix('>').or_else(|| rest.strip_prefix("->")) {
+                rest = tail;
+                continue;
+            }
+            match rest.find("-->") {
+                Some(end) => rest = &rest[end + 3..],
+                None => return out,
+            }
+        }
+        out.push_str(rest);
+        out
     }
 }

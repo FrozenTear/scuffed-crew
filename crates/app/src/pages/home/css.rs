@@ -138,6 +138,12 @@ pub const HOME_SHARED_CSS: &str = r#"
         margin-top: 1.85rem;
     }
     .home-skel-btn { width: 8.75rem; height: 2.35rem; }
+    /* Matches `.home-metric strong` (1.85rem / line-height 1) so an empty
+       strong does not collapse the metrics row while overview is loading. */
+    .home-skel-metric { width: 2.4rem; height: 1.85rem; }
+    /* `.home-metric span` adds 0.3rem above captions. The skeleton is the
+       number, so that margin must not apply or the row grows while loading. */
+    .home-metric .home-skel-metric { margin-top: 0; }
     .home-badge {
         display: inline-flex;
         align-items: center;

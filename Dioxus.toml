@@ -8,7 +8,7 @@ app = "crates/app"
 
 [web.app]
 # Used by dx for <title> in the SPA shell. Containerfile must COPY this file.
-title = "The Scuffed Crew"
+title = "Community"
 
 [web.watcher]
 reload_html = true

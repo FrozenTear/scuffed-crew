@@ -1,3 +1,4 @@
+use stat_tracker::boundary::{self, ResultMark};
 use stat_tracker::capture_gate::{self, Counters, GateState};
 use stat_tracker::hero_auth::{self, HeroAuthState, HeroSource};
 use stat_tracker::{capture, config, detect, ocr, parse, setup, storage, sync};
@@ -282,6 +283,9 @@ struct CaptureRequest {
     create_session: bool,
     game_outcome: detect::MatchOutcome,
     session_map: Option<String>,
+    /// Where [`Self::session_map`] was read. The board case of a different-map
+    /// Tab trusts the top bar and the accolade only.
+    session_map_source: Option<boundary::MapSource>,
     map_candidates: Vec<String>,
     allow_banner_recovery: bool,
     /// The session's per-cell capture-gate state (last accepted + last raw
@@ -291,6 +295,32 @@ struct CaptureRequest {
     prev_gate: Option<(GateState, std::time::Duration)>,
     /// CG-4 C: career/portrait authority carried across captures of this game.
     hero_auth: HeroAuthState,
+    /// An end screen (confirmed outcome or result streak) was already seen
+    /// for this session. Logged when a stat split opens the next game.
+    after_end_screen: bool,
+    /// Time since the reset baseline. Rate checks use this, not the age of
+    /// the last stored row.
+    baseline_age: Option<std::time::Duration>,
+    /// Progressed boards already accepted since the current hint.
+    progressed_boards: u8,
+    /// The deferred board was carried onto this session from the one that
+    /// closed. A board deferred here is dropped when the next capture stays.
+    deferred_imported: bool,
+    /// See [`ActiveGame::reset_streak`].
+    reset_streak: u32,
+    /// See [`ActiveGame::reset_baseline`].
+    reset_baseline: Option<GateState>,
+    /// Player row that owns the reset baseline.
+    baseline_row: Option<u32>,
+    /// Unconfirmed decided word already on the session.
+    hint: Option<detect::MatchOutcome>,
+    pending_boundary: bool,
+    awaiting_first_board: bool,
+    /// Board held off the previous session. Written onto the session this
+    /// capture actually stores, at `carried_deferred_at`.
+    carried_deferred: Option<Counters>,
+    carried_deferred_hero: Option<String>,
+    carried_deferred_at: Option<chrono::DateTime<Utc>>,
 }
 
 /// Package version shown by `--version` / `--help`.
@@ -443,7 +473,7 @@ fn handle_preinit_flags() -> bool {
              \x20 --generate-tessdata   build the game-font tessdata model and exit\n\
              \x20 --vacuum              compact the local stats DB and exit\n\
              \x20                       (daemon also auto-vacuums at start if store is bloated)\n\
-             \x20 --collect-portraits   dev: save hero portrait crops while running\n\
+             \x20 --collect-portraits   only fills missing portraits and the Doctrine stand-in; it never overwrites an existing reference\n\
              \x20 --dump-poll-frames    dev: save every polled frame while running\n\
              \x20 --ocr-threads N       OCR workers 1..=8 (RAM vs speed; also config/env)\n\n\
              With no flags, runs the capture daemon (see README).",
@@ -702,7 +732,7 @@ fn log_startup_readiness(config: &config::Config, dump_poll_frames: bool, collec
 
     if collect_portraits {
         tracing::info!(
-            "portrait collection mode enabled — will save portrait references when OCR identifies heroes"
+            "portrait collection mode enabled — only fills missing portraits and the Doctrine stand-in; it never overwrites an existing reference"
         );
     }
 }
@@ -715,9 +745,16 @@ fn log_startup_readiness(config: &config::Config, dump_poll_frames: bool, collec
 struct ActiveGame {
     session_id: String,
     outcome: detect::MatchOutcome,
-    /// The map actually being played, once a trusted read confirms it
-    /// (top-bar label, accolade screen). Never set from the map vote.
+    /// The map actually being played, once a read names it. Never set from
+    /// the map vote. [`Self::map_source`] says which read stored it. A
+    /// full-board text fallback is recorded and is not a map for a poll
+    /// split or a later different-map Tab until a top bar or an accolade
+    /// agrees with it.
     map: Option<String>,
+    /// Where [`Self::map`] was read. Absent until a read stores the map.
+    /// A skeleton from before 0.4.19 has no source; recovery treats a map
+    /// on that file as untrusted text.
+    map_source: Option<boundary::MapSource>,
     /// Canonicalized names seen on the map-vote screen. The winner is
     /// unknowable at vote time, so these are CANDIDATES only — they constrain
     /// later OCR reads (a read that isn't one of them is a misread) but are
@@ -745,20 +782,71 @@ struct ActiveGame {
     last_stats_at: Option<Instant>,
     /// CG-4 C: portrait confirm-not-switch + career-ever-ok for this game.
     hero_auth: HeroAuthState,
+    /// Result word seen for this session. An unconfirmed hint stays sealable
+    /// until a second progressed board, or one progressed board after an arm.
+    /// A confirmed result's grace starts when it is recorded, not when the
+    /// word was first sighted.
+    result_mark: Option<ResultMark>,
+    /// Hero select after a board-followed hint. The first reset signal.
+    /// The next fresh board splits and seals. A second progressed board, or
+    /// one after this arm, drops the hint.
+    pending_boundary: bool,
+    /// Opened by a start screen; the first board has not been accepted.
+    awaiting_first_board: bool,
+    /// Consecutive fresh-match boards already seen. One is not a new game.
+    /// A refresh, or counted progress, clears this. An unidentified or
+    /// implausible row leaves it.
+    reset_streak: u32,
+    /// Counters the reset is measured from. Set when the first fresh-match
+    /// board is held. A refresh replaces them with the accepted gate. An
+    /// unidentified or implausible row leaves them.
+    reset_baseline: Option<GateState>,
+    /// Player row that owns [`Self::reset_baseline`]. A later board counts
+    /// as a fresh reset only on this same row.
+    baseline_row: Option<u32>,
+    /// When [`Self::reset_baseline`] was taken. Rate checks measure from here.
+    baseline_at: Option<Instant>,
+    /// Progressed boards accepted since the current hint. The second drops it.
+    progressed_boards: u8,
+    /// First fresh-match board, held off the current session until a split
+    /// stores it on the new one. `deferred_at` is that capture's own time.
+    deferred: Option<Counters>,
+    deferred_hero: Option<String>,
+    deferred_at: Option<chrono::DateTime<Utc>>,
+    /// Set when `deferred` was carried from the session that just closed.
+    /// The first stored capture writes that board and then clears this,
+    /// along with `deferred`. A deferral taken on this session stays false
+    /// and is dropped if the next stored board does not split.
+    deferred_imported: bool,
+    /// A different result replaced the hint. The confirming accolade must
+    /// not rewrite a text-fallback map after that. Cleared with the hint,
+    /// except when recovery drops the hint because its timestamp cannot be
+    /// mapped onto this boot: the lock stays.
+    text_fallback_locked: bool,
 }
 
 impl ActiveGame {
+    #[cfg(test)]
     fn open_now(
         session_id: String,
         outcome: detect::MatchOutcome,
         map_candidates: Vec<String>,
     ) -> Self {
-        let now = Instant::now();
+        Self::open_at(session_id, outcome, map_candidates, Instant::now())
+    }
+
+    fn open_at(
+        session_id: String,
+        outcome: detect::MatchOutcome,
+        map_candidates: Vec<String>,
+        now: Instant,
+    ) -> Self {
         ActiveGame {
             session_id,
             outcome_recorded_at: (outcome != detect::MatchOutcome::Unknown).then_some(now),
             outcome,
             map: None,
+            map_source: None,
             map_candidates,
             session_created: false,
             opened_at: now,
@@ -766,7 +854,76 @@ impl ActiveGame {
             gate: None,
             last_stats_at: None,
             hero_auth: HeroAuthState::default(),
+            result_mark: None,
+            pending_boundary: false,
+            awaiting_first_board: false,
+            reset_streak: 0,
+            reset_baseline: None,
+            baseline_row: None,
+            baseline_at: None,
+            progressed_boards: 0,
+            deferred: None,
+            deferred_hero: None,
+            deferred_at: None,
+            deferred_imported: false,
+            text_fallback_locked: false,
         }
+    }
+
+    fn boundary_state(&self) -> boundary::BoundaryState {
+        boundary::BoundaryState {
+            map: self.map.clone(),
+            outcome: self.outcome,
+            outcome_at: self.outcome_recorded_at,
+            result: self.result_mark,
+            reset_streak: self.reset_streak,
+            reset_baseline: self.reset_baseline,
+            baseline_row: self.baseline_row,
+            last_board_at: self.last_stats_at,
+            pending_boundary: self.pending_boundary,
+            awaiting_first_board: self.awaiting_first_board,
+            progressed_boards: self.progressed_boards,
+            baseline_at: self.baseline_at,
+            hero: self.hero_auth.accepted_hero.clone(),
+            deferred: self.deferred,
+            gate: self.gate,
+            text_fallback_locked: self.text_fallback_locked,
+        }
+    }
+
+    fn apply_boundary_state(&mut self, state: &boundary::BoundaryState) {
+        self.map = state.map.clone();
+        self.outcome = state.outcome;
+        self.outcome_recorded_at = state.outcome_at;
+        self.result_mark = state.result;
+        self.reset_streak = state.reset_streak;
+        self.reset_baseline = state.reset_baseline;
+        self.baseline_row = state.baseline_row;
+        self.pending_boundary = state.pending_boundary;
+        self.awaiting_first_board = state.awaiting_first_board;
+        self.progressed_boards = state.progressed_boards;
+        self.baseline_at = state.baseline_at;
+        self.deferred = state.deferred;
+        if state.deferred.is_none() {
+            self.deferred_hero = None;
+            self.deferred_at = None;
+            self.deferred_imported = false;
+        }
+        if state.last_board_at.is_some() {
+            self.last_stats_at = state.last_board_at;
+        }
+        self.gate = state.gate;
+        self.text_fallback_locked = state.text_fallback_locked;
+    }
+
+    /// Top bar and accolade. A text fallback, and a missing source, are not.
+    fn map_is_trusted(&self) -> bool {
+        self.map_source
+            .is_some_and(boundary::MapSource::trusted_for_board_split)
+    }
+
+    fn has_post_result(&self) -> bool {
+        boundary::has_post_result(self.outcome, self.result_mark)
     }
 
     fn finished(&self) -> bool {
@@ -774,13 +931,41 @@ impl ActiveGame {
     }
 
     fn record_outcome(&mut self, outcome: detect::MatchOutcome) {
-        self.outcome = outcome;
-        self.outcome_recorded_at = Some(Instant::now());
-        self.last_activity = Instant::now();
+        self.record_outcome_at(outcome, Instant::now());
     }
 
-    fn touch(&mut self) {
-        self.last_activity = Instant::now();
+    fn record_outcome_at(&mut self, outcome: detect::MatchOutcome, now: Instant) {
+        self.outcome = outcome;
+        self.outcome_recorded_at = Some(now);
+        self.last_activity = now;
+    }
+
+    fn touch_at(&mut self, now: Instant) {
+        self.last_activity = now;
+    }
+
+    /// Remember a result word. A repeat of the same outcome keeps the first
+    /// sighting. The post-match grace is [`Self::outcome_recorded_at`],
+    /// stamped when the result is recorded. The hint stays sealable until a
+    /// second progressed board, or one progressed board after an arm.
+    fn note_result(&mut self, outcome: detect::MatchOutcome, confirmed: bool) {
+        if !outcome.is_decided() {
+            return;
+        }
+        let seen_at = self
+            .result_mark
+            .filter(|m| m.outcome == outcome)
+            .map(|m| m.seen_at)
+            .unwrap_or_else(Instant::now);
+        let confirmed = confirmed
+            || self
+                .result_mark
+                .is_some_and(|m| m.outcome == outcome && m.confirmed);
+        self.result_mark = Some(ResultMark {
+            outcome,
+            confirmed,
+            seen_at,
+        });
     }
 }
 
@@ -794,6 +979,11 @@ struct PersistedGame {
     outcome: detect::MatchOutcome,
     #[serde(default)]
     map: Option<String>,
+    /// Missing on skeletons written before 0.4.19. Recovery treats a map
+    /// with no source as untrusted text ([`boundary::MapSource::TextFallback`]).
+    /// A file with no map keeps `None`.
+    #[serde(default)]
+    map_source: Option<boundary::MapSource>,
     #[serde(default)]
     map_candidates: Vec<String>,
     session_created: bool,
@@ -809,6 +999,38 @@ struct PersistedGame {
     last_stats_at: Option<chrono::DateTime<Utc>>,
     #[serde(default)]
     hero_auth: HeroAuthState,
+    #[serde(default)]
+    result_outcome: Option<detect::MatchOutcome>,
+    #[serde(default)]
+    result_confirmed: bool,
+    #[serde(default)]
+    result_seen_at: Option<chrono::DateTime<Utc>>,
+    #[serde(default)]
+    pending_boundary: bool,
+    #[serde(default)]
+    awaiting_first_board: bool,
+    #[serde(default)]
+    reset_streak: u32,
+    #[serde(default)]
+    reset_baseline: Option<GateState>,
+    #[serde(default)]
+    baseline_row: Option<u32>,
+    #[serde(default)]
+    deferred: Option<Counters>,
+    #[serde(default)]
+    deferred_hero: Option<String>,
+    #[serde(default)]
+    deferred_at: Option<chrono::DateTime<Utc>>,
+    #[serde(default)]
+    deferred_imported: bool,
+    #[serde(default)]
+    progressed_boards: u8,
+    #[serde(default)]
+    baseline_at: Option<chrono::DateTime<Utc>>,
+    /// Missing on older skeletons. A file from before this field was not
+    /// mid-replacement, so recovery leaves the window open.
+    #[serde(default)]
+    text_fallback_locked: bool,
 }
 
 fn active_game_path(data_dir: &std::path::Path) -> std::path::PathBuf {
@@ -856,6 +1078,199 @@ fn note_unrecorded_game(data_dir: &std::path::Path, g: &ActiveGame, reason: &str
     }
 }
 
+/// Close the in-memory session because a new game is starting.
+///
+/// A confirmed outcome is already in the store. A provisional hint is written
+/// when `seal` is set: a map vote, a hero ban, a hero select with no board
+/// yet, or a stat reset or gap that closed a hinted session. A stat split
+/// passes `report.seal` the same way. A session with no Tab captures is
+/// logged to `debug/unrecorded_games.jsonl`.
+async fn retire_active_game(
+    st: &mut SessionState,
+    store: &storage::LocalStore,
+    data_dir: &std::path::Path,
+    seal: Option<detect::MatchOutcome>,
+    reason: &str,
+) {
+    let Some(mut g) = st.active_game.take() else {
+        return;
+    };
+    let had_outcome = g.finished();
+    if !had_outcome {
+        // Only an explicit two-signal seal. A leftover hint is not an outcome.
+        let outcome = boundary::outcome_sealed_on_close(g.outcome, seal);
+        if let Some(outcome) = outcome {
+            g.record_outcome(outcome);
+            tracing::info!(
+                outcome = %outcome,
+                session_id = %g.session_id,
+                reason,
+                "sealing session with end-screen outcome at new-game boundary"
+            );
+        }
+    }
+    if g.session_created && g.finished() && !had_outcome {
+        if let Err(e) = store
+            .set_session_outcome(&g.session_id, &g.outcome.to_string())
+            .await
+        {
+            tracing::warn!(error = %e, "failed to seal session outcome");
+        }
+        refresh_snapshot(store, data_dir).await;
+    }
+    if g.session_created {
+        tracing::info!(
+            session_id = %g.session_id,
+            outcome = %g.outcome,
+            map = g.map.as_deref().unwrap_or("?"),
+            reason,
+            "closed session at new-game boundary"
+        );
+    } else {
+        note_unrecorded_game(data_dir, &g, reason);
+    }
+}
+
+/// Apply one [`boundary::decide_poll`] result: record on the open session, or
+/// close it and start the next one.
+async fn apply_poll_decision(
+    st: &mut SessionState,
+    store: &storage::LocalStore,
+    data_dir: &std::path::Path,
+    decision: boundary::PollDecision,
+    now: Instant,
+) {
+    if let boundary::PollDecision::IgnoreContradictory { kept, ignored } = &decision {
+        tracing::info!(
+            kept = %kept,
+            ignored = %ignored,
+            session_id = st.active_game.as_ref().map(|g| g.session_id.as_str()),
+            "result word ignored — it does not override the open session"
+        );
+    }
+    let Some(current) = st.active_game.as_ref() else {
+        return;
+    };
+    let mut state = current.boundary_state();
+    let before = state.clone();
+    let carried_deferred = current
+        .deferred
+        .map(|counters| (counters, current.deferred_hero.clone(), current.deferred_at));
+    let (candidates, end_screen) = match &decision {
+        boundary::PollDecision::Open(open)
+            if open.reason == boundary::CloseReason::EndScreenMap =>
+        {
+            let (armed, map) = boundary::end_screen_log_fields(current.pending_boundary, open)
+                .expect("an end-screen split carries its accolade map");
+            (open.candidates.clone(), Some((armed, map)))
+        }
+        boundary::PollDecision::Open(open) => (open.candidates.clone(), None),
+        _ => (Vec::new(), None),
+    };
+    let commit = boundary::commit_poll(&mut state, decision, now);
+    if let Some(closed) = commit.closed {
+        let new_id = format!("{:016x}", rand_id());
+        match closed.reason {
+            boundary::CloseReason::MapVote => {
+                tracing::info!(
+                    ?candidates,
+                    session_id = %new_id,
+                    "auto-detect: map vote — new game"
+                );
+            }
+            boundary::CloseReason::HeroSelectOrBan => {
+                tracing::info!(
+                    session_id = %new_id,
+                    "auto-detect: hero select/ban — new game (map vote missed)"
+                );
+            }
+            boundary::CloseReason::EndScreenMap => {
+                let (armed, accolade_map) =
+                    end_screen.expect("an end-screen close was captured with its accolade map");
+                let split = boundary::format_end_screen_split(armed, closed.seal, &accolade_map);
+                tracing::info!(
+                    reason = closed.reason.log(),
+                    session_id = %new_id,
+                    split = %split,
+                    "auto-detect: new game boundary"
+                );
+            }
+            other => {
+                tracing::info!(reason = other.log(), session_id = %new_id, "auto-detect: new game boundary");
+            }
+        }
+        retire_active_game(st, store, data_dir, closed.seal, closed.reason.log()).await;
+        let mut g = ActiveGame::open_at(new_id, state.outcome, candidates, now);
+        g.apply_boundary_state(&state);
+        // A different-map end screen is an accolade read. That is the new
+        // session's map, and it is trusted for a later board-case split.
+        if g.map.is_some() {
+            g.map_source = Some(boundary::MapSource::Accolade);
+        }
+        // The deferred board belongs to the session being opened. The fresh
+        // state has none; put it back so the next stored capture writes it
+        // once. That capture clears the hold.
+        if let Some((counters, hero, at)) = carried_deferred {
+            g.deferred = Some(counters);
+            g.deferred_hero = hero;
+            g.deferred_at = at;
+            g.deferred_imported = true;
+        }
+        st.active_game = Some(g);
+        st.last_game_open = Some(now);
+        clear_cadence_wakes(st);
+        st.pending_outcome = None;
+        persist_active_game(data_dir, st.active_game.as_ref());
+        return;
+    }
+    let Some(g) = st.active_game.as_mut() else {
+        return;
+    };
+    g.apply_boundary_state(&state);
+    if let Some(outcome) = commit.recorded_outcome {
+        g.touch_at(now);
+        tracing::info!(
+            ?outcome,
+            session_id = %g.session_id,
+            "auto-detect: outcome confirmed from post-match screens"
+        );
+        if g.session_created {
+            if let Err(e) = store
+                .set_session_outcome(&g.session_id, &g.outcome.to_string())
+                .await
+            {
+                tracing::warn!(error = %e, "failed to back-fill session outcome");
+            }
+            refresh_snapshot(store, data_dir).await;
+        }
+    }
+    if let Some(map) = commit.adopted_map {
+        if !g.map_candidates.is_empty() && !g.map_candidates.contains(&map) {
+            tracing::warn!(
+                map = %map,
+                candidates = ?g.map_candidates,
+                "accolade map is not a vote candidate"
+            );
+        }
+        g.map_source = Some(boundary::MapSource::Accolade);
+        tracing::info!(
+            map = %map,
+            session_id = %g.session_id,
+            "map recovered from accolade screen"
+        );
+        g.touch_at(now);
+        if g.session_created {
+            if let Err(e) = store.set_session_map(&g.session_id, &map).await {
+                tracing::warn!(error = %e, "failed to set session map");
+            }
+            refresh_snapshot(store, data_dir).await;
+        }
+    }
+    if state != before {
+        persist_active_game(data_dir, Some(g));
+    }
+}
+
 fn persist_active_game(data_dir: &std::path::Path, game: Option<&ActiveGame>) {
     let path = active_game_path(data_dir);
     let Some(g) = game else {
@@ -871,6 +1286,7 @@ fn persist_active_game(data_dir: &std::path::Path, game: Option<&ActiveGame>) {
         session_id: g.session_id.clone(),
         outcome: g.outcome,
         map: g.map.clone(),
+        map_source: g.map_source,
         map_candidates: g.map_candidates.clone(),
         session_created: g.session_created,
         opened_at: to_wall(g.opened_at),
@@ -879,6 +1295,21 @@ fn persist_active_game(data_dir: &std::path::Path, game: Option<&ActiveGame>) {
         gate: g.gate,
         last_stats_at: g.last_stats_at.map(to_wall),
         hero_auth: g.hero_auth.clone(),
+        result_outcome: g.result_mark.map(|m| m.outcome),
+        result_confirmed: g.result_mark.is_some_and(|m| m.confirmed),
+        result_seen_at: g.result_mark.map(|m| to_wall(m.seen_at)),
+        pending_boundary: g.pending_boundary,
+        awaiting_first_board: g.awaiting_first_board,
+        reset_streak: g.reset_streak,
+        reset_baseline: g.reset_baseline,
+        baseline_row: g.baseline_row,
+        deferred: g.deferred,
+        deferred_hero: g.deferred_hero.clone(),
+        deferred_at: g.deferred_at,
+        deferred_imported: g.deferred_imported,
+        progressed_boards: g.progressed_boards,
+        baseline_at: g.baseline_at.map(to_wall),
+        text_fallback_locked: g.text_fallback_locked,
     };
     let write = || -> std::io::Result<()> {
         let tmp = path.with_extension("json.tmp");
@@ -903,10 +1334,20 @@ fn recover_active_game(data_dir: &std::path::Path) -> Option<ActiveGame> {
     if last_activity.elapsed() > UNFINISHED_SESSION_IDLE {
         return None;
     }
+    let result_mark = recover_result_mark(
+        p.result_outcome,
+        p.result_confirmed,
+        p.result_seen_at,
+        &to_instant,
+    );
+    let hint_recovered = result_mark.is_some();
     Some(ActiveGame {
         session_id: p.session_id,
         outcome: p.outcome,
-        map: p.map,
+        map: p.map.clone(),
+        map_source: p
+            .map_source
+            .or_else(|| p.map.is_some().then_some(boundary::MapSource::TextFallback)),
         map_candidates: p.map_candidates,
         session_created: p.session_created,
         opened_at: to_instant(p.opened_at)?,
@@ -917,6 +1358,43 @@ fn recover_active_game(data_dir: &std::path::Path) -> Option<ActiveGame> {
         last_stats_at: p.last_stats_at.and_then(to_instant),
         gate: p.gate,
         hero_auth: p.hero_auth,
+        result_mark,
+        // An arm with no hint would hold full poll cadence forever.
+        pending_boundary: p.pending_boundary && hint_recovered,
+        awaiting_first_board: p.awaiting_first_board,
+        reset_streak: p.reset_streak,
+        reset_baseline: p.reset_baseline,
+        baseline_row: p.baseline_row,
+        baseline_at: p.baseline_at.and_then(to_instant),
+        progressed_boards: p.progressed_boards,
+        deferred: p.deferred,
+        deferred_hero: p.deferred_hero,
+        deferred_at: p.deferred_at,
+        deferred_imported: p.deferred_imported,
+        // The hint is dropped when its timestamp cannot be mapped onto
+        // this boot. The lock stays, so a text-fallback name does not
+        // become open for an accolade just because the hint did not
+        // survive the restart. The arm is the other way around: it is
+        // dropped in that same case, above.
+        text_fallback_locked: p.text_fallback_locked,
+    })
+}
+
+/// A result timestamp that cannot be mapped back onto this boot drops the
+/// hint only. The rest of the recovered session still loads, including the
+/// text-fallback lock: losing the hint must not reopen the accolade window.
+fn recover_result_mark(
+    outcome: Option<detect::MatchOutcome>,
+    confirmed: bool,
+    seen: Option<chrono::DateTime<Utc>>,
+    to_instant: &impl Fn(chrono::DateTime<Utc>) -> Option<Instant>,
+) -> Option<ResultMark> {
+    let outcome = outcome.filter(|outcome| outcome.is_decided())?;
+    let seen_at = to_instant(seen?)?;
+    Some(ResultMark {
+        outcome,
+        confirmed,
+        seen_at,
     })
 }
 
@@ -1073,6 +1551,63 @@ fn map_vote_should_open_new_game(
     )
 }
 
+/// Map vote uses the debounce and the same-map guard. Hero select and ban
+/// are blocked only while the session they just opened is still inside the
+/// debounce, so a stable screen does not split itself on the next tick.
+fn start_screen_blocked(
+    active: Option<&ActiveGame>,
+    last_game_open: Option<Instant>,
+    now: Instant,
+    debounce: std::time::Duration,
+    screen: &boundary::StartScreen,
+) -> bool {
+    match screen {
+        boundary::StartScreen::MapVote { candidates } => {
+            !map_vote_should_open_new_game(active, last_game_open, now, debounce, candidates)
+        }
+        boundary::StartScreen::HeroSelect | boundary::StartScreen::HeroBan => {
+            active.is_some_and(|g| g.awaiting_first_board)
+                && last_game_open
+                    .is_some_and(|opened| now.saturating_duration_since(opened) < debounce)
+        }
+    }
+}
+
+/// Start a session when the poller sees a start screen and nothing is open.
+fn open_detected_game(
+    st: &mut SessionState,
+    data_dir: &std::path::Path,
+    screen: &boundary::StartScreen,
+    now: Instant,
+    debounce: std::time::Duration,
+) {
+    let (candidates, log_vote) = match screen {
+        boundary::StartScreen::MapVote { candidates } => {
+            if !map_vote_should_open_new_game(None, st.last_game_open, now, debounce, candidates) {
+                return;
+            }
+            (candidates.clone(), true)
+        }
+        boundary::StartScreen::HeroSelect | boundary::StartScreen::HeroBan => (Vec::new(), false),
+    };
+    let sid = format!("{:016x}", rand_id());
+    if log_vote {
+        tracing::info!(?candidates, session_id = %sid, "auto-detect: map vote — new game");
+    } else {
+        tracing::info!(
+            session_id = %sid,
+            "auto-detect: hero select/ban — new game (map vote missed)"
+        );
+    }
+    let mut g = ActiveGame::open_at(sid, detect::MatchOutcome::Unknown, candidates, now);
+    g.awaiting_first_board = true;
+    st.active_game = Some(g);
+    st.last_game_open = Some(now);
+    clear_cadence_wakes(st);
+    st.pending_outcome = None;
+    persist_active_game(data_dir, st.active_game.as_ref());
+}
+
 /// Minimum time since the session's last accepted capture before a stat
 /// regression is allowed to split off a new session. Real between-game gaps
 /// (result screens + queue + load) measured ≥3 min; consecutive captures of
@@ -1176,16 +1711,40 @@ fn take_fresh_pending(
 /// wrong ~2/3 of the time with 2+ candidates) — but when candidates are known
 /// they veto OCR reads that aren't among them: the played map must be one of
 /// the voted maps, so a read outside the set is a misread.
+#[cfg(test)]
 fn resolve_map(
     session_map: Option<&str>,
     panel_read: Option<&str>,
     text_read: &str,
     candidates: &[String],
 ) -> String {
-    if let Some(map) = session_map {
-        return map.to_string();
-    }
+    resolved_map(session_map, panel_read, text_read, candidates).0
+}
+
+/// The map to store, and which read supplied it.
+///
+/// A session that already has a map keeps that name. A top-bar label that
+/// agrees with it is [`MapSource::TopBar`], so a later Tab can upgrade a
+/// text fallback. A top-bar label on a session with no map is
+/// [`MapSource::TopBar`]. The full-board text is
+/// [`MapSource::TextFallback`] and is not trusted for a poll split or a
+/// later different-map split until a top bar or an accolade agrees.
+fn resolved_map(
+    session_map: Option<&str>,
+    panel_read: Option<&str>,
+    text_read: &str,
+    candidates: &[String],
+) -> (String, Option<boundary::MapSource>) {
     let plausible = |m: &&str| candidates.is_empty() || candidates.iter().any(|c| c == m);
+    if let Some(map) = session_map.map(str::trim).filter(|name| !name.is_empty()) {
+        let upgrade = panel_read
+            .map(str::trim)
+            .filter(|panel| {
+                !panel.is_empty() && panel.eq_ignore_ascii_case(map) && plausible(panel)
+            })
+            .map(|_| boundary::MapSource::TopBar);
+        return (map.to_string(), upgrade);
+    }
     let dropped = |m: &&str| {
         if !plausible(m) {
             tracing::debug!(
@@ -1195,25 +1754,95 @@ fn resolve_map(
             );
         }
     };
-    panel_read
+    if let Some(panel) = panel_read.inspect(dropped).filter(plausible) {
+        return (panel.to_string(), Some(boundary::MapSource::TopBar));
+    }
+    if let Some(text) = Some(text_read)
+        .filter(|m| !m.is_empty())
         .inspect(dropped)
         .filter(plausible)
-        .or_else(|| {
-            Some(text_read)
-                .filter(|m| !m.is_empty())
-                .inspect(dropped)
-                .filter(plausible)
-        })
-        .unwrap_or_default()
-        .to_string()
+    {
+        return (text.to_string(), Some(boundary::MapSource::TextFallback));
+    }
+    (String::new(), None)
+}
+
+/// What [`stage_capture`] decided to write. Production and the night harness
+/// both store from this, so the gate, the map source, and a carried board
+/// cannot drift between them.
+struct StagedCapture {
+    target_session: String,
+    create_session: bool,
+    map_name: String,
+    map_source: Option<boundary::MapSource>,
+    outcome: detect::MatchOutcome,
+    outcome_label: String,
+    gate: capture_gate::GateOutcome,
+    carried: Option<Counters>,
+    carried_hero: Option<String>,
+    carried_at: chrono::DateTime<Utc>,
+    split: bool,
+    /// Empty when no map was read. Callers store `None`, not `"Unknown"`.
+    recorded_map: Option<String>,
+}
+
+/// Gate, map, and carried-board decisions for one planned capture.
+///
+/// `plan.skip_store` is the hold path and is not staged: nothing is written.
+fn stage_capture(
+    req: &CaptureRequest,
+    plan: &boundary::CapturePlan,
+    raw: Counters,
+    suspect: [bool; capture_gate::GATE_COLS],
+    map_from_panel: Option<&str>,
+    parsed_map: &str,
+    captured_at: chrono::DateTime<Utc>,
+) -> StagedCapture {
+    let split = plan.split;
+    let outcome = plan.stored_outcome;
+    let target_session = if split {
+        format!("{:016x}", rand_id())
+    } else {
+        req.session_id.clone()
+    };
+    let gate_prev = gate_prev_for_store(req.prev_gate, req.awaiting_first_board);
+    let gate = capture_gate::apply_gate(gate_prev, raw, suspect, split);
+    let (map_name, map_source) = if split {
+        resolved_map(None, map_from_panel, parsed_map, &[])
+    } else {
+        resolved_map(
+            req.session_map.as_deref(),
+            map_from_panel,
+            parsed_map,
+            &req.map_candidates,
+        )
+    };
+    let carried = carried_counters_to_write(req.carried_deferred, split, req.deferred_imported);
+    let carried_at = req
+        .carried_deferred_at
+        .unwrap_or(captured_at - chrono::Duration::seconds(1));
+    StagedCapture {
+        target_session,
+        create_session: split || req.create_session,
+        recorded_map: (!map_name.is_empty()).then(|| map_name.clone()),
+        map_name,
+        map_source,
+        outcome,
+        outcome_label: outcome.to_string(),
+        gate,
+        carried,
+        carried_hero: req.carried_deferred_hero.clone(),
+        carried_at,
+        split,
+    }
 }
 
 /// Everything the blocking vision/OCR pass extracts from one Tab frame.
 /// Replaces a 9-tuple whose adjacent same-typed fields were swap-prone.
 struct FrameAnalysis {
-    /// Outcome for this capture: the game's own if already known, else
-    /// recovered from the frame (banner colors / result header text).
-    outcome: detect::MatchOutcome,
+    /// Result read off this frame only. A split stores this and never the
+    /// inherited session outcome.
+    frame_outcome: detect::MatchOutcome,
     /// Full-image OCR (hero/map name lookup); the per-cell rows carry stats.
     ocr: Result<ocr::OcrResult, Box<dyn std::error::Error + Send + Sync>>,
     /// Column-calibrated per-cell OCR rows, one per scoreboard row.
@@ -1259,6 +1888,12 @@ struct CaptureReport {
     /// Map stored on the snapshot, if one was read — the caller adopts the
     /// first discovery onto the active game so the whole session shares it.
     map: Option<String>,
+    /// Where `map` was read. [`resolved_map`] returns
+    /// [`boundary::MapSource::TopBar`] whenever the top bar agrees with the
+    /// stored name, trusted or not.
+    /// `None` while `map` still holds the kept session map: the top bar was
+    /// missing or disagreed, so this capture did not adopt a new source.
+    map_source: Option<boundary::MapSource>,
     /// The session the snapshot was actually written to. Differs from the
     /// requested session when a stat regression split off a new game.
     session_id: String,
@@ -1266,6 +1901,32 @@ struct CaptureReport {
     /// capture — a new game was detected and written to a fresh session; the
     /// caller must replace its active game to match.
     split: bool,
+    /// First fresh-match board. Not written to the current session. The
+    /// streak and baseline are what the next Tab uses. Also set for a live
+    /// match, not only after a result.
+    armed_reset: bool,
+    /// The hold path. `plan_capture` does not return this for a stored row.
+    ignore_row: bool,
+    /// Fresh-match streak to keep when `split` is false. A refresh or counted
+    /// progress sets this to zero. An unidentified or implausible row leaves it.
+    reset_streak: u32,
+    /// Baseline to keep when `split` is false and `refresh_baseline` is false.
+    reset_baseline: Option<GateState>,
+    /// Player row that owns `reset_baseline`.
+    baseline_row: Option<u32>,
+    /// This capture's accepted gate becomes the reset baseline.
+    refresh_baseline: bool,
+    /// A second progressed board, or one after an arm, arrived. The caller
+    /// clears an unconfirmed hint. A confirmed mark is left alone.
+    clear_hint: bool,
+    /// First progressed board after a hint. The hint stays.
+    count_progress: bool,
+    /// This capture's hero came from the career panel.
+    career_panel: bool,
+    /// Counters of a deferred fresh-match board, stored on the new session
+    /// when the reset commits.
+    held_counters: Option<Counters>,
+    held_hero: Option<String>,
     /// The per-cell capture-gate state after this capture (accepted + raw
     /// counters), carried into the next capture's monotonic-hold + rate-cap
     /// checks and the whole-row regression check. `None` when nothing was
@@ -1273,6 +1934,11 @@ struct CaptureReport {
     gate_state: Option<GateState>,
     /// Updated hero authority after this capture (carry into the next Tab).
     hero_auth: HeroAuthState,
+    /// Hint sealed onto the session this capture closed, when `split` is set.
+    seal: Option<detect::MatchOutcome>,
+    close_reason: Option<boundary::CloseReason>,
+    /// Wall time of a deferred board, taken when that capture was parsed.
+    held_at: Option<chrono::DateTime<Utc>>,
 }
 
 /// Volatile session-tracking state owned by [`run_loop`]. Bundles the mutable
@@ -1303,7 +1969,9 @@ struct SessionState {
     /// hallucinated OCR read can't finish the open game with a wrong outcome.
     /// The reads may come from different screens (accolade → rank screen) and
     /// need not be consecutive ticks; garbage/transition frames don't reset it.
-    word_outcome_streak: Option<(detect::MatchOutcome, Instant)>,
+    /// `map` is this tick's accolade, or the map carried from the previous
+    /// agreeing read when this tick has none.
+    word_outcome_streak: Option<WordStreak>,
     /// Reference (monotonic, wall) pair for suspend detection
     /// (`SUSPEND_RESET_GAP`): refreshed each cmd tick; wall time advancing much
     /// further than the monotonic clock between ticks means the machine slept.
@@ -1333,7 +2001,7 @@ fn end_reel_wake_active(st: &SessionState, now: Instant) -> bool {
 fn cadence_wake_active(st: &SessionState, now: Instant) -> bool {
     st.word_outcome_streak
         .as_ref()
-        .is_some_and(|(_, t)| now.duration_since(*t) <= OUTCOME_CONFIRM_WINDOW)
+        .is_some_and(|streak| now.duration_since(streak.seen_at) <= OUTCOME_CONFIRM_WINDOW)
         || end_reel_wake_active(st, now)
 }
 
@@ -1362,6 +2030,386 @@ fn clear_cadence_wakes(st: &mut SessionState) {
     st.end_reel_wake_until = None;
 }
 
+/// The Tab request the capture task runs. Ages are measured from `now`,
+/// which is [`Instant::now`] in the daemon and the injected clock in tests.
+fn build_capture_request(g: &ActiveGame, opened_by_this_tab: bool, now: Instant) -> CaptureRequest {
+    let banner_ok =
+        opened_by_this_tab || now.saturating_duration_since(g.opened_at) >= MIN_BANNER_SESSION_AGE;
+    // This session's own gate. A start screen's first board has none, and
+    // the previous game is not an anchor for it.
+    let prev_gate = match (g.gate, g.last_stats_at) {
+        (Some(state), Some(at)) => Some((state, now.saturating_duration_since(at))),
+        _ => None,
+    };
+    CaptureRequest {
+        session_id: g.session_id.clone(),
+        create_session: !g.session_created,
+        game_outcome: g.outcome,
+        session_map: g.map.clone(),
+        session_map_source: g.map_source,
+        map_candidates: g.map_candidates.clone(),
+        allow_banner_recovery: banner_ok,
+        prev_gate,
+        hero_auth: g.hero_auth.clone(),
+        after_end_screen: g.has_post_result(),
+        baseline_age: g.baseline_at.map(|at| now.saturating_duration_since(at)),
+        progressed_boards: g.progressed_boards,
+        deferred_imported: g.deferred_imported,
+        reset_streak: g.reset_streak,
+        reset_baseline: g.reset_baseline,
+        baseline_row: g.baseline_row,
+        hint: g
+            .result_mark
+            .filter(|mark| !mark.confirmed && mark.outcome.is_decided())
+            .map(|mark| mark.outcome),
+        pending_boundary: g.pending_boundary,
+        awaiting_first_board: g.awaiting_first_board,
+        carried_deferred: g.deferred,
+        carried_deferred_hero: g.deferred_hero.clone(),
+        carried_deferred_at: g.deferred_at,
+    }
+}
+
+/// Open a session when this Tab is past grace or the unfinished idle bound.
+/// Returns whether this Tab opened it. The deferred board of the session
+/// being closed is carried onto the new one.
+async fn open_fresh_if_tab_starts_one(
+    st: &mut SessionState,
+    store: &storage::LocalStore,
+    data_dir: &std::path::Path,
+    now: Instant,
+) -> bool {
+    if !should_start_fresh_session(st.active_game.as_ref(), now) {
+        return false;
+    }
+    let carried_deferred = st.active_game.as_ref().and_then(|g| {
+        g.deferred
+            .map(|counters| (counters, g.deferred_hero.clone(), g.deferred_at))
+    });
+    retire_active_game(st, store, data_dir, None, "superseded by Tab-opened game").await;
+    let inherited = take_fresh_pending(&mut st.pending_outcome, now);
+    let mut opened = ActiveGame::open_at(
+        format!("{:016x}", rand_id()),
+        inherited.unwrap_or(detect::MatchOutcome::Unknown),
+        Vec::new(),
+        now,
+    );
+    if let Some((counters, hero, at)) = carried_deferred {
+        opened.deferred = Some(counters);
+        opened.deferred_hero = hero;
+        opened.deferred_at = at;
+        opened.deferred_imported = true;
+    }
+    st.active_game = Some(opened);
+    st.last_game_open = Some(now);
+    clear_cadence_wakes(st);
+    persist_active_game(data_dir, st.active_game.as_ref());
+    true
+}
+
+/// The previous game is not a latch for a session that has no board yet.
+///
+/// Guard. [`build_capture_request`] already omits a gate this session does
+/// not have, so production passes `None` while awaiting the first board.
+/// The filter stays so a caller that still holds the previous game's gate
+/// cannot latch this row to it. [`gate_prev_for_store`] is what both the
+/// daemon and the night harness apply.
+fn gate_prev_for_store(
+    prev: Option<(GateState, std::time::Duration)>,
+    awaiting_first_board: bool,
+) -> Option<(GateState, std::time::Duration)> {
+    prev.filter(|_| !awaiting_first_board)
+}
+
+/// A held board is written when this capture splits, or when it was carried
+/// in from the session that just closed.
+fn carried_counters_to_write(
+    carried: Option<Counters>,
+    split: bool,
+    deferred_imported: bool,
+) -> Option<Counters> {
+    carried.filter(|_| split || deferred_imported)
+}
+
+/// What the vision pass (or a test stub) read off one Tab.
+struct BoardFacts<'a> {
+    counters: Counters,
+    suspect: [bool; capture_gate::GATE_COLS],
+    row_counts: bool,
+    row_id: Option<u32>,
+    hero: &'a str,
+    map_from_panel: Option<&'a str>,
+    parsed_map: &'a str,
+    frame_outcome: detect::MatchOutcome,
+}
+
+/// The capture plan for one analyzed board. Production and the night harness
+/// both call this, so the gap, the same-map guard, and the hinted-map split
+/// cannot drift.
+fn plan_from_board(req: &CaptureRequest, facts: &BoardFacts<'_>) -> boundary::CapturePlan {
+    let incoming_map = facts
+        .map_from_panel
+        .filter(|s| !s.is_empty())
+        .or(req.session_map.as_deref())
+        .or(Some(facts.parsed_map).filter(|s| !s.is_empty()));
+    let suppress_split = same_unfinished_match(
+        matches!(req.game_outcome, detect::MatchOutcome::Unknown),
+        std::time::Duration::ZERO,
+        req.session_map.as_deref(),
+        req.hero_auth.accepted_hero.as_deref(),
+        IncomingIdentity {
+            map: incoming_map,
+            hero: Some(facts.hero),
+            vote_candidates: &req.map_candidates,
+        },
+    );
+    let (gate_age, classic_regressed) = match req.prev_gate {
+        Some((state, age)) => {
+            let classic = stats_regressed(
+                state.accepted.edd(),
+                state.last_raw.edd(),
+                (
+                    facts.counters.elims,
+                    facts.counters.deaths,
+                    facts.counters.damage,
+                ),
+                (facts.suspect[0], facts.suspect[2], facts.suspect[3]),
+                (
+                    state.last_raw_suspect[0],
+                    state.last_raw_suspect[2],
+                    state.last_raw_suspect[3],
+                ),
+            );
+            (Some(age), classic)
+        }
+        None => (None, false),
+    };
+    let (prev_gate, baseline) = match req.prev_gate {
+        Some((state, _)) => (Some(state), req.reset_baseline),
+        None => (None, req.reset_baseline),
+    };
+    boundary::plan_capture(&boundary::CapturePlanInput {
+        prev_gate: prev_gate.as_ref(),
+        baseline: baseline.as_ref(),
+        streak: req.reset_streak,
+        cur: facts.counters,
+        suspect: facts.suspect,
+        create_session: req.create_session,
+        suppress_same_unfinished: suppress_split,
+        age: gate_age,
+        min_gap: STAT_SPLIT_MIN_GAP,
+        classic_regressed,
+        row_counts: facts.row_counts,
+        row_id: facts.row_id,
+        baseline_row: req.baseline_row,
+        confirmed_end: req.game_outcome.is_decided(),
+        inherited_outcome: req.game_outcome,
+        frame_outcome: facts.frame_outcome,
+        session_hero: req.hero_auth.accepted_hero.as_deref(),
+        hint: req.hint,
+        pending_boundary: req.pending_boundary,
+        awaiting_first_board: req.awaiting_first_board,
+        baseline_age: req.baseline_age,
+        progressed_boards: req.progressed_boards,
+        session_map: req.session_map.as_deref(),
+        session_map_source: req.session_map_source,
+        incoming_map,
+    })
+}
+
+/// Fold one capture report into the open session. Store writes already
+/// happened. Returns whether this report counts toward the periodic sync.
+async fn apply_capture_report(
+    st: &mut SessionState,
+    store: &storage::LocalStore,
+    data_dir: &std::path::Path,
+    sid: &str,
+    result: Result<CaptureReport, String>,
+    now: Instant,
+) -> bool {
+    match result {
+        Err(e) => {
+            tracing::error!(error = %e, "capture cycle failed");
+            false
+        }
+        Ok(report) if report.armed_reset => {
+            if let Some(g) = st.active_game.as_mut().filter(|g| g.session_id == sid) {
+                let mut state = g.boundary_state();
+                boundary::note_accepted_capture(
+                    &mut state,
+                    &boundary::CapturePlan {
+                        split: false,
+                        defer: true,
+                        ignore_row: false,
+                        skip_store: true,
+                        clear_hint: false,
+                        reset_streak: report.reset_streak,
+                        reset_baseline: report.reset_baseline,
+                        baseline_row: report.baseline_row,
+                        refresh_baseline: false,
+                        count_progress: false,
+                        stored_outcome: g.outcome,
+                        deferred_counters: report.held_counters,
+                        seal: None,
+                        close_reason: None,
+                    },
+                    GateState::default(),
+                    now,
+                );
+                g.apply_boundary_state(&state);
+                g.deferred_imported = false;
+                g.deferred_hero = report.held_hero.clone();
+                if g.deferred.is_some() {
+                    g.deferred_at = report.held_at.or(Some(Utc::now()));
+                }
+                persist_active_game(data_dir, Some(g));
+            }
+            false
+        }
+        Ok(report) if !report.recorded => {
+            if !matches!(report.outcome, detect::MatchOutcome::Unknown)
+                && let Some(g) = st.active_game.as_mut().filter(|g| g.session_id == sid)
+                && !g.finished()
+            {
+                g.record_outcome_at(report.outcome, now);
+                g.note_result(report.outcome, true);
+                // Adopting the frame's outcome closes the armed boundary.
+                // The hint is now the recorded result.
+                g.pending_boundary = false;
+                tracing::info!(
+                    outcome = ?report.outcome,
+                    session_id = %g.session_id,
+                    "outcome recovered from rejected capture frame — adopting"
+                );
+                if g.session_created {
+                    if let Err(e) = store
+                        .set_session_outcome(&g.session_id, &g.outcome.to_string())
+                        .await
+                    {
+                        tracing::warn!(error = %e, "failed to back-fill session outcome");
+                    }
+                    refresh_snapshot(store, data_dir).await;
+                }
+                persist_active_game(data_dir, Some(g));
+            }
+            false
+        }
+        Ok(report) if report.split => {
+            if st.active_game.as_ref().is_some_and(|g| g.session_id == sid) {
+                let reason = report
+                    .close_reason
+                    .map(|reason| reason.log())
+                    .unwrap_or("superseded by stat reset");
+                retire_active_game(st, store, data_dir, report.seal, reason).await;
+                let mut g = session_opened_by_split(
+                    report.session_id.clone(),
+                    report.outcome,
+                    report.hero_auth.clone(),
+                    report.career_panel,
+                    report.gate_state,
+                    report.map.clone(),
+                    now,
+                );
+                g.map_source = report.map_source;
+                g.baseline_row = report.baseline_row;
+                tracing::info!(
+                    old_session = %sid,
+                    session_id = %g.session_id,
+                    reason,
+                    "active game replaced after stat-regression split"
+                );
+                st.active_game = Some(g);
+                st.last_game_open = Some(now);
+                clear_cadence_wakes(st);
+                persist_active_game(data_dir, st.active_game.as_ref());
+            }
+            true
+        }
+        Ok(report) => {
+            if let Some(g) = st.active_game.as_mut().filter(|g| g.session_id == sid) {
+                g.session_created = true;
+                g.touch_at(now);
+                if let Some(accepted) = report.gate_state {
+                    let mut state = g.boundary_state();
+                    boundary::note_accepted_capture(
+                        &mut state,
+                        &boundary::CapturePlan {
+                            split: false,
+                            defer: false,
+                            ignore_row: report.ignore_row,
+                            skip_store: false,
+                            clear_hint: report.clear_hint,
+                            reset_streak: report.reset_streak,
+                            reset_baseline: report.reset_baseline,
+                            baseline_row: report.baseline_row,
+                            refresh_baseline: report.refresh_baseline,
+                            count_progress: report.count_progress,
+                            stored_outcome: report.outcome,
+                            deferred_counters: None,
+                            seal: None,
+                            close_reason: None,
+                        },
+                        accepted,
+                        now,
+                    );
+                    g.apply_boundary_state(&state);
+                }
+                // The imported board was written with this stored capture.
+                // Drop it so a later Tab that does not refresh the baseline
+                // does not write it again, and so it no longer blocks this
+                // session's own accolade. A deferral taken on this session
+                // stays: `deferred_imported` is false there.
+                if g.deferred_imported {
+                    g.deferred = None;
+                    g.deferred_hero = None;
+                    g.deferred_at = None;
+                    g.deferred_imported = false;
+                }
+                g.hero_auth = report.hero_auth.clone();
+                if let Some(map) = report.map.clone() {
+                    let agrees = g
+                        .map
+                        .as_ref()
+                        .is_some_and(|stored| stored.eq_ignore_ascii_case(&map));
+                    let untrusted = !g.map_is_trusted();
+                    let incoming_trusted = report
+                        .map_source
+                        .is_some_and(boundary::MapSource::trusted_for_board_split);
+                    if g.map.is_none() {
+                        g.map = Some(map.clone());
+                        g.map_source = report.map_source;
+                        if let Err(e) = store.set_session_map(&g.session_id, &map).await {
+                            tracing::warn!(error = %e, "failed to set session map");
+                        }
+                    } else if agrees && untrusted && incoming_trusted {
+                        // A later top bar that names the map already stored
+                        // upgrades a text fallback. The name stays.
+                        g.map_source = report.map_source;
+                    }
+                }
+                if !g.finished() && !matches!(report.outcome, detect::MatchOutcome::Unknown) {
+                    g.record_outcome_at(report.outcome, now);
+                    g.note_result(report.outcome, true);
+                    g.pending_boundary = false;
+                    tracing::info!(
+                        outcome = ?report.outcome,
+                        session_id = %g.session_id,
+                        "outcome recovered from captured frame — back-filling session"
+                    );
+                    if let Err(e) = store
+                        .set_session_outcome(&g.session_id, &g.outcome.to_string())
+                        .await
+                    {
+                        tracing::warn!(error = %e, "failed to back-fill session outcome");
+                    }
+                }
+                persist_active_game(data_dir, Some(g));
+            }
+            true
+        }
+    }
+}
+
 /// PR-B: whether the poller sits mid-match with nothing imminent — a mature
 /// open game, outcome still unknown, and no cadence wake (fresh word-OCR
 /// streak or POTG / end-reel deadline). Every end-of-match signal path
@@ -1370,11 +2418,228 @@ fn clear_cadence_wakes(st: &mut SessionState) {
 /// an end-reel / POTG hit sets `end_reel_wake_until`, and a detected start
 /// phase opens a new game (resetting `last_game_open`).
 fn poll_slow_mode(st: &SessionState, now: Instant) -> bool {
+    let hint_open = st.active_game.as_ref().is_some_and(|g| {
+        g.pending_boundary
+            || g.result_mark
+                .is_some_and(|mark| !mark.confirmed && mark.outcome.is_decided())
+    });
     st.active_game.as_ref().is_some_and(|g| !g.finished())
         && st
             .last_game_open
             .is_none_or(|t| now.duration_since(t) >= SLOW_AFTER_GAME_OPEN)
         && !cadence_wake_active(st, now)
+        && !hint_open
+}
+
+/// One result-word sighting. `map` survives onto the confirming tick when
+/// that tick's screen has no map of its own.
+struct WordStreak {
+    outcome: detect::MatchOutcome,
+    seen_at: Instant,
+    map: Option<String>,
+}
+
+/// Record this result-word tick and return the map the decision should see.
+///
+/// A tick with no map keeps the map from the previous read of the same
+/// outcome, and only while that read is still inside
+/// [`OUTCOME_CONFIRM_WINDOW`]. A different outcome, or an older read, drops
+/// the carried map so it cannot relabel the session.
+fn note_word_streak(
+    streak: &mut Option<WordStreak>,
+    outcome: detect::MatchOutcome,
+    seen_at: Instant,
+    this_map: Option<String>,
+) -> Option<String> {
+    let carried = streak.as_ref().and_then(|prior| {
+        let age = seen_at.saturating_duration_since(prior.seen_at);
+        (prior.outcome == outcome && age <= OUTCOME_CONFIRM_WINDOW)
+            .then(|| prior.map.clone())
+            .flatten()
+    });
+    let map = this_map.or(carried);
+    *streak = Some(WordStreak {
+        outcome,
+        seen_at,
+        map: map.clone(),
+    });
+    map
+}
+
+/// What one poll tick decided about the result word, before the session
+/// machine runs. Production and the night harness both call this, so the
+/// carried map and the confirm rule cannot drift.
+struct ResolvedWordTick {
+    signal: Option<detect::MatchOutcome>,
+    signal_confirmed: bool,
+    accolade_map: Option<String>,
+}
+
+fn resolve_word_tick(
+    streak: &mut Option<WordStreak>,
+    signal: Option<(detect::MatchOutcome, detect::match_end::OutcomeSource)>,
+    seen_at: Instant,
+    this_map: Option<String>,
+) -> ResolvedWordTick {
+    let prior = streak.as_ref().map(|prior| {
+        (
+            prior.outcome,
+            seen_at.saturating_duration_since(prior.seen_at),
+        )
+    });
+    let hit = poll_debug_hit(signal, prior, OUTCOME_CONFIRM_WINDOW);
+    match signal {
+        Some((outcome, detect::match_end::OutcomeSource::Banner)) => ResolvedWordTick {
+            signal: Some(outcome),
+            signal_confirmed: true,
+            accolade_map: None,
+        },
+        Some((outcome, source)) => {
+            let agreed = matches!(hit, Some((PollDebugHit::Confirm, _)));
+            let accolade_map = note_word_streak(streak, outcome, seen_at, this_map);
+            if !agreed {
+                tracing::debug!(
+                    ?outcome,
+                    ?source,
+                    "result word read — awaiting agreeing read"
+                );
+            }
+            ResolvedWordTick {
+                signal: Some(outcome),
+                signal_confirmed: agreed,
+                accolade_map,
+            }
+        }
+        None => ResolvedWordTick {
+            signal: None,
+            signal_confirmed: false,
+            accolade_map: this_map,
+        },
+    }
+}
+
+/// The [`boundary::PollInput`] for one open session. `map_trusted` is the
+/// stored source, so a text fallback stays absent on the poll path.
+fn poll_input_from_game<'a>(
+    game: &'a ActiveGame,
+    signal: Option<detect::MatchOutcome>,
+    signal_confirmed: bool,
+    accolade_map: Option<&'a str>,
+    start_screen: Option<boundary::StartScreen>,
+    block_map_vote: bool,
+    now: Instant,
+) -> boundary::PollInput<'a> {
+    boundary::PollInput {
+        outcome: game.outcome,
+        result: game.result_mark,
+        pending_boundary: game.pending_boundary,
+        awaiting_first_board: game.awaiting_first_board,
+        has_board: game.gate.is_some(),
+        reset_streak: game.reset_streak,
+        map: game.map.as_deref(),
+        map_trusted: game.map_is_trusted(),
+        hero: game.hero_auth.accepted_hero.as_deref(),
+        signal,
+        signal_confirmed,
+        accolade_map,
+        start_screen,
+        block_map_vote,
+        deferred: game.deferred.is_some(),
+        text_fallback_locked: game.text_fallback_locked,
+        now,
+    }
+}
+
+/// One poll tick after the word is resolved. [`run_loop`] and the night
+/// harness both call this, so the post-tick glue cannot drift: the
+/// start-screen block, [`poll_input_from_game`] (including the carried
+/// accolade map), [`apply_poll_decision`], a confirmed word with no game
+/// open, and [`open_detected_game`].
+async fn apply_poll_tick(
+    st: &mut SessionState,
+    store: &storage::LocalStore,
+    data_dir: &std::path::Path,
+    tick: &ResolvedWordTick,
+    start_screen: Option<boundary::StartScreen>,
+    now: Instant,
+    debounce: std::time::Duration,
+) {
+    let block_map_vote = start_screen.as_ref().is_some_and(|screen| {
+        start_screen_blocked(
+            st.active_game.as_ref(),
+            st.last_game_open,
+            now,
+            debounce,
+            screen,
+        )
+    });
+    let decision = st.active_game.as_ref().map(|g| {
+        boundary::decide_poll(&poll_input_from_game(
+            g,
+            tick.signal,
+            tick.signal_confirmed,
+            tick.accolade_map.as_deref(),
+            start_screen.clone(),
+            block_map_vote,
+            now,
+        ))
+    });
+    let opened = matches!(decision, Some(boundary::PollDecision::Open(_)));
+    if let Some(decision) = decision {
+        apply_poll_decision(st, store, data_dir, decision, now).await;
+    } else if tick.signal_confirmed
+        && let Some(outcome) = tick.signal
+    {
+        // No game open yet — applies to the next session if one opens
+        // within the TTL.
+        st.pending_outcome = Some((outcome, now));
+    }
+    // An open session is only closed by `decide_poll`. This arm starts a
+    // session when nothing is active yet.
+    if !opened
+        && st.active_game.is_none()
+        && let Some(screen) = &start_screen
+    {
+        open_detected_game(st, data_dir, screen, now, debounce);
+    }
+}
+
+/// Session state at process start, and again after a suspend.
+///
+/// `opened_at` is the instant the session opened, which is also when
+/// `last_game_open` was set. Restoring it keeps the debounce across a
+/// restart so the first ban or select does not split a session that is
+/// still inside it.
+fn startup_session(data_dir: &std::path::Path) -> SessionState {
+    let active_game = recover_active_game(data_dir);
+    let last_game_open = active_game.as_ref().map(|g| g.opened_at);
+    SessionState {
+        capture_count: 0,
+        last_game_open,
+        last_tab_capture: None,
+        active_game,
+        pending_outcome: None,
+        word_outcome_streak: None,
+        suspend_probe: (Instant::now(), Utc::now()),
+        ocr_stability: detect::stability::FrameStability::default(),
+        poll_ticks_skipped: 0,
+        end_reel_wake_until: None,
+    }
+}
+
+/// Resume after a suspend. Drops the volatile windows and re-admits the
+/// active game through the same recovery startup uses, so `last_game_open`
+/// is `opened_at` again and a ban inside the debounce does not split.
+fn resume_after_suspend(st: &mut SessionState, data_dir: &std::path::Path) {
+    st.pending_outcome = None;
+    clear_cadence_wakes(st);
+    st.last_tab_capture = None;
+    let recovered = startup_session(data_dir);
+    st.last_game_open = recovered.last_game_open;
+    st.active_game = recovered.active_game;
+    if st.active_game.is_none() {
+        persist_active_game(data_dir, None);
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1410,18 +2675,7 @@ async fn run_loop(ctx: Arc<DaemonCtx>) -> anyhow::Result<()> {
     // value instead of a fistful of parallel `let mut`s (QUAL-004). Field
     // meanings/rationale are documented on `SessionState`. `active_game` is
     // recovered from the previous run when the daemon restarted mid-game.
-    let mut st = SessionState {
-        capture_count: 0,
-        last_game_open: None,
-        last_tab_capture: None,
-        active_game: recover_active_game(data_dir),
-        pending_outcome: None,
-        word_outcome_streak: None,
-        suspend_probe: (Instant::now(), Utc::now()),
-        ocr_stability: detect::stability::FrameStability::default(),
-        poll_ticks_skipped: 0,
-        end_reel_wake_until: None,
-    };
+    let mut st = startup_session(data_dir);
     if let Some(g) = &st.active_game {
         tracing::info!(
             session_id = %g.session_id,
@@ -1498,62 +2752,17 @@ async fn run_loop(ctx: Arc<DaemonCtx>) -> anyhow::Result<()> {
                         // post-match scoreboard within the grace window), or
                         // open a fresh one, inheriting a still-fresh outcome
                         // the poller saw before any game was open.
-                        let opened_by_this_tab = should_start_fresh_session(st.active_game.as_ref(), Instant::now());
-                        if opened_by_this_tab {
-                            if let Some(prev) = st.active_game.as_ref() {
-                                note_unrecorded_game(data_dir, prev, "superseded by Tab-opened game");
-                            }
-                            let inherited = take_fresh_pending(&mut st.pending_outcome, Instant::now());
-                            st.active_game = Some(ActiveGame::open_now(
-                                format!("{:016x}", rand_id()),
-                                inherited.unwrap_or(detect::MatchOutcome::Unknown),
-                                Vec::new(),
-                            ));
-                            st.last_game_open = Some(Instant::now());
-                            // Word reads / end-reel wake about the previous
-                            // match must not carry into this one.
-                            clear_cadence_wakes(&mut st);
-                            persist_active_game(data_dir, st.active_game.as_ref());
-                        }
-
-                        let (sid, create, outcome, session_map, candidates, banner_ok, prev_gate, hero_auth) = {
-                            let g = st.active_game.as_ref().expect("active_game set above");
-                            // A banner-color outcome off a Tab frame is only
-                            // plausible when the daemon just joined mid/post
-                            // match (fresh Tab session) or the game is old
-                            // enough to have actually ended. Mid-game heavy
-                            // red vignettes otherwise fake a DEFEAT banner and
-                            // split the real game.
-                            let banner_ok = opened_by_this_tab
-                                || g.opened_at.elapsed() >= MIN_BANNER_SESSION_AGE;
-                            let prev_gate = match (g.gate, g.last_stats_at) {
-                                (Some(state), Some(at)) => Some((state, at.elapsed())),
-                                _ => None,
-                            };
-                            (
-                                g.session_id.clone(),
-                                !g.session_created,
-                                g.outcome,
-                                g.map.clone(),
-                                g.map_candidates.clone(),
-                                banner_ok,
-                                prev_gate,
-                                g.hero_auth.clone(),
-                            )
-                        };
-
+                        let now = Instant::now();
+                        let opened_by_this_tab =
+                            open_fresh_if_tab_starts_one(&mut st, store, data_dir, now).await;
+                        let req = build_capture_request(
+                            st.active_game.as_ref().expect("active_game set above"),
+                            opened_by_this_tab,
+                            now,
+                        );
+                        let sid = req.session_id.clone();
                         let tx = capture_tx.clone();
                         let ctx_task = Arc::clone(&ctx);
-                        let req = CaptureRequest {
-                            session_id: sid.clone(),
-                            create_session: create,
-                            game_outcome: outcome,
-                            session_map,
-                            map_candidates: candidates,
-                            allow_banner_recovery: banner_ok,
-                            prev_gate,
-                            hero_auth,
-                        };
                         capture_task = Some(tokio::spawn(async move {
                             // Wait for the game to render the scoreboard
                             // overlay after the Tab press.
@@ -1593,134 +2802,19 @@ async fn run_loop(ctx: Arc<DaemonCtx>) -> anyhow::Result<()> {
                 }
             }
             Some((sid, result)) = capture_rx.recv() => {
-                match result {
-                    Err(e) => tracing::error!(error = %e, "capture cycle failed"),
-                    // Rejected by a trust gate — nothing was recorded, so
-                    // the session must not be marked as created. The frame
-                    // may still carry the game's outcome (a Tab on the
-                    // VICTORY!/DEFEAT! end-title or the endcards screen has
-                    // no scoreboard rows and is rejected by preflight —
-                    // exactly the 2026-08-17 23:22:03 frame), so adopt that
-                    // like the recorded path does; without this the outcome
-                    // detected on the Tab path was silently dropped
-                    // (fleet::tracker-wl ET-2).
-                    Ok(report) if !report.recorded => {
-                        if !matches!(report.outcome, detect::MatchOutcome::Unknown)
-                            && let Some(g) = st.active_game.as_mut().filter(|g| g.session_id == sid)
-                            && !g.finished()
-                        {
-                            g.record_outcome(report.outcome);
-                            tracing::info!(
-                                outcome = ?report.outcome,
-                                session_id = %g.session_id,
-                                "outcome recovered from rejected capture frame — adopting"
-                            );
-                            if g.session_created {
-                                if let Err(e) = store.set_session_outcome(&g.session_id, &g.outcome.to_string()).await {
-                                    tracing::warn!(error = %e, "failed to back-fill session outcome");
-                                }
-                                // The GUI reads the snapshot, not the store —
-                                // publish the adopted outcome like the recorded
-                                // path does (ET-2b).
-                                refresh_snapshot(store, data_dir).await;
-                            }
-                            persist_active_game(data_dir, Some(g));
-                        }
-                    }
-                    Ok(report) if report.split => {
-                        // The capture detected a stat regression and wrote a
-                        // fresh session — the game this Tab was requested for
-                        // ended without the poller ever seeing its end/start
-                        // screens. Replace the stale active game, but only if
-                        // it is still the one the capture was taken for.
-                        if st.active_game.as_ref().is_some_and(|g| g.session_id == sid) {
-                            let mut g = ActiveGame::open_now(
-                                report.session_id.clone(),
-                                report.outcome,
-                                Vec::new(),
-                            );
-                            g.session_created = true;
-                            g.map = report.map.clone();
-                            g.gate = report.gate_state;
-                            g.last_stats_at = Some(Instant::now());
-                            tracing::info!(
-                                old_session = %sid,
-                                session_id = %g.session_id,
-                                "active game replaced after stat-regression split"
-                            );
-                            st.active_game = Some(g);
-                            st.last_game_open = Some(Instant::now());
-                            // Result-word reads / end-reel wake about the
-                            // previous game must not confirm into this one.
-                            clear_cadence_wakes(&mut st);
-                            persist_active_game(data_dir, st.active_game.as_ref());
-                        }
-                        st.capture_count += 1;
-                        maybe_spawn_periodic_sync(
-                            &mut sync_task,
-                            &sync_backoff,
-                            store,
-                            sync_client,
-                            data_dir,
-                            st.capture_count,
-                        );
-                        refresh_snapshot(store, data_dir).await;
-                    }
-                    Ok(report) => {
-                        // Mutate the in-memory game only if it is still the
-                        // game this capture was taken for — a start screen may
-                        // have opened a new one while OCR was running. The
-                        // store writes (keyed by session id) already happened
-                        // inside the capture task and remain correct.
-                        if let Some(g) = st.active_game.as_mut().filter(|g| g.session_id == sid) {
-                            g.session_created = true;
-                            g.touch();
-                            if let Some(gate_state) = report.gate_state {
-                                g.gate = Some(gate_state);
-                                g.last_stats_at = Some(Instant::now());
-                            }
-                            g.hero_auth = report.hero_auth.clone();
-                            // First trusted map discovery propagates
-                            // to the whole session (one game, one map).
-                            if g.map.is_none()
-                                && let Some(map) = &report.map
-                            {
-                                g.map = Some(map.clone());
-                                if let Err(e) = store.set_session_map(&g.session_id, map).await {
-                                    tracing::warn!(error = %e, "failed to set session map");
-                                }
-                            }
-                            // The capture recovered an outcome the game
-                            // didn't have yet (banner / header text on
-                            // the frame) — adopt it so the in-memory
-                            // state agrees with what was stored, and
-                            // back-fill earlier snapshots.
-                            if !g.finished()
-                                && !matches!(report.outcome, detect::MatchOutcome::Unknown)
-                            {
-                                g.record_outcome(report.outcome);
-                                tracing::info!(
-                                    outcome = ?report.outcome,
-                                    session_id = %g.session_id,
-                                    "outcome recovered from captured frame — back-filling session"
-                                );
-                                if let Err(e) = store.set_session_outcome(&g.session_id, &g.outcome.to_string()).await {
-                                    tracing::warn!(error = %e, "failed to back-fill session outcome");
-                                }
-                            }
-                            persist_active_game(data_dir, Some(g));
-                        }
-                        st.capture_count += 1;
-                        maybe_spawn_periodic_sync(
-                            &mut sync_task,
-                            &sync_backoff,
-                            store,
-                            sync_client,
-                            data_dir,
-                            st.capture_count,
-                        );
-                        refresh_snapshot(store, data_dir).await;
-                    }
+                // The report handler is the same function the night harness
+                // calls. Sync stays here so a slow upload cannot hide inside it.
+                if apply_capture_report(&mut st, store, data_dir, &sid, result, Instant::now()).await {
+                    st.capture_count += 1;
+                    maybe_spawn_periodic_sync(
+                        &mut sync_task,
+                        &sync_backoff,
+                        store,
+                        sync_client,
+                        data_dir,
+                        st.capture_count,
+                    );
+                    refresh_snapshot(store, data_dir).await;
                 }
             }
             _ = poll_timer.tick(), if auto_detect.enabled => {
@@ -1767,7 +2861,10 @@ async fn run_loop(ctx: Arc<DaemonCtx>) -> anyhow::Result<()> {
                         // On-hit evidence (debug_ocr): confirm + first streak only.
                         // `--dump-poll-frames` still writes every tick as `poll_*`.
                         let on_hit_dir = debug_ocr.then(|| data_dir.join("debug").join("poll"));
-                        let prior_streak = st.word_outcome_streak.map(|(o, t)| (o, t.elapsed()));
+                        let prior_streak = st
+                            .word_outcome_streak
+                            .as_ref()
+                            .map(|streak| (streak.outcome, streak.seen_at.elapsed()));
                         let mut stability = std::mem::take(&mut st.ocr_stability);
                         let (signal, phase, accolade_map, end_reel, stability) = tokio::task::spawn_blocking(move || {
                             if let Some(dir) = &dump_dir {
@@ -1788,11 +2885,16 @@ async fn run_loop(ctx: Arc<DaemonCtx>) -> anyhow::Result<()> {
                             // and end-reel refresh still run (same confirm /
                             // on-hit dump machinery below).
                             let accolade_map = if outcome_only {
+                                // Tab cell OCR is in flight. This tick still
+                                // reads the outcome word, but not the map, so
+                                // two of these ticks confirm with no map and
+                                // seal onto the open session.
                                 None
                             } else {
-                                // The accolade screen also prints the map —
-                                // read it while we're here; it recovers games
-                                // where the in-game top-bar OCR missed all match.
+                                // Only a result-word tick reads the map. The
+                                // rank screen does not. A banner tick is the
+                                // gameplay HUD under a result flash, so that
+                                // crop is not a map.
                                 match &signal {
                                     Some((_, detect::match_end::OutcomeSource::ResultWord)) => {
                                         detect::match_end::read_accolade_map(&img)
@@ -1844,158 +2946,46 @@ async fn run_loop(ctx: Arc<DaemonCtx>) -> anyhow::Result<()> {
                         // immediately (and only lasts ~3s — a second tick may
                         // never come). A word-OCR outcome (accolade or rank
                         // screen) needs a second agreeing read within the
-                        // confirmation window. `poll_debug_hit` is the same
-                        // confirm/streak rule used for debug_ocr PNGs.
-                        let hit = poll_debug_hit(
+                        // confirmation window. The streak is recorded before
+                        // the decision and carries a map only inside that
+                        // window. [`resolve_word_tick`] is the same rule the
+                        // night harness runs.
+                        let now = Instant::now();
+                        let tick = resolve_word_tick(
+                            &mut st.word_outcome_streak,
                             signal,
-                            st.word_outcome_streak.map(|(o, t)| (o, t.elapsed())),
-                            OUTCOME_CONFIRM_WINDOW,
+                            now,
+                            accolade_map,
                         );
-                        let confirmed = match signal {
-                            Some((outcome, detect::match_end::OutcomeSource::Banner)) => {
-                                Some(outcome)
-                            }
-                            Some((outcome, source)) => {
-                                let agreed = matches!(hit, Some((PollDebugHit::Confirm, _)));
-                                st.word_outcome_streak = Some((outcome, Instant::now()));
-                                if agreed {
-                                    Some(outcome)
-                                } else {
-                                    tracing::debug!(?outcome, ?source, "result word read — awaiting agreeing read");
-                                    None
-                                }
-                            }
-                            // No signal this tick (transition/garbage frame) —
-                            // keep the streak; the window bounds its lifetime.
-                            None => None,
-                        };
 
-                        // Post-match accolade screen → record the outcome on the
-                        // open game. Idempotent: the screen shows for ~20s (several
-                        // ticks) but only the first, while the outcome is still
-                        // Unknown, writes it.
-                        if let Some(outcome) = confirmed {
-                            match st.active_game.as_mut() {
-                                Some(g) if !g.finished() => {
-                                    g.record_outcome(outcome);
-                                    tracing::info!(?outcome, session_id = %g.session_id, "auto-detect: outcome confirmed from post-match screens");
-                                    if g.session_created {
-                                        if let Err(e) = store.set_session_outcome(&g.session_id, &outcome.to_string()).await {
-                                            tracing::warn!(error = %e, "failed to back-fill session outcome");
-                                        }
-                                        refresh_snapshot(store, data_dir).await;
-                                    }
-                                    persist_active_game(data_dir, Some(g));
-                                }
-                                Some(_) => { /* outcome already recorded for this game */ }
-                                None => {
-                                    // No game open yet — applies to the next
-                                    // session if one opens within the TTL.
-                                    st.pending_outcome = Some((outcome, Instant::now()));
-                                }
-                            }
-                        }
-
-                        if let Some(map) = accolade_map
-                            && let Some(g) = st.active_game.as_mut()
-                            && g.map.is_none()
-                        {
-                            // The accolade read is a dedicated-region OCR and
-                            // trusted even alongside vote candidates (which
-                            // used to block this recovery entirely) — but a
-                            // contradiction is worth a trace.
-                            if !g.map_candidates.is_empty() && !g.map_candidates.contains(&map) {
-                                tracing::warn!(map = %map, candidates = ?g.map_candidates, "accolade map is not a vote candidate");
-                            }
-                            tracing::info!(map = %map, session_id = %g.session_id, "map recovered from accolade screen");
-                            g.map = Some(map.clone());
-                            g.touch();
-                            if g.session_created {
-                                if let Err(e) = store.set_session_map(&g.session_id, &map).await {
-                                    tracing::warn!(error = %e, "failed to set session map");
-                                }
-                                refresh_snapshot(store, data_dir).await;
-                            }
-                            persist_active_game(data_dir, Some(g));
-                        }
-
-                        // Game-start screens open a new game. Map vote is the
-                        // unambiguous boundary (debounced so a lingering screen
-                        // across ticks opens only one game); hero select/ban only
-                        // open a game when none is active (fallback if the map
-                        // vote was missed).
-                        // A game whose outcome has already been recorded is
-                        // finished; the next start screen must begin a fresh game
-                        // so the previous result can't carry over to it.
-                        let game_finished = st.active_game.as_ref().is_some_and(ActiveGame::finished);
-                        match phase {
+                        // Boundaries live in `boundary::decide_poll`. A map vote
+                        // or a hero ban after a board-followed hint splits and
+                        // seals it. A hero select only arms. A confirmed word
+                        // on a trusted different map opens the next session.
+                        // A start screen still inside the debounce does not
+                        // open another session.
+                        let start_screen = match &phase {
                             detect::GamePhase::MapVote { maps } => {
-                                // Vote names are screen-text constants
-                                // ("SHAMBALI") — canonicalize through the
-                                // MAPS table so candidate checks compare
-                                // display names with display names.
                                 let candidates: Vec<String> = maps
                                     .iter()
                                     .filter_map(|m| parse::canonical_map(m))
                                     .collect();
-                                let now = Instant::now();
-                                let can_open = map_vote_should_open_new_game(
-                                    st.active_game.as_ref(),
-                                    st.last_game_open,
-                                    now,
-                                    new_game_debounce,
-                                    &candidates,
-                                );
-                                if can_open {
-                                    let sid = format!("{:016x}", rand_id());
-                                    tracing::info!(?candidates, session_id = %sid, "auto-detect: map vote — new game");
-                                    if let Some(prev) = st.active_game.as_ref() {
-                                        note_unrecorded_game(data_dir, prev, "superseded by map vote");
-                                    }
-                                    st.active_game = Some(ActiveGame::open_now(sid, detect::MatchOutcome::Unknown, candidates));
-                                    st.last_game_open = Some(Instant::now());
-                                    // Evidence about the previous match must not
-                                    // confirm into this one — and a pending
-                                    // outcome from before any game was open
-                                    // can't be this new game's result either.
-                                    clear_cadence_wakes(&mut st);
-                                    st.pending_outcome = None;
-                                    persist_active_game(data_dir, st.active_game.as_ref());
-                                } else if should_reuse_unfinished_same_match(
-                                    st.active_game.as_ref(),
-                                    IncomingIdentity {
-                                        map: None,
-                                        hero: None,
-                                        vote_candidates: &candidates,
-                                    },
-                                    now,
-                                ) {
-                                    tracing::info!(
-                                        session_id = st
-                                            .active_game
-                                            .as_ref()
-                                            .map(|g| g.session_id.as_str()),
-                                        ?candidates,
-                                        "auto-detect: map vote reused unfinished same-map/hero game"
-                                    );
-                                }
+                                Some(boundary::StartScreen::MapVote { candidates })
                             }
-                            detect::GamePhase::HeroBan | detect::GamePhase::HeroSelect
-                                if st.active_game.is_none() || game_finished =>
-                            {
-                                let sid = format!("{:016x}", rand_id());
-                                tracing::info!(session_id = %sid, "auto-detect: hero select/ban — new game (map vote missed)");
-                                if let Some(prev) = st.active_game.as_ref() {
-                                    note_unrecorded_game(data_dir, prev, "superseded by hero select/ban");
-                                }
-                                st.active_game = Some(ActiveGame::open_now(sid, detect::MatchOutcome::Unknown, Vec::new()));
-                                st.last_game_open = Some(Instant::now());
-                                clear_cadence_wakes(&mut st);
-                                st.pending_outcome = None;
-                                persist_active_game(data_dir, st.active_game.as_ref());
-                            }
-                            _ => {}
-                        }
+                            detect::GamePhase::HeroSelect => Some(boundary::StartScreen::HeroSelect),
+                            detect::GamePhase::HeroBan => Some(boundary::StartScreen::HeroBan),
+                            _ => None,
+                        };
+                        apply_poll_tick(
+                            &mut st,
+                            store,
+                            data_dir,
+                            &tick,
+                            start_screen,
+                            now,
+                            new_game_debounce,
+                        )
+                        .await;
                     }
                     Err(e) => {
                         tracing::trace!(error = %e, "poll capture failed (game may not be running)");
@@ -2016,14 +3006,7 @@ async fn run_loop(ctx: Arc<DaemonCtx>) -> anyhow::Result<()> {
                         gap_secs = (wall - mono).as_secs(),
                         "suspend/clock-jump detected — resetting session windows"
                     );
-                    st.pending_outcome = None;
-                    clear_cadence_wakes(&mut st);
-                    st.last_game_open = None;
-                    st.last_tab_capture = None;
-                    st.active_game = recover_active_game(data_dir);
-                    if st.active_game.is_none() {
-                        persist_active_game(data_dir, None);
-                    }
+                    resume_after_suspend(&mut st, data_dir);
                 }
                 st.suspend_probe = (Instant::now(), Utc::now());
 
@@ -2126,19 +3109,22 @@ fn analyze_frame(
     // read the VICTORY/DEFEAT header text off this frame. The last step
     // recovers the case where the poller missed the screens and we're
     // sitting on a post-match scoreboard that prints the result header.
-    let outcome = if matches!(game_outcome, detect::MatchOutcome::Unknown) {
-        let o = if allow_banner_recovery {
-            detect::match_end::detect_outcome(&img)
-        } else {
-            detect::MatchOutcome::Unknown
-        };
-        if matches!(o, detect::MatchOutcome::Unknown) {
-            detect::match_end::detect_outcome_text(&img)
-        } else {
-            o
-        }
+    let detected = if allow_banner_recovery {
+        detect::match_end::detect_outcome(&img)
     } else {
+        detect::MatchOutcome::Unknown
+    };
+    let frame_outcome = if matches!(detected, detect::MatchOutcome::Unknown) {
+        detect::match_end::detect_outcome_text(&img)
+    } else {
+        detected
+    };
+    // The open session's outcome wins on a capture that stays in that session.
+    // A gap split keeps this frame's own header. A reset split stores Unknown.
+    let outcome = if game_outcome.is_decided() {
         game_outcome
+    } else {
+        frame_outcome
     };
 
     let scoreboard = ocr::preprocess::crop_scoreboard(&img);
@@ -2213,7 +3199,7 @@ fn analyze_frame(
     };
 
     FrameAnalysisOutcome::Analyzed(Box::new(FrameAnalysis {
-        outcome,
+        frame_outcome,
         ocr,
         rows,
         portrait_hero: portrait_match,
@@ -2226,6 +3212,222 @@ fn analyze_frame(
     }))
 }
 
+/// Row id passed into [`boundary::plan_capture`]. `None` when the player
+/// row was not identified.
+fn identified_row_id(player_row_idx: Option<usize>) -> Option<u32> {
+    player_row_idx.map(|idx| idx as u32)
+}
+
+/// Session a stat split just opened. A decided `outcome` is the current
+/// frame's header (gap split) and stamps grace. Unknown is a reset split.
+///
+/// `career_ever_ok` is per game. It is set when this capture read the career
+/// panel. A flag carried from the previous game does not. Portrait switch
+/// state does not carry.
+fn session_opened_by_split(
+    session_id: String,
+    outcome: detect::MatchOutcome,
+    hero_auth: HeroAuthState,
+    career_panel: bool,
+    gate: Option<GateState>,
+    map: Option<String>,
+    now: Instant,
+) -> ActiveGame {
+    let mut g = ActiveGame::open_at(session_id, outcome, Vec::new(), now);
+    g.session_created = true;
+    g.map = map;
+    g.gate = gate;
+    g.last_stats_at = Some(now);
+    g.baseline_at = gate.map(|_| now);
+    g.reset_baseline = gate;
+    g.hero_auth = HeroAuthState {
+        career_ever_ok: career_panel,
+        accepted_hero: hero_auth.accepted_hero,
+        portrait_pending: None,
+    };
+    g
+}
+
+/// Write the board that was held off the finished game onto the new session
+/// at that capture's own timestamp, and record it the same way as a Tab.
+#[allow(clippy::too_many_arguments)]
+async fn store_held_board(
+    store: &storage::LocalStore,
+    data_dir: &std::path::Path,
+    session_id: &str,
+    hero: &str,
+    map_name: &str,
+    outcome: &str,
+    counters: Counters,
+    played_at: chrono::DateTime<Utc>,
+) -> anyhow::Result<()> {
+    let played_at = SurrealDatetime::from(played_at);
+    let row = storage::PersonalMatch {
+        id: None,
+        hero: hero.to_string(),
+        map_name: map_name.to_string(),
+        game_mode: String::new(),
+        role: parse::guess_role_public(hero),
+        outcome: outcome.to_string(),
+        elims: counters.elims,
+        deaths: counters.deaths,
+        assists: counters.assists,
+        damage: counters.damage,
+        healing: counters.healing,
+        mitigation: counters.mitigation,
+        played_at,
+        synced: false,
+        sync_rev: 0,
+        session_id: session_id.to_string(),
+        corrected_hero: None,
+        corrected_role: None,
+        corrected_map_name: None,
+        corrected_outcome: None,
+        corrected_elims: None,
+        corrected_deaths: None,
+        corrected_assists: None,
+        corrected_damage: None,
+        corrected_healing: None,
+        corrected_mitigation: None,
+        edited_fields: Vec::new(),
+        edited_at: None,
+        heroes_played: Vec::new(),
+        segment_resolutions: Vec::new(),
+    };
+    storage::append_match_log(data_dir, &row);
+    store
+        .insert_match(row)
+        .await
+        .map_err(anyhow::Error::from_boxed)
+        .context("deferred board insert failed")?;
+    if let Err(e) = store.append_capture(session_id, played_at, outcome).await {
+        tracing::warn!(error = %e, "failed to append the deferred board to the session");
+    }
+    if let Err(e) = store.refresh_session_hero_timeline(session_id).await {
+        tracing::debug!(error = %e, "failed to refresh hero timeline for the deferred board");
+    }
+    Ok(())
+}
+
+/// The hold-path report. Production and the night harness both build it
+/// here, so the stored outcome and the career-panel flag cannot drift.
+fn skipped_capture_report(
+    plan: &boundary::CapturePlan,
+    session_id: &str,
+    career_panel: bool,
+    hero_auth: HeroAuthState,
+    held_hero: Option<String>,
+    held_at: Option<chrono::DateTime<Utc>>,
+) -> CaptureReport {
+    CaptureReport {
+        recorded: false,
+        outcome: plan.stored_outcome,
+        map: None,
+        map_source: None,
+        session_id: session_id.to_string(),
+        split: false,
+        armed_reset: plan.defer,
+        ignore_row: plan.ignore_row,
+        reset_streak: plan.reset_streak,
+        reset_baseline: plan.reset_baseline,
+        baseline_row: plan.baseline_row,
+        refresh_baseline: false,
+        clear_hint: false,
+        count_progress: false,
+        career_panel,
+        held_counters: plan.deferred_counters,
+        held_hero,
+        gate_state: None,
+        hero_auth,
+        seal: None,
+        close_reason: None,
+        held_at,
+    }
+}
+
+/// Session row and carried board for one staged capture. Production and the
+/// night harness both write through this. The current board's own snapshot
+/// stays with the caller: production inserts the parsed row, the harness
+/// inserts the accepted counters.
+async fn write_staged_rows(
+    store: &storage::LocalStore,
+    data_dir: &std::path::Path,
+    staged: &StagedCapture,
+    hero: &str,
+    role: &str,
+    now: SurrealDatetime,
+) -> anyhow::Result<bool> {
+    let mut create = staged.create_session;
+    if let Some(counters) = staged.carried {
+        let played_at = staged.carried_at;
+        if create {
+            let carried_hero = staged
+                .carried_hero
+                .clone()
+                .unwrap_or_else(|| hero.to_string());
+            let session = storage::MatchSession {
+                session_id: staged.target_session.clone(),
+                hero: carried_hero,
+                map_name: staged.map_name.clone(),
+                role: role.to_string(),
+                started_at: SurrealDatetime::from(played_at),
+                last_capture_at: SurrealDatetime::from(played_at),
+                capture_count: 0,
+                final_outcome: staged.outcome_label.clone(),
+            };
+            store
+                .create_session(&session)
+                .await
+                .map_err(anyhow::Error::from_boxed)
+                .context("session create failed")?;
+            create = false;
+        }
+        let carried_hero = staged
+            .carried_hero
+            .clone()
+            .unwrap_or_else(|| hero.to_string());
+        store_held_board(
+            store,
+            data_dir,
+            &staged.target_session,
+            &carried_hero,
+            &staged.map_name,
+            &staged.outcome_label,
+            counters,
+            played_at,
+        )
+        .await?;
+    }
+    if create {
+        let session = storage::MatchSession {
+            session_id: staged.target_session.clone(),
+            hero: hero.to_string(),
+            map_name: staged.map_name.clone(),
+            role: role.to_string(),
+            started_at: now,
+            last_capture_at: now,
+            capture_count: 1,
+            final_outcome: staged.outcome_label.clone(),
+        };
+        // A failed create must abort the capture: pressing on would write
+        // a snapshot the caller then marks "session created", and every
+        // later outcome/map back-fill would update a session row that
+        // doesn't exist. The Tab can simply be pressed again.
+        store
+            .create_session(&session)
+            .await
+            .map_err(anyhow::Error::from_boxed)
+            .context("session create failed")?;
+        tracing::info!(session_id = %staged.target_session, "started new match session");
+    } else if let Err(e) = store
+        .append_capture(&staged.target_session, now, &staged.outcome_label)
+        .await
+    {
+        tracing::warn!(error = %e, "failed to append capture to session");
+    }
+    Ok(create)
+}
+
 async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<CaptureReport> {
     // QUAL-002 follow-up (multi-file seam split — parked for USER per DR-1 A4)
     // Ergonomic locals over the context/request (the body predates A1).
@@ -2236,10 +3438,8 @@ async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<
     let collect_portraits = ctx.collect_portraits;
     let data_dir: &std::path::Path = &ctx.data_dir;
     let session_id: &str = &req.session_id;
-    let create_session = req.create_session;
     let game_outcome = req.game_outcome;
     let session_map = req.session_map.as_deref();
-    let map_candidates: &[String] = &req.map_candidates;
     let allow_banner_recovery = req.allow_banner_recovery;
 
     tracing::info!("Tab detected — capturing screen (hold Tab to keep scoreboard visible)");
@@ -2279,15 +3479,30 @@ async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<
                 recorded: false,
                 outcome,
                 map: None,
+                map_source: None,
                 session_id: session_id.to_string(),
                 split: false,
+                armed_reset: false,
+                ignore_row: false,
+                reset_streak: req.reset_streak,
+                reset_baseline: req.reset_baseline,
+                baseline_row: req.baseline_row,
+                refresh_baseline: false,
+                clear_hint: false,
+                count_progress: false,
+                career_panel: false,
+                held_counters: None,
+                held_hero: None,
                 gate_state: None,
                 hero_auth: req.hero_auth.clone(),
+                seal: None,
+                close_reason: None,
+                held_at: None,
             });
         }
     };
     let FrameAnalysis {
-        outcome,
+        mut frame_outcome,
         ocr,
         rows,
         portrait_hero,
@@ -2309,16 +3524,19 @@ async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<
     // The full-board text is already paid for, so this costs nothing; it is
     // limited to the first lines (header position) so chat or player names
     // deeper in the board can never supply a result (fleet::tracker-wl ET-2).
-    let outcome = if matches!(outcome, detect::MatchOutcome::Unknown) {
+    if matches!(frame_outcome, detect::MatchOutcome::Unknown) {
         match parse::outcome_from_board_header(&ocr_result.raw_text) {
-            detect::MatchOutcome::Unknown => outcome,
+            detect::MatchOutcome::Unknown => {}
             o => {
                 tracing::info!(outcome = ?o, "outcome read from scoreboard OCR header line");
-                o
+                frame_outcome = o;
             }
         }
+    }
+    let mut outcome = if game_outcome.is_decided() {
+        game_outcome
     } else {
-        outcome
+        frame_outcome
     };
 
     tracing::info!(?outcome, "frame analysis");
@@ -2359,14 +3577,29 @@ async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<
             recorded: false,
             outcome,
             map: None,
+            map_source: None,
             session_id: session_id.to_string(),
             split: false,
+            armed_reset: false,
+            ignore_row: false,
+            reset_streak: req.reset_streak,
+            reset_baseline: req.reset_baseline,
+            baseline_row: req.baseline_row,
+            refresh_baseline: false,
+            clear_hint: false,
+            count_progress: false,
+            career_panel: false,
+            held_counters: None,
+            held_hero: None,
             gate_state: None,
             hero_auth: req.hero_auth.clone(),
+            seal: None,
+            close_reason: None,
+            held_at: None,
         });
     }
 
-    let outcome_label = outcome.to_string();
+    let mut outcome_label = outcome.to_string();
     // CG-4 C: mutates across this capture; carried back on CaptureReport.
     let mut hero_auth = req.hero_auth.clone();
 
@@ -2409,39 +3642,52 @@ async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<
 
         // Auto-collect a portrait reference when the hero is identified and
         // collection is enabled — or, always, when the career panel (the
-        // authoritative OCR read) names a hero that has no reference on disk
-        // yet. New heroes ship faster than bundled portraits (D.Mon, WL-5):
-        // the first game on one seeds its reference here, and the matcher
-        // picks it up on the next daemon start. Only the career-panel source
-        // may seed (a portrait/held/text guess must not template itself).
+        // authoritative OCR read) names a hero whose reference is missing.
+        // A bundled stand-in (PROVISIONAL_PORTRAITS: Blizzard Entertainment
+        // artwork sourced via the Overwatch wiki, for Doctrine) counts as
+        // missing, so the first career-panel crop replaces it. A file with
+        // any other bytes is a real crop or a user file and is never
+        // overwritten. The player's row must be known: cropping row 0 when
+        // the row was not identified would store someone else's hero and
+        // then stick. New heroes ship faster than bundled portraits
+        // (D.Mon, WL-5): the first game on one seeds its reference here, and
+        // the matcher picks it up on the next daemon start. Only the
+        // career-panel source may seed (a portrait/held/text guess must not
+        // template itself).
         let portraits_path = detect::hero_portrait::portraits_dir(data_dir);
-        let seed_missing = matches!(source, HeroSource::CareerPanel)
-            && parsed.hero != "Unknown"
-            && !detect::hero_portrait::portrait_reference_path(&portraits_path, &parsed.hero)
-                .exists();
-        if seed_missing {
-            tracing::info!(hero = %parsed.hero, "no portrait reference for career-panel hero — seeding one from this capture");
+        let reference_path =
+            detect::hero_portrait::portrait_reference_path(&portraits_path, &parsed.hero);
+        let slot_replaceable = parsed.hero != "Unknown"
+            && detect::hero_portrait::portrait_slot_is_replaceable(&reference_path);
+        let career_panel = matches!(source, HeroSource::CareerPanel);
+        let save_portrait = detect::hero_portrait::should_save_portrait_crop(
+            career_panel,
+            collect_portraits,
+            slot_replaceable,
+            player_row_idx.is_some(),
+        );
+        if save_portrait && career_panel {
+            tracing::info!(hero = %parsed.hero, "no real portrait reference for career-panel hero — seeding one from this capture");
         }
-        if (collect_portraits || seed_missing) && parsed.hero != "Unknown" {
+        if save_portrait && let Some(row) = player_row_idx {
             // Shared geometry (5v5/6v6 + team gap) — an inlined 5v5-only copy
             // here used to mis-crop 6v6/team-2 references into the template
             // library.
             let dims = (scoreboard_img.width(), scoreboard_img.height());
-            if let Some(r) =
-                detect::hero_portrait::portrait_rect(dims, player_row_idx.unwrap_or(0), team_size)
-            {
+            if let Some(r) = detect::hero_portrait::portrait_rect(dims, row, team_size) {
                 let crop = scoreboard_img.crop_imm(r.x, r.y, r.w, r.h);
-                if let Err(e) = detect::hero_portrait::save_portrait_reference(
+                if let Err(e) = detect::hero_portrait::save_captured_portrait(
                     &portraits_path,
                     &parsed.hero,
                     &crop,
                 ) {
-                    tracing::debug!(error = %e, "portrait save failed (non-fatal)");
+                    tracing::warn!(error = %e, hero = %parsed.hero, "portrait save failed");
                 }
             }
         }
 
-        let now = SurrealDatetime::from(Utc::now());
+        let captured_at = Utc::now();
+        let now = SurrealDatetime::from(captured_at);
 
         // Edge-ink suspect mask (CG-3) for the player's row — read from the same
         // per-cell OCR the stats came from. Threaded into BOTH the split decision
@@ -2452,66 +3698,11 @@ async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<
         // Stat-regression boundary (detector-independent): scoreboard stats
         // are cumulative within a match, so if this capture's counters sit
         // below the session's previous accepted capture, the poller missed
-        // the game boundary (end screens + start screens) and this board
-        // belongs to a NEW game. Split it into a fresh session instead of
-        // appending — 2026-07-14 three games merged into one session this way.
+        // the game boundary and this board belongs to a new game.
         // Same-map/hero unfinished session: a stat-looking regression after
         // the 120s gap is almost always OCR noise or a late scoreboard of
-        // THIS match (21:49 empty + 21:55 WIN). Do not split it off.
-        let incoming_map = map_from_panel
-            .as_deref()
-            .filter(|s| !s.is_empty())
-            .or(session_map)
-            .or(Some(parsed.map_name.as_str()).filter(|s| !s.is_empty()));
-        let suppress_split = same_unfinished_match(
-            matches!(req.game_outcome, detect::MatchOutcome::Unknown),
-            std::time::Duration::ZERO,
-            session_map,
-            req.hero_auth.accepted_hero.as_deref(),
-            IncomingIdentity {
-                map: incoming_map,
-                hero: Some(parsed.hero.as_str()),
-                vote_candidates: map_candidates,
-            },
-        );
-        let split = !create_session
-            && !suppress_split
-            && req.prev_gate.is_some_and(|(state, age)| {
-                age >= STAT_SPLIT_MIN_GAP
-                    && stats_regressed(
-                        state.accepted.edd(),
-                        state.last_raw.edd(),
-                        (parsed.elims, parsed.deaths, parsed.damage),
-                        // edd order is (elims, deaths, damage) = cols 0, 2, 3.
-                        (suspect[0], suspect[2], suspect[3]),
-                        (
-                            state.last_raw_suspect[0],
-                            state.last_raw_suspect[2],
-                            state.last_raw_suspect[3],
-                        ),
-                    )
-            });
-        let (target_session, target_create) = if split {
-            let fresh = format!("{:016x}", rand_id());
-            tracing::info!(
-                old_session = %session_id,
-                new_session = %fresh,
-                elims = parsed.elims,
-                deaths = parsed.deaths,
-                damage = parsed.damage,
-                "player stats regressed — previous game never closed; splitting into a new session"
-            );
-            (fresh, true)
-        } else {
-            (session_id.to_string(), create_session)
-        };
-
-        // Per-cell capture gate: within a game, cumulative counters never
-        // decrease and never jump beyond a plausible rate. Hold a single cell
-        // that violates that (misread collapse, or ghost-9 inflation) to its
-        // last accepted value while keeping every genuinely-advancing cell.
-        // Skipped on a split — a real new game legitimately resets every
-        // counter, so the raw read seeds the fresh session's gate state.
+        // this match. Do not split it off. A fresh-match drop is a candidate
+        // new game even inside that gap. The first is held.
         let raw_counters = Counters {
             elims: parsed.elims,
             assists: parsed.assists,
@@ -2520,7 +3711,65 @@ async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<
             healing: parsed.healing,
             mitigation: parsed.mitigation,
         };
-        let gate = capture_gate::apply_gate(req.prev_gate, raw_counters, suspect, split);
+        let plan = plan_from_board(
+            &req,
+            &BoardFacts {
+                counters: raw_counters,
+                suspect,
+                row_counts: parse::row_counts(&rows, player_row_idx),
+                row_id: identified_row_id(player_row_idx),
+                hero: &parsed.hero,
+                map_from_panel: map_from_panel.as_deref(),
+                parsed_map: &parsed.map_name,
+                frame_outcome,
+            },
+        );
+        if plan.skip_store {
+            if plan.defer {
+                tracing::info!(
+                    session_id = %session_id,
+                    elims = parsed.elims,
+                    deaths = parsed.deaths,
+                    damage = parsed.damage,
+                    "fresh-match board held — not written onto the current game"
+                );
+            }
+            return Ok(skipped_capture_report(
+                &plan,
+                session_id,
+                matches!(source, HeroSource::CareerPanel),
+                hero_auth,
+                plan.defer.then(|| parsed.hero.clone()),
+                plan.defer.then_some(captured_at),
+            ));
+        }
+        let staged = stage_capture(
+            &req,
+            &plan,
+            raw_counters,
+            suspect,
+            map_from_panel.as_deref(),
+            &parsed.map_name,
+            captured_at,
+        );
+        let split = staged.split;
+        outcome = staged.outcome;
+        outcome_label = staged.outcome_label.clone();
+        parsed.outcome = outcome_label.clone();
+        let target_session = staged.target_session.clone();
+        if split {
+            tracing::info!(
+                old_session = %session_id,
+                new_session = %target_session,
+                elims = parsed.elims,
+                deaths = parsed.deaths,
+                damage = parsed.damage,
+                after_end_screen = req.after_end_screen,
+                reset_streak = plan.reset_streak,
+                "player stats regressed — previous game never closed; splitting into a new session"
+            );
+        }
+        let gate = &staged.gate;
         // CG-4 B3: always surface the per-column suspect mask on the accept
         // path so a latched inflation can be diagnosed as flagged vs clean
         // (the 07-22 HLG 22994 case was undiagnosable without this).
@@ -2566,50 +3815,18 @@ async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<
         parsed.healing = gate.accepted.healing;
         parsed.mitigation = gate.accepted.mitigation;
 
-        parsed.map_name = if split {
-            // The old session's confirmed map and vote candidates belong to
-            // the previous game — resolve this frame's reads on their own.
-            resolve_map(None, map_from_panel.as_deref(), &parsed.map_name, &[])
-        } else {
-            resolve_map(
-                session_map,
-                map_from_panel.as_deref(),
-                &parsed.map_name,
-                map_candidates,
-            )
-        };
+        parsed.map_name = staged.map_name.clone();
 
         // The session is owned by the active game (map-vote → accolade). The
         // first capture creates the session row; later captures (including hero
         // swaps and the post-match scoreboard) append to the same session.
         parsed.session_id = target_session.clone();
-        if target_create {
-            let session = storage::MatchSession {
-                session_id: target_session.clone(),
-                hero: parsed.hero.clone(),
-                map_name: parsed.map_name.clone(),
-                role: parsed.role.clone(),
-                started_at: now,
-                last_capture_at: now,
-                capture_count: 1,
-                final_outcome: outcome_label.clone(),
-            };
-            // A failed create must abort the capture: pressing on would write
-            // a snapshot the caller then marks "session created", and every
-            // later outcome/map back-fill would update a session row that
-            // doesn't exist. The Tab can simply be pressed again.
-            store
-                .create_session(&session)
-                .await
-                .map_err(anyhow::Error::from_boxed)
-                .context("session create failed")?;
-            tracing::info!(session_id = %target_session, "started new match session");
-        } else if let Err(e) = store
-            .append_capture(&target_session, now, &outcome_label)
-            .await
-        {
-            tracing::warn!(error = %e, "failed to append capture to session");
-        }
+        // A board deferred on this same session is dropped when the capture
+        // stays. A split, or a board carried in from the session that closed,
+        // is written onto the session this row lands on. The same function
+        // writes the night harness.
+        let created_this_capture =
+            write_staged_rows(store, data_dir, &staged, &parsed.hero, &parsed.role, now).await?;
 
         tracing::info!(
             hero = %parsed.hero,
@@ -2618,7 +3835,7 @@ async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<
             deaths = parsed.deaths,
             "parsed scoreboard"
         );
-        let recorded_map = (!parsed.map_name.is_empty()).then(|| parsed.map_name.clone());
+        let recorded_map = staged.recorded_map.clone();
         storage::append_match_log(data_dir, &parsed);
         store
             .insert_match(parsed)
@@ -2639,7 +3856,8 @@ async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<
         // recorded a 97%-Ana game as Rein). set_session_hero is now a MANUAL
         // repair helper only. Per-snapshot reads stay raw; the derived primary
         // drives the displayed/uploaded hero.
-        if !target_create && let Err(e) = store.refresh_session_hero_timeline(&target_session).await
+        if !created_this_capture
+            && let Err(e) = store.refresh_session_hero_timeline(&target_session).await
         {
             tracing::debug!(error = %e, "failed to refresh session hero timeline");
         }
@@ -2669,10 +3887,25 @@ async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<
             recorded: true,
             outcome,
             map: recorded_map,
+            map_source: staged.map_source,
             session_id: target_session,
             split,
-            gate_state: Some(gate.state),
+            armed_reset: false,
+            ignore_row: plan.ignore_row,
+            reset_streak: plan.reset_streak,
+            reset_baseline: plan.reset_baseline,
+            baseline_row: plan.baseline_row,
+            refresh_baseline: plan.refresh_baseline,
+            clear_hint: plan.clear_hint,
+            count_progress: plan.count_progress,
+            career_panel: matches!(source, HeroSource::CareerPanel),
+            held_counters: None,
+            held_hero: None,
+            gate_state: Some(staged.gate.state),
             hero_auth,
+            seal: plan.seal,
+            close_reason: plan.close_reason,
+            held_at: None,
         })
     } else {
         // Scoreboard-shaped frame, but the player's row couldn't be positively
@@ -2687,10 +3920,25 @@ async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<
             recorded: false,
             outcome,
             map: None,
+            map_source: None,
             session_id: session_id.to_string(),
             split: false,
+            armed_reset: false,
+            ignore_row: true,
+            reset_streak: req.reset_streak,
+            reset_baseline: req.reset_baseline,
+            baseline_row: req.baseline_row,
+            refresh_baseline: false,
+            clear_hint: false,
+            count_progress: false,
+            career_panel: false,
+            held_counters: None,
+            held_hero: None,
             gate_state: None,
             hero_auth,
+            seal: None,
+            close_reason: None,
+            held_at: None,
         })
     }
 }
@@ -3352,6 +4600,14 @@ mod tests {
         Instant::now() + Duration::from_secs(600)
     }
 
+    fn word_streak(outcome: detect::MatchOutcome, seen_at: Instant) -> WordStreak {
+        WordStreak {
+            outcome,
+            seen_at,
+            map: None,
+        }
+    }
+
     fn game(
         outcome: detect::MatchOutcome,
         recorded_secs_ago: Option<u64>,
@@ -3361,6 +4617,7 @@ mod tests {
             session_id: "test".into(),
             outcome,
             map: None,
+            map_source: None,
             map_candidates: Vec::new(),
             session_created: true,
             outcome_recorded_at: recorded_secs_ago.map(|s| now - Duration::from_secs(s)),
@@ -3369,6 +4626,19 @@ mod tests {
             gate: None,
             last_stats_at: None,
             hero_auth: HeroAuthState::default(),
+            result_mark: None,
+            pending_boundary: false,
+            awaiting_first_board: false,
+            reset_streak: 0,
+            reset_baseline: None,
+            baseline_row: None,
+            baseline_at: None,
+            progressed_boards: 0,
+            deferred: None,
+            deferred_hero: None,
+            deferred_at: None,
+            deferred_imported: false,
+            text_fallback_locked: false,
         }
     }
 
@@ -3415,15 +4685,34 @@ mod tests {
         // A fresh unconfirmed word read holds full cadence while it waits for
         // its agreeing partner...
         let mut st = session(Some(game(detect::MatchOutcome::Unknown, None, now)), now);
-        st.word_outcome_streak =
-            Some((detect::MatchOutcome::Defeat, now - Duration::from_secs(10)));
+        st.word_outcome_streak = Some(word_streak(
+            detect::MatchOutcome::Defeat,
+            now - Duration::from_secs(10),
+        ));
         assert!(!poll_slow_mode(&st, now));
         // ...but a streak past the confirmation window no longer does.
-        st.word_outcome_streak = Some((
+        st.word_outcome_streak = Some(word_streak(
             detect::MatchOutcome::Defeat,
             now - OUTCOME_CONFIRM_WINDOW - Duration::from_secs(1),
         ));
         assert!(poll_slow_mode(&st, now));
+        // The OCR streak expired, but the session still has a sealable hint.
+        st.word_outcome_streak = None;
+        st.active_game.as_mut().unwrap().result_mark = Some(ResultMark {
+            outcome: detect::MatchOutcome::Defeat,
+            confirmed: false,
+            seen_at: now - Duration::from_secs(90),
+        });
+        assert!(
+            !poll_slow_mode(&st, now),
+            "an open hint keeps full poll cadence"
+        );
+        st.active_game.as_mut().unwrap().result_mark = None;
+        st.active_game.as_mut().unwrap().pending_boundary = true;
+        assert!(
+            !poll_slow_mode(&st, now),
+            "a pending boundary keeps full poll cadence"
+        );
     }
 
     #[test]
@@ -3449,8 +4738,10 @@ mod tests {
 
         // Outcome streak / finished still win over a leftover wake field.
         st.end_reel_wake_until = None;
-        st.word_outcome_streak =
-            Some((detect::MatchOutcome::Victory, now - Duration::from_secs(5)));
+        st.word_outcome_streak = Some(word_streak(
+            detect::MatchOutcome::Victory,
+            now - Duration::from_secs(5),
+        ));
         assert!(!poll_slow_mode(&st, now));
         let finished = session(Some(game(detect::MatchOutcome::Defeat, Some(2), now)), now);
         assert!(!poll_slow_mode(&finished, now));
@@ -3461,8 +4752,10 @@ mod tests {
         let now = test_now();
         let mut st = session(Some(game(detect::MatchOutcome::Unknown, None, now)), now);
         assert!(!cadence_wake_active(&st, now));
-        st.word_outcome_streak =
-            Some((detect::MatchOutcome::Victory, now - Duration::from_secs(1)));
+        st.word_outcome_streak = Some(word_streak(
+            detect::MatchOutcome::Victory,
+            now - Duration::from_secs(1),
+        ));
         assert!(cadence_wake_active(&st, now));
         st.word_outcome_streak = None;
         st.end_reel_wake_until = Some(now + Duration::from_secs(10));
@@ -3501,8 +4794,10 @@ mod tests {
         // Word streak alone is not the Tab-busy exception — mid-match skip
         // stays unless end-reel wake is hot.
         st.end_reel_wake_until = None;
-        st.word_outcome_streak =
-            Some((detect::MatchOutcome::Victory, now - Duration::from_secs(1)));
+        st.word_outcome_streak = Some(word_streak(
+            detect::MatchOutcome::Victory,
+            now - Duration::from_secs(1),
+        ));
         assert!(
             skip_poll_for_tab_in_flight(true, &st, now),
             "word streak without end-reel wake still skips"
@@ -3691,6 +4986,109 @@ mod tests {
     }
 
     #[test]
+    fn live_map_vote_uses_the_open_game() {
+        let now = test_now();
+        let opened = now - Duration::from_secs(400);
+        let mut g = game(detect::MatchOutcome::Unknown, None, now);
+        g.map = Some("Busan".into());
+        g.opened_at = opened;
+        g.last_activity = now - Duration::from_secs(30);
+        g.gate = Some(GateState {
+            accepted: Counters {
+                elims: 8,
+                assists: 3,
+                deaths: 2,
+                damage: 1800,
+                healing: 400,
+                mitigation: 100,
+            },
+            ..GateState::default()
+        });
+        let debounce = Duration::from_secs(120);
+        let other = vec!["Junkertown".into(), "Ilios".into()];
+        let same = vec!["Busan".into(), "Dorado".into()];
+        assert!(
+            map_vote_should_open_new_game(Some(&g), Some(opened), now, debounce, &other),
+            "an early leave plus a different vote closes the unfinished session"
+        );
+        assert!(!map_vote_should_open_new_game(
+            Some(&g),
+            Some(opened),
+            now,
+            debounce,
+            &same,
+        ));
+        let open = boundary::decide_poll(&boundary::PollInput {
+            outcome: g.outcome,
+            result: g.result_mark,
+            pending_boundary: g.pending_boundary,
+            awaiting_first_board: g.awaiting_first_board,
+            has_board: g.gate.is_some(),
+            reset_streak: g.reset_streak,
+            map: g.map.as_deref(),
+            map_trusted: g.map_is_trusted(),
+            hero: g.hero_auth.accepted_hero.as_deref(),
+            signal: None,
+            signal_confirmed: false,
+            accolade_map: None,
+            start_screen: Some(boundary::StartScreen::MapVote {
+                candidates: other.clone(),
+            }),
+            block_map_vote: !map_vote_should_open_new_game(
+                Some(&g),
+                Some(opened),
+                now,
+                debounce,
+                &other,
+            ),
+            now,
+
+            deferred: false,
+            text_fallback_locked: false,
+        });
+        match open {
+            boundary::PollDecision::Open(opened_game) => {
+                assert_eq!(opened_game.reason, boundary::CloseReason::MapVote);
+                assert!(opened_game.seal_outcome.is_none());
+                assert_eq!(opened_game.candidates, other);
+            }
+            other => panic!("expected a split, got {other:?}"),
+        }
+        let blocked = boundary::decide_poll(&boundary::PollInput {
+            outcome: g.outcome,
+            result: g.result_mark,
+            pending_boundary: g.pending_boundary,
+            awaiting_first_board: g.awaiting_first_board,
+            has_board: g.gate.is_some(),
+            reset_streak: g.reset_streak,
+            map: g.map.as_deref(),
+            map_trusted: g.map_is_trusted(),
+            hero: g.hero_auth.accepted_hero.as_deref(),
+            signal: None,
+            signal_confirmed: false,
+            accolade_map: None,
+            start_screen: Some(boundary::StartScreen::MapVote {
+                candidates: same.clone(),
+            }),
+            block_map_vote: !map_vote_should_open_new_game(
+                Some(&g),
+                Some(opened),
+                now,
+                debounce,
+                &same,
+            ),
+            now,
+
+            deferred: false,
+            text_fallback_locked: false,
+        });
+        assert!(
+            !matches!(blocked, boundary::PollDecision::Open(_)),
+            "the same-map vote does not open a second session"
+        );
+    }
+
+    #[test]
     fn active_game_persists_and_recovers() {
         let dir = tempfile::tempdir().expect("tempdir");
         let mut g = ActiveGame::open_now(
@@ -3700,6 +5098,7 @@ mod tests {
         );
         g.session_created = true;
         g.map = Some("Oasis".into());
+        g.map_source = Some(boundary::MapSource::TopBar);
         let gate_state = GateState {
             accepted: Counters {
                 elims: 12,
@@ -3721,12 +5120,29 @@ mod tests {
         };
         g.gate = Some(gate_state);
         g.last_stats_at = Some(Instant::now());
+        g.note_result(detect::MatchOutcome::Defeat, false);
+        g.pending_boundary = true;
+        g.awaiting_first_board = true;
+        g.deferred = Some(Counters {
+            elims: 1,
+            assists: 0,
+            deaths: 0,
+            damage: 100,
+            healing: 0,
+            mitigation: 50,
+        });
+        g.deferred_hero = Some("Wrecking Ball".into());
+        g.deferred_at = Some(Utc::now() - chrono::Duration::seconds(30));
+        g.deferred_imported = true;
+        g.progressed_boards = 2;
+        g.baseline_at = Some(Instant::now());
         persist_active_game(dir.path(), Some(&g));
 
         let r = recover_active_game(dir.path()).expect("recent game recovers");
         assert_eq!(r.session_id, "abc123");
         assert_eq!(r.outcome, detect::MatchOutcome::Unknown);
         assert_eq!(r.map.as_deref(), Some("Oasis"));
+        assert_eq!(r.map_source, Some(boundary::MapSource::TopBar));
         assert_eq!(
             r.map_candidates,
             vec!["Oasis".to_string(), "Busan".to_string()]
@@ -3743,10 +5159,314 @@ mod tests {
             "gate state (all six counters) survives a daemon restart"
         );
         assert!(r.last_stats_at.is_some());
+        assert_eq!(
+            r.result_mark.map(|m| (m.outcome, m.confirmed)),
+            Some((detect::MatchOutcome::Defeat, false)),
+            "a defeat streak must survive a restart so the next queue can close this session"
+        );
+        assert!(r.pending_boundary);
+        assert!(r.awaiting_first_board);
+        assert_eq!(r.deferred.map(|c| c.elims), Some(1));
+        assert_eq!(r.deferred_hero.as_deref(), Some("Wrecking Ball"));
+        assert!(r.deferred_at.is_some());
+        assert!(r.deferred_imported);
+        assert_eq!(r.progressed_boards, 2);
+        assert!(r.baseline_at.is_some());
+        assert!(
+            start_screen_blocked(
+                Some(&r),
+                Some(r.opened_at),
+                r.opened_at + Duration::from_secs(30),
+                Duration::from_secs(120),
+                &boundary::StartScreen::HeroSelect,
+            ),
+            "a recovered session still inside the debounce does not split on select"
+        );
 
         // Clearing removes the file — nothing to recover.
         persist_active_game(dir.path(), None);
         assert!(recover_active_game(dir.path()).is_none());
+    }
+
+    #[test]
+    fn future_result_timestamp_does_not_drop_the_recovered_game() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let g = ActiveGame::open_now("abc123".into(), detect::MatchOutcome::Unknown, Vec::new());
+        persist_active_game(dir.path(), Some(&g));
+        let path = active_game_path(dir.path());
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        value["result_outcome"] = serde_json::json!("defeat");
+        value["result_confirmed"] = serde_json::json!(false);
+        value["result_seen_at"] = serde_json::json!("2999-01-01T00:00:00Z");
+        value["pending_boundary"] = serde_json::json!(true);
+        std::fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+        let recovered = recover_active_game(dir.path()).expect("a bad hint timestamp is not fatal");
+        assert_eq!(recovered.session_id, "abc123");
+        assert!(recovered.result_mark.is_none());
+        assert!(
+            !recovered.pending_boundary,
+            "an arm without a recoverable hint must not hold full cadence"
+        );
+    }
+
+    #[test]
+    fn split_session_does_not_inherit_post_match_grace() {
+        let now = test_now();
+        let opened = session_opened_by_split(
+            "fresh".into(),
+            detect::MatchOutcome::Unknown,
+            HeroAuthState::default(),
+            false,
+            None,
+            None,
+            now,
+        );
+        assert!(!opened.finished());
+        assert!(opened.outcome_recorded_at.is_none());
+        assert!(
+            !should_start_fresh_session(Some(&opened), now + Duration::from_secs(10)),
+            "the new session is in progress, not a finished defeat inside the 75s grace"
+        );
+        let inherited = game(detect::MatchOutcome::Defeat, Some(10), now);
+        assert!(inherited.finished());
+        assert!(
+            !should_start_fresh_session(Some(&inherited), now),
+            "a defeat stamped now would swallow the next tab"
+        );
+    }
+
+    #[test]
+    fn identified_row_id_is_the_player_row() {
+        assert_eq!(identified_row_id(Some(3)), Some(3));
+        assert_eq!(identified_row_id(None), None);
+    }
+
+    #[test]
+    fn gap_split_keeps_the_frame_outcome_on_the_new_session() {
+        let defeat = session_opened_by_split(
+            "gap".into(),
+            detect::MatchOutcome::Defeat,
+            HeroAuthState::default(),
+            false,
+            None,
+            None,
+            Instant::now(),
+        );
+        assert_eq!(defeat.outcome, detect::MatchOutcome::Defeat);
+        assert!(defeat.outcome_recorded_at.is_some());
+        let reset = session_opened_by_split(
+            "reset".into(),
+            detect::MatchOutcome::Unknown,
+            HeroAuthState {
+                career_ever_ok: true,
+                accepted_hero: Some("Zenyatta".into()),
+                portrait_pending: Some(("Illari".into(), 2)),
+            },
+            false,
+            None,
+            None,
+            Instant::now(),
+        );
+        assert!(
+            !reset.hero_auth.career_ever_ok,
+            "a carried career flag is not this capture's career panel"
+        );
+        assert!(reset.hero_auth.portrait_pending.is_none());
+        assert_eq!(reset.hero_auth.accepted_hero.as_deref(), Some("Zenyatta"));
+        let seeded = session_opened_by_split(
+            "seeded".into(),
+            detect::MatchOutcome::Unknown,
+            HeroAuthState {
+                career_ever_ok: true,
+                accepted_hero: Some("Wrecking Ball".into()),
+                portrait_pending: None,
+            },
+            true,
+            None,
+            None,
+            Instant::now(),
+        );
+        assert!(seeded.hero_auth.career_ever_ok);
+        assert_eq!(
+            seeded.hero_auth.accepted_hero.as_deref(),
+            Some("Wrecking Ball")
+        );
+        assert!(!reset.finished());
+        assert!(reset.outcome_recorded_at.is_none());
+    }
+
+    #[tokio::test]
+    async fn held_board_is_inserted_on_the_new_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = storage::LocalStore::open(dir.path()).await.unwrap();
+        let held = Counters {
+            elims: 2,
+            assists: 1,
+            deaths: 0,
+            damage: 400,
+            healing: 80,
+            mitigation: 900,
+        };
+        let played_at = Utc::now() - chrono::Duration::seconds(90);
+        store
+            .create_session(&storage::MatchSession {
+                session_id: "junkertown".into(),
+                hero: "Wrecking Ball".into(),
+                map_name: "Junkertown".into(),
+                role: "Tank".into(),
+                started_at: SurrealDatetime::from(played_at),
+                last_capture_at: SurrealDatetime::from(played_at),
+                capture_count: 0,
+                final_outcome: "unknown".into(),
+            })
+            .await
+            .unwrap();
+        store_held_board(
+            &store,
+            dir.path(),
+            "junkertown",
+            "Wrecking Ball",
+            "Junkertown",
+            "unknown",
+            held,
+            played_at,
+        )
+        .await
+        .unwrap();
+        let snaps = store.get_session_snapshots("junkertown").await.unwrap();
+        assert_eq!(snaps.len(), 1);
+        assert_eq!(snaps[0].hero, "Wrecking Ball");
+        assert_eq!(snaps[0].elims, 2);
+        assert_eq!(snaps[0].damage, 400);
+        assert_eq!(snaps[0].outcome, "unknown");
+        let stored: chrono::DateTime<Utc> = snaps[0].played_at.into();
+        assert!((stored - played_at).num_seconds().abs() < 2);
+    }
+
+    #[tokio::test]
+    async fn apply_poll_decision_stamps_grace_at_confirm_and_writes_the_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = storage::LocalStore::open(dir.path()).await.unwrap();
+        store
+            .insert_match(test_match("sess-grace", "unknown"))
+            .await
+            .unwrap();
+        let sighting = Instant::now() - Duration::from_secs(200);
+        let mut g = game(detect::MatchOutcome::Unknown, None, Instant::now());
+        g.session_id = "sess-grace".into();
+        g.session_created = true;
+        g.result_mark = Some(ResultMark {
+            outcome: detect::MatchOutcome::Defeat,
+            confirmed: false,
+            seen_at: sighting,
+        });
+        g.pending_boundary = false;
+        let mut st = session(Some(g), Instant::now());
+        let decision = {
+            let g = st.active_game.as_ref().unwrap();
+            boundary::decide_poll(&boundary::PollInput {
+                outcome: g.outcome,
+                result: g.result_mark,
+                pending_boundary: g.pending_boundary,
+                awaiting_first_board: g.awaiting_first_board,
+                has_board: g.gate.is_some(),
+                reset_streak: g.reset_streak,
+                map: g.map.as_deref(),
+                map_trusted: g.map_is_trusted(),
+                hero: g.hero_auth.accepted_hero.as_deref(),
+                signal: Some(detect::MatchOutcome::Defeat),
+                signal_confirmed: true,
+                accolade_map: None,
+                start_screen: None,
+                block_map_vote: false,
+                deferred: g.deferred.is_some(),
+                text_fallback_locked: g.text_fallback_locked,
+                now: Instant::now(),
+            })
+        };
+        apply_poll_decision(&mut st, &store, dir.path(), decision, Instant::now()).await;
+        let g = st.active_game.expect("the confirm stays on this session");
+        assert_eq!(g.outcome, detect::MatchOutcome::Defeat);
+        let stamped = g.outcome_recorded_at.expect("grace is stamped");
+        assert!(
+            stamped.saturating_duration_since(sighting) > Duration::from_secs(150),
+            "grace is not the word's first sighting"
+        );
+        assert!(
+            stamped.elapsed() < Duration::from_secs(5),
+            "grace starts when apply_poll_decision records the result"
+        );
+        assert!(!should_start_fresh_session(
+            Some(&g),
+            stamped + Duration::from_secs(10)
+        ));
+        assert!(should_start_fresh_session(
+            Some(&g),
+            stamped + POST_MATCH_GRACE + Duration::from_secs(1)
+        ));
+        let snaps = store.get_session_snapshots("sess-grace").await.unwrap();
+        assert_eq!(snaps.len(), 1);
+        assert_eq!(snaps[0].outcome, "defeat");
+    }
+
+    #[tokio::test]
+    async fn retire_active_game_writes_a_seal_and_leaves_an_unsealed_hint() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = storage::LocalStore::open(dir.path()).await.unwrap();
+        store
+            .insert_match(test_match("sess-seal", "unknown"))
+            .await
+            .unwrap();
+        store
+            .insert_match(test_match("sess-hint", "unknown"))
+            .await
+            .unwrap();
+
+        let mut sealed = game(detect::MatchOutcome::Unknown, None, Instant::now());
+        sealed.session_id = "sess-seal".into();
+        sealed.session_created = true;
+        sealed.result_mark = Some(ResultMark {
+            outcome: detect::MatchOutcome::Defeat,
+            confirmed: false,
+            seen_at: Instant::now() - Duration::from_secs(20),
+        });
+        let mut st = session(Some(sealed), Instant::now());
+        retire_active_game(
+            &mut st,
+            &store,
+            dir.path(),
+            Some(detect::MatchOutcome::Defeat),
+            "superseded by hero select/ban",
+        )
+        .await;
+        assert!(st.active_game.is_none());
+        let snaps = store.get_session_snapshots("sess-seal").await.unwrap();
+        assert_eq!(snaps[0].outcome, "defeat");
+
+        let mut hinted = game(detect::MatchOutcome::Unknown, None, Instant::now());
+        hinted.session_id = "sess-hint".into();
+        hinted.session_created = true;
+        hinted.result_mark = Some(ResultMark {
+            outcome: detect::MatchOutcome::Victory,
+            confirmed: false,
+            seen_at: Instant::now() - Duration::from_secs(10),
+        });
+        let mut st = session(Some(hinted), Instant::now());
+        retire_active_game(
+            &mut st,
+            &store,
+            dir.path(),
+            None,
+            "superseded by stat reset",
+        )
+        .await;
+        assert!(st.active_game.is_none());
+        let snaps = store.get_session_snapshots("sess-hint").await.unwrap();
+        assert_eq!(
+            snaps[0].outcome, "unknown",
+            "retire with no seal leaves the hint unstored"
+        );
     }
 
     #[test]
@@ -3756,6 +5476,7 @@ mod tests {
             session_id: "old".into(),
             outcome: detect::MatchOutcome::Unknown,
             map: None,
+            map_source: None,
             map_candidates: Vec::new(),
             session_created: true,
             opened_at: Utc::now() - chrono::Duration::hours(9),
@@ -3764,6 +5485,21 @@ mod tests {
             gate: None,
             last_stats_at: None,
             hero_auth: HeroAuthState::default(),
+            result_outcome: None,
+            result_confirmed: false,
+            result_seen_at: None,
+            pending_boundary: false,
+            awaiting_first_board: false,
+            reset_streak: 0,
+            reset_baseline: None,
+            baseline_row: None,
+            deferred: None,
+            deferred_hero: None,
+            deferred_at: None,
+            deferred_imported: false,
+            progressed_boards: 0,
+            baseline_at: None,
+            text_fallback_locked: false,
         };
         std::fs::write(
             active_game_path(dir.path()),
@@ -3774,6 +5510,446 @@ mod tests {
             recover_active_game(dir.path()).is_none(),
             "yesterday's unfinished game must not swallow today's captures"
         );
+    }
+
+    #[test]
+    fn awaiting_first_board_does_not_latch_a_carried_gate() {
+        let carried = (GateState::default(), Duration::from_secs(40));
+        assert!(
+            gate_prev_for_store(Some(carried), true).is_none(),
+            "a session with no board of its own does not latch the previous game"
+        );
+        let own = (GateState::default(), Duration::from_secs(40));
+        assert!(gate_prev_for_store(Some(own), false).is_some());
+    }
+
+    #[test]
+    fn a_recovered_awaiting_session_keeps_the_debounce() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut g = ActiveGame::open_now(
+            "await".into(),
+            detect::MatchOutcome::Unknown,
+            vec!["Busan".into()],
+        );
+        g.awaiting_first_board = true;
+        persist_active_game(dir.path(), Some(&g));
+        let st = startup_session(dir.path());
+        let opened = st
+            .last_game_open
+            .expect("startup restores the debounce from opened_at");
+        assert_eq!(opened, st.active_game.as_ref().unwrap().opened_at);
+        let screen = boundary::StartScreen::HeroBan;
+        let debounce = Duration::from_secs(120);
+        let now = opened + Duration::from_secs(30);
+        assert!(
+            start_screen_blocked(
+                st.active_game.as_ref(),
+                Some(opened),
+                now,
+                debounce,
+                &screen
+            ),
+            "a ban inside the restored debounce does not split the awaiting session"
+        );
+        let mut resumed = startup_session(dir.path());
+        resumed.last_game_open = None;
+        let recovered = startup_session(dir.path());
+        resumed.last_game_open = recovered.last_game_open;
+        resumed.active_game = recovered.active_game;
+        assert!(start_screen_blocked(
+            resumed.active_game.as_ref(),
+            resumed.last_game_open,
+            now,
+            debounce,
+            &screen,
+        ));
+        let game = resumed.active_game.as_ref().unwrap();
+        let decision = boundary::decide_poll(&boundary::PollInput {
+            outcome: game.outcome,
+            result: game.result_mark,
+            pending_boundary: game.pending_boundary,
+            awaiting_first_board: game.awaiting_first_board,
+            has_board: game.gate.is_some(),
+            reset_streak: game.reset_streak,
+            map: game.map.as_deref(),
+            map_trusted: game.map_is_trusted(),
+            hero: game.hero_auth.accepted_hero.as_deref(),
+            signal: None,
+            signal_confirmed: false,
+            accolade_map: None,
+            start_screen: Some(screen),
+            block_map_vote: true,
+            deferred: game.deferred.is_some(),
+            text_fallback_locked: game.text_fallback_locked,
+            now,
+        });
+        assert!(
+            !matches!(decision, boundary::PollDecision::Open(_)),
+            "the recovered session stays through the ban"
+        );
+    }
+
+    #[test]
+    fn a_suspend_resume_keeps_the_debounce() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut g = ActiveGame::open_now(
+            "await".into(),
+            detect::MatchOutcome::Unknown,
+            vec!["Busan".into()],
+        );
+        g.awaiting_first_board = true;
+        persist_active_game(dir.path(), Some(&g));
+        let mut st = startup_session(dir.path());
+        st.last_game_open = None;
+        st.pending_outcome = Some((detect::MatchOutcome::Victory, Instant::now()));
+        resume_after_suspend(&mut st, dir.path());
+        assert!(
+            st.pending_outcome.is_none(),
+            "resume drops the volatile pending outcome"
+        );
+        let opened = st
+            .last_game_open
+            .expect("resume restores the debounce from opened_at");
+        assert_eq!(opened, st.active_game.as_ref().unwrap().opened_at);
+        let screen = boundary::StartScreen::HeroBan;
+        let now = opened + Duration::from_secs(30);
+        assert!(
+            start_screen_blocked(
+                st.active_game.as_ref(),
+                st.last_game_open,
+                now,
+                Duration::from_secs(120),
+                &screen,
+            ),
+            "a ban inside the restored debounce does not split"
+        );
+    }
+
+    #[test]
+    fn a_pre_0_4_19_skeleton_with_a_map_is_untrusted_text() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut g = ActiveGame::open_now("old".into(), detect::MatchOutcome::Unknown, Vec::new());
+        g.map = Some("Busan".into());
+        g.map_source = Some(boundary::MapSource::TopBar);
+        persist_active_game(dir.path(), Some(&g));
+        let path = active_game_path(dir.path());
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        value.as_object_mut().unwrap().remove("map_source");
+        std::fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+        let recovered = recover_active_game(dir.path()).expect("recent skeleton recovers");
+        assert_eq!(recovered.map.as_deref(), Some("Busan"));
+        assert_eq!(
+            recovered.map_source,
+            Some(boundary::MapSource::TextFallback),
+            "a map with no source is untrusted text"
+        );
+
+        g.map = None;
+        g.map_source = None;
+        persist_active_game(dir.path(), Some(&g));
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        value.as_object_mut().unwrap().remove("map_source");
+        std::fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+        let recovered = recover_active_game(dir.path()).unwrap();
+        assert!(recovered.map.is_none());
+        assert!(
+            recovered.map_source.is_none(),
+            "a skeleton with no map stays unsourced"
+        );
+    }
+
+    #[test]
+    fn a_persisted_text_fallback_lock_survives_recovery() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut g =
+            ActiveGame::open_now("locked".into(), detect::MatchOutcome::Unknown, Vec::new());
+        g.map = Some("Dorado".into());
+        g.map_source = Some(boundary::MapSource::TextFallback);
+        g.text_fallback_locked = true;
+        persist_active_game(dir.path(), Some(&g));
+        let recovered = recover_active_game(dir.path()).expect("recent skeleton recovers");
+        assert!(
+            recovered.text_fallback_locked,
+            "a lock written to disk must still be set after recovery"
+        );
+        assert_eq!(recovered.map.as_deref(), Some("Dorado"));
+    }
+
+    #[test]
+    fn a_main_0_4_18_skeleton_recovers_as_untrusted_unlocked_text() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // Main persists through chrono's serde, which is RFC3339 with `Z`
+        // and a fractional second whenever the instant is not whole.
+        let when = Utc::now();
+        let when = if when.timestamp_subsec_nanos() == 0 {
+            when + chrono::Duration::nanoseconds(1)
+        } else {
+            when
+        };
+        let stamped = serde_json::to_value(when).expect("stamp");
+        let text = stamped.as_str().expect("rfc3339 string");
+        let parsed: chrono::DateTime<Utc> =
+            serde_json::from_value(stamped.clone()).expect("a skeleton timestamp parses");
+        assert_eq!(
+            serde_json::to_value(parsed).expect("round trip"),
+            stamped,
+            "a skeleton timestamp round-trips through chrono's serde"
+        );
+        assert!(
+            text.contains('.'),
+            "a real skeleton timestamp carries a fraction, got {text}"
+        );
+        let now = text;
+        // The eleven keys a 0.4.18 skeleton actually stored, with a mid-match
+        // gate and the three hero-authority keys. Later fields stay absent so
+        // a missing default fails this load.
+        let skeleton = serde_json::json!({
+            "session_id": "old",
+            "outcome": "unknown",
+            "map": "Busan",
+            "map_candidates": [],
+            "session_created": true,
+            "opened_at": now,
+            "last_activity": now,
+            "outcome_recorded_at": null,
+            "gate": {
+                "accepted": {
+                    "elims": 14,
+                    "assists": 22,
+                    "deaths": 6,
+                    "damage": 2400,
+                    "healing": 9800,
+                    "mitigation": 400
+                },
+                "last_raw": {
+                    "elims": 14,
+                    "assists": 22,
+                    "deaths": 6,
+                    "damage": 2400,
+                    "healing": 9800,
+                    "mitigation": 400
+                },
+                "down_streak_len": [0, 0, 0, 0, 0, 0],
+                "down_streak_last": [0, 0, 0, 0, 0, 0],
+                "last_raw_suspect": [false, false, false, false, false, false]
+            },
+            "last_stats_at": now,
+            "hero_auth": {
+                "career_ever_ok": true,
+                "accepted_hero": "Zenyatta",
+                "portrait_pending": null
+            }
+        });
+        assert_eq!(
+            skeleton.as_object().expect("object").len(),
+            11,
+            "a 0.4.18 skeleton has these eleven keys and no later fields"
+        );
+        assert_eq!(
+            skeleton["hero_auth"].as_object().expect("hero_auth").len(),
+            3
+        );
+        std::fs::write(
+            active_game_path(dir.path()),
+            serde_json::to_vec(&skeleton).unwrap(),
+        )
+        .unwrap();
+        let recovered = recover_active_game(dir.path()).expect("a 0.4.18 skeleton recovers");
+        assert_eq!(recovered.map.as_deref(), Some("Busan"));
+        assert_eq!(
+            recovered.map_source,
+            Some(boundary::MapSource::TextFallback),
+            "a map with no source is untrusted text"
+        );
+        assert!(!recovered.text_fallback_locked);
+        assert!(recovered.result_mark.is_none());
+        assert!(!recovered.pending_boundary);
+        assert!(!recovered.awaiting_first_board);
+        assert!(recovered.session_created);
+        assert!(recovered.last_stats_at.is_some());
+        assert_eq!(recovered.gate.map(|gate| gate.accepted.elims), Some(14));
+        assert!(recovered.hero_auth.career_ever_ok);
+        assert_eq!(
+            recovered.hero_auth.accepted_hero.as_deref(),
+            Some("Zenyatta")
+        );
+        assert!(recovered.hero_auth.portrait_pending.is_none());
+    }
+
+    #[test]
+    fn a_skipped_capture_report_uses_the_plan_outcome_and_the_callers_career_flag() {
+        let plan = boundary::CapturePlan {
+            split: false,
+            defer: true,
+            ignore_row: false,
+            skip_store: true,
+            clear_hint: false,
+            reset_streak: 1,
+            reset_baseline: None,
+            baseline_row: Some(2),
+            refresh_baseline: false,
+            count_progress: false,
+            stored_outcome: detect::MatchOutcome::Victory,
+            deferred_counters: Some(night_counters(2, 1, 0, 100, 40, 10)),
+            seal: None,
+            close_reason: None,
+        };
+        let report = skipped_capture_report(
+            &plan,
+            "sid",
+            true,
+            HeroAuthState::default(),
+            Some("Zenyatta".into()),
+            None,
+        );
+        assert_eq!(report.outcome, detect::MatchOutcome::Victory);
+        assert!(report.career_panel);
+        assert!(!report.recorded);
+        assert!(report.armed_reset);
+        assert_eq!(report.held_counters.map(|c| c.elims), Some(2));
+        assert_eq!(report.session_id, "sid");
+    }
+
+    #[test]
+    fn the_confirming_tick_uses_the_carried_map() {
+        let now = test_now();
+        let mut streak = None;
+        let first = resolve_word_tick(
+            &mut streak,
+            Some((
+                detect::MatchOutcome::Victory,
+                detect::match_end::OutcomeSource::ResultWord,
+            )),
+            now,
+            Some("Junkertown".into()),
+        );
+        assert!(!first.signal_confirmed);
+        assert_eq!(first.accolade_map.as_deref(), Some("Junkertown"));
+        let second = resolve_word_tick(
+            &mut streak,
+            Some((
+                detect::MatchOutcome::Victory,
+                detect::match_end::OutcomeSource::ResultWord,
+            )),
+            now + Duration::from_secs(4),
+            None,
+        );
+        assert!(second.signal_confirmed);
+        assert_eq!(
+            second.accolade_map.as_deref(),
+            Some("Junkertown"),
+            "the confirming tick keeps the first read's map"
+        );
+    }
+
+    #[test]
+    fn a_carried_map_requires_the_same_outcome() {
+        let now = test_now();
+        let mut streak = None;
+        note_word_streak(
+            &mut streak,
+            detect::MatchOutcome::Victory,
+            now,
+            Some("Junkertown".into()),
+        );
+        let dropped = note_word_streak(
+            &mut streak,
+            detect::MatchOutcome::Defeat,
+            now + Duration::from_secs(4),
+            None,
+        );
+        assert!(
+            dropped.is_none(),
+            "a different outcome must not keep the previous map"
+        );
+    }
+
+    #[test]
+    fn a_carried_map_expires_with_the_confirm_window() {
+        let now = test_now();
+        let mut fresh = None;
+        note_word_streak(
+            &mut fresh,
+            detect::MatchOutcome::Victory,
+            now,
+            Some("Junkertown".into()),
+        );
+        assert_eq!(
+            note_word_streak(
+                &mut fresh,
+                detect::MatchOutcome::Victory,
+                now + Duration::from_secs(30),
+                None,
+            )
+            .as_deref(),
+            Some("Junkertown")
+        );
+        let mut stale = None;
+        note_word_streak(
+            &mut stale,
+            detect::MatchOutcome::Victory,
+            now,
+            Some("Junkertown".into()),
+        );
+        assert!(
+            note_word_streak(
+                &mut stale,
+                detect::MatchOutcome::Victory,
+                now + OUTCOME_CONFIRM_WINDOW + Duration::from_secs(1),
+                None,
+            )
+            .is_none(),
+            "a map older than the confirm window is not carried"
+        );
+        let mut edge = None;
+        note_word_streak(
+            &mut edge,
+            detect::MatchOutcome::Victory,
+            now,
+            Some("Junkertown".into()),
+        );
+        assert_eq!(
+            note_word_streak(
+                &mut edge,
+                detect::MatchOutcome::Victory,
+                now + OUTCOME_CONFIRM_WINDOW,
+                None,
+            )
+            .as_deref(),
+            Some("Junkertown"),
+            "a map exactly as old as the confirm window is still carried"
+        );
+        assert_eq!(
+            poll_debug_hit(
+                Some((
+                    detect::MatchOutcome::Victory,
+                    detect::match_end::OutcomeSource::ResultWord,
+                )),
+                Some((detect::MatchOutcome::Victory, OUTCOME_CONFIRM_WINDOW)),
+                OUTCOME_CONFIRM_WINDOW,
+            ),
+            Some((PollDebugHit::Confirm, detect::MatchOutcome::Victory)),
+            "the confirm window's exact edge agrees with the carried map"
+        );
+    }
+
+    #[test]
+    fn a_text_fallback_poll_input_is_not_map_trusted() {
+        let now = test_now();
+        let mut game =
+            ActiveGame::open_at("sid".into(), detect::MatchOutcome::Unknown, Vec::new(), now);
+        game.map = Some("Busan".into());
+        game.map_source = Some(boundary::MapSource::TextFallback);
+        let input = poll_input_from_game(&game, None, false, None, None, false, now);
+        assert!(
+            !input.map_trusted,
+            "a text fallback is absent on the poll path"
+        );
+        game.map_source = Some(boundary::MapSource::TopBar);
+        let input = poll_input_from_game(&game, None, false, None, None, false, now);
+        assert!(input.map_trusted);
     }
 
     #[test]
@@ -3804,6 +5980,19 @@ mod tests {
         // Without candidates, panel > text (unchanged behavior).
         assert_eq!(resolve_map(None, Some("Ilios"), "Nepal", &[]), "Ilios");
         assert_eq!(resolve_map(None, None, "Nepal", &[]), "Nepal");
+
+        let (name, source) = resolved_map(Some("Busan"), Some("Busan"), "Ilios", &[]);
+        assert_eq!(name, "Busan");
+        assert_eq!(
+            source,
+            Some(boundary::MapSource::TopBar),
+            "a later top bar that agrees upgrades the stored source"
+        );
+        assert_eq!(
+            resolved_map(Some("Busan"), None, "Busan", &[]).1,
+            None,
+            "full-board text that agrees does not upgrade the source"
+        );
     }
 
     // Transitions below are real (elims, deaths, damage) sequences from the
@@ -4403,5 +6592,2339 @@ mod tests {
             periodic_sync_due(10, false, true),
             "a reset backoff allows the next periodic sync"
         );
+    }
+    /// Production poll cadence. A stable screen is emitted on every tick.
+    const NIGHT_TICKS: usize = 4;
+
+    fn night_tick() -> Duration {
+        Duration::from_secs(config::AutoDetectConfig::default().poll_interval_secs)
+    }
+
+    fn night_debounce() -> Duration {
+        Duration::from_secs(config::AutoDetectConfig::default().cooldown_secs)
+    }
+
+    fn night_counters(e: u32, a: u32, d: u32, dmg: u32, hlg: u32, mit: u32) -> Counters {
+        Counters {
+            elims: e,
+            assists: a,
+            deaths: d,
+            damage: dmg,
+            healing: hlg,
+            mitigation: mit,
+        }
+    }
+
+    const NIGHT_CLEAN: [bool; stat_tracker::capture_gate::GATE_COLS] =
+        [false; stat_tracker::capture_gate::GATE_COLS];
+
+    /// Drives the real poll and Tab path at the production cadence, with the
+    /// gap, grace, debounce, and idle bounds left on. Time is the injected clock.
+    struct Night {
+        st: SessionState,
+        store: storage::LocalStore,
+        dir: tempfile::TempDir,
+        now: Instant,
+        wall: chrono::DateTime<Utc>,
+    }
+
+    impl Night {
+        async fn new() -> Self {
+            let dir = tempfile::tempdir().unwrap();
+            let store = storage::LocalStore::open(dir.path()).await.unwrap();
+            let now = test_now();
+            Self {
+                st: session(None, now),
+                store,
+                dir,
+                now,
+                wall: Utc::now(),
+            }
+        }
+
+        fn advance(&mut self, by: Duration) {
+            self.now += by;
+            self.wall += chrono::Duration::from_std(by).unwrap();
+        }
+
+        fn game(&self) -> &ActiveGame {
+            self.st.active_game.as_ref().expect("active game")
+        }
+
+        fn id(&self) -> String {
+            self.game().session_id.clone()
+        }
+
+        /// A match already underway, the way a recovered session looks.
+        fn begin_on(&mut self, map: &str, hero: &str) {
+            let mut g = ActiveGame::open_at(
+                format!("{:016x}", rand_id()),
+                detect::MatchOutcome::Unknown,
+                Vec::new(),
+                self.now,
+            );
+            g.map = Some(map.to_string());
+            g.map_source = Some(boundary::MapSource::TopBar);
+            g.hero_auth.accepted_hero = Some(hero.to_string());
+            self.st.active_game = Some(g);
+            self.st.last_game_open = Some(self.now);
+        }
+
+        async fn poll_screen(&mut self, screen: boundary::StartScreen) {
+            self.apply_resolved_tick(
+                ResolvedWordTick {
+                    signal: None,
+                    signal_confirmed: false,
+                    accolade_map: None,
+                },
+                Some(screen),
+            )
+            .await;
+        }
+
+        /// Apply one resolved poll tick through [`apply_poll_tick`], the
+        /// same function [`run_loop`] calls. [`resolve_word_tick`] has
+        /// already noted the streak. When no game is open, this records a
+        /// confirmed word as the pending outcome.
+        async fn apply_resolved_tick(
+            &mut self,
+            tick: ResolvedWordTick,
+            start_screen: Option<boundary::StartScreen>,
+        ) {
+            apply_poll_tick(
+                &mut self.st,
+                &self.store,
+                self.dir.path(),
+                &tick,
+                start_screen,
+                self.now,
+                night_debounce(),
+            )
+            .await;
+        }
+
+        /// Several consecutive ticks of one stable screen.
+        async fn screen(&mut self, screen: boundary::StartScreen) {
+            for i in 0..NIGHT_TICKS {
+                self.poll_screen(screen.clone()).await;
+                if i + 1 != NIGHT_TICKS {
+                    self.advance(night_tick());
+                }
+            }
+        }
+
+        /// One result-word tick through [`resolve_word_tick`], including
+        /// when no game is open. Production notes that streak too.
+        async fn word_tick(&mut self, outcome: detect::MatchOutcome, map: Option<&str>) {
+            let tick = resolve_word_tick(
+                &mut self.st.word_outcome_streak,
+                Some((outcome, detect::match_end::OutcomeSource::ResultWord)),
+                self.now,
+                map.map(str::to_string),
+            );
+            self.apply_resolved_tick(tick, None).await;
+        }
+
+        /// A result word held across several ticks. The second agreeing tick confirms.
+        async fn word(&mut self, outcome: detect::MatchOutcome, map: Option<&str>) {
+            for i in 0..NIGHT_TICKS {
+                self.word_tick(outcome, map).await;
+                if i + 1 != NIGHT_TICKS {
+                    self.advance(night_tick());
+                }
+            }
+        }
+
+        /// A poll tick with no result word and no start screen.
+        async fn no_signal_tick(&mut self) {
+            self.apply_resolved_tick(
+                ResolvedWordTick {
+                    signal: None,
+                    signal_confirmed: false,
+                    accolade_map: None,
+                },
+                None,
+            )
+            .await;
+        }
+
+        /// One unconfirmed read. Production has not seen the agreeing tick yet.
+        async fn word_once(&mut self, outcome: detect::MatchOutcome) {
+            self.word_tick(outcome, None).await;
+        }
+
+        /// A banner confirms on one tick and has no accolade map. Production
+        /// reads the map crop only on result-word ticks.
+        async fn banner(&mut self, outcome: detect::MatchOutcome) {
+            let tick = resolve_word_tick(
+                &mut self.st.word_outcome_streak,
+                Some((outcome, detect::match_end::OutcomeSource::Banner)),
+                self.now,
+                None,
+            );
+            self.apply_resolved_tick(tick, None).await;
+        }
+
+        async fn tab_once(
+            &mut self,
+            cur: Counters,
+            hero: &str,
+            row: Option<u32>,
+            map: Option<&str>,
+            suspect: [bool; stat_tracker::capture_gate::GATE_COLS],
+        ) {
+            self.tab_read(
+                cur,
+                hero,
+                row,
+                (map, map.unwrap_or("")),
+                suspect,
+                detect::MatchOutcome::Unknown,
+            )
+            .await;
+        }
+
+        /// The map came from full-board text. There is no top-bar label.
+        async fn tab_text(
+            &mut self,
+            cur: Counters,
+            hero: &str,
+            row: Option<u32>,
+            text_map: &str,
+            suspect: [bool; stat_tracker::capture_gate::GATE_COLS],
+        ) {
+            self.tab_read(
+                cur,
+                hero,
+                row,
+                (None, text_map),
+                suspect,
+                detect::MatchOutcome::Unknown,
+            )
+            .await;
+        }
+
+        /// One Tab through the production request, plan, [`stage_capture`], and report.
+        /// `maps` is the top-bar label and the full-board fallback. `frame` is
+        /// the header on this board. Unknown is a board with none.
+        async fn tab_read(
+            &mut self,
+            cur: Counters,
+            hero: &str,
+            row: Option<u32>,
+            maps: (Option<&str>, &str),
+            suspect: [bool; stat_tracker::capture_gate::GATE_COLS],
+            frame: detect::MatchOutcome,
+        ) {
+            let (panel, text_map) = maps;
+            let opened =
+                open_fresh_if_tab_starts_one(&mut self.st, &self.store, self.dir.path(), self.now)
+                    .await;
+            let req = build_capture_request(self.game(), opened, self.now);
+            let (hero_resolved, source, hero_auth) = hero_auth::resolve_hero(
+                Some(hero),
+                None,
+                hero,
+                &req.hero_auth,
+                parse::canonical_hero,
+            );
+            let career_panel = matches!(source, HeroSource::CareerPanel);
+            let plan = plan_from_board(
+                &req,
+                &BoardFacts {
+                    counters: cur,
+                    suspect,
+                    row_counts: row.is_some(),
+                    row_id: row,
+                    hero: &hero_resolved,
+                    map_from_panel: panel,
+                    parsed_map: text_map,
+                    frame_outcome: frame,
+                },
+            );
+            let sid = req.session_id.clone();
+            if plan.skip_store {
+                let report = skipped_capture_report(
+                    &plan,
+                    &sid,
+                    career_panel,
+                    hero_auth,
+                    plan.defer.then(|| hero_resolved.clone()),
+                    plan.defer.then_some(self.wall),
+                );
+                apply_capture_report(
+                    &mut self.st,
+                    &self.store,
+                    self.dir.path(),
+                    &sid,
+                    Ok(report),
+                    self.now,
+                )
+                .await;
+                return;
+            }
+            let staged = stage_capture(&req, &plan, cur, suspect, panel, text_map, self.wall);
+            write_staged_rows(
+                &self.store,
+                self.dir.path(),
+                &staged,
+                &hero_resolved,
+                "",
+                SurrealDatetime::from(self.wall),
+            )
+            .await
+            .unwrap();
+            self.write_board(
+                &staged.target_session,
+                &hero_resolved,
+                &staged.map_name,
+                &staged.outcome_label,
+                staged.gate.accepted,
+                self.wall,
+            )
+            .await;
+            let report = CaptureReport {
+                recorded: true,
+                outcome: staged.outcome,
+                map: staged.recorded_map,
+                map_source: staged.map_source,
+                session_id: staged.target_session,
+                split: staged.split,
+                armed_reset: false,
+                ignore_row: plan.ignore_row,
+                reset_streak: plan.reset_streak,
+                reset_baseline: plan.reset_baseline,
+                baseline_row: plan.baseline_row,
+                refresh_baseline: plan.refresh_baseline,
+                clear_hint: plan.clear_hint,
+                count_progress: plan.count_progress,
+                career_panel,
+                held_counters: None,
+                held_hero: None,
+                gate_state: Some(staged.gate.state),
+                hero_auth,
+                seal: plan.seal,
+                close_reason: plan.close_reason,
+                held_at: None,
+            };
+            apply_capture_report(
+                &mut self.st,
+                &self.store,
+                self.dir.path(),
+                &sid,
+                Ok(report),
+                self.now,
+            )
+            .await;
+        }
+
+        async fn write_board(
+            &self,
+            id: &str,
+            hero: &str,
+            map: &str,
+            outcome: &str,
+            counters: Counters,
+            at: chrono::DateTime<Utc>,
+        ) {
+            store_held_board(
+                &self.store,
+                self.dir.path(),
+                id,
+                hero,
+                map,
+                outcome,
+                counters,
+                at,
+            )
+            .await
+            .unwrap();
+        }
+
+        /// The same scoreboard captured on several ticks, the way a held Tab
+        /// is sampled. A fresh board uses [`Self::tab_once`]: a second sample
+        /// inside 45 seconds is not a second reset signal.
+        async fn tab_held(
+            &mut self,
+            cur: Counters,
+            hero: &str,
+            row: Option<u32>,
+            map: Option<&str>,
+        ) {
+            for i in 0..NIGHT_TICKS {
+                self.tab_once(cur, hero, row, map, NIGHT_CLEAN).await;
+                if i + 1 != NIGHT_TICKS {
+                    self.advance(night_tick());
+                }
+            }
+        }
+
+        async fn elims(&self, session: &str) -> Vec<u32> {
+            self.store
+                .get_session_snapshots(session)
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|row| row.elims)
+                .collect()
+        }
+    }
+
+    fn vote(candidates: &[&str]) -> boundary::StartScreen {
+        boundary::StartScreen::MapVote {
+            candidates: candidates.iter().map(|c| (*c).to_string()).collect(),
+        }
+    }
+
+    #[tokio::test]
+    async fn multi_tick_vote_ban_and_select_keep_one_session_and_its_candidates() {
+        let mut night = Night::new().await;
+        let candidates = ["Junkertown", "Ilios"];
+        night.screen(vote(&candidates)).await;
+        let id = night.id();
+        assert_eq!(night.game().map_candidates, vec!["Junkertown", "Ilios"]);
+        night.screen(boundary::StartScreen::HeroBan).await;
+        night.screen(boundary::StartScreen::HeroSelect).await;
+        assert_eq!(night.id(), id, "a stable start screen must not re-split");
+        assert_eq!(
+            night.game().map_candidates,
+            vec!["Junkertown", "Ilios"],
+            "ban and select keep the vote candidates"
+        );
+        assert!(night.game().awaiting_first_board);
+        let rows = night.elims(&id).await;
+        assert!(rows.is_empty(), "no false unrecorded split wrote a board");
+    }
+
+    #[tokio::test]
+    async fn board_one_defeat_then_vote_seals_a_and_opens_b_with_no_tab() {
+        let mut night = Night::new().await;
+        night.begin_on("Busan", "Zenyatta");
+        night
+            .tab_held(
+                night_counters(14, 22, 6, 2400, 9800, 400),
+                "Zenyatta",
+                Some(2),
+                Some("Busan"),
+            )
+            .await;
+        night.advance(Duration::from_secs(8 * 60));
+        night.word_once(detect::MatchOutcome::Defeat).await;
+        let a = night.id();
+        night.advance(Duration::from_secs(20));
+        night.screen(vote(&["Junkertown", "Ilios"])).await;
+        night.screen(boundary::StartScreen::HeroBan).await;
+        night.screen(boundary::StartScreen::HeroSelect).await;
+        assert_ne!(night.id(), a, "the vote opens B");
+        assert_eq!(night.elims(&a).await, vec![14, 14, 14, 14]);
+        let snaps = night.store.get_session_snapshots(&a).await.unwrap();
+        assert!(
+            snaps.iter().all(|row| row.outcome == "defeat"),
+            "A stays Defeat, got {:?}",
+            snaps
+                .iter()
+                .map(|row| row.outcome.clone())
+                .collect::<Vec<_>>()
+        );
+        night
+            .word(detect::MatchOutcome::Victory, Some("Junkertown"))
+            .await;
+        assert_eq!(night.game().outcome, detect::MatchOutcome::Victory);
+        assert_ne!(night.id(), a);
+        assert!(
+            night.elims(&night.id()).await.is_empty(),
+            "B was played with no Tab"
+        );
+    }
+
+    #[tokio::test]
+    async fn one_read_on_b_then_c_does_not_seal_b_onto_a() {
+        let mut night = Night::new().await;
+        night.begin_on("Busan", "Zenyatta");
+        night
+            .tab_once(
+                night_counters(14, 22, 6, 2400, 9800, 400),
+                "Zenyatta",
+                Some(2),
+                Some("Busan"),
+                NIGHT_CLEAN,
+            )
+            .await;
+        night.advance(Duration::from_secs(8 * 60));
+        night.word_once(detect::MatchOutcome::Defeat).await;
+        let a = night.id();
+        night.advance(Duration::from_secs(30));
+        night.screen(vote(&["Junkertown"])).await;
+        let b = night.id();
+        assert_ne!(b, a);
+        night.word_once(detect::MatchOutcome::Victory).await;
+        night.advance(Duration::from_secs(20));
+        night
+            .tab_once(
+                night_counters(6, 2, 1, 900, 200, 400),
+                "Wrecking Ball",
+                Some(0),
+                Some("Junkertown"),
+                NIGHT_CLEAN,
+            )
+            .await;
+        assert_eq!(night.id(), b, "B's first Tab is B's board");
+        night.advance(Duration::from_secs(130));
+        night
+            .tab_once(
+                night_counters(2, 1, 0, 350, 60, 800),
+                "Reinhardt",
+                Some(1),
+                Some("Ilios"),
+                NIGHT_CLEAN,
+            )
+            .await;
+        assert_ne!(night.id(), b, "C's gap closes B");
+        assert_ne!(night.id(), a);
+        let snaps = night.store.get_session_snapshots(&a).await.unwrap();
+        assert!(
+            snaps.iter().all(|row| row.outcome == "defeat"),
+            "C's gap must not seal B's word onto A"
+        );
+        let b_rows = night.store.get_session_snapshots(&b).await.unwrap();
+        assert!(
+            b_rows.iter().all(|row| row.outcome == "victory"),
+            "B's one read is sealed on B"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_tab_on_b_does_not_move_bs_board_onto_c() {
+        let mut night = Night::new().await;
+        night.begin_on("Busan", "Zenyatta");
+        // The debounce runs from when the session opened, the gap from the
+        // last board. Open long enough for the vote, then take A's board.
+        night.advance(Duration::from_secs(130));
+        night
+            .tab_once(
+                night_counters(14, 22, 6, 2400, 9800, 400),
+                "Zenyatta",
+                Some(2),
+                Some("Busan"),
+                NIGHT_CLEAN,
+            )
+            .await;
+        night.advance(Duration::from_secs(20));
+        night.word_once(detect::MatchOutcome::Defeat).await;
+        let a = night.id();
+        night.advance(Duration::from_secs(20));
+        night.screen(vote(&["Junkertown"])).await;
+        let b = night.id();
+        night.advance(Duration::from_secs(20));
+        night
+            .tab_once(
+                night_counters(3, 1, 1, 400, 80, 500),
+                "Wrecking Ball",
+                Some(0),
+                Some("Junkertown"),
+                NIGHT_CLEAN,
+            )
+            .await;
+        assert_eq!(night.id(), b, "B's first Tab stays on B");
+        assert_eq!(night.elims(&b).await, vec![3]);
+        assert_eq!(night.elims(&a).await, vec![14]);
+        night.advance(Duration::from_secs(130));
+        night.screen(vote(&["Ilios"])).await;
+        assert_ne!(night.id(), b);
+        assert_eq!(night.elims(&a).await, vec![14]);
+        assert_eq!(night.elims(&b).await, vec![3]);
+    }
+
+    #[tokio::test]
+    async fn fresh_misread_then_hero_swap_does_not_split() {
+        let mut night = Night::new().await;
+        night.begin_on("Busan", "Zenyatta");
+        night
+            .tab_once(
+                night_counters(14, 22, 6, 2400, 9800, 400),
+                "Zenyatta",
+                Some(2),
+                Some("Busan"),
+                NIGHT_CLEAN,
+            )
+            .await;
+        let id = night.id();
+        night.advance(Duration::from_secs(60));
+        night
+            .tab_once(
+                night_counters(2, 1, 0, 350, 60, 800),
+                "Zenyatta",
+                Some(2),
+                Some("Busan"),
+                NIGHT_CLEAN,
+            )
+            .await;
+        assert_eq!(night.id(), id);
+        assert!(night.game().deferred.is_some(), "the misread is held");
+        assert_eq!(night.elims(&id).await, vec![14]);
+        night.advance(Duration::from_secs(30));
+        night.screen(boundary::StartScreen::HeroSelect).await;
+        assert_eq!(
+            night.id(),
+            id,
+            "a hero swap after one misread does not split"
+        );
+        assert_eq!(night.elims(&id).await, vec![14]);
+    }
+
+    #[tokio::test]
+    async fn ordinary_growth_is_not_the_short_band_and_uses_the_baseline_clock() {
+        let mut night = Night::new().await;
+        night.begin_on("Busan", "Ana");
+        night
+            .tab_once(
+                night_counters(4, 3, 2, 1500, 400, 300),
+                "Ana",
+                Some(0),
+                Some("Busan"),
+                NIGHT_CLEAN,
+            )
+            .await;
+        // E4 at 2:00, E9 at 5:00. Three minutes of ordinary 2-4x growth.
+        night.advance(Duration::from_secs(2 * 60));
+        night
+            .tab_once(
+                night_counters(4, 3, 2, 1500, 400, 300),
+                "Ana",
+                Some(0),
+                Some("Busan"),
+                NIGHT_CLEAN,
+            )
+            .await;
+        night.advance(Duration::from_secs(3 * 60));
+        night
+            .tab_once(
+                night_counters(9, 7, 4, 3800, 900, 800),
+                "Ana",
+                Some(0),
+                Some("Busan"),
+                NIGHT_CLEAN,
+            )
+            .await;
+        assert_eq!(
+            night.game().reset_baseline.map(|gate| gate.accepted.elims),
+            Some(9),
+            "a long-age 2-4x row becomes the baseline"
+        );
+        // Fresh session for the baseline clock. The first Tab is past the gap,
+        // so the gate accepts the raw row instead of latching it to the
+        // previous game. A short 2-4x row keeps the baseline. A spike at
+        // 6:00 is stored and still is not the baseline. E17 twenty seconds
+        // later is ordinary growth from that baseline.
+        night.screen(vote(&["Ilios"])).await;
+        night.advance(Duration::from_secs(130));
+        night
+            .tab_once(
+                night_counters(4, 3, 2, 1500, 400, 300),
+                "Ana",
+                Some(0),
+                Some("Ilios"),
+                NIGHT_CLEAN,
+            )
+            .await;
+        night.advance(Duration::from_secs(30));
+        night
+            .tab_once(
+                night_counters(10, 8, 6, 4000, 1000, 800),
+                "Ana",
+                Some(0),
+                Some("Ilios"),
+                NIGHT_CLEAN,
+            )
+            .await;
+        assert_eq!(
+            night.game().reset_baseline.map(|gate| gate.accepted.elims),
+            Some(4),
+            "the short 2-4x band does not move the baseline"
+        );
+        night.advance(Duration::from_secs(6 * 60 - 30));
+        night
+            .tab_once(
+                night_counters(90, 40, 40, 30000, 50000, 5000),
+                "Ana",
+                Some(0),
+                Some("Ilios"),
+                NIGHT_CLEAN,
+            )
+            .await;
+        assert_eq!(
+            night.game().reset_baseline.map(|gate| gate.accepted.elims),
+            Some(4),
+            "the spike is stored and is not the baseline"
+        );
+        night.advance(Duration::from_secs(20));
+        night
+            .tab_once(
+                night_counters(17, 8, 5, 6100, 1200, 900),
+                "Ana",
+                Some(0),
+                Some("Ilios"),
+                NIGHT_CLEAN,
+            )
+            .await;
+        assert_eq!(
+            night.game().reset_baseline.map(|gate| gate.accepted.elims),
+            Some(17),
+            "E17 at 6:20 is normal growth when age is measured from the baseline"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_deferred_board_is_dropped_when_the_match_continues() {
+        let mut night = Night::new().await;
+        night.begin_on("Busan", "Zenyatta");
+        night
+            .tab_once(
+                night_counters(14, 22, 6, 2400, 9800, 400),
+                "Zenyatta",
+                Some(2),
+                Some("Busan"),
+                NIGHT_CLEAN,
+            )
+            .await;
+        night.advance(Duration::from_secs(60));
+        night
+            .tab_once(
+                night_counters(2, 1, 0, 350, 60, 800),
+                "Zenyatta",
+                Some(2),
+                Some("Busan"),
+                NIGHT_CLEAN,
+            )
+            .await;
+        assert!(night.game().deferred.is_some());
+        night.advance(Duration::from_secs(10));
+        night
+            .tab_once(
+                night_counters(16, 23, 6, 2600, 10000, 420),
+                "Zenyatta",
+                Some(2),
+                Some("Busan"),
+                NIGHT_CLEAN,
+            )
+            .await;
+        assert!(night.game().deferred.is_none());
+        assert_eq!(night.elims(&night.id()).await, vec![14, 16]);
+    }
+
+    #[tokio::test]
+    async fn a_carried_deferred_board_is_written_on_the_new_session() {
+        let mut night = Night::new().await;
+        night.begin_on("Busan", "Zenyatta");
+        night
+            .tab_once(
+                night_counters(18, 7, 9, 6400, 11000, 800),
+                "Zenyatta",
+                Some(2),
+                Some("Busan"),
+                NIGHT_CLEAN,
+            )
+            .await;
+        night.advance(Duration::from_secs(30));
+        night
+            .word(detect::MatchOutcome::Defeat, Some("Busan"))
+            .await;
+        night.advance(Duration::from_secs(50));
+        let first = night_counters(1, 3, 0, 220, 80, 400);
+        night
+            .tab_once(first, "Wrecking Ball", Some(2), Some("Busan"), NIGHT_CLEAN)
+            .await;
+        assert_eq!(night.game().deferred, Some(first));
+        assert!(!night.game().deferred_imported);
+        let held_on = night.id();
+        night.advance(Duration::from_secs(20));
+        night.screen(boundary::StartScreen::HeroSelect).await;
+        let opened = night.id();
+        assert_ne!(opened, held_on, "the confirmed game closes");
+        assert!(
+            night.game().deferred_imported,
+            "the held board is carried onto the session the start screen opened"
+        );
+        assert_eq!(night.game().deferred, Some(first));
+        let next = night_counters(6, 2, 1, 900, 200, 400);
+        night
+            .tab_once(
+                next,
+                "Wrecking Ball",
+                Some(0),
+                Some("Junkertown"),
+                NIGHT_CLEAN,
+            )
+            .await;
+        assert_eq!(night.id(), opened, "the carried board does not split again");
+        let rows = night.elims(&opened).await;
+        assert!(
+            rows.contains(&1),
+            "the carried board is written on the new session, got {rows:?}"
+        );
+        assert!(rows.contains(&6), "the new session's own board is stored");
+        assert!(
+            !night.elims(&held_on).await.contains(&1),
+            "the held board did not land on the session that deferred it"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_carried_board_is_stored_once_and_the_accolade_can_correct_the_map() {
+        let mut night = Night::new().await;
+        night.begin_on("Busan", "Zenyatta");
+        night
+            .tab_once(
+                night_counters(18, 7, 9, 6400, 11000, 800),
+                "Zenyatta",
+                Some(2),
+                Some("Busan"),
+                NIGHT_CLEAN,
+            )
+            .await;
+        night.advance(Duration::from_secs(30));
+        night
+            .word(detect::MatchOutcome::Defeat, Some("Busan"))
+            .await;
+        night.advance(Duration::from_secs(50));
+        let carried = night_counters(1, 3, 0, 220, 80, 400);
+        night
+            .tab_once(
+                carried,
+                "Wrecking Ball",
+                Some(2),
+                Some("Busan"),
+                NIGHT_CLEAN,
+            )
+            .await;
+        assert_eq!(night.game().deferred, Some(carried));
+        night.advance(Duration::from_secs(20));
+        night.screen(boundary::StartScreen::HeroSelect).await;
+        let opened = night.id();
+        assert!(
+            night.game().deferred_imported,
+            "the held board is carried onto the session the start screen opened"
+        );
+        night.advance(Duration::from_secs(10));
+        night
+            .tab_text(
+                night_counters(3, 1, 0, 400, 100, 200),
+                "Wrecking Ball",
+                None,
+                "Dorado",
+                NIGHT_CLEAN,
+            )
+            .await;
+        assert_eq!(night.id(), opened);
+        assert_eq!(night.game().map.as_deref(), Some("Dorado"));
+        assert_eq!(
+            night.game().map_source,
+            Some(boundary::MapSource::TextFallback)
+        );
+        night.advance(Duration::from_secs(10));
+        night
+            .tab_text(
+                night_counters(4, 2, 1, 500, 150, 250),
+                "Wrecking Ball",
+                None,
+                "Dorado",
+                NIGHT_CLEAN,
+            )
+            .await;
+        let rows = night.elims(&opened).await;
+        assert_eq!(
+            rows.iter().filter(|elims| **elims == 1).count(),
+            1,
+            "the carried board is stored once, got {rows:?}"
+        );
+        assert!(
+            rows.contains(&3) && rows.contains(&4),
+            "each unidentified Tab is stored on its own, got {rows:?}"
+        );
+        // The hold is still set here unless the first store cleared it. A
+        // later identified Tab would clear it by refreshing the baseline,
+        // which would hide the leftover flag.
+        night.advance(Duration::from_secs(8 * 60));
+        night
+            .word(detect::MatchOutcome::Victory, Some("Ilios"))
+            .await;
+        assert_eq!(night.id(), opened, "the accolade stays on this session");
+        assert_eq!(night.game().map.as_deref(), Some("Ilios"));
+        assert_eq!(night.game().map_source, Some(boundary::MapSource::Accolade));
+        let snaps = night.store.get_session_snapshots(&opened).await.unwrap();
+        assert!(
+            !snaps.is_empty() && snaps.iter().all(|row| row.map_name == "Ilios"),
+            "the accolade rewrites the map after the hold is cleared, got {:?}",
+            snaps
+                .iter()
+                .map(|row| row.map_name.clone())
+                .collect::<Vec<_>>()
+        );
+        night.advance(Duration::from_secs(10));
+        night
+            .tab_text(
+                night_counters(5, 2, 1, 600, 180, 280),
+                "Wrecking Ball",
+                Some(0),
+                "Ilios",
+                NIGHT_CLEAN,
+            )
+            .await;
+        let rows = night.elims(&opened).await;
+        assert_eq!(
+            rows.iter().filter(|elims| **elims == 1).count(),
+            1,
+            "the identified Tab does not store the carried board again, got {rows:?}"
+        );
+        assert!(
+            rows.contains(&5),
+            "the identified Tab is stored on its own, got {rows:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn one_defeat_then_post_match_tab_then_vote_leaves_a_as_defeat() {
+        let mut night = Night::new().await;
+        night.begin_on("Busan", "Zenyatta");
+        night
+            .tab_once(
+                night_counters(8, 3, 2, 1800, 4000, 100),
+                "Zenyatta",
+                Some(2),
+                Some("Busan"),
+                NIGHT_CLEAN,
+            )
+            .await;
+        night.advance(Duration::from_secs(30));
+        night.word_once(detect::MatchOutcome::Defeat).await;
+        night.advance(Duration::from_secs(20));
+        night
+            .tab_once(
+                night_counters(10, 4, 2, 2200, 4600, 140),
+                "Zenyatta",
+                Some(2),
+                Some("Busan"),
+                NIGHT_CLEAN,
+            )
+            .await;
+        assert_eq!(
+            night.game().result_mark.map(|mark| mark.outcome),
+            Some(detect::MatchOutcome::Defeat),
+            "the first progressed board keeps the hint"
+        );
+        let a = night.id();
+        night.advance(Duration::from_secs(130));
+        night.screen(vote(&["Junkertown"])).await;
+        assert_ne!(night.id(), a);
+        let snaps = night.store.get_session_snapshots(&a).await.unwrap();
+        assert!(
+            snaps.iter().all(|row| row.outcome == "defeat"),
+            "the vote seals the hint the post-match Tab kept"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_vote_session_keeps_its_first_tab_and_its_candidates() {
+        let mut night = Night::new().await;
+        night.begin_on("Busan", "Zenyatta");
+        night
+            .tab_once(
+                night_counters(14, 22, 6, 2400, 9800, 400),
+                "Zenyatta",
+                Some(2),
+                Some("Busan"),
+                NIGHT_CLEAN,
+            )
+            .await;
+        let a = night.id();
+        night.advance(Duration::from_secs(130));
+        night.screen(vote(&["Junkertown", "Ilios"])).await;
+        let b = night.id();
+        assert_ne!(b, a);
+        assert!(night.game().awaiting_first_board);
+        night.advance(Duration::from_secs(130));
+        night
+            .tab_once(
+                night_counters(2, 1, 0, 350, 60, 800),
+                "Wrecking Ball",
+                Some(0),
+                Some("Junkertown"),
+                NIGHT_CLEAN,
+            )
+            .await;
+        assert_eq!(
+            night.id(),
+            b,
+            "the first Tab stays on the session the vote opened"
+        );
+        assert_eq!(night.elims(&b).await, vec![2]);
+        assert_eq!(night.elims(&a).await, vec![14]);
+        assert_eq!(
+            night.game().map_candidates,
+            vec!["Junkertown".to_string(), "Ilios".to_string()]
+        );
+        let unrecorded = std::fs::read_to_string(
+            night
+                .dir
+                .path()
+                .join("debug")
+                .join("unrecorded_games.jsonl"),
+        )
+        .unwrap_or_default();
+        assert!(
+            !unrecorded.contains(&b),
+            "the vote session was recorded: {unrecorded}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_normal_night_is_one_session_per_game() {
+        let mut night = Night::new().await;
+        night.begin_on("Busan", "Zenyatta");
+        night
+            .tab_held(
+                night_counters(10, 4, 3, 2000, 800, 100),
+                "Zenyatta",
+                Some(0),
+                Some("Busan"),
+            )
+            .await;
+        night.advance(Duration::from_secs(8 * 60));
+        night
+            .word(detect::MatchOutcome::Victory, Some("Busan"))
+            .await;
+        let busan = night.id();
+        night.advance(Duration::from_secs(20));
+        night.screen(vote(&["Junkertown", "Ilios"])).await;
+        assert_ne!(night.id(), busan);
+        assert_eq!(night.game().map_candidates, vec!["Junkertown", "Ilios"]);
+        let vote_session = night.id();
+        night.advance(Duration::from_secs(150));
+        night.screen(boundary::StartScreen::HeroSelect).await;
+        night.advance(Duration::from_secs(150));
+        night.screen(boundary::StartScreen::HeroSelect).await;
+        assert_eq!(
+            night.id(),
+            vote_session,
+            "a hero swap before the first Tab, after the debounce, stays"
+        );
+        assert_eq!(night.game().map_candidates, vec!["Junkertown", "Ilios"]);
+        night.advance(Duration::from_secs(30));
+        night
+            .tab_held(
+                night_counters(4, 6, 2, 900, 3000, 200),
+                "Ana",
+                Some(1),
+                Some("Junkertown"),
+            )
+            .await;
+        let junkertown = night.id();
+        assert_eq!(
+            junkertown, vote_session,
+            "the vote session keeps its first Tab"
+        );
+        assert_eq!(night.game().map_candidates, vec!["Junkertown", "Ilios"]);
+        let unrecorded = std::fs::read_to_string(
+            night
+                .dir
+                .path()
+                .join("debug")
+                .join("unrecorded_games.jsonl"),
+        )
+        .unwrap_or_default();
+        assert!(
+            !unrecorded.contains(&vote_session),
+            "the vote session was recorded: {unrecorded}"
+        );
+        assert_ne!(junkertown, busan);
+        night.advance(Duration::from_secs(8 * 60));
+        night
+            .word(detect::MatchOutcome::Defeat, Some("Junkertown"))
+            .await;
+        night.advance(Duration::from_secs(20));
+        night.screen(boundary::StartScreen::HeroSelect).await;
+        night.advance(Duration::from_secs(30));
+        night
+            .tab_held(
+                night_counters(6, 2, 1, 1500, 200, 4000),
+                "Reinhardt",
+                Some(0),
+                Some("Ilios"),
+            )
+            .await;
+        let ilios = night.id();
+        assert_ne!(ilios, junkertown);
+        night.advance(Duration::from_secs(8 * 60));
+        night
+            .word(detect::MatchOutcome::Victory, Some("Ilios"))
+            .await;
+        assert_eq!(night.id(), ilios);
+        assert_eq!(night.game().outcome, detect::MatchOutcome::Victory);
+        assert_eq!(night.game().map.as_deref(), Some("Ilios"));
+        let busan_rows = night.store.get_session_snapshots(&busan).await.unwrap();
+        assert!(busan_rows.iter().all(|row| row.outcome == "victory"));
+        let junk_rows = night
+            .store
+            .get_session_snapshots(&junkertown)
+            .await
+            .unwrap();
+        assert!(junk_rows.iter().all(|row| row.outcome == "defeat"));
+        assert!(night.elims(&ilios).await.contains(&6));
+    }
+
+    #[tokio::test]
+    async fn busan_board_one_defeat_then_junkertown_wrecking_ball() {
+        let mut night = Night::new().await;
+        night.begin_on("Busan", "Zenyatta");
+        night
+            .tab_once(
+                night_counters(14, 22, 6, 2400, 9800, 400),
+                "Zenyatta",
+                Some(2),
+                Some("Busan"),
+                NIGHT_CLEAN,
+            )
+            .await;
+        night.advance(Duration::from_secs(8 * 60));
+        night.word_once(detect::MatchOutcome::Defeat).await;
+        let busan = night.id();
+        night.advance(Duration::from_secs(60));
+        night
+            .tab_once(
+                night_counters(4, 3, 2, 1500, 400, 300),
+                "Wrecking Ball",
+                Some(0),
+                Some("Junkertown"),
+                NIGHT_CLEAN,
+            )
+            .await;
+        let junk = night.id();
+        assert_ne!(junk, busan, "the nine-minute gap splits with the gap on");
+        let busan_rows = night.store.get_session_snapshots(&busan).await.unwrap();
+        assert!(busan_rows.iter().all(|row| row.outcome == "defeat"));
+        assert_eq!(night.elims(&busan).await, vec![14]);
+        night.advance(Duration::from_secs(3 * 60));
+        night
+            .tab_once(
+                night_counters(9, 7, 4, 3800, 900, 800),
+                "Wrecking Ball",
+                Some(0),
+                Some("Junkertown"),
+                NIGHT_CLEAN,
+            )
+            .await;
+        assert_eq!(
+            night.game().reset_baseline.map(|gate| gate.accepted.elims),
+            Some(9),
+            "a long-age 2-4x row becomes the baseline"
+        );
+        night.advance(Duration::from_secs(3 * 60));
+        let final_board = night_counters(23, 9, 5, 6792, 1463, 3006);
+        night
+            .tab_once(
+                final_board,
+                "Wrecking Ball",
+                Some(0),
+                Some("Junkertown"),
+                NIGHT_CLEAN,
+            )
+            .await;
+        assert!(
+            night.elims(&junk).await.contains(&23),
+            "the final board is stored"
+        );
+        assert_eq!(
+            night.game().gate.map(|gate| gate.accepted),
+            Some(final_board)
+        );
+        night.advance(Duration::from_secs(10 * 60));
+        let over = night_counters(100, 20, 12, 14000, 3000, 6000);
+        night
+            .tab_once(
+                over,
+                "Wrecking Ball",
+                Some(0),
+                Some("Junkertown"),
+                NIGHT_CLEAN,
+            )
+            .await;
+        assert!(
+            night.elims(&junk).await.contains(&100),
+            "a long-age row past 4x is stored"
+        );
+        night
+            .word(detect::MatchOutcome::Victory, Some("Junkertown"))
+            .await;
+        assert_eq!(night.game().outcome, detect::MatchOutcome::Victory);
+        assert_eq!(night.game().map.as_deref(), Some("Junkertown"));
+        assert_eq!(
+            night.game().hero_auth.accepted_hero.as_deref(),
+            Some("Wrecking Ball")
+        );
+    }
+
+    #[tokio::test]
+    async fn defeat_word_with_no_board_and_no_start_screen_then_junkertown() {
+        let mut night = Night::new().await;
+        night.begin_on("Busan", "Zenyatta");
+        night.word_once(detect::MatchOutcome::Defeat).await;
+        let busan = night.id();
+        night.advance(Duration::from_secs(9 * 60));
+        night
+            .tab_once(
+                night_counters(2, 1, 0, 350, 60, 800),
+                "Wrecking Ball",
+                Some(0),
+                Some("Junkertown"),
+                NIGHT_CLEAN,
+            )
+            .await;
+        assert_ne!(
+            night.id(),
+            busan,
+            "a hinted session with no board splits when the first Tab names another map"
+        );
+        let snaps = night.store.get_session_snapshots(&busan).await.unwrap();
+        assert!(
+            snaps.is_empty() || snaps.iter().all(|row| row.outcome == "defeat"),
+            "the hint is sealed on the session that had no board"
+        );
+        assert_eq!(night.game().map.as_deref(), Some("Junkertown"));
+    }
+
+    #[tokio::test]
+    async fn a_same_map_tab_after_a_boardless_hint_stays() {
+        let mut night = Night::new().await;
+        night.begin_on("Busan", "Zenyatta");
+        night.word_once(detect::MatchOutcome::Defeat).await;
+        let busan = night.id();
+        night.advance(Duration::from_secs(9 * 60));
+        night
+            .tab_once(
+                night_counters(8, 3, 2, 1800, 400, 100),
+                "Zenyatta",
+                Some(2),
+                Some("Busan"),
+                NIGHT_CLEAN,
+            )
+            .await;
+        assert_eq!(
+            night.id(),
+            busan,
+            "a late Tab of the same map is this match"
+        );
+        assert_eq!(night.elims(&busan).await, vec![8]);
+    }
+
+    #[tokio::test]
+    async fn grace_then_idle_each_open_a_fresh_session() {
+        let mut night = Night::new().await;
+        night.begin_on("Busan", "Ana");
+        night
+            .tab_once(
+                night_counters(8, 3, 2, 1800, 400, 100),
+                "Ana",
+                Some(0),
+                Some("Busan"),
+                NIGHT_CLEAN,
+            )
+            .await;
+        night
+            .word(detect::MatchOutcome::Victory, Some("Busan"))
+            .await;
+        let finished = night.id();
+        night.advance(Duration::from_secs(80));
+        night
+            .tab_once(
+                night_counters(2, 1, 0, 400, 80, 200),
+                "Ana",
+                Some(0),
+                Some("Ilios"),
+                NIGHT_CLEAN,
+            )
+            .await;
+        assert_ne!(
+            night.id(),
+            finished,
+            "past the 75s grace the next Tab is a new session"
+        );
+        let unfinished = night.id();
+        night.advance(Duration::from_secs(21 * 60));
+        night
+            .tab_once(
+                night_counters(4, 2, 1, 900, 100, 300),
+                "Ana",
+                Some(0),
+                Some("Ilios"),
+                NIGHT_CLEAN,
+            )
+            .await;
+        assert_ne!(
+            night.id(),
+            unfinished,
+            "an unfinished session idle for 20 minutes does not absorb the next Tab"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_ban_after_a_held_misread_does_not_split() {
+        let mut night = Night::new().await;
+        night.begin_on("Busan", "Zenyatta");
+        night
+            .tab_once(
+                night_counters(14, 22, 6, 2400, 9800, 400),
+                "Zenyatta",
+                Some(2),
+                Some("Busan"),
+                NIGHT_CLEAN,
+            )
+            .await;
+        let id = night.id();
+        night.advance(Duration::from_secs(60));
+        night
+            .tab_once(
+                night_counters(2, 1, 0, 350, 60, 800),
+                "Zenyatta",
+                Some(2),
+                Some("Busan"),
+                NIGHT_CLEAN,
+            )
+            .await;
+        assert!(night.game().deferred.is_some());
+        night.screen(boundary::StartScreen::HeroBan).await;
+        assert_eq!(
+            night.id(),
+            id,
+            "a ban after one held misread does not split"
+        );
+        assert_eq!(night.elims(&id).await, vec![14]);
+    }
+
+    async fn arm_busan_defeat(night: &mut Night) -> String {
+        night.begin_on("Busan", "Zenyatta");
+        night
+            .tab_once(
+                night_counters(14, 22, 6, 2400, 9800, 400),
+                "Zenyatta",
+                Some(2),
+                Some("Busan"),
+                NIGHT_CLEAN,
+            )
+            .await;
+        night.advance(Duration::from_secs(30));
+        night.word_once(detect::MatchOutcome::Defeat).await;
+        night.screen(boundary::StartScreen::HeroSelect).await;
+        assert!(night.game().pending_boundary);
+        night.id()
+    }
+
+    #[tokio::test]
+    async fn an_armed_different_map_end_screen_seals_the_old_hint() {
+        let mut night = Night::new().await;
+        let busan = arm_busan_defeat(&mut night).await;
+        night.advance(Duration::from_secs(20));
+        // Two agreeing word reads, the way the poller confirms. The first
+        // must not replace Busan's hint.
+        night
+            .word(detect::MatchOutcome::Victory, Some("Junkertown"))
+            .await;
+        assert_ne!(night.id(), busan);
+        assert_eq!(night.game().outcome, detect::MatchOutcome::Victory);
+        assert_eq!(night.game().map.as_deref(), Some("Junkertown"));
+        assert_eq!(night.game().map_source, Some(boundary::MapSource::Accolade));
+        let snaps = night.store.get_session_snapshots(&busan).await.unwrap();
+        assert!(
+            snaps.iter().all(|row| row.outcome == "defeat"),
+            "B's confirmed result does not overwrite A, got {:?}",
+            snaps
+                .iter()
+                .map(|row| row.outcome.clone())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_single_different_map_word_does_not_replace_the_hint_before_a_vote() {
+        let mut night = Night::new().await;
+        let busan = arm_busan_defeat(&mut night).await;
+        night
+            .word_tick(detect::MatchOutcome::Victory, Some("Junkertown"))
+            .await;
+        assert_eq!(night.id(), busan);
+        assert_eq!(
+            night.game().result_mark.map(|mark| mark.outcome),
+            Some(detect::MatchOutcome::Defeat),
+            "one unconfirmed word on the next map leaves A's hint"
+        );
+        night.advance(Duration::from_secs(150));
+        night
+            .screen(boundary::StartScreen::MapVote {
+                candidates: vec!["Junkertown".into(), "Ilios".into()],
+            })
+            .await;
+        assert_ne!(night.id(), busan);
+        assert_eq!(night.game().outcome, detect::MatchOutcome::Unknown);
+        let snaps = night.store.get_session_snapshots(&busan).await.unwrap();
+        assert!(
+            snaps.iter().all(|row| row.outcome == "defeat"),
+            "C's vote seals A's defeat, got {:?}",
+            snaps
+                .iter()
+                .map(|row| row.outcome.clone())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[tokio::test]
+    async fn an_armed_banner_has_no_map_and_seals_onto_the_open_session() {
+        let mut night = Night::new().await;
+        let busan = arm_busan_defeat(&mut night).await;
+        night.banner(detect::MatchOutcome::Victory).await;
+        assert_eq!(night.id(), busan);
+        assert_eq!(
+            night.game().outcome,
+            detect::MatchOutcome::Victory,
+            "a banner carries no accolade map, so it still seals onto A"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_armed_end_title_without_a_map_does_not_replace_the_hint() {
+        let mut night = Night::new().await;
+        let busan = arm_busan_defeat(&mut night).await;
+        night.word_tick(detect::MatchOutcome::Victory, None).await;
+        assert_eq!(night.id(), busan);
+        assert_eq!(
+            night.game().result_mark.map(|mark| mark.outcome),
+            Some(detect::MatchOutcome::Defeat),
+            "an end title with no map leaves A's hint"
+        );
+        night.advance(Duration::from_secs(4));
+        night
+            .word_tick(detect::MatchOutcome::Victory, Some("Junkertown"))
+            .await;
+        assert_ne!(night.id(), busan, "the confirming accolade opens B");
+        assert_eq!(night.game().outcome, detect::MatchOutcome::Victory);
+        assert_eq!(night.game().map.as_deref(), Some("Junkertown"));
+        let snaps = night.store.get_session_snapshots(&busan).await.unwrap();
+        assert!(
+            snaps.iter().all(|row| row.outcome == "defeat"),
+            "A keeps its own result, got {:?}",
+            snaps
+                .iter()
+                .map(|row| row.outcome.clone())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[tokio::test]
+    async fn an_accolade_map_carries_into_the_rank_screen_confirmation() {
+        let mut night = Night::new().await;
+        let busan = arm_busan_defeat(&mut night).await;
+        night
+            .word_tick(detect::MatchOutcome::Victory, Some("Junkertown"))
+            .await;
+        assert_eq!(night.id(), busan);
+        assert_eq!(
+            night.game().result_mark.map(|mark| mark.outcome),
+            Some(detect::MatchOutcome::Defeat)
+        );
+        night.advance(Duration::from_secs(4));
+        night.word_tick(detect::MatchOutcome::Victory, None).await;
+        assert_ne!(
+            night.id(),
+            busan,
+            "the rank screen confirms with the map carried from the accolade"
+        );
+        assert_eq!(night.game().outcome, detect::MatchOutcome::Victory);
+        assert_eq!(night.game().map.as_deref(), Some("Junkertown"));
+        assert_eq!(night.game().map_source, Some(boundary::MapSource::Accolade));
+        let snaps = night.store.get_session_snapshots(&busan).await.unwrap();
+        assert!(
+            snaps.iter().all(|row| row.outcome == "defeat"),
+            "A keeps its own result, got {:?}",
+            snaps
+                .iter()
+                .map(|row| row.outcome.clone())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unarmed_trusted_difference_splits_and_a_missing_name_seals() {
+        let mut split = Night::new().await;
+        split.begin_on("Busan", "Zenyatta");
+        split
+            .tab_once(
+                night_counters(14, 22, 6, 2400, 9800, 400),
+                "Zenyatta",
+                Some(2),
+                Some("Busan"),
+                NIGHT_CLEAN,
+            )
+            .await;
+        split.word_once(detect::MatchOutcome::Defeat).await;
+        let busan = split.id();
+        split.advance(Duration::from_secs(4));
+        split
+            .word(detect::MatchOutcome::Victory, Some("Junkertown"))
+            .await;
+        assert_ne!(split.id(), busan);
+        assert_eq!(split.game().outcome, detect::MatchOutcome::Victory);
+        assert_eq!(split.game().map.as_deref(), Some("Junkertown"));
+        let snaps = split.store.get_session_snapshots(&busan).await.unwrap();
+        assert!(
+            snaps.iter().all(|row| row.outcome == "defeat"),
+            "an unarmed trusted difference still leaves A's result, got {:?}",
+            snaps
+                .iter()
+                .map(|row| row.outcome.clone())
+                .collect::<Vec<_>>()
+        );
+
+        let mut seal = Night::new().await;
+        seal.begin_on("Busan", "Zenyatta");
+        seal.tab_once(
+            night_counters(14, 22, 6, 2400, 9800, 400),
+            "Zenyatta",
+            Some(2),
+            Some("Busan"),
+            NIGHT_CLEAN,
+        )
+        .await;
+        seal.word_once(detect::MatchOutcome::Defeat).await;
+        let busan = seal.id();
+        seal.word(detect::MatchOutcome::Victory, None).await;
+        assert_eq!(
+            seal.id(),
+            busan,
+            "a confirming word with no trusted name seals onto the open session"
+        );
+        assert_eq!(seal.game().outcome, detect::MatchOutcome::Victory);
+    }
+
+    async fn text_fallback(night: &mut Night, map: &str) -> String {
+        let mut g = ActiveGame::open_at(
+            format!("{:016x}", rand_id()),
+            detect::MatchOutcome::Unknown,
+            Vec::new(),
+            night.now,
+        );
+        g.hero_auth.accepted_hero = Some("Zenyatta".into());
+        night.st.active_game = Some(g);
+        night.st.last_game_open = Some(night.now);
+        night
+            .tab_text(
+                night_counters(14, 22, 6, 2400, 9800, 400),
+                "Zenyatta",
+                Some(2),
+                map,
+                NIGHT_CLEAN,
+            )
+            .await;
+        assert_eq!(night.game().map.as_deref(), Some(map));
+        assert_eq!(
+            night.game().map_source,
+            Some(boundary::MapSource::TextFallback)
+        );
+        night.id()
+    }
+
+    #[tokio::test]
+    async fn a_text_fallback_sessions_own_accolade_replaces_the_map() {
+        let mut night = Night::new().await;
+        let dorado = text_fallback(&mut night, "Dorado").await;
+        night
+            .word_tick(detect::MatchOutcome::Victory, Some("Busan"))
+            .await;
+        assert_eq!(
+            night.id(),
+            dorado,
+            "this session's own accolade does not split"
+        );
+        assert_eq!(night.game().map.as_deref(), Some("Busan"));
+        assert_eq!(night.game().map_source, Some(boundary::MapSource::Accolade));
+        let snaps = night.store.get_session_snapshots(&dorado).await.unwrap();
+        assert!(
+            !snaps.is_empty() && snaps.iter().all(|row| row.map_name == "Busan"),
+            "the adopted accolade rewrites the snapshots, got {:?}",
+            snaps
+                .iter()
+                .map(|row| row.map_name.clone())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[tokio::test]
+    async fn an_armed_text_fallback_is_not_relabelled_by_the_next_map() {
+        let mut night = Night::new().await;
+        let busan = text_fallback(&mut night, "Busan").await;
+        night.word_once(detect::MatchOutcome::Defeat).await;
+        night.screen(boundary::StartScreen::HeroSelect).await;
+        assert!(night.game().pending_boundary);
+        night
+            .word(detect::MatchOutcome::Victory, Some("Junkertown"))
+            .await;
+        assert_eq!(night.id(), busan);
+        assert_eq!(night.game().map.as_deref(), Some("Busan"));
+        let snaps = night.store.get_session_snapshots(&busan).await.unwrap();
+        assert!(
+            snaps.iter().all(|row| row.map_name == "Busan"),
+            "the next accolade must not rewrite A's snapshots, got {:?}",
+            snaps
+                .iter()
+                .map(|row| row.map_name.clone())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_text_fallback_hint_is_not_relabelled_by_the_next_result() {
+        let mut night = Night::new().await;
+        let busan = text_fallback(&mut night, "Busan").await;
+        night.word_once(detect::MatchOutcome::Defeat).await;
+        night
+            .word_tick(detect::MatchOutcome::Victory, Some("Junkertown"))
+            .await;
+        assert!(night.game().text_fallback_locked);
+        night.advance(Duration::from_secs(4));
+        night.no_signal_tick().await;
+        assert!(
+            night.game().text_fallback_locked,
+            "a tick with no result word keeps the text-fallback lock"
+        );
+        night.advance(Duration::from_secs(4));
+        night
+            .word(detect::MatchOutcome::Victory, Some("Junkertown"))
+            .await;
+        assert_eq!(night.id(), busan);
+        assert_eq!(night.game().map.as_deref(), Some("Busan"));
+        let snaps = night.store.get_session_snapshots(&busan).await.unwrap();
+        assert!(snaps.iter().all(|row| row.map_name == "Busan"));
+    }
+
+    #[tokio::test]
+    async fn progressed_boards_clear_the_lock_so_the_accolade_can_correct_the_map() {
+        let mut night = Night::new().await;
+        let dorado = text_fallback(&mut night, "Dorado").await;
+        night.word_once(detect::MatchOutcome::Defeat).await;
+        night.word_once(detect::MatchOutcome::Victory).await;
+        assert!(
+            night.game().text_fallback_locked,
+            "a different result replaces the hint and locks the text map"
+        );
+        night.advance(Duration::from_secs(70));
+        night
+            .tab_text(
+                night_counters(16, 24, 7, 2800, 10400, 500),
+                "Zenyatta",
+                Some(2),
+                "Dorado",
+                NIGHT_CLEAN,
+            )
+            .await;
+        assert!(
+            night.game().result_mark.is_some(),
+            "the first progressed board keeps the hint"
+        );
+        assert!(night.game().text_fallback_locked);
+        night.advance(Duration::from_secs(60));
+        night
+            .tab_text(
+                night_counters(18, 26, 8, 3200, 11000, 600),
+                "Zenyatta",
+                Some(2),
+                "Dorado",
+                NIGHT_CLEAN,
+            )
+            .await;
+        assert!(
+            night.game().result_mark.is_none(),
+            "the second progressed board clears the hint"
+        );
+        assert!(
+            !night.game().text_fallback_locked,
+            "clearing the hint clears the text-fallback lock"
+        );
+        night.advance(Duration::from_secs(5 * 60));
+        night
+            .word(detect::MatchOutcome::Victory, Some("Busan"))
+            .await;
+        assert_eq!(night.id(), dorado);
+        assert_eq!(night.game().outcome, detect::MatchOutcome::Victory);
+        assert_eq!(night.game().map.as_deref(), Some("Busan"));
+        assert_eq!(night.game().map_source, Some(boundary::MapSource::Accolade));
+        let snaps = night.store.get_session_snapshots(&dorado).await.unwrap();
+        assert_eq!(
+            snaps.len(),
+            3,
+            "the opening board and both progressed boards"
+        );
+        assert!(
+            snaps.iter().all(|row| row.map_name == "Busan"),
+            "the corrected accolade rewrites every snapshot, got {:?}",
+            snaps
+                .iter()
+                .map(|row| row.map_name.clone())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_finished_text_fallback_session_keeps_its_map() {
+        let mut night = Night::new().await;
+        let busan = text_fallback(&mut night, "Busan").await;
+        night.banner(detect::MatchOutcome::Victory).await;
+        assert_eq!(night.game().outcome, detect::MatchOutcome::Victory);
+        assert_eq!(night.game().map.as_deref(), Some("Busan"));
+        night
+            .word(detect::MatchOutcome::Defeat, Some("Junkertown"))
+            .await;
+        assert_eq!(night.id(), busan);
+        assert_eq!(night.game().outcome, detect::MatchOutcome::Victory);
+        assert_eq!(night.game().map.as_deref(), Some("Busan"));
+        let snaps = night.store.get_session_snapshots(&busan).await.unwrap();
+        assert!(snaps.iter().all(|row| row.map_name == "Busan"));
+    }
+
+    #[tokio::test]
+    async fn a_word_with_no_open_game_still_notes_the_streak() {
+        let mut night = Night::new().await;
+        night
+            .word_tick(detect::MatchOutcome::Victory, Some("Busan"))
+            .await;
+        assert!(night.st.active_game.is_none());
+        assert_eq!(
+            night
+                .st
+                .word_outcome_streak
+                .as_ref()
+                .map(|streak| streak.outcome),
+            Some(detect::MatchOutcome::Victory)
+        );
+        night.advance(Duration::from_secs(4));
+        night.word_tick(detect::MatchOutcome::Victory, None).await;
+        assert_eq!(
+            night.st.pending_outcome.map(|(outcome, _)| outcome),
+            Some(detect::MatchOutcome::Victory)
+        );
+        assert_eq!(
+            night
+                .st
+                .word_outcome_streak
+                .as_ref()
+                .and_then(|streak| streak.map.as_deref()),
+            Some("Busan")
+        );
+    }
+
+    #[tokio::test]
+    async fn an_accolade_adopts_the_map_source() {
+        let mut night = Night::new().await;
+        let g = ActiveGame::open_at(
+            format!("{:016x}", rand_id()),
+            detect::MatchOutcome::Unknown,
+            Vec::new(),
+            night.now,
+        );
+        night.st.active_game = Some(g);
+        night.st.last_game_open = Some(night.now);
+        night
+            .word_tick(detect::MatchOutcome::Victory, Some("Busan"))
+            .await;
+        assert_eq!(night.game().map.as_deref(), Some("Busan"));
+        assert_eq!(night.game().map_source, Some(boundary::MapSource::Accolade));
+    }
+
+    #[tokio::test]
+    async fn a_stat_split_session_keeps_the_top_bar_map_source() {
+        let mut night = Night::new().await;
+        night.begin_on("Busan", "Zenyatta");
+        night
+            .tab_once(
+                night_counters(14, 22, 6, 2400, 9800, 400),
+                "Zenyatta",
+                Some(2),
+                Some("Busan"),
+                NIGHT_CLEAN,
+            )
+            .await;
+        night.word_once(detect::MatchOutcome::Defeat).await;
+        let busan = night.id();
+        night.advance(Duration::from_secs(150));
+        night
+            .tab_once(
+                night_counters(16, 23, 7, 2800, 10000, 500),
+                "Zenyatta",
+                Some(2),
+                Some("Junkertown"),
+                NIGHT_CLEAN,
+            )
+            .await;
+        assert_ne!(night.id(), busan);
+        assert_eq!(night.game().map.as_deref(), Some("Junkertown"));
+        assert_eq!(night.game().map_source, Some(boundary::MapSource::TopBar));
+    }
+
+    #[tokio::test]
+    async fn a_later_top_bar_upgrades_a_text_fallback_and_the_next_map_splits() {
+        let mut night = Night::new().await;
+        let mut g = ActiveGame::open_at(
+            format!("{:016x}", rand_id()),
+            detect::MatchOutcome::Unknown,
+            Vec::new(),
+            night.now,
+        );
+        g.hero_auth.accepted_hero = Some("Zenyatta".into());
+        night.st.active_game = Some(g);
+        night.st.last_game_open = Some(night.now);
+        night
+            .tab_text(
+                night_counters(14, 22, 6, 2400, 9800, 400),
+                "Zenyatta",
+                Some(2),
+                "Busan",
+                NIGHT_CLEAN,
+            )
+            .await;
+        assert_eq!(
+            night.game().map_source,
+            Some(boundary::MapSource::TextFallback)
+        );
+        night.advance(Duration::from_secs(10));
+        night
+            .tab_once(
+                night_counters(16, 23, 7, 2600, 10000, 450),
+                "Zenyatta",
+                Some(2),
+                Some("Busan"),
+                NIGHT_CLEAN,
+            )
+            .await;
+        assert_eq!(night.game().map.as_deref(), Some("Busan"));
+        assert_eq!(night.game().map_source, Some(boundary::MapSource::TopBar));
+        night.word_once(detect::MatchOutcome::Defeat).await;
+        let busan = night.id();
+        night.advance(Duration::from_secs(150));
+        night
+            .tab_once(
+                night_counters(18, 24, 8, 3000, 11000, 520),
+                "Zenyatta",
+                Some(2),
+                Some("Junkertown"),
+                NIGHT_CLEAN,
+            )
+            .await;
+        assert_ne!(
+            night.id(),
+            busan,
+            "once the top bar agrees, a later different map still splits"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_different_map_inside_the_gap_stays_one_game() {
+        let mut night = Night::new().await;
+        night.begin_on("Busan", "Zenyatta");
+        night
+            .tab_once(
+                night_counters(14, 22, 6, 2400, 9800, 400),
+                "Zenyatta",
+                Some(2),
+                Some("Busan"),
+                NIGHT_CLEAN,
+            )
+            .await;
+        night.word_once(detect::MatchOutcome::Defeat).await;
+        let id = night.id();
+        night.advance(Duration::from_secs(60));
+        night
+            .tab_once(
+                night_counters(16, 23, 7, 2800, 10000, 500),
+                "Zenyatta",
+                Some(2),
+                Some("Junkertown"),
+                NIGHT_CLEAN,
+            )
+            .await;
+        assert_eq!(night.id(), id, "inside 120s a different top bar stays");
+    }
+
+    #[tokio::test]
+    async fn a_same_map_tab_after_the_gap_stays_one_game() {
+        let mut night = Night::new().await;
+        night.begin_on("Busan", "Zenyatta");
+        night
+            .tab_once(
+                night_counters(14, 22, 6, 2400, 9800, 400),
+                "Zenyatta",
+                Some(2),
+                Some("Busan"),
+                NIGHT_CLEAN,
+            )
+            .await;
+        night.word_once(detect::MatchOutcome::Defeat).await;
+        let id = night.id();
+        night.advance(Duration::from_secs(150));
+        night
+            .tab_once(
+                night_counters(16, 23, 7, 2800, 10000, 500),
+                "Zenyatta",
+                Some(2),
+                Some("Busan"),
+                NIGHT_CLEAN,
+            )
+            .await;
+        assert_eq!(night.id(), id);
+    }
+
+    #[tokio::test]
+    async fn a_text_fallback_map_does_not_split_on_a_later_top_bar() {
+        let mut night = Night::new().await;
+        let mut g = ActiveGame::open_at(
+            format!("{:016x}", rand_id()),
+            detect::MatchOutcome::Unknown,
+            Vec::new(),
+            night.now,
+        );
+        g.hero_auth.accepted_hero = Some("Zenyatta".into());
+        night.st.active_game = Some(g);
+        night.st.last_game_open = Some(night.now);
+        night
+            .tab_text(
+                night_counters(14, 22, 6, 2400, 9800, 400),
+                "Zenyatta",
+                Some(2),
+                "Dorado",
+                NIGHT_CLEAN,
+            )
+            .await;
+        assert_eq!(night.game().map.as_deref(), Some("Dorado"));
+        assert_eq!(
+            night.game().map_source,
+            Some(boundary::MapSource::TextFallback)
+        );
+        night.word_once(detect::MatchOutcome::Defeat).await;
+        let id = night.id();
+        night.advance(Duration::from_secs(150));
+        night
+            .tab_once(
+                night_counters(16, 23, 7, 2800, 10000, 500),
+                "Zenyatta",
+                Some(2),
+                Some("Busan"),
+                NIGHT_CLEAN,
+            )
+            .await;
+        assert_eq!(
+            night.id(),
+            id,
+            "a text-fallback map does not make the post-match Tab a new game"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unidentified_row_leaves_the_held_board_for_the_split() {
+        let mut night = Night::new().await;
+        night.begin_on("Busan", "Zenyatta");
+        night
+            .tab_once(
+                night_counters(14, 22, 6, 2400, 9800, 400),
+                "Zenyatta",
+                Some(2),
+                Some("Busan"),
+                NIGHT_CLEAN,
+            )
+            .await;
+        night.advance(Duration::from_secs(60));
+        night
+            .tab_once(
+                night_counters(2, 1, 0, 200, 40, 80),
+                "Zenyatta",
+                Some(2),
+                Some("Busan"),
+                NIGHT_CLEAN,
+            )
+            .await;
+        assert_eq!(night.game().deferred.map(|c| c.elims), Some(2));
+        assert!(night.game().reset_streak >= 1);
+        night.advance(Duration::from_secs(10));
+        night
+            .tab_once(
+                night_counters(9, 4, 3, 1500, 400, 200),
+                "Zenyatta",
+                None,
+                Some("Busan"),
+                NIGHT_CLEAN,
+            )
+            .await;
+        assert_eq!(
+            night.game().deferred.map(|c| c.elims),
+            Some(2),
+            "an unidentified row leaves the held board"
+        );
+        assert!(night.game().reset_streak >= 1);
+        let finished = night.id();
+        night.advance(Duration::from_secs(60));
+        night
+            .tab_once(
+                night_counters(1, 0, 0, 80, 10, 20),
+                "Zenyatta",
+                Some(2),
+                Some("Busan"),
+                NIGHT_CLEAN,
+            )
+            .await;
+        assert_ne!(night.id(), finished);
+        let elims = night.elims(&night.id()).await;
+        assert!(
+            elims.contains(&2),
+            "the split writes the held board onto the new session, got {elims:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_held_board_is_written_on_a_tab_opened_session() {
+        let mut night = Night::new().await;
+        night.begin_on("Busan", "Zenyatta");
+        night
+            .tab_once(
+                night_counters(14, 22, 6, 2400, 9800, 400),
+                "Zenyatta",
+                Some(2),
+                Some("Busan"),
+                NIGHT_CLEAN,
+            )
+            .await;
+        night
+            .word(detect::MatchOutcome::Victory, Some("Busan"))
+            .await;
+        night.advance(Duration::from_secs(60));
+        night
+            .tab_once(
+                night_counters(2, 1, 0, 200, 40, 80),
+                "Zenyatta",
+                Some(2),
+                Some("Busan"),
+                NIGHT_CLEAN,
+            )
+            .await;
+        assert!(night.game().deferred.is_some());
+        let finished = night.id();
+        night.advance(Duration::from_secs(80));
+        night
+            .tab_once(
+                night_counters(4, 2, 1, 900, 100, 200),
+                "Ana",
+                Some(0),
+                Some("Ilios"),
+                NIGHT_CLEAN,
+            )
+            .await;
+        assert_ne!(night.id(), finished);
+        let elims = night.elims(&night.id()).await;
+        assert!(
+            elims.contains(&2),
+            "grace opens a session and writes the held board, got {elims:?}"
+        );
+        assert!(!night.elims(&finished).await.contains(&2));
+    }
+
+    #[tokio::test]
+    async fn a_rejected_frame_adopts_the_outcome_and_clears_the_arm() {
+        let mut night = Night::new().await;
+        let busan = arm_busan_defeat(&mut night).await;
+        let report = CaptureReport {
+            recorded: false,
+            outcome: detect::MatchOutcome::Victory,
+            map: None,
+            map_source: None,
+            session_id: busan.clone(),
+            split: false,
+            armed_reset: false,
+            ignore_row: true,
+            reset_streak: night.game().reset_streak,
+            reset_baseline: night.game().reset_baseline,
+            baseline_row: night.game().baseline_row,
+            refresh_baseline: false,
+            clear_hint: false,
+            count_progress: false,
+            career_panel: false,
+            held_counters: None,
+            held_hero: None,
+            gate_state: None,
+            hero_auth: night.game().hero_auth.clone(),
+            seal: None,
+            close_reason: None,
+            held_at: None,
+        };
+        apply_capture_report(
+            &mut night.st,
+            &night.store,
+            night.dir.path(),
+            &busan,
+            Ok(report),
+            night.now,
+        )
+        .await;
+        assert_eq!(night.game().outcome, detect::MatchOutcome::Victory);
+        assert!(
+            !night.game().pending_boundary,
+            "adopting the rejected frame's outcome clears the armed boundary"
+        );
+    }
+
+    /// Move the injected clock to an absolute UTC stamp, measured from `origin`.
+    fn jump_to(
+        night: &mut Night,
+        origin: Instant,
+        start: chrono::DateTime<Utc>,
+        stamp: &str,
+        day: &str,
+    ) {
+        let when = chrono::DateTime::parse_from_rfc3339(&format!("{day}T{stamp}"))
+            .unwrap()
+            .with_timezone(&Utc);
+        let target = origin + (when - start).to_std().unwrap();
+        if target > night.now {
+            night.advance(target.saturating_duration_since(night.now));
+        }
+    }
+
+    #[tokio::test]
+    #[allow(clippy::type_complexity)]
+    async fn busan_defeat_and_junkertown_victory_stay_two_games() {
+        // Boards from a 2026-10-05 night. The file labeled the later boards
+        // with the earlier map because they had been merged; the later map
+        // is Junkertown. No person's name belongs in this test.
+        let njc: &[(u32, u32, u32, u32, u32, u32, &str)] = &[
+            (6, 3, 2, 1703, 412, 954, "20:22:13Z"),
+            (6, 4, 2, 2121, 459, 1161, "20:23:02Z"),
+            (6, 4, 2, 2121, 459, 1161, "20:23:08Z"),
+            (6, 4, 2, 2121, 459, 1161, "20:23:13Z"),
+            (10, 4, 2, 3352, 509, 1629, "20:23:59Z"),
+            (10, 4, 2, 4566, 759, 2221, "20:24:58Z"),
+            (10, 4, 2, 5499, 1131, 2821, "20:26:00Z"),
+            (1, 5, 2, 5554, 1131, 3146, "20:26:04Z"),
+            (1, 5, 2, 5554, 1131, 3146, "20:26:08Z"),
+            (1, 5, 2, 5554, 1181, 3146, "20:26:37Z"),
+            (1, 5, 2, 5554, 1181, 3146, "20:26:43Z"),
+            (13, 7, 2, 6657, 1432, 4188, "20:28:34Z"),
+            (14, 8, 2, 6877, 1582, 4434, "20:30:03Z"),
+            (18, 9, 4, 8224, 1765, 4726, "20:31:04Z"),
+            (19, 9, 4, 8243, 1765, 4726, "20:31:11Z"),
+            (19, 9, 4, 8243, 1765, 4726, "20:31:16Z"),
+        ];
+        let busan: &[(u32, u32, u32, u32, u32, u32, &str, &str)] = &[
+            (3, 3, 0, 2905, 691, 0, "20:40:39Z", "Soldier: 76"),
+            (4, 3, 0, 2905, 691, 1, "20:42:20Z", "Zenyatta"),
+            (4, 4, 2, 3695, 691, 294, "20:43:14Z", "Zenyatta"),
+            (4, 4, 5, 4409, 0, 294, "20:43:58Z", "Zenyatta"),
+            (6, 4, 5, 4409, 0, 294, "20:44:43Z", "Zenyatta"),
+            (6, 4, 6, 4409, 809, 9, "20:45:03Z", "Zenyatta"),
+            (8, 4649, 7, 4409, 809, 9, "20:45:33Z", "Zenyatta"),
+            (8, 4649, 7, 5, 809, 9, "20:45:44Z", "Zenyatta"),
+        ];
+        let junk: &[(u32, u32, u32, u32, u32, u32, &str)] = &[
+            (10, 4649, 7, 2879, 921, 1679, "21:01:48Z"),
+            (14, 4649, 7, 4572, 1044, 2202, "21:03:09Z"),
+            (14, 3, 5, 4572, 1044, 2202, "21:03:14Z"),
+            (14, 3, 5, 4572, 1044, 2202, "21:03:27Z"),
+            (16, 3, 6, 5145, 1099, 2319, "21:05:08Z"),
+            (16, 3, 7, 5229, 1149, 2319, "21:05:27Z"),
+            (16, 4, 7, 5691, 1349, 2564, "21:06:06Z"),
+            (7, 4, 7, 5691, 1349, 2564, "21:06:12Z"),
+            (7, 4, 7, 5691, 1349, 2564, "21:06:17Z"),
+            (7, 4, 7, 5691, 1349, 2564, "21:06:20Z"),
+            (21, 5, 9, 6121, 1413, 2714, "21:07:23Z"),
+            (23, 5, 9, 6792, 1463, 3006, "21:08:06Z"),
+            (23, 5, 9, 6792, 1463, 3006, "21:08:38Z"),
+        ];
+        let mut night = Night::new().await;
+        night.begin_on("New Junk City", "Wrecking Ball");
+        let origin = night.now;
+        let start = chrono::DateTime::parse_from_rfc3339("2026-10-05T20:22:13Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let day = "2026-10-05";
+        for (e, d, a, dmg, hlg, mit, stamp) in njc {
+            jump_to(&mut night, origin, start, stamp, day);
+            night
+                .tab_once(
+                    night_counters(*e, *a, *d, *dmg, *hlg, *mit),
+                    "Wrecking Ball",
+                    Some(0),
+                    Some("New Junk City"),
+                    NIGHT_CLEAN,
+                )
+                .await;
+        }
+        let njc_id = night.id();
+        jump_to(&mut night, origin, start, "20:34:07Z", day);
+        night
+            .word(detect::MatchOutcome::Victory, Some("New Junk City"))
+            .await;
+        assert_eq!(night.id(), njc_id);
+        assert_eq!(night.game().outcome, detect::MatchOutcome::Victory);
+        for (e, d, a, dmg, hlg, mit, stamp, hero) in busan {
+            jump_to(&mut night, origin, start, stamp, day);
+            night
+                .tab_once(
+                    night_counters(*e, *a, *d, *dmg, *hlg, *mit),
+                    hero,
+                    Some(0),
+                    Some("Busan"),
+                    NIGHT_CLEAN,
+                )
+                .await;
+        }
+        let busan_id = night.id();
+        assert_ne!(
+            busan_id, njc_id,
+            "grace closes the finished New Junk City game"
+        );
+        jump_to(&mut night, origin, start, "20:46:15Z", day);
+        night.word_once(detect::MatchOutcome::Defeat).await;
+        assert_eq!(night.id(), busan_id);
+        for (e, d, a, dmg, hlg, mit, stamp) in junk {
+            jump_to(&mut night, origin, start, stamp, day);
+            night
+                .tab_once(
+                    night_counters(*e, *a, *d, *dmg, *hlg, *mit),
+                    "Wrecking Ball",
+                    Some(0),
+                    Some("Junkertown"),
+                    NIGHT_CLEAN,
+                )
+                .await;
+        }
+        let junk_id = night.id();
+        assert_ne!(
+            junk_id, busan_id,
+            "the gap seals Busan and opens Junkertown"
+        );
+        jump_to(&mut night, origin, start, "21:08:47Z", day);
+        night
+            .word(detect::MatchOutcome::Victory, Some("Junkertown"))
+            .await;
+        assert_eq!(night.id(), junk_id);
+        assert_eq!(night.game().outcome, detect::MatchOutcome::Victory);
+        let busan_rows = night.store.get_session_snapshots(&busan_id).await.unwrap();
+        assert!(
+            busan_rows.iter().all(|row| row.outcome == "defeat"),
+            "Busan closes as Defeat"
+        );
+        assert!(night.elims(&junk_id).await.contains(&23));
+        assert!(!night.elims(&busan_id).await.contains(&23));
+        assert!(night.elims(&njc_id).await.contains(&19));
+        assert!(
+            night
+                .store
+                .get_session_snapshots(&njc_id)
+                .await
+                .unwrap()
+                .iter()
+                .all(|row| row.outcome == "victory")
+        );
+    }
+
+    #[tokio::test]
+    async fn neon_junction_side_swap_stays_one_session() {
+        // One Hybrid match. A hero-select screen at the side swap used to
+        // split it. Elims misreads (9→1, 15→7) are in the row list.
+        let rows: &[(u32, u32, u32, u32, u32, u32, &str)] = &[
+            (9, 3, 4, 4470, 716, 1880, "21:55:03Z"),
+            (9, 4, 4, 5736, 871, 2374, "21:56:54Z"),
+            (9, 4, 4, 5736, 871, 2374, "21:56:59Z"),
+            (1, 4, 4, 5736, 871, 2374, "21:57:02Z"),
+            (1, 4, 4, 5736, 871, 2374, "21:57:07Z"),
+            (1, 4, 4, 5736, 871, 2374, "21:57:12Z"),
+            (1, 4, 4, 5736, 871, 2374, "21:57:32Z"),
+            (1, 4, 4, 5736, 871, 2374, "21:57:55Z"),
+            (1, 4, 4, 5736, 871, 2374, "21:58:12Z"),
+            (1, 4, 4, 5736, 871, 2374, "21:58:23Z"),
+            (1, 4, 4, 5736, 871, 2374, "21:58:31Z"),
+            (12, 5, 4, 6660, 1171, 2924, "21:59:39Z"),
+            (12, 5, 4, 6660, 1171, 2924, "21:59:44Z"),
+            (12, 5, 4, 6660, 1171, 2924, "21:59:51Z"),
+            (15, 5, 4, 7646, 1271, 3318, "22:00:48Z"),
+            (15, 6, 4, 7859, 1321, 3718, "22:01:27Z"),
+            (15, 7, 4, 8793, 1371, 4118, "22:02:05Z"),
+            (15, 7, 4, 8793, 1371, 4118, "22:02:11Z"),
+            (15, 7, 4, 10131, 1584, 4639, "22:03:05Z"),
+            (15, 8, 4, 10165, 1634, 4789, "22:03:15Z"),
+            (7, 8, 4, 10165, 1634, 4789, "22:03:21Z"),
+            (7, 8, 4, 10165, 1634, 4789, "22:03:28Z"),
+            (7, 8, 4, 10310, 1667, 4862, "22:03:44Z"),
+            (7, 8, 4, 10654, 1667, 4962, "22:04:04Z"),
+            (7, 8, 4, 10965, 1667, 5099, "22:04:27Z"),
+            (7, 8, 4, 10965, 1667, 5099, "22:04:39Z"),
+            (20, 8, 6, 11867, 1809, 5756, "22:05:17Z"),
+            (23, 9, 8, 12469, 1923, 5821, "22:05:59Z"),
+            (24, 9, 8, 12915, 2046, 6833, "22:06:52Z"),
+            (24, 9, 8, 12915, 2046, 6833, "22:06:59Z"),
+            (24, 9, 8, 12915, 2046, 6833, "22:07:04Z"),
+            (24, 9, 8, 12921, 2096, 6833, "22:07:10Z"),
+            (28, 9, 9, 14579, 2246, 7458, "22:07:48Z"),
+            (32, 10, 10, 15143, 2446, 7940, "22:08:31Z"),
+            (32, 10, 10, 15143, 2446, 7940, "22:08:44Z"),
+            (32, 10, 10, 15143, 2446, 7940, "22:08:48Z"),
+        ];
+        let mut night = Night::new().await;
+        night.begin_on("Neon Junction", "Wrecking Ball");
+        let origin = night.now;
+        let start = chrono::DateTime::parse_from_rfc3339("2026-09-27T21:55:03Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let id = night.id();
+        for (e, d, a, dmg, hlg, mit, stamp) in rows {
+            if *stamp == "22:05:59Z" {
+                jump_to(&mut night, origin, start, "22:05:38Z", "2026-09-27");
+                night.screen(boundary::StartScreen::HeroSelect).await;
+            }
+            jump_to(&mut night, origin, start, stamp, "2026-09-27");
+            night
+                .tab_once(
+                    night_counters(*e, *a, *d, *dmg, *hlg, *mit),
+                    "Wrecking Ball",
+                    Some(0),
+                    Some("Neon Junction"),
+                    NIGHT_CLEAN,
+                )
+                .await;
+            assert_eq!(night.id(), id, "split at {stamp}");
+        }
+        assert!(night.elims(&id).await.contains(&32));
+    }
+
+    #[tokio::test]
+    async fn a_stomp_with_a_short_tab_gap_and_a_hero_select_stays_one_session() {
+        let mut night = Night::new().await;
+        night.begin_on("Colosseo", "Reinhardt");
+        let id = night.id();
+        let rows = [
+            (0, 0, 0, 120, 40, 80),
+            (0, 1, 1, 480, 60, 200),
+            (1, 2, 1, 900, 80, 400),
+            (1, 3, 2, 1400, 90, 700),
+            (2, 4, 2, 2100, 110, 1100),
+        ];
+        for (i, (e, d, a, dmg, hlg, mit)) in rows.into_iter().enumerate() {
+            if i == 3 {
+                night.screen(boundary::StartScreen::HeroSelect).await;
+            }
+            night.advance(Duration::from_secs(40));
+            night
+                .tab_once(
+                    night_counters(e, a, d, dmg, hlg, mit),
+                    "Reinhardt",
+                    Some(0),
+                    Some("Colosseo"),
+                    NIGHT_CLEAN,
+                )
+                .await;
+            assert_eq!(night.id(), id);
+        }
+        assert_eq!(night.elims(&id).await, vec![0, 0, 1, 1, 2]);
     }
 }

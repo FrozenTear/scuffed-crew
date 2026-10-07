@@ -101,9 +101,11 @@ impl SecurityPolicy {
             connect.push(format!("wss://{host}"));
         }
         connect.extend(self.connect_extras.iter().cloned());
-        // `document::Link rel=preconnect` to Google Fonts is a connection hint.
-        // Chrome checks preconnect against connect-src. The stylesheet itself
-        // is style-src; the font files are font-src.
+        // Preconnect hints in `crates/app/index.html` are connection hints.
+        // Chrome checks preconnect against connect-src. The stylesheet is
+        // applied from `document::Link` in `crates/app/src/main.rs` (index.html
+        // only preloads it). style-src allows the stylesheet host; font files
+        // are font-src.
         connect.push("https://fonts.googleapis.com".to_string());
         connect.push("https://fonts.gstatic.com".to_string());
         dedupe(&mut connect);
@@ -131,8 +133,9 @@ impl SecurityPolicy {
         // 'unsafe-inline' then. Do not add it to script-src.
         //
         // https://fonts.googleapis.com is the Inter / Space Grotesk / JetBrains
-        // Mono stylesheet (`crates/app/src/main.rs`). Font files load from
-        // fonts.gstatic.com (font-src below).
+        // Mono stylesheet. `index.html` preloads it; `crates/app/src/main.rs`
+        // applies it with `document::Link`. Preconnect in index.html is only a
+        // connection hint. Font files load from fonts.gstatic.com (font-src below).
         let script_src = script.join(" ");
         let img_src = img.join(" ");
         let connect_src = connect.join(" ");
@@ -265,11 +268,40 @@ fn inline_script_hashes(html: &str) -> Vec<String> {
         };
         let body = &rest[body_start..body_start + close_at];
         rest = &rest[body_start + close_at + "</script".len()..];
-        if !open_tag_has_src(open_tag) {
+        // `type="application/json"` (the SPA settings block) is a data block,
+        // not a script. Hashing it would change script-src for content that
+        // is never executed. External `src` modules stay covered by `'self'`.
+        if !open_tag_has_src(open_tag) && script_type_is_executable(open_tag) {
             hashes.push(csp_sha256(body));
         }
     }
     hashes
+}
+
+/// Missing `type`, or a JavaScript / module type.
+///
+/// `type="application/json"` (the settings data block from
+/// `load_anonymous_settings` / `serde_json`) is not an executable script, so
+/// it is not hashed into `script-src`. External module tags are skipped by
+/// `open_tag_has_src`; Dioxus 0.7's loader is one of those, not an import map.
+fn script_type_is_executable(open_tag: &str) -> bool {
+    let Some(raw) = open_tag.split_whitespace().find_map(|part| {
+        let part = part.trim_end_matches(['>', '/']);
+        part.to_ascii_lowercase()
+            .strip_prefix("type=")
+            .map(str::to_string)
+    }) else {
+        return true;
+    };
+    let value = raw.trim_matches(|c| c == '"' || c == '\'');
+    matches!(
+        value,
+        "" | "text/javascript"
+            | "application/javascript"
+            | "text/ecmascript"
+            | "application/ecmascript"
+            | "module"
+    )
 }
 
 fn csp_sha256(body: &str) -> String {
@@ -469,6 +501,17 @@ mod tests {
             inline_script_hashes(&with_loader),
             hashes,
             "Dioxus external module loader must not be treated as an inline script"
+        );
+
+        let with_settings = html.replacen(
+            "</head>",
+            "<script id=\"sc-settings\" type=\"application/json\">{\"org\":\"x\"}</script></head>",
+            1,
+        );
+        assert_eq!(
+            inline_script_hashes(&with_settings),
+            hashes,
+            "settings JSON data block must not change script-src hashes"
         );
     }
 
@@ -727,5 +770,63 @@ mod tests {
             "enforcing page CSP must not replace the upload sandbox"
         );
         assert!(html.headers().get(CSP_REPORT_ONLY_HEADER).is_none());
+    }
+
+    #[tokio::test]
+    async fn csp_middleware_keeps_json_settings_script() {
+        let page = concat!(
+            "<!DOCTYPE html><html><head>",
+            "<script id=\"sc-settings\" type=\"application/json\">{\"a\":\"\\u003c/script\\u003e\"}</script>",
+            "</head><body>ok</body></html>"
+        );
+        let policy = test_policy(false);
+        let expected = policy.policy(Some("localhost:3030"));
+        let json_hash = csp_sha256(r#"{"a":"\u003c/script\u003e"}"#);
+        assert!(
+            !expected.contains(json_hash.trim_matches('\'')),
+            "precomputed CSP must not hash the settings data block: {expected}"
+        );
+
+        let app =
+            Router::new()
+                .route(
+                    "/",
+                    get(move || async move {
+                        ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], page)
+                    }),
+                )
+                .layer(axum::middleware::from_fn(move |req, next| {
+                    let policy = policy.clone();
+                    async move { apply(req, next, policy).await }
+                }));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/")
+                    .header(header::HOST, "localhost:3030")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let csp = response
+            .headers()
+            .get(CSP_REPORT_ONLY_HEADER)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert_eq!(csp, expected);
+        assert!(!csp.contains(&json_hash));
+
+        let bytes = http_body_util::BodyExt::collect(response.into_body())
+            .await
+            .unwrap()
+            .to_bytes();
+        let body = String::from_utf8_lossy(&bytes);
+        assert!(body.contains("id=\"sc-settings\""));
+        assert!(body.contains("type=\"application/json\""));
+        assert!(body.contains("\\u003c/script\\u003e"));
+        assert!(body.contains("<body>ok</body>"));
     }
 }

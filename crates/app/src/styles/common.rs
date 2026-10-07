@@ -60,6 +60,8 @@ pub const CSS: &str = r#"
         font: inherit;
         cursor: pointer;
     }
+    /* In-panel retries. The page-level button keeps the 2rem bottom margin. */
+    .fetch-error__retry.is-compact { margin: 0.25rem 0 0; }
 
     .list-cap-notice {
         color: var(--text-2);

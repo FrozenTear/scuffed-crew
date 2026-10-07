@@ -9,6 +9,7 @@ use surrealdb_types::{RecordId, SurrealValue};
 
 use crate::types::{
     HeroStats, MapStats, MemberHeroScopedAgg, MemberLeaderboardRow, PersonalMatch, PersonalStats,
+    RoleStats,
 };
 use crate::{with_timeout, Database, DbError, DbResult};
 
@@ -496,6 +497,90 @@ impl Database {
             }
 
             Ok(hero_stats)
+        })
+        .await
+    }
+
+    pub async fn get_role_stats(&self, member_id: &str) -> DbResult<Vec<RoleStats>> {
+        self.get_role_stats_in(member_id, None).await
+    }
+
+    /// Per-role aggregates from the stored `role` column only.
+    ///
+    /// One `GROUP BY role` over `personal_match` for this member. The column
+    /// is the role the tracker uploaded: its manual correction if made, else
+    /// the detected role. The schema type is `string` (a `NONE` write is
+    /// rejected), so an empty role is `""` and is its own group — the value
+    /// is not defaulted when decoding via SurrealValue.
+    /// Optional season window matches [`Self::get_hero_stats_in`]
+    /// (`played_at >= start AND played_at < end`). Order: `matches`
+    /// descending, then `role` ascending.
+    pub async fn get_role_stats_in(
+        &self,
+        member_id: &str,
+        season: Option<SeasonWindow>,
+    ) -> DbResult<Vec<RoleStats>> {
+        with_timeout(async {
+            #[derive(Deserialize, SurrealValue)]
+            struct RoleRow {
+                role: String,
+                matches: u32,
+                wins: u32,
+                losses: u32,
+                draws: u32,
+                avg_elims: f64,
+                avg_deaths: f64,
+                avg_damage: f64,
+                avg_healing: f64,
+            }
+
+            let mut q = self
+                .client
+                .query(format!(
+                    r#"
+                    SELECT
+                        role,
+                        count() AS matches,
+                        math::sum(IF outcome = 'victory' THEN 1 ELSE 0 END) AS wins,
+                        math::sum(IF outcome = 'defeat' THEN 1 ELSE 0 END) AS losses,
+                        math::sum(IF outcome = 'draw' THEN 1 ELSE 0 END) AS draws,
+                        math::mean(elims) AS avg_elims,
+                        math::mean(deaths) AS avg_deaths,
+                        math::mean(damage) AS avg_damage,
+                        math::mean(healing) AS avg_healing
+                    FROM personal_match
+                    WHERE member_id = $mid{}
+                    GROUP BY role
+                    ORDER BY matches DESC, role ASC
+                "#,
+                    season_filter(season)
+                ))
+                .bind(("mid", member_id.to_string()));
+            if let Some((start, end)) = season {
+                q = q
+                    .bind(("season_start", SurrealDatetime::from(start)))
+                    .bind(("season_end", SurrealDatetime::from(end)));
+            }
+            let mut result = q.await?;
+            let mut rows: Vec<RoleRow> = result.take(0)?;
+            // The query orders the same way. Sort again so a tie-break in the
+            // engine cannot change the response contract.
+            rows.sort_by(|a, b| b.matches.cmp(&a.matches).then_with(|| a.role.cmp(&b.role)));
+
+            Ok(rows
+                .into_iter()
+                .map(|row| RoleStats {
+                    role: row.role,
+                    matches: row.matches,
+                    wins: row.wins,
+                    losses: row.losses,
+                    draws: row.draws,
+                    avg_elims: row.avg_elims,
+                    avg_deaths: row.avg_deaths,
+                    avg_damage: row.avg_damage,
+                    avg_healing: row.avg_healing,
+                })
+                .collect())
         })
         .await
     }
@@ -1741,5 +1826,223 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].outcome, "defeat");
         assert_eq!(rows[0].elims, 40);
+    }
+
+    fn close(actual: f64, expected: f64) {
+        assert!((actual - expected).abs() < 1e-6, "{actual} != {expected}");
+    }
+
+    /// Sombra stored as Damage and as Support, plus Doctrine stored as Support
+    /// and one empty-role row. Counts follow the stored role, not the hero name
+    /// (Doctrine and Sombra would both land in Damage if the role were guessed).
+    #[tokio::test]
+    async fn role_stats_group_by_stored_role_including_empty() {
+        let db = test_db().await;
+
+        let played =
+            |day: u32, month: u32| Utc.with_ymd_and_hms(2026, month, day, 20, 0, 0).unwrap();
+        let game = |sid: &str,
+                    hero: &str,
+                    role: &str,
+                    outcome: &str,
+                    day: u32,
+                    month: u32,
+                    elims: u32,
+                    deaths: u32,
+                    damage: u32,
+                    healing: u32| {
+            let mut m = entry(sid, outcome, elims);
+            m.hero = hero.into();
+            m.role = role.into();
+            m.deaths = deaths;
+            m.damage = damage;
+            m.healing = healing;
+            m.played_at = played(day, month);
+            m
+        };
+
+        db.upsert_personal_matches(
+            "m1",
+            &[
+                game("d1", "Sombra", "Damage", "victory", 15, 1, 10, 4, 8000, 0),
+                game("d2", "Sombra", "Damage", "defeat", 16, 1, 6, 8, 4000, 100),
+                game(
+                    "s1", "Sombra", "Support", "victory", 17, 1, 4, 2, 2000, 9000,
+                ),
+                game("s2", "Doctrine", "Support", "draw", 18, 1, 2, 2, 1000, 5000),
+                game("e1", "Reaper", "", "defeat", 19, 1, 1, 6, 500, 0),
+                // Outside the Jan–Jun window. Support all-time, not in-season.
+                game("s3", "Ana", "Support", "victory", 15, 7, 20, 1, 100, 10000),
+            ],
+        )
+        .await
+        .unwrap();
+
+        // Another member's Sombra Support must not leak into m1.
+        let mut other = entry("o1", "victory", 9);
+        other.member_id = "m2".into();
+        other.hero = "Sombra".into();
+        other.role = "Support".into();
+        db.upsert_personal_matches("m2", &[other]).await.unwrap();
+
+        let all = db.get_role_stats("m1").await.unwrap();
+        assert_eq!(
+            all.iter().map(|r| r.role.as_str()).collect::<Vec<_>>(),
+            vec!["Support", "Damage", ""],
+            "matches desc, then role asc; empty role is its own row"
+        );
+        let support = all.iter().find(|r| r.role == "Support").unwrap();
+        assert_eq!(
+            (support.matches, support.wins, support.losses, support.draws),
+            (3, 2, 0, 1)
+        );
+        let damage = all.iter().find(|r| r.role == "Damage").unwrap();
+        assert_eq!(
+            (damage.matches, damage.wins, damage.losses, damage.draws),
+            (2, 1, 1, 0),
+            "Sombra Support must not count as Damage"
+        );
+        let empty = all.iter().find(|r| r.role.is_empty()).unwrap();
+        assert_eq!(
+            (empty.matches, empty.wins, empty.losses, empty.draws),
+            (1, 0, 1, 0)
+        );
+
+        let window = (
+            Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap(),
+            Utc.with_ymd_and_hms(2026, 6, 1, 0, 0, 0).unwrap(),
+        );
+        let season = db.get_role_stats_in("m1", Some(window)).await.unwrap();
+        assert_eq!(
+            season.iter().map(|r| r.role.as_str()).collect::<Vec<_>>(),
+            vec!["Damage", "Support", ""]
+        );
+        let s_support = season.iter().find(|r| r.role == "Support").unwrap();
+        assert_eq!(
+            (
+                s_support.matches,
+                s_support.wins,
+                s_support.losses,
+                s_support.draws
+            ),
+            (2, 1, 0, 1),
+            "Doctrine Support + Sombra Support; July Ana is outside the window"
+        );
+        close(s_support.avg_elims, 3.0);
+        close(s_support.avg_deaths, 2.0);
+        close(s_support.avg_damage, 1500.0);
+        close(s_support.avg_healing, 7000.0);
+        let s_damage = season.iter().find(|r| r.role == "Damage").unwrap();
+        close(s_damage.avg_elims, 8.0);
+        close(s_damage.avg_deaths, 6.0);
+        close(s_damage.avg_damage, 6000.0);
+        close(s_damage.avg_healing, 50.0);
+        let s_empty = season.iter().find(|r| r.role.is_empty()).unwrap();
+        close(s_empty.avg_elims, 1.0);
+        close(s_empty.avg_deaths, 6.0);
+        close(s_empty.avg_damage, 500.0);
+        close(s_empty.avg_healing, 0.0);
+
+        let other_roles = db.get_role_stats("m2").await.unwrap();
+        assert_eq!(other_roles.len(), 1);
+        assert_eq!(other_roles[0].role, "Support");
+        assert_eq!(other_roles[0].matches, 1);
+
+        // All-time Support is three games whose elims are 4 + 2 + 20 = 26.
+        close(support.avg_elims, 26.0 / 3.0);
+    }
+
+    /// Half-open season window `[start, end)`, same predicate as hero stats.
+    /// Three in-window games have elims 8 + 9 + 9 = 26.
+    #[tokio::test]
+    async fn role_stats_fractional_mean_and_season_bounds() {
+        let db = test_db().await;
+        let start = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+        let end = Utc.with_ymd_and_hms(2026, 6, 1, 0, 0, 0).unwrap();
+        let just_before_start = start - chrono::Duration::seconds(1);
+        let just_inside_end = end - chrono::Duration::seconds(1);
+
+        let row = |sid: &str, at: chrono::DateTime<Utc>, elims: u32| {
+            let mut m = entry(sid, "victory", elims);
+            m.hero = "Boundary".into();
+            m.role = "Tank".into();
+            m.played_at = at;
+            m
+        };
+        db.upsert_personal_matches(
+            "bounds",
+            &[
+                row("before-start", just_before_start, 100),
+                row("at-start", start, 8),
+                row("inside", start + chrono::Duration::hours(1), 9),
+                row("before-end", just_inside_end, 9),
+                row("at-end", end, 100),
+                row("after-end", end + chrono::Duration::seconds(1), 100),
+            ],
+        )
+        .await
+        .unwrap();
+
+        let window = Some((start, end));
+        let roles = db.get_role_stats_in("bounds", window).await.unwrap();
+        assert_eq!(roles.len(), 1);
+        assert_eq!(roles[0].role, "Tank");
+        assert_eq!(
+            roles[0].matches, 3,
+            "start is included; one second before start, end, and after are not"
+        );
+        close(roles[0].avg_elims, 26.0 / 3.0);
+
+        let heroes = db.get_hero_stats_in("bounds", window).await.unwrap();
+        assert_eq!(heroes.len(), 1);
+        assert_eq!(heroes[0].matches, 3, "role window matches the hero window");
+    }
+
+    /// `personal_match.role` is `TYPE string`. NONE is not a stored value, so
+    /// the aggregate must not paper over a missing role when decoding via
+    /// SurrealValue. The same insert with `role = ''` succeeds.
+    #[tokio::test]
+    async fn role_none_is_rejected_and_empty_string_still_groups() {
+        let db = test_db().await;
+
+        async fn insert_role(db: &Database, role_expr: &str) -> Result<(), String> {
+            let sql = format!(
+                r#"CREATE personal_match SET
+                    member_id = 'none-probe',
+                    hero = 'Sombra',
+                    map_name = 'Oasis',
+                    game_mode = 'control',
+                    role = {role_expr},
+                    outcome = 'victory',
+                    elims = 1,
+                    deaths = 0,
+                    assists = 0,
+                    damage = 0,
+                    healing = 0,
+                    mitigation = 0,
+                    played_at = d'2026-03-01T00:00:00Z',
+                    uploaded_at = time::now(),
+                    session_id = 'none-probe-sid',
+                    edited = false"#
+            );
+            match db.client.query(sql).await {
+                Ok(response) => response.check().map(|_| ()).map_err(|err| err.to_string()),
+                Err(err) => Err(err.to_string()),
+            }
+        }
+
+        let none_error = insert_role(&db, "NONE").await.expect_err("role = NONE");
+        insert_role(&db, "''")
+            .await
+            .expect("the same insert with role = '' succeeds");
+        assert!(
+            none_error.to_lowercase().contains("role"),
+            "NONE rejection should name the role field: {none_error}"
+        );
+
+        let roles = db.get_role_stats("none-probe").await.unwrap();
+        assert_eq!(roles.len(), 1);
+        assert_eq!(roles[0].role, "");
+        assert_eq!(roles[0].matches, 1);
     }
 }

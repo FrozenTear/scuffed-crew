@@ -4,11 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
-    # `main`, plus this follow-up branch so the stacked no-default-flash PR
-    # (its base is this branch, not main) runs the same checks.
-    branches:
-      - main
-      - cursor/site-146-followup-nits-9602
+    branches: [main]
 
 env:
   CARGO_TERM_COLOR: always
@@ -18,6 +14,7 @@ jobs:
   dep-guardrails:
     name: Dependency Guardrails
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - name: Check for non-standard frontend deps
@@ -32,6 +29,7 @@ jobs:
   fmt:
     name: Rustfmt
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -42,6 +40,7 @@ jobs:
   clippy:
     name: Clippy
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
@@ -80,6 +79,7 @@ jobs:
   build-and-test:
     name: Build & Test
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     env:
       # Debuginfo dominates target/ size; without it the workspace build fits
       # the hosted runner's disk alongside the restored cache. Backtraces in CI
@@ -135,6 +135,7 @@ jobs:
   app-build:
     name: App Build (Dioxus)
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
@@ -145,8 +146,11 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Install dioxus-cli
-        run: cargo install --locked dioxus-cli@0.7.4
+        run: cargo install --locked dioxus-cli@0.7.9
 
       - name: Build app
         working-directory: crates/app
         run: dx build --release
+
+      - name: Favicon is in the dx bundle
+        run: test -f target/dx/scuffed-app/release/web/public/assets/favicon.svg

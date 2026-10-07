@@ -88,6 +88,16 @@ pub fn parse_scoreboard_cells(
     })
 }
 
+/// Whether this capture's stats came from the identified player row.
+/// A raw-text fallback and an unidentified row do not count toward a
+/// stat-reset split and must not replace the reset baseline.
+pub fn row_counts(rows: &[RowOcrResult], player_row_index: Option<usize>) -> bool {
+    player_row_index
+        .and_then(|idx| rows.get(idx))
+        .and_then(stats_from_row)
+        .is_some()
+}
+
 /// Whether the OCR'd rows plausibly come from an actual scoreboard, as opposed
 /// to a menu, a replay browser, or an arbitrary desktop frame that happened to
 /// be captured (Tab is a global hook). A real scoreboard renders a full team of
@@ -321,6 +331,20 @@ pub fn match_map_in_text(text: &str) -> Option<String> {
     find_map(&lines)
 }
 
+/// Exact substring match only. The accolade crop uses this so a fuzzy
+/// near-miss in the gameplay HUD cannot become the session map.
+pub fn exact_map_in_text(text: &str) -> Option<String> {
+    // Join wrapped lines first. "New Junk\nCity" is one map name.
+    let joined = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let text = normalize_ocr_glyphs(&joined.to_lowercase());
+    for &(display_name, pattern) in MAPS {
+        if text.contains(&normalize_ocr_glyphs(pattern)) {
+            return Some(display_name.to_string());
+        }
+    }
+    None
+}
+
 /// Result word printed as the header of the scoreboard region itself, read
 /// from the full-board OCR text a Tab capture already paid for. Only the
 /// first two non-empty lines count — that is where a header lives; player
@@ -351,10 +375,9 @@ fn guess_role(hero: &str) -> String {
         "d.mon" | "dmon" | "d.va" | "dva" | "doomfist" | "domina" | "junker queen"
         | "junker_queen" | "mauga" | "orisa" | "ramattra" | "reinhardt" | "roadhog" | "sigma"
         | "winston" | "wrecking ball" | "wrecking_ball" | "zarya" | "hazard" => "Tank".to_string(),
-        "ana" | "baptiste" | "brigitte" | "illari" | "jetpack cat" | "juno" | "kiriko"
-        | "lifeweaver" | "lucio" | "mercy" | "mizuki" | "moira" | "wuyang" | "zenyatta" => {
-            "Support".to_string()
-        }
+        "ana" | "baptiste" | "brigitte" | "doctrine" | "illari" | "jetpack cat" | "juno"
+        | "kiriko" | "lifeweaver" | "lucio" | "mercy" | "mizuki" | "moira" | "sombra"
+        | "wuyang" | "zenyatta" => "Support".to_string(),
         _ => "Damage".to_string(),
     }
 }
@@ -513,6 +536,40 @@ mod tests {
     }
 
     #[test]
+    fn exact_map_joins_wrapped_lines() {
+        assert_eq!(
+            exact_map_in_text("New Junk\nCity").as_deref(),
+            Some("New Junk City")
+        );
+        assert_eq!(exact_map_in_text("BUSAN").as_deref(), Some("Busan"));
+        assert!(exact_map_in_text("not a map").is_none());
+    }
+
+    #[test]
+    fn row_counts_only_for_a_validated_identified_row() {
+        let rows = vec![valid_row("TEAMMATE"), valid_row("FROZEN")];
+        assert!(row_counts(&rows, Some(1)));
+        assert!(
+            !row_counts(&rows, None),
+            "an unidentified row does not count"
+        );
+        assert!(
+            !row_counts(&rows, Some(9)),
+            "a missing row index does not count"
+        );
+        let garbage = vec![garbage_row()];
+        assert!(!row_counts(&garbage, Some(0)));
+        let implausible = vec![row(
+            Some("FROZEN"),
+            ["118", "3", "2", "4,316", "1,200", "899"],
+        )];
+        assert!(
+            !row_counts(&implausible, Some(0)),
+            "a row stats_from_row rejects does not count"
+        );
+    }
+
+    #[test]
     fn identified_player_row_parses() {
         let rows = vec![valid_row("OTHER"), valid_row("FROZEN")];
         let parsed = parse_scoreboard_cells(&rows, Some(1), "", "victory", Some("FROZEN")).unwrap();
@@ -591,6 +648,19 @@ mod tests {
         assert_eq!(guess_role("D.Mon"), "Tank");
         assert_eq!(guess_role("dmon"), "Tank");
         assert_eq!(guess_role("D.Va"), "Tank");
+    }
+
+    /// Season 5 (2026-10-06): Doctrine is Support, Sombra moved to Support.
+    /// An unknown name still falls through to Damage. Roadhog stays Tank.
+    #[test]
+    fn season5_roles_and_damage_fallback() {
+        assert_eq!(guess_role("Doctrine"), "Support");
+        assert_eq!(guess_role("doctrine"), "Support");
+        assert_eq!(guess_role("Sombra"), "Support");
+        assert_eq!(guess_role("sombra"), "Support");
+        assert_eq!(guess_role("Roadhog"), "Tank");
+        assert_eq!(guess_role("NotAHero"), "Damage");
+        assert_eq!(guess_role(""), "Damage");
     }
 
     #[test]
@@ -716,6 +786,7 @@ mod hero_map_name_tests {
         // looser short-name threshold.
         assert_eq!(match_map_in_text("REAPER"), None);
         assert_eq!(match_map_in_text("SOMBRA"), None);
+        assert_eq!(match_map_in_text("DOCTRINE"), None);
         assert_eq!(match_map_in_text("WIDOWMAKER"), None);
         assert_eq!(match_map_in_text("xXGamerTagXx"), None);
         assert_eq!(match_map_in_text("FR0ZEN"), None);

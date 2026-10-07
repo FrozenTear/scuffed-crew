@@ -97,8 +97,6 @@ pub const BG_DARK: &str = "#17171d";
 /// Product-default brand accents (matches `BrandConfig::product_default`).
 pub const BRAND_ACCENT_DARK: &str = "#8f73ff";
 pub const BRAND_ACCENT_LIGHT: &str = "#6d4aff";
-/// Browser chrome `theme-color` meta (dark shell).
-pub const THEME_COLOR: &str = BG_DARK;
 
 /// Convenience for the app root.
 pub fn theme_css_current() -> String {
@@ -106,10 +104,67 @@ pub fn theme_css_current() -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use std::collections::HashMap;
+pub(crate) fn scope_decls(css: &str, scope: &str) -> std::collections::HashMap<String, String> {
+    let start = css.find(scope).unwrap_or_else(|| panic!("missing {scope}"));
+    let after = &css[start + scope.len()..];
+    let open = after.find('{').expect("scope brace");
+    let close = after.find('}').expect("scope end");
+    let mut map = std::collections::HashMap::new();
+    for part in after[open + 1..close].split(';') {
+        let Some((key, value)) = part.split_once(':') else {
+            continue;
+        };
+        let key = key.trim();
+        if let Some(name) = key.strip_prefix("--") {
+            if name.contains("--") {
+                continue;
+            }
+            let hex = value.split_whitespace().next().unwrap_or("").trim();
+            if hex.starts_with('#') {
+                map.insert(format!("--{name}"), hex.to_string());
+            }
+        }
+    }
+    map
+}
 
-    use super::{BrandConfig, theme_css};
+#[cfg(test)]
+pub(crate) fn contrast_ratio(fg: &str, bg: &str) -> f64 {
+    let l1 = relative_luminance(fg);
+    let l2 = relative_luminance(bg);
+    let (hi, lo) = if l1 > l2 { (l1, l2) } else { (l2, l1) };
+    (hi + 0.05) / (lo + 0.05)
+}
+
+#[cfg(test)]
+pub(crate) fn relative_luminance(hex: &str) -> f64 {
+    let (r, g, b) = parse_hex(hex);
+    let lin = |c: u8| {
+        let c = f64::from(c) / 255.0;
+        if c <= 0.04045 {
+            c / 12.92
+        } else {
+            ((c + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b)
+}
+
+#[cfg(test)]
+pub(crate) fn parse_hex(hex: &str) -> (u8, u8, u8) {
+    let hex = hex.trim().trim_start_matches('#');
+    assert_eq!(hex.len(), 6, "{hex}");
+    let n = u32::from_str_radix(hex, 16).unwrap_or_else(|_| panic!("bad hex {hex}"));
+    (
+        ((n >> 16) & 0xff) as u8,
+        ((n >> 8) & 0xff) as u8,
+        (n & 0xff) as u8,
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{BrandConfig, contrast_ratio, scope_decls, theme_css};
 
     #[test]
     fn emits_both_theme_scopes_and_uses_brand_accent() {
@@ -191,60 +246,5 @@ mod tests {
             "white on {} = {light_accent:.2}",
             brand.accent_light
         );
-    }
-
-    fn scope_decls(css: &str, scope: &str) -> HashMap<String, String> {
-        let start = css.find(scope).unwrap_or_else(|| panic!("missing {scope}"));
-        let after = &css[start + scope.len()..];
-        let open = after.find('{').expect("scope brace");
-        let close = after.find('}').expect("scope end");
-        let mut map = HashMap::new();
-        for part in after[open + 1..close].split(';') {
-            let Some((key, value)) = part.split_once(':') else {
-                continue;
-            };
-            let key = key.trim();
-            if let Some(name) = key.strip_prefix("--") {
-                if name.contains("--") {
-                    continue;
-                }
-                let hex = value.split_whitespace().next().unwrap_or("").trim();
-                if hex.starts_with('#') {
-                    map.insert(format!("--{name}"), hex.to_string());
-                }
-            }
-        }
-        map
-    }
-
-    fn contrast_ratio(fg: &str, bg: &str) -> f64 {
-        let l1 = relative_luminance(fg);
-        let l2 = relative_luminance(bg);
-        let (hi, lo) = if l1 > l2 { (l1, l2) } else { (l2, l1) };
-        (hi + 0.05) / (lo + 0.05)
-    }
-
-    fn relative_luminance(hex: &str) -> f64 {
-        let (r, g, b) = parse_hex(hex);
-        let lin = |c: u8| {
-            let c = f64::from(c) / 255.0;
-            if c <= 0.04045 {
-                c / 12.92
-            } else {
-                ((c + 0.055) / 1.055).powf(2.4)
-            }
-        };
-        0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b)
-    }
-
-    fn parse_hex(hex: &str) -> (u8, u8, u8) {
-        let hex = hex.trim().trim_start_matches('#');
-        assert_eq!(hex.len(), 6, "{hex}");
-        let n = u32::from_str_radix(hex, 16).unwrap_or_else(|_| panic!("bad hex {hex}"));
-        (
-            ((n >> 16) & 0xff) as u8,
-            ((n >> 8) & 0xff) as u8,
-            (n & 0xff) as u8,
-        )
     }
 }

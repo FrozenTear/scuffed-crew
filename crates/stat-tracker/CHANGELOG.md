@@ -4,6 +4,173 @@ User-facing notes for `stat-tracker-v*` GitHub Releases. The release workflow
 prepends the section whose heading matches the tag version (for example
 `## 0.4.15` for `stat-tracker-v0.4.15`).
 
+## 0.4.19
+
+Boundaries are one board-order state machine. A result hint stays sealable
+until a second board with progressed stats is accepted after it, or one
+progressed board after a hero select has armed a boundary, or until a
+reset, a gap, a Tab that names a different map, an end screen whose map
+and the session map are both trusted and differ, or an unblocked map vote
+or hero ban seals it. The first progressed board keeps the hint.
+Progressed means a counter moved forward from the reset baseline: not
+the same totals, not a decided result header, and not an implausible
+jump. There is no 60-second hint timer. The 75-second grace starts
+when the result is recorded, not when the word was first seen.
+
+Wall-clock time is the 75-second grace, the 120-second stat gap, the
+45-second wait before the first fresh-match board counts, the 20-minute
+bound on an unfinished session, the map-vote debounce, and the rate
+ceilings: elims, assists, and deaths `elapsed / 5 + 8`, and damage,
+healing, and mitigation `elapsed * 80 + 2500`. The rate clock is the
+reset baseline, not the last stored row. The 2x–4x all-increase band
+applies within 60s of the baseline.
+
+A map vote that is not blocked, or a hero ban, after a hint that already
+has a board splits and seals the hint. A ban with no held board splits
+at once. A ban after a held fresh-match board does not. A hero select
+after that board only arms a pending boundary, and a select after a held
+fresh-match board does not split. The next fresh-match board then splits
+and seals. A hero select when no board has been stored yet seals
+immediately, except on the session a start screen just opened: a swap
+before that session's first Tab stays, including after the debounce.
+The session a vote opens keeps that vote's candidates and its first Tab.
+That is the trade-off: a vote session with no board and no result word
+absorbs a following select-only game until the 20-minute idle bound, and
+its old candidates veto that game's top-bar reads until an accolade fills
+the map in. A hero select during a live match primes a reset and does not
+split. A hero ban, or a map vote past the debounce, closes an unfinished
+session without sealing a result. The same-map guard covers votes. The
+same-map-plus-hero guard still suppresses a gap split of an unfinished
+match.
+
+A fresh-match reset is the same identified row, with clean elims, deaths,
+and damage, at or under elims max(2, previous/4), deaths max(1,
+previous/4), and damage previous/4, versus a mature board, and the first
+is at least 45 seconds later. The first is held off the current session
+and written onto the new one, at that capture's own time, when a second
+fresh board commits. That carried board is stored on the first Tab that
+writes it, and not again on later Tabs. A hero select or ban before that
+board is the other signal. A select after the held board does not split
+by itself. A ban after that held board does not split either. An unidentified or
+implausible row is stored and leaves the held board and the streak. A
+plausible continuation, or counted progress, clears them. A hero
+change by itself is not a split. A different row never counts as a reset.
+A row with no id never counts. The new session's outcome is Unknown
+unless the split is the 120-second gap or a different-map Tab, which
+keeps that frame's header. An end screen whose map and the session map
+are both trusted and differ gives the new session that screen's result,
+whether or not a boundary is armed. A reset or a gap after a hint seals
+the hint on the old session. An implausible jump is still stored, and it
+does not become the reset baseline. One misread stat cell is still held.
+A long post-match screen does not split on the gap.
+
+A hinted session whose next Tab names a different map splits and seals
+the hint. The session has to already have a map. With no board of its
+own, that map is the accolade read on the hint tick, and the first
+different Tab is enough. Without that accolade there is nothing to
+differ from, and the limitation is unchanged. A session that already
+has a board waits out the 120-second gap, and only when the stored map
+came from the top bar or the accolade. A full-board text fallback is
+stored and does not split a later Tab. A late Tab of the same map does
+not split. A read inside the gap does not split.
+
+An unconfirmed word replaces the hint when its map matches the session,
+or when the boundary is not armed and either side has no trusted name.
+A different map never replaces the hint. While a hero select has armed
+a boundary, a word where either side has no trusted name does not
+replace the hint either. The cost of that armed rule: a real result
+read once with no map is dropped, and the earlier false hint is sealed
+by the next vote. The unarmed exception is the other cost of still
+taking a rank screen or an end title that prints no map: a mapless
+misread can replace the hint, and a second mapless read then seals it
+onto this session.
+
+The second agreeing read opens a new session when both the session map
+and the word's map are trusted (top bar or accolade) and they differ,
+whether or not a boundary is armed. The old hint stays on this session.
+The new session takes the new word and that map. When this tick has no
+map of its own, it uses the map from the previous read of the same
+outcome. That map is stored again on every read, so reads under 60
+seconds apart can pass it along, and a read exactly 60 seconds later
+still carries it. A carried map older than that window is dropped. The
+late read still counts as a new unconfirmed word. This is harmless for
+the confirm itself, because the second read already agrees; the carried
+name is what the split uses when this tick has none. If either side has
+no trusted name, the confirming read seals onto the open session. A
+banner has no map, so a banner-only confirmation still seals onto the
+open session.
+
+Two mapless reads confirm each other and seal onto the open session.
+The same happens when a Tab capture is in flight: the cheap outcome
+poll skips the accolade crop, so those ticks have no map and cannot
+open the next session. The cost is the next game's result landing on
+this one. It happens when the accolade screen is not read, when a
+carried map is older than the confirm window, or when the only
+confirming ticks fall during that Tab.
+
+A trusted top bar and a trusted accolade that disagree inside one
+match open a new session and seal this session's hint. The cost is
+this match's real result leaving with that split when the two reads
+simply disagree, before the player has queued again. That close is
+logged as an end-screen map, counted apart from a stat regression.
+The log also records whether a boundary was armed, the sealed hint, and
+the accolade map. Those fields separate an armed split, or a split that
+sealed a hint, from the other end-screen closes. An unarmed close that
+sealed nothing logs the same shape for a disagreement and for a requeue.
+A gap and a hinted Tab stay a stat regression.
+
+A full-board text fallback is not a map for a different-map split. An
+accolade replaces that name only while no boundary signal has been seen
+yet: no arm, no start screen, no primed or held reset, the outcome not
+yet recorded, and no hint of a different result. After any of those
+signals, the accolade must not rewrite the map or its snapshots. The
+tracker cannot tell that the accolade is this session's own end screen
+beyond those signals. A hint that matches the next result, or a session
+with no hint, can still take the next game's accolade. Replacing a
+hint of a different result sets a lock that closes the window, so the
+confirming read cannot relabel the map. A misread end title that sets
+that lock, and an arm, keep the text name. The tick that reads this
+session's own accolade records the result then, so the hint is not
+cleared and the text name stays. The text name changes only when
+progressed boards clear the hint before that end screen. Those boards
+also clear the lock. A restart that cannot restore the hint's timestamp
+drops the hint and keeps the lock. A carry older than the confirm
+window is dropped, so it cannot relabel the session. A later top bar
+that names the same map still upgrades the source. A skeleton written
+before 0.4.19 has no source; a map on that file is untrusted text.
+
+### Install
+
+```sh
+curl --proto '=https' -fsSL https://raw.githubusercontent.com/FrozenTear/scuffed-crew/main/crates/stat-tracker/dist/bootstrap.sh | bash
+```
+
+Or extract the tarball and run `./install.sh`. Pin with
+`STAT_TRACKER_TAG=stat-tracker-v0.4.19`.
+
+## 0.4.18
+
+Season 5 ([patch notes](https://overwatch.blizzard.com/en-us/news/patch-notes/)):
+new captures recognize the Support hero Doctrine, and read Sombra as
+Support. Games already stored keep the role they were captured with.
+Roadhog's rework does not change his role.
+
+Doctrine ships with stand-in wiki art (Blizzard Entertainment artwork,
+sourced via the Overwatch wiki). The tracker replaces that file
+automatically with a real in-game crop the first time you play Doctrine.
+
+`--collect-portraits` only fills missing portraits and the Doctrine
+stand-in; it never overwrites an existing reference.
+
+### Install
+
+```sh
+curl --proto '=https' -fsSL https://raw.githubusercontent.com/FrozenTear/scuffed-crew/main/crates/stat-tracker/dist/bootstrap.sh | bash
+```
+
+Or extract the tarball and run `./install.sh`. Pin with
+`STAT_TRACKER_TAG=stat-tracker-v0.4.18`.
+
 ## 0.4.17
 
 The user systemd unit now refuses new privileges and mounts the

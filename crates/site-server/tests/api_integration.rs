@@ -52,6 +52,7 @@ async fn test_state() -> AppState {
         dm_events: None,
         nip05_domain: None,
         nip05_republish_enabled: false,
+        public_settings: scuffed_site_server::state::PublicSettingsCache::new(),
     }
 }
 
@@ -7673,6 +7674,484 @@ async fn seasons_crud_and_stats_season_filter() {
         .await
         .unwrap();
     assert_eq!(body_json(resp).await["total_matches"], 2);
+}
+
+// ─── Role aggregates (stored personal_match.role) ───────────────────────────
+
+fn approx_stat(v: &Value, expected: f64) {
+    let n = v
+        .as_f64()
+        .unwrap_or_else(|| panic!("expected number, got {v}"));
+    assert!((n - expected).abs() < 1e-6, "{n} != {expected}");
+}
+
+fn sum_role_matches(rows: &[Value]) -> u64 {
+    rows.iter()
+        .map(|r| r["matches"].as_u64().expect("matches"))
+        .sum()
+}
+
+fn role_row<'a>(rows: &'a [Value], role: &str) -> &'a Value {
+    rows.iter()
+        .find(|r| r["role"].as_str() == Some(role))
+        .unwrap_or_else(|| panic!("missing role {role:?} in {rows:?}"))
+}
+
+/// Stored-role aggregates, plus the same session denials as `/heroes`.
+///
+/// `/heroes` has no per-member privacy flag: any active org member may read
+/// any member id (including a suspended target). Anonymous and non-session
+/// bearers are 401. Inactive or suspended callers are 403.
+#[tokio::test]
+async fn role_stats_endpoints_match_heroes_auth_and_group_stored_role() {
+    use chrono::{TimeZone, Utc};
+    use scuffed_db::PersonalMatch;
+
+    let state = test_state().await;
+    seed_all_roles(&state.db).await;
+
+    let played = |day: u32, month: u32| Utc.with_ymd_and_hms(2026, month, day, 20, 0, 0).unwrap();
+    let game = |sid: &str,
+                member: &str,
+                hero: &str,
+                role: &str,
+                outcome: &str,
+                day: u32,
+                month: u32,
+                elims: u32,
+                deaths: u32,
+                damage: u32,
+                healing: u32| PersonalMatch {
+        id: String::new(),
+        member_id: member.into(),
+        session_id: sid.into(),
+        hero: hero.into(),
+        map_name: "Oasis".into(),
+        game_mode: "control".into(),
+        role: role.into(),
+        outcome: outcome.into(),
+        elims,
+        deaths,
+        assists: 0,
+        damage,
+        healing,
+        mitigation: 0,
+        played_at: played(day, month),
+        uploaded_at: Utc::now(),
+        edited: false,
+    };
+
+    state
+        .db
+        .upsert_personal_matches(
+            "membermember",
+            &[
+                game(
+                    "d1",
+                    "membermember",
+                    "Sombra",
+                    "Damage",
+                    "victory",
+                    15,
+                    1,
+                    10,
+                    4,
+                    8000,
+                    0,
+                ),
+                game(
+                    "d2",
+                    "membermember",
+                    "Sombra",
+                    "Damage",
+                    "defeat",
+                    16,
+                    1,
+                    6,
+                    8,
+                    4000,
+                    100,
+                ),
+                game(
+                    "s1",
+                    "membermember",
+                    "Sombra",
+                    "Support",
+                    "victory",
+                    17,
+                    1,
+                    4,
+                    2,
+                    2000,
+                    9000,
+                ),
+                game(
+                    "s2",
+                    "membermember",
+                    "Doctrine",
+                    "Support",
+                    "draw",
+                    18,
+                    1,
+                    2,
+                    2,
+                    1000,
+                    5000,
+                ),
+                game(
+                    "e1",
+                    "membermember",
+                    "Reaper",
+                    "",
+                    "defeat",
+                    19,
+                    1,
+                    1,
+                    6,
+                    500,
+                    0,
+                ),
+                game(
+                    "s3",
+                    "membermember",
+                    "Ana",
+                    "Support",
+                    "victory",
+                    15,
+                    7,
+                    20,
+                    1,
+                    100,
+                    10000,
+                ),
+            ],
+        )
+        .await
+        .unwrap();
+    state
+        .db
+        .upsert_personal_matches(
+            "officermember",
+            &[game(
+                "t1",
+                "officermember",
+                "Reinhardt",
+                "Tank",
+                "victory",
+                15,
+                1,
+                3,
+                1,
+                1000,
+                0,
+            )],
+        )
+        .await
+        .unwrap();
+
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(authed_json_request(
+            Method::POST,
+            "/api/admin/seasons",
+            ADMIN_TOKEN,
+            json!({
+                "name": "Season 1",
+                "starts_at": "2026-01-01T00:00:00Z",
+                "ends_at": "2026-06-01T00:00:00Z",
+                "is_current": true
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let season_id = body_json(resp).await["id"].as_str().unwrap().to_string();
+
+    async fn get_json(state: &AppState, uri: &str, token: Option<&str>) -> (StatusCode, Value) {
+        let req = match token {
+            Some(token) => authed_request(Method::GET, uri, token),
+            None => unauthed_request(Method::GET, uri),
+        };
+        let resp = create_router(state.clone()).oneshot(req).await.unwrap();
+        let status = resp.status();
+        let body = body_json(resp).await;
+        (status, body)
+    }
+
+    // Denials match /heroes before any happy-path read.
+    for (uri_roles, uri_heroes) in [
+        ("/api/stats/me/roles", "/api/stats/me/heroes"),
+        (
+            "/api/stats/member/membermember/roles",
+            "/api/stats/member/membermember/heroes",
+        ),
+    ] {
+        let (rs, rb) = get_json(&state, uri_roles, None).await;
+        let (hs, hb) = get_json(&state, uri_heroes, None).await;
+        assert_eq!(rs, StatusCode::UNAUTHORIZED, "{uri_roles}");
+        assert_eq!(hs, rs, "anonymous denial must match heroes for {uri_roles}");
+        assert_eq!(rb["error"], hb["error"]);
+
+        let (rs, _) = get_json(&state, uri_roles, Some("not-a-session")).await;
+        let (hs, _) = get_json(&state, uri_heroes, Some("not-a-session")).await;
+        assert_eq!(rs, StatusCode::UNAUTHORIZED, "{uri_roles} bad token");
+        assert_eq!(hs, rs);
+    }
+
+    let (status, mine) = get_json(&state, "/api/stats/me/roles", Some(MEMBER_TOKEN)).await;
+    assert_eq!(status, StatusCode::OK);
+    let rows = mine.as_array().expect("role array");
+    assert!(
+        rows.iter().all(|r| r.get("hero").is_none()),
+        "role rows must not carry a hero field: {rows:?}"
+    );
+    for key in [
+        "role",
+        "matches",
+        "wins",
+        "losses",
+        "draws",
+        "avg_elims",
+        "avg_deaths",
+        "avg_damage",
+        "avg_healing",
+    ] {
+        assert!(rows[0].get(key).is_some(), "missing {key}");
+    }
+    assert_eq!(
+        rows.iter()
+            .map(|r| r["role"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        vec!["Support", "Damage", ""]
+    );
+    let support = role_row(rows, "Support");
+    assert_eq!(support["matches"], 3);
+    assert_eq!(support["wins"], 2);
+    assert_eq!(support["losses"], 0);
+    assert_eq!(support["draws"], 1);
+    // 4 + 2 + 20 elims across the three Support games.
+    approx_stat(&support["avg_elims"], 26.0 / 3.0);
+    let damage = role_row(rows, "Damage");
+    assert_eq!(damage["matches"], 2, "Sombra Support is not Damage");
+    assert_eq!(damage["wins"], 1);
+    assert_eq!(damage["losses"], 1);
+    assert_eq!(damage["draws"], 0);
+    let empty = role_row(rows, "");
+    assert_eq!(empty["matches"], 1);
+    assert_eq!(empty["wins"], 0);
+    assert_eq!(empty["losses"], 1);
+    assert_eq!(empty["draws"], 0);
+
+    // Another active member sees the same rows. Own roles stay separate.
+    let (status, seen) = get_json(
+        &state,
+        "/api/stats/member/membermember/roles",
+        Some(OFFICER_TOKEN),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(seen, mine);
+
+    let (status, body) = get_json(&state, "/api/stats/me/roles", Some(OFFICER_TOKEN)).await;
+    assert_eq!(status, StatusCode::OK);
+    let officer_rows = body.as_array().unwrap();
+    assert_eq!(officer_rows.len(), 1);
+    assert_eq!(officer_rows[0]["role"], "Tank");
+    assert_eq!(officer_rows[0]["matches"], 1);
+
+    let (status, body) = get_json(
+        &state,
+        "/api/stats/member/officermember/roles",
+        Some(MEMBER_TOKEN),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body[0]["role"], "Tank");
+
+    let (status, season_body) = get_json(
+        &state,
+        &format!("/api/stats/me/roles?season={season_id}"),
+        Some(MEMBER_TOKEN),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let season_rows = season_body.as_array().unwrap();
+    assert_eq!(
+        season_rows
+            .iter()
+            .map(|r| r["role"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        vec!["Damage", "Support", ""]
+    );
+    let s_support = role_row(season_rows, "Support");
+    assert_eq!(s_support["matches"], 2);
+    assert_eq!(s_support["wins"], 1);
+    assert_eq!(s_support["losses"], 0);
+    assert_eq!(s_support["draws"], 1);
+    approx_stat(&s_support["avg_elims"], 3.0);
+    approx_stat(&s_support["avg_deaths"], 2.0);
+    approx_stat(&s_support["avg_damage"], 1500.0);
+    approx_stat(&s_support["avg_healing"], 7000.0);
+    let s_damage = role_row(season_rows, "Damage");
+    approx_stat(&s_damage["avg_elims"], 8.0);
+    approx_stat(&s_damage["avg_deaths"], 6.0);
+    approx_stat(&s_damage["avg_damage"], 6000.0);
+    approx_stat(&s_damage["avg_healing"], 50.0);
+
+    let (status, seen_season) = get_json(
+        &state,
+        &format!("/api/stats/member/membermember/roles?season={season_id}"),
+        Some(OFFICER_TOKEN),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(seen_season, season_body);
+
+    let (status, blank) = get_json(&state, "/api/stats/me/roles?season=", Some(MEMBER_TOKEN)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        blank.as_array().unwrap().len(),
+        3,
+        "blank season is all time"
+    );
+
+    // Per-role matches sum to the same total the overview reports.
+    let (status, overview) = get_json(&state, "/api/stats/me", Some(MEMBER_TOKEN)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        sum_role_matches(rows),
+        overview["total_matches"].as_u64().unwrap()
+    );
+    let (status, season_overview) = get_json(
+        &state,
+        &format!("/api/stats/me?season={season_id}"),
+        Some(MEMBER_TOKEN),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        sum_role_matches(season_rows),
+        season_overview["total_matches"].as_u64().unwrap()
+    );
+    let (status, member_overview) = get_json(
+        &state,
+        &format!("/api/stats/member/membermember?season={season_id}"),
+        Some(OFFICER_TOKEN),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        sum_role_matches(season_rows),
+        member_overview["total_matches"].as_u64().unwrap()
+    );
+
+    let (status, unknown) = get_json(
+        &state,
+        "/api/stats/member/no-such-member/roles",
+        Some(OFFICER_TOKEN),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(unknown, json!([]));
+
+    // A session for a user with no member row is 403, same as /heroes.
+    let nomember_token = "test-nomember-token";
+    seed_applicant(&state.db, "nomemberuser", "NoMember", nomember_token).await;
+    let (rs, rb) = get_json(&state, "/api/stats/me/roles", Some(nomember_token)).await;
+    let (hs, hb) = get_json(&state, "/api/stats/me/heroes", Some(nomember_token)).await;
+    assert_eq!(rs, StatusCode::FORBIDDEN);
+    assert_eq!(hs, rs);
+    assert_eq!(rb["error"], "Not an org member");
+    assert_eq!(rb["error"], hb["error"]);
+
+    let (rs, _) = get_json(
+        &state,
+        "/api/stats/me/roles?season=nope",
+        Some(MEMBER_TOKEN),
+    )
+    .await;
+    let (hs, _) = get_json(
+        &state,
+        "/api/stats/me/heroes?season=nope",
+        Some(MEMBER_TOKEN),
+    )
+    .await;
+    assert_eq!(rs, StatusCode::NOT_FOUND);
+    assert_eq!(hs, rs);
+
+    // Inactive caller: same 403 as /heroes.
+    state
+        .db
+        .client
+        .query("UPDATE member:recruitmember SET is_active = false")
+        .await
+        .expect("deactivate recruit");
+    for (uri_roles, uri_heroes) in [
+        ("/api/stats/me/roles", "/api/stats/me/heroes"),
+        (
+            "/api/stats/member/membermember/roles",
+            "/api/stats/member/membermember/heroes",
+        ),
+    ] {
+        let (rs, rb) = get_json(&state, uri_roles, Some(RECRUIT_TOKEN)).await;
+        let (hs, hb) = get_json(&state, uri_heroes, Some(RECRUIT_TOKEN)).await;
+        assert_eq!(rs, StatusCode::FORBIDDEN, "{uri_roles} inactive");
+        assert_eq!(hs, rs);
+        assert_eq!(rb["error"], "Membership inactive");
+        assert_eq!(rb["error"], hb["error"]);
+    }
+
+    // Suspended caller: same 403 as /heroes. Target suspension does not hide rows.
+    state
+        .db
+        .client
+        .query(
+            r#"
+            CREATE moderation_action SET
+                member_id = 'membermember',
+                action_type = 'suspension',
+                reason = 'test suspension',
+                issued_by = 'adminmember',
+                expires_at = time::now() + 30d,
+                is_active = true,
+                created_at = time::now();
+        "#,
+        )
+        .await
+        .expect("suspend member");
+    for (uri_roles, uri_heroes) in [
+        ("/api/stats/me/roles", "/api/stats/me/heroes"),
+        (
+            "/api/stats/member/officermember/roles",
+            "/api/stats/member/officermember/heroes",
+        ),
+    ] {
+        let (rs, rb) = get_json(&state, uri_roles, Some(MEMBER_TOKEN)).await;
+        let (hs, hb) = get_json(&state, uri_heroes, Some(MEMBER_TOKEN)).await;
+        assert_eq!(rs, StatusCode::FORBIDDEN, "{uri_roles} suspended");
+        assert_eq!(hs, rs);
+        assert_eq!(rb["error"], "Account suspended");
+        assert_eq!(rb["error"], hb["error"]);
+    }
+    let (status, body) = get_json(
+        &state,
+        "/api/stats/member/membermember/roles",
+        Some(OFFICER_TOKEN),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body.as_array().unwrap().len(),
+        3,
+        "suspending the target does not hide their role stats"
+    );
+    let (hs, _) = get_json(
+        &state,
+        "/api/stats/member/membermember/heroes",
+        Some(OFFICER_TOKEN),
+    )
+    .await;
+    assert_eq!(hs, StatusCode::OK);
 }
 
 // ─── Articles: unpublished reads ────────────────────────────────────────────

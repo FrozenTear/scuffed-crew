@@ -7,9 +7,9 @@
 ow.scuffedcrew.no {
 	encode zstd gzip
 
-	# Hashed static assets — cache aggressively
-	@hashed path *.wasm *.js *.css
-	header @hashed Cache-Control "public, max-age=31536000, immutable"
+	# Cache-Control is set by the origin (cache_control_value). Do not add a
+	# second Cache-Control header here — it would duplicate the origin policy
+	# and freeze unhashed .js/.css/.wasm plus the HTML shell for a year.
 
 	# Security headers. CSP is set by scuffed-server
 	# (Content-Security-Policy-Report-Only, or Content-Security-Policy when

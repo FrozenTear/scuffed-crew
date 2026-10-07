@@ -10858,6 +10858,7 @@ dependencies = [
  "chrono",
  "dashmap",
  "dotenvy",
+ "flate2",
  "futures",
  "http-body-util",
  "reqwest 0.12.28",
@@ -10915,7 +10916,7 @@ dependencies = [
 
 [[package]]
 name = "scuffed-stat-tracker"
-version = "0.4.17"
+version = "0.4.19"
 dependencies = [
  "anyhow",
  "ashpd",
@@ -10930,6 +10931,7 @@ dependencies = [
  "scuffed-types",
  "serde",
  "serde_json",
+ "sha2",
  "strsim",
  "surrealdb",
  "surrealdb-types",

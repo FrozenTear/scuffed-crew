@@ -1,5 +1,11 @@
+#[cfg(test)]
+use std::future::Future;
 use std::path::PathBuf;
-use std::sync::Arc;
+#[cfg(test)]
+use std::pin::Pin;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+use tokio::time::Instant;
 
 use scuffed_auth::crypto::CryptoService;
 use scuffed_auth::server::HasAuth;
@@ -53,6 +59,398 @@ pub struct AppState {
     /// behalf, so it takes an explicit operator action to even become callable
     /// — see `routes::members::republish_profiles`.
     pub nip05_republish_enabled: bool,
+    /// In-memory copy of the anonymous settings embedded in the SPA shell.
+    /// Write paths call [`PublicSettingsCache::invalidate`]. Per process:
+    /// a restart clears it, and it is not shared across instances.
+    pub public_settings: PublicSettingsCache,
+}
+
+/// How long a cached public-settings blob may be served before a re-read.
+///
+/// Writes invalidate immediately. The TTL only covers a missed invalidation.
+pub(crate) const PUBLIC_SETTINGS_TTL: Duration = Duration::from_secs(10);
+
+/// After a failed or timed-out refresh, further misses serve the stale blob
+/// immediately for this long instead of starting another read. An invalidation
+/// clears this by moving `generation`. A spawned read that is still in flight
+/// and older than the embed cap is also served stale, until that read drops
+/// its lock. See [`PublicSettingsCache::refresh_in_flight_older_than`].
+pub(crate) const EMBED_REFRESH_BACKOFF: Duration = Duration::from_secs(1);
+
+/// DB-outage warnings for the shell embed, at most once per interval.
+const SETTINGS_WARN_INTERVAL: Duration = Duration::from_secs(60);
+
+/// Cached rewritten head: `(template Arc, head prefix)`, compared with `Arc::ptr_eq`.
+type RenderedHead = std::sync::Arc<Mutex<Option<(std::sync::Arc<str>, std::sync::Arc<str>)>>>;
+
+/// Anonymous settings already rendered for the HTML shell.
+///
+/// `script_block` is produced once, when the blob is stored. The rewritten
+/// head prefix is filled on the first response that uses this blob and reused
+/// after that, so a hit does not scan the template again.
+#[derive(Clone, Debug)]
+pub(crate) struct CachedPublicSettings {
+    pub script_block: String,
+    pub org_name: String,
+    pub site_description: String,
+    /// Rewritten head prefix for the template this blob was last rendered with.
+    rendered_head: RenderedHead,
+}
+
+impl CachedPublicSettings {
+    pub(crate) fn from_parts(
+        script_block: String,
+        org_name: String,
+        site_description: String,
+    ) -> Self {
+        Self {
+            script_block,
+            org_name,
+            site_description,
+            rendered_head: std::sync::Arc::new(Mutex::new(None)),
+        }
+    }
+
+    /// Rewritten head prefix for `template`, computed once for this blob.
+    ///
+    /// The slot keeps the template `Arc` and matches it with [`Arc::ptr_eq`],
+    /// so a later template allocated at the same address is not reused.
+    pub(crate) fn rendered_head(
+        &self,
+        template: &std::sync::Arc<str>,
+        build: impl FnOnce() -> String,
+    ) -> std::sync::Arc<str> {
+        let mut slot = self
+            .rendered_head
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        if let Some((key, head)) = slot.as_ref()
+            && std::sync::Arc::ptr_eq(key, template)
+        {
+            return std::sync::Arc::clone(head);
+        }
+        let head: std::sync::Arc<str> = std::sync::Arc::from(build());
+        *slot = Some((
+            std::sync::Arc::clone(template),
+            std::sync::Arc::clone(&head),
+        ));
+        head
+    }
+}
+
+#[derive(Debug)]
+struct PublicSettingsEntry {
+    payload: Arc<CachedPublicSettings>,
+    stored_at: Instant,
+    generation: u64,
+}
+
+#[derive(Debug)]
+struct PublicSettingsInner {
+    generation: u64,
+    entry: Option<PublicSettingsEntry>,
+    /// `(generation, when)` of the last failed refresh for that generation.
+    refresh_failed: Option<(u64, Instant)>,
+    /// When the spawned read holding `refresh` started. Cleared when that
+    /// lock drops.
+    refresh_started: Option<Instant>,
+}
+
+/// Test-only stand-in for the settings read, invoked at the real load point
+/// (inside the refresh lock and the embed timeout). Not in release builds.
+#[cfg(test)]
+pub(crate) type EmbedLoader = Arc<
+    dyn Fn() -> Pin<Box<dyn Future<Output = Result<CachedPublicSettings, String>> + Send>>
+        + Send
+        + Sync,
+>;
+
+/// Test-only hook around a settings database write.
+///
+/// As the before-write hook it runs after the early invalidation and before
+/// the database update, so a test can start an in-flight read in that window.
+/// As the after-write hook it runs after that update returns and before the
+/// handler returns, while the drop guard is still held.
+#[cfg(test)]
+pub(crate) type SettingsWriteHook =
+    Arc<dyn Fn() -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
+
+/// Loader and the before-write and after-write hooks. Manual `Debug` because
+/// the trait objects are not.
+#[cfg(test)]
+#[derive(Default)]
+struct SettingsTestHooks {
+    loader: Mutex<Option<EmbedLoader>>,
+    write_hook: Mutex<Option<SettingsWriteHook>>,
+    after_write_hook: Mutex<Option<SettingsWriteHook>>,
+}
+
+#[cfg(test)]
+impl std::fmt::Debug for SettingsTestHooks {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("SettingsTestHooks")
+    }
+}
+
+/// Process-local cache of the anonymous settings embed.
+///
+/// Shared across `AppState` clones (the router and the SPA fallback hold the
+/// same `Arc`). A settings write bumps `generation` and drops any blob stored
+/// before that bump, so an in-flight read cannot store or later serve a
+/// pre-write row. A blob that is merely past the TTL stays available for
+/// stale-on-error.
+#[derive(Clone, Debug)]
+pub struct PublicSettingsCache {
+    inner: Arc<Mutex<PublicSettingsInner>>,
+    /// One settings read at a time. Concurrent misses wait on this instead of
+    /// each querying the database.
+    refresh: Arc<tokio::sync::Mutex<()>>,
+    last_warn: Arc<Mutex<Option<Instant>>>,
+    #[cfg(test)]
+    hooks: Arc<SettingsTestHooks>,
+}
+
+impl Default for PublicSettingsCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl PublicSettingsCache {
+    pub fn new() -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(PublicSettingsInner {
+                generation: 0,
+                entry: None,
+                refresh_failed: None,
+                refresh_started: None,
+            })),
+            refresh: Arc::new(tokio::sync::Mutex::new(())),
+            last_warn: Arc::new(Mutex::new(None)),
+            #[cfg(test)]
+            hooks: Arc::new(SettingsTestHooks::default()),
+        }
+    }
+
+    /// Bump the generation and drop every blob stored before this call.
+    ///
+    /// Settings writes call this before the database update and again when
+    /// that update returns, success or error. The second bump discards a
+    /// read that re-cached the pre-write row, so that row cannot stay fresh
+    /// or be served later as the stale-on-error fallback.
+    pub fn invalidate(&self) {
+        let mut guard = self.lock();
+        guard.generation = guard.generation.wrapping_add(1);
+        guard.refresh_failed = None;
+        guard.entry = None;
+    }
+
+    /// Second [`Self::invalidate`] when the guard drops.
+    ///
+    /// Held across the write so every return path, including a validation
+    /// error or a dropped request, bumps the generation again after the attempt.
+    #[must_use = "bind it so it drops after the write"]
+    pub(crate) fn invalidate_on_drop(&self) -> InvalidateOnDrop<'_> {
+        InvalidateOnDrop(self)
+    }
+
+    pub(crate) fn generation(&self) -> u64 {
+        self.lock().generation
+    }
+
+    /// Fresh blob, if one was stored for the current generation inside the TTL.
+    pub(crate) fn fresh(&self) -> Option<Arc<CachedPublicSettings>> {
+        let guard = self.lock();
+        let entry = guard.entry.as_ref()?;
+        if entry.generation != guard.generation {
+            return None;
+        }
+        if entry.stored_at.elapsed() >= PUBLIC_SETTINGS_TTL {
+            return None;
+        }
+        Some(Arc::clone(&entry.payload))
+    }
+
+    /// Last blob from the current generation, including after the TTL.
+    ///
+    /// [`Self::store`] writes nothing when the generation has moved, and
+    /// [`Self::invalidate`] clears the entry. The generation check is only a
+    /// safety net for a blob that is still in the slot after a bump that did
+    /// not clear it.
+    pub(crate) fn stale(&self) -> Option<Arc<CachedPublicSettings>> {
+        let guard = self.lock();
+        let entry = guard.entry.as_ref()?;
+        if entry.generation != guard.generation {
+            return None;
+        }
+        Some(Arc::clone(&entry.payload))
+    }
+
+    /// Store `payload` only if no invalidation landed since `generation`.
+    ///
+    /// `started` is when the read began. The TTL is measured from then, so a
+    /// slow read does not add its own duration on top of the 10 seconds.
+    /// Returns whether the cache accepted the write.
+    pub(crate) fn store(
+        &self,
+        generation: u64,
+        payload: CachedPublicSettings,
+        started: Instant,
+    ) -> bool {
+        let mut guard = self.lock();
+        if guard.generation != generation {
+            return false;
+        }
+        guard.refresh_failed = None;
+        guard.entry = Some(PublicSettingsEntry {
+            payload: Arc::new(payload),
+            stored_at: started,
+            generation,
+        });
+        true
+    }
+
+    /// Record that the spawned read holding the refresh lock started at `started`.
+    pub(crate) fn note_refresh_started(&self, started: Instant) {
+        self.lock().refresh_started = Some(started);
+    }
+
+    /// Clear the in-flight start. Called when that read drops the refresh lock.
+    pub(crate) fn clear_refresh_started(&self) {
+        self.lock().refresh_started = None;
+    }
+
+    /// `true` when a spawned read is still in flight and started more than `cap` ago.
+    ///
+    /// Callers should serve [`Self::stale`] immediately instead of waiting on
+    /// that read's lock.
+    pub(crate) fn refresh_in_flight_older_than(&self, cap: Duration) -> bool {
+        self.lock()
+            .refresh_started
+            .is_some_and(|started| started.elapsed() > cap)
+    }
+
+    /// `true` when a refresh for this generation just failed and callers
+    /// should serve [`Self::stale`] instead of starting another read.
+    pub(crate) fn refresh_suppressed(&self) -> bool {
+        let guard = self.lock();
+        match guard.refresh_failed {
+            Some((generation, at)) => {
+                generation == guard.generation && at.elapsed() < EMBED_REFRESH_BACKOFF
+            }
+            None => false,
+        }
+    }
+
+    pub(crate) fn note_refresh_failure(&self, generation: u64) {
+        let mut guard = self.lock();
+        if guard.generation == generation {
+            guard.refresh_failed = Some((generation, Instant::now()));
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn refresh_lock(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.refresh.lock().await
+    }
+
+    /// Owned guard so a settings read can outlive the request that started it.
+    pub(crate) async fn refresh_lock_owned(&self) -> tokio::sync::OwnedMutexGuard<()> {
+        Arc::clone(&self.refresh).lock_owned().await
+    }
+
+    /// Log `message` at most once per [`SETTINGS_WARN_INTERVAL`].
+    pub(crate) fn note_embed_failure(&self, message: &str) -> bool {
+        let mut slot = self.last_warn.lock().unwrap_or_else(|err| err.into_inner());
+        let now = Instant::now();
+        if slot.is_some_and(|prev| now.saturating_duration_since(prev) < SETTINGS_WARN_INTERVAL) {
+            return false;
+        }
+        *slot = Some(now);
+        tracing::warn!("{message}");
+        true
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_loader(&self, loader: Option<EmbedLoader>) {
+        *self
+            .hooks
+            .loader
+            .lock()
+            .unwrap_or_else(|err| err.into_inner()) = loader;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn loader(&self) -> Option<EmbedLoader> {
+        self.hooks
+            .loader
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .clone()
+    }
+
+    /// Install a hook for the next settings write. The handler takes it once,
+    /// before the database update.
+    #[cfg(test)]
+    pub(crate) fn set_write_hook(&self, hook: Option<SettingsWriteHook>) {
+        *self
+            .hooks
+            .write_hook
+            .lock()
+            .unwrap_or_else(|err| err.into_inner()) = hook;
+    }
+
+    /// Hook that runs after `update_settings` returns and before the handler does.
+    #[cfg(test)]
+    pub(crate) fn set_after_write_hook(&self, hook: Option<SettingsWriteHook>) {
+        *self
+            .hooks
+            .after_write_hook
+            .lock()
+            .unwrap_or_else(|err| err.into_inner()) = hook;
+    }
+
+    /// Run and clear the write hook, if a test installed one.
+    #[cfg(test)]
+    pub(crate) async fn run_write_hook(&self) {
+        Self::take_hook(&self.hooks.write_hook).await;
+    }
+
+    /// Run and clear the post-write hook, if a test installed one.
+    #[cfg(test)]
+    pub(crate) async fn run_after_write_hook(&self) {
+        Self::take_hook(&self.hooks.after_write_hook).await;
+    }
+
+    #[cfg(test)]
+    async fn take_hook(slot: &Mutex<Option<SettingsWriteHook>>) {
+        let hook = slot.lock().unwrap_or_else(|err| err.into_inner()).take();
+        if let Some(hook) = hook {
+            hook().await;
+        }
+    }
+
+    /// Push the stored blob past the TTL without sleeping.
+    #[cfg(test)]
+    pub(crate) fn expire_for_test(&self) {
+        let mut guard = self.lock();
+        if let Some(entry) = guard.entry.as_mut() {
+            entry.stored_at = Instant::now() - (PUBLIC_SETTINGS_TTL + Duration::from_secs(1));
+        }
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, PublicSettingsInner> {
+        self.inner.lock().unwrap_or_else(|err| err.into_inner())
+    }
+}
+
+/// Calls [`PublicSettingsCache::invalidate`] when dropped.
+pub struct InvalidateOnDrop<'a>(&'a PublicSettingsCache);
+
+impl Drop for InvalidateOnDrop<'_> {
+    fn drop(&mut self) {
+        self.0.invalidate();
+    }
 }
 
 /// Treat blank/whitespace as unset so `NOSTR_RELAY_URL=""` does not report
@@ -340,6 +738,104 @@ mod tests {
         assert_eq!(nip05_identifier("Frozen Tear", None), None);
         // Name that normalizes to nothing → no identifier.
         assert_eq!(nip05_identifier("!!!", Some("ow.scuffedcrew.no")), None);
+    }
+}
+
+#[cfg(test)]
+mod public_settings_cache_tests {
+    use super::{CachedPublicSettings, Instant, PublicSettingsCache};
+
+    fn payload(name: &str) -> CachedPublicSettings {
+        CachedPublicSettings::from_parts(
+            format!(
+                "<script id=\"sc-settings\" type=\"application/json\">{{\"org_name\":\"{name}\"}}</script>"
+            ),
+            name.to_string(),
+            "tagline".into(),
+        )
+    }
+
+    #[tokio::test]
+    async fn stale_writer_cannot_overwrite_a_newer_invalidation() {
+        let cache = PublicSettingsCache::new();
+        let generation = cache.generation();
+        assert!(cache.store(generation, payload("First"), Instant::now()));
+        assert_eq!(cache.fresh().unwrap().org_name, "First");
+
+        cache.invalidate();
+        assert!(cache.fresh().is_none());
+        assert!(
+            cache.stale().is_none(),
+            "invalidate drops blobs stored before the bump"
+        );
+        assert!(
+            !cache.store(generation, payload("Stale"), Instant::now()),
+            "a read that started before invalidation must not store"
+        );
+        assert!(cache.stale().is_none());
+
+        let next = cache.generation();
+        assert_ne!(next, generation);
+        assert!(cache.store(next, payload("Fresh"), Instant::now()));
+        assert_eq!(cache.fresh().unwrap().org_name, "Fresh");
+        assert!(cache.fresh().unwrap().script_block.contains("Fresh"));
+    }
+
+    #[tokio::test]
+    async fn ttl_expiry_keeps_the_blob_for_stale_on_error() {
+        let cache = PublicSettingsCache::new();
+        assert!(cache.store(cache.generation(), payload("Cached"), Instant::now()));
+        assert!(cache.fresh().is_some());
+        cache.expire_for_test();
+        assert!(
+            cache.fresh().is_none(),
+            "an expired blob is not a fresh hit"
+        );
+        assert_eq!(cache.stale().unwrap().org_name, "Cached");
+        assert!(
+            cache
+                .stale()
+                .unwrap()
+                .script_block
+                .contains(r#"{"org_name":"Cached"}"#)
+        );
+    }
+
+    #[tokio::test]
+    async fn ttl_is_measured_from_when_the_read_started() {
+        let cache = PublicSettingsCache::new();
+        tokio::time::pause();
+        let started = Instant::now();
+        tokio::time::advance(super::PUBLIC_SETTINGS_TTL - std::time::Duration::from_secs(1)).await;
+        assert!(cache.store(cache.generation(), payload("Late"), started));
+        assert!(
+            cache.fresh().is_some(),
+            "a slow read must not restart the TTL when it stores"
+        );
+        tokio::time::advance(std::time::Duration::from_secs(2)).await;
+        assert!(
+            cache.fresh().is_none(),
+            "the blob expires 10s after the read started, not after it stored"
+        );
+        assert_eq!(cache.stale().unwrap().org_name, "Late");
+    }
+
+    #[tokio::test]
+    async fn embed_failure_warning_is_rate_limited() {
+        let cache = PublicSettingsCache::new();
+        assert!(cache.note_embed_failure("settings read failed"));
+        assert!(!cache.note_embed_failure("settings read failed again"));
+    }
+
+    #[tokio::test]
+    async fn failed_refresh_suppresses_a_second_read_until_invalidate() {
+        let cache = PublicSettingsCache::new();
+        let generation = cache.generation();
+        assert!(!cache.refresh_suppressed());
+        cache.note_refresh_failure(generation);
+        assert!(cache.refresh_suppressed());
+        cache.invalidate();
+        assert!(!cache.refresh_suppressed());
     }
 }
 
