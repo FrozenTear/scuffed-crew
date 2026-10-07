@@ -151,3 +151,6 @@ jobs:
       - name: Build app
         working-directory: crates/app
         run: dx build --release
+
+      - name: Favicon is in the dx bundle
+        run: test -f target/dx/scuffed-app/release/web/public/assets/favicon.svg

@@ -41,7 +41,15 @@ enum MineView {
     Status,
 }
 
-fn mine_view<T>(data: Option<Option<Option<&T>>>, error: Option<&str>) -> MineView {
+fn mine_view<T>(
+    state: UseResourceState,
+    data: Option<Option<Option<&T>>>,
+    error: Option<&str>,
+) -> MineView {
+    // A refetch is Pending while the previous value is still a failure.
+    if state == UseResourceState::Pending {
+        return MineView::Pending;
+    }
     match data {
         None if error.is_none() => MineView::Pending,
         Some(Some(Some(_))) => MineView::Status,
@@ -102,6 +110,8 @@ const APPLY_CSS: &str = r#"
     .apply-game-btn.selected { background: var(--accent); color: var(--accent-fg); border-color: var(--accent); }
     .apply-actions { margin-top: 1.5rem; }
     .apply-loading { color: var(--text-3); text-align: center; padding: 2rem; }
+    /* Home injects this class. /apply does not, so the games error needs it here. */
+    .muted { color: var(--text-3); font-size: 0.88rem; }
 "#;
 
 #[component]
@@ -125,17 +135,13 @@ pub fn Apply() -> Element {
     let org_name = s.as_ref().map(|x| x.org_name.clone());
     let mine_data = my_app.data.read();
     let mine_error = my_app.error.read();
-    let mine_settled = mine_view(
+    let mine = mine_view(
+        my_app.data.state()(),
         mine_data
             .as_ref()
             .map(|outer| outer.as_ref().map(|inner| inner.as_ref())),
         mine_error.as_deref(),
     );
-    let mine = if my_app.data.state()() == UseResourceState::Pending {
-        MineView::Pending
-    } else {
-        mine_settled
-    };
     let status_app = mine_data
         .as_ref()
         .and_then(|outer| outer.as_ref())
@@ -277,7 +283,7 @@ pub fn Apply() -> Element {
                         }
                     } else if mine == MineView::Pending || mine == MineView::Failed {
                         rsx! {
-                            div { role: "status",
+                            div { class: "fetch-error-wrap", role: "status",
                                 if mine == MineView::Pending {
                                     p { class: "apply-loading", "Loading..." }
                                 } else {
@@ -444,16 +450,38 @@ mod tests {
     #[test]
     fn logged_in_apply_waits_for_the_existing_application() {
         assert_eq!(
-            mine_view(None::<Option<Option<&()>>>, None),
+            mine_view(UseResourceState::Ready, None::<Option<Option<&()>>>, None),
             MineView::Pending
         );
         assert_eq!(
-            mine_view(Some(None::<Option<&()>>), Some("offline")),
+            mine_view(
+                UseResourceState::Ready,
+                Some(None::<Option<&()>>),
+                Some("offline")
+            ),
             MineView::Failed
         );
-        assert_eq!(mine_view(Some(Some(None::<&()>)), None), MineView::Form);
-        assert_eq!(mine_view(Some(Some(Some(&()))), None), MineView::Status);
-        assert_ne!(mine_view(None::<Option<Option<&()>>>, None), MineView::Form);
+        // Deleting the Pending override leaves this as Failed.
+        assert_eq!(
+            mine_view(
+                UseResourceState::Pending,
+                Some(None::<Option<&()>>),
+                Some("offline")
+            ),
+            MineView::Pending
+        );
+        assert_eq!(
+            mine_view(UseResourceState::Ready, Some(Some(None::<&()>)), None),
+            MineView::Form
+        );
+        assert_eq!(
+            mine_view(UseResourceState::Ready, Some(Some(Some(&()))), None),
+            MineView::Status
+        );
+        assert_ne!(
+            mine_view(UseResourceState::Ready, None::<Option<Option<&()>>>, None),
+            MineView::Form
+        );
     }
 
     #[test]

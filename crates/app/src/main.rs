@@ -171,11 +171,13 @@ fn App() -> Element {
 
 #[cfg(test)]
 mod tests {
-    /// PR 152 requires title, description, og:title, and og:description exactly
-    /// once, and og:site_name once when this shell includes it.
+    /// This test is the one that requires og:site_name. PR 152 requires the
+    /// other four head tags on its own, and og:site_name only when the shell
+    /// includes it. Comments are removed before those five counts.
     #[test]
     fn index_html_has_one_of_each_rewritten_head_tag() {
         let html = include_str!("../index.html");
+        let visible = strip_html_comments(html);
         for needle in [
             "<title>",
             "name=\"description\"",
@@ -183,7 +185,7 @@ mod tests {
             "property=\"og:description\"",
             "property=\"og:site_name\"",
         ] {
-            let count = html.matches(needle).count();
+            let count = visible.matches(needle).count();
             assert_eq!(count, 1, "{needle} appears {count} times");
         }
         // dx injects a loader at every `</body>`, including one inside a comment.
@@ -192,5 +194,22 @@ mod tests {
             1,
             "index.html must not mention the closing body tag except the real one"
         );
+    }
+
+    /// dx still sees a closing body tag inside a comment, so that count stays
+    /// on the raw file. Head-tag counts use the stripped text.
+    fn strip_html_comments(html: &str) -> String {
+        let mut out = String::with_capacity(html.len());
+        let mut rest = html;
+        while let Some(start) = rest.find("<!--") {
+            out.push_str(&rest[..start]);
+            rest = &rest[start + 4..];
+            match rest.find("-->") {
+                Some(end) => rest = &rest[end + 3..],
+                None => return out,
+            }
+        }
+        out.push_str(rest);
+        out
     }
 }

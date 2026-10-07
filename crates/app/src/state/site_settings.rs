@@ -363,7 +363,12 @@ mod tests {
         let (done, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             if rx.recv_timeout(limit).is_err() {
-                eprintln!("settings fetch test exceeded {limit:?}");
+                // libtest captures eprintln, then process::exit drops that buffer.
+                use std::io::Write;
+                let _ = writeln!(
+                    std::io::stderr(),
+                    "settings_fetch_runs_once_and_replaces_the_seed exceeded {limit:?}"
+                );
                 std::process::exit(101);
             }
         });

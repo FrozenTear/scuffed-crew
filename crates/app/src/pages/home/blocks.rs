@@ -852,7 +852,11 @@ mod tests {
         assert!(teams_html.contains("load teams."), "{teams_html}");
         assert!(teams_html.contains("fetch-error__retry"), "{teams_html}");
         assert!(
-            teams_html.contains("aria-label=\"Retry loading teams\""),
+            teams_html.contains("is-compact\" aria-label=\"Retry loading teams\""),
+            "{teams_html}"
+        );
+        assert!(
+            !teams_html.contains("role=\"status\" aria-label"),
             "{teams_html}"
         );
         assert!(teams_html.contains("Retry"), "{teams_html}");
