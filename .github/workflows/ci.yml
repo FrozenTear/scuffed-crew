@@ -146,7 +146,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Install dioxus-cli
-        run: cargo install --locked dioxus-cli@0.7.4
+        run: cargo install --locked dioxus-cli@0.7.9
 
       - name: Build app
         working-directory: crates/app

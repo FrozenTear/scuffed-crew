@@ -194,6 +194,9 @@ mod tests {
             1,
             "index.html must not mention the closing body tag except the real one"
         );
+        // `<!-->` and `<!--->` are empty comments. They must not swallow the
+        // following text the way a scan for `-->` would.
+        assert_eq!(strip_html_comments("a<!-->b<!--->c<!--x-->d"), "abcd");
     }
 
     /// dx still sees a closing body tag inside a comment, so that count stays
@@ -204,6 +207,11 @@ mod tests {
         while let Some(start) = rest.find("<!--") {
             out.push_str(&rest[..start]);
             rest = &rest[start + 4..];
+            // Empty comments close immediately. A later `-->` is a different comment.
+            if let Some(tail) = rest.strip_prefix('>').or_else(|| rest.strip_prefix("->")) {
+                rest = tail;
+                continue;
+            }
             match rest.find("-->") {
                 Some(end) => rest = &rest[end + 3..],
                 None => return out,
