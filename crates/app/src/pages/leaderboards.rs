@@ -5,9 +5,9 @@ use serde::Deserialize;
 
 use scuffed_api_client::ApiClient;
 
-use crate::components::ui::{Card, HeroSelect, Pill, PillTone, SeasonSelect};
+use crate::components::ui::{Card, HeroSelect, Pill, PillTone, SeasonSelect, use_stats_season};
 use crate::routes::Route;
-use crate::util::{encode_query, season_url};
+use crate::util::encode_query;
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 struct LeaderboardRow {
@@ -103,25 +103,36 @@ const PAGE_CSS: &str = r#"
     }
 "#;
 
+/// Hold keeps the previous "still waiting" state visible. A finished `None`
+/// would render as a load error while the season list is still in flight.
+enum LeaderboardLoad {
+    Hold,
+    Failed,
+    Rows(Vec<LeaderboardRow>),
+}
+
 #[component]
 pub fn Leaderboards() -> Element {
     let mut metric = use_signal(|| "winrate".to_string());
     let mut hero = use_signal(|| None::<String>);
-    let mut season = use_signal(|| None::<String>);
+    let season = use_stats_season();
     let rows = use_resource(move || {
         let m = metric();
         let h = hero();
-        let se = season();
+        let mut url = format!("/api/public/leaderboards?metric={m}&limit=50");
+        if let Some(h) = h {
+            url.push_str(&format!("&hero={}", encode_query(&h)));
+        }
+        // Empty while a saved season is unresolved — do not send it raw.
+        let url = season.fetch_path(&url);
         async move {
-            let mut url = format!("/api/public/leaderboards?metric={m}&limit=50");
-            if let Some(h) = h {
-                url.push_str(&format!("&hero={}", encode_query(&h)));
+            if url.is_empty() {
+                return LeaderboardLoad::Hold;
             }
-            let url = season_url(&url, se);
-            ApiClient::web()
-                .fetch::<Vec<LeaderboardRow>>(&url)
-                .await
-                .ok()
+            match ApiClient::web().fetch::<Vec<LeaderboardRow>>(&url).await {
+                Ok(list) => LeaderboardLoad::Rows(list),
+                Err(_) => LeaderboardLoad::Failed,
+            }
         }
     });
 
@@ -160,8 +171,9 @@ pub fn Leaderboards() -> Element {
                 div { class: "lb-hero",
                     SeasonSelect {
                         label: "Season".to_string(),
-                        value: season(),
-                        onchange: move |s| season.set(s),
+                        seasons: season.season_list(),
+                        value: season.selected_id(),
+                        onchange: move |s| season.choose(s),
                     }
                 }
             }
@@ -169,15 +181,15 @@ pub fn Leaderboards() -> Element {
             Card {
                 {
                     match rows.read().as_ref() {
-                        None => rsx! { p { class: "lb-status", "Loading..." } },
-                        Some(None) => rsx! { p { class: "lb-status", "Couldn't load leaderboards." } },
-                        Some(Some(list)) if list.is_empty() && hero().is_some() => rsx! {
+                        None | Some(LeaderboardLoad::Hold) => rsx! { p { class: "lb-status", "Loading..." } },
+                        Some(LeaderboardLoad::Failed) => rsx! { p { class: "lb-status", "Couldn't load leaderboards." } },
+                        Some(LeaderboardLoad::Rows(list)) if list.is_empty() && hero().is_some() => rsx! {
                             p { class: "lb-status", "No ranked matches on this hero yet." }
                         },
-                        Some(Some(list)) if list.is_empty() => rsx! {
+                        Some(LeaderboardLoad::Rows(list)) if list.is_empty() => rsx! {
                             p { class: "lb-status", "No ranked matches yet. Upload stats from the tracker." }
                         },
-                        Some(Some(list)) => rsx! {
+                        Some(LeaderboardLoad::Rows(list)) => rsx! {
                             table { class: "lb-table",
                                 thead {
                                     tr {
