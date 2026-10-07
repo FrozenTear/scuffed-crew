@@ -197,6 +197,7 @@ pub enum MapName {
     Route66,
     ShambaliMonastery,
     WatchpointGibraltar,
+    WatchpointGrimsvotn,
 
     // Hybrid
     BlizzardWorld,
@@ -260,6 +261,7 @@ impl MapName {
         Route66,
         ShambaliMonastery,
         WatchpointGibraltar,
+        WatchpointGrimsvotn,
         BlizzardWorld,
         Eichenwalde,
         Hollywood,
@@ -295,7 +297,8 @@ impl MapName {
             | Self::Rialto
             | Self::Route66
             | Self::ShambaliMonastery
-            | Self::WatchpointGibraltar => GameMode::Escort,
+            | Self::WatchpointGibraltar
+            | Self::WatchpointGrimsvotn => GameMode::Escort,
 
             Self::BlizzardWorld
             | Self::Eichenwalde
@@ -334,6 +337,7 @@ impl MapName {
             Self::Route66 => "Route 66",
             Self::ShambaliMonastery => "Shambali Monastery",
             Self::WatchpointGibraltar => "Watchpoint: Gibraltar",
+            Self::WatchpointGrimsvotn => "Watchpoint: Grímsvötn",
             Self::BlizzardWorld => "Blizzard World",
             Self::Eichenwalde => "Eichenwalde",
             Self::Hollywood => "Hollywood",
@@ -387,8 +391,10 @@ impl std::fmt::Display for MapName {
 }
 
 /// Fold a live/OCR map string to a comparable key: lowercase, strip
-/// combining-style punctuation, and drop Portuguese/Spanish accents so
-/// `"Paraíso"` / `"Paraiso"` and `"Esperança"` / `"Esperanca"` collide.
+/// combining-style punctuation, and drop accents so `"Paraíso"` / `"Paraiso"`,
+/// `"Esperança"` / `"Esperanca"`, and `"Watchpoint: Grímsvötn"` /
+/// `"Watchpoint: Grimsvotn"` (also `Grímsvotn` / `Grimsvötn`) collide.
+/// `ö`/`Ö` fold to `o` the same way `í` folds to `i`.
 fn fold_map_key(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
@@ -396,7 +402,7 @@ fn fold_map_key(s: &str) -> String {
             'Á' | 'À' | 'Ã' | 'Â' | 'á' | 'à' | 'ã' | 'â' => 'a',
             'É' | 'Ê' | 'é' | 'ê' => 'e',
             'Í' | 'í' => 'i',
-            'Ó' | 'Ô' | 'Õ' | 'ó' | 'ô' | 'õ' => 'o',
+            'Ó' | 'Ô' | 'Õ' | 'Ö' | 'ó' | 'ô' | 'õ' | 'ö' => 'o',
             'Ú' | 'Ü' | 'ú' | 'ü' => 'u',
             'Ç' | 'ç' => 'c',
             'Ñ' | 'ñ' => 'n',
@@ -432,8 +438,16 @@ impl std::str::FromStr for MapName {
             "rialto" => Ok(Self::Rialto),
             "route 66" | "route66" => Ok(Self::Route66),
             "shambali monastery" | "shambali" => Ok(Self::ShambaliMonastery),
-            "watchpoint gibraltar" | "watchpointgibraltar" | "watchpoint" => {
+            // Bare "watchpoint" stays Gibraltar so legacy rows do not move.
+            // Bare "gibraltar" matches the tracker alias for the same map.
+            "watchpoint gibraltar" | "watchpointgibraltar" | "watchpoint" | "gibraltar" => {
                 Ok(Self::WatchpointGibraltar)
+            }
+            // Distinctive word, with or without the Watchpoint prefix, and the
+            // no-space form. Diacritics fold to this key (grímsvötn, grimsvötn,
+            // grímsvotn, grimsvotn).
+            "watchpoint grimsvotn" | "watchpointgrimsvotn" | "grimsvotn" => {
+                Ok(Self::WatchpointGrimsvotn)
             }
             "blizzard world" | "blizzardworld" => Ok(Self::BlizzardWorld),
             "eichenwalde" => Ok(Self::Eichenwalde),
@@ -491,7 +505,7 @@ mod tests {
 
     #[test]
     fn all_covers_every_map_and_display_names_round_trip() {
-        assert_eq!(MapName::ALL.len(), 32);
+        assert_eq!(MapName::ALL.len(), 33);
         let mut names: Vec<&str> = MapName::ALL.iter().map(|m| m.display_name()).collect();
         let n = names.len();
         names.sort_unstable();
@@ -503,9 +517,10 @@ mod tests {
     }
 
     /// Live Maps-tab names (accented + unaccented) plus Neon Junction.
-    /// These six strings are the ones that used to land in Other.
+    /// The first six strings are the ones that used to land in Other.
+    /// Grímsvötn rows are the canonical name and the ASCII/diacritic folds.
     #[test]
-    fn six_map_string_forms_classify_mode() {
+    fn map_string_forms_classify_mode() {
         let cases = [
             ("Neon Junction", "Hybrid", MapName::NeonJunction),
             ("Paraíso", "Hybrid", MapName::Paraiso),
@@ -513,6 +528,48 @@ mod tests {
             ("Esperança", "Push", MapName::Esperanca),
             ("Esperanca", "Push", MapName::Esperanca),
             ("neon junction", "Hybrid", MapName::NeonJunction),
+            (
+                "Watchpoint: Grímsvötn",
+                "Escort",
+                MapName::WatchpointGrimsvotn,
+            ),
+            (
+                "Watchpoint: Grimsvotn",
+                "Escort",
+                MapName::WatchpointGrimsvotn,
+            ),
+            (
+                "Watchpoint: Grímsvotn",
+                "Escort",
+                MapName::WatchpointGrimsvotn,
+            ),
+            (
+                "Watchpoint: Grimsvötn",
+                "Escort",
+                MapName::WatchpointGrimsvotn,
+            ),
+            (
+                "WATCHPOINT: GRÍMSVÖTN",
+                "Escort",
+                MapName::WatchpointGrimsvotn,
+            ),
+            ("grimsvotn", "Escort", MapName::WatchpointGrimsvotn),
+            ("grímsvötn", "Escort", MapName::WatchpointGrimsvotn),
+            ("grimsvötn", "Escort", MapName::WatchpointGrimsvotn),
+            ("grímsvotn", "Escort", MapName::WatchpointGrimsvotn),
+            (
+                "watchpoint grimsvotn",
+                "Escort",
+                MapName::WatchpointGrimsvotn,
+            ),
+            (
+                "watchpointgrimsvotn",
+                "Escort",
+                MapName::WatchpointGrimsvotn,
+            ),
+            ("gibraltar", "Escort", MapName::WatchpointGibraltar),
+            ("Gibraltar", "Escort", MapName::WatchpointGibraltar),
+            ("Watchpoint", "Escort", MapName::WatchpointGibraltar),
         ];
         for (name, mode, parsed) in cases {
             assert_eq!(
@@ -525,6 +582,7 @@ mod tests {
                 match mode {
                     "Hybrid" => GameMode::Hybrid,
                     "Push" => GameMode::Push,
+                    "Escort" => GameMode::Escort,
                     other => panic!("unexpected mode fixture {other}"),
                 },
                 "game_mode() wrong for {name:?}"
@@ -534,6 +592,76 @@ mod tests {
                 mode,
                 "game_mode_label failed for {name:?}"
             );
+        }
+    }
+
+    /// Gibraltar strings stay Gibraltar. Grímsvötn strings stay Grímsvötn.
+    /// A bare `Watchpoint` is the Gibraltar alias and must not become Grímsvötn.
+    /// Bare `gibraltar` is the tracker alias for Gibraltar. Bare `grimsvotn`
+    /// (any diacritic fold) is Grímsvötn.
+    #[test]
+    fn watchpoint_grimsvotn_does_not_collide_with_gibraltar() {
+        assert_eq!(
+            MapName::WatchpointGrimsvotn.display_name(),
+            "Watchpoint: Grímsvötn"
+        );
+        // Legacy rows that stored a bare "watchpoint" stay Gibraltar.
+        assert_eq!(
+            "watchpoint".parse::<MapName>(),
+            Ok(MapName::WatchpointGibraltar)
+        );
+        assert_ne!(
+            "watchpoint".parse::<MapName>(),
+            Ok(MapName::WatchpointGrimsvotn)
+        );
+        // The prefixed phrase is Grímsvötn, not Gibraltar.
+        assert_eq!(
+            "watchpoint grimsvotn".parse::<MapName>(),
+            Ok(MapName::WatchpointGrimsvotn)
+        );
+        assert_ne!(
+            "watchpoint grimsvotn".parse::<MapName>(),
+            Ok(MapName::WatchpointGibraltar)
+        );
+        let grimsvotn = [
+            "Watchpoint: Grímsvötn",
+            "Watchpoint: Grimsvotn",
+            "Watchpoint: Grímsvotn",
+            "Watchpoint: Grimsvötn",
+            "watchpoint: grímsvötn",
+            "watchpoint grimsvotn",
+            "watchpointgrimsvotn",
+            "watchpointgrímsvötn",
+            "watchpoint_grimsvotn",
+            "grimsvotn",
+            "grímsvötn",
+            "grimsvötn",
+            "grímsvotn",
+            "GRÍMSVÖTN",
+            "Grimsvotn",
+        ];
+        let gibraltar = [
+            "Watchpoint: Gibraltar",
+            "watchpoint gibraltar",
+            "watchpointgibraltar",
+            "Watchpoint",
+            "watchpoint",
+            "WATCHPOINT",
+            "watchpoint_gibraltar",
+            "Watchpoint: gibraltar",
+            "gibraltar",
+            "Gibraltar",
+            "GIBRALTAR",
+        ];
+        for name in grimsvotn {
+            let parsed = MapName::from_str(name);
+            assert_eq!(parsed, Ok(MapName::WatchpointGrimsvotn), "{name:?}");
+            assert_ne!(parsed, Ok(MapName::WatchpointGibraltar), "{name:?}");
+        }
+        for name in gibraltar {
+            let parsed = MapName::from_str(name);
+            assert_eq!(parsed, Ok(MapName::WatchpointGibraltar), "{name:?}");
+            assert_ne!(parsed, Ok(MapName::WatchpointGrimsvotn), "{name:?}");
         }
     }
 

@@ -60,6 +60,11 @@ pub const PICKABLE_MAPS: &[PickableMap] = &[
         name: "Watchpoint: Gibraltar",
         game_mode: GameMode::Escort,
     },
+    PickableMap {
+        id: map_slug(MapName::WatchpointGrimsvotn),
+        name: "Watchpoint: Grímsvötn",
+        game_mode: GameMode::Escort,
+    },
     // Hybrid
     PickableMap {
         id: map_slug(MapName::BlizzardWorld),
@@ -208,6 +213,7 @@ pub const fn map_slug(map: MapName) -> &'static str {
         MapName::Route66 => "route_66",
         MapName::ShambaliMonastery => "shambali_monastery",
         MapName::WatchpointGibraltar => "watchpoint_gibraltar",
+        MapName::WatchpointGrimsvotn => "watchpoint_grimsvotn",
         MapName::BlizzardWorld => "blizzard_world",
         MapName::Eichenwalde => "eichenwalde",
         MapName::Hollywood => "hollywood",
@@ -333,7 +339,7 @@ mod tests {
             assert_eq!(parsed.game_mode(), map.game_mode);
             assert_eq!(map_slug(parsed), map.id);
         }
-        assert_eq!(PICKABLE_MAPS.len(), 32);
+        assert_eq!(PICKABLE_MAPS.len(), 33);
     }
 
     #[test]
@@ -357,5 +363,41 @@ mod tests {
         assert_eq!(game_mode_for_map("ilios"), GameMode::Control);
         assert_eq!(game_mode_for_map("unknown_map"), GameMode::Control);
         assert_eq!(game_mode_api_str(GameMode::Hybrid), "hybrid");
+    }
+
+    #[test]
+    fn game_mode_for_map_watchpoint_grimsvotn_is_escort() {
+        assert_eq!(game_mode_for_map("watchpoint_grimsvotn"), GameMode::Escort);
+        assert_eq!(game_mode_for_map("Watchpoint: Grímsvötn"), GameMode::Escort);
+        assert_eq!(game_mode_for_map("Watchpoint: Grimsvotn"), GameMode::Escort);
+        assert_eq!(game_mode_for_map("Watchpoint: Grímsvotn"), GameMode::Escort);
+        assert_eq!(game_mode_for_map("Watchpoint: Grimsvötn"), GameMode::Escort);
+        assert_eq!(
+            pickable_map_by_id("watchpoint_grimsvotn").map(|m| m.id),
+            Some("watchpoint_grimsvotn")
+        );
+        assert_eq!(
+            pickable_map_by_id("Watchpoint: Grímsvötn").map(|m| m.name),
+            Some("Watchpoint: Grímsvötn")
+        );
+        assert_eq!(
+            pickable_map_by_id("Watchpoint: Gibraltar").map(|m| m.id),
+            Some("watchpoint_gibraltar")
+        );
+        assert_eq!(
+            pickable_map_by_id("Watchpoint").map(|m| m.id),
+            Some("watchpoint_gibraltar")
+        );
+        assert_eq!(game_mode_for_map("grimsvotn"), GameMode::Escort);
+        assert_eq!(game_mode_for_map("grímsvötn"), GameMode::Escort);
+        assert_eq!(game_mode_for_map("watchpoint grimsvotn"), GameMode::Escort);
+        assert_eq!(
+            pickable_map_by_id("gibraltar").map(|m| m.id),
+            Some("watchpoint_gibraltar")
+        );
+        assert_eq!(
+            pickable_map_by_id("grimsvotn").map(|m| m.id),
+            Some("watchpoint_grimsvotn")
+        );
     }
 }
