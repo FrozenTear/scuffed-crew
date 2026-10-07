@@ -15,9 +15,9 @@
 //! measured from the reset baseline: a counter moved forward, the totals
 //! are not the same, the frame is not a decided result header, and the
 //! jump is not implausible. Wall-clock time is the caller's 75-second
-//! post-match grace, the 120-second stat gap, the
-//! 45-second wait before the first reset board counts, the 20-minute
-//! unfinished-session idle bound, and the map-vote debounce.
+//! post-match grace, the 120-second stat gap, the 45-second wait before
+//! the first reset board counts, the 20-minute unfinished-session idle
+//! bound, and the map-vote debounce.
 //!
 //! # States
 //!
@@ -81,7 +81,7 @@
 //! | PostResultStreak | same totals, or a decided header | Append. The hint stays. |
 //! | PostResultStreak | fresh-match board | Defer, then split on the next fresh board. The split seals the hint. An armed streak splits on this board. |
 //! | PostResultStreak | 120s gap | Split. Seal the hint. Keep this frame's header. |
-//! | PostResultStreak | end screen, both maps trusted and different | Split, armed or not. Seal the old hint. The new session takes the end-screen outcome and that map, including a map carried from the previous read of the same outcome. That map is re-stored on every result-word read and kept while the previous read is inside the confirm window. If either side has no trusted name, the word seals onto this session. A banner has no map, so a banner-only confirmation still seals onto this session. The close is an end-screen map, counted apart from a stat regression. |
+//! | PostResultStreak | end screen, both maps trusted and different | Split, armed or not. Seal the old hint. The new session takes the end-screen outcome and that map, including a map carried from the previous read of the same outcome. That map is re-stored on every word read (accolade, rank screen or end title), not a banner, and kept while the previous read is inside the confirm window. If either side has no trusted name, the word seals onto this session. A banner has no map, so a banner-only confirmation still seals onto this session. The close is an end-screen map, counted apart from a stat regression. |
 //! | PostResultStreak | hinted Tab, different map | Split. Seal the hint. The new session keeps this frame's header. [`plan_capture`] builds [`Obs::HintedDifferentMap`] only when the stored map is the top bar or the accolade and the gap has elapsed, or when the session has no board yet. A text-fallback map does not build it. |
 //! | PostMatch | word | Ignore the outcome. Adopt an accolade map when this session has none. Do not rewrite a text-fallback map once the outcome is recorded. |
 //! | PostMatch | start screen, not blocked | Split. No seal. The new session is Unknown and has no grace. |
@@ -134,6 +134,35 @@ impl CloseReason {
     }
 }
 
+/// The end-screen split, as the daemon log prints it.
+///
+/// `armed` is whether a boundary was already pending. `sealed_hint` is the
+/// hint stored on the session being closed. `accolade_map` is the name the
+/// new session takes; this close always has one. A missing hint prints
+/// `none`, the same spelling as a present hint's name, not `Some` or `None`.
+pub fn format_end_screen_split(
+    armed: bool,
+    sealed_hint: Option<MatchOutcome>,
+    accolade_map: &str,
+) -> String {
+    let hint = match sealed_hint {
+        Some(outcome) => outcome.to_string(),
+        None => "none".to_string(),
+    };
+    format!("armed={armed} sealed_hint={hint} accolade_map={accolade_map}")
+}
+
+/// Arm flag and accolade map for an end-screen split log.
+///
+/// `None` unless this open is an end-screen close that carries a map. The
+/// map is required: this close always has one, so there is no `none` stand-in.
+pub fn end_screen_log_fields(armed: bool, open: &OpenNew) -> Option<(bool, String)> {
+    if open.reason != CloseReason::EndScreenMap {
+        return None;
+    }
+    Some((armed, open.new_map.clone()?))
+}
+
 /// End-screen evidence kept on the session until a second progressed board
 /// clears it, or one progressed board after an arm, or a confirmed read
 /// seals it.
@@ -161,12 +190,14 @@ impl CloseReason {
 /// of a different result. Those checks are not the same as "this session's
 /// own end screen". A hint that matches the next result, or a session with
 /// no hint, can still take the next game's accolade. Replacing a hint of a
-/// different result locks the window, so the confirming read cannot
-/// relabel the map. A misread end title that sets the lock, and an arm,
-/// keep the text name: the confirming read records the result in that same
-/// tick, so the hint is not cleared and the text name stays. The text name
-/// changes only when progressed boards clear the hint before that end
-/// screen. Clearing the hint clears the lock. A disagreement between a
+/// different result sets a lock that closes the window, so the confirming
+/// read cannot relabel the map. A misread end title that sets that lock,
+/// and an arm, keep the text name. The tick that reads this session's own
+/// accolade records the result then, so the hint is not cleared and the
+/// text name stays. The text name changes only when progressed boards
+/// clear the hint before that end screen. Clearing the hint clears the
+/// lock, except when recovery drops the hint because its timestamp cannot
+/// be mapped onto this boot: the lock stays. A disagreement between a
 /// trusted top bar and a trusted accolade inside one match opens a new
 /// session.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -219,7 +250,9 @@ pub struct PollInput<'a> {
     /// may replace the stored name only while no boundary signal has been
     /// seen yet and [`Self::text_fallback_locked`] is false. A hint that
     /// matches the next result, or no hint at all, can still take the next
-    /// game's accolade. The lock is cleared when the hint is cleared.
+    /// game's accolade. The lock is cleared when the hint is cleared,
+    /// except when recovery drops the hint because its timestamp cannot be
+    /// mapped onto this boot: the lock stays.
     pub map_trusted: bool,
     pub hero: Option<&'a str>,
     pub signal: Option<MatchOutcome>,
@@ -2355,10 +2388,34 @@ mod tests {
             ("armed", armed),
         ] {
             match transition(&state, &end).effect {
-                Effect::Split { reason, .. } => {
+                Effect::Split { reason, seal, .. } => {
                     assert_eq!(reason, CloseReason::EndScreenMap, "{label}");
                     assert_eq!(reason.log(), "superseded by end-screen map", "{label}");
                     assert_ne!(reason.log(), CloseReason::StatRegression.log());
+                    let sealed = outcome_sealed_on_close(state.outcome, seal);
+                    let open = OpenNew {
+                        reason,
+                        seal_outcome: seal,
+                        new_outcome: MatchOutcome::Victory,
+                        new_map: Some("Ilios".into()),
+                        candidates: Vec::new(),
+                        new_result: None,
+                    };
+                    let (armed, map) = end_screen_log_fields(state.pending_boundary, &open)
+                        .expect("an end-screen split carries its accolade map");
+                    let line = format_end_screen_split(armed, sealed, &map);
+                    let hint = match sealed {
+                        Some(outcome) => outcome.to_string(),
+                        None => "none".to_string(),
+                    };
+                    assert_eq!(
+                        line,
+                        format!(
+                            "armed={} sealed_hint={hint} accolade_map=Ilios",
+                            state.pending_boundary
+                        ),
+                        "{label}"
+                    );
                 }
                 other => panic!("{label} end screen should split, got {other:?}"),
             }
@@ -4296,7 +4353,7 @@ mod tests {
     }
 
     #[test]
-    fn an_arm_or_a_held_reset_keeps_a_same_result_text_map() {
+    fn an_arm_or_a_primed_reset_keeps_a_same_result_text_map() {
         let now = t0();
         let hint = ResultMark {
             outcome: MatchOutcome::Victory,
@@ -4335,12 +4392,12 @@ mod tests {
             }
             other => panic!("expected a seal without a new map, got {other:?}"),
         }
-        let held = PollInput {
+        let primed = PollInput {
             pending_boundary: false,
             reset_streak: 1,
             ..armed
         };
-        match decide_poll(&held) {
+        match decide_poll(&primed) {
             PollDecision::Update(update) => {
                 assert_eq!(update.record_outcome, Some(MatchOutcome::Victory));
                 assert!(
@@ -4394,6 +4451,14 @@ mod tests {
         );
     }
 
+    fn adopted_map(decision: &PollDecision) -> Option<&str> {
+        match decision {
+            PollDecision::Update(update) => update.adopt_map.as_deref(),
+            PollDecision::Open(open) => open.new_map.as_deref(),
+            PollDecision::Keep | PollDecision::IgnoreContradictory { .. } => None,
+        }
+    }
+
     #[test]
     fn a_blocked_start_screen_or_a_held_board_keeps_the_text_map() {
         let now = t0();
@@ -4410,7 +4475,7 @@ mod tests {
             map: Some("Dorado"),
             map_trusted: false,
             hero: None,
-            signal: None,
+            signal: Some(MatchOutcome::Victory),
             signal_confirmed: false,
             accolade_map: Some("Busan"),
             start_screen: Some(screen),
@@ -4420,8 +4485,8 @@ mod tests {
             now,
         };
         assert!(
-            matches!(decide_poll(&blocked), PollDecision::Keep),
-            "a blocked start screen on the same frame must not adopt the accolade, got {:?}",
+            adopted_map(&decide_poll(&blocked)).is_none(),
+            "a blocked start screen on an unconfirmed word must not adopt the accolade, got {:?}",
             decide_poll(&blocked)
         );
         let held = PollInput {
@@ -4430,11 +4495,20 @@ mod tests {
             deferred: true,
             ..blocked
         };
-        assert!(
-            matches!(decide_poll(&held), PollDecision::Keep),
-            "a held board with no streak must not adopt the accolade, got {:?}",
-            decide_poll(&held)
-        );
+        match decide_poll(&held) {
+            PollDecision::Update(update) => {
+                assert!(
+                    update.adopt_map.is_none(),
+                    "a held board with no streak must not adopt the accolade"
+                );
+                assert_eq!(
+                    update.result.map(|mark| mark.outcome),
+                    Some(MatchOutcome::Victory),
+                    "the unconfirmed word is still recorded"
+                );
+            }
+            other => panic!("expected the word to update without a new map, got {other:?}"),
+        }
     }
 
     #[test]

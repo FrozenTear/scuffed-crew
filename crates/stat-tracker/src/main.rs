@@ -814,11 +814,14 @@ struct ActiveGame {
     deferred_hero: Option<String>,
     deferred_at: Option<chrono::DateTime<Utc>>,
     /// Set when `deferred` was carried from the session that just closed.
-    /// A deferral taken on this session stays false and is dropped if the
-    /// next stored board does not split.
+    /// The first stored capture writes that board and then clears this,
+    /// along with `deferred`. A deferral taken on this session stays false
+    /// and is dropped if the next stored board does not split.
     deferred_imported: bool,
     /// A different result replaced the hint. The confirming accolade must
-    /// not rewrite a text-fallback map after that. Cleared with the hint.
+    /// not rewrite a text-fallback map after that. Cleared with the hint,
+    /// except when recovery drops the hint because its timestamp cannot be
+    /// mapped onto this boot: the lock stays.
     text_fallback_locked: bool,
 }
 
@@ -1154,11 +1157,14 @@ async fn apply_poll_decision(
         .deferred
         .map(|counters| (counters, current.deferred_hero.clone(), current.deferred_at));
     let (candidates, end_screen) = match &decision {
-        boundary::PollDecision::Open(open) => {
-            let detail = (open.reason == boundary::CloseReason::EndScreenMap)
-                .then_some((current.pending_boundary, open.new_map.clone()));
-            (open.candidates.clone(), detail)
+        boundary::PollDecision::Open(open)
+            if open.reason == boundary::CloseReason::EndScreenMap =>
+        {
+            let (armed, map) = boundary::end_screen_log_fields(current.pending_boundary, open)
+                .expect("an end-screen split carries its accolade map");
+            (open.candidates.clone(), Some((armed, map)))
         }
+        boundary::PollDecision::Open(open) => (open.candidates.clone(), None),
         _ => (Vec::new(), None),
     };
     let commit = boundary::commit_poll(&mut state, decision, now);
@@ -1179,13 +1185,13 @@ async fn apply_poll_decision(
                 );
             }
             boundary::CloseReason::EndScreenMap => {
-                let (armed, accolade_map) = end_screen.unwrap_or((false, None));
+                let (armed, accolade_map) =
+                    end_screen.expect("an end-screen close was captured with its accolade map");
+                let split = boundary::format_end_screen_split(armed, closed.seal, &accolade_map);
                 tracing::info!(
                     reason = closed.reason.log(),
                     session_id = %new_id,
-                    armed,
-                    sealed_hint = ?closed.seal,
-                    accolade_map = accolade_map.as_deref().unwrap_or("none"),
+                    split = %split,
                     "auto-detect: new game boundary"
                 );
             }
@@ -1202,7 +1208,8 @@ async fn apply_poll_decision(
             g.map_source = Some(boundary::MapSource::Accolade);
         }
         // The deferred board belongs to the session being opened. The fresh
-        // state has none; put it back so the next stored capture writes it.
+        // state has none; put it back so the next stored capture writes it
+        // once. That capture clears the hold.
         if let Some((counters, hero, at)) = carried_deferred {
             g.deferred = Some(counters);
             g.deferred_hero = hero;
@@ -1364,12 +1371,18 @@ fn recover_active_game(data_dir: &std::path::Path) -> Option<ActiveGame> {
         deferred_hero: p.deferred_hero,
         deferred_at: p.deferred_at,
         deferred_imported: p.deferred_imported,
+        // The hint is dropped when its timestamp cannot be mapped onto
+        // this boot. The lock stays, so a text-fallback name does not
+        // become open for an accolade just because the hint did not
+        // survive the restart. The arm is the other way around: it is
+        // dropped in that same case, above.
         text_fallback_locked: p.text_fallback_locked,
     })
 }
 
 /// A result timestamp that cannot be mapped back onto this boot drops the
-/// hint only. The rest of the recovered session still loads.
+/// hint only. The rest of the recovered session still loads, including the
+/// text-fallback lock: losing the hint must not reopen the accolade window.
 fn recover_result_mark(
     outcome: Option<detect::MatchOutcome>,
     confirmed: bool,
@@ -2340,6 +2353,17 @@ async fn apply_capture_report(
                         now,
                     );
                     g.apply_boundary_state(&state);
+                }
+                // The imported board was written with this stored capture.
+                // Drop it so a later Tab that does not refresh the baseline
+                // does not write it again, and so it no longer blocks this
+                // session's own accolade. A deferral taken on this session
+                // stays: `deferred_imported` is false there.
+                if g.deferred_imported {
+                    g.deferred = None;
+                    g.deferred_hero = None;
+                    g.deferred_at = None;
+                    g.deferred_imported = false;
                 }
                 g.hero_auth = report.hero_auth.clone();
                 if let Some(map) = report.map.clone() {
@@ -5656,11 +5680,28 @@ mod tests {
     #[test]
     fn a_main_0_4_18_skeleton_recovers_as_untrusted_unlocked_text() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let now = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-        assert!(
-            now.ends_with('Z'),
-            "a 0.4.18 timestamp ends in Z, got {now}"
+        // Main persists through chrono's serde, which is RFC3339 with `Z`
+        // and a fractional second whenever the instant is not whole.
+        let when = Utc::now();
+        let when = if when.timestamp_subsec_nanos() == 0 {
+            when + chrono::Duration::nanoseconds(1)
+        } else {
+            when
+        };
+        let stamped = serde_json::to_value(when).expect("stamp");
+        let text = stamped.as_str().expect("rfc3339 string");
+        let parsed: chrono::DateTime<Utc> =
+            serde_json::from_value(stamped.clone()).expect("a skeleton timestamp parses");
+        assert_eq!(
+            serde_json::to_value(parsed).expect("round trip"),
+            stamped,
+            "a skeleton timestamp round-trips through chrono's serde"
         );
+        assert!(
+            text.contains('.'),
+            "a real skeleton timestamp carries a fraction, got {text}"
+        );
+        let now = text;
         // The eleven keys a 0.4.18 skeleton actually stored, with a mid-match
         // gate and the three hero-authority keys. Later fields stay absent so
         // a missing default fails this load.
@@ -7325,6 +7366,119 @@ mod tests {
         assert!(
             !night.elims(&held_on).await.contains(&1),
             "the held board did not land on the session that deferred it"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_carried_board_is_stored_once_and_the_accolade_can_correct_the_map() {
+        let mut night = Night::new().await;
+        night.begin_on("Busan", "Zenyatta");
+        night
+            .tab_once(
+                night_counters(18, 7, 9, 6400, 11000, 800),
+                "Zenyatta",
+                Some(2),
+                Some("Busan"),
+                NIGHT_CLEAN,
+            )
+            .await;
+        night.advance(Duration::from_secs(30));
+        night
+            .word(detect::MatchOutcome::Defeat, Some("Busan"))
+            .await;
+        night.advance(Duration::from_secs(50));
+        let carried = night_counters(1, 3, 0, 220, 80, 400);
+        night
+            .tab_once(
+                carried,
+                "Wrecking Ball",
+                Some(2),
+                Some("Busan"),
+                NIGHT_CLEAN,
+            )
+            .await;
+        assert_eq!(night.game().deferred, Some(carried));
+        night.advance(Duration::from_secs(20));
+        night.screen(boundary::StartScreen::HeroSelect).await;
+        let opened = night.id();
+        assert!(
+            night.game().deferred_imported,
+            "the held board is carried onto the session the start screen opened"
+        );
+        night.advance(Duration::from_secs(10));
+        night
+            .tab_text(
+                night_counters(3, 1, 0, 400, 100, 200),
+                "Wrecking Ball",
+                None,
+                "Dorado",
+                NIGHT_CLEAN,
+            )
+            .await;
+        assert_eq!(night.id(), opened);
+        assert_eq!(night.game().map.as_deref(), Some("Dorado"));
+        assert_eq!(
+            night.game().map_source,
+            Some(boundary::MapSource::TextFallback)
+        );
+        night.advance(Duration::from_secs(10));
+        night
+            .tab_text(
+                night_counters(4, 2, 1, 500, 150, 250),
+                "Wrecking Ball",
+                None,
+                "Dorado",
+                NIGHT_CLEAN,
+            )
+            .await;
+        let rows = night.elims(&opened).await;
+        assert_eq!(
+            rows.iter().filter(|elims| **elims == 1).count(),
+            1,
+            "the carried board is stored once, got {rows:?}"
+        );
+        assert!(
+            rows.contains(&3) && rows.contains(&4),
+            "each unidentified Tab is stored on its own, got {rows:?}"
+        );
+        // The hold is still set here unless the first store cleared it. A
+        // later identified Tab would clear it by refreshing the baseline,
+        // which would hide the leftover flag.
+        night.advance(Duration::from_secs(8 * 60));
+        night
+            .word(detect::MatchOutcome::Victory, Some("Ilios"))
+            .await;
+        assert_eq!(night.id(), opened, "the accolade stays on this session");
+        assert_eq!(night.game().map.as_deref(), Some("Ilios"));
+        assert_eq!(night.game().map_source, Some(boundary::MapSource::Accolade));
+        let snaps = night.store.get_session_snapshots(&opened).await.unwrap();
+        assert!(
+            !snaps.is_empty() && snaps.iter().all(|row| row.map_name == "Ilios"),
+            "the accolade rewrites the map after the hold is cleared, got {:?}",
+            snaps
+                .iter()
+                .map(|row| row.map_name.clone())
+                .collect::<Vec<_>>()
+        );
+        night.advance(Duration::from_secs(10));
+        night
+            .tab_text(
+                night_counters(5, 2, 1, 600, 180, 280),
+                "Wrecking Ball",
+                Some(0),
+                "Ilios",
+                NIGHT_CLEAN,
+            )
+            .await;
+        let rows = night.elims(&opened).await;
+        assert_eq!(
+            rows.iter().filter(|elims| **elims == 1).count(),
+            1,
+            "the identified Tab does not store the carried board again, got {rows:?}"
+        );
+        assert!(
+            rows.contains(&5),
+            "the identified Tab is stored on its own, got {rows:?}"
         );
     }
 

@@ -48,9 +48,10 @@ and damage, at or under elims max(2, previous/4), deaths max(1,
 previous/4), and damage previous/4, versus a mature board, and the first
 is at least 45 seconds later. The first is held off the current session
 and written onto the new one, at that capture's own time, when a second
-fresh board commits. A hero select or ban before that board is the other
-signal. A select after the held board does not split by itself. A ban
-after that held board does not split either. An unidentified or
+fresh board commits. That carried board is stored on the first Tab that
+writes it, and not again on later Tabs. A hero select or ban before that
+board is the other signal. A select after the held board does not split
+by itself. A ban after that held board does not split either. An unidentified or
 implausible row is stored and leaves the held board and the streak. A
 plausible continuation, or counted progress, clears them. A hero
 change by itself is not a split. A different row never counts as a reset.
@@ -58,11 +59,10 @@ A row with no id never counts. The new session's outcome is Unknown
 unless the split is the 120-second gap or a different-map Tab, which
 keeps that frame's header. An end screen whose map and the session map
 are both trusted and differ gives the new session that screen's result,
-whether or not a boundary is armed.
-A reset or a gap after a hint seals the hint on the old session. An
-implausible jump is still stored, and it does not become the reset
-baseline. One misread stat cell is still held. A long post-match screen
-does not split on the gap.
+whether or not a boundary is armed. A reset or a gap after a hint seals
+the hint on the old session. An implausible jump is still stored, and it
+does not become the reset baseline. One misread stat cell is still held.
+A long post-match screen does not split on the gap.
 
 A hinted session whose next Tab names a different map splits and seals
 the hint. The session has to already have a map. With no board of its
@@ -93,12 +93,12 @@ map of its own, it uses the map from the previous read of the same
 outcome. That map is stored again on every read, so reads under 60
 seconds apart can pass it along, and a read exactly 60 seconds later
 still carries it. A carried map older than that window is dropped. The
-late read still counts as a new unconfirmed word. This is
-harmless for the confirm itself, because the second read already
-agrees; the carried name is what the split uses when this tick has
-none. If either side has no trusted name, the confirming read seals
-onto the open session. A banner has no map, so a banner-only
-confirmation still seals onto the open session.
+late read still counts as a new unconfirmed word. This is harmless for
+the confirm itself, because the second read already agrees; the carried
+name is what the split uses when this tick has none. If either side has
+no trusted name, the confirming read seals onto the open session. A
+banner has no map, so a banner-only confirmation still seals onto the
+open session.
 
 Two mapless reads confirm each other and seal onto the open session.
 The same happens when a Tab capture is in flight: the cheap outcome
@@ -114,7 +114,9 @@ this match's real result leaving with that split when the two reads
 simply disagree, before the player has queued again. That close is
 logged as an end-screen map, counted apart from a stat regression.
 The log also records whether a boundary was armed, the sealed hint, and
-the accolade map, so a disagreement can be told from a real requeue.
+the accolade map. Those fields separate an armed split, or a split that
+sealed a hint, from the other end-screen closes. An unarmed close that
+sealed nothing logs the same shape for a disagreement and for a requeue.
 A gap and a hinted Tab stay a stat regression.
 
 A full-board text fallback is not a map for a different-map split. An
@@ -125,16 +127,17 @@ signals, the accolade must not rewrite the map or its snapshots. The
 tracker cannot tell that the accolade is this session's own end screen
 beyond those signals. A hint that matches the next result, or a session
 with no hint, can still take the next game's accolade. Replacing a
-hint of a different result closes the window, so the confirming read
-cannot relabel the map. A misread end title that sets the lock, and an
-arm, keep the text name. The confirming read records the result in that
-same tick, so the hint is not cleared and the text name stays. The text
-name changes only when progressed boards clear the hint before that end
-screen. Those boards also clear the lock.
-A carry older than the confirm window is dropped, so it cannot relabel
-the session. A later top bar that names the same map still upgrades the
-source. A skeleton written before 0.4.19 has no source; a map on that
-file is untrusted text.
+hint of a different result sets a lock that closes the window, so the
+confirming read cannot relabel the map. A misread end title that sets
+that lock, and an arm, keep the text name. The tick that reads this
+session's own accolade records the result then, so the hint is not
+cleared and the text name stays. The text name changes only when
+progressed boards clear the hint before that end screen. Those boards
+also clear the lock. A restart that cannot restore the hint's timestamp
+drops the hint and keeps the lock. A carry older than the confirm
+window is dropped, so it cannot relabel the session. A later top bar
+that names the same map still upgrades the source. A skeleton written
+before 0.4.19 has no source; a map on that file is untrusted text.
 
 ### Install
 
