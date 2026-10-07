@@ -53,12 +53,13 @@ pub fn parse_scoreboard_cells(
     let hero = find_hero(&lines).unwrap_or_else(|| "Unknown".to_string());
     let role = guess_role(&hero);
     let map_name = find_map(&lines).unwrap_or_default();
+    let game_mode = map_mode(&map_name).unwrap_or("").to_string();
 
     Some(PersonalMatch {
         id: None,
         hero,
         map_name,
-        game_mode: String::new(),
+        game_mode,
         role,
         outcome: outcome.to_string(),
         elims: stats.elims,
@@ -394,6 +395,11 @@ const MAPS: &[(&str, &str)] = &[
     ("Rialto", "rialto"),
     ("Route 66", "route 66"),
     ("Shambali Monastery", "shambali"),
+    // Grímsvötn is before the shared "watchpoint" prefix. The first
+    // substring hit wins, so a Grímsvötn key anywhere in the text beats
+    // the prefix. A bare "watchpoint" still falls through to Gibraltar.
+    ("Watchpoint: Grímsvötn", "grimsvotn"),
+    ("Watchpoint: Gibraltar", "gibraltar"),
     ("Watchpoint: Gibraltar", "watchpoint"),
     ("Blizzard World", "blizzard world"),
     ("Eichenwalde", "eichenwalde"),
@@ -422,9 +428,10 @@ const MAPS: &[(&str, &str)] = &[
     ("Throne of Anubis", "anubis"),
 ];
 
-/// Fold OCR-ambiguous glyphs to one canonical letter each so a mangled map
-/// name still matches. `1`, `|`, `l` all collapse to `i`; `0` collapses to `o`.
-/// Operates on already-lowercased text.
+/// Fold OCR-ambiguous glyphs and Latin diacritics so a mangled map name still
+/// matches. `1`, `|`, `l` collapse to `i`; `0` collapses to `o`. Precomposed
+/// accents fold to ASCII (`í`→`i`, `ö`→`o`, and the other letters this table
+/// already stores). Combining marks are dropped. Callers lowercase first.
 ///
 /// Applied to BOTH the OCR candidate text and the map patterns (see `find_map`,
 /// `fuzzy_match_map`, and the vote reader in `detect::match_start`). The fold is
@@ -433,13 +440,61 @@ const MAPS: &[(&str, &str)] = &[
 /// `hollywood`→`hoiiywood` on both sides still matches). Named for the class of
 /// misread it fixes: ILIOS (three capital I's) reads as `1LIOS`/`IL10S`/`|LIOS`.
 pub(crate) fn normalize_ocr_glyphs(s: &str) -> String {
-    s.chars()
-        .map(|c| match c {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        if ('\u{0300}'..='\u{036f}').contains(&c) {
+            continue;
+        }
+        let c = match c {
+            'á' | 'à' | 'ã' | 'â' | 'ä' | 'Á' | 'À' | 'Ã' | 'Â' | 'Ä' => 'a',
+            'é' | 'è' | 'ê' | 'ë' | 'É' | 'È' | 'Ê' | 'Ë' => 'e',
+            'í' | 'ì' | 'î' | 'ï' | 'Í' | 'Ì' | 'Î' | 'Ï' => 'i',
+            'ó' | 'ò' | 'ô' | 'õ' | 'ö' | 'Ó' | 'Ò' | 'Ô' | 'Õ' | 'Ö' => 'o',
+            'ú' | 'ù' | 'û' | 'ü' | 'Ú' | 'Ù' | 'Û' | 'Ü' => 'u',
+            'ç' | 'Ç' => 'c',
+            'ñ' | 'Ñ' => 'n',
+            'ý' | 'ÿ' | 'Ý' => 'y',
+            other => other,
+        };
+        out.push(match c {
             '1' | '|' | 'l' => 'i',
             '0' => 'o',
             other => other,
-        })
-        .collect()
+        });
+    }
+    out
+}
+
+/// Mode bucket for a canonical map display name from [`MAPS`].
+///
+/// The tracker stores the display string and fills `game_mode` from this
+/// table. It does not consult `scuffed_types::MapName`. A name that is not
+/// in the table has no bucket.
+pub(crate) fn map_mode(canonical_name: &str) -> Option<&'static str> {
+    match canonical_name {
+        "Circuit Royal"
+        | "Dorado"
+        | "Havana"
+        | "Junkertown"
+        | "Rialto"
+        | "Route 66"
+        | "Shambali Monastery"
+        | "Watchpoint: Gibraltar"
+        | "Watchpoint: Grímsvötn" => Some("Escort"),
+        "Blizzard World" | "Eichenwalde" | "Hollywood" | "King's Row" | "Midtown"
+        | "Neon Junction" | "Numbani" | "Paraiso" => Some("Hybrid"),
+        "Antarctic Peninsula"
+        | "Busan"
+        | "Ilios"
+        | "Lijiang Tower"
+        | "Nepal"
+        | "Oasis"
+        | "Samoa" => Some("Control"),
+        "Colosseo" | "Esperanca" | "New Queen Street" | "Runasapi" => Some("Push"),
+        "Aatlis" | "New Junk City" | "Suravasa" => Some("Flashpoint"),
+        "Hanaoka" | "Throne of Anubis" => Some("Clash"),
+        _ => None,
+    }
 }
 
 /// Fuzzy threshold for a map name of `len` non-space chars. Short names get a
@@ -753,12 +808,111 @@ mod hero_map_name_tests {
             canonical_map("WATCHPOINT").as_deref(),
             Some("Watchpoint: Gibraltar")
         );
+        assert_eq!(
+            canonical_map("GIBRALTAR").as_deref(),
+            Some("Watchpoint: Gibraltar")
+        );
         assert_eq!(canonical_map("ROUTE 66").as_deref(), Some("Route 66"));
         assert_eq!(
             canonical_map("NEON JUNCTION").as_deref(),
             Some("Neon Junction")
         );
         assert_eq!(canonical_map("garbage read"), None);
+    }
+
+    const GRIMSVOTN: &str = "Watchpoint: Grímsvötn";
+
+    #[test]
+    fn grimsvotn_canonical_name_is_byte_exact() {
+        // Same precomposed display string and Escort bucket as
+        // `scuffed_types::MapName::WatchpointGrimsvotn`.
+        let shared = scuffed_types::MapName::WatchpointGrimsvotn.display_name();
+        assert_eq!(shared, GRIMSVOTN);
+        assert!(
+            !shared
+                .chars()
+                .any(|c| ('\u{0300}'..='\u{036F}').contains(&c)),
+            "display name must be precomposed"
+        );
+        let name = canonical_map(GRIMSVOTN).expect("canonical name");
+        assert_eq!(name.as_bytes(), shared.as_bytes());
+        assert_eq!(
+            map_mode(&name),
+            Some(scuffed_types::MapName::game_mode_label(shared))
+        );
+        assert_eq!(map_mode(&name), Some("Escort"));
+        assert_eq!(map_mode("Watchpoint: Gibraltar"), Some("Escort"));
+        for &(display, _) in MAPS {
+            assert!(map_mode(display).is_some(), "{display} has no mode bucket");
+        }
+    }
+
+    #[test]
+    fn bare_grimsvotn_resolves_with_or_without_accents() {
+        for raw in [
+            "grimsvotn",
+            "GRIMSVOTN",
+            "Grimsvotn",
+            "GRIMSVÖTN",
+            "GRÍMSVÖTN",
+        ] {
+            let name = canonical_map(raw).unwrap_or_else(|| panic!("{raw} did not match"));
+            assert_eq!(name.as_bytes(), GRIMSVOTN.as_bytes(), "{raw}");
+        }
+    }
+
+    #[test]
+    fn prefixed_grimsvotn_wins_over_watchpoint() {
+        // The prefix is also the Gibraltar key. Grímsvötn's own key, or an
+        // OCR variant of it, has to win wherever it appears in the text.
+        for raw in [
+            "WATCHPOINT: GRIMSVOTN",
+            "WATCHPOINT GRIMSV0TN",
+            "WATCHPOINT: GRÍMSVÖTN",
+            "watchpoint grimsvotn",
+            "Watchpoint: Grímsvötn",
+            "GRLMSVOTN",
+            "GR1MSVOTN",
+        ] {
+            let name = match_map_in_text(raw).unwrap_or_else(|| panic!("{raw} did not match"));
+            assert_eq!(name.as_bytes(), GRIMSVOTN.as_bytes(), "{raw}");
+        }
+    }
+
+    #[test]
+    fn watchpoint_maps_do_not_collide() {
+        let gibraltar = [
+            "Watchpoint: Gibraltar",
+            "WATCHPOINT: GIBRALTAR",
+            "WATCHPOINT",
+            "watchpoint",
+            "GIBRALTAR",
+            "gibraltar",
+        ];
+        let grimsvotn = [
+            "grimsvotn",
+            "GRIMSVÖTN",
+            "Watchpoint: Grímsvötn",
+            "WATCHPOINT: GRIMSVOTN",
+            "WATCHPOINT GRIMSV0TN",
+            "GRLMSVOTN",
+            "GR1MSVOTN",
+            "GRÍMSVÖTN",
+        ];
+        for raw in gibraltar {
+            assert_eq!(
+                match_map_in_text(raw).as_deref(),
+                Some("Watchpoint: Gibraltar"),
+                "{raw} must not become Grímsvötn"
+            );
+        }
+        for raw in grimsvotn {
+            assert_eq!(
+                match_map_in_text(raw).as_deref(),
+                Some(GRIMSVOTN),
+                "{raw} must not become Gibraltar"
+            );
+        }
     }
 
     #[test]

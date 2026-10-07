@@ -17,6 +17,12 @@ that never got a result, and then sits idle for 20 minutes, is closed
 too, with outcome Unknown. Restarting the daemon no longer drops a
 stale open game without uploading its rows.
 
+Watchpoint: Grímsvötn is an Escort map. The tracker stores that name
+exactly, including í and ö. The name grimsvotn on its own, with or
+without accents and with or without the Watchpoint prefix, is that
+map. A bare Watchpoint is still Gibraltar. When the Grímsvötn name
+appears in the same text as that prefix, Grímsvötn wins.
+
 ### Install
 
 ```sh

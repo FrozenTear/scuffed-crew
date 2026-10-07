@@ -131,7 +131,7 @@ Winston Wrecking Ball Wuyang Zarya Zenyatta\n";
 const TRAINING_MAPS: &str = "\
 King's Row Circuit Royal Dorado Havana\n\
 Junkertown Rialto Route 66 Shambali Monastery\n\
-Watchpoint: Gibraltar Blizzard World Eichenwalde\n\
+Watchpoint: Gibraltar Watchpoint: Grímsvötn Blizzard World Eichenwalde\n\
 Hollywood Midtown Numbani Paraiso Neon Junction\n\
 Antarctic Peninsula Busan Ilios Lijiang Tower\n\
 Nepal Oasis Samoa Colosseo Esperanca\n\

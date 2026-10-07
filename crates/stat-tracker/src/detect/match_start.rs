@@ -439,8 +439,12 @@ const MAP_NAMES: &[&str] = &[
     "RIALTO",
     "ROUTE 66",
     "SHAMBALI",
+    // Bare "WATCHPOINT" stays the Gibraltar token. "GRIMSVOTN" is listed
+    // too; if that key is in the same text, the prefix token is dropped
+    // below so a Grímsvötn card is not also a Gibraltar candidate.
     "WATCHPOINT",
     "GIBRALTAR",
+    "GRIMSVOTN",
     "BLIZZARD WORLD",
     "EICHENWALDE",
     "HOLLYWOOD",
@@ -511,6 +515,16 @@ fn extract_map_names(text: &str) -> Vec<String> {
             found.push(name.to_string());
         }
     }
+    // A Grímsvötn key anywhere in the text wins over the shared prefix.
+    // Bare "WATCHPOINT" is still returned when that key is absent.
+    let grimsvotn_present = found
+        .iter()
+        .any(|name| crate::parse::normalize_ocr_glyphs(&name.to_lowercase()).contains("grimsvotn"));
+    if grimsvotn_present {
+        found.retain(|name| {
+            crate::parse::normalize_ocr_glyphs(&name.to_lowercase()) != "watchpoint"
+        });
+    }
     found
 }
 
@@ -534,6 +548,38 @@ mod tests {
         assert!(maps.contains(&"ILIOS".to_string()));
         assert!(maps.contains(&"NEPAL".to_string()));
         assert!(maps.contains(&"OASIS".to_string()));
+    }
+
+    #[test]
+    fn vote_reader_splits_the_two_watchpoint_maps() {
+        let gibraltar = extract_map_names("WATCHPOINT: GIBRALTAR");
+        assert!(gibraltar.contains(&"GIBRALTAR".to_string()));
+        assert!(!gibraltar.iter().any(|name| name == "GRIMSVOTN"));
+        assert_eq!(
+            crate::parse::canonical_map("GIBRALTAR").as_deref(),
+            Some("Watchpoint: Gibraltar")
+        );
+
+        let grimsvotn = extract_map_names("WATCHPOINT: GRÍMSVÖTN");
+        assert!(grimsvotn.contains(&"GRIMSVOTN".to_string()));
+        assert!(!grimsvotn.iter().any(|name| name == "GIBRALTAR"));
+        assert_eq!(
+            crate::parse::canonical_map("GRIMSVOTN").as_deref(),
+            Some("Watchpoint: Grímsvötn")
+        );
+
+        let bare = extract_map_names("WATCHPOINT");
+        assert!(bare.contains(&"WATCHPOINT".to_string()));
+        assert_eq!(
+            crate::parse::canonical_map("WATCHPOINT").as_deref(),
+            Some("Watchpoint: Gibraltar")
+        );
+        let prefixed = extract_map_names("WATCHPOINT: GRIMSVOTN");
+        assert!(prefixed.contains(&"GRIMSVOTN".to_string()));
+        assert!(
+            !prefixed.iter().any(|name| name == "WATCHPOINT"),
+            "the Grímsvötn key drops the shared prefix: {prefixed:?}"
+        );
     }
 
     #[test]
