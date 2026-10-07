@@ -81,7 +81,8 @@ mod tests {
     fn catalog_roles_match_role_for_hero_name() {
         assert_eq!(ROSTER.len(), scuffed_types::HEROES.len());
         for name in scuffed_types::HEROES {
-            let hero = hero_by_id(&hero_id(name)).unwrap_or_else(|| panic!("{name}"));
+            let hero =
+                hero_by_id(&hero_id(name)).unwrap_or_else(|| panic!("{name} is not on the roster"));
             assert_eq!(
                 hero.role,
                 scuffed_types::role_for_hero_name(name).unwrap(),
