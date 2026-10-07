@@ -863,12 +863,12 @@ mod tests {
         let history = use_hook(|| {
             let url = PROBE_URL.with(|slot| slot.borrow().clone());
             let history = std::rc::Rc::new(dioxus::history::MemoryHistory::with_initial_path(url));
-            // This native test has no `window.location`, so it cannot call
-            // `capture_initial_login_banner`. The memory history still holds the
-            // initial path, query included, until the child `Router` mounts and
-            // replaces it with `/login`. Capture from `current_route()` now,
-            // before that replace. The route this test reads afterwards is the
-            // replaced one.
+            // `capture_initial_login_banner` can run here. Off wasm,
+            // `window.location` is empty, so that probe would miss the URL.
+            // The memory history still holds the initial path, query included,
+            // until the child `Router` mounts and replaces it with `/login`.
+            // Capture from `current_route()` now, before that replace. The
+            // route this test reads afterwards is the replaced one.
             capture_login_banner_from_url(&history.current_route());
             PROBE_HISTORY.with(|slot| *slot.borrow_mut() = Some(history.clone()));
             history

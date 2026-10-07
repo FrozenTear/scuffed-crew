@@ -5,18 +5,19 @@
     <meta charset="UTF-8" />
     <meta content="text/html;charset=utf-8" http-equiv="Content-Type" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <meta
-      name="description"
-      content="The Scuffed Crew — multi-game EMEA gaming org. Small teams, real structure, scheduled play nights."
-    />
-    <meta property="og:title" content="The Scuffed Crew" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link rel="preload" as="style" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&amp;family=Space+Grotesk:wght@500;600;700&amp;family=JetBrains+Mono:wght@500&amp;display=swap" />
+    <meta name="description" content="A community site for teams, events, and scheduled play." />
+    <meta property="og:title" content="Community" />
     <meta
       property="og:description"
-      content="Multi-game EMEA gaming org. Small teams, real structure, scheduled play nights."
+      content="A community site for teams, events, and scheduled play."
     />
+    <meta property="og:site_name" content="Community" />
     <meta property="og:type" content="website" />
-    <meta name="theme-color" content="#17171d" />
     <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml" />
+    <meta name="theme-color" content="#17171d" />
     <style>
       html, body {
         margin: 0;
@@ -40,18 +41,15 @@
         pointer-events: none;
         z-index: 0;
       }
+      /* Fill matches BrandConfig::pending in crates/app/src/theme/brand.rs.
+         assets/favicon.svg and org_favicon_data_uri use the same hex.
+         The border stays lighter than the fill. */
       #sc-boot .mark {
         width: 40px;
         height: 40px;
         border-radius: 8px;
-        background: #8f73ff;
-        color: #fff;
-        font-weight: 700;
-        font-size: 0.85rem;
-        letter-spacing: 0.04em;
-        display: grid;
-        place-items: center;
-        box-shadow: 0 0 24px rgba(143, 115, 255, 0.35);
+        background: #808088;
+        border: 1px solid #9a9aa8;
       }
       #sc-boot .label {
         font-size: 0.75rem;
@@ -63,11 +61,11 @@
   </head>
   <body>
     <div id="sc-boot" aria-hidden="true">
-      <div class="mark">SC</div>
+      <div class="mark"></div>
       <div class="label">Loading</div>
     </div>
     <div id="main"></div>
-    <!-- Dioxus injects the WASM loader before </body> -->
+    <!-- Dioxus injects the WASM loader here, before the closing body tag. -->
     <script>
       // Hide boot skeleton once the app mounts content into #main
       (function () {

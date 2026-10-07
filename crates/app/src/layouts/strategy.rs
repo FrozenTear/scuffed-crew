@@ -1,8 +1,8 @@
 use dioxus::prelude::*;
-use scuffed_api_client::ApiClient;
 use scuffed_types::SiteSettings;
 
 use crate::routes::Route;
+use crate::state::use_site_settings;
 
 const STRATEGY_CSS: &str = r#"
     .strategy-nav {
@@ -93,7 +93,8 @@ const STRATEGY_CSS: &str = r#"
     }
 "#;
 
-/// Site-side gate. Reads `strategies_enabled` from GET /api/settings (default ON).
+/// Site-side gate. Uses the shared settings slot, including a `#sc-settings` seed.
+/// A missing payload fail-opens.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum StrategyPathPolicy {
     Open,
@@ -102,10 +103,6 @@ enum StrategyPathPolicy {
     /// GET /api/settings is still in flight on that alias. Not the fail-open default.
     AwaitingSettings,
     Blocked,
-}
-
-fn strategies_enabled_or_default(settings: Option<&SiteSettings>) -> bool {
-    settings.map(|s| s.strategies_enabled).unwrap_or(true)
 }
 
 /// `None` while the settings resource has not settled.
@@ -123,40 +120,35 @@ fn strategy_path_policy(path: &str, strategies_enabled: Option<bool>) -> Strateg
     }
 }
 
-/// Outer `None`: resource still pending (do not apply the default).
-/// Inner `None`: settled with no settings payload → default on.
-fn flag_from_loaded_settings(loaded: Option<Option<&SiteSettings>>) -> Option<bool> {
-    loaded.map(|settings| strategies_enabled_or_default(settings))
-}
-
-fn read_strategies_flag(settings: Resource<Option<SiteSettings>>) -> Option<bool> {
-    let loaded = settings.read();
-    flag_from_loaded_settings(loaded.as_ref().map(|payload| payload.as_ref()))
+/// `None` while settings are still unknown. A seed or a successful fetch is
+/// `Ok`. A failed fetch with nothing painted fail-opens (`Some(true)`).
+fn flag_from_resolved(resolved: Option<&Result<SiteSettings, String>>) -> Option<bool> {
+    match resolved {
+        None => None,
+        Some(Ok(settings)) => Some(settings.strategies_enabled),
+        Some(Err(_)) => Some(true),
+    }
 }
 
 #[component]
 pub fn StrategyLayout() -> Element {
     let navigator = use_navigator();
-    let site_settings = use_resource(|| async {
-        ApiClient::web()
-            .fetch::<SiteSettings>("/api/settings")
-            .await
-            .ok()
-    });
-    // Dioxus 0.7 effects re-run only when signals are read *inside* the effect.
-    // `use_route()` is a hook (`use_hook`) and must stay out here; `router().current()`
-    // subscribes this effect to navigation. Reading the resource here subscribes it
-    // to GET /api/settings. A copied `surface` value does neither.
+    let site_settings = use_site_settings();
+    // `resolved` is already memoized on the settings context. This memo reads
+    // that slot once per change. Dioxus 0.7 effects re-run only when signals
+    // are read *inside* the effect, so the effect reads `flag()` (Copy) and
+    // `router().current()`. `use_route()` is a hook and stays outside.
+    let flag = use_memo(move || flag_from_resolved(site_settings.resolved.read().as_ref()));
     use_effect(move || {
         let path = router().current::<Route>().to_string();
-        let flag = read_strategies_flag(site_settings);
-        if strategy_path_policy(&path, flag) == StrategyPathPolicy::RedirectPatchNotes {
+        let enabled = flag();
+        if strategy_path_policy(&path, enabled) == StrategyPathPolicy::RedirectPatchNotes {
             navigator.replace(Route::PatchNotes {});
         }
     });
 
     let path = router().current::<Route>().to_string();
-    let surface = strategy_path_policy(&path, read_strategies_flag(site_settings));
+    let surface = strategy_path_policy(&path, flag());
 
     if matches!(
         surface,
@@ -262,9 +254,31 @@ mod tests {
             strategy_path_policy("/strategy/patch-notes", Some(true)),
             StrategyPathPolicy::Open
         );
-        assert!(strategies_enabled_or_default(None));
-        assert_eq!(flag_from_loaded_settings(None), None);
-        assert_eq!(flag_from_loaded_settings(Some(None)), Some(true));
+        assert_eq!(flag_from_resolved(None), None);
+        assert_eq!(flag_from_resolved(Some(&Err("offline".into()))), Some(true));
+    }
+
+    #[test]
+    fn resolved_seed_uses_strategies_enabled() {
+        let off = settings_with_flag(false);
+        let on = settings_with_flag(true);
+        assert_eq!(flag_from_resolved(Some(&Ok(off))), Some(false));
+        assert_eq!(flag_from_resolved(Some(&Ok(on))), Some(true));
+        assert_eq!(
+            strategy_path_policy(
+                "/strategy/patch-notes",
+                flag_from_resolved(Some(&Ok(settings_with_flag(false))))
+            ),
+            StrategyPathPolicy::RedirectPatchNotes
+        );
+    }
+
+    fn settings_with_flag(enabled: bool) -> SiteSettings {
+        let flag = if enabled { "true" } else { "false" };
+        let raw = format!(
+            r#"{{"id":"site","org_name":"Org","site_description":"d","recruitment_open":true,"recruitment_message":"m","min_age":16,"forum_backend":"local","extra_relay_urls":"","strategies_enabled":{flag},"updated_at":"2026-10-06T00:00:00Z"}}"#
+        );
+        serde_json::from_str(&raw).expect("settings fixture")
     }
 
     #[test]
@@ -284,13 +298,23 @@ mod tests {
     #[test]
     fn redirect_effect_subscribes_inside_the_effect() {
         let src = include_str!("strategy.rs");
+        let memo_at = src.find("use_memo(move ||").expect("flag memo");
+        let memo = &src[memo_at..memo_at + 120];
+        assert!(
+            memo.contains("resolved.read()") && memo.contains("flag_from_resolved"),
+            "memo must read the shared settings slot, including an embedded seed"
+        );
         let start = src.find("use_effect(move || {").expect("redirect effect");
         let body = &src[start..];
         let end = body.find("});").expect("effect end");
         let effect = &body[..end];
         assert!(
-            effect.contains("read_strategies_flag"),
-            "effect must read settings inside so it re-runs when GET /api/settings settles"
+            effect.contains("flag()"),
+            "effect must read the memo so it re-runs when settings settle"
+        );
+        assert!(
+            !effect.contains("resolved()"),
+            "resolved() belongs in the memo so StrategyLayout does not clone settings twice"
         );
         assert!(
             effect.contains("router().current"),

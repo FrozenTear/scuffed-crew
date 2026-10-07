@@ -34,6 +34,17 @@ impl BrandConfig {
         }
     }
 
+    /// Neutral accent while public settings are still unknown.
+    ///
+    /// The product purple is a real brand. Painting it before settings arrive
+    /// flashes the wrong accent on orgs that chose something else. This gray
+    /// stays at least 3:1 against both theme backgrounds and against the dark
+    /// `--border` used by a focused field. The boot mark in `index.html`,
+    /// `assets/favicon.svg`, and [`org_favicon_data_uri`] use the same hex.
+    pub fn pending() -> Self {
+        Self::from_accents("#808088", "#808088")
+    }
+
     /// Resolve settings fields: empty → product default.
     pub fn from_settings(accent_dark: &str, accent_light: &str) -> Self {
         let d = accent_dark.trim();
@@ -47,9 +58,40 @@ impl BrandConfig {
     }
 }
 
-/// Active brand when settings are not loaded yet.
+/// Product-default purple for callers that are not the public boot path.
+///
+/// Unloaded public settings use [`BrandConfig::pending`], not this. This is
+/// the installed accent, not a placeholder.
 pub fn current() -> BrandConfig {
     BrandConfig::product_default()
+}
+
+/// SVG favicon for one org. Letters come from the org name; the fill is the
+/// pending gray so every clan does not share the same mark color and initials.
+pub fn org_favicon_data_uri(initials: &str) -> String {
+    let letters: String = initials
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .take(2)
+        .collect();
+    let svg = format!(
+        "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='6' fill='%23808088'/><text x='16' y='22' text-anchor='middle' font-family='system-ui,sans-serif' font-size='14' font-weight='700' fill='%23ffffff'>{letters}</text></svg>"
+    );
+    format!("data:image/svg+xml,{svg}")
+}
+
+/// `None` leaves the shell's static icon (settings still unknown).
+/// A non-empty org name always gets a data-URI mark, even when the initials
+/// are `CL`. A settled blank name keeps the neutral asset.
+pub fn runtime_favicon_href(settled_org_name: Option<&str>) -> Option<String> {
+    match settled_org_name
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+    {
+        None if settled_org_name.is_none() => None,
+        None => Some("/assets/favicon.svg".to_string()),
+        Some(name) => Some(org_favicon_data_uri(&scuffed_types::org_initials(name))),
+    }
 }
 
 /// Accept `#rgb` / `#rrggbb` / bare hex → lowercase `#rrggbb`.
@@ -100,6 +142,82 @@ mod tests {
     fn from_settings_empty_uses_product_default() {
         let b = BrandConfig::from_settings("", "");
         assert_eq!(b.accent_dark, "#8f73ff");
+    }
+
+    #[test]
+    fn pending_accent_is_not_the_product_purple() {
+        let pending = BrandConfig::pending();
+        let product = BrandConfig::product_default();
+        assert_ne!(pending.accent_dark, product.accent_dark);
+        assert_ne!(pending.accent_light, product.accent_light);
+        assert_ne!(pending.accent_dark, "#8f73ff");
+        assert_ne!(pending.accent_light, "#6d4aff");
+        assert_eq!(pending.accent_dark, pending.accent_light);
+    }
+
+    #[test]
+    fn pending_accent_meets_ui_contrast_on_both_themes() {
+        use crate::theme::tokens::{contrast_ratio, scope_decls};
+        let pending = BrandConfig::pending();
+        let css = crate::theme::theme_css(&pending);
+        let dark = scope_decls(&css, "[data-theme=\"dark\"]");
+        let light = scope_decls(&css, "[data-theme=\"light\"]");
+        for (scope, name) in [
+            (&dark, "--bg"),
+            (&dark, "--surface"),
+            (&dark, "--surface-2"),
+            (&dark, "--border"),
+            (&light, "--bg"),
+            (&light, "--surface"),
+            (&light, "--surface-2"),
+            (&light, "--border"),
+        ] {
+            let accent = scope
+                .get("--accent")
+                .unwrap_or_else(|| panic!("missing --accent"));
+            let bg = scope.get(name).unwrap_or_else(|| panic!("missing {name}"));
+            let ratio = contrast_ratio(accent, bg);
+            assert!(ratio >= 3.0, "{accent} on {name} {bg} = {ratio:.2}");
+        }
+        let accent = pending.accent_dark.as_str();
+        let white_on_pending = contrast_ratio("#ffffff", accent);
+        assert!(
+            white_on_pending >= 3.0,
+            "white on {accent} = {white_on_pending:.2}"
+        );
+        let boot = include_str!("../../index.html");
+        assert!(
+            boot.contains(accent),
+            "boot mark must use the same gray as BrandConfig::pending"
+        );
+    }
+
+    #[test]
+    fn favicon_assets_use_the_pending_gray_including_cl_initials() {
+        let pending = BrandConfig::pending();
+        let svg = include_str!("../../assets/favicon.svg");
+        assert!(
+            svg.contains(pending.accent_dark.as_str()),
+            "favicon.svg fill must match BrandConfig::pending"
+        );
+        let encoded = pending.accent_dark.replacen('#', "%23", 1);
+        let marked = org_favicon_data_uri("CL");
+        assert!(marked.contains(&encoded), "{marked}");
+        assert!(runtime_favicon_href(None).is_none());
+        assert_eq!(
+            runtime_favicon_href(Some("")),
+            Some("/assets/favicon.svg".to_string())
+        );
+        assert_eq!(
+            runtime_favicon_href(Some("   ")),
+            Some("/assets/favicon.svg".to_string())
+        );
+        let clan = runtime_favicon_href(Some("Clan League")).expect("mark");
+        assert!(clan.starts_with("data:image/svg+xml,"), "{clan}");
+        assert!(clan.contains(&encoded), "{clan}");
+        assert!(clan.contains("CL"), "{clan}");
+        let bangs = runtime_favicon_href(Some("!!!")).expect("punctuation still has a name");
+        assert!(bangs.starts_with("data:image/svg+xml,"), "{bangs}");
     }
 
     #[test]

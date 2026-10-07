@@ -11,7 +11,9 @@ fn default_false() -> bool {
     false
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+// `PartialEq` lets the app memoize a resolved copy. `use_memo` skips
+// subscribers when a refetch returns the same settings.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SiteSettings {
     pub id: String,
     pub org_name: String,
