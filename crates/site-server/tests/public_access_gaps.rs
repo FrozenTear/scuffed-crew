@@ -48,6 +48,7 @@ async fn test_state() -> AppState {
         dm_events: None,
         nip05_domain: None,
         nip05_republish_enabled: false,
+        public_settings: scuffed_site_server::state::PublicSettingsCache::new(),
     }
 }
 

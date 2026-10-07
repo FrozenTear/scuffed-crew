@@ -198,14 +198,16 @@ Wait until `dig +short ow.scuffedcrew.no` returns the VPS.
 ```caddy
 ow.scuffedcrew.no {
 	encode zstd gzip
-	@hashed path *.wasm *.js *.css
-	header @hashed Cache-Control "public, max-age=31536000, immutable"
 	header X-Content-Type-Options "nosniff"
 	header X-Frame-Options "DENY"
 	header Referrer-Policy "strict-origin-when-cross-origin"
 	reverse_proxy 127.0.0.1:HOST_PORT   # from data/secrets.env on the VPS
 }
 ```
+
+Do not add a Caddy `Cache-Control` header for `*.wasm` / `*.js` / `*.css`. The origin is the only cache policy (`cache_control_value` in `crates/site-server`): Dioxus `dxh`-hashed assets are `public, max-age=31536000, immutable`, unhashed `.js` / `.css` / `.wasm` are `no-cache`, other static files are one day, and the HTML shell is `no-cache`. A matcher on every `.js` / `.css` / `.wasm` path also covers unhashed files and the HTML fallback, and Caddy emits a second `Cache-Control` beside the origin's.
+
+`deploy/Caddyfile` is the repo template. Changing it does not edit the live host file (often `/etc/caddy/Caddyfile`). Copy this block there and reload Caddy yourself.
 
 ```bash
 # on VPS
@@ -217,6 +219,24 @@ systemctl reload caddy
 ```
 
 Template also lives in repo: `deploy/Caddyfile`.
+
+### Public settings in the HTML shell
+
+`GET /`, `GET /index.html`, and every client route that serves the SPA shell (`/strategies/foo`, `/admin/settings`, …) include the anonymous settings JSON immediately before `</head>`:
+
+```html
+<script id="sc-settings" type="application/json">{"id":"…","org_name":"…"}</script>
+```
+
+That object is the body of anonymous `GET /api/settings` (`load_anonymous_settings` mapped with `to_api_settings`, then `serde_json` — the same serializer as the JSON response). `<`, `>`, `&`, U+2028, and U+2029 are escaped as `\u003c`, `\u003e`, `\u0026`, `\u2028`, and `\u2029`, so a settings string cannot close the script element. The script block is cached with the blob. The rewritten head prefix is computed once for that blob and reused. The shell response stays `Cache-Control: no-cache`. `type="application/json"` is not executed (`script_type_is_executable` skips it), so it does not change the CSP script hashes.
+
+The same rewrite fills `<title>`, `og:title`, and `og:site_name` from `org_name`, and the description / `og:description` meta tags from `site_description`, when those tags are already in `index.html`. Inserted values are trimmed, then HTML-escaped. A blank `org_name` or `site_description` (empty after trimming) leaves that field's template text in place; the other field is still rewritten. If settings are unavailable the template text is left as built.
+
+`index.html` is read when the process starts and kept in memory. After rebuilding `dist/`, restart site-server so the new shell is what gets served. A running process keeps the previous file until then.
+
+The blob lives in memory on each server process for 10 seconds (`PUBLIC_SETTINGS_TTL` in `crates/site-server`). A `PUT /api/settings` or first-boot setup write drops it immediately and drops it again when the write returns, including when the write fails. A shell read that overlaps the save may include the row it just read in that response, but the row is not kept: the store is skipped when the generation has already moved, and the second drop clears a store that landed before the handler returned. A later request cannot serve that row as the stale fallback. A read that is still running after the cap can still fill the cache when it finishes, if the generation it started with is still current. That store's TTL starts when the read started, not when it finished. A timeout records its backoff against that starting generation, so a save during the wait does not suppress the next one. A direct database edit that bypasses those routes is not invalidated; the shell can keep the previous settings for at most about 10 seconds plus the 300 millisecond cap, because the TTL is measured from when the read started. A timed-out or failed re-read can still serve the last blob from the current generation. The embed read waits at most 300 milliseconds (`EMBED_SETTINGS_TIMEOUT`). That cap includes waiting behind an in-flight read that has not yet passed it. Once a refresh is already in flight past the cap, or refreshes are backing off, a miss returns immediately with the stale blob or with no embed. On timeout or error the page is still served, with that blob if one exists and without the `sc-settings` block otherwise. The cache is per process: a restart clears it, and two app instances do not share it.
+
+A missing file under `/assets/`, or a missing top-level file whose extension is a real static type (`js`, `mjs`, `css`, `wasm`, `map`, `svg`, `png`, `jpg`, `jpeg`, `webp`, `gif`, `avif`, `ico`, `woff`, `woff2`, `ttf`, `json` — for example `/favicon.ico` or `/foo.wasm`), is `404` with `Cache-Control: no-store` and a plain-text body. A multi-segment path outside `/assets/` is a client route even when the last segment looks like a file (`/wiki/config.json`, `/blog/foo.png`, `/articles/v1.2.png`, `/wiki/foo.bar`).
 
 The app sets `Content-Security-Policy-Report-Only` itself (same-origin scripts,
 Google Fonts, Discord/Google avatar hosts, and `NOSTR_RELAY_URL` for chat
