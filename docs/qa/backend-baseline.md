@@ -12,7 +12,8 @@ This pass records bugs. It does not change application behavior. Each confirmed 
 - Local server: `PORT=3030 cargo run -p scuffed-server` with `SURREALDB_URL`, `PRODUCTION`, and `ENCRYPTION_KEY` unset. That is the documented in-memory dev boot (`Database::connect_memory`, migrations, `seed_dev_data`). Compose / Podman was not used; it is the production install path and needs generated secrets.
 - The process logged `Clan platform server listening on 0.0.0.0:3030`, seeded user `devadmin` / member `devmember` (admin), and wrote no `ERROR` or panic lines during the probe below.
 - `dx build` (the `app-build` CI job) was not run. The community-page bug is demonstrated by a serde contract test against the live overview JSON, not by a browser click.
-- Full workspace `clippy` (native workspace minus the app and stat-tracker, plus wasm `scuffed-app`) was not re-run. `cargo clippy -p scuffed-site-server -p scuffed-server --all-targets -- -D warnings` exited 0 after the test edits.
+- Full workspace `clippy` (native workspace minus the app and stat-tracker, plus wasm `scuffed-app`) was not re-run. `cargo clippy -p scuffed-site-server -p scuffed-server --all-targets -- -D warnings` was re-run after the triage edits.
+- `qa_baseline` does not list `AppState` fields. It calls `scuffed_site_server::test_support::test_state`, the same constructor the in-crate route tests use. That module is `pub` and `#[doc(hidden)]` so integration tests can reach it without `cfg(test)`. PR #164 already adds `leaderboard_cache` inside that constructor.
 
 ## Test suite results
 
@@ -30,7 +31,7 @@ cargo test -p scuffed-api-client --no-default-features --features native
 
 Guardrail scripts and `cargo fmt --check` exited 0.
 
-`cargo test --workspace …` exited 0. Sum of every `test result` line in that run: **838 passed, 0 failed, 6 ignored**. Nothing was skipped for a missing feature. The 6 ignored tests are the regressions that already existed when that command ran (4 in `qa_baseline`, 1 strategy bearer test, 1 community overview test). Two more ignored tests were added after that run (`missing_public_content_is_not_found_not_internal_error`, `strategy_heroes_returns_catalog`). A follow-up pass added ten more ignored tests (bugs 9–18 below). They are `#[ignore]` only. A second full workspace run was not done. Default `cargo test -p scuffed-site-server --test qa_baseline` after the follow-up exited 0 with 13 ignored. `cargo clippy -p scuffed-site-server --all-targets -- -D warnings` exited 0 after those edits.
+`cargo test --workspace …` exited 0. Sum of every `test result` line in that run: **838 passed, 0 failed, 6 ignored**. Nothing was skipped for a missing feature. The 6 ignored tests are the regressions that already existed when that command ran (4 in `qa_baseline`, 1 strategy bearer test, 1 community overview test). Two more ignored tests were added after that run (`missing_public_content_is_not_found_not_internal_error`, `strategy_heroes_returns_catalog`). A follow-up pass added ten more ignored tests (bugs 9–18 below). They are `#[ignore]` only. A second full workspace run was not done. The triage pass removed `unknown_api_get_is_json_404` (covered by PR #156) and added `deactivated_officer_is_not_an_officer_channel_recipient`. Default `cargo test -p scuffed-site-server --test qa_baseline` after that pass is the command in the test section below. `cargo clippy -p scuffed-site-server --all-targets -- -D warnings` and the same clippy invocation for `scuffed-server` were re-run after the triage edits.
 
 | Target | Result |
 |---|---|
@@ -58,8 +59,13 @@ Ignored tests fail when run on purpose:
 cargo test -p scuffed-site-server --test qa_baseline -- --ignored --test-threads=1
 cargo test -p scuffed-server --bin scuffed-server owner_bearer -- --ignored
 cargo test -p scuffed-server --bin scuffed-server strategy_heroes_returns_catalog -- --ignored
+cargo test -p scuffed-server --bin scuffed-server deactivated_officer_is_not_an_officer_channel_recipient -- --ignored
 cargo test -p scuffed-app --bin scuffed-app public_overview_accepts -- --ignored
+cargo test -p scuffed-site-server --lib full_map_still_locks -- --ignored
+cargo test -p scuffed-site-server --lib trusted_peer_without_xff_ignores_x_real_ip -- --ignored
 ```
+
+Triage re-run: default `cargo test -p scuffed-site-server --test qa_baseline` exited 0 (0 passed, 12 ignored). The ignored commands above each failed on the assertion named in the bug entry. `cargo clippy -p scuffed-site-server -p scuffed-server --all-targets -- -D warnings` exited 0.
 
 Each assertion below is the failure from that run.
 
@@ -89,7 +95,7 @@ Each assertion below is the failure from that run.
 | `/api/forum/*` | public unless `min_role`; officer for boards | List ACL covered; pagination bugs 2 and 6 are not. |
 | `/api/nostr/*` including DM | member (health is lighter) | Challenge, verify, backup, import covered. Relay and `ENCRYPTION_KEY` were unset in the live process, so publish/sync could not be exercised end to end. |
 | `GET /api/settings`, `PUT /api/settings`, admin seasons, Discord webhook test | GET is public; writes are admin | Settings body on the live server is org/brand fields (no webhook secret). |
-| `GET /robots.txt`, `GET /sitemap.xml`, SPA fallback, `/uploads` | public | `seo.rs`. Fallback behavior is bug 5. |
+| `GET /robots.txt`, `GET /sitemap.xml`, SPA fallback, `/uploads` | public | `seo.rs`. Unknown `/api` GETs are bug 5, fixed by PR #156. |
 | `/api/strategy/strategies`, `/{id}`, `/heroes`, `/meta`, patch notes | public reads; member create; feature flag 404 when strategies are disabled | Bearer bug 3. Heroes stub is bug 7. |
 | `GET /api/strategy/strategies/mine` | member (`AuthUser`, so bearer works) | **No test request.** |
 | `POST /api/chat/auth-token` | member | **No test request.** Live empty body was `422` (missing `relay_url`). |
@@ -97,7 +103,7 @@ Each assertion below is the failure from that run.
 | `POST /api/chat/decrypt` | member | **No test request.** Live unauthenticated call was `401`. |
 | `GET /api/strategy/ws` | optional; user comes from the session cookie only | Handshake tests exist. Bearer identity is the same hole as bug 3. |
 
-Biggest untested areas: chat token provisioning and decrypt (both need `ENCRYPTION_KEY` and a relay to do anything real), `GET /api/strategy/strategies/mine`, and the strategy WebSocket once a bearer token is the only credential. HTTP path coverage elsewhere is broad; the holes are behavioral (pagination, roster `is_active`, SPA miss, cookie-vs-bearer).
+Biggest untested areas: chat token provisioning and decrypt (both need `ENCRYPTION_KEY` and a relay to do anything real), `GET /api/strategy/strategies/mine`, and the strategy WebSocket once a bearer token is the only credential. HTTP path coverage elsewhere is broad; the holes are behavioral (pagination, roster `is_active`, cookie-vs-bearer). Unknown `/api` misses are covered by PR #156.
 
 ## Live probe
 
@@ -134,7 +140,7 @@ The unknown-API live result differs from bug 5 because this process booted with 
 
 Severity is about what a caller can observe on a deployed site. Tests are ignored so CI stays green. Run them with the commands in the test section.
 
-### 1. High — deactivated members stay on public rosters
+### 1. Medium (fix early) — deactivated members stay on public rosters
 
 `GET /api/public/members/{id}` returns `404` once `member.is_active` is false. `GET /api/teams/{id}/roster`, `GET /api/public/teams/{id}`, and `roster_count` on `GET /api/public/overview` still list that member. Roster queries filter `plays_on.is_active`, and a ban sets `member.is_active = false` without dropping the edge (`crates/db/src/queries/roster.rs` `get_team_roster_named`, `crates/site-server/src/routes/roster.rs`, `crates/site-server/src/routes/public.rs`).
 
@@ -172,15 +178,11 @@ The existing `forum_unfiltered_list_hides_restricted_and_orphan_threads` test st
 
 The homepage reads `teams` directly. This mismatch is the community page.
 
-### 5. Medium — unknown `GET /api/*` is the SPA shell
+### 5. Fixed by #156 — unknown `GET /api/*` was the SPA shell
 
-`spa_service` treats a missing multi-segment path as a client route when `index.html` exists (`classify_spa_route` / `is_static_miss_path` in `crates/site-server/src/routes/seo.rs`). `/api/…` is multi-segment and has no static extension, so an unregistered GET is `200` `text/html`.
+On this branch, `spa_service` still treats a missing multi-segment path as a client route when `index.html` exists (`classify_spa_route` / `is_static_miss_path` in `crates/site-server/src/routes/seo.rs`). An unregistered `GET /api/…` is `200` `text/html` when a shell is present. The live process, which had no shell at boot, returned `404` `text/plain` for the same URL. `POST` to an unknown API path was `405`.
 
-- Expected: `404` with a non-HTML body.
-- Actual: `200`, `content-type: text/html; charset=utf-8`, body is the shell (`SPA-SHELL-MARKER` in the test).
-- Test: `unknown_api_get_is_json_404` in `crates/site-server/tests/qa_baseline.rs`.
-
-On the live process, which had no shell at boot, the same URL was `404` `text/plain`. `POST` to an unknown API path was `405`.
+PR #156 ("JSON 404 for unknown /api paths") answers unmatched `/api` and `/api/*` with `404` `{"error":"Not found"}`. Its `seo.rs` test `unmatched_api_paths_are_json_404_and_client_routes_stay_the_shell` already covers an unknown nested path, exact `/api`, a query string, and the other methods. The baseline test `unknown_api_get_is_json_404` overlapped that coverage, so it was removed rather than kept.
 
 ### 6. Low — forum `total` is the page length
 
@@ -192,10 +194,10 @@ On the live process, which had no shell at boot, the same URL was `404` `text/pl
 
 ### 7. Medium — strategy heroes page is fed an empty list
 
-`list_heroes` in `crates/server/src/routes/strategy.rs` is `Json(json!({ "data": [] }))`. `StrategyHeroes` in `crates/app/src/pages/strategy/heroes.rs` renders that `data` array (name, role, abilities, health).
+`list_heroes` in `crates/server/src/routes/strategy.rs` is `Json(json!({ "data": [] }))`. `StrategyHeroes` in `crates/app/src/pages/strategy/heroes.rs` deserializes `ListResponse { data: Vec<Hero> }` (`id`, `name`, `role`, `portrait_url`, `abilities`, `health`, `armor`, `shields`; each ability has `name`, `key`, `description`, optional `cooldown` and `icon_url`). `data` may also be named `heroes`.
 
-- Expected: the catalog is non-empty so the page can list heroes.
-- Actual: `200` `{"data":[]}` (live probe and the test).
+- Expected: a non-empty catalog in that shape.
+- Actual: `200` `{"data":[]}`. An empty `data` array deserializes and still fails the non-empty check. A non-empty array of the wrong object fails the deserialize.
 - Test: `strategy_heroes_returns_catalog` in `crates/server/src/routes/strategy.rs`.
 
 ### 8. Low — missing forum, wiki, and article rows say "Internal error"
@@ -216,7 +218,7 @@ Games, teams, and public member misses use a specific message (`Game not found`,
 
 A second pass re-read public reads, authorization, and validation. The roster leak (bug 1) and the forum `LIMIT` hole (bugs 2 and 6) are the same defects already listed. These additional ones failed under `--ignored`.
 
-### 9. Medium — any member can read a deactivated profile by id
+### 9. Low — any member can read a deactivated profile by id
 
 `GET /api/members` omits inactive rows unless the caller is officer+ and passes `include_inactive=true`. `GET /api/members/{id}` returns `get_member_safe` with no `is_active` check (`crates/site-server/src/routes/members.rs`). The public profile 404s the same id.
 
@@ -224,7 +226,7 @@ A second pass re-read public reads, authorization, and validation. The roster le
 - Actual: `200` with bio, role, and `is_active: false`.
 - Test: `recruit_cannot_read_deactivated_member_by_id` in `crates/site-server/tests/qa_baseline.rs`.
 
-### 10. Medium — a deactivated team stays public by id
+### 10. Low — a deactivated team stays public by id
 
 `list_teams` is `WHERE is_active = true`. `get_team` is a raw select, and `public_team_detail` 404s only when the row is missing (`crates/site-server/src/routes/public.rs`, `crates/db/src/queries/teams.rs`).
 
@@ -256,7 +258,7 @@ A ban sets `is_active` false. `submit_application` allows the user through becau
 - Actual: `200` with `org_role: recruit` and the bio.
 - Test: `accepting_application_does_not_reactivate_a_ban`.
 
-### 14. Medium — login does not use the register username rules
+### 14. Low — login does not use the register username rules
 
 `validate_local_username` (1–32 characters, `[A-Za-z0-9_-]`) is used by register and setup. `local_login` trims, lowercases, and looks the string up (`crates/site-server/src/routes/auth.rs`). A miss still runs the dummy Argon2 verify and stores the string in the lockout map.
 
@@ -272,13 +274,13 @@ A ban sets `is_active` false. `submit_application` allows the user through becau
 - Actual: the file is removed.
 - Test: `avatar_replace_does_not_delete_another_members_file`.
 
-### 16. Medium — event `time` is not a clock time
+### 16. Low — event `time` is not a clock time
 
-Create rejects control characters in `time` and then stores the string. The public ICS builder does `hour * 60 + minute + duration` in `u32` (`crates/site-server/src/calendar.rs`). `71582789:00` overflows `u32`. Debug builds panic on that overflow. Release builds wrap.
+Create rejects control characters in `time` and then stores the string. The public ICS builder does `hour * 60 + minute + duration_minutes` in `u32` (`crates/site-server/src/calendar.rs`). `71582789:00` overflows `hour * 60`. A valid clock `20:00` plus `duration_minutes: 4294967295` (`u32::MAX`) overflows the same sum. Debug builds panic on that overflow. Release builds wrap.
 
-- Expected: `POST /api/events` with that time is `400`.
-- Actual: `201` and the row stores `"time": "71582789:00"`.
-- Test: `event_time_must_be_a_clock_time`. The test stops at create so the ICS handler is not invoked.
+- Expected: both creates are `400`.
+- Actual: both are `201`.
+- Test: `event_time_must_be_a_clock_time`. One assertion checks both statuses. The test stops at create so the ICS handler is not invoked.
 
 ### 17. Medium — login lockout fails open when the map is full
 
@@ -288,13 +290,25 @@ Create rejects control characters in `time` and then stores the string. The publ
 - Actual: `retry_after_at` stays empty.
 - Test: `full_map_still_locks_a_new_username` in `crates/site-server/src/login_lockout.rs`.
 
-### 18. Medium — `X-Real-IP` selects the rate-limit bucket when `X-Forwarded-For` is absent
+### 18. Low — `X-Real-IP` selects the rate-limit bucket when `X-Forwarded-For` is absent
 
 From a trusted peer, a parsed `X-Forwarded-For` wins. If that header is missing, `X-Real-IP` is the key (`crates/site-server/src/rate_limit.rs`). Caddy sets `X-Forwarded-For`, so browser traffic through the published proxy does not hit this. A client that reaches the process with a trusted peer and no `X-Forwarded-For` can rotate buckets.
 
 - Expected: peer `127.0.0.1` plus `X-Real-IP: 203.0.113.50` and no `X-Forwarded-For` keys the bucket as `127.0.0.1`.
 - Actual: the key is `203.0.113.50`.
 - Test: `trusted_peer_without_xff_ignores_x_real_ip` in `crates/site-server/src/rate_limit.rs`.
+
+### 19. Medium (fix early) — officer chat still includes banned or deactivated officers
+
+Same root as bug 1. Roster reads keep a `plays_on` edge whose `is_active` is true and never look at `member.is_active`.
+
+`send_encrypted` walks that roster and gift-wraps to anyone whose `org_role` can access the officer channel and who has a pubkey (`crates/server/src/routes/chat.rs`, about lines 277–310). `sync_team_roster` adds those same pubkeys to the NIP-29 groups (`crates/chat/src/provisioning.rs`, about lines 185–215). A ban or deactivation that leaves the roster edge in place keeps the officer in the recipient set and in channel membership.
+
+- Expected: the only roster member is a deactivated officer with a pubkey, so send returns `422` and does not build a gift wrap for them.
+- Actual: `503` `{"error":"Cannot connect to relay for publishing"}`. The empty-recipient check already passed, so the deactivated officer was selected and the gift wrap was built. The relay is never reached on purpose.
+- Test: `deactivated_officer_is_not_an_officer_channel_recipient` in `crates/server/src/routes/chat.rs`. The sender is a different active officer, so the request is not rejected by `OfficerUser`.
+
+`sync_team_roster` is the same filter and needs a relay `GroupManager` before it adds anyone. That path is confirmed in source and does not have its own test.
 
 ## Confirmed in source, no separate regression
 

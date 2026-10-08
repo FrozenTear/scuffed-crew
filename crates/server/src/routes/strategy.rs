@@ -1348,7 +1348,37 @@ mod tests {
         assert_eq!(body["name"], "Private plan");
     }
 
-    /// The strategy heroes page fetches this route and renders `data`.
+    /// Shape `crates/app/src/pages/strategy/heroes.rs` deserializes.
+    /// A non-empty `data` array of the wrong object still fails this test.
+    #[derive(Debug, Deserialize)]
+    struct HeroAbility {
+        name: String,
+        key: String,
+        description: String,
+        cooldown: Option<f32>,
+        icon_url: Option<String>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct HeroRow {
+        id: String,
+        name: String,
+        role: String,
+        portrait_url: String,
+        abilities: Vec<HeroAbility>,
+        health: u32,
+        armor: u32,
+        shields: u32,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct HeroList {
+        #[serde(alias = "heroes")]
+        data: Vec<HeroRow>,
+    }
+
+    /// The strategy heroes page fetches this route and deserializes `data`
+    /// as heroes (id, name, role, portrait, abilities, health, armor, shields).
     /// The handler returns a hardcoded empty list, so the page stays blank.
     #[tokio::test]
     #[ignore = "known bug: GET /api/strategy/heroes is hardcoded to an empty list"]
@@ -1356,10 +1386,31 @@ mod tests {
         let state = test_state().await;
         let (status, body) = get_json(strategy_routes(state), "/api/strategy/heroes").await;
         assert_eq!(status, StatusCode::OK, "{body}");
-        let count = body["data"].as_array().map(|rows| rows.len()).unwrap_or(0);
+        let parsed: HeroList = serde_json::from_value(body.clone()).unwrap_or_else(|err| {
+            panic!("heroes payload is not the shape the strategy page deserializes ({err}): {body}")
+        });
         assert!(
-            count > 0,
+            !parsed.data.is_empty(),
             "strategy heroes page has nothing to render: {body}"
         );
+        let hero = &parsed.data[0];
+        let _shape = (
+            hero.id.as_str(),
+            hero.name.as_str(),
+            hero.role.as_str(),
+            hero.portrait_url.as_str(),
+            hero.health,
+            hero.armor,
+            hero.shields,
+        );
+        for ability in &hero.abilities {
+            let _ability = (
+                ability.name.as_str(),
+                ability.key.as_str(),
+                ability.description.as_str(),
+                ability.cooldown,
+                ability.icon_url.as_deref(),
+            );
+        }
     }
 }
