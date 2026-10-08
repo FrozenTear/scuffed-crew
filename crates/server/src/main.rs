@@ -184,9 +184,9 @@ async fn main() {
     // F-API-003: existing teams have no team_channel rows until backfill.
     scuffed_site_server::team_channels::backfill_on_startup(&state).await;
 
-    // Strategy collab and the same-origin Nostr relay share one admission
-    // limit. Unjoined strategy sockets count; only strategy sockets have a
-    // join deadline. See routes::ws and routes::relay_ws.
+    // Strategy collab admission. Every socket holds a permit until it closes,
+    // including sockets that never join a room. Unjoined sockets are closed
+    // after the join deadline. See routes::ws.
     let (ws_global, ws_per_ip) = routes::ws::WsAdmission::limits_from_env();
     let rooms = Arc::new(collab::RoomManager::with_global_limit(ws_global));
     let ws_state = routes::ws::WsState {
@@ -232,11 +232,7 @@ async fn main() {
         )
         .route(
             "/api/strategy/ws",
-            get(routes::ws::websocket_handler).with_state(ws_state.clone()),
-        )
-        .route(
-            "/relay",
-            get(routes::relay_ws::relay_websocket_handler).with_state(ws_state),
+            get(routes::ws::websocket_handler).with_state(ws_state),
         )
         .layer(DefaultBodyLimit::max(10 * 1024 * 1024))
         .layer(CompressionLayer::new())

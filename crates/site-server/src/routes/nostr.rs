@@ -1081,16 +1081,50 @@ async fn feed_caller_is_officer(
     state: &AppState,
     jar: &axum_extra::extract::cookie::CookieJar,
 ) -> bool {
-    let Some(cookie) = jar.get(&state.session_config.cookie_name) else {
+    feed_caller_is_officer_with(state.db.as_ref(), &state.session_config.cookie_name, jar).await
+}
+
+trait FeedCallerLookups {
+    async fn session_user(&self, token: &str) -> Result<Option<String>, scuffed_db::DbError>;
+    async fn member_by_user(
+        &self,
+        user_id: &str,
+    ) -> Result<Option<scuffed_db::Member>, scuffed_db::DbError>;
+    async fn member_suspended(&self, member_id: &str) -> Result<bool, scuffed_db::DbError>;
+}
+
+impl FeedCallerLookups for scuffed_db::Database {
+    async fn session_user(&self, token: &str) -> Result<Option<String>, scuffed_db::DbError> {
+        self.get_session(token).await
+    }
+
+    async fn member_by_user(
+        &self,
+        user_id: &str,
+    ) -> Result<Option<scuffed_db::Member>, scuffed_db::DbError> {
+        scuffed_db::Database::get_member_by_user(self, user_id).await
+    }
+
+    async fn member_suspended(&self, member_id: &str) -> Result<bool, scuffed_db::DbError> {
+        self.is_member_suspended_or_banned(member_id).await
+    }
+}
+
+async fn feed_caller_is_officer_with(
+    db: &impl FeedCallerLookups,
+    cookie_name: &str,
+    jar: &axum_extra::extract::cookie::CookieJar,
+) -> bool {
+    let Some(cookie) = jar.get(cookie_name) else {
         return false;
     };
-    let Ok(Some(uid)) = state.db.get_session(cookie.value()).await else {
+    let Ok(Some(uid)) = db.session_user(cookie.value()).await else {
         return false;
     };
-    let Ok(Some(member)) = state.db.get_member_by_user(&uid).await else {
+    let Ok(Some(member)) = db.member_by_user(&uid).await else {
         return false;
     };
-    let suspended = match state.db.is_member_suspended_or_banned(&member.id).await {
+    let suspended = match db.member_suspended(&member.id).await {
         Ok(flag) => flag,
         Err(e) => {
             tracing::error!(
@@ -1112,10 +1146,53 @@ fn group_post_denied(status: StatusCode, error: &str) -> (StatusCode, Json<Error
     )
 }
 
+trait GroupPostLookups {
+    async fn member_suspended(&self, member_id: &str) -> Result<bool, scuffed_db::DbError>;
+    async fn channel_by_group_id(
+        &self,
+        group_id: &str,
+    ) -> Result<Option<scuffed_db::TeamChannel>, scuffed_db::DbError>;
+    async fn on_team_roster(
+        &self,
+        member_id: &str,
+        team_id: &str,
+    ) -> Result<bool, scuffed_db::DbError>;
+}
+
+impl GroupPostLookups for scuffed_db::Database {
+    async fn member_suspended(&self, member_id: &str) -> Result<bool, scuffed_db::DbError> {
+        self.is_member_suspended_or_banned(member_id).await
+    }
+
+    async fn channel_by_group_id(
+        &self,
+        group_id: &str,
+    ) -> Result<Option<scuffed_db::TeamChannel>, scuffed_db::DbError> {
+        self.get_channel_by_group_id(group_id).await
+    }
+
+    async fn on_team_roster(
+        &self,
+        member_id: &str,
+        team_id: &str,
+    ) -> Result<bool, scuffed_db::DbError> {
+        self.is_on_team_roster(member_id, team_id).await
+    }
+}
+
 /// `group_id` may be written only by an active, non-banned member of that
 /// channel. Officer channels additionally require an officer or admin role.
+/// The checked value is trimmed; callers must use that same string as the `h` tag.
 async fn ensure_can_post_to_group(
     state: &AppState,
+    caller: &OrgMember,
+    group_id: &str,
+) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
+    ensure_can_post_to_group_with(state.db.as_ref(), caller, group_id).await
+}
+
+async fn ensure_can_post_to_group_with(
+    db: &impl GroupPostLookups,
     caller: &OrgMember,
     group_id: &str,
 ) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
@@ -1132,14 +1209,10 @@ async fn ensure_can_post_to_group(
             "Not allowed to post to this group",
         ));
     }
-    let suspended = state
-        .db
-        .is_member_suspended_or_banned(&caller.member.id)
-        .await
-        .map_err(|e| {
-            tracing::error!(error = %e, "suspension lookup failed during nostr post");
-            group_post_denied(StatusCode::INTERNAL_SERVER_ERROR, "Internal error")
-        })?;
+    let suspended = db.member_suspended(&caller.member.id).await.map_err(|e| {
+        tracing::error!(error = %e, "suspension lookup failed during nostr post");
+        group_post_denied(StatusCode::INTERNAL_SERVER_ERROR, "Internal error")
+    })?;
     if suspended {
         return Err(group_post_denied(
             StatusCode::FORBIDDEN,
@@ -1147,14 +1220,10 @@ async fn ensure_can_post_to_group(
         ));
     }
 
-    let channel = state
-        .db
-        .get_channel_by_group_id(group_id)
-        .await
-        .map_err(|e| {
-            tracing::error!(error = %e, "channel lookup failed during nostr post");
-            group_post_denied(StatusCode::INTERNAL_SERVER_ERROR, "Internal error")
-        })?;
+    let channel = db.channel_by_group_id(group_id).await.map_err(|e| {
+        tracing::error!(error = %e, "channel lookup failed during nostr post");
+        group_post_denied(StatusCode::INTERNAL_SERVER_ERROR, "Internal error")
+    })?;
     let Some(channel) = channel else {
         return Err(group_post_denied(
             StatusCode::NOT_FOUND,
@@ -1168,9 +1237,8 @@ async fn ensure_can_post_to_group(
         ));
     }
 
-    let on_roster = state
-        .db
-        .is_on_team_roster(&caller.member.id, &channel.team_id)
+    let on_roster = db
+        .on_team_roster(&caller.member.id, &channel.team_id)
         .await
         .map_err(|e| {
             tracing::error!(error = %e, "roster lookup failed during nostr post");
@@ -1191,6 +1259,21 @@ async fn ensure_can_post_to_group(
         ));
     }
     Ok(())
+}
+
+/// Trimmed group id for both the membership check and the event `h` tag.
+/// `None` means the post is ungrouped. Surrounding whitespace is not stored.
+async fn group_id_for_event(
+    state: &AppState,
+    caller: &OrgMember,
+    raw: Option<&str>,
+) -> Result<Option<String>, (StatusCode, Json<ErrorResponse>)> {
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    let group_id = raw.trim();
+    ensure_can_post_to_group(state, caller, group_id).await?;
+    Ok(Some(group_id.to_string()))
 }
 
 #[derive(Deserialize)]
@@ -1311,9 +1394,7 @@ pub async fn nostr_post(
     caller: OrgMember,
     Json(body): Json<CommunityPostRequest>,
 ) -> Result<Json<CommunityPostResponse>, (StatusCode, Json<ErrorResponse>)> {
-    if let Some(group_id) = body.group_id.as_deref() {
-        ensure_can_post_to_group(&state, &caller, group_id).await?;
-    }
+    let group_id = group_id_for_event(&state, &caller, body.group_id.as_deref()).await?;
 
     let relay_url = state.relay_url.clone().ok_or_else(|| {
         (
@@ -1378,7 +1459,7 @@ pub async fn nostr_post(
         &body.content,
         &body.hashtags,
         body.community_id.as_deref(),
-        body.group_id.as_deref(),
+        group_id.as_deref(),
         body.reply_to.as_deref(),
         body.root.as_deref(),
     )
@@ -1396,7 +1477,7 @@ pub async fn nostr_post(
     let post_context_id = body
         .community_id
         .clone()
-        .or_else(|| body.group_id.clone())
+        .or_else(|| group_id.clone())
         .unwrap_or_else(|| caller.member.id.clone());
 
     let db = state.db.clone();
@@ -2521,5 +2602,262 @@ mod feed_acl_tests {
             Ok(_) => panic!("not a roster member"),
         };
         assert_eq!(err.0, StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn padded_officer_group_id_is_checked_and_tagged_trimmed() {
+        let state = test_state().await;
+        let game = state.db.create_game("Overwatch", Some("OW")).await.unwrap();
+        let team = state
+            .db
+            .create_team("Alpha", &game.id, None, None, None)
+            .await
+            .unwrap();
+        state
+            .db
+            .create_team_channel(&team.id, "officers", GroupType::Officer, "ws://relay.test")
+            .await
+            .unwrap();
+
+        let recruit = state
+            .db
+            .create_member("pad-recruit", "Recruit", OrgRole::Recruit)
+            .await
+            .unwrap();
+        state
+            .db
+            .add_to_roster(&recruit.id, &team.id, TeamRole::Player)
+            .await
+            .unwrap();
+        let officer = state
+            .db
+            .create_member("pad-officer", "Officer", OrgRole::Officer)
+            .await
+            .unwrap();
+        state
+            .db
+            .add_to_roster(&officer.id, &team.id, TeamRole::Player)
+            .await
+            .unwrap();
+
+        let body = CommunityPostRequest {
+            content: "hello".into(),
+            hashtags: vec![],
+            community_id: None,
+            group_id: Some(" officers".into()),
+            reply_to: None,
+            root: None,
+        };
+        let err = match nostr_post(State(state.clone()), caller(recruit), Json(body)).await {
+            Err(err) => err,
+            Ok(_) => panic!("padded officer group id must still be rejected"),
+        };
+        assert_eq!(err.0, StatusCode::FORBIDDEN);
+        assert_eq!(err.1.0.error, "Not allowed to post to this group");
+
+        let h_tag = match group_id_for_event(&state, &caller(officer), Some(" officers")).await {
+            Ok(value) => value,
+            Err(err) => panic!("officer may post to the trimmed officer group: {}", err.0),
+        };
+        assert_eq!(h_tag.as_deref(), Some("officers"));
+
+        let mut known = HashSet::new();
+        known.insert("officers".into());
+        let groups = OfficerGroups::Known(known);
+        let leaked = visible_feed_events(vec![tagged("pad", " officers")], &groups, false);
+        assert_eq!(
+            ids_of(&leaked),
+            vec!["pad"],
+            "an untrimmed h tag would miss the officer set and show publicly"
+        );
+        let hidden = visible_feed_events(
+            vec![tagged("pad", h_tag.as_deref().unwrap())],
+            &groups,
+            false,
+        );
+        assert!(hidden.is_empty(), "the trimmed h tag stays officer-only");
+    }
+
+    fn active_officer() -> scuffed_db::Member {
+        scuffed_db::Member {
+            id: "member-1".into(),
+            user_id: "user-1".into(),
+            org_role: OrgRole::Officer,
+            display_name: "Officer".into(),
+            bio: None,
+            avatar_url: None,
+            timezone: None,
+            pronouns: None,
+            availability_status: None,
+            nostr_pubkey: None,
+            nostr_key_mode: None,
+            nostr_secret_key_encrypted: None,
+            joined_at: Utc::now(),
+            is_active: true,
+            main_role: None,
+            twitch: None,
+            twitter: None,
+        }
+    }
+
+    fn open_channel(group_id: &str) -> scuffed_db::TeamChannel {
+        scuffed_db::TeamChannel {
+            id: "channel-1".into(),
+            team_id: "team-1".into(),
+            group_id: group_id.into(),
+            group_type: GroupType::Public,
+            relay_url: "ws://relay.test".into(),
+            is_active: true,
+            created_at: Utc::now(),
+            synced_at: None,
+        }
+    }
+
+    fn assert_post_lookup_failed(err: (StatusCode, Json<ErrorResponse>)) {
+        assert_eq!(err.0, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(err.1.0.error, "Internal error");
+    }
+
+    struct FeedLookup {
+        fail_suspended: bool,
+    }
+
+    impl FeedCallerLookups for FeedLookup {
+        async fn session_user(&self, _token: &str) -> Result<Option<String>, scuffed_db::DbError> {
+            Ok(Some("user-1".into()))
+        }
+
+        async fn member_by_user(
+            &self,
+            _user_id: &str,
+        ) -> Result<Option<scuffed_db::Member>, scuffed_db::DbError> {
+            Ok(Some(active_officer()))
+        }
+
+        async fn member_suspended(&self, _member_id: &str) -> Result<bool, scuffed_db::DbError> {
+            if self.fail_suspended {
+                Err(scuffed_db::DbError::Timeout)
+            } else {
+                Ok(false)
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn suspension_lookup_failure_treats_feed_caller_as_non_officer() {
+        use axum_extra::extract::cookie::{Cookie, CookieJar};
+
+        let jar = CookieJar::new().add(Cookie::new("sid", "token"));
+        let failed = feed_caller_is_officer_with(
+            &FeedLookup {
+                fail_suspended: true,
+            },
+            "sid",
+            &jar,
+        )
+        .await;
+        assert!(!failed, "a suspension lookup error is not an officer");
+
+        let clear = feed_caller_is_officer_with(
+            &FeedLookup {
+                fail_suspended: false,
+            },
+            "sid",
+            &jar,
+        )
+        .await;
+        assert!(
+            clear,
+            "the same officer is recognized when the lookup succeeds"
+        );
+    }
+
+    enum PostLookupFail {
+        Suspended,
+        Channel,
+        Roster,
+    }
+
+    struct PostLookup {
+        mode: PostLookupFail,
+    }
+
+    impl GroupPostLookups for PostLookup {
+        async fn member_suspended(&self, _member_id: &str) -> Result<bool, scuffed_db::DbError> {
+            match self.mode {
+                PostLookupFail::Suspended => Err(scuffed_db::DbError::Timeout),
+                PostLookupFail::Channel | PostLookupFail::Roster => Ok(false),
+            }
+        }
+
+        async fn channel_by_group_id(
+            &self,
+            group_id: &str,
+        ) -> Result<Option<scuffed_db::TeamChannel>, scuffed_db::DbError> {
+            match self.mode {
+                PostLookupFail::Channel => Err(scuffed_db::DbError::Timeout),
+                PostLookupFail::Roster => Ok(Some(open_channel(group_id))),
+                PostLookupFail::Suspended => panic!("channel lookup runs after suspension"),
+            }
+        }
+
+        async fn on_team_roster(
+            &self,
+            _member_id: &str,
+            _team_id: &str,
+        ) -> Result<bool, scuffed_db::DbError> {
+            match self.mode {
+                PostLookupFail::Roster => Err(scuffed_db::DbError::Timeout),
+                PostLookupFail::Suspended | PostLookupFail::Channel => {
+                    panic!("roster lookup runs after channel")
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn group_post_lookup_failures_are_denied() {
+        let caller = caller(active_officer());
+        let suspended = match ensure_can_post_to_group_with(
+            &PostLookup {
+                mode: PostLookupFail::Suspended,
+            },
+            &caller,
+            "officers",
+        )
+        .await
+        {
+            Err(err) => err,
+            Ok(()) => panic!("suspension lookup failure"),
+        };
+        assert_post_lookup_failed(suspended);
+
+        let channel = match ensure_can_post_to_group_with(
+            &PostLookup {
+                mode: PostLookupFail::Channel,
+            },
+            &caller,
+            "officers",
+        )
+        .await
+        {
+            Err(err) => err,
+            Ok(()) => panic!("channel lookup failure"),
+        };
+        assert_post_lookup_failed(channel);
+
+        let roster = match ensure_can_post_to_group_with(
+            &PostLookup {
+                mode: PostLookupFail::Roster,
+            },
+            &caller,
+            "officers",
+        )
+        .await
+        {
+            Err(err) => err,
+            Ok(()) => panic!("roster lookup failure"),
+        };
+        assert_post_lookup_failed(roster);
     }
 }

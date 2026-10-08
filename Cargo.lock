@@ -10873,7 +10873,6 @@ dependencies = [
  "sha2",
  "thiserror 2.0.18",
  "tokio",
- "tokio-tungstenite 0.26.2",
  "tower",
  "tower-http",
  "tracing",

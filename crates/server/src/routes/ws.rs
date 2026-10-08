@@ -28,10 +28,9 @@ pub(crate) const MAX_WS_FRAME_SIZE: usize = 64 * 1024; // 64KB
 pub(crate) const MAX_WS_MESSAGE_SIZE: usize = 256 * 1024; // 256KB
 
 /// Strategy sockets that never send JoinRoom are closed after this long.
-/// The same-origin `/relay` socket does not use it.
 pub const WS_JOIN_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Default global cap for strategy and relay sockets together (`WS_MAX_CONNECTIONS`).
+/// Default global cap for strategy sockets (`WS_MAX_CONNECTIONS`).
 pub const DEFAULT_WS_MAX_CONNECTIONS: usize = 512;
 /// Default concurrent sockets per client IP (`WS_MAX_PER_IP`).
 pub const DEFAULT_WS_MAX_PER_IP: usize = 32;
@@ -42,12 +41,12 @@ pub struct WsState {
     pub app: AppState,
     pub rooms: Arc<RoomManager>,
     pub admission: Arc<WsAdmission>,
-    /// Join deadline for `/api/strategy/ws` only. `/relay` ignores this.
+    /// Join deadline for `/api/strategy/ws`.
     pub join_timeout: Duration,
 }
 
 /// Global semaphore plus a per-client-IP semaphore. One permit of each is held
-/// for the whole life of a socket (strategy or relay).
+/// for the whole life of a strategy socket.
 #[derive(Clone)]
 pub struct WsAdmission {
     global: Arc<Semaphore>,
@@ -150,8 +149,7 @@ pub(crate) fn ws_over_cap(err: WsAdmitError) -> Response {
 ///
 /// Every accepted socket holds a global and per-IP permit until the handler
 /// returns, including sockets that never join a room. A socket that has not
-/// sent JoinRoom within [`WS_JOIN_TIMEOUT`] is closed. `/relay` uses the same
-/// permits and does not use that deadline.
+/// sent JoinRoom within [`WS_JOIN_TIMEOUT`] is closed.
 pub async fn websocket_handler(
     ws: WebSocketUpgrade,
     State(state): State<WsState>,
@@ -832,7 +830,6 @@ mod strategies_gate_tests {
     use axum::Router;
     use axum::http::{HeaderMap, StatusCode};
     use axum::routing::get;
-    use futures::{SinkExt, StreamExt};
     use scuffed_auth::SessionConfig;
     use scuffed_db::Database;
     use scuffed_db::migrations::run_migrations;
@@ -842,7 +839,6 @@ mod strategies_gate_tests {
     use std::path::PathBuf;
     use std::time::Duration;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
     use super::super::strategy::strategies_gate_status;
 
@@ -924,10 +920,6 @@ mod strategies_gate_tests {
     fn ws_router(state: AppState) -> Router {
         Router::new()
             .route("/api/strategy/ws", get(websocket_handler))
-            .route(
-                "/relay",
-                get(crate::routes::relay_ws::relay_websocket_handler),
-            )
             .with_state(test_ws_state(state, 512, 32, WS_JOIN_TIMEOUT))
     }
 
@@ -1067,10 +1059,6 @@ mod strategies_gate_tests {
         let addr = listener.local_addr().expect("addr");
         let app = Router::new()
             .route("/api/strategy/ws", get(websocket_handler))
-            .route(
-                "/relay",
-                get(crate::routes::relay_ws::relay_websocket_handler),
-            )
             .with_state(test_ws_state(state, global, per_ip, join_timeout))
             .into_make_service_with_connect_info::<SocketAddr>();
         tokio::spawn(async move {
@@ -1162,83 +1150,24 @@ mod strategies_gate_tests {
     #[tokio::test]
     async fn trusted_proxy_forwarded_ips_do_not_share_a_bucket() {
         let state = test_state().await;
+        set_strategies_enabled(&state, true).await;
         // Loopback is a trusted proxy, so X-Forwarded-For is the client key.
         let addr = serve_ws(state, 8, 1, WS_JOIN_TIMEOUT).await;
 
-        let (status, _, held_a) = ws_upgrade(addr, "/relay", Some("203.0.113.10")).await;
+        let (status, _, held_a) = ws_upgrade(addr, "/api/strategy/ws", Some("203.0.113.10")).await;
         assert_eq!(status, StatusCode::SWITCHING_PROTOCOLS);
         let _held_a = held_a.expect("first forwarded client");
 
-        let (status, retry, _) = ws_upgrade(addr, "/relay", Some("203.0.113.10")).await;
+        let (status, retry, _) = ws_upgrade(addr, "/api/strategy/ws", Some("203.0.113.10")).await;
         assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
         assert!(retry.unwrap_or(0) >= 1);
 
-        let (status, _, held_b) = ws_upgrade(addr, "/relay", Some("203.0.113.20")).await;
+        let (status, _, held_b) = ws_upgrade(addr, "/api/strategy/ws", Some("203.0.113.20")).await;
         assert_eq!(
             status,
             StatusCode::SWITCHING_PROTOCOLS,
             "a different forwarded client must get its own bucket"
         );
         drop(held_b);
-    }
-
-    #[tokio::test]
-    async fn idle_relay_survives_join_timeout_that_closes_unjoined_strategy_socket() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("upstream bind");
-        let upstream_addr = listener.local_addr().unwrap();
-        tokio::spawn(async move {
-            loop {
-                let Ok((stream, _)) = listener.accept().await else {
-                    break;
-                };
-                tokio::spawn(async move {
-                    let Ok(mut socket) = tokio_tungstenite::accept_async(stream).await else {
-                        return;
-                    };
-                    while socket.next().await.is_some() {}
-                });
-            }
-        });
-
-        let mut state = test_state().await;
-        set_strategies_enabled(&state, true).await;
-        state.relay_url = Some(format!("ws://{upstream_addr}"));
-        let join = Duration::from_millis(200);
-        let addr = serve_ws(state, 8, 32, join).await;
-
-        let mut strategy_req = format!("ws://{addr}/api/strategy/ws")
-            .into_client_request()
-            .unwrap();
-        strategy_req
-            .headers_mut()
-            .insert("origin", "http://localhost:3000".parse().unwrap());
-        let (mut strategy, _) = tokio_tungstenite::connect_async(strategy_req)
-            .await
-            .expect("strategy upgrade");
-
-        let mut relay_req = format!("ws://{addr}/relay").into_client_request().unwrap();
-        relay_req
-            .headers_mut()
-            .insert("origin", "http://localhost:3000".parse().unwrap());
-        let (mut relay, _) = tokio_tungstenite::connect_async(relay_req)
-            .await
-            .expect("relay upgrade");
-
-        tokio::time::sleep(join + Duration::from_millis(400)).await;
-
-        let strategy_end = tokio::time::timeout(Duration::from_secs(1), strategy.next()).await;
-        assert!(
-            strategy_end.is_ok(),
-            "unjoined strategy socket should already be closed"
-        );
-
-        relay
-            .send(tokio_tungstenite::tungstenite::Message::Ping(
-                vec![1].into(),
-            ))
-            .await
-            .expect("idle relay socket must still be open past the join timeout");
     }
 }
