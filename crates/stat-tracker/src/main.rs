@@ -2284,10 +2284,9 @@ fn carried_counters_to_write(
 struct BoardFacts<'a> {
     counters: Counters,
     suspect: [bool; capture_gate::GATE_COLS],
-    /// Same bit as [`trusted_cells`]: the stats came from the identified
-    /// player's per-cell row. A raw-text fallback is false for both.
-    row_counts: bool,
     /// Per-cell parse succeeded. The capture gate treats false as low-trust.
+    /// The boundary plan's `row_counts` is this same bit: a raw-text
+    /// fallback does not count as a stat-reset row.
     trusted_cells: bool,
     row_id: Option<u32>,
     hero: &'a str,
@@ -2352,7 +2351,7 @@ fn plan_from_board(req: &CaptureRequest, facts: &BoardFacts<'_>) -> boundary::Ca
         age: gate_age,
         min_gap: STAT_SPLIT_MIN_GAP,
         classic_regressed,
-        row_counts: facts.row_counts,
+        row_counts: facts.trusted_cells,
         row_id: facts.row_id,
         baseline_row: req.baseline_row,
         confirmed_end: req.game_outcome.is_decided(),
@@ -3965,9 +3964,8 @@ async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<
             let facts = BoardFacts {
                 counters: raw_counters,
                 suspect,
-                // `trusted_cells` is `stats_from_row` on the identified row, which
-                // is the same predicate as `parse::row_counts`.
-                row_counts: trusted_cells,
+                // `trusted_cells` is `stats_from_row` on the identified row,
+                // which is the same predicate as `parse::row_counts`.
                 trusted_cells,
                 row_id: identified_row_id(player_row_idx),
                 hero: &parsed.hero,
@@ -4044,13 +4042,23 @@ async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<
                 );
             }
             for u in &gate.unlatches {
-                tracing::warn!(
-                    session_id = %target_session,
-                    col = u.col,
-                    raw = u.raw,
-                    revised_from = u.revised_from,
-                    "capture gate un-latched a cell (clean reads revised a latched value down)"
-                );
+                if u.replaced_unconfirmed {
+                    tracing::warn!(
+                        session_id = %target_session,
+                        col = u.col,
+                        raw = u.raw,
+                        revised_from = u.revised_from,
+                        "capture gate replaced an unconfirmed cell"
+                    );
+                } else {
+                    tracing::warn!(
+                        session_id = %target_session,
+                        col = u.col,
+                        raw = u.raw,
+                        revised_from = u.revised_from,
+                        "capture gate un-latched a cell (clean reads revised a latched value down)"
+                    );
+                }
             }
             if gate.state.low_trust {
                 tracing::warn!(
@@ -7032,6 +7040,10 @@ mod tests {
         wall: chrono::DateTime<Utc>,
         syncs: std::sync::Arc<std::sync::atomic::AtomicUsize>,
         uploads: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        /// Overrides the "a row index means per-cell stats" bit for the next
+        /// Tab. `None` keeps that bit. `Some(false)` is an identified row
+        /// whose cells were unreadable, so the text fallback was used.
+        cells_trusted: Option<bool>,
     }
 
     impl Night {
@@ -7047,6 +7059,7 @@ mod tests {
                 wall: Utc::now(),
                 syncs: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
                 uploads: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                cells_trusted: None,
             }
         }
 
@@ -7321,11 +7334,10 @@ mod tests {
                 parse::canonical_hero,
             );
             let career_panel = matches!(source, HeroSource::CareerPanel);
-            let cells_trusted = row.is_some();
+            let cells_trusted = self.cells_trusted.take().unwrap_or(row.is_some());
             let facts = BoardFacts {
                 counters: cur,
                 suspect,
-                row_counts: cells_trusted,
                 trusted_cells: cells_trusted,
                 row_id: row,
                 hero: &hero_resolved,
@@ -7469,7 +7481,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_fallback_board_yields_to_one_clean_read_and_a_ghost_stays_held() {
+    async fn a_fallback_board_yields_to_one_clean_read_and_a_later_ghost_is_rate_capped() {
         let mut night = Night::new().await;
         night.begin_on("Dorado", "Wrecking Ball");
         night
@@ -7514,6 +7526,29 @@ mod tests {
         let ghost = night.game().gate.expect("ghost stored");
         assert_eq!(ghost.accepted.elims, 2, "the rate cap still holds a ghost");
         assert!(!ghost.low_trust);
+    }
+
+    #[tokio::test]
+    async fn an_identified_row_can_still_be_an_untrusted_fallback() {
+        // The row index is set, and the cells were unreadable, so the
+        // numbers came from the text fallback. Trust does not follow the
+        // row index.
+        let mut night = Night::new().await;
+        night.begin_on("Dorado", "Wrecking Ball");
+        night.cells_trusted = Some(false);
+        night
+            .tab_once(
+                night_counters(2, 40, 18, 450, 0, 2),
+                "Wrecking Ball",
+                Some(0),
+                Some("Dorado"),
+                NIGHT_CLEAN,
+            )
+            .await;
+        let latched = night.game().gate.expect("fallback stored");
+        assert!(latched.low_trust);
+        assert!(latched.unconfirmed.iter().all(|&col| col));
+        assert_eq!(latched.accepted.assists, 40);
     }
 
     #[tokio::test]

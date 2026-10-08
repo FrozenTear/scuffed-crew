@@ -160,7 +160,10 @@ const DIM_ZERO_V_MAX: u8 = 148;
 const DIM_ZERO_SAT_MAX: u8 = 80;
 
 /// A hole narrower or shorter than this fraction of the glyph box is a
-/// bowl (6, 9), a closed 4, or the ring in "10", not the counter of a 0.
+/// bowl (6, 9) or a closed 4, not the counter of a 0. A "10" is not
+/// rejected by this fraction when the "1" sits close to the ring: the
+/// ring's own hole is still large. That pair is two ink components, and
+/// a zero is one ring.
 const DIM_ZERO_HOLE_EXTENT_MIN: u32 = 45;
 
 const DIM_LABEL_INK: u8 = 1;
@@ -172,18 +175,67 @@ pub struct DimZeroHit {
     /// Dim-zero ink lies in the outer `edge_cols` of the crop. The ring is
     /// clipped or bleeding, so the capture gate must not treat the 0 as a
     /// clean read.
+    ///
+    /// One in-band pixel is enough. [`has_edge_ink`] wants 12% of the same
+    /// band, about 13px on a 56px cell with a 2px band. A thin ring only
+    /// kisses the edge, and that fill fraction would miss it.
     pub touches_edge: bool,
 }
 
-/// Whether `img` is a single dim `0`: a gray ring the primary cell mask
+/// Eight-connected ink blobs. Returns early once a second blob is found.
+fn ink_component_count(label: &[u8], w: u32, h: u32) -> u32 {
+    let mut seen = vec![false; label.len()];
+    let mut count = 0u32;
+    let mut stack = Vec::new();
+    for y in 0..h {
+        for x in 0..w {
+            let start = (y * w + x) as usize;
+            if label[start] != DIM_LABEL_INK || seen[start] {
+                continue;
+            }
+            count += 1;
+            if count > 1 {
+                return count;
+            }
+            stack.push((x, y));
+            seen[start] = true;
+            while let Some((cx, cy)) = stack.pop() {
+                for dy in -1i32..=1 {
+                    for dx in -1i32..=1 {
+                        if dx == 0 && dy == 0 {
+                            continue;
+                        }
+                        let nx = cx as i32 + dx;
+                        let ny = cy as i32 + dy;
+                        if nx < 0 || ny < 0 || nx >= w as i32 || ny >= h as i32 {
+                            continue;
+                        }
+                        let i = (ny as u32 * w + nx as u32) as usize;
+                        if label[i] == DIM_LABEL_INK && !seen[i] {
+                            seen[i] = true;
+                            stack.push((nx as u32, ny as u32));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    count
+}
+
+/// Whether `img` is a single dim `0`: one gray ring the primary cell mask
 /// erases, with one hole that fills the middle of the glyph.
 ///
 /// Called only after that mask found almost no ink. A `6` or `9` also has
 /// one hole, but the hole is a bowl: it covers well under half the glyph
-/// on one axis. A closed `4` and the ring in `10` are the same. An `8` has
-/// two holes. Those stay unread so a failed cell is still rejected instead
-/// of being invented as zero. `edge_cols` is the same vertical band the
-/// bright-ink suspect check uses.
+/// on one axis. A closed `4` is the same. An `8` has two holes. A `10` is
+/// two ink blobs whenever the `1` does not touch the ring, including a
+/// gap of one to three pixels, so the hole-size rule is not what rejects
+/// it. Those stay unread so a failed cell is still rejected instead of
+/// being invented as zero. `edge_cols` is the same vertical band the
+/// bright-ink suspect check uses. The bright check wants a fill fraction
+/// of that band. This one flags any pixel in it, because a ring against
+/// the crop is only a few pixels of ink.
 pub fn dim_zero_glyph(img: &DynamicImage, edge_cols: u32) -> Option<DimZeroHit> {
     let owned;
     let rgb = if let Some(rgb) = img.as_rgb8() {
@@ -218,6 +270,9 @@ pub fn dim_zero_glyph(img: &DynamicImage, edge_cols: u32) -> Option<DimZeroHit> 
             }
             label[(y * w + x) as usize] = DIM_LABEL_INK;
             ink_count += 1;
+            // One pixel, not the 12% fill `has_edge_ink` uses. A thin ring
+            // in this band is a few pixels, and 12% of a 2-column band on
+            // a 56px cell is about 13px.
             if x < edge || x + edge >= w {
                 touches_edge = true;
             }
@@ -243,6 +298,12 @@ pub fn dim_zero_glyph(img: &DynamicImage, edge_cols: u32) -> Option<DimZeroHit> 
     let bbox_area = bw * bh;
     let fill = ink_count * 100 / bbox_area;
     if !(15..=75).contains(&fill) {
+        return None;
+    }
+    // A zero is one ring. A "10" with a gap, even one pixel, is two blobs.
+    // Eight-connected, so a thin ring that only meets on a diagonal stays
+    // one component. An empty column between a stroke and a ring does not.
+    if ink_component_count(&label, w, h) != 1 {
         return None;
     }
 
@@ -341,8 +402,9 @@ pub fn dim_zero_glyph(img: &DynamicImage, edge_cols: u32) -> Option<DimZeroHit> 
     }
     let hole_w = hole_max_x - hole_min_x + 1;
     let hole_h = hole_max_y - hole_min_y + 1;
-    // The counter of a zero fills the ring. A 6 or 9 bowl, a closed 4, and
-    // the 0 in a dim "10" are all smaller than this on one axis.
+    // The counter of a zero fills the ring. A 6 or 9 bowl and a closed 4
+    // are smaller than this on one axis. A "10" is rejected earlier, as
+    // two ink components, once the stroke does not touch the ring.
     if hole_w * 100 < bw * DIM_ZERO_HOLE_EXTENT_MIN || hole_h * 100 < bh * DIM_ZERO_HOLE_EXTENT_MIN
     {
         return None;
@@ -440,10 +502,14 @@ pub fn edge_ink_fraction(binary: &GrayImage, edge_cols: u32) -> (f64, f64) {
 }
 
 /// Whether a borderless binarized cell has ink touching either vertical edge
-/// beyond `threshold` fill — the "suspect" signal that the stat-column window is
+/// beyond `threshold` fill. The "suspect" signal that the stat-column window is
 /// clipping or bleeding a glyph. Uses the worse of the two sides (a clip touches
 /// only one edge). See [`edge_ink_fraction`]; threshold validated against the
 /// 2026-07-20 drift fixtures (see `capture_gate` module docs).
+///
+/// A dim zero does not use this fraction. Any one in-band pixel sets
+/// `touches_edge`, because a thin ring in a 2-column band is a few pixels
+/// and 12% of that band on a 56px cell is about 13px.
 pub fn has_edge_ink(binary: &GrayImage, edge_cols: u32, threshold: f64) -> bool {
     let (l, r) = edge_ink_fraction(binary, edge_cols);
     l.max(r) > threshold
@@ -1865,17 +1931,103 @@ pub(crate) mod dim_zero_fixtures {
         wrap(img)
     }
 
-    /// A dim "10": a thin stroke beside a ring. The ring's hole is close
-    /// enough to the box center for a centroid test, and narrower than half
-    /// the two-digit box.
+    /// A dim "10": a 4px stroke, then a 2px gap, then the zero fixture's ring.
+    /// The hole in the ring is large enough to pass the extent rule. The
+    /// stroke is a second ink component, which is what rejects it.
     pub(crate) fn dim_ten() -> DynamicImage {
+        dim_ten_gap(4, 2)
+    }
+
+    /// A `stroke_w` pixel "1" sitting `gap` empty columns left of the zero
+    /// fixture's ring (outer ink at x = 16).
+    pub(crate) fn dim_ten_gap(stroke_w: u32, gap: u32) -> DynamicImage {
         let mut img = cell(48, 56);
+        let ring_left = 16u32;
+        let stroke_right = ring_left - gap;
+        let stroke_left = stroke_right - stroke_w;
         for y in 14..42 {
-            for x in 10..14 {
+            for x in stroke_left..stroke_right {
                 img.put_pixel(x, y, DIM);
             }
         }
-        paint_ring(&mut img, 26.0, 28.0, 8.0, 14.0, 2.8, DIM);
+        paint_ring(&mut img, 24.0, 28.0, 8.0, 14.0, 3.0, DIM);
+        wrap(img)
+    }
+
+    /// Same ring as [`dim_zero_cell`] with a 4px stroke. The hole still
+    /// covers about half the box, so a 60% extent rule would drop it.
+    pub(crate) fn dim_bold_zero() -> DynamicImage {
+        let mut img = cell(48, 56);
+        paint_ring(&mut img, 24.0, 28.0, 8.0, 14.0, 4.0, DIM);
+        wrap(img)
+    }
+
+    /// Same ring with a 2px stroke. Eight-connected ink must keep this one
+    /// blob, or a thin zero splits into unread pieces.
+    pub(crate) fn dim_thin_zero() -> DynamicImage {
+        let mut img = cell(48, 56);
+        paint_ring(&mut img, 24.0, 28.0, 8.0, 14.0, 2.0, DIM);
+        wrap(img)
+    }
+
+    /// A rectangular frame whose fill is past 75% and whose hole still
+    /// spans half the box. Fill is the only check that rejects it.
+    pub(crate) fn dim_fill_frame() -> DynamicImage {
+        let mut img = cell(48, 56);
+        for y in 14..42 {
+            for x in 14..32 {
+                let in_hole = (18..27).contains(&x) && (20..33).contains(&y);
+                if !in_hole {
+                    img.put_pixel(x, y, DIM);
+                }
+            }
+        }
+        wrap(img)
+    }
+
+    /// A thin frame whose hole is more than 55% of the box. Hole size is
+    /// the only check that rejects it. A closed ring large enough for the
+    /// box floor already has more than 8 hole pixels, so the lower bound
+    /// is not separately reachable.
+    pub(crate) fn dim_wide_hole() -> DynamicImage {
+        let mut img = cell(48, 56);
+        for y in 14..42 {
+            for x in 16..32 {
+                let in_hole = (18..30).contains(&x) && (16..40).contains(&y);
+                if !in_hole {
+                    img.put_pixel(x, y, DIM);
+                }
+            }
+        }
+        wrap(img)
+    }
+
+    /// A frame whose hole sits far enough left that the centroid check is
+    /// the only one that rejects it.
+    pub(crate) fn dim_shifted_hole() -> DynamicImage {
+        let mut img = cell(48, 56);
+        for y in 12..42 {
+            for x in 10..30 {
+                let in_hole = (11..20).contains(&x) && (18..36).contains(&y);
+                if !in_hole {
+                    img.put_pixel(x, y, DIM);
+                }
+            }
+        }
+        wrap(img)
+    }
+
+    /// A 5x9 frame. The box floor is the only check that rejects it.
+    pub(crate) fn dim_tiny_frame() -> DynamicImage {
+        let mut img = cell(48, 56);
+        for y in 20..29 {
+            for x in 20..25 {
+                let in_hole = (21..24).contains(&x) && (21..28).contains(&y);
+                if !in_hole {
+                    img.put_pixel(x, y, DIM);
+                }
+            }
+        }
         wrap(img)
     }
 
@@ -1920,9 +2072,10 @@ pub(crate) mod dim_zero_fixtures {
 #[cfg(test)]
 mod dim_zero_tests {
     use super::dim_zero_fixtures::{
-        cell, dim_eight, dim_filled_blob, dim_four_closed, dim_nine_realistic, dim_six_cell,
-        dim_six_realistic, dim_speck, dim_stroke_cell, dim_ten, dim_wide_pair, dim_zero_cell,
-        dim_zero_touching_left_edge, paint_ring, wrap,
+        cell, dim_bold_zero, dim_eight, dim_fill_frame, dim_filled_blob, dim_four_closed,
+        dim_nine_realistic, dim_shifted_hole, dim_six_cell, dim_six_realistic, dim_speck,
+        dim_stroke_cell, dim_ten, dim_ten_gap, dim_thin_zero, dim_tiny_frame, dim_wide_hole,
+        dim_wide_pair, dim_zero_cell, dim_zero_touching_left_edge, paint_ring, wrap,
     };
     use super::dim_zero_glyph;
     use image::{DynamicImage, Rgb};
@@ -1999,5 +2152,29 @@ mod dim_zero_tests {
         assert!(!is_zero(&dim_filled_blob()), "filled blob");
         assert!(!is_zero(&dim_wide_pair()), "two-digit cell");
         assert!(!is_zero(&dim_speck()), "speck");
+    }
+
+    #[test]
+    fn a_bold_zero_still_reads_and_each_shape_check_has_its_own_reject() {
+        // 4px stroke on a 16px-wide ring. Hole extent is about half the
+        // box, so raising the 45% rule to 60% drops this zero.
+        assert!(is_zero(&dim_bold_zero()), "bold zero");
+        assert!(is_zero(&dim_thin_zero()), "thin zero stays one component");
+        assert!(!is_zero(&dim_fill_frame()), "fill");
+        assert!(!is_zero(&dim_wide_hole()), "hole size");
+        assert!(!is_zero(&dim_shifted_hole()), "centroid");
+        assert!(!is_zero(&dim_tiny_frame()), "box floor");
+    }
+
+    #[test]
+    fn a_close_ten_is_not_a_zero() {
+        // The extent rule only rejects a "10" once the stroke is far
+        // enough to widen the box. A gap of 1 to 3px still has a full
+        // ring, and it must stay unread because it is two components.
+        for gap in 1..=4 {
+            assert!(!is_zero(&dim_ten_gap(4, gap)), "4px stroke at gap {gap}");
+            assert!(!is_zero(&dim_ten_gap(3, gap)), "3px stroke at gap {gap}");
+        }
+        assert!(!is_zero(&dim_ten()), "fixture gap");
     }
 }

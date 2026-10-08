@@ -229,10 +229,18 @@ pub fn player_row_suspect_mask(
     mask
 }
 
-/// E/A above 99 or D above 50 is a column bleed, not a real scoreboard.
-/// Shared with the text fallback and the capture gate's first-capture check.
+/// Elims past this are a damage or timer digit in the elims column.
+pub(crate) const MAX_ELIMS: u32 = 99;
+/// Assists past this are a damage or timer digit in the assists column.
+pub(crate) const MAX_ASSISTS: u32 = 99;
+/// Deaths past this are a damage or timer digit in the deaths column.
+pub(crate) const MAX_DEATHS: u32 = 50;
+
+/// E/A above [`MAX_ELIMS`] / [`MAX_ASSISTS`] or D above [`MAX_DEATHS`] is a
+/// column bleed, not a real scoreboard. Shared with the text fallback and
+/// the capture gate's first-capture check.
 pub(crate) fn kill_columns_implausible(elims: u32, assists: u32, deaths: u32) -> bool {
-    elims > 99 || assists > 99 || deaths > 50
+    elims > MAX_ELIMS || assists > MAX_ASSISTS || deaths > MAX_DEATHS
 }
 
 fn parse_cell_number(s: &str) -> Option<u32> {
@@ -307,12 +315,19 @@ fn name_word_index(line: &str, player_name: &str) -> Option<usize> {
 /// `2 0 0 1,105 259 450 00:02` became elims 0, assists 1105, deaths 259.
 /// Rank badges sit *before* the name, so the numbers after the name are the
 /// stats. A clock token is removed first. The six have to be one unbroken
-/// run, with no word or `%` inside or after it: a dropped column plus one
-/// extra hero stat (`ACCURACY 35%`) is still six numbers and used to be
-/// accepted. A number that does not fit in `u32` refuses the line instead
-/// of being dropped. The first line that merely mentions the name (a join
-/// message) is skipped so a later stat line can still match. The six still
-/// have to pass the same kill-column ceilings as [`stats_from_row`].
+/// run. A word or `%` after that run refuses the line. `ACCURACY 35%` is
+/// five numbers, then a word; the run length refuses it, not the percent.
+/// `8 1 2 989 1,583 35%` is six numbers and a percent, and the percent
+/// refuses it. `8 1 2 989 1,583 35` has lost both the label and the
+/// percent, so a count of six still accepts that shifted line. A
+/// hero-panel label after a correct row (`450 OBJ CONTEST TIME 00:02`)
+/// refuses the line too. That is intentional: the per-cell path still has
+/// the row, and a label is not a seventh stat. A number that does not fit
+/// in `u32` refuses the line instead of being dropped. A chat line
+/// (`name: 1 2 3 4 5 6`) is skipped so a later stat line can match. The
+/// first line that merely mentions the name (a join message) is skipped
+/// the same way. The six still have to pass the same kill-column ceilings
+/// as [`stats_from_row`].
 fn text_fallback_stats(lines: &[&str], player_name: Option<&str>) -> Option<PlayerStats> {
     let name = configured_name(player_name)?;
     for line in lines {
@@ -322,6 +337,12 @@ fn text_fallback_stats(lines: &[&str], player_name: Option<&str>) -> Option<Play
         let Some(suffix) = suffix_after_name(line, name) else {
             continue;
         };
+        // `[Team] <name>: 1 2 3 4 5 6` is chat. The row's own line does not
+        // put a colon right after the name. Skip it so a later stat line
+        // can still match.
+        if suffix.trim_start().starts_with(':') {
+            continue;
+        }
         if let Some(stats) = stats_from_player_suffix(suffix) {
             return Some(stats);
         }
@@ -440,9 +461,16 @@ enum SuffixToken {
 
 /// The six stats after the name, or nothing.
 ///
-/// They have to be one consecutive run of numbers. A word or `%` inside
-/// that run, or after it, refuses the line. A word before the run is a
-/// title and is allowed. A number that overflows `u32` refuses the line.
+/// They have to be one consecutive run of numbers. A word or `%` after
+/// that run refuses the line, including a correct row whose hero-panel
+/// label follows the stats. A word before the run is a title and is
+/// allowed. A second run cannot appear: it would have to follow a word
+/// or a percent, which already refused the line. A number that overflows
+/// `u32` refuses the line.
+///
+/// Six numbers with the accuracy label and the percent both missing
+/// (`8 1 2 989 1,583 35`) are still accepted. Nothing in the line says
+/// the last figure is not mitigation.
 fn stat_run_after_name(suffix: &str) -> Option<[u32; 6]> {
     let tokens = suffix_tokens(suffix);
     if tokens.iter().any(|t| matches!(t, SuffixToken::Overflow)) {
@@ -450,7 +478,6 @@ fn stat_run_after_name(suffix: &str) -> Option<[u32; 6]> {
         return None;
     }
     let mut i = 0;
-    let mut run: Option<[u32; 6]> = None;
     while i < tokens.len() {
         if !matches!(tokens[i], SuffixToken::Number(_)) {
             i += 1;
@@ -468,9 +495,6 @@ fn stat_run_after_name(suffix: &str) -> Option<[u32; 6]> {
             );
             return None;
         }
-        if run.is_some() {
-            return None;
-        }
         if tokens[i..]
             .iter()
             .any(|t| matches!(t, SuffixToken::Word | SuffixToken::Percent))
@@ -478,9 +502,9 @@ fn stat_run_after_name(suffix: &str) -> Option<[u32; 6]> {
             tracing::debug!("rejecting text fallback: a word or percent follows the stat run");
             return None;
         }
-        run = Some([nums[0], nums[1], nums[2], nums[3], nums[4], nums[5]]);
+        return Some([nums[0], nums[1], nums[2], nums[3], nums[4], nums[5]]);
     }
-    run
+    None
 }
 
 fn suffix_tokens(s: &str) -> Vec<SuffixToken> {
@@ -973,6 +997,34 @@ mod tests {
             read_scoreboard(&[], None, shifted, "unknown", Some("FROZEN")).unwrap_err(),
             ScoreboardMiss::CellsUnreadable
         );
+        // Last six of this line are in the ceilings (E1 A2 D30 DMG989 H1583
+        // MIT35). Taking the last six would accept it. The first six of the
+        // line above fail the deaths ceiling, so that line does not pin this.
+        let last_six = "FROZEN 8 1 2 30 989 1,583 35";
+        assert_eq!(
+            read_scoreboard(&[], None, last_six, "unknown", Some("FROZEN")).unwrap_err(),
+            ScoreboardMiss::CellsUnreadable
+        );
+        // Six numbers and a percent. The run length is fine. The percent
+        // after the run is what refuses it.
+        let percent = "FROZEN 8 1 2 989 1,583 35%";
+        assert_eq!(
+            read_scoreboard(&[], None, percent, "unknown", Some("FROZEN")).unwrap_err(),
+            ScoreboardMiss::CellsUnreadable
+        );
+        // A hero-panel label after a correct row. Refusing it is intentional.
+        let labeled = "FROZEN 8 1 2 3,993 989 1,583 OBJ CONTEST TIME 00:02";
+        assert_eq!(
+            read_scoreboard(&[], None, labeled, "unknown", Some("FROZEN")).unwrap_err(),
+            ScoreboardMiss::CellsUnreadable
+        );
+        // The label and the percent are both gone. Six numbers are still
+        // accepted, shifted. Nothing in the line says 35 is not mitigation.
+        let unlabeled = "FROZEN 8 1 2 989 1,583 35";
+        let read = read_scoreboard(&[], None, unlabeled, "unknown", Some("FROZEN")).unwrap();
+        assert_eq!(read.matched.elims, 8);
+        assert_eq!(read.matched.damage, 989);
+        assert_eq!(read.matched.mitigation, 35);
         let overflow = "FROZEN 2 0 0 1,105 259 450 99999999999";
         assert_eq!(
             read_scoreboard(&[], None, overflow, "unknown", Some("FROZEN")).unwrap_err(),
@@ -1004,6 +1056,18 @@ mod tests {
         let read = read_scoreboard(&[], None, raw, "unknown", Some("FROZEN")).unwrap();
         assert!(!read.trusted_cells);
         assert_eq!(read.matched.elims, 8);
+        assert_eq!(read.matched.damage, 3993);
+        assert_eq!(read.matched.mitigation, 1583);
+    }
+
+    #[test]
+    fn a_chat_line_does_not_hide_the_stat_line() {
+        // The row's own line failed, and a chat line before it has six
+        // numbers after the name. Those are not the scoreboard.
+        let raw = "[Team] FROZEN: 1 2 3 4 5 6\nFROZEN 8 1 2 3,993 989 1,583";
+        let read = read_scoreboard(&[], None, raw, "unknown", Some("FROZEN")).unwrap();
+        assert_eq!(read.matched.elims, 8);
+        assert_eq!(read.matched.assists, 1);
         assert_eq!(read.matched.damage, 3993);
         assert_eq!(read.matched.mitigation, 1583);
     }

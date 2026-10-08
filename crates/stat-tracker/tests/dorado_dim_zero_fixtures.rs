@@ -62,6 +62,28 @@ fn dorado_frames_read_dim_zeros_inside_the_kill_ceilings() {
             "{} kill columns out of range: {numbers:?}",
             path.display()
         );
+        for (col, value) in cells.iter().enumerate() {
+            if numbers[col] == 0 {
+                assert_eq!(
+                    *value,
+                    "0",
+                    "{} col {col} parsed as 0 but the cell text is {value:?}",
+                    path.display()
+                );
+            }
+        }
+        // The early board on this night is E2 A0 D0 DMG1105 H259 MIT450.
+        // A dim zero read as 8 still sits inside the ceilings, so those
+        // two zero cells have to be the string "0".
+        if numbers[3] == 1105 && numbers[4] == 259 {
+            assert_eq!(cells[0], "2", "{}", path.display());
+            assert_eq!(cells[1], "0", "assists zero {}", path.display());
+            assert_eq!(cells[2], "0", "deaths zero {}", path.display());
+            assert_eq!(cells[5], "450", "{}", path.display());
+        }
+        if numbers[3] == 3993 && numbers[4] == 989 && numbers[5] == 1583 {
+            assert_eq!((numbers[0], numbers[1], numbers[2]), (8, 1, 2));
+        }
         checked += 1;
     }
     assert!(checked > 0, "no fixture frames found — nothing was tested");

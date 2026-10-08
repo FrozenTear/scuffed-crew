@@ -15,15 +15,20 @@ cannot be read is logged separately from a frame where the player row
 was not found.
 
 The text fallback no longer takes the last six numbers on the player's
-line. That line can also contain the hero panel's objective timer, and
-a trailing `00:02` shifted the columns (assists and deaths became the
-damage and healing figures). The fallback now ignores a clock, keeps a
-line only when exactly six numbers sit after the name, and uses the
-same elims, assists, and deaths ceilings as the cell reader. Numbers
-from that fallback are low-trust: the first capture is checked too, and
-one clean cell read replaces an unconfirmed column. A jump past the
-rate cap, or a trailing-digit inject, is still held. A confirmed value
-still has to agree three times before it moves down.
+line. The name has to match as a whole word. That line can also contain
+the hero panel's objective timer, and a trailing `00:02` shifted the
+columns (assists and deaths became the damage and healing figures). The
+fallback now ignores a clock, keeps a line only when the stats are one
+unbroken run of exactly six numbers with no word or percent after that
+run, and uses the same elims, assists, and deaths ceilings as the cell
+reader. A chat line and a join line are skipped so a later stat line
+can match. Numbers from that fallback are low-trust: the first capture
+is checked too, and one clean cell read replaces an unconfirmed column
+when that read is not a clip below a value the fallback moved off, and
+not a wide column with its last digit cut off. A jump past the rate
+cap, or a trailing-digit inject, is still held. A confirmed value,
+including one a fallback moved away from, still has to agree three
+times before it moves down.
 
 ### Install
 

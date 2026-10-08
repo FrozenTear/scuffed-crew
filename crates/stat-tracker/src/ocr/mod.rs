@@ -922,6 +922,14 @@ mod tests {
         assert_eq!(cell.value, "0");
         assert!(!cell.suspect);
 
+        let edge = recognize_cell(&preprocess::dim_zero_fixtures::dim_zero_touching_left_edge())
+            .expect("edge ring");
+        assert_eq!(edge.value, "0");
+        assert!(
+            edge.suspect,
+            "touches_edge has to arrive on the cell result"
+        );
+
         let stroke =
             recognize_cell(&preprocess::dim_zero_fixtures::dim_stroke_cell()).expect("dim stroke");
         assert_eq!(stroke.value, "", "a dim 1 must not be invented as 0");
