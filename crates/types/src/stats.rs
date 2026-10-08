@@ -457,10 +457,8 @@ impl std::str::FromStr for MapName {
                 Ok(Self::WatchpointGrimsvotn)
             }
             "blizzard world" | "blizzardworld" => Ok(Self::BlizzardWorld),
-            // Adlersbrunn is the Halloween event label of Eichenwalde. The tracker
-            // folds that label into Eichenwalde, and only for two-team PvP boards.
-            // Junkenstein's Revenge PvE also uses the name, but the tracker
-            // refuses to store those boards.
+            // Adlersbrunn is the Halloween event label of Eichenwalde.
+            // The alias matters for tracker 0.4.22+.
             "eichenwalde" | "adlersbrunn" => Ok(Self::Eichenwalde),
             "hollywood" => Ok(Self::Hollywood),
             "kings row" | "kingsrow" => Ok(Self::KingsRow),
@@ -701,10 +699,8 @@ mod tests {
         assert_eq!("grimsvotn\u{0370}".parse::<MapName>(), Err(()));
     }
 
-    /// Adlersbrunn is the Halloween event label of Eichenwalde. The tracker
-    /// folds that label into Eichenwalde, and only for two-team PvP boards.
-    /// Junkenstein's Revenge PvE also uses the name, but the tracker refuses
-    /// to store those boards.
+    /// Adlersbrunn is the Halloween event label of Eichenwalde.
+    /// The alias matters for tracker 0.4.22+.
     #[test]
     fn adlersbrunn_halloween_label_folds_into_eichenwalde() {
         assert_eq!("Adlersbrunn".parse::<MapName>(), Ok(MapName::Eichenwalde));
