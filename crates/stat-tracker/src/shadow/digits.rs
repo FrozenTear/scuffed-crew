@@ -16,6 +16,10 @@
 //! minus second-best correlation (min over glyphs), also bounded by how far
 //! the best reading beats the best different reading.
 //!
+//! Text band: each cell estimates its own (top, height); a cell whose height
+//! is 2+ px off its row's median takes the row's band, so a lone thin-stem
+//! glyph (a 4 at 1440p) cannot shrink its band and get split into pieces.
+//!
 //! Resampling reproduces Pillow's float bilinear resize so canvases match the
 //! ones the templates were built from.
 
@@ -97,6 +101,9 @@ const MAX_GLYPH: f64 = 1.10;
 const SPLIT_PEN: f64 = 0.04;
 /// Canvas covers [top, top + DESC * dh) so the comma tail fits.
 const DESC: f64 = 1.35;
+/// A cell whose own text height is this many px off its row's median takes
+/// the row's text band instead (see [`row_text_band`]).
+const BAND_TOL: usize = 2;
 
 /// Python-style `round()` (ties to even), used wherever the prototype rounds.
 fn pyround(x: f64) -> i64 {
@@ -652,10 +659,56 @@ struct Cell {
     rival: f64,
 }
 
-/// Template-independent work for one cell: segmentation and all candidate piece canvases.
-fn prepare_cell(n: &Plane, band: (usize, usize), win: (usize, usize), pad: usize) -> Option<Cell> {
-    let ink = cell_ink(n, band, win, pad)?;
-    let seg = segment(ink)?;
+/// Ink map and segmentation for one cell.
+fn segment_cell(
+    n: &Plane,
+    band: (usize, usize),
+    win: (usize, usize),
+    pad: usize,
+) -> Option<Segment> {
+    segment(cell_ink(n, band, win, pad)?)
+}
+
+/// Row consensus text band `(top, dh)` from the cells' own estimates.
+///
+/// `segment` finds the text band from rows holding at least 25% of the
+/// widest row's ink. A lone '4' is the weak case: its crossbar row is ~10 px
+/// wide at 1440p and the stem below it 2 to 3 px, so depending on sub-pixel
+/// phase the stem rows fall under the cut and `dh` shrinks from 13 to 9 or 10.
+/// The 10 px wide glyph then looks wider than `WIDE_RUN * dh`, is split as
+/// touching glyphs, and reads "16" or "311". All cells of a row share one
+/// font size and baseline, so the lower median of `dh` over the row (and the
+/// median `top` of the cells that agree with it) is a safe reference.
+fn row_text_band(segs: &[Option<Segment>]) -> Option<(usize, usize)> {
+    let mut dhs: Vec<usize> = segs.iter().flatten().map(|s| s.dh).collect();
+    if dhs.len() < 3 {
+        return None;
+    }
+    dhs.sort_unstable();
+    let med = dhs[(dhs.len() - 1) / 2];
+    let mut tops: Vec<usize> = segs
+        .iter()
+        .flatten()
+        .filter(|s| s.dh.abs_diff(med) <= 1)
+        .map(|s| s.top)
+        .collect();
+    tops.sort_unstable();
+    Some((tops[(tops.len() - 1) / 2], med))
+}
+
+/// Replace a cell's band by the row's when its own height is off by `BAND_TOL` or more.
+fn apply_row_band(seg: &mut Segment, row: Option<(usize, usize)>) {
+    if let Some((top, dh)) = row
+        && seg.dh.abs_diff(dh) >= BAND_TOL
+        && top < seg.ink.h
+    {
+        seg.top = top;
+        seg.dh = dh;
+    }
+}
+
+/// Template-independent work for one cell: all candidate piece canvases.
+fn prepare_cell(seg: Segment) -> Option<Cell> {
     let dh = seg.dh;
     let (strip, sc) = scaled_strip(&seg.ink, seg.top, dh);
     let w = seg.ink.w;
@@ -970,8 +1023,14 @@ pub fn read_board(
     }
     let mut rows = Vec::with_capacity(bands.len());
     for band in bands {
+        let mut segs: [Option<Segment>; 6] =
+            std::array::from_fn(|k| segment_cell(&n, band, wins[k], pad));
+        let row_band = row_text_band(&segs);
         let cells = std::array::from_fn(|k| {
-            let cell = prepare_cell(&n, band, wins[k], pad);
+            let cell = segs[k].take().and_then(|mut seg| {
+                apply_row_band(&mut seg, row_band);
+                prepare_cell(seg)
+            });
             let r = read_cell(cell.as_ref(), tpl, k);
             let confidence = r.margin.clamp(0.0, 1.0) as f32;
             CellRead {
@@ -1218,6 +1277,41 @@ mod tests {
             read_board(&board, 6, Duration::ZERO),
             Err(ShadowError::OverBudget)
         ));
+    }
+
+    fn seg_with(top: usize, dh: usize) -> Segment {
+        Segment {
+            ink: Plane::zeros(8, 24),
+            b: vec![false; 8 * 24],
+            top,
+            dh,
+            runs: vec![(1, 7)],
+            rival: 0.0,
+        }
+    }
+
+    #[test]
+    fn row_band_overrides_a_shrunk_lone_four() {
+        // dh as measured on a real 1440p row: a lone '4' with a 2 px stem came out as 9
+        let mut segs: Vec<Option<Segment>> = [(4, 13), (4, 13), (5, 9), (4, 13), (4, 14), (4, 13)]
+            .iter()
+            .map(|&(t, d)| Some(seg_with(t, d)))
+            .collect();
+        segs.push(None);
+        let band = row_text_band(&segs);
+        assert_eq!(band, Some((4, 13)));
+        let mut four = segs[2].take().unwrap();
+        apply_row_band(&mut four, band);
+        assert_eq!((four.top, four.dh), (4, 13));
+        // within tolerance: left alone
+        let mut close = seg_with(5, 14);
+        apply_row_band(&mut close, band);
+        assert_eq!((close.top, close.dh), (5, 14));
+        // too few cells for a consensus
+        assert_eq!(
+            row_text_band(&[Some(seg_with(4, 13)), None, Some(seg_with(5, 9))]),
+            None
+        );
     }
 
     #[test]
