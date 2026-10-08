@@ -12,9 +12,11 @@
 //! Digits: brightness-normalised ink map (per cell `(min(R,G,B) - bg) / (peak - bg)`,
 //! masked to low saturation), column-projection segmentation, comma
 //! detection, fixed-size canvases and zero-mean normalised correlation
-//! against embedded per-resolution templates. Confidence is a margin: best
-//! minus second-best correlation (min over glyphs), also bounded by how far
-//! the best reading beats the best different reading.
+//! against embedded per-resolution templates. Confidence is a calibrated
+//! margin: each glyph's best minus second-best correlation divided by that
+//! digit's typical margin (min over glyphs), also bounded by how far the best
+//! reading beats the best different reading. 1.0 means "as clear as a typical
+//! correct read of that digit".
 //!
 //! Text band: each cell estimates its own (top, height); a cell whose height
 //! is 2+ px off its row's median takes the row's band, so a lone thin-stem
@@ -32,8 +34,26 @@ use crate::ocr::preprocess;
 
 pub const FIELDS: [&str; 6] = ["E", "A", "D", "DMG", "H", "MIT"];
 
-/// Flag a cell when best minus second-best correlation is below this.
-pub const SUSPECT_MARGIN: f32 = 0.06;
+/// Identifies this recognizer's output. Bump it whenever any value,
+/// confidence or suspect flag can change, so logged reads from different
+/// builds are never pooled by mistake. The `recognizer_snapshot_is_pinned`
+/// test fails until the bump is made.
+///
+/// * `cv-v1`: template matcher as shipped in 0.4.23 (raw margins, 0.06 cut).
+/// * `cv-v2`: per-digit calibrated confidence, suspect below 0.35.
+pub const RECOGNIZER_ID: &str = "cv-v2";
+
+/// Flag a cell when its calibrated confidence is below this.
+///
+/// Raw margins are not comparable across digits: a correct '3' (runner-up
+/// '8') typically clears it by ~0.12 and can drop to 0.05, while a lone '1'
+/// sits around 0.43. The old raw cut of 0.06 flagged right 3s and 8s; on the
+/// labelled and stressed sets the worst wrong read it caught scores 0.29
+/// after calibration, so 0.35 keeps every such error flagged with headroom.
+pub const SUSPECT_CONF: f32 = 0.35;
+/// Partition margins (best reading minus best different reading) are scaled
+/// by this so `2 * pm / PM_REF` sits on the same 1.0-is-typical scale.
+const PM_REF: f64 = 0.2;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct CellRead {
@@ -119,6 +139,8 @@ struct Templates {
     t: Vec<[f32; CANVAS]>,
     ar_lo: [f64; NCLS],
     ar_hi: [f64; NCLS],
+    /// Median glyph margin of correct reads per class (calibration scale).
+    typ: [f64; NCLS],
 }
 
 const TPL_1440_PNG: &[u8] = include_bytes!("../../assets/shadow-digits/digits_1440.png");
@@ -183,7 +205,17 @@ const AR_1080: ([f64; NCLS], [f64; NCLS]) = (
     ],
 );
 
-fn load_templates(png: &[u8], ar: ([f64; NCLS], [f64; NCLS])) -> Templates {
+// Median best-minus-second-best margin of correctly read glyphs per class
+// 0-9 and ',', measured with these templates on the labelled 1440p and 1080p
+// Tab sets (20 boards each; per-match hold-out moves no flag decision).
+const TYP_1440: [f64; NCLS] = [
+    0.1931, 0.4281, 0.2000, 0.1210, 0.3097, 0.1475, 0.1769, 0.4278, 0.1161, 0.2369, 0.7227,
+];
+const TYP_1080: [f64; NCLS] = [
+    0.1883, 0.3636, 0.1719, 0.1177, 0.2792, 0.1396, 0.1582, 0.3833, 0.1142, 0.2124, 0.7031,
+];
+
+fn load_templates(png: &[u8], ar: ([f64; NCLS], [f64; NCLS]), typ: [f64; NCLS]) -> Templates {
     let img = image::load_from_memory(png)
         .expect("embedded shadow digit templates decode")
         .to_luma8();
@@ -206,6 +238,7 @@ fn load_templates(png: &[u8], ar: ([f64; NCLS], [f64; NCLS])) -> Templates {
         t,
         ar_lo: ar.0,
         ar_hi: ar.1,
+        typ,
     }
 }
 
@@ -213,9 +246,9 @@ fn templates_for(board_h: u32) -> &'static Templates {
     static T1440: OnceLock<Templates> = OnceLock::new();
     static T1080: OnceLock<Templates> = OnceLock::new();
     if board_h.abs_diff(REF_H_1440) <= board_h.abs_diff(REF_H_1080) {
-        T1440.get_or_init(|| load_templates(TPL_1440_PNG, AR_1440))
+        T1440.get_or_init(|| load_templates(TPL_1440_PNG, AR_1440, TYP_1440))
     } else {
-        T1080.get_or_init(|| load_templates(TPL_1080_PNG, AR_1080))
+        T1080.get_or_init(|| load_templates(TPL_1080_PNG, AR_1080, TYP_1080))
     }
 }
 
@@ -966,14 +999,15 @@ fn read_cell(cell: Option<&Cell>, tpl: &Templates, k: usize) -> Reading {
         .iter()
         .find(|(_, a)| text(a).replace(',', "") != digits)
         .map(|(o, _)| *o);
+    // glyph margin in units of that digit's typical margin
     let gm = acc
         .iter()
-        .map(|&p| best_s[p] - second_s[p])
+        .map(|&p| (best_s[p] - second_s[p]) / tpl.typ[best_c[p]])
         .fold(f64::INFINITY, f64::min);
     let gm = if acc.is_empty() { 0.0 } else { gm };
     // partition ambiguity: best alternative reading with a different digit string
     let pm = alt.map_or(1.0, |a| obj - a);
-    let margin = gm.min(2.0 * pm);
+    let margin = gm.min(2.0 * pm / PM_REF);
     if digits.is_empty() {
         return Reading {
             value: None,
@@ -1045,7 +1079,7 @@ pub fn read_board(
             CellRead {
                 value: r.value,
                 confidence,
-                suspect: r.flagged || r.value.is_none() || confidence < SUSPECT_MARGIN,
+                suspect: r.flagged || r.value.is_none() || confidence < SUSPECT_CONF,
             }
         });
         rows.push(RowRead { cells });
@@ -1349,6 +1383,150 @@ mod tests {
     }
 
     #[test]
+    fn calibration_scale_frees_close_digit_pairs() {
+        for typ in [TYP_1440, TYP_1080] {
+            // a right '3' or '8' at the lowest raw margin seen (0.049) passes ...
+            for c in [3, 8] {
+                assert!(0.049 / typ[c] >= SUSPECT_CONF as f64, "class {c}");
+            }
+            // ... while a '1' or '7' that close to its runner-up stays flagged
+            for c in [1, 7] {
+                assert!(0.049 / typ[c] < SUSPECT_CONF as f64, "class {c}");
+            }
+        }
+        // the old live misread "16" (raw glyph margin 0.024 on a '6') stays flagged
+        assert!(0.024 / TYP_1440[6] < SUSPECT_CONF as f64);
+    }
+
+    /// Snapshot fixtures: synthetic boards only (template glyph means drawn
+    /// on a flat background), degraded in fixed, deterministic ways so the
+    /// confidences spread out and a few cells go suspect. No captured pixels.
+    fn snapshot_fixtures() -> Vec<(&'static str, DynamicImage)> {
+        let want = sample_values(6);
+        let clean = synth_board(&want, 6, 3);
+        let touching = synth_board(&want, 6, 0);
+        let small = clean.resize_exact(1248, 756, image::imageops::Triangle);
+        let mut s: u32 = 0x5eed_1234;
+        let mut noisy = |w: u32, h: u32| {
+            let mut img = clean
+                .resize_exact(w, h, image::imageops::Triangle)
+                .to_rgb8();
+            for px in img.pixels_mut() {
+                s = s.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                let d = ((s >> 24) % 25) as i32 - 12;
+                for ch in px.0.iter_mut() {
+                    *ch = (*ch as i32 + d).clamp(0, 255) as u8;
+                }
+            }
+            DynamicImage::ImageRgb8(img)
+        };
+        // between the two template sizes, then half scale (below both)
+        let odd = noisy(1331, 806);
+        let tiny = noisy(832, 504);
+        vec![
+            ("clean", clean),
+            ("touching", touching),
+            ("small", small),
+            ("odd_noisy", odd),
+            ("tiny_noisy", tiny),
+        ]
+    }
+
+    /// One line per cell: fixture, row, field, value, confidence (2 dp), suspect.
+    fn snapshot_reads() -> Vec<String> {
+        let mut out = Vec::new();
+        for (name, img) in snapshot_fixtures() {
+            let read = read_board(&img, 6, Duration::from_secs(10)).unwrap();
+            for (r, row) in read.rows.iter().enumerate() {
+                for (k, c) in row.cells.iter().enumerate() {
+                    out.push(format!(
+                        "{name} r{r} {} {:?} {:.2} {}",
+                        FIELDS[k], c.value, c.confidence, c.suspect
+                    ));
+                }
+            }
+        }
+        out
+    }
+
+    /// FNV-1a 64 over the snapshot lines.
+    fn snapshot_fingerprint(lines: &[String]) -> u64 {
+        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+        for b in lines.join("\n").bytes() {
+            h ^= b as u64;
+            h = h.wrapping_mul(0x0100_0000_01b3);
+        }
+        h
+    }
+
+    #[test]
+    #[ignore]
+    fn print_snapshot_reads() {
+        let lines = snapshot_reads();
+        for l in &lines {
+            println!("SNAP {l}");
+        }
+        println!("FINGERPRINT {:#018x}", snapshot_fingerprint(&lines));
+    }
+
+    /// Output fingerprint per recognizer id, oldest first. Append only: a new
+    /// id goes at the end with the fingerprint the failing test prints; never
+    /// edit an existing entry.
+    const RECOGNIZER_HISTORY: &[(&str, u64)] =
+        &[("cv-v1", 0xb42753ed1222dfaa), ("cv-v2", 0x8ab56b86663fcb05)];
+
+    /// Readable part of the pinned snapshot for the current id.
+    const SNAPSHOT_SAMPLE: &[&str] = &[
+        "clean r0 A Some(3) 0.79 false",
+        "clean r0 MIT Some(2347) 0.76 false",
+        "touching r2 E Some(27) 0.93 false",
+        "touching r2 DMG Some(18744) 0.89 false",
+        "small r7 E Some(16) 0.91 false",
+        "small r7 DMG Some(22058) 0.73 false",
+        "odd_noisy r0 DMG Some(5480) 0.52 false",
+        "odd_noisy r1 E Some(0) 0.64 false",
+        "odd_noisy r4 MIT Some(104512) 0.60 false",
+        "tiny_noisy r0 MIT Some(2347) 0.32 true",
+        "tiny_noisy r6 MIT Some(1000) 0.33 true",
+        "tiny_noisy r9 H Some(280) 0.33 true",
+    ];
+
+    #[test]
+    fn recognizer_snapshot_is_pinned() {
+        let ids: Vec<&str> = RECOGNIZER_HISTORY.iter().map(|e| e.0).collect();
+        assert_eq!(
+            ids.last(),
+            Some(&RECOGNIZER_ID),
+            "newest history entry must be RECOGNIZER_ID"
+        );
+        for (i, a) in RECOGNIZER_HISTORY.iter().enumerate() {
+            for b in &RECOGNIZER_HISTORY[i + 1..] {
+                assert!(
+                    a.0 != b.0 && a.1 != b.1,
+                    "duplicate history entry {} / {}",
+                    a.0,
+                    b.0
+                );
+            }
+        }
+        let lines = snapshot_reads();
+        let fp = snapshot_fingerprint(&lines);
+        assert_eq!(
+            fp,
+            RECOGNIZER_HISTORY.last().unwrap().1,
+            "shadow matcher output changed without a RECOGNIZER_ID bump: bump the id, append \
+             (new id, {fp:#018x}) to RECOGNIZER_HISTORY and refresh SNAPSHOT_SAMPLE \
+             (cargo test print_snapshot_reads -- --ignored --nocapture)"
+        );
+        for want in SNAPSHOT_SAMPLE {
+            assert!(
+                lines.iter().any(|l| l == want),
+                "snapshot line missing: {want}"
+            );
+        }
+    }
+
+    #[test]
     fn grammar_and_grouping() {
         assert_eq!(thousands(0), "0");
         assert_eq!(thousands(999), "999");
@@ -1387,6 +1565,7 @@ mod tests {
                 let norm: f32 = t.t[c].iter().map(|v| v * v).sum();
                 assert!((norm - 1.0).abs() < 1e-3);
                 assert!(t.ar_lo[c] < t.ar_hi[c]);
+                assert!(t.typ[c] > 0.05 && t.typ[c] < 1.0);
             }
         }
     }
