@@ -1515,6 +1515,7 @@ struct StaleHeldBoard {
     hero: Option<String>,
     map: Option<String>,
     at: Option<chrono::DateTime<Utc>>,
+    outcome: detect::MatchOutcome,
     imported: bool,
 }
 
@@ -1525,6 +1526,7 @@ struct ArchivedHold {
     counters: Counters,
     hero: Option<String>,
     map: String,
+    outcome: String,
     at: chrono::DateTime<Utc>,
 }
 
@@ -1574,6 +1576,7 @@ fn admit_persisted_game(data_dir: &std::path::Path) -> ActiveAdmission {
         hero: persisted.deferred_hero.clone(),
         map: persisted.map.clone(),
         at: persisted.deferred_at,
+        outcome: persisted.outcome,
         imported: persisted.deferred_imported,
     });
     match active_game_from_persisted(persisted) {
@@ -4842,20 +4845,33 @@ fn retire_stale_skeleton(data_dir: &std::path::Path) -> Option<StaleDrop> {
     match admit_persisted_game(data_dir) {
         ActiveAdmission::Stale { session_id, hold } => {
             let archive = hold.map(|hold| {
-                let session_id = if hold.imported {
-                    session_id.clone()
+                // A fresh hold belongs to the next game. The skeleton map is
+                // the previous game, so keeping it would archive that board
+                // as Busan and a later GUI result would upload it as Busan.
+                let (session_id, map, outcome) = if hold.imported {
+                    (
+                        session_id.clone(),
+                        hold.map.unwrap_or_default(),
+                        hold.outcome.to_string(),
+                    )
                 } else {
-                    format!("{:016x}", rand_id())
+                    (
+                        format!("{:016x}", rand_id()),
+                        String::new(),
+                        "unknown".into(),
+                    )
                 };
                 tracing::warn!(
                     session_id = %session_id,
-                    "stale restart kept a held board in local history as an unknown session"
+                    outcome = %outcome,
+                    "stale restart kept a held board in local history"
                 );
                 ArchivedHold {
                     session_id,
                     counters: hold.counters,
                     hero: hold.hero,
-                    map: hold.map.unwrap_or_default(),
+                    map,
+                    outcome,
                     at: hold.at.unwrap_or_else(Utc::now),
                 }
             });
@@ -4873,8 +4889,10 @@ fn retire_stale_skeleton(data_dir: &std::path::Path) -> Option<StaleDrop> {
     }
 }
 
-/// Write a stale hold as an unknown closed session. Unknown rows are not
-/// uploaded. A Deathmatch map stays local even if a later edit sets a result.
+/// Write a stale hold into local history. An imported hold keeps the
+/// persisted map and outcome. A fresh hold is an unknown session with an
+/// empty map. Unknown rows are not uploaded. A Deathmatch map stays local
+/// even if a later edit sets a result.
 async fn archive_stale_hold(
     store: &storage::LocalStore,
     data_dir: &std::path::Path,
@@ -4887,7 +4905,7 @@ async fn archive_stale_hold(
         &archive.session_id,
         &hero,
         &archive.map,
-        "unknown",
+        &archive.outcome,
         archive.counters,
         archive.at,
     )
@@ -5079,9 +5097,11 @@ async fn begin_daemon_session(
     // stays, and those rows stay unsynced until a result, a new-game
     // boundary, or the 6-hour bound. A clean shutdown keeps it.
     schedule_store_sync(sync_task, backoff, store, client, data_dir, dropped.clone());
-    let mut st = startup_session(data_dir);
-    retry_imported_hold_on_start(&mut st, store, data_dir).await;
-    st
+    // A resume within 20 minutes must not write a pending imported hold.
+    // The skeleton map is often empty, and writing it here would store the
+    // board under that empty map. A stale start already archived the hold
+    // above, with the persisted map and outcome.
+    startup_session(data_dir)
 }
 
 /// Hero for a held board. Prefer the hero captured with the hold. Otherwise
@@ -5138,32 +5158,6 @@ fn clear_imported_hold(game: &mut ActiveGame) {
     game.deferred_imported = false;
 }
 
-/// A restart retries an imported hold that shutdown could not store.
-async fn retry_imported_hold_on_start(
-    st: &mut SessionState,
-    store: &storage::LocalStore,
-    data_dir: &std::path::Path,
-) {
-    let Some(game) = st.active_game.as_ref() else {
-        return;
-    };
-    if !game.deferred_imported || game.deferred.is_none() {
-        return;
-    }
-    match write_imported_hold(game, store, data_dir).await {
-        Ok(()) => {
-            if let Some(game) = st.active_game.as_mut() {
-                clear_imported_hold(game);
-            }
-            persist_active_game(data_dir, st.active_game.as_ref());
-        }
-        Err(e) => {
-            tracing::warn!(error = %e, "failed to store a held board on startup");
-            persist_active_game(data_dir, st.active_game.as_ref());
-        }
-    }
-}
-
 /// Close or keep the open session before the final sync.
 ///
 /// A held board is written onto the current session only when
@@ -5171,8 +5165,10 @@ async fn retry_imported_hold_on_start(
 /// fresh-match hold belongs to the next game: it is not written onto a
 /// finished session. That session's decided rows stay the ones that upload.
 /// An unfinished game keeps its skeleton so a clean restart resumes it.
-/// If the imported write fails, the hold stays on the skeleton and the next
-/// start tries again.
+/// If the imported write fails, the hold stays on the skeleton. A resume
+/// within 20 minutes leaves it pending. A stale start (more than 20
+/// minutes, or a clock that moved backwards) archives it with the
+/// persisted map and outcome.
 async fn close_session_on_shutdown(
     st: &mut SessionState,
     store: &storage::LocalStore,
@@ -11534,17 +11530,15 @@ mod tests {
             .await
             .unwrap();
         assert!(
-            rows.iter()
-                .any(|row| row.elims == 4 && row.hero == "Tracer"),
-            "the next start retries the held board: {rows:?}"
+            rows.iter().all(|row| row.elims != 4),
+            "a resume within 20 minutes must leave the hold pending: {rows:?}"
         );
-        assert!(
-            restarted
-                .active_game
-                .as_ref()
-                .is_some_and(|game| game.deferred.is_none() && !game.deferred_imported),
-            "a successful retry clears the hold"
-        );
+        let held = restarted
+            .active_game
+            .as_ref()
+            .expect("the session is still open");
+        assert!(held.deferred_imported);
+        assert_eq!(held.deferred.map(|c| c.elims), Some(4));
     }
 
     #[tokio::test]
@@ -11640,6 +11634,202 @@ mod tests {
             .find(|row| row.elims == 2)
             .unwrap();
         assert!(kept.synced, "the unknown hold is kept locally and not sent");
+    }
+
+    fn persisted_with_hold(
+        session_id: &str,
+        outcome: detect::MatchOutcome,
+        map: Option<&str>,
+        imported: bool,
+        elims: u32,
+        last_activity: chrono::DateTime<Utc>,
+    ) -> PersistedGame {
+        PersistedGame {
+            session_id: session_id.into(),
+            outcome,
+            map: map.map(str::to_string),
+            map_source: None,
+            map_candidates: Vec::new(),
+            session_created: false,
+            opened_at: last_activity - chrono::Duration::minutes(20),
+            last_activity,
+            outcome_recorded_at: None,
+            gate: None,
+            last_stats_at: None,
+            hero_auth: HeroAuthState::default(),
+            result_outcome: None,
+            result_confirmed: false,
+            result_seen_at: None,
+            pending_boundary: false,
+            awaiting_first_board: false,
+            reset_streak: 0,
+            reset_baseline: None,
+            baseline_row: None,
+            deferred: Some(fresh_counters(elims)),
+            deferred_hero: Some("Tracer".into()),
+            deferred_at: Some(last_activity),
+            deferred_imported: imported,
+            progressed_boards: 0,
+            baseline_at: None,
+            text_fallback_locked: false,
+        }
+    }
+
+    async fn begin_from_persisted(
+        dir: &std::path::Path,
+        store: &storage::LocalStore,
+        game: PersistedGame,
+    ) -> SessionState {
+        std::fs::write(active_game_path(dir), serde_json::to_vec(&game).unwrap()).unwrap();
+        let mut sync_task = None;
+        let backoff = std::sync::Arc::new(std::sync::Mutex::new(sync::SyncBackoff::default()));
+        begin_daemon_session(dir, &mut sync_task, &backoff, store, None).await
+    }
+
+    #[tokio::test]
+    async fn a_stale_fresh_hold_does_not_keep_the_previous_map() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = storage::LocalStore::open(dir.path()).await.unwrap();
+        let when = Utc::now() - chrono::Duration::hours(9);
+        begin_from_persisted(
+            dir.path(),
+            &store,
+            persisted_with_hold(
+                "busan-game",
+                detect::MatchOutcome::Victory,
+                Some("Busan"),
+                false,
+                3,
+                when,
+            ),
+        )
+        .await;
+        let rows = store.get_all_matches().await.unwrap();
+        let held = rows
+            .iter()
+            .find(|row| row.elims == 3)
+            .expect("the fresh hold is archived");
+        assert_ne!(held.session_id, "busan-game");
+        assert!(held.map_name.is_empty(), "fresh hold map: {held:?}");
+        assert_eq!(held.outcome, "unknown");
+        store
+            .apply_command(&storage::StoreCommand::SetOutcome {
+                session_id: held.session_id.clone(),
+                outcome: "victory".into(),
+            })
+            .await
+            .unwrap();
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen_upload = std::sync::Arc::clone(&seen);
+        try_sync_with(&store, dir.path(), None, move |matches, _| {
+            let seen_upload = std::sync::Arc::clone(&seen_upload);
+            async move {
+                *seen_upload.lock().unwrap() = matches
+                    .into_iter()
+                    .map(|row| (row.session_id, row.elims, row.map_name, row.outcome))
+                    .collect();
+                Ok(upload_ok())
+            }
+        })
+        .await;
+        let uploaded = seen.lock().unwrap().clone();
+        assert!(
+            !uploaded.is_empty(),
+            "a later GUI result uploads the archived hold"
+        );
+        assert!(
+            uploaded.iter().all(|(_, _, map, _)| map.is_empty()),
+            "the fresh hold must not upload as Busan: {uploaded:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_stale_imported_hold_keeps_the_session_outcome() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = storage::LocalStore::open(dir.path()).await.unwrap();
+        let when = Utc::now() - chrono::Duration::hours(9);
+        begin_from_persisted(
+            dir.path(),
+            &store,
+            persisted_with_hold(
+                "decided-session",
+                detect::MatchOutcome::Victory,
+                Some("Busan"),
+                true,
+                6,
+                when,
+            ),
+        )
+        .await;
+        let held = store
+            .get_all_matches()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|row| row.elims == 6)
+            .expect("the imported hold is archived");
+        assert_eq!(held.session_id, "decided-session");
+        assert_eq!(held.map_name, "Busan");
+        assert_eq!(held.outcome, "victory");
+    }
+
+    #[tokio::test]
+    async fn a_resume_within_twenty_minutes_leaves_an_imported_hold_pending() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = storage::LocalStore::open(dir.path()).await.unwrap();
+        let when = Utc::now() - chrono::Duration::minutes(5);
+        let st = begin_from_persisted(
+            dir.path(),
+            &store,
+            persisted_with_hold(
+                "still-open",
+                detect::MatchOutcome::Unknown,
+                Some("Busan"),
+                true,
+                4,
+                when,
+            ),
+        )
+        .await;
+        let held = st.active_game.as_ref().expect("the session resumes");
+        assert!(held.deferred_imported);
+        assert_eq!(held.deferred.map(|c| c.elims), Some(4));
+        let rows = store.get_all_matches().await.unwrap();
+        assert!(
+            rows.iter().all(|row| row.elims != 4),
+            "resume must not write the hold: {rows:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_backwards_clock_archives_an_imported_hold_with_its_persisted_map() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = storage::LocalStore::open(dir.path()).await.unwrap();
+        let when = Utc::now() + chrono::Duration::hours(3);
+        begin_from_persisted(
+            dir.path(),
+            &store,
+            persisted_with_hold(
+                "clock-back",
+                detect::MatchOutcome::Defeat,
+                Some("Nepal"),
+                true,
+                8,
+                when,
+            ),
+        )
+        .await;
+        let held = store
+            .get_all_matches()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|row| row.elims == 8)
+            .expect("a backwards clock archives the hold");
+        assert_eq!(held.session_id, "clock-back");
+        assert_eq!(held.map_name, "Nepal");
+        assert_eq!(held.outcome, "defeat");
+        assert!(!active_game_path(dir.path()).exists());
     }
 
     #[tokio::test]
