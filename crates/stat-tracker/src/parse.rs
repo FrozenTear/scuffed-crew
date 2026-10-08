@@ -125,7 +125,7 @@ pub fn looks_like_scoreboard(rows: &[RowOcrResult]) -> bool {
 /// True when each team half has at least one row with four clean stat cells.
 ///
 /// `looks_like_scoreboard` only counts rows. A 4-player co-op board can pass
-/// it. Row order is team 1, then team 2, `team_size` rows each — the same
+/// it. Row order is team 1, then team 2, `team_size` rows each: the same
 /// layout the scoreboard crop uses. An Adlersbrunn read is stored as
 /// Eichenwalde only when both halves clear this check.
 pub fn both_teams_have_stats(rows: &[RowOcrResult], team_size: usize) -> bool {
