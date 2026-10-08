@@ -1272,6 +1272,38 @@ mod hero_map_name_tests {
     }
 
     #[test]
+    fn lang_tower_line_is_lijiang() {
+        assert_eq!(
+            match_map_in_text("Q control | Lang Tower Jjjf").as_deref(),
+            Some("Lijiang Tower")
+        );
+    }
+
+    #[test]
+    fn llang_tower_line_is_lijiang() {
+        assert_eq!(
+            match_map_in_text("Q control | LlanG Tower Jjj").as_deref(),
+            Some("Lijiang Tower")
+        );
+    }
+
+    #[test]
+    fn luang_tower_line_is_lijiang() {
+        assert_eq!(
+            match_map_in_text("Q control | Luang tower [jj").as_deref(),
+            Some("Lijiang Tower")
+        );
+    }
+
+    #[test]
+    fn lulang_tower_line_is_lijiang() {
+        assert_eq!(
+            match_map_in_text("Q control | Lulang tower Jj").as_deref(),
+            Some("Lijiang Tower")
+        );
+    }
+
+    #[test]
     fn lijiang_ocr_aliases_do_not_steal_other_maps() {
         let liang = normalize_ocr_glyphs("liang tower");
         let lulang = normalize_ocr_glyphs("lulang tower");
