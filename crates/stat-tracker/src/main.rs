@@ -10553,11 +10553,9 @@ mod tests {
                 *seen_upload.lock().unwrap() = matches
                     .into_iter()
                     .map(|row| {
-                        (
-                            row.session_id,
-                            row.display_outcome().to_string(),
-                            row.is_edited(),
-                        )
+                        let outcome = row.display_outcome().to_string();
+                        let edited = row.is_edited();
+                        (row.session_id, outcome, edited)
                     })
                     .collect();
                 Ok(upload_ok())
