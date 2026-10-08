@@ -176,39 +176,36 @@ fn normalize_optional_handle(
     }
 }
 
-/// PUT /api/members/:id — update member profile (self or officer+)
-pub async fn update_member(
-    State(state): State<AppState>,
-    caller: OrgMember,
-    Path(id): Path<String>,
-    Json(body): Json<UpdateMemberRequest>,
-) -> Result<Json<Member>, (StatusCode, Json<ErrorResponse>)> {
-    // Members can edit themselves; officers+ can edit anyone
-    let target = state
-        .db
-        .get_member_safe(&id)
-        .await
-        .map_err(|e| {
-            tracing::error!(error = %e, "get_member_safe failed");
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: "Internal server error".into(),
-                }),
-            )
-        })?
-        .ok_or_else(|| {
-            (
-                StatusCode::NOT_FOUND,
-                Json(ErrorResponse {
-                    error: "Member not found".into(),
-                }),
-            )
-        })?;
+type ProfileEditReject = (StatusCode, Json<ErrorResponse>);
 
+/// Load `id` and require the caller may edit that member's profile, including avatar.
+///
+/// Self (same user) always. Otherwise officer or admin. This is the only gate
+/// `PUT /api/members/{mid}` applies to avatar and the other profile fields.
+pub(crate) async fn require_profile_edit(
+    state: &AppState,
+    caller: &OrgMember,
+    id: &str,
+) -> Result<Member, ProfileEditReject> {
+    let target = state.db.get_member_safe(id).await.map_err(|e| {
+        tracing::error!(error = %e, "get_member_safe failed");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: "Internal server error".into(),
+            }),
+        )
+    })?;
+    let Some(target) = target else {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: "Member not found".into(),
+            }),
+        ));
+    };
     let is_self = target.user_id == caller.user.id;
     let is_officer = caller.member.org_role.is_at_least(OrgRole::Officer);
-
     if !is_self && !is_officer {
         return Err((
             StatusCode::FORBIDDEN,
@@ -217,6 +214,17 @@ pub async fn update_member(
             }),
         ));
     }
+    Ok(target)
+}
+
+/// PUT /api/members/:id — update member profile (self or officer+)
+pub async fn update_member(
+    State(state): State<AppState>,
+    caller: OrgMember,
+    Path(id): Path<String>,
+    Json(body): Json<UpdateMemberRequest>,
+) -> Result<Json<Member>, (StatusCode, Json<ErrorResponse>)> {
+    let target = require_profile_edit(&state, &caller, &id).await?;
 
     // nostr_pubkey must go through /api/nostr/challenge + /api/nostr/verify
     // (signature proof). Reject arbitrary sets/clears here to prevent NIP-05
@@ -285,6 +293,23 @@ pub async fn update_member(
     let twitch = normalize_optional_handle(&body.twitch)?;
     let twitter = normalize_optional_handle(&body.twitter)?;
 
+    // avatar_url is attacker-controlled and the next avatar upload deletes the
+    // stored path. Only clear it, set an external https URL, or point at this
+    // member's own avatars/<key>/ folder.
+    let avatar_url = match &body.avatar_url {
+        None => None,
+        Some(None) => Some(None),
+        Some(Some(raw)) => match crate::routes::uploads::normalize_avatar_url(&target.id, raw) {
+            Ok(value) => Some(value),
+            Err(msg) => {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    Json(ErrorResponse { error: msg.into() }),
+                ));
+            }
+        },
+    };
+
     // main_role: trim; empty → clear
     let main_role = match &body.main_role {
         None => None,
@@ -312,7 +337,7 @@ pub async fn update_member(
             &id,
             body.display_name.as_deref(),
             body.bio.as_ref().map(|b| b.as_deref()),
-            body.avatar_url.as_ref().map(|a| a.as_deref()),
+            avatar_url.as_ref().map(|a| a.as_deref()),
             body.timezone.as_ref().map(|t| t.as_deref()),
             body.pronouns.as_ref().map(|p| p.as_deref()),
             body.availability_status.as_ref().map(|a| a.as_deref()),

@@ -315,6 +315,23 @@ send enforcing `Content-Security-Policy` instead. `CSP_EXTRA_CONNECT_SRC` and
 > `podman exec <site-server> ss -tn '( sport = :3000 )'` shows the source
 > address. It must be `127.0.0.1` or one of the `TRUSTED_PROXIES` values.
 
+> **WebSocket caps.** `/api/strategy/ws` has one admission limit. The client
+> IP is resolved with the same trusted-proxy rules as the HTTP limiters
+> (`TRUSTED_PROXIES` / loopback). Do not key this cap on the raw container
+> peer or every visitor behind Caddy shares one bucket.
+>
+> | Env | Default | Meaning |
+> |---|---|---|
+> | `WS_MAX_CONNECTIONS` | `512` | Strategy sockets open at once, held until the socket closes |
+> | `WS_MAX_PER_IP` | `32` | Concurrent strategy sockets for one client IP (several players, multiple tabs) |
+>
+> Over-cap upgrades are rejected with `Retry-After: 1` (503 when the global
+> cap is full, 429 when the per-IP cap is full). A strategy socket that has
+> not sent JoinRoom within 10 seconds is closed.
+>
+> Set the two variables in `data/secrets.env`. Compose passes them through.
+> Leave them unset to keep the defaults.
+
 **3. App public URL** (required for cookies / redirects):
 
 ```bash
