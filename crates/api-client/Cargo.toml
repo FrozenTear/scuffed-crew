@@ -26,3 +26,6 @@ reqwest = { workspace = true, optional = true }
 default = ["web"]
 web = ["dep:web-sys", "dep:wasm-bindgen", "dep:wasm-bindgen-futures", "dep:js-sys"]
 native = ["dep:reqwest"]
+
+[dev-dependencies]
+tokio = { workspace = true }

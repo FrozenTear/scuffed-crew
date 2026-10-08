@@ -2,6 +2,7 @@ mod heroes;
 mod history;
 mod maps;
 mod overview;
+pub(crate) mod role;
 
 use dioxus::prelude::*;
 
@@ -218,7 +219,7 @@ fn persist_density(d: &str) {
 }
 
 /// Fetch-failed state with a retry button (bumps the resource's refresh counter).
-fn load_error_state(what: &'static str, mut refresh: Signal<u64>) -> Element {
+pub(crate) fn load_error_state(what: &'static str, mut refresh: Signal<u64>) -> Element {
     rsx! {
         div { class: "stats-load-error",
             p { "Couldn't load {what}." }
@@ -907,6 +908,9 @@ pub fn Stats() -> Element {
     let stats = use_api_with::<PersonalStats>(move || season_url("/api/stats/me", season()));
     let heroes =
         use_api_with::<Vec<HeroStats>>(move || season_url("/api/stats/me/heroes", season()));
+    let role_stats = use_api_with::<Vec<scuffed_types::RoleStats>>(move || {
+        season_url(role::my_roles_path(), season())
+    });
     let maps = use_api_with::<Vec<MapStats>>(move || season_url("/api/stats/me/maps", season()));
     let server_settings = use_api::<MemberSettingsResponse>("/api/stats/settings");
 
@@ -985,7 +989,7 @@ pub fn Stats() -> Element {
     let show_full_setup = !slim_tracker || setup_open();
 
     let tab_body = match tab() {
-        StatsTab::Overview => overview::overview_tab(heroes, maps, form_matches),
+        StatsTab::Overview => overview::overview_tab(heroes, role_stats, maps, form_matches),
         StatsTab::Heroes => heroes::heroes_tab(heroes, hero_role, hero_sort),
         StatsTab::Maps => maps::maps_tab(maps),
         StatsTab::History => history::history_tab(

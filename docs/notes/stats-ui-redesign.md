@@ -59,7 +59,7 @@ dashboard for a member who already tracks; setup is secondary once
    mini (gated) · mode WR chips · last-10 form strip. Claude adds: winrate-over-
    time sparkline if history is already loaded (decide vs form-strip API open Q).
 9. **Heroes tab**: role filter chips (Tank/Damage/Support, client-side via
-   `hero_to_role`) + sort control (WR / volume / avg) (grok G4; claude D1 concurs
+   `stats::role::current_role_label`; history uses `stored_role_label`) + sort control (WR / volume / avg) (grok G4; claude D1 concurs
    on sort). Hero icons = out of scope unless assets exist.
 10. **Maps tab**: best/worst map callout chips (gated), empty modes
     collapsed/omitted (grok G5).

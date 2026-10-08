@@ -76,6 +76,15 @@ jobs:
             -p scuffed-app \
             -- -D warnings
 
+      - name: Clippy (api-client, native)
+        run: |
+          cargo clippy \
+            -p scuffed-api-client \
+            --no-default-features \
+            --features native \
+            --all-targets \
+            -- -D warnings
+
   build-and-test:
     name: Build & Test
     runs-on: ubuntu-latest
@@ -121,6 +130,9 @@ jobs:
       # thing being changed.
       - name: Test (workspace)
         run: cargo test --workspace --exclude scuffed-stat-tracker --exclude scuffed-stat-tracker-ui
+
+      - name: Test (api-client, native)
+        run: cargo test -p scuffed-api-client --no-default-features --features native
 
       # Records headroom on the job that died 3x in 2 days from disk exhaustion
       # (e0d16e6). If this trends toward zero, split the app tests into their

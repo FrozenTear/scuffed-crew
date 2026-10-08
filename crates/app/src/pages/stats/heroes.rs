@@ -4,7 +4,7 @@ use crate::components::DataTable;
 use crate::components::charts::{BarEntry, HBarChart};
 use crate::hooks::ApiResource;
 
-use super::overview::hero_to_role;
+use super::role::hero_row_matches_filter;
 use super::{
     HeroStats, MIN_GAMES, MIN_GAMES_NOTE, load_error_state, winrate_pct, wr_bar_color,
     wr_text_class,
@@ -30,7 +30,7 @@ pub(super) fn heroes_tab(
 
             let filtered: Vec<&HeroStats> = list
                 .iter()
-                .filter(|h| role == "All" || hero_to_role(&h.hero) == role)
+                .filter(|h| hero_row_matches_filter(&h.hero, role))
                 .collect();
 
             let mut sorted = filtered.clone();
@@ -76,7 +76,7 @@ pub(super) fn heroes_tab(
             rsx! {
                 div { class: "stats-filters",
                     div { class: "filter-group",
-                        span { class: "filter-label", "Role" }
+                        span { class: "filter-label", "Current role" }
                         {["All", "Tank", "Damage", "Support"].iter().map(|&r| {
                             let active = role == r;
                             rsx! {
