@@ -346,16 +346,17 @@ mod tests {
     }
 
     #[test]
-    fn every_map_has_a_picker_row_and_a_serde_id_equal_to_its_slug() {
+    fn every_map_has_a_picker_row_and_a_pinned_serde_id() {
         assert_eq!(PICKABLE_MAPS.len(), MapName::ALL.len());
         for &map in MapName::ALL {
             let slug = map_slug(map);
             assert!(
-                pickable_map_by_id(slug).is_some_and(|m| m.id == slug),
-                "{map:?}"
+                PICKABLE_MAPS.iter().any(|m| m.id == slug),
+                "no picker row for {map:?} (slug {slug})"
             );
-            // Route66 is the one known split: serde "route66", slug "route_66".
+            // Route 66 is the one known split: serde id "route66", slug "route_66".
             let serde_id = if map == MapName::Route66 {
+                assert_eq!(slug, "route_66");
                 "route66"
             } else {
                 slug
@@ -370,7 +371,7 @@ mod tests {
         assert_eq!(by_slug.name, "King's Row");
         let by_name = pickable_map_by_id("King's Row").expect("display");
         assert_eq!(by_name.id, "kings_row");
-        // serde rename of Route66 is "route66"; catalog slug is route_66.
+        // Route 66 serde id is "route66"; catalog slug is "route_66".
         assert_eq!(
             pickable_map_by_id("route66").map(|m| m.id),
             Some("route_66")

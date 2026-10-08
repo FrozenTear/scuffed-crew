@@ -1185,6 +1185,7 @@ mod map_mode_tests {
             "Watchpoint: Grimsvotn",
             "Watchpoint: Grímsvotn",
             "Watchpoint: Grimsvötn",
+            "Watchpoint: Gri\u{0301}msvo\u{0308}tn",
             "WATCHPOINT: grímsvötn",
             "watchpoint grimsvotn",
             "watchpointgrimsvotn",

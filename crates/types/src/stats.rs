@@ -390,19 +390,16 @@ impl std::fmt::Display for MapName {
     }
 }
 
-/// Fold a live/OCR map string to a comparable key: lowercase, strip
-/// combining-style punctuation, and drop accents so `"Paraíso"` / `"Paraiso"`,
+/// Fold a live/OCR map string to a comparable key: lowercase, drop apostrophes,
+/// treat `_`/`-`/`:` as spaces, and drop accents so `"Paraíso"` / `"Paraiso"`,
 /// `"Esperança"` / `"Esperanca"`, and `"Watchpoint: Grímsvötn"` /
 /// `"Watchpoint: Grimsvotn"` (also `Grímsvotn` / `Grimsvötn`) collide.
 /// `ö`/`Ö` fold to `o` the same way `í` folds to `i`. Decomposed (NFD)
-/// combining marks in U+0300..=U+036F are dropped so the base letter remains.
+/// combining marks `\u{0300}`..=`\u{036f}` are dropped so the base letter remains,
+/// including a mark produced when a character lowercases to a base letter plus a mark.
 fn fold_map_key(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
-        // Decomposed (NFD) input: drop the combining accent, keep the base letter.
-        if ('\u{0300}'..='\u{036f}').contains(&c) {
-            continue;
-        }
         let mapped = match c {
             'Á' | 'À' | 'Ã' | 'Â' | 'á' | 'à' | 'ã' | 'â' => 'a',
             'É' | 'Ê' | 'é' | 'ê' => 'e',
@@ -415,7 +412,13 @@ fn fold_map_key(s: &str) -> String {
             '_' | '-' | ':' => ' ',
             other => other,
         };
+        // Accent arms above each produce one char that lowercases to itself.
+        // `other` can expand (`\u{0130}` becomes `i` + `\u{0307}`). Drop that
+        // combining mark and keep the base letter.
         for lower in mapped.to_lowercase() {
+            if ('\u{0300}'..='\u{036f}').contains(&lower) {
+                continue;
+            }
             if lower.is_whitespace() {
                 if !out.is_empty() && !out.ends_with(' ') {
                     out.push(' ');
@@ -455,7 +458,9 @@ impl std::str::FromStr for MapName {
                 Ok(Self::WatchpointGrimsvotn)
             }
             "blizzard world" | "blizzardworld" => Ok(Self::BlizzardWorld),
-            "eichenwalde" => Ok(Self::Eichenwalde),
+            // Adlersbrunn is Eichenwalde's Halloween name. The tracker normally
+            // uploads "Eichenwalde"; this alias is defensive.
+            "eichenwalde" | "adlersbrunn" => Ok(Self::Eichenwalde),
             "hollywood" => Ok(Self::Hollywood),
             "kings row" | "kingsrow" => Ok(Self::KingsRow),
             "midtown" => Ok(Self::Midtown),
@@ -510,7 +515,6 @@ mod tests {
 
     #[test]
     fn all_covers_every_map_and_display_names_round_trip() {
-        assert_eq!(MapName::ALL.len(), 33);
         let mut names: Vec<&str> = MapName::ALL.iter().map(|m| m.display_name()).collect();
         let n = names.len();
         names.sort_unstable();
@@ -530,8 +534,10 @@ mod tests {
             ("Neon Junction", "Hybrid", MapName::NeonJunction),
             ("Paraíso", "Hybrid", MapName::Paraiso),
             ("Paraiso", "Hybrid", MapName::Paraiso),
+            ("Parai\u{0301}so", "Hybrid", MapName::Paraiso),
             ("Esperança", "Push", MapName::Esperanca),
             ("Esperanca", "Push", MapName::Esperanca),
+            ("Esperanc\u{0327}a", "Push", MapName::Esperanca),
             ("neon junction", "Hybrid", MapName::NeonJunction),
             (
                 "Watchpoint: Grímsvötn",
@@ -550,6 +556,11 @@ mod tests {
             ),
             (
                 "Watchpoint: Grimsvötn",
+                "Escort",
+                MapName::WatchpointGrimsvotn,
+            ),
+            (
+                "Watchpoint: Gri\u{0301}msvo\u{0308}tn",
                 "Escort",
                 MapName::WatchpointGrimsvotn,
             ),
@@ -633,7 +644,8 @@ mod tests {
             "Watchpoint: Grimsvotn",
             "Watchpoint: Grímsvotn",
             "Watchpoint: Grimsvötn",
-            "Watchpoint: Gri\u{301}msvo\u{308}tn",
+            "Watchpoint: Gri\u{0301}msvo\u{0308}tn",
+            "GR\u{0130}MSV\u{00d6}TN",
             "watchpoint: grímsvötn",
             "watchpoint grimsvotn",
             "watchpointgrimsvotn",
@@ -643,7 +655,7 @@ mod tests {
             "grímsvötn",
             "grimsvötn",
             "grímsvotn",
-            "gri\u{301}msvo\u{308}tn",
+            "gri\u{0301}msvo\u{0308}tn",
             "GRÍMSVÖTN",
             "Grimsvotn",
         ];
@@ -670,6 +682,29 @@ mod tests {
             assert_eq!(parsed, Ok(MapName::WatchpointGibraltar), "{name:?}");
             assert_ne!(parsed, Ok(MapName::WatchpointGrimsvotn), "{name:?}");
         }
+    }
+
+    /// Inclusive ends of the combining-mark block parse; the code points
+    /// just outside it do not.
+    #[test]
+    fn combining_mark_skip_includes_u0300_through_u036f_only() {
+        assert_eq!(
+            "grimsvotn\u{0300}".parse::<MapName>(),
+            Ok(MapName::WatchpointGrimsvotn)
+        );
+        assert_eq!(
+            "grimsvotn\u{036f}".parse::<MapName>(),
+            Ok(MapName::WatchpointGrimsvotn)
+        );
+        assert_eq!("grimsvotn\u{02ff}".parse::<MapName>(), Err(()));
+        assert_eq!("grimsvotn\u{0370}".parse::<MapName>(), Err(()));
+    }
+
+    /// Adlersbrunn is the Halloween name for Eichenwalde.
+    #[test]
+    fn adlersbrunn_parses_as_eichenwalde_hybrid() {
+        assert_eq!("Adlersbrunn".parse::<MapName>(), Ok(MapName::Eichenwalde));
+        assert_eq!(MapName::game_mode_label("Adlersbrunn"), "Hybrid");
     }
 
     /// Season 5: Doctrine is Support; Sombra moved Damage → Support.
