@@ -116,24 +116,23 @@ struct LeaderboardPayload {
     cached_at: Option<String>,
 }
 
-/// "Updated just now" / "Updated 12s ago" / "Updated 3m ago".
+/// "Updated just now" / "Updated 12s ago" / "Updated 3m ago" / "Updated 2h ago".
 ///
-/// An empty string means the label is hidden. A timestamp ahead of `now`
-/// (clock skew) reads as just now. A value that is not RFC 3339 is hidden.
-fn updated_label(cached_at: &str, now: chrono::DateTime<chrono::Utc>) -> String {
-    let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(cached_at) else {
-        return String::new();
-    };
-    let secs = now
-        .signed_duration_since(parsed.with_timezone(&chrono::Utc))
-        .num_seconds()
-        .max(0);
+/// A timestamp ahead of `now` (clock skew) reads as just now. Parsing stays
+/// in [`parse_cached_at`]; a missing stamp is not passed in.
+fn updated_label(
+    cached_at: chrono::DateTime<chrono::Utc>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> String {
+    let secs = now.signed_duration_since(cached_at).num_seconds().max(0);
     if secs < 5 {
         "Updated just now".into()
     } else if secs < 60 {
         format!("Updated {secs}s ago")
-    } else {
+    } else if secs < 3600 {
         format!("Updated {}m ago", secs / 60)
+    } else {
+        format!("Updated {}h ago", secs / 3600)
     }
 }
 
@@ -150,7 +149,8 @@ pub fn Leaderboards() -> Element {
     let mut hero = use_signal(|| None::<String>);
     let mut season = use_signal(|| None::<String>);
     // Last stamp that arrived. A filter change does not clear this, so the
-    // header keeps its label until the next payload lands.
+    // header keeps its label until the next payload lands. A failed fetch
+    // does clear it, so the label does not sit above the error.
     let mut shown_at = use_signal(|| None::<chrono::DateTime<chrono::Utc>>);
     let mut label_tick = use_signal(|| 0u32);
     // `use_future` spawns on this component's scope. Dioxus drops that task
@@ -183,16 +183,16 @@ pub fn Leaderboards() -> Element {
                     shown_at.set(parse_cached_at(payload.cached_at.as_deref()));
                     Some(payload.rows)
                 }
-                Err(_) => None,
+                Err(_) => {
+                    shown_at.set(None);
+                    None
+                }
             }
         }
     });
     let _tick = label_tick();
     let updated = match shown_at() {
-        Some(at) => updated_label(
-            &at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-            chrono::Utc::now(),
-        ),
+        Some(at) => updated_label(at, chrono::Utc::now()),
         None => String::new(),
     };
 
@@ -298,37 +298,49 @@ pub fn Leaderboards() -> Element {
 
 #[cfg(test)]
 mod tests {
-    use super::{LeaderboardPayload, updated_label};
+    use super::{LeaderboardPayload, parse_cached_at, updated_label};
     use chrono::{TimeZone, Utc};
 
-    fn at(secs_from_now: i64, now: chrono::DateTime<Utc>) -> String {
-        (now + chrono::Duration::seconds(secs_from_now))
-            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+    fn at(secs_from_now: i64, now: chrono::DateTime<Utc>) -> chrono::DateTime<Utc> {
+        now + chrono::Duration::seconds(secs_from_now)
     }
 
     #[test]
     fn updated_label_just_now_seconds_and_minutes() {
         let now = Utc.with_ymd_and_hms(2026, 10, 8, 12, 0, 0).unwrap();
-        assert_eq!(updated_label(&at(0, now), now), "Updated just now");
-        assert_eq!(updated_label(&at(-4, now), now), "Updated just now");
-        assert_eq!(updated_label(&at(-5, now), now), "Updated 5s ago");
-        assert_eq!(updated_label(&at(-59, now), now), "Updated 59s ago");
-        assert_eq!(updated_label(&at(-60, now), now), "Updated 1m ago");
-        assert_eq!(updated_label(&at(-125, now), now), "Updated 2m ago");
+        assert_eq!(updated_label(at(0, now), now), "Updated just now");
+        assert_eq!(updated_label(at(-4, now), now), "Updated just now");
+        assert_eq!(updated_label(at(-5, now), now), "Updated 5s ago");
+        assert_eq!(updated_label(at(-59, now), now), "Updated 59s ago");
+        assert_eq!(updated_label(at(-60, now), now), "Updated 1m ago");
+        assert_eq!(updated_label(at(-125, now), now), "Updated 2m ago");
+    }
+
+    #[test]
+    fn updated_label_hours_start_at_sixty_minutes() {
+        let now = Utc.with_ymd_and_hms(2026, 10, 8, 12, 0, 0).unwrap();
+        assert_eq!(updated_label(at(-59 * 60, now), now), "Updated 59m ago");
+        assert_eq!(updated_label(at(-60 * 60, now), now), "Updated 1h ago");
+        assert_eq!(updated_label(at(-2 * 3600, now), now), "Updated 2h ago");
+        assert_eq!(updated_label(at(-5 * 3600, now), now), "Updated 5h ago");
     }
 
     #[test]
     fn updated_label_future_stamp_reads_as_just_now() {
         let now = Utc.with_ymd_and_hms(2026, 10, 8, 12, 0, 0).unwrap();
-        assert_eq!(updated_label(&at(30, now), now), "Updated just now");
+        assert_eq!(updated_label(at(30, now), now), "Updated just now");
     }
 
     #[test]
-    fn updated_label_malformed_is_hidden() {
+    fn parse_cached_at_hides_malformed_stamps() {
         let now = Utc.with_ymd_and_hms(2026, 10, 8, 12, 0, 0).unwrap();
-        assert_eq!(updated_label("", now), "");
-        assert_eq!(updated_label("not-a-timestamp", now), "");
-        assert_eq!(updated_label("2026-13-99", now), "");
+        assert_eq!(parse_cached_at(None), None);
+        assert_eq!(parse_cached_at(Some("")), None);
+        assert_eq!(parse_cached_at(Some("   ")), None);
+        assert_eq!(parse_cached_at(Some("not-a-timestamp")), None);
+        assert_eq!(parse_cached_at(Some("2026-13-99")), None);
+        let raw = now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        assert_eq!(parse_cached_at(Some(&raw)), Some(now));
     }
 
     #[test]
@@ -339,10 +351,6 @@ mod tests {
         .unwrap();
         assert!(payload.cached_at.is_none());
         assert_eq!(payload.rows.len(), 1);
-        let now = Utc.with_ymd_and_hms(2026, 10, 8, 12, 0, 0).unwrap();
-        assert_eq!(
-            updated_label(payload.cached_at.as_deref().unwrap_or(""), now),
-            ""
-        );
+        assert_eq!(parse_cached_at(payload.cached_at.as_deref()), None);
     }
 }
