@@ -173,7 +173,7 @@ pub struct GateState {
     ///
     /// Set when they came from the raw-text fallback, or when a kill column
     /// is above the same ceilings the parser uses (elims/assists above 99,
-    /// deaths above 50) — including the first capture of a game, which
+    /// deaths above 50), including the first capture of a game, which
     /// otherwise accepts the raw read verbatim. One later clean per-cell
     /// read replaces the latch. Missing on a pre-0.4.21 `active_game.json`
     /// means already trusted.
@@ -452,7 +452,7 @@ fn fresh_state(raw: Counters, suspect: [bool; GATE_COLS], trusted: bool) -> Gate
 ///
 /// `trusted` is false when the six stats came from the raw-text fallback.
 /// That latch is `low_trust` even when every column is in range, and so is
-/// a first capture whose kill columns are implausible — the first capture
+/// a first capture whose kill columns are implausible: the first capture
 /// used to be stored as the baseline with no check, which is how a shifted
 /// assists/deaths pair locked for the rest of the match.
 ///

@@ -17,12 +17,8 @@ use stat_tracker::parse;
 #[ignore = "needs local fixture frames"]
 fn dorado_frames_read_dim_zeros_inside_the_kill_ceilings() {
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("test-data/dorado-20261008");
-    let entries = std::fs::read_dir(&dir).unwrap_or_else(|_| {
-        panic!(
-            "no fixture frames in {} — nothing was tested",
-            dir.display()
-        )
-    });
+    let entries = std::fs::read_dir(&dir)
+        .unwrap_or_else(|_| panic!("no fixture frames in {}: nothing was tested", dir.display()));
     let mut checked = 0usize;
     for entry in entries.flatten() {
         let path = entry.path();
@@ -87,5 +83,5 @@ fn dorado_frames_read_dim_zeros_inside_the_kill_ceilings() {
         }
         checked += 1;
     }
-    assert!(checked > 0, "no fixture frames found — nothing was tested");
+    assert!(checked > 0, "no fixture frames found: nothing was tested");
 }

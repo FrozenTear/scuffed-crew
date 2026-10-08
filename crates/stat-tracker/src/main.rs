@@ -3857,7 +3857,7 @@ async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<
                     damage = parsed.damage,
                     healing = parsed.healing,
                     mitigation = parsed.mitigation,
-                    "stat cells unreadable — using raw-text fallback (low trust)"
+                    "stat cells unreadable: using raw-text fallback (low trust)"
                 );
             }
             // Hero authority (CG-4 C): career-panel always wins; portrait may
@@ -3891,7 +3891,7 @@ async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<
             );
 
             // Auto-collect a portrait reference when the hero is identified and
-            // collection is enabled — or, always, when the career panel (the
+            // collection is enabled, or, always, when the career panel (the
             // authoritative OCR read) names a hero whose reference is missing.
             // A bundled stand-in (PROVISIONAL_PORTRAITS: Blizzard Entertainment
             // artwork sourced via the Overwatch wiki, for Doctrine) counts as
@@ -3917,10 +3917,10 @@ async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<
                 player_row_idx.is_some(),
             );
             if save_portrait && career_panel {
-                tracing::info!(hero = %parsed.hero, "no real portrait reference for career-panel hero — seeding one from this capture");
+                tracing::info!(hero = %parsed.hero, "no real portrait reference for career-panel hero: seeding one from this capture");
             }
             if save_portrait && let Some(row) = player_row_idx {
-                // Shared geometry (5v5/6v6 + team gap) — an inlined 5v5-only copy
+                // Shared geometry (5v5/6v6 + team gap): an inlined 5v5-only copy
                 // here used to mis-crop 6v6/team-2 references into the template
                 // library.
                 let dims = (scoreboard_img.width(), scoreboard_img.height());
@@ -3939,7 +3939,7 @@ async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<
             let captured_at = Utc::now();
             let now = SurrealDatetime::from(captured_at);
 
-            // Edge-ink suspect mask (CG-3) for the player's row — read from the same
+            // Edge-ink suspect mask (CG-3) for the player's row, read from the same
             // per-cell OCR the stats came from. Threaded into BOTH the split decision
             // (DUP-1: a suspect column must not vote as a regression) and the capture
             // gate (a suspect read never corroborates a jump or drives an un-latch).
@@ -3981,7 +3981,7 @@ async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<
                         elims = parsed.elims,
                         deaths = parsed.deaths,
                         damage = parsed.damage,
-                        "fresh-match board held — not written onto the current game"
+                        "fresh-match board held: not written onto the current game"
                     );
                 }
                 return Ok(skipped_capture_report(
@@ -4008,7 +4008,7 @@ async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<
                     damage = parsed.damage,
                     after_end_screen = req.after_end_screen,
                     reset_streak = plan.reset_streak,
-                    "player stats regressed — previous game never closed; splitting into a new session"
+                    "player stats regressed: previous game never closed; splitting into a new session"
                 );
             }
             let gate = &staged.gate;
@@ -4109,7 +4109,7 @@ async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<
                 .context("store insert failed")?;
 
             // Dump the accepted scoreboard crop to a bounded ring so a corrupt
-            // ACCEPTED board is diagnosable after the fact — tonight's corruption
+            // ACCEPTED board is diagnosable after the fact: tonight's corruption
             // was undiagnosable because only rejected frames were ever saved.
             save_accepted_frame(data_dir, scoreboard_img);
 
@@ -4138,7 +4138,7 @@ async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<
                     let dir = data_dir.join("debug").join("mapmiss");
                     tracing::warn!(
                         consecutive = n,
-                        "N consecutive scoreboard captures resolved no map — dumping map region to debug/mapmiss"
+                        "N consecutive scoreboard captures resolved no map: dumping map region to debug/mapmiss"
                     );
                     tokio::task::spawn_blocking(move || {
                         save_frame_ring(&dir, "mapmiss", &region, MAPMISS_KEEP);
@@ -4181,7 +4181,7 @@ async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<
             let reason = match miss {
                 parse::ScoreboardMiss::PlayerRowNotFound => {
                     tracing::warn!(
-                        "capture rejected — player row not found (saved to debug/rejected; \
+                        "capture rejected: player row not found (saved to debug/rejected; \
                      set player_name in config.toml if it is missing)"
                     );
                     "noplayerrow"
@@ -4197,7 +4197,7 @@ async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<
                     tracing::warn!(
                         ?player_row_idx,
                         ?cells,
-                        "capture rejected — stat cells unreadable (saved to debug/rejected)"
+                        "capture rejected: stat cells unreadable (saved to debug/rejected)"
                     );
                     "unreadable"
                 }
