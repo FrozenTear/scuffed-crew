@@ -1,4 +1,5 @@
-use std::collections::HashMap;
+#[cfg(test)]
+use std::cell::Cell;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -874,12 +875,210 @@ impl Database {
     }
 }
 
+/// Rows per SurrealDB response while the session-index migration still has
+/// work to do. A single `SELECT * FROM personal_match` resets the WebSocket
+/// once the table is about 60k rows (SurrealDB 3.0.5; 58k still fit). 2000
+/// narrow rows stay well under that frame, and steady-state boot does not
+/// read the table at all.
+const PERSONAL_MATCH_MIGRATION_BATCH: u32 = 2_000;
+
+const PERSONAL_MATCH_MIGRATION_COLS: &str =
+    "id, member_id, session_id, hero, map_name, game_mode, \
+     role, outcome, elims, deaths, assists, damage, healing, mitigation, edited, played_at, \
+     uploaded_at";
+
+#[cfg(test)]
+thread_local! {
+    static DATA_PASS_SELECTS: Cell<u64> = const { Cell::new(0) };
+    static MIGRATION_BATCH_OVERRIDE: Cell<Option<u32>> = const { Cell::new(None) };
+}
+
+fn note_data_pass_select() {
+    #[cfg(test)]
+    DATA_PASS_SELECTS.with(|n| n.set(n.get().saturating_add(1)));
+}
+
+fn migration_batch_size() -> u32 {
+    #[cfg(test)]
+    {
+        if let Some(n) = MIGRATION_BATCH_OVERRIDE.with(|c| c.get()) {
+            return n.max(1);
+        }
+    }
+    PERSONAL_MATCH_MIGRATION_BATCH
+}
+
+#[cfg(test)]
+struct MigrationBatchGuard;
+
+#[cfg(test)]
+impl Drop for MigrationBatchGuard {
+    fn drop(&mut self) {
+        MIGRATION_BATCH_OVERRIDE.with(|c| c.set(None));
+    }
+}
+
+#[cfg(test)]
+#[must_use]
+fn set_migration_batch_size(n: u32) -> MigrationBatchGuard {
+    MIGRATION_BATCH_OVERRIDE.with(|c| c.set(Some(n)));
+    MigrationBatchGuard
+}
+
+#[cfg(test)]
+fn reset_data_pass_selects() {
+    DATA_PASS_SELECTS.with(|n| n.set(0));
+}
+
+#[cfg(test)]
+fn data_pass_selects() -> u64 {
+    DATA_PASS_SELECTS.with(|n| n.get())
+}
+
+/// Keeper rule for one `(member_id, session_id)` group.
+///
+/// Newest `uploaded_at` wins. An equal timestamp keeps the lexicographically
+/// greatest record-id key (`"id-z"` beats `"id-a"`).
+fn prefer_personal_match_keeper(
+    uploaded_at: DateTime<Utc>,
+    record_key: &str,
+    best_uploaded_at: DateTime<Utc>,
+    best_record_key: &str,
+) -> bool {
+    uploaded_at > best_uploaded_at
+        || (uploaded_at == best_uploaded_at && record_key > best_record_key)
+}
+
+fn sql_token(word: &str) -> &str {
+    word.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+}
+
+/// Column names after `FIELDS` / `COLUMNS`, stopping at `UNIQUE`.
+/// The index name `pm_session_idx` contains the letters of `session_id`, so
+/// a substring search is not a column check.
+fn define_column_names(define: &str) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut in_columns = false;
+    for word in define.split_whitespace() {
+        let token = sql_token(word);
+        if token.is_empty() {
+            continue;
+        }
+        if !in_columns {
+            if token.eq_ignore_ascii_case("fields") || token.eq_ignore_ascii_case("columns") {
+                in_columns = true;
+            }
+            continue;
+        }
+        if token.eq_ignore_ascii_case("unique") {
+            break;
+        }
+        names.push(token.to_ascii_lowercase());
+    }
+    names
+}
+
+fn columns_are_member_and_session(names: &[String]) -> bool {
+    names.iter().any(|name| name == "member_id") && names.iter().any(|name| name == "session_id")
+}
+
+fn pm_session_define_is_unique(define: &str) -> bool {
+    let has_unique = define
+        .split_whitespace()
+        .any(|word| sql_token(word).eq_ignore_ascii_case("UNIQUE"));
+    has_unique && columns_are_member_and_session(&define_column_names(define))
+}
+
+fn info_pm_session_index_is_unique(info: &serde_json::Value) -> bool {
+    let Some(indexes) = info.get("indexes").or_else(|| info.get("indices")) else {
+        return false;
+    };
+    let Some(defn) = indexes.get("pm_session_idx") else {
+        return false;
+    };
+    match defn {
+        serde_json::Value::String(define) => pm_session_define_is_unique(define),
+        serde_json::Value::Object(map) => {
+            let columns_ok = map.values().any(|value| {
+                value
+                    .as_str()
+                    .is_some_and(|text| columns_are_member_and_session(&define_column_names(text)))
+                    || value.as_array().is_some_and(|cols| {
+                        let names = cols
+                            .iter()
+                            .filter_map(|col| col.as_str().map(|name| name.to_ascii_lowercase()))
+                            .collect::<Vec<_>>();
+                        columns_are_member_and_session(&names)
+                    })
+            });
+            let unique_flag = matches!(map.get("unique"), Some(serde_json::Value::Bool(true)));
+            let unique_text = map
+                .values()
+                .any(|value| value.as_str().is_some_and(pm_session_define_is_unique));
+            (unique_flag && columns_ok) || unique_text
+        }
+        _ => false,
+    }
+}
+
+async fn pm_session_index_is_unique(client: &Surreal<Any>) -> DbResult<bool> {
+    let mut res = client
+        .query("INFO FOR TABLE personal_match")
+        .await?
+        .check()?;
+    let info: Option<serde_json::Value> = res.take(0)?;
+    Ok(info.as_ref().is_some_and(info_pm_session_index_is_unique))
+}
+
+#[derive(Debug, Deserialize, SurrealValue)]
+struct DupSessionGroup {
+    member_id: String,
+    session_id: String,
+}
+
+#[derive(Debug, Deserialize, SurrealValue)]
+struct BlankSessionRow {
+    id: RecordId,
+    member_id: String,
+    hero: String,
+    map_name: String,
+    played_at: SurrealDatetime,
+}
+
+#[derive(Debug, Deserialize, SurrealValue)]
+struct GroupCount {
+    n: u64,
+}
+
 /// Make `(member_id, session_id)` unique without collapsing distinct
 /// pre-session games.
 ///
-/// Operator pre-check (read-only). Counts groups that already share a
-/// non-empty session id. Blank ids are excluded: pre-session rows all stored
-/// `''` and are distinct games, not one duplicated session.
+/// Steady state (Contabo and any database that already finished this
+/// migration): `INFO FOR TABLE personal_match` shows `pm_session_idx` as a
+/// UNIQUE index on `(member_id, session_id)`. This returns without reading
+/// `personal_match`. Boot stays O(1) in table size.
+///
+/// First boot, or a database whose index is still the non-unique placeholder
+/// (or missing): page through the table. Never `SELECT *` the whole table —
+/// that single WebSocket frame panics startup around 60k rows.
+///
+/// Which row survives:
+/// 1. An empty session id (`''` or NONE) is rewritten to
+///    [`legacy_session_id`] (member, hero, map, `played_at`) before grouping.
+///    Distinct pre-session games therefore do not share `''`, and a later
+///    content-identical upload matches the rewritten row.
+/// 2. Each `(member_id, session_id)` group keeps the newest `uploaded_at`.
+/// 3. Timestamp ties keep the lexicographically greatest record-id key.
+/// 4. That keeper is moved to [`personal_match_record_key`] when its id is
+///    not already that key, so the next UPSERT updates it instead of
+///    inserting a second row the unique index would reject. Losers are
+///    deleted first, including a loser that already sits on the deterministic
+///    id (a partial earlier run).
+/// 5. `REMOVE INDEX IF EXISTS pm_session_idx` then `DEFINE INDEX ... UNIQUE`.
+///    `DEFINE INDEX IF NOT EXISTS` cannot turn the non-unique placeholder
+///    into a unique index, so the remove is required.
+///
+/// Operator pre-check (read-only), non-empty session ids only:
 ///
 /// ```surql
 /// SELECT count() AS duplicate_groups FROM (
@@ -889,106 +1088,15 @@ impl Database {
 ///     GROUP BY member_id, session_id
 /// ) WHERE n > 1 GROUP ALL;
 /// ```
-///
-/// Blank rows, counted separately (rewritten to `legacy-*`, not deleted as one
-/// group):
-///
-/// ```surql
-/// SELECT member_id, count() AS blank_session_rows
-/// FROM personal_match
-/// WHERE session_id = '' OR session_id = NONE
-/// GROUP BY member_id;
-/// ```
-///
-/// Idempotent. Order:
-/// 1. Rows with an empty session id get the same `legacy-*` id the write path
-///    uses, so a later content-identical upload matches them and two different
-///    games do not share `''`.
-/// 2. Each `(member_id, session_id)` group keeps the newest `uploaded_at`.
-///    Ties keep the lexicographically greatest record-id key.
-/// 3. The survivor is moved to the deterministic record id when it is not
-///    already there (so the next UPSERT updates it instead of inserting a
-///    second row that the unique index would reject).
-/// 4. `REMOVE INDEX IF EXISTS pm_session_idx` then
-///    `DEFINE INDEX ... UNIQUE`. `DEFINE INDEX IF NOT EXISTS` cannot alter an
-///    existing non-unique index, so the remove is required.
 pub(crate) async fn migrate_personal_match_session_index(client: &Surreal<Any>) -> DbResult<()> {
-    let mut result = client
-        .query("SELECT * FROM personal_match")
-        .await?
-        .check()?;
-    let rows: Vec<DbPersonalMatch> = result.take(0)?;
-
-    struct Planned {
-        effective_sid: String,
-        uploaded_at: DateTime<Utc>,
-        record_key: String,
-        row: DbPersonalMatch,
+    if pm_session_index_is_unique(client).await? {
+        tracing::info!("pm_session_idx already UNIQUE; skipping personal_match data pass");
+        return Ok(());
     }
 
-    let mut blank_session_ids = 0u64;
-    let mut planned = Vec::with_capacity(rows.len());
-    for row in rows {
-        let uploaded_at: DateTime<Utc> = row.uploaded_at.into();
-        let record_key = row.id.as_ref().map(record_key_of).unwrap_or_default();
-        let effective_sid = if row.session_id.is_empty() {
-            blank_session_ids += 1;
-            let played: DateTime<Utc> = row.played_at.into();
-            legacy_session_id(&row.member_id, &row.hero, &row.map_name, &played)
-        } else {
-            row.session_id.clone()
-        };
-        planned.push(Planned {
-            effective_sid,
-            uploaded_at,
-            record_key,
-            row,
-        });
-    }
-
-    let mut groups: HashMap<(String, String), Vec<Planned>> = HashMap::new();
-    for item in planned {
-        groups
-            .entry((item.row.member_id.clone(), item.effective_sid.clone()))
-            .or_default()
-            .push(item);
-    }
-
-    let mut deleted = 0u64;
-    let mut rekeyed = 0u64;
-    for ((member_id, session_id), mut group) in groups {
-        group.sort_by(|a, b| {
-            b.uploaded_at
-                .cmp(&a.uploaded_at)
-                .then_with(|| b.record_key.cmp(&a.record_key))
-        });
-        let winner = group.swap_remove(0);
-        for loser in group {
-            if let Some(id) = loser.row.id.clone() {
-                delete_personal_match_record(client, id).await?;
-                deleted += 1;
-            }
-        }
-
-        let desired_key = personal_match_record_key(&member_id, &session_id);
-        let desired = personal_match_rid(&member_id, &session_id);
-        if winner.record_key != desired_key {
-            // A loser may already occupy the deterministic id (partial earlier
-            // run). It was deleted above, so this UPSERT recreates the keeper.
-            relocate_personal_match(client, desired, &winner.row, &session_id).await?;
-            if let Some(id) = winner.row.id.clone() {
-                delete_personal_match_record(client, id).await?;
-            }
-            rekeyed += 1;
-        } else if winner.row.session_id != session_id {
-            client
-                .query("UPDATE $rid SET session_id = $sid")
-                .bind(("rid", desired))
-                .bind(("sid", session_id))
-                .await?
-                .check()?;
-        }
-    }
+    let blank_session_ids = rewrite_blank_session_ids(client).await?;
+    let (deleted, rekeyed_dups) = collapse_duplicate_sessions(client).await?;
+    let rekeyed_rest = rekey_personal_matches(client).await?;
 
     client
         .query(
@@ -1002,11 +1110,283 @@ pub(crate) async fn migrate_personal_match_session_index(client: &Surreal<Any>) 
 
     tracing::info!(
         deleted,
-        rekeyed,
+        rekeyed = rekeyed_dups + rekeyed_rest,
         blank_session_ids,
         "personal_match session index is UNIQUE on (member_id, session_id)"
     );
     Ok(())
+}
+
+async fn rewrite_blank_session_ids(client: &Surreal<Any>) -> DbResult<u64> {
+    let mut rewritten = 0u64;
+    let mut previous_first: Option<String> = None;
+    loop {
+        note_data_pass_select();
+        let mut res = client
+            .query(
+                "SELECT id, member_id, hero, map_name, played_at FROM personal_match \
+                 WHERE session_id = '' OR session_id IS NONE \
+                 ORDER BY id LIMIT $lim",
+            )
+            .bind(("lim", migration_batch_size()))
+            .await?
+            .check()?;
+        let rows: Vec<BlankSessionRow> = res.take(0)?;
+        if rows.is_empty() {
+            break;
+        }
+        let first_key = record_key_of(&rows[0].id);
+        if previous_first.as_deref() == Some(first_key.as_str()) {
+            return Err(DbError::Conflict(
+                "blank personal_match session_id rewrite made no progress".into(),
+            ));
+        }
+        previous_first = Some(first_key);
+        for row in rows {
+            let played: DateTime<Utc> = row.played_at.into();
+            let sid = legacy_session_id(&row.member_id, &row.hero, &row.map_name, &played);
+            client
+                .query("UPDATE $rid SET session_id = $sid")
+                .bind(("rid", row.id))
+                .bind(("sid", sid))
+                .await?
+                .check()?;
+            rewritten += 1;
+        }
+    }
+    Ok(rewritten)
+}
+
+async fn collapse_duplicate_sessions(client: &Surreal<Any>) -> DbResult<(u64, u64)> {
+    let mut deleted = 0u64;
+    let mut rekeyed = 0u64;
+    let mut previous_first: Option<(String, String)> = None;
+    loop {
+        note_data_pass_select();
+        let mut res = client
+            .query(
+                "SELECT member_id, session_id FROM ( \
+                     SELECT member_id, session_id, count() AS n \
+                     FROM personal_match \
+                     WHERE session_id != '' \
+                     GROUP BY member_id, session_id \
+                 ) WHERE n > 1 \
+                 LIMIT $lim",
+            )
+            .bind(("lim", migration_batch_size()))
+            .await?
+            .check()?;
+        let groups: Vec<DupSessionGroup> = res.take(0)?;
+        if groups.is_empty() {
+            break;
+        }
+        let first = (groups[0].member_id.clone(), groups[0].session_id.clone());
+        if previous_first.as_ref() == Some(&first) {
+            return Err(DbError::Conflict(
+                "personal_match duplicate collapse made no progress".into(),
+            ));
+        }
+        previous_first = Some(first);
+        for group in groups {
+            let (group_deleted, group_rekeyed) =
+                collapse_one_session_group(client, &group.member_id, &group.session_id).await?;
+            deleted += group_deleted;
+            rekeyed += group_rekeyed;
+        }
+    }
+    Ok((deleted, rekeyed))
+}
+
+async fn collapse_one_session_group(
+    client: &Surreal<Any>,
+    member_id: &str,
+    session_id: &str,
+) -> DbResult<(u64, u64)> {
+    let batch = migration_batch_size();
+    let mut start = 0u32;
+    let mut best: Option<DbPersonalMatch> = None;
+    let mut best_uploaded_at: Option<DateTime<Utc>> = None;
+    let mut best_record_key = String::new();
+
+    loop {
+        note_data_pass_select();
+        let sql = format!(
+            "SELECT {PERSONAL_MATCH_MIGRATION_COLS} FROM personal_match \
+             WHERE member_id = $mid AND session_id = $sid \
+             ORDER BY id LIMIT $lim START $off"
+        );
+        let mut res = client
+            .query(sql)
+            .bind(("mid", member_id.to_string()))
+            .bind(("sid", session_id.to_string()))
+            .bind(("lim", batch))
+            .bind(("off", start))
+            .await?
+            .check()?;
+        let rows: Vec<DbPersonalMatch> = res.take(0)?;
+        if rows.is_empty() {
+            break;
+        }
+        let page_len = rows.len() as u32;
+        for row in rows {
+            let uploaded_at: DateTime<Utc> = row.uploaded_at.into();
+            let record_key = row.id.as_ref().map(record_key_of).unwrap_or_default();
+            let better = match best_uploaded_at {
+                None => true,
+                Some(current) => prefer_personal_match_keeper(
+                    uploaded_at,
+                    &record_key,
+                    current,
+                    &best_record_key,
+                ),
+            };
+            if better {
+                best_uploaded_at = Some(uploaded_at);
+                best_record_key = record_key;
+                best = Some(row);
+            }
+        }
+        if page_len < batch {
+            break;
+        }
+        start = start.saturating_add(batch);
+    }
+
+    let winner = best.ok_or_else(|| {
+        DbError::Conflict(format!(
+            "duplicate personal_match group ({member_id}, {session_id}) disappeared"
+        ))
+    })?;
+    let winner_id = winner.id.clone().ok_or_else(|| {
+        DbError::Conflict(format!(
+            "duplicate personal_match group ({member_id}, {session_id}) keeper has no id"
+        ))
+    })?;
+
+    let mut counted = client
+        .query(
+            "SELECT count() AS n FROM personal_match \
+             WHERE member_id = $mid AND session_id = $sid GROUP ALL",
+        )
+        .bind(("mid", member_id.to_string()))
+        .bind(("sid", session_id.to_string()))
+        .await?
+        .check()?;
+    let counts: Vec<GroupCount> = counted.take(0)?;
+    let deleted = counts.first().map(|c| c.n).unwrap_or(0).saturating_sub(1);
+
+    // RETURN NONE: a plain DELETE ships every removed row back on the
+    // WebSocket, which is the failure this migration is fixing.
+    client
+        .query(
+            "DELETE personal_match WHERE member_id = $mid AND session_id = $sid \
+             AND id != $keep RETURN NONE",
+        )
+        .bind(("mid", member_id.to_string()))
+        .bind(("sid", session_id.to_string()))
+        .bind(("keep", winner_id.clone()))
+        .await?
+        .check()?;
+
+    let desired_key = personal_match_record_key(member_id, session_id);
+    let mut rekeyed = 0u64;
+    if best_record_key != desired_key {
+        let desired = personal_match_rid(member_id, session_id);
+        // Losers, including one that already held `desired`, were deleted above.
+        relocate_personal_match(client, desired, &winner, session_id).await?;
+        delete_personal_match_record(client, winner_id).await?;
+        rekeyed = 1;
+    } else if winner.session_id != session_id {
+        let desired = personal_match_rid(member_id, session_id);
+        client
+            .query("UPDATE $rid SET session_id = $sid")
+            .bind(("rid", desired))
+            .bind(("sid", session_id.to_string()))
+            .await?
+            .check()?;
+    }
+    Ok((deleted, rekeyed))
+}
+
+async fn rekey_personal_matches(client: &Surreal<Any>) -> DbResult<u64> {
+    let batch = migration_batch_size();
+    let mut rekeyed = 0u64;
+    let mut cursor: Option<RecordId> = None;
+    let first_page = format!(
+        "SELECT {PERSONAL_MATCH_MIGRATION_COLS} FROM personal_match ORDER BY id LIMIT $lim"
+    );
+    let later_page = format!(
+        "SELECT {PERSONAL_MATCH_MIGRATION_COLS} FROM personal_match \
+         WHERE id > $cursor ORDER BY id LIMIT $lim"
+    );
+
+    loop {
+        note_data_pass_select();
+        let mut res = if let Some(cursor_id) = cursor.clone() {
+            client
+                .query(later_page.as_str())
+                .bind(("lim", batch))
+                .bind(("cursor", cursor_id))
+                .await?
+                .check()?
+        } else {
+            client
+                .query(first_page.as_str())
+                .bind(("lim", batch))
+                .await?
+                .check()?
+        };
+        let rows: Vec<DbPersonalMatch> = res.take(0)?;
+        if rows.is_empty() {
+            break;
+        }
+        let page_len = rows.len() as u32;
+        let last_id = rows.last().and_then(|row| row.id.clone());
+        let last_key = last_id.as_ref().map(record_key_of).unwrap_or_default();
+        if cursor
+            .as_ref()
+            .is_some_and(|id| record_key_of(id) == last_key)
+        {
+            return Err(DbError::Conflict(
+                "personal_match rekey scan made no progress".into(),
+            ));
+        }
+
+        for row in rows {
+            let record_key = row.id.as_ref().map(record_key_of).unwrap_or_default();
+            let session_id = if row.session_id.is_empty() {
+                let played: DateTime<Utc> = row.played_at.into();
+                legacy_session_id(&row.member_id, &row.hero, &row.map_name, &played)
+            } else {
+                row.session_id.clone()
+            };
+            let desired_key = personal_match_record_key(&row.member_id, &session_id);
+            if record_key == desired_key {
+                if row.session_id != session_id {
+                    let desired = personal_match_rid(&row.member_id, &session_id);
+                    client
+                        .query("UPDATE $rid SET session_id = $sid")
+                        .bind(("rid", desired))
+                        .bind(("sid", session_id))
+                        .await?
+                        .check()?;
+                }
+                continue;
+            }
+            let desired = personal_match_rid(&row.member_id, &session_id);
+            relocate_personal_match(client, desired, &row, &session_id).await?;
+            if let Some(id) = row.id.clone() {
+                delete_personal_match_record(client, id).await?;
+            }
+            rekeyed += 1;
+        }
+
+        cursor = last_id;
+        if page_len < batch {
+            break;
+        }
+    }
+    Ok(rekeyed)
 }
 
 async fn delete_personal_match_record(client: &Surreal<Any>, rid: RecordId) -> DbResult<()> {
@@ -1535,6 +1915,9 @@ mod tests {
     #[tokio::test]
     async fn migration_dedupes_keeps_newest_and_is_rerunnable() {
         let db = test_db().await;
+        // One row per page, so the keeper is chosen across batches rather than
+        // from a single in-memory group.
+        let _batch = super::set_migration_batch_size(1);
         drop_session_index(&db).await;
 
         let play = Utc.with_ymd_and_hms(2026, 7, 1, 20, 0, 0).unwrap();
@@ -1634,6 +2017,7 @@ mod tests {
     #[tokio::test]
     async fn migration_rewrites_blank_sessions_without_collapsing_distinct_games() {
         let db = test_db().await;
+        let _batch = super::set_migration_batch_size(1);
         drop_session_index(&db).await;
 
         let oasis_at = Utc.with_ymd_and_hms(2026, 6, 1, 18, 0, 0).unwrap();
@@ -1784,6 +2168,202 @@ mod tests {
         );
         assert_eq!(
             db.list_personal_matches("blank-merge", 10, 0)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn keeper_prefers_newest_upload_then_greatest_record_key() {
+        let older = Utc.with_ymd_and_hms(2026, 7, 4, 1, 0, 0).unwrap();
+        let newer = Utc.with_ymd_and_hms(2026, 7, 4, 2, 0, 0).unwrap();
+        assert!(super::prefer_personal_match_keeper(
+            newer, "id-a", older, "id-z"
+        ));
+        assert!(!super::prefer_personal_match_keeper(
+            older, "id-z", newer, "id-a"
+        ));
+        assert!(super::prefer_personal_match_keeper(
+            newer, "id-z", newer, "id-a"
+        ));
+        assert!(!super::prefer_personal_match_keeper(
+            newer, "id-a", newer, "id-z"
+        ));
+    }
+
+    #[test]
+    fn unique_index_define_string_requires_both_columns() {
+        assert!(super::pm_session_define_is_unique(
+            "DEFINE INDEX pm_session_idx ON personal_match FIELDS member_id, session_id UNIQUE"
+        ));
+        assert!(!super::pm_session_define_is_unique(
+            "DEFINE INDEX pm_session_idx ON personal_match FIELDS member_id, session_id"
+        ));
+        assert!(!super::pm_session_define_is_unique(
+            "DEFINE INDEX pm_session_idx ON personal_match FIELDS member_id UNIQUE"
+        ));
+    }
+
+    #[tokio::test]
+    async fn migration_with_unique_index_does_not_select_personal_match_rows() {
+        let db = test_db().await;
+        let mut info_res = db
+            .client
+            .query("INFO FOR TABLE personal_match")
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+        let info: Option<serde_json::Value> = info_res.take(0).unwrap();
+        let info = info.expect("INFO FOR TABLE personal_match");
+        assert!(
+            super::info_pm_session_index_is_unique(&info),
+            "fresh migrations must leave pm_session_idx UNIQUE, INFO FOR TABLE was {info}"
+        );
+        db.upsert_personal_matches("skip-scan", &[entry("already-unique", "victory", 4)])
+            .await
+            .unwrap();
+        let before = db.list_personal_matches("skip-scan", 10, 0).await.unwrap();
+        assert_eq!(before.len(), 1);
+
+        super::reset_data_pass_selects();
+        run_migrations(&db.client).await.unwrap();
+        assert_eq!(
+            super::data_pass_selects(),
+            0,
+            "boot migration must not select personal_match rows when pm_session_idx is UNIQUE"
+        );
+        let after = db.list_personal_matches("skip-scan", 10, 0).await.unwrap();
+        assert_eq!(after.len(), 1);
+        assert_eq!(after[0].id, before[0].id);
+        assert_eq!(after[0].elims, 4);
+
+        // Non-unique and missing indexes still take the data pass.
+        drop_session_index(&db).await;
+        super::reset_data_pass_selects();
+        run_migrations(&db.client).await.unwrap();
+        assert!(
+            super::data_pass_selects() > 0,
+            "dropping pm_session_idx must run the paged data pass"
+        );
+        assert!(super::pm_session_index_is_unique(&db.client).await.unwrap());
+    }
+
+    /// A few thousand already-unique rows, read in small id-ordered pages.
+    /// Proves the not-yet-migrated path pages instead of one `SELECT *`.
+    #[tokio::test]
+    async fn migration_pages_a_few_thousand_rows_with_a_small_batch() {
+        let db = test_db().await;
+        drop_session_index(&db).await;
+
+        const ROWS: u32 = 2_000;
+        const BATCH: u32 = 100;
+        let mut sql = String::new();
+        for i in 0..ROWS {
+            sql.push_str(&format!(
+                "CREATE personal_match SET member_id = 'bulk', session_id = '{i}', \
+                 hero = 'Ana', map_name = 'Oasis', game_mode = 'control', role = 'Support', \
+                 outcome = 'victory', elims = {i}, deaths = 1, assists = 1, damage = 1, \
+                 healing = 1, mitigation = 0, edited = false, \
+                 played_at = d'2026-04-01T00:00:00Z', uploaded_at = d'2026-04-02T00:00:00Z' \
+                 RETURN NONE;\n"
+            ));
+        }
+        db.client.query(sql).await.unwrap().check().unwrap();
+
+        let play = Utc.with_ymd_and_hms(2026, 4, 3, 12, 0, 0).unwrap();
+        let older = Utc.with_ymd_and_hms(2026, 4, 4, 1, 0, 0).unwrap();
+        let newer = Utc.with_ymd_and_hms(2026, 4, 4, 2, 0, 0).unwrap();
+        insert_raw(
+            &db,
+            "page-old",
+            "paged-dup",
+            "sess-dup",
+            "Oasis",
+            play,
+            older,
+            1,
+        )
+        .await;
+        insert_raw(
+            &db,
+            "page-new",
+            "paged-dup",
+            "sess-dup",
+            "Oasis",
+            play,
+            newer,
+            7,
+        )
+        .await;
+
+        let _batch = super::set_migration_batch_size(BATCH);
+        super::reset_data_pass_selects();
+        run_migrations(&db.client).await.unwrap();
+        let selects = super::data_pass_selects();
+        assert!(
+            selects > u64::from(ROWS / BATCH),
+            "expected more than one page of selects, got {selects}"
+        );
+        assert!(super::pm_session_index_is_unique(&db.client).await.unwrap());
+
+        use serde::Deserialize;
+        use surrealdb_types::SurrealValue;
+        #[derive(Deserialize, SurrealValue)]
+        struct IdSid {
+            id: surrealdb_types::RecordId,
+            member_id: String,
+            session_id: String,
+        }
+        let mut offset = 0u32;
+        let mut seen = 0u32;
+        loop {
+            let mut res = db
+                .client
+                .query(
+                    "SELECT id, member_id, session_id FROM personal_match \
+                     WHERE member_id = 'bulk' ORDER BY id LIMIT 400 START $off",
+                )
+                .bind(("off", offset))
+                .await
+                .unwrap()
+                .check()
+                .unwrap();
+            let page: Vec<IdSid> = res.take(0).unwrap();
+            if page.is_empty() {
+                break;
+            }
+            for row in &page {
+                assert_eq!(
+                    super::record_key_of(&row.id),
+                    personal_match_record_key(&row.member_id, &row.session_id),
+                    "every paged row is moved onto its deterministic id"
+                );
+            }
+            let n = u32::try_from(page.len()).unwrap();
+            seen += n;
+            offset += n;
+        }
+        assert_eq!(
+            seen, ROWS,
+            "pagination must not drop or duplicate bulk rows"
+        );
+
+        let dup = db.list_personal_matches("paged-dup", 10, 0).await.unwrap();
+        assert_eq!(dup.len(), 1);
+        assert_eq!(dup[0].elims, 7, "newest duplicate survives the paged pass");
+
+        super::reset_data_pass_selects();
+        run_migrations(&db.client).await.unwrap();
+        assert_eq!(
+            super::data_pass_selects(),
+            0,
+            "the following boot sees the UNIQUE index and skips the table"
+        );
+        assert_eq!(
+            db.list_personal_matches("paged-dup", 10, 0)
                 .await
                 .unwrap()
                 .len(),
