@@ -600,8 +600,10 @@ fn ScrimCreateForm(teams: Vec<Team>, games: Vec<Game>, on_created: EventHandler<
             h3 { class: "scrim-create-title", "Request a Scrim" }
             div { class: "scrim-form-row",
                 div { class: "scrim-form-field",
-                    label { class: "scrim-form-label", "Team" }
+                    label { class: "scrim-form-label", r#for: "scrim-team", "Team" }
                     select {
+                        id: "scrim-team",
+                        name: "scrim-team",
                         class: "scrim-form-select",
                         value: "{team_id}",
                         onchange: move |e| team_id.set(e.value()),
@@ -612,8 +614,10 @@ fn ScrimCreateForm(teams: Vec<Team>, games: Vec<Game>, on_created: EventHandler<
                     }
                 }
                 div { class: "scrim-form-field",
-                    label { class: "scrim-form-label", "Game" }
+                    label { class: "scrim-form-label", r#for: "scrim-game", "Game" }
                     select {
+                        id: "scrim-game",
+                        name: "scrim-game",
                         class: "scrim-form-select",
                         value: "{game_id}",
                         onchange: move |e| game_id.set(e.value()),
@@ -626,8 +630,10 @@ fn ScrimCreateForm(teams: Vec<Team>, games: Vec<Game>, on_created: EventHandler<
             }
             div { class: "scrim-form-row",
                 div { class: "scrim-form-field",
-                    label { class: "scrim-form-label", "Scheduled Date & Time" }
+                    label { class: "scrim-form-label", r#for: "scrim-scheduled-at", "Scheduled Date & Time" }
                     input {
+                        id: "scrim-scheduled-at",
+                        name: "scrim-scheduled-at",
                         class: "scrim-form-input",
                         r#type: "datetime-local",
                         value: "{scheduled_at}",
@@ -635,8 +641,10 @@ fn ScrimCreateForm(teams: Vec<Team>, games: Vec<Game>, on_created: EventHandler<
                     }
                 }
                 div { class: "scrim-form-field",
-                    label { class: "scrim-form-label", "Duration (min)" }
+                    label { class: "scrim-form-label", r#for: "scrim-duration", "Duration (min)" }
                     input {
+                        id: "scrim-duration",
+                        name: "scrim-duration",
                         class: "scrim-form-input",
                         r#type: "number",
                         value: "{duration}",
@@ -648,8 +656,10 @@ fn ScrimCreateForm(teams: Vec<Team>, games: Vec<Game>, on_created: EventHandler<
             }
             div { class: "scrim-form-row",
                 div { class: "scrim-form-field",
-                    label { class: "scrim-form-label", "Notes (optional)" }
+                    label { class: "scrim-form-label", r#for: "scrim-notes", "Notes (optional)" }
                     textarea {
+                        id: "scrim-notes",
+                        name: "scrim-notes",
                         class: "scrim-form-textarea",
                         placeholder: "Any details about the scrim...",
                         value: "{notes}",

@@ -212,6 +212,8 @@ pub fn Members() -> Element {
 
             div { class: "members-toolbar",
                 HeroSelect {
+                    id: "members-hero".to_string(),
+                    name: "members-hero".to_string(),
                     label: Some("Filter by hero".to_string()),
                     value: hero(),
                     onchange: move |v| hero.set(v),

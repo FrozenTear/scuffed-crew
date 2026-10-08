@@ -268,6 +268,8 @@ pub fn Leaderboards() -> Element {
             div { class: "lb-filters",
                 div { class: "lb-hero",
                     HeroSelect {
+                        id: "leaderboard-hero".to_string(),
+                        name: "leaderboard-hero".to_string(),
                         label: "Hero".to_string(),
                         value: hero(),
                         onchange: move |h| hero.set(h),
@@ -275,6 +277,8 @@ pub fn Leaderboards() -> Element {
                 }
                 div { class: "lb-hero",
                     SeasonSelect {
+                        id: "leaderboard-season".to_string(),
+                        name: "leaderboard-season".to_string(),
                         label: "Season".to_string(),
                         seasons: season.season_list(),
                         seasons_error: season.seasons_error(),
@@ -347,6 +351,21 @@ mod tests {
 
     fn at(secs_from_now: i64, now: chrono::DateTime<Utc>) -> chrono::DateTime<Utc> {
         now + chrono::Duration::seconds(secs_from_now)
+    }
+
+    #[test]
+    fn filter_controls_pass_stable_id_and_name() {
+        let src = include_str!("leaderboards.rs");
+        for id in ["leaderboard-hero", "leaderboard-season"] {
+            assert!(
+                src.contains(&format!("id: \"{id}\".to_string()")),
+                "{id} id"
+            );
+            assert!(
+                src.contains(&format!("name: \"{id}\".to_string()")),
+                "{id} name"
+            );
+        }
     }
 
     #[test]

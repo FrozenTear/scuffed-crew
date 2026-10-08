@@ -182,9 +182,12 @@ pub fn StrategyHeroes() -> Element {
             // ---- LEFT PANEL: hero grid ----
             div { class: "heroes-left",
                 input {
+                    id: "strategy-hero-search",
+                    name: "strategy-hero-search",
                     class: "heroes-search",
                     r#type: "text",
                     placeholder: "Search heroes...",
+                    aria_label: "Search heroes...",
                     value: "{search_filter}",
                     oninput: move |e| search_filter.set(e.value()),
                 }

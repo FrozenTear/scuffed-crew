@@ -152,8 +152,11 @@ pub fn Wiki() -> Element {
 
             div { class: "wiki-search",
                 input {
+                    id: "wiki-search",
+                    name: "wiki-search",
                     r#type: "text",
                     placeholder: "Search wiki...",
+                    aria_label: "Search wiki...",
                     value: "{search_text}",
                     oninput: move |e| search_text.set(e.value()),
                 }
