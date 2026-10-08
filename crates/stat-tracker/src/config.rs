@@ -242,10 +242,8 @@ impl Config {
             config.debug_ocr = true;
         }
 
-        // Env overlay for the shadow digit recognizer (log only).
-        if Self::env_truthy("SCUFFED_SHADOW_RECOGNIZER") {
-            config.shadow_recognizer = true;
-        }
+        // SCUFFED_SHADOW_RECOGNIZER is read by `shadow_recognizer_enabled()`,
+        // never folded into the struct, so a Settings save can't persist it.
 
         // OCR worker count: CLI > env > config file > auto (None).
         if let Some(raw) = Self::arg_value("--ocr-threads")
@@ -304,6 +302,21 @@ impl Config {
         self.debug_ocr || Self::env_truthy("STAT_TRACKER_DEBUG_OCR")
     }
 
+    /// Whether the shadow digit recognizer runs this process (config file
+    /// and/or env `SCUFFED_SHADOW_RECOGNIZER`). The env override is read here
+    /// only, so `shadow_recognizer` always holds the file value and a save
+    /// never writes the override.
+    pub fn shadow_recognizer_enabled(&self) -> bool {
+        Self::shadow_enabled(
+            self.shadow_recognizer,
+            std::env::var("SCUFFED_SHADOW_RECOGNIZER").ok().as_deref(),
+        )
+    }
+
+    fn shadow_enabled(file_flag: bool, env: Option<&str>) -> bool {
+        file_flag || Self::truthy(env)
+    }
+
     /// Resolved OCR worker count for the Rayon pool (and thus Tesseract instances).
     /// Explicit config/env/CLI wins; otherwise auto from host parallelism.
     pub fn ocr_threads_resolved(&self) -> usize {
@@ -322,10 +335,11 @@ impl Config {
     }
 
     fn env_truthy(key: &str) -> bool {
-        matches!(
-            std::env::var(key).as_deref(),
-            Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES")
-        )
+        Self::truthy(std::env::var(key).ok().as_deref())
+    }
+
+    fn truthy(value: Option<&str>) -> bool {
+        matches!(value, Some("1" | "true" | "TRUE" | "yes" | "YES"))
     }
 
     /// Find a `--key value` pair in std::env::args().
@@ -385,6 +399,50 @@ mod tests {
         assert!(!raw.contains("shadow_recognizer"), "{raw}");
         let on: Config = toml::from_str(&format!("shadow_recognizer = true\n{raw}")).unwrap();
         assert!(on.shadow_recognizer);
+    }
+
+    #[test]
+    fn shadow_env_off_values_keep_it_off() {
+        for v in [
+            None,
+            Some("0"),
+            Some("false"),
+            Some("FALSE"),
+            Some("no"),
+            Some(""),
+        ] {
+            assert!(
+                !Config::shadow_enabled(false, v),
+                "{v:?} must not turn it on"
+            );
+        }
+        for v in [Some("1"), Some("true"), Some("yes")] {
+            assert!(Config::shadow_enabled(false, v), "{v:?} turns it on");
+        }
+        assert!(
+            Config::shadow_enabled(true, Some("0")),
+            "file flag still wins"
+        );
+    }
+
+    #[test]
+    fn shadow_env_override_is_never_saved() {
+        // The override is resolved at use, not stored: a config built from the
+        // file value (what Settings saves) serializes without the key even
+        // when the env would turn the recognizer on.
+        let cfg = Config::default();
+        assert!(Config::shadow_enabled(cfg.shadow_recognizer, Some("1")));
+        assert!(!cfg.shadow_recognizer);
+        let raw = toml::to_string_pretty(&cfg).unwrap();
+        assert!(!raw.contains("shadow_recognizer"), "{raw}");
+        // Config::load must not fold the env var into the struct.
+        let src = include_str!("config.rs");
+        let load = &src[src.find("pub fn load").expect("load")..];
+        let load = &load[..load.find("pub fn config_path").expect("end of load")];
+        assert!(
+            !load.contains(concat!("config.shadow_", "recognizer =")),
+            "load() must not persist SCUFFED_SHADOW_RECOGNIZER into the config"
+        );
     }
 
     #[test]

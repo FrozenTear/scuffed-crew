@@ -7494,6 +7494,105 @@ mod tests {
         }
     }
 
+    /// Shadow mode is log only: the same capture stored and uploaded with the
+    /// flag off and on gives byte-identical stored rows and upload body. The
+    /// hand-off below is the one the accept path runs after `stage_capture`.
+    #[tokio::test]
+    async fn shadow_flag_on_and_off_store_and_upload_identical_rows() {
+        async fn run(flag_on: bool) -> (String, String, bool) {
+            let dir = tempfile::tempdir().unwrap();
+            let cfg = config::Config {
+                data_dir: dir.path().to_path_buf(),
+                shadow_recognizer: flag_on,
+                ..config::Config::default()
+            };
+            let worker = shadow::worker::ShadowWorker::start_if_enabled(&cfg);
+            assert_eq!(worker.is_some(), flag_on);
+            let scoreboard = Arc::new(image::DynamicImage::new_rgb8(1664, 1007));
+            let rows: Vec<ocr::RowOcrResult> = (0..10)
+                .map(|i| ocr::RowOcrResult {
+                    name: None,
+                    stats: ["12", "3", "4", "5,480", "950", "2,347"]
+                        .iter()
+                        .map(|v| ocr::CellOcrResult {
+                            value: v.to_string(),
+                            confidence: 80 + i,
+                            suspect: false,
+                        })
+                        .collect(),
+                    mean_confidence: 80 + i,
+                })
+                .collect();
+            let rows_before = format!("{rows:?}");
+            let input = shadow::worker::ShadowInput::when(worker.is_some(), &scoreboard, 5, 1440);
+            if let (Some(w), Some(input)) = (&worker, &input) {
+                assert!(w.try_submit(shadow::worker::ShadowJob::new(
+                    input,
+                    &rows,
+                    Some(0),
+                    "sess-shadow",
+                    Utc::now(),
+                )));
+            }
+            let store = storage::LocalStore::open(dir.path()).await.unwrap();
+            let mut row = test_match("sess-shadow", "victory");
+            row.played_at = SurrealDatetime::from(
+                chrono::DateTime::<Utc>::from_timestamp(1_760_000_000, 0).unwrap(),
+            );
+            store.insert_match(row).await.unwrap();
+            let log = dir.path().join("shadow").join("digits.jsonl");
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while flag_on && !log.exists() && std::time::Instant::now() < deadline {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            drop(worker);
+            assert_eq!(
+                format!("{rows:?}"),
+                rows_before,
+                "the hand-off never edits rows"
+            );
+            let stored = store.get_unsynced().await.unwrap();
+            assert_eq!(stored.len(), 1);
+            let stored_json = serde_json::to_string(&stored).unwrap();
+            let body = serde_json::to_string(&sync::upload_request(&stored, &[])).unwrap();
+            (stored_json, body, log.exists())
+        }
+        let (stored_off, body_off, log_off) = run(false).await;
+        let (stored_on, body_on, log_on) = run(true).await;
+        assert_eq!(
+            stored_off, stored_on,
+            "stored rows must not depend on shadow mode"
+        );
+        assert_eq!(
+            body_off, body_on,
+            "upload body must not depend on shadow mode"
+        );
+        assert!(!log_off, "flag off writes no shadow log");
+        assert!(log_on, "flag on wrote its log line");
+    }
+
+    /// The accept path hands the shadow worker shared borrows only, and the
+    /// row commit never sees shadow state.
+    #[test]
+    fn shadow_hook_only_borrows_and_stays_out_of_the_commit() {
+        let src = include_str!("main.rs");
+        let hook = src
+            .find("worker.try_submit(shadow::worker::ShadowJob::new(")
+            .expect("shadow hand-off in the accept path");
+        let call = &src[hook..hook + 300];
+        assert!(call.contains("&rows,"), "{call}");
+        assert!(call.contains("&staged.target_session,"), "{call}");
+        let commit = src
+            .find("async fn commit_capture_rows(")
+            .expect("commit_capture_rows");
+        let body = src[commit..].split("\nasync fn ").next().unwrap();
+        let body = body.split("\nfn ").next().unwrap();
+        assert!(
+            !body.contains("shadow"),
+            "commit_capture_rows must not read shadow state"
+        );
+    }
+
     #[tokio::test]
     async fn local_write_during_inflight_upload_stays_unsynced_until_next_sync() {
         let dir = tempfile::tempdir().unwrap();

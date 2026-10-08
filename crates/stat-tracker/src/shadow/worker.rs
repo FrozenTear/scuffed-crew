@@ -121,7 +121,7 @@ pub struct ShadowWorker {
 impl ShadowWorker {
     /// Spawn the worker only when the config flag is on.
     pub fn start_if_enabled(config: &crate::config::Config) -> Option<Self> {
-        if !config.shadow_recognizer {
+        if !config.shadow_recognizer_enabled() {
             return None;
         }
         let log = ShadowLog::new(&config.data_dir);
