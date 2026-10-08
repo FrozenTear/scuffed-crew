@@ -2,6 +2,10 @@ use dioxus::prelude::*;
 
 use serde::Deserialize;
 
+use super::stats::load_error_state;
+use super::stats::role::{
+    RolePanel, hide_member_role_error, member_roles_path, role_aggs_from_rows, role_panel,
+};
 use crate::components::ui::SeasonSelect;
 use crate::components::{DataTable, member_pending};
 use crate::hooks::use_api_with;
@@ -173,6 +177,7 @@ pub fn StatsMember(id: String) -> Element {
     let member_id = id.clone();
     let member_id_h = id.clone();
     let member_id_m = id.clone();
+    let member_id_r = id.clone();
 
     // Total or per season — same `?season=` contract as My Stats.
     let mut season = use_signal(|| None::<String>);
@@ -187,6 +192,10 @@ pub fn StatsMember(id: String) -> Element {
 
     let maps = use_api_with::<Vec<MapStats>>(move || {
         season_url(&format!("/api/stats/member/{member_id_m}/maps"), season())
+    });
+
+    let roles = use_api_with::<Vec<scuffed_types::RoleStats>>(move || {
+        season_url(&member_roles_path(&member_id_r), season())
     });
 
     let mut tab = use_signal(|| MemberStatsTab::Overview);
@@ -256,9 +265,53 @@ pub fn StatsMember(id: String) -> Element {
 
             match tab() {
                 MemberStatsTab::Overview => rsx! {
-                    p { class: "empty-state",
-                        style: "padding: 1rem 0; text-align: left;",
-                        "Select Heroes or Maps to view detailed breakdown."
+                    {
+                        let err = roles.error.read().clone();
+                        let data = roles.data.read();
+                        let rows = data.as_ref().and_then(|d| d.as_ref());
+                        if err.as_deref().is_some_and(hide_member_role_error) {
+                            rsx! {}
+                        } else {
+                            match role_panel(err.as_deref(), rows.map(|rows| rows.as_slice())) {
+                                RolePanel::Pending => rsx! {
+                                    p { class: "loading-state", "Loading role breakdown..." }
+                                },
+                                RolePanel::Failed => load_error_state("role breakdown", roles.refresh),
+                                RolePanel::Ready(rows) => {
+                                    let aggs = role_aggs_from_rows(rows);
+                                    let shown: Vec<_> = aggs.iter().filter(|r| r.matches > 0).collect();
+                                    if shown.is_empty() {
+                                        rsx! {
+                                            p { class: "empty-state",
+                                                style: "padding: 1rem 0; text-align: left;",
+                                                "No role stats yet."
+                                            }
+                                        }
+                                    } else {
+                                        rsx! {
+                                            DataTable { headers: vec!["Role", "Matches", "Win %"],
+                                                for agg in shown.iter() {
+                                                    {
+                                                        let wr = winrate_pct(agg.wins, agg.matches);
+                                                        let wr_cls = wr_text_class(agg.matches);
+                                                        let row_cls = if agg.matches < 3 { "stats-row-muted" } else { "" };
+                                                        let name = agg.name;
+                                                        let matches = agg.matches;
+                                                        rsx! {
+                                                            tr { key: "{name}", class: "{row_cls}",
+                                                                td { "{name}" }
+                                                                td { "{matches}" }
+                                                                td { span { class: "{wr_cls}", "{wr:.1}%" } }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                 },
                 MemberStatsTab::Heroes => rsx! {

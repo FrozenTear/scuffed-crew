@@ -2,7 +2,7 @@ use dioxus::prelude::*;
 
 use crate::hooks::ApiResource;
 
-use super::overview::hero_to_role;
+use super::role::{history_row_matches_role, stored_role_label};
 use super::{MatchPage, format_date, load_error_state};
 
 /// The tracker stores outcomes as `victory` / `defeat` / `draw` (see the
@@ -63,9 +63,7 @@ pub(super) fn history_tab(
                         }
                         _ => m.outcome.eq_ignore_ascii_case(of),
                     };
-                    let r_ok = rf == "all"
-                        || m.role.eq_ignore_ascii_case(rf)
-                        || hero_to_role(&m.hero).eq_ignore_ascii_case(rf);
+                    let r_ok = history_row_matches_role(&m.role, rf);
                     o_ok && r_ok
                 })
                 .collect();
@@ -133,12 +131,13 @@ pub(super) fn history_tab(
                                     } else {
                                         m.map_name.clone()
                                     };
+                                    let role_label = stored_role_label(&m.role);
                                     rsx! {
                                         div { class: "match-card", key: "{m.id}",
                                             div { class: "match-outcome {oc}", "{m.outcome}" }
                                             div { class: "match-identity",
                                                 div { class: "match-hero", "{m.hero}" }
-                                                div { class: "match-map", "{map_label} · {m.role}" }
+                                                div { class: "match-map", "{map_label} · {role_label}" }
                                             }
                                             div { class: "match-stats",
                                                 div {
