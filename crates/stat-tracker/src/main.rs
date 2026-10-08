@@ -1509,13 +1509,40 @@ fn persist_active_game(data_dir: &std::path::Path, game: Option<&ActiveGame>) {
     }
 }
 
+/// A held board found on a skeleton that is too old to resume.
+struct StaleHeldBoard {
+    counters: Counters,
+    hero: Option<String>,
+    map: Option<String>,
+    at: Option<chrono::DateTime<Utc>>,
+    imported: bool,
+}
+
+/// Where a stale hold is written. An imported hold stays on its session.
+/// A fresh hold is the next game, so it gets its own unknown session.
+struct ArchivedHold {
+    session_id: String,
+    counters: Counters,
+    hero: Option<String>,
+    map: String,
+    at: chrono::DateTime<Utc>,
+}
+
+/// A skeleton [`retire_stale_skeleton`] removed, plus a hold to keep.
+struct StaleDrop {
+    session_id: String,
+    archive: Option<ArchivedHold>,
+}
+
 /// What [`admit_persisted_game`] decided about `active_game.json`.
 enum ActiveAdmission {
     Open(Box<ActiveGame>),
     /// The file parsed, and the game is past the idle bound (or its clock
     /// cannot be mapped onto this boot). The rows are still in the store.
+    /// `hold` is a board that was never written.
     Stale {
         session_id: String,
+        hold: Option<StaleHeldBoard>,
     },
     Absent,
 }
@@ -1542,9 +1569,16 @@ fn admit_persisted_game(data_dir: &std::path::Path) -> ActiveAdmission {
         return ActiveAdmission::Absent;
     };
     let session_id = persisted.session_id.clone();
+    let hold = persisted.deferred.map(|counters| StaleHeldBoard {
+        counters,
+        hero: persisted.deferred_hero.clone(),
+        map: persisted.map.clone(),
+        at: persisted.deferred_at,
+        imported: persisted.deferred_imported,
+    });
     match active_game_from_persisted(persisted) {
         Some(game) => ActiveAdmission::Open(Box::new(game)),
-        None => ActiveAdmission::Stale { session_id },
+        None => ActiveAdmission::Stale { session_id, hold },
     }
 }
 
@@ -1612,25 +1646,20 @@ fn active_game_from_persisted(p: PersistedGame) -> Option<ActiveGame> {
 #[cfg_attr(not(test), allow(dead_code))]
 async fn recover_or_sync_active_game<F, Fut>(
     data_dir: &std::path::Path,
+    store: &storage::LocalStore,
     sync_now: F,
 ) -> SessionState
 where
     F: FnOnce(Option<String>) -> Fut,
     Fut: std::future::Future<Output = ()>,
 {
-    let dropped = match admit_persisted_game(data_dir) {
-        ActiveAdmission::Stale { session_id } => {
-            persist_active_game(data_dir, None);
-            Some(session_id)
-        }
-        ActiveAdmission::Open(_) | ActiveAdmission::Absent => None,
-    };
-    if let Some(session_id) = &dropped {
-        tracing::info!(
-            session_id = %session_id,
-            "dropped stale active game; holding its unknown rows and uploading decided ones"
-        );
+    let dropped = retire_stale_skeleton(data_dir);
+    if let Some(drop) = dropped.as_ref()
+        && let Some(archive) = &drop.archive
+    {
+        archive_stale_hold(store, data_dir, archive).await;
     }
+    let dropped = dropped.map(|drop| drop.session_id);
     sync_now(dropped.clone()).await;
     if let Some(session_id) = &dropped {
         tracing::info!(
@@ -3051,7 +3080,8 @@ async fn run_loop(ctx: Arc<DaemonCtx>) -> anyhow::Result<()> {
     // It does not await HTTP. `last_game_open` still comes from
     // `startup_session`, so the debounce survives the restart. SIGTERM waits
     // on `finish_sync_on_shutdown`.
-    let mut st = begin_daemon_session(data_dir, &mut sync_task, &sync_backoff, store, sync_client);
+    let mut st =
+        begin_daemon_session(data_dir, &mut sync_task, &sync_backoff, store, sync_client).await;
     if let Some(g) = &st.active_game {
         tracing::info!(
             session_id = %g.session_id,
@@ -3401,7 +3431,8 @@ async fn run_loop(ctx: Arc<DaemonCtx>) -> anyhow::Result<()> {
                         &sync_backoff,
                         store,
                         sync_client,
-                    );
+                    )
+                    .await;
                     adopt_startup_session(&mut st, restored);
                 }
                 st.suspend_probe = (Instant::now(), Utc::now());
@@ -3607,6 +3638,11 @@ fn session_opened_by_split(
     g
 }
 
+/// The next `store_held_board` for this session id fails once, then clears.
+/// Other sessions are left alone so parallel tests do not trip it.
+#[cfg(test)]
+static FAIL_HELD_BOARD_SESSION: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
 /// Write the board that was held off the finished game onto the new session
 /// at that capture's own timestamp, and record it the same way as a Tab.
 #[allow(clippy::too_many_arguments)]
@@ -3620,6 +3656,16 @@ async fn store_held_board(
     counters: Counters,
     played_at: chrono::DateTime<Utc>,
 ) -> anyhow::Result<()> {
+    #[cfg(test)]
+    {
+        let mut fail = FAIL_HELD_BOARD_SESSION
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if fail.as_deref() == Some(session_id) {
+            *fail = None;
+            anyhow::bail!("held board write failed");
+        }
+    }
     let played_at = SurrealDatetime::from(played_at);
     let row = storage::PersonalMatch {
         id: None,
@@ -3808,9 +3854,11 @@ async fn write_carried_after_current(
 /// Map, mode, and the PvE gate for one staged capture.
 ///
 /// An untrusted Château Guillard read is dropped back to the session map
-/// so a fuzzy board cannot rename an open game. A trusted Deathmatch map
-/// stays, and the caller stores that row locally. Adlersbrunn with stats
-/// on only one team is not stored as Eichenwalde.
+/// so a fuzzy board cannot rename an open game. A stat split still carries
+/// the previous game on the request, so that fallback is empty and the new
+/// session stays Unknown. A trusted Deathmatch map stays, and the caller
+/// stores that row locally. Adlersbrunn with stats on only one team is not
+/// stored as Eichenwalde.
 fn prepare_capture_row(
     parsed: &mut storage::PersonalMatch,
     staged: &mut StagedCapture,
@@ -3824,7 +3872,15 @@ fn prepare_capture_row(
             .map_source
             .is_some_and(|source| source.trusted_for_board_split())
     {
-        staged.map_name = session_map.unwrap_or("").to_string();
+        // `session_map` is the open game. On a split that game is the one
+        // being closed, and an untrusted Deathmatch read must not name the
+        // new session after it.
+        let fallback = if staged.split {
+            None
+        } else {
+            session_map.filter(|name| !name.is_empty())
+        };
+        staged.map_name = fallback.unwrap_or("").to_string();
         staged.recorded_map = (!staged.map_name.is_empty()).then(|| staged.map_name.clone());
         staged.map_source = None;
     }
@@ -4780,18 +4836,68 @@ fn maybe_resume_sync_after_settings_change(
 }
 
 /// Delete a stale skeleton without uploading. The daemon loop schedules the
-/// upload on `sync_task` so startup does not wait on HTTP.
-fn retire_stale_skeleton(data_dir: &std::path::Path) -> Option<String> {
+/// upload on `sync_task` so startup does not wait on HTTP. A held board is
+/// returned so the caller can write it before that upload.
+fn retire_stale_skeleton(data_dir: &std::path::Path) -> Option<StaleDrop> {
     match admit_persisted_game(data_dir) {
-        ActiveAdmission::Stale { session_id } => {
+        ActiveAdmission::Stale { session_id, hold } => {
+            let archive = hold.map(|hold| {
+                let session_id = if hold.imported {
+                    session_id.clone()
+                } else {
+                    format!("{:016x}", rand_id())
+                };
+                tracing::warn!(
+                    session_id = %session_id,
+                    "stale restart kept a held board in local history as an unknown session"
+                );
+                ArchivedHold {
+                    session_id,
+                    counters: hold.counters,
+                    hero: hold.hero,
+                    map: hold.map.unwrap_or_default(),
+                    at: hold.at.unwrap_or_else(Utc::now),
+                }
+            });
             persist_active_game(data_dir, None);
             tracing::info!(
                 session_id = %session_id,
                 "dropped stale active game; holding its unknown rows and uploading decided ones"
             );
-            Some(session_id)
+            Some(StaleDrop {
+                session_id,
+                archive,
+            })
         }
         ActiveAdmission::Open(_) | ActiveAdmission::Absent => None,
+    }
+}
+
+/// Write a stale hold as an unknown closed session. Unknown rows are not
+/// uploaded. A Deathmatch map stays local even if a later edit sets a result.
+async fn archive_stale_hold(
+    store: &storage::LocalStore,
+    data_dir: &std::path::Path,
+    archive: &ArchivedHold,
+) {
+    let hero = archive.hero.clone().unwrap_or_default();
+    if let Err(e) = store_held_board(
+        store,
+        data_dir,
+        &archive.session_id,
+        &hero,
+        &archive.map,
+        "unknown",
+        archive.counters,
+        archive.at,
+    )
+    .await
+    {
+        tracing::warn!(
+            error = %e,
+            session_id = %archive.session_id,
+            "failed to keep a stale held board in local history"
+        );
     }
 }
 
@@ -4954,7 +5060,7 @@ async fn apply_queued_commands(
 
 /// Startup and resume. Drop a stale skeleton, schedule its upload, then
 /// restore the session. Does not wait for HTTP.
-fn begin_daemon_session(
+async fn begin_daemon_session(
     data_dir: &std::path::Path,
     sync_task: &mut Option<tokio::task::JoinHandle<()>>,
     backoff: &Arc<std::sync::Mutex<sync::SyncBackoff>>,
@@ -4962,12 +5068,20 @@ fn begin_daemon_session(
     client: Option<&sync::SyncClient>,
 ) -> SessionState {
     let dropped = retire_stale_skeleton(data_dir);
+    if let Some(drop) = dropped.as_ref()
+        && let Some(archive) = &drop.archive
+    {
+        archive_stale_hold(store, data_dir, archive).await;
+    }
+    let dropped = dropped.map(|drop| drop.session_id);
     // A stale skeleton is no longer the open game. Mark that session's
     // `unknown` rows synced locally and do not send them. A fresh skeleton
     // stays, and those rows stay unsynced until a result, a new-game
     // boundary, or the 6-hour bound. A clean shutdown keeps it.
     schedule_store_sync(sync_task, backoff, store, client, data_dir, dropped.clone());
-    startup_session(data_dir)
+    let mut st = startup_session(data_dir);
+    retry_imported_hold_on_start(&mut st, store, data_dir).await;
+    st
 }
 
 /// Hero for a held board. Prefer the hero captured with the hold. Otherwise
@@ -4989,6 +5103,67 @@ async fn held_board_hero(
         .unwrap_or_default()
 }
 
+/// Write the imported hold onto its session. The caller clears the hold
+/// only after this returns Ok.
+async fn write_imported_hold(
+    game: &ActiveGame,
+    store: &storage::LocalStore,
+    data_dir: &std::path::Path,
+) -> anyhow::Result<()> {
+    let Some(counters) = game.deferred else {
+        return Ok(());
+    };
+    let hero = held_board_hero(store, &game.session_id, game.deferred_hero.clone()).await;
+    let map_name = game.map.clone().unwrap_or_default();
+    let outcome = game.outcome.to_string();
+    let played_at = game.deferred_at.unwrap_or_else(Utc::now);
+    store_held_board(
+        store,
+        data_dir,
+        &game.session_id,
+        &hero,
+        &map_name,
+        &outcome,
+        counters,
+        played_at,
+    )
+    .await
+}
+
+fn clear_imported_hold(game: &mut ActiveGame) {
+    game.session_created = true;
+    game.deferred = None;
+    game.deferred_hero = None;
+    game.deferred_at = None;
+    game.deferred_imported = false;
+}
+
+/// A restart retries an imported hold that shutdown could not store.
+async fn retry_imported_hold_on_start(
+    st: &mut SessionState,
+    store: &storage::LocalStore,
+    data_dir: &std::path::Path,
+) {
+    let Some(game) = st.active_game.as_ref() else {
+        return;
+    };
+    if !game.deferred_imported || game.deferred.is_none() {
+        return;
+    }
+    match write_imported_hold(game, store, data_dir).await {
+        Ok(()) => {
+            if let Some(game) = st.active_game.as_mut() {
+                clear_imported_hold(game);
+            }
+            persist_active_game(data_dir, st.active_game.as_ref());
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to store a held board on startup");
+            persist_active_game(data_dir, st.active_game.as_ref());
+        }
+    }
+}
+
 /// Close or keep the open session before the final sync.
 ///
 /// A held board is written onto the current session only when
@@ -4996,44 +5171,33 @@ async fn held_board_hero(
 /// fresh-match hold belongs to the next game: it is not written onto a
 /// finished session. That session's decided rows stay the ones that upload.
 /// An unfinished game keeps its skeleton so a clean restart resumes it.
+/// If the imported write fails, the hold stays on the skeleton and the next
+/// start tries again.
 async fn close_session_on_shutdown(
     st: &mut SessionState,
     store: &storage::LocalStore,
     data_dir: &std::path::Path,
 ) {
-    if st
-        .active_game
-        .as_ref()
-        .is_some_and(|game| game.deferred_imported)
-        && let Some(game) = st.active_game.as_ref()
-        && let Some(counters) = game.deferred
+    let imported_write = if let Some(game) = st.active_game.as_ref()
+        && game.deferred_imported
+        && game.deferred.is_some()
     {
-        let session_id = game.session_id.clone();
-        let deferred_hero = game.deferred_hero.clone();
-        let map_name = game.map.clone().unwrap_or_default();
-        let outcome = game.outcome.to_string();
-        let played_at = game.deferred_at.unwrap_or_else(Utc::now);
-        let hero = held_board_hero(store, &session_id, deferred_hero).await;
-        if let Err(e) = store_held_board(
-            store,
-            data_dir,
-            &session_id,
-            &hero,
-            &map_name,
-            &outcome,
-            counters,
-            played_at,
-        )
-        .await
-        {
-            tracing::warn!(error = %e, "failed to store a held board on shutdown");
-        } else if let Some(game) = st.active_game.as_mut() {
-            game.session_created = true;
-            game.deferred = None;
-            game.deferred_hero = None;
-            game.deferred_at = None;
-            game.deferred_imported = false;
+        Some(write_imported_hold(game, store, data_dir).await)
+    } else {
+        None
+    };
+    match imported_write {
+        Some(Ok(())) => {
+            if let Some(game) = st.active_game.as_mut() {
+                clear_imported_hold(game);
+            }
         }
+        Some(Err(e)) => {
+            tracing::warn!(error = %e, "failed to store a held board on shutdown");
+            persist_active_game(data_dir, st.active_game.as_ref());
+            return;
+        }
+        None => {}
     }
     let fresh_hold = st.active_game.as_ref().and_then(|game| {
         if game.deferred_imported {
@@ -7643,7 +7807,7 @@ mod tests {
             .find("async fn apply_queued_commands(")
             .expect("command tick body");
         let commands_body = src[commands_fn..]
-            .split("\nfn begin_daemon_session(")
+            .split("\nasync fn begin_daemon_session(")
             .next()
             .unwrap();
         let set_at = commands_body
@@ -7772,7 +7936,7 @@ mod tests {
             let uploads = std::sync::Arc::clone(&self.uploads);
             let store = self.store.clone();
             let dir = self.dir.path().to_path_buf();
-            recover_or_sync_active_game(self.dir.path(), |dropped| {
+            recover_or_sync_active_game(self.dir.path(), &self.store, |dropped| {
                 let syncs = std::sync::Arc::clone(&syncs);
                 let uploads = std::sync::Arc::clone(&uploads);
                 let store = store.clone();
@@ -8014,7 +8178,51 @@ mod tests {
                 .await;
                 return;
             }
-            let staged = stage_capture(&req, &plan, cur, suspect, panel, text_map, self.wall);
+            let mut staged = stage_capture(&req, &plan, cur, suspect, panel, text_map, self.wall);
+            let mut parsed = test_match(&staged.target_session, &staged.outcome_label);
+            if prepare_capture_row(
+                &mut parsed,
+                &mut staged,
+                req.session_map.as_deref(),
+                panel,
+                text_map,
+                true,
+            ) {
+                let report = CaptureReport {
+                    recorded: false,
+                    outcome: staged.outcome,
+                    map: None,
+                    map_source: None,
+                    session_id: sid.clone(),
+                    split: false,
+                    armed_reset: false,
+                    ignore_row: false,
+                    reset_streak: plan.reset_streak,
+                    reset_baseline: plan.reset_baseline,
+                    baseline_row: plan.baseline_row,
+                    refresh_baseline: false,
+                    clear_hint: false,
+                    count_progress: false,
+                    career_panel,
+                    held_counters: None,
+                    held_hero: None,
+                    gate_state: None,
+                    hero_auth,
+                    seal: None,
+                    close_reason: None,
+                    held_at: None,
+                };
+                apply_capture_report(
+                    &mut self.st,
+                    &self.store,
+                    self.dir.path(),
+                    &sid,
+                    Ok(report),
+                    self.now,
+                )
+                .await;
+                return;
+            }
             write_staged_rows(
                 &self.store,
                 &staged,
@@ -10553,7 +10761,7 @@ mod tests {
             let _ = rx.await;
         }));
         let backoff = std::sync::Arc::new(std::sync::Mutex::new(sync::SyncBackoff::default()));
-        let st = begin_daemon_session(dir.path(), &mut sync_task, &backoff, &store, None);
+        let st = begin_daemon_session(dir.path(), &mut sync_task, &backoff, &store, None).await;
         assert!(st.active_game.is_none());
         assert!(
             !sync_task.as_ref().unwrap().is_finished(),
@@ -10800,7 +11008,11 @@ mod tests {
         )
         .unwrap();
         let dropped = retire_stale_skeleton(dir.path());
-        assert_eq!(dropped.as_deref(), Some("stale-unfinished"));
+        assert_eq!(
+            dropped.as_ref().map(|drop| drop.session_id.as_str()),
+            Some("stale-unfinished")
+        );
+        assert!(dropped.as_ref().is_some_and(|drop| drop.archive.is_none()));
         assert!(!active_game_path(dir.path()).exists());
         let restored = startup_session(dir.path());
         assert!(restored.active_game.is_none());
@@ -10980,6 +11192,7 @@ mod tests {
         };
         let restored = recover_or_sync_active_game(
             dir.path(),
+            &store,
             sync_with(
                 std::sync::Arc::clone(&uploads),
                 store.clone(),
@@ -11006,6 +11219,7 @@ mod tests {
 
         let again = recover_or_sync_active_game(
             dir.path(),
+            &store,
             sync_with(
                 std::sync::Arc::clone(&uploads),
                 store.clone(),
@@ -11276,6 +11490,255 @@ mod tests {
                 "writing the board must not warn that the game had no captures: {text}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn a_failed_shutdown_write_keeps_an_imported_hold_for_the_next_start() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = storage::LocalStore::open(dir.path()).await.unwrap();
+        let mut row = test_match("held-session-fail", "victory");
+        row.map_name = "Busan".into();
+        row.game_mode = "Control".into();
+        row.hero = "Ana".into();
+        row.elims = 9;
+        store.insert_match(row).await.unwrap();
+        let now = test_now();
+        let mut g = game(detect::MatchOutcome::Victory, Some(10), now);
+        g.session_id = "held-session-fail".into();
+        g.map = Some("Busan".into());
+        g.deferred = Some(fresh_counters(4));
+        g.deferred_hero = Some("Tracer".into());
+        g.deferred_at = Some(Utc::now());
+        g.deferred_imported = true;
+        let mut st = session(Some(g), now);
+        *FAIL_HELD_BOARD_SESSION.lock().unwrap() = Some("held-session-fail".into());
+        close_session_on_shutdown(&mut st, &store, dir.path()).await;
+        let held = st.active_game.as_ref().expect("the hold stays open");
+        assert!(held.deferred_imported);
+        assert_eq!(held.deferred.map(|c| c.elims), Some(4));
+        let rows = store
+            .get_session_snapshots("held-session-fail")
+            .await
+            .unwrap();
+        assert!(
+            rows.iter().all(|row| row.elims != 4),
+            "a failed write must not drop the hold by storing it: {rows:?}"
+        );
+        assert!(active_game_path(dir.path()).exists());
+        let mut sync_task = None;
+        let backoff = std::sync::Arc::new(std::sync::Mutex::new(sync::SyncBackoff::default()));
+        let restarted =
+            begin_daemon_session(dir.path(), &mut sync_task, &backoff, &store, None).await;
+        let rows = store
+            .get_session_snapshots("held-session-fail")
+            .await
+            .unwrap();
+        assert!(
+            rows.iter()
+                .any(|row| row.elims == 4 && row.hero == "Tracer"),
+            "the next start retries the held board: {rows:?}"
+        );
+        assert!(
+            restarted
+                .active_game
+                .as_ref()
+                .is_some_and(|game| game.deferred.is_none() && !game.deferred_imported),
+            "a successful retry clears the hold"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_stale_restart_keeps_a_held_board_as_an_unknown_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = storage::LocalStore::open(dir.path()).await.unwrap();
+        let mut decided = test_match("already-decided", "victory");
+        decided.map_name = "Busan".into();
+        decided.game_mode = "Control".into();
+        decided.elims = 14;
+        store.insert_match(decided).await.unwrap();
+        let when = Utc::now() - chrono::Duration::hours(9);
+        let stale = PersistedGame {
+            session_id: "next-game".into(),
+            outcome: detect::MatchOutcome::Unknown,
+            map: None,
+            map_source: None,
+            map_candidates: Vec::new(),
+            session_created: false,
+            opened_at: when - chrono::Duration::minutes(20),
+            last_activity: when,
+            outcome_recorded_at: None,
+            gate: None,
+            last_stats_at: None,
+            hero_auth: HeroAuthState::default(),
+            result_outcome: None,
+            result_confirmed: false,
+            result_seen_at: None,
+            pending_boundary: false,
+            awaiting_first_board: false,
+            reset_streak: 0,
+            reset_baseline: None,
+            baseline_row: None,
+            deferred: Some(fresh_counters(2)),
+            deferred_hero: Some("Tracer".into()),
+            deferred_at: Some(when),
+            deferred_imported: true,
+            progressed_boards: 0,
+            baseline_at: None,
+            text_fallback_locked: false,
+        };
+        std::fs::write(
+            active_game_path(dir.path()),
+            serde_json::to_vec(&stale).unwrap(),
+        )
+        .unwrap();
+        let mut sync_task = None;
+        let backoff = std::sync::Arc::new(std::sync::Mutex::new(sync::SyncBackoff::default()));
+        let st = begin_daemon_session(dir.path(), &mut sync_task, &backoff, &store, None).await;
+        assert!(st.active_game.is_none());
+        assert!(!active_game_path(dir.path()).exists());
+        let rows = store.get_all_matches().await.unwrap();
+        let held = rows
+            .iter()
+            .find(|row| row.elims == 2)
+            .expect("the hold is in local history");
+        assert_eq!(held.outcome, "unknown");
+        assert_eq!(held.session_id, "next-game");
+        assert_eq!(held.hero, "Tracer");
+        assert!(held.map_name.is_empty());
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen_upload = std::sync::Arc::clone(&seen);
+        try_sync_with(
+            &store,
+            dir.path(),
+            Some("next-game".into()),
+            move |matches, _| {
+                let seen_upload = std::sync::Arc::clone(&seen_upload);
+                async move {
+                    *seen_upload.lock().unwrap() = matches
+                        .into_iter()
+                        .map(|row| (row.session_id, row.elims, row.map_name, row.outcome))
+                        .collect();
+                    Ok(upload_ok())
+                }
+            },
+        )
+        .await;
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![(
+                "already-decided".to_string(),
+                14,
+                "Busan".to_string(),
+                "victory".to_string()
+            )]
+        );
+        let kept = store
+            .get_all_matches()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|row| row.elims == 2)
+            .unwrap();
+        assert!(kept.synced, "the unknown hold is kept locally and not sent");
+    }
+
+    #[tokio::test]
+    async fn a_stat_reset_on_untrusted_guillard_stays_unknown_and_does_not_upload_as_busan() {
+        let mut night = Night::new().await;
+        night.begin_on("Busan", "Zenyatta");
+        night
+            .tab_once(
+                night_counters(14, 22, 6, 2400, 9800, 400),
+                "Zenyatta",
+                Some(2),
+                Some("Busan"),
+                NIGHT_CLEAN,
+            )
+            .await;
+        let busan = night.id();
+        night.advance(Duration::from_secs(60));
+        night
+            .tab_once(
+                night_counters(1, 3, 0, 220, 80, 400),
+                "Zenyatta",
+                Some(2),
+                Some("Busan"),
+                NIGHT_CLEAN,
+            )
+            .await;
+        assert_eq!(
+            night.id(),
+            busan,
+            "the first fresh board only arms the reset"
+        );
+        assert!(night.game().reset_streak >= 1);
+        night.advance(Duration::from_secs(20));
+        let guillard = parse::match_map_in_text("guillard").expect("text guillard");
+        assert_eq!(guillard, "Château Guillard");
+        night
+            .tab_text(
+                night_counters(2, 1, 0, 300, 40, 80),
+                "Zenyatta",
+                Some(2),
+                &guillard,
+                NIGHT_CLEAN,
+            )
+            .await;
+        let opened = night.id();
+        assert_ne!(
+            opened, busan,
+            "the second fresh board is the stat reset split"
+        );
+        assert!(
+            night.game().map.is_none(),
+            "an untrusted guillard read must not name the new session Busan, got {:?}",
+            night.game().map
+        );
+        let snaps = night.store.get_session_snapshots(&opened).await.unwrap();
+        assert!(
+            !snaps.is_empty() && snaps.iter().all(|row| row.map_name.is_empty()),
+            "the new session is stored with an empty map: {snaps:?}"
+        );
+        assert!(snaps.iter().all(|row| row.game_mode.is_empty()));
+        night
+            .store
+            .set_session_outcome(&opened, "victory")
+            .await
+            .unwrap();
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen_upload = std::sync::Arc::clone(&seen);
+        try_sync_with(
+            &night.store,
+            night.dir.path(),
+            night.st.settle_closed_unknown.clone(),
+            move |matches, _| {
+                let seen_upload = std::sync::Arc::clone(&seen_upload);
+                async move {
+                    *seen_upload.lock().unwrap() = matches
+                        .into_iter()
+                        .map(|row| (row.session_id, row.map_name, row.game_mode))
+                        .collect();
+                    Ok(upload_ok())
+                }
+            },
+        )
+        .await;
+        let uploaded = seen.lock().unwrap().clone();
+        assert!(
+            !uploaded.is_empty(),
+            "the new session has a result and is eligible to upload"
+        );
+        assert!(
+            uploaded
+                .iter()
+                .all(|(_, map, mode)| map != "Busan" && mode != "Control"),
+            "nothing from the guillard split uploads as Busan: {uploaded:?}"
+        );
+        assert!(
+            uploaded
+                .iter()
+                .all(|(id, map, _)| id == &opened && map.is_empty())
+        );
     }
 
     #[test]
