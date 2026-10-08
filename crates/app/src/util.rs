@@ -398,6 +398,19 @@ mod tests {
     }
 
     #[test]
+    fn format_datetime_trims_iso_to_the_minute() {
+        assert_eq!(
+            format_datetime("2026-07-10T22:55:07.962043010Z"),
+            "2026-07-10 22:55"
+        );
+        assert_eq!(
+            format_datetime("2026-07-10T19:30:35.657Z"),
+            "2026-07-10 19:30"
+        );
+        assert_eq!(format_datetime("not a timestamp"), "not a timestamp");
+    }
+
+    #[test]
     fn classify_fetch_keeps_loading_error_and_ready_distinct() {
         assert_eq!(
             classify_fetch(None::<&Result<Vec<u8>, String>>),

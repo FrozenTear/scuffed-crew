@@ -79,9 +79,16 @@ fn App() -> Element {
     });
 
     // One settings fetch for the document head and every public consumer.
-    // `document::Title` updates the existing `<title>` once a real org name
-    // exists. Description and Open Graph tags stay in index.html: `document::Meta`
+    // Description and Open Graph tags stay in index.html: `document::Meta`
     // would append a second copy and ignore later prop changes.
+    //
+    // The existing `<title>` is updated once a real org name exists.
+    // On web, `Document::set_title` writes that element. `document::Title`
+    // goes through Dioxus `WebDocument::set_title`, which runs
+    // `document.title = ...` via `js_sys::Function::new_with_args`
+    // (`new Function`). That is the string-as-JavaScript the report-only
+    // CSP attributes to the scuffed-app bundle on home and /leaderboards.
+    // Desktop keeps `document::Title` for the window title (no page CSP).
     let site_settings = state::provide_site_settings();
     let resolved = site_settings.resolved.read();
     let loaded_settings = state::loaded_site_settings(resolved.as_ref());
@@ -89,6 +96,22 @@ fn App() -> Element {
         let title = state::document_title(Some(&s.org_name));
         if title.is_empty() { None } else { Some(title) }
     });
+    #[cfg(all(feature = "web", target_arch = "wasm32"))]
+    {
+        use_effect(move || {
+            let resolved = site_settings.resolved.read();
+            let Some(title) = state::loaded_site_settings(resolved.as_ref()).and_then(|s| {
+                let title = state::document_title(Some(&s.org_name));
+                if title.is_empty() { None } else { Some(title) }
+            }) else {
+                return;
+            };
+            let Some(document) = web_sys::window().and_then(|window| window.document()) else {
+                return;
+            };
+            document.set_title(&title);
+        });
+    }
     // Update the one `<link rel="icon">` from index.html. Pending leaves that
     // static href. A non-empty org name gets a data URI, including initials CL.
     // `document::Link` appends and then ignores href changes, so this effect
@@ -144,11 +167,10 @@ fn App() -> Element {
 
     rsx! {
         // index.html owns description, og:title, og:description, and og:site_name
-        // so the server can fill the one copy of each. Title is the exception:
-        // `document::Title` replaces the text of the existing element.
-        if let Some(title) = page_title.as_ref() {
-            document::Title { "{title}" }
-        }
+        // so the server can fill the one copy of each. Web title updates go
+        // through `Document::set_title` above. Desktop still uses
+        // `document::Title`, which replaces the window title.
+        {document_title_element(page_title.as_deref())}
         // Preload in index.html starts the download without blocking boot paint.
         // Applying it here avoids an inline onload, which script-src would block.
         document::Link {
@@ -165,6 +187,26 @@ fn App() -> Element {
             ToastProvider {
                 Router::<Route> {}
             }
+        }
+    }
+}
+
+/// Desktop window title. The web build sets `document.title` with `web_sys`
+/// instead, so Dioxus does not `eval` the assignment. See `App`.
+fn document_title_element(title: Option<&str>) -> Element {
+    #[cfg(all(feature = "web", target_arch = "wasm32"))]
+    {
+        let _ = title;
+        rsx! {}
+    }
+    #[cfg(not(all(feature = "web", target_arch = "wasm32")))]
+    {
+        if let Some(title) = title {
+            rsx! {
+                document::Title { "{title}" }
+            }
+        } else {
+            rsx! {}
         }
     }
 }
