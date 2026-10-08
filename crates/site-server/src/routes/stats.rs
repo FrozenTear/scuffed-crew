@@ -73,18 +73,26 @@ pub async fn upload_stats(
         );
     }
 
-    let inserted = state
-        .db
-        .upsert_personal_matches(&daemon.member.id, &stub_matches)
-        .await
-        .map_err(|_e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: "Internal error".into(),
-                }),
-            )
-        })?;
+    let inserted = if stub_matches.is_empty() {
+        0
+    } else {
+        let inserted = state
+            .db
+            .upsert_personal_matches(&daemon.member.id, &stub_matches)
+            .await
+            .map_err(|_e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse {
+                        error: "Internal error".into(),
+                    }),
+                )
+            })?;
+        // New games and edits of an existing session both come through this
+        // upsert. Drop the board now so the next read is not stuck on the TTL.
+        state.leaderboard_cache.invalidate();
+        inserted
+    };
 
     // Tombstones: sessions the user deleted locally. Scoped to this member's
     // rows by the query itself.
@@ -100,6 +108,9 @@ pub async fn upload_stats(
                 }),
             )
         })?;
+    if deleted > 0 {
+        state.leaderboard_cache.invalidate();
+    }
 
     audit(
         &state.db,

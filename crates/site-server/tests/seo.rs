@@ -95,6 +95,7 @@ async fn test_state(upload_dir: PathBuf) -> AppState {
         nip05_domain: None,
         nip05_republish_enabled: false,
         public_settings: scuffed_site_server::state::PublicSettingsCache::new(),
+        leaderboard_cache: scuffed_site_server::leaderboard_cache::LeaderboardCache::from_env(),
     }
 }
 

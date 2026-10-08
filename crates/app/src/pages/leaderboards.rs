@@ -101,14 +101,44 @@ const PAGE_CSS: &str = r#"
         max-width: 280px;
         margin-bottom: 1.25rem;
     }
+    .lb-updated {
+        color: var(--text-3);
+        font-size: 0.8rem;
+        margin: -0.75rem 0 1.25rem;
+    }
 "#;
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+struct LeaderboardPayload {
+    rows: Vec<LeaderboardRow>,
+    cached_at: String,
+}
+
+/// "Updated just now" / "Updated 12s ago" / "Updated 3m ago".
+fn updated_label(cached_at: &str) -> String {
+    let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(cached_at) else {
+        return String::new();
+    };
+    let now = chrono::Utc::now();
+    let secs = now
+        .signed_duration_since(parsed.with_timezone(&chrono::Utc))
+        .num_seconds()
+        .max(0);
+    if secs < 5 {
+        "Updated just now".into()
+    } else if secs < 60 {
+        format!("Updated {secs}s ago")
+    } else {
+        format!("Updated {}m ago", secs / 60)
+    }
+}
 
 #[component]
 pub fn Leaderboards() -> Element {
     let mut metric = use_signal(|| "winrate".to_string());
     let mut hero = use_signal(|| None::<String>);
     let mut season = use_signal(|| None::<String>);
-    let rows = use_resource(move || {
+    let board = use_resource(move || {
         let m = metric();
         let h = hero();
         let se = season();
@@ -119,9 +149,10 @@ pub fn Leaderboards() -> Element {
             }
             let url = season_url(&url, se);
             ApiClient::web()
-                .fetch::<Vec<LeaderboardRow>>(&url)
+                .fetch::<LeaderboardPayload>(&url)
                 .await
                 .ok()
+                .map(|payload| (payload.rows, updated_label(&payload.cached_at)))
         }
     });
 
@@ -130,6 +161,14 @@ pub fn Leaderboards() -> Element {
         main { class: "lb-page",
             h1 { "Leaderboards" }
             p { class: "lb-sub", "Ranked from uploaded personal stats (OCR). Sparse data is normal." }
+            {
+                match board.read().as_ref() {
+                    Some(Some((_, updated))) if !updated.is_empty() => rsx! {
+                        p { class: "lb-updated", "{updated}" }
+                    },
+                    _ => rsx! {},
+                }
+            }
 
             div { class: "lb-tabs",
                 button {
@@ -168,16 +207,16 @@ pub fn Leaderboards() -> Element {
 
             Card {
                 {
-                    match rows.read().as_ref() {
+                    match board.read().as_ref() {
                         None => rsx! { p { class: "lb-status", "Loading..." } },
                         Some(None) => rsx! { p { class: "lb-status", "Couldn't load leaderboards." } },
-                        Some(Some(list)) if list.is_empty() && hero().is_some() => rsx! {
+                        Some(Some((list, _))) if list.is_empty() && hero().is_some() => rsx! {
                             p { class: "lb-status", "No ranked matches on this hero yet." }
                         },
-                        Some(Some(list)) if list.is_empty() => rsx! {
+                        Some(Some((list, _))) if list.is_empty() => rsx! {
                             p { class: "lb-status", "No ranked matches yet. Upload stats from the tracker." }
                         },
-                        Some(Some(list)) => rsx! {
+                        Some(Some((list, _))) => rsx! {
                             table { class: "lb-table",
                                 thead {
                                     tr {
