@@ -177,4 +177,26 @@ impl Database {
         })
         .await
     }
+
+    /// Active ban that has not expired. Suspensions are a different state and
+    /// are not included — a suspension keeps `is_active` so lift restores access.
+    pub async fn is_member_banned(&self, member_id: &str) -> DbResult<bool> {
+        with_timeout(async {
+            let mut result = self
+                .client
+                .query(
+                    "SELECT count() FROM moderation_action WHERE member_id = $mid AND is_active = true AND action_type = 'ban' AND (expires_at IS NONE OR expires_at > time::now()) GROUP ALL",
+                )
+                .bind(("mid", member_id.to_string()))
+                .await?;
+
+            #[derive(Deserialize, SurrealValue)]
+            struct CountResult {
+                count: u64,
+            }
+            let counts: Vec<CountResult> = result.take(0)?;
+            Ok(counts.first().map(|c| c.count > 0).unwrap_or(false))
+        })
+        .await
+    }
 }

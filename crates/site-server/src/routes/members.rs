@@ -72,10 +72,10 @@ pub async fn list_members(
 /// GET /api/members/:id — get member profile (never loads Nostr secrets).
 pub async fn get_member(
     State(state): State<AppState>,
-    _member: OrgMember,
+    caller: OrgMember,
     Path(id): Path<String>,
 ) -> Result<Json<Member>, (StatusCode, Json<ErrorResponse>)> {
-    state
+    let member = state
         .db
         .get_member_safe(&id)
         .await
@@ -88,7 +88,6 @@ pub async fn get_member(
                 }),
             )
         })?
-        .map(Json)
         .ok_or_else(|| {
             (
                 StatusCode::NOT_FOUND,
@@ -96,7 +95,18 @@ pub async fn get_member(
                     error: "Member not found".into(),
                 }),
             )
-        })
+        })?;
+    // The list hides inactive rows from recruits and members. Fetch-by-id
+    // matches that, and still lets officer+ open a deactivated profile.
+    if !member.is_active && !caller.member.org_role.is_at_least(OrgRole::Officer) {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: "Member not found".into(),
+            }),
+        ));
+    }
+    Ok(Json(member))
 }
 
 /// Deserializer for "omit = leave unchanged, null = clear" fields. A plain
@@ -1097,4 +1107,75 @@ pub async fn republish_profiles(
         candidates: listed,
         published,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::Json;
+    use axum::extract::{Path, State};
+    use axum::http::StatusCode;
+    use scuffed_db::OrgRole;
+
+    use super::get_member;
+    use crate::extractors::OrgMember;
+    use crate::test_support::{must_err, must_ok, seed_user, test_state};
+
+    async fn as_member(state: &crate::state::AppState, user_id: &str, role: OrgRole) -> OrgMember {
+        seed_user(state, user_id, user_id).await;
+        let member = state
+            .db
+            .create_member(user_id, user_id, role)
+            .await
+            .expect("member");
+        let user = state
+            .db
+            .get_user(user_id)
+            .await
+            .expect("get user")
+            .expect("user");
+        OrgMember { user, member }
+    }
+
+    #[tokio::test]
+    async fn non_officer_cannot_read_deactivated_member_by_id() {
+        let state = test_state().await;
+        let recruit = as_member(&state, "recruituser", OrgRole::Recruit).await;
+        let member = as_member(&state, "memberuser", OrgRole::Member).await;
+        let officer = as_member(&state, "officeruser", OrgRole::Officer).await;
+        let target = as_member(&state, "targetuser", OrgRole::Member).await;
+        state
+            .db
+            .update_member(
+                &target.member.id,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(false),
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("deactivate");
+
+        for caller in [recruit, member] {
+            let (status, body) = must_err(
+                get_member(State(state.clone()), caller, Path(target.member.id.clone())).await,
+                "hidden",
+            );
+            assert_eq!(status, StatusCode::NOT_FOUND);
+            assert_eq!(body.error, "Member not found");
+        }
+
+        let Json(visible) = must_ok(
+            get_member(State(state), officer, Path(target.member.id)).await,
+            "officer can read",
+        );
+        assert!(!visible.is_active);
+        assert_eq!(visible.display_name, "targetuser");
+    }
 }

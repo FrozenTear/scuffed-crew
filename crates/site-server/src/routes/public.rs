@@ -67,14 +67,18 @@ pub async fn overview(
                 }),
             )
         })?;
-        let record = state.db.get_team_record(&team.id).await.map_err(|_e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: "Internal error".into(),
-                }),
-            )
-        })?;
+        let record = state
+            .db
+            .get_public_team_record(&team.id)
+            .await
+            .map_err(|_e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse {
+                        error: "Internal error".into(),
+                    }),
+                )
+            })?;
         team_overviews.push(TeamOverview {
             roster_count: roster.len(),
             team,
@@ -655,6 +659,15 @@ pub async fn public_team_detail(
             )
         })?;
 
+    if !team.is_active {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: "Team not found".into(),
+            }),
+        ));
+    }
+
     // Get game name
     let game_name = state
         .db
@@ -701,7 +714,7 @@ pub async fn public_team_detail(
         })
         .collect();
 
-    let record = state.db.get_team_record(&id).await.map_err(|_e| {
+    let record = state.db.get_public_team_record(&id).await.map_err(|_e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse {
@@ -776,5 +789,156 @@ mod resolve_members_hero_tests {
     #[test]
     fn unknown_errors() {
         assert!(resolve_members_hero(Some("NotAHero")).is_err());
+    }
+}
+
+#[cfg(test)]
+mod visibility_tests {
+    use axum::Json;
+    use axum::extract::{Path, State};
+    use axum::http::StatusCode;
+    use chrono::Utc;
+    use scuffed_db::{MatchType, ModerationActionType, OrgRole, TeamRole};
+
+    use super::{overview, public_team_detail};
+    use crate::test_support::{must_err, must_ok, seed_user, test_state};
+
+    async fn deactivate_team(state: &crate::state::AppState, id: &str) {
+        state
+            .db
+            .client
+            .query("UPDATE team SET is_active = false WHERE meta::id(id) = $id")
+            .bind(("id", id.to_string()))
+            .await
+            .expect("deactivate team");
+    }
+
+    #[tokio::test]
+    async fn public_roster_and_record_hide_private_rows() {
+        let state = test_state().await;
+        let team = state
+            .db
+            .create_team("Alpha", "ow2", None, None, None)
+            .await
+            .expect("team");
+        seed_user(&state, "activeuser", "Active").await;
+        seed_user(&state, "goneuser", "Gone").await;
+        seed_user(&state, "banneduser", "Banned").await;
+        let active = state
+            .db
+            .create_member("activeuser", "Active", OrgRole::Member)
+            .await
+            .expect("active");
+        let gone = state
+            .db
+            .create_member("goneuser", "Gone", OrgRole::Member)
+            .await
+            .expect("gone");
+        let banned = state
+            .db
+            .create_member("banneduser", "Banned", OrgRole::Officer)
+            .await
+            .expect("banned");
+        state
+            .db
+            .update_member(
+                &gone.id,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(false),
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("deactivate");
+        state
+            .db
+            .create_moderation_action(&banned.id, ModerationActionType::Ban, "x", &active.id, None)
+            .await
+            .expect("ban");
+        for id in [&active.id, &gone.id, &banned.id] {
+            state
+                .db
+                .add_to_roster(id, &team.id, TeamRole::Player)
+                .await
+                .expect("roster");
+        }
+        let played = Some(Utc::now());
+        state
+            .db
+            .record_match(
+                &team.id,
+                "Public",
+                Some(2),
+                Some(0),
+                None,
+                None,
+                MatchType::Official,
+                played,
+                None,
+                "rec",
+                None,
+                true,
+                None,
+                None,
+            )
+            .await
+            .expect("public");
+        state
+            .db
+            .record_match(
+                &team.id,
+                "Scrim",
+                Some(0),
+                Some(1),
+                None,
+                None,
+                MatchType::Scrim,
+                played,
+                None,
+                "rec",
+                None,
+                false,
+                None,
+                None,
+            )
+            .await
+            .expect("scrim");
+
+        let Json(overview) = must_ok(overview(State(state.clone())).await, "overview");
+        assert_eq!(overview.teams.len(), 1);
+        assert_eq!(overview.teams[0].roster_count, 1);
+        assert_eq!(overview.teams[0].record.wins, 1);
+        assert_eq!(overview.teams[0].record.losses, 0);
+
+        let Json(detail) = must_ok(
+            public_team_detail(State(state.clone()), Path(team.id.clone())).await,
+            "detail",
+        );
+        assert_eq!(detail.roster.len(), 1);
+        assert_eq!(detail.roster[0].member_id, active.id);
+        assert_eq!(detail.record.wins, 1);
+        assert_eq!(detail.record.losses, 0);
+
+        let full = state.db.get_team_record(&team.id).await.expect("full");
+        assert_eq!(full.wins, 1);
+        assert_eq!(
+            full.losses, 1,
+            "member-facing record still counts the scrim"
+        );
+
+        deactivate_team(&state, &team.id).await;
+        let (status, body) = must_err(
+            public_team_detail(State(state), Path(team.id)).await,
+            "hidden",
+        );
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body.error, "Team not found");
     }
 }
