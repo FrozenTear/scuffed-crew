@@ -1189,8 +1189,8 @@ async fn retire_active_game(
         }
         refresh_snapshot(store, data_dir).await;
     }
-    // No result ever arrived. The rows stay `unknown` until this close.
-    // The command tick (or shutdown) uploads them so they do not sit queued.
+    // No result ever arrived. The server cannot store that. The command
+    // tick marks the rows synced locally and does not send them.
     if g.session_created && !g.finished() {
         st.upload_closed_rows = true;
     }
@@ -1623,9 +1623,11 @@ fn finished_game_close_after(configured_secs: u64) -> std::time::Duration {
 /// boundary: the session id stays, and no outcome is invented. Unfinished
 /// games stay open on this timer so a late result can still attach.
 /// [`UNFINISHED_SESSION_IDLE`] still starts a fresh session when a later
-/// Tab arrives. An unfinished game is closed and its rows are uploaded at
-/// the next new-game boundary, on daemon shutdown, or on the next start
-/// once the on-disk session is older than [`UNFINISHED_SESSION_IDLE`].
+/// Tab arrives. An unfinished game is closed at the next new-game
+/// boundary, on daemon shutdown, or on the next start once the on-disk
+/// session is older than [`UNFINISHED_SESSION_IDLE`]. Its `unknown` rows
+/// are marked synced locally and are not sent. A GUI SetOutcome requeues
+/// them with `edited` set.
 fn quiet_close_reason(
     game: &ActiveGame,
     now: Instant,
@@ -2233,8 +2235,8 @@ struct SessionState {
     /// cadence. None = no active wake. See [`END_REEL_WAKE`].
     end_reel_wake_until: Option<Instant>,
     /// The open session was closed while its outcome was still unknown.
-    /// The next command tick uploads those rows. Cleared when the upload
-    /// is scheduled.
+    /// The next command tick marks those rows synced locally and does not
+    /// send them. Cleared when that settle is scheduled.
     upload_closed_rows: bool,
 }
 
@@ -3359,7 +3361,23 @@ async fn run_loop(ctx: Arc<DaemonCtx>) -> anyhow::Result<()> {
                         // successful apply, so a crash or store error here
                         // retries the edit instead of losing it.
                         match store.apply_command(cmd).await {
-                            Ok(()) => storage::remove_command_file(cmd_file),
+                            Ok(()) => {
+                                storage::remove_command_file(cmd_file);
+                                // A SetOutcome on the still-open session is
+                                // eligible now. Schedule the upload; do not
+                                // wait for a new-game boundary or shutdown.
+                                // `false` leaves other unknown rows unsynced.
+                                if matches!(cmd, storage::StoreCommand::SetOutcome { .. }) {
+                                    schedule_store_sync(
+                                        &mut sync_task,
+                                        &sync_backoff,
+                                        store,
+                                        sync_client,
+                                        data_dir,
+                                        false,
+                                    );
+                                }
+                            }
                             Err(e) => {
                                 tracing::warn!(error = %e, "GUI command failed — will retry")
                             }
@@ -4551,10 +4569,10 @@ async fn try_sync(
     store: &storage::LocalStore,
     client: &sync::SyncClient,
     data_dir: &std::path::Path,
-    include_unknown: bool,
+    settle_unknown: bool,
 ) -> sync::SyncAttempt {
     let client = client.clone();
-    let outcome = try_sync_with(store, data_dir, include_unknown, {
+    let outcome = try_sync_with(store, data_dir, settle_unknown, {
         let client = client.clone();
         move |matches, tombstones| {
             let client = client.clone();
@@ -4719,7 +4737,7 @@ async fn upload_once(
     backoff: &std::sync::Mutex<sync::SyncBackoff>,
     store: &storage::LocalStore,
     data_dir: &std::path::Path,
-    include_unknown: bool,
+    settle_unknown: bool,
 ) -> sync::SyncAttempt {
     let rejected = backoff
         .lock()
@@ -4730,7 +4748,7 @@ async fn upload_once(
         return sync::SyncAttempt::NoServerCall;
     }
     match client {
-        Some(client) => try_sync(store, client, data_dir, include_unknown).await,
+        Some(client) => try_sync(store, client, data_dir, settle_unknown).await,
         None => sync::SyncAttempt::NoServerCall,
     }
 }
@@ -4761,7 +4779,7 @@ fn schedule_store_sync(
     store: &storage::LocalStore,
     client: Option<&sync::SyncClient>,
     data_dir: &std::path::Path,
-    include_unknown: bool,
+    settle_unknown: bool,
 ) {
     let previous = sync_task.take();
     let client = client.cloned();
@@ -4769,14 +4787,8 @@ fn schedule_store_sync(
     let data_dir = data_dir.to_path_buf();
     let backoff = Arc::clone(backoff);
     *sync_task = Some(spawn_after_previous(previous, move || async move {
-        let outcome = upload_once(
-            client.as_ref(),
-            &backoff,
-            &store,
-            &data_dir,
-            include_unknown,
-        )
-        .await;
+        let outcome =
+            upload_once(client.as_ref(), &backoff, &store, &data_dir, settle_unknown).await;
         apply_sync_backoff(&backoff, outcome);
     }));
 }
@@ -4791,9 +4803,10 @@ fn begin_daemon_session(
     client: Option<&sync::SyncClient>,
 ) -> SessionState {
     let dropped = retire_stale_skeleton(data_dir);
-    // A stale skeleton is no longer the open game. Include its `unknown`
-    // rows in this upload. A fresh skeleton is resumed, and those rows
-    // stay held until a result, a new-game boundary, or shutdown.
+    // A stale skeleton is no longer the open game. Mark its `unknown`
+    // rows synced locally and do not send them. A fresh skeleton is
+    // resumed, and those rows stay unsynced until a result, a new-game
+    // boundary, or shutdown.
     schedule_store_sync(
         sync_task,
         backoff,
@@ -4805,11 +4818,12 @@ fn begin_daemon_session(
     startup_session(data_dir)
 }
 
-/// Close the open session before the final upload.
+/// Close the open session before the final sync.
 ///
-/// An unfinished game (no result screen) is included: its rows are still
-/// `unknown`, and [`finish_sync_on_shutdown`] sends those. A held board is
-/// written onto the session first so deleting the skeleton does not drop it.
+/// An unfinished game (no result screen) stays `unknown`. The shutdown
+/// sync marks those rows synced locally and does not send them. A held
+/// board is written onto the session first so deleting the skeleton does
+/// not drop it.
 async fn close_session_on_shutdown(
     st: &mut SessionState,
     store: &storage::LocalStore,
@@ -4865,7 +4879,7 @@ async fn finish_sync_on_shutdown(
 async fn try_sync_with<F, Fut>(
     store: &storage::LocalStore,
     data_dir: &std::path::Path,
-    include_unknown: bool,
+    settle_unknown: bool,
     upload: F,
 ) -> sync::SyncAttempt
 where
@@ -4876,11 +4890,34 @@ where
 {
     // Errors are stringified immediately: `Box<dyn Error>` isn't `Send`, and
     // this future runs on a spawned task.
-    let pending = if include_unknown {
-        store.get_unsynced_including_unknown().await
-    } else {
-        store.get_unsynced().await
-    };
+    //
+    // The server cannot store an outcome-less game. On a close, mark those
+    // rows synced locally and do not put them in the request. A GUI
+    // SetOutcome writes a decided outcome and `synced = false`, which the
+    // decided query below then uploads with `edited` set.
+    if settle_unknown {
+        match store
+            .get_unsynced_unknown()
+            .await
+            .map_err(|e| e.to_string())
+        {
+            Ok(unknown) if !unknown.is_empty() => {
+                let claims = storage::SyncClaim::capture(&unknown);
+                match store.mark_synced(&claims).await.map_err(|e| e.to_string()) {
+                    Ok(()) => tracing::info!(
+                        rows = unknown.len(),
+                        "held unknown-outcome rows locally — not sent"
+                    ),
+                    Err(e) => {
+                        tracing::error!(error = %e, "failed to hold an unknown-outcome row locally")
+                    }
+                }
+            }
+            Ok(_) => {}
+            Err(e) => tracing::error!(error = %e, "failed to query unknown-outcome rows"),
+        }
+    }
+    let pending = store.get_unsynced().await;
     let unsynced = match pending.map_err(|e| e.to_string()) {
         Ok(u) => u,
         Err(e) => {
@@ -7299,7 +7336,14 @@ mod tests {
         let startup_body = src[startup_fn..].split("\nasync fn ").next().unwrap();
         assert!(
             startup_body.contains("dropped.is_some()"),
-            "a stale skeleton on the next start must upload unknown rows"
+            "a stale skeleton on the next start must settle unknown rows locally"
+        );
+        let set_at = run_loop
+            .find("StoreCommand::SetOutcome {")
+            .expect("SetOutcome arm");
+        assert!(
+            run_loop[set_at..].contains("schedule_store_sync("),
+            "a SetOutcome on the open session must schedule the next sync"
         );
     }
 
@@ -10264,55 +10308,67 @@ mod tests {
         row
     }
 
-    /// While the session is still open, an unknown row stays out of the
-    /// upload so a late result can replace it. Closing the session sends it.
-    async fn assert_unknown_uploads_only_after_close(
+    /// While the session is still open, an unknown row stays unsynced so a
+    /// late result can replace it, and no request is made. Closing the
+    /// session marks it synced locally and still does not call upload.
+    async fn assert_unknown_is_held_locally_on_close(
         store: &storage::LocalStore,
         dir: &std::path::Path,
         session_id: &str,
     ) {
-        let held = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let held_upload = std::sync::Arc::clone(&held);
-        try_sync_with(store, dir, false, move |matches, _| {
-            let held_upload = std::sync::Arc::clone(&held_upload);
+        let called = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let called_upload = std::sync::Arc::clone(&called);
+        let open = try_sync_with(store, dir, false, move |_matches, _| {
+            let called_upload = std::sync::Arc::clone(&called_upload);
             async move {
-                held_upload.store(matches.len(), std::sync::atomic::Ordering::SeqCst);
+                called_upload.store(true, std::sync::atomic::Ordering::SeqCst);
                 Ok(upload_ok())
             }
         })
         .await;
-        assert_eq!(
-            held.load(std::sync::atomic::Ordering::SeqCst),
-            0,
-            "an open unfinished game is not uploaded yet"
+        assert!(
+            matches!(open, sync::SyncAttempt::NoServerCall),
+            "an open unfinished game makes no request"
         );
-        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-        let seen_upload = std::sync::Arc::clone(&seen);
-        try_sync_with(store, dir, true, move |matches, _| {
-            let seen_upload = std::sync::Arc::clone(&seen_upload);
-            async move {
-                *seen_upload.lock().unwrap() = matches
-                    .into_iter()
-                    .map(|row| (row.session_id, row.outcome))
-                    .collect();
-                Ok(upload_ok())
-            }
-        })
-        .await;
-        assert_eq!(
-            *seen.lock().unwrap(),
-            vec![(session_id.to_string(), "unknown".to_string())]
+        assert!(
+            !called.load(std::sync::atomic::Ordering::SeqCst),
+            "an open unfinished game must not call upload"
         );
         let rows = store.get_all_matches().await.unwrap();
         assert!(
             rows.iter()
-                .any(|row| row.session_id == session_id && row.synced),
-            "the close upload marks the row synced"
+                .any(|row| row.session_id == session_id && !row.synced),
+            "an open unfinished game stays unsynced so a late result can attach"
+        );
+        let settled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let settled_upload = std::sync::Arc::clone(&settled);
+        let close = try_sync_with(store, dir, true, move |_matches, _| {
+            let settled_upload = std::sync::Arc::clone(&settled_upload);
+            async move {
+                settled_upload.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(upload_ok())
+            }
+        })
+        .await;
+        assert!(
+            matches!(close, sync::SyncAttempt::NoServerCall),
+            "holding an unknown row locally makes no request"
+        );
+        assert!(
+            !settled.load(std::sync::atomic::Ordering::SeqCst),
+            "an unknown row must not be sent"
+        );
+        let rows = store.get_all_matches().await.unwrap();
+        assert!(
+            rows.iter().any(|row| {
+                row.session_id == session_id && row.synced && row.outcome == "unknown"
+            }),
+            "the close marks the unknown row synced without sending it"
         );
     }
 
     #[tokio::test]
-    async fn shutdown_closes_an_unfinished_game_and_uploads_its_rows() {
+    async fn shutdown_closes_an_unfinished_game_and_holds_its_rows() {
         let dir = tempfile::tempdir().unwrap();
         let store = storage::LocalStore::open(dir.path()).await.unwrap();
         store
@@ -10332,11 +10388,11 @@ mod tests {
             st.upload_closed_rows,
             "shutdown of an unfinished game queues its rows"
         );
-        assert_unknown_uploads_only_after_close(&store, dir.path(), "quit-after-match").await;
+        assert_unknown_is_held_locally_on_close(&store, dir.path(), "quit-after-match").await;
     }
 
     #[tokio::test]
-    async fn a_new_tab_after_idle_closes_an_unfinished_game_and_uploads_it() {
+    async fn a_new_tab_after_idle_closes_an_unfinished_game_and_holds_it() {
         let dir = tempfile::tempdir().unwrap();
         let store = storage::LocalStore::open(dir.path()).await.unwrap();
         store
@@ -10357,11 +10413,11 @@ mod tests {
             Some("left-open")
         );
         assert!(st.upload_closed_rows);
-        assert_unknown_uploads_only_after_close(&store, dir.path(), "left-open").await;
+        assert_unknown_is_held_locally_on_close(&store, dir.path(), "left-open").await;
     }
 
     #[tokio::test]
-    async fn restart_uploads_a_stale_unfinished_game_and_keeps_a_fresh_one() {
+    async fn restart_holds_a_stale_unfinished_game_and_keeps_a_fresh_one() {
         let dir = tempfile::tempdir().unwrap();
         let store = storage::LocalStore::open(dir.path()).await.unwrap();
         store
@@ -10408,7 +10464,7 @@ mod tests {
         assert!(!active_game_path(dir.path()).exists());
         let restored = startup_session(dir.path());
         assert!(restored.active_game.is_none());
-        assert_unknown_uploads_only_after_close(&store, dir.path(), "stale-unfinished").await;
+        assert_unknown_is_held_locally_on_close(&store, dir.path(), "stale-unfinished").await;
 
         let fresh_dir = tempfile::tempdir().unwrap();
         let fresh_store = storage::LocalStore::open(fresh_dir.path()).await.unwrap();
@@ -10448,6 +10504,74 @@ mod tests {
         })
         .await;
         assert_eq!(seen.load(std::sync::atomic::Ordering::SeqCst), 0);
+        let rows = fresh_store.get_all_matches().await.unwrap();
+        assert!(
+            rows.iter()
+                .any(|row| row.session_id == "still-this-match" && !row.synced),
+            "a resumed match stays unsynced so a late result can attach"
+        );
+    }
+
+    #[tokio::test]
+    async fn set_outcome_on_the_open_session_uploads_on_the_next_sync() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = storage::LocalStore::open(dir.path()).await.unwrap();
+        store
+            .insert_match(unfinished_row("open-set"))
+            .await
+            .unwrap();
+        let now = test_now();
+        let mut g = game(detect::MatchOutcome::Unknown, None, now);
+        g.session_id = "open-set".into();
+        g.map = Some("Busan".into());
+        let mut st = session(Some(g), now);
+        assert!(!st.upload_closed_rows);
+        if let Some(active) = st.active_game.as_mut() {
+            active.record_outcome(detect::MatchOutcome::Victory);
+        }
+        store
+            .apply_command(&storage::StoreCommand::SetOutcome {
+                session_id: "open-set".into(),
+                outcome: "victory".into(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            st.active_game
+                .as_ref()
+                .map(|active| active.session_id.as_str()),
+            Some("open-set"),
+            "SetOutcome does not close the open session"
+        );
+        assert!(!st.upload_closed_rows);
+        assert!(st.active_game.as_ref().unwrap().finished());
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen_upload = std::sync::Arc::clone(&seen);
+        let attempt = try_sync_with(&store, dir.path(), false, move |matches, _| {
+            let seen_upload = std::sync::Arc::clone(&seen_upload);
+            async move {
+                *seen_upload.lock().unwrap() = matches
+                    .into_iter()
+                    .map(|row| {
+                        (
+                            row.session_id,
+                            row.display_outcome().to_string(),
+                            row.is_edited(),
+                        )
+                    })
+                    .collect();
+                Ok(upload_ok())
+            }
+        })
+        .await;
+        assert!(
+            matches!(attempt, sync::SyncAttempt::Uploaded),
+            "the next sync uploads the open session"
+        );
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![("open-set".to_string(), "victory".to_string(), true)]
+        );
     }
 
     #[tokio::test]

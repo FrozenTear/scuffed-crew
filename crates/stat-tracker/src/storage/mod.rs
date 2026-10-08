@@ -390,19 +390,19 @@ impl LocalStore {
     /// used to fail the whole batch forever. An outcome back-fill flips the
     /// row to a decided outcome and `synced = false`, releasing it here.
     ///
-    /// A closed session with no result uses [`Self::get_unsynced_including_unknown`]
-    /// so the row is sent once and does not stay queued. The server skips
-    /// `unknown`; a later outcome edit requeues the row.
+    /// A closed session with no result is not sent. [`Self::get_unsynced_unknown`]
+    /// loads those rows so the caller can mark them synced with no request.
+    /// A GUI `SetOutcome` writes a real outcome and `synced = false`, which
+    /// releases the row here.
     pub async fn get_unsynced(
         &self,
     ) -> Result<Vec<PersonalMatch>, Box<dyn std::error::Error + Send + Sync>> {
         self.pending_upload_rows(false).await
     }
 
-    /// Like [`Self::get_unsynced`], plus rows whose outcome is still `unknown`.
-    /// Used when the session has been closed (new-game boundary, shutdown, or
-    /// a stale skeleton on the next start) and will not receive a result.
-    pub async fn get_unsynced_including_unknown(
+    /// Unsynced rows whose outcome is still `unknown`. The server cannot store
+    /// them. Callers mark these synced locally and do not put them in a request.
+    pub async fn get_unsynced_unknown(
         &self,
     ) -> Result<Vec<PersonalMatch>, Box<dyn std::error::Error + Send + Sync>> {
         self.pending_upload_rows(true).await
@@ -410,10 +410,10 @@ impl LocalStore {
 
     async fn pending_upload_rows(
         &self,
-        include_unknown: bool,
+        unknown_only: bool,
     ) -> Result<Vec<PersonalMatch>, Box<dyn std::error::Error + Send + Sync>> {
-        let sql = if include_unknown {
-            "SELECT * FROM personal_match WHERE synced = false ORDER BY played_at ASC"
+        let sql = if unknown_only {
+            "SELECT * FROM personal_match WHERE synced = false AND outcome = 'unknown' ORDER BY played_at ASC"
         } else {
             "SELECT * FROM personal_match WHERE synced = false AND outcome != 'unknown' ORDER BY played_at ASC"
         };
@@ -605,7 +605,19 @@ impl LocalStore {
             StoreCommand::SetOutcome {
                 session_id,
                 outcome,
-            } => self.set_session_outcome(session_id, outcome).await,
+            } => {
+                // The raw outcome makes the row eligible for the next sync.
+                // The overlay marks it edited so the upload carries edited=true.
+                self.set_session_outcome(session_id, outcome).await?;
+                self.edit_match(
+                    session_id,
+                    &MatchEdit {
+                        outcome: Some(outcome.clone()),
+                        ..MatchEdit::default()
+                    },
+                )
+                .await
+            }
             StoreCommand::DeleteSession { session_id } => self.delete_session(session_id).await,
             StoreCommand::EditMatch { session_id, edit } => self.edit_match(session_id, edit).await,
             StoreCommand::ResolveSegment {

@@ -15,15 +15,19 @@ when both teams have stat rows. Château Guillard is Deathmatch: it is
 kept in the local store and never uploaded. The desktop totals and
 history skip those rows. The 20-minute
 timer no longer closes an unfinished game, so a long match can still
-take its result. That game is closed, and its rows are uploaded, at
-the next new-game boundary, on daemon shutdown, or on the next start
-once the saved session is older than 20 minutes. A restart inside
-that bound resumes the same session. The server stores victory,
-defeat, and draw; a row that is still unknown is sent on that close
-and skipped until an outcome is set. Uploads from startup, resume, and the quiet-close
-timer no longer block Tab, polling, or shutdown signals. A held board
-on a finished game is carried onto the next session when that game
-closes. `game_mode` is taken from the map that was stored.
+take its result. That game is closed at the next new-game boundary,
+on daemon shutdown, or on the next start once the saved session is
+older than 20 minutes. A restart inside that bound resumes the same
+session. The server cannot store an outcome-less game, so the tracker
+does not send those rows. It holds them locally, marked synced, and
+makes no request. Games > card > Victory, Defeat, or Draw requeues
+the row, and the next sync uploads it with edited set. A SetOutcome
+on the still-open session does the same on the next sync, without
+waiting for that close. Uploads from startup, resume, and the
+quiet-close timer no longer block Tab, polling, or shutdown signals.
+A held board on a finished game is carried onto the next session
+when that game closes. `game_mode` is taken from the map that was
+stored.
 
 ### Install
 
