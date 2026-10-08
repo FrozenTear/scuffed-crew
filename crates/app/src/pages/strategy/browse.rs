@@ -284,7 +284,7 @@ pub fn StrategyBrowse() -> Element {
                     class: "strategy-search-input",
                     r#type: "text",
                     placeholder: "Search strategies...",
-                    aria_label: "Search strategies...",
+                    aria_label: "Search strategies",
                     value: "{search_input}",
                     oninput: move |e| search_input.set(e.value()),
                 }

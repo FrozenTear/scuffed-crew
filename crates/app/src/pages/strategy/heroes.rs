@@ -187,7 +187,7 @@ pub fn StrategyHeroes() -> Element {
                     class: "heroes-search",
                     r#type: "text",
                     placeholder: "Search heroes...",
-                    aria_label: "Search heroes...",
+                    aria_label: "Search heroes",
                     value: "{search_filter}",
                     oninput: move |e| search_filter.set(e.value()),
                 }

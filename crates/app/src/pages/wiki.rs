@@ -156,7 +156,7 @@ pub fn Wiki() -> Element {
                     name: "wiki-search",
                     r#type: "text",
                     placeholder: "Search wiki...",
-                    aria_label: "Search wiki...",
+                    aria_label: "Search wiki",
                     value: "{search_text}",
                     oninput: move |e| search_text.set(e.value()),
                 }

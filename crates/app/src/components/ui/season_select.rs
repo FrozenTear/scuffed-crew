@@ -1,8 +1,10 @@
 //! Season picker shared by My Stats, member stats, and leaderboards.
 //!
 //! The control offers "All time", an explicit "Current season", and each
-//! season from `GET /api/public/seasons`. It renders nothing while that list
-//! is loading or empty, and a retry when the request fails.
+//! season from `GET /api/public/seasons`. The select is omitted while that
+//! list is loading or empty, and a retry is shown when the request fails.
+//! A visible label still renders in those states, without `for`, because
+//! there is no select to point at.
 //!
 //! Nothing saved means all time. The "Current season" option stores
 //! [`CURRENT_SEASON`] so a later rollover follows. Every season row is pinned
@@ -617,11 +619,10 @@ pub fn SeasonSelect(
         Some(None) => {
             let retrying = !failed;
             let shown_label = label_text;
-            let label_for = field_id;
             rsx! {
                 div { class: "season-select",
                     if let Some(text) = shown_label {
-                        Label { for_id: label_for, {text} }
+                        Label { {text} }
                     }
                     p { class: "season-select-status", "Couldn't load seasons." }
                     Button {
@@ -634,7 +635,13 @@ pub fn SeasonSelect(
                 }
             }
         }
-        _ => rsx! {},
+        _ => rsx! {
+            if let Some(text) = label_text {
+                div { class: "season-select",
+                    Label { {text} }
+                }
+            }
+        },
     }
 }
 
@@ -1745,5 +1752,36 @@ mod tests {
             !html.contains("aria-label"),
             "a wired label should be the accessible name: {html}"
         );
+    }
+
+    #[test]
+    fn failed_season_label_does_not_point_at_a_missing_select() {
+        let _timeout = abort_on_timeout(std::time::Duration::from_secs(8));
+        blank_hooks();
+        fail_seasons();
+        let mut dom = VirtualDom::new(labeled_season_probe);
+        dom.rebuild_in_place();
+        pump(&mut dom);
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains(">Season<"), "{html}");
+        assert!(html.contains("season-select-status"), "{html}");
+        assert!(html.contains("load seasons."), "{html}");
+        assert!(!html.contains("<select"), "{html}");
+        assert!(!html.contains("<label"), "{html}");
+        assert!(!html.contains("for="), "{html}");
+    }
+
+    #[test]
+    fn loading_season_label_has_no_for() {
+        let _timeout = abort_on_timeout(std::time::Duration::from_secs(8));
+        blank_hooks();
+        let mut dom = VirtualDom::new(labeled_season_probe);
+        dom.rebuild_in_place();
+        pump(&mut dom);
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains(">Season<"), "{html}");
+        assert!(!html.contains("<select"), "{html}");
+        assert!(!html.contains("<label"), "{html}");
+        assert!(!html.contains("for="), "{html}");
     }
 }
