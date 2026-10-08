@@ -891,4 +891,144 @@ mod tests {
         assert_eq!(rows[0].elims, 0);
         assert!(!rows[0].edited);
     }
+
+    #[tokio::test]
+    async fn upload_non_ascii_recognizer_returns_400() {
+        let (state, member_id, token) = daemon().await;
+        // `é` and U+2011 (a Unicode hyphen, not ASCII `-`) are outside [a-z0-9.-].
+        for id in ["cv-v1\u{00e9}", "ocr\u{2011}v1"] {
+            let mut entry = match_object("sess-non-ascii", 2);
+            entry["recognizer"] = serde_json::json!(id);
+            let (status, parsed) = post_raw(
+                create_router(state.clone()),
+                &token,
+                serde_json::json!({ "matches": [entry] }),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{id}");
+            assert!(
+                parsed["error"]
+                    .as_str()
+                    .unwrap_or("")
+                    .contains("recognizer"),
+                "{id}: {parsed}"
+            );
+        }
+        let rows = state
+            .db
+            .list_personal_matches(&member_id, 10, 0)
+            .await
+            .unwrap();
+        assert!(rows.is_empty(), "non-ascii ids must not be stored");
+    }
+
+    #[tokio::test]
+    async fn upload_recognizer_rejects_33_bytes_and_accepts_32() {
+        let (state, member_id, token) = daemon().await;
+        let too_long = "a".repeat(33);
+        assert_eq!(too_long.len(), 33);
+        let mut entry = match_object("sess-len", 2);
+        entry["recognizer"] = serde_json::json!(too_long);
+        let (status, parsed) = post_raw(
+            create_router(state.clone()),
+            &token,
+            serde_json::json!({ "matches": [entry] }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(
+            parsed["error"]
+                .as_str()
+                .unwrap_or("")
+                .contains("recognizer"),
+            "{parsed}"
+        );
+        let rows = state
+            .db
+            .list_personal_matches(&member_id, 10, 0)
+            .await
+            .unwrap();
+        assert!(rows.is_empty(), "a 33-byte id must not be stored");
+
+        let accepted = "a".repeat(32);
+        assert_eq!(accepted.len(), 32);
+        let mut entry = match_object("sess-len", 6);
+        entry["recognizer"] = serde_json::json!(accepted);
+        let (status, parsed) = post_raw(
+            create_router(state.clone()),
+            &token,
+            serde_json::json!({ "matches": [entry] }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(parsed["inserted"], 1);
+        let rows = state
+            .db
+            .list_personal_matches(&member_id, 10, 0)
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].recognizer, accepted);
+        assert_eq!(rows[0].elims, 6);
+    }
+
+    #[tokio::test]
+    async fn upload_bad_recognizer_with_deleted_sessions_returns_400_and_keeps_rows() {
+        let (state, member_id, token) = daemon().await;
+        let (status, _) = post_raw(
+            create_router(state.clone()),
+            &token,
+            serde_json::json!({ "matches": [match_object("sess-tomb", 4)] }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, _) = post_raw(
+            create_router(state.clone()),
+            &token,
+            serde_json::json!({ "matches": [match_object("sess-edit", 5)] }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        // Tombstone an existing row and try to overwrite another. The bad id
+        // must fail the batch before either write.
+        let mut bad = match_object("sess-edit", 99);
+        bad["recognizer"] = serde_json::json!("NOPE");
+        let (status, parsed) = post_raw(
+            create_router(state.clone()),
+            &token,
+            serde_json::json!({
+                "matches": [bad],
+                "deleted_sessions": ["sess-tomb"]
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(
+            parsed["error"]
+                .as_str()
+                .unwrap_or("")
+                .contains("recognizer"),
+            "{parsed}"
+        );
+
+        let rows = state
+            .db
+            .list_personal_matches(&member_id, 10, 0)
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 2, "rejected batch must not insert a row");
+        let tomb = rows
+            .iter()
+            .find(|r| r.session_id == "sess-tomb")
+            .expect("tombstoned row still exists");
+        assert_eq!(tomb.elims, 4);
+        assert_eq!(tomb.recognizer, "ocr-v1");
+        let edited = rows
+            .iter()
+            .find(|r| r.session_id == "sess-edit")
+            .expect("match from the batch was not removed");
+        assert_eq!(edited.elims, 5, "match from the batch was not updated");
+        assert_eq!(edited.recognizer, "ocr-v1");
+    }
 }
