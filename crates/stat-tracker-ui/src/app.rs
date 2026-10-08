@@ -3,7 +3,7 @@ use std::time::{Duration, SystemTime};
 
 use chrono::{DateTime, Utc};
 use iced::widget::image::Handle;
-use iced::widget::{column, container, responsive, row};
+use iced::widget::{column, container, responsive, row, stack};
 use iced::{Element, Fill, Length, Padding, Subscription, Task, window};
 use stat_tracker::capture::CaptureBackend;
 use stat_tracker::config::Config;
@@ -14,6 +14,7 @@ use crate::cli::{Cli, FixtureKind};
 use crate::daemon::{self, DaemonVerb, DaemonView};
 use crate::hotkey::{self, OverlayHotkey};
 use crate::model::{EditField, EditForm, Game, Outcome, Role, RoleFilter, Screen, SeasonSel};
+use crate::notes::{self, ShownRelease};
 use crate::overlay::{self, CompanionChild, OverlayHold};
 use crate::seasons::{self, SeasonCache};
 use crate::settings::{self, SettingsField, SettingsForm, SettingsToggle};
@@ -77,6 +78,17 @@ pub enum Message {
     WindowClosed(window::Id),
     Tray(TrayAction),
     ToggleOverlay,
+    OpenAbout,
+    DismissNotes,
+    OpenNotesLink(String),
+}
+
+struct NotesDialog {
+    subtitle: String,
+    sections: Vec<ShownRelease>,
+    /// Installed version written when this dialog closes. Set for the
+    /// once-per-version prompt. About keeps it if that prompt was already open.
+    remember: Option<String>,
 }
 
 /// What tray Hide / Show must do. Close+open (not Hidden/minimize) is the
@@ -138,6 +150,9 @@ pub struct TrackerApp {
     pub update: Option<UpdateInfo>,
     pub update_progress: UpdateProgress,
     pub update_plan: UpdatePlan,
+    /// Notes for the offered update, drawn inside the update prompt.
+    pub update_notes: Vec<ShownRelease>,
+    notes_dialog: Option<NotesDialog>,
     /// Resolved once at startup so Settings can pin a tag without spawning
     /// the daemon on every frame.
     pub installed_version: Option<String>,
@@ -207,6 +222,8 @@ impl TrackerApp {
                 .map(|s| (s.server_url.as_str(), s.token.as_str())),
         );
         let overlay_hotkey = seasons::load_overlay_hotkey(&cli.data_dir);
+        let installed_version = update::current_version();
+        let notes_dialog = notes_dialog_for(&cli.data_dir, installed_version.as_deref());
         let mut settings = SettingsForm::from_config(&saved_config);
         settings.overlay_hotkey = overlay_hotkey.bind.clone();
         settings.overlay_hotkey_enabled = overlay_hotkey.enabled;
@@ -262,12 +279,14 @@ impl TrackerApp {
             preview: None,
             preview_error: None,
             update: None,
-            installed_version: update::current_version(),
+            installed_version,
             update_progress: UpdateProgress::Idle,
             update_plan: UpdatePlan::Blocked {
                 reason: String::new(),
                 hint: String::new(),
             },
+            update_notes: Vec::new(),
+            notes_dialog,
             confirm_clear: false,
             tessdata_busy: false,
             tessdata_installed: capture::tessdata_installed(),
@@ -755,6 +774,22 @@ impl TrackerApp {
                 Task::none()
             }
             Message::UpdateChecked(info) => {
+                self.update_notes = info
+                    .as_ref()
+                    .map(|i| {
+                        let remote: Vec<(&str, &str)> = i
+                            .release_bodies
+                            .iter()
+                            .map(|body| (body.version.as_str(), body.body.as_str()))
+                            .collect();
+                        notes::render(notes::notes_for_update(
+                            notes::BUNDLED_CHANGELOG,
+                            &i.current,
+                            &i.latest,
+                            &remote,
+                        ))
+                    })
+                    .unwrap_or_default();
                 self.update_plan = info
                     .as_ref()
                     .map(|i| update::evaluate_plan(&i.latest))
@@ -763,6 +798,35 @@ impl TrackerApp {
                         hint: String::new(),
                     });
                 self.update = info;
+                Task::none()
+            }
+            Message::OpenAbout => {
+                let remember = self.notes_dialog.as_ref().and_then(|d| d.remember.clone());
+                self.notes_dialog = Some(NotesDialog {
+                    subtitle:
+                        "Release notes bundled with this app. Install steps stay on the GitHub page."
+                            .into(),
+                    sections: notes::render(notes::all_notes(notes::BUNDLED_CHANGELOG)),
+                    remember,
+                });
+                Task::none()
+            }
+            Message::DismissNotes => {
+                if let Some(version) = self
+                    .notes_dialog
+                    .as_ref()
+                    .and_then(|dialog| dialog.remember.clone())
+                    && let Err(e) = seasons::save_last_seen_version(&self.data_dir, &version)
+                {
+                    tracing::warn!(error = %e, "failed to remember installed version");
+                }
+                self.notes_dialog = None;
+                Task::none()
+            }
+            Message::OpenNotesLink(url) => {
+                if url.starts_with("https://") || url.starts_with("http://") {
+                    update::open_release_page(&url);
+                }
                 Task::none()
             }
             Message::OpenUpdate(url) => {
@@ -1015,23 +1079,34 @@ impl TrackerApp {
         });
 
         let chrome = row![
-            container(nav).width(SIDEBAR_WIDTH).padding(Padding {
-                top: PAGE_PAD_Y,
-                bottom: PAGE_PAD_Y,
-                left: PAGE_PAD_X,
-                right: 8.0,
-            }),
+            container(nav)
+                .width(SIDEBAR_WIDTH)
+                .height(Fill)
+                .padding(Padding {
+                    top: PAGE_PAD_Y,
+                    bottom: PAGE_PAD_Y,
+                    left: PAGE_PAD_X,
+                    right: 8.0,
+                }),
             iced::widget::scrollable(main).width(Fill).height(Fill),
         ]
         .spacing(0)
         .width(Fill)
         .height(Fill);
 
-        container(chrome)
+        let page = container(chrome)
             .width(Fill)
             .height(Fill)
-            .style(theme::page_background)
-            .into()
+            .style(theme::page_background);
+
+        if let Some(dialog) = &self.notes_dialog {
+            stack![page, notes::dialog(&dialog.subtitle, &dialog.sections)]
+                .width(Fill)
+                .height(Fill)
+                .into()
+        } else {
+            page.into()
+        }
     }
 
     fn health_now(&self) -> String {
@@ -1060,6 +1135,32 @@ fn live_status_for(games: &[Game]) -> String {
     } else {
         "Waiting for a capture".into()
     }
+}
+
+fn notes_dialog_for(data_dir: &std::path::Path, installed: Option<&str>) -> Option<NotesDialog> {
+    let last_seen = seasons::load_last_seen_version(data_dir);
+    let change = notes::classify_seen(last_seen.as_deref(), installed);
+    if change == notes::SeenChange::Unchanged {
+        return None;
+    }
+    let installed = installed?;
+    let sections = notes::notes_for_change(
+        notes::BUNDLED_CHANGELOG,
+        change,
+        last_seen.as_deref(),
+        installed,
+    );
+    if sections.is_empty() {
+        if let Err(e) = seasons::save_last_seen_version(data_dir, installed) {
+            tracing::warn!(error = %e, "failed to remember installed version");
+        }
+        return None;
+    }
+    Some(NotesDialog {
+        subtitle: notes::launch_subtitle(change).to_string(),
+        sections: notes::render(sections),
+        remember: Some(installed.to_string()),
+    })
 }
 
 fn health_status_for(
@@ -1095,6 +1196,36 @@ mod tests {
         let id = window::Id::unique();
         assert_eq!(tray_hide_op(Some(id)), Some(TrayWindowOp::Close(id)));
         assert_eq!(tray_hide_op(None), None);
+    }
+
+    #[test]
+    fn launch_notes_follow_the_stored_version() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let first = super::notes_dialog_for(dir.path(), Some("0.4.23")).expect("first run");
+        assert_eq!(first.remember.as_deref(), Some("0.4.23"));
+        assert_eq!(first.sections[0].version, "0.4.23");
+        assert!(first.sections[0].summary.contains("private log"));
+
+        super::seasons::save_last_seen_version(dir.path(), "0.4.23").expect("save");
+        assert!(super::notes_dialog_for(dir.path(), Some("0.4.23")).is_none());
+
+        let upgraded = super::notes_dialog_for(dir.path(), Some("0.4.23"));
+        // Stored version is already 0.4.23, so a same-version launch stays quiet.
+        assert!(upgraded.is_none());
+
+        super::seasons::save_last_seen_version(dir.path(), "0.4.19").expect("older");
+        let upgraded = super::notes_dialog_for(dir.path(), Some("0.4.23")).expect("upgrade");
+        let versions: Vec<_> = upgraded
+            .sections
+            .iter()
+            .map(|section| section.version.as_str())
+            .collect();
+        assert_eq!(versions, ["0.4.23", "0.4.22", "0.4.21", "0.4.20"]);
+
+        super::seasons::save_last_seen_version(dir.path(), "0.4.23").expect("newer");
+        let downgraded = super::notes_dialog_for(dir.path(), Some("0.4.20")).expect("downgrade");
+        assert_eq!(downgraded.sections.len(), 1);
+        assert_eq!(downgraded.sections[0].version, "0.4.20");
     }
 
     #[test]

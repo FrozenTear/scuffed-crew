@@ -12,8 +12,8 @@ use std::time::Duration;
 
 use crate::daemon::DaemonVerb;
 
-use iced::widget::{button, column, container, row, text};
-use iced::{Element, Fill, Padding};
+use iced::widget::{button, column, container, row, scrollable, text};
+use iced::{Element, Fill, Length, Padding};
 
 use crate::app::Message;
 use crate::theme::{
@@ -43,6 +43,15 @@ pub struct UpdateInfo {
     pub latest: String,
     pub current: String,
     pub url: String,
+    /// GitHub release bodies for versions newer than `current`, newest first.
+    /// Empty bodies mean the bundled changelog is the fallback.
+    pub release_bodies: Vec<ReleaseBody>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReleaseBody {
+    pub version: String,
+    pub body: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -349,10 +358,13 @@ pub fn evaluate_plan_with(latest: &str, probes: UpdateProbes<'_>) -> UpdatePlan 
 }
 
 /// Query GitHub Releases; `None` on failure or when already current.
+///
+/// `per_page=100` so a player who skipped several releases still gets those
+/// bodies for the in-app notes. The bundled changelog covers anything the
+/// response leaves out.
 pub async fn check_for_update() -> Option<UpdateInfo> {
     let current = current_version()?;
-    let cur = parse_semver(&current)?;
-    let url = format!("https://api.github.com/repos/{REPO}/releases?per_page=20");
+    let url = format!("https://api.github.com/repos/{REPO}/releases?per_page=100");
     let client = reqwest::Client::builder()
         .user_agent("scuffed-stat-tracker-gui")
         .timeout(Duration::from_secs(8))
@@ -367,32 +379,65 @@ pub async fn check_for_update() -> Option<UpdateInfo> {
         .json()
         .await
         .ok()?;
+    select_newer_release(&current, &releases)
+}
 
-    let mut best: Option<((u32, u32, u32), String, String)> = None;
-    for r in releases {
-        if r["draft"].as_bool().unwrap_or(false) || r["prerelease"].as_bool().unwrap_or(false) {
+/// Newest stable `stat-tracker-v*` newer than `current`, plus the bodies of
+/// every stable release between them (newest first).
+pub fn select_newer_release(current: &str, releases: &[serde_json::Value]) -> Option<UpdateInfo> {
+    let cur = parse_semver(current)?;
+    struct Parsed {
+        ver: (u32, u32, u32),
+        ver_str: String,
+        html: String,
+        body: String,
+    }
+    let mut parsed = Vec::new();
+    for release in releases {
+        if release["draft"].as_bool().unwrap_or(false)
+            || release["prerelease"].as_bool().unwrap_or(false)
+        {
             continue;
         }
-        let Some(ver_str) = r["tag_name"]
+        let Some(ver_str) = release["tag_name"]
             .as_str()
-            .and_then(|t| t.strip_prefix("stat-tracker-v"))
+            .and_then(|tag| tag.strip_prefix("stat-tracker-v"))
         else {
             continue;
         };
         let Some(ver) = parse_semver(ver_str) else {
             continue;
         };
-        if best.as_ref().is_none_or(|(b, _, _)| ver > *b) {
-            let html = r["html_url"].as_str().unwrap_or_default().to_string();
-            best = Some((ver, ver_str.to_string(), html));
-        }
+        parsed.push(Parsed {
+            ver,
+            ver_str: ver_str.to_string(),
+            html: release["html_url"].as_str().unwrap_or_default().to_string(),
+            body: release["body"].as_str().unwrap_or_default().to_string(),
+        });
     }
-
-    let (latest_ver, latest_str, html_url) = best?;
-    (latest_ver > cur).then_some(UpdateInfo {
-        latest: latest_str,
-        current,
-        url: html_url,
+    let best = parsed.iter().max_by_key(|item| item.ver)?;
+    if best.ver <= cur {
+        return None;
+    }
+    let latest_ver = best.ver;
+    let latest = best.ver_str.clone();
+    let url = best.html.clone();
+    let mut notes: Vec<_> = parsed
+        .into_iter()
+        .filter(|item| item.ver > cur && item.ver <= latest_ver)
+        .collect();
+    notes.sort_by_key(|item| std::cmp::Reverse(item.ver));
+    Some(UpdateInfo {
+        latest,
+        current: current.trim().trim_start_matches('v').to_string(),
+        url,
+        release_bodies: notes
+            .into_iter()
+            .map(|item| ReleaseBody {
+                version: item.ver_str,
+                body: item.body,
+            })
+            .collect(),
     })
 }
 
@@ -577,11 +622,12 @@ async fn download_and_run_bootstrap(
     ))
 }
 
-pub fn banner(
+pub fn banner<'a>(
     info: &UpdateInfo,
     progress: &UpdateProgress,
     plan: &UpdatePlan,
-) -> Element<'static, Message> {
+    notes: &'a [crate::notes::ShownRelease],
+) -> Element<'a, Message> {
     let url = info.url.clone();
     let cmd = pinned_install_command(&info.latest);
     let running = matches!(progress, UpdateProgress::Running);
@@ -676,7 +722,7 @@ pub fn banner(
         .style(theme::ghost_btn())
         .on_press(Message::CopyUpdateCmd),
         button(
-            text("Release notes")
+            text("Open on GitHub")
                 .size(SIZE_META)
                 .font(FONT_SEMIBOLD)
                 .color(TEXT),
@@ -688,6 +734,7 @@ pub fn banner(
     .spacing(8);
 
     body = body.push(actions);
+    body = body.push(update_notes_block(info, notes));
 
     container(body)
         .padding(PAD_INNER)
@@ -705,11 +752,88 @@ pub fn banner(
         .into()
 }
 
+fn update_notes_block<'a>(
+    info: &UpdateInfo,
+    notes: &'a [crate::notes::ShownRelease],
+) -> Element<'a, Message> {
+    if notes.is_empty() {
+        return text(format!(
+            "Release notes for v{} could not be loaded. They will show here after you update.",
+            info.latest
+        ))
+        .size(SIZE_META)
+        .font(FONT_MEDIUM)
+        .color(TEXT_2)
+        .into();
+    }
+    let heading = if notes.len() > 1 {
+        "What's new, including versions since the one you have installed."
+    } else {
+        "What's new in this update."
+    };
+    column![
+        text(heading)
+            .size(SIZE_META)
+            .font(FONT_SEMIBOLD)
+            .color(TEXT_2),
+        scrollable(crate::notes::notes_column(notes))
+            .height(Length::Fixed(280.0))
+            .width(Fill),
+    ]
+    .spacing(8)
+    .width(Fill)
+    .into()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::daemon::DaemonVerb;
     use std::path::PathBuf;
+
+    #[test]
+    fn select_newer_release_keeps_bodies_between_current_and_latest() {
+        let releases = vec![
+            serde_json::json!({
+                "tag_name": "stat-tracker-v0.4.22",
+                "draft": false,
+                "prerelease": false,
+                "html_url": "https://example.com/22",
+                "body": "notes 22"
+            }),
+            serde_json::json!({
+                "tag_name": "stat-tracker-v0.4.23",
+                "draft": false,
+                "prerelease": false,
+                "html_url": "https://example.com/23",
+                "body": "notes 23"
+            }),
+            serde_json::json!({
+                "tag_name": "stat-tracker-v0.4.24",
+                "draft": true,
+                "html_url": "https://example.com/draft",
+                "body": "draft"
+            }),
+            serde_json::json!({
+                "tag_name": "stat-tracker-v0.4.21",
+                "draft": false,
+                "html_url": "https://example.com/21",
+                "body": "notes 21"
+            }),
+        ];
+        let info = select_newer_release("0.4.21", &releases).expect("update");
+        assert_eq!(info.latest, "0.4.23");
+        assert_eq!(info.current, "0.4.21");
+        assert_eq!(info.url, "https://example.com/23");
+        assert_eq!(
+            info.release_bodies
+                .iter()
+                .map(|body| (body.version.as_str(), body.body.as_str()))
+                .collect::<Vec<_>>(),
+            [("0.4.23", "notes 23"), ("0.4.22", "notes 22")]
+        );
+        assert!(select_newer_release("0.4.23", &releases).is_none());
+    }
 
     #[test]
     fn semver_parses_and_orders() {
