@@ -493,6 +493,11 @@ const MAPS: &[(&str, &str)] = &[
     ("Busan", "busan"),
     ("Ilios", "ilios"),
     ("Lijiang Tower", "lijiang"),
+    // A koverwatch read drops the J ("LIANG TOWER") or turns IJ into UL
+    // ("LULANG TOWER"). Both are this map. Neither string is a substring
+    // of another canonical name.
+    ("Lijiang Tower", "liang tower"),
+    ("Lijiang Tower", "lulang tower"),
     ("Nepal", "nepal"),
     ("Oasis", "oasis"),
     ("Samoa", "samoa"),
@@ -1242,6 +1247,51 @@ mod hero_map_name_tests {
                 match_map_in_text(raw).as_deref(),
                 Some(GIBRALTAR_NAME),
                 "top bar {raw}"
+            );
+        }
+    }
+
+    #[test]
+    fn liang_tower_is_lijiang() {
+        assert_eq!(
+            match_map_in_text("LIANG TOWER").as_deref(),
+            Some("Lijiang Tower")
+        );
+    }
+
+    #[test]
+    fn lulang_tower_is_lijiang() {
+        assert_eq!(
+            match_map_in_text("LULANG TOWER").as_deref(),
+            Some("Lijiang Tower")
+        );
+        assert_eq!(
+            match_map_in_text("Lulang tower").as_deref(),
+            Some("Lijiang Tower")
+        );
+    }
+
+    #[test]
+    fn lijiang_ocr_aliases_do_not_steal_other_maps() {
+        let liang = normalize_ocr_glyphs("liang tower");
+        let lulang = normalize_ocr_glyphs("lulang tower");
+        for &(display, pattern) in MAPS {
+            if pattern == "liang tower" || pattern == "lulang tower" {
+                continue;
+            }
+            assert_eq!(
+                match_map_in_text(display).as_deref(),
+                Some(display),
+                "{display} no longer resolves to itself"
+            );
+            let folded = normalize_ocr_glyphs(&display.to_lowercase());
+            assert!(
+                !folded.contains(&liang),
+                "{display} contains the LIANG TOWER alias"
+            );
+            assert!(
+                !folded.contains(&lulang),
+                "{display} contains the LULANG TOWER alias"
             );
         }
     }

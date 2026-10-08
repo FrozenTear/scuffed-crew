@@ -58,9 +58,9 @@ const TRAINING_PAGES: &[TrainingPage] = &[
     TrainingPage {
         text: TRAINING_MAPS,
         xsize: 1800,
-        // 20 lines: 20 * 60px + 60px margin. The repeated names below
+        // 25 lines: 25 * 60px + 60px margin. The repeated names below
         // need the extra height; a short page busy-spins text2image.
-        ysize: 1260,
+        ysize: 1560,
         exposure: 0,
     },
     TrainingPage {
@@ -146,6 +146,11 @@ Chateau Guillard\n\
 Grimsvotn\n\
 Adlersbrunn\n\
 Chateau Guillard\n\
+LIJIANG TOWER\n\
+LIJIANG TOWER\n\
+LIJIANG TOWER\n\
+LIJIANG TOWER\n\
+Lijiang Tower\n\
 Hollywood Midtown Numbani Paraiso Neon Junction\n\
 Antarctic Peninsula Busan Ilios Lijiang Tower\n\
 Nepal Oasis Samoa Colosseo Esperanca\n\
@@ -774,6 +779,20 @@ mod training_maps_tests {
                 owned.len()
             );
         }
+        let lijiang_upper: Vec<_> = TRAINING_MAPS
+            .lines()
+            .filter(|line| line.trim() == "LIJIANG TOWER")
+            .collect();
+        assert!(
+            lijiang_upper.len() >= 4,
+            "LIJIANG TOWER needs repeated own-line samples, got {}",
+            lijiang_upper.len()
+        );
+        let lijiang_title: Vec<_> = TRAINING_MAPS
+            .lines()
+            .filter(|line| line.trim() == "Lijiang Tower")
+            .collect();
+        assert_eq!(lijiang_title.len(), 1);
         assert!(!gibraltar.contains("Grimsvotn"));
     }
 }

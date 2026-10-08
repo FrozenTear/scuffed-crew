@@ -54,7 +54,9 @@ stored map, including a map correction and the mode sent on upload.
 Training text includes an ASCII Grimsvotn line, plus Adlersbrunn and
 Chateau Guillard on their own lines. Those three names are repeated,
 and the font fine-tune runs 4000 iterations, so a line crop of each
-name still reads back.
+name still reads back. `LIJIANG TOWER` is on its own line four times,
+plus one title-case line, so the IJ pair is not dropped. `LIANG TOWER`
+and `LULANG TOWER` still canonicalize to Lijiang Tower.
 
 ### Install
 
