@@ -9,7 +9,7 @@ use scuffed_db::migrations::run_migrations;
 
 use crate::state::{AppState, OAuthConfig};
 
-pub(crate) async fn test_state() -> AppState {
+pub async fn test_state() -> AppState {
     let db = Database::connect_memory()
         .await
         .expect("in-memory DB connect");
@@ -41,6 +41,7 @@ pub(crate) async fn test_state() -> AppState {
 }
 
 /// Seed a minimal user row (the fields session/member queries expect).
+#[cfg(test)]
 pub(crate) async fn seed_user(state: &AppState, id: &str, username: &str) {
     // Test-only: `id` is always a fixed alphanumeric literal from a test, so
     // interpolating it into the record id is safe here (site-server has no

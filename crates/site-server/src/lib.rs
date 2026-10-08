@@ -11,8 +11,12 @@ pub mod routes;
 pub mod seed;
 pub mod state;
 pub mod team_channels;
-#[cfg(test)]
-pub(crate) mod test_support;
+/// In-memory fixtures shared by unit tests and `tests/`.
+///
+/// Integration tests compile this crate without `cfg(test)`, so the module
+/// stays available. Handlers do not call it.
+#[doc(hidden)]
+pub mod test_support;
 pub mod uploads;
 
 use axum::{

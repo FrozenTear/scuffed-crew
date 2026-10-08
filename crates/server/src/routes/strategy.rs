@@ -1306,4 +1306,111 @@ mod tests {
         assert_eq!(status, StatusCode::CREATED, "{body}");
         assert_eq!(body["version"], "5.0.0");
     }
+
+    /// POST/PUT/DELETE on this router accept `Authorization: Bearer`.
+    /// GET by id only consults the session cookie (`try_get_user`), so the
+    /// same token that created a private strategy cannot read it back.
+    /// `/api/strategy/ws` has the same cookie-only lookup (`get_user_from_cookie`).
+    #[tokio::test]
+    #[ignore = "known bug: private strategy GET (and the strategy WebSocket) ignore Authorization bearer tokens"]
+    async fn owner_bearer_can_read_private_strategy() {
+        let state = test_state().await;
+        seed_role(&state, "stratowner", OrgRole::Member, "owner-token").await;
+        let (status, created) = call_json(
+            strategy_routes(state.clone()),
+            Method::POST,
+            "/api/strategy/strategies",
+            Some("owner-token"),
+            Some(json!({
+                "name": "Private plan",
+                "map_id": "kings-row",
+                "game_mode": "hybrid",
+                "visibility": "private"
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{created}");
+        let id = created["id"].as_str().expect("created strategy id");
+
+        let (status, body) = call_json(
+            strategy_routes(state),
+            Method::GET,
+            &format!("/api/strategy/strategies/{id}"),
+            Some("owner-token"),
+            None,
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "owner bearer must read the private strategy they just created, got {status} {body}"
+        );
+        assert_eq!(body["name"], "Private plan");
+    }
+
+    /// Shape `crates/app/src/pages/strategy/heroes.rs` deserializes.
+    /// A non-empty `data` array of the wrong object still fails this test.
+    #[derive(Debug, Deserialize)]
+    struct HeroAbility {
+        name: String,
+        key: String,
+        description: String,
+        cooldown: Option<f32>,
+        icon_url: Option<String>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct HeroRow {
+        id: String,
+        name: String,
+        role: String,
+        portrait_url: String,
+        abilities: Vec<HeroAbility>,
+        health: u32,
+        armor: u32,
+        shields: u32,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct HeroList {
+        #[serde(alias = "heroes")]
+        data: Vec<HeroRow>,
+    }
+
+    /// The strategy heroes page fetches this route and deserializes `data`
+    /// as heroes (id, name, role, portrait, abilities, health, armor, shields).
+    /// The handler returns a hardcoded empty list, so the page stays blank.
+    #[tokio::test]
+    #[ignore = "known bug: GET /api/strategy/heroes is hardcoded to an empty list"]
+    async fn strategy_heroes_returns_catalog() {
+        let state = test_state().await;
+        let (status, body) = get_json(strategy_routes(state), "/api/strategy/heroes").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let parsed: HeroList = serde_json::from_value(body.clone()).unwrap_or_else(|err| {
+            panic!("heroes payload is not the shape the strategy page deserializes ({err}): {body}")
+        });
+        assert!(
+            !parsed.data.is_empty(),
+            "strategy heroes page has nothing to render: {body}"
+        );
+        let hero = &parsed.data[0];
+        let _shape = (
+            hero.id.as_str(),
+            hero.name.as_str(),
+            hero.role.as_str(),
+            hero.portrait_url.as_str(),
+            hero.health,
+            hero.armor,
+            hero.shields,
+        );
+        for ability in &hero.abilities {
+            let _ability = (
+                ability.name.as_str(),
+                ability.key.as_str(),
+                ability.description.as_str(),
+                ability.cooldown,
+                ability.icon_url.as_deref(),
+            );
+        }
+    }
 }

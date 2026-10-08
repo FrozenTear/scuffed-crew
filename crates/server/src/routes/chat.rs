@@ -663,4 +663,100 @@ mod tests {
             "channel found; empty roster has no recipient pubkeys: {body}"
         );
     }
+
+    /// A banned or deactivated officer who is still on `plays_on` must not
+    /// receive officer gift wraps. `send_encrypted` keeps anyone whose role
+    /// can access the officer channel and who has a pubkey.
+    #[tokio::test]
+    #[ignore = "known bug: officer chat still gift-wraps to banned or deactivated officers who stay on the roster"]
+    async fn deactivated_officer_is_not_an_officer_channel_recipient() {
+        let state = test_state().await;
+        seed_officer(&state.db).await;
+        state
+            .db
+            .client
+            .query(
+                r#"CREATE user:banneduser SET
+                    provider = 'discord',
+                    username = 'BannedOfficer',
+                    avatar_url = NONE,
+                    provider_id = 'banned-pid',
+                    provider_id_hash = 'banned-pidh',
+                    provider_id_encrypted = NONE,
+                    created_at = time::now()"#,
+            )
+            .await
+            .expect("seed banned user");
+        state
+            .db
+            .client
+            .query(
+                r#"CREATE member:bannedmember SET
+                    user_id = 'banneduser',
+                    org_role = 'officer',
+                    display_name = 'BannedOfficer',
+                    bio = NONE,
+                    avatar_url = NONE,
+                    timezone = NONE,
+                    pronouns = NONE,
+                    availability_status = NONE,
+                    joined_at = time::now(),
+                    is_active = false"#,
+            )
+            .await
+            .expect("seed banned member");
+        let (pubkey, encrypted) = NostrAuthService::new(test_crypto())
+            .generate_keypair()
+            .expect("banned keypair");
+        state
+            .db
+            .update_member_nostr_keys(
+                "bannedmember",
+                Some(&pubkey),
+                Some("server_managed"),
+                Some(&encrypted),
+            )
+            .await
+            .expect("store banned keys");
+        let team = state
+            .db
+            .create_team("Alpha", "ow2", None, None, None)
+            .await
+            .unwrap();
+        state
+            .db
+            .add_to_roster("bannedmember", &team.id, scuffed_db::TeamRole::Player)
+            .await
+            .expect("roster edge stays active");
+        scuffed_chat::ensure_team_channel_rows(&state.db, &team.id, "")
+            .await
+            .unwrap();
+
+        let app = Router::new()
+            .route("/api/chat/send-encrypted", post(send_encrypted))
+            .with_state(state);
+        let resp = app
+            .oneshot(send_req(&officer_group_id(&team.id)))
+            .await
+            .unwrap();
+        let status = resp.status();
+        let body = String::from_utf8(
+            resp.into_body()
+                .collect()
+                .await
+                .unwrap()
+                .to_bytes()
+                .to_vec(),
+        )
+        .unwrap();
+        assert_eq!(
+            status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "a deactivated officer still on the roster must not be a gift-wrap recipient: {status} {body}"
+        );
+        assert!(
+            body.contains("No channel members have Nostr keys provisioned"),
+            "expected the empty-recipient rejection, got {body}"
+        );
+    }
 }

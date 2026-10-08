@@ -375,6 +375,32 @@ fn OfficerCommunityActions(org_name: String) -> Element {
 mod tests {
     use super::*;
 
+    /// `GET /api/public/overview` returns `member_count` plus `teams` / `events`
+    /// arrays. This page's DTO instead requires `team_count` and
+    /// `upcoming_events`, so `fetch` fails and the stats block never renders.
+    #[test]
+    #[ignore = "known bug: Community PublicOverview does not match GET /api/public/overview, so member/team counts never render"]
+    fn public_overview_accepts_the_live_overview_payload() {
+        let raw = r#"{
+            "teams": [{"id":"t1","name":"A","game_id":"g1"}],
+            "games": [],
+            "events": [{"id":"e1"}],
+            "announcements": [],
+            "settings": {"org_name":"Clan"},
+            "member_count": 4,
+            "upcoming_matches": [],
+            "recent_results": []
+        }"#;
+        let parsed = serde_json::from_str::<PublicOverview>(raw);
+        assert!(
+            parsed.is_ok(),
+            "community stats must deserialize the overview route: {parsed:?}"
+        );
+        let stats = parsed.unwrap();
+        assert_eq!(stats.member_count, 4);
+        assert_eq!(stats.team_count, 1, "team count is the length of teams");
+    }
+
     #[test]
     fn intro_omits_a_name_until_settings_load() {
         let pending = community_intro(None);
