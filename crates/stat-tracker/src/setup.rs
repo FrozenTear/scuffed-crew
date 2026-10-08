@@ -58,7 +58,9 @@ const TRAINING_PAGES: &[TrainingPage] = &[
     TrainingPage {
         text: TRAINING_MAPS,
         xsize: 1800,
-        ysize: 540,
+        // 25 lines: 25 * 60px + 60px margin. The repeated names below
+        // need the extra height; a short page busy-spins text2image.
+        ysize: 1560,
         exposure: 0,
     },
     TrainingPage {
@@ -131,7 +133,24 @@ Winston Wrecking Ball Wuyang Zarya Zenyatta\n";
 const TRAINING_MAPS: &str = "\
 King's Row Circuit Royal Dorado Havana\n\
 Junkertown Rialto Route 66 Shambali Monastery\n\
-Watchpoint: Gibraltar Watchpoint: Grímsvötn Blizzard World Eichenwalde\n\
+Watchpoint: Gibraltar Blizzard World Eichenwalde\n\
+Grimsvotn\n\
+Adlersbrunn\n\
+Chateau Guillard\n\
+Grimsvotn\n\
+Adlersbrunn\n\
+Chateau Guillard\n\
+Grimsvotn\n\
+Adlersbrunn\n\
+Chateau Guillard\n\
+Grimsvotn\n\
+Adlersbrunn\n\
+Chateau Guillard\n\
+LIJIANG TOWER\n\
+LIJIANG TOWER\n\
+LIJIANG TOWER\n\
+LIJIANG TOWER\n\
+Lijiang Tower\n\
 Hollywood Midtown Numbani Paraiso Neon Junction\n\
 Antarctic Peninsula Busan Ilios Lijiang Tower\n\
 Nepal Oasis Samoa Colosseo Esperanca\n\
@@ -164,7 +183,10 @@ GhostRider Widowmaker 15 2 4 9,012 0 0\n\
 ThunderGod Sigma 4 7 3 4,567 0 15,678\n\
 PixelHunter Sojourn 10 4 3 8,234 0 0\n";
 
-const LSTM_MAX_ITERATIONS: u32 = 800;
+// 800 iterations left a line crop of Chateau Guillard as Guillarod and
+// Adlersbrunn mixed-case. 4000 iterations, with the repeated map lines
+// above, keeps those names on a line crop.
+const LSTM_MAX_ITERATIONS: u32 = 4000;
 
 pub fn tessdata_dir() -> PathBuf {
     dirs::data_dir()
@@ -722,5 +744,55 @@ mod training_heroes_tests {
                 page.ysize
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod training_maps_tests {
+    use super::TRAINING_MAPS;
+
+    #[test]
+    fn grimsvotn_training_sample_is_ascii_on_its_own_line() {
+        let line = TRAINING_MAPS
+            .lines()
+            .find(|line| line.contains("Grimsvotn"))
+            .expect("ascii Grimsvotn sample");
+        assert_eq!(line.trim(), "Grimsvotn");
+        assert!(
+            !TRAINING_MAPS.contains("Grímsvötn"),
+            "an accented name on a shared line drops the other samples"
+        );
+        let gibraltar = TRAINING_MAPS
+            .lines()
+            .find(|line| line.contains("Gibraltar"))
+            .expect("gibraltar line");
+        assert!(gibraltar.contains("Blizzard World"));
+        assert!(gibraltar.contains("Eichenwalde"));
+        for sample in ["Grimsvotn", "Adlersbrunn", "Chateau Guillard"] {
+            let owned: Vec<_> = TRAINING_MAPS
+                .lines()
+                .filter(|line| line.trim() == sample)
+                .collect();
+            assert!(
+                owned.len() >= 4,
+                "{sample} needs repeated own-line samples, got {}",
+                owned.len()
+            );
+        }
+        let lijiang_upper: Vec<_> = TRAINING_MAPS
+            .lines()
+            .filter(|line| line.trim() == "LIJIANG TOWER")
+            .collect();
+        assert!(
+            lijiang_upper.len() >= 4,
+            "LIJIANG TOWER needs repeated own-line samples, got {}",
+            lijiang_upper.len()
+        );
+        let lijiang_title: Vec<_> = TRAINING_MAPS
+            .lines()
+            .filter(|line| line.trim() == "Lijiang Tower")
+            .collect();
+        assert_eq!(lijiang_title.len(), 1);
+        assert!(!gibraltar.contains("Grimsvotn"));
     }
 }

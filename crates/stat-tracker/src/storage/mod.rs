@@ -389,13 +389,35 @@ impl LocalStore {
     /// stores decided games, and one unstorable row at the head of the queue
     /// used to fail the whole batch forever. An outcome back-fill flips the
     /// row to a decided outcome and `synced = false`, releasing it here.
+    ///
+    /// A closed session with no result is not sent. [`Self::get_unsynced_unknown`]
+    /// loads those rows so the caller can mark them synced with no request.
+    /// A GUI `SetOutcome` writes a real outcome and `synced = false`, which
+    /// releases the row here.
     pub async fn get_unsynced(
         &self,
     ) -> Result<Vec<PersonalMatch>, Box<dyn std::error::Error + Send + Sync>> {
-        let mut result = self
-            .db
-            .query("SELECT * FROM personal_match WHERE synced = false AND outcome != 'unknown' ORDER BY played_at ASC")
-            .await?;
+        self.pending_upload_rows(false).await
+    }
+
+    /// Unsynced rows whose outcome is still `unknown`. The server cannot store
+    /// them. Callers mark these synced locally and do not put them in a request.
+    pub async fn get_unsynced_unknown(
+        &self,
+    ) -> Result<Vec<PersonalMatch>, Box<dyn std::error::Error + Send + Sync>> {
+        self.pending_upload_rows(true).await
+    }
+
+    async fn pending_upload_rows(
+        &self,
+        unknown_only: bool,
+    ) -> Result<Vec<PersonalMatch>, Box<dyn std::error::Error + Send + Sync>> {
+        let sql = if unknown_only {
+            "SELECT * FROM personal_match WHERE synced = false AND outcome = 'unknown' ORDER BY played_at ASC"
+        } else {
+            "SELECT * FROM personal_match WHERE synced = false AND outcome != 'unknown' ORDER BY played_at ASC"
+        };
+        let mut result = self.db.query(sql).await?;
         let matches: Vec<PersonalMatch> = result.take(0)?;
         Ok(matches)
     }
@@ -522,9 +544,30 @@ impl LocalStore {
         capture_time: SurrealDatetime,
         outcome: &str,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        // A carried board is written after the current row and carries an
+        // older timestamp. Do not move last_capture_at backwards. Sessions
+        // are listed by that stamp.
+        let mut existing = self
+            .db
+            .query("SELECT last_capture_at FROM match_session WHERE session_id = $sid")
+            .bind(("sid", session_id.to_string()))
+            .await?;
+        let rows: Vec<SessionStamp> = existing.take(0)?;
+        let time = match rows.first() {
+            Some(row) => {
+                let have: chrono::DateTime<chrono::Utc> = row.last_capture_at.into();
+                let incoming: chrono::DateTime<chrono::Utc> = capture_time.into();
+                if have > incoming {
+                    row.last_capture_at
+                } else {
+                    capture_time
+                }
+            }
+            None => capture_time,
+        };
         self.db
             .query("UPDATE match_session SET last_capture_at = $time, capture_count += 1, final_outcome = $outcome WHERE session_id = $sid")
-            .bind(("time", capture_time))
+            .bind(("time", time))
             .bind(("outcome", outcome.to_string()))
             .bind(("sid", session_id.to_string()))
             .await?;
@@ -583,7 +626,19 @@ impl LocalStore {
             StoreCommand::SetOutcome {
                 session_id,
                 outcome,
-            } => self.set_session_outcome(session_id, outcome).await,
+            } => {
+                // The raw outcome makes the row eligible for the next sync.
+                // The overlay marks it edited so the upload carries edited=true.
+                self.set_session_outcome(session_id, outcome).await?;
+                self.edit_match(
+                    session_id,
+                    &MatchEdit {
+                        outcome: Some(outcome.clone()),
+                        ..MatchEdit::default()
+                    },
+                )
+                .await
+            }
             StoreCommand::DeleteSession { session_id } => self.delete_session(session_id).await,
             StoreCommand::EditMatch { session_id, edit } => self.edit_match(session_id, edit).await,
             StoreCommand::ResolveSegment {
@@ -783,14 +838,16 @@ impl LocalStore {
         session_id: &str,
         map: &str,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let mode = crate::parse::stored_game_mode(map);
         self.db
             .query(
                 "UPDATE match_session SET map_name = $map WHERE session_id = $sid; \
-                 UPDATE personal_match SET map_name = $map, synced = false, \
+                 UPDATE personal_match SET map_name = $map, game_mode = $mode, synced = false, \
                  sync_rev = (sync_rev ?? 0) + 1 \
-                 WHERE session_id = $sid AND map_name != $map",
+                 WHERE session_id = $sid AND (map_name != $map OR game_mode != $mode)",
             )
             .bind(("map", map.to_string()))
+            .bind(("mode", mode.clone()))
             .bind(("sid", session_id.to_string()))
             .await?;
         let map = map.to_string();
@@ -799,6 +856,7 @@ impl LocalStore {
             session_id,
             Some(&|m| {
                 m.map_name = map.clone();
+                m.game_mode = mode.clone();
             }),
         );
         Ok(())
@@ -1091,6 +1149,11 @@ fn match_log_path(data_dir: &Path) -> PathBuf {
 #[derive(Debug, Serialize, Deserialize, SurrealValue)]
 struct DeletedSession {
     session_id: String,
+}
+
+#[derive(Debug, Deserialize, SurrealValue)]
+struct SessionStamp {
+    last_capture_at: SurrealDatetime,
 }
 
 /// Rewrite `matches.jsonl` rows of one session (atomic tmp+rename): apply

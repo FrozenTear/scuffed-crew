@@ -40,9 +40,16 @@ pub fn install_fixture(data_dir: &Path, kind: FixtureKind) -> anyhow::Result<Sna
 
 pub fn games_from_snapshot(snap: &Snapshot) -> Vec<Game> {
     // Snapshot is already newest-first / latest-per-game; keep first row per session.
+    // Deathmatch stays in the local store and is never part of the totals or
+    // the history list. The mode or the map (Château Guillard) is enough.
     let mut seen = std::collections::HashSet::new();
     let mut out = Vec::new();
     for m in &snap.matches {
+        let map = m.display_map_name();
+        let mode = stat_tracker::parse::uploaded_game_mode(map, &m.game_mode);
+        if !stat_tracker::parse::stats_row_is_tracked(map, &mode) {
+            continue;
+        }
         if m.session_id.is_empty() {
             out.push(Game::from_match(m));
             continue;
@@ -99,5 +106,38 @@ mod tests {
         assert!(snap.matches.is_empty());
         assert!(games_from_snapshot(&snap).is_empty());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn deathmatch_rows_are_left_out_of_history_and_totals() {
+        let mut snap = fixtures::snapshot(FixtureKind::Sample);
+        let tracked = games_from_snapshot(&snap).len();
+        let mut dm = snap.matches[0].clone();
+        dm.session_id = "dm-guillard".into();
+        dm.map_name = "Château Guillard".into();
+        dm.game_mode = "Deathmatch".into();
+        dm.outcome = "victory".into();
+        snap.matches.insert(0, dm);
+        let games = games_from_snapshot(&snap);
+        assert_eq!(games.len(), tracked);
+        assert!(games.iter().all(|game| game.session_id != "dm-guillard"));
+        let totals = crate::aggregate::aggregate(&games, None, None);
+        assert_eq!(totals.record.games, tracked);
+        assert!(
+            totals
+                .maps
+                .iter()
+                .all(|map| map.map_name != "Château Guillard")
+        );
+
+        let mut corrected = snap.matches[0].clone();
+        corrected.session_id = "edited-to-dm".into();
+        corrected.map_name = "Busan".into();
+        corrected.game_mode = "Control".into();
+        corrected.corrected_map_name = Some("Château Guillard".into());
+        snap.matches.insert(0, corrected);
+        let games = games_from_snapshot(&snap);
+        assert!(games.iter().all(|game| game.session_id != "edited-to-dm"));
+        assert_eq!(games.len(), tracked);
     }
 }
