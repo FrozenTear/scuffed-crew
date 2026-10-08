@@ -101,19 +101,20 @@ pub(super) fn overview_tab(
         .unwrap_or_default();
 
     let maps_guard = maps.data.read();
-    let maps_owned: Vec<MapStats> = maps_guard
-        .as_ref()
-        .and_then(|d| d.as_ref())
-        .cloned()
-        .unwrap_or_default();
+    let maps_loaded = maps_guard.as_ref().and_then(|d| d.as_ref());
+    // A held fetch finishes as `Some(None)`. Flattening treats that as still
+    // loading, the same way the heroes tab does. An empty list is the only
+    // "no data" state.
+    let maps_waiting = maps_loaded.is_none();
+    let maps_owned: Vec<MapStats> = maps_loaded.cloned().unwrap_or_default();
     let chips = mode_chips(&maps_owned);
+    drop(maps_guard);
 
     let form_guard = form.data.read();
-    let form_rows: Vec<_> = form_guard
-        .as_ref()
-        .and_then(|d| d.as_ref())
-        .map(|p| p.data.clone())
-        .unwrap_or_default();
+    let form_loaded = form_guard.as_ref().and_then(|d| d.as_ref());
+    let form_waiting = form_loaded.is_none();
+    let form_rows: Vec<_> = form_loaded.map(|p| p.data.clone()).unwrap_or_default();
+    drop(form_guard);
 
     rsx! {
         div { class: "overview-grid",
@@ -208,7 +209,7 @@ pub(super) fn overview_tab(
                     p { class: "empty-state",
                         if maps.error.read().is_some() {
                             "Couldn't load maps."
-                        } else if maps.data.read().is_none() {
+                        } else if maps_waiting {
                             "Loading maps…"
                         } else {
                             "No map data yet."
@@ -243,7 +244,7 @@ pub(super) fn overview_tab(
                 p { class: "empty-state",
                     if form.error.read().is_some() {
                         "Couldn't load recent matches."
-                    } else if form.data.read().is_none() {
+                    } else if form_waiting {
                         "Loading form…"
                     } else {
                         "No recent matches."
@@ -272,5 +273,90 @@ pub(super) fn overview_tab(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::hooks::ApiResource;
+
+    fn resource_of<T: Clone + 'static>(value: Option<T>) -> ApiResource<T> {
+        let refresh = use_signal(|| 0u64);
+        let error = use_signal(|| None::<String>);
+        let truncated = use_signal(|| false);
+        let shown = use_signal(|| 0usize);
+        let page_budget = use_signal(|| 1usize);
+        let data = use_resource(move || {
+            let value = value.clone();
+            async move { value }
+        });
+        ApiResource {
+            data,
+            refresh,
+            error,
+            truncated,
+            shown,
+            page_budget,
+        }
+    }
+
+    fn pump(dom: &mut VirtualDom) {
+        for _ in 0..8 {
+            dom.render_immediate(&mut dioxus::dioxus_core::NoOpMutations);
+        }
+    }
+
+    #[test]
+    fn held_overview_fetches_stay_on_loading_text() {
+        fn view() -> Element {
+            let heroes = resource_of(None::<Vec<HeroStats>>);
+            let roles = resource_of(None::<Vec<RoleStats>>);
+            let maps = resource_of(None::<Vec<MapStats>>);
+            let form = resource_of(None::<MatchPage>);
+            overview_tab(heroes, roles, maps, form)
+        }
+
+        let mut dom = VirtualDom::new(view);
+        dom.rebuild_in_place();
+        pump(&mut dom);
+        let html = dioxus_ssr::render(&dom);
+        assert!(
+            html.contains("Loading maps"),
+            "a finished held maps fetch must stay on loading: {html}"
+        );
+        assert!(
+            html.contains("Loading form"),
+            "a finished held form fetch must stay on loading: {html}"
+        );
+        assert!(
+            !html.contains("No map data yet."),
+            "held maps must not look empty: {html}"
+        );
+        assert!(
+            !html.contains("No recent matches."),
+            "held form must not look empty: {html}"
+        );
+    }
+
+    #[test]
+    fn empty_overview_lists_say_there_is_no_data() {
+        fn view() -> Element {
+            let heroes = resource_of(Some(Vec::<HeroStats>::new()));
+            let roles = resource_of(Some(Vec::<RoleStats>::new()));
+            let maps = resource_of(Some(Vec::<MapStats>::new()));
+            let form = resource_of(Some(MatchPage {
+                data: Vec::new(),
+                next_cursor: None,
+            }));
+            overview_tab(heroes, roles, maps, form)
+        }
+
+        let mut dom = VirtualDom::new(view);
+        dom.rebuild_in_place();
+        pump(&mut dom);
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains("No map data yet."), "{html}");
+        assert!(html.contains("No recent matches."), "{html}");
     }
 }

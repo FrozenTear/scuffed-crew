@@ -103,18 +103,31 @@ const PAGE_CSS: &str = r#"
     }
 "#;
 
-/// Hold keeps the previous "still waiting" state visible. A finished `None`
-/// would render as a load error while the season list is still in flight.
+/// `Hold` is the skipped request while a saved season is unresolved. It
+/// renders as Loading. It is not a finished failure.
+#[derive(Debug, PartialEq)]
 enum LeaderboardLoad {
     Hold,
     Failed,
     Rows(Vec<LeaderboardRow>),
 }
 
+/// `Some(Hold)` when the season filter has not resolved yet. A non-empty
+/// path is fetched by the caller.
+fn leaderboard_hold(path: &str) -> Option<LeaderboardLoad> {
+    if path.is_empty() {
+        Some(LeaderboardLoad::Hold)
+    } else {
+        None
+    }
+}
+
 #[component]
 pub fn Leaderboards() -> Element {
     let mut metric = use_signal(|| "winrate".to_string());
     let mut hero = use_signal(|| None::<String>);
+    // Same saved season as My Stats and member stats, including the
+    // "current" sentinel. A pick here changes those pages too.
     let season = use_stats_season();
     let rows = use_resource(move || {
         let m = metric();
@@ -126,8 +139,8 @@ pub fn Leaderboards() -> Element {
         // Empty while a saved season is unresolved — do not send it raw.
         let url = season.fetch_path(&url);
         async move {
-            if url.is_empty() {
-                return LeaderboardLoad::Hold;
+            if let Some(held) = leaderboard_hold(&url) {
+                return held;
             }
             match ApiClient::web().fetch::<Vec<LeaderboardRow>>(&url).await {
                 Ok(list) => LeaderboardLoad::Rows(list),
@@ -172,6 +185,8 @@ pub fn Leaderboards() -> Element {
                     SeasonSelect {
                         label: "Season".to_string(),
                         seasons: season.season_list(),
+                        seasons_error: season.seasons_error(),
+                        on_retry: move |_| season.retry(),
                         value: season.selected_id(),
                         onchange: move |s| season.choose(s),
                     }
@@ -231,5 +246,23 @@ pub fn Leaderboards() -> Element {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unresolved_season_path_holds_instead_of_failing() {
+        assert_eq!(
+            leaderboard_hold(""),
+            Some(LeaderboardLoad::Hold),
+            "an empty season path is the unresolved hold, not a failure"
+        );
+        assert_eq!(
+            leaderboard_hold("/api/public/leaderboards?metric=winrate"),
+            None
+        );
     }
 }

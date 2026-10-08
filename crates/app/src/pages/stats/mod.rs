@@ -982,6 +982,8 @@ pub fn Stats() -> Element {
                     SeasonSelect {
                         id: "stats-season".to_string(),
                         seasons: season.season_list(),
+                        seasons_error: season.seasons_error(),
+                        on_retry: move |_| season.retry(),
                         value: season.selected_id(),
                         onchange: move |s: Option<String>| {
                             season.choose(s);
