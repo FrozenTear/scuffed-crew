@@ -1933,16 +1933,13 @@ struct StagedCapture {
 /// Gate, map, and carried-board decisions for one planned capture.
 ///
 /// `plan.skip_store` is the hold path and is not staged: nothing is written.
-#[allow(clippy::too_many_arguments)]
+/// The trust bit rides on [`BoardFacts`] with the counters, so this does not
+/// grow another argument.
 fn stage_capture(
     req: &CaptureRequest,
     plan: &boundary::CapturePlan,
-    raw: Counters,
-    suspect: [bool; capture_gate::GATE_COLS],
-    map_from_panel: Option<&str>,
-    parsed_map: &str,
+    facts: &BoardFacts<'_>,
     captured_at: chrono::DateTime<Utc>,
-    trusted_cells: bool,
 ) -> StagedCapture {
     let split = plan.split;
     let outcome = plan.stored_outcome;
@@ -1952,14 +1949,20 @@ fn stage_capture(
         req.session_id.clone()
     };
     let gate_prev = gate_prev_for_store(req.prev_gate, req.awaiting_first_board);
-    let gate = capture_gate::apply_gate_with_trust(gate_prev, raw, suspect, split, trusted_cells);
+    let gate = capture_gate::apply_gate_with_trust(
+        gate_prev,
+        facts.counters,
+        facts.suspect,
+        split,
+        facts.trusted_cells,
+    );
     let (map_name, map_source) = if split {
-        resolved_map(None, map_from_panel, parsed_map, &[])
+        resolved_map(None, facts.map_from_panel, facts.parsed_map, &[])
     } else {
         resolved_map(
             req.session_map.as_deref(),
-            map_from_panel,
-            parsed_map,
+            facts.map_from_panel,
+            facts.parsed_map,
             &req.map_candidates,
         )
     };
@@ -2281,7 +2284,11 @@ fn carried_counters_to_write(
 struct BoardFacts<'a> {
     counters: Counters,
     suspect: [bool; capture_gate::GATE_COLS],
+    /// Same bit as [`trusted_cells`]: the stats came from the identified
+    /// player's per-cell row. A raw-text fallback is false for both.
     row_counts: bool,
+    /// Per-cell parse succeeded. The capture gate treats false as low-trust.
+    trusted_cells: bool,
     row_id: Option<u32>,
     hero: &'a str,
     map_from_panel: Option<&'a str>,
@@ -3838,364 +3845,381 @@ async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<
         &outcome_label,
         player_name,
     );
-    if let Ok(parsed_read) = &scoreboard_read {
-        let mut parsed = parsed_read.matched.clone();
-        let trusted_cells = parsed_read.trusted_cells;
-        if !trusted_cells {
-            tracing::warn!(
-                elims = parsed.elims,
-                assists = parsed.assists,
-                deaths = parsed.deaths,
-                damage = parsed.damage,
-                healing = parsed.healing,
-                mitigation = parsed.mitigation,
-                "player row found but stat cells unreadable — using raw-text fallback (low trust)"
+    match scoreboard_read {
+        Ok(parsed_read) => {
+            let trusted_cells = parsed_read.trusted_cells;
+            let mut parsed = parsed_read.matched;
+            if !trusted_cells {
+                tracing::warn!(
+                    ?player_row_idx,
+                    elims = parsed.elims,
+                    assists = parsed.assists,
+                    deaths = parsed.deaths,
+                    damage = parsed.damage,
+                    healing = parsed.healing,
+                    mitigation = parsed.mitigation,
+                    "stat cells unreadable — using raw-text fallback (low trust)"
+                );
+            }
+            // Hero authority (CG-4 C): career-panel always wins; portrait may
+            // confirm current hero but may only switch if career never succeeded
+            // this game and ≥2 consecutive matches ≥0.85. See hero_auth::resolve_hero.
+            let portrait = portrait_hero
+                .as_ref()
+                .map(|(name, conf)| (name.as_str(), *conf));
+            let (hero, source, next_auth) = hero_auth::resolve_hero(
+                career_hero.as_deref(),
+                portrait,
+                &parsed.hero,
+                &hero_auth,
+                parse::canonical_hero,
             );
-        }
-        // Hero authority (CG-4 C): career-panel always wins; portrait may
-        // confirm current hero but may only switch if career never succeeded
-        // this game and ≥2 consecutive matches ≥0.85. See hero_auth::resolve_hero.
-        let portrait = portrait_hero
-            .as_ref()
-            .map(|(name, conf)| (name.as_str(), *conf));
-        let (hero, source, next_auth) = hero_auth::resolve_hero(
-            career_hero.as_deref(),
-            portrait,
-            &parsed.hero,
-            &hero_auth,
-            parse::canonical_hero,
-        );
-        hero_auth = next_auth;
-        parsed.hero = hero;
-        parsed.role = parse::guess_role_public(&parsed.hero);
-        let source_label = match source {
-            HeroSource::CareerPanel => "career_panel",
-            HeroSource::Portrait => "portrait",
-            HeroSource::Held => "held",
-            HeroSource::OcrText => "ocr_text",
-        };
-        tracing::info!(
-            hero = %parsed.hero,
-            source = source_label,
-            career_ever_ok = hero_auth.career_ever_ok,
-            portrait_conf = portrait_hero.as_ref().map(|(_, c)| *c),
-            "hero resolved (CG-4 C authority)"
-        );
+            hero_auth = next_auth;
+            parsed.hero = hero;
+            parsed.role = parse::guess_role_public(&parsed.hero);
+            let source_label = match source {
+                HeroSource::CareerPanel => "career_panel",
+                HeroSource::Portrait => "portrait",
+                HeroSource::Held => "held",
+                HeroSource::OcrText => "ocr_text",
+            };
+            tracing::info!(
+                hero = %parsed.hero,
+                source = source_label,
+                career_ever_ok = hero_auth.career_ever_ok,
+                portrait_conf = portrait_hero.as_ref().map(|(_, c)| *c),
+                "hero resolved (CG-4 C authority)"
+            );
 
-        // Auto-collect a portrait reference when the hero is identified and
-        // collection is enabled — or, always, when the career panel (the
-        // authoritative OCR read) names a hero whose reference is missing.
-        // A bundled stand-in (PROVISIONAL_PORTRAITS: Blizzard Entertainment
-        // artwork sourced via the Overwatch wiki, for Doctrine) counts as
-        // missing, so the first career-panel crop replaces it. A file with
-        // any other bytes is a real crop or a user file and is never
-        // overwritten. The player's row must be known: cropping row 0 when
-        // the row was not identified would store someone else's hero and
-        // then stick. New heroes ship faster than bundled portraits
-        // (D.Mon, WL-5): the first game on one seeds its reference here, and
-        // the matcher picks it up on the next daemon start. Only the
-        // career-panel source may seed (a portrait/held/text guess must not
-        // template itself).
-        let portraits_path = detect::hero_portrait::portraits_dir(data_dir);
-        let reference_path =
-            detect::hero_portrait::portrait_reference_path(&portraits_path, &parsed.hero);
-        let slot_replaceable = parsed.hero != "Unknown"
-            && detect::hero_portrait::portrait_slot_is_replaceable(&reference_path);
-        let career_panel = matches!(source, HeroSource::CareerPanel);
-        let save_portrait = detect::hero_portrait::should_save_portrait_crop(
-            career_panel,
-            collect_portraits,
-            slot_replaceable,
-            player_row_idx.is_some(),
-        );
-        if save_portrait && career_panel {
-            tracing::info!(hero = %parsed.hero, "no real portrait reference for career-panel hero — seeding one from this capture");
-        }
-        if save_portrait && let Some(row) = player_row_idx {
-            // Shared geometry (5v5/6v6 + team gap) — an inlined 5v5-only copy
-            // here used to mis-crop 6v6/team-2 references into the template
-            // library.
-            let dims = (scoreboard_img.width(), scoreboard_img.height());
-            if let Some(r) = detect::hero_portrait::portrait_rect(dims, row, team_size) {
-                let crop = scoreboard_img.crop_imm(r.x, r.y, r.w, r.h);
-                if let Err(e) = detect::hero_portrait::save_captured_portrait(
-                    &portraits_path,
-                    &parsed.hero,
-                    &crop,
-                ) {
-                    tracing::warn!(error = %e, hero = %parsed.hero, "portrait save failed");
+            // Auto-collect a portrait reference when the hero is identified and
+            // collection is enabled — or, always, when the career panel (the
+            // authoritative OCR read) names a hero whose reference is missing.
+            // A bundled stand-in (PROVISIONAL_PORTRAITS: Blizzard Entertainment
+            // artwork sourced via the Overwatch wiki, for Doctrine) counts as
+            // missing, so the first career-panel crop replaces it. A file with
+            // any other bytes is a real crop or a user file and is never
+            // overwritten. The player's row must be known: cropping row 0 when
+            // the row was not identified would store someone else's hero and
+            // then stick. New heroes ship faster than bundled portraits
+            // (D.Mon, WL-5): the first game on one seeds its reference here, and
+            // the matcher picks it up on the next daemon start. Only the
+            // career-panel source may seed (a portrait/held/text guess must not
+            // template itself).
+            let portraits_path = detect::hero_portrait::portraits_dir(data_dir);
+            let reference_path =
+                detect::hero_portrait::portrait_reference_path(&portraits_path, &parsed.hero);
+            let slot_replaceable = parsed.hero != "Unknown"
+                && detect::hero_portrait::portrait_slot_is_replaceable(&reference_path);
+            let career_panel = matches!(source, HeroSource::CareerPanel);
+            let save_portrait = detect::hero_portrait::should_save_portrait_crop(
+                career_panel,
+                collect_portraits,
+                slot_replaceable,
+                player_row_idx.is_some(),
+            );
+            if save_portrait && career_panel {
+                tracing::info!(hero = %parsed.hero, "no real portrait reference for career-panel hero — seeding one from this capture");
+            }
+            if save_portrait && let Some(row) = player_row_idx {
+                // Shared geometry (5v5/6v6 + team gap) — an inlined 5v5-only copy
+                // here used to mis-crop 6v6/team-2 references into the template
+                // library.
+                let dims = (scoreboard_img.width(), scoreboard_img.height());
+                if let Some(r) = detect::hero_portrait::portrait_rect(dims, row, team_size) {
+                    let crop = scoreboard_img.crop_imm(r.x, r.y, r.w, r.h);
+                    if let Err(e) = detect::hero_portrait::save_captured_portrait(
+                        &portraits_path,
+                        &parsed.hero,
+                        &crop,
+                    ) {
+                        tracing::warn!(error = %e, hero = %parsed.hero, "portrait save failed");
+                    }
                 }
             }
-        }
 
-        let captured_at = Utc::now();
-        let now = SurrealDatetime::from(captured_at);
+            let captured_at = Utc::now();
+            let now = SurrealDatetime::from(captured_at);
 
-        // Edge-ink suspect mask (CG-3) for the player's row — read from the same
-        // per-cell OCR the stats came from. Threaded into BOTH the split decision
-        // (DUP-1: a suspect column must not vote as a regression) and the capture
-        // gate (a suspect read never corroborates a jump or drives an un-latch).
-        let suspect = parse::player_row_suspect_mask(&rows, player_row_idx);
+            // Edge-ink suspect mask (CG-3) for the player's row — read from the same
+            // per-cell OCR the stats came from. Threaded into BOTH the split decision
+            // (DUP-1: a suspect column must not vote as a regression) and the capture
+            // gate (a suspect read never corroborates a jump or drives an un-latch).
+            let suspect = parse::player_row_suspect_mask(&rows, player_row_idx);
 
-        // Stat-regression boundary (detector-independent): scoreboard stats
-        // are cumulative within a match, so if this capture's counters sit
-        // below the session's previous accepted capture, the poller missed
-        // the game boundary and this board belongs to a new game.
-        // Same-map/hero unfinished session: a stat-looking regression after
-        // the 120s gap is almost always OCR noise or a late scoreboard of
-        // this match. Do not split it off. A fresh-match drop is a candidate
-        // new game even inside that gap. The first is held.
-        let raw_counters = Counters {
-            elims: parsed.elims,
-            assists: parsed.assists,
-            deaths: parsed.deaths,
-            damage: parsed.damage,
-            healing: parsed.healing,
-            mitigation: parsed.mitigation,
-        };
-        let plan = plan_from_board(
-            &req,
-            &BoardFacts {
+            // Stat-regression boundary (detector-independent): scoreboard stats
+            // are cumulative within a match, so if this capture's counters sit
+            // below the session's previous accepted capture, the poller missed
+            // the game boundary and this board belongs to a new game.
+            // Same-map/hero unfinished session: a stat-looking regression after
+            // the 120s gap is almost always OCR noise or a late scoreboard of
+            // this match. Do not split it off. A fresh-match drop is a candidate
+            // new game even inside that gap. The first is held.
+            let raw_counters = Counters {
+                elims: parsed.elims,
+                assists: parsed.assists,
+                deaths: parsed.deaths,
+                damage: parsed.damage,
+                healing: parsed.healing,
+                mitigation: parsed.mitigation,
+            };
+            let facts = BoardFacts {
                 counters: raw_counters,
                 suspect,
-                row_counts: parse::row_counts(&rows, player_row_idx),
+                // `trusted_cells` is `stats_from_row` on the identified row, which
+                // is the same predicate as `parse::row_counts`.
+                row_counts: trusted_cells,
+                trusted_cells,
                 row_id: identified_row_id(player_row_idx),
                 hero: &parsed.hero,
                 map_from_panel: map_from_panel.as_deref(),
                 parsed_map: &parsed.map_name,
                 frame_outcome,
-            },
-        );
-        if plan.skip_store {
-            if plan.defer {
+            };
+            let plan = plan_from_board(&req, &facts);
+            if plan.skip_store {
+                if plan.defer {
+                    tracing::info!(
+                        session_id = %session_id,
+                        elims = parsed.elims,
+                        deaths = parsed.deaths,
+                        damage = parsed.damage,
+                        "fresh-match board held — not written onto the current game"
+                    );
+                }
+                return Ok(skipped_capture_report(
+                    &plan,
+                    session_id,
+                    matches!(source, HeroSource::CareerPanel),
+                    hero_auth,
+                    plan.defer.then(|| parsed.hero.clone()),
+                    plan.defer.then_some(captured_at),
+                ));
+            }
+            let staged = stage_capture(&req, &plan, &facts, captured_at);
+            let split = staged.split;
+            outcome = staged.outcome;
+            outcome_label = staged.outcome_label.clone();
+            parsed.outcome = outcome_label.clone();
+            let target_session = staged.target_session.clone();
+            if split {
                 tracing::info!(
-                    session_id = %session_id,
+                    old_session = %session_id,
+                    new_session = %target_session,
                     elims = parsed.elims,
                     deaths = parsed.deaths,
                     damage = parsed.damage,
-                    "fresh-match board held — not written onto the current game"
+                    after_end_screen = req.after_end_screen,
+                    reset_streak = plan.reset_streak,
+                    "player stats regressed — previous game never closed; splitting into a new session"
                 );
             }
-            return Ok(skipped_capture_report(
-                &plan,
-                session_id,
-                matches!(source, HeroSource::CareerPanel),
-                hero_auth,
-                plan.defer.then(|| parsed.hero.clone()),
-                plan.defer.then_some(captured_at),
-            ));
-        }
-        let staged = stage_capture(
-            &req,
-            &plan,
-            raw_counters,
-            suspect,
-            map_from_panel.as_deref(),
-            &parsed.map_name,
-            captured_at,
-            trusted_cells,
-        );
-        let split = staged.split;
-        outcome = staged.outcome;
-        outcome_label = staged.outcome_label.clone();
-        parsed.outcome = outcome_label.clone();
-        let target_session = staged.target_session.clone();
-        if split {
+            let gate = &staged.gate;
+            // CG-4 B3: always surface the per-column suspect mask on the accept
+            // path so a latched inflation can be diagnosed as flagged vs clean
+            // (the 07-22 HLG 22994 case was undiagnosable without this).
+            if suspect.iter().any(|&s| s) {
+                tracing::info!(
+                    session_id = %target_session,
+                    suspect = ?suspect,
+                    raw_elims = raw_counters.elims,
+                    raw_assists = raw_counters.assists,
+                    raw_deaths = raw_counters.deaths,
+                    raw_damage = raw_counters.damage,
+                    raw_healing = raw_counters.healing,
+                    raw_mitigation = raw_counters.mitigation,
+                    accepted_healing = gate.accepted.healing,
+                    accepted_damage = gate.accepted.damage,
+                    accepted_mitigation = gate.accepted.mitigation,
+                    "capture accepted with edge-ink suspect mask"
+                );
+            }
+            for h in &gate.holds {
+                tracing::warn!(
+                    session_id = %target_session,
+                    col = h.col,
+                    kind = ?h.kind,
+                    raw = h.raw,
+                    held = h.held,
+                    "capture gate held a cell (suspected OCR misread)"
+                );
+            }
+            for u in &gate.unlatches {
+                tracing::warn!(
+                    session_id = %target_session,
+                    col = u.col,
+                    raw = u.raw,
+                    revised_from = u.revised_from,
+                    "capture gate un-latched a cell (clean reads revised a latched value down)"
+                );
+            }
+            if gate.state.low_trust {
+                tracing::warn!(
+                    session_id = %target_session,
+                    elims = gate.accepted.elims,
+                    assists = gate.accepted.assists,
+                    deaths = gate.accepted.deaths,
+                    damage = gate.accepted.damage,
+                    healing = gate.accepted.healing,
+                    mitigation = gate.accepted.mitigation,
+                    "stored capture is low-trust"
+                );
+            }
+            parsed.elims = gate.accepted.elims;
+            parsed.assists = gate.accepted.assists;
+            parsed.deaths = gate.accepted.deaths;
+            parsed.damage = gate.accepted.damage;
+            parsed.healing = gate.accepted.healing;
+            parsed.mitigation = gate.accepted.mitigation;
+
+            parsed.map_name = staged.map_name.clone();
+
+            // The session is owned by the active game (map-vote → accolade). The
+            // first capture creates the session row; later captures (including hero
+            // swaps and the post-match scoreboard) append to the same session.
+            parsed.session_id = target_session.clone();
+            // A board deferred on this same session is dropped when the capture
+            // stays. A split, or a board carried in from the session that closed,
+            // is written onto the session this row lands on. The same function
+            // writes the night harness.
+            let created_this_capture =
+                write_staged_rows(store, data_dir, &staged, &parsed.hero, &parsed.role, now)
+                    .await?;
+
             tracing::info!(
-                old_session = %session_id,
-                new_session = %target_session,
+                hero = %parsed.hero,
+                map = %parsed.map_name,
                 elims = parsed.elims,
                 deaths = parsed.deaths,
-                damage = parsed.damage,
-                after_end_screen = req.after_end_screen,
-                reset_streak = plan.reset_streak,
-                "player stats regressed — previous game never closed; splitting into a new session"
+                "parsed scoreboard"
             );
-        }
-        let gate = &staged.gate;
-        // CG-4 B3: always surface the per-column suspect mask on the accept
-        // path so a latched inflation can be diagnosed as flagged vs clean
-        // (the 07-22 HLG 22994 case was undiagnosable without this).
-        if suspect.iter().any(|&s| s) {
-            tracing::info!(
-                session_id = %target_session,
-                suspect = ?suspect,
-                raw_elims = raw_counters.elims,
-                raw_assists = raw_counters.assists,
-                raw_deaths = raw_counters.deaths,
-                raw_damage = raw_counters.damage,
-                raw_healing = raw_counters.healing,
-                raw_mitigation = raw_counters.mitigation,
-                accepted_healing = gate.accepted.healing,
-                accepted_damage = gate.accepted.damage,
-                accepted_mitigation = gate.accepted.mitigation,
-                "capture accepted with edge-ink suspect mask"
-            );
-        }
-        for h in &gate.holds {
-            tracing::warn!(
-                session_id = %target_session,
-                col = h.col,
-                kind = ?h.kind,
-                raw = h.raw,
-                held = h.held,
-                "capture gate held a cell (suspected OCR misread)"
-            );
-        }
-        for u in &gate.unlatches {
-            tracing::warn!(
-                session_id = %target_session,
-                col = u.col,
-                raw = u.raw,
-                revised_from = u.revised_from,
-                "capture gate un-latched a cell (clean reads revised a latched value down)"
-            );
-        }
-        parsed.elims = gate.accepted.elims;
-        parsed.assists = gate.accepted.assists;
-        parsed.deaths = gate.accepted.deaths;
-        parsed.damage = gate.accepted.damage;
-        parsed.healing = gate.accepted.healing;
-        parsed.mitigation = gate.accepted.mitigation;
+            let recorded_map = staged.recorded_map.clone();
+            storage::append_match_log(data_dir, &parsed);
+            store
+                .insert_match(parsed)
+                .await
+                .map_err(anyhow::Error::from_boxed)
+                .context("store insert failed")?;
 
-        parsed.map_name = staged.map_name.clone();
+            // Dump the accepted scoreboard crop to a bounded ring so a corrupt
+            // ACCEPTED board is diagnosable after the fact — tonight's corruption
+            // was undiagnosable because only rejected frames were ever saved.
+            save_accepted_frame(data_dir, scoreboard_img);
 
-        // The session is owned by the active game (map-vote → accolade). The
-        // first capture creates the session row; later captures (including hero
-        // swaps and the post-match scoreboard) append to the same session.
-        parsed.session_id = target_session.clone();
-        // A board deferred on this same session is dropped when the capture
-        // stays. A split, or a board carried in from the session that closed,
-        // is written onto the session this row lands on. The same function
-        // writes the night harness.
-        let created_this_capture =
-            write_staged_rows(store, data_dir, &staged, &parsed.hero, &parsed.role, now).await?;
-
-        tracing::info!(
-            hero = %parsed.hero,
-            map = %parsed.map_name,
-            elims = parsed.elims,
-            deaths = parsed.deaths,
-            "parsed scoreboard"
-        );
-        let recorded_map = staged.recorded_map.clone();
-        storage::append_match_log(data_dir, &parsed);
-        store
-            .insert_match(parsed)
-            .await
-            .map_err(anyhow::Error::from_boxed)
-            .context("store insert failed")?;
-
-        // Dump the accepted scoreboard crop to a bounded ring so a corrupt
-        // ACCEPTED board is diagnosable after the fact — tonight's corruption
-        // was undiagnosable because only rejected frames were ever saved.
-        save_accepted_frame(data_dir, scoreboard_img);
-
-        // Re-derive the session's hero timeline from its RAW snapshots after
-        // every capture (HS-1). A single capture can mislabel (career panel
-        // shows the spectated hero while dead; portrait matching can misfire),
-        // and a late hero swap must be recorded as its own segment rather than
-        // stamped across the whole game (the old set_session_hero last-write
-        // recorded a 97%-Ana game as Rein). set_session_hero is now a MANUAL
-        // repair helper only. Per-snapshot reads stay raw; the derived primary
-        // drives the displayed/uploaded hero.
-        if !created_this_capture
-            && let Err(e) = store.refresh_session_hero_timeline(&target_session).await
-        {
-            tracing::debug!(error = %e, "failed to refresh session hero timeline");
-        }
-        // Diagnostics: after N consecutive scoreboard captures that parsed but
-        // resolved no map, dump the map-label region so the next failure is
-        // debuggable from raw pixels (the 07-17 Ilios game left none).
-        use std::sync::atomic::Ordering;
-        if recorded_map.is_none() {
-            let n = ctx.empty_map_reads.fetch_add(1, Ordering::Relaxed) + 1;
-            if n >= EMPTY_MAP_DUMP_THRESHOLD {
+            // Re-derive the session's hero timeline from its RAW snapshots after
+            // every capture (HS-1). A single capture can mislabel (career panel
+            // shows the spectated hero while dead; portrait matching can misfire),
+            // and a late hero swap must be recorded as its own segment rather than
+            // stamped across the whole game (the old set_session_hero last-write
+            // recorded a 97%-Ana game as Rein). set_session_hero is now a MANUAL
+            // repair helper only. Per-snapshot reads stay raw; the derived primary
+            // drives the displayed/uploaded hero.
+            if !created_this_capture
+                && let Err(e) = store.refresh_session_hero_timeline(&target_session).await
+            {
+                tracing::debug!(error = %e, "failed to refresh session hero timeline");
+            }
+            // Diagnostics: after N consecutive scoreboard captures that parsed but
+            // resolved no map, dump the map-label region so the next failure is
+            // debuggable from raw pixels (the 07-17 Ilios game left none).
+            use std::sync::atomic::Ordering;
+            if recorded_map.is_none() {
+                let n = ctx.empty_map_reads.fetch_add(1, Ordering::Relaxed) + 1;
+                if n >= EMPTY_MAP_DUMP_THRESHOLD {
+                    ctx.empty_map_reads.store(0, Ordering::Relaxed);
+                    let region = ocr::preprocess::crop_map_name(&frame_img);
+                    let dir = data_dir.join("debug").join("mapmiss");
+                    tracing::warn!(
+                        consecutive = n,
+                        "N consecutive scoreboard captures resolved no map — dumping map region to debug/mapmiss"
+                    );
+                    tokio::task::spawn_blocking(move || {
+                        save_frame_ring(&dir, "mapmiss", &region, MAPMISS_KEEP);
+                    });
+                }
+            } else {
                 ctx.empty_map_reads.store(0, Ordering::Relaxed);
-                let region = ocr::preprocess::crop_map_name(&frame_img);
-                let dir = data_dir.join("debug").join("mapmiss");
-                tracing::warn!(
-                    consecutive = n,
-                    "N consecutive scoreboard captures resolved no map — dumping map region to debug/mapmiss"
-                );
-                tokio::task::spawn_blocking(move || {
-                    save_frame_ring(&dir, "mapmiss", &region, MAPMISS_KEEP);
-                });
             }
-        } else {
-            ctx.empty_map_reads.store(0, Ordering::Relaxed);
-        }
 
-        Ok(CaptureReport {
-            recorded: true,
-            outcome,
-            map: recorded_map,
-            map_source: staged.map_source,
-            session_id: target_session,
-            split,
-            armed_reset: false,
-            ignore_row: plan.ignore_row,
-            reset_streak: plan.reset_streak,
-            reset_baseline: plan.reset_baseline,
-            baseline_row: plan.baseline_row,
-            refresh_baseline: plan.refresh_baseline,
-            clear_hint: plan.clear_hint,
-            count_progress: plan.count_progress,
-            career_panel: matches!(source, HeroSource::CareerPanel),
-            held_counters: None,
-            held_hero: None,
-            gate_state: Some(staged.gate.state),
-            hero_auth,
-            seal: plan.seal,
-            close_reason: plan.close_reason,
-            held_at: None,
-        })
-    } else {
-        // Recording another row's stats would be worse than recording nothing.
-        // A found row whose cells did not parse is not the same failure as a
-        // frame where the row itself is missing.
-        let miss = scoreboard_read.unwrap_err();
-        let reason = match miss {
-            parse::ScoreboardMiss::PlayerRowNotFound => {
-                tracing::warn!(
-                    "capture rejected — player row not found (saved to debug/rejected; \
+            Ok(CaptureReport {
+                recorded: true,
+                outcome,
+                map: recorded_map,
+                map_source: staged.map_source,
+                session_id: target_session,
+                split,
+                armed_reset: false,
+                ignore_row: plan.ignore_row,
+                reset_streak: plan.reset_streak,
+                reset_baseline: plan.reset_baseline,
+                baseline_row: plan.baseline_row,
+                refresh_baseline: plan.refresh_baseline,
+                clear_hint: plan.clear_hint,
+                count_progress: plan.count_progress,
+                career_panel: matches!(source, HeroSource::CareerPanel),
+                held_counters: None,
+                held_hero: None,
+                gate_state: Some(staged.gate.state),
+                hero_auth,
+                seal: plan.seal,
+                close_reason: plan.close_reason,
+                held_at: None,
+            })
+        }
+        Err(miss) => {
+            // Recording another row's stats would be worse than recording nothing.
+            // A found row whose cells did not parse is not the same failure as a
+            // frame where the row itself is missing. CellsUnreadable also fires
+            // when the name shows up only in chat or the kill feed.
+            let reason = match miss {
+                parse::ScoreboardMiss::PlayerRowNotFound => {
+                    tracing::warn!(
+                        "capture rejected — player row not found (saved to debug/rejected; \
                      set player_name in config.toml if it is missing)"
-                );
-                "noplayerrow"
-            }
-            parse::ScoreboardMiss::CellsUnreadable => {
-                tracing::warn!(
-                    "capture rejected — player row found but stat cells unreadable \
-                     (saved to debug/rejected)"
-                );
-                "unreadable"
-            }
-        };
-        save_rejected_frame(data_dir, frame_img, reason);
-        Ok(CaptureReport {
-            recorded: false,
-            outcome,
-            map: None,
-            map_source: None,
-            session_id: session_id.to_string(),
-            split: false,
-            armed_reset: false,
-            ignore_row: true,
-            reset_streak: req.reset_streak,
-            reset_baseline: req.reset_baseline,
-            baseline_row: req.baseline_row,
-            refresh_baseline: false,
-            clear_hint: false,
-            count_progress: false,
-            career_panel: false,
-            held_counters: None,
-            held_hero: None,
-            gate_state: None,
-            hero_auth,
-            seal: None,
-            close_reason: None,
-            held_at: None,
-        })
+                    );
+                    "noplayerrow"
+                }
+                parse::ScoreboardMiss::CellsUnreadable => {
+                    let cells = player_row_idx.and_then(|i| rows.get(i)).map(|row| {
+                        row.stats
+                            .iter()
+                            .take(6)
+                            .map(|cell| cell.value.clone())
+                            .collect::<Vec<_>>()
+                    });
+                    tracing::warn!(
+                        ?player_row_idx,
+                        ?cells,
+                        "capture rejected — stat cells unreadable (saved to debug/rejected)"
+                    );
+                    "unreadable"
+                }
+            };
+            save_rejected_frame(data_dir, frame_img, reason);
+            Ok(CaptureReport {
+                recorded: false,
+                outcome,
+                map: None,
+                map_source: None,
+                session_id: session_id.to_string(),
+                split: false,
+                armed_reset: false,
+                ignore_row: true,
+                reset_streak: req.reset_streak,
+                reset_baseline: req.reset_baseline,
+                baseline_row: req.baseline_row,
+                refresh_baseline: false,
+                clear_hint: false,
+                count_progress: false,
+                career_panel: false,
+                held_counters: None,
+                held_hero: None,
+                gate_state: None,
+                hero_auth,
+                seal: None,
+                close_reason: None,
+                held_at: None,
+            })
+        }
     }
 }
 
@@ -6032,6 +6056,12 @@ mod tests {
             Some("Zenyatta")
         );
         assert!(recovered.hero_auth.portrait_pending.is_none());
+        let gate = recovered.gate.expect("skeleton gate");
+        assert!(
+            !gate.low_trust,
+            "a pre-0.4.21 skeleton has no low-trust bit, so the latch stays trusted"
+        );
+        assert!(!gate.unconfirmed.iter().any(|&col| col));
     }
 
     #[test]
@@ -7291,19 +7321,19 @@ mod tests {
                 parse::canonical_hero,
             );
             let career_panel = matches!(source, HeroSource::CareerPanel);
-            let plan = plan_from_board(
-                &req,
-                &BoardFacts {
-                    counters: cur,
-                    suspect,
-                    row_counts: row.is_some(),
-                    row_id: row,
-                    hero: &hero_resolved,
-                    map_from_panel: panel,
-                    parsed_map: text_map,
-                    frame_outcome: frame,
-                },
-            );
+            let cells_trusted = row.is_some();
+            let facts = BoardFacts {
+                counters: cur,
+                suspect,
+                row_counts: cells_trusted,
+                trusted_cells: cells_trusted,
+                row_id: row,
+                hero: &hero_resolved,
+                map_from_panel: panel,
+                parsed_map: text_map,
+                frame_outcome: frame,
+            };
+            let plan = plan_from_board(&req, &facts);
             let sid = req.session_id.clone();
             if plan.skip_store {
                 let report = skipped_capture_report(
@@ -7325,7 +7355,7 @@ mod tests {
                 .await;
                 return;
             }
-            let staged = stage_capture(&req, &plan, cur, suspect, panel, text_map, self.wall, true);
+            let staged = stage_capture(&req, &plan, &facts, self.wall);
             write_staged_rows(
                 &self.store,
                 self.dir.path(),
@@ -7436,6 +7466,54 @@ mod tests {
         boundary::StartScreen::MapVote {
             candidates: candidates.iter().map(|c| (*c).to_string()).collect(),
         }
+    }
+
+    #[tokio::test]
+    async fn a_fallback_board_yields_to_one_clean_read_and_a_ghost_stays_held() {
+        let mut night = Night::new().await;
+        night.begin_on("Dorado", "Wrecking Ball");
+        night
+            .tab_once(
+                night_counters(2, 40, 18, 450, 0, 2),
+                "Wrecking Ball",
+                None,
+                Some("Dorado"),
+                NIGHT_CLEAN,
+            )
+            .await;
+        let latched = night.game().gate.expect("fallback stored");
+        assert!(latched.low_trust);
+        assert_eq!(latched.accepted.assists, 40);
+
+        night.advance(Duration::from_secs(20));
+        night
+            .tab_once(
+                night_counters(2, 0, 0, 1105, 259, 450),
+                "Wrecking Ball",
+                Some(0),
+                Some("Dorado"),
+                NIGHT_CLEAN,
+            )
+            .await;
+        let cleaned = night.game().gate.expect("clean read stored");
+        assert_eq!(cleaned.accepted.assists, 0);
+        assert_eq!(cleaned.accepted.deaths, 0);
+        assert_eq!(cleaned.accepted.damage, 1105);
+        assert!(!cleaned.low_trust);
+
+        night.advance(Duration::from_secs(20));
+        night
+            .tab_once(
+                night_counters(91, 0, 0, 1105, 259, 450),
+                "Wrecking Ball",
+                Some(0),
+                Some("Dorado"),
+                NIGHT_CLEAN,
+            )
+            .await;
+        let ghost = night.game().gate.expect("ghost stored");
+        assert_eq!(ghost.accepted.elims, 2, "the rate cap still holds a ghost");
+        assert!(!ghost.low_trust);
     }
 
     #[tokio::test]

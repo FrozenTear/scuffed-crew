@@ -40,10 +40,13 @@ pub fn parse_scoreboard_cells(
 /// zeros came back empty looked the same as a frame with no row at all.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ScoreboardMiss {
-    /// No highlighted row and the configured name is not in the raw text.
+    /// No identified row, by name or highlight, and the configured name is
+    /// not a whole word in the raw text.
     PlayerRowNotFound,
-    /// The row was found, but its cells did not parse and the text fallback
-    /// did not yield six in-range stats.
+    /// A row index was set, or the configured name appears as a whole word,
+    /// but the cells did not parse and the text fallback did not yield
+    /// exactly six in-range stats. The name can be in chat or the kill feed
+    /// rather than on a scoreboard row.
     CellsUnreadable,
 }
 
@@ -65,24 +68,23 @@ pub fn read_scoreboard(
     outcome: &str,
     player_name: Option<&str>,
 ) -> Result<ScoreboardRead, ScoreboardMiss> {
-    let from_cells = player_row_index
-        .and_then(|idx| rows.get(idx))
-        .and_then(stats_from_row);
-    let (stats, trusted_cells) = if let Some(stats) = from_cells {
-        (stats, true)
-    } else if let Some(stats) = text_fallback_stats(raw_text, player_name) {
-        (stats, false)
-    } else if player_row_index.is_some() || name_in_raw_text(raw_text, player_name) {
-        return Err(ScoreboardMiss::CellsUnreadable);
-    } else {
-        return Err(ScoreboardMiss::PlayerRowNotFound);
-    };
-
     let lines: Vec<&str> = raw_text
         .lines()
         .map(|l| l.trim())
         .filter(|l| !l.is_empty())
         .collect();
+    let from_cells = player_row_index
+        .and_then(|idx| rows.get(idx))
+        .and_then(stats_from_row);
+    let (stats, trusted_cells) = if let Some(stats) = from_cells {
+        (stats, true)
+    } else if let Some(stats) = text_fallback_stats(&lines, player_name) {
+        (stats, false)
+    } else if player_row_index.is_some() || name_in_lines(&lines, player_name) {
+        return Err(ScoreboardMiss::CellsUnreadable);
+    } else {
+        return Err(ScoreboardMiss::PlayerRowNotFound);
+    };
 
     let hero = find_hero(&lines).unwrap_or_else(|| "Unknown".to_string());
     let role = guess_role(&hero);
@@ -251,55 +253,85 @@ struct PlayerStats {
     mitigation: u32,
 }
 
-fn name_in_raw_text(raw_text: &str, player_name: Option<&str>) -> bool {
-    let Some(name) = player_name else {
+fn configured_name(player_name: Option<&str>) -> Option<&str> {
+    player_name.map(str::trim).filter(|name| !name.is_empty())
+}
+
+fn name_in_lines(lines: &[&str], player_name: Option<&str>) -> bool {
+    let Some(name) = configured_name(player_name) else {
         return false;
     };
-    let name_lower = name.to_lowercase();
-    raw_text.to_lowercase().contains(&name_lower)
-}
-
-fn find_player_row<'a>(lines: &[&'a str], player_name: &str) -> Option<&'a str> {
-    let name_lower = player_name.to_lowercase();
     lines
         .iter()
-        .find(|line| {
-            let lower = line.to_lowercase();
-            lower.contains(&name_lower)
-        })
-        .copied()
+        .any(|line| name_word_index(line, name).is_some())
 }
 
-/// Stats from the full-board text line that contains the player name.
-///
-/// The per-cell path is positional. This one is not, and the line for row 0
-/// also picks up the hero panel's objective timer (`00:02`), which sits at
-/// the same height. Taking the last six numbers then slid the columns:
-/// `2 0 0 1,105 259 450 00:02` became elims 0, assists 1105, deaths 259.
-/// Rank badges sit *before* the name, so the numbers after the name are the
-/// stats. A clock token is removed first. Anything other than exactly six
-/// numbers after that is contamination (a dropped digit, a timer the clock
-/// strip missed) and the fallback is refused — a dropped capture is
-/// recoverable, a shifted row is not. The six still have to pass the same
-/// kill-column ceilings as [`stats_from_row`].
-fn text_fallback_stats(raw_text: &str, player_name: Option<&str>) -> Option<PlayerStats> {
-    let name = player_name?;
-    let lines: Vec<&str> = raw_text
-        .lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty())
-        .collect();
-    let line = find_player_row(&lines, name)?;
-    let suffix = suffix_after_name(line, name)?;
-    let suffix = strip_clock_tokens(suffix);
-    let numbers = extract_numbers(&suffix);
-    if numbers.len() != 6 {
-        tracing::debug!(
-            n = numbers.len(),
-            "rejecting text fallback: not exactly six stats after the player name"
-        );
+/// Byte index of `player_name` in the lowercased line, when it is a whole
+/// word. `Ana` does not match inside `BANANA`. An empty name matches nothing.
+fn name_word_index(line: &str, player_name: &str) -> Option<usize> {
+    let name_lower = player_name.trim().to_lowercase();
+    if name_lower.is_empty() {
         return None;
     }
+    let line_lower = line.to_lowercase();
+    let mut search_from = 0;
+    while let Some(rel) = line_lower[search_from..].find(&name_lower) {
+        let start = search_from + rel;
+        let end = start + name_lower.len();
+        let before_ok = line_lower[..start]
+            .chars()
+            .next_back()
+            .is_none_or(|c| !c.is_alphanumeric());
+        let after_ok = line_lower[end..]
+            .chars()
+            .next()
+            .is_none_or(|c| !c.is_alphanumeric());
+        if before_ok && after_ok {
+            return Some(start);
+        }
+        let step = name_lower.chars().next().map_or(1, char::len_utf8);
+        search_from = start + step;
+        if search_from >= line_lower.len() {
+            break;
+        }
+    }
+    None
+}
+
+/// Stats from a full-board text line that contains the player name as a
+/// whole word.
+///
+/// The per-cell path is positional. This one is not, and the line for row 0
+/// can also pick up the hero panel's objective timer (`00:02`), which sits
+/// at the same height. Taking the last six numbers then slid the columns:
+/// `2 0 0 1,105 259 450 00:02` became elims 0, assists 1105, deaths 259.
+/// Rank badges sit *before* the name, so the numbers after the name are the
+/// stats. A clock token is removed first. The six have to be one unbroken
+/// run, with no word or `%` inside or after it: a dropped column plus one
+/// extra hero stat (`ACCURACY 35%`) is still six numbers and used to be
+/// accepted. A number that does not fit in `u32` refuses the line instead
+/// of being dropped. The first line that merely mentions the name (a join
+/// message) is skipped so a later stat line can still match. The six still
+/// have to pass the same kill-column ceilings as [`stats_from_row`].
+fn text_fallback_stats(lines: &[&str], player_name: Option<&str>) -> Option<PlayerStats> {
+    let name = configured_name(player_name)?;
+    for line in lines {
+        if name_word_index(line, name).is_none() {
+            continue;
+        }
+        let Some(suffix) = suffix_after_name(line, name) else {
+            continue;
+        };
+        if let Some(stats) = stats_from_player_suffix(suffix) {
+            return Some(stats);
+        }
+    }
+    None
+}
+
+fn stats_from_player_suffix(suffix: &str) -> Option<PlayerStats> {
+    let suffix = strip_clock_tokens(suffix);
+    let numbers = stat_run_after_name(&suffix)?;
     let stats = PlayerStats {
         elims: numbers[0],
         assists: numbers[1],
@@ -320,16 +352,20 @@ fn text_fallback_stats(raw_text: &str, player_name: Option<&str>) -> Option<Play
     Some(stats)
 }
 
-/// Text after the first case-insensitive occurrence of `player_name`.
+/// Text after the first whole-word, case-insensitive match of `player_name`.
+///
+/// An empty or whitespace name does not match. `Ana` does not match inside
+/// `BANANA`. ASCII lines keep byte indexes (lowercasing does not move them).
+/// Any other line is walked, because a character that grows and one that
+/// shrinks can leave the lowercased string the same length while the indexes
+/// no longer line up.
 fn suffix_after_name<'a>(line: &'a str, player_name: &str) -> Option<&'a str> {
-    let name_lower = player_name.to_lowercase();
-    let line_lower = line.to_lowercase();
-    let start = line_lower.find(&name_lower)?;
-    let end = start + name_lower.len();
-    // ASCII names (the scoreboard case) keep byte indexes aligned. A
-    // lowercasing that changes width is walked so the slice stays on a
-    // char boundary.
-    if line_lower.len() == line.len() {
+    let name_lower = player_name.trim().to_lowercase();
+    if name_lower.is_empty() {
+        return None;
+    }
+    let end = name_word_index(line, player_name)? + name_lower.len();
+    if line.is_ascii() {
         return line.get(end..);
     }
     let mut byte = 0;
@@ -368,15 +404,15 @@ fn clock_token_len(chars: &[char], i: usize) -> Option<usize> {
         return None;
     }
     let mut j = i;
-    let mut hour = 0;
+    let mut minute_digits = 0;
     while j < chars.len() && chars[j].is_ascii_digit() {
-        hour += 1;
+        minute_digits += 1;
         j += 1;
-        if hour > 2 {
+        if minute_digits > 2 {
             return None;
         }
     }
-    if !(1..=2).contains(&hour) || j >= chars.len() || chars[j] != ':' {
+    if !(1..=2).contains(&minute_digits) || j >= chars.len() || chars[j] != ':' {
         return None;
     }
     j += 1;
@@ -393,13 +429,95 @@ fn clock_token_len(chars: &[char], i: usize) -> Option<usize> {
     Some(j - i)
 }
 
-fn extract_numbers(s: &str) -> Vec<u32> {
-    let cleaned: String = s.chars().filter(|c| *c != ',').collect();
-    cleaned
-        .split(|c: char| !c.is_ascii_digit())
-        .filter(|w| !w.is_empty())
-        .filter_map(|w| w.parse::<u32>().ok())
-        .collect()
+enum SuffixToken {
+    Number(u32),
+    /// Digits that do not fit in `u32`. Dropping one used to leave a
+    /// shifted line looking like six stats.
+    Overflow,
+    Word,
+    Percent,
+}
+
+/// The six stats after the name, or nothing.
+///
+/// They have to be one consecutive run of numbers. A word or `%` inside
+/// that run, or after it, refuses the line. A word before the run is a
+/// title and is allowed. A number that overflows `u32` refuses the line.
+fn stat_run_after_name(suffix: &str) -> Option<[u32; 6]> {
+    let tokens = suffix_tokens(suffix);
+    if tokens.iter().any(|t| matches!(t, SuffixToken::Overflow)) {
+        tracing::debug!("rejecting text fallback: a number does not fit in u32");
+        return None;
+    }
+    let mut i = 0;
+    let mut run: Option<[u32; 6]> = None;
+    while i < tokens.len() {
+        if !matches!(tokens[i], SuffixToken::Number(_)) {
+            i += 1;
+            continue;
+        }
+        let mut nums = Vec::new();
+        while let Some(SuffixToken::Number(n)) = tokens.get(i) {
+            nums.push(*n);
+            i += 1;
+        }
+        if nums.len() != 6 {
+            tracing::debug!(
+                n = nums.len(),
+                "rejecting text fallback: not exactly six stats after the player name"
+            );
+            return None;
+        }
+        if run.is_some() {
+            return None;
+        }
+        if tokens[i..]
+            .iter()
+            .any(|t| matches!(t, SuffixToken::Word | SuffixToken::Percent))
+        {
+            tracing::debug!("rejecting text fallback: a word or percent follows the stat run");
+            return None;
+        }
+        run = Some([nums[0], nums[1], nums[2], nums[3], nums[4], nums[5]]);
+    }
+    run
+}
+
+fn suffix_tokens(s: &str) -> Vec<SuffixToken> {
+    let chars: Vec<char> = s.chars().collect();
+    let mut i = 0;
+    let mut out = Vec::new();
+    while i < chars.len() {
+        let c = chars[i];
+        if c.is_ascii_digit() {
+            let mut digits = String::new();
+            while i < chars.len() && (chars[i].is_ascii_digit() || chars[i] == ',') {
+                if chars[i].is_ascii_digit() {
+                    digits.push(chars[i]);
+                }
+                i += 1;
+            }
+            match digits.parse::<u32>() {
+                Ok(n) => out.push(SuffixToken::Number(n)),
+                Err(_) => out.push(SuffixToken::Overflow),
+            }
+            continue;
+        }
+        if c == '%' {
+            out.push(SuffixToken::Percent);
+            i += 1;
+            continue;
+        }
+        if c.is_alphabetic() {
+            while i < chars.len() && chars[i].is_alphabetic() {
+                i += 1;
+            }
+            out.push(SuffixToken::Word);
+            continue;
+        }
+        i += 1;
+    }
+    out
 }
 
 pub fn guess_role_public(hero: &str) -> String {
@@ -840,7 +958,66 @@ mod tests {
             ),
             (2, 0, 0, 1105, 259, 450)
         );
-        assert_ne!((p.assists, p.deaths), (1105, 259));
+    }
+
+    #[test]
+    fn seven_numbers_and_a_shifted_extra_stat_are_refused() {
+        let seven = "FROZEN 8 1 2 3,993 989 1,583 35";
+        assert_eq!(
+            read_scoreboard(&[], None, seven, "unknown", Some("FROZEN")).unwrap_err(),
+            ScoreboardMiss::CellsUnreadable
+        );
+        // Damage dropped, and an accuracy percent supplies the sixth number.
+        let shifted = "FROZEN 8 1 2 989 1,583 ACCURACY 35%";
+        assert_eq!(
+            read_scoreboard(&[], None, shifted, "unknown", Some("FROZEN")).unwrap_err(),
+            ScoreboardMiss::CellsUnreadable
+        );
+        let overflow = "FROZEN 2 0 0 1,105 259 450 99999999999";
+        assert_eq!(
+            read_scoreboard(&[], None, overflow, "unknown", Some("FROZEN")).unwrap_err(),
+            ScoreboardMiss::CellsUnreadable
+        );
+    }
+
+    #[test]
+    fn a_short_or_empty_name_does_not_read_another_row() {
+        let banana = "BANANA 9 9 9 9999 9999 9999";
+        assert_eq!(
+            read_scoreboard(&[], None, banana, "unknown", Some("Ana")).unwrap_err(),
+            ScoreboardMiss::PlayerRowNotFound
+        );
+        let someone = "SOMEONE 1 2 3 4 5 6";
+        assert_eq!(
+            read_scoreboard(&[], None, someone, "unknown", Some("")).unwrap_err(),
+            ScoreboardMiss::PlayerRowNotFound
+        );
+        assert_eq!(
+            read_scoreboard(&[], None, someone, "unknown", Some("   ")).unwrap_err(),
+            ScoreboardMiss::PlayerRowNotFound
+        );
+    }
+
+    #[test]
+    fn a_join_line_does_not_hide_the_stat_line() {
+        let raw = "FROZEN joined the game\nFROZEN 8 1 2 3,993 989 1,583";
+        let read = read_scoreboard(&[], None, raw, "unknown", Some("FROZEN")).unwrap();
+        assert!(!read.trusted_cells);
+        assert_eq!(read.matched.elims, 8);
+        assert_eq!(read.matched.damage, 3993);
+        assert_eq!(read.matched.mitigation, 1583);
+    }
+
+    #[test]
+    fn suffix_after_a_name_keeps_char_boundaries_when_casefold_widths_cancel() {
+        // İ (U+0130) lowercases to two code points. K (U+212A) lowercases to
+        // one byte. The old fast path treated equal byte lengths as aligned
+        // indexes and sliced into the stats.
+        let raw = "İİFROZEN K 12 0 0 100 200 300";
+        let read = read_scoreboard(&[], None, raw, "unknown", Some("FROZEN")).unwrap();
+        assert_eq!(read.matched.elims, 12);
+        assert_eq!(read.matched.assists, 0);
+        assert_eq!(read.matched.mitigation, 300);
     }
 
     #[test]

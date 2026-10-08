@@ -183,6 +183,12 @@ const STATS_PER_ROW: usize = 6;
 /// empty-page diagnostics it floods the journal with.
 const MIN_CELL_INK_PIXELS: usize = 20;
 
+/// Confidence stamped on a geometric dim zero. It is not a Tesseract score.
+/// 60 sits below a clean whitelist hit and above an empty cell (0), so a
+/// recovered zero is visible in the row without looking like a high-confidence
+/// OCR read.
+const DIM_ZERO_CONFIDENCE: i32 = 60;
+
 /// Count ink pixels in a prepared (binarized, black-on-white) cell image.
 fn prepared_ink_pixels(img: &image::GrayImage) -> usize {
     img.pixels().filter(|p| p.0[0] < 128).count()
@@ -328,11 +334,11 @@ fn recognize_cell_with_whitelist(
         // A dim 0 never clears the HSV mask, so the cell is empty and the
         // row used to be thrown away. Recover that glyph as 0. Anything
         // else with no bright ink stays empty — a blank cell is not a zero.
-        if preprocess::dim_zero_glyph(img) {
+        if let Some(hit) = preprocess::dim_zero_glyph(img, EDGE_INK_COLS) {
             return Ok(CellOcrResult {
                 value: "0".to_string(),
-                confidence: 60,
-                suspect: false,
+                confidence: DIM_ZERO_CONFIDENCE,
+                suspect: hit.touches_edge,
             });
         }
         return Ok(CellOcrResult {
@@ -909,7 +915,7 @@ mod tests {
         let binary = preprocess::prepare_cell_binary(&img);
         let ink = binary.pixels().filter(|p| p.0[0] < 128).count();
         assert!(
-            ink < 20,
+            ink < MIN_CELL_INK_PIXELS,
             "fixture must be a zero the HSV mask drops, ink={ink}"
         );
         let cell = recognize_cell(&img).expect("dim zero cell");

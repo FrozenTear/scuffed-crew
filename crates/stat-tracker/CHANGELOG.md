@@ -8,20 +8,22 @@ prepends the section whose heading matches the tag version (for example
 
 A zero on the scoreboard is drawn fainter than the other digits. The
 cell reader was dropping those cells, and one empty cell threw away the
-whole row, so an early Tab with a 0 in elims, assists, or deaths was
-not saved. Those zeros now read as 0. A row that is on screen but whose
-cells still cannot be read is logged separately from a frame where the
-player row was not found.
+whole row. Those Tabs were often saved anyway, through the text
+fallback, with the columns shifted. Those zeros now read as 0 in any
+of the six stat columns. A row that is on screen but whose cells still
+cannot be read is logged separately from a frame where the player row
+was not found.
 
 The text fallback no longer takes the last six numbers on the player's
-line. That line also contains the hero panel's objective timer, and a
-trailing `00:02` shifted the columns (assists and deaths became the
+line. That line can also contain the hero panel's objective timer, and
+a trailing `00:02` shifted the columns (assists and deaths became the
 damage and healing figures). The fallback now ignores a clock, keeps a
-line only when six numbers sit after the name, and uses the same
-elims, assists, and deaths ceilings as the cell reader. Numbers from
-that fallback are low-trust: the first capture is checked too, and one
-clean cell read replaces them. A trusted cell read still has to agree
-three times before a confirmed value moves down.
+line only when exactly six numbers sit after the name, and uses the
+same elims, assists, and deaths ceilings as the cell reader. Numbers
+from that fallback are low-trust: the first capture is checked too, and
+one clean cell read replaces an unconfirmed column. A jump past the
+rate cap, or a trailing-digit inject, is still held. A confirmed value
+still has to agree three times before it moves down.
 
 ### Install
 
