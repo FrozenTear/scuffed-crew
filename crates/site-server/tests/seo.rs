@@ -1042,9 +1042,9 @@ async fn unmatched_api_paths_are_json_404_and_client_routes_stay_the_shell() {
     let get_body = get_body.expect("the loop must include GET");
 
     let (status, headers, body) = exchange(app.clone(), Method::HEAD, "/api/nope").await;
-    assert_eq!(status, StatusCode::NOT_FOUND);
-    assert_eq!(content_type(&headers), "application/json");
-    assert_eq!(cache_control(&headers), Some("no-store"));
+    assert_eq!(status, StatusCode::NOT_FOUND, "HEAD");
+    assert_eq!(content_type(&headers), "application/json", "HEAD");
+    assert_eq!(cache_control(&headers), Some("no-store"), "HEAD");
     assert!(
         body.is_empty(),
         "HEAD must not include a body, got {body:?}"
@@ -1065,7 +1065,7 @@ async fn unmatched_api_paths_are_json_404_and_client_routes_stay_the_shell() {
         "Content-Length must equal the GET body length"
     );
 
-    // The CORS layer answers every OPTIONS request before the JSON 404.
+    // The CORS layer answers every OPTIONS request on an unmatched path before the JSON 404.
     let (status, headers, body) = exchange(app.clone(), Method::OPTIONS, "/api/nope").await;
     assert_eq!(status, StatusCode::OK, "OPTIONS");
     assert!(

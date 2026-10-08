@@ -282,11 +282,12 @@ pub(crate) fn is_api_path(path: &str) -> bool {
 /// The router reaches this service only after registered routes miss, so a
 /// known `/api` path with a wrong method other than OPTIONS stays 405. OPTIONS
 /// on a route registered inside [`crate::create_router`] is answered by the
-/// CORS layer with 200 and does not reach this function. A route added after
-/// `create_router` still returns 405 for OPTIONS. `scuffed-server` merges
-/// strategy routes and adds chat and websocket routes with `.route` on top of
-/// [`crate::create_router`]; those stay registered routes. HEAD uses the same
-/// status and headers as GET, with an empty body.
+/// CORS layer with 200 and does not reach this function. OPTIONS on an
+/// unmatched `/api` path is also answered by the CORS layer with 200 and never
+/// reaches this function. `scuffed-server` merges strategy routes and adds chat
+/// and websocket routes with `.route` on top of [`crate::create_router`]; those
+/// stay registered routes, outside the CORS layer, so OPTIONS on them is 405.
+/// HEAD uses the same status and headers as GET, with an empty body.
 fn unmatched_api_response(method: &Method) -> Response {
     let json = serde_json::to_vec(&ErrorResponse {
         error: "Not found".to_string(),
