@@ -192,6 +192,45 @@ pub fn format_datetime(iso: &str) -> String {
     }
 }
 
+/// [`format_datetime`] with a ` UTC` label when the value was a timestamp.
+/// Strings that do not trim pass through unchanged.
+pub fn format_datetime_utc(iso: &str) -> String {
+    let trimmed = format_datetime(iso);
+    if trimmed == iso {
+        trimmed
+    } else {
+        format!("{trimmed} UTC")
+    }
+}
+
+/// Forum time in the viewer's local zone, `YYYY-MM-DD HH:MM`.
+///
+/// Wasm parses the ISO string with `js_sys::Date` and reads the local
+/// getters. Native tests and unparsable input use [`format_datetime_utc`].
+pub fn format_local_datetime(iso: &str) -> String {
+    #[cfg(all(feature = "web", target_arch = "wasm32"))]
+    if let Some(local) = local_datetime_from_js(iso) {
+        return local;
+    }
+    format_datetime_utc(iso)
+}
+
+#[cfg(all(feature = "web", target_arch = "wasm32"))]
+fn local_datetime_from_js(iso: &str) -> Option<String> {
+    let date = js_sys::Date::new(&wasm_bindgen::JsValue::from_str(iso));
+    if !date.get_time().is_finite() {
+        return None;
+    }
+    Some(format!(
+        "{:04}-{:02}-{:02} {:02}:{:02}",
+        date.get_full_year(),
+        date.get_month() + 1,
+        date.get_date(),
+        date.get_hours(),
+        date.get_minutes(),
+    ))
+}
+
 pub fn encode_query(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     for b in value.bytes() {
@@ -395,6 +434,42 @@ mod tests {
             !card.contains("match_indices(\"http\")"),
             "substring matching on http links javascript payloads"
         );
+    }
+
+    #[test]
+    fn format_datetime_trims_iso_to_the_minute() {
+        assert_eq!(
+            format_datetime("2026-07-10T22:55:07.962043010Z"),
+            "2026-07-10 22:55"
+        );
+        assert_eq!(
+            format_datetime("2026-07-10T19:30:35.657Z"),
+            "2026-07-10 19:30"
+        );
+        assert_eq!(format_datetime("not a timestamp"), "not a timestamp");
+    }
+
+    #[test]
+    fn format_datetime_utc_labels_the_trimmed_minute() {
+        assert_eq!(
+            format_datetime_utc("2026-07-10T22:55:07.962043010Z"),
+            "2026-07-10 22:55 UTC"
+        );
+        assert_eq!(
+            format_datetime_utc("2026-07-10T19:30:35.657Z"),
+            "2026-07-10 19:30 UTC"
+        );
+        assert_eq!(format_datetime_utc("not a timestamp"), "not a timestamp");
+    }
+
+    #[cfg(not(all(feature = "web", target_arch = "wasm32")))]
+    #[test]
+    fn format_local_datetime_uses_labelled_utc_off_wasm() {
+        assert_eq!(
+            format_local_datetime("2026-07-10T22:55:07.962043010Z"),
+            "2026-07-10 22:55 UTC"
+        );
+        assert_eq!(format_local_datetime("not a timestamp"), "not a timestamp");
     }
 
     #[test]

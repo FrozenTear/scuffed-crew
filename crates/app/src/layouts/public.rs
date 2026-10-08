@@ -57,6 +57,7 @@ pub(crate) fn nav_route(id: &str) -> Option<Route> {
         "blog" => Route::Blog {},
         "wiki" => Route::Wiki {},
         "stats" => Route::Stats {},
+        "leaderboards" => Route::Leaderboards {},
         "strategy" => Route::StrategyBrowse {},
         "patch_notes" => Route::PatchNotes {},
         "scrims" => Route::Scrims {},
@@ -78,7 +79,7 @@ struct NavLink {
 }
 
 /// `strategy` follows `GET /api/settings`.strategies_enabled (default ON).
-/// Patch Notes is never gated here.
+/// Patch Notes, Stats, and Leaderboards are not gated here.
 fn nav_id_visible(id: &str, strategies_enabled: bool) -> bool {
     strategies_enabled || id != "strategy"
 }
@@ -876,6 +877,7 @@ mod tests {
     #[test]
     fn patch_notes_catalog_id_opens_public_route() {
         assert_eq!(nav_route("patch_notes"), Some(Route::PatchNotes {}));
+        assert_eq!(nav_route("leaderboards"), Some(Route::Leaderboards {}));
         assert_ne!(nav_route("patch_notes"), Some(Route::StrategyPatchNotes {}));
         assert_eq!(nav_route("strategy"), Some(Route::StrategyBrowse {}));
         assert_eq!(nav_route("not_in_catalog"), None);
@@ -899,6 +901,14 @@ mod tests {
         assert!(nav_id_visible("strategy", true));
         assert!(!nav_id_visible("strategy", false));
         assert!(nav_id_visible("patch_notes", false));
+        assert!(nav_id_visible("stats", false));
+        assert!(nav_id_visible("leaderboards", false));
+        assert!(
+            more_off.iter().any(|l| l.id == "leaderboards"),
+            "Leaderboards follows Stats: the strategies flag does not hide it"
+        );
+        let primary_off = resolve_nav(&cfg, NavPlacement::Primary, false);
+        assert!(primary_off.iter().any(|l| l.id == "stats"));
     }
 
     #[test]

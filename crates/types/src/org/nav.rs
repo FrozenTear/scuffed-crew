@@ -122,6 +122,11 @@ pub const NAV_CATALOG: &[NavCatalogEntry] = &[
         description: "Player statistics",
     },
     NavCatalogEntry {
+        id: "leaderboards",
+        label: "Leaderboards",
+        description: "Top players by stat",
+    },
+    NavCatalogEntry {
         id: "strategy",
         label: "Strategy",
         description: "Strategy browser",
@@ -154,11 +159,13 @@ impl Default for NavConfig {
                 item("forum", NavPlacement::Primary, 1),
                 item("events", NavPlacement::Primary, 2),
                 item("stats", NavPlacement::Primary, 3),
-                item("news", NavPlacement::More, 0),
-                item("tournaments", NavPlacement::More, 1),
-                item("scrims", NavPlacement::More, 2),
-                item("strategy", NavPlacement::More, 3),
-                item("patch_notes", NavPlacement::More, 4),
+                // More, immediately after Stats in the default chrome.
+                item("leaderboards", NavPlacement::More, 0),
+                item("news", NavPlacement::More, 1),
+                item("tournaments", NavPlacement::More, 2),
+                item("scrims", NavPlacement::More, 3),
+                item("strategy", NavPlacement::More, 4),
+                item("patch_notes", NavPlacement::More, 5),
                 item("community", NavPlacement::Hidden, 0),
                 item("feed", NavPlacement::Hidden, 1),
                 item("polls", NavPlacement::Hidden, 2),
@@ -196,7 +203,9 @@ impl NavConfig {
         serde_json::to_string(self).unwrap_or_else(|_| "{}".into())
     }
 
-    /// Drop unknown ids, de-dupe, and append any missing catalog entries as Hidden.
+    /// Drop unknown ids, de-dupe, and append catalog ids the saved list
+    /// omitted. Each missing id uses its default placement and is ordered at
+    /// the end of that bucket. Ids already saved keep their placement and order.
     ///
     /// This is the **save / persist** path. Do **not** run it on Admin Settings
     /// load: a GET payload id that the compiled `NAV_CATALOG` does not yet
@@ -213,12 +222,23 @@ impl NavConfig {
         self.merge_missing_catalog();
     }
 
-    /// Admin Settings load: keep every GET payload row, de-dupe, add missing
-    /// catalog ids as Hidden. Never drops an id the API already returned.
+    /// Admin Settings load: keep every GET payload row, de-dupe, append missing
+    /// catalog ids at their default placement. Never drops an id the API
+    /// already returned.
     pub fn prepare_for_editor(&mut self) {
         let mut seen = std::collections::HashSet::new();
         self.items.retain(|it| seen.insert(it.id.clone()));
         self.merge_missing_catalog();
+    }
+
+    /// Placement from [`NavConfig::default`]. Unknown ids are Hidden.
+    fn default_placement(id: &str) -> NavPlacement {
+        NavConfig::default()
+            .items
+            .into_iter()
+            .find(|item| item.id == id)
+            .map(|item| item.placement)
+            .unwrap_or(NavPlacement::Hidden)
     }
 
     fn merge_missing_catalog(&mut self) {
@@ -226,8 +246,9 @@ impl NavConfig {
             self.items.iter().map(|i| i.id.clone()).collect();
         for entry in NAV_CATALOG {
             if !seen.contains(entry.id) {
-                let order = self.next_order(NavPlacement::Hidden);
-                self.items.push(item(entry.id, NavPlacement::Hidden, order));
+                let placement = Self::default_placement(entry.id);
+                let order = self.next_order(placement);
+                self.items.push(item(entry.id, placement, order));
             }
         }
     }
@@ -377,7 +398,18 @@ mod tests {
             .collect();
         assert_eq!(
             more,
-            ["news", "tournaments", "scrims", "strategy", "patch_notes"]
+            [
+                "leaderboards",
+                "news",
+                "tournaments",
+                "scrims",
+                "strategy",
+                "patch_notes",
+            ]
+        );
+        assert_eq!(
+            NavConfig::catalog_label("leaderboards"),
+            Some("Leaderboards")
         );
         assert!(
             cfg.items
@@ -414,15 +446,16 @@ mod tests {
     }
 
     #[test]
-    fn normalize_adds_new_catalog_id_as_hidden() {
-        // Existing Contabo `site_settings.nav` JSON predates `patch_notes`.
-        // Unknown ids are dropped; missing catalog ids appear as Hidden so
-        // Admin can place them without a redeploy. Fresh Default stays More.
+    fn normalize_appends_missing_catalog_ids_at_default_placement() {
+        // Saved nav that predates later catalog ids. Unknown ids are dropped.
+        // Missing ids are appended in their default placement. Rows already
+        // stored keep placement and order (stats stays More, not Primary).
         let mut stored = NavConfig {
             items: vec![
                 item("members", NavPlacement::Primary, 0),
                 item("forum", NavPlacement::Primary, 1),
                 item("news", NavPlacement::More, 0),
+                item("stats", NavPlacement::More, 4),
                 item("not_a_real_page", NavPlacement::Primary, 9),
             ],
         };
@@ -431,13 +464,73 @@ mod tests {
             stored.items.iter().all(|i| i.id != "not_a_real_page"),
             "unknown ids are dropped"
         );
-        let added = stored
+        let patch = stored
             .items
             .iter()
             .find(|i| i.id == "patch_notes")
             .expect("new catalog id is merged in");
-        assert_eq!(added.placement, NavPlacement::Hidden);
+        assert_eq!(patch.placement, NavPlacement::More);
+        let stats = stored
+            .items
+            .iter()
+            .find(|i| i.id == "stats")
+            .expect("saved stats row");
+        assert_eq!(stats.placement, NavPlacement::More);
+        assert_eq!(stats.order, 4);
+        let boards = stored
+            .items
+            .iter()
+            .find(|i| i.id == "leaderboards")
+            .expect("leaderboards is merged in");
+        assert_eq!(boards.placement, NavPlacement::More);
+        let more: Vec<&str> = stored
+            .items_in(NavPlacement::More)
+            .into_iter()
+            .map(|i| i.id.as_str())
+            .collect();
+        let stats_pos = more.iter().position(|id| *id == "stats").unwrap();
+        let boards_pos = more.iter().position(|id| *id == "leaderboards").unwrap();
+        assert!(
+            boards_pos > stats_pos,
+            "appended leaderboards stays after the saved stats row: {more:?}"
+        );
         assert_eq!(stored.items.len(), NAV_CATALOG.len());
+    }
+
+    #[test]
+    fn saved_list_without_leaderboards_shows_it_in_more_after_stats() {
+        let mut stored = live_contabo_get_nav();
+        assert!(
+            stored.items.iter().all(|i| i.id != "leaderboards"),
+            "fixture is a saved list from before the leaderboards id"
+        );
+        let stats_before = stored
+            .items
+            .iter()
+            .find(|i| i.id == "stats")
+            .expect("stats")
+            .clone();
+        stored.normalize();
+        let stats_after = stored
+            .items
+            .iter()
+            .find(|i| i.id == "stats")
+            .expect("stats");
+        assert_eq!(stats_after.placement, stats_before.placement);
+        assert_eq!(stats_after.order, stats_before.order);
+        assert!(
+            stored
+                .items
+                .iter()
+                .any(|i| i.id == "patch_notes" && i.placement == NavPlacement::Hidden),
+            "a saved Hidden row is not moved to its default"
+        );
+        let more: Vec<&str> = stored
+            .items_in(NavPlacement::More)
+            .into_iter()
+            .map(|i| i.id.as_str())
+            .collect();
+        assert_eq!(more, ["events", "stats", "leaderboards"]);
     }
 
     #[test]
