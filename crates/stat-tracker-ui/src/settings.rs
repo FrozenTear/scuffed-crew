@@ -120,9 +120,10 @@ impl SettingsForm {
         }
     }
 
-    /// Map the form onto `base`, keeping `data_dir`, `ocr_threads`, and
-    /// `finished_game_close_secs`. That quiet-close key is config-file only;
-    /// Settings has no control for it, so the value already in `base` is kept.
+    /// Map the form onto `base`, keeping `data_dir`, `ocr_threads`,
+    /// `shadow_recognizer`, and `finished_game_close_secs`. Those keys are
+    /// config-file only; Settings has no control for them, so the values
+    /// already in `base` are kept.
     pub fn to_config(&self, base: &Config) -> Config {
         Config {
             data_dir: base.data_dir.clone(),
@@ -139,6 +140,7 @@ impl SettingsForm {
             game_process_names: parse_process_names(&self.game_process_names),
             debug_ocr: self.debug_ocr,
             ocr_threads: base.ocr_threads,
+            shadow_recognizer: base.shadow_recognizer,
         }
     }
 }

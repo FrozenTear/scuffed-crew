@@ -43,6 +43,14 @@ pub struct Config {
     /// Overlay: env `STAT_TRACKER_OCR_THREADS`, CLI `--ocr-threads N`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ocr_threads: Option<u32>,
+    /// Shadow digit recognizer. When true, a background thread reads each
+    /// accepted scoreboard with a template digit matcher and appends where it
+    /// disagrees with ocr-v1 to `{data_dir}/shadow/digits.jsonl` (capped at
+    /// about 4 MB). Log only: stored stats, the capture gate, and uploads
+    /// still use ocr-v1. Off by default. Also enabled by env
+    /// `SCUFFED_SHADOW_RECOGNIZER=1`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub shadow_recognizer: bool,
 }
 
 fn default_session_window_secs() -> u64 {
@@ -234,6 +242,11 @@ impl Config {
             config.debug_ocr = true;
         }
 
+        // Env overlay for the shadow digit recognizer (log only).
+        if Self::env_truthy("SCUFFED_SHADOW_RECOGNIZER") {
+            config.shadow_recognizer = true;
+        }
+
         // OCR worker count: CLI > env > config file > auto (None).
         if let Some(raw) = Self::arg_value("--ocr-threads")
             .or_else(|| std::env::var("STAT_TRACKER_OCR_THREADS").ok())
@@ -339,6 +352,7 @@ impl Default for Config {
             game_process_names: default_game_process_names(),
             debug_ocr: false,
             ocr_threads: None,
+            shadow_recognizer: false,
         }
     }
 }
@@ -362,6 +376,15 @@ mod tests {
         assert_eq!(c.ocr_threads_resolved(), 8);
         c.ocr_threads = Some(0);
         assert_eq!(c.ocr_threads_resolved(), 1);
+    }
+
+    #[test]
+    fn shadow_recognizer_defaults_off_and_is_not_written_when_off() {
+        assert!(!Config::default().shadow_recognizer);
+        let raw = toml::to_string_pretty(&Config::default()).unwrap();
+        assert!(!raw.contains("shadow_recognizer"), "{raw}");
+        let on: Config = toml::from_str(&format!("shadow_recognizer = true\n{raw}")).unwrap();
+        assert!(on.shadow_recognizer);
     }
 
     #[test]
@@ -451,6 +474,10 @@ server_url = "http://example.com"
 token = "secret"
 "#;
         let cfg: Config = toml::from_str(raw).expect("existing shape must still parse");
+        assert!(
+            !cfg.shadow_recognizer,
+            "the shadow recognizer is off unless a config asks for it"
+        );
         assert_eq!(
             cfg.finished_game_close_secs, FINISHED_GAME_CLOSE_DEFAULT_SECS,
             "an older config file has no quiet-close setting"
@@ -486,6 +513,7 @@ token = "secret"
             },
             debug_ocr: full,
             ocr_threads: full.then_some(2),
+            shadow_recognizer: full,
         }
     }
 
