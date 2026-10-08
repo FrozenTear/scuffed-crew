@@ -12,7 +12,9 @@ use scuffed_types::api::{CreateSeasonRequest, UpdateSeasonRequest};
 use scuffed_types::{HeroAgg, MemberLeaderboardRow as TypesMemberRow, resolve_hero_query};
 
 use crate::extractors::AdminUser;
-use crate::leaderboard_cache::{CacheError, FailKind, LeaderboardKey, LoadError, OnError};
+use crate::leaderboard_cache::{
+    CacheError, FailKind, LeaderboardKey, LoadError, OnError, limit_bucket, truncate_to_requested,
+};
 use crate::routes::audit_log::audit;
 use crate::state::AppState;
 
@@ -209,7 +211,10 @@ pub async fn public_leaderboards(
         "kd" | "games" | "winrate" => q.metric.clone(),
         _ => "winrate".to_string(),
     };
-    let limit = q.limit.clamp(1, 100);
+    let requested = q.limit.clamp(1, 100);
+    // Cache and scan the bucket (10, 25, 50, 100). The response is cut
+    // back to `requested` so odd limits do not create extra keys.
+    let bucket = limit_bucket(requested);
 
     // W3 B2: optional ?hero= → canonical HEROES name, then DB bound filter.
     // Unknown names are 400 and are not cached.
@@ -232,15 +237,13 @@ pub async fn public_leaderboards(
         .unwrap_or("")
         .to_string();
     let key =
-        LeaderboardKey::public_board(&metric, limit, &season_id, hero.as_deref().unwrap_or(""));
+        LeaderboardKey::public_board(&metric, bucket, &season_id, hero.as_deref().unwrap_or(""));
 
+    let load_state = state.clone();
     let board = state
         .leaderboard_cache
-        .get_or_load(key, || {
-            let state = state.clone();
-            let metric = metric.clone();
-            let season_id = season_id.clone();
-            let hero = hero.clone();
+        .get_or_load(key, move || {
+            let state = load_state;
             async move {
                 let season_window = resolve_season_window(
                     &state,
@@ -260,7 +263,7 @@ pub async fn public_leaderboards(
                 })?;
                 state
                     .db
-                    .member_leaderboard(&metric, limit, season_window, hero.as_deref())
+                    .member_leaderboard(&metric, bucket, season_window, hero.as_deref())
                     .await
                     .map(|rows| rows.into_iter().map(map_lb_row).collect())
                     .map_err(|_e| BoardError::Db)
@@ -276,7 +279,7 @@ pub async fn public_leaderboards(
         })?;
 
     Ok(Json(PublicLeaderboardBody {
-        rows: board.rows,
+        rows: truncate_to_requested(board.rows, requested),
         cached_at: board.cached_at,
     }))
 }
