@@ -31,8 +31,9 @@
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 
+use axum::body::Body;
 use axum::extract::ConnectInfo;
-use axum::http::{HeaderMap, Request};
+use axum::http::{HeaderMap, HeaderValue, Request, Response, StatusCode};
 use ipnet::IpNet;
 use tower_governor::{errors::GovernorError, key_extractor::KeyExtractor};
 
@@ -204,6 +205,35 @@ fn host_net(ip: IpAddr) -> IpNet {
     }
 }
 
+/// 429 body for every governor layer.
+///
+/// `tower_governor` 0.8 writes `Retry-After` from `Duration::as_secs`, which
+/// truncates. The public limiter refills every 200 ms, so that header is
+/// always `0` and a client that honors it retries immediately. The fraction
+/// is already gone by the time this handler runs, so a reported wait of 0
+/// becomes 1 (the ceil of any sub-second wait, and the minimum). A wait of
+/// 2 seconds stays 2.
+pub fn governor_error_response(error: GovernorError) -> Response<Body> {
+    match error {
+        GovernorError::TooManyRequests { wait_time, headers } => {
+            let secs = wait_time.max(1);
+            let mut response =
+                Response::new(Body::from(format!("Too Many Requests! Wait for {secs}s")));
+            *response.status_mut() = StatusCode::TOO_MANY_REQUESTS;
+            let mut headers = headers.unwrap_or_default();
+            let value = HeaderValue::from_str(&secs.to_string()).expect("digit header");
+            headers.insert(axum::http::header::RETRY_AFTER, value.clone());
+            headers.insert(
+                axum::http::HeaderName::from_static("x-ratelimit-after"),
+                value,
+            );
+            *response.headers_mut() = headers;
+            response
+        }
+        other => Response::<Body>::from(other),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -361,5 +391,28 @@ mod tests {
             ex.extract(&req("10.0.0.1", Some("203.0.113.9"))).unwrap(),
             ip("10.0.0.1")
         );
+    }
+
+    #[test]
+    fn subsecond_wait_retry_after_is_at_least_one() {
+        let mut headers = HeaderMap::new();
+        headers.insert(axum::http::header::RETRY_AFTER, "0".parse().unwrap());
+        headers.insert(
+            axum::http::HeaderName::from_static("x-ratelimit-after"),
+            "0".parse().unwrap(),
+        );
+        let res = super::governor_error_response(GovernorError::TooManyRequests {
+            wait_time: 0,
+            headers: Some(headers),
+        });
+        assert_eq!(res.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(res.headers().get("retry-after").unwrap(), "1");
+        assert_eq!(res.headers().get("x-ratelimit-after").unwrap(), "1");
+        let res = super::governor_error_response(GovernorError::TooManyRequests {
+            wait_time: 2,
+            headers: None,
+        });
+        assert_eq!(res.headers().get("retry-after").unwrap(), "2");
+        assert_eq!(res.headers().get("x-ratelimit-after").unwrap(), "2");
     }
 }

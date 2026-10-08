@@ -63,6 +63,8 @@ pub struct AppState {
     /// Write paths call [`PublicSettingsCache::invalidate`]. Per process:
     /// a restart clears it, and it is not shared across instances.
     pub public_settings: PublicSettingsCache,
+    /// In-process public leaderboard cache. See [`crate::leaderboard_cache`].
+    pub leaderboard_cache: crate::leaderboard_cache::LeaderboardCache,
 }
 
 /// How long a cached public-settings blob may be served before a re-read.

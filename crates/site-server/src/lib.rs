@@ -2,6 +2,7 @@ pub mod calendar;
 pub mod challenge_store;
 pub mod dm_subscriber;
 pub mod extractors;
+pub mod leaderboard_cache;
 pub mod login_lockout;
 pub mod membership_policy;
 pub mod nostr_rate_limit;
@@ -92,7 +93,9 @@ pub fn create_router_with_dist(state: AppState, dist_dir: impl Into<PathBuf>) ->
             "/api/auth/nostr/verify",
             post(routes::auth::nostr_login_verify),
         )
-        .layer(GovernorLayer::new(governor_config));
+        .layer(
+            GovernorLayer::new(governor_config).error_handler(rate_limit::governor_error_response),
+        );
 
     // Per-IP rate limit for the write-heavy upload endpoints: 8-burst, then 1
     // every 10s (≈6/min sustained). Uploads were previously unthrottled, letting
@@ -110,7 +113,10 @@ pub fn create_router_with_dist(state: AppState, dist_dir: impl Into<PathBuf>) ->
     let upload_routes = Router::new()
         .route("/api/upload/avatar", post(routes::uploads::upload_avatar))
         .route("/api/upload/image", post(routes::uploads::upload_image))
-        .layer(GovernorLayer::new(upload_governor_config));
+        .layer(
+            GovernorLayer::new(upload_governor_config)
+                .error_handler(rate_limit::governor_error_response),
+        );
 
     // Per-IP rate limit for public read endpoints (HS-DR P1): 40-burst, then
     // 1 every 200ms (≈5/s sustained). Previously unthrottled; hero-filter
@@ -181,7 +187,10 @@ pub fn create_router_with_dist(state: AppState, dist_dir: impl Into<PathBuf>) ->
         // before login, and the stricter budget would fight normal first loads.
         .route("/api/auth/setup-status", get(routes::auth::setup_status))
         .route("/api/auth/providers", get(routes::auth::auth_providers))
-        .layer(GovernorLayer::new(public_governor_config));
+        .layer(
+            GovernorLayer::new(public_governor_config)
+                .error_handler(rate_limit::governor_error_response),
+        );
 
     // Dev login only for local in-memory dev. PRODUCTION, or any non-blank
     // SURREALDB_URL, leaves the route unregistered (blank URL counts as unset).

@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use axum::{
     Json,
     extract::{Path, Query, State},
@@ -12,6 +14,9 @@ use scuffed_types::api::{CreateSeasonRequest, UpdateSeasonRequest};
 use scuffed_types::{HeroAgg, MemberLeaderboardRow as TypesMemberRow, resolve_hero_query};
 
 use crate::extractors::AdminUser;
+use crate::leaderboard_cache::{
+    CacheError, FailKind, LeaderboardKey, LoadError, LoadedBoard, OnError, truncate_to_requested,
+};
 use crate::routes::audit_log::audit;
 use crate::state::AppState;
 
@@ -169,22 +174,53 @@ pub async fn resolve_season_window(
     Ok(Some((season.starts_at, season.ends_at)))
 }
 
+/// JSON body for `GET /api/public/leaderboards`.
+///
+/// `rows` keeps the member fields the array body used to return.
+/// `cached_at` is when this process started the query that produced `rows`
+/// (RFC 3339 UTC). A cache hit repeats that timestamp.
+#[derive(Serialize)]
+pub struct PublicLeaderboardBody {
+    pub rows: Vec<TypesMemberRow>,
+    pub cached_at: DateTime<Utc>,
+}
+
+enum BoardError {
+    SeasonNotFound,
+    Db,
+}
+
+impl LoadError for BoardError {
+    fn on_error(&self) -> OnError {
+        match self {
+            // A missing season is a 404. Do not substitute an older board.
+            BoardError::SeasonNotFound => OnError::Surface,
+            BoardError::Db => OnError::ServeStale,
+        }
+    }
+}
+
 /// GET /api/public/leaderboards?metric=winrate|kd|games&limit=25&season=<id>&hero=<name>
+///
+/// Anonymous and logged-in callers get the same rows. Inactive members are
+/// omitted by the query. One grouped scan per season is cached. Metric,
+/// hero, and limit are projections of that snapshot, so a different hero
+/// does not start another scan. The cache key still carries a public
+/// audience tag so a crew-only board cannot be stored in this slot.
 pub async fn public_leaderboards(
     State(state): State<AppState>,
     Query(q): Query<LeaderboardQuery>,
-) -> Result<Json<Vec<TypesMemberRow>>, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<Json<PublicLeaderboardBody>, (StatusCode, Json<ErrorResponse>)> {
     let metric = match q.metric.as_str() {
-        "kd" | "games" | "winrate" => q.metric.as_str(),
-        _ => "winrate",
+        "kd" | "games" | "winrate" => q.metric.clone(),
+        _ => "winrate".to_string(),
     };
-    let limit = q.limit.clamp(1, 100);
+    let requested = q.limit.clamp(1, 100);
 
-    let season_window = resolve_season_window(&state, q.season.as_deref()).await?;
-
-    // W3 B2: optional ?hero= → canonical HEROES name, then DB bound filter.
+    // W3 B2: optional ?hero= → canonical HEROES name. Unknown names are 400
+    // and are not cached. The hero is applied to the season snapshot.
     let hero = match resolve_leaderboard_hero(q.hero.as_deref()) {
-        Ok(h) => h,
+        Ok(h) => h.map(str::to_string),
         Err(()) => {
             return Err((
                 StatusCode::BAD_REQUEST,
@@ -194,20 +230,74 @@ pub async fn public_leaderboards(
             ));
         }
     };
+    let season_id = q
+        .season
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("")
+        .to_string();
+    // One cache entry per season. Metric, hero, and limit are projections.
+    let key = LeaderboardKey::public_board("scan", 0, &season_id, "");
 
-    let rows = state
-        .db
-        .member_leaderboard(metric, limit, season_window, hero)
+    let load_state = state.clone();
+    let load_season = season_id.clone();
+    let board = state
+        .leaderboard_cache
+        .get_or_load(key, move || {
+            let state = load_state;
+            let season_id = load_season;
+            async move {
+                let season_window = resolve_season_window(
+                    &state,
+                    if season_id.is_empty() {
+                        None
+                    } else {
+                        Some(season_id.as_str())
+                    },
+                )
+                .await
+                .map_err(|err| {
+                    if err.0 == StatusCode::NOT_FOUND {
+                        BoardError::SeasonNotFound
+                    } else {
+                        BoardError::Db
+                    }
+                })?;
+                let snapshot = state
+                    .db
+                    .leaderboard_snapshot(season_window)
+                    .await
+                    .map_err(|_e| BoardError::Db)?;
+                Ok(LoadedBoard {
+                    rows: Vec::new(),
+                    snapshot: Some(Arc::new(snapshot)),
+                })
+            }
+        })
         .await
-        .map_err(|_e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: "Internal error".into(),
-                }),
-            )
+        .map_err(|err| match err {
+            CacheError::Load(BoardError::SeasonNotFound)
+            | CacheError::Leader(FailKind::Rejected) => season_not_found(),
+            CacheError::Load(BoardError::Db) | CacheError::Leader(FailKind::Unavailable) => {
+                internal_error()
+            }
         })?;
-    Ok(Json(rows.into_iter().map(map_lb_row).collect()))
+
+    let hero_name = hero.as_deref().unwrap_or("");
+    let rows = match &board.snapshot {
+        Some(snapshot) => snapshot
+            .project(&metric, hero_name, requested)
+            .into_iter()
+            .map(map_lb_row)
+            .collect(),
+        None => truncate_to_requested(board.rows, requested),
+    };
+
+    Ok(Json(PublicLeaderboardBody {
+        rows,
+        cached_at: board.cached_at,
+    }))
 }
 
 #[cfg(test)]
@@ -405,4 +495,185 @@ pub async fn admin_delete_season(
     .await;
 
     Ok(StatusCode::NO_CONTENT)
+}
+
+#[cfg(test)]
+mod cache_http_tests {
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode, header};
+    use chrono::{TimeZone, Utc};
+    use http_body_util::BodyExt;
+    use scuffed_db::OrgRole;
+    use scuffed_types::api::{StatsUploadEntry, StatsUploadRequest};
+    use serde_json::Value;
+    use tower::ServiceExt;
+
+    use crate::create_router;
+    use crate::test_support::test_state;
+
+    fn with_peer(builder: axum::http::request::Builder) -> axum::http::request::Builder {
+        builder
+            .header("x-forwarded-for", "127.0.0.1")
+            .extension(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+                [127, 0, 0, 1],
+                9,
+            ))))
+    }
+
+    async fn body_json(resp: axum::response::Response) -> Value {
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null)
+    }
+
+    fn upload(session_id: &str, elims: u32, edited: bool) -> StatsUploadRequest {
+        StatsUploadRequest {
+            matches: vec![StatsUploadEntry {
+                session_id: session_id.to_string(),
+                hero: "Ana".into(),
+                map_name: "Oasis".into(),
+                game_mode: "control".into(),
+                role: "Support".into(),
+                outcome: "victory".into(),
+                elims,
+                deaths: 1,
+                assists: 0,
+                damage: 1000,
+                healing: 4000,
+                mitigation: 0,
+                played_at: Utc.with_ymd_and_hms(2026, 7, 1, 20, 0, 0).unwrap(),
+                edited,
+            }],
+            deleted_sessions: vec![],
+        }
+    }
+
+    async fn post_upload(app: &axum::Router, token: &str, body: &StatsUploadRequest) {
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/stats/upload")
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(serde_json::to_vec(body).unwrap()))
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    async fn get_board(app: &axum::Router, token: Option<&str>) -> Value {
+        let mut builder = with_peer(
+            Request::builder()
+                .method("GET")
+                .uri("/api/public/leaderboards?metric=games&limit=25"),
+        );
+        if let Some(token) = token {
+            builder = builder.header(header::AUTHORIZATION, format!("Bearer {token}"));
+        }
+        let resp = app
+            .clone()
+            .oneshot(builder.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        body_json(resp).await
+    }
+
+    async fn member_with_token(state: &crate::state::AppState, name: &str, token: &str) -> String {
+        let member = state
+            .db
+            .create_member(&format!("user-{name}"), name, OrgRole::Member)
+            .await
+            .unwrap();
+        state
+            .db
+            .create_daemon_token(&member.id, token, "tracker")
+            .await
+            .unwrap();
+        member.id
+    }
+
+    #[tokio::test]
+    async fn upload_and_edit_do_not_drop_the_cached_board() {
+        let state = test_state().await;
+        let token = "tracker-token-board";
+        member_with_token(&state, "onboard", token).await;
+        let app = create_router(state);
+
+        post_upload(&app, token, &upload("sess-a", 1, false)).await;
+        let first = get_board(&app, None).await;
+        assert_eq!(first["rows"][0]["games"].as_u64(), Some(1));
+        assert_eq!(first["rows"][0]["kd"].as_f64(), Some(1.0));
+        let cached_at = first["cached_at"].as_str().unwrap();
+        assert!(
+            cached_at.contains('T') && cached_at.ends_with('Z'),
+            "{cached_at}"
+        );
+
+        // Same session, corrected elims, then a second game. The cached
+        // board stays until the TTL. Freshness does not depend on uploads.
+        post_upload(&app, token, &upload("sess-a", 8, true)).await;
+        post_upload(&app, token, &upload("sess-b", 2, false)).await;
+        let still = get_board(&app, None).await;
+        assert_eq!(still, first);
+    }
+
+    #[tokio::test]
+    async fn anonymous_and_member_see_the_same_public_board() {
+        let state = test_state().await;
+        let active_id = member_with_token(&state, "onboard", "tok-onboard").await;
+        let benched_id = member_with_token(&state, "benched", "tok-benched").await;
+        let app = create_router(state.clone());
+        post_upload(&app, "tok-onboard", &upload("sess-on", 3, false)).await;
+        post_upload(&app, "tok-benched", &upload("sess-bench", 9, false)).await;
+        state
+            .db
+            .update_member(
+                &benched_id,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(false),
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let viewer = state
+            .db
+            .create_local_user("viewer", "unused-hash")
+            .await
+            .unwrap();
+        state
+            .db
+            .create_session(&viewer.id, "viewer-session", 24)
+            .await
+            .unwrap();
+
+        // Prime the cache as an anonymous caller, then repeat with a session.
+        let anon = get_board(&app, None).await;
+        let authed = get_board(&app, Some("viewer-session")).await;
+        assert_eq!(
+            anon, authed,
+            "auth must not change the public board or its cache slot"
+        );
+
+        let ids: Vec<&str> = anon["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["member_id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, vec![active_id.as_str()]);
+        assert!(!ids.contains(&benched_id.as_str()));
+        let cached_at = anon["cached_at"].as_str().unwrap();
+        assert!(
+            cached_at.contains('T') && cached_at.ends_with('Z'),
+            "{cached_at}"
+        );
+    }
 }

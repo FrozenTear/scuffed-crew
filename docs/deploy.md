@@ -353,6 +353,26 @@ First visit → create admin if `setup-status` still needs setup.
 
 **HTTPS note:** release builds set **Secure** cookies. Use the `https://` subdomain above; plain `http://IP:port` often won’t keep login.
 
+## Public leaderboard cache
+
+`GET /api/public/leaderboards` keeps an in-process cache so the full `personal_match` scan does not run on every request. The default lifetime is 30 seconds (`LEADERBOARD_CACHE_TTL_SECS` in `data/secrets.env`). Values below 5 or above 300 are clamped. A blank or non-numeric value uses 30. The cache is per process: a restart clears it, and two app instances do not share it.
+
+Each stored entry stays fresh for `TTL` times a factor chosen once in the inclusive range 0.8 to 1.2. Keys filled together after a restart therefore do not all expire on the same tick. Past that window the handler keeps serving the previous board, with its original `cached_at`, while exactly one background refresh runs for that key. A request waits for a scan only when the key is cold, or when the stored board is older than 10 TTLs. A failed refresh is not stored, so the previous board stays until a later refresh succeeds.
+
+At most `LEADERBOARD_CACHE_MAX_SCANS` scans run at once (default 2, clamped to 1..=8). Background refreshes may use at most one fewer slot than that cap, and always at least one. They try once and do not wait. If no refresh slot is free, the key joins a queue ordered by board age, bounded by the key cap. When a scan finishes, that slot is handed to the oldest key still waiting, so refreshes run back to back while a slot is free. A request does not sit on the 10 TTL cap while a refresh slot is idle and a stale key is queued. If nothing hands the key a slot, the next request-driven try waits a jittered backoff between 0.25 and 1 times the TTL, so skipped keys do not all retry on the same millisecond. Cold keys and boards older than 10 TTLs may use any free slot, including the one a refresh cannot take, so they are not queued behind background refreshes. A blocking read whose refresh is already running joins that one scan.
+
+One scan covers a whole season. The query groups `personal_match` by member and hero once. Every hero, every metric (winrate, kd, games), and every limit is a sort and a truncate of that result. The public page's hero list is 54 names, so those filters share one cache entry per season instead of 54 scans. With the default cap of 2, filling 54 separate hero keys at about 1.4 seconds per pair took about 40 seconds, and the last cold reader waited about 19 seconds. After this change that wait is one grouped scan of the same table. A single-hero scan in that harness was about 1.4 seconds. The grouped query does the same pass with a wider `GROUP BY`. Even at a few times that cost the wait stays under 19 seconds, and the aim is one scan (about 5 seconds or less).
+
+Steady state for one hot season is about one TTL plus that scan. A quiet rerun of the previous commit measured a 135 second median and a 234 second p99 (4 to 10 times a 30 second TTL) because every skipped key retried on the same half-TTL tick, one won, and the rest waited another 15 seconds. Only 11 scans ran in 90 seconds while Surreal sat at 30% CPU. The handoff removes that idle gap. If many seasons are hot at once, age grows with how long the refresh slots take to walk the queue. `LEADERBOARD_CACHE_MAX_SCANS` and `LEADERBOARD_CACHE_TTL_SECS` are still the knobs. The 10 TTL cap still forces a wait, so a board is not served older than that.
+
+`limit`, `metric`, and `hero` are applied in memory from the season snapshot. The JSON `rows` array is cut to the limit the caller asked for (clamped to 1..=100). Two limits, two heroes, or two metrics on the same season share one `cached_at`. An unusual limit does not add another database scan.
+
+Freshness is that TTL only. A stats upload, an edit, or a deleted session does not clear the cache. Clearing on every upload dropped boards that were still loading once uploads arrived faster than the scan, so a busy process never stored a result. A member's new game shows up after the fresh window, on the refresh that follows it. A failed database read is not stored. If a previous board for the same query is still in memory, the handler may serve it instead of a 500.
+
+The JSON body is an object. `rows` has the same member fields as the old array (`member_id`, `display_name`, `games`, `winrate`, `kd`). `cached_at` is RFC 3339 UTC, the time this process started the query that produced `rows`. The site uses it to show how long ago the board was computed, and refreshes that label while the page is open. A cache hit, and a stale board served during refresh, both repeat that timestamp. A response with no `cached_at` still renders the rows; the site hides the label.
+
+The cache key for this route is the season id and a public audience tag. Metric, limit, and hero are projections of the snapshot stored under that key. This route does not take a role or game-mode filter. Anonymous and logged-in callers see the same rows, and inactive members stay off the board. The audience tag is there so a crew-only board cannot be stored in a slot an anonymous caller reads.
+
 ## Power-user path
 
 Copy `.env.example` → `data/secrets.env` (or `.env`), set values yourself, then:

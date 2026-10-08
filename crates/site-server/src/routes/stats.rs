@@ -73,18 +73,22 @@ pub async fn upload_stats(
         );
     }
 
-    let inserted = state
-        .db
-        .upsert_personal_matches(&daemon.member.id, &stub_matches)
-        .await
-        .map_err(|_e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: "Internal error".into(),
-                }),
-            )
-        })?;
+    let inserted = if stub_matches.is_empty() {
+        0
+    } else {
+        state
+            .db
+            .upsert_personal_matches(&daemon.member.id, &stub_matches)
+            .await
+            .map_err(|_e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse {
+                        error: "Internal error".into(),
+                    }),
+                )
+            })?
+    };
 
     // Tombstones: sessions the user deleted locally. Scoped to this member's
     // rows by the query itself.

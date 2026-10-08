@@ -53,6 +53,7 @@ async fn test_state() -> AppState {
         nip05_domain: None,
         nip05_republish_enabled: false,
         public_settings: scuffed_site_server::state::PublicSettingsCache::new(),
+        leaderboard_cache: scuffed_site_server::leaderboard_cache::LeaderboardCache::from_env(),
     }
 }
 
@@ -3379,6 +3380,27 @@ async fn auth_ip_governor_429_sets_retry_after() {
     assert!(saw_429, "burst past the per-IP auth governor must be 429");
 }
 
+/// The public governor refills every 200 ms. tower_governor floors that wait
+/// to whole seconds, which used to send Retry-After: 0.
+#[tokio::test]
+async fn public_governor_429_retry_after_is_at_least_one() {
+    let state = test_state().await;
+    let app = create_router(state);
+    let mut saw_429 = false;
+    for _ in 0..50 {
+        let res = app
+            .clone()
+            .oneshot(unauthed_request(Method::GET, "/api/auth/providers"))
+            .await
+            .unwrap();
+        if res.status() == StatusCode::TOO_MANY_REQUESTS {
+            assert!(assert_retry_after(&res) >= 1);
+            saw_429 = true;
+        }
+    }
+    assert!(saw_429, "burst past the public governor must be 429");
+}
+
 /// L15 must not apply to OAuth or to the stat-tracker daemon bearer token.
 #[tokio::test]
 async fn oauth_and_daemon_token_are_not_login_locked() {
@@ -6001,7 +6023,18 @@ async fn public_leaderboards_and_member_heroes() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     let json = body_json(resp).await;
-    assert!(json.as_array().unwrap().is_empty() || json.as_array().is_some());
+    assert!(
+        json["rows"]
+            .as_array()
+            .expect("leaderboard rows")
+            .is_empty(),
+        "empty db has no ranked rows"
+    );
+    let cached_at = json["cached_at"].as_str().expect("cached_at");
+    assert!(
+        cached_at.contains('T') && cached_at.ends_with('Z'),
+        "cached_at must be RFC 3339 UTC, got {cached_at}"
+    );
 
     // Unknown member heroes → 404
     let app = create_router(state.clone());

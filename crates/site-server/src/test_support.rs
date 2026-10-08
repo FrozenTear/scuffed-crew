@@ -57,6 +57,7 @@ pub(crate) async fn test_state() -> AppState {
         nip05_domain: None,
         nip05_republish_enabled: false,
         public_settings: crate::state::PublicSettingsCache::new(),
+        leaderboard_cache: crate::leaderboard_cache::LeaderboardCache::from_env(),
     }
 }
 

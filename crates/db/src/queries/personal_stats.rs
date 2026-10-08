@@ -1,5 +1,6 @@
 #[cfg(test)]
 use std::cell::Cell;
+use std::collections::HashMap;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -9,13 +10,13 @@ use surrealdb::Surreal;
 use surrealdb_types::{RecordId, SurrealValue};
 
 use crate::types::{
-    HeroStats, MapStats, MemberHeroScopedAgg, MemberLeaderboardRow, PersonalMatch, PersonalStats,
-    RoleStats,
+    HeroStats, LeaderboardHeroAgg, LeaderboardSnapshot, MapStats, MemberHeroScopedAgg,
+    MemberLeaderboardRow, PersonalMatch, PersonalStats, RoleStats,
 };
 use crate::{with_timeout, Database, DbError, DbResult};
 
 /// Minimum games required for rate metrics (winrate / kd) on public boards.
-const LEADERBOARD_MIN_GAMES: u32 = 5;
+pub use crate::types::LEADERBOARD_MIN_GAMES;
 
 #[derive(Debug, Clone, Serialize, Deserialize, SurrealValue)]
 struct DbPersonalMatch {
@@ -615,10 +616,23 @@ impl Database {
         season_window: Option<(DateTime<Utc>, DateTime<Utc>)>,
         hero: Option<&str>,
     ) -> DbResult<Vec<MemberLeaderboardRow>> {
+        let snapshot = self.leaderboard_snapshot(season_window).await?;
+        Ok(snapshot.project(metric, hero.unwrap_or(""), limit))
+    }
+
+    /// One grouped scan for every hero in the season window.
+    ///
+    /// Metric, limit, and hero are not part of the query. Callers sort and
+    /// truncate with [`LeaderboardSnapshot::project`].
+    pub async fn leaderboard_snapshot(
+        &self,
+        season_window: Option<(DateTime<Utc>, DateTime<Utc>)>,
+    ) -> DbResult<LeaderboardSnapshot> {
         with_timeout(async {
             #[derive(Deserialize, SurrealValue)]
             struct AggRow {
                 member_id: String,
+                hero: String,
                 games: u32,
                 wins: u32,
                 elims: u32,
@@ -630,22 +644,18 @@ impl Database {
             } else {
                 ""
             };
-            let hero_filter = if hero.is_some() {
-                " AND hero = $hero"
-            } else {
-                ""
-            };
             let sql = format!(
                 r#"
                     SELECT
                         member_id,
+                        hero,
                         count() AS games,
                         math::sum(IF outcome = 'victory' THEN 1 ELSE 0 END) AS wins,
                         math::sum(elims) AS elims,
                         math::sum(deaths) AS deaths
                     FROM personal_match
-                    WHERE outcome IN ['victory', 'defeat', 'draw']{season_filter}{hero_filter}
-                    GROUP BY member_id
+                    WHERE outcome IN ['victory', 'defeat', 'draw']{season_filter}
+                    GROUP BY member_id, hero
                     "#
             );
 
@@ -654,9 +664,6 @@ impl Database {
                 q = q
                     .bind(("season_start", SurrealDatetime::from(start)))
                     .bind(("season_end", SurrealDatetime::from(end)));
-            }
-            if let Some(hero_name) = hero {
-                q = q.bind(("hero", hero_name.to_owned()));
             }
             let mut result = q.await?;
             let rows: Vec<AggRow> = result.take(0)?;
@@ -672,7 +679,7 @@ impl Database {
                 .query("SELECT id, display_name FROM member WHERE is_active = true")
                 .await?;
             let active_rows: Vec<ActiveName> = active_q.take(0)?;
-            let active: std::collections::HashMap<String, String> = active_rows
+            let active: HashMap<String, String> = active_rows
                 .into_iter()
                 .filter_map(|r| {
                     let id = r.id.map(|rid| crate::record_id_key_to_string(rid.key))?;
@@ -680,13 +687,9 @@ impl Database {
                 })
                 .collect();
 
-            let rate_metric = matches!(metric, "winrate" | "kd");
-            let mut out = Vec::with_capacity(rows.len());
+            let mut aggs = Vec::with_capacity(rows.len());
             for row in rows {
                 if row.games == 0 {
-                    continue;
-                }
-                if rate_metric && row.games < LEADERBOARD_MIN_GAMES {
                     continue;
                 }
                 // Normalize member_id in case the aggregate returns table-prefixed keys.
@@ -698,39 +701,19 @@ impl Database {
                 let Some(display_name) = active.get(&mid).cloned() else {
                     continue;
                 };
-                let winrate = row.wins as f32 / row.games as f32;
-                let kd = row.elims as f64 / (row.deaths.max(1) as f64);
-                out.push(MemberLeaderboardRow {
-                    member_id: mid,
-                    display_name,
-                    games: row.games,
-                    winrate,
-                    kd,
-                });
+                aggs.push((
+                    row.hero,
+                    LeaderboardHeroAgg {
+                        member_id: mid,
+                        display_name,
+                        games: row.games,
+                        wins: row.wins,
+                        elims: row.elims,
+                        deaths: row.deaths,
+                    },
+                ));
             }
-
-            match metric {
-                "kd" => out.sort_by(|a, b| {
-                    b.kd.partial_cmp(&a.kd)
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                        .then_with(|| b.games.cmp(&a.games))
-                }),
-                "games" => out.sort_by(|a, b| {
-                    b.games.cmp(&a.games).then_with(|| {
-                        b.winrate
-                            .partial_cmp(&a.winrate)
-                            .unwrap_or(std::cmp::Ordering::Equal)
-                    })
-                }),
-                _ => out.sort_by(|a, b| {
-                    b.winrate
-                        .partial_cmp(&a.winrate)
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                        .then_with(|| b.games.cmp(&a.games))
-                }),
-            }
-            out.truncate(limit as usize);
-            Ok(out)
+            Ok(LeaderboardSnapshot::from_rows(aggs))
         })
         .await
     }
