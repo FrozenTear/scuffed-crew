@@ -2860,4 +2860,40 @@ mod feed_acl_tests {
         };
         assert_post_lookup_failed(roster);
     }
+
+    struct NoGroupLookups;
+
+    impl GroupPostLookups for NoGroupLookups {
+        async fn member_suspended(&self, _member_id: &str) -> Result<bool, scuffed_db::DbError> {
+            panic!("blank group id must not query suspension");
+        }
+
+        async fn channel_by_group_id(
+            &self,
+            _group_id: &str,
+        ) -> Result<Option<scuffed_db::TeamChannel>, scuffed_db::DbError> {
+            panic!("blank group id must not query the channel");
+        }
+
+        async fn on_team_roster(
+            &self,
+            _member_id: &str,
+            _team_id: &str,
+        ) -> Result<bool, scuffed_db::DbError> {
+            panic!("blank group id must not query the roster");
+        }
+    }
+
+    #[tokio::test]
+    async fn whitespace_only_group_id_is_400_without_lookups() {
+        let err =
+            match ensure_can_post_to_group_with(&NoGroupLookups, &caller(active_officer()), "   ")
+                .await
+            {
+                Err(err) => err,
+                Ok(()) => panic!("whitespace group id"),
+            };
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+        assert_eq!(err.1.0.error, "group_id must not be empty");
+    }
 }

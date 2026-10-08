@@ -1170,4 +1170,39 @@ mod strategies_gate_tests {
         );
         drop(held_b);
     }
+
+    /// An unjoined strategy socket is closed once `join_timeout` elapses.
+    /// The deadline is injected so the test does not sleep the production 10s.
+    #[tokio::test]
+    async fn unjoined_strategy_socket_closes_at_join_deadline() {
+        let state = test_state().await;
+        set_strategies_enabled(&state, true).await;
+        let join = Duration::from_millis(40);
+        let addr = serve_ws(state, 8, 32, join).await;
+
+        let (status, _, held) = ws_upgrade(addr, "/api/strategy/ws", None).await;
+        assert_eq!(status, StatusCode::SWITCHING_PROTOCOLS);
+        let mut stream = held.expect("socket stays open until the deadline");
+
+        let started = std::time::Instant::now();
+        let mut buf = [0u8; 64];
+        let closed = loop {
+            match tokio::time::timeout(Duration::from_millis(30), stream.read(&mut buf)).await {
+                Ok(Ok(0)) => break true,
+                Ok(Ok(_)) if buf[0] & 0x0f == 0x8 => break true,
+                Ok(Ok(n)) => panic!("unexpected payload before close: {n} bytes"),
+                Ok(Err(err)) => panic!("read failed: {err}"),
+                Err(_) if started.elapsed() > Duration::from_secs(2) => break false,
+                Err(_) => continue,
+            }
+        };
+        assert!(
+            closed,
+            "unjoined strategy socket was still open after the join deadline"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "close took too long for an injected deadline"
+        );
+    }
 }
