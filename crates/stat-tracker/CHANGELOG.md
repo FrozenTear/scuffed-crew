@@ -52,8 +52,9 @@ on the quiet timer or a new-game boundary. `game_mode` follows the
 stored map, including a map correction and the mode sent on upload.
 
 Training text includes an ASCII Grimsvotn line, plus Adlersbrunn and
-Chateau Guillard on their own lines. Those three names are repeated
-so the font model keeps the letter sequence.
+Chateau Guillard on their own lines. Those three names are repeated,
+and the font fine-tune runs 4000 iterations, so a line crop of each
+name still reads back.
 
 ### Install
 

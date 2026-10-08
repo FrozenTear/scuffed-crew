@@ -178,7 +178,10 @@ GhostRider Widowmaker 15 2 4 9,012 0 0\n\
 ThunderGod Sigma 4 7 3 4,567 0 15,678\n\
 PixelHunter Sojourn 10 4 3 8,234 0 0\n";
 
-const LSTM_MAX_ITERATIONS: u32 = 800;
+// 800 iterations left a line crop of Chateau Guillard as Guillarod and
+// Adlersbrunn mixed-case. 4000 iterations, with the repeated map lines
+// above, keeps those names on a line crop.
+const LSTM_MAX_ITERATIONS: u32 = 4000;
 
 pub fn tessdata_dir() -> PathBuf {
     dirs::data_dir()

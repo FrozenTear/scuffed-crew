@@ -1278,6 +1278,33 @@ mod hero_map_name_tests {
     }
 
     #[test]
+    fn guillard_ocr_near_misses_still_canonicalize() {
+        // koverwatch on a rendered "Chateau Guillard": a line crop is exact.
+        // A tall canvas reads Guiltard, and a 43px-tall crop reads Guitlard.
+        assert_eq!(
+            match_map_in_text("Chateau Guillard").as_deref(),
+            Some("Château Guillard")
+        );
+        assert_eq!(
+            match_map_in_text("Chateau Guiltard").as_deref(),
+            Some("Château Guillard")
+        );
+        assert_eq!(
+            match_map_in_text("Chateau Guitlard").as_deref(),
+            Some("Château Guillard")
+        );
+        assert_eq!(match_map_in_text("Chateau Guiltarod").as_deref(), None);
+        assert_eq!(
+            match_map_in_text("AdLErSBRuNN").as_deref(),
+            Some("Eichenwalde")
+        );
+        assert_eq!(
+            match_map_in_text("Grimsvotn").as_deref(),
+            Some("Watchpoint: Grímsvötn")
+        );
+    }
+
+    #[test]
     fn chateau_guillard_is_deathmatch_and_untracked() {
         for raw in ["GUILLARD", "Château Guillard", "Chateau Guillard"] {
             let name = canonical_map(raw).unwrap_or_else(|| panic!("{raw}"));
