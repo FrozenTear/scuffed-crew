@@ -10917,7 +10917,7 @@ dependencies = [
 
 [[package]]
 name = "scuffed-stat-tracker"
-version = "0.4.20"
+version = "0.4.21"
 dependencies = [
  "anyhow",
  "ashpd",

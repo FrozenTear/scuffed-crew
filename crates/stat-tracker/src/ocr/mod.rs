@@ -321,19 +321,66 @@ fn recognize_cell_with_whitelist(
     img: &DynamicImage,
     whitelist: &str,
 ) -> Result<CellOcrResult, Box<dyn std::error::Error + Send + Sync>> {
-    // Binarize once; measure edge ink on the borderless form, OCR the bordered.
-    let binary = preprocess::prepare_cell_binary(img);
-    let suspect = preprocess::has_edge_ink(&binary, EDGE_INK_COLS, EDGE_INK_THRESHOLD);
-    if prepared_ink_pixels(&binary) < MIN_CELL_INK_PIXELS {
+    let bright = recognize_cell_bright(img, whitelist)?;
+    if !bright.value.is_empty() {
+        return Ok(bright);
+    }
+    // The bright path came back empty. Either the HSV mask found almost no
+    // ink, or it kept the ring (the Dorado stroke cores are about 171-186
+    // and neutral) and Tesseract still returned nothing. A dim 0 can be
+    // there in both cases, and the geometric check is what recovers it.
+    // Anything else stays empty: a blank cell is not a zero, and a white
+    // digit is not a ring.
+    match preprocess::dim_zero_glyph(img, EDGE_INK_COLS) {
+        Some(hit) => Ok(CellOcrResult {
+            value: "0".to_string(),
+            confidence: hit.confidence,
+            suspect: hit.touches_edge || bright.suspect,
+        }),
+        None => Ok(bright),
+    }
+}
+
+/// The bright-ink path alone: HSV white mask, binarize, Tesseract, with no
+/// dim-zero recovery. Column calibration scores layouts with it (see
+/// [`count_valid_cells`]).
+fn recognize_cell_bright(
+    img: &DynamicImage,
+    whitelist: &str,
+) -> Result<CellOcrResult, Box<dyn std::error::Error + Send + Sync>> {
+    let first = read_cell_binary(&preprocess::prepare_cell_binary(img), whitelist)?;
+    if !first.value.is_empty() {
+        return Ok(first);
+    }
+    // The PR 158 upscale cap moved this cell off the factor it used to get,
+    // and the capped read is empty. Read it again at the old factor, so the
+    // cap cannot lose a cell the old factor read. See
+    // `preprocess::prepare_cell_binary_uncapped` for the cells and factors.
+    if let Some(binary) = preprocess::prepare_cell_binary_uncapped(img) {
+        let retry = read_cell_binary(&binary, whitelist)?;
+        if !retry.value.is_empty() {
+            return Ok(retry);
+        }
+    }
+    Ok(first)
+}
+
+/// Tesseract on one binarized cell. Measures edge ink on the borderless
+/// form, OCRs the bordered one.
+fn read_cell_binary(
+    binary: &image::GrayImage,
+    whitelist: &str,
+) -> Result<CellOcrResult, Box<dyn std::error::Error + Send + Sync>> {
+    if prepared_ink_pixels(binary) < MIN_CELL_INK_PIXELS {
         return Ok(CellOcrResult {
             value: String::new(),
             confidence: 0,
             suspect: false,
         });
     }
-    let png_buf = encode_png(&preprocess::add_cell_border(&binary))?;
+    let suspect = preprocess::has_edge_ink(binary, EDGE_INK_COLS, EDGE_INK_THRESHOLD);
+    let png_buf = encode_png(&preprocess::add_cell_border(binary))?;
     let (text, confidence) = ocr_with("eng", "7", Some(whitelist), &png_buf)?;
-
     Ok(CellOcrResult {
         value: text.trim().to_string(),
         confidence,
@@ -714,11 +761,19 @@ pub(crate) const CELL_SCORE_CLEAN: i32 = 2;
 /// drifted offset tie a clean one when both read the same digit count).
 pub(crate) const CELL_SCORE_SUSPECT: i32 = 1;
 
+/// Scores with [`recognize_cell_bright`], not the dim-zero recovery. A
+/// recovered ring says a zero is somewhere in the window, not that the
+/// window's edges sit on the column. Counting recovered zeros pushed the
+/// header-anchored layout of the 0.75x frame `accepted_20261008_001449`
+/// over the 75% floor. That skipped the offset sweep main runs there and
+/// lost 10 cells main reads (Scuffed Vision baseline, PR 158). With the
+/// bright path, PR 158 picks the same layout as main on all 40 frames of
+/// that baseline (20 at 1440p, the same 20 at 0.75x).
 fn count_valid_cells(row: &DynamicImage, cols: &preprocess::StatColumns) -> i32 {
     let mut valid = 0i32;
     for col_idx in 0..6 {
         if let Some(cell) = preprocess::crop_stat_cell(row, col_idx, cols)
-            && let Ok(result) = recognize_cell(&cell)
+            && let Ok(result) = recognize_cell_bright(&cell, "0123456789,")
         {
             // A cell whose glyph ink touches a crop edge (CG-3 bleed/clip)
             // SUBTRACTS from the layout's score, so the sweep prefers offsets
@@ -889,6 +944,51 @@ fn run_ocr(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dim_zero_cell_reads_as_zero() {
+        // The primary mask erases this glyph (ink under the empty-cell
+        // skip). It must still come back as 0, or an early-game row with a
+        // 0 in E/A/D is rejected whole.
+        let img = preprocess::dim_zero_fixtures::dim_zero_cell();
+        let binary = preprocess::prepare_cell_binary(&img);
+        let ink = binary.pixels().filter(|p| p.0[0] < 128).count();
+        assert!(
+            ink < MIN_CELL_INK_PIXELS,
+            "fixture must be a zero the HSV mask drops, ink={ink}"
+        );
+        let cell = recognize_cell(&img).expect("dim zero cell");
+        assert_eq!(cell.value, "0");
+        assert!(!cell.suspect);
+        let hit = preprocess::dim_zero_glyph(&img, EDGE_INK_COLS).expect("ring");
+        assert_eq!(
+            cell.confidence, hit.confidence,
+            "a recovered zero carries the ring's geometric confidence"
+        );
+        assert!(cell.confidence >= 70, "a clean ring is not suspect");
+        let bright = recognize_cell_bright(&img, "0123456789,").expect("bright path");
+        assert_eq!(
+            bright.value, "",
+            "column calibration scores the bright path, which has no dim-zero recovery"
+        );
+
+        let edge = recognize_cell(&preprocess::dim_zero_fixtures::dim_zero_touching_left_edge())
+            .expect("edge ring");
+        assert_eq!(edge.value, "0");
+        assert!(
+            edge.suspect,
+            "touches_edge has to arrive on the cell result"
+        );
+
+        let stroke =
+            recognize_cell(&preprocess::dim_zero_fixtures::dim_stroke_cell()).expect("dim stroke");
+        assert_eq!(stroke.value, "", "a dim 1 must not be invented as 0");
+        let blank = recognize_cell(&DynamicImage::ImageRgb8(
+            preprocess::dim_zero_fixtures::cell(48, 56),
+        ))
+        .expect("blank");
+        assert_eq!(blank.value, "");
+    }
 
     #[test]
     fn kill_columns_reject_wide_and_multidigit_reads() {
