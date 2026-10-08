@@ -390,7 +390,7 @@ impl std::fmt::Display for MapName {
     }
 }
 
-/// Fold a live/OCR map string to a comparable key: lowercase, drop apostrophes,
+/// Fold a live/OCR map string to a comparable key: lowercase, drop ASCII apostrophes,
 /// treat `_`/`-`/`:` as spaces, and drop accents so `"Paraíso"` / `"Paraiso"`,
 /// `"Esperança"` / `"Esperanca"`, and `"Watchpoint: Grímsvötn"` /
 /// `"Watchpoint: Grimsvotn"` (also `Grímsvotn` / `Grimsvötn`) collide.
@@ -412,9 +412,8 @@ fn fold_map_key(s: &str) -> String {
             '_' | '-' | ':' => ' ',
             other => other,
         };
-        // Accent arms above each produce one char that lowercases to itself.
-        // `other` can expand (`\u{0130}` becomes `i` + `\u{0307}`). Drop that
-        // combining mark and keep the base letter.
+        // Drop combining marks here: NFD marks pass through `other` unchanged,
+        // and `\u{0130}` lowercases to `i` + `\u{0307}`.
         for lower in mapped.to_lowercase() {
             if ('\u{0300}'..='\u{036f}').contains(&lower) {
                 continue;
@@ -458,8 +457,10 @@ impl std::str::FromStr for MapName {
                 Ok(Self::WatchpointGrimsvotn)
             }
             "blizzard world" | "blizzardworld" => Ok(Self::BlizzardWorld),
-            // Adlersbrunn is Eichenwalde's Halloween name. The tracker normally
-            // uploads "Eichenwalde"; this alias is defensive.
+            // Adlersbrunn is the Halloween event label of Eichenwalde. The tracker
+            // folds that label into Eichenwalde, and only for two-team PvP boards.
+            // Junkenstein's Revenge PvE also uses the name, but the tracker
+            // refuses to store those boards.
             "eichenwalde" | "adlersbrunn" => Ok(Self::Eichenwalde),
             "hollywood" => Ok(Self::Hollywood),
             "kings row" | "kingsrow" => Ok(Self::KingsRow),
@@ -534,11 +535,11 @@ mod tests {
             ("Neon Junction", "Hybrid", MapName::NeonJunction),
             ("Paraíso", "Hybrid", MapName::Paraiso),
             ("Paraiso", "Hybrid", MapName::Paraiso),
-            ("Parai\u{0301}so", "Hybrid", MapName::Paraiso),
             ("Esperança", "Push", MapName::Esperanca),
             ("Esperanca", "Push", MapName::Esperanca),
-            ("Esperanc\u{0327}a", "Push", MapName::Esperanca),
             ("neon junction", "Hybrid", MapName::NeonJunction),
+            ("Parai\u{0301}so", "Hybrid", MapName::Paraiso),
+            ("Esperanc\u{0327}a", "Push", MapName::Esperanca),
             (
                 "Watchpoint: Grímsvötn",
                 "Escort",
@@ -700,9 +701,12 @@ mod tests {
         assert_eq!("grimsvotn\u{0370}".parse::<MapName>(), Err(()));
     }
 
-    /// Adlersbrunn is the Halloween name for Eichenwalde.
+    /// Adlersbrunn is the Halloween event label of Eichenwalde. The tracker
+    /// folds that label into Eichenwalde, and only for two-team PvP boards.
+    /// Junkenstein's Revenge PvE also uses the name, but the tracker refuses
+    /// to store those boards.
     #[test]
-    fn adlersbrunn_parses_as_eichenwalde_hybrid() {
+    fn adlersbrunn_halloween_label_folds_into_eichenwalde() {
         assert_eq!("Adlersbrunn".parse::<MapName>(), Ok(MapName::Eichenwalde));
         assert_eq!(MapName::game_mode_label("Adlersbrunn"), "Hybrid");
     }
