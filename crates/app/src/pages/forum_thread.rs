@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use crate::components::{Toast, fetch_error, is_http_status, use_toast};
 use crate::routes::Route;
 use crate::state::auth::use_auth;
-use crate::util::{FetchClass, classify_fetch, format_datetime};
+use crate::util::{FetchClass, classify_fetch, format_local_datetime};
 use scuffed_api_client::ApiClient;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -289,7 +289,7 @@ pub fn ForumThread(id: String) -> Element {
                             };
                         };
                         let t = &resp.thread;
-                        let date = format_datetime(&t.created_at);
+                        let date = format_local_datetime(&t.created_at);
                         let reply_id = id.clone();
                         let board_slug = resp.board.as_ref().map(|b| b.slug.clone());
                         let board_name = resp
@@ -409,7 +409,7 @@ pub fn ForumThread(id: String) -> Element {
 }
 
 fn render_reply(r: &ForumReplyData) -> Element {
-    let date = format_datetime(&r.created_at);
+    let date = format_local_datetime(&r.created_at);
 
     rsx! {
         div { class: "thread-reply-card",
