@@ -394,10 +394,15 @@ impl std::fmt::Display for MapName {
 /// combining-style punctuation, and drop accents so `"Paraíso"` / `"Paraiso"`,
 /// `"Esperança"` / `"Esperanca"`, and `"Watchpoint: Grímsvötn"` /
 /// `"Watchpoint: Grimsvotn"` (also `Grímsvotn` / `Grimsvötn`) collide.
-/// `ö`/`Ö` fold to `o` the same way `í` folds to `i`.
+/// `ö`/`Ö` fold to `o` the same way `í` folds to `i`. Decomposed (NFD)
+/// combining marks in U+0300..=U+036F are dropped so the base letter remains.
 fn fold_map_key(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
+        // Decomposed (NFD) input: drop the combining accent, keep the base letter.
+        if ('\u{0300}'..='\u{036f}').contains(&c) {
+            continue;
+        }
         let mapped = match c {
             'Á' | 'À' | 'Ã' | 'Â' | 'á' | 'à' | 'ã' | 'â' => 'a',
             'É' | 'Ê' | 'é' | 'ê' => 'e',
@@ -444,8 +449,8 @@ impl std::str::FromStr for MapName {
                 Ok(Self::WatchpointGibraltar)
             }
             // Distinctive word, with or without the Watchpoint prefix, and the
-            // no-space form. Diacritics fold to this key (grímsvötn, grimsvötn,
-            // grímsvotn, grimsvotn).
+            // no-space form. Diacritics fold to this key, precomposed or NFD
+            // (grímsvötn, grimsvötn, grímsvotn, grimsvotn).
             "watchpoint grimsvotn" | "watchpointgrimsvotn" | "grimsvotn" => {
                 Ok(Self::WatchpointGrimsvotn)
             }
@@ -628,6 +633,7 @@ mod tests {
             "Watchpoint: Grimsvotn",
             "Watchpoint: Grímsvotn",
             "Watchpoint: Grimsvötn",
+            "Watchpoint: Gri\u{301}msvo\u{308}tn",
             "watchpoint: grímsvötn",
             "watchpoint grimsvotn",
             "watchpointgrimsvotn",
@@ -637,6 +643,7 @@ mod tests {
             "grímsvötn",
             "grimsvötn",
             "grímsvotn",
+            "gri\u{301}msvo\u{308}tn",
             "GRÍMSVÖTN",
             "Grimsvotn",
         ];

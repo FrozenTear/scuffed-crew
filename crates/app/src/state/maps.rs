@@ -1,7 +1,8 @@
 //! Static Overwatch map catalog for the strategy editor picker.
 //!
-//! There is no `/api/maps` list on the current contract. IDs are the
-//! `snake_case` serde names of [`scuffed_types::MapName`] (`kings_row`).
+//! There is no `/api/maps` list on the current contract. Catalog ids match
+//! the `snake_case` serde names of [`scuffed_types::MapName`] (`kings_row`),
+//! except Route 66: the serde id is `route66` and the catalog slug is `route_66`.
 
 use scuffed_types::MapName;
 use scuffed_types::strategy::GameMode;
@@ -202,7 +203,10 @@ pub const PICKER_MODE_ORDER: &[GameMode] = &[
     GameMode::Clash,
 ];
 
-/// Serde `snake_case` slug for [`MapName`]. Keep in lockstep with `rename_all`.
+/// Catalog slug for [`MapName`].
+///
+/// Equal to the serde `snake_case` id for every variant except Route 66, whose
+/// serde id is `route66` and whose slug here is `route_66`.
 pub const fn map_slug(map: MapName) -> &'static str {
     match map {
         MapName::CircuitRoyal => "circuit_royal",
@@ -339,7 +343,25 @@ mod tests {
             assert_eq!(parsed.game_mode(), map.game_mode);
             assert_eq!(map_slug(parsed), map.id);
         }
-        assert_eq!(PICKABLE_MAPS.len(), 33);
+    }
+
+    #[test]
+    fn every_map_has_a_picker_row_and_a_serde_id_equal_to_its_slug() {
+        assert_eq!(PICKABLE_MAPS.len(), MapName::ALL.len());
+        for &map in MapName::ALL {
+            let slug = map_slug(map);
+            assert!(
+                pickable_map_by_id(slug).is_some_and(|m| m.id == slug),
+                "{map:?}"
+            );
+            // Route66 is the one known split: serde "route66", slug "route_66".
+            let serde_id = if map == MapName::Route66 {
+                "route66"
+            } else {
+                slug
+            };
+            assert_eq!(serde_json::to_value(map).unwrap(), serde_id, "{map:?}");
+        }
     }
 
     #[test]
