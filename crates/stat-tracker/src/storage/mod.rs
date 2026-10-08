@@ -389,13 +389,35 @@ impl LocalStore {
     /// stores decided games, and one unstorable row at the head of the queue
     /// used to fail the whole batch forever. An outcome back-fill flips the
     /// row to a decided outcome and `synced = false`, releasing it here.
+    ///
+    /// A closed session with no result uses [`Self::get_unsynced_including_unknown`]
+    /// so the row is sent once and does not stay queued. The server skips
+    /// `unknown`; a later outcome edit requeues the row.
     pub async fn get_unsynced(
         &self,
     ) -> Result<Vec<PersonalMatch>, Box<dyn std::error::Error + Send + Sync>> {
-        let mut result = self
-            .db
-            .query("SELECT * FROM personal_match WHERE synced = false AND outcome != 'unknown' ORDER BY played_at ASC")
-            .await?;
+        self.pending_upload_rows(false).await
+    }
+
+    /// Like [`Self::get_unsynced`], plus rows whose outcome is still `unknown`.
+    /// Used when the session has been closed (new-game boundary, shutdown, or
+    /// a stale skeleton on the next start) and will not receive a result.
+    pub async fn get_unsynced_including_unknown(
+        &self,
+    ) -> Result<Vec<PersonalMatch>, Box<dyn std::error::Error + Send + Sync>> {
+        self.pending_upload_rows(true).await
+    }
+
+    async fn pending_upload_rows(
+        &self,
+        include_unknown: bool,
+    ) -> Result<Vec<PersonalMatch>, Box<dyn std::error::Error + Send + Sync>> {
+        let sql = if include_unknown {
+            "SELECT * FROM personal_match WHERE synced = false ORDER BY played_at ASC"
+        } else {
+            "SELECT * FROM personal_match WHERE synced = false AND outcome != 'unknown' ORDER BY played_at ASC"
+        };
+        let mut result = self.db.query(sql).await?;
         let matches: Vec<PersonalMatch> = result.take(0)?;
         Ok(matches)
     }

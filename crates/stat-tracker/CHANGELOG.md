@@ -12,9 +12,15 @@ the English OCR model produces when í and ö are missing. Turkish İ
 and dotless ı fold to i, so GRİMSVÖTN is Grímsvötn. If neither
 name wins, the read is dropped. Adlersbrunn is stored as Eichenwalde
 when both teams have stat rows. Château Guillard is Deathmatch: it is
-kept in the local unrecorded log and never uploaded. The 20-minute
+kept in the local store and never uploaded. The desktop totals and
+history skip those rows. The 20-minute
 timer no longer closes an unfinished game, so a long match can still
-take its result. Uploads from startup, resume, and the quiet-close
+take its result. That game is closed, and its rows are uploaded, at
+the next new-game boundary, on daemon shutdown, or on the next start
+once the saved session is older than 20 minutes. A restart inside
+that bound resumes the same session. The server stores victory,
+defeat, and draw; a row that is still unknown is sent on that close
+and skipped until an outcome is set. Uploads from startup, resume, and the quiet-close
 timer no longer block Tab, polling, or shutdown signals. A held board
 on a finished game is carried onto the next session when that game
 closes. `game_mode` is taken from the map that was stored.
