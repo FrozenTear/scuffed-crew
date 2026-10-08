@@ -634,6 +634,9 @@ impl LeaderboardSnapshot {
     }
 
     /// `hero` empty means every hero. `limit` is the row cap after sorting.
+    ///
+    /// Equal metric values break the tie by `member_id`, ascending, so two
+    /// members who rank the same do not swap places between refreshes.
     pub fn project(&self, metric: &str, hero: &str, limit: u32) -> Vec<MemberLeaderboardRow> {
         let source: &[LeaderboardHeroAgg] = if hero.is_empty() {
             &self.all
@@ -665,19 +668,24 @@ impl LeaderboardSnapshot {
                 b.kd.partial_cmp(&a.kd)
                     .unwrap_or(std::cmp::Ordering::Equal)
                     .then_with(|| b.games.cmp(&a.games))
+                    .then_with(|| a.member_id.cmp(&b.member_id))
             }),
             "games" => out.sort_by(|a, b| {
-                b.games.cmp(&a.games).then_with(|| {
-                    b.winrate
-                        .partial_cmp(&a.winrate)
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                })
+                b.games
+                    .cmp(&a.games)
+                    .then_with(|| {
+                        b.winrate
+                            .partial_cmp(&a.winrate)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    })
+                    .then_with(|| a.member_id.cmp(&b.member_id))
             }),
             _ => out.sort_by(|a, b| {
                 b.winrate
                     .partial_cmp(&a.winrate)
                     .unwrap_or(std::cmp::Ordering::Equal)
                     .then_with(|| b.games.cmp(&a.games))
+                    .then_with(|| a.member_id.cmp(&b.member_id))
             }),
         }
         let n = limit as usize;
@@ -733,6 +741,51 @@ mod snapshot_project_tests {
         assert_eq!(top.len(), 1);
         assert_eq!(top[0].member_id, both[0].member_id);
         assert_eq!(both.len(), 2);
+    }
+
+    fn tied(id: &str) -> LeaderboardHeroAgg {
+        LeaderboardHeroAgg {
+            member_id: id.into(),
+            display_name: id.into(),
+            games: 8,
+            wins: 4,
+            elims: 10,
+            deaths: 2,
+        }
+    }
+
+    #[test]
+    fn tied_members_keep_member_id_order_across_builds() {
+        let forward = vec![("Ana".into(), tied("z")), ("Ana".into(), tied("a"))];
+        let reverse = vec![("Ana".into(), tied("a")), ("Ana".into(), tied("z"))];
+        let ids = |rows: Vec<(String, LeaderboardHeroAgg)>| {
+            LeaderboardSnapshot::from_rows(rows)
+                .project("games", "Ana", 10)
+                .into_iter()
+                .map(|row| row.member_id)
+                .collect::<Vec<_>>()
+        };
+        let first = ids(forward);
+        let second = ids(reverse);
+        assert_eq!(first, second);
+        assert_eq!(first, vec!["a".to_string(), "z".to_string()]);
+
+        // Descending input must not survive a full tie. sort is stable, so
+        // this fails if the metric comparison treats the rows as equal.
+        let descending = LeaderboardSnapshot {
+            all: vec![tied("z"), tied("a")],
+            by_hero: std::collections::HashMap::new(),
+        };
+        for metric in ["games", "winrate", "kd"] {
+            let rows = descending.project(metric, "", 10);
+            assert_eq!(
+                rows.iter()
+                    .map(|row| row.member_id.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["a", "z"],
+                "{metric}"
+            );
+        }
     }
 }
 
