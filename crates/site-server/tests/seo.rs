@@ -1013,14 +1013,16 @@ async fn unmatched_api_paths_are_json_404_and_client_routes_stay_the_shell() {
     // websocket (`.route`).
     let app = create_router_with_dist(state, tree.dist())
         .route(
-            "/api/merged-probe",
-            axum::routing::get(|| async { "merged-ok" }),
+            "/api/route-probe",
+            axum::routing::get(|| async { "route-ok" }),
         )
         .merge(axum::Router::new().route(
             "/api/merge-probe",
             axum::routing::get(|| async { "merge-ok" }),
         ));
 
+    let mut get_headers = None;
+    let mut get_body = None;
     for method in [
         Method::GET,
         Method::POST,
@@ -1031,11 +1033,13 @@ async fn unmatched_api_paths_are_json_404_and_client_routes_stay_the_shell() {
         let (status, headers, body) = exchange(app.clone(), method.clone(), "/api/nope").await;
         assert_eq!(status, StatusCode::NOT_FOUND, "{method}");
         assert_json_not_found(&headers, &body, method.as_str());
+        if method == Method::GET {
+            get_headers = Some(headers);
+            get_body = Some(body);
+        }
     }
-
-    let (get_status, get_headers, get_body) = exchange(app.clone(), Method::GET, "/api/nope").await;
-    assert_eq!(get_status, StatusCode::NOT_FOUND);
-    assert_json_not_found(&get_headers, &get_body, "GET length");
+    let get_headers = get_headers.expect("GET");
+    let get_body = get_body.expect("GET");
 
     let (status, headers, body) = exchange(app.clone(), Method::HEAD, "/api/nope").await;
     assert_eq!(status, StatusCode::NOT_FOUND);
@@ -1055,7 +1059,24 @@ async fn unmatched_api_paths_are_json_404_and_client_routes_stay_the_shell() {
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.parse::<usize>().ok())
         .expect("content-length");
-    assert_eq!(len, get_body.len());
+    assert_eq!(
+        len,
+        get_body.len(),
+        "Content-Length must equal the GET body length"
+    );
+
+    // The CORS layer answers every OPTIONS request before the JSON 404.
+    let (status, headers, body) = exchange(app.clone(), Method::OPTIONS, "/api/nope").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        body.is_empty(),
+        "OPTIONS must not include a body, got {body:?}"
+    );
+    assert!(
+        headers.get(header::ACCESS_CONTROL_ALLOW_METHODS).is_some(),
+        "CORS layer must answer OPTIONS"
+    );
+    assert_ne!(content_type(&headers), "application/json");
 
     // `/api/stats/me/roles` is a registered route (401 without a session).
     // This path is not.
@@ -1088,9 +1109,9 @@ async fn unmatched_api_paths_are_json_404_and_client_routes_stay_the_shell() {
     assert!(!body.contains(SHELL));
     assert!(!body.contains("\"error\""));
 
-    let (status, _, body) = exchange(app.clone(), Method::GET, "/api/merged-probe").await;
+    let (status, _, body) = exchange(app.clone(), Method::GET, "/api/route-probe").await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(body, "merged-ok");
+    assert_eq!(body, "route-ok");
 
     let (status, _, body) = exchange(app.clone(), Method::GET, "/api/merge-probe").await;
     assert_eq!(status, StatusCode::OK);

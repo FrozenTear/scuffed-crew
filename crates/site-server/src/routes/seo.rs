@@ -3,7 +3,8 @@
 //! `/robots.txt` and `/sitemap.xml` are explicit routes so they win over the
 //! `dist/` catch-all (which would otherwise return `index.html` as 200 HTML).
 //! Unmatched `/api` and `/api/*` requests get the JSON error envelope
-//! (`{"error":"Not found"}`) instead of that shell. The static cache policy
+//! (`{"error":"Not found"}`) instead of that shell. OPTIONS is answered by
+//! the CORS layer and never reaches that 404. The static cache policy
 //! (`cache_control_value`) applies only to `dist/` responses, never to
 //! registered `/api/*` routes or `/uploads`; the unmatched-API 404 is `no-store`.
 //!
@@ -280,9 +281,10 @@ pub(crate) fn is_api_path(path: &str) -> bool {
 ///
 /// The router reaches this service only after registered routes miss, so a
 /// known `/api` path with the wrong method stays 405. `scuffed-server` merges
-/// strategy and chat routes onto [`crate::create_router`]; those stay
-/// registered routes. HEAD uses the same status and headers as GET, with an
-/// empty body.
+/// strategy routes and adds chat and websocket routes with `.route` on top of
+/// [`crate::create_router`]; those stay registered routes. HEAD uses the same
+/// status and headers as GET, with an empty body. OPTIONS is answered by the
+/// CORS layer and does not reach this function.
 fn unmatched_api_response(method: &Method) -> Response {
     let json = serde_json::to_vec(&ErrorResponse {
         error: "Not found".to_string(),
@@ -2099,9 +2101,9 @@ mod tests {
     /// `SCUFFED_EXTRA_INDEX`, when set, is a path to another `index.html`
     /// checked with the same rules. `<title>`, description, `og:title`,
     /// `og:description`, and `og:site_name` must each appear exactly once.
-    /// More than one copy, or a missing `og:site_name`, fails.
+    /// A missing or duplicated tag fails.
     #[test]
-    fn real_app_index_rewrite_fills_each_present_tag_once() {
+    fn real_app_index_rewrite_fills_each_tag_once() {
         let html = include_str!("../../../app/index.html");
         assert_real_index_rewrite(html);
         if let Ok(path) = std::env::var("SCUFFED_EXTRA_INDEX") {
@@ -2127,19 +2129,6 @@ mod tests {
 <meta property=\"og:description\" content=\"Desc\">\
 </head><body></body></html>";
         assert_real_index_rewrite(html);
-    }
-
-    /// `og:site_name` is required exactly once on every template this check
-    /// accepts, including the bundled `index.html`.
-    fn og_site_name_requirement(html: &str) -> Result<(), String> {
-        let found = meta_values(html, MetaKind::Property("og:site_name")).len();
-        if found == 1 {
-            Ok(())
-        } else {
-            Err(format!(
-                "og:site_name must appear exactly once, found {found}"
-            ))
-        }
     }
 
     fn assert_real_index_rewrite(html: &str) {
@@ -2183,7 +2172,11 @@ mod tests {
             MetaKind::Property("og:description"),
             &escaped_desc,
         );
-        og_site_name_requirement(html).unwrap_or_else(|err| panic!("{err}"));
+        let found = meta_values(html, MetaKind::Property("og:site_name")).len();
+        assert_eq!(
+            found, 1,
+            "og:site_name must appear exactly once, found {found}"
+        );
         assert_eq!(
             meta_values(&out, MetaKind::Property("og:site_name")),
             vec![escaped_org.clone()]
