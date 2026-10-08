@@ -72,10 +72,10 @@ pub async fn list_members(
 /// GET /api/members/:id — get member profile (never loads Nostr secrets).
 pub async fn get_member(
     State(state): State<AppState>,
-    _member: OrgMember,
+    caller: OrgMember,
     Path(id): Path<String>,
 ) -> Result<Json<Member>, (StatusCode, Json<ErrorResponse>)> {
-    state
+    let member = state
         .db
         .get_member_safe(&id)
         .await
@@ -88,7 +88,6 @@ pub async fn get_member(
                 }),
             )
         })?
-        .map(Json)
         .ok_or_else(|| {
             (
                 StatusCode::NOT_FOUND,
@@ -96,7 +95,18 @@ pub async fn get_member(
                     error: "Member not found".into(),
                 }),
             )
-        })
+        })?;
+    // The list hides inactive rows from recruits and members. Fetch-by-id
+    // matches that, and still lets officer+ open a deactivated profile.
+    if !member.is_active && !caller.member.org_role.is_at_least(OrgRole::Officer) {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: "Member not found".into(),
+            }),
+        ));
+    }
+    Ok(Json(member))
 }
 
 /// Deserializer for "omit = leave unchanged, null = clear" fields. A plain
@@ -176,39 +186,36 @@ fn normalize_optional_handle(
     }
 }
 
-/// PUT /api/members/:id — update member profile (self or officer+)
-pub async fn update_member(
-    State(state): State<AppState>,
-    caller: OrgMember,
-    Path(id): Path<String>,
-    Json(body): Json<UpdateMemberRequest>,
-) -> Result<Json<Member>, (StatusCode, Json<ErrorResponse>)> {
-    // Members can edit themselves; officers+ can edit anyone
-    let target = state
-        .db
-        .get_member_safe(&id)
-        .await
-        .map_err(|e| {
-            tracing::error!(error = %e, "get_member_safe failed");
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: "Internal server error".into(),
-                }),
-            )
-        })?
-        .ok_or_else(|| {
-            (
-                StatusCode::NOT_FOUND,
-                Json(ErrorResponse {
-                    error: "Member not found".into(),
-                }),
-            )
-        })?;
+type ProfileEditReject = (StatusCode, Json<ErrorResponse>);
 
+/// Load `id` and require the caller may edit that member's profile, including avatar.
+///
+/// Self (same user) always. Otherwise officer or admin. This is the only gate
+/// `PUT /api/members/{mid}` applies to avatar and the other profile fields.
+pub(crate) async fn require_profile_edit(
+    state: &AppState,
+    caller: &OrgMember,
+    id: &str,
+) -> Result<Member, ProfileEditReject> {
+    let target = state.db.get_member_safe(id).await.map_err(|e| {
+        tracing::error!(error = %e, "get_member_safe failed");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: "Internal server error".into(),
+            }),
+        )
+    })?;
+    let Some(target) = target else {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: "Member not found".into(),
+            }),
+        ));
+    };
     let is_self = target.user_id == caller.user.id;
     let is_officer = caller.member.org_role.is_at_least(OrgRole::Officer);
-
     if !is_self && !is_officer {
         return Err((
             StatusCode::FORBIDDEN,
@@ -217,6 +224,17 @@ pub async fn update_member(
             }),
         ));
     }
+    Ok(target)
+}
+
+/// PUT /api/members/:id — update member profile (self or officer+)
+pub async fn update_member(
+    State(state): State<AppState>,
+    caller: OrgMember,
+    Path(id): Path<String>,
+    Json(body): Json<UpdateMemberRequest>,
+) -> Result<Json<Member>, (StatusCode, Json<ErrorResponse>)> {
+    let target = require_profile_edit(&state, &caller, &id).await?;
 
     // nostr_pubkey must go through /api/nostr/challenge + /api/nostr/verify
     // (signature proof). Reject arbitrary sets/clears here to prevent NIP-05
@@ -285,6 +303,23 @@ pub async fn update_member(
     let twitch = normalize_optional_handle(&body.twitch)?;
     let twitter = normalize_optional_handle(&body.twitter)?;
 
+    // avatar_url is attacker-controlled and the next avatar upload deletes the
+    // stored path. Only clear it, set an external https URL, or point at this
+    // member's own avatars/<key>/ folder.
+    let avatar_url = match &body.avatar_url {
+        None => None,
+        Some(None) => Some(None),
+        Some(Some(raw)) => match crate::routes::uploads::normalize_avatar_url(&target.id, raw) {
+            Ok(value) => Some(value),
+            Err(msg) => {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    Json(ErrorResponse { error: msg.into() }),
+                ));
+            }
+        },
+    };
+
     // main_role: trim; empty → clear
     let main_role = match &body.main_role {
         None => None,
@@ -312,7 +347,7 @@ pub async fn update_member(
             &id,
             body.display_name.as_deref(),
             body.bio.as_ref().map(|b| b.as_deref()),
-            body.avatar_url.as_ref().map(|a| a.as_deref()),
+            avatar_url.as_ref().map(|a| a.as_deref()),
             body.timezone.as_ref().map(|t| t.as_deref()),
             body.pronouns.as_ref().map(|p| p.as_deref()),
             body.availability_status.as_ref().map(|a| a.as_deref()),
@@ -1072,4 +1107,75 @@ pub async fn republish_profiles(
         candidates: listed,
         published,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::Json;
+    use axum::extract::{Path, State};
+    use axum::http::StatusCode;
+    use scuffed_db::OrgRole;
+
+    use super::get_member;
+    use crate::extractors::OrgMember;
+    use crate::test_support::{must_err, must_ok, seed_user, test_state};
+
+    async fn as_member(state: &crate::state::AppState, user_id: &str, role: OrgRole) -> OrgMember {
+        seed_user(state, user_id, user_id).await;
+        let member = state
+            .db
+            .create_member(user_id, user_id, role)
+            .await
+            .expect("member");
+        let user = state
+            .db
+            .get_user(user_id)
+            .await
+            .expect("get user")
+            .expect("user");
+        OrgMember { user, member }
+    }
+
+    #[tokio::test]
+    async fn non_officer_cannot_read_deactivated_member_by_id() {
+        let state = test_state().await;
+        let recruit = as_member(&state, "recruituser", OrgRole::Recruit).await;
+        let member = as_member(&state, "memberuser", OrgRole::Member).await;
+        let officer = as_member(&state, "officeruser", OrgRole::Officer).await;
+        let target = as_member(&state, "targetuser", OrgRole::Member).await;
+        state
+            .db
+            .update_member(
+                &target.member.id,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(false),
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("deactivate");
+
+        for caller in [recruit, member] {
+            let (status, body) = must_err(
+                get_member(State(state.clone()), caller, Path(target.member.id.clone())).await,
+                "hidden",
+            );
+            assert_eq!(status, StatusCode::NOT_FOUND);
+            assert_eq!(body.error, "Member not found");
+        }
+
+        let Json(visible) = must_ok(
+            get_member(State(state), officer, Path(target.member.id)).await,
+            "officer can read",
+        );
+        assert!(!visible.is_active);
+        assert_eq!(visible.display_name, "targetuser");
+    }
 }

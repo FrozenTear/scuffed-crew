@@ -30,62 +30,101 @@ pub fn parse_scoreboard_cells(
     outcome: &str,
     player_name: Option<&str>,
 ) -> Option<PersonalMatch> {
-    let stats = player_row_index
-        .and_then(|idx| rows.get(idx))
-        .and_then(stats_from_row)
-        .or_else(|| {
-            let lines: Vec<&str> = raw_text
-                .lines()
-                .map(|l| l.trim())
-                .filter(|l| !l.is_empty())
-                .collect();
-            player_name
-                .and_then(|name| find_player_row(&lines, name))
-                .and_then(extract_row_stats)
-        })?;
+    read_scoreboard(rows, player_row_index, raw_text, outcome, player_name)
+        .ok()
+        .map(|read| read.matched)
+}
 
+/// Why [`read_scoreboard`] refused a frame. The two cases used to share one
+/// log line ("player row not identified"), so an early-game row whose dim
+/// zeros came back empty looked the same as a frame with no row at all.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScoreboardMiss {
+    /// No identified row, by name or highlight, and the configured name is
+    /// not a whole word in the raw text.
+    PlayerRowNotFound,
+    /// A row index was set, or the configured name appears as a whole word,
+    /// but the cells did not parse and the text fallback did not yield
+    /// exactly six in-range stats. The name can be in chat or the kill feed
+    /// rather than on a scoreboard row.
+    CellsUnreadable,
+}
+
+/// One accepted scoreboard read.
+#[derive(Debug)]
+pub struct ScoreboardRead {
+    pub matched: PersonalMatch,
+    /// `false` when the six stats came from the raw-text fallback. The
+    /// capture gate treats that latch as low-trust.
+    pub trusted_cells: bool,
+}
+
+/// Same inputs as [`parse_scoreboard_cells`], plus which path produced the
+/// stats and why a refusal happened.
+pub fn read_scoreboard(
+    rows: &[RowOcrResult],
+    player_row_index: Option<usize>,
+    raw_text: &str,
+    outcome: &str,
+    player_name: Option<&str>,
+) -> Result<ScoreboardRead, ScoreboardMiss> {
     let lines: Vec<&str> = raw_text
         .lines()
         .map(|l| l.trim())
         .filter(|l| !l.is_empty())
         .collect();
+    let from_cells = player_row_index
+        .and_then(|idx| rows.get(idx))
+        .and_then(stats_from_row);
+    let (stats, trusted_cells) = if let Some(stats) = from_cells {
+        (stats, true)
+    } else if let Some(stats) = text_fallback_stats(&lines, player_name) {
+        (stats, false)
+    } else if player_row_index.is_some() || name_in_lines(&lines, player_name) {
+        return Err(ScoreboardMiss::CellsUnreadable);
+    } else {
+        return Err(ScoreboardMiss::PlayerRowNotFound);
+    };
 
     let hero = find_hero(&lines).unwrap_or_else(|| "Unknown".to_string());
     let role = guess_role(&hero);
     let map_name = find_map(&lines).unwrap_or_default();
     let game_mode = map_mode(&map_name).unwrap_or("").to_string();
 
-    Some(PersonalMatch {
-        id: None,
-        hero,
-        map_name,
-        game_mode,
-        role,
-        outcome: outcome.to_string(),
-        elims: stats.elims,
-        deaths: stats.deaths,
-        assists: stats.assists,
-        damage: stats.damage,
-        healing: stats.healing,
-        mitigation: stats.mitigation,
-        played_at: SurrealDatetime::from(Utc::now()),
-        synced: false,
-        sync_rev: 0,
-        session_id: String::new(),
-        corrected_hero: None,
-        corrected_role: None,
-        corrected_map_name: None,
-        corrected_outcome: None,
-        corrected_elims: None,
-        corrected_deaths: None,
-        corrected_assists: None,
-        corrected_damage: None,
-        corrected_healing: None,
-        corrected_mitigation: None,
-        edited_fields: Vec::new(),
-        edited_at: None,
-        heroes_played: Vec::new(),
-        segment_resolutions: Vec::new(),
+    Ok(ScoreboardRead {
+        trusted_cells,
+        matched: PersonalMatch {
+            id: None,
+            hero,
+            map_name,
+            game_mode,
+            role,
+            outcome: outcome.to_string(),
+            elims: stats.elims,
+            deaths: stats.deaths,
+            assists: stats.assists,
+            damage: stats.damage,
+            healing: stats.healing,
+            mitigation: stats.mitigation,
+            played_at: SurrealDatetime::from(Utc::now()),
+            synced: false,
+            sync_rev: 0,
+            session_id: String::new(),
+            corrected_hero: None,
+            corrected_role: None,
+            corrected_map_name: None,
+            corrected_outcome: None,
+            corrected_elims: None,
+            corrected_deaths: None,
+            corrected_assists: None,
+            corrected_damage: None,
+            corrected_healing: None,
+            corrected_mitigation: None,
+            edited_fields: Vec::new(),
+            edited_at: None,
+            heroes_played: Vec::new(),
+            segment_resolutions: Vec::new(),
+        },
     })
 }
 
@@ -233,8 +272,9 @@ fn stats_from_row(row: &RowOcrResult) -> Option<PlayerStats> {
     // Sanity gate: eliminations/assists/deaths are small two-digit figures in
     // OW2 (extreme games top out around 70 elims / 30 deaths). A larger value
     // means a neighboring column or badge digit bled into the cell — observed
-    // misreads: 110, 118, 311 slipping past the old 200 cap.
-    if stats.elims > 99 || stats.assists > 99 || stats.deaths > 50 {
+    // misreads: 110, 118, 311 slipping past the old 200 cap. The text fallback
+    // and the capture gate use the same ceilings.
+    if kill_columns_implausible(stats.elims, stats.assists, stats.deaths) {
         tracing::debug!(
             elims = stats.elims,
             assists = stats.assists,
@@ -272,6 +312,20 @@ pub fn player_row_suspect_mask(
     mask
 }
 
+/// Elims past this are a damage or timer digit in the elims column.
+pub(crate) const MAX_ELIMS: u32 = 99;
+/// Assists past this are a damage or timer digit in the assists column.
+pub(crate) const MAX_ASSISTS: u32 = 99;
+/// Deaths past this are a damage or timer digit in the deaths column.
+pub(crate) const MAX_DEATHS: u32 = 50;
+
+/// E/A above [`MAX_ELIMS`] / [`MAX_ASSISTS`] or D above [`MAX_DEATHS`] is a
+/// column bleed, not a real scoreboard. Shared with the text fallback and
+/// the capture gate's first-capture check.
+pub(crate) fn kill_columns_implausible(elims: u32, assists: u32, deaths: u32) -> bool {
+    elims > MAX_ELIMS || assists > MAX_ASSISTS || deaths > MAX_DEATHS
+}
+
 fn parse_cell_number(s: &str) -> Option<u32> {
     let cleaned: String = s.chars().filter(|c| c.is_ascii_digit()).collect();
     if cleaned.is_empty() {
@@ -290,47 +344,287 @@ struct PlayerStats {
     mitigation: u32,
 }
 
-fn find_player_row<'a>(lines: &[&'a str], player_name: &str) -> Option<&'a str> {
-    let name_lower = player_name.to_lowercase();
+fn configured_name(player_name: Option<&str>) -> Option<&str> {
+    player_name.map(str::trim).filter(|name| !name.is_empty())
+}
+
+fn name_in_lines(lines: &[&str], player_name: Option<&str>) -> bool {
+    let Some(name) = configured_name(player_name) else {
+        return false;
+    };
     lines
         .iter()
-        .find(|line| {
-            let lower = line.to_lowercase();
-            lower.contains(&name_lower)
-        })
-        .copied()
+        .any(|line| name_word_index(line, name).is_some())
 }
 
-fn extract_row_stats(line: &str) -> Option<PlayerStats> {
-    let numbers = extract_numbers(line);
-    stats_from_numbers(&numbers)
-}
-
-// OW2 scoreboard stat columns: E, A, D, DMG, HLG, MIT
-fn stats_from_numbers(numbers: &[u32]) -> Option<PlayerStats> {
-    if numbers.len() < 6 {
+/// Byte index of `player_name` in the lowercased line, when it is a whole
+/// word. `Ana` does not match inside `BANANA`. An empty name matches nothing.
+fn name_word_index(line: &str, player_name: &str) -> Option<usize> {
+    let name_lower = player_name.trim().to_lowercase();
+    if name_lower.is_empty() {
         return None;
     }
-
-    // Take the last 6 numbers — earlier tokens may be from player name/rank OCR artifacts
-    let offset = numbers.len() - 6;
-    Some(PlayerStats {
-        elims: numbers[offset],
-        assists: numbers[offset + 1],
-        deaths: numbers[offset + 2],
-        damage: numbers[offset + 3],
-        healing: numbers[offset + 4],
-        mitigation: numbers[offset + 5],
-    })
+    let line_lower = line.to_lowercase();
+    let mut search_from = 0;
+    while let Some(rel) = line_lower[search_from..].find(&name_lower) {
+        let start = search_from + rel;
+        let end = start + name_lower.len();
+        let before_ok = line_lower[..start]
+            .chars()
+            .next_back()
+            .is_none_or(|c| !c.is_alphanumeric());
+        let after_ok = line_lower[end..]
+            .chars()
+            .next()
+            .is_none_or(|c| !c.is_alphanumeric());
+        if before_ok && after_ok {
+            return Some(start);
+        }
+        let step = name_lower.chars().next().map_or(1, char::len_utf8);
+        search_from = start + step;
+        if search_from >= line_lower.len() {
+            break;
+        }
+    }
+    None
 }
 
-fn extract_numbers(s: &str) -> Vec<u32> {
-    let cleaned: String = s.chars().filter(|c| *c != ',').collect();
-    cleaned
-        .split(|c: char| !c.is_ascii_digit())
-        .filter(|w| !w.is_empty())
-        .filter_map(|w| w.parse::<u32>().ok())
-        .collect()
+/// Stats from a full-board text line that contains the player name as a
+/// whole word.
+///
+/// The per-cell path is positional. This one is not, and the line for row 0
+/// can also pick up the hero panel's objective timer (`00:02`), which sits
+/// at the same height. Taking the last six numbers then slid the columns:
+/// `2 0 0 1,105 259 450 00:02` became elims 0, assists 1105, deaths 259.
+/// Rank badges sit *before* the name, so the numbers after the name are the
+/// stats. A clock token is removed first. The six have to be one unbroken
+/// run. A word or `%` after that run refuses the line. `ACCURACY 35%` is
+/// five numbers, then a word; the run length refuses it, not the percent.
+/// `8 1 2 989 1,583 35%` is six numbers and a percent, and the percent
+/// refuses it. `8 1 2 989 1,583 35` has lost both the label and the
+/// percent, so a count of six still accepts that shifted line. A
+/// hero-panel label after a correct row (`450 OBJ CONTEST TIME 00:02`)
+/// refuses the line too. That is intentional: the per-cell path still has
+/// the row, and a label is not a seventh stat. A number that does not fit
+/// in `u32` refuses the line instead of being dropped. A chat line
+/// (`name: 1 2 3 4 5 6`) is skipped so a later stat line can match. The
+/// first line that merely mentions the name (a join message) is skipped
+/// the same way. The six still have to pass the same kill-column ceilings
+/// as [`stats_from_row`].
+fn text_fallback_stats(lines: &[&str], player_name: Option<&str>) -> Option<PlayerStats> {
+    let name = configured_name(player_name)?;
+    for line in lines {
+        if name_word_index(line, name).is_none() {
+            continue;
+        }
+        let Some(suffix) = suffix_after_name(line, name) else {
+            continue;
+        };
+        // `[Team] <name>: 1 2 3 4 5 6` is chat. The row's own line does not
+        // put a colon right after the name. Skip it so a later stat line
+        // can still match.
+        if suffix.trim_start().starts_with(':') {
+            continue;
+        }
+        if let Some(stats) = stats_from_player_suffix(suffix) {
+            return Some(stats);
+        }
+    }
+    None
+}
+
+fn stats_from_player_suffix(suffix: &str) -> Option<PlayerStats> {
+    let suffix = strip_clock_tokens(suffix);
+    let numbers = stat_run_after_name(&suffix)?;
+    let stats = PlayerStats {
+        elims: numbers[0],
+        assists: numbers[1],
+        deaths: numbers[2],
+        damage: numbers[3],
+        healing: numbers[4],
+        mitigation: numbers[5],
+    };
+    if kill_columns_implausible(stats.elims, stats.assists, stats.deaths) {
+        tracing::debug!(
+            elims = stats.elims,
+            assists = stats.assists,
+            deaths = stats.deaths,
+            "rejecting text fallback: kill-column value out of plausible range"
+        );
+        return None;
+    }
+    Some(stats)
+}
+
+/// Text after the first whole-word, case-insensitive match of `player_name`.
+///
+/// An empty or whitespace name does not match. `Ana` does not match inside
+/// `BANANA`. ASCII lines keep byte indexes (lowercasing does not move them).
+/// Any other line is walked, because a character that grows and one that
+/// shrinks can leave the lowercased string the same length while the indexes
+/// no longer line up.
+fn suffix_after_name<'a>(line: &'a str, player_name: &str) -> Option<&'a str> {
+    let name_lower = player_name.trim().to_lowercase();
+    if name_lower.is_empty() {
+        return None;
+    }
+    let end = name_word_index(line, player_name)? + name_lower.len();
+    if line.is_ascii() {
+        return line.get(end..);
+    }
+    let mut byte = 0;
+    let mut low_byte = 0;
+    for ch in line.chars() {
+        let low: String = ch.to_lowercase().collect();
+        if low_byte >= end {
+            return Some(&line[byte..]);
+        }
+        low_byte += low.len();
+        byte += ch.len_utf8();
+    }
+    if low_byte >= end { Some("") } else { None }
+}
+
+/// Drop `MM:SS` / `M:SS` tokens. The hero-panel objective timer is the one
+/// that lands on the player's OCR line; stat columns do not contain a colon.
+fn strip_clock_tokens(s: &str) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    let mut out = String::with_capacity(s.len());
+    let mut i = 0;
+    while i < chars.len() {
+        if let Some(len) = clock_token_len(&chars, i) {
+            i += len;
+            out.push(' ');
+            continue;
+        }
+        out.push(chars[i]);
+        i += 1;
+    }
+    out
+}
+
+fn clock_token_len(chars: &[char], i: usize) -> Option<usize> {
+    if i > 0 && chars[i - 1].is_ascii_digit() {
+        return None;
+    }
+    let mut j = i;
+    let mut minute_digits = 0;
+    while j < chars.len() && chars[j].is_ascii_digit() {
+        minute_digits += 1;
+        j += 1;
+        if minute_digits > 2 {
+            return None;
+        }
+    }
+    if !(1..=2).contains(&minute_digits) || j >= chars.len() || chars[j] != ':' {
+        return None;
+    }
+    j += 1;
+    let sec_at = j;
+    while j < chars.len() && chars[j].is_ascii_digit() {
+        j += 1;
+        if j - sec_at > 2 {
+            return None;
+        }
+    }
+    if j - sec_at != 2 || (j < chars.len() && chars[j].is_ascii_digit()) {
+        return None;
+    }
+    Some(j - i)
+}
+
+enum SuffixToken {
+    Number(u32),
+    /// Digits that do not fit in `u32`. Dropping one used to leave a
+    /// shifted line looking like six stats.
+    Overflow,
+    Word,
+    Percent,
+}
+
+/// The six stats after the name, or nothing.
+///
+/// They have to be one consecutive run of numbers. A word or `%` after
+/// that run refuses the line, including a correct row whose hero-panel
+/// label follows the stats. A word before the run is a title and is
+/// allowed. A second run cannot appear: it would have to follow a word
+/// or a percent, which already refused the line. A number that overflows
+/// `u32` refuses the line.
+///
+/// Six numbers with the accuracy label and the percent both missing
+/// (`8 1 2 989 1,583 35`) are still accepted. Nothing in the line says
+/// the last figure is not mitigation.
+fn stat_run_after_name(suffix: &str) -> Option<[u32; 6]> {
+    let tokens = suffix_tokens(suffix);
+    if tokens.iter().any(|t| matches!(t, SuffixToken::Overflow)) {
+        tracing::debug!("rejecting text fallback: a number does not fit in u32");
+        return None;
+    }
+    let mut i = 0;
+    while i < tokens.len() {
+        if !matches!(tokens[i], SuffixToken::Number(_)) {
+            i += 1;
+            continue;
+        }
+        let mut nums = Vec::new();
+        while let Some(SuffixToken::Number(n)) = tokens.get(i) {
+            nums.push(*n);
+            i += 1;
+        }
+        if nums.len() != 6 {
+            tracing::debug!(
+                n = nums.len(),
+                "rejecting text fallback: not exactly six stats after the player name"
+            );
+            return None;
+        }
+        if tokens[i..]
+            .iter()
+            .any(|t| matches!(t, SuffixToken::Word | SuffixToken::Percent))
+        {
+            tracing::debug!("rejecting text fallback: a word or percent follows the stat run");
+            return None;
+        }
+        return Some([nums[0], nums[1], nums[2], nums[3], nums[4], nums[5]]);
+    }
+    None
+}
+
+fn suffix_tokens(s: &str) -> Vec<SuffixToken> {
+    let chars: Vec<char> = s.chars().collect();
+    let mut i = 0;
+    let mut out = Vec::new();
+    while i < chars.len() {
+        let c = chars[i];
+        if c.is_ascii_digit() {
+            let mut digits = String::new();
+            while i < chars.len() && (chars[i].is_ascii_digit() || chars[i] == ',') {
+                if chars[i].is_ascii_digit() {
+                    digits.push(chars[i]);
+                }
+                i += 1;
+            }
+            match digits.parse::<u32>() {
+                Ok(n) => out.push(SuffixToken::Number(n)),
+                Err(_) => out.push(SuffixToken::Overflow),
+            }
+            continue;
+        }
+        if c == '%' {
+            out.push(SuffixToken::Percent);
+            i += 1;
+            continue;
+        }
+        if c.is_alphabetic() {
+            while i < chars.len() && chars[i].is_alphabetic() {
+                i += 1;
+            }
+            out.push(SuffixToken::Word);
+            continue;
+        }
+        i += 1;
+    }
+    out
 }
 
 pub fn guess_role_public(hero: &str) -> String {
@@ -860,9 +1154,179 @@ mod tests {
         // No per-cell row index, but the player's line is present in the
         // full-image OCR text → stats come from that line, not an arbitrary one.
         let raw = "SOMEONE 9 9 9 9999 9999 9999\nFROZEN 7 1 3 5,155 1,326 3,316";
-        let parsed = parse_scoreboard_cells(&[], None, raw, "defeat", Some("FROZEN")).unwrap();
-        assert_eq!(parsed.elims, 7);
-        assert_eq!(parsed.mitigation, 3316);
+        let read = read_scoreboard(&[], None, raw, "defeat", Some("FROZEN")).unwrap();
+        assert!(!read.trusted_cells);
+        assert_eq!(read.matched.elims, 7);
+        assert_eq!(read.matched.mitigation, 3316);
+    }
+
+    #[test]
+    fn timer_on_the_player_line_does_not_shift_columns() {
+        // Row 0 sits at the same height as the hero panel's OBJ CONTEST TIME.
+        // The old last-6 window turned
+        // "2 0 0 1,105 259 450 ... 00:02" into E 0, A 1105, D 259, DMG 450.
+        let raw = "74 FROZEN Giant Troll 2 0 0 1,105 259 450 00:02";
+        let read = read_scoreboard(&[], None, raw, "unknown", Some("FROZEN")).unwrap();
+        assert!(!read.trusted_cells);
+        let p = &read.matched;
+        assert_eq!(
+            (
+                p.elims,
+                p.assists,
+                p.deaths,
+                p.damage,
+                p.healing,
+                p.mitigation
+            ),
+            (2, 0, 0, 1105, 259, 450)
+        );
+    }
+
+    #[test]
+    fn seven_numbers_and_a_shifted_extra_stat_are_refused() {
+        let seven = "FROZEN 8 1 2 3,993 989 1,583 35";
+        assert_eq!(
+            read_scoreboard(&[], None, seven, "unknown", Some("FROZEN")).unwrap_err(),
+            ScoreboardMiss::CellsUnreadable
+        );
+        // Damage dropped, and an accuracy percent supplies the sixth number.
+        let shifted = "FROZEN 8 1 2 989 1,583 ACCURACY 35%";
+        assert_eq!(
+            read_scoreboard(&[], None, shifted, "unknown", Some("FROZEN")).unwrap_err(),
+            ScoreboardMiss::CellsUnreadable
+        );
+        // Last six of this line are in the ceilings (E1 A2 D30 DMG989 H1583
+        // MIT35). Taking the last six would accept it. The first six of the
+        // line above fail the deaths ceiling, so that line does not pin this.
+        let last_six = "FROZEN 8 1 2 30 989 1,583 35";
+        assert_eq!(
+            read_scoreboard(&[], None, last_six, "unknown", Some("FROZEN")).unwrap_err(),
+            ScoreboardMiss::CellsUnreadable
+        );
+        // Six numbers and a percent. The run length is fine. The percent
+        // after the run is what refuses it.
+        let percent = "FROZEN 8 1 2 989 1,583 35%";
+        assert_eq!(
+            read_scoreboard(&[], None, percent, "unknown", Some("FROZEN")).unwrap_err(),
+            ScoreboardMiss::CellsUnreadable
+        );
+        // A hero-panel label after a correct row. Refusing it is intentional.
+        let labeled = "FROZEN 8 1 2 3,993 989 1,583 OBJ CONTEST TIME 00:02";
+        assert_eq!(
+            read_scoreboard(&[], None, labeled, "unknown", Some("FROZEN")).unwrap_err(),
+            ScoreboardMiss::CellsUnreadable
+        );
+        // The label and the percent are both gone. Six numbers are still
+        // accepted, shifted. Nothing in the line says 35 is not mitigation.
+        let unlabeled = "FROZEN 8 1 2 989 1,583 35";
+        let read = read_scoreboard(&[], None, unlabeled, "unknown", Some("FROZEN")).unwrap();
+        assert_eq!(read.matched.elims, 8);
+        assert_eq!(read.matched.damage, 989);
+        assert_eq!(read.matched.mitigation, 35);
+        let overflow = "FROZEN 2 0 0 1,105 259 450 99999999999";
+        assert_eq!(
+            read_scoreboard(&[], None, overflow, "unknown", Some("FROZEN")).unwrap_err(),
+            ScoreboardMiss::CellsUnreadable
+        );
+    }
+
+    #[test]
+    fn a_short_or_empty_name_does_not_read_another_row() {
+        let banana = "BANANA 9 9 9 9999 9999 9999";
+        assert_eq!(
+            read_scoreboard(&[], None, banana, "unknown", Some("Ana")).unwrap_err(),
+            ScoreboardMiss::PlayerRowNotFound
+        );
+        let someone = "SOMEONE 1 2 3 4 5 6";
+        assert_eq!(
+            read_scoreboard(&[], None, someone, "unknown", Some("")).unwrap_err(),
+            ScoreboardMiss::PlayerRowNotFound
+        );
+        assert_eq!(
+            read_scoreboard(&[], None, someone, "unknown", Some("   ")).unwrap_err(),
+            ScoreboardMiss::PlayerRowNotFound
+        );
+    }
+
+    #[test]
+    fn a_join_line_does_not_hide_the_stat_line() {
+        let raw = "FROZEN joined the game\nFROZEN 8 1 2 3,993 989 1,583";
+        let read = read_scoreboard(&[], None, raw, "unknown", Some("FROZEN")).unwrap();
+        assert!(!read.trusted_cells);
+        assert_eq!(read.matched.elims, 8);
+        assert_eq!(read.matched.damage, 3993);
+        assert_eq!(read.matched.mitigation, 1583);
+    }
+
+    #[test]
+    fn a_chat_line_does_not_hide_the_stat_line() {
+        // The row's own line failed, and a chat line before it has six
+        // numbers after the name. Those are not the scoreboard.
+        let raw = "[Team] FROZEN: 1 2 3 4 5 6\nFROZEN 8 1 2 3,993 989 1,583";
+        let read = read_scoreboard(&[], None, raw, "unknown", Some("FROZEN")).unwrap();
+        assert_eq!(read.matched.elims, 8);
+        assert_eq!(read.matched.assists, 1);
+        assert_eq!(read.matched.damage, 3993);
+        assert_eq!(read.matched.mitigation, 1583);
+    }
+
+    #[test]
+    fn suffix_after_a_name_keeps_char_boundaries_when_casefold_widths_cancel() {
+        // İ (U+0130) lowercases to two code points. K (U+212A) lowercases to
+        // one byte. The old fast path treated equal byte lengths as aligned
+        // indexes and sliced into the stats.
+        let raw = "İİFROZEN K 12 0 0 100 200 300";
+        let read = read_scoreboard(&[], None, raw, "unknown", Some("FROZEN")).unwrap();
+        assert_eq!(read.matched.elims, 12);
+        assert_eq!(read.matched.assists, 0);
+        assert_eq!(read.matched.mitigation, 300);
+    }
+
+    #[test]
+    fn shifted_fallback_numbers_are_rejected() {
+        // The six numbers the old window emitted, with the name in front.
+        // Assists 1105 and deaths 259 are not a scoreboard.
+        let raw = "FROZEN 0 1105 259 450 0 2";
+        assert_eq!(
+            read_scoreboard(&[], None, raw, "unknown", Some("FROZEN")).unwrap_err(),
+            ScoreboardMiss::CellsUnreadable
+        );
+        // A dropped zero plus the timer is not six stats. Do not slide.
+        let dropped = "FROZEN 2 1,105 259 450 00:02";
+        assert_eq!(
+            read_scoreboard(&[], None, dropped, "unknown", Some("FROZEN")).unwrap_err(),
+            ScoreboardMiss::CellsUnreadable
+        );
+    }
+
+    #[test]
+    fn identified_row_with_an_empty_cell_is_unreadable_not_missing() {
+        let rows = vec![row(Some("FROZEN"), ["2", "", "0", "1105", "259", "450"])];
+        assert_eq!(
+            read_scoreboard(&rows, Some(0), "", "unknown", Some("FROZEN")).unwrap_err(),
+            ScoreboardMiss::CellsUnreadable
+        );
+        assert_eq!(
+            read_scoreboard(
+                &[],
+                None,
+                "no name on this frame",
+                "unknown",
+                Some("FROZEN")
+            )
+            .unwrap_err(),
+            ScoreboardMiss::PlayerRowNotFound
+        );
+    }
+
+    #[test]
+    fn explicit_zero_cells_are_a_trusted_read() {
+        let rows = vec![row(Some("FROZEN"), ["0", "0", "0", "0", "0", "0"])];
+        let read = read_scoreboard(&rows, Some(0), "", "unknown", Some("FROZEN")).unwrap();
+        assert!(read.trusted_cells);
+        assert_eq!(read.matched.elims, 0);
+        assert_eq!(read.matched.assists, 0);
+        assert_eq!(read.matched.deaths, 0);
     }
 
     #[test]

@@ -12,12 +12,11 @@ use serde::Deserialize;
 use scuffed_api_client::ApiClient;
 use scuffed_types::api::{MemberSettingsResponse, UpdateMemberSettingsRequest};
 
-use crate::components::ui::SeasonSelect;
+use crate::components::ui::{SeasonSelect, use_stats_season};
 use crate::components::{Toast, member_pending, use_toast};
 use crate::hooks::{use_api, use_api_with};
 use crate::routes::Route;
 use crate::state::use_auth;
-use crate::util::season_url;
 
 // -- Shared data models (fetched once here, consumed by the tab modules) --
 
@@ -172,37 +171,6 @@ fn initial_density() -> &'static str {
         }
     }
     "compact"
-}
-
-/// Last chosen season id (per browser); `None` = all time.
-fn initial_season() -> Option<String> {
-    #[cfg(feature = "web")]
-    {
-        if let Some(win) = web_sys::window()
-            && let Ok(Some(storage)) = win.local_storage()
-            && let Ok(Some(v)) = storage.get_item("stats-season")
-            && !v.is_empty()
-        {
-            return Some(v);
-        }
-    }
-    None
-}
-
-fn persist_season(season: Option<&str>) {
-    #[cfg(feature = "web")]
-    {
-        if let Some(win) = web_sys::window()
-            && let Ok(Some(storage)) = win.local_storage()
-        {
-            let _ = match season {
-                Some(id) => storage.set_item("stats-season", id),
-                None => storage.remove_item("stats-season"),
-            };
-        }
-    }
-    #[cfg(not(feature = "web"))]
-    let _ = season;
 }
 
 fn persist_density(d: &str) {
@@ -902,16 +870,17 @@ const STATS_CSS: &str = r#"
 #[component]
 pub fn Stats() -> Element {
     let auth = use_auth();
-    // "Total or per season": one selection drives every tab's fetch. `None`
-    // = all time. Remembered per browser, like the density toggle.
-    let mut season = use_signal(initial_season);
-    let stats = use_api_with::<PersonalStats>(move || season_url("/api/stats/me", season()));
-    let heroes =
-        use_api_with::<Vec<HeroStats>>(move || season_url("/api/stats/me/heroes", season()));
+    // "Total or per season": one selection drives every tab's fetch.
+    // Nothing saved is all time. "Current season" is stored as a sentinel so a
+    // rollover follows. Every season row is pinned by id, including the one
+    // that is current now, an upcoming season, and a second flagged season.
+    let season = use_stats_season();
+    let stats = use_api_with::<PersonalStats>(move || season.fetch_path("/api/stats/me"));
+    let heroes = use_api_with::<Vec<HeroStats>>(move || season.fetch_path("/api/stats/me/heroes"));
     let role_stats = use_api_with::<Vec<scuffed_types::RoleStats>>(move || {
-        season_url(role::my_roles_path(), season())
+        season.fetch_path(role::my_roles_path())
     });
-    let maps = use_api_with::<Vec<MapStats>>(move || season_url("/api/stats/me/maps", season()));
+    let maps = use_api_with::<Vec<MapStats>>(move || season.fetch_path("/api/stats/me/maps"));
     let server_settings = use_api::<MemberSettingsResponse>("/api/stats/settings");
 
     let mut tab = use_signal(|| StatsTab::Overview);
@@ -962,11 +931,11 @@ pub fn Stats() -> Element {
             Some(c) => format!("/api/stats/me/matches?limit=25&cursor={c}"),
             None => "/api/stats/me/matches?limit=25".to_string(),
         };
-        season_url(&base, season())
+        season.fetch_path(&base)
     });
     // Overview form strip — same endpoint, limit=10, no new backend (Q3).
     let form_matches =
-        use_api_with::<MatchPage>(move || season_url("/api/stats/me/matches?limit=10", season()));
+        use_api_with::<MatchPage>(move || season.fetch_path("/api/stats/me/matches?limit=10"));
 
     let mut density = use_signal(initial_density);
     let hero_role = use_signal(|| "All");
@@ -1013,10 +982,12 @@ pub fn Stats() -> Element {
                 div { class: "stats-header-actions",
                     SeasonSelect {
                         id: "stats-season".to_string(),
-                        value: season(),
+                        seasons: season.season_list(),
+                        seasons_error: season.seasons_error(),
+                        on_retry: move |_| season.retry(),
+                        value: season.selected_id(),
                         onchange: move |s: Option<String>| {
-                            persist_season(s.as_deref());
-                            season.set(s);
+                            season.choose(s);
                             // History pagination belongs to one window — restart it.
                             page_cursor.set(None);
                             cursor_history.set(vec![None]);
@@ -1189,6 +1160,7 @@ mod map_mode_tests {
             "Watchpoint: Grimsvotn",
             "Watchpoint: Grímsvotn",
             "Watchpoint: Grimsvötn",
+            "Watchpoint: Gri\u{0301}msvo\u{0308}tn",
             "WATCHPOINT: grímsvötn",
             "watchpoint grimsvotn",
             "watchpointgrimsvotn",
@@ -1197,7 +1169,7 @@ mod map_mode_tests {
             "grimsvötn",
             "grímsvotn",
         ] {
-            assert_eq!(map_game_mode(name), "Escort", "{name}");
+            assert_eq!(map_game_mode(name), "Escort", "{name:?}");
         }
         assert_eq!(map_game_mode("Watchpoint: Gibraltar"), "Escort");
         assert_eq!(map_game_mode("Watchpoint"), "Escort");

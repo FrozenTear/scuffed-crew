@@ -339,16 +339,63 @@ impl RowScan {
 
     /// 5v5 or 6v6 from the row pitch; defaults to 5 when no pitch was
     /// measurable. Threshold sits between the measured 5v5 (~8.3%) and
-    /// 6v6 (~7.4%) pitches. Prefers the spectral pitch — dip spacing
-    /// overshoots when a sparse row fails to produce its own dip (measured
-    /// 0.101 on a 0:00 all-zero 6v6 board, misread as 5v5).
+    /// 6v6 (~7.4%) pitches. See [`RowScan::checked_team_size`] for which
+    /// pitch is used. When that returns `None` (the pitches contradict each
+    /// other), this falls back to the old rule (spectral pitch, else dip
+    /// pitch) so offline callers still get a size. The capture path rejects
+    /// that frame instead.
     pub fn team_size(&self) -> usize {
-        match self.spectral_pitch.or(self.median_pitch) {
-            Some(p) if p < 0.079 => 6,
-            _ => 5,
+        self.checked_team_size().unwrap_or_else(|| {
+            match self.spectral_pitch.or(self.median_pitch) {
+                Some(p) if p < TEAM_SIZE_PITCH_SPLIT => 6,
+                _ => 5,
+            }
+        })
+    }
+
+    /// 5v5 or 6v6 only when the row pitch says so without contradiction.
+    ///
+    /// A pitch outside [`ROW_PITCH_PLAUSIBLE`] matches neither layout and
+    /// is ignored. Dip spacing overshoots when a sparse row fails to make
+    /// its own dip (0.101 on a 0:00 all-zero 6v6 board). The spectral peak
+    /// can lock onto something that is not the row pitch: on the centred
+    /// post-game table (`accepted_20261007_235921`, placeholder portraits,
+    /// titles under some names) it measured 0.102 while the dips measured
+    /// 0.0745. Preferring that spectral value gave 5, every row of that
+    /// 6v6 table was cut one slot off, and 60 of 72 cells were wrong, 20 of
+    /// them at confidence 90 or more (Scuffed Vision baseline, PR 158).
+    ///
+    /// - No pitch measured at all: 5, the documented default, as before.
+    /// - Both pitches plausible: they must agree on the layout, or the size
+    ///   is unknown.
+    /// - One plausible: that one decides.
+    /// - Pitches measured but none plausible: unknown.
+    pub fn checked_team_size(&self) -> Option<usize> {
+        if self.spectral_pitch.is_none() && self.median_pitch.is_none() {
+            return Some(5);
+        }
+        let plausible = |p: Option<f64>| p.filter(|p| ROW_PITCH_PLAUSIBLE.contains(p));
+        let layout = |p: f64| if p < TEAM_SIZE_PITCH_SPLIT { 6 } else { 5 };
+        match (
+            plausible(self.spectral_pitch).map(layout),
+            plausible(self.median_pitch).map(layout),
+        ) {
+            (Some(a), Some(b)) if a == b => Some(a),
+            (Some(_), Some(_)) => None,
+            (Some(a), None) | (None, Some(a)) => Some(a),
+            (None, None) => None,
         }
     }
 }
+
+/// Row pitch (fraction of crop height) between the two layouts: 6v6 below,
+/// 5v5 at or above.
+const TEAM_SIZE_PITCH_SPLIT: f64 = 0.079;
+
+/// Row pitches that can be a real 6v6 (about 0.074) or 5v5 (about 0.083)
+/// scoreboard, with about 15% of margin on each side. 0.101 and 0.102, the
+/// two misleading pitches measured so far, fall outside.
+const ROW_PITCH_PLAUSIBLE: std::ops::RangeInclusive<f64> = 0.062..=0.095;
 
 /// Detect whether the scoreboard shows 5v5 or 6v6 via the team-1 row pitch.
 ///
@@ -906,5 +953,82 @@ mod provisional_portrait_tests {
         let replaceable = portrait_slot_is_replaceable(&path);
         assert!(!replaceable);
         assert!(!should_save_portrait_crop(true, true, replaceable, true));
+    }
+}
+
+#[cfg(test)]
+mod team_size_tests {
+    use super::RowScan;
+
+    fn scan(dips: usize, median: Option<f64>, spectral: Option<f64>) -> RowScan {
+        RowScan {
+            dip_count: dips,
+            median_pitch: median,
+            spectral_pitch: spectral,
+        }
+    }
+
+    #[test]
+    fn postgame_table_with_a_stray_spectral_peak_is_six() {
+        // Measured on accepted_20261007_235921 (Scuffed Vision, PR 158) at
+        // native and 0.75x. The old rule preferred the 0.102 spectral peak
+        // and returned 5, shifting every row of the 6v6 table.
+        for s in [
+            scan(4, Some(0.07447864945382324), Some(0.10228401191658391)),
+            scan(4, Some(0.07539682539682539), Some(0.10185185185185185)),
+        ] {
+            assert_eq!(s.checked_team_size(), Some(6), "{s:?}");
+            assert_eq!(s.team_size(), 6, "{s:?}");
+        }
+    }
+
+    #[test]
+    fn sparse_board_with_overshooting_dips_is_still_six() {
+        // 0:00 all-zero 6v6 board: a missing dip stretches the dip pitch to
+        // 0.101 while the spectral peak keeps the real 0.0745 row pitch.
+        let s = scan(3, Some(0.101), Some(0.0745));
+        assert_eq!(s.checked_team_size(), Some(6));
+        assert_eq!(s.team_size(), 6);
+    }
+
+    #[test]
+    fn typical_boards_keep_their_size() {
+        assert_eq!(
+            scan(6, Some(0.074), Some(0.0742)).checked_team_size(),
+            Some(6)
+        );
+        assert_eq!(
+            scan(5, Some(0.083), Some(0.0835)).checked_team_size(),
+            Some(5)
+        );
+        assert_eq!(scan(5, Some(0.083), None).checked_team_size(), Some(5));
+        assert_eq!(scan(6, None, Some(0.074)).checked_team_size(), Some(6));
+    }
+
+    #[test]
+    fn nothing_measured_keeps_the_documented_default() {
+        let s = scan(0, None, None);
+        assert_eq!(s.checked_team_size(), Some(5));
+        assert_eq!(s.team_size(), 5);
+    }
+
+    #[test]
+    fn contradicting_plausible_pitches_are_unknown() {
+        // Both pitches fit a layout but not the same one: capture rejects,
+        // offline callers fall back to the spectral pitch as before.
+        let s = scan(5, Some(0.084), Some(0.074));
+        assert_eq!(s.checked_team_size(), None);
+        assert_eq!(s.team_size(), 6);
+        let s = scan(5, Some(0.074), Some(0.084));
+        assert_eq!(s.checked_team_size(), None);
+        assert_eq!(s.team_size(), 5);
+    }
+
+    #[test]
+    fn only_implausible_pitches_are_unknown() {
+        let s = scan(3, Some(0.11), Some(0.05));
+        assert_eq!(s.checked_team_size(), None);
+        assert_eq!(s.team_size(), 6);
+        assert_eq!(scan(2, Some(0.12), None).checked_team_size(), None);
     }
 }

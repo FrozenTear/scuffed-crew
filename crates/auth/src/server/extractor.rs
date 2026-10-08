@@ -32,6 +32,11 @@ impl<S: HasAuth> AuthUser<S> {
     pub fn into_inner(self) -> User {
         self.0
     }
+
+    /// Build the extractor from a user row. Route tests call handlers directly.
+    pub fn from_user(user: User) -> Self {
+        Self(user, std::marker::PhantomData)
+    }
 }
 
 impl<S: HasAuth> std::ops::Deref for AuthUser<S> {

@@ -125,6 +125,27 @@ fn session_inactive_not_in_list(recent: &[Member], listed_ids: &[String]) -> Vec
         .collect()
 }
 
+/// Officer avatar upload for one member on the admin list.
+///
+/// `member_id` is the same record key `PUT /api/members/{mid}` already uses.
+/// It is percent-encoded and otherwise left as-is (a `member:` prefix stays).
+fn admin_avatar_upload_url(member_id: &str) -> String {
+    format!(
+        "/api/upload/avatar?member_id={}",
+        crate::util::encode_query(member_id)
+    )
+}
+
+/// Toast copy when the avatar upload is rejected. 403 and 404 come from the
+/// same profile-edit check as `PUT /api/members/{mid}`.
+fn avatar_upload_failure_message(status: u16) -> String {
+    match status {
+        403 => "You don't have permission to change this member's avatar.".to_string(),
+        404 => "That member no longer exists.".to_string(),
+        other => format!("Upload failed: HTTP {other}"),
+    }
+}
+
 #[component]
 pub fn AdminMembers() -> Element {
     let auth = use_auth();
@@ -509,8 +530,8 @@ pub fn AdminMembers() -> Element {
             opts.set_body(&form_data.into());
             opts.set_credentials(web_sys::RequestCredentials::SameOrigin);
 
-            let Ok(request) = web_sys::Request::new_with_str_and_init("/api/upload/avatar", &opts)
-            else {
+            let upload_url = admin_avatar_upload_url(&mid);
+            let Ok(request) = web_sys::Request::new_with_str_and_init(&upload_url, &opts) else {
                 toast.show(Toast::error("Could not build upload request."));
                 avatar_uploading.set(false);
                 return;
@@ -563,10 +584,7 @@ pub fn AdminMembers() -> Element {
                             toast.show(Toast::error("Failed to read upload response."));
                         }
                     } else {
-                        toast.show(Toast::error(format!(
-                            "Upload failed: HTTP {}",
-                            resp.status()
-                        )));
+                        toast.show(Toast::error(avatar_upload_failure_message(resp.status())));
                     }
                 }
                 Err(_) => toast.show(Toast::error("Upload request failed.")),
@@ -1194,5 +1212,45 @@ mod tests {
         assert!(!session_inactive_note().contains("#52"));
         assert!(!session_inactive_note().contains("include_inactive"));
         assert!(session_inactive_note().contains("Activate"));
+    }
+
+    #[test]
+    fn admin_avatar_upload_url_keeps_a_plain_key() {
+        assert_eq!(
+            admin_avatar_upload_url("abc123"),
+            "/api/upload/avatar?member_id=abc123"
+        );
+    }
+
+    #[test]
+    fn admin_avatar_upload_url_keeps_a_member_prefix() {
+        assert_eq!(
+            admin_avatar_upload_url("member:abc123"),
+            "/api/upload/avatar?member_id=member%3Aabc123"
+        );
+    }
+
+    #[test]
+    fn admin_avatar_upload_url_encodes_reserved_characters() {
+        assert_eq!(
+            admin_avatar_upload_url("a b/c+d"),
+            "/api/upload/avatar?member_id=a%20b%2Fc%2Bd"
+        );
+    }
+
+    #[test]
+    fn avatar_upload_failure_message_names_403_and_404() {
+        assert_eq!(
+            avatar_upload_failure_message(403),
+            "You don't have permission to change this member's avatar."
+        );
+        assert_eq!(
+            avatar_upload_failure_message(404),
+            "That member no longer exists."
+        );
+        assert_eq!(
+            avatar_upload_failure_message(500),
+            "Upload failed: HTTP 500"
+        );
     }
 }

@@ -89,6 +89,28 @@ fn team_rid(id: &str) -> RecordId {
     RecordId::new("team", id)
 }
 
+/// Roster rows that are safe to show and to fan out.
+///
+/// The edge must be active, the member row must be active, and the member must
+/// not have an active ban. `moderation_action.member_id` is the bare key, so
+/// compare it with `meta::id(in)` (same normalisation as `count_actionable_admins`).
+/// A suspension is not a ban: those members stay active and stay on the roster.
+macro_rules! roster_select {
+    ($select:literal) => {
+        concat!(
+            $select,
+            " AND is_active = true ",
+            "AND in.is_active = true ",
+            "AND meta::id(in) NOT IN ( ",
+            "SELECT VALUE member_id FROM moderation_action ",
+            "WHERE is_active = true ",
+            "AND action_type = 'ban' ",
+            "AND (expires_at IS NONE OR expires_at > time::now()) ",
+            ")"
+        )
+    };
+}
+
 impl Database {
     /// Add a member to a team's roster.
     pub async fn add_to_roster(
@@ -121,16 +143,21 @@ impl Database {
         .await
     }
 
-    /// Get a team's roster (all active members on the team).
+    /// Get a team's roster: active edges to active members who are not banned.
+    ///
+    /// Public roster pages, `roster_count`, officer gift-wrap recipients, and
+    /// NIP-29 `sync_team_roster` all read this. A ban leaves the edge in place
+    /// and (until lifted) leaves `member.is_active` false; both are filtered,
+    /// and a ban row also excludes a member whose `is_active` was set back on.
     pub async fn get_team_roster(&self, team_id: &str) -> DbResult<Vec<RosterEntry>> {
         with_timeout(async {
             let mut result = self
                 .client
-                .query(
+                .query(roster_select!(
                     r#"SELECT *, meta::id(id) as id, <string>in as in, <string>out as out
                        FROM plays_on
-                       WHERE out = $team_rid AND is_active = true"#,
-                )
+                       WHERE out = $team_rid"#
+                ))
                 .bind(("team_rid", team_rid(team_id)))
                 .await?;
             let entries: Vec<DbRosterEntry> = result.take(0)?;
@@ -151,12 +178,12 @@ impl Database {
         with_timeout(async {
             let mut result = self
                 .client
-                .query(
+                .query(roster_select!(
                     r#"SELECT <string>in AS member_id, team_role, joined_at,
                        in.display_name AS member_name, in.avatar_url AS avatar_url
                        FROM plays_on
-                       WHERE out = $team_rid AND is_active = true"#,
-                )
+                       WHERE out = $team_rid"#
+                ))
                 .bind(("team_rid", team_rid(team_id)))
                 .await?;
             let entries: Vec<DbNamedRosterEntry> = result.take(0)?;
@@ -368,19 +395,73 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn named_roster_dangling_edge_yields_none() {
+    async fn named_roster_omits_dangling_edge() {
         let db = seeded_db().await;
-        // An edge whose `in` points at a member id with no backing row. (Deleting
-        // an existing member cascades the edge away in SurrealDB v3, so a dangling
-        // edge can only arise from an edge referencing a never-present member.)
+        // An edge whose `in` points at a member id with no backing row. There is
+        // no active member to show, so the roster omits it.
         db.add_to_roster("ghost", "t1", TeamRole::Player)
             .await
             .expect("relate ghost edge");
 
-        let roster = db.get_team_roster_named("t1").await.expect("join");
-        assert_eq!(roster.len(), 1);
-        assert_eq!(roster[0].member_id, "ghost");
-        assert_eq!(roster[0].member_name, None, "dangling edge => no name");
-        assert_eq!(roster[0].avatar_url, None);
+        let named = db.get_team_roster_named("t1").await.expect("join");
+        assert!(named.is_empty(), "dangling edge is not a member: {named:?}");
+        let plain = db.get_team_roster("t1").await.expect("plain");
+        assert!(plain.is_empty(), "dangling edge is not a member: {plain:?}");
+    }
+
+    #[tokio::test]
+    async fn roster_omits_inactive_and_banned_members() {
+        let db = seeded_db().await;
+        db.client
+            .query(
+                r#"CREATE member:gone SET user_id = 'ug', org_role = 'member',
+                       display_name = 'Gone', is_active = false;
+                   CREATE member:banned SET user_id = 'uban', org_role = 'officer',
+                       display_name = 'Banned', is_active = true;
+                   CREATE member:suspended SET user_id = 'usus', org_role = 'officer',
+                       display_name = 'Suspended', is_active = true;"#,
+            )
+            .await
+            .expect("seed extra members");
+        for (id, role) in [
+            ("alice", TeamRole::Captain),
+            ("gone", TeamRole::Player),
+            ("banned", TeamRole::Player),
+            ("suspended", TeamRole::Coach),
+        ] {
+            db.add_to_roster(id, "t1", role).await.expect("add");
+        }
+        db.create_moderation_action(
+            "banned",
+            crate::types::ModerationActionType::Ban,
+            "roster",
+            "alice",
+            None,
+        )
+        .await
+        .expect("ban");
+        db.create_moderation_action(
+            "suspended",
+            crate::types::ModerationActionType::Suspension,
+            "temp",
+            "alice",
+            None,
+        )
+        .await
+        .expect("suspend");
+
+        let mut named = db.get_team_roster_named("t1").await.expect("named");
+        named.sort_by(|a, b| a.member_id.cmp(&b.member_id));
+        let ids: Vec<_> = named.iter().map(|e| e.member_id.as_str()).collect();
+        assert_eq!(
+            ids,
+            ["alice", "suspended"],
+            "inactive and banned members stay off the roster; a suspension does not"
+        );
+
+        let mut plain = db.get_team_roster("t1").await.expect("plain");
+        plain.sort_by(|a, b| a.member_id.cmp(&b.member_id));
+        let plain_ids: Vec<_> = plain.iter().map(|e| e.member_id.as_str()).collect();
+        assert_eq!(plain_ids, ["alice", "suspended"]);
     }
 }

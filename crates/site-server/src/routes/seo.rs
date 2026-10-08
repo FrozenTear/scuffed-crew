@@ -2,8 +2,11 @@
 //!
 //! `/robots.txt` and `/sitemap.xml` are explicit routes so they win over the
 //! `dist/` catch-all (which would otherwise return `index.html` as 200 HTML).
-//! Cache headers are applied only to that catch-all, never to `/api/*` or
-//! `/uploads`.
+//! Unmatched `/api` and `/api/*` requests get the JSON error envelope
+//! (`{"error":"Not found"}`) instead of that shell. OPTIONS is answered by
+//! the CORS layer and never reaches that 404. The static cache policy
+//! (`cache_control_value`) applies only to `dist/` responses, never to
+//! registered `/api/*` routes or `/uploads`; the unmatched-API 404 is `no-store`.
 //!
 //! # `sc-settings` embed
 //!
@@ -55,6 +58,7 @@ use axum::extract::State;
 use axum::http::{HeaderValue, Method, Request, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use chrono::{DateTime, SecondsFormat, Utc};
+use scuffed_auth::server::session::ErrorResponse;
 use scuffed_db::{ForumBoard, ForumBoardNode, ForumCategoryNode, MatchType, TournamentStatus};
 use tower::Service;
 use tower_http::services::ServeDir;
@@ -266,6 +270,42 @@ pub(crate) fn spa_service(dist_dir: &Path, state: AppState) -> SpaService {
         files,
         state,
     }
+}
+
+/// `/api` and `/api/...`. `/apiary` and `/api-docs` are ordinary client paths.
+pub(crate) fn is_api_path(path: &str) -> bool {
+    path == "/api" || path.starts_with("/api/")
+}
+
+/// JSON 404 for an unmatched API path.
+///
+/// The router reaches this service only after registered routes miss, so a
+/// known `/api` path with a wrong method other than OPTIONS stays 405. OPTIONS
+/// on a route registered inside [`crate::create_router`] is answered by the
+/// CORS layer with 200 and does not reach this function. OPTIONS on an
+/// unmatched `/api` path is also answered by the CORS layer with 200 and never
+/// reaches this function. `scuffed-server` merges strategy routes and adds chat
+/// and websocket routes with `.route` on top of [`crate::create_router`]; those
+/// stay registered routes, outside the CORS layer, so OPTIONS on them is 405.
+/// HEAD uses the same status and headers as GET, with an empty body.
+fn unmatched_api_response(method: &Method) -> Response {
+    let json = serde_json::to_vec(&ErrorResponse {
+        error: "Not found".to_string(),
+    })
+    .expect("ErrorResponse serializes");
+    let len = json.len();
+    let body = if *method == Method::HEAD {
+        Body::empty()
+    } else {
+        Body::from(json)
+    };
+    Response::builder()
+        .status(StatusCode::NOT_FOUND)
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::CACHE_CONTROL, "no-store")
+        .header(header::CONTENT_LENGTH, len.to_string())
+        .body(body)
+        .expect("unmatched api response")
 }
 
 #[derive(Clone)]
@@ -1093,6 +1133,10 @@ where
     fn call(&mut self, req: Request<ReqBody>) -> Self::Future {
         let path = req.uri().path().to_owned();
         let method = req.method().clone();
+        if is_api_path(&path) {
+            let response = unmatched_api_response(&method);
+            return Box::pin(std::future::ready(Ok(response)));
+        }
         let shell_method = method == Method::GET || method == Method::HEAD;
         let route = if shell_method {
             let have_index = self
@@ -1734,6 +1778,19 @@ mod tests {
         assert!(!SHELL_CACHE.contains("immutable"));
     }
 
+    #[test]
+    fn api_path_requires_the_api_segment() {
+        assert!(is_api_path("/api"));
+        assert!(is_api_path("/api/"));
+        assert!(is_api_path("/api/nope"));
+        assert!(is_api_path("/api/stats/me/roles"));
+        assert!(!is_api_path("/apiary"));
+        assert!(!is_api_path("/api-docs"));
+        assert!(!is_api_path("/"));
+        assert!(!is_api_path("/wiki/foo"));
+        assert!(!is_api_path("/assets/app.js"));
+    }
+
     fn disallow_rules(body: &str) -> Vec<&str> {
         body.lines()
             .filter_map(|line| line.trim().strip_prefix("Disallow:"))
@@ -2045,28 +2102,39 @@ mod tests {
     /// Rewrite the repo `crates/app/index.html`, and an optional second file.
     ///
     /// `SCUFFED_EXTRA_INDEX`, when set, is a path to another `index.html`
-    /// (for example Site PR #150) checked with the same rules.
-    /// `og:site_name` is required exactly once only when that template already
-    /// contains the tag, or when `SCUFFED_REQUIRE_OG_SITE_NAME=1` (the flag
-    /// applies to the extra file). More than one copy fails. PR #156 will
-    /// make the check unconditional.
+    /// checked with the same rules. `<title>`, description, `og:title`,
+    /// `og:description`, and `og:site_name` must each appear exactly once.
+    /// A missing or duplicated tag fails.
     #[test]
-    fn real_app_index_rewrite_fills_each_present_tag_once() {
+    fn real_app_index_rewrite_fills_each_tag_once() {
         let html = include_str!("../../../app/index.html");
-        assert_real_index_rewrite(html, false);
+        assert_real_index_rewrite(html);
         if let Ok(path) = std::env::var("SCUFFED_EXTRA_INDEX") {
             let extra = std::fs::read_to_string(&path).unwrap_or_else(|err| {
                 panic!("read {path}: {err}");
             });
-            let require_og_site_name = std::env::var("SCUFFED_REQUIRE_OG_SITE_NAME")
-                .ok()
-                .as_deref()
-                == Some("1");
-            assert_real_index_rewrite(&extra, require_og_site_name);
+            assert_real_index_rewrite(&extra);
         }
     }
 
-    fn assert_real_index_rewrite(html: &str, require_og_site_name: bool) {
+    /// A shell that has the other rewritten tags but no `og:site_name` fails
+    /// the bundled-template check. The live `index.html` carries the tag.
+    /// Going through `assert_real_index_rewrite` keeps the requirement on the
+    /// path the bundled file actually uses.
+    #[test]
+    #[should_panic(expected = "og:site_name must appear exactly once, found 0")]
+    fn template_without_og_site_name_is_rejected() {
+        let html = "\
+<!DOCTYPE html><html><head>\
+<title>Community</title>\
+<meta name=\"description\" content=\"Desc\">\
+<meta property=\"og:title\" content=\"Community\">\
+<meta property=\"og:description\" content=\"Desc\">\
+</head><body></body></html>";
+        assert_real_index_rewrite(html);
+    }
+
+    fn assert_real_index_rewrite(html: &str) {
         let org = "Boot <Clan> & \"Q\"";
         let desc = "Tag <line> & \"Q\"";
         let escaped_org = escape_html_text(org);
@@ -2107,17 +2175,15 @@ mod tests {
             MetaKind::Property("og:description"),
             &escaped_desc,
         );
-        let site_names = meta_values(html, MetaKind::Property("og:site_name"));
-        if require_og_site_name || !site_names.is_empty() {
-            assert_eq!(site_names.len(), 1, "og:site_name must appear exactly once");
-            assert_eq!(
-                meta_values(&out, MetaKind::Property("og:site_name")),
-                vec![escaped_org.clone()]
-            );
-        } else {
-            assert!(site_names.is_empty());
-            assert!(meta_values(&out, MetaKind::Property("og:site_name")).is_empty());
-        }
+        let found = meta_values(html, MetaKind::Property("og:site_name")).len();
+        assert_eq!(
+            found, 1,
+            "og:site_name must appear exactly once, found {found}"
+        );
+        assert_eq!(
+            meta_values(&out, MetaKind::Property("og:site_name")),
+            vec![escaped_org.clone()]
+        );
         assert_eq!(
             meta_values(html, MetaKind::Property("og:type")),
             meta_values(&out, MetaKind::Property("og:type"))
@@ -2139,11 +2205,15 @@ mod tests {
     }
 
     fn assert_present_once(source: &str, out: &str, kind: MetaKind, expected: &str) {
+        let label = match kind {
+            MetaKind::Name(name) => format!("name={name}"),
+            MetaKind::Property(name) => format!("property={name}"),
+        };
         let before = meta_values(source, kind);
         assert_eq!(
             before.len(),
             1,
-            "template must contain this meta exactly once"
+            "template must contain {label} exactly once"
         );
         assert_eq!(meta_values(out, kind), vec![expected.to_string()]);
     }

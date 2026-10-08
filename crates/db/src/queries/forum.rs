@@ -1,3 +1,6 @@
+#[cfg(test)]
+use std::cell::Cell;
+
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use surrealdb::engine::any::Any;
@@ -274,74 +277,190 @@ async fn create_board_raw(
     Ok(rid_key(created.and_then(|c| c.id)))
 }
 
-async fn migrate_legacy_thread_categories(client: &Surreal<Any>) -> DbResult<()> {
-    // Load boards by slug for mapping
-    let mut res = client
-        .query("SELECT * FROM forum_board WHERE is_active = true")
-        .await?;
-    let boards: Vec<DbForumBoard> = res.take(0)?;
-    let slug_to_id: std::collections::HashMap<String, String> = boards
-        .into_iter()
-        .map(|b| {
-            let id = rid_key(b.id.clone());
-            (b.slug, id)
-        })
-        .collect();
+/// Threads fetched per response while backfilling a missing `board_id`.
+/// Steady-state boot does not read `forum_thread` at all.
+const FORUM_LEGACY_THREAD_BATCH: u32 = 500;
 
-    let map_cat = |cat: &str| -> Option<String> {
-        let slug = match cat {
-            "general" => "general",
-            "game" => "overwatch",
-            "strategy" => "ow-strategy",
-            "offtopic" => "offtopic-general",
-            other
-                if !other.is_empty()
-                // try exact slug match
-                && slug_to_id.contains_key(other) =>
-            {
-                other
-            }
-            _ => "general",
-        };
-        slug_to_id.get(slug).cloned()
+#[cfg(test)]
+thread_local! {
+    static FORUM_THREAD_ROW_SELECTS: Cell<u64> = const { Cell::new(0) };
+    static FORUM_THREAD_BATCH_OVERRIDE: Cell<Option<u32>> = const { Cell::new(None) };
+}
+
+fn note_forum_thread_row_select() {
+    #[cfg(test)]
+    FORUM_THREAD_ROW_SELECTS.with(|n| n.set(n.get().saturating_add(1)));
+}
+
+fn forum_legacy_batch_size() -> u32 {
+    #[cfg(test)]
+    {
+        if let Some(n) = FORUM_THREAD_BATCH_OVERRIDE.with(|c| c.get()) {
+            return n.max(1);
+        }
+    }
+    FORUM_LEGACY_THREAD_BATCH
+}
+
+#[cfg(test)]
+struct ForumBatchGuard;
+
+#[cfg(test)]
+impl Drop for ForumBatchGuard {
+    fn drop(&mut self) {
+        FORUM_THREAD_BATCH_OVERRIDE.with(|c| c.set(None));
+    }
+}
+
+#[cfg(test)]
+#[must_use]
+fn set_forum_legacy_batch_size(n: u32) -> ForumBatchGuard {
+    FORUM_THREAD_BATCH_OVERRIDE.with(|c| c.set(Some(n)));
+    ForumBatchGuard
+}
+
+#[cfg(test)]
+fn reset_forum_thread_row_selects() {
+    FORUM_THREAD_ROW_SELECTS.with(|n| n.set(0));
+}
+
+#[cfg(test)]
+fn forum_thread_row_selects() -> u64 {
+    FORUM_THREAD_ROW_SELECTS.with(|n| n.get())
+}
+
+#[derive(Debug, Deserialize, SurrealValue)]
+struct BoardSlug {
+    #[surreal(default)]
+    id: Option<RecordId>,
+    slug: String,
+}
+
+#[derive(Debug, Deserialize, SurrealValue)]
+struct LegacyThreadPage {
+    #[surreal(default)]
+    id: Option<RecordId>,
+    #[serde(default)]
+    category: String,
+    #[serde(default)]
+    board_id: Option<String>,
+}
+
+fn legacy_board_id(
+    cat: &str,
+    slug_to_id: &std::collections::HashMap<String, String>,
+) -> Option<String> {
+    let slug = match cat {
+        "general" => "general",
+        "game" => "overwatch",
+        "strategy" => "ow-strategy",
+        "offtopic" => "offtopic-general",
+        other if !other.is_empty() && slug_to_id.contains_key(other) => other,
+        _ => "general",
     };
+    slug_to_id.get(slug).cloned()
+}
 
-    let mut tres = client
-        .query("SELECT * FROM forum_thread WHERE board_id = NONE OR board_id = NONE")
+async fn count_threads_missing_board(client: &Surreal<Any>) -> DbResult<u64> {
+    let mut count_res = client
+        .query(
+            "SELECT count() AS total FROM forum_thread \
+             WHERE board_id IS NONE OR board_id = '' GROUP ALL",
+        )
         .await?;
-    // Surreal may use NONE; also catch empty
-    let mut threads: Vec<DbForumThread> = tres.take(0).unwrap_or_default();
+    #[derive(Deserialize, SurrealValue)]
+    struct C {
+        total: u64,
+    }
+    Ok(count_res
+        .take::<Option<C>>(0)?
+        .map(|c| c.total)
+        .unwrap_or(0))
+}
 
-    // Also grab threads where board_id is missing entirely via broader select
-    if threads.is_empty() {
-        let mut all = client
-            .query("SELECT * FROM forum_thread WHERE is_active = true")
-            .await?;
-        let all_t: Vec<DbForumThread> = all.take(0).unwrap_or_default();
-        threads = all_t
-            .into_iter()
-            .filter(|t| t.board_id.as_ref().map(|s| s.is_empty()).unwrap_or(true))
-            .collect();
+async fn migrate_legacy_thread_categories(client: &Surreal<Any>) -> DbResult<()> {
+    // Missing `board_id` is the only work. A count of zero (the steady state)
+    // returns before any thread row is loaded. The old fallback was
+    // `SELECT * FROM forum_thread WHERE is_active = true` on every boot,
+    // because `board_id = NONE` does not match NONE in SurrealDB.
+    if count_threads_missing_board(client).await? == 0 {
+        return Ok(());
     }
 
+    let mut res = client
+        .query("SELECT id, slug FROM forum_board WHERE is_active = true")
+        .await?;
+    let boards: Vec<BoardSlug> = res.take(0)?;
+    let slug_to_id: std::collections::HashMap<String, String> = boards
+        .into_iter()
+        .map(|b| (b.slug, rid_key(b.id)))
+        .collect();
+
+    let batch = forum_legacy_batch_size();
+    let mut cursor: Option<RecordId> = None;
     let mut migrated = 0u32;
-    for t in threads {
-        if t.board_id.as_ref().map(|s| !s.is_empty()).unwrap_or(false) {
-            continue;
-        }
-        let Some(bid) = map_cat(&t.category) else {
-            continue;
+    loop {
+        note_forum_thread_row_select();
+        let mut page_res = if let Some(cursor_id) = cursor.clone() {
+            client
+                .query(
+                    "SELECT id, category, board_id FROM forum_thread \
+                     WHERE (board_id IS NONE OR board_id = '') AND id > $cursor \
+                     ORDER BY id LIMIT $lim",
+                )
+                .bind(("cursor", cursor_id))
+                .bind(("lim", batch))
+                .await?
+                .check()?
+        } else {
+            client
+                .query(
+                    "SELECT id, category, board_id FROM forum_thread \
+                     WHERE board_id IS NONE OR board_id = '' \
+                     ORDER BY id LIMIT $lim",
+                )
+                .bind(("lim", batch))
+                .await?
+                .check()?
         };
-        let id = rid_key(t.id);
-        if id == "unknown" {
-            continue;
+        let threads: Vec<LegacyThreadPage> = page_res.take(0)?;
+        if threads.is_empty() {
+            break;
         }
-        client
-            .query("UPDATE $rid SET board_id = $bid")
-            .bind(("rid", RecordId::new("forum_thread", id.as_str())))
-            .bind(("bid", bid))
-            .await?;
-        migrated += 1;
+        let page_len = threads.len() as u32;
+        let last_id = threads.last().and_then(|t| t.id.clone());
+        for thread in threads {
+            if thread
+                .board_id
+                .as_ref()
+                .is_some_and(|board| !board.is_empty())
+            {
+                continue;
+            }
+            let Some(bid) = legacy_board_id(&thread.category, &slug_to_id) else {
+                continue;
+            };
+            let id = rid_key(thread.id);
+            if id == "unknown" {
+                continue;
+            }
+            client
+                .query("UPDATE $rid SET board_id = $bid")
+                .bind(("rid", RecordId::new("forum_thread", id.as_str())))
+                .bind(("bid", bid))
+                .await?;
+            migrated += 1;
+        }
+        let Some(last_id) = last_id else {
+            break;
+        };
+        if cursor.as_ref() == Some(&last_id) {
+            break;
+        }
+        cursor = Some(last_id);
+        if page_len < batch {
+            break;
+        }
     }
     if migrated > 0 {
         tracing::info!("Migrated {migrated} forum threads to board_id");
@@ -812,6 +931,153 @@ impl Database {
             Ok(row.map(|r| r.total).unwrap_or(0))
         })
         .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ensure_forum_hierarchy;
+    use crate::migrations::run_migrations;
+    use crate::Database;
+
+    async fn test_db() -> Database {
+        let db = Database::connect_memory().await.unwrap();
+        run_migrations(&db.client).await.unwrap();
+        db
+    }
+
+    async fn board_key(db: &Database, slug: &str) -> String {
+        use serde::Deserialize;
+        use surrealdb_types::SurrealValue;
+        #[derive(Deserialize, SurrealValue)]
+        struct Row {
+            id: surrealdb_types::RecordId,
+        }
+        let mut res = db
+            .client
+            .query("SELECT id FROM forum_board WHERE slug = $slug LIMIT 1")
+            .bind(("slug", slug.to_string()))
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+        let rows: Vec<Row> = res.take(0).unwrap();
+        super::rid_key(rows.into_iter().next().map(|row| row.id))
+    }
+
+    #[tokio::test]
+    async fn forum_boot_skips_thread_scan_when_boards_are_assigned() {
+        let db = test_db().await;
+        let general = board_key(&db, "general").await;
+        db.create_forum_thread("hello", &general, "m1", "body")
+            .await
+            .unwrap();
+
+        super::reset_forum_thread_row_selects();
+        ensure_forum_hierarchy(&db.client).await.unwrap();
+        assert_eq!(
+            super::forum_thread_row_selects(),
+            0,
+            "threads that already have a board_id must not be loaded at boot"
+        );
+    }
+
+    #[tokio::test]
+    async fn legacy_threads_gain_board_ids_in_pages() {
+        let db = test_db().await;
+        let _batch = super::set_forum_legacy_batch_size(2);
+        let cases = [
+            ("general", "general", true),
+            ("game", "overwatch", true),
+            ("strategy", "ow-strategy", true),
+            ("offtopic", "offtopic-general", true),
+            ("lfg", "lfg", false),
+            ("", "general", true),
+        ];
+        for (i, (cat, _slug, active)) in cases.iter().enumerate() {
+            db.client
+                .query(
+                    "CREATE forum_thread SET title = $title, category = $cat, \
+                     author_member_id = 'm1', content = 'x', board_id = NONE, \
+                     is_active = $active",
+                )
+                .bind(("title", format!("legacy-{i}")))
+                .bind(("cat", (*cat).to_string()))
+                .bind(("active", *active))
+                .await
+                .unwrap()
+                .check()
+                .unwrap();
+        }
+        // Empty string is a second spelling of "missing".
+        db.client
+            .query(
+                "CREATE forum_thread SET title = 'blank-board', category = 'strategy', \
+                 author_member_id = 'm1', content = 'x', board_id = '', is_active = true",
+            )
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+
+        super::reset_forum_thread_row_selects();
+        ensure_forum_hierarchy(&db.client).await.unwrap();
+        let selects = super::forum_thread_row_selects();
+        assert!(
+            selects >= 3,
+            "legacy threads must be loaded in pages, got {selects} selects"
+        );
+
+        use serde::Deserialize;
+        use surrealdb_types::SurrealValue;
+        #[derive(Deserialize, SurrealValue)]
+        struct ThreadBoard {
+            title: String,
+            category: String,
+            board_id: Option<String>,
+        }
+        let mut res = db
+            .client
+            .query("SELECT title, category, board_id FROM forum_thread")
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+        let threads: Vec<ThreadBoard> = res.take(0).unwrap();
+        assert_eq!(threads.len(), cases.len() + 1);
+        for thread in threads {
+            let expected_slug = if thread.title == "blank-board" {
+                "ow-strategy"
+            } else {
+                let (_cat, slug, _) = cases
+                    .iter()
+                    .find(|(cat, _, _)| thread.category == *cat && thread.title != "blank-board")
+                    .copied()
+                    .unwrap_or_else(|| panic!("unexpected thread {}", thread.title));
+                // Disambiguate the two rows that map through "general".
+                if thread.category.is_empty() {
+                    "general"
+                } else {
+                    slug
+                }
+            };
+            let expected = board_key(&db, expected_slug).await;
+            assert_eq!(
+                thread.board_id.as_deref(),
+                Some(expected.as_str()),
+                "title {} category {:?}",
+                thread.title,
+                thread.category
+            );
+        }
+
+        super::reset_forum_thread_row_selects();
+        ensure_forum_hierarchy(&db.client).await.unwrap();
+        assert_eq!(
+            super::forum_thread_row_selects(),
+            0,
+            "once every thread has a board_id, boot must not read forum_thread"
+        );
     }
 }
 
