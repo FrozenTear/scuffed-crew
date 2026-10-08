@@ -105,6 +105,9 @@ services:
       # compose-network gateway. scripts/ensure-trusted-proxies.sh writes that
       # gateway into data/secrets.env (see docs/deploy.md).
       TRUSTED_PROXIES: ${TRUSTED_PROXIES:-}
+      # Shared by /api/strategy/ws and /relay. See .env.example.
+      WS_MAX_CONNECTIONS: ${WS_MAX_CONNECTIONS:-512}
+      WS_MAX_PER_IP: ${WS_MAX_PER_IP:-32}
       PRODUCTION: ${PRODUCTION:-}
       SECURE_COOKIES: ${SECURE_COOKIES:-}
       BOOTSTRAP_ADMIN_RESET: ${BOOTSTRAP_ADMIN_RESET:-}

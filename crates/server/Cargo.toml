@@ -30,6 +30,7 @@ thiserror = { workspace = true }
 dotenvy = "0.15"
 dashmap = "6"
 futures = "0.3"
+tokio-tungstenite = { version = "0.26", features = ["native-tls"] }
 blake3 = "1"
 base64 = "0.22"
 sha2 = "0.10"

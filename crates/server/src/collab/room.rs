@@ -6,8 +6,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore, mpsc};
 
-/// Hard caps against connection floods (strategy collab WS).
-pub const MAX_GLOBAL_CONNECTIONS: usize = 256;
+/// Joined-room cap. Matches the default `WS_MAX_CONNECTIONS` semaphore, which
+/// is the admission limit for every socket (joined or not). `RoomManager::with_global_limit`
+/// uses the configured value so the two caps stay aligned.
+pub const MAX_GLOBAL_CONNECTIONS: usize = 512;
 pub const MAX_ROOM_CONNECTIONS: usize = 32;
 /// Max concurrent fire-and-forget DB persist tasks across all rooms.
 pub const MAX_CONCURRENT_PERSISTS: usize = 64;
@@ -122,20 +124,32 @@ impl Default for Room {
 pub struct RoomManager {
     rooms: DashMap<StrategyId, Room>,
     global_connections: AtomicUsize,
+    max_global: usize,
     persist_sem: Arc<Semaphore>,
     strategy_locks: DashMap<StrategyId, Arc<Mutex<()>>>,
 }
 
 impl RoomManager {
     pub fn new() -> Self {
+        Self::with_global_limit(MAX_GLOBAL_CONNECTIONS)
+    }
+
+    /// `max_global` is the joined-connection cap. Pass the same number as
+    /// `WS_MAX_CONNECTIONS` so a socket that already holds an admission permit
+    /// is not rejected by a lower hard-coded ceiling.
+    pub fn with_global_limit(max_global: usize) -> Self {
         Self {
             rooms: DashMap::new(),
             global_connections: AtomicUsize::new(0),
+            max_global: max_global.max(1),
             persist_sem: Arc::new(Semaphore::new(MAX_CONCURRENT_PERSISTS)),
             strategy_locks: DashMap::new(),
         }
     }
 
+    /// Joined strategy connections. Sockets that have not joined are counted
+    /// by the WebSocket admission semaphore instead.
+    #[allow(dead_code)]
     pub fn global_connection_count(&self) -> usize {
         self.global_connections.load(Ordering::Relaxed)
     }
@@ -154,7 +168,7 @@ impl RoomManager {
     ) -> Result<(), JoinError> {
         // Optimistic global reserve; roll back on room-limit reject.
         let prev = self.global_connections.fetch_add(1, Ordering::AcqRel);
-        if prev >= MAX_GLOBAL_CONNECTIONS {
+        if prev >= self.max_global {
             self.global_connections.fetch_sub(1, Ordering::AcqRel);
             return Err(JoinError::GlobalLimit);
         }

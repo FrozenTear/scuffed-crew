@@ -141,14 +141,16 @@ impl Database {
         .await
     }
 
-    /// List all group IDs that are officer-only (used for read ACL filtering).
+    /// List every officer-only group id, including deactivated channels.
+    ///
+    /// The feed ACL must keep historical posts from a deactivated officer
+    /// channel restricted. Filtering only `is_active = true` made those posts
+    /// public the moment the channel was turned off.
     pub async fn list_officer_group_ids(&self) -> DbResult<Vec<String>> {
         with_timeout(async {
             let mut result = self
                 .client
-                .query(
-                    "SELECT group_id FROM team_channel WHERE group_type = 'officer' AND is_active = true",
-                )
+                .query("SELECT * FROM team_channel WHERE group_type = 'officer'")
                 .await?;
             let rows: Vec<DbTeamChannel> = result.take(0)?;
             Ok(rows.into_iter().map(|r| r.group_id).collect())

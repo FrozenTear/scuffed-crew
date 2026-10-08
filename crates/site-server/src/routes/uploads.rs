@@ -49,7 +49,7 @@ pub struct UploadResponse {
 ///
 /// Member ids are server-generated record ids (e.g. `member:abc123`); we still
 /// sanitize defensively so a key can never contain path separators or `..`.
-fn member_dir_key(member_id: &str) -> String {
+pub(crate) fn member_dir_key(member_id: &str) -> String {
     let key: String = member_id
         .chars()
         .map(|c| {
@@ -133,32 +133,155 @@ async fn enforce_member_quota(category_dir: &Path, new_bytes: u64) -> Result<(),
     Ok(())
 }
 
-/// Best-effort delete of a previously-stored **local** upload. External URLs
-/// (e.g. a Discord/Google OAuth avatar CDN link) and anything that isn't a
-/// clean `/uploads/…` path are ignored. Failures are logged, never fatal.
-async fn delete_local_upload(upload_dir: &Path, url: &str) {
-    let Some(rel) = url.strip_prefix("/uploads/") else {
-        return; // not a locally-hosted upload
-    };
-    // Reject traversal / empty components defensively.
-    if rel.is_empty()
-        || rel
-            .split('/')
-            .any(|c| c.is_empty() || c == "." || c == "..")
-    {
-        tracing::warn!(url = %url, "refusing to delete suspicious upload path");
-        return;
+/// Public URL prefix for one member's avatar files: `/uploads/avatars/<key>/`.
+pub(crate) fn member_avatar_prefix(member_id: &str) -> String {
+    format!("/uploads/avatars/{}/", member_dir_key(member_id))
+}
+
+/// Accept an avatar URL on profile update.
+///
+/// `Ok(None)` clears the field (empty / whitespace). `Ok(Some)` is either an
+/// external `https` URL or a path under **this** member's `avatars/<key>/`
+/// folder. Anything else — another member's upload, an officer image, a
+/// traversal, `http` — is rejected.
+pub(crate) fn normalize_avatar_url(
+    member_id: &str,
+    raw: &str,
+) -> Result<Option<String>, &'static str> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
     }
-    let path = upload_dir.join(rel);
+    if trimmed.chars().any(|c| c.is_control() || c.is_whitespace()) {
+        return Err(
+            "avatar_url must be empty, an https URL, or a file under your own avatars folder",
+        );
+    }
+    if trimmed
+        .get(..8)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("https://"))
+    {
+        let rest = &trimmed[8..];
+        if rest.is_empty() || rest.contains('\\') {
+            return Err(
+                "avatar_url must be empty, an https URL, or a file under your own avatars folder",
+            );
+        }
+        return Ok(Some(trimmed.to_string()));
+    }
+    let prefix = member_avatar_prefix(member_id);
+    if let Some(rel) = trimmed.strip_prefix(&prefix)
+        && avatar_rel_is_safe(rel)
+    {
+        return Ok(Some(trimmed.to_string()));
+    }
+    Err("avatar_url must be empty, an https URL, or a file under your own avatars folder")
+}
+
+/// Relative path under `avatars/<key>/`. Rejects empty segments, `.`, `..`,
+/// and characters that would let a later join escape the folder.
+fn avatar_rel_is_safe(rel: &str) -> bool {
+    if rel.is_empty()
+        || rel.contains('\\')
+        || rel.contains('\0')
+        || rel.contains('?')
+        || rel.contains('#')
+        || rel.contains('%')
+    {
+        return false;
+    }
+    let mut any = false;
+    for seg in rel.split('/') {
+        if seg.is_empty() || seg == "." || seg == ".." {
+            return false;
+        }
+        if !seg
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
+        {
+            return false;
+        }
+        any = true;
+    }
+    any
+}
+
+/// Delete the uploader's previous avatar file, and nothing else.
+///
+/// The stored URL must sit under `avatars/<this member's key>/`. The path is
+/// canonicalized; `..`, a symlink anywhere along the path, or a resolved
+/// location outside that folder is left untouched.
+async fn delete_replaced_avatar(upload_dir: &Path, member_id: &str, url: &str) {
+    let Some(path) = owned_avatar_file(upload_dir, member_id, url).await else {
+        if url.starts_with("/uploads/") {
+            tracing::warn!(
+                url = %url,
+                member_id = %member_id,
+                "refusing to delete avatar outside the uploader's own folder"
+            );
+        }
+        return;
+    };
     match tokio::fs::remove_file(&path).await {
-        Ok(()) => tracing::debug!(path = %path.display(), "deleted replaced upload"),
+        Ok(()) => tracing::debug!(path = %path.display(), "deleted replaced avatar"),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            tracing::debug!(path = %path.display(), "replaced upload already gone");
+            tracing::debug!(path = %path.display(), "replaced avatar already gone");
         }
         Err(e) => {
-            tracing::warn!(path = %path.display(), error = %e, "failed to delete replaced upload")
+            tracing::warn!(path = %path.display(), error = %e, "failed to delete replaced avatar")
         }
     }
+}
+
+async fn owned_avatar_file(
+    upload_dir: &Path,
+    member_id: &str,
+    url: &str,
+) -> Option<std::path::PathBuf> {
+    let prefix = member_avatar_prefix(member_id);
+    let rel = url.strip_prefix(&prefix)?;
+    if !avatar_rel_is_safe(rel) {
+        return None;
+    }
+    let base = upload_dir.join("avatars").join(member_dir_key(member_id));
+    let candidate = base.join(rel);
+    if path_contains_symlink(&candidate).await {
+        return None;
+    }
+    let canon_base = tokio::fs::canonicalize(&base).await.ok()?;
+    let canon_file = tokio::fs::canonicalize(&candidate).await.ok()?;
+    if !canon_file.starts_with(&canon_base) || canon_file == canon_base {
+        return None;
+    }
+    let meta = tokio::fs::symlink_metadata(&canon_file).await.ok()?;
+    if !meta.is_file() {
+        return None;
+    }
+    Some(canon_file)
+}
+
+/// True when any existing component of `path` is a symlink.
+async fn path_contains_symlink(path: &Path) -> bool {
+    let mut cur = std::path::PathBuf::new();
+    for comp in path.components() {
+        use std::path::Component;
+        match comp {
+            Component::Prefix(_) | Component::RootDir => cur.push(comp),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                cur.pop();
+            }
+            Component::Normal(seg) => {
+                cur.push(seg);
+                if let Ok(meta) = tokio::fs::symlink_metadata(&cur).await
+                    && meta.file_type().is_symlink()
+                {
+                    return true;
+                }
+            }
+        }
+    }
+    false
 }
 
 /// Map a `save_upload` failure onto an HTTP response, preserving the specific
@@ -255,12 +378,13 @@ pub async fn upload_avatar(
     )
     .await?;
 
-    // Delete-on-replace: remove the member's PREVIOUS local avatar so it is not
-    // orphaned forever (biggest disk-growth fix). Best-effort; never fatal.
+    // Delete-on-replace: only the uploader's own previous avatar file.
+    // A stored URL that points anywhere else (another member, an officer
+    // image, a symlink out of the folder) is left on disk.
     if let Some(prev) = member.member.avatar_url.as_deref()
         && prev != url
     {
-        delete_local_upload(&state.upload_dir, prev).await;
+        delete_replaced_avatar(&state.upload_dir, &member.member.id, prev).await;
     }
 
     audit(
@@ -310,6 +434,12 @@ pub async fn upload_image(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::SocketAddr;
+
+    use axum::body::Body;
+    use axum::extract::ConnectInfo;
+    use axum::http::{Request, StatusCode};
+    use tower::ServiceExt;
 
     /// Standard CRC-32 (IEEE, poly 0xEDB88320) for crafting valid PNG chunks.
     fn crc32(bytes: &[u8]) -> u32 {
@@ -421,27 +551,186 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn delete_local_upload_removes_local_ignores_external_and_traversal() {
+    async fn delete_replaced_avatar_only_removes_own_folder_file() {
         let root = unique_tmp("delete");
-        let avatars = root.join("avatars");
-        tokio::fs::create_dir_all(&avatars).await.unwrap();
-        let file = avatars.join("old.png");
-        tokio::fs::write(&file, b"old").await.unwrap();
-        assert!(file.exists());
+        let own_id = "member:attacker";
+        let own_dir = root.join("avatars").join(member_dir_key(own_id));
+        let victim_dir = root.join("images").join("victim");
+        tokio::fs::create_dir_all(&own_dir).await.unwrap();
+        tokio::fs::create_dir_all(&victim_dir).await.unwrap();
+        let own = own_dir.join("old.png");
+        let victim = victim_dir.join("secret.png");
+        tokio::fs::write(&own, b"old").await.unwrap();
+        tokio::fs::write(&victim, b"keep").await.unwrap();
 
-        // Local upload path → deleted.
-        delete_local_upload(&root, "/uploads/avatars/old.png").await;
-        assert!(!file.exists());
+        delete_replaced_avatar(
+            &root,
+            own_id,
+            &format!("/uploads/avatars/{}/old.png", member_dir_key(own_id)),
+        )
+        .await;
+        assert!(!own.exists(), "own previous avatar is removed");
+        assert!(victim.exists());
 
-        // External CDN URL → no-op, no panic.
-        delete_local_upload(&root, "https://cdn.discordapp.com/avatars/x/y.png").await;
+        // Another member's /uploads path, an officer image, and traversal stay.
+        delete_replaced_avatar(&root, own_id, "/uploads/images/victim/secret.png").await;
+        delete_replaced_avatar(
+            &root,
+            own_id,
+            &format!(
+                "/uploads/avatars/{}/../../images/victim/secret.png",
+                member_dir_key(own_id)
+            ),
+        )
+        .await;
+        delete_replaced_avatar(&root, own_id, "https://cdn.discordapp.com/avatars/x/y.png").await;
+        assert!(victim.exists(), "other uploads must survive avatar replace");
 
-        // Traversal attempt → refused, sentinel outside the uploads path survives.
-        let sentinel = root.join("sentinel");
-        tokio::fs::write(&sentinel, b"keep").await.unwrap();
-        delete_local_upload(&root, "/uploads/../sentinel").await;
-        assert!(sentinel.exists());
+        // Symlink inside the member folder pointing at the victim file.
+        let link = own_dir.join("link.png");
+        std::os::unix::fs::symlink(&victim, &link).unwrap();
+        delete_replaced_avatar(
+            &root,
+            own_id,
+            &format!("/uploads/avatars/{}/link.png", member_dir_key(own_id)),
+        )
+        .await;
+        assert!(victim.exists(), "symlink must not delete the target");
+        assert!(link.exists(), "symlink itself is not removed");
 
+        tokio::fs::remove_dir_all(&root).await.ok();
+    }
+
+    #[test]
+    fn avatar_url_must_be_empty_https_or_own_folder() {
+        let id = "member:abc";
+        let prefix = member_avatar_prefix(id);
+        assert_eq!(normalize_avatar_url(id, "  ").unwrap(), None);
+        assert_eq!(
+            normalize_avatar_url(id, "https://cdn.example/a.png")
+                .unwrap()
+                .as_deref(),
+            Some("https://cdn.example/a.png")
+        );
+        let own = format!("{prefix}pic.png");
+        assert_eq!(
+            normalize_avatar_url(id, &own).unwrap().as_deref(),
+            Some(own.as_str())
+        );
+        assert!(normalize_avatar_url(id, "/uploads/images/officer/x.png").is_err());
+        assert!(normalize_avatar_url(id, "/uploads/avatars/member_other/x.png").is_err());
+        assert!(normalize_avatar_url(id, &format!("{prefix}../x.png")).is_err());
+        assert!(normalize_avatar_url(id, "http://cdn.example/a.png").is_err());
+    }
+
+    fn with_peer(builder: axum::http::request::Builder) -> axum::http::request::Builder {
+        builder
+            .header("x-forwarded-for", "127.0.0.1")
+            .extension(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 9))))
+    }
+
+    #[tokio::test]
+    async fn foreign_avatar_url_is_rejected_and_upload_does_not_delete_it() {
+        let mut state = crate::test_support::test_state().await;
+        let root = unique_tmp("avatar-http");
+        state.upload_dir = root.clone();
+        crate::test_support::seed_user(&state, "attacker", "attacker").await;
+        let member = state
+            .db
+            .create_member("attacker", "Attacker", scuffed_db::OrgRole::Member)
+            .await
+            .unwrap();
+        let token = "avatar-test-token";
+        state
+            .db
+            .create_session("attacker", token, 24)
+            .await
+            .unwrap();
+
+        let victim = root.join("images/victim/secret.png");
+        tokio::fs::create_dir_all(victim.parent().unwrap())
+            .await
+            .unwrap();
+        tokio::fs::write(&victim, b"keep-me").await.unwrap();
+
+        let app = crate::create_router(state.clone());
+        let foreign = "/uploads/images/victim/secret.png";
+        let put = with_peer(
+            Request::builder()
+                .method("PUT")
+                .uri(format!("/api/members/{}", urlencoding::encode(&member.id)))
+                .header("authorization", format!("Bearer {token}"))
+                .header("content-type", "application/json"),
+        )
+        .body(Body::from(format!(r#"{{"avatar_url":"{foreign}"}}"#)))
+        .unwrap();
+        let res = app.clone().oneshot(put).await.unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+        assert!(victim.exists());
+
+        let own = format!("{}ok.png", member_avatar_prefix(&member.id));
+        let put_own = with_peer(
+            Request::builder()
+                .method("PUT")
+                .uri(format!("/api/members/{}", urlencoding::encode(&member.id)))
+                .header("authorization", format!("Bearer {token}"))
+                .header("content-type", "application/json"),
+        )
+        .body(Body::from(format!(r#"{{"avatar_url":"{own}"}}"#)))
+        .unwrap();
+        let res = app.clone().oneshot(put_own).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK, "own avatar path is allowed");
+
+        // A row written before the setter check (or by another bug) must still
+        // not be able to aim delete-on-replace at someone else's file.
+        state
+            .db
+            .update_member(
+                &member.id,
+                None,
+                None,
+                Some(Some(foreign)),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let png = png_with_dims(1, 1);
+        let boundary = "----scuffedboundary";
+        let mut body = Vec::new();
+        body.extend_from_slice(
+            format!(
+                "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"a.png\"\r\nContent-Type: image/png\r\n\r\n"
+            )
+            .as_bytes(),
+        );
+        body.extend_from_slice(&png);
+        body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+        let upload = with_peer(
+            Request::builder()
+                .method("POST")
+                .uri("/api/upload/avatar")
+                .header("authorization", format!("Bearer {token}"))
+                .header(
+                    "content-type",
+                    format!("multipart/form-data; boundary={boundary}"),
+                ),
+        )
+        .body(Body::from(body))
+        .unwrap();
+        let res = app.oneshot(upload).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK, "avatar upload should succeed");
+        assert!(
+            victim.exists(),
+            "avatar upload deleted another member's file"
+        );
         tokio::fs::remove_dir_all(&root).await.ok();
     }
 

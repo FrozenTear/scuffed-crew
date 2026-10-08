@@ -69,6 +69,14 @@ impl TrustedProxyIpKeyExtractor {
         }
     }
 
+    /// Trust `raw` the same way as `TRUSTED_PROXIES` (comma-separated IPs or
+    /// CIDRs). Loopback is always included. Does not read the environment.
+    pub fn with_proxies(raw: &str) -> Self {
+        Self {
+            trusted: Arc::new(parse_trusted_proxies(raw)),
+        }
+    }
+
     /// Construct directly from a trust set (used in tests).
     #[cfg(test)]
     fn with_trusted(trusted: Vec<IpNet>) -> Self {
@@ -81,13 +89,21 @@ impl TrustedProxyIpKeyExtractor {
         self.trusted.iter().any(|net| net.contains(&ip))
     }
 
-    /// Resolve the client IP used as the rate-limit bucket key.
+    /// Client IP for rate limits and WebSocket caps.
     ///
     /// - If the peer socket is **not** a trusted proxy, use the peer IP and
     ///   ignore every forwarded header (the spoofing-resistant path).
     /// - If the peer **is** a trusted proxy, walk `X-Forwarded-For` right-to-left
     ///   skipping further trusted hops; the first untrusted entry is the client.
     ///   Fall back to `X-Real-IP`, then the peer, when XFF yields nothing.
+    ///
+    /// Callers behind Caddy must use this and not the raw peer address, or
+    /// every visitor shares the compose-network gateway's bucket.
+    pub fn client_ip(&self, peer: IpAddr, headers: &HeaderMap) -> IpAddr {
+        self.resolve_key(peer, headers)
+    }
+
+    /// Resolve the client IP used as the rate-limit bucket key.
     fn resolve_key(&self, peer: IpAddr, headers: &HeaderMap) -> IpAddr {
         if !self.is_trusted(peer) {
             return peer;
