@@ -21,6 +21,7 @@ use scuffed_site_server::state::{AppState, OAuthConfig};
 
 const OFFICER_TOKEN: &str = "qa-officer-token";
 const MEMBER_TOKEN: &str = "qa-member-token";
+const RECRUIT_TOKEN: &str = "qa-recruit-token";
 
 async fn test_state() -> AppState {
     let db = Database::connect_memory().await.expect("in-memory DB");
@@ -507,4 +508,462 @@ async fn missing_public_content_is_not_found_not_internal_error() {
             "{uri} reported a missing row as an internal error: {body}"
         );
     }
+}
+
+/// The member list hides inactive rows from recruits. Fetch-by-id does not.
+#[tokio::test]
+#[ignore = "known bug: GET /api/members/:id returns a deactivated member to any org member"]
+async fn recruit_cannot_read_deactivated_member_by_id() {
+    let state = test_state().await;
+    seed_user(
+        &state.db,
+        "memberuser",
+        "membermember",
+        "ListedMember",
+        "member",
+        MEMBER_TOKEN,
+    )
+    .await;
+    seed_user(
+        &state.db,
+        "recruituser",
+        "recruitmember",
+        "Recruit",
+        "recruit",
+        RECRUIT_TOKEN,
+    )
+    .await;
+    state
+        .db
+        .client
+        .query("UPDATE member:membermember SET is_active = false")
+        .await
+        .expect("deactivate");
+
+    let app = create_router_with_dist(state, std::env::temp_dir());
+    let (status, body, raw) = send(
+        app,
+        authed(
+            Method::GET,
+            "/api/members/membermember",
+            RECRUIT_TOKEN,
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "a recruit must not load a deactivated profile: {status} {raw}"
+    );
+    let _ = body;
+}
+
+/// Overview and sitemap drop `is_active = false` teams. The public id route does not.
+#[tokio::test]
+#[ignore = "known bug: GET /api/public/teams/:id still returns a deactivated team"]
+async fn inactive_team_is_absent_from_public_detail() {
+    let state = test_state().await;
+    seed_game_and_team(&state.db).await;
+    state
+        .db
+        .client
+        .query("UPDATE team:alpha SET is_active = false")
+        .await
+        .expect("deactivate team");
+
+    let app = create_router_with_dist(state, std::env::temp_dir());
+    let (status, overview, raw) =
+        send(app.clone(), anon(Method::GET, "/api/public/overview")).await;
+    assert_eq!(status, StatusCode::OK, "{raw}");
+    let names = strings_at(&overview["teams"], "name");
+    assert!(
+        !names.iter().any(|n| n == "Alpha"),
+        "overview already hides inactive teams: {overview}"
+    );
+
+    let (status, _, raw) = send(app, anon(Method::GET, "/api/public/teams/alpha")).await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "public team page must 404 an inactive team: {raw}"
+    );
+}
+
+/// Public match lists drop scrims and `is_public = false`. `record` counts every completed row.
+#[tokio::test]
+#[ignore = "known bug: public team record counts private and scrim results"]
+async fn public_record_ignores_private_and_scrim_results() {
+    let state = test_state().await;
+    seed_user(
+        &state.db,
+        "officeruser",
+        "officermember",
+        "QaOfficer",
+        "officer",
+        OFFICER_TOKEN,
+    )
+    .await;
+    seed_game_and_team(&state.db).await;
+    let app = create_router_with_dist(state, std::env::temp_dir());
+
+    let (status, _, raw) = send(
+        app.clone(),
+        authed(
+            Method::POST,
+            "/api/matches",
+            OFFICER_TOKEN,
+            Some(json!({
+                "team_id": "alpha",
+                "opponent": "Public",
+                "score_us": 2,
+                "score_them": 0,
+                "match_type": "official",
+                "is_public": true
+            })),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{raw}");
+    let (status, _, raw) = send(
+        app.clone(),
+        authed(
+            Method::POST,
+            "/api/matches",
+            OFFICER_TOKEN,
+            Some(json!({
+                "team_id": "alpha",
+                "opponent": "Private scrim",
+                "score_us": 0,
+                "score_them": 1,
+                "match_type": "scrim",
+                "is_public": false
+            })),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{raw}");
+
+    let (status, detail, raw) = send(app, anon(Method::GET, "/api/public/teams/alpha")).await;
+    assert_eq!(status, StatusCode::OK, "{raw}");
+    assert_eq!(detail["record"]["wins"].as_u64(), Some(1), "{detail}");
+    assert_eq!(
+        detail["record"]["losses"].as_u64(),
+        Some(0),
+        "private scrim loss must not appear in the public record: {detail}"
+    );
+}
+
+/// Deactivating a board removes it from the tree. Thread reads only check `min_role`.
+#[tokio::test]
+#[ignore = "known bug: deactivating a forum board does not hide its threads"]
+async fn deactivated_forum_board_hides_its_threads() {
+    let state = test_state().await;
+    let board_id = create_board(&state, "public-board").await;
+    let app = create_router_with_dist(state.clone(), std::env::temp_dir());
+    let (status, created, raw) = send(
+        app.clone(),
+        authed(
+            Method::POST,
+            "/api/forum/threads",
+            MEMBER_TOKEN,
+            Some(json!({
+                "title": "Still visible",
+                "content": "secret after hide",
+                "board_id": board_id
+            })),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{raw}");
+    let thread_id = created["id"].as_str().expect("thread id");
+    state
+        .db
+        .client
+        .query("UPDATE forum_board SET is_active = false WHERE slug = 'public-board'")
+        .await
+        .expect("deactivate board");
+
+    let (status, _, raw) = send(
+        app.clone(),
+        anon(Method::GET, &format!("/api/forum/threads/{thread_id}")),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "a deactivated board's thread must 404: {raw}"
+    );
+
+    let (status, body, raw) = send(app, anon(Method::GET, "/api/forum/threads")).await;
+    assert_eq!(status, StatusCode::OK, "{raw}");
+    let titles = strings_at(&body["threads"], "title");
+    assert!(
+        !titles.iter().any(|t| t == "Still visible"),
+        "unfiltered list still returned a thread from a deactivated board: {body}"
+    );
+}
+
+/// Register and setup reject usernames outside 1–32 `[A-Za-z0-9_-]`. Login does not.
+#[tokio::test]
+#[ignore = "known bug: POST /api/auth/local/login accepts usernames that register rejects"]
+async fn login_rejects_usernames_register_would_reject() {
+    let (app, _dist) = router().await;
+    let username = "a".repeat(33);
+    let (status, body, raw) = send(
+        app,
+        with_peer(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/auth/local/login")
+                .header(header::CONTENT_TYPE, "application/json"),
+        )
+        .body(Body::from(
+            serde_json::to_vec(&json!({"username": username, "password": "whatever"})).unwrap(),
+        ))
+        .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "oversized username must be rejected before lookup: {status} {raw}"
+    );
+    let msg = body["error"].as_str().unwrap_or("");
+    assert!(
+        msg.contains("32"),
+        "expected the register length error, got {body}"
+    );
+}
+
+/// Replacing an avatar deletes whatever path is stored in `avatar_url` under `/uploads/`.
+#[tokio::test]
+#[ignore = "known bug: avatar replace deletes any /uploads path stored on the member, including another member's file"]
+async fn avatar_replace_does_not_delete_another_members_file() {
+    let mut state = test_state().await;
+    let dir = std::env::temp_dir().join(format!("scuffed-qa-upl-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(dir.join("images/victim")).expect("victim dir");
+    let victim = dir.join("images/victim/secret.png");
+    std::fs::write(&victim, b"keep-me").expect("victim file");
+    state.upload_dir = dir.clone();
+    seed_user(
+        &state.db,
+        "memberuser",
+        "membermember",
+        "ListedMember",
+        "member",
+        MEMBER_TOKEN,
+    )
+    .await;
+
+    let app = create_router_with_dist(state, std::env::temp_dir());
+    let (status, _, raw) = send(
+        app.clone(),
+        authed(
+            Method::PUT,
+            "/api/members/membermember",
+            MEMBER_TOKEN,
+            Some(json!({"avatar_url": "/uploads/images/victim/secret.png"})),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{raw}");
+
+    let resp = app
+        .oneshot(avatar_upload(
+            "/api/upload/avatar",
+            MEMBER_TOKEN,
+            &tiny_png(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "avatar upload should succeed"
+    );
+    assert!(
+        victim.exists(),
+        "replacing an avatar deleted another member's upload at {}",
+        victim.display()
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// Accepting an application from a banned member sets `is_active` true again.
+/// Lift is supposed to leave them inactive. The public profile keys off `is_active`.
+#[tokio::test]
+#[ignore = "known bug: accepting an application reactivates a banned member"]
+async fn accepting_application_does_not_reactivate_a_ban() {
+    let state = test_state().await;
+    seed_user(
+        &state.db,
+        "officeruser",
+        "officermember",
+        "QaOfficer",
+        "officer",
+        OFFICER_TOKEN,
+    )
+    .await;
+    seed_user(
+        &state.db,
+        "memberuser",
+        "membermember",
+        "ListedMember",
+        "member",
+        MEMBER_TOKEN,
+    )
+    .await;
+    let app = create_router_with_dist(state.clone(), std::env::temp_dir());
+    let (status, _, raw) = send(
+        app.clone(),
+        authed(
+            Method::POST,
+            "/api/moderation",
+            OFFICER_TOKEN,
+            Some(json!({
+                "member_id": "membermember",
+                "action_type": "ban",
+                "reason": "qa ban"
+            })),
+        ),
+    )
+    .await;
+    assert!(
+        status == StatusCode::CREATED || status == StatusCode::OK,
+        "ban failed: {status} {raw}"
+    );
+    state
+        .db
+        .create_session("memberuser", MEMBER_TOKEN, 24)
+        .await
+        .expect("session after ban revoke");
+
+    let (status, application, raw) = send(
+        app.clone(),
+        authed(
+            Method::POST,
+            "/api/applications",
+            MEMBER_TOKEN,
+            Some(json!({
+                "preferred_games": ["Overwatch"],
+                "preferred_roles": ["flex"]
+            })),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{raw}");
+    let app_id = application["id"].as_str().expect("application id");
+    let (status, _, raw) = send(
+        app.clone(),
+        authed(
+            Method::PATCH,
+            &format!("/api/applications/{app_id}"),
+            OFFICER_TOKEN,
+            Some(json!({"status": "accepted"})),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{raw}");
+
+    let (status, _, raw) = send(app, anon(Method::GET, "/api/public/members/membermember")).await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "a ban must keep the public profile hidden after the application is accepted: {raw}"
+    );
+}
+
+/// `time` is stored as text. A value that overflows `hour * 60` in the ICS builder is accepted.
+#[tokio::test]
+#[ignore = "known bug: event time is not validated as a clock time, so the public ICS feed can overflow"]
+async fn event_time_must_be_a_clock_time() {
+    let state = test_state().await;
+    seed_user(
+        &state.db,
+        "officeruser",
+        "officermember",
+        "QaOfficer",
+        "officer",
+        OFFICER_TOKEN,
+    )
+    .await;
+    let app = create_router_with_dist(state, std::env::temp_dir());
+    let (status, _, raw) = send(
+        app,
+        authed(
+            Method::POST,
+            "/api/events",
+            OFFICER_TOKEN,
+            Some(json!({
+                "title": "Overflow",
+                "day_of_week": 1,
+                "time": "71582789:00",
+                "is_public": true
+            })),
+        ),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "a non-clock time must be rejected: {status} {raw}"
+    );
+}
+
+fn tiny_png() -> Vec<u8> {
+    fn crc32(bytes: &[u8]) -> u32 {
+        let mut crc: u32 = 0xFFFF_FFFF;
+        for &b in bytes {
+            crc ^= b as u32;
+            for _ in 0..8 {
+                let mask = (crc & 1).wrapping_neg();
+                crc = (crc >> 1) ^ (0xEDB8_8320 & mask);
+            }
+        }
+        !crc
+    }
+    let mut out = vec![0x89, b'P', b'N', b'G', b'\r', b'\n', 0x1a, b'\n'];
+    let mut ihdr = Vec::new();
+    ihdr.extend_from_slice(b"IHDR");
+    ihdr.extend_from_slice(&1u32.to_be_bytes());
+    ihdr.extend_from_slice(&1u32.to_be_bytes());
+    ihdr.extend_from_slice(&[8, 2, 0, 0, 0]);
+    out.extend_from_slice(&13u32.to_be_bytes());
+    out.extend_from_slice(&ihdr);
+    out.extend_from_slice(&crc32(&ihdr).to_be_bytes());
+    let mut idat = Vec::new();
+    idat.extend_from_slice(b"IDAT");
+    idat.extend_from_slice(&[0x78, 0x9c, 0x63, 0x00, 0x00, 0x00, 0x01, 0x00, 0x01]);
+    out.extend_from_slice(&((idat.len() - 4) as u32).to_be_bytes());
+    out.extend_from_slice(&idat);
+    out.extend_from_slice(&crc32(&idat).to_be_bytes());
+    out.extend_from_slice(&0u32.to_be_bytes());
+    out.extend_from_slice(b"IEND");
+    out.extend_from_slice(&crc32(b"IEND").to_be_bytes());
+    out
+}
+
+fn avatar_upload(uri: &str, token: &str, data: &[u8]) -> Request<Body> {
+    let boundary = "qabaselineboundary";
+    let mut body: Vec<u8> = Vec::new();
+    body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+    body.extend_from_slice(
+        b"Content-Disposition: form-data; name=\"file\"; filename=\"a.png\"\r\n",
+    );
+    body.extend_from_slice(b"Content-Type: image/png\r\n\r\n");
+    body.extend_from_slice(data);
+    body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+    with_peer(
+        Request::builder()
+            .method(Method::POST)
+            .uri(uri)
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .header(
+                header::CONTENT_TYPE,
+                format!("multipart/form-data; boundary={boundary}"),
+            ),
+    )
+    .body(Body::from(body))
+    .unwrap()
 }

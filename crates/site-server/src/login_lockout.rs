@@ -175,6 +175,26 @@ mod tests {
         base + Duration::from_secs(secs)
     }
 
+    /// Once the map is full of live usernames, a new username is not recorded
+    /// and therefore never locks.
+    #[test]
+    #[ignore = "known bug: per-account login lockout fails open when the tracked-username map is full"]
+    fn full_map_still_locks_a_new_username() {
+        let store = LoginLockout::new();
+        let t0 = Instant::now();
+        for i in 0..MAX_TRACKED_ACCOUNTS {
+            assert_eq!(store.record_failure_at(&format!("filler-{i}"), t0), None);
+        }
+        for _ in 0..FIRST_LOCK_AFTER {
+            store.record_failure_at("newcomer", t0);
+        }
+        assert_eq!(
+            store.retry_after_at("newcomer", t0),
+            Some(FIRST_LOCK_SECS),
+            "a full map must not skip lockout for a username that was not already tracked"
+        );
+    }
+
     #[test]
     fn locks_on_fifth_failure_and_resets_on_success() {
         let store = LoginLockout::new();

@@ -312,6 +312,20 @@ mod tests {
         assert_eq!(k, ip("127.0.0.1"));
     }
 
+    /// From a trusted peer, a missing `X-Forwarded-For` must not let the client
+    /// pick a fresh bucket by rotating `X-Real-IP`.
+    #[test]
+    #[ignore = "known bug: a trusted peer with no X-Forwarded-For uses X-Real-IP as the rate-limit key"]
+    fn trusted_peer_without_xff_ignores_x_real_ip() {
+        let ex = TrustedProxyIpKeyExtractor::with_trusted(loopback_nets());
+        let mut request = req("127.0.0.1", None);
+        request
+            .headers_mut()
+            .insert("x-real-ip", "203.0.113.50".parse().unwrap());
+        let key = ex.extract(&request).unwrap();
+        assert_eq!(key, ip("127.0.0.1"), "got {key}");
+    }
+
     #[test]
     fn missing_connect_info_errors() {
         let ex = TrustedProxyIpKeyExtractor::with_trusted(loopback_nets());

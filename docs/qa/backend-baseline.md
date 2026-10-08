@@ -30,7 +30,7 @@ cargo test -p scuffed-api-client --no-default-features --features native
 
 Guardrail scripts and `cargo fmt --check` exited 0.
 
-`cargo test --workspace …` exited 0. Sum of every `test result` line in that run: **838 passed, 0 failed, 6 ignored**. Nothing was skipped for a missing feature. The 6 ignored tests are the regressions that already existed when that command ran (4 in `qa_baseline`, 1 strategy bearer test, 1 community overview test). Two more ignored tests were added after that run (`missing_public_content_is_not_found_not_internal_error`, `strategy_heroes_returns_catalog`). They are `#[ignore]` only. A second full workspace run was not done. Default `cargo test -p scuffed-site-server --test qa_baseline` after the addition exited 0 with 5 ignored.
+`cargo test --workspace …` exited 0. Sum of every `test result` line in that run: **838 passed, 0 failed, 6 ignored**. Nothing was skipped for a missing feature. The 6 ignored tests are the regressions that already existed when that command ran (4 in `qa_baseline`, 1 strategy bearer test, 1 community overview test). Two more ignored tests were added after that run (`missing_public_content_is_not_found_not_internal_error`, `strategy_heroes_returns_catalog`). A follow-up pass added ten more ignored tests (bugs 9–18 below). They are `#[ignore]` only. A second full workspace run was not done. Default `cargo test -p scuffed-site-server --test qa_baseline` after the follow-up exited 0 with 13 ignored. `cargo clippy -p scuffed-site-server --all-targets -- -D warnings` exited 0 after those edits.
 
 | Target | Result |
 |---|---|
@@ -212,12 +212,108 @@ Games, teams, and public member misses use a specific message (`Game not found`,
 - Actual: `{"error":"Internal error"}`.
 - Test: `missing_public_content_is_not_found_not_internal_error` in `crates/site-server/tests/qa_baseline.rs`. The run fails on the forum URL first. Wiki and article were confirmed with curl on the live server.
 
+## Follow-up confirmations
+
+A second pass re-read public reads, authorization, and validation. The roster leak (bug 1) and the forum `LIMIT` hole (bugs 2 and 6) are the same defects already listed. These additional ones failed under `--ignored`.
+
+### 9. Medium — any member can read a deactivated profile by id
+
+`GET /api/members` omits inactive rows unless the caller is officer+ and passes `include_inactive=true`. `GET /api/members/{id}` returns `get_member_safe` with no `is_active` check (`crates/site-server/src/routes/members.rs`). The public profile 404s the same id.
+
+- Expected: a recruit receives `404`.
+- Actual: `200` with bio, role, and `is_active: false`.
+- Test: `recruit_cannot_read_deactivated_member_by_id` in `crates/site-server/tests/qa_baseline.rs`.
+
+### 10. Medium — a deactivated team stays public by id
+
+`list_teams` is `WHERE is_active = true`. `get_team` is a raw select, and `public_team_detail` 404s only when the row is missing (`crates/site-server/src/routes/public.rs`, `crates/db/src/queries/teams.rs`).
+
+- Expected: `GET /api/public/teams/alpha` is `404` after `is_active = false`. Overview already omits the team.
+- Actual: `200` with `"is_active": false`, roster, and record.
+- Test: `inactive_team_is_absent_from_public_detail`.
+
+### 11. Medium — the public win/loss record counts private scrims
+
+`recent_matches` on the public team page keeps `is_public` and drops scrims. `get_team_record` counts every completed `match_result` for the team (`crates/db/src/queries/matches.rs`).
+
+- Expected: one public official win and one private scrim loss yield `wins: 1`, `losses: 0`.
+- Actual: `wins: 1`, `losses: 1`. The match list in the same body contains only the official win.
+- Test: `public_record_ignores_private_and_scrim_results`.
+
+### 12. Medium — deactivating a forum board does not hide its threads
+
+The tree and slug lookup require `forum_board.is_active = true`. `list_threads` / `get_thread` load the board with a raw select and then only enforce `min_role` (`crates/site-server/src/routes/forum.rs`, `crates/db/src/queries/forum.rs`).
+
+- Expected: after `is_active = false`, `GET /api/forum/threads/{id}` is `404` and the unfiltered list omits the thread.
+- Actual: `200` with the title and content, and the board object in that body has `"is_active": false`.
+- Test: `deactivated_forum_board_hides_its_threads`.
+
+### 13. Medium — accepting an application clears a ban's deactivation
+
+A ban sets `is_active` false. `submit_application` allows the user through because they are not active. `ensure_member_for_application` then sets `is_active` true with no moderation check (`crates/site-server/src/routes/applications.rs`). The public profile treats `is_active` as the gate, so the banned member's bio is public again. `OrgMember` routes still 403 while the ban row exists. Lift is documented to leave the member inactive.
+
+- Expected: `GET /api/public/members/{id}` stays `404` after the application is accepted.
+- Actual: `200` with `org_role: recruit` and the bio.
+- Test: `accepting_application_does_not_reactivate_a_ban`.
+
+### 14. Medium — login does not use the register username rules
+
+`validate_local_username` (1–32 characters, `[A-Za-z0-9_-]`) is used by register and setup. `local_login` trims, lowercases, and looks the string up (`crates/site-server/src/routes/auth.rs`). A miss still runs the dummy Argon2 verify and stores the string in the lockout map.
+
+- Expected: a 33-character username is `400`.
+- Actual: `401` `{"error":"invalid username or password"}`.
+- Test: `login_rejects_usernames_register_would_reject`.
+
+### 15. High — replacing an avatar can delete another member's upload
+
+`PUT /api/members/{id}` stores `avatar_url` with no check that the path belongs to that member. The next `POST /api/upload/avatar` deletes the previous value when it starts with `/uploads/` and has no `.` or `..` segment (`crates/site-server/src/routes/uploads.rs` `delete_local_upload`).
+
+- Expected: `images/victim/secret.png` is still on disk after the attacker uploads a new avatar.
+- Actual: the file is removed.
+- Test: `avatar_replace_does_not_delete_another_members_file`.
+
+### 16. Medium — event `time` is not a clock time
+
+Create rejects control characters in `time` and then stores the string. The public ICS builder does `hour * 60 + minute + duration` in `u32` (`crates/site-server/src/calendar.rs`). `71582789:00` overflows `u32`. Debug builds panic on that overflow. Release builds wrap.
+
+- Expected: `POST /api/events` with that time is `400`.
+- Actual: `201` and the row stores `"time": "71582789:00"`.
+- Test: `event_time_must_be_a_clock_time`. The test stops at create so the ICS handler is not invoked.
+
+### 17. Medium — login lockout fails open when the map is full
+
+`record_failure_at` returns without inserting once 8192 non-idle usernames are tracked (`crates/site-server/src/login_lockout.rs`). A username that was not already in the map never locks. The per-IP auth governor still applies.
+
+- Expected: five failures on a new username lock it.
+- Actual: `retry_after_at` stays empty.
+- Test: `full_map_still_locks_a_new_username` in `crates/site-server/src/login_lockout.rs`.
+
+### 18. Medium — `X-Real-IP` selects the rate-limit bucket when `X-Forwarded-For` is absent
+
+From a trusted peer, a parsed `X-Forwarded-For` wins. If that header is missing, `X-Real-IP` is the key (`crates/site-server/src/rate_limit.rs`). Caddy sets `X-Forwarded-For`, so browser traffic through the published proxy does not hit this. A client that reaches the process with a trusted peer and no `X-Forwarded-For` can rotate buckets.
+
+- Expected: peer `127.0.0.1` plus `X-Real-IP: 203.0.113.50` and no `X-Forwarded-For` keys the bucket as `127.0.0.1`.
+- Actual: the key is `203.0.113.50`.
+- Test: `trusted_peer_without_xff_ignores_x_real_ip` in `crates/site-server/src/rate_limit.rs`.
+
+## Confirmed in source, no separate regression
+
+These match the code. A failing test was not added because the handler returns before the interesting branch without a relay, or the check needs an open WebSocket.
+
+- **High.** `GET /api/strategy/ws` compares `global_connection_count()` to the cap before upgrade, and that counter increments only inside `join_room` (`crates/server/src/routes/ws.rs`, `crates/server/src/collab/room.rs`). A socket that never joins, including an anonymous `JoinRoom`, is not counted. `Ping` resets the idle timer.
+- **Medium.** `GET /api/nostr/feed` treats the caller as an officer from role alone. It does not use `OrgMember`, so `is_active` and an active suspension are ignored. If `list_officer_group_ids` errors, `unwrap_or_default` makes the officer-group set empty, and an empty set skips the `h`-tag filter (`crates/site-server/src/routes/nostr.rs`).
+- **Medium.** `POST /api/nostr/post` copies the client `group_id` into the `h` tag with no role check. The feed treats those tags as officer-only. The handler returns `400` until the member has a server-managed key, and `503` until a relay is configured, so this pass did not publish an event.
+- **Known gap.** `POST /api/nostr/export-backup` wraps the server-held secret with the password in the body. It does not require the account password. The handler comment already calls this out as a step-up reauth follow-up.
+
 ## Not filed as defects
 
 - Auth rate limit works. After the burst, `POST /api/auth/local/login` returned `429`.
 - CORS does not reflect `https://evil.example`. `http://localhost:3000` is allowed. `access-control-allow-credentials` is true.
 - The authenticated member list does not include `nostr_secret_key_encrypted`. Public settings on overview are org and brand fields.
 - Axum JSON extractor failures are `text/plain` (`400` for malformed JSON, `422` for a missing field) rather than the `{error}` JSON envelope used by handlers. Observed, no regression added.
+- `role_meets_min` treats an unrecognized `min_role` as unrestricted for a logged-in caller. The function comment says that is the rule, and the HTTP board API does not write the column.
+- Anonymous tournament match and bracket payloads include `notes` and `replay_codes`. Public org-match detail strips `notes`. Bracket notes may be public commentary, so this was not filed.
+- `GET /api/nostr/health` is unauthenticated and includes `relay_url`. `extra_relay_urls` and `forum_backend` are already on anonymous `GET /api/settings`.
 - A garbage `cursor` on `GET /api/announcements` returned `200` and an empty page. Not chased further.
 - `GET /api/strategy/meta` anonymous body has an empty `heroes` array and no `personal` block. Personal stats use the cookie lookup from bug 3. Not given a separate test.
 - Nostr publish, DM sync, and chat decrypt were not driven against a relay. The live process had no `ENCRYPTION_KEY` and no `NOSTR_RELAY_URL`.
