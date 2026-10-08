@@ -147,65 +147,20 @@ const TEAM_PANEL_CSS: &str = r#"
     }
 "#;
 
-/// Hero name lookup by ID (minimal inline table).
-fn hero_name(id: &str) -> &'static str {
-    match id {
-        "dva" => "D.Va",
-        "doomfist" => "Doomfist",
-        "junker-queen" => "Junker Queen",
-        "mauga" => "Mauga",
-        "orisa" => "Orisa",
-        "ramattra" => "Ramattra",
-        "reinhardt" => "Reinhardt",
-        "roadhog" => "Roadhog",
-        "sigma" => "Sigma",
-        "winston" => "Winston",
-        "wrecking-ball" => "Wrecking Ball",
-        "zarya" => "Zarya",
-        "hazard" => "Hazard",
-        "ashe" => "Ashe",
-        "bastion" => "Bastion",
-        "cassidy" => "Cassidy",
-        "echo" => "Echo",
-        "genji" => "Genji",
-        "hanzo" => "Hanzo",
-        "junkrat" => "Junkrat",
-        "mei" => "Mei",
-        "pharah" => "Pharah",
-        "reaper" => "Reaper",
-        "sojourn" => "Sojourn",
-        "soldier-76" => "Soldier: 76",
-        "sombra" => "Sombra",
-        "symmetra" => "Symmetra",
-        "torbjorn" => "Torbjorn",
-        "tracer" => "Tracer",
-        "venture" => "Venture",
-        "widowmaker" => "Widowmaker",
-        "ana" => "Ana",
-        "baptiste" => "Baptiste",
-        "brigitte" => "Brigitte",
-        "doctrine" => "Doctrine",
-        "illari" => "Illari",
-        "juno" => "Juno",
-        "kiriko" => "Kiriko",
-        "lifeweaver" => "Lifeweaver",
-        "lucio" => "Lucio",
-        "mercy" => "Mercy",
-        "moira" => "Moira",
-        "zenyatta" => "Zenyatta",
-        _ => "Unknown",
+/// Name and role for a filled slot. The role is the catalog's `role`, which
+/// the roster sets from `role_for_hero_name`. Unknown ids stay "Unknown" and
+/// count as Damage.
+fn assigned_hero(id: &str) -> (&'static str, HeroRole) {
+    match super::hero_catalog::hero_by_id(id) {
+        Some(hero) => (hero.name, hero.role),
+        None => ("Unknown", HeroRole::Damage),
     }
 }
 
-/// Hero role lookup by ID.
-fn hero_role(id: &str) -> HeroRole {
-    match id {
-        "dva" | "doomfist" | "junker-queen" | "mauga" | "orisa" | "ramattra" | "reinhardt"
-        | "roadhog" | "sigma" | "winston" | "wrecking-ball" | "zarya" | "hazard" => HeroRole::Tank,
-        "ana" | "baptiste" | "brigitte" | "doctrine" | "illari" | "juno" | "kiriko"
-        | "lifeweaver" | "lucio" | "mercy" | "moira" | "sombra" | "zenyatta" => HeroRole::Support,
-        _ => HeroRole::Damage,
-    }
+/// 6v6 slots accept any role. 5v5 slots accept only the slot's required role.
+/// The role is the catalog's `role`, same as a filled slot.
+fn slot_accepts(hero: &super::hero_catalog::CatalogHero, is_6v6: bool, slot: TeamSlot) -> bool {
+    is_6v6 || hero.role == slot.required_role()
 }
 
 #[component]
@@ -230,6 +185,9 @@ pub fn TeamPanel(
 ) -> Element {
     let slots = team_format.slots();
     let is_6v6 = team_format == TeamFormat::SixVSix;
+    let picked = selected_hero
+        .as_deref()
+        .and_then(super::hero_catalog::hero_by_id);
 
     rsx! {
         style { {TEAM_PANEL_CSS} }
@@ -286,10 +244,9 @@ pub fn TeamPanel(
                                     Some(sel) => {
                                         {
                                             let hid = &sel.hero_id;
-                                            let hname = hero_name(hid);
-                                            let hrole = hero_role(hid);
+                                            let (hname, hrole) = assigned_hero(hid);
                                             let role_color = hrole.color_hex();
-                                            let icon_path = format!("/assets/heroes/{hid}/icon.webp");
+                                            let icon_path = super::hero_catalog::icon_path(hid);
 
                                             rsx! {
                                                 div { class: "assigned-hero",
@@ -319,12 +276,11 @@ pub fn TeamPanel(
                                     None => {
                                         // Offer one-click assignment when a hero is picked and
                                         // its role fits this slot (6v6 slots accept any role).
-                                        let assignable_hero = selected_hero.as_ref().filter(|h| {
-                                            is_6v6 || hero_role(h) == slot.required_role()
-                                        });
+                                        let assignable_hero = picked
+                                            .filter(|hero| slot_accepts(hero, is_6v6, slot));
                                         match assignable_hero {
-                                            Some(hid) => {
-                                                let hname = hero_name(hid);
+                                            Some(hero) => {
+                                                let hname = hero.name;
                                                 rsx! {
                                                     button {
                                                         class: "slot-assign-btn",
@@ -355,5 +311,60 @@ pub fn TeamPanel(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn accepts(id: &str, is_6v6: bool, slot: TeamSlot) -> bool {
+        super::super::hero_catalog::hero_by_id(id)
+            .is_some_and(|hero| slot_accepts(hero, is_6v6, slot))
+    }
+
+    #[test]
+    fn five_v_five_checks_the_shared_role() {
+        assert!(accepts("domina", false, TeamSlot::Tank1));
+        assert!(accepts("dmon", false, TeamSlot::Tank1));
+        assert!(!accepts("sombra", false, TeamSlot::Tank1));
+        assert!(accepts("sombra", false, TeamSlot::Support1));
+        assert!(accepts("doctrine", false, TeamSlot::Support1));
+        assert!(accepts("jetpack-cat", false, TeamSlot::Support2));
+        assert!(accepts("mizuki", false, TeamSlot::Support1));
+        assert!(accepts("wuyang", false, TeamSlot::Support2));
+        assert!(!accepts("mizuki", false, TeamSlot::Dps1));
+        assert!(!accepts("domina", false, TeamSlot::Dps1));
+        assert!(!accepts("jetpack-cat", false, TeamSlot::Dps1));
+    }
+
+    #[test]
+    fn six_v_six_accepts_any_role() {
+        assert!(accepts("sombra", true, TeamSlot::Tank1));
+        assert!(accepts("domina", true, TeamSlot::Dps1));
+        assert!(accepts("wuyang", true, TeamSlot::Tank2));
+        assert!(accepts("dmon", true, TeamSlot::Support1));
+    }
+
+    #[test]
+    fn filled_slots_use_role_for_hero_name() {
+        for name in scuffed_types::HEROES {
+            let id = super::super::hero_catalog::hero_id(name);
+            let (shown, role) = assigned_hero(&id);
+            assert_eq!(shown, *name, "{name}");
+            assert_eq!(
+                role,
+                scuffed_types::role_for_hero_name(name).unwrap(),
+                "{name}"
+            );
+        }
+        assert_eq!(assigned_hero("dmon"), ("D.Mon", HeroRole::Tank));
+        assert_eq!(assigned_hero("sombra"), ("Sombra", HeroRole::Support));
+        assert_eq!(assigned_hero("doctrine"), ("Doctrine", HeroRole::Support));
+        assert_eq!(
+            assigned_hero("jetpack-cat"),
+            ("Jetpack Cat", HeroRole::Support)
+        );
+        assert_eq!(assigned_hero("not-a-hero"), ("Unknown", HeroRole::Damage));
     }
 }

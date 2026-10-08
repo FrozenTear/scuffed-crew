@@ -194,89 +194,23 @@ struct AbilityDef {
     cooldown: Option<f32>,
 }
 
-/// Returns the canonical hero roster grouped by role.
-fn heroes_by_role(role: HeroRole) -> Vec<HeroDef> {
-    let roster: &[(&str, &str)] = match role {
-        HeroRole::Tank => &[
-            ("dva", "D.Va"),
-            ("domina", "Domina"),
-            ("doomfist", "Doomfist"),
-            ("hazard", "Hazard"),
-            ("junker-queen", "Junker Queen"),
-            ("mauga", "Mauga"),
-            ("orisa", "Orisa"),
-            ("ramattra", "Ramattra"),
-            ("reinhardt", "Reinhardt"),
-            ("roadhog", "Roadhog"),
-            ("sigma", "Sigma"),
-            ("winston", "Winston"),
-            ("wrecking-ball", "Wrecking Ball"),
-            ("zarya", "Zarya"),
-        ],
-        HeroRole::Damage => &[
-            ("anran", "Anran"),
-            ("ashe", "Ashe"),
-            ("bastion", "Bastion"),
-            ("cassidy", "Cassidy"),
-            ("echo", "Echo"),
-            ("emre", "Emre"),
-            ("freja", "Freja"),
-            ("genji", "Genji"),
-            ("hanzo", "Hanzo"),
-            ("junkrat", "Junkrat"),
-            ("mei", "Mei"),
-            ("pharah", "Pharah"),
-            ("reaper", "Reaper"),
-            ("sierra", "Sierra"),
-            ("sojourn", "Sojourn"),
-            ("soldier-76", "Soldier: 76"),
-            ("symmetra", "Symmetra"),
-            ("torbjorn", "Torbjorn"),
-            ("tracer", "Tracer"),
-            ("vendetta", "Vendetta"),
-            ("venture", "Venture"),
-            ("widowmaker", "Widowmaker"),
-        ],
-        HeroRole::Support => &[
-            ("ana", "Ana"),
-            ("baptiste", "Baptiste"),
-            ("brigitte", "Brigitte"),
-            ("doctrine", "Doctrine"),
-            ("illari", "Illari"),
-            ("juno", "Juno"),
-            ("kiriko", "Kiriko"),
-            ("lifeweaver", "Lifeweaver"),
-            ("lucio", "Lucio"),
-            ("mercy", "Mercy"),
-            ("mizuki", "Mizuki"),
-            ("moira", "Moira"),
-            ("sombra", "Sombra"),
-            ("wuyang", "Wuyang"),
-            ("zenyatta", "Zenyatta"),
-        ],
-    };
-
-    roster
-        .iter()
-        .map(|(id, name)| HeroDef {
-            id,
-            name,
-            role,
-            icon_path: format!("/assets/heroes/{id}/icon.webp"),
-            abilities: Vec::new(), // abilities are populated when selected
-        })
-        .collect()
-}
-
-/// Returns the full hero definition with abilities for the info panel.
-fn hero_by_id(id: &str) -> Option<HeroDef> {
-    // Walk all roles to find the hero
-    for role in [HeroRole::Tank, HeroRole::Damage, HeroRole::Support] {
-        if let Some(hero) = heroes_by_role(role).into_iter().find(|h| h.id == id) {
-            return Some(hero);
+impl From<&'static super::hero_catalog::CatalogHero> for HeroDef {
+    fn from(hero: &'static super::hero_catalog::CatalogHero) -> Self {
+        HeroDef {
+            id: hero.id.as_str(),
+            name: hero.name,
+            role: hero.role,
+            icon_path: super::hero_catalog::icon_path(&hero.id),
+            abilities: Vec::new(),
         }
     }
-    None
+}
+
+/// Returns the shared hero roster for one role.
+fn heroes_by_role(role: HeroRole) -> Vec<HeroDef> {
+    super::hero_catalog::heroes_for_role(role)
+        .map(HeroDef::from)
+        .collect()
 }
 
 /// Hero winrate entry for display in the picker.
@@ -284,15 +218,6 @@ fn hero_by_id(id: &str) -> Option<HeroDef> {
 pub struct HeroWinRate {
     pub hero_name: String,
     pub winrate: f64,
-}
-
-fn normalize_hero_id(name: &str) -> String {
-    name.to_lowercase()
-        .replace(".", "")
-        .replace(": ", "-")
-        .replace(" ", "-")
-        .replace("ö", "o")
-        .replace("ú", "u")
 }
 
 fn wr_badge_class(pct: f64) -> &'static str {
@@ -326,7 +251,7 @@ pub fn HeroPicker(
             h3 { class: "panel-title", "Heroes" }
 
             // Role sections
-            {[HeroRole::Tank, HeroRole::Damage, HeroRole::Support].iter().map(|role| {
+            {HeroRole::ALL.iter().map(|role| {
                 let role = *role;
                 let heroes = heroes_by_role(role);
                 let hero_count = heroes.len();
@@ -355,23 +280,23 @@ pub fn HeroPicker(
                         if is_expanded {
                             div { class: "hero-grid",
                                 {heroes.iter().map(|hero| {
-                                    let hero_id = hero.id.to_string();
-                                    let hero_id_click = hero_id.clone();
+                                    let hero_id = hero.id;
                                     let hero_name = hero.name;
                                     let icon = hero.icon_path.clone();
-                                    let is_selected = selected_hero.as_deref() == Some(hero.id);
+                                    let is_selected = selected_hero.as_deref() == Some(hero_id);
                                     let btn_cls = if is_selected { "hero-btn selected" } else { "hero-btn" };
 
                                     let wr = hero_winrates.as_ref().and_then(|rates| {
-                                        let norm_id = hero.id;
-                                        rates.iter().find(|r| normalize_hero_id(&r.hero_name) == norm_id)
+                                        rates.iter().find(|r| {
+                                            super::hero_catalog::hero_id(&r.hero_name) == hero_id
+                                        })
                                     });
 
                                     rsx! {
                                         button {
                                             class: "{btn_cls}",
                                             title: "{hero_name}",
-                                            onclick: move |_| on_select.call(hero_id_click.clone()),
+                                            onclick: move |_| on_select.call(hero_id.to_string()),
                                             img {
                                                 class: "hero-icon",
                                                 src: "{icon}",
@@ -398,7 +323,7 @@ pub fn HeroPicker(
 
             // Selected hero info panel
             if let Some(ref hero_id) = selected_hero {
-                if let Some(hero) = hero_by_id(hero_id) {
+                if let Some(hero) = super::hero_catalog::hero_by_id(hero_id).map(HeroDef::from) {
                     div { class: "selected-hero-info",
                         div { class: "hero-details",
                             img {
@@ -434,6 +359,37 @@ pub fn HeroPicker(
                         }
                     }
                 }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::hero_catalog::hero_id;
+    use super::*;
+
+    #[test]
+    fn every_shared_hero_appears_under_its_role() {
+        for name in scuffed_types::HEROES {
+            let role = scuffed_types::role_for_hero_name(name)
+                .unwrap_or_else(|| panic!("{name} has no role"));
+            let id = hero_id(name);
+            let found = heroes_by_role(role)
+                .into_iter()
+                .find(|hero| hero.id == id)
+                .unwrap_or_else(|| panic!("{name} is missing from the {role} picker"));
+            assert_eq!(found.name, *name);
+            assert_eq!(found.role, role);
+            assert_eq!(found.icon_path, format!("/assets/heroes/{id}/icon.webp"));
+            for other in HeroRole::ALL {
+                if *other == role {
+                    continue;
+                }
+                assert!(
+                    heroes_by_role(*other).iter().all(|hero| hero.id != id),
+                    "{name} also appears under {other}"
+                );
             }
         }
     }

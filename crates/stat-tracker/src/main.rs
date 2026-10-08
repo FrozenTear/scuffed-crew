@@ -263,6 +263,9 @@ struct DaemonCtx {
     player_name: Option<String>,
     capture_output: Option<String>,
     auto_detect: config::AutoDetectConfig,
+    /// Quiet period before a finished game is closed. Already clamped so it
+    /// is never shorter than post-match grace.
+    finished_game_close: std::time::Duration,
     game_process_names: Vec<String>,
     portrait_matcher: Arc<detect::hero_portrait::PortraitMatcher>,
     collect_portraits: bool,
@@ -443,6 +446,7 @@ async fn main() -> anyhow::Result<()> {
         player_name: config.player_name.clone(),
         capture_output: config.capture_output.clone(),
         auto_detect: config.auto_detect,
+        finished_game_close: finished_game_close_after(config.finished_game_close_secs),
         game_process_names: config.game_process_names.clone(),
         portrait_matcher,
         collect_portraits,
@@ -1131,6 +1135,44 @@ async fn retire_active_game(
     }
 }
 
+/// Close a quiet session the way a boundary does, then upload.
+///
+/// The session id is left on the stored rows. `active_game.json` is removed
+/// before the upload so a restart cannot close the same session again.
+/// `sync_now` is the shutdown upload ([`finish_sync_on_shutdown`]). No
+/// screen capture and no OCR.
+async fn close_quiet_session_and_sync<F, Fut>(
+    st: &mut SessionState,
+    store: &storage::LocalStore,
+    data_dir: &std::path::Path,
+    now: Instant,
+    close_after: std::time::Duration,
+    sync_now: F,
+) -> bool
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = ()>,
+{
+    let Some(game) = st.active_game.as_ref() else {
+        return false;
+    };
+    let Some(reason) = quiet_close_reason(game, now, close_after) else {
+        return false;
+    };
+    let session_id = game.session_id.clone();
+    tracing::info!(
+        session_id = %session_id,
+        reason,
+        "closing quiet session"
+    );
+    // No seal. A finished game already has its outcome. An unfinished game
+    // stays Unknown — the same write a later Tab would leave behind.
+    retire_active_game(st, store, data_dir, None, reason).await;
+    persist_active_game(data_dir, None);
+    sync_now().await;
+    true
+}
+
 /// Apply one [`boundary::decide_poll`] result: record on the open session, or
 /// close it and start the next one.
 async fn apply_poll_decision(
@@ -1321,13 +1363,46 @@ fn persist_active_game(data_dir: &std::path::Path, game: Option<&ActiveGame>) {
     }
 }
 
+/// What [`admit_persisted_game`] decided about `active_game.json`.
+enum ActiveAdmission {
+    Open(Box<ActiveGame>),
+    /// The file parsed, and the game is past the idle bound (or its clock
+    /// cannot be mapped onto this boot). The rows are still in the store.
+    Stale {
+        session_id: String,
+    },
+    Absent,
+}
+
 /// Recover the open game from a previous daemon run, if it is still plausibly
 /// the current game (last activity within [`UNFINISHED_SESSION_IDLE`]).
 /// Timestamps that predate the current boot (recovery across a reboot) are
-/// treated as stale rather than clamped.
+/// treated as stale rather than clamped. [`startup_session`] is the session
+/// restore. [`recover_or_sync_active_game`] deletes a stale skeleton and
+/// uploads before that restore.
 fn recover_active_game(data_dir: &std::path::Path) -> Option<ActiveGame> {
-    let bytes = std::fs::read(active_game_path(data_dir)).ok()?;
-    let p: PersistedGame = serde_json::from_slice(&bytes).ok()?;
+    match admit_persisted_game(data_dir) {
+        ActiveAdmission::Open(game) => Some(*game),
+        ActiveAdmission::Stale { .. } | ActiveAdmission::Absent => None,
+    }
+}
+
+fn admit_persisted_game(data_dir: &std::path::Path) -> ActiveAdmission {
+    let bytes = match std::fs::read(active_game_path(data_dir)) {
+        Ok(bytes) => bytes,
+        Err(_) => return ActiveAdmission::Absent,
+    };
+    let Ok(persisted) = serde_json::from_slice::<PersistedGame>(&bytes) else {
+        return ActiveAdmission::Absent;
+    };
+    let session_id = persisted.session_id.clone();
+    match active_game_from_persisted(persisted) {
+        Some(game) => ActiveAdmission::Open(Box::new(game)),
+        None => ActiveAdmission::Stale { session_id },
+    }
+}
+
+fn active_game_from_persisted(p: PersistedGame) -> Option<ActiveGame> {
     let to_instant =
         |w: chrono::DateTime<Utc>| Instant::now().checked_sub((Utc::now() - w).to_std().ok()?);
     let last_activity = to_instant(p.last_activity)?;
@@ -1380,6 +1455,44 @@ fn recover_active_game(data_dir: &std::path::Path) -> Option<ActiveGame> {
     })
 }
 
+/// Upload unsynced rows, then restore the session with [`startup_session`].
+///
+/// A stale skeleton is deleted before the upload so the next start cannot
+/// drop it a second time. [`startup_session`] then sees no file and returns
+/// an empty session. An open game is left on disk and restored afterwards,
+/// including `last_game_open`, so the debounce survives a restart. The
+/// upload is the same path as shutdown. Rows stay in the local store.
+async fn recover_or_sync_active_game<F, Fut>(
+    data_dir: &std::path::Path,
+    sync_now: F,
+) -> SessionState
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = ()>,
+{
+    let dropped = match admit_persisted_game(data_dir) {
+        ActiveAdmission::Stale { session_id } => {
+            persist_active_game(data_dir, None);
+            Some(session_id)
+        }
+        ActiveAdmission::Open(_) | ActiveAdmission::Absent => None,
+    };
+    if let Some(session_id) = &dropped {
+        tracing::info!(
+            session_id = %session_id,
+            "dropped stale active game — syncing unsynced rows so the match is not lost"
+        );
+    }
+    sync_now().await;
+    if let Some(session_id) = &dropped {
+        tracing::info!(
+            session_id = %session_id,
+            "synced unsynced rows after dropping a stale active game"
+        );
+    }
+    startup_session(data_dir)
+}
+
 /// A result timestamp that cannot be mapped back onto this boot drops the
 /// hint only. The rest of the recovered session still loads, including the
 /// text-fallback lock: losing the hint must not reopen the accolade window.
@@ -1404,6 +1517,37 @@ fn recover_result_mark(
 /// session for the same match and double-counted it. Past the window, the
 /// finished result must not leak onto the next match's captures.
 const POST_MATCH_GRACE: std::time::Duration = std::time::Duration::from_secs(75);
+
+/// Quiet time before a finished game is closed when no further capture
+/// arrives. Counted from the last capture (the result itself, or a
+/// post-match Tab). Never shorter than [`POST_MATCH_GRACE`].
+fn finished_game_close_after(configured_secs: u64) -> std::time::Duration {
+    std::time::Duration::from_secs(configured_secs.max(POST_MATCH_GRACE.as_secs()))
+}
+
+/// Why the command-tick timer is closing the open session. Not a new-game
+/// boundary: the session id stays, and no outcome is invented.
+fn quiet_close_reason(
+    game: &ActiveGame,
+    now: Instant,
+    close_after: std::time::Duration,
+) -> Option<&'static str> {
+    let close_after = close_after.max(POST_MATCH_GRACE);
+    if game.finished() {
+        let grace_expired = game
+            .outcome_recorded_at
+            .is_none_or(|recorded| now.saturating_duration_since(recorded) > POST_MATCH_GRACE);
+        let quiet = now.saturating_duration_since(game.last_activity) >= close_after;
+        if grace_expired && quiet {
+            return Some("finished game closed after quiet period");
+        }
+        return None;
+    }
+    if now.saturating_duration_since(game.last_activity) > UNFINISHED_SESSION_IDLE {
+        return Some("unfinished game closed after idle bound");
+    }
+    None
+}
 
 /// How long an unfinished session stays reusable with no recorded activity.
 /// If the poller misses the outcome AND the next game's start screens (likely
@@ -2670,19 +2814,7 @@ async fn run_loop(ctx: Arc<DaemonCtx>) -> anyhow::Result<()> {
     let poll_interval = tokio::time::Duration::from_secs(auto_detect.poll_interval_secs);
     let new_game_debounce = std::time::Duration::from_secs(auto_detect.cooldown_secs);
     let tab_debounce = std::time::Duration::from_secs(3);
-
-    // Volatile session-tracking state, bundled so the select! arms share one
-    // value instead of a fistful of parallel `let mut`s (QUAL-004). Field
-    // meanings/rationale are documented on `SessionState`. `active_game` is
-    // recovered from the previous run when the daemon restarted mid-game.
-    let mut st = startup_session(data_dir);
-    if let Some(g) = &st.active_game {
-        tracing::info!(
-            session_id = %g.session_id,
-            outcome = %g.outcome,
-            "recovered open game from previous run"
-        );
-    }
+    let finished_close = ctx.finished_game_close;
 
     // Periodic sync runs as a spawned task so a slow or hung server can't
     // stall Tab capture, polling, or shutdown. Single-flight: while one sync
@@ -2704,6 +2836,40 @@ async fn run_loop(ctx: Arc<DaemonCtx>) -> anyhow::Result<()> {
             .record_auth_rejected();
         tracing::error!(
             "sync paused — token rejected. Update the token in Settings; sync resumes when the URL or token changes."
+        );
+    }
+
+    // Startup upload uses the shutdown path: join nothing, then upload once,
+    // including when a stale skeleton was just dropped. Auth rejection skips
+    // the upload inside `finish_sync_on_shutdown`. The session comes from
+    // `startup_session`, so `last_game_open` stays the open instant and the
+    // debounce survives the restart.
+    let startup_client = sync_client.cloned();
+    let startup_backoff = Arc::clone(&sync_backoff);
+    let startup_store = store.clone();
+    let startup_dir = data_dir.to_path_buf();
+    let mut st = recover_or_sync_active_game(data_dir, || {
+        let startup_client = startup_client.clone();
+        let startup_backoff = Arc::clone(&startup_backoff);
+        let startup_store = startup_store.clone();
+        let startup_dir = startup_dir.clone();
+        async move {
+            finish_sync_on_shutdown(
+                startup_client.as_ref(),
+                &startup_backoff,
+                None,
+                &startup_store,
+                &startup_dir,
+            )
+            .await;
+        }
+    })
+    .await;
+    if let Some(g) = &st.active_game {
+        tracing::info!(
+            session_id = %g.session_id,
+            outcome = %g.outcome,
+            "recovered open game from previous run"
         );
     }
 
@@ -2993,12 +3159,47 @@ async fn run_loop(ctx: Arc<DaemonCtx>) -> anyhow::Result<()> {
                 }
             }
             _ = cmd_timer.tick() => {
+                // Quiet-session timer. Runs on this existing tick so it does
+                // not take a screenshot or run OCR, and it does not wait for
+                // Tab. The upload is the shutdown sync path.
+                {
+                    let client = sync_client.cloned();
+                    let backoff = Arc::clone(&sync_backoff);
+                    let store_for_sync = store.clone();
+                    let dir_for_sync = data_dir.to_path_buf();
+                    close_quiet_session_and_sync(
+                        &mut st,
+                        store,
+                        data_dir,
+                        Instant::now(),
+                        finished_close,
+                        || {
+                            let task = sync_task.take();
+                            let client = client.clone();
+                            let backoff = Arc::clone(&backoff);
+                            let store_for_sync = store_for_sync.clone();
+                            let dir_for_sync = dir_for_sync.clone();
+                            async move {
+                                finish_sync_on_shutdown(
+                                    client.as_ref(),
+                                    &backoff,
+                                    task,
+                                    &store_for_sync,
+                                    &dir_for_sync,
+                                )
+                                .await;
+                            }
+                        },
+                    )
+                    .await;
+                }
                 maybe_resume_sync_after_settings_change(sync_client, &sync_backoff, data_dir);
                 // Suspend detection (m4): after a sleep, every Instant-based
                 // window believes no time passed. Treat resume like a daemon
                 // restart — drop the volatile windows and re-admit the active
                 // game only through the wall-clock recovery bound (the on-disk
                 // skeleton was persisted with correct wall times pre-suspend).
+                // A skeleton past that bound is dropped and its rows are synced.
                 let mono = st.suspend_probe.0.elapsed();
                 let wall = (Utc::now() - st.suspend_probe.1).to_std().unwrap_or(mono);
                 if wall > mono + SUSPEND_RESET_GAP {
@@ -3006,6 +3207,31 @@ async fn run_loop(ctx: Arc<DaemonCtx>) -> anyhow::Result<()> {
                         gap_secs = (wall - mono).as_secs(),
                         "suspend/clock-jump detected — resetting session windows"
                     );
+                    // Upload first, including a stale skeleton. Then
+                    // `resume_after_suspend` re-admits through `startup_session`,
+                    // so the debounce comes back from `opened_at`.
+                    let client = sync_client.cloned();
+                    let backoff = Arc::clone(&sync_backoff);
+                    let store_for_sync = store.clone();
+                    let dir_for_sync = data_dir.to_path_buf();
+                    let _restored = recover_or_sync_active_game(data_dir, || {
+                        let task = sync_task.take();
+                        let client = client.clone();
+                        let backoff = Arc::clone(&backoff);
+                        let store_for_sync = store_for_sync.clone();
+                        let dir_for_sync = dir_for_sync.clone();
+                        async move {
+                            finish_sync_on_shutdown(
+                                client.as_ref(),
+                                &backoff,
+                                task,
+                                &store_for_sync,
+                                &dir_for_sync,
+                            )
+                            .await;
+                        }
+                    })
+                    .await;
                     resume_after_suspend(&mut st, data_dir);
                 }
                 st.suspend_probe = (Instant::now(), Utc::now());
@@ -6593,6 +6819,124 @@ mod tests {
             "a reset backoff allows the next periodic sync"
         );
     }
+
+    #[test]
+    fn quiet_close_waits_for_grace_and_does_not_invent_an_outcome() {
+        let now = test_now();
+        let close = finished_game_close_after(30);
+        assert_eq!(
+            close, POST_MATCH_GRACE,
+            "a shorter setting still waits out grace"
+        );
+        let mut finished = game(detect::MatchOutcome::Defeat, Some(0), now);
+        finished.last_activity = now;
+        finished.outcome_recorded_at = Some(now);
+        assert!(
+            quiet_close_reason(&finished, now + POST_MATCH_GRACE, close).is_none(),
+            "grace is still open at exactly 75s"
+        );
+        assert_eq!(
+            quiet_close_reason(
+                &finished,
+                now + POST_MATCH_GRACE + Duration::from_secs(1),
+                close
+            ),
+            Some("finished game closed after quiet period")
+        );
+        let close = finished_game_close_after(config::FINISHED_GAME_CLOSE_DEFAULT_SECS);
+        assert!(quiet_close_reason(&finished, now + Duration::from_secs(179), close).is_none());
+        assert_eq!(
+            quiet_close_reason(&finished, now + Duration::from_secs(180), close),
+            Some("finished game closed after quiet period")
+        );
+        let mut hinted = game(detect::MatchOutcome::Unknown, None, now);
+        hinted.last_activity = now;
+        hinted.result_mark = Some(ResultMark {
+            outcome: detect::MatchOutcome::Defeat,
+            confirmed: false,
+            seen_at: now,
+        });
+        assert!(
+            quiet_close_reason(&hinted, now + Duration::from_secs(180), close).is_none(),
+            "a hint is not a recorded result"
+        );
+        assert!(
+            quiet_close_reason(&hinted, now + UNFINISHED_SESSION_IDLE, close).is_none(),
+            "the 20 minute bound is exclusive"
+        );
+        assert_eq!(
+            quiet_close_reason(
+                &hinted,
+                now + UNFINISHED_SESSION_IDLE + Duration::from_secs(1),
+                close
+            ),
+            Some("unfinished game closed after idle bound")
+        );
+    }
+
+    /// Deleting the command-tick call, or the upload inside the timer, fails
+    /// this test even if a lookalike helper is left behind.
+    #[test]
+    fn daemon_loop_runs_the_quiet_close_timer_and_its_sync() {
+        let src = include_str!("main.rs");
+        // Bound the slice to `run_loop` itself. The night harness and this
+        // test both mention the same names later in the file; an unbounded
+        // search would match those and stay green after the timer was deleted.
+        let run_at = src.find("async fn run_loop").expect("run_loop");
+        let after = &src[run_at..];
+        let end = after
+            .find("\nfn analyze_frame(")
+            .expect("run_loop ends before analyze_frame");
+        let run_loop = &after[..end];
+        let call = run_loop
+            .find("close_quiet_session_and_sync(")
+            .expect("the command tick must call the quiet-close timer");
+        let window = &run_loop[call..call + 1200];
+        assert!(
+            window.contains("finish_sync_on_shutdown("),
+            "deleting the quiet-close sync call must fail"
+        );
+        let def = src
+            .find("async fn close_quiet_session_and_sync")
+            .expect("quiet-close timer");
+        let fn_body = src[def..].split("\nasync fn ").next().unwrap();
+        assert!(
+            fn_body.contains("sync_now().await"),
+            "deleting the sync call inside the quiet-close timer must fail"
+        );
+        assert!(
+            fn_body.contains("persist_active_game(data_dir, None)"),
+            "a restart must see the session already closed"
+        );
+        assert!(
+            run_loop.contains("recover_or_sync_active_game("),
+            "startup must sync when it drops a stale skeleton"
+        );
+        let restore = src
+            .find("async fn recover_or_sync_active_game")
+            .expect("startup restore");
+        let restore_body = src[restore..].split("\nasync fn ").next().unwrap();
+        assert!(
+            restore_body.contains("startup_session(data_dir)"),
+            "startup sync must restore through startup_session"
+        );
+        let suspend = run_loop
+            .find("suspend/clock-jump detected")
+            .expect("suspend arm");
+        let after_suspend = &run_loop[suspend..];
+        let resume_at = after_suspend
+            .find("resume_after_suspend(")
+            .expect("suspend must resume through resume_after_suspend");
+        assert!(
+            after_suspend[..resume_at].contains("recover_or_sync_active_game("),
+            "a stale skeleton dropped on resume must be synced"
+        );
+        assert!(
+            after_suspend[..resume_at].contains("finish_sync_on_shutdown("),
+            "resume sync must use the shutdown path"
+        );
+    }
+
     /// Production poll cadence. A stable screen is emitted on every tick.
     const NIGHT_TICKS: usize = 4;
 
@@ -6626,6 +6970,8 @@ mod tests {
         dir: tempfile::TempDir,
         now: Instant,
         wall: chrono::DateTime<Utc>,
+        syncs: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        uploads: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     }
 
     impl Night {
@@ -6639,7 +6985,93 @@ mod tests {
                 dir,
                 now,
                 wall: Utc::now(),
+                syncs: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                uploads: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             }
+        }
+
+        fn sync_count(&self) -> usize {
+            self.syncs.load(std::sync::atomic::Ordering::SeqCst)
+        }
+
+        fn upload_count(&self) -> usize {
+            self.uploads.load(std::sync::atomic::Ordering::SeqCst)
+        }
+
+        /// One command tick of the quiet-session timer. Same function the
+        /// daemon loop calls; the closure is the shutdown upload.
+        async fn quiet_tick(&mut self) -> bool {
+            let syncs = std::sync::Arc::clone(&self.syncs);
+            let uploads = std::sync::Arc::clone(&self.uploads);
+            let store = self.store.clone();
+            let dir = self.dir.path().to_path_buf();
+            close_quiet_session_and_sync(
+                &mut self.st,
+                &self.store,
+                self.dir.path(),
+                self.now,
+                finished_game_close_after(config::FINISHED_GAME_CLOSE_DEFAULT_SECS),
+                || {
+                    let syncs = std::sync::Arc::clone(&syncs);
+                    let uploads = std::sync::Arc::clone(&uploads);
+                    let store = store.clone();
+                    let dir = dir.clone();
+                    async move {
+                        syncs.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        let _ = try_sync_with(&store, &dir, move |_matches, _tombstones| {
+                            let uploads = std::sync::Arc::clone(&uploads);
+                            async move {
+                                uploads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                                Ok(upload_ok())
+                            }
+                        })
+                        .await;
+                    }
+                },
+            )
+            .await
+        }
+
+        /// Step the injected clock the way the 3-second command tick does,
+        /// and run the quiet-close timer on each step.
+        async fn idle_through(&mut self, until: Instant) {
+            while self.now < until {
+                let step = until
+                    .saturating_duration_since(self.now)
+                    .min(Duration::from_secs(3));
+                if step.is_zero() {
+                    break;
+                }
+                self.advance(step);
+                self.quiet_tick().await;
+            }
+        }
+
+        /// What a daemon restart does with the on-disk skeleton.
+        async fn restart_from_disk(&self) -> Option<ActiveGame> {
+            let syncs = std::sync::Arc::clone(&self.syncs);
+            let uploads = std::sync::Arc::clone(&self.uploads);
+            let store = self.store.clone();
+            let dir = self.dir.path().to_path_buf();
+            recover_or_sync_active_game(self.dir.path(), || {
+                let syncs = std::sync::Arc::clone(&syncs);
+                let uploads = std::sync::Arc::clone(&uploads);
+                let store = store.clone();
+                let dir = dir.clone();
+                async move {
+                    syncs.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    let _ = try_sync_with(&store, &dir, move |_matches, _tombstones| {
+                        let uploads = std::sync::Arc::clone(&uploads);
+                        async move {
+                            uploads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                            Ok(upload_ok())
+                        }
+                    })
+                    .await;
+                }
+            })
+            .await
+            .active_game
         }
 
         fn advance(&mut self, by: Duration) {
@@ -8926,5 +9358,349 @@ mod tests {
             assert_eq!(night.id(), id);
         }
         assert_eq!(night.elims(&id).await, vec![0, 0, 1, 1, 2]);
+    }
+
+    fn close_after() -> Duration {
+        finished_game_close_after(config::FINISHED_GAME_CLOSE_DEFAULT_SECS)
+    }
+
+    async fn finish_colosseo(night: &mut Night) -> String {
+        night.begin_on("Colosseo", "Zenyatta");
+        night
+            .tab_once(
+                night_counters(14, 22, 6, 2400, 9800, 400),
+                "Zenyatta",
+                Some(2),
+                Some("Colosseo"),
+                NIGHT_CLEAN,
+            )
+            .await;
+        night
+            .word(detect::MatchOutcome::Defeat, Some("Colosseo"))
+            .await;
+        assert_eq!(night.game().outcome, detect::MatchOutcome::Defeat);
+        night.id()
+    }
+
+    #[tokio::test]
+    async fn last_game_of_the_night_retires_at_three_minutes_and_syncs_once() {
+        let mut night = Night::new().await;
+        let id = finish_colosseo(&mut night).await;
+        let activity = night.game().last_activity;
+        let recorded = night.game().outcome_recorded_at.expect("result recorded");
+        assert_eq!(activity, recorded);
+        assert!(
+            night.now < activity + Duration::from_secs(179),
+            "the confirming word must not already consume the quiet window"
+        );
+        night
+            .idle_through(activity + close_after() - Duration::from_secs(1))
+            .await;
+        assert_eq!(night.id(), id, "still the open game just before 180s");
+        assert_eq!(night.sync_count(), 0, "no sync before the quiet window");
+        assert_eq!(night.upload_count(), 0);
+        night.idle_through(activity + close_after()).await;
+        assert!(
+            night.st.active_game.is_none(),
+            "the last game is retired at 180s without another Tab"
+        );
+        assert_eq!(night.sync_count(), 1, "deleting the sync call must fail");
+        assert_eq!(night.upload_count(), 1);
+        night
+            .idle_through(activity + Duration::from_secs(10 * 60))
+            .await;
+        assert!(
+            night.st.active_game.is_none(),
+            "the retired game stays closed through the rest of the night"
+        );
+        assert!(
+            !active_game_path(night.dir.path()).exists(),
+            "active_game.json is cleared with the session"
+        );
+        assert_eq!(night.sync_count(), 1, "deleting the sync call must fail");
+        assert_eq!(
+            night.upload_count(),
+            1,
+            "the unsynced rows upload exactly once"
+        );
+        let rows = night.store.get_session_snapshots(&id).await.unwrap();
+        assert!(
+            !rows.is_empty(),
+            "the scoreboard rows are still in the store"
+        );
+        assert!(rows.iter().all(|row| row.outcome == "defeat"));
+        assert!(rows.iter().all(|row| row.synced));
+        assert_eq!(night.elims(&id).await, vec![14]);
+    }
+
+    #[tokio::test]
+    async fn post_match_tab_inside_grace_delays_the_quiet_close() {
+        let mut night = Night::new().await;
+        let id = finish_colosseo(&mut night).await;
+        let recorded = night.game().outcome_recorded_at.expect("result recorded");
+        night.idle_through(recorded + Duration::from_secs(60)).await;
+        assert_eq!(night.id(), id);
+        assert_eq!(night.sync_count(), 0);
+        night
+            .tab_once(
+                night_counters(16, 23, 6, 2600, 10000, 420),
+                "Zenyatta",
+                Some(2),
+                Some("Colosseo"),
+                NIGHT_CLEAN,
+            )
+            .await;
+        assert_eq!(
+            night.id(),
+            id,
+            "a Tab at +60s still lands on the finished game"
+        );
+        assert!(night.elims(&id).await.contains(&16));
+        let activity = night.game().last_activity;
+        assert!(activity >= recorded + Duration::from_secs(60));
+        night.idle_through(recorded + close_after()).await;
+        assert_eq!(
+            night.id(),
+            id,
+            "180s after the result is not enough once a later Tab moved last activity"
+        );
+        assert_eq!(night.sync_count(), 0);
+        night
+            .idle_through(activity + close_after() - Duration::from_secs(1))
+            .await;
+        assert_eq!(night.id(), id);
+        night.idle_through(activity + close_after()).await;
+        assert!(night.st.active_game.is_none());
+        assert_eq!(night.sync_count(), 1);
+        assert_eq!(night.upload_count(), 1);
+        let rows = night.store.get_session_snapshots(&id).await.unwrap();
+        assert!(rows.iter().all(|row| row.outcome == "defeat"));
+        assert!(night.elims(&id).await.contains(&16));
+    }
+
+    #[tokio::test]
+    async fn tab_after_the_quiet_close_opens_a_new_session() {
+        let mut night = Night::new().await;
+        let id = finish_colosseo(&mut night).await;
+        let activity = night.game().last_activity;
+        night.idle_through(activity + close_after()).await;
+        assert!(night.st.active_game.is_none());
+        assert_eq!(night.upload_count(), 1);
+        let before = night.elims(&id).await;
+        night
+            .idle_through(night.now + Duration::from_secs(5 * 60))
+            .await;
+        assert_eq!(
+            night.upload_count(),
+            1,
+            "sitting after the close does not upload again"
+        );
+        night
+            .tab_once(
+                night_counters(2, 1, 0, 350, 60, 800),
+                "Reinhardt",
+                Some(0),
+                Some("Ilios"),
+                NIGHT_CLEAN,
+            )
+            .await;
+        assert_ne!(night.id(), id, "the Tab opens a new session");
+        assert_eq!(
+            night.elims(&id).await,
+            before,
+            "the retired game is not written again"
+        );
+        let old = night.store.get_session_snapshots(&id).await.unwrap();
+        assert!(old.iter().all(|row| row.outcome == "defeat"));
+        night
+            .word(detect::MatchOutcome::Victory, Some("Ilios"))
+            .await;
+        assert_eq!(night.game().outcome, detect::MatchOutcome::Victory);
+        assert_ne!(night.id(), id);
+        let old = night.store.get_session_snapshots(&id).await.unwrap();
+        assert!(
+            old.iter().all(|row| row.outcome == "defeat"),
+            "a later result is not sealed onto the retired game"
+        );
+    }
+
+    #[tokio::test]
+    async fn unfinished_game_idle_for_21_minutes_retires_as_unknown_and_syncs() {
+        let mut night = Night::new().await;
+        night.begin_on("Busan", "Ana");
+        night
+            .tab_once(
+                night_counters(8, 3, 2, 1800, 400, 100),
+                "Ana",
+                Some(0),
+                Some("Busan"),
+                NIGHT_CLEAN,
+            )
+            .await;
+        let id = night.id();
+        assert!(!night.game().finished());
+        let activity = night.game().last_activity;
+        night.idle_through(activity + UNFINISHED_SESSION_IDLE).await;
+        assert_eq!(night.id(), id, "exactly 20 minutes is still this game");
+        assert_eq!(night.sync_count(), 0);
+        night
+            .idle_through(activity + Duration::from_secs(21 * 60))
+            .await;
+        assert!(night.st.active_game.is_none());
+        assert_eq!(night.sync_count(), 1, "deleting the sync call must fail");
+        assert!(
+            !active_game_path(night.dir.path()).exists(),
+            "the unfinished skeleton is retired"
+        );
+        let rows = night.store.get_session_snapshots(&id).await.unwrap();
+        assert!(!rows.is_empty());
+        assert!(
+            rows.iter().all(|row| row.outcome == "unknown"),
+            "idle close does not invent an outcome, got {:?}",
+            rows.iter()
+                .map(|row| row.outcome.clone())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[tokio::test]
+    async fn restart_syncs_a_stale_finished_skeleton_without_losing_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = storage::LocalStore::open(dir.path()).await.unwrap();
+        store
+            .insert_match(test_match("colosseo-defeat", "defeat"))
+            .await
+            .unwrap();
+        let when = Utc::now() - chrono::Duration::hours(9);
+        let stale = PersistedGame {
+            session_id: "colosseo-defeat".into(),
+            outcome: detect::MatchOutcome::Defeat,
+            map: Some("Colosseo".into()),
+            map_source: None,
+            map_candidates: Vec::new(),
+            session_created: true,
+            opened_at: when - chrono::Duration::minutes(20),
+            last_activity: when,
+            outcome_recorded_at: Some(when),
+            gate: None,
+            last_stats_at: None,
+            hero_auth: HeroAuthState::default(),
+            result_outcome: Some(detect::MatchOutcome::Defeat),
+            result_confirmed: true,
+            result_seen_at: Some(when),
+            pending_boundary: false,
+            awaiting_first_board: false,
+            reset_streak: 0,
+            reset_baseline: None,
+            baseline_row: None,
+            deferred: None,
+            deferred_hero: None,
+            deferred_at: None,
+            deferred_imported: false,
+            progressed_boards: 0,
+            baseline_at: None,
+            text_fallback_locked: false,
+        };
+        std::fs::write(
+            active_game_path(dir.path()),
+            serde_json::to_vec(&stale).unwrap(),
+        )
+        .unwrap();
+        let uploads = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let sync_with = |uploads: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+                         store: storage::LocalStore,
+                         dir: std::path::PathBuf| {
+            move || {
+                let uploads = std::sync::Arc::clone(&uploads);
+                let store = store.clone();
+                let dir = dir.clone();
+                async move {
+                    let _ = try_sync_with(&store, &dir, move |matches, _tombstones| {
+                        let uploads = std::sync::Arc::clone(&uploads);
+                        async move {
+                            assert_eq!(matches.len(), 1);
+                            assert_eq!(matches[0].session_id, "colosseo-defeat");
+                            assert_eq!(matches[0].outcome, "defeat");
+                            uploads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                            Ok(upload_ok())
+                        }
+                    })
+                    .await;
+                }
+            }
+        };
+        let restored = recover_or_sync_active_game(
+            dir.path(),
+            sync_with(
+                std::sync::Arc::clone(&uploads),
+                store.clone(),
+                dir.path().to_path_buf(),
+            ),
+        )
+        .await;
+        assert!(
+            restored.active_game.is_none() && restored.last_game_open.is_none(),
+            "a 9-hour-old skeleton is not the open game"
+        );
+        assert_eq!(uploads.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(!active_game_path(dir.path()).exists());
+        let rows = store.get_all_matches().await.unwrap();
+        assert_eq!(
+            rows.len(),
+            1,
+            "dropping the skeleton must not drop the rows"
+        );
+        assert_eq!(rows[0].session_id, "colosseo-defeat");
+        assert_eq!(rows[0].outcome, "defeat");
+        assert_eq!(rows[0].elims, 10);
+        assert!(rows[0].synced);
+
+        let again = recover_or_sync_active_game(
+            dir.path(),
+            sync_with(
+                std::sync::Arc::clone(&uploads),
+                store.clone(),
+                dir.path().to_path_buf(),
+            ),
+        )
+        .await;
+        assert!(again.active_game.is_none());
+        assert_eq!(
+            uploads.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "a second start must not upload the same game again"
+        );
+        assert_eq!(store.get_all_matches().await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn quiet_close_persists_so_a_restart_does_not_retire_twice() {
+        let mut night = Night::new().await;
+        let id = finish_colosseo(&mut night).await;
+        let activity = night.game().last_activity;
+        night.idle_through(activity + close_after()).await;
+        assert!(night.st.active_game.is_none());
+        assert!(!active_game_path(night.dir.path()).exists());
+        assert_eq!(night.upload_count(), 1);
+        let uploads = night.upload_count();
+        let recovered = night.restart_from_disk().await;
+        assert!(
+            recovered.is_none(),
+            "the cleared skeleton must not come back as the open game"
+        );
+        assert!(recover_active_game(night.dir.path()).is_none());
+        assert_eq!(
+            night.upload_count(),
+            uploads,
+            "restart must not upload again"
+        );
+        assert!(
+            !night.quiet_tick().await,
+            "a second quiet tick must not close the session again"
+        );
+        assert_eq!(night.upload_count(), uploads);
+        let rows = night.store.get_session_snapshots(&id).await.unwrap();
+        assert!(!rows.is_empty());
+        assert!(rows.iter().all(|row| row.outcome == "defeat" && row.synced));
     }
 }

@@ -103,6 +103,9 @@ pub enum HeroRole {
 }
 
 impl HeroRole {
+    /// Tank, then Damage, then Support. Pickers and dropdowns walk this.
+    pub const ALL: &[HeroRole] = &[HeroRole::Tank, HeroRole::Damage, HeroRole::Support];
+
     pub fn color_hex(&self) -> &'static str {
         match self {
             HeroRole::Tank => "#f5b43c",
