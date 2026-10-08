@@ -200,7 +200,7 @@ pub fn compare(
     let board = match result {
         Ok(b) => b,
         Err(e) => {
-            record.error = Some(format!("{e:?}"));
+            record.error = Some(e.to_string());
             return record;
         }
     };
@@ -278,6 +278,30 @@ mod tests {
     }
 
     #[test]
+    fn flag_on_runs_the_real_matcher_and_writes_one_log_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = crate::config::Config {
+            data_dir: dir.path().to_path_buf(),
+            shadow_recognizer: true,
+            ..crate::config::Config::default()
+        };
+        let worker = ShadowWorker::start_if_enabled(&config).expect("flag on spawns");
+        // A blank board: the matcher must answer (error or read), never hang.
+        assert!(worker.try_submit(job("e2e")));
+        let log = ShadowLog::new(dir.path());
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let line_written = || std::fs::read_to_string(log.path()).is_ok_and(|t| t.ends_with('\n'));
+        while !line_written() && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        drop(worker);
+        let text = std::fs::read_to_string(log.path()).expect("one line written");
+        let v: serde_json::Value = serde_json::from_str(text.lines().next().unwrap()).unwrap();
+        assert_eq!(v["session"], "e2e");
+        assert_eq!(v["resolution"], 1440);
+    }
+
+    #[test]
     fn job_reads_ocr_values_like_the_tracker_parse() {
         let c = |v: &str, conf| CellOcrResult {
             value: v.into(),
@@ -329,7 +353,7 @@ mod tests {
         assert_eq!(r.diffs[1].matcher, Some(8));
 
         let err = compare(&job("s2"), Err(ShadowError::OverBudget), 0);
-        assert_eq!(err.error.as_deref(), Some("OverBudget"));
+        assert_eq!(err.error.as_deref(), Some("over budget"));
         assert_eq!((err.cells, err.agree), (0, 0));
     }
 
