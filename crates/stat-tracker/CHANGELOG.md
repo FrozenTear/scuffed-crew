@@ -58,6 +58,15 @@ name still reads back. `LIJIANG TOWER` is on its own line four times,
 plus one title-case line, so the IJ pair is not dropped. `LIANG TOWER`
 and `LULANG TOWER` still canonicalize to Lijiang Tower.
 
+### Install
+
+```sh
+curl --proto '=https' -fsSL https://raw.githubusercontent.com/FrozenTear/scuffed-crew/main/crates/stat-tracker/dist/bootstrap.sh | bash
+```
+
+Or extract the tarball and run `./install.sh`. Pin with
+`STAT_TRACKER_TAG=stat-tracker-v0.4.22`.
+
 ## 0.4.21
 
 A zero on the scoreboard is drawn fainter than the other digits. The
