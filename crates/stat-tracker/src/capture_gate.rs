@@ -51,6 +51,24 @@
 //!   cases; does **not** cover `2782→22994` alone (prefix < accepted) — that
 //!   needs B1 + Lane A geometry.
 //!
+//! ## Low-trust latch
+//!
+//! A raw-text fallback, or a first capture whose kill columns are past the
+//! parser ceilings, is stored but marked `low_trust`. Those columns are
+//! `unconfirmed`. One later clean per-cell read (no edge-ink) may replace an
+//! unconfirmed column, including with a lower number, which is how a shifted
+//! assists/deaths pair is dropped without waiting for [`UNLATCH_STREAK`].
+//!
+//! That replacement still goes through the same holds as any other capture:
+//! a decrease of a *confirmed* column is the monotonic hold (B), a kill-column
+//! jump past [`max_delta`] without corroboration is the rate cap (C), and a
+//! trailing-digit inject is [`HoldKind::DigitInject`] (B2). A replacement
+//! below the confirmed value a fallback moved off, or a wide column that is
+//! the latched number with its last digit cut off, also falls through to B.
+//! While any of those holds is in force, or any column is still unconfirmed,
+//! `low_trust` stays set. A second fallback, or a read with edge-ink, does
+//! not clear an unconfirmed column.
+//!
 //! ## Known residuals (documented, out of scope)
 //!
 //! * **F-CG2-1a** — the raw-continuity split vote anchors on `last_raw`, which
@@ -130,11 +148,13 @@ impl Counters {
 /// is the raw OCR read (even when it was held), used for the
 /// two-consecutive-reads corroboration of an implausible jump (C).
 ///
-/// The `down_*` / `last_raw_suspect` fields back the CG-2 un-latch and are
-/// ADDITIVE with `#[serde(default)]`: an in-flight `active_game.json` written by
-/// a pre-un-latch build deserializes cleanly (missing → zero/false, i.e. no
-/// streak in progress, previous raw treated as clean). Do not rename or drop the
-/// existing fields — that would silently discard recovered in-game state.
+/// The `down_*` / `last_raw_suspect` / `low_trust` / `unconfirmed` /
+/// `confirmed_floor` fields are ADDITIVE with `#[serde(default)]`: an
+/// in-flight `active_game.json` written by an older build deserializes
+/// cleanly (missing means zero/false, i.e. no streak in progress, previous
+/// raw treated as clean, latch already trusted, no confirmed floor). Do not
+/// rename or drop the existing fields. That would silently discard recovered
+/// in-game state.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GateState {
     pub accepted: Counters,
@@ -149,6 +169,33 @@ pub struct GateState {
     /// must never corroborate the current capture's upward jump (C).
     #[serde(default)]
     pub last_raw_suspect: [bool; GATE_COLS],
+    /// The latched counters are not confirmed by a clean per-cell read.
+    ///
+    /// Set when they came from the raw-text fallback, or when a kill column
+    /// is above the same ceilings the parser uses (elims/assists above 99,
+    /// deaths above 50), including the first capture of a game, which
+    /// otherwise accepts the raw read verbatim. One later clean per-cell
+    /// read replaces the latch. Missing on a pre-0.4.21 `active_game.json`
+    /// means already trusted.
+    #[serde(default)]
+    pub low_trust: bool,
+    /// Which accepted columns came from a fallback or an implausible latch.
+    /// A clean per-cell read may replace these on the next capture. A column
+    /// left false was already confirmed, so a decrease of it still waits for
+    /// [`UNLATCH_STREAK`]. Missing on an older save means none.
+    #[serde(default)]
+    pub unconfirmed: [bool; GATE_COLS],
+    /// Previous accepted value of a column that was confirmed, then moved by
+    /// a fallback. A clean replacement below this floor is a clip of that
+    /// confirmed value, so it takes the monotonic hold. Cleared when a clean
+    /// read stores the column and confirms it. Missing on an older save
+    /// means no floor.
+    #[serde(default)]
+    pub confirmed_floor: [u32; GATE_COLS],
+    /// Which columns have [`Self::confirmed_floor`] set. A floor of 0 is a
+    /// real confirmed zero, so the flag is not the value.
+    #[serde(default)]
+    pub has_confirmed_floor: [bool; GATE_COLS],
 }
 
 /// Why a cell was held, for per-capture observability logging.
@@ -187,6 +234,9 @@ pub struct Unlatch {
     pub raw: u32,
     /// The (suspected-corrupt) value that had been latched.
     pub revised_from: u32,
+    /// True when one clean read replaced an unconfirmed cell. False when
+    /// [`UNLATCH_STREAK`] clean reads revised a confirmed latch down.
+    pub replaced_unconfirmed: bool,
 }
 
 /// Result of gating one capture.
@@ -333,28 +383,102 @@ fn downstreak_continues(streak_last: u32, cur: u32) -> bool {
 /// whole-row game-split signal already fired (a real new game).
 ///
 /// On a split or a first capture the raw read is accepted verbatim (a new game
-/// legitimately resets every counter). Otherwise each cell is checked
-/// independently: a decrease is held to the previous accepted value (B) unless a
-/// run of `UNLATCH_STREAK` clean coherent decreases revises the latched value
-/// DOWN (CG-2 un-latch); a trailing-digit inject is held (CG-4 B2); an increase
-/// beyond the plausible rate is held unless a clean previous raw read
+/// legitimately resets every counter) and marked low-trust when the read is
+/// untrusted or a kill column is past the ceilings. Otherwise each cell is
+/// checked independently: a decrease is held to the previous accepted value (B)
+/// unless a run of `UNLATCH_STREAK` clean coherent decreases revises the latched
+/// value DOWN (CG-2 un-latch); a trailing-digit inject is held (CG-4 B2); an
+/// increase beyond the plausible rate is held unless a clean previous raw read
 /// corroborates it (C / CG-4 B1 for suspect wide cols); an advance within rate
 /// passes through unchanged.
+///
+/// `apply_gate` is [`apply_gate_with_trust`] with the read marked trusted.
 pub fn apply_gate(
     prev: Option<(GateState, Duration)>,
     raw: Counters,
     suspect: [bool; GATE_COLS],
     split: bool,
 ) -> GateOutcome {
+    apply_gate_with_trust(prev, raw, suspect, split, true)
+}
+
+fn kill_col_over_ceiling(col: usize, value: u32) -> bool {
+    match col {
+        0 => value > crate::parse::MAX_ELIMS,
+        1 => value > crate::parse::MAX_ASSISTS,
+        2 => value > crate::parse::MAX_DEATHS,
+        _ => false,
+    }
+}
+
+/// Kill columns past the shared parse ceilings.
+///
+/// A 0.4.20 save has no per-column trust bit, so only these columns are
+/// marked. A shifted wide column that sits above its real value still needs
+/// [`UNLATCH_STREAK`] clean reads. Wide columns have no ceiling here.
+fn mark_implausible(unconfirmed: &mut [bool; GATE_COLS], c: Counters) {
+    let cols = c.to_array();
+    for col in 0..GATE_COLS {
+        if kill_col_over_ceiling(col, cols[col]) {
+            unconfirmed[col] = true;
+        }
+    }
+}
+
+/// An untrusted read must not corroborate the next jump or build a down
+/// streak. Recording every column suspect is the same rule the edge-ink
+/// mask already uses.
+fn raw_suspect_mask(suspect: [bool; GATE_COLS], trusted: bool) -> [bool; GATE_COLS] {
+    if trusted { suspect } else { [true; GATE_COLS] }
+}
+
+fn fresh_state(raw: Counters, suspect: [bool; GATE_COLS], trusted: bool) -> GateState {
+    // An untrusted first capture has not confirmed any column. A trusted
+    // one only leaves the kill columns that are past the ceilings
+    // unconfirmed. The other columns of that read were fine.
+    let mut unconfirmed = [!trusted; GATE_COLS];
+    mark_implausible(&mut unconfirmed, raw);
+    GateState {
+        accepted: raw,
+        last_raw: raw,
+        last_raw_suspect: raw_suspect_mask(suspect, trusted),
+        low_trust: unconfirmed.iter().any(|&c| c),
+        unconfirmed,
+        ..Default::default()
+    }
+}
+
+/// [`apply_gate`] with an explicit trust bit.
+///
+/// `trusted` is false when the six stats came from the raw-text fallback.
+/// That latch is `low_trust` even when every column is in range, and so is
+/// a first capture whose kill columns are implausible: the first capture
+/// used to be stored as the baseline with no check, which is how a shifted
+/// assists/deaths pair locked for the rest of the match.
+///
+/// A later read that is trusted and has no edge-ink suspect column may
+/// replace an *unconfirmed* column on this capture, including with a lower
+/// number. The replacement still applies the monotonic hold (B) to a
+/// confirmed column, the rate cap (C), and the trailing-digit inject hold
+/// (B2). It also holds a replacement below the confirmed value a fallback
+/// moved off, and a wide column whose clean read is the latched number
+/// with its last digit cut off. `low_trust` stays set while any column is
+/// held or still unconfirmed. A second fallback, or a read with edge-ink,
+/// does not clear an unconfirmed column. A trusted decrease of a confirmed
+/// latch still waits for [`UNLATCH_STREAK`] clean reads. An untrusted read
+/// is recorded as suspect on every column, so it does not corroborate the
+/// next jump and does not build the un-latch streak.
+pub fn apply_gate_with_trust(
+    prev: Option<(GateState, Duration)>,
+    raw: Counters,
+    suspect: [bool; GATE_COLS],
+    split: bool,
+    trusted: bool,
+) -> GateOutcome {
     let Some((state, elapsed)) = prev.filter(|_| !split) else {
         return GateOutcome {
             accepted: raw,
-            state: GateState {
-                accepted: raw,
-                last_raw: raw,
-                last_raw_suspect: suspect,
-                ..Default::default()
-            },
+            state: fresh_state(raw, suspect, trusted),
             holds: Vec::new(),
             unlatches: Vec::new(),
         };
@@ -367,17 +491,45 @@ pub fn apply_gate(
     let mut out = cur;
     let mut down_len = state.down_streak_len;
     let mut down_last = state.down_streak_last;
+    let mut unconfirmed = state.unconfirmed;
+    let mut confirmed_floor = state.confirmed_floor;
+    let mut has_confirmed_floor = state.has_confirmed_floor;
     let mut holds = Vec::new();
     let mut unlatches = Vec::new();
+    // A fully clean per-cell read may replace unconfirmed columns. Confirmed
+    // columns, and every increase, still go through B, C, and B2 below.
+    let replacing = state.low_trust && trusted && !suspect.iter().any(|&s| s);
 
     for col in 0..GATE_COLS {
+        if cur[col] < prev_acc[col] && replacing && unconfirmed[col] {
+            // Below the value a fallback moved off a confirmed column, or a
+            // wide column that is just the latched number with its last
+            // digit cut off. Both are clips. Fall through to the monotonic
+            // hold instead of storing them as the new trusted value.
+            let below_floor = has_confirmed_floor[col] && cur[col] < confirmed_floor[col];
+            let wide_clip =
+                !is_kill_col(col) && is_trailing_digit_inject(cur[col], prev_acc[col], elapsed);
+            if !below_floor && !wide_clip {
+                unlatches.push(Unlatch {
+                    col,
+                    raw: cur[col],
+                    revised_from: prev_acc[col],
+                    replaced_unconfirmed: true,
+                });
+                out[col] = cur[col];
+                down_len[col] = 0;
+                down_last[col] = 0;
+                continue;
+            }
+        }
         if cur[col] < prev_acc[col] {
             // (B) cumulative counter decreased → misread; hold last accepted,
             // UNLESS a run of clean coherent decreases un-latches a value the
             // gate latched onto a corrupt inflation (CG-2).
-            if suspect[col] {
-                // A suspect below-read (a clip like Havana HLG 224/234) must not
-                // build the streak — it would talk the gate out of a correct hold.
+            if suspect[col] || !trusted {
+                // A suspect below-read (a clip like Havana HLG 224/234), or
+                // any untrusted read, must not build the streak. It would
+                // talk the gate out of a correct hold.
                 down_len[col] = 0;
                 out[col] = prev_acc[col];
                 holds.push(Hold {
@@ -398,6 +550,7 @@ pub fn apply_gate(
                     col,
                     raw: cur[col],
                     revised_from: prev_acc[col],
+                    replaced_unconfirmed: false,
                 });
                 out[col] = cur[col];
                 down_len[col] = 0;
@@ -452,6 +605,46 @@ pub fn apply_gate(
     }
 
     let accepted = Counters::from_array(out);
+    // Adopting a fallback number marks that column unconfirmed. If the
+    // column was confirmed, keep that value as a floor so a later clip
+    // cannot replace it.
+    if !trusted {
+        for col in 0..GATE_COLS {
+            if out[col] == cur[col] && out[col] != prev_acc[col] {
+                if !unconfirmed[col] {
+                    confirmed_floor[col] = prev_acc[col];
+                    has_confirmed_floor[col] = true;
+                }
+                unconfirmed[col] = true;
+            }
+        }
+    }
+    if replacing {
+        for col in 0..GATE_COLS {
+            if out[col] != cur[col] {
+                continue;
+            }
+            // A ghost under an implausible kill latch is stored, but the
+            // column stays unconfirmed until a non-suspect read already
+            // agreed with it. Otherwise B would lock the ghost in.
+            // Plausible columns, including a fallback assists of 40, still
+            // confirm on this read.
+            let over = kill_col_over_ceiling(col, prev_acc[col]);
+            let agrees = !prev_raw_suspect[col] && cur[col] == prev_raw[col];
+            if over && !agrees {
+                continue;
+            }
+            unconfirmed[col] = false;
+            has_confirmed_floor[col] = false;
+            confirmed_floor[col] = 0;
+        }
+    }
+    // A 0.4.20 save has no low_trust bit, so a shifted latch loads as
+    // trusted. Keeping the implausible number marks those columns so the
+    // next clean read can replace them. Wide columns are not marked; a
+    // shifted one still waits for the un-latch streak.
+    mark_implausible(&mut unconfirmed, accepted);
+    let low_trust = unconfirmed.iter().any(|&c| c) || (state.low_trust && !holds.is_empty());
     GateOutcome {
         accepted,
         state: GateState {
@@ -459,7 +652,11 @@ pub fn apply_gate(
             last_raw: raw,
             down_streak_len: down_len,
             down_streak_last: down_last,
-            last_raw_suspect: suspect,
+            last_raw_suspect: raw_suspect_mask(suspect, trusted),
+            low_trust,
+            unconfirmed,
+            confirmed_floor,
+            has_confirmed_floor,
         },
         holds,
         unlatches,
@@ -505,6 +702,532 @@ mod tests {
         let out = apply_gate(None, c(5, 3, 2, 4316, 1200, 899), CLEAN, false);
         assert_eq!(out.accepted, c(5, 3, 2, 4316, 1200, 899));
         assert!(out.holds.is_empty());
+        assert!(!out.state.low_trust);
+    }
+
+    #[test]
+    fn fallback_latch_yields_to_one_clean_lower_read() {
+        // In-range but wrong assists/deaths from the text fallback. A clean
+        // per-cell read replaces them on the next capture. The un-latch
+        // streak of 3 must not keep the junk.
+        let first = apply_gate_with_trust(None, c(2, 40, 18, 450, 0, 2), CLEAN, false, false);
+        assert!(first.state.low_trust);
+        assert_eq!(first.accepted.assists, 40);
+        let second = apply_gate_with_trust(
+            Some((first.state, secs(20))),
+            c(2, 0, 0, 1105, 259, 450),
+            CLEAN,
+            false,
+            true,
+        );
+        assert_eq!(second.accepted, c(2, 0, 0, 1105, 259, 450));
+        assert!(!second.state.low_trust);
+        assert!(
+            second
+                .unlatches
+                .iter()
+                .any(|u| u.col == 1 && u.raw == 0 && u.revised_from == 40)
+        );
+        assert!(
+            second
+                .unlatches
+                .iter()
+                .any(|u| u.col == 2 && u.raw == 0 && u.revised_from == 18)
+        );
+    }
+
+    #[test]
+    fn implausible_first_capture_does_not_lock() {
+        // Shifted timer digits: A 1105, D 259 on the first capture of the
+        // game. That used to become the baseline. One clean per-cell read
+        // replaces the values. The kill columns stay unconfirmed until the
+        // next clean read agrees, trusted source or not.
+        let shifted = c(0, 1105, 259, 450, 0, 2);
+        let clean = c(8, 1, 2, 3993, 989, 1583);
+        for trusted in [false, true] {
+            let first = apply_gate_with_trust(None, shifted, CLEAN, false, trusted);
+            assert!(first.state.low_trust, "trusted={trusted}");
+            if trusted {
+                assert!(first.state.unconfirmed[1] && first.state.unconfirmed[2]);
+                assert!(
+                    !first.state.unconfirmed[0] && !first.state.unconfirmed[3],
+                    "a trusted first capture only unconfirms the kill columns past the ceilings"
+                );
+            }
+            let second =
+                apply_gate_with_trust(Some((first.state, secs(30))), clean, CLEAN, false, true);
+            assert_eq!(second.accepted, clean);
+            // The implausible assists and deaths are stored, but they stay
+            // unconfirmed until a second clean read agrees. Confirming the
+            // first replacement would let B lock a ghost in.
+            assert!(second.state.low_trust, "trusted={trusted}");
+            assert!(second.state.unconfirmed[1] && second.state.unconfirmed[2]);
+            let third =
+                apply_gate_with_trust(Some((second.state, secs(20))), clean, CLEAN, false, true);
+            assert_eq!(third.accepted, clean);
+            assert!(!third.state.low_trust, "trusted={trusted}");
+        }
+    }
+
+    #[test]
+    fn another_fallback_does_not_replace_a_low_trust_latch() {
+        let first = apply_gate_with_trust(None, c(2, 40, 18, 450, 0, 2), CLEAN, false, false);
+        let second = apply_gate_with_trust(
+            Some((first.state, secs(10))),
+            c(2, 1, 2, 500, 10, 10),
+            CLEAN,
+            false,
+            false,
+        );
+        assert_eq!(second.accepted.assists, 40);
+        assert_eq!(second.accepted.deaths, 18);
+        assert!(second.state.low_trust);
+    }
+
+    #[test]
+    fn a_suspect_read_does_not_clear_a_low_trust_latch() {
+        let first = apply_gate_with_trust(None, c(2, 40, 18, 450, 0, 2), CLEAN, false, false);
+        let mut suspect = CLEAN;
+        suspect[1] = true;
+        let second = apply_gate_with_trust(
+            Some((first.state, secs(10))),
+            c(2, 1, 2, 500, 10, 10),
+            suspect,
+            false,
+            true,
+        );
+        assert_eq!(second.accepted.assists, 40, "suspect assists stays held");
+        assert!(second.state.low_trust);
+    }
+
+    #[test]
+    fn clean_replacement_holds_a_kill_rate_ghost() {
+        // E 9 → 91 in 20s. Cap is 20/5 + 8 = 12. A trusted first capture holds
+        // it; a fallback latch must hold it too, and stay low-trust.
+        let ghost = c(91, 0, 0, 0, 0, 0);
+        let trusted = apply_gate(None, c(9, 0, 0, 0, 0, 0), CLEAN, false);
+        let trusted_next = apply_gate(Some((trusted.state, secs(20))), ghost, CLEAN, false);
+        assert_eq!(trusted_next.accepted.elims, 9);
+        assert!(!trusted_next.state.low_trust);
+
+        let fallback = apply_gate_with_trust(None, c(9, 0, 0, 0, 0, 0), CLEAN, false, false);
+        assert!(fallback.state.low_trust);
+        let next =
+            apply_gate_with_trust(Some((fallback.state, secs(20))), ghost, CLEAN, false, true);
+        assert_eq!(next.accepted.elims, 9);
+        assert!(
+            next.holds
+                .iter()
+                .any(|h| h.col == 0 && h.kind == HoldKind::RateCap && h.raw == 91)
+        );
+        assert!(next.state.low_trust);
+    }
+
+    #[test]
+    fn clean_replacement_holds_a_trailing_digit_inject() {
+        let first = apply_gate_with_trust(None, c(2, 0, 0, 5200, 0, 0), CLEAN, false, false);
+        let next = apply_gate_with_trust(
+            Some((first.state, secs(20))),
+            c(2, 0, 0, 52004, 0, 0),
+            CLEAN,
+            false,
+            true,
+        );
+        assert_eq!(next.accepted.damage, 5200);
+        assert!(
+            next.holds
+                .iter()
+                .any(|h| h.col == 3 && h.kind == HoldKind::DigitInject && h.raw == 52004)
+        );
+        assert!(next.state.low_trust);
+    }
+
+    #[test]
+    fn a_mid_game_fallback_marks_only_the_adopted_columns() {
+        let first = apply_gate(None, c(13, 5, 4, 5000, 0, 900), CLEAN, false);
+        assert!(!first.state.low_trust);
+        let adopted = apply_gate_with_trust(
+            Some((first.state, secs(20))),
+            c(13, 8, 4, 5200, 0, 1000),
+            CLEAN,
+            false,
+            false,
+        );
+        assert!(adopted.state.low_trust);
+        assert_eq!(adopted.accepted.assists, 8);
+        assert_eq!(adopted.accepted.damage, 5200);
+        assert!(adopted.state.unconfirmed[1]);
+        assert!(adopted.state.unconfirmed[3]);
+        assert!(adopted.state.unconfirmed[5]);
+        assert!(!adopted.state.unconfirmed[0]);
+
+        let drop = apply_gate_with_trust(
+            Some((adopted.state, secs(20))),
+            c(1, 8, 4, 5200, 0, 1000),
+            CLEAN,
+            false,
+            true,
+        );
+        assert_eq!(
+            drop.accepted.elims, 13,
+            "a confirmed column still monotonic-holds"
+        );
+        assert!(
+            drop.holds
+                .iter()
+                .any(|h| h.col == 0 && h.kind == HoldKind::Monotonic)
+        );
+        assert!(drop.state.low_trust);
+
+        let ghost = apply_gate_with_trust(
+            Some((adopted.state, secs(20))),
+            c(93, 8, 4, 52004, 0, 1000),
+            CLEAN,
+            false,
+            true,
+        );
+        assert_eq!(ghost.accepted.elims, 13);
+        assert_eq!(ghost.accepted.damage, 5200);
+        assert!(
+            ghost
+                .holds
+                .iter()
+                .any(|h| h.col == 0 && h.kind == HoldKind::RateCap)
+        );
+        assert!(
+            ghost
+                .holds
+                .iter()
+                .any(|h| h.col == 3 && h.kind == HoldKind::DigitInject)
+        );
+        assert!(ghost.state.low_trust);
+    }
+
+    #[test]
+    fn a_fully_held_fallback_does_not_mark_the_latch_low_trust() {
+        let first = apply_gate(None, c(13, 5, 4, 5000, 0, 900), CLEAN, false);
+        let held = apply_gate_with_trust(
+            Some((first.state, secs(10))),
+            c(1, 1, 1, 100, 0, 100),
+            CLEAN,
+            false,
+            false,
+        );
+        assert_eq!(held.accepted, first.accepted);
+        assert!(!held.state.low_trust);
+        assert!(!held.state.unconfirmed.iter().any(|&c| c));
+    }
+
+    #[test]
+    fn a_pre_0_4_21_implausible_save_recovers_on_the_second_clean_read() {
+        // 0.4.20 has no low_trust field. The shifted row loads as trusted,
+        // so the first clean read holds it and only then marks the kill
+        // columns unconfirmed. The second clean read replaces them.
+        let loaded = state(c(0, 1105, 259, 450, 0, 2));
+        assert!(!loaded.low_trust);
+        let clean = c(8, 1, 2, 3993, 989, 1583);
+        let first = apply_gate_with_trust(Some((loaded, secs(30))), clean, CLEAN, false, true);
+        assert_eq!(first.accepted.assists, 1105);
+        assert_eq!(first.accepted.deaths, 259);
+        assert!(first.state.low_trust);
+        assert!(first.state.unconfirmed[1]);
+        assert!(first.state.unconfirmed[2]);
+        let second =
+            apply_gate_with_trust(Some((first.state, secs(20))), clean, CLEAN, false, true);
+        assert_eq!(second.accepted, clean);
+        assert!(!second.state.low_trust);
+    }
+
+    #[test]
+    fn a_clip_below_a_confirmed_floor_stays_held_and_the_real_read_lands() {
+        // R1. A fallback moved columns off values a clean read had already
+        // confirmed. A later clean clip of those columns must not become
+        // the trusted latch, or the inject hold locks the real damage out.
+        let first = apply_gate(None, c(13, 5, 4, 5000, 0, 900), CLEAN, false);
+        let adopted = apply_gate_with_trust(
+            Some((first.state, secs(20))),
+            c(14, 8, 4, 5200, 0, 1000),
+            CLEAN,
+            false,
+            false,
+        );
+        assert!(adopted.state.has_confirmed_floor[0]);
+        assert_eq!(adopted.state.confirmed_floor[0], 13);
+        assert_eq!(adopted.state.confirmed_floor[1], 5);
+        assert_eq!(adopted.state.confirmed_floor[3], 5000);
+        assert_eq!(adopted.state.confirmed_floor[5], 900);
+        assert!(!adopted.state.has_confirmed_floor[2]);
+
+        let clip = apply_gate_with_trust(
+            Some((adopted.state, secs(20))),
+            c(1, 8, 4, 520, 0, 1000),
+            CLEAN,
+            false,
+            true,
+        );
+        assert_eq!(clip.accepted.elims, 14);
+        assert_eq!(clip.accepted.damage, 5200);
+        assert!(
+            clip.holds
+                .iter()
+                .any(|h| h.col == 0 && h.kind == HoldKind::Monotonic && h.raw == 1)
+        );
+        assert!(
+            clip.holds
+                .iter()
+                .any(|h| h.col == 3 && h.kind == HoldKind::Monotonic && h.raw == 520)
+        );
+        assert!(clip.state.low_trust);
+
+        let real = apply_gate_with_trust(
+            Some((clip.state, secs(20))),
+            c(14, 8, 4, 5300, 0, 1000),
+            CLEAN,
+            false,
+            true,
+        );
+        assert_eq!(real.accepted.damage, 5300);
+        assert_eq!(real.accepted.elims, 14);
+        assert!(!real.state.has_confirmed_floor[3]);
+    }
+
+    #[test]
+    fn a_wide_trailing_digit_clip_of_a_fallback_first_capture_stays_held() {
+        // R5. The first capture is a correct fallback damage figure. One
+        // clean read that drops the last digit must not become trusted, or
+        // DigitInject holds every later real read.
+        let first = apply_gate_with_trust(None, c(8, 1, 2, 12672, 0, 0), CLEAN, false, false);
+        assert_eq!(first.accepted.damage, 12672);
+        assert!(first.state.low_trust);
+        let clip = apply_gate_with_trust(
+            Some((first.state, secs(20))),
+            c(8, 1, 2, 1267, 0, 0),
+            CLEAN,
+            false,
+            true,
+        );
+        assert_eq!(clip.accepted.damage, 12672);
+        assert!(
+            clip.holds
+                .iter()
+                .any(|h| h.col == 3 && h.kind == HoldKind::Monotonic && h.raw == 1267)
+        );
+        assert!(clip.state.low_trust);
+
+        let mut state = clip.state;
+        let later = [13000, 14000, 15500, 17000, 19000, 21000];
+        let gaps = [30, 40, 50, 60, 70, 90];
+        for (dmg, gap) in later.into_iter().zip(gaps) {
+            let next = apply_gate_with_trust(
+                Some((state, secs(gap))),
+                c(8, 1, 2, dmg, 0, 0),
+                CLEAN,
+                false,
+                true,
+            );
+            assert_eq!(next.accepted.damage, dmg, "gap {gap}");
+            state = next.state;
+        }
+        assert_eq!(state.accepted.damage, 21000);
+        assert!(!state.low_trust);
+    }
+
+    #[test]
+    fn a_wrong_high_fallback_above_the_floor_still_corrects_in_one_read() {
+        // The fallback is in range and above the confirmed value. The clean
+        // read is below that latch and still above the floor, so it replaces
+        // the column in one read.
+        let first = apply_gate(None, c(13, 5, 4, 5000, 0, 900), CLEAN, false);
+        let adopted = apply_gate_with_trust(
+            Some((first.state, secs(120))),
+            c(40, 12, 4, 8000, 0, 900),
+            CLEAN,
+            false,
+            false,
+        );
+        assert_eq!(adopted.accepted.elims, 40);
+        assert_eq!(adopted.accepted.damage, 8000);
+        assert_eq!(adopted.state.confirmed_floor[0], 13);
+        assert_eq!(adopted.state.confirmed_floor[3], 5000);
+        let clean = apply_gate_with_trust(
+            Some((adopted.state, secs(20))),
+            c(19, 8, 4, 5900, 0, 900),
+            CLEAN,
+            false,
+            true,
+        );
+        assert_eq!(clean.accepted, c(19, 8, 4, 5900, 0, 900));
+        assert!(!clean.state.low_trust);
+        assert!(!clean.state.has_confirmed_floor.iter().any(|&set| set));
+    }
+
+    #[test]
+    fn a_fallback_raw_read_does_not_corroborate_a_ghost() {
+        // D2. The second read is another fallback, held, and its raw 91
+        // must not corroborate the clean ghost that follows.
+        let first = apply_gate_with_trust(None, c(9, 0, 0, 0, 0, 0), CLEAN, false, false);
+        let second = apply_gate_with_trust(
+            Some((first.state, secs(20))),
+            c(91, 0, 0, 0, 0, 0),
+            CLEAN,
+            false,
+            false,
+        );
+        assert_eq!(second.accepted.elims, 9);
+        assert!(second.state.last_raw_suspect.iter().all(|&s| s));
+        let third = apply_gate_with_trust(
+            Some((second.state, secs(20))),
+            c(91, 0, 0, 0, 0, 0),
+            CLEAN,
+            false,
+            true,
+        );
+        assert_eq!(third.accepted.elims, 9);
+        assert!(
+            third
+                .holds
+                .iter()
+                .any(|h| h.col == 0 && h.kind == HoldKind::RateCap && h.raw == 91)
+        );
+        assert!(third.state.low_trust);
+
+        // D3. A trusted latch, a held fallback ghost, then the same ghost
+        // from a clean read. The fallback raw still does not corroborate.
+        let trusted = apply_gate(None, c(13, 5, 4, 5000, 0, 900), CLEAN, false);
+        let fallback = apply_gate_with_trust(
+            Some((trusted.state, secs(20))),
+            c(91, 5, 4, 5000, 0, 900),
+            CLEAN,
+            false,
+            false,
+        );
+        assert_eq!(fallback.accepted.elims, 13);
+        assert!(fallback.state.last_raw_suspect[0]);
+        let ghost = apply_gate_with_trust(
+            Some((fallback.state, secs(20))),
+            c(91, 5, 4, 5000, 0, 900),
+            CLEAN,
+            false,
+            true,
+        );
+        assert_eq!(ghost.accepted.elims, 13);
+        assert!(
+            ghost
+                .holds
+                .iter()
+                .any(|h| h.col == 0 && h.kind == HoldKind::RateCap)
+        );
+    }
+
+    #[test]
+    fn three_fallback_decreases_do_not_unlatch_a_confirmed_column() {
+        // G4. Three lower fallback reads must not walk a confirmed column
+        // down. An untrusted read does not build the streak.
+        let mut state = apply_gate(None, c(13, 5, 4, 5000, 0, 900), CLEAN, false).state;
+        for _ in 0..3 {
+            let next = apply_gate_with_trust(
+                Some((state, secs(20))),
+                c(1, 5, 4, 5000, 0, 900),
+                CLEAN,
+                false,
+                false,
+            );
+            assert_eq!(next.accepted.elims, 13);
+            assert!(next.unlatches.is_empty());
+            assert!(!next.state.unconfirmed[0]);
+            assert!(!next.state.low_trust);
+            state = next.state;
+        }
+    }
+
+    #[test]
+    fn a_held_unconfirmed_column_stays_unconfirmed_and_still_replaces() {
+        // A clean ghost is held, and that column stays unconfirmed. The
+        // next clean lower read still replaces it in one read.
+        let first = apply_gate_with_trust(None, c(9, 0, 0, 0, 0, 0), CLEAN, false, false);
+        let held = apply_gate_with_trust(
+            Some((first.state, secs(20))),
+            c(91, 0, 0, 0, 0, 0),
+            CLEAN,
+            false,
+            true,
+        );
+        assert_eq!(held.accepted.elims, 9);
+        assert!(held.state.unconfirmed[0]);
+        assert!(held.state.low_trust);
+        let replaced = apply_gate_with_trust(
+            Some((held.state, secs(20))),
+            c(2, 0, 0, 0, 0, 0),
+            CLEAN,
+            false,
+            true,
+        );
+        assert_eq!(replaced.accepted.elims, 2);
+        assert!(
+            replaced
+                .unlatches
+                .iter()
+                .any(|u| u.col == 0 && u.raw == 2 && u.replaced_unconfirmed)
+        );
+        assert!(!replaced.state.unconfirmed[0]);
+        assert!(!replaced.state.low_trust);
+    }
+
+    #[test]
+    fn an_implausible_ghost_stays_unconfirmed_so_a_lower_read_can_replace_it() {
+        // C3. A 1105 to 91 is stored, but the column stays unconfirmed.
+        // The following assists of 1 still replaces it in one read. There
+        // is no confirmed floor on a first implausible capture.
+        let first = apply_gate(None, c(0, 1105, 2, 450, 0, 2), CLEAN, false);
+        assert!(first.state.unconfirmed[1]);
+        assert!(!first.state.has_confirmed_floor[1]);
+        let ghost = apply_gate_with_trust(
+            Some((first.state, secs(20))),
+            c(0, 91, 2, 450, 0, 2),
+            CLEAN,
+            false,
+            true,
+        );
+        assert_eq!(ghost.accepted.assists, 91);
+        assert!(ghost.state.unconfirmed[1]);
+        assert!(ghost.state.low_trust);
+        let real = apply_gate_with_trust(
+            Some((ghost.state, secs(20))),
+            c(0, 1, 2, 450, 0, 2),
+            CLEAN,
+            false,
+            true,
+        );
+        assert_eq!(real.accepted.assists, 1);
+        assert!(
+            real.unlatches
+                .iter()
+                .any(|u| u.col == 1 && u.raw == 1 && u.replaced_unconfirmed)
+        );
+    }
+
+    #[test]
+    fn a_shifted_wide_column_on_an_old_save_still_needs_three_reads() {
+        // F5. A 0.4.20 save only marks kill columns past the ceilings. A
+        // wide column that is merely too high still waits for the streak.
+        let loaded = state(c(8, 1, 2, 20000, 989, 1583));
+        let clean = c(8, 1, 2, 3993, 989, 1583);
+        let mut state = loaded;
+        for n in 1..=3 {
+            let next = apply_gate_with_trust(Some((state, secs(20))), clean, CLEAN, false, true);
+            if n < 3 {
+                assert_eq!(next.accepted.damage, 20000, "read {n}");
+                assert!(next.unlatches.is_empty());
+            } else {
+                assert_eq!(next.accepted.damage, 3993);
+                assert!(
+                    next.unlatches
+                        .iter()
+                        .any(|u| u.col == 3 && !u.replaced_unconfirmed)
+                );
+            }
+            state = next.state;
+        }
     }
 
     #[test]

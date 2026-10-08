@@ -238,6 +238,8 @@ The blob lives in memory on each server process for 10 seconds (`PUBLIC_SETTINGS
 
 A missing file under `/assets/`, or a missing top-level file whose extension is a real static type (`js`, `mjs`, `css`, `wasm`, `map`, `svg`, `png`, `jpg`, `jpeg`, `webp`, `gif`, `avif`, `ico`, `woff`, `woff2`, `ttf`, `json` — for example `/favicon.ico` or `/foo.wasm`), is `404` with `Cache-Control: no-store` and a plain-text body. A multi-segment path outside `/assets/` is a client route even when the last segment looks like a file (`/wiki/config.json`, `/blog/foo.png`, `/articles/v1.2.png`, `/wiki/foo.bar`).
 
+Unmatched `/api` and `/api/*` requests return `404` with `Content-Type: application/json`, body `{"error":"Not found"}`, and `Cache-Control: no-store` (HEAD gets the same status and headers with no body; OPTIONS is answered by the CORS layer). A wrong method other than OPTIONS on a known API path stays `405`. OPTIONS on a route registered inside `create_router` is answered by the CORS layer with `200`. `scuffed-server` adds the strategy routes (`/api/strategy/strategies`, `/api/strategy/strategies/mine`, `/api/strategy/strategies/{id}`, `/api/strategy/heroes`, `/api/strategy/meta`, `/api/strategy/patch-notes`, `/api/strategy/patch-notes/{version}`), the chat routes (`/api/chat/auth-token`, `/api/chat/send-encrypted`, `/api/chat/decrypt`), and the websocket route (`/api/strategy/ws`) after `create_router`. OPTIONS on those still returns `405`. `/apiary` and `/api-docs` are client routes.
+
 The app sets `Content-Security-Policy-Report-Only` itself (same-origin scripts,
 Google Fonts, Discord/Google avatar hosts, and `NOSTR_RELAY_URL` for chat
 sockets). Leave CSP off the Caddy block so the two policies do not intersect.
@@ -314,6 +316,23 @@ send enforcing `Content-Security-Policy` instead. `CSP_EXTRA_CONNECT_SRC` and
 > `curl -sS -o /dev/null "http://127.0.0.1:${HOST_PORT}/api/health"`,
 > `podman exec <site-server> ss -tn '( sport = :3000 )'` shows the source
 > address. It must be `127.0.0.1` or one of the `TRUSTED_PROXIES` values.
+
+> **WebSocket caps.** `/api/strategy/ws` has one admission limit. The client
+> IP is resolved with the same trusted-proxy rules as the HTTP limiters
+> (`TRUSTED_PROXIES` / loopback). Do not key this cap on the raw container
+> peer or every visitor behind Caddy shares one bucket.
+>
+> | Env | Default | Meaning |
+> |---|---|---|
+> | `WS_MAX_CONNECTIONS` | `512` | Strategy sockets open at once, held until the socket closes |
+> | `WS_MAX_PER_IP` | `32` | Concurrent strategy sockets for one client IP (several players, multiple tabs) |
+>
+> Over-cap upgrades are rejected with `Retry-After: 1` (503 when the global
+> cap is full, 429 when the per-IP cap is full). A strategy socket that has
+> not sent JoinRoom within 10 seconds is closed.
+>
+> Set the two variables in `data/secrets.env`. Compose passes them through.
+> Leave them unset to keep the defaults.
 
 **3. App public URL** (required for cookies / redirects):
 

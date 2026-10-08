@@ -785,6 +785,8 @@ pub async fn run_migrations(client: &Surreal<Any>) -> DbResult<()> {
     // Dedupe (member_id, session_id), rewrite blank legacy ids, then replace
     // pm_session_idx with a UNIQUE index. Must run after the schema statement
     // above and must fail startup if uniqueness cannot be enforced.
+    // When that UNIQUE index is already installed this is an INFO FOR TABLE
+    // check only — it does not read personal_match.
     crate::queries::personal_stats::migrate_personal_match_session_index(client).await?;
 
     // Seed default category/board tree and migrate legacy thread.category strings.

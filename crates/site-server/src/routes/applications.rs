@@ -80,15 +80,32 @@ pub async fn submit_application(
         return Err((status, Json(ErrorResponse { error: msg.into() })));
     }
 
-    // Already an active org member → no application needed
+    // Banned accounts cannot re-enter through recruitment. 403 here so the
+    // application is never stored. Accept/trial also refuses (409) below, so an
+    // application that already exists cannot set `is_active` and undo the ban.
+    // A deactivated member who is not banned can still apply.
     if let Some(m) = state
         .db
         .get_member_by_user(&user.id)
         .await
         .map_err(|e| internal_err(e, "get_member_by_user on submit"))?
-        && m.is_active
     {
-        return Err(conflict("Already an active org member"));
+        if state
+            .db
+            .is_member_banned(&m.id)
+            .await
+            .map_err(|e| internal_err(e, "ban check on submit"))?
+        {
+            return Err((
+                StatusCode::FORBIDDEN,
+                Json(ErrorResponse {
+                    error: "Banned members cannot apply".into(),
+                }),
+            ));
+        }
+        if m.is_active {
+            return Err(conflict("Already an active org member"));
+        }
     }
 
     // Open pipeline (pending/trial) blocks a second application
@@ -484,6 +501,16 @@ async fn ensure_member_for_application(
         .map_err(|e| internal_err(e, "get_member_by_user ensure"))?;
 
     if let Some(member) = existing_member {
+        // Do not clear a ban. Submit already 403s; this covers an application
+        // that was stored before the ban (or written past the submit gate).
+        if state
+            .db
+            .is_member_banned(&member.id)
+            .await
+            .map_err(|e| internal_err(e, "ban check on application transition"))?
+        {
+            return Err(conflict("An active ban blocks this application"));
+        }
         // Reactivate if needed
         let mut current = member;
         if !current.is_active {
@@ -609,7 +636,7 @@ mod tests {
 
     use crate::extractors::OfficerUser;
     use crate::state::AppState;
-    use crate::test_support::{seed_user, test_state};
+    use crate::test_support::{must_err, must_ok, seed_user, test_state};
 
     async fn session_count(state: &AppState, user_id: &str) -> usize {
         let mut r = state
@@ -910,6 +937,262 @@ mod tests {
             session_count(&state, user_id).await,
             0,
             "reject should revoke the recruit's sessions"
+        );
+    }
+
+    fn auth_user(user: scuffed_auth::User) -> AuthUser<AppState> {
+        AuthUser::from_user(user)
+    }
+
+    async fn officer(state: &AppState) -> OfficerUser {
+        seed_user(state, "officeruser", "Off").await;
+        let member = state
+            .db
+            .create_member("officeruser", "Off", OrgRole::Officer)
+            .await
+            .expect("officer");
+        let user = state
+            .db
+            .get_user("officeruser")
+            .await
+            .expect("get user")
+            .expect("user");
+        OfficerUser { user, member }
+    }
+
+    /// Submit is 403 for a banned member, so accept never gets a new application.
+    /// A deactivated member who is not banned can still apply and be reactivated.
+    #[tokio::test]
+    async fn banned_member_cannot_submit_application() {
+        let state = test_state().await;
+        seed_user(&state, "banneduser", "Banned").await;
+        let member = state
+            .db
+            .create_member("banneduser", "Banned", OrgRole::Member)
+            .await
+            .expect("member");
+        state
+            .db
+            .update_member(
+                &member.id,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(false),
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("deactivate");
+        state
+            .db
+            .create_moderation_action(
+                &member.id,
+                scuffed_db::ModerationActionType::Ban,
+                "no return",
+                "officer",
+                None,
+            )
+            .await
+            .expect("ban");
+        let user = state
+            .db
+            .get_user("banneduser")
+            .await
+            .expect("get user")
+            .expect("user");
+
+        let (status, body) = must_err(
+            submit_application(
+                State(state.clone()),
+                auth_user(user),
+                Json(SubmitApplicationRequest {
+                    preferred_games: vec!["Overwatch".into()],
+                    preferred_roles: vec!["flex".into()],
+                    message: None,
+                }),
+            )
+            .await,
+            "banned submit must fail",
+        );
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body.error, "Banned members cannot apply");
+        assert!(
+            state
+                .db
+                .get_application_by_user("banneduser")
+                .await
+                .expect("lookup")
+                .is_none(),
+            "a banned submit must not store an application"
+        );
+    }
+
+    /// An application that already exists must not clear the ban on accept.
+    #[tokio::test]
+    async fn accepting_application_does_not_clear_a_ban() {
+        let state = test_state().await;
+        seed_user(&state, "banneduser", "Banned").await;
+        let member = state
+            .db
+            .create_member("banneduser", "Banned", OrgRole::Member)
+            .await
+            .expect("member");
+        state
+            .db
+            .update_member(
+                &member.id,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(false),
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("deactivate");
+        let app = state
+            .db
+            .submit_application("banneduser", vec![], vec![], None)
+            .await
+            .expect("stored before the ban");
+        state
+            .db
+            .create_moderation_action(
+                &member.id,
+                scuffed_db::ModerationActionType::Ban,
+                "no return",
+                "officer",
+                None,
+            )
+            .await
+            .expect("ban");
+
+        let (status, body) = must_err(
+            update_application(
+                State(state.clone()),
+                officer(&state).await,
+                Path(app.id.clone()),
+                Json(UpdateApplicationRequest {
+                    status: ApplicationStatus::Accepted,
+                    review_notes: None,
+                }),
+            )
+            .await,
+            "accept must refuse",
+        );
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body.error, "An active ban blocks this application");
+
+        let after = state
+            .db
+            .get_member_by_user("banneduser")
+            .await
+            .expect("reload")
+            .expect("member");
+        assert!(
+            !after.is_active,
+            "accept must not reactivate a banned member"
+        );
+        let stored = state
+            .db
+            .get_application(&app.id)
+            .await
+            .expect("reload app")
+            .expect("app");
+        assert_eq!(stored.status, ApplicationStatus::Pending);
+
+        let (status, body) = must_err(
+            crate::routes::public::public_member_profile(State(state), Path(member.id.clone()))
+                .await,
+            "public profile",
+        );
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body.error, "Member not found");
+    }
+
+    #[tokio::test]
+    async fn deactivated_unbanned_member_can_reapply_and_be_accepted() {
+        let state = test_state().await;
+        seed_user(&state, "returnuser", "Return").await;
+        let member = state
+            .db
+            .create_member("returnuser", "Return", OrgRole::Member)
+            .await
+            .expect("member");
+        state
+            .db
+            .update_member(
+                &member.id,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(false),
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("deactivate");
+        let user = state
+            .db
+            .get_user("returnuser")
+            .await
+            .expect("get user")
+            .expect("user");
+
+        let (status, Json(app)) = must_ok(
+            submit_application(
+                State(state.clone()),
+                auth_user(user),
+                Json(SubmitApplicationRequest {
+                    preferred_games: vec![],
+                    preferred_roles: vec![],
+                    message: None,
+                }),
+            )
+            .await,
+            "unbanned reapply",
+        );
+        assert_eq!(status, StatusCode::CREATED);
+
+        let Json(updated) = must_ok(
+            update_application(
+                State(state.clone()),
+                officer(&state).await,
+                Path(app.id),
+                Json(UpdateApplicationRequest {
+                    status: ApplicationStatus::Accepted,
+                    review_notes: None,
+                }),
+            )
+            .await,
+            "accept",
+        );
+        assert_eq!(updated.status, ApplicationStatus::Accepted);
+        let after = state
+            .db
+            .get_member_by_user("returnuser")
+            .await
+            .expect("reload")
+            .expect("member");
+        assert!(
+            after.is_active,
+            "an unbanned applicant is reactivated on accept"
         );
     }
 }

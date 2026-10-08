@@ -5,9 +5,9 @@ use serde::Deserialize;
 
 use scuffed_api_client::ApiClient;
 
-use crate::components::ui::{Card, HeroSelect, Pill, PillTone, SeasonSelect};
+use crate::components::ui::{Card, HeroSelect, Pill, PillTone, SeasonSelect, use_stats_season};
 use crate::routes::Route;
-use crate::util::{encode_query, season_url};
+use crate::util::encode_query;
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 struct LeaderboardRow {
@@ -143,14 +143,53 @@ fn parse_cached_at(raw: Option<&str>) -> Option<chrono::DateTime<chrono::Utc>> {
         .map(|dt| dt.with_timezone(&chrono::Utc))
 }
 
+/// `Hold` is the skipped request while a saved season is unresolved. It
+/// renders as Loading. It is not a finished failure.
+#[derive(Debug, PartialEq)]
+enum LeaderboardLoad {
+    Hold,
+    Failed,
+    Rows(Vec<LeaderboardRow>),
+}
+
+/// `Some(Hold)` when the season filter has not resolved yet. A non-empty
+/// path is fetched by the caller.
+fn leaderboard_hold(path: &str) -> Option<LeaderboardLoad> {
+    if path.is_empty() {
+        Some(LeaderboardLoad::Hold)
+    } else {
+        None
+    }
+}
+
+/// Status line for the leaderboard card. `None` means render the table.
+fn leaderboard_message(
+    load: Option<&LeaderboardLoad>,
+    hero_filtered: bool,
+) -> Option<&'static str> {
+    match load {
+        None | Some(LeaderboardLoad::Hold) => Some("Loading..."),
+        Some(LeaderboardLoad::Failed) => Some("Couldn't load leaderboards."),
+        Some(LeaderboardLoad::Rows(list)) if list.is_empty() && hero_filtered => {
+            Some("No ranked matches on this hero yet.")
+        }
+        Some(LeaderboardLoad::Rows(list)) if list.is_empty() => {
+            Some("No ranked matches yet. Upload stats from the tracker.")
+        }
+        Some(LeaderboardLoad::Rows(_)) => None,
+    }
+}
+
 #[component]
 pub fn Leaderboards() -> Element {
     let mut metric = use_signal(|| "winrate".to_string());
     let mut hero = use_signal(|| None::<String>);
-    let mut season = use_signal(|| None::<String>);
-    // Last stamp that arrived. A filter change does not clear this, so the
-    // header keeps its label until the next payload lands. A failed fetch
-    // does clear it, so the label does not sit above the error.
+    // Same saved season as My Stats and member stats, including the
+    // "current" sentinel. A pick here changes those pages too.
+    let season = use_stats_season();
+    // Last stamp that arrived. A filter change and an unresolved season
+    // hold do not clear this, so the header keeps its label until the next
+    // payload lands. A failed fetch does clear it.
     let mut shown_at = use_signal(|| None::<chrono::DateTime<chrono::Utc>>);
     let mut label_tick = use_signal(|| 0u32);
     // `use_future` spawns on this component's scope. Dioxus drops that task
@@ -168,24 +207,27 @@ pub fn Leaderboards() -> Element {
             label_tick += 1;
         }
     });
-    let board = use_resource(move || {
+    let rows = use_resource(move || {
         let m = metric();
         let h = hero();
-        let se = season();
+        let mut url = format!("/api/public/leaderboards?metric={m}&limit=50");
+        if let Some(h) = h {
+            url.push_str(&format!("&hero={}", encode_query(&h)));
+        }
+        // Empty while a saved season is unresolved. Do not send it raw.
+        let url = season.fetch_path(&url);
         async move {
-            let mut url = format!("/api/public/leaderboards?metric={m}&limit=50");
-            if let Some(h) = h {
-                url.push_str(&format!("&hero={}", encode_query(&h)));
+            if let Some(held) = leaderboard_hold(&url) {
+                return held;
             }
-            let url = season_url(&url, se);
             match ApiClient::web().fetch::<LeaderboardPayload>(&url).await {
                 Ok(payload) => {
                     shown_at.set(parse_cached_at(payload.cached_at.as_deref()));
-                    Some(payload.rows)
+                    LeaderboardLoad::Rows(payload.rows)
                 }
                 Err(_) => {
                     shown_at.set(None);
-                    None
+                    LeaderboardLoad::Failed
                 }
             }
         }
@@ -234,24 +276,25 @@ pub fn Leaderboards() -> Element {
                 div { class: "lb-hero",
                     SeasonSelect {
                         label: "Season".to_string(),
-                        value: season(),
-                        onchange: move |s| season.set(s),
+                        seasons: season.season_list(),
+                        seasons_error: season.seasons_error(),
+                        on_retry: move |_| season.retry(),
+                        value: season.selected_id(),
+                        onchange: move |s| season.choose(s),
                     }
                 }
             }
 
             Card {
                 {
-                    match board.read().as_ref() {
-                        None => rsx! { p { class: "lb-status", "Loading..." } },
-                        Some(None) => rsx! { p { class: "lb-status", "Couldn't load leaderboards." } },
-                        Some(Some(list)) if list.is_empty() && hero().is_some() => rsx! {
-                            p { class: "lb-status", "No ranked matches on this hero yet." }
-                        },
-                        Some(Some(list)) if list.is_empty() => rsx! {
-                            p { class: "lb-status", "No ranked matches yet. Upload stats from the tracker." }
-                        },
-                        Some(Some(list)) => rsx! {
+                    let snapshot = rows.read();
+                    let filtered = hero().is_some();
+                    match (
+                        leaderboard_message(snapshot.as_ref(), filtered),
+                        snapshot.as_ref(),
+                    ) {
+                        (Some(message), _) => rsx! { p { class: "lb-status", "{message}" } },
+                        (None, Some(LeaderboardLoad::Rows(list))) => rsx! {
                             table { class: "lb-table",
                                 thead {
                                     tr {
@@ -289,6 +332,7 @@ pub fn Leaderboards() -> Element {
                                 }
                             }
                         },
+                        _ => rsx! {},
                     }
                 }
             }
@@ -298,7 +342,7 @@ pub fn Leaderboards() -> Element {
 
 #[cfg(test)]
 mod tests {
-    use super::{LeaderboardPayload, parse_cached_at, updated_label};
+    use super::*;
     use chrono::{TimeZone, Utc};
 
     fn at(secs_from_now: i64, now: chrono::DateTime<Utc>) -> chrono::DateTime<Utc> {
@@ -352,5 +396,56 @@ mod tests {
         assert!(payload.cached_at.is_none());
         assert_eq!(payload.rows.len(), 1);
         assert_eq!(parse_cached_at(payload.cached_at.as_deref()), None);
+    }
+
+    #[test]
+    fn unresolved_season_path_holds_instead_of_failing() {
+        assert_eq!(
+            leaderboard_hold(""),
+            Some(LeaderboardLoad::Hold),
+            "an empty season path is the unresolved hold, not a failure"
+        );
+        assert_eq!(
+            leaderboard_hold("/api/public/leaderboards?metric=winrate"),
+            None
+        );
+    }
+
+    #[test]
+    fn hold_renders_loading_not_the_failure() {
+        assert_eq!(leaderboard_message(None, false), Some("Loading..."));
+        assert_eq!(
+            leaderboard_message(Some(&LeaderboardLoad::Hold), false),
+            Some("Loading...")
+        );
+        assert_ne!(
+            leaderboard_message(Some(&LeaderboardLoad::Hold), false),
+            Some("Couldn't load leaderboards.")
+        );
+        assert_eq!(
+            leaderboard_message(Some(&LeaderboardLoad::Failed), false),
+            Some("Couldn't load leaderboards.")
+        );
+        assert_eq!(
+            leaderboard_message(Some(&LeaderboardLoad::Rows(Vec::new())), true),
+            Some("No ranked matches on this hero yet.")
+        );
+        assert_eq!(
+            leaderboard_message(Some(&LeaderboardLoad::Rows(Vec::new())), false),
+            Some("No ranked matches yet. Upload stats from the tracker.")
+        );
+        assert_eq!(
+            leaderboard_message(
+                Some(&LeaderboardLoad::Rows(vec![LeaderboardRow {
+                    member_id: "m1".into(),
+                    display_name: "A".into(),
+                    games: 1,
+                    winrate: 1.0,
+                    kd: 1.0,
+                }])),
+                false
+            ),
+            None
+        );
     }
 }

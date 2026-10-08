@@ -14,12 +14,18 @@ fn community_intro(org_name: Option<&str>) -> String {
     }
 }
 
+/// Fields this page reads from `GET /api/public/overview`.
+///
+/// Mirrors `PublicOverview` in `crates/site-server/src/routes/public.rs`:
+/// `member_count` plus `teams`. The route also sends `games`, `events`,
+/// `announcements`, `settings`, `upcoming_matches`, and `recent_results`.
+/// Those are ignored here. Team rows are not read field by field; the stats
+/// block shows `teams.len()`.
 #[derive(Debug, Clone, Deserialize)]
 struct PublicOverview {
     member_count: u64,
-    team_count: u64,
-    #[allow(dead_code)]
-    upcoming_events: u64,
+    #[serde(default)]
+    teams: Vec<serde::de::IgnoredAny>,
 }
 
 #[derive(Serialize)]
@@ -282,7 +288,7 @@ pub fn Community() -> Element {
                                 div { class: "community-stat-label", "Members" }
                             }
                             div { class: "community-stat",
-                                div { class: "community-stat-value", "{stats.team_count}" }
+                                div { class: "community-stat-value", "{stats.teams.len()}" }
                                 div { class: "community-stat-label", "Teams" }
                             }
                         }
@@ -385,5 +391,158 @@ mod tests {
             "Your Night Owls account is backed by a Nostr keypair.\n\n"
         );
         assert!(!community_intro(Some("  ")).contains("My Clan"));
+    }
+
+    fn parse_overview(json: serde_json::Value) -> PublicOverview {
+        serde_json::from_value(json).expect("overview payload")
+    }
+
+    /// Hand-written sample of `PublicOverview` in
+    /// `crates/site-server/src/routes/public.rs`. The app crate does not depend
+    /// on the server crate, so this is not built by serializing that type.
+    /// Field names match the server struct. Nested objects follow `Team` (flattened
+    /// into `TeamOverview`), `TeamRecord`, `Game`, `Event`, `Announcement`,
+    /// `SiteSettings` in `crates/db/src/types.rs`, and `UpcomingMatch` /
+    /// `RecentResult` in `crates/types`.
+    fn server_shaped_overview() -> serde_json::Value {
+        serde_json::json!({
+            "teams": [
+                {
+                    "id": "team-1",
+                    "name": "Night Owls",
+                    "game_id": "ow2",
+                    "color": null,
+                    "division": "Open",
+                    "lore_quote": null,
+                    "logo_url": null,
+                    "is_active": true,
+                    "created_at": "2026-01-15T00:00:00Z",
+                    "roster_count": 5,
+                    "record": { "wins": 3, "losses": 1, "draws": 0 }
+                },
+                {
+                    "id": "team-2",
+                    "name": "Day Hawks",
+                    "game_id": "ow2",
+                    "color": null,
+                    "division": null,
+                    "lore_quote": "Hold the high ground.",
+                    "logo_url": null,
+                    "is_active": true,
+                    "created_at": "2026-02-01T00:00:00Z",
+                    "roster_count": 4,
+                    "record": { "wins": 0, "losses": 2, "draws": 1 }
+                }
+            ],
+            "games": [
+                {
+                    "id": "ow2",
+                    "name": "Overwatch 2",
+                    "abbreviation": "OW2",
+                    "is_active": true,
+                    "created_at": "2026-01-01T00:00:00Z"
+                }
+            ],
+            "events": [
+                {
+                    "id": "event-1",
+                    "title": "Scrim night",
+                    "day_of_week": 2,
+                    "time": "19:00",
+                    "timezone": "UTC",
+                    "duration_minutes": 120,
+                    "is_recurring": true,
+                    "team_id": "team-1",
+                    "created_by": "member-1",
+                    "is_active": true,
+                    "is_public": true
+                }
+            ],
+            "announcements": [
+                {
+                    "id": "ann-1",
+                    "title": "Welcome",
+                    "content": "Season starts soon.",
+                    "author_id": "member-1",
+                    "pinned": true,
+                    "is_active": true,
+                    "created_at": "2026-03-01T12:00:00Z",
+                    "updated_at": "2026-03-01T12:00:00Z"
+                }
+            ],
+            "settings": {
+                "id": "settings",
+                "org_name": "Night Owls",
+                "site_description": "Competitive gaming community",
+                "recruitment_open": true,
+                "strategies_enabled": true,
+                "officers_can_edit_teams": false,
+                "recruitment_message": "Apply in the form.",
+                "min_age": 16,
+                "forum_backend": "local",
+                "extra_relay_urls": "",
+                "home_shell": "ops_hub",
+                "home_skin": "clean",
+                "public_layout": "hub",
+                "homepage_json": "{}",
+                "nav_json": "{}",
+                "page_bg_color": "",
+                "page_bg_image_url": "",
+                "brand_accent_dark": "",
+                "brand_accent_light": "",
+                "updated_at": "2026-03-01T12:00:00Z"
+            },
+            "member_count": 12,
+            "upcoming_matches": [
+                {
+                    "id": "match-1",
+                    "team_id": "team-1",
+                    "team_name": "Night Owls",
+                    "game_name": "Overwatch 2",
+                    "opponent": "Rivals",
+                    "match_type": "official",
+                    "scheduled_at": "2026-04-01T18:00:00Z"
+                }
+            ],
+            "recent_results": [
+                {
+                    "id": "match-0",
+                    "team_id": "team-1",
+                    "team_name": "Night Owls",
+                    "opponent": "Rivals",
+                    "score_us": 2,
+                    "score_them": 1,
+                    "outcome": "win",
+                    "match_type": "official",
+                    "played_at": "2026-03-20T18:00:00Z"
+                }
+            ]
+        })
+    }
+
+    #[test]
+    fn server_shaped_overview_parses_member_and_team_counts() {
+        let overview = parse_overview(server_shaped_overview());
+        assert_eq!(overview.member_count, 12);
+        assert_eq!(overview.teams.len(), 2);
+    }
+
+    #[test]
+    fn empty_teams_list_counts_as_zero() {
+        let mut payload = server_shaped_overview();
+        payload["teams"] = serde_json::json!([]);
+        payload["member_count"] = serde_json::json!(4);
+        let overview = parse_overview(payload);
+        assert_eq!(overview.member_count, 4);
+        assert_eq!(overview.teams.len(), 0);
+    }
+
+    #[test]
+    fn missing_teams_field_defaults_to_zero() {
+        let mut payload = server_shaped_overview();
+        payload.as_object_mut().expect("object").remove("teams");
+        let overview = parse_overview(payload);
+        assert_eq!(overview.member_count, 12);
+        assert_eq!(overview.teams.len(), 0);
     }
 }

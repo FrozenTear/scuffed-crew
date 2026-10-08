@@ -75,23 +75,34 @@ fn enforce_board_access(
     }
 }
 
+/// A deactivated board is not found for anyone below officer.
+fn board_hidden_from_caller(board: &ForumBoard, role: Option<OrgRole>) -> bool {
+    !board.is_active && !role.is_some_and(|r| r.is_at_least(OrgRole::Officer))
+}
+
 /// Resolve the thread's board for ACL. Fail closed when `board_id` is missing
 /// or the board row cannot be loaded (F-API-001) — never skip min_role.
+/// An inactive board is the same as a missing board for non-officers.
 async fn require_thread_board(
     state: &AppState,
     thread: &ForumThread,
+    role: Option<OrgRole>,
 ) -> Result<ForumBoard, (StatusCode, Json<ErrorResponse>)> {
     let bid = thread
         .board_id
         .as_deref()
         .filter(|s| !s.is_empty())
         .ok_or_else(|| err_404("Thread not found"))?;
-    state
+    let board = state
         .db
         .get_forum_board(bid)
         .await
         .map_err(err_500)?
-        .ok_or_else(|| err_404("Thread not found"))
+        .ok_or_else(|| err_404("Thread not found"))?;
+    if board_hidden_from_caller(&board, role) {
+        return Err(err_404("Thread not found"));
+    }
+    Ok(board)
 }
 
 // ─── Request/Response types ─────────────────────────────────
@@ -470,7 +481,7 @@ pub async fn list_threads(
         let Some(Some(board)) = board_cache.get(bid) else {
             continue;
         };
-        if enforce_board_access(board, role).is_err() {
+        if board_hidden_from_caller(board, role) || enforce_board_access(board, role).is_err() {
             continue;
         }
         let reply_count = state.db.count_forum_replies(&thread.id).await.unwrap_or(0);
@@ -505,7 +516,7 @@ pub async fn get_thread(
     })?;
 
     // Fail closed: a missing board must not skip min_role (F-API-001).
-    let b = require_thread_board(&state, &thread).await?;
+    let b = require_thread_board(&state, &thread, caller.as_ref().map(|m| m.org_role)).await?;
     enforce_board_access(&b, caller.as_ref().map(|m| m.org_role))?;
     let mut parent_board = None;
     if let Some(pid) = b.parent_board_id.as_deref() {
@@ -581,6 +592,9 @@ pub async fn create_thread(
         return Err(err_400("board or board_id is required"));
     };
 
+    if board_hidden_from_caller(&board, Some(member.member.org_role)) {
+        return Err(err_404("Board not found"));
+    }
     enforce_board_access(&board, Some(member.member.org_role))?;
     let board_id = board.id.clone();
 
@@ -647,7 +661,7 @@ pub async fn create_reply(
         ));
     }
 
-    let board = require_thread_board(&state, &thread).await?;
+    let board = require_thread_board(&state, &thread, Some(member.member.org_role)).await?;
     enforce_board_access(&board, Some(member.member.org_role))?;
 
     let reply = state
@@ -883,4 +897,187 @@ async fn maybe_publish_reply_to_relay(
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::Json;
+    use axum::extract::{Path, Query, State};
+    use axum::http::StatusCode;
+    use scuffed_db::OrgRole;
+
+    use super::{
+        CreateThreadRequest, ListRepliesQuery, ListThreadsQuery, create_thread, get_thread,
+        list_threads,
+    };
+    use crate::extractors::{OptionalOrgMember, OrgMember};
+    use crate::test_support::{must_err, must_ok, seed_user, test_state};
+
+    async fn as_member(state: &crate::state::AppState, user_id: &str, role: OrgRole) -> OrgMember {
+        seed_user(state, user_id, user_id).await;
+        let member = state
+            .db
+            .create_member(user_id, user_id, role)
+            .await
+            .expect("member");
+        let user = state
+            .db
+            .get_user(user_id)
+            .await
+            .expect("get user")
+            .expect("user");
+        OrgMember { user, member }
+    }
+
+    #[tokio::test]
+    async fn deactivated_board_hides_threads_from_non_officers() {
+        let state = test_state().await;
+        let member = as_member(&state, "memberuser", OrgRole::Member).await;
+        let officer = as_member(&state, "officeruser", OrgRole::Officer).await;
+        let category = state
+            .db
+            .create_forum_category("General", "general", None, 0)
+            .await
+            .expect("category");
+        let board = state
+            .db
+            .create_forum_board(&category.id, None, "Public", "public-board", None, 0)
+            .await
+            .expect("board");
+        let thread = state
+            .db
+            .create_forum_thread("Still visible", &board.id, &member.member.id, "secret")
+            .await
+            .expect("thread");
+        state
+            .db
+            .update_forum_board(&board.id, None, None, None, None, Some(false))
+            .await
+            .expect("deactivate board");
+
+        let replies = Query(ListRepliesQuery {
+            limit: 50,
+            offset: 0,
+        });
+        let (status, body) = must_err(
+            get_thread(
+                State(state.clone()),
+                OptionalOrgMember(None),
+                Path(thread.id.clone()),
+                replies,
+            )
+            .await,
+            "anon",
+        );
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body.error, "Thread not found");
+
+        let (status, body) = must_err(
+            get_thread(
+                State(state.clone()),
+                OptionalOrgMember(Some(member.member.clone())),
+                Path(thread.id.clone()),
+                Query(ListRepliesQuery {
+                    limit: 50,
+                    offset: 0,
+                }),
+            )
+            .await,
+            "member",
+        );
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body.error, "Thread not found");
+
+        let Json(detail) = must_ok(
+            get_thread(
+                State(state.clone()),
+                OptionalOrgMember(Some(officer.member.clone())),
+                Path(thread.id.clone()),
+                Query(ListRepliesQuery {
+                    limit: 50,
+                    offset: 0,
+                }),
+            )
+            .await,
+            "officer can read",
+        );
+        assert_eq!(detail.thread.title, "Still visible");
+
+        let list_q = Query(ListThreadsQuery {
+            board: None,
+            category: None,
+            limit: 25,
+            offset: 0,
+        });
+        let Json(anon_list) = must_ok(
+            list_threads(
+                State(state.clone()),
+                OptionalOrgMember(None),
+                Query(ListThreadsQuery {
+                    board: None,
+                    category: None,
+                    limit: 25,
+                    offset: 0,
+                }),
+            )
+            .await,
+            "anon list",
+        );
+        assert!(
+            anon_list
+                .threads
+                .iter()
+                .all(|t| t.thread.title != "Still visible")
+        );
+        let Json(officer_list) = must_ok(
+            list_threads(
+                State(state.clone()),
+                OptionalOrgMember(Some(officer.member.clone())),
+                list_q,
+            )
+            .await,
+            "officer list",
+        );
+        assert!(
+            officer_list
+                .threads
+                .iter()
+                .any(|t| t.thread.title == "Still visible")
+        );
+
+        let (status, body) = must_err(
+            create_thread(
+                State(state.clone()),
+                member,
+                Json(CreateThreadRequest {
+                    title: "Nope".into(),
+                    content: "hidden board".into(),
+                    board_id: Some(board.id.clone()),
+                    board: None,
+                    category: None,
+                }),
+            )
+            .await,
+            "member cannot post",
+        );
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body.error, "Board not found");
+
+        let (status, _) = must_ok(
+            create_thread(
+                State(state),
+                officer,
+                Json(CreateThreadRequest {
+                    title: "Officer note".into(),
+                    content: "still here".into(),
+                    board_id: Some(board.id),
+                    board: None,
+                    category: None,
+                }),
+            )
+            .await,
+            "officer can post",
+        );
+        assert_eq!(status, StatusCode::CREATED);
+    }
 }

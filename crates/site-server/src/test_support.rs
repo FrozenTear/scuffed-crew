@@ -3,11 +3,31 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use axum::Json;
+use axum::http::StatusCode;
 use scuffed_auth::SessionConfig;
+use scuffed_auth::server::session::ErrorResponse;
 use scuffed_db::Database;
 use scuffed_db::migrations::run_migrations;
 
 use crate::state::{AppState, OAuthConfig};
+
+pub(crate) fn must_ok<T>(result: Result<T, (StatusCode, Json<ErrorResponse>)>, ctx: &str) -> T {
+    match result {
+        Ok(value) => value,
+        Err((status, Json(body))) => panic!("{ctx}: {status} {}", body.error),
+    }
+}
+
+pub(crate) fn must_err<T>(
+    result: Result<T, (StatusCode, Json<ErrorResponse>)>,
+    ctx: &str,
+) -> (StatusCode, ErrorResponse) {
+    match result {
+        Err((status, Json(body))) => (status, body),
+        Ok(_) => panic!("{ctx}: expected an error"),
+    }
+}
 
 pub(crate) async fn test_state() -> AppState {
     let db = Database::connect_memory()

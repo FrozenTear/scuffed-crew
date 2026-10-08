@@ -7001,8 +7001,9 @@ async fn upload_avatar_deletes_previous_local_avatar() {
     seed_all_roles(&state.db).await;
     let dir = state.upload_dir.clone();
 
-    // Point the member at an existing local avatar and put that file on disk.
-    let old_rel = "avatars/old-avatar.png";
+    // Point the member at an existing local avatar under their own folder.
+    // Delete-on-replace only removes files in avatars/<member key>/.
+    let old_rel = "avatars/membermember/old-avatar.png";
     let old_url = format!("/uploads/{old_rel}");
     state
         .db
@@ -7011,7 +7012,7 @@ async fn upload_avatar_deletes_previous_local_avatar() {
         .bind(("u", old_url.clone()))
         .await
         .expect("set old avatar_url");
-    std::fs::create_dir_all(dir.join("avatars")).unwrap();
+    std::fs::create_dir_all(dir.join("avatars/membermember")).unwrap();
     std::fs::write(dir.join(old_rel), b"old-bytes").unwrap();
     assert!(dir.join(old_rel).exists());
 

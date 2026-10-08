@@ -75,6 +75,22 @@ pub async fn get_team_roster(
     State(state): State<AppState>,
     Path(team_id): Path<String>,
 ) -> Result<Json<Vec<RosterMemberResponse>>, (StatusCode, Json<ErrorResponse>)> {
+    if let Some(team) = state.db.get_team(&team_id).await.map_err(|_e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: "Internal error".into(),
+            }),
+        )
+    })? && !team.is_active
+    {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: "Team not found".into(),
+            }),
+        ));
+    }
     let entries = state
         .db
         .get_team_roster_named(&team_id)
@@ -212,4 +228,86 @@ pub async fn remove_from_roster(
     .await;
 
     Ok(StatusCode::OK)
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::Json;
+    use axum::extract::{Path, State};
+    use axum::http::StatusCode;
+    use scuffed_db::{OrgRole, TeamRole};
+
+    use super::get_team_roster;
+    use crate::test_support::{must_err, must_ok, seed_user, test_state};
+
+    #[tokio::test]
+    async fn public_roster_hides_inactive_members_and_inactive_teams() {
+        let state = test_state().await;
+        let team = state
+            .db
+            .create_team("Alpha", "ow2", None, None, None)
+            .await
+            .expect("team");
+        seed_user(&state, "activeuser", "Active").await;
+        seed_user(&state, "goneuser", "Gone").await;
+        let active = state
+            .db
+            .create_member("activeuser", "Active", OrgRole::Member)
+            .await
+            .expect("active");
+        let gone = state
+            .db
+            .create_member("goneuser", "Gone", OrgRole::Member)
+            .await
+            .expect("gone");
+        state
+            .db
+            .update_member(
+                &gone.id,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(false),
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("deactivate member");
+        state
+            .db
+            .add_to_roster(&active.id, &team.id, TeamRole::Captain)
+            .await
+            .expect("add active");
+        state
+            .db
+            .add_to_roster(&gone.id, &team.id, TeamRole::Player)
+            .await
+            .expect("add gone");
+
+        let Json(roster) = must_ok(
+            get_team_roster(State(state.clone()), Path(team.id.clone())).await,
+            "roster",
+        );
+        assert_eq!(roster.len(), 1);
+        assert_eq!(roster[0].member_id, active.id);
+
+        state
+            .db
+            .client
+            .query("UPDATE team SET is_active = false WHERE meta::id(id) = $id")
+            .bind(("id", team.id.clone()))
+            .await
+            .expect("deactivate team");
+        let (status, body) = must_err(
+            get_team_roster(State(state), Path(team.id)).await,
+            "inactive team",
+        );
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body.error, "Team not found");
+    }
 }

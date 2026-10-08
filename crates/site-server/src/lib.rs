@@ -617,7 +617,10 @@ pub fn create_router_with_dist(state: AppState, dist_dir: impl Into<PathBuf>) ->
             "/uploads",
             uploads::uploads_router(state.upload_dir.clone()),
         )
-        // Static files from dist/, falling back to index.html for SPA routing (Dioxus handles all routes).
+        // Unmatched `/api` and `/api/*` are a JSON 404 inside the SPA service.
+        // Every other unmatched path is the shell or a static file. Known
+        // routes, including a wrong method on a known path, are resolved
+        // before this fallback.
         .fallback_service(routes::seo::spa_service(&dist_dir, state.clone()))
         // Allow up to 6 MB so officer image uploads (5 MB cap) fit under Axum's default 2 MB limit
         .layer(DefaultBodyLimit::max(6 * 1024 * 1024))

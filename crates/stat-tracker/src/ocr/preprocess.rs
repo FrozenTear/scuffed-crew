@@ -138,6 +138,373 @@ const CELL_UPSCALE_TARGET_H: u32 = 64;
 /// oversmooth thin digits into empty reads.
 const CELL_UPSCALE_MAX_FACTOR: f64 = 3.0;
 
+/// Once a crop is at least this tall, the smooth upscale does not go past
+/// [`CELL_UPSCALE_FACTOR_CAP`]. A shorter crop is a tiny glyph, not a
+/// trimmed stat cell, and still climbs toward [`CELL_UPSCALE_TARGET_H`].
+const CELL_UPSCALE_CAP_MIN_H: u32 = 28;
+
+/// 64/39. A native Dorado stat cell is 39px tall and already reads at this
+/// factor (PR 158). Targeting 64px after a 3-4px trim raises the factor
+/// to about 1.94-2.06, and Tesseract then returns "" or "1" for a "11".
+/// Capping here keeps a trimmed crop on the same scale as the cell it was
+/// cut from.
+const CELL_UPSCALE_FACTOR_CAP: f64 = CELL_UPSCALE_TARGET_H as f64 / 39.0;
+
+/// Two checks for a dim zero stroke. Not a calibrated grey level.
+///
+/// Neutral grey: R, G, and B roughly equal. Purple and yellow row fills
+/// are strongly saturated, and the soft edge of a glyph picks that colour
+/// up. On the Dorado cells in PR 158 the zero stroke stays at saturation
+/// at most about 33, so the cap is 40 (that measurement plus a small
+/// margin). Fill near saturation 240 fails this check.
+///
+/// Below white: white digits on those cells reach 250-255. The ceiling is
+/// 220, clear of that range and above the measured stroke cores (about
+/// 171-186). The floor is 96, just above team-fill brightness in the low
+/// 90s, which still keeps the neutral stroke.
+///
+/// The HSV mask already keeps a neutral pixel at about 172 (saturation
+/// under 60 and value at least 150), so a native cell often has enough
+/// ink for Tesseract and this path does not run. The same stroke still
+/// has to pass here when that mask leaves the cell empty.
+///
+/// The crop is one cell, so there is no brighter digit in the same image
+/// to measure against. A threshold relative to the rest of the row would
+/// need pixels this function does not receive.
+const DIM_ZERO_V_MIN: u8 = 96;
+const DIM_ZERO_V_MAX: u8 = 220;
+const DIM_ZERO_SAT_MAX: u8 = 40;
+
+/// A hole narrower or shorter than this fraction of the glyph box is a
+/// bowl (6, 9) or a closed 4, not the counter of a 0. The Dorado zeros
+/// in PR 158 have a counter 4px wide in a 10px box (40%). A realistic 6
+/// is about 35% on its short axis, so 38 still rejects that bowl and
+/// accepts the real counter with a little room. A "10" is not rejected
+/// by this fraction when the "1" sits close to the ring: the ring's own
+/// hole is still large. That pair is two ink components, and a zero is
+/// one ring.
+const DIM_ZERO_HOLE_EXTENT_MIN: u32 = 38;
+
+/// The hole's centroid may sit at most this far from the glyph box centre,
+/// in percent of the box on each axis.
+const DIM_ZERO_CENTRE_OFFSET_MAX_PCT: u32 = 22;
+
+/// Taken off a dim zero's confidence when its ring reaches the outer edge
+/// columns. The ring may be clipped or another glyph bleeding in.
+const DIM_ZERO_EDGE_PENALTY: i32 = 15;
+
+const DIM_LABEL_INK: u8 = 1;
+const DIM_LABEL_EXTERIOR: u8 = 2;
+const DIM_LABEL_HOLE: u8 = 3;
+
+/// A cell the bright mask emptied that is still a dim zero value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DimZeroHit {
+    /// Dim-zero ink lies in the outer `edge_cols` of the crop. The ring is
+    /// clipped or bleeding, so the capture gate must not treat the 0 as a
+    /// clean read.
+    ///
+    /// One in-band pixel is enough. [`has_edge_ink`] wants 12% of the same
+    /// band, about 13px on a 56px cell with a 2px band. A thin ring only
+    /// kisses the edge, and that fill fraction would miss it.
+    pub touches_edge: bool,
+    /// The hole's share of the glyph box on its tighter axis, in percent.
+    /// The floor is [`DIM_ZERO_HOLE_EXTENT_MIN`].
+    pub hole_extent_pct: u32,
+    /// How far the hole's centroid sits from the glyph box centre on its
+    /// worse axis, in percent of the box on that axis. The ceiling is
+    /// [`DIM_ZERO_CENTRE_OFFSET_MAX_PCT`].
+    pub centre_offset_pct: u32,
+    /// 0..=100. See [`dim_zero_confidence`].
+    pub confidence: i32,
+}
+
+/// Hole extent at which the extent term is full. A realistic 6 or 9 bowl is
+/// about 35% on its short axis and the floor is 38%, so 44% is clearly a
+/// counter and not a bowl. The real zeros in the Scuffed Vision baseline
+/// measure 40-55% at 1440p and 42-60% at 0.75x.
+const DIM_ZERO_EXTENT_FULL_PCT: u32 = 44;
+
+/// Confidence for a geometric dim zero, on the same 0..=100 scale as a
+/// Tesseract word confidence. It says how far the ring cleared the two
+/// shape checks that tell a 0 from a 6, 9, or closed 4:
+///
+/// - 55 is the floor: the ring only just passed both checks (hole extent
+///   at the 38% floor, centroid offset at the 22% ceiling).
+/// - up to +25 for hole extent, linear from 38% to 44% and full above.
+/// - up to +15 for centring, linear from a 22% offset to a perfectly
+///   centred hole.
+///
+/// So a ring at the floor scores 55, a counter of 41% or more with the
+/// hole within 5% of centre scores at least 78, and the ceiling is 95.
+/// Every dim zero in that baseline scores 75 or more, above a "conf below
+/// 70 is suspect" rule. A ring in the outer edge columns is also marked
+/// `suspect`, so it loses 15.
+pub fn dim_zero_confidence(hole_extent_pct: u32, centre_offset_pct: u32) -> i32 {
+    let floor = DIM_ZERO_HOLE_EXTENT_MIN as f32;
+    let full = DIM_ZERO_EXTENT_FULL_PCT as f32;
+    let extent = ((hole_extent_pct as f32 - floor) / (full - floor)).clamp(0.0, 1.0);
+    let max_off = DIM_ZERO_CENTRE_OFFSET_MAX_PCT as f32;
+    let centred = (1.0 - centre_offset_pct as f32 / max_off).clamp(0.0, 1.0);
+    (55.0 + 25.0 * extent + 15.0 * centred).round() as i32
+}
+
+/// Eight-connected ink blobs. Returns early once a second blob is found.
+fn ink_component_count(label: &[u8], w: u32, h: u32) -> u32 {
+    let mut seen = vec![false; label.len()];
+    let mut count = 0u32;
+    let mut stack = Vec::new();
+    for y in 0..h {
+        for x in 0..w {
+            let start = (y * w + x) as usize;
+            if label[start] != DIM_LABEL_INK || seen[start] {
+                continue;
+            }
+            count += 1;
+            if count > 1 {
+                return count;
+            }
+            stack.push((x, y));
+            seen[start] = true;
+            while let Some((cx, cy)) = stack.pop() {
+                for dy in -1i32..=1 {
+                    for dx in -1i32..=1 {
+                        if dx == 0 && dy == 0 {
+                            continue;
+                        }
+                        let nx = cx as i32 + dx;
+                        let ny = cy as i32 + dy;
+                        if nx < 0 || ny < 0 || nx >= w as i32 || ny >= h as i32 {
+                            continue;
+                        }
+                        let i = (ny as u32 * w + nx as u32) as usize;
+                        if label[i] == DIM_LABEL_INK && !seen[i] {
+                            seen[i] = true;
+                            stack.push((nx as u32, ny as u32));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    count
+}
+
+/// Whether `img` is a single dim `0`: one gray ring the primary cell mask
+/// erases, with one hole that fills the middle of the glyph.
+///
+/// Called only after that mask found almost no ink. A `6` or `9` also has
+/// one hole, but the hole is a bowl: it covers well under half the glyph
+/// on one axis. A closed `4` is the same. An `8` has two holes. A `10` is
+/// two ink blobs whenever the `1` does not touch the ring, including a
+/// gap of one to three pixels, so the hole-size rule is not what rejects
+/// it. Those stay unread so a failed cell is still rejected instead of
+/// being invented as zero. `edge_cols` is the same vertical band the
+/// bright-ink suspect check uses. The bright check wants a fill fraction
+/// of that band. This one flags any pixel in it, because a ring against
+/// the crop is only a few pixels of ink.
+pub fn dim_zero_glyph(img: &DynamicImage, edge_cols: u32) -> Option<DimZeroHit> {
+    let owned;
+    let rgb = if let Some(rgb) = img.as_rgb8() {
+        rgb
+    } else {
+        owned = img.to_rgb8();
+        &owned
+    };
+    let (w, h) = rgb.dimensions();
+    if w < 12 || h < 16 || w > 400 || h > 400 {
+        return None;
+    }
+    let n = (w * h) as usize;
+    // 0 empty, 1 ink, 2 exterior, 3 hole. One buffer for the whole pass.
+    let mut label = vec![0u8; n];
+    let (mut min_x, mut min_y, mut max_x, mut max_y) = (w, h, 0u32, 0u32);
+    let mut ink_count = 0u32;
+    let mut touches_edge = false;
+    let edge = edge_cols.min(w);
+    for y in 0..h {
+        for x in 0..w {
+            let [r, g, b] = rgb.get_pixel(x, y).0;
+            let v = r.max(g).max(b);
+            let min_c = r.min(g).min(b);
+            let sat = if v == 0 {
+                0
+            } else {
+                ((u16::from(v - min_c) * 255) / u16::from(v)) as u8
+            };
+            // Neutral grey, then clearly darker than white text.
+            let neutral = sat <= DIM_ZERO_SAT_MAX;
+            let below_white = (DIM_ZERO_V_MIN..=DIM_ZERO_V_MAX).contains(&v);
+            if !neutral || !below_white {
+                continue;
+            }
+            label[(y * w + x) as usize] = DIM_LABEL_INK;
+            ink_count += 1;
+            // One pixel, not the 12% fill `has_edge_ink` uses. A thin ring
+            // in this band is a few pixels, and 12% of a 2-column band on
+            // a 56px cell is about 13px.
+            if x < edge || x + edge >= w {
+                touches_edge = true;
+            }
+            min_x = min_x.min(x);
+            min_y = min_y.min(y);
+            max_x = max_x.max(x);
+            max_y = max_y.max(y);
+        }
+    }
+    // A zero stroke is a thin ring, not a speck and not a filled blob.
+    if ink_count < 24 {
+        return None;
+    }
+    let bw = max_x - min_x + 1;
+    let bh = max_y - min_y + 1;
+    if bw < 6 || bh < 10 {
+        return None;
+    }
+    let aspect = bw as f32 / bh as f32;
+    if !(0.35..=1.05).contains(&aspect) {
+        return None;
+    }
+    let bbox_area = bw * bh;
+    let fill = ink_count * 100 / bbox_area;
+    if !(15..=75).contains(&fill) {
+        return None;
+    }
+    // A zero is one ring. A "10" with a gap, even one pixel, is two blobs.
+    // Eight-connected, so a thin ring that only meets on a diagonal stays
+    // one component. An empty column between a stroke and a ring does not.
+    if ink_component_count(&label, w, h) != 1 {
+        return None;
+    }
+
+    // Non-ink pixels connected to the crop border are the background. What
+    // remains inside the ring is the hole.
+    let mut stack = Vec::new();
+    {
+        let mut seed = |x: u32, y: u32| {
+            let i = (y * w + x) as usize;
+            if label[i] == 0 {
+                label[i] = DIM_LABEL_EXTERIOR;
+                stack.push((x, y));
+            }
+        };
+        for x in 0..w {
+            seed(x, 0);
+            seed(x, h - 1);
+        }
+        for y in 0..h {
+            seed(0, y);
+            seed(w - 1, y);
+        }
+    }
+    while let Some((x, y)) = stack.pop() {
+        let mut step = |nx: u32, ny: u32| {
+            let i = (ny * w + nx) as usize;
+            if label[i] == 0 {
+                label[i] = DIM_LABEL_EXTERIOR;
+                stack.push((nx, ny));
+            }
+        };
+        if x > 0 {
+            step(x - 1, y);
+        }
+        if x + 1 < w {
+            step(x + 1, y);
+        }
+        if y > 0 {
+            step(x, y - 1);
+        }
+        if y + 1 < h {
+            step(x, y + 1);
+        }
+    }
+
+    let mut hole_count = 0u32;
+    let mut components = 0u32;
+    let mut sum_x = 0u64;
+    let mut sum_y = 0u64;
+    let (mut hole_min_x, mut hole_min_y, mut hole_max_x, mut hole_max_y) = (w, h, 0u32, 0u32);
+    for y in min_y..=max_y {
+        for x in min_x..=max_x {
+            let start = (y * w + x) as usize;
+            if label[start] != 0 {
+                continue;
+            }
+            components += 1;
+            stack.clear();
+            stack.push((x, y));
+            label[start] = DIM_LABEL_HOLE;
+            while let Some((cx, cy)) = stack.pop() {
+                hole_count += 1;
+                sum_x += u64::from(cx);
+                sum_y += u64::from(cy);
+                hole_min_x = hole_min_x.min(cx);
+                hole_min_y = hole_min_y.min(cy);
+                hole_max_x = hole_max_x.max(cx);
+                hole_max_y = hole_max_y.max(cy);
+                let mut visit = |nx: u32, ny: u32| {
+                    let i = (ny * w + nx) as usize;
+                    if label[i] == 0 {
+                        label[i] = DIM_LABEL_HOLE;
+                        stack.push((nx, ny));
+                    }
+                };
+                if cx > min_x {
+                    visit(cx - 1, cy);
+                }
+                if cx < max_x {
+                    visit(cx + 1, cy);
+                }
+                if cy > min_y {
+                    visit(cx, cy - 1);
+                }
+                if cy < max_y {
+                    visit(cx, cy + 1);
+                }
+            }
+        }
+    }
+    // One enclosed hole, large enough to be the counter of a zero and not
+    // most of the glyph. Two counters (an 8) fail here even when the pair
+    // of holes, taken together, is centered and tall.
+    if components != 1 || hole_count < 8 || hole_count * 100 / bbox_area > 55 {
+        return None;
+    }
+    let hole_w = hole_max_x - hole_min_x + 1;
+    let hole_h = hole_max_y - hole_min_y + 1;
+    // The counter of a zero fills the ring. A 6 or 9 bowl and a closed 4
+    // are smaller than this on one axis. A "10" is rejected earlier, as
+    // two ink components, once the stroke does not touch the ring.
+    if hole_w * 100 < bw * DIM_ZERO_HOLE_EXTENT_MIN || hole_h * 100 < bh * DIM_ZERO_HOLE_EXTENT_MIN
+    {
+        return None;
+    }
+    let hx = sum_x as f32 / hole_count as f32;
+    let hy = sum_y as f32 / hole_count as f32;
+    let cx = (min_x + max_x) as f32 / 2.0;
+    let cy = (min_y + max_y) as f32 / 2.0;
+    let off_x = (hx - cx).abs() * 100.0 / bw as f32;
+    let off_y = (hy - cy).abs() * 100.0 / bh as f32;
+    let centre_offset_pct = off_x.max(off_y).round() as u32;
+    if off_x > DIM_ZERO_CENTRE_OFFSET_MAX_PCT as f32
+        || off_y > DIM_ZERO_CENTRE_OFFSET_MAX_PCT as f32
+    {
+        return None;
+    }
+    let hole_extent_pct = (hole_w * 100 / bw).min(hole_h * 100 / bh);
+    Some(DimZeroHit {
+        touches_edge,
+        hole_extent_pct,
+        centre_offset_pct,
+        confidence: dim_zero_confidence(hole_extent_pct, centre_offset_pct)
+            - if touches_edge {
+                DIM_ZERO_EDGE_PENALTY
+            } else {
+                0
+            },
+    })
+}
+
 /// Binarized cell WITHOUT the OCR white border: foreground ink = 0 (black),
 /// background = 255. This is the image [`prepare_cell`] borders for Tesseract;
 /// the edge-ink suspect check ([`edge_ink_fraction`]) runs on the *borderless*
@@ -145,9 +512,33 @@ const CELL_UPSCALE_MAX_FACTOR: f64 = 3.0;
 /// ink touching them means the window is clipping or bleeding a neighbour glyph
 /// (CG-3 offset drift).
 pub fn prepare_cell_binary(img: &DynamicImage) -> GrayImage {
+    prepare_cell_binary_at(img, cell_upscale_factor(img.height()))
+}
+
+/// [`prepare_cell_binary`] at the factor the cell got before PR 158 capped
+/// it, or `None` when the cap does not change this cell's factor.
+///
+/// The cap only binds on crops 28 to 38 px tall. On a 1440p 6v6 board that
+/// is the bottom row alone: [`crop_player_row`] cuts it off at the edge of
+/// the scoreboard crop (54 of 77 px), so its cells are 38 px tall and get
+/// 64/39 = 1.641 instead of 64/38 = 1.684. Tesseract's read of a small
+/// glyph flips with tiny factor changes. On `accepted_20261008_000324` a
+/// white 8 reads at 1.60, 1.62, 1.684, 1.70 and 1.80 but is empty at 1.641,
+/// 1.66 and 2.0. On `accepted_20261008_001449` a white 183 reads at 1.0,
+/// 1.5, 1.684 and 2.0 but is empty at 1.60 to 1.66 (Scuffed Vision
+/// baseline, PR 158). The per-cell read retries here when the capped read
+/// is empty, so the cap never loses a cell the old factor read.
+pub fn prepare_cell_binary_uncapped(img: &DynamicImage) -> Option<GrayImage> {
+    let h = img.height();
+    let capped = cell_upscale_factor(h);
+    let uncapped = uncapped_cell_upscale_factor(h);
+    ((uncapped - capped).abs() > 1e-9).then(|| prepare_cell_binary_at(img, uncapped))
+}
+
+fn prepare_cell_binary_at(img: &DynamicImage, factor: f64) -> GrayImage {
     let masked = hsv_white_mask(img);
     let gray = DynamicImage::ImageRgb8(masked).to_luma8();
-    let work_img = upscale_cell_for_ocr(&gray);
+    let work_img = upscale_cell_at(&gray, factor);
 
     let (ww, hh) = work_img.dimensions();
     let mut binary = GrayImage::new(ww, hh);
@@ -160,17 +551,26 @@ pub fn prepare_cell_binary(img: &DynamicImage) -> GrayImage {
     binary
 }
 
-/// CG-4 D: upscale **only** cells with height &lt; [`CELL_UPSCALE_TRIGGER_H`]
-/// toward [`CELL_UPSCALE_TARGET_H`] (factor capped at [`CELL_UPSCALE_MAX_FACTOR`]).
-/// Native-height cells pass through unchanged so dim low-contrast glyphs are not
-/// smooth-warped into phantom digits. CatmullRom (not Lanczos) — Lanczos on dim
-/// "0" glyphs produced conf-96 "9" phantoms at any factor ≥1.05 (Claude reject).
+/// Test helper: [`upscale_cell_at`] at the normal [`cell_upscale_factor`].
+#[cfg(test)]
 fn upscale_cell_for_ocr(gray: &GrayImage) -> GrayImage {
+    upscale_cell_at(gray, cell_upscale_factor(gray.height()))
+}
+
+/// CG-4 D: upscale **only** cells with height &lt; [`CELL_UPSCALE_TRIGGER_H`]
+/// toward [`CELL_UPSCALE_TARGET_H`] (factor capped at [`CELL_UPSCALE_MAX_FACTOR`],
+/// and at [`CELL_UPSCALE_FACTOR_CAP`] once the crop is at least
+/// [`CELL_UPSCALE_CAP_MIN_H`]). Native-height cells pass through unchanged so
+/// dim low-contrast glyphs are not smooth-warped into phantom digits.
+/// CatmullRom (not Lanczos). Lanczos on dim "0" glyphs produced conf-96 "9"
+/// phantoms at any factor ≥1.05 (Claude reject). `factor` is normally
+/// [`cell_upscale_factor`]; [`prepare_cell_binary_uncapped`] passes the
+/// uncapped one.
+fn upscale_cell_at(gray: &GrayImage, factor: f64) -> GrayImage {
     let (w, h) = gray.dimensions();
     if w == 0 || h == 0 || h >= CELL_UPSCALE_TRIGGER_H {
         return gray.clone();
     }
-    let factor = (CELL_UPSCALE_TARGET_H as f64 / h as f64).min(CELL_UPSCALE_MAX_FACTOR);
     if factor < 1.05 {
         return gray.clone();
     }
@@ -179,10 +579,18 @@ fn upscale_cell_for_ocr(gray: &GrayImage) -> GrayImage {
     image::imageops::resize(gray, nw, nh, image::imageops::FilterType::CatmullRom)
 }
 
-/// Test-visible factor selection for CG-4 D (height → scale, capped).
-/// Returns 1.0 when the cell is at/above the trigger (no upscale).
-#[cfg(test)]
+/// Height to scale factor. 1.0 at or above the trigger (no upscale).
 fn cell_upscale_factor(h: u32) -> f64 {
+    let toward = uncapped_cell_upscale_factor(h);
+    if h >= CELL_UPSCALE_CAP_MIN_H {
+        toward.min(CELL_UPSCALE_FACTOR_CAP)
+    } else {
+        toward
+    }
+}
+
+/// [`cell_upscale_factor`] without the [`CELL_UPSCALE_FACTOR_CAP`] cap.
+fn uncapped_cell_upscale_factor(h: u32) -> f64 {
     if h == 0 || h >= CELL_UPSCALE_TRIGGER_H {
         1.0
     } else {
@@ -221,10 +629,14 @@ pub fn edge_ink_fraction(binary: &GrayImage, edge_cols: u32) -> (f64, f64) {
 }
 
 /// Whether a borderless binarized cell has ink touching either vertical edge
-/// beyond `threshold` fill — the "suspect" signal that the stat-column window is
+/// beyond `threshold` fill. The "suspect" signal that the stat-column window is
 /// clipping or bleeding a glyph. Uses the worse of the two sides (a clip touches
 /// only one edge). See [`edge_ink_fraction`]; threshold validated against the
 /// 2026-07-20 drift fixtures (see `capture_gate` module docs).
+///
+/// A dim zero does not use this fraction. Any one in-band pixel sets
+/// `touches_edge`, because a thin ring in a 2-column band is a few pixels
+/// and 12% of that band on a 56px cell is about 13px.
 pub fn has_edge_ink(binary: &GrayImage, edge_cols: u32, threshold: f64) -> bool {
     let (l, r) = edge_ink_fraction(binary, edge_cols);
     l.max(r) > threshold
@@ -1318,26 +1730,33 @@ mod cell_upscale_tests {
 
     #[test]
     fn factor_targets_64_only_below_trigger_and_caps_at_3x() {
-        // 42px (<48) → 64/42 ≈ 1.524
+        // 42px (<48) → 64/42 ≈ 1.524, under the Dorado cap.
         let f42 = cell_upscale_factor(42);
         assert!((f42 - (64.0 / 42.0)).abs() < 1e-9);
         assert!(f42 < CELL_UPSCALE_MAX_FACTOR);
 
-        // 32px → exactly 2×
-        assert!((cell_upscale_factor(32) - 2.0).abs() < 1e-9);
+        // 39px is the native Dorado cell. A 31px trim of that cell must
+        // not scale harder, or a "11" comes back as "1".
+        let native = cell_upscale_factor(39);
+        assert!((native - CELL_UPSCALE_FACTOR_CAP).abs() < 1e-9);
+        assert!(cell_upscale_factor(31) <= native + 1e-9);
+        assert!(cell_upscale_factor(33) <= native + 1e-9);
 
-        // Very short cell would want >3× → capped
+        // Very short cell would want >3× → capped. The Dorado cap does
+        // not apply under 28px.
         assert!((cell_upscale_factor(15) - 3.0).abs() < 1e-9);
         assert!((cell_upscale_factor(10) - 3.0).abs() < 1e-9);
     }
 
     #[test]
     fn upscale_grows_short_cell_to_about_target_height() {
-        let gray = GrayImage::from_pixel(20, 32, Luma([200]));
+        // 22px is under the Dorado cap's minimum height, so it still
+        // climbs to the 64px target (64/22, under the 3× ceiling).
+        let gray = GrayImage::from_pixel(20, 22, Luma([200]));
         let up = upscale_cell_for_ocr(&gray);
         let (w, h) = up.dimensions();
-        assert_eq!(h, 64, "32×2 → 64");
-        assert_eq!(w, 40, "width scales with height");
+        assert_eq!(h, 64, "22 × 64/22 → 64");
+        assert_eq!(w, 58, "width scales with height");
     }
 
     #[test]
@@ -1508,5 +1927,475 @@ mod prepare_title_chroma_tests {
             tall_ink_columns(&trimmed) >= 30,
             "trimmed image has no magenta title ink"
         );
+    }
+}
+
+/// Synthetic dim glyphs. Shape tests live in [`dim_zero_tests`].
+#[cfg(test)]
+pub(crate) mod dim_zero_fixtures {
+    use super::*;
+
+    const BG: Rgb<u8> = Rgb([72, 28, 112]);
+    /// Gray just under the HSV soft-weight binary cut (value ~122).
+    pub(crate) const DIM: Rgb<u8> = Rgb([122, 122, 122]);
+
+    pub(crate) fn cell(w: u32, h: u32) -> RgbImage {
+        RgbImage::from_pixel(w, h, BG)
+    }
+
+    pub(crate) fn paint_ring(
+        img: &mut RgbImage,
+        cx: f32,
+        cy: f32,
+        rx: f32,
+        ry: f32,
+        thickness: f32,
+        color: Rgb<u8>,
+    ) {
+        let (w, h) = img.dimensions();
+        let norm = thickness / rx.min(ry);
+        for y in 0..h {
+            for x in 0..w {
+                let dx = (x as f32 + 0.5 - cx) / rx;
+                let dy = (y as f32 + 0.5 - cy) / ry;
+                let d = dx.mul_add(dx, dy * dy).sqrt();
+                if d <= 1.0 && d >= 1.0 - norm {
+                    img.put_pixel(x, y, color);
+                }
+            }
+        }
+    }
+
+    pub(crate) fn wrap(img: RgbImage) -> DynamicImage {
+        DynamicImage::ImageRgb8(img)
+    }
+
+    /// Native-height kill cell whose only glyph is a dim zero. The primary
+    /// mask drops it (see the OCR test); this is the shape `dim_zero_glyph`
+    /// has to accept.
+    pub(crate) fn dim_zero_cell() -> DynamicImage {
+        let mut img = cell(48, 56);
+        paint_ring(&mut img, 24.0, 28.0, 8.0, 14.0, 3.0, DIM);
+        wrap(img)
+    }
+
+    /// Same ring, shifted so its left stroke sits in the outer two columns.
+    pub(crate) fn dim_zero_touching_left_edge() -> DynamicImage {
+        let mut img = cell(48, 56);
+        paint_ring(&mut img, 8.0, 28.0, 8.0, 14.0, 3.0, DIM);
+        wrap(img)
+    }
+
+    pub(crate) fn dim_stroke_cell() -> DynamicImage {
+        let mut img = cell(48, 56);
+        for y in 12..44 {
+            for x in 22..27 {
+                img.put_pixel(x, y, DIM);
+            }
+        }
+        wrap(img)
+    }
+
+    /// A dim 6 whose bowl is only the lower ~44% of the glyph. The hole
+    /// sits too low to be a zero even before the extent check.
+    pub(crate) fn dim_six_cell() -> DynamicImage {
+        let mut img = cell(48, 56);
+        paint_ring(&mut img, 24.0, 40.0, 8.0, 9.0, 2.5, DIM);
+        for y in 8..40 {
+            for x in 16..20 {
+                img.put_pixel(x, y, DIM);
+            }
+        }
+        wrap(img)
+    }
+
+    /// A 6 whose bowl is about 57% of the glyph height, so the hole's
+    /// center is close enough to the box center to fool a centroid test.
+    /// The hole itself is still a bowl, not the counter of a zero.
+    pub(crate) fn dim_six_realistic() -> DynamicImage {
+        let mut img = cell(48, 56);
+        // Glyph roughly y=8..48 (height 40). Bowl is the lower 23px.
+        paint_ring(&mut img, 24.0, 36.0, 8.0, 11.0, 3.2, DIM);
+        for y in 8..36 {
+            for x in 16..20 {
+                img.put_pixel(x, y, DIM);
+            }
+        }
+        wrap(img)
+    }
+
+    /// Mirror of [`dim_six_realistic`]: bowl high, stem down the right.
+    pub(crate) fn dim_nine_realistic() -> DynamicImage {
+        let mut img = cell(48, 56);
+        paint_ring(&mut img, 24.0, 20.0, 8.0, 11.0, 3.2, DIM);
+        for y in 20..48 {
+            for x in 28..32 {
+                img.put_pixel(x, y, DIM);
+            }
+        }
+        wrap(img)
+    }
+
+    /// A closed 4: stem, crossbar, and a left stroke that seals a small
+    /// counter. The counter is not half the glyph.
+    pub(crate) fn dim_four_closed() -> DynamicImage {
+        let mut img = cell(48, 56);
+        // Stem runs the full glyph. The closed counter sits on the center
+        // so a centroid test accepts it, and it is much shorter than the stem.
+        for y in 8..48 {
+            for x in 30..34 {
+                img.put_pixel(x, y, DIM);
+            }
+        }
+        for y in 18..22 {
+            for x in 16..34 {
+                img.put_pixel(x, y, DIM);
+            }
+        }
+        for y in 32..36 {
+            for x in 16..34 {
+                img.put_pixel(x, y, DIM);
+            }
+        }
+        for y in 18..36 {
+            for x in 16..20 {
+                img.put_pixel(x, y, DIM);
+            }
+        }
+        wrap(img)
+    }
+
+    /// A dim "10": a 4px stroke, then a 2px gap, then the zero fixture's ring.
+    /// The hole in the ring is large enough to pass the extent rule. The
+    /// stroke is a second ink component, which is what rejects it.
+    pub(crate) fn dim_ten() -> DynamicImage {
+        dim_ten_gap(4, 2)
+    }
+
+    /// A `stroke_w` pixel "1" sitting `gap` empty columns left of the zero
+    /// fixture's ring (outer ink at x = 16).
+    pub(crate) fn dim_ten_gap(stroke_w: u32, gap: u32) -> DynamicImage {
+        let mut img = cell(48, 56);
+        let ring_left = 16u32;
+        let stroke_right = ring_left - gap;
+        let stroke_left = stroke_right - stroke_w;
+        for y in 14..42 {
+            for x in stroke_left..stroke_right {
+                img.put_pixel(x, y, DIM);
+            }
+        }
+        paint_ring(&mut img, 24.0, 28.0, 8.0, 14.0, 3.0, DIM);
+        wrap(img)
+    }
+
+    /// Same ring as [`dim_zero_cell`] with a 4px stroke. The hole still
+    /// covers about half the box, so a 60% extent rule would drop it.
+    pub(crate) fn dim_bold_zero() -> DynamicImage {
+        let mut img = cell(48, 56);
+        paint_ring(&mut img, 24.0, 28.0, 8.0, 14.0, 4.0, DIM);
+        wrap(img)
+    }
+
+    /// Same ring with a 2px stroke. Eight-connected ink must keep this one
+    /// blob, or a thin zero splits into unread pieces.
+    pub(crate) fn dim_thin_zero() -> DynamicImage {
+        let mut img = cell(48, 56);
+        paint_ring(&mut img, 24.0, 28.0, 8.0, 14.0, 2.0, DIM);
+        wrap(img)
+    }
+
+    /// A rectangular frame whose fill is past 75% and whose hole still
+    /// spans half the box. Fill is the only check that rejects it.
+    pub(crate) fn dim_fill_frame() -> DynamicImage {
+        let mut img = cell(48, 56);
+        for y in 14..42 {
+            for x in 14..32 {
+                let in_hole = (18..27).contains(&x) && (20..33).contains(&y);
+                if !in_hole {
+                    img.put_pixel(x, y, DIM);
+                }
+            }
+        }
+        wrap(img)
+    }
+
+    /// A thin frame whose hole is more than 55% of the box. Hole size is
+    /// the only check that rejects it. A closed ring large enough for the
+    /// box floor already has more than 8 hole pixels, so the lower bound
+    /// is not separately reachable.
+    pub(crate) fn dim_wide_hole() -> DynamicImage {
+        let mut img = cell(48, 56);
+        for y in 14..42 {
+            for x in 16..32 {
+                let in_hole = (18..30).contains(&x) && (16..40).contains(&y);
+                if !in_hole {
+                    img.put_pixel(x, y, DIM);
+                }
+            }
+        }
+        wrap(img)
+    }
+
+    /// A frame whose hole sits far enough left that the centroid check is
+    /// the only one that rejects it.
+    pub(crate) fn dim_shifted_hole() -> DynamicImage {
+        let mut img = cell(48, 56);
+        for y in 12..42 {
+            for x in 10..30 {
+                let in_hole = (11..20).contains(&x) && (18..36).contains(&y);
+                if !in_hole {
+                    img.put_pixel(x, y, DIM);
+                }
+            }
+        }
+        wrap(img)
+    }
+
+    /// A 5x9 frame. The box floor is the only check that rejects it.
+    pub(crate) fn dim_tiny_frame() -> DynamicImage {
+        let mut img = cell(48, 56);
+        for y in 20..29 {
+            for x in 20..25 {
+                let in_hole = (21..24).contains(&x) && (21..28).contains(&y);
+                if !in_hole {
+                    img.put_pixel(x, y, DIM);
+                }
+            }
+        }
+        wrap(img)
+    }
+
+    /// Two stacked counters. The pair is centered; only the one-hole rule
+    /// keeps this from being read as zero.
+    pub(crate) fn dim_eight() -> DynamicImage {
+        let mut img = cell(48, 56);
+        paint_ring(&mut img, 24.0, 18.0, 8.0, 8.0, 2.6, DIM);
+        paint_ring(&mut img, 24.0, 36.0, 8.0, 8.0, 2.6, DIM);
+        wrap(img)
+    }
+
+    pub(crate) fn dim_filled_blob() -> DynamicImage {
+        let mut img = cell(48, 56);
+        for y in 12..44 {
+            for x in 16..32 {
+                img.put_pixel(x, y, DIM);
+            }
+        }
+        wrap(img)
+    }
+
+    /// One ring, wider than it is tall. A single digit is not this shape.
+    pub(crate) fn dim_wide_pair() -> DynamicImage {
+        let mut img = cell(64, 56);
+        paint_ring(&mut img, 32.0, 28.0, 20.0, 12.0, 3.0, DIM);
+        wrap(img)
+    }
+
+    /// A handful of dim pixels. Not a stroke and not a ring.
+    pub(crate) fn dim_speck() -> DynamicImage {
+        let mut img = cell(48, 56);
+        for y in 26..29 {
+            for x in 22..25 {
+                img.put_pixel(x, y, DIM);
+            }
+        }
+        wrap(img)
+    }
+}
+
+#[cfg(test)]
+mod dim_zero_tests {
+    use super::dim_zero_fixtures::{
+        cell, dim_bold_zero, dim_eight, dim_fill_frame, dim_filled_blob, dim_four_closed,
+        dim_nine_realistic, dim_shifted_hole, dim_six_cell, dim_six_realistic, dim_speck,
+        dim_stroke_cell, dim_ten, dim_ten_gap, dim_thin_zero, dim_tiny_frame, dim_wide_hole,
+        dim_wide_pair, dim_zero_cell, dim_zero_touching_left_edge, paint_ring, wrap,
+    };
+    use super::dim_zero_glyph;
+    use image::{DynamicImage, Rgb};
+
+    fn is_zero(img: &DynamicImage) -> bool {
+        dim_zero_glyph(img, 2).is_some()
+    }
+
+    #[test]
+    fn a_dim_ring_is_a_zero_and_a_stroke_is_not() {
+        let hit = dim_zero_glyph(&dim_zero_cell(), 2).expect("centered dim ring");
+        assert!(!hit.touches_edge);
+        assert!(!is_zero(&dim_stroke_cell()), "a dim 1 has no hole");
+        assert!(!is_zero(&dim_six_cell()), "a low hole is a 6, not a 0");
+        assert!(!is_zero(&DynamicImage::ImageRgb8(cell(48, 56))));
+    }
+
+    #[test]
+    fn a_ring_in_the_outer_columns_is_a_suspect_zero() {
+        let hit = dim_zero_glyph(&dim_zero_touching_left_edge(), 2)
+            .expect("a complete ring may sit against the crop edge");
+        assert!(hit.touches_edge);
+    }
+
+    #[test]
+    fn dim_zero_confidence_follows_the_documented_scale() {
+        use super::dim_zero_confidence;
+        assert_eq!(dim_zero_confidence(38, 22), 55, "the floor");
+        assert_eq!(dim_zero_confidence(30, 40), 55, "never below the floor");
+        assert_eq!(dim_zero_confidence(44, 0), 95, "the ceiling");
+        assert_eq!(dim_zero_confidence(60, 0), 95, "never above the ceiling");
+        assert!(dim_zero_confidence(41, 5) >= 78);
+        assert!(dim_zero_confidence(42, 4) > dim_zero_confidence(40, 4));
+        assert!(dim_zero_confidence(42, 2) > dim_zero_confidence(42, 10));
+    }
+
+    #[test]
+    fn a_hit_carries_its_geometric_confidence_and_the_edge_penalty() {
+        use super::{DIM_ZERO_EDGE_PENALTY, dim_zero_confidence};
+        let hit = dim_zero_glyph(&dim_zero_cell(), 2).expect("centered dim ring");
+        assert_eq!(
+            hit.confidence,
+            dim_zero_confidence(hit.hole_extent_pct, hit.centre_offset_pct)
+        );
+        assert!(hit.confidence >= 70, "a clean ring is not suspect: {hit:?}");
+        let edge = dim_zero_glyph(&dim_zero_touching_left_edge(), 2).expect("edge ring");
+        assert_eq!(
+            edge.confidence,
+            dim_zero_confidence(edge.hole_extent_pct, edge.centre_offset_pct)
+                - DIM_ZERO_EDGE_PENALTY
+        );
+    }
+
+    #[test]
+    fn a_bright_ring_is_not_the_dim_zero_path() {
+        let mut img = cell(48, 56);
+        paint_ring(&mut img, 24.0, 28.0, 8.0, 14.0, 3.0, Rgb([236, 236, 236]));
+        assert!(
+            !is_zero(&wrap(img)),
+            "a bright digit stays on the Tesseract path"
+        );
+    }
+
+    /// Below white, not a single grey. Floor 96, a core like the measured
+    /// stroke, a value well above that core, the ceiling, then the first
+    /// step past it and a white digit.
+    #[test]
+    fn a_ring_clearly_darker_than_white_is_a_zero() {
+        for (gray, readable) in [
+            (90u8, false),
+            (96, true),
+            (180, true),
+            (220, true),
+            (221, false),
+            (250, false),
+        ] {
+            let mut img = cell(48, 56);
+            paint_ring(
+                &mut img,
+                24.0,
+                28.0,
+                8.0,
+                14.0,
+                3.0,
+                Rgb([gray, gray, gray]),
+            );
+            assert_eq!(
+                is_zero(&wrap(img)),
+                readable,
+                "gray {gray} readable={readable}"
+            );
+        }
+    }
+
+    /// Neutral grey: channels roughly equal. Saturation 40 is the cap
+    /// (measured stroke max about 33, plus margin). Just over the cap is
+    /// row-fill colour on the edge of a glyph, not the stroke.
+    #[test]
+    fn a_neutral_grey_ring_is_a_zero_and_a_saturated_ring_is_not() {
+        // (172 - 145) * 255 / 172 = 40. The next step is 41.
+        let mut at_cap = cell(48, 56);
+        paint_ring(
+            &mut at_cap,
+            24.0,
+            28.0,
+            8.0,
+            14.0,
+            3.0,
+            Rgb([172, 145, 145]),
+        );
+        assert!(is_zero(&wrap(at_cap)), "saturation 40 still reads");
+        let mut over_cap = cell(48, 56);
+        paint_ring(
+            &mut over_cap,
+            24.0,
+            28.0,
+            8.0,
+            14.0,
+            3.0,
+            Rgb([172, 144, 144]),
+        );
+        assert!(!is_zero(&wrap(over_cap)), "saturation 41 is not neutral");
+        let mut img = cell(48, 56);
+        paint_ring(&mut img, 24.0, 28.0, 8.0, 14.0, 3.0, Rgb([140, 40, 40]));
+        assert!(!is_zero(&wrap(img)), "a red ring is row fill");
+    }
+
+    #[test]
+    fn realistic_dim_digits_are_not_zero() {
+        assert!(!is_zero(&dim_six_realistic()), "realistic 6");
+        assert!(!is_zero(&dim_nine_realistic()), "realistic 9");
+        assert!(!is_zero(&dim_four_closed()), "closed 4");
+        assert!(!is_zero(&dim_ten()), "10");
+        assert!(!is_zero(&dim_eight()), "8");
+    }
+
+    #[test]
+    fn shape_checks_reject_a_blob_a_wide_cell_and_a_speck() {
+        assert!(!is_zero(&dim_filled_blob()), "filled blob");
+        assert!(!is_zero(&dim_wide_pair()), "two-digit cell");
+        assert!(!is_zero(&dim_speck()), "speck");
+    }
+
+    #[test]
+    fn a_bold_zero_still_reads_and_each_shape_check_has_its_own_reject() {
+        // 4px stroke on a 16px-wide ring. Hole extent is about half the
+        // box, so raising the 38% rule to 60% drops this zero.
+        assert!(is_zero(&dim_bold_zero()), "bold zero");
+        assert!(is_zero(&dim_thin_zero()), "thin zero stays one component");
+        assert!(!is_zero(&dim_fill_frame()), "fill");
+        assert!(!is_zero(&dim_wide_hole()), "hole size");
+        assert!(!is_zero(&dim_shifted_hole()), "centroid");
+        assert!(!is_zero(&dim_tiny_frame()), "box floor");
+    }
+
+    #[test]
+    fn a_close_ten_is_not_a_zero() {
+        // The extent rule only rejects a "10" once the stroke is far
+        // enough to widen the box. A gap of 1 to 3px still has a full
+        // ring, and it must stay unread because it is two components.
+        for gap in 1..=4 {
+            assert!(!is_zero(&dim_ten_gap(4, gap)), "4px stroke at gap {gap}");
+            assert!(!is_zero(&dim_ten_gap(3, gap)), "3px stroke at gap {gap}");
+        }
+        assert!(!is_zero(&dim_ten()), "fixture gap");
+    }
+}
+
+#[cfg(test)]
+mod uncapped_retry_tests {
+    use super::{prepare_cell_binary, prepare_cell_binary_uncapped};
+    use image::{DynamicImage, RgbImage};
+
+    fn blank(h: u32) -> DynamicImage {
+        DynamicImage::ImageRgb8(RgbImage::new(40, h))
+    }
+
+    #[test]
+    fn only_capped_heights_get_an_uncapped_retry() {
+        // 38 px is the truncated bottom row at native: capped to 64/39.
+        let retry = prepare_cell_binary_uncapped(&blank(38)).expect("38 px is capped");
+        let capped = prepare_cell_binary(&blank(38));
+        assert_eq!(retry.height(), 64, "64/38 of 38 px");
+        assert_eq!(capped.height(), 62, "64/39 of 38 px");
+        for h in [20, 27, 39, 44, 48, 60] {
+            assert!(prepare_cell_binary_uncapped(&blank(h)).is_none(), "h={h}");
+        }
     }
 }

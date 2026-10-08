@@ -4,6 +4,69 @@ User-facing notes for `stat-tracker-v*` GitHub Releases. The release workflow
 prepends the section whose heading matches the tag version (for example
 `## 0.4.15` for `stat-tracker-v0.4.15`).
 
+## 0.4.21
+
+A zero on the scoreboard is drawn fainter than the other digits. The
+cell reader was dropping those cells, and one empty cell threw away the
+whole row. Those Tabs were often saved anyway, through the text
+fallback, with the columns shifted. Those zeros now read as 0 in any
+of the six stat columns. A row that is on screen but whose cells still
+cannot be read is logged separately from a frame where the player row
+was not found.
+
+That check is two tests, not one grey level. The stroke has to be
+neutral grey, because purple and yellow row fills are strongly
+saturated and the soft edge of a glyph picks that colour up. It also
+has to be clearly darker than white text. On the Dorado cells the
+stroke cores are about 171-186 and white digits reach 250-255. When
+the bright mask keeps the stroke but Tesseract returns nothing, the
+same check still reads the ring as 0.
+
+The text fallback no longer takes the last six numbers on the player's
+line. The name has to match as a whole word. That line can also contain
+the hero panel's objective timer, and a trailing `00:02` shifted the
+columns (assists and deaths became the damage and healing figures). The
+fallback now ignores a clock, keeps a line only when the stats are one
+unbroken run of exactly six numbers with no word or percent after that
+run, and uses the same elims, assists, and deaths ceilings as the cell
+reader. A chat line and a join line are skipped so a later stat line
+can match. Numbers from that fallback are low-trust: the first capture
+is checked too, and one clean cell read replaces an unconfirmed column
+when that read is not a clip below a value the fallback moved off, and
+not a wide column with its last digit cut off. A jump past the rate
+cap, or a trailing-digit inject, is still held. A confirmed value,
+including one a fallback moved away from, still has to agree three
+times before it moves down.
+
+A recovered 0 now carries a confidence from how cleanly the ring
+matched (hole size and how centred it is), from 55 for a ring that only
+just passes up to 95, instead of a flat 60. A clean ring scores 75 or
+more. A ring touching the cell edge loses 15 and is still marked
+suspect.
+
+The bottom player row is cut short at the edge of the scoreboard crop,
+so its cells get a slightly smaller upscale. Tesseract sometimes reads
+nothing at that size where it read the digit before, so an empty read
+there is tried once more at the old size. Column calibration scores
+each candidate layout on bright digits only, so recovered zeros cannot
+push it to a layout the old build did not pick.
+
+5v5 or 6v6 no longer trusts one row-pitch measurement that fits
+neither layout. On a post-game table the stronger measurement said
+5v5 while the rows were 6v6, and every row was read one slot off. A
+pitch that fits neither layout is ignored, and when the two
+measurements point at different sizes the capture is rejected (saved
+to `debug/rejected`) instead of read with shifted rows.
+
+### Install
+
+```sh
+curl --proto '=https' -fsSL https://raw.githubusercontent.com/FrozenTear/scuffed-crew/main/crates/stat-tracker/dist/bootstrap.sh | bash
+```
+
+Or extract the tarball and run `./install.sh`. Pin with
+`STAT_TRACKER_TAG=stat-tracker-v0.4.21`.
+
 ## 0.4.20
 
 The last game of the night now uploads by itself about 3 minutes after

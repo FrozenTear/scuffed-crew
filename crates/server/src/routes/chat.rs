@@ -302,11 +302,25 @@ pub async fn send_encrypted(
                 }),
             )
         })?;
-        if let Some(m) = m
-            && m.org_role.can_access_officer_channel()
-            && let Some(pubkey) = &m.nostr_pubkey
-        {
-            recipient_pubkeys.push(pubkey.clone());
+        if let Some(m) = m {
+            // Same rule as `get_team_roster`: active and not banned. The query
+            // already drops them; this skips a row that is still on the edge.
+            let banned = state.db.is_member_banned(&m.id).await.map_err(|e| {
+                tracing::error!("Failed to check ban for {}: {e}", m.id);
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse {
+                        error: "Failed to resolve member keys".into(),
+                    }),
+                )
+            })?;
+            if m.is_active
+                && !banned
+                && m.org_role.can_access_officer_channel()
+                && let Some(pubkey) = &m.nostr_pubkey
+            {
+                recipient_pubkeys.push(pubkey.clone());
+            }
         }
     }
 
@@ -662,6 +676,131 @@ mod tests {
             status,
             StatusCode::UNPROCESSABLE_ENTITY,
             "channel found; empty roster has no recipient pubkeys: {body}"
+        );
+    }
+
+    async fn seed_keyed_officer(db: &Database, id: &str, user_id: &str, active: bool) {
+        db.client
+            .query(format!(
+                r#"CREATE user:{user_id} SET
+                    provider = 'discord',
+                    username = '{user_id}',
+                    avatar_url = NONE,
+                    provider_id = '{user_id}-pid',
+                    provider_id_hash = '{user_id}-pidh',
+                    provider_id_encrypted = NONE,
+                    created_at = time::now();
+                   CREATE member:{id} SET
+                    user_id = '{user_id}',
+                    org_role = 'officer',
+                    display_name = '{user_id}',
+                    bio = NONE,
+                    avatar_url = NONE,
+                    timezone = NONE,
+                    pronouns = NONE,
+                    availability_status = NONE,
+                    joined_at = time::now(),
+                    is_active = {active}"#
+            ))
+            .await
+            .expect("seed officer");
+        let (pubkey, encrypted) = NostrAuthService::new(test_crypto())
+            .generate_keypair()
+            .expect("keypair");
+        db.update_member_nostr_keys(id, Some(&pubkey), Some("server_managed"), Some(&encrypted))
+            .await
+            .expect("keys");
+    }
+
+    #[tokio::test]
+    async fn send_encrypted_skips_banned_and_deactivated_officers() {
+        let state = test_state().await;
+        seed_officer(&state.db).await;
+        let team = state
+            .db
+            .create_team("Alpha", "ow2", None, None, None)
+            .await
+            .unwrap();
+        scuffed_chat::ensure_team_channel_rows(&state.db, &team.id, "")
+            .await
+            .unwrap();
+        seed_keyed_officer(&state.db, "deadofficer", "deaduser", false).await;
+        seed_keyed_officer(&state.db, "bannedofficer", "banneduser", true).await;
+        state
+            .db
+            .add_to_roster("deadofficer", &team.id, scuffed_db::TeamRole::Player)
+            .await
+            .unwrap();
+        state
+            .db
+            .add_to_roster("bannedofficer", &team.id, scuffed_db::TeamRole::Player)
+            .await
+            .unwrap();
+        state
+            .db
+            .create_moderation_action(
+                "bannedofficer",
+                scuffed_db::ModerationActionType::Ban,
+                "chat",
+                "officermember",
+                None,
+            )
+            .await
+            .unwrap();
+
+        let group_id = officer_group_id(&team.id);
+        let app = Router::new()
+            .route("/api/chat/send-encrypted", post(send_encrypted))
+            .with_state(state.clone());
+        let resp = app.oneshot(send_req(&group_id)).await.unwrap();
+        let status = resp.status();
+        let body = String::from_utf8(
+            resp.into_body()
+                .collect()
+                .await
+                .unwrap()
+                .to_bytes()
+                .to_vec(),
+        )
+        .unwrap();
+        assert_eq!(
+            status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "banned and deactivated officers must not be gift-wrap recipients: {body}"
+        );
+        assert!(
+            body.contains("No channel members"),
+            "expected the empty-recipient error, got {body}"
+        );
+
+        seed_keyed_officer(&state.db, "liveofficer", "liveuser", true).await;
+        state
+            .db
+            .add_to_roster("liveofficer", &team.id, scuffed_db::TeamRole::Player)
+            .await
+            .unwrap();
+        let app = Router::new()
+            .route("/api/chat/send-encrypted", post(send_encrypted))
+            .with_state(state);
+        let resp = app.oneshot(send_req(&group_id)).await.unwrap();
+        let status = resp.status();
+        let body = String::from_utf8(
+            resp.into_body()
+                .collect()
+                .await
+                .unwrap()
+                .to_bytes()
+                .to_vec(),
+        )
+        .unwrap();
+        assert_eq!(
+            status,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "an active officer is still a recipient, so publish reaches the relay: {body}"
+        );
+        assert!(
+            body.contains("Cannot connect to relay"),
+            "expected the relay error, got {body}"
         );
     }
 }

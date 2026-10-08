@@ -171,9 +171,8 @@ fn App() -> Element {
 
 #[cfg(test)]
 mod tests {
-    /// This test is the one that requires og:site_name. PR 152 requires the
-    /// other four head tags on its own, and og:site_name only when the shell
-    /// includes it. Comments are removed before those five counts.
+    /// The live shell must contain exactly one of each rewritten head tag,
+    /// including `og:site_name`. Comments are removed before those counts.
     #[test]
     fn index_html_has_one_of_each_rewritten_head_tag() {
         let html = include_str!("../index.html");

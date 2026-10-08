@@ -185,11 +185,20 @@ async fn main() {
     // F-API-003: existing teams have no team_channel rows until backfill.
     scuffed_site_server::team_channels::backfill_on_startup(&state).await;
 
-    // Create the collaboration room manager
-    let rooms = Arc::new(collab::RoomManager::new());
+    // Strategy collab admission. Every socket holds a permit until it closes,
+    // including sockets that never join a room. Unjoined sockets are closed
+    // after the join deadline. See routes::ws.
+    let (ws_global, ws_per_ip) = routes::ws::WsAdmission::limits_from_env();
+    let rooms = Arc::new(collab::RoomManager::with_global_limit(ws_global));
     let ws_state = routes::ws::WsState {
         app: state.clone(),
         rooms,
+        admission: Arc::new(routes::ws::WsAdmission::new(
+            ws_global,
+            ws_per_ip,
+            scuffed_site_server::rate_limit::TrustedProxyIpKeyExtractor::from_env(),
+        )),
+        join_timeout: routes::ws::WS_JOIN_TIMEOUT,
     };
 
     // Spawn hourly session cleanup task
