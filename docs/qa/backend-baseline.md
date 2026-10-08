@@ -1,0 +1,223 @@
+# Backend and site QA baseline
+
+Pass date: 2026-10-08. Scope is the Axum servers (`crates/server`, `crates/site-server`) and the crates they sit on (`crates/auth`, `crates/db`, `crates/chat`, `crates/types`, `crates/relay-policy`, `crates/api-client`) plus the site client in `crates/app` where it calls those servers. `crates/stat-tracker*` and the map crates were not edited. Map crates did compile as part of the workspace test command CI uses.
+
+This pass records bugs. It does not change application behavior. Each confirmed bug has an ignored regression so `cargo test` stays green.
+
+## Environment
+
+- Worktree: `.claude/worktrees/grok-qa-baseline` on `cursor/backend-qa-baseline-e0cb` (off `main` at `9590e52`).
+- Toolchain: `rustc 1.99.0 (b940084d7 2026-09-28)`. `libssl-dev` and `pkg-config` were installed so `openssl-sys` could build.
+- CI definition: `.github/workflows/ci.yml` (`dep-guardrails`, `fmt`, `clippy`, `build-and-test`, `app-build`).
+- Local server: `PORT=3030 cargo run -p scuffed-server` with `SURREALDB_URL`, `PRODUCTION`, and `ENCRYPTION_KEY` unset. That is the documented in-memory dev boot (`Database::connect_memory`, migrations, `seed_dev_data`). Compose / Podman was not used; it is the production install path and needs generated secrets.
+- The process logged `Clan platform server listening on 0.0.0.0:3030`, seeded user `devadmin` / member `devmember` (admin), and wrote no `ERROR` or panic lines during the probe below.
+- `dx build` (the `app-build` CI job) was not run. The community-page bug is demonstrated by a serde contract test against the live overview JSON, not by a browser click.
+- Full workspace `clippy` (native workspace minus the app and stat-tracker, plus wasm `scuffed-app`) was not re-run. `cargo clippy -p scuffed-site-server -p scuffed-server --all-targets -- -D warnings` exited 0 after the test edits.
+
+## Test suite results
+
+Command matched the `build-and-test` job, from this worktree, with `CARGO_PROFILE_DEV_DEBUG=0`:
+
+```text
+cargo fmt --check
+bash scripts/check-frontend-deps.sh
+bash scripts/check-design-tokens.sh
+bash scripts/test-backup-secrets.sh
+bash scripts/test-restic-access.sh
+cargo test --workspace --exclude scuffed-stat-tracker --exclude scuffed-stat-tracker-ui
+cargo test -p scuffed-api-client --no-default-features --features native
+```
+
+Guardrail scripts and `cargo fmt --check` exited 0.
+
+`cargo test --workspace …` exited 0. Sum of every `test result` line in that run: **838 passed, 0 failed, 6 ignored**. Nothing was skipped for a missing feature. The 6 ignored tests are the regressions that already existed when that command ran (4 in `qa_baseline`, 1 strategy bearer test, 1 community overview test). Two more ignored tests were added after that run (`missing_public_content_is_not_found_not_internal_error`, `strategy_heroes_returns_catalog`). They are `#[ignore]` only. A second full workspace run was not done. Default `cargo test -p scuffed-site-server --test qa_baseline` after the addition exited 0 with 5 ignored.
+
+| Target | Result |
+|---|---|
+| `relay-policy` bin | 19 passed |
+| `scuffed-api-client` (default features) | 6 passed |
+| `scuffed-app` lib | 9 passed |
+| `scuffed-app` bin | 203 passed, 1 ignored |
+| `scuffed-auth` | 33 passed |
+| `scuffed-chat` | 51 passed |
+| `scuffed-db` (+ `scuffed-rewrap` bin, 0 tests) | 98 passed |
+| `scuffed-map-pipeline` lib + `tests/integration.rs` | 31 + 1 passed |
+| `scuffed-map-renderer` | 0 tests |
+| `scuffed-server` bin | 30 passed, 1 ignored |
+| `scuffed-site-server` lib | 128 passed |
+| `tests/api_integration.rs` | 151 passed |
+| `tests/public_access_gaps.rs` | 6 passed |
+| `tests/qa_baseline.rs` | 0 passed, 4 ignored (5 ignored after the later addition) |
+| `tests/seo.rs` | 14 passed |
+| `scuffed-types` | 51 passed |
+| `scuffed-api-client` `--features native` (separate CI step) | 7 passed |
+
+Ignored tests fail when run on purpose:
+
+```text
+cargo test -p scuffed-site-server --test qa_baseline -- --ignored --test-threads=1
+cargo test -p scuffed-server --bin scuffed-server owner_bearer -- --ignored
+cargo test -p scuffed-server --bin scuffed-server strategy_heroes_returns_catalog -- --ignored
+cargo test -p scuffed-app --bin scuffed-app public_overview_accepts -- --ignored
+```
+
+Each assertion below is the failure from that run.
+
+## Route surface
+
+148 route registrations in `crates/site-server/src/lib.rs`, `crates/server/src/main.rs`, `crates/server/src/routes/strategy.rs`, and `crates/server/src/routes/ws.rs`. A path counts as covered when a non-comment string in `crates/site-server/tests`, or in a `#[cfg(test)]` module under `site-server`, `server`, or `app`, matches the route pattern. **145 paths match. 3 do not.**
+
+| Area | Auth | Notes |
+|---|---|---|
+| `GET /api/health` | none, no rate limit | Liveness only. Covered. |
+| `/api/auth/{provider}/login`, `callback`, `setup`, `local/login`, `local/register`, `nostr/challenge`, `nostr/verify` | public | Governor: burst 5, then 1 per 2s per IP. Covered (setup, login, register, rate limit). |
+| `GET /api/dev/login` | in-memory dev only | Unregistered when `PRODUCTION` is set or `SURREALDB_URL` is non-blank. Live probe got `303` and `Set-Cookie: sc_session=…; HttpOnly`. |
+| `POST /api/upload/avatar`, `POST /api/upload/image` | member | Dedicated upload governor. Avatar happy path, oversize, quota covered. |
+| `/api/public/*`, `/api/calendar/*.ics`, `/.well-known/nostr.json`, `GET /api/auth/setup-status`, `GET /api/auth/providers` | none | Shared public governor (burst 40, 1 per 200ms). Overview, members, teams, matches, leaderboards, ICS, and the public-access gap tests cover this group. |
+| `/api/members`, game accounts, role, reset-password, `POST /api/admin/nostr/republish-profiles` | member / officer / admin | List omits `nostr_secret_key_encrypted` (confirmed again on the live member list). Last-admin and moderation paths have tests. |
+| `/api/games`, `/api/teams`, roster, channels, `POST /api/admin/teams/provision-channels` | public read; admin or officer write | Roster read is public. See bug 1. |
+| `/api/events`, RSVP, attendance | mixed (public list vs member/officer writes) | Private-event leakage is covered in `public_access_gaps.rs`. |
+| `/api/applications` | member submit; officer review | CAS / withdraw / last-admin races covered in `api_integration.rs`. |
+| `/api/matches`, `/api/stats/*` | member, officer, or daemon token | Stats me/member/heroes/roles/maps and upload auth covered. |
+| `GET /api/audit-log` | admin | Path is requested by tests. |
+| `/api/moderation` | officer; lift is admin | Ban / lift / last-admin covered. |
+| `/api/announcements`, `/api/polls` | public or member read; officer write | Paths are requested by tests. |
+| `/api/articles` | public published; officer drafts | Slug miss is bug 8. |
+| `/api/tournaments` and bracket/standings/report | public read; officer write | Covered in both integration files. |
+| `/api/scrims` | member | Covered. |
+| `/api/wiki` | public read; member write; officer delete | Topic miss is bug 8. |
+| `/api/forum/*` | public unless `min_role`; officer for boards | List ACL covered; pagination bugs 2 and 6 are not. |
+| `/api/nostr/*` including DM | member (health is lighter) | Challenge, verify, backup, import covered. Relay and `ENCRYPTION_KEY` were unset in the live process, so publish/sync could not be exercised end to end. |
+| `GET /api/settings`, `PUT /api/settings`, admin seasons, Discord webhook test | GET is public; writes are admin | Settings body on the live server is org/brand fields (no webhook secret). |
+| `GET /robots.txt`, `GET /sitemap.xml`, SPA fallback, `/uploads` | public | `seo.rs`. Fallback behavior is bug 5. |
+| `/api/strategy/strategies`, `/{id}`, `/heroes`, `/meta`, patch notes | public reads; member create; feature flag 404 when strategies are disabled | Bearer bug 3. Heroes stub is bug 7. |
+| `GET /api/strategy/strategies/mine` | member (`AuthUser`, so bearer works) | **No test request.** |
+| `POST /api/chat/auth-token` | member | **No test request.** Live empty body was `422` (missing `relay_url`). |
+| `POST /api/chat/send-encrypted` | officer | Unit test around channel lookup. |
+| `POST /api/chat/decrypt` | member | **No test request.** Live unauthenticated call was `401`. |
+| `GET /api/strategy/ws` | optional; user comes from the session cookie only | Handshake tests exist. Bearer identity is the same hole as bug 3. |
+
+Biggest untested areas: chat token provisioning and decrypt (both need `ENCRYPTION_KEY` and a relay to do anything real), `GET /api/strategy/strategies/mine`, and the strategy WebSocket once a bearer token is the only credential. HTTP path coverage elsewhere is broad; the holes are behavioral (pagination, roster `is_active`, SPA miss, cookie-vs-bearer).
+
+## Live probe
+
+Against `http://127.0.0.1:3030` after the seed finished.
+
+| Call | Result |
+|---|---|
+| `GET /api/health` | `200` |
+| `GET /api/auth/me`, `GET /api/members`, `GET /api/audit-log`, `GET /api/polls` with no cookie | `401` `{"error":"Authentication required"}` |
+| `PUT /api/settings` with no cookie | `401` |
+| `GET /api/settings`, `GET /api/games`, `GET /api/wiki`, `GET /api/announcements` | `200` JSON |
+| `GET /api/public/overview` | `200`. Keys: `teams`, `games`, `events`, `announcements`, `settings`, `member_count`, `upcoming_matches`, `recent_results`. There is no `team_count` or `upcoming_events`. |
+| `GET /api/members` with the dev session | `200`. Row keys include `nostr_pubkey` and `nostr_key_mode`. `nostr_secret_key_encrypted` is absent. |
+| `POST /api/strategy/strategies` with the dev cookie, `visibility: private` | `201` |
+| `GET` that id with the same cookie | `200` |
+| `GET` that id with `Authorization: Bearer dev-session-token-do-not-use-in-production` and no cookie | `404` `{"error":"Strategy not found"}` |
+| `GET /api/strategy/heroes` | `200` `{"data":[]}` |
+| `GET /api/forum/threads/does-not-exist`, `GET /api/wiki/no-such-topic`, `GET /api/articles/no-such-slug` | `404` `{"error":"Internal error"}` |
+| `GET /api/games/no-such`, `GET /api/teams/no-such`, `GET /api/public/members/no-such` | `404` with a specific not-found message |
+| `POST /api/auth/local/login` bad JSON | `400` `text/plain` (Axum JSON parse error) |
+| `POST` login `{}` | `422` `text/plain` (missing `username`) |
+| `POST` login username `名前`, empty password | `401` JSON |
+| `POST` login with a 5000-character username | `401` JSON, no panic |
+| Repeated login after the burst | `429` |
+| `OPTIONS /api/public/overview` with `Origin: http://localhost:3000` | `access-control-allow-origin: http://localhost:3000` |
+| Same with `Origin: https://evil.example` | `200`, no `access-control-allow-origin` |
+| `GET /api/qa-baseline-no-such-route` on this process | `404` `text/plain` `not found` |
+
+The unknown-API live result differs from bug 5 because this process booted with no `dist/index.html`. The regression builds a dist directory that contains the shell and gets `200` `text/html`. That is the production shape (`scuffed-server` serving `dx build` output).
+
+`POST` to an unknown `/api/…` path was `405`. `DELETE /api/health` was `405`.
+
+## Confirmed bugs
+
+Severity is about what a caller can observe on a deployed site. Tests are ignored so CI stays green. Run them with the commands in the test section.
+
+### 1. High — deactivated members stay on public rosters
+
+`GET /api/public/members/{id}` returns `404` once `member.is_active` is false. `GET /api/teams/{id}/roster`, `GET /api/public/teams/{id}`, and `roster_count` on `GET /api/public/overview` still list that member. Roster queries filter `plays_on.is_active`, and a ban sets `member.is_active = false` without dropping the edge (`crates/db/src/queries/roster.rs` `get_team_roster_named`, `crates/site-server/src/routes/roster.rs`, `crates/site-server/src/routes/public.rs`).
+
+- Expected: a deactivated or banned member is absent from public roster payloads and does not increment `roster_count`.
+- Actual: the roster array contains `member_id = membermember` after `UPDATE member:membermember SET is_active = false`.
+- Test: `deactivated_member_is_absent_from_public_rosters` in `crates/site-server/tests/qa_baseline.rs`. Failure: `GET /api/teams/{id}/roster listed a deactivated member: ["membermember"]`.
+
+### 2. Medium — forum `min_role` is applied after `LIMIT`
+
+`list_forum_threads` applies SQL `LIMIT`/`START`, then drops rows the caller cannot see (`crates/site-server/src/routes/forum.rs` `list_threads`, `crates/db/src/queries/forum.rs`). A newer officer-only thread occupies the only slot of `?limit=1`. The anonymous caller drops it and receives an empty page, so the older public thread never appears.
+
+- Expected: `limit=1` still returns a public thread when the newest row is restricted, and the restricted title is absent.
+- Actual: `{"threads":[],"total":0}`.
+- Test: `forum_list_does_not_hide_public_threads_behind_restricted_ones` in `crates/site-server/tests/qa_baseline.rs`.
+
+The existing `forum_unfiltered_list_hides_restricted_and_orphan_threads` test still passes. It checks that a restricted row is hidden when the page is large enough to include the public row. It does not catch this hole.
+
+### 3. Medium — private strategy GET ignores `Authorization: Bearer`
+
+`POST /api/strategy/strategies` takes `AuthUser`, which accepts the bearer token. `GET /api/strategy/strategies/{id}` calls `try_get_user`, which reads only the session cookie (`crates/server/src/routes/strategy.rs`). A private strategy the token just created is `404`.
+
+- Expected: the owner bearer receives `200` and the strategy body.
+- Actual: `404` `{"error":"Strategy not found"}`. The same id with the cookie is `200` (unit test and live probe).
+- Test: `owner_bearer_can_read_private_strategy` in `crates/server/src/routes/strategy.rs`.
+
+`GET /api/strategy/ws` resolves the user with `get_user_from_cookie` in `crates/server/src/routes/ws.rs`. `GET /api/strategy/meta` uses the same `try_get_user` cookie lookup for the personal block. Those two paths were not given their own failing tests.
+
+### 4. Medium — Community stats never render
+
+`Community` in `crates/app/src/pages/community.rs` fetches `GET /api/public/overview` into a `PublicOverview` that requires `team_count` and `upcoming_events`. The route returns `teams` and `events` arrays plus `member_count` (`crates/site-server/src/routes/public.rs`). `fetch` fails, `.ok()` swallows it, and the members/teams block is omitted. The live overview body has the server shape.
+
+- Expected: the client accepts the live payload and can show `member_count` and a team count.
+- Actual: `missing field team_count`.
+- Test: `public_overview_accepts_the_live_overview_payload` in `crates/app/src/pages/community.rs`.
+
+The homepage reads `teams` directly. This mismatch is the community page.
+
+### 5. Medium — unknown `GET /api/*` is the SPA shell
+
+`spa_service` treats a missing multi-segment path as a client route when `index.html` exists (`classify_spa_route` / `is_static_miss_path` in `crates/site-server/src/routes/seo.rs`). `/api/…` is multi-segment and has no static extension, so an unregistered GET is `200` `text/html`.
+
+- Expected: `404` with a non-HTML body.
+- Actual: `200`, `content-type: text/html; charset=utf-8`, body is the shell (`SPA-SHELL-MARKER` in the test).
+- Test: `unknown_api_get_is_json_404` in `crates/site-server/tests/qa_baseline.rs`.
+
+On the live process, which had no shell at boot, the same URL was `404` `text/plain`. `POST` to an unknown API path was `405`.
+
+### 6. Low — forum `total` is the page length
+
+`list_threads` sets `total` to `items.len()` after the page is filtered (`crates/site-server/src/routes/forum.rs`).
+
+- Expected: two threads and `?limit=1` yield `total: 2` and one row.
+- Actual: `total: 1` with a single thread (`Second`).
+- Test: `forum_thread_total_counts_every_match` in `crates/site-server/tests/qa_baseline.rs`.
+
+### 7. Medium — strategy heroes page is fed an empty list
+
+`list_heroes` in `crates/server/src/routes/strategy.rs` is `Json(json!({ "data": [] }))`. `StrategyHeroes` in `crates/app/src/pages/strategy/heroes.rs` renders that `data` array (name, role, abilities, health).
+
+- Expected: the catalog is non-empty so the page can list heroes.
+- Actual: `200` `{"data":[]}` (live probe and the test).
+- Test: `strategy_heroes_returns_catalog` in `crates/server/src/routes/strategy.rs`.
+
+### 8. Low — missing forum, wiki, and article rows say "Internal error"
+
+Status is `404`. The body is `{"error":"Internal error"}`.
+
+- `get_forum_thread` maps every `Err`, including `DbError::NotFound`, to that body (`crates/site-server/src/routes/forum.rs`).
+- `get_wiki_page` maps `NotFound` to `404` and still sets the message to `Internal error` (`crates/site-server/src/routes/wiki.rs`).
+- `article_not_found` does the same (`crates/site-server/src/routes/articles.rs`).
+
+Games, teams, and public member misses use a specific message (`Game not found`, and so on). Live checks matched that split.
+
+- Expected: `404` whose `error` string is a not-found message.
+- Actual: `{"error":"Internal error"}`.
+- Test: `missing_public_content_is_not_found_not_internal_error` in `crates/site-server/tests/qa_baseline.rs`. The run fails on the forum URL first. Wiki and article were confirmed with curl on the live server.
+
+## Not filed as defects
+
+- Auth rate limit works. After the burst, `POST /api/auth/local/login` returned `429`.
+- CORS does not reflect `https://evil.example`. `http://localhost:3000` is allowed. `access-control-allow-credentials` is true.
+- The authenticated member list does not include `nostr_secret_key_encrypted`. Public settings on overview are org and brand fields.
+- Axum JSON extractor failures are `text/plain` (`400` for malformed JSON, `422` for a missing field) rather than the `{error}` JSON envelope used by handlers. Observed, no regression added.
+- A garbage `cursor` on `GET /api/announcements` returned `200` and an empty page. Not chased further.
+- `GET /api/strategy/meta` anonymous body has an empty `heroes` array and no `personal` block. Personal stats use the cookie lookup from bug 3. Not given a separate test.
+- Nostr publish, DM sync, and chat decrypt were not driven against a relay. The live process had no `ENCRYPTION_KEY` and no `NOSTR_RELAY_URL`.

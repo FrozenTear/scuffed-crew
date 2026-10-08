@@ -1306,4 +1306,60 @@ mod tests {
         assert_eq!(status, StatusCode::CREATED, "{body}");
         assert_eq!(body["version"], "5.0.0");
     }
+
+    /// POST/PUT/DELETE on this router accept `Authorization: Bearer`.
+    /// GET by id only consults the session cookie (`try_get_user`), so the
+    /// same token that created a private strategy cannot read it back.
+    /// `/api/strategy/ws` has the same cookie-only lookup (`get_user_from_cookie`).
+    #[tokio::test]
+    #[ignore = "known bug: private strategy GET (and the strategy WebSocket) ignore Authorization bearer tokens"]
+    async fn owner_bearer_can_read_private_strategy() {
+        let state = test_state().await;
+        seed_role(&state, "stratowner", OrgRole::Member, "owner-token").await;
+        let (status, created) = call_json(
+            strategy_routes(state.clone()),
+            Method::POST,
+            "/api/strategy/strategies",
+            Some("owner-token"),
+            Some(json!({
+                "name": "Private plan",
+                "map_id": "kings-row",
+                "game_mode": "hybrid",
+                "visibility": "private"
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{created}");
+        let id = created["id"].as_str().expect("created strategy id");
+
+        let (status, body) = call_json(
+            strategy_routes(state),
+            Method::GET,
+            &format!("/api/strategy/strategies/{id}"),
+            Some("owner-token"),
+            None,
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "owner bearer must read the private strategy they just created, got {status} {body}"
+        );
+        assert_eq!(body["name"], "Private plan");
+    }
+
+    /// The strategy heroes page fetches this route and renders `data`.
+    /// The handler returns a hardcoded empty list, so the page stays blank.
+    #[tokio::test]
+    #[ignore = "known bug: GET /api/strategy/heroes is hardcoded to an empty list"]
+    async fn strategy_heroes_returns_catalog() {
+        let state = test_state().await;
+        let (status, body) = get_json(strategy_routes(state), "/api/strategy/heroes").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let count = body["data"].as_array().map(|rows| rows.len()).unwrap_or(0);
+        assert!(
+            count > 0,
+            "strategy heroes page has nothing to render: {body}"
+        );
+    }
 }
