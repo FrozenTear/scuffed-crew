@@ -84,7 +84,7 @@ Pin a tag by fetching that tag's bootstrap (the assignment has to be on
 `bash`, because `VAR=x curl … | bash` does not pass `VAR` to `bash`):
 
 ```sh
-TAG=stat-tracker-v0.4.20
+TAG=stat-tracker-v0.4.22
 curl --proto '=https' -fsSL "https://raw.githubusercontent.com/FrozenTear/scuffed-crew/${TAG}/crates/stat-tracker/dist/bootstrap.sh" \
   | STAT_TRACKER_TAG="$TAG" STAT_TRACKER_PREFIX="$HOME/.local" bash
 ```
@@ -159,6 +159,7 @@ inherit. See Troubleshooting if capture stays on `CaptureBackend::None`.
 | `auto_detect.*` | Poll-based match start/end detection (interval, cooldown) |
 | `game_process_names` | Only capture while one of these processes runs (empty disables the gate) |
 | `debug_ocr` | Dump Tab OCR intermediates and poll Victory/Defeat evidence frames (confirm + first streak, not every tick) under `{data_dir}/debug/` (also env `STAT_TRACKER_DEBUG_OCR=1`) |
+| `finished_game_close_secs` | Quiet time after the last activity before a finished game is closed and uploaded. Activity is a stored capture, a recorded outcome, an accolade map, or the session open. Clamped to the 75-second grace. Default 180. Config-file only (no Settings control) |
 | `ocr_threads` | Parallel OCR workers (1–8). Each keeps a ~23 MB Tesseract model in RAM. Omit for auto (`(cores/2)` clamped 2–4). Also env `STAT_TRACKER_OCR_THREADS` or CLI `--ocr-threads N`. Use `1` to minimize RAM; higher speeds Tab OCR. |
 
 Example low-RAM:

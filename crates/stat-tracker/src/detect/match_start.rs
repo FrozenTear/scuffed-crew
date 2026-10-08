@@ -439,14 +439,15 @@ const MAP_NAMES: &[&str] = &[
     "RIALTO",
     "ROUTE 66",
     "SHAMBALI",
-    // Bare "WATCHPOINT" stays the Gibraltar token. "GRIMSVOTN" is listed
-    // too; if that key is in the same text, the prefix token is dropped
-    // below so a Grímsvötn card is not also a Gibraltar candidate.
+    // Bare "WATCHPOINT" is a prefix token, not a map. A second occurrence
+    // beside a Grímsvötn card is a Gibraltar card (see below). "GRIMSVOTN"
+    // is its own key.
     "WATCHPOINT",
     "GIBRALTAR",
     "GRIMSVOTN",
     "BLIZZARD WORLD",
     "EICHENWALDE",
+    "ADLERSBRUNN",
     "HOLLYWOOD",
     // Not bare "KING"/"ROW" — they substring-match unrelated text
     // ("WRECKING", "BROWN"); apostrophe loss in OCR is covered by both forms.
@@ -475,6 +476,7 @@ const MAP_NAMES: &[&str] = &[
     "THRONE",
     "ANUBIS",
     "AATLIS",
+    "GUILLARD",
 ];
 
 /// Pull map names off the vote screen's OCR text. `text` is the uppercased OCR
@@ -515,17 +517,33 @@ fn extract_map_names(text: &str) -> Vec<String> {
             found.push(name.to_string());
         }
     }
-    // A Grímsvötn key anywhere in the text wins over the shared prefix.
-    // Bare "WATCHPOINT" is still returned when that key is absent.
-    let grimsvotn_present = found
-        .iter()
-        .any(|name| crate::parse::normalize_ocr_glyphs(&name.to_lowercase()).contains("grimsvotn"));
-    if grimsvotn_present {
-        found.retain(|name| {
-            crate::parse::normalize_ocr_glyphs(&name.to_lowercase()) != "watchpoint"
-        });
-    }
+    // One "WATCHPOINT" next to a Grímsvötn key is that card's prefix, so the
+    // token is dropped. Two or more means the extra card is Gibraltar: emit
+    // GIBRALTAR (canonical_map no longer trusts a bare WATCHPOINT) and drop
+    // the raw prefix. A lone WATCHPOINT stays in the list; canonical_map
+    // turns it into no candidate.
+    reconcile_watchpoint_votes(&norm, &mut found);
     found
+}
+
+fn reconcile_watchpoint_votes(norm: &str, found: &mut Vec<String>) {
+    let folded = |name: &str| crate::parse::normalize_ocr_glyphs(&name.to_lowercase());
+    let grimsvotn_present = found.iter().any(|name| folded(name).contains("grimsvotn"));
+    if !grimsvotn_present {
+        return;
+    }
+    let watchpoint_count = norm
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|word| *word == "watchpoint")
+        .count();
+    found.retain(|name| folded(name) != "watchpoint");
+    // Glyph fold turns `l` into `i`, so compare the folded token, not the
+    // raw spelling. Otherwise a Gibraltar card already in the list is added
+    // again.
+    let gibraltar = folded("gibraltar");
+    if watchpoint_count >= 2 && !found.iter().any(|name| folded(name) == gibraltar) {
+        found.push("GIBRALTAR".to_string());
+    }
 }
 
 #[cfg(test)]
@@ -572,13 +590,55 @@ mod tests {
         assert!(bare.contains(&"WATCHPOINT".to_string()));
         assert_eq!(
             crate::parse::canonical_map("WATCHPOINT").as_deref(),
-            Some("Watchpoint: Gibraltar")
+            None,
+            "a lone watchpoint token is not a Gibraltar candidate"
         );
         let prefixed = extract_map_names("WATCHPOINT: GRIMSVOTN");
         assert!(prefixed.contains(&"GRIMSVOTN".to_string()));
         assert!(
             !prefixed.iter().any(|name| name == "WATCHPOINT"),
-            "the Grímsvötn key drops the shared prefix: {prefixed:?}"
+            "one prefix beside Grímsvötn is that card: {prefixed:?}"
+        );
+
+        let both = extract_map_names("WATCHPOINT   WATCHPOINT: GRÍMSVÖTN");
+        assert!(
+            both.contains(&"GIBRALTAR".to_string()),
+            "a second watchpoint card is Gibraltar: {both:?}"
+        );
+        assert!(both.contains(&"GRIMSVOTN".to_string()));
+        assert!(!both.iter().any(|name| name == "WATCHPOINT"));
+        assert_eq!(
+            crate::parse::canonical_map("GIBRALTAR").as_deref(),
+            Some("Watchpoint: Gibraltar")
+        );
+
+        let labeled = extract_map_names("WATCHPOINT: GIBRALTAR WATCHPOINT: GRIMSVOTN");
+        assert!(labeled.contains(&"GIBRALTAR".to_string()));
+        assert!(labeled.contains(&"GRIMSVOTN".to_string()));
+        assert_eq!(
+            labeled.iter().filter(|name| *name == "GIBRALTAR").count(),
+            1,
+            "an existing Gibraltar token is not added twice: {labeled:?}"
+        );
+    }
+
+    #[test]
+    fn vote_reader_keeps_halloween_aliases() {
+        let adlers = extract_map_names("ADLERSBRUNN");
+        assert!(adlers.contains(&"ADLERSBRUNN".to_string()));
+        assert_eq!(
+            crate::parse::canonical_map("ADLERSBRUNN").as_deref(),
+            Some("Eichenwalde")
+        );
+        let hollywood = extract_map_names("HALLOWEEN HOLLYWOOD");
+        assert!(hollywood.contains(&"HOLLYWOOD".to_string()));
+        let lijiang = extract_map_names("HALLOWEEN LIJIANG");
+        assert!(lijiang.contains(&"LIJIANG".to_string()));
+        let guillard = extract_map_names("CHATEAU GUILLARD");
+        assert!(guillard.contains(&"GUILLARD".to_string()));
+        assert_eq!(
+            crate::parse::canonical_map("GUILLARD").as_deref(),
+            Some("Château Guillard")
         );
     }
 

@@ -15,10 +15,12 @@ pub struct Config {
     pub auto_detect: AutoDetectConfig,
     #[serde(default = "default_session_window_secs")]
     pub session_window_secs: u64,
-    /// Quiet time after the last capture before a finished game is closed
-    /// and uploaded. The daemon clamps this to the 75-second post-match
-    /// grace, so a shorter setting still waits that grace out. Missing
-    /// means [`FINISHED_GAME_CLOSE_DEFAULT_SECS`].
+    /// Quiet time after the last activity before a finished game is closed
+    /// and uploaded. Activity is a stored capture, a recorded outcome, an
+    /// accolade map, or the session open. The daemon clamps this to the
+    /// 75-second post-match grace, so a shorter setting still waits that
+    /// grace out. Missing means [`FINISHED_GAME_CLOSE_DEFAULT_SECS`].
+    /// Config-file only: Settings keeps the value from the file.
     #[serde(default = "default_finished_game_close_secs")]
     pub finished_game_close_secs: u64,
     /// Process names (as they appear in /proc/<pid>/comm) that must be running

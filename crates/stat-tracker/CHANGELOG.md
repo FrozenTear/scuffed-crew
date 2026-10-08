@@ -4,24 +4,54 @@ User-facing notes for `stat-tracker-v*` GitHub Releases. The release workflow
 prepends the section whose heading matches the tag version (for example
 `## 0.4.15` for `stat-tracker-v0.4.15`).
 
+## 0.4.22
+
+A bare or ambiguous Watchpoint is not stored as Gibraltar. A following
+word is matched against Grímsvötn and Gibraltar, including the misreads
+the English OCR model produces when í and ö are missing. Turkish İ
+and dotless ı fold to i, so GRİMSVÖTN is Grímsvötn. If neither
+name wins, the read is dropped. Adlersbrunn is stored as Eichenwalde
+when both teams have stat rows. Château Guillard is Deathmatch: it is
+kept in the local unrecorded log and never uploaded. The 20-minute
+timer no longer closes an unfinished game, so a long match can still
+take its result. Uploads from startup, resume, and the quiet-close
+timer no longer block Tab, polling, or shutdown signals. A held board
+on a finished game is carried onto the next session when that game
+closes. `game_mode` is taken from the map that was stored.
+
+### Install
+
+```sh
+curl --proto '=https' -fsSL https://raw.githubusercontent.com/FrozenTear/scuffed-crew/main/crates/stat-tracker/dist/bootstrap.sh | bash
+```
+
+Or extract the tarball and run `./install.sh`. Pin with
+`STAT_TRACKER_TAG=stat-tracker-v0.4.22`.
+
 ## 0.4.20
 
 The last game of the night now uploads by itself about 3 minutes after
 the result screen. Before this, that game stayed open until the next
 Tab or a clean shutdown, so it could sit unsynced for hours. A Tab
 still belongs to the finished game for 75 seconds after the result.
-After that, if nothing new is captured for about 3 minutes, the daemon
+After that, if nothing new is recorded for about 3 minutes, the daemon
 closes the game and uploads it. Those 3 minutes start from the last
-capture, and they are never shorter than the 75-second grace. A game
-that never got a result, and then sits idle for 20 minutes, is closed
-too, with outcome Unknown. Restarting the daemon no longer drops a
-stale open game without uploading its rows.
+activity: a stored capture, a recorded outcome, an accolade map, or
+the session opening. They are never shorter than the 75-second grace.
+A game that never got a result, and then sits idle for 20 minutes, is
+closed too, with outcome Unknown. That close uploads nothing, because
+an Unknown game is not sent. 0.4.22 stops closing unfinished games on
+this timer. Restarting the daemon no longer drops a stale open game
+without uploading its rows.
 
 Watchpoint: Grímsvötn is an Escort map. The tracker stores that name
 exactly, including í and ö. The name grimsvotn on its own, with or
 without accents and with or without the Watchpoint prefix, is that
-map. A bare Watchpoint is still Gibraltar. When the Grímsvötn name
-appears in the same text as that prefix, Grímsvötn wins.
+map. A bare Watchpoint is Gibraltar, and so is the name gibraltar on
+its own. 0.4.22 stops trusting a bare or ambiguous Watchpoint. When
+the Grímsvötn name appears in the same text as that prefix, Grímsvötn
+wins. A stored row's game mode is filled from the map name read in
+the scoreboard text. 0.4.22 fills it from the map that was stored.
 
 ### Install
 
@@ -79,8 +109,9 @@ and written onto the new one, at that capture's own time, when a second
 fresh board commits. That carried board is stored on the first Tab that
 writes it, and not again on later Tabs. A hero select or ban before that
 board is the other signal. A select after the held board does not split
-by itself. A ban after that held board does not split either. An unidentified or
-implausible row is stored and leaves the held board and the streak. A
+by itself. A ban after that held board does not split either.
+An unidentified or implausible row is stored and leaves the held board
+and the streak. A
 plausible continuation, or counted progress, clears them. A hero
 change by itself is not a split. A different row never counts as a reset.
 A row with no id never counts. The new session's outcome is Unknown

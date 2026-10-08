@@ -122,6 +122,49 @@ pub fn looks_like_scoreboard(rows: &[RowOcrResult]) -> bool {
     plausible_rows >= 3
 }
 
+/// True when each team half has at least one row with four clean stat cells.
+///
+/// `looks_like_scoreboard` only counts rows. A 4-player co-op board can pass
+/// it. Row order is team 1, then team 2, `team_size` rows each — the same
+/// layout the scoreboard crop uses. An Adlersbrunn read is stored as
+/// Eichenwalde only when both halves clear this check.
+pub fn both_teams_have_stats(rows: &[RowOcrResult], team_size: usize) -> bool {
+    if team_size == 0 {
+        return false;
+    }
+    let plausible = |row: &RowOcrResult| {
+        row.stats
+            .iter()
+            .filter(|cell| crate::ocr::is_clean_stat(cell.value.trim()))
+            .count()
+            >= 4
+    };
+    let team1 = rows.iter().take(team_size).any(plausible);
+    let team2 = rows.iter().skip(team_size).take(team_size).any(plausible);
+    team1 && team2
+}
+
+/// Halloween Eichenwalde is labeled Adlersbrunn. Literal "Eichenwalde" is not.
+pub fn is_adlersbrunn_alias(text: &str) -> bool {
+    let folded = normalize_ocr_glyphs(&text.to_lowercase());
+    folded.contains(&normalize_ocr_glyphs("adlersbrunn"))
+}
+
+/// Deathmatch maps are kept on disk and never uploaded.
+pub fn map_is_untracked(name: &str) -> bool {
+    map_mode(name) == Some("Deathmatch")
+}
+
+/// A stats row is uploaded only when neither the map nor the mode is Deathmatch.
+pub fn stats_row_is_tracked(map_name: &str, game_mode: &str) -> bool {
+    !map_is_untracked(map_name) && !game_mode.eq_ignore_ascii_case("Deathmatch")
+}
+
+/// Mode stored on a row, from the canonical map that was actually kept.
+pub fn stored_game_mode(canonical: &str) -> String {
+    map_mode(canonical).unwrap_or("").to_string()
+}
+
 /// Extract the six stats from one OCR'd row. Columns are positional:
 /// 0=Elims, 1=Assists, 2=Deaths, 3=Damage, 4=Healing, 5=Mitigation.
 /// Returns `None` if any cell is unreadable or the narrow E/A/D columns hold
@@ -338,12 +381,7 @@ pub fn exact_map_in_text(text: &str) -> Option<String> {
     // Join wrapped lines first. "New Junk\nCity" is one map name.
     let joined = text.split_whitespace().collect::<Vec<_>>().join(" ");
     let text = normalize_ocr_glyphs(&joined.to_lowercase());
-    for &(display_name, pattern) in MAPS {
-        if text.contains(&normalize_ocr_glyphs(pattern)) {
-            return Some(display_name.to_string());
-        }
-    }
-    None
+    map_from_normalized(&text, false)
 }
 
 /// Result word printed as the header of the scoreboard region itself, read
@@ -395,14 +433,16 @@ const MAPS: &[(&str, &str)] = &[
     ("Rialto", "rialto"),
     ("Route 66", "route 66"),
     ("Shambali Monastery", "shambali"),
-    // Grímsvötn is before the shared "watchpoint" prefix. The first
-    // substring hit wins, so a Grímsvötn key anywhere in the text beats
-    // the prefix. A bare "watchpoint" still falls through to Gibraltar.
+    // Grímsvötn is before Gibraltar. A bare "watchpoint" is not a key:
+    // `resolve_watchpoint` decides the family, and an undecided prefix
+    // matches neither map.
     ("Watchpoint: Grímsvötn", "grimsvotn"),
     ("Watchpoint: Gibraltar", "gibraltar"),
-    ("Watchpoint: Gibraltar", "watchpoint"),
     ("Blizzard World", "blizzard world"),
     ("Eichenwalde", "eichenwalde"),
+    // Halloween label for the same Hybrid map. Junkenstein's Revenge uses
+    // the name too; the capture path refuses it unless both teams have stats.
+    ("Eichenwalde", "adlersbrunn"),
     ("Hollywood", "hollywood"),
     ("Midtown", "midtown"),
     ("Numbani", "numbani"),
@@ -426,12 +466,18 @@ const MAPS: &[(&str, &str)] = &[
     ("Aatlis", "aatlis"),
     ("Hanaoka", "hanaoka"),
     ("Throne of Anubis", "anubis"),
+    // Deathmatch only. `map_mode` returns "Deathmatch" and the daemon does
+    // not upload those sessions.
+    ("Château Guillard", "guillard"),
 ];
 
 /// Fold OCR-ambiguous glyphs and Latin diacritics so a mangled map name still
 /// matches. `1`, `|`, `l` collapse to `i`; `0` collapses to `o`. Precomposed
 /// accents fold to ASCII (`í`→`i`, `ö`→`o`, and the other letters this table
-/// already stores). Combining marks are dropped. Callers lowercase first.
+/// already stores). Turkish `İ` (U+0130) and dotless `ı` (U+0131) fold to `i`,
+/// matching the site map parser. Combining marks are dropped. Callers
+/// lowercase first; `İ` then arrives as `i` plus a combining dot, which this
+/// fold deletes, leaving the `i`.
 ///
 /// Applied to BOTH the OCR candidate text and the map patterns (see `find_map`,
 /// `fuzzy_match_map`, and the vote reader in `detect::match_start`). The fold is
@@ -448,7 +494,7 @@ pub(crate) fn normalize_ocr_glyphs(s: &str) -> String {
         let c = match c {
             'á' | 'à' | 'ã' | 'â' | 'ä' | 'Á' | 'À' | 'Ã' | 'Â' | 'Ä' => 'a',
             'é' | 'è' | 'ê' | 'ë' | 'É' | 'È' | 'Ê' | 'Ë' => 'e',
-            'í' | 'ì' | 'î' | 'ï' | 'Í' | 'Ì' | 'Î' | 'Ï' => 'i',
+            'í' | 'ì' | 'î' | 'ï' | 'Í' | 'Ì' | 'Î' | 'Ï' | 'İ' | 'ı' => 'i',
             'ó' | 'ò' | 'ô' | 'õ' | 'ö' | 'Ó' | 'Ò' | 'Ô' | 'Õ' | 'Ö' => 'o',
             'ú' | 'ù' | 'û' | 'ü' | 'Ú' | 'Ù' | 'Û' | 'Ü' => 'u',
             'ç' | 'Ç' => 'c',
@@ -493,6 +539,7 @@ pub(crate) fn map_mode(canonical_name: &str) -> Option<&'static str> {
         "Colosseo" | "Esperanca" | "New Queen Street" | "Runasapi" => Some("Push"),
         "Aatlis" | "New Junk City" | "Suravasa" => Some("Flashpoint"),
         "Hanaoka" | "Throne of Anubis" => Some("Clash"),
+        "Château Guillard" => Some("Deathmatch"),
         _ => None,
     }
 }
@@ -507,18 +554,119 @@ pub(crate) fn map_fuzzy_threshold(len: usize) -> f64 {
     if len <= 6 { 0.80 } else { 0.85 }
 }
 
-fn find_map(lines: &[&str]) -> Option<String> {
-    let text = normalize_ocr_glyphs(&lines.join(" ").to_lowercase());
+const GRIMSVOTN_NAME: &str = "Watchpoint: Grímsvötn";
+const GIBRALTAR_NAME: &str = "Watchpoint: Gibraltar";
 
-    // Pass 1: exact substring match (patterns glyph-normalized to match).
+/// What a "watchpoint" token decided. Absent means the text never said it,
+/// so the ordinary table still runs. Named is one of the two maps. Undecided
+/// means the prefix was there and neither name won: the bare key must not
+/// become Gibraltar, and the rest of the table may still match.
+enum WatchpointFamily {
+    Absent,
+    Named(&'static str),
+    Undecided,
+}
+
+fn map_from_normalized(text: &str, allow_fuzzy: bool) -> Option<String> {
+    if let WatchpointFamily::Named(name) = resolve_watchpoint(text) {
+        return Some(name.to_string());
+    }
     for &(display_name, pattern) in MAPS {
         if text.contains(&normalize_ocr_glyphs(pattern)) {
             return Some(display_name.to_string());
         }
     }
+    if allow_fuzzy {
+        fuzzy_match_map(text)
+    } else {
+        None
+    }
+}
 
-    // Pass 2: fuzzy match each word/bigram against map patterns
-    fuzzy_match_map(&text)
+/// The word or two words after "watchpoint", apostrophes removed.
+fn watchpoint_tails(words: &[String]) -> Vec<String> {
+    let mut tails = Vec::new();
+    for (i, word) in words.iter().enumerate() {
+        if word != "watchpoint" {
+            continue;
+        }
+        let Some(next) = words.get(i + 1) else {
+            continue;
+        };
+        tails.push(next.clone());
+        if let Some(after) = words.get(i + 2) {
+            tails.push(format!("{next}{after}"));
+        }
+    }
+    tails
+}
+
+fn score_watchpoint_tail(tail: &str) -> (f64, f64) {
+    let grim_pattern = "grimsvotn";
+    let gib_pattern = "gibraltar";
+    let folded_six = tail.replace('6', "o");
+    let mut grim = normalized_levenshtein(tail, grim_pattern);
+    if folded_six != tail {
+        grim = grim.max(normalized_levenshtein(&folded_six, grim_pattern));
+    }
+    if tail.contains(grim_pattern) || folded_six.contains(grim_pattern) {
+        grim = 1.0;
+    }
+    let gib = if tail.contains(gib_pattern) {
+        1.0
+    } else {
+        normalized_levenshtein(tail, gib_pattern)
+    };
+    (grim, gib)
+}
+
+/// Bare or ambiguous "watchpoint" is not Gibraltar. A following word is
+/// fuzzy-matched against Grímsvötn and Gibraltar; one side has to clear the
+/// long-name threshold and beat the other. `6` folds to `o` only here, so
+/// Route 66 is left alone. The next two tokens are also joined, so
+/// "GRIMS VOTN" can still hit Grímsvötn.
+fn resolve_watchpoint(text: &str) -> WatchpointFamily {
+    let words: Vec<String> = text
+        .split(|c: char| !c.is_ascii_alphanumeric() && c != '\'')
+        .filter(|word| !word.is_empty())
+        .map(|word| word.replace('\'', ""))
+        .filter(|word| !word.is_empty())
+        .collect();
+    let saw_prefix = words.iter().any(|word| word == "watchpoint");
+    if !saw_prefix {
+        return WatchpointFamily::Absent;
+    }
+    let stripped = text.replace('\'', "");
+    if stripped.contains("grimsvotn") {
+        return WatchpointFamily::Named(GRIMSVOTN_NAME);
+    }
+    if text.contains("gibraltar") {
+        return WatchpointFamily::Named(GIBRALTAR_NAME);
+    }
+    let tails = watchpoint_tails(&words);
+    if tails.is_empty() {
+        return WatchpointFamily::Undecided;
+    }
+    let mut best_grim: f64 = 0.0;
+    let mut best_gib: f64 = 0.0;
+    for tail in &tails {
+        let (grim, gib) = score_watchpoint_tail(tail);
+        best_grim = best_grim.max(grim);
+        best_gib = best_gib.max(gib);
+    }
+    let threshold = map_fuzzy_threshold("grimsvotn".chars().count());
+    if best_grim >= threshold && best_grim > best_gib {
+        WatchpointFamily::Named(GRIMSVOTN_NAME)
+    } else if best_gib >= threshold && best_gib > best_grim {
+        WatchpointFamily::Named(GIBRALTAR_NAME)
+    } else {
+        WatchpointFamily::Undecided
+    }
+}
+
+fn find_map(lines: &[&str]) -> Option<String> {
+    let text = normalize_ocr_glyphs(&lines.join(" ").to_lowercase());
+    map_from_normalized(&text, true)
 }
 
 fn fuzzy_match_map(text: &str) -> Option<String> {
@@ -804,6 +952,37 @@ mod tests {
         mixed.extend((0..8).map(|_| garbage_row()));
         assert!(!looks_like_scoreboard(&mixed));
     }
+
+    #[test]
+    fn text_map_sets_game_mode_on_the_parsed_row() {
+        let rows = vec![valid_row("FROZEN")];
+        let parsed = parse_scoreboard_cells(
+            &rows,
+            Some(0),
+            "DORADO\nFROZEN 5 3 2 4,316 1,200 899",
+            "victory",
+            Some("FROZEN"),
+        )
+        .unwrap();
+        assert_eq!(parsed.map_name, "Dorado");
+        assert_eq!(parsed.game_mode, "Escort");
+        assert_eq!(stored_game_mode("Busan"), "Control");
+        assert_eq!(stored_game_mode("Château Guillard"), "Deathmatch");
+    }
+
+    #[test]
+    fn both_teams_need_a_stat_row_before_an_alias_is_trusted() {
+        let team: Vec<_> = (0..10).map(|_| valid_row("X")).collect();
+        assert!(both_teams_have_stats(&team, 5));
+        let one_team: Vec<_> = (0..4).map(|_| valid_row("X")).collect();
+        assert!(
+            !both_teams_have_stats(&one_team, 5),
+            "a 4-player co-op board has no enemy half"
+        );
+        let mut enemy_blank: Vec<_> = team.into_iter().take(5).collect();
+        enemy_blank.extend((0..5).map(|_| garbage_row()));
+        assert!(!both_teams_have_stats(&enemy_blank, 5));
+    }
 }
 
 #[cfg(test)]
@@ -837,7 +1016,8 @@ mod hero_map_name_tests {
         );
         assert_eq!(
             canonical_map("WATCHPOINT").as_deref(),
-            Some("Watchpoint: Gibraltar")
+            None,
+            "a bare watchpoint is not Gibraltar"
         );
         assert_eq!(
             canonical_map("GIBRALTAR").as_deref(),
@@ -915,8 +1095,6 @@ mod hero_map_name_tests {
         let gibraltar = [
             "Watchpoint: Gibraltar",
             "WATCHPOINT: GIBRALTAR",
-            "WATCHPOINT",
-            "watchpoint",
             "GIBRALTAR",
             "gibraltar",
         ];
@@ -944,6 +1122,90 @@ mod hero_map_name_tests {
                 "{raw} must not become Gibraltar"
             );
         }
+        for raw in ["WATCHPOINT", "watchpoint", "WATCHPOINT:"] {
+            assert_eq!(
+                match_map_in_text(raw),
+                None,
+                "{raw} must not become Gibraltar"
+            );
+            assert_eq!(exact_map_in_text(raw), None, "{raw}");
+        }
+    }
+
+    #[test]
+    fn garbled_grimsvotn_after_watchpoint_is_not_gibraltar() {
+        // eng LSTM has no í/ö. A misread second word used to hit the bare
+        // watchpoint key and become a trusted Gibraltar.
+        for raw in [
+            "WATCHPOINT: GRIMSV6TN",
+            "WATCHPOINT: GRIMSVOT",
+            "WATCHPOINT: GRIMSVQTN",
+            "WATCHPOINT: GRMSVOTN",
+            "WATCHPOINT: GR'IMSVOTN",
+            "WATCHPOINT: GRIMS VOTN",
+        ] {
+            assert_eq!(
+                exact_map_in_text(raw).as_deref(),
+                Some(GRIMSVOTN),
+                "accolade {raw}"
+            );
+            assert_eq!(
+                match_map_in_text(raw).as_deref(),
+                Some(GRIMSVOTN),
+                "top bar {raw}"
+            );
+        }
+    }
+
+    #[test]
+    fn dotted_turkish_i_in_grimsvotn_canonicalizes() {
+        // U+0130 lowercases to i + a combining dot. U+0131 is dotless i.
+        assert_eq!(canonical_map("GRİMSVÖTN").as_deref(), Some(GRIMSVOTN));
+        assert_eq!(
+            canonical_map("GR\u{0131}MSVÖTN").as_deref(),
+            Some(GRIMSVOTN)
+        );
+        assert_eq!(
+            canonical_map("Gri\u{301}msvo\u{308}tn").as_deref(),
+            Some(GRIMSVOTN)
+        );
+    }
+
+    #[test]
+    fn adlersbrunn_and_halloween_prefixes_canonicalize() {
+        for raw in ["ADLERSBRUNN", "Adlersbrunn", "adiersbrunn", "ADLERSBRUNN "] {
+            assert_eq!(
+                canonical_map(raw.trim()).as_deref(),
+                Some("Eichenwalde"),
+                "{raw}"
+            );
+        }
+        assert_eq!(
+            match_map_in_text("HALLOWEEN HOLLYWOOD").as_deref(),
+            Some("Hollywood")
+        );
+        assert_eq!(
+            match_map_in_text("HALLOWEEN LIJIANG TOWER").as_deref(),
+            Some("Lijiang Tower")
+        );
+        assert_eq!(canonical_map("EICHENWALDE").as_deref(), Some("Eichenwalde"));
+        assert_eq!(canonical_map("KING'S ROW").as_deref(), Some("King's Row"));
+        assert!(!is_adlersbrunn_alias("Eichenwalde"));
+        assert!(is_adlersbrunn_alias("Adlersbrunn"));
+        assert!(is_adlersbrunn_alias("adiersbrunn"));
+    }
+
+    #[test]
+    fn chateau_guillard_is_deathmatch_and_untracked() {
+        for raw in ["GUILLARD", "Château Guillard", "Chateau Guillard"] {
+            let name = canonical_map(raw).unwrap_or_else(|| panic!("{raw}"));
+            assert_eq!(name, "Château Guillard");
+            assert_eq!(map_mode(&name), Some("Deathmatch"));
+            assert!(map_is_untracked(&name));
+            assert!(!stats_row_is_tracked(&name, "Deathmatch"));
+        }
+        assert!(stats_row_is_tracked("Busan", "Control"));
+        assert!(!stats_row_is_tracked("Busan", "Deathmatch"));
     }
 
     #[test]

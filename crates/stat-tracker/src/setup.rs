@@ -58,7 +58,7 @@ const TRAINING_PAGES: &[TrainingPage] = &[
     TrainingPage {
         text: TRAINING_MAPS,
         xsize: 1800,
-        ysize: 540,
+        ysize: 600,
         exposure: 0,
     },
     TrainingPage {
@@ -131,7 +131,8 @@ Winston Wrecking Ball Wuyang Zarya Zenyatta\n";
 const TRAINING_MAPS: &str = "\
 King's Row Circuit Royal Dorado Havana\n\
 Junkertown Rialto Route 66 Shambali Monastery\n\
-Watchpoint: Gibraltar Watchpoint: Grímsvötn Blizzard World Eichenwalde\n\
+Watchpoint: Gibraltar Blizzard World Eichenwalde\n\
+Grimsvotn\n\
 Hollywood Midtown Numbani Paraiso Neon Junction\n\
 Antarctic Peninsula Busan Ilios Lijiang Tower\n\
 Nepal Oasis Samoa Colosseo Esperanca\n\
@@ -722,5 +723,30 @@ mod training_heroes_tests {
                 page.ysize
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod training_maps_tests {
+    use super::TRAINING_MAPS;
+
+    #[test]
+    fn grimsvotn_training_sample_is_ascii_on_its_own_line() {
+        let line = TRAINING_MAPS
+            .lines()
+            .find(|line| line.contains("Grimsvotn"))
+            .expect("ascii Grimsvotn sample");
+        assert_eq!(line.trim(), "Grimsvotn");
+        assert!(
+            !TRAINING_MAPS.contains("Grímsvötn"),
+            "an accented name on a shared line drops the other samples"
+        );
+        let gibraltar = TRAINING_MAPS
+            .lines()
+            .find(|line| line.contains("Gibraltar"))
+            .expect("gibraltar line");
+        assert!(gibraltar.contains("Blizzard World"));
+        assert!(gibraltar.contains("Eichenwalde"));
+        assert!(!gibraltar.contains("Grimsvotn"));
     }
 }
