@@ -122,6 +122,24 @@ fn leaderboard_hold(path: &str) -> Option<LeaderboardLoad> {
     }
 }
 
+/// Status line for the leaderboard card. `None` means render the table.
+fn leaderboard_message(
+    load: Option<&LeaderboardLoad>,
+    hero_filtered: bool,
+) -> Option<&'static str> {
+    match load {
+        None | Some(LeaderboardLoad::Hold) => Some("Loading..."),
+        Some(LeaderboardLoad::Failed) => Some("Couldn't load leaderboards."),
+        Some(LeaderboardLoad::Rows(list)) if list.is_empty() && hero_filtered => {
+            Some("No ranked matches on this hero yet.")
+        }
+        Some(LeaderboardLoad::Rows(list)) if list.is_empty() => {
+            Some("No ranked matches yet. Upload stats from the tracker.")
+        }
+        Some(LeaderboardLoad::Rows(_)) => None,
+    }
+}
+
 #[component]
 pub fn Leaderboards() -> Element {
     let mut metric = use_signal(|| "winrate".to_string());
@@ -195,16 +213,14 @@ pub fn Leaderboards() -> Element {
 
             Card {
                 {
-                    match rows.read().as_ref() {
-                        None | Some(LeaderboardLoad::Hold) => rsx! { p { class: "lb-status", "Loading..." } },
-                        Some(LeaderboardLoad::Failed) => rsx! { p { class: "lb-status", "Couldn't load leaderboards." } },
-                        Some(LeaderboardLoad::Rows(list)) if list.is_empty() && hero().is_some() => rsx! {
-                            p { class: "lb-status", "No ranked matches on this hero yet." }
-                        },
-                        Some(LeaderboardLoad::Rows(list)) if list.is_empty() => rsx! {
-                            p { class: "lb-status", "No ranked matches yet. Upload stats from the tracker." }
-                        },
-                        Some(LeaderboardLoad::Rows(list)) => rsx! {
+                    let snapshot = rows.read();
+                    let filtered = hero().is_some();
+                    match (
+                        leaderboard_message(snapshot.as_ref(), filtered),
+                        snapshot.as_ref(),
+                    ) {
+                        (Some(message), _) => rsx! { p { class: "lb-status", "{message}" } },
+                        (None, Some(LeaderboardLoad::Rows(list))) => rsx! {
                             table { class: "lb-table",
                                 thead {
                                     tr {
@@ -242,6 +258,7 @@ pub fn Leaderboards() -> Element {
                                 }
                             }
                         },
+                        _ => rsx! {},
                     }
                 }
             }
@@ -262,6 +279,44 @@ mod tests {
         );
         assert_eq!(
             leaderboard_hold("/api/public/leaderboards?metric=winrate"),
+            None
+        );
+    }
+
+    #[test]
+    fn hold_renders_loading_not_the_failure() {
+        assert_eq!(leaderboard_message(None, false), Some("Loading..."));
+        assert_eq!(
+            leaderboard_message(Some(&LeaderboardLoad::Hold), false),
+            Some("Loading...")
+        );
+        assert_ne!(
+            leaderboard_message(Some(&LeaderboardLoad::Hold), false),
+            Some("Couldn't load leaderboards.")
+        );
+        assert_eq!(
+            leaderboard_message(Some(&LeaderboardLoad::Failed), false),
+            Some("Couldn't load leaderboards.")
+        );
+        assert_eq!(
+            leaderboard_message(Some(&LeaderboardLoad::Rows(Vec::new())), true),
+            Some("No ranked matches on this hero yet.")
+        );
+        assert_eq!(
+            leaderboard_message(Some(&LeaderboardLoad::Rows(Vec::new())), false),
+            Some("No ranked matches yet. Upload stats from the tracker.")
+        );
+        assert_eq!(
+            leaderboard_message(
+                Some(&LeaderboardLoad::Rows(vec![LeaderboardRow {
+                    member_id: "m1".into(),
+                    display_name: "A".into(),
+                    games: 1,
+                    winrate: 1.0,
+                    kd: 1.0,
+                }])),
+                false
+            ),
             None
         );
     }

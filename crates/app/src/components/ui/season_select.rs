@@ -4,26 +4,31 @@
 //! season from `GET /api/public/seasons`. It renders nothing while that list
 //! is loading or empty, and a retry when the request fails.
 //!
-//! Nothing saved means all time. "Current season", and only the season the
-//! sentinel resolves to, is stored as [`CURRENT_SEASON`] so a later rollover
-//! follows. Any other season is pinned by id. The sentinel is kept when no
-//! season is current. A saved id the list does not contain becomes all time
-//! and is removed. An id saved by the previous picker is migrated once.
+//! Nothing saved means all time. The "Current season" option stores
+//! [`CURRENT_SEASON`] so a later rollover follows. Every season row is pinned
+//! by id, including the season that is current now. The sentinel is kept when
+//! no season is current, and that option says none is running. A saved id the
+//! list cannot resolve becomes all time and is removed. An id saved by the
+//! previous picker is migrated once.
 
 use dioxus::prelude::*;
 use scuffed_types::Season;
 
-use crate::components::ui::Label;
+use crate::components::ui::{BtnSize, BtnVariant, Button, Label};
 #[cfg(not(test))]
 use crate::hooks::use_api;
 use crate::util::season_url;
 
 pub const ALL_TIME_LABEL: &str = "All time";
 
-/// `stats-season` value meaning "whichever season is current right now".
+/// Live `stats-season-v2` value meaning "whichever season is current right now".
 const CURRENT_SEASON: &str = "current";
 
-/// Previous picker key. Read once, then removed.
+const CURRENT_SEASON_LABEL: &str = "Current season";
+const CURRENT_SEASON_GAP_LABEL: &str = "Current season (none running, showing all time)";
+
+/// Previous picker key (`stats-season`). The memo and the effect read it on
+/// every run until a loaded list migrates it and the key is removed.
 const LEGACY_SEASON_KEY: &str = "stats-season";
 
 /// Live key. `current` follows the season flagged current; any other value is
@@ -32,6 +37,7 @@ const STATS_SEASON_KEY: &str = "stats-season-v2";
 
 pub const SEASON_SELECT_CSS: &str = r#"
 .season-select { display: flex; flex-direction: column; gap: var(--space-1); }
+.season-select-status { margin: 0; color: var(--text-3); font-size: var(--text-xs); }
 "#;
 
 /// One season the picker can resolve a saved value against.
@@ -64,27 +70,26 @@ fn resolve_stored_season<'a>(
 
 /// What to write for a picker choice. `None` clears storage (all time).
 ///
-/// The sentinel is stored for the explicit "Current season" option and for
-/// the one id [`resolve_stored_season`] returns for that sentinel. Every
-/// other id is pinned, including a second season that is also flagged current.
-fn season_to_store<'a>(selected: Option<&'a str>, seasons: &[SeasonChoice<'_>]) -> Option<&'a str> {
-    let selected = token(selected)?;
-    if selected == CURRENT_SEASON
-        || resolve_stored_season(Some(CURRENT_SEASON), seasons) == Some(selected)
-    {
-        Some(CURRENT_SEASON)
-    } else {
-        Some(selected)
-    }
+/// Only the explicit "Current season" option stores the sentinel. Every
+/// season row is pinned to its own id, including the row that is current
+/// now, so that click does not jump the control onto "Current season".
+fn season_to_store(selected: Option<&str>) -> Option<&str> {
+    token(selected)
 }
 
 /// One-shot rewrite of an id saved by the previous picker.
 ///
-/// The id that is the season marked current becomes the sentinel. Any other
-/// listed id is kept. Anything else is dropped.
+/// A legacy `current` stays `current`. The id of the season marked current
+/// becomes `current`. Any other listed id is kept. Anything else is dropped.
+///
+/// An id migrated while no season is current stays pinned. The next season
+/// starting does not turn that pin into follow. Nothing later says the old
+/// picker user meant to follow rather than stay on that season.
 fn migrate_legacy(legacy: &str, seasons: &[SeasonChoice<'_>]) -> Option<String> {
     let legacy = token(Some(legacy))?;
-    if resolve_stored_season(Some(CURRENT_SEASON), seasons) == Some(legacy) {
+    if legacy == CURRENT_SEASON
+        || resolve_stored_season(Some(CURRENT_SEASON), seasons) == Some(legacy)
+    {
         Some(CURRENT_SEASON.to_string())
     } else if seasons.iter().any(|s| s.id == legacy) {
         Some(legacy.to_string())
@@ -158,19 +163,66 @@ fn resolve_saved(v2: Option<&str>, legacy: Option<&str>, list: SeasonList<'_>) -
 }
 
 /// In-session `Id(current)` follows the list. A pinned id is sent as itself.
+/// `Some(Pending)` is representable, but [`StatsSeason::choose`] never writes it.
 fn apply_choice(
-    choice: Option<ResolvedSeason>,
+    choice: Option<&ResolvedSeason>,
     v2: Option<&str>,
     legacy: Option<&str>,
     list: SeasonList<'_>,
 ) -> ResolvedSeason {
     match choice {
         Some(ResolvedSeason::All) => ResolvedSeason::All,
-        Some(ResolvedSeason::Id(id)) if token(Some(&id)) == Some(CURRENT_SEASON) => {
+        Some(ResolvedSeason::Id(id)) if token(Some(id)) == Some(CURRENT_SEASON) => {
             resolve_season_filter(Some(CURRENT_SEASON), list)
         }
-        Some(ResolvedSeason::Id(id)) => ResolvedSeason::Id(id),
+        Some(ResolvedSeason::Id(id)) => ResolvedSeason::Id(id.clone()),
         Some(ResolvedSeason::Pending) | None => resolve_saved(v2, legacy, list),
+    }
+}
+
+/// Select token computed with the request filter, so a render does not read
+/// storage on its own. The sentinel stays `current` instead of the live id.
+fn select_for(
+    choice: Option<&ResolvedSeason>,
+    v2: Option<&str>,
+    legacy: Option<&str>,
+    list: SeasonList<'_>,
+) -> Option<String> {
+    match choice {
+        Some(ResolvedSeason::All) | Some(ResolvedSeason::Pending) => None,
+        Some(ResolvedSeason::Id(id)) => Some(id.clone()),
+        None => stored_select(v2, legacy, list),
+    }
+}
+
+fn stored_select(v2: Option<&str>, legacy: Option<&str>, list: SeasonList<'_>) -> Option<String> {
+    let SeasonList::Ready(seasons) = list else {
+        return None;
+    };
+    if seasons.is_empty() {
+        return None;
+    }
+    if let Some(v2) = token(v2) {
+        return select_token(v2, seasons);
+    }
+    legacy.and_then(|value| migrate_legacy(value, seasons))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SeasonView {
+    request: ResolvedSeason,
+    select: Option<String>,
+}
+
+fn season_view(
+    choice: Option<&ResolvedSeason>,
+    v2: Option<&str>,
+    legacy: Option<&str>,
+    list: SeasonList<'_>,
+) -> SeasonView {
+    SeasonView {
+        request: apply_choice(choice, v2, legacy, list),
+        select: select_for(choice, v2, legacy, list),
     }
 }
 
@@ -201,46 +253,31 @@ fn select_token(stored: &str, seasons: &[SeasonChoice<'_>]) -> Option<String> {
 /// season list and refetches whenever the list updates.
 #[derive(Clone, Copy)]
 pub struct StatsSeason {
-    resolved: Memo<ResolvedSeason>,
+    view: Memo<SeasonView>,
     /// `Resource` is `Copy` without requiring `Season: Copy`. `ApiResource` is
     /// not, because its derive adds that bound.
     rows: Resource<Option<Vec<Season>>>,
     refresh: Signal<u64>,
     error: Signal<Option<String>>,
     /// `None` means "use storage". `Some` is a choice made in this session.
+    /// `Some(Pending)` is representable, but [`Self::choose`] never writes it.
     /// `Id(current)` follows; any other id is pinned.
     pick: Signal<Option<ResolvedSeason>>,
 }
 
 impl StatsSeason {
     fn resolved(self) -> ResolvedSeason {
-        (self.resolved)()
+        self.view.read().request.clone()
     }
 
     /// Value for the `<select>`.
     ///
-    /// `None` is all time, and also while a saved value is still unresolved
-    /// (the picker stays hidden until the list loads). `Some("current")`
-    /// follows the current season. `Some(id)` is pinned to that season.
+    /// Comes from the same memo as the request filter, so a render does not
+    /// read storage itself. `None` is all time, and also while a saved value
+    /// is still unresolved (the picker stays hidden until the list loads).
+    /// `Some("current")` follows the current season. `Some(id)` is pinned.
     pub fn selected_id(self) -> Option<String> {
-        match self.pick.read().as_ref() {
-            Some(ResolvedSeason::All) | Some(ResolvedSeason::Pending) => None,
-            Some(ResolvedSeason::Id(id)) => Some(id.clone()),
-            None => self.stored_select_value(),
-        }
-    }
-
-    fn stored_select_value(self) -> Option<String> {
-        let data = self.rows.read();
-        let list = data.as_ref().and_then(|inner| inner.as_ref())?;
-        if list.is_empty() {
-            return None;
-        }
-        let choices = choices_from(list);
-        if let Some(v2) = read_v2() {
-            return select_token(&v2, &choices);
-        }
-        read_legacy().and_then(|legacy| migrate_legacy(&legacy, &choices))
+        self.view.read().select.clone()
     }
 
     /// Handle for the shared `/api/public/seasons` fetch. The picker reads it;
@@ -267,25 +304,20 @@ impl StatsSeason {
     }
 
     /// Record a picker change. `None` is all time. The stored token and the
-    /// in-session pick are the same trimmed value.
+    /// in-session pick are the same trimmed value. Only the explicit
+    /// "Current season" option stores the sentinel; a season row stores its id.
     pub fn choose(mut self, picked: Option<String>) {
-        let stored = {
-            let data = self.rows.peek();
-            let choices = match data.as_ref().and_then(|inner| inner.as_ref()) {
-                Some(list) => choices_from(list),
-                None => Vec::new(),
-            };
-            season_to_store(picked.as_deref(), &choices).map(str::to_string)
-        };
+        let stored = season_to_store(picked.as_deref()).map(str::to_string);
         write_v2(stored.as_deref());
         write_legacy(None);
         let next = match stored.as_deref() {
             None => Some(ResolvedSeason::All),
             Some(id) => Some(ResolvedSeason::Id(id.to_string())),
         };
-        if self.pick.peek().as_ref() != next.as_ref() {
-            self.pick.set(next);
-        }
+        // Always write. An equal value still notifies, so a click the browser
+        // just highlighted is painted back. The memo's PartialEq keeps an
+        // unchanged filter from refetching.
+        self.pick.set(next);
     }
 }
 
@@ -385,31 +417,45 @@ thread_local! {
     static TEST_PROBE: std::cell::Cell<Option<StatsSeason>> = const { std::cell::Cell::new(None) };
 }
 
+/// Shared season filter for My Stats, member stats, and leaderboards.
+///
+/// Call it once, unconditionally, at the top of the page. The three pages
+/// share `stats-season-v2`, so a pick on one page is the pick on the others.
 pub fn use_stats_season() -> StatsSeason {
     let pick = use_signal(|| None::<ResolvedSeason>);
     let (rows, refresh, error) = use_season_rows();
     // The memo is the only signal stats resources should read. It notifies
-    // only when PartialEq says the filter changed, so nothing saved stays
-    // one all-time fetch after the season list arrives.
-    let resolved = use_memo(move || {
+    // only when PartialEq says the view changed, so nothing saved stays
+    // one all-time fetch after the season list arrives. The select token
+    // rides along so a render does not read storage on its own.
+    let view = use_memo(move || {
         let choice = pick();
         let v2 = read_v2();
         let legacy = read_legacy();
         let data = rows.read();
-        let list = match data.as_ref() {
-            None => SeasonList::Loading,
-            Some(None) => SeasonList::Unavailable,
+        match data.as_ref() {
             Some(Some(list)) => {
                 let choices = choices_from(list);
-                return apply_choice(
-                    choice,
+                season_view(
+                    choice.as_ref(),
                     v2.as_deref(),
                     legacy.as_deref(),
                     SeasonList::Ready(&choices),
-                );
+                )
             }
-        };
-        apply_choice(choice, v2.as_deref(), legacy.as_deref(), list)
+            Some(None) => season_view(
+                choice.as_ref(),
+                v2.as_deref(),
+                legacy.as_deref(),
+                SeasonList::Unavailable,
+            ),
+            None => season_view(
+                choice.as_ref(),
+                v2.as_deref(),
+                legacy.as_deref(),
+                SeasonList::Loading,
+            ),
+        }
     });
 
     // `pick` means the user chose in this session, so this effect must not
@@ -439,7 +485,7 @@ pub fn use_stats_season() -> StatsSeason {
     });
 
     StatsSeason {
-        resolved,
+        view,
         rows,
         refresh,
         error,
@@ -466,15 +512,16 @@ fn use_season_rows() -> SeasonRows {
     let data = use_resource(move || {
         let _generation = refresh();
         async move {
+            // Same moment as `use_api`: clear the error when the fetch starts,
+            // while the previous `Some(None)` stays. The retry control stays
+            // mounted for that gap.
+            error.set(None);
             match TEST_SEASONS.with(|slot| slot.borrow().clone()) {
                 SeasonFetch::Hold => {
                     std::future::pending::<()>().await;
                     None
                 }
-                SeasonFetch::Ready(list) => {
-                    error.set(None);
-                    Some(list)
-                }
+                SeasonFetch::Ready(list) => Some(list),
                 SeasonFetch::Failed => {
                     error.set(Some("offline".into()));
                     None
@@ -508,60 +555,73 @@ pub fn SeasonSelect(
     let current = value.unwrap_or_default();
     let data = seasons.read();
     let failed = seasons_error.read().is_some();
-    let Some(list) = data
-        .as_ref()
-        .and_then(|inner| inner.as_ref())
-        .filter(|list| !list.is_empty())
-    else {
-        if !failed {
-            return rsx! {};
-        }
-        return rsx! {
-            div { class: "season-select",
-                if let Some(label) = label {
-                    Label { {label} }
-                }
-                p { "Couldn't load seasons." }
-                button { onclick: move |_| on_retry.call(()), "Retry" }
-            }
-        };
-    };
-    rsx! {
-        div { class: "season-select",
-            if let Some(label) = label {
-                Label { {label} }
-            }
-            select {
-                class: "ui-field",
-                id,
-                value: "{current}",
-                "aria-label": "Season",
-                onchange: move |e| {
-                    let v = e.value();
-                    onchange.call(if v.is_empty() { None } else { Some(v) });
-                },
-                option {
-                    key: "all",
-                    value: "",
-                    selected: current.is_empty(),
-                    "{ALL_TIME_LABEL}"
-                }
-                option {
-                    key: "follow-current",
-                    value: "{CURRENT_SEASON}",
-                    selected: current == CURRENT_SEASON,
-                    "Current season"
-                }
-                for s in list.iter() {
-                    option {
-                        key: "{s.id}",
-                        value: "{s.id}",
-                        selected: current == s.id,
-                        if s.is_current { "{s.name} (current)" } else { "{s.name}" }
+    match data.as_ref() {
+        Some(Some(list)) if !list.is_empty() => {
+            let follow_label = if list.iter().any(|s| s.is_current) {
+                CURRENT_SEASON_LABEL
+            } else {
+                CURRENT_SEASON_GAP_LABEL
+            };
+            rsx! {
+                div { class: "season-select",
+                    if let Some(label) = label {
+                        Label { {label} }
+                    }
+                    select {
+                        class: "ui-field",
+                        id,
+                        value: "{current}",
+                        "aria-label": "Season",
+                        onchange: move |e| {
+                            let v = e.value();
+                            onchange.call(if v.is_empty() { None } else { Some(v) });
+                        },
+                        option {
+                            key: "all",
+                            value: "",
+                            selected: current.is_empty(),
+                            "{ALL_TIME_LABEL}"
+                        }
+                        option {
+                            key: "follow-current",
+                            value: "current",
+                            selected: current == CURRENT_SEASON,
+                            "{follow_label}"
+                        }
+                        for s in list.iter() {
+                            option {
+                                key: "{s.id}",
+                                value: "{s.id}",
+                                selected: current == s.id,
+                                if s.is_current { "{s.name} (current)" } else { "{s.name}" }
+                            }
+                        }
                     }
                 }
             }
         }
+        // `Some(None)` is a finished failure, or a retry whose error was
+        // cleared while the previous empty result is still held. Keep one
+        // button mounted so keyboard focus is not dropped between them.
+        Some(None) => {
+            let retrying = !failed;
+            rsx! {
+                div { class: "season-select",
+                    if let Some(label) = label {
+                        Label { {label} }
+                    }
+                    p { class: "season-select-status", "Couldn't load seasons." }
+                    Button {
+                        variant: BtnVariant::Ghost,
+                        size: BtnSize::Sm,
+                        disabled: retrying,
+                        onclick: move |_| on_retry.call(()),
+                        if retrying { "Retrying..." } else { "Retry" }
+                    }
+                }
+            }
+        }
+        _ => rsx! {},
     }
 }
 
@@ -683,19 +743,25 @@ mod tests {
     }
 
     #[test]
-    fn picking_the_current_season_stores_the_sentinel() {
-        let stored = season_to_store(Some("season-4"), &during_season_four());
-        assert_eq!(stored, Some(CURRENT_SEASON));
+    fn current_season_constant_is_the_select_value() {
+        assert_eq!(CURRENT_SEASON, "current");
+    }
+
+    #[test]
+    fn picking_a_season_row_stores_that_id() {
+        assert_eq!(season_to_store(Some("season-4")), Some("season-4"));
+        assert_eq!(season_to_store(Some("season-6")), Some("season-6"));
+        assert_eq!(season_to_store(Some(CURRENT_SEASON)), Some(CURRENT_SEASON));
         let after = after_rollover();
-        assert_eq!(resolve_stored_season(stored, &after), Some("season-5"));
+        assert_eq!(
+            resolve_stored_season(Some(CURRENT_SEASON), &after),
+            Some("season-5")
+        );
     }
 
     #[test]
     fn picking_a_past_season_stores_that_id() {
-        assert_eq!(
-            season_to_store(Some("season-4"), &after_rollover()),
-            Some("season-4")
-        );
+        assert_eq!(season_to_store(Some("season-4")), Some("season-4"));
     }
 
     #[test]
@@ -714,32 +780,20 @@ mod tests {
             resolve_stored_season(Some(CURRENT_SEASON), &seasons),
             Some("season-6")
         );
-        assert_eq!(
-            season_to_store(Some("season-5"), &seasons),
-            Some("season-5")
-        );
-        assert_eq!(
-            season_to_store(Some("season-6"), &seasons),
-            Some(CURRENT_SEASON)
-        );
-        assert_eq!(
-            season_to_store(Some(CURRENT_SEASON), &seasons),
-            Some(CURRENT_SEASON)
-        );
+        assert_eq!(season_to_store(Some("season-5")), Some("season-5"));
+        assert_eq!(season_to_store(Some("season-6")), Some("season-6"));
+        assert_eq!(season_to_store(Some(CURRENT_SEASON)), Some(CURRENT_SEASON));
     }
 
     #[test]
     fn picking_all_time_clears_storage() {
-        assert_eq!(season_to_store(None, &after_rollover()), None);
-        assert_eq!(season_to_store(Some("  "), &after_rollover()), None);
+        assert_eq!(season_to_store(None), None);
+        assert_eq!(season_to_store(Some("  ")), None);
     }
 
     #[test]
     fn stored_tokens_are_trimmed_once() {
-        assert_eq!(
-            season_to_store(Some("  season-4  "), &after_rollover()),
-            Some("season-4")
-        );
+        assert_eq!(season_to_store(Some("  season-4  ")), Some("season-4"));
         assert_eq!(
             resolve_stored_season(Some("  current  "), &during_season_four()),
             Some("season-4")
@@ -758,6 +812,23 @@ mod tests {
             Some("season-3".to_string())
         );
         assert_eq!(migrate_legacy("missing", &during), None);
+        assert_eq!(
+            migrate_legacy(CURRENT_SEASON, &during),
+            Some(CURRENT_SEASON.to_string())
+        );
+        let gap = [SeasonChoice {
+            id: "season-4",
+            is_current: false,
+        }];
+        assert_eq!(
+            migrate_legacy(CURRENT_SEASON, &gap),
+            Some(CURRENT_SEASON.to_string())
+        );
+        // A listed id migrated while nothing is current stays that id.
+        assert_eq!(
+            migrate_legacy("season-4", &gap),
+            Some("season-4".to_string())
+        );
         let after = after_rollover();
         assert_eq!(
             resolve_stored_season(migrate_legacy("season-4", &during).as_deref(), &after),
@@ -1021,7 +1092,10 @@ mod tests {
         assert_held_then(&render_paths(), ROLE_PATH);
         assert_eq!(read_v2().as_deref(), Some(CURRENT_SEASON));
         let html = dioxus_ssr::render(&dom);
-        assert!(html.contains("Retry"), "{html}");
+        assert!(html.contains(">Retry<"), "{html}");
+        assert!(!html.contains("Retrying"), "{html}");
+        assert!(html.contains("ui-btn--ghost"), "{html}");
+        assert!(html.contains("season-select-status"), "{html}");
 
         set_seasons(vec![season_row("season-4", "Season 4", true)]);
         clear_paths();
@@ -1045,9 +1119,33 @@ mod tests {
         blank_hooks();
         put_v2(CURRENT_SEASON);
         set_seasons(vec![season_row("season-4", "Season 4", false)]);
-        let _dom = mount();
+        let dom = mount();
         assert_held_then(&render_paths(), ROLE_PATH);
         assert_eq!(read_v2().as_deref(), Some(CURRENT_SEASON));
+        let html = dioxus_ssr::render(&dom);
+        assert_option_selected(&html, "current");
+        assert_option_not_selected(&html, "");
+        assert!(
+            option_chunk(&html, "current").contains(CURRENT_SEASON_GAP_LABEL),
+            "{html}"
+        );
+        drop(dom);
+
+        set_seasons(vec![season_row("season-5", "Season 5", true)]);
+        clear_paths();
+        let dom = mount();
+        assert_held_then(&render_paths(), "/api/stats/me/roles?season=season-5");
+        assert_eq!(read_v2().as_deref(), Some(CURRENT_SEASON));
+        let html = dioxus_ssr::render(&dom);
+        assert_option_selected(&html, "current");
+        assert!(
+            option_chunk(&html, "current").contains(CURRENT_SEASON_LABEL),
+            "{html}"
+        );
+        assert!(
+            !option_chunk(&html, "current").contains("none running"),
+            "{html}"
+        );
     }
 
     #[test]
@@ -1059,7 +1157,7 @@ mod tests {
             season_row("season-3", "Season 3", false),
         ]);
         let mut dom = mount();
-        choose(&mut dom, Some("season-4"));
+        choose(&mut dom, Some(CURRENT_SEASON));
         assert_eq!(read_v2().as_deref(), Some(CURRENT_SEASON));
         assert_eq!(
             render_paths().last().map(String::as_str),
@@ -1249,23 +1347,18 @@ mod tests {
         )
     }
 
-    fn is_insert(edit: &Mutation) -> bool {
-        matches!(
-            edit,
-            Mutation::InsertBefore { .. }
-                | Mutation::InsertAfter { .. }
-                | Mutation::ReplacePlaceholder { .. }
-                | Mutation::ReplaceWith { .. }
-        )
-    }
-
     fn brief(edits: &[Mutation]) -> String {
         edits
             .iter()
             .enumerate()
             .map(|(i, edit)| match edit {
-                Mutation::SetAttribute { name, value, .. } => format!("{i} set {name}={value:?}"),
-                Mutation::CreateTextNode { value, .. } => format!("{i} text {value:?}"),
+                Mutation::SetAttribute {
+                    name, value, id, ..
+                } => {
+                    format!("{i} set {name}={value:?} id={id:?}")
+                }
+                Mutation::CreateTextNode { value, id } => format!("{i} text {value:?} id={id:?}"),
+                Mutation::AssignId { path, id } => format!("{i} assign {path:?} id={id:?}"),
                 Mutation::InsertBefore { m, .. } => format!("{i} insert_before m={m}"),
                 Mutation::InsertAfter { m, .. } => format!("{i} insert_after m={m}"),
                 Mutation::AppendChildren { m, .. } => format!("{i} append m={m}"),
@@ -1297,26 +1390,63 @@ mod tests {
             all.extend(batch.edits);
         }
         let log = brief(&all);
-        let text_at = all.iter().position(|edit| {
-            matches!(edit, Mutation::CreateTextNode { value, .. } if value.contains("Season 4"))
-        });
-        let text_at = text_at.unwrap_or_else(|| panic!("missing season option text\n{log}"));
+        let select_id = all
+            .iter()
+            .find_map(|edit| match edit {
+                Mutation::SetAttribute {
+                    name: "value",
+                    value: AttributeValue::Text(text),
+                    id,
+                    ..
+                } if text == "season-4" => Some(*id),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("missing select value\n{log}"));
+        let select_path = all
+            .iter()
+            .find_map(|edit| match edit {
+                Mutation::AssignId { path, id } if *id == select_id => Some(*path),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("select was not assigned an id\n{log}"));
+        let all_time_id = all
+            .iter()
+            .find_map(|edit| match edit {
+                Mutation::AssignId { path, id }
+                    if path.len() == select_path.len() + 1
+                        && path[..select_path.len()] == *select_path
+                        && path[select_path.len()] == 0 =>
+                {
+                    Some(*id)
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("missing All time option\n{log}"));
+        let season_count = 2;
         let insert_at = all
             .iter()
-            .enumerate()
-            .position(|(i, edit)| i > text_at && is_insert(edit))
-            .unwrap_or_else(|| panic!("season option was not inserted\n{log}"));
+            .position(
+                |edit| matches!(edit, Mutation::ReplacePlaceholder { m, .. } if *m == season_count),
+            )
+            .unwrap_or_else(|| panic!("season options were not inserted\n{log}"));
+        let all_time_cleared = all[..insert_at].iter().any(|edit| {
+            matches!(
+                edit,
+                Mutation::SetAttribute {
+                    name: "selected",
+                    value: AttributeValue::Bool(false),
+                    id,
+                    ..
+                } if *id == all_time_id
+            )
+        });
         assert!(
-            all.iter()
-                .enumerate()
-                .any(|(i, edit)| i < insert_at && is_selected(edit, true)),
-            "selected=true must be set before the option is inserted\n{log}"
+            all_time_cleared,
+            "All time must be explicitly unselected before the options are inserted\n{log}"
         );
         assert!(
-            all.iter()
-                .enumerate()
-                .any(|(i, edit)| i < insert_at && is_selected(edit, false)),
-            "All time must be explicitly unselected before the options are inserted\n{log}"
+            all[..insert_at].iter().any(|edit| is_selected(edit, true)),
+            "selected=true must be set before the options are inserted\n{log}"
         );
         let html = dioxus_ssr::render(&dom);
         assert_option_selected(&html, "season-4");
@@ -1349,6 +1479,155 @@ mod tests {
         let html = dioxus_ssr::render(&dom);
         assert!(html.contains("Current season"), "{html}");
         assert_eq!(html.matches("selected=true").count(), 1, "{html}");
+    }
+
+    #[test]
+    fn choosing_the_current_row_pins_it() {
+        let _timeout = abort_on_timeout(std::time::Duration::from_secs(8));
+        blank_hooks();
+        set_seasons(vec![
+            season_row("season-4", "Season 4", true),
+            season_row("season-3", "Season 3", false),
+        ]);
+        let mut dom = mount();
+        choose(&mut dom, Some("season-4"));
+        assert_eq!(read_v2().as_deref(), Some("season-4"));
+        let html = dioxus_ssr::render(&dom);
+        assert_option_selected(&html, "season-4");
+        assert_option_not_selected(&html, "current");
+
+        choose(&mut dom, Some(CURRENT_SEASON));
+        assert_eq!(read_v2().as_deref(), Some(CURRENT_SEASON));
+        let html = dioxus_ssr::render(&dom);
+        assert_option_selected(&html, "current");
+        assert_option_not_selected(&html, "season-4");
+
+        choose(&mut dom, Some("season-4"));
+        assert_eq!(read_v2().as_deref(), Some("season-4"));
+        let html = dioxus_ssr::render(&dom);
+        assert_option_selected(&html, "season-4");
+        assert_option_not_selected(&html, "current");
+        assert!(
+            render_paths()
+                .last()
+                .is_some_and(|path| path.ends_with("season=season-4")),
+            "{:?}",
+            render_paths()
+        );
+    }
+
+    #[test]
+    fn p2_12_legacy_current_id_selects_current_on_the_migrating_mount() {
+        let _timeout = abort_on_timeout(std::time::Duration::from_secs(8));
+        blank_hooks();
+        put_legacy("season-4");
+        set_seasons(vec![
+            season_row("season-4", "Season 4", true),
+            season_row("season-3", "Season 3", false),
+        ]);
+        let dom = mount();
+        let html = dioxus_ssr::render(&dom);
+        assert_option_selected(&html, "current");
+        assert_option_not_selected(&html, "season-4");
+        assert!(
+            render_paths()
+                .last()
+                .is_some_and(|path| path.ends_with("?season=season-4")),
+            "{:?}",
+            render_paths()
+        );
+    }
+
+    #[test]
+    fn p2_13_legacy_key_survives_loading_and_failure_then_retry_migrates_it() {
+        let _timeout = abort_on_timeout(std::time::Duration::from_secs(8));
+        blank_hooks();
+        put_legacy("season-4");
+        let mut dom = mount();
+        assert_eq!(read_legacy().as_deref(), Some("season-4"));
+        assert_eq!(read_v2(), None);
+        assert!(
+            render_paths().iter().all(|path| path.is_empty()),
+            "{:?}",
+            render_paths()
+        );
+
+        fail_seasons();
+        dom.in_runtime(|| {
+            let season = TEST_PROBE.with(|slot| slot.get().expect("probe"));
+            season.retry();
+        });
+        pump(&mut dom);
+        assert_eq!(read_legacy().as_deref(), Some("season-4"));
+        assert_eq!(read_v2(), None);
+        assert_eq!(render_paths().last().map(String::as_str), Some(ROLE_PATH));
+
+        set_seasons(vec![season_row("season-4", "Season 4", true)]);
+        clear_paths();
+        dom.in_runtime(|| {
+            let season = TEST_PROBE.with(|slot| slot.get().expect("probe"));
+            season.retry();
+        });
+        pump(&mut dom);
+        assert_eq!(read_v2().as_deref(), Some(CURRENT_SEASON));
+        assert_eq!(read_legacy(), None);
+        assert!(
+            render_paths()
+                .last()
+                .is_some_and(|path| path.ends_with("?season=season-4")),
+            "{:?}",
+            render_paths()
+        );
+    }
+
+    #[test]
+    fn both_keys_present_keeps_v2_and_drops_legacy() {
+        let _timeout = abort_on_timeout(std::time::Duration::from_secs(8));
+        blank_hooks();
+        put_v2("season-3");
+        put_legacy("season-4");
+        set_seasons(vec![
+            season_row("season-4", "Season 4", true),
+            season_row("season-3", "Season 3", false),
+        ]);
+        let dom = mount();
+        assert_eq!(read_v2().as_deref(), Some("season-3"));
+        assert_eq!(read_legacy(), None);
+        assert!(
+            render_paths()
+                .last()
+                .is_some_and(|path| path.ends_with("?season=season-3")),
+            "{:?}",
+            render_paths()
+        );
+        let html = dioxus_ssr::render(&dom);
+        assert_option_selected(&html, "season-3");
+        assert_option_not_selected(&html, "season-4");
+    }
+
+    #[test]
+    fn retry_stays_mounted_while_the_next_fetch_is_in_flight() {
+        let _timeout = abort_on_timeout(std::time::Duration::from_secs(8));
+        blank_hooks();
+        fail_seasons();
+        let mut dom = mount();
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains(">Retry<"), "{html}");
+        assert!(html.contains("ui-btn--ghost"), "{html}");
+        assert!(html.contains("ui-btn--sm"), "{html}");
+        assert!(!html.contains("Retrying"), "{html}");
+
+        TEST_SEASONS.with(|slot| *slot.borrow_mut() = SeasonFetch::Hold);
+        dom.in_runtime(|| {
+            let season = TEST_PROBE.with(|slot| slot.get().expect("probe"));
+            season.retry();
+        });
+        pump(&mut dom);
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains("Retrying..."), "{html}");
+        assert!(html.contains("disabled=true"), "{html}");
+        assert!(html.contains("ui-btn--ghost"), "{html}");
+        assert!(html.contains("season-select-status"), "{html}");
     }
 
     #[test]
@@ -1392,5 +1671,31 @@ mod tests {
         assert!(boards.contains("season.fetch_path("));
         assert!(boards.contains("leaderboard_hold("));
         assert!(boards.contains("return held;"));
+        assert!(
+            boards.contains("leaderboard_message(snapshot.as_ref()"),
+            "leaderboards must render through leaderboard_message"
+        );
+        let picker = std::fs::read_to_string(root.join("components/ui/season_select.rs"))
+            .expect("season select source");
+        // Split so this assertion does not contain the call it is looking for.
+        let retry_call = format!("on_retry.{}", "call(())");
+        assert!(
+            picker.contains(&retry_call),
+            "the Retry button must call on_retry"
+        );
+        assert!(
+            picker.contains("value: \"current\""),
+            "the Current season option value is the literal sentinel"
+        );
+        for (rel, text) in [
+            ("pages/stats/mod.rs", stats.as_str()),
+            ("pages/stats_member.rs", member.as_str()),
+            ("pages/leaderboards.rs", boards.as_str()),
+        ] {
+            assert!(
+                text.contains("season.retry()"),
+                "{rel} must retry the season list"
+            );
+        }
     }
 }

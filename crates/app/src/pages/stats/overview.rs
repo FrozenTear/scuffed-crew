@@ -206,14 +206,12 @@ pub(super) fn overview_tab(
             div { class: "overview-section",
                 h3 { "Mode Win Rates" }
                 if chips.is_empty() {
-                    p { class: "empty-state",
-                        if maps.error.read().is_some() {
-                            "Couldn't load maps."
-                        } else if maps_waiting {
-                            "Loading maps…"
-                        } else {
-                            "No map data yet."
-                        }
+                    if maps.error.read().is_some() {
+                        p { class: "empty-state", "Couldn't load maps." }
+                    } else if maps_waiting {
+                        p { class: "loading-state", "Loading maps…" }
+                    } else {
+                        p { class: "empty-state", "No map data yet." }
                     }
                 } else {
                     div { class: "mode-chips",
@@ -241,14 +239,12 @@ pub(super) fn overview_tab(
         div { class: "overview-section overview-form",
             h3 { "Recent form" }
             if form_rows.is_empty() {
-                p { class: "empty-state",
-                    if form.error.read().is_some() {
-                        "Couldn't load recent matches."
-                    } else if form_waiting {
-                        "Loading form…"
-                    } else {
-                        "No recent matches."
-                    }
+                if form.error.read().is_some() {
+                    p { class: "empty-state", "Couldn't load recent matches." }
+                } else if form_waiting {
+                    p { class: "loading-state", "Loading form…" }
+                } else {
+                    p { class: "empty-state", "No recent matches." }
                 }
             } else {
                 div { class: "form-strip",
@@ -337,6 +333,14 @@ mod tests {
             !html.contains("No recent matches."),
             "held form must not look empty: {html}"
         );
+        assert!(
+            html.contains("loading-state"),
+            "a held fetch uses the loading class: {html}"
+        );
+        assert!(
+            !html.contains("empty-state"),
+            "a held fetch must not use the empty class: {html}"
+        );
     }
 
     #[test]
@@ -358,5 +362,8 @@ mod tests {
         let html = dioxus_ssr::render(&dom);
         assert!(html.contains("No map data yet."), "{html}");
         assert!(html.contains("No recent matches."), "{html}");
+        assert!(html.contains("empty-state"), "{html}");
+        assert!(!html.contains("Loading maps"), "{html}");
+        assert!(!html.contains("Loading form"), "{html}");
     }
 }

@@ -871,8 +871,9 @@ const STATS_CSS: &str = r#"
 pub fn Stats() -> Element {
     let auth = use_auth();
     // "Total or per season": one selection drives every tab's fetch.
-    // Nothing saved is all time. The current season is stored as a sentinel
-    // so a rollover follows; a past season stays pinned to its id.
+    // Nothing saved is all time. "Current season" is stored as a sentinel so a
+    // rollover follows. Every season row is pinned by id, including the one
+    // that is current now, an upcoming season, and a second flagged season.
     let season = use_stats_season();
     let stats = use_api_with::<PersonalStats>(move || season.fetch_path("/api/stats/me"));
     let heroes = use_api_with::<Vec<HeroStats>>(move || season.fetch_path("/api/stats/me/heroes"));
