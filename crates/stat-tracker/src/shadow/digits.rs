@@ -104,6 +104,9 @@ const DESC: f64 = 1.35;
 /// A cell whose own text height is this many px off its row's median takes
 /// the row's text band instead (see [`row_text_band`]).
 const BAND_TOL: usize = 2;
+/// Cells that must segment before a row consensus is trusted (a row has 6
+/// stat cells; with fewer voters two shrunk cells can carry the median).
+const MIN_BAND_CELLS: usize = 4;
 
 /// Python-style `round()` (ties to even), used wherever the prototype rounds.
 fn pyround(x: f64) -> i64 {
@@ -678,10 +681,16 @@ fn segment_cell(
 /// The 10 px wide glyph then looks wider than `WIDE_RUN * dh`, is split as
 /// touching glyphs, and reads "16" or "311". All cells of a row share one
 /// font size and baseline, so the lower median of `dh` over the row (and the
-/// median `top` of the cells that agree with it) is a safe reference.
+/// median `top` of the cells within `BAND_TOL` of it) is a safe reference.
+///
+/// [`apply_row_band`] uses it in both directions: a cell `BAND_TOL` or more
+/// shorter or taller than the row gets the row's band. Taller cells are kept
+/// in on purpose; on live boards that correction only raised confidence.
+/// With fewer than `MIN_BAND_CELLS` segmented cells there is no consensus and
+/// every cell keeps its own measurement.
 fn row_text_band(segs: &[Option<Segment>]) -> Option<(usize, usize)> {
     let mut dhs: Vec<usize> = segs.iter().flatten().map(|s| s.dh).collect();
-    if dhs.len() < 3 {
+    if dhs.len() < MIN_BAND_CELLS {
         return None;
     }
     dhs.sort_unstable();
@@ -689,7 +698,7 @@ fn row_text_band(segs: &[Option<Segment>]) -> Option<(usize, usize)> {
     let mut tops: Vec<usize> = segs
         .iter()
         .flatten()
-        .filter(|s| s.dh.abs_diff(med) <= 1)
+        .filter(|s| s.dh.abs_diff(med) < BAND_TOL)
         .map(|s| s.top)
         .collect();
     tops.sort_unstable();
@@ -1312,6 +1321,31 @@ mod tests {
             row_text_band(&[Some(seg_with(4, 13)), None, Some(seg_with(5, 9))]),
             None
         );
+    }
+
+    #[test]
+    fn short_row_keeps_per_cell_bands() {
+        // three cells, two of them shrunk: a 3-cell median would pick 10 and
+        // squash the good cell, so below MIN_BAND_CELLS nothing is overridden
+        let mut segs: Vec<Option<Segment>> = vec![
+            Some(seg_with(5, 10)),
+            Some(seg_with(5, 9)),
+            Some(seg_with(4, 13)),
+            None,
+            None,
+            None,
+        ];
+        let band = row_text_band(&segs);
+        assert_eq!(band, None);
+        let want = [(5, 10), (5, 9), (4, 13)];
+        for (seg, w) in segs.iter_mut().flatten().zip(want) {
+            apply_row_band(seg, band);
+            assert_eq!((seg.top, seg.dh), w);
+        }
+        // a fourth agreeing cell is enough for a consensus again
+        segs[3] = Some(seg_with(4, 13));
+        segs[4] = Some(seg_with(4, 13));
+        assert_eq!(row_text_band(&segs), Some((4, 13)));
     }
 
     #[test]
