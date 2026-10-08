@@ -63,7 +63,78 @@ pub enum Hero {
     Zenyatta,
 }
 
+macro_rules! hero_all {
+    ($($variant:ident),* $(,)?) => {
+        /// Every `Hero` variant, in enum order.
+        ///
+        /// `_hero_all_exhaustive` matches the same variants with no wildcard,
+        /// so a new `Hero` fails to compile until it is added here. A repeated
+        /// entry is an unreachable pattern.
+        pub const ALL: &'static [Hero] = &[$(Hero::$variant),*];
+
+        const fn _hero_all_exhaustive(hero: Hero) {
+            match hero {
+                $(Hero::$variant => {}),*
+            }
+        }
+    };
+}
+
 impl Hero {
+    hero_all! {
+        DVa,
+        Domina,
+        Doomfist,
+        Hazard,
+        JunkerQueen,
+        Mauga,
+        Orisa,
+        Ramattra,
+        Reinhardt,
+        Roadhog,
+        Sigma,
+        Winston,
+        WreckingBall,
+        Zarya,
+        Anran,
+        Ashe,
+        Bastion,
+        Cassidy,
+        Echo,
+        Emre,
+        Freja,
+        Genji,
+        Hanzo,
+        Junkrat,
+        Mei,
+        Pharah,
+        Reaper,
+        Sierra,
+        Sojourn,
+        Soldier76,
+        Symmetra,
+        Torbjorn,
+        Tracer,
+        Vendetta,
+        Venture,
+        Widowmaker,
+        Ana,
+        Baptiste,
+        Brigitte,
+        Doctrine,
+        Illari,
+        Juno,
+        Kiriko,
+        Lifeweaver,
+        Lucio,
+        Mercy,
+        Mizuki,
+        Moira,
+        Sombra,
+        Wuyang,
+        Zenyatta,
+    }
+
     pub fn role(&self) -> HeroRole {
         match self {
             Self::DVa
@@ -502,6 +573,16 @@ impl std::fmt::Display for MatchOutcome {
 mod tests {
     use super::*;
     use std::str::FromStr;
+
+    #[test]
+    fn hero_all_display_names_are_unique() {
+        let mut names: Vec<&str> = Hero::ALL.iter().map(|hero| hero.display_name()).collect();
+        let n = names.len();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), n, "display names must be unique");
+        assert_eq!(Hero::ALL.len(), 51);
+    }
 
     #[test]
     fn all_covers_every_map_and_display_names_round_trip() {

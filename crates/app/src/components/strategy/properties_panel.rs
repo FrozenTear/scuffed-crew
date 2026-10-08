@@ -145,72 +145,13 @@ const PRESET_COLORS: [(Color, &str); 5] = [
     (Color::SUPPORT, "Support"),
 ];
 
-/// Known heroes for the dropdown.
-const HEROES: &[(HeroRole, &[(&str, &str)])] = &[
-    (
-        HeroRole::Tank,
-        &[
-            ("dva", "D.Va"),
-            ("doomfist", "Doomfist"),
-            ("junker-queen", "Junker Queen"),
-            ("mauga", "Mauga"),
-            ("orisa", "Orisa"),
-            ("ramattra", "Ramattra"),
-            ("reinhardt", "Reinhardt"),
-            ("roadhog", "Roadhog"),
-            ("sigma", "Sigma"),
-            ("winston", "Winston"),
-            ("wrecking-ball", "Wrecking Ball"),
-            ("zarya", "Zarya"),
-            ("hazard", "Hazard"),
-        ],
-    ),
-    (
-        HeroRole::Damage,
-        &[
-            ("ashe", "Ashe"),
-            ("bastion", "Bastion"),
-            ("cassidy", "Cassidy"),
-            ("echo", "Echo"),
-            ("genji", "Genji"),
-            ("hanzo", "Hanzo"),
-            ("junkrat", "Junkrat"),
-            ("mei", "Mei"),
-            ("pharah", "Pharah"),
-            ("reaper", "Reaper"),
-            ("sojourn", "Sojourn"),
-            ("soldier-76", "Soldier: 76"),
-            ("symmetra", "Symmetra"),
-            ("torbjorn", "Torbjorn"),
-            ("tracer", "Tracer"),
-            ("venture", "Venture"),
-            ("widowmaker", "Widowmaker"),
-        ],
-    ),
-    (
-        HeroRole::Support,
-        &[
-            ("ana", "Ana"),
-            ("baptiste", "Baptiste"),
-            ("brigitte", "Brigitte"),
-            ("doctrine", "Doctrine"),
-            ("illari", "Illari"),
-            ("juno", "Juno"),
-            ("kiriko", "Kiriko"),
-            ("lifeweaver", "Lifeweaver"),
-            ("lucio", "Lucio"),
-            ("mercy", "Mercy"),
-            ("moira", "Moira"),
-            ("sombra", "Sombra"),
-            ("zenyatta", "Zenyatta"),
-        ],
-    ),
-];
-
+/// Shared roster, grouped Tank then Damage then Support.
 fn all_heroes() -> Vec<(&'static str, &'static str)> {
-    HEROES
+    HeroRole::ALL
         .iter()
-        .flat_map(|(_, heroes)| heroes.iter().copied())
+        .copied()
+        .flat_map(super::hero_catalog::heroes_for_role)
+        .map(|hero| (hero.id.as_str(), hero.name))
         .collect()
 }
 
@@ -385,6 +326,43 @@ pub fn PropertiesPanel(
                     }
                 },
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dropdown_lists_the_shared_roster_in_role_order() {
+        let heroes = all_heroes();
+        assert_eq!(heroes.len(), scuffed_types::HEROES.len());
+        let rank = |role: HeroRole| {
+            HeroRole::ALL
+                .iter()
+                .position(|candidate| *candidate == role)
+                .unwrap()
+        };
+        let roles: Vec<HeroRole> = heroes
+            .iter()
+            .map(|(_, name)| scuffed_types::role_for_hero_name(name).unwrap())
+            .collect();
+        assert!(roles.windows(2).all(|pair| rank(pair[0]) <= rank(pair[1])));
+        for id in [
+            "dva",
+            "junker-queen",
+            "wrecking-ball",
+            "soldier-76",
+            "torbjorn",
+            "lucio",
+            "dmon",
+            "jetpack-cat",
+        ] {
+            assert!(
+                heroes.iter().any(|(hid, _)| *hid == id),
+                "{id} is missing from the dropdown"
+            );
         }
     }
 }
