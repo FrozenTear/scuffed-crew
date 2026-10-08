@@ -38,6 +38,26 @@ cap, or a trailing-digit inject, is still held. A confirmed value,
 including one a fallback moved away from, still has to agree three
 times before it moves down.
 
+A recovered 0 now carries a confidence from how cleanly the ring
+matched (hole size and how centred it is), from 55 for a ring that only
+just passes up to 95, instead of a flat 60. A clean ring scores 75 or
+more. A ring touching the cell edge loses 15 and is still marked
+suspect.
+
+The bottom player row is cut short at the edge of the scoreboard crop,
+so its cells get a slightly smaller upscale. Tesseract sometimes reads
+nothing at that size where it read the digit before, so an empty read
+there is tried once more at the old size. Column calibration scores
+each candidate layout on bright digits only, so recovered zeros cannot
+push it to a layout the old build did not pick.
+
+5v5 or 6v6 no longer trusts one row-pitch measurement that fits
+neither layout. On a post-game table the stronger measurement said
+5v5 while the rows were 6v6, and every row was read one slot off. A
+pitch that fits neither layout is ignored, and when the two
+measurements point at different sizes the capture is rejected (saved
+to `debug/rejected`) instead of read with shifted rows.
+
 ### Install
 
 ```sh

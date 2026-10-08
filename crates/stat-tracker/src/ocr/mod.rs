@@ -183,12 +183,6 @@ const STATS_PER_ROW: usize = 6;
 /// empty-page diagnostics it floods the journal with.
 const MIN_CELL_INK_PIXELS: usize = 20;
 
-/// Confidence stamped on a geometric dim zero. It is not a Tesseract score.
-/// 60 sits below a clean whitelist hit and above an empty cell (0), so a
-/// recovered zero is visible in the row without looking like a high-confidence
-/// OCR read.
-const DIM_ZERO_CONFIDENCE: i32 = 60;
-
 /// Count ink pixels in a prepared (binarized, black-on-white) cell image.
 fn prepared_ink_pixels(img: &image::GrayImage) -> usize {
     img.pixels().filter(|p| p.0[0] < 128).count()
@@ -327,51 +321,71 @@ fn recognize_cell_with_whitelist(
     img: &DynamicImage,
     whitelist: &str,
 ) -> Result<CellOcrResult, Box<dyn std::error::Error + Send + Sync>> {
-    // Binarize once; measure edge ink on the borderless form, OCR the bordered.
-    let binary = preprocess::prepare_cell_binary(img);
-    let suspect = preprocess::has_edge_ink(&binary, EDGE_INK_COLS, EDGE_INK_THRESHOLD);
-    if prepared_ink_pixels(&binary) < MIN_CELL_INK_PIXELS {
-        // The bright mask found almost nothing. A dim 0 can still be there.
-        // Anything else with no bright ink stays empty. A blank cell is not
-        // a zero.
-        if let Some(hit) = preprocess::dim_zero_glyph(img, EDGE_INK_COLS) {
-            return Ok(dim_zero_result(hit));
+    let bright = recognize_cell_bright(img, whitelist)?;
+    if !bright.value.is_empty() {
+        return Ok(bright);
+    }
+    // The bright path came back empty. Either the HSV mask found almost no
+    // ink, or it kept the ring (the Dorado stroke cores are about 171-186
+    // and neutral) and Tesseract still returned nothing. A dim 0 can be
+    // there in both cases, and the geometric check is what recovers it.
+    // Anything else stays empty: a blank cell is not a zero, and a white
+    // digit is not a ring.
+    match preprocess::dim_zero_glyph(img, EDGE_INK_COLS) {
+        Some(hit) => Ok(CellOcrResult {
+            value: "0".to_string(),
+            confidence: hit.confidence,
+            suspect: hit.touches_edge || bright.suspect,
+        }),
+        None => Ok(bright),
+    }
+}
+
+/// The bright-ink path alone: HSV white mask, binarize, Tesseract, with no
+/// dim-zero recovery. Column calibration scores layouts with it (see
+/// [`count_valid_cells`]).
+fn recognize_cell_bright(
+    img: &DynamicImage,
+    whitelist: &str,
+) -> Result<CellOcrResult, Box<dyn std::error::Error + Send + Sync>> {
+    let first = read_cell_binary(&preprocess::prepare_cell_binary(img), whitelist)?;
+    if !first.value.is_empty() {
+        return Ok(first);
+    }
+    // The PR 158 upscale cap moved this cell off the factor it used to get,
+    // and the capped read is empty. Read it again at the old factor, so the
+    // cap cannot lose a cell the old factor read. See
+    // `preprocess::prepare_cell_binary_uncapped` for the cells and factors.
+    if let Some(binary) = preprocess::prepare_cell_binary_uncapped(img) {
+        let retry = read_cell_binary(&binary, whitelist)?;
+        if !retry.value.is_empty() {
+            return Ok(retry);
         }
+    }
+    Ok(first)
+}
+
+/// Tesseract on one binarized cell. Measures edge ink on the borderless
+/// form, OCRs the bordered one.
+fn read_cell_binary(
+    binary: &image::GrayImage,
+    whitelist: &str,
+) -> Result<CellOcrResult, Box<dyn std::error::Error + Send + Sync>> {
+    if prepared_ink_pixels(binary) < MIN_CELL_INK_PIXELS {
         return Ok(CellOcrResult {
             value: String::new(),
             confidence: 0,
             suspect: false,
         });
     }
-    let png_buf = encode_png(&preprocess::add_cell_border(&binary))?;
+    let suspect = preprocess::has_edge_ink(binary, EDGE_INK_COLS, EDGE_INK_THRESHOLD);
+    let png_buf = encode_png(&preprocess::add_cell_border(binary))?;
     let (text, confidence) = ocr_with("eng", "7", Some(whitelist), &png_buf)?;
-    let text = text.trim().to_string();
-    // The Dorado stroke cores are about 171-186 and neutral, so the HSV
-    // mask keeps them and this branch runs. Tesseract still returns an
-    // empty string for some of those rings. The geometric check is what
-    // recovers them. A white digit is not a ring, so an empty read of one
-    // stays empty.
-    if text.is_empty()
-        && let Some(hit) = preprocess::dim_zero_glyph(img, EDGE_INK_COLS)
-    {
-        let mut recovered = dim_zero_result(hit);
-        recovered.suspect = recovered.suspect || suspect;
-        return Ok(recovered);
-    }
-
     Ok(CellOcrResult {
-        value: text,
+        value: text.trim().to_string(),
         confidence,
         suspect,
     })
-}
-
-fn dim_zero_result(hit: preprocess::DimZeroHit) -> CellOcrResult {
-    CellOcrResult {
-        value: "0".to_string(),
-        confidence: DIM_ZERO_CONFIDENCE,
-        suspect: hit.touches_edge,
-    }
 }
 
 /// Recognize a player name cell.
@@ -747,11 +761,19 @@ pub(crate) const CELL_SCORE_CLEAN: i32 = 2;
 /// drifted offset tie a clean one when both read the same digit count).
 pub(crate) const CELL_SCORE_SUSPECT: i32 = 1;
 
+/// Scores with [`recognize_cell_bright`], not the dim-zero recovery. A
+/// recovered ring says a zero is somewhere in the window, not that the
+/// window's edges sit on the column. Counting recovered zeros pushed the
+/// header-anchored layout of the 0.75x frame `accepted_20261008_001449`
+/// over the 75% floor. That skipped the offset sweep main runs there and
+/// lost 10 cells main reads (Scuffed Vision baseline, PR 158). With the
+/// bright path, PR 158 picks the same layout as main on all 40 frames of
+/// that baseline (20 at 1440p, the same 20 at 0.75x).
 fn count_valid_cells(row: &DynamicImage, cols: &preprocess::StatColumns) -> i32 {
     let mut valid = 0i32;
     for col_idx in 0..6 {
         if let Some(cell) = preprocess::crop_stat_cell(row, col_idx, cols)
-            && let Ok(result) = recognize_cell(&cell)
+            && let Ok(result) = recognize_cell_bright(&cell, "0123456789,")
         {
             // A cell whose glyph ink touches a crop edge (CG-3 bleed/clip)
             // SUBTRACTS from the layout's score, so the sweep prefers offsets
@@ -938,6 +960,17 @@ mod tests {
         let cell = recognize_cell(&img).expect("dim zero cell");
         assert_eq!(cell.value, "0");
         assert!(!cell.suspect);
+        let hit = preprocess::dim_zero_glyph(&img, EDGE_INK_COLS).expect("ring");
+        assert_eq!(
+            cell.confidence, hit.confidence,
+            "a recovered zero carries the ring's geometric confidence"
+        );
+        assert!(cell.confidence >= 70, "a clean ring is not suspect");
+        let bright = recognize_cell_bright(&img, "0123456789,").expect("bright path");
+        assert_eq!(
+            bright.value, "",
+            "column calibration scores the bright path, which has no dim-zero recovery"
+        );
 
         let edge = recognize_cell(&preprocess::dim_zero_fixtures::dim_zero_touching_left_edge())
             .expect("edge ring");

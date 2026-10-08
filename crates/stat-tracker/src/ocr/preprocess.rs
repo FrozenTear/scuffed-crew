@@ -185,11 +185,20 @@ const DIM_ZERO_SAT_MAX: u8 = 40;
 /// one ring.
 const DIM_ZERO_HOLE_EXTENT_MIN: u32 = 38;
 
+/// The hole's centroid may sit at most this far from the glyph box centre,
+/// in percent of the box on each axis.
+const DIM_ZERO_CENTRE_OFFSET_MAX_PCT: u32 = 22;
+
+/// Taken off a dim zero's confidence when its ring reaches the outer edge
+/// columns. The ring may be clipped or another glyph bleeding in.
+const DIM_ZERO_EDGE_PENALTY: i32 = 15;
+
 const DIM_LABEL_INK: u8 = 1;
 const DIM_LABEL_EXTERIOR: u8 = 2;
 const DIM_LABEL_HOLE: u8 = 3;
 
 /// A cell the bright mask emptied that is still a dim zero value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DimZeroHit {
     /// Dim-zero ink lies in the outer `edge_cols` of the crop. The ring is
     /// clipped or bleeding, so the capture gate must not treat the 0 as a
@@ -199,6 +208,45 @@ pub struct DimZeroHit {
     /// band, about 13px on a 56px cell with a 2px band. A thin ring only
     /// kisses the edge, and that fill fraction would miss it.
     pub touches_edge: bool,
+    /// The hole's share of the glyph box on its tighter axis, in percent.
+    /// The floor is [`DIM_ZERO_HOLE_EXTENT_MIN`].
+    pub hole_extent_pct: u32,
+    /// How far the hole's centroid sits from the glyph box centre on its
+    /// worse axis, in percent of the box on that axis. The ceiling is
+    /// [`DIM_ZERO_CENTRE_OFFSET_MAX_PCT`].
+    pub centre_offset_pct: u32,
+    /// 0..=100. See [`dim_zero_confidence`].
+    pub confidence: i32,
+}
+
+/// Hole extent at which the extent term is full. A realistic 6 or 9 bowl is
+/// about 35% on its short axis and the floor is 38%, so 44% is clearly a
+/// counter and not a bowl. The real zeros in the Scuffed Vision baseline
+/// measure 40-55% at 1440p and 42-60% at 0.75x.
+const DIM_ZERO_EXTENT_FULL_PCT: u32 = 44;
+
+/// Confidence for a geometric dim zero, on the same 0..=100 scale as a
+/// Tesseract word confidence. It says how far the ring cleared the two
+/// shape checks that tell a 0 from a 6, 9, or closed 4:
+///
+/// - 55 is the floor: the ring only just passed both checks (hole extent
+///   at the 38% floor, centroid offset at the 22% ceiling).
+/// - up to +25 for hole extent, linear from 38% to 44% and full above.
+/// - up to +15 for centring, linear from a 22% offset to a perfectly
+///   centred hole.
+///
+/// So a ring at the floor scores 55, a counter of 41% or more with the
+/// hole within 5% of centre scores at least 78, and the ceiling is 95.
+/// Every dim zero in that baseline scores 75 or more, above a "conf below
+/// 70 is suspect" rule. A ring in the outer edge columns is also marked
+/// `suspect`, so it loses 15.
+pub fn dim_zero_confidence(hole_extent_pct: u32, centre_offset_pct: u32) -> i32 {
+    let floor = DIM_ZERO_HOLE_EXTENT_MIN as f32;
+    let full = DIM_ZERO_EXTENT_FULL_PCT as f32;
+    let extent = ((hole_extent_pct as f32 - floor) / (full - floor)).clamp(0.0, 1.0);
+    let max_off = DIM_ZERO_CENTRE_OFFSET_MAX_PCT as f32;
+    let centred = (1.0 - centre_offset_pct as f32 / max_off).clamp(0.0, 1.0);
+    (55.0 + 25.0 * extent + 15.0 * centred).round() as i32
 }
 
 /// Eight-connected ink blobs. Returns early once a second blob is found.
@@ -435,10 +483,26 @@ pub fn dim_zero_glyph(img: &DynamicImage, edge_cols: u32) -> Option<DimZeroHit> 
     let hy = sum_y as f32 / hole_count as f32;
     let cx = (min_x + max_x) as f32 / 2.0;
     let cy = (min_y + max_y) as f32 / 2.0;
-    if (hx - cx).abs() > bw as f32 * 0.22 || (hy - cy).abs() > bh as f32 * 0.22 {
+    let off_x = (hx - cx).abs() * 100.0 / bw as f32;
+    let off_y = (hy - cy).abs() * 100.0 / bh as f32;
+    let centre_offset_pct = off_x.max(off_y).round() as u32;
+    if off_x > DIM_ZERO_CENTRE_OFFSET_MAX_PCT as f32
+        || off_y > DIM_ZERO_CENTRE_OFFSET_MAX_PCT as f32
+    {
         return None;
     }
-    Some(DimZeroHit { touches_edge })
+    let hole_extent_pct = (hole_w * 100 / bw).min(hole_h * 100 / bh);
+    Some(DimZeroHit {
+        touches_edge,
+        hole_extent_pct,
+        centre_offset_pct,
+        confidence: dim_zero_confidence(hole_extent_pct, centre_offset_pct)
+            - if touches_edge {
+                DIM_ZERO_EDGE_PENALTY
+            } else {
+                0
+            },
+    })
 }
 
 /// Binarized cell WITHOUT the OCR white border: foreground ink = 0 (black),
@@ -448,9 +512,33 @@ pub fn dim_zero_glyph(img: &DynamicImage, edge_cols: u32) -> Option<DimZeroHit> 
 /// ink touching them means the window is clipping or bleeding a neighbour glyph
 /// (CG-3 offset drift).
 pub fn prepare_cell_binary(img: &DynamicImage) -> GrayImage {
+    prepare_cell_binary_at(img, cell_upscale_factor(img.height()))
+}
+
+/// [`prepare_cell_binary`] at the factor the cell got before PR 158 capped
+/// it, or `None` when the cap does not change this cell's factor.
+///
+/// The cap only binds on crops 28 to 38 px tall. On a 1440p 6v6 board that
+/// is the bottom row alone: [`crop_player_row`] cuts it off at the edge of
+/// the scoreboard crop (54 of 77 px), so its cells are 38 px tall and get
+/// 64/39 = 1.641 instead of 64/38 = 1.684. Tesseract's read of a small
+/// glyph flips with tiny factor changes. On `accepted_20261008_000324` a
+/// white 8 reads at 1.60, 1.62, 1.684, 1.70 and 1.80 but is empty at 1.641,
+/// 1.66 and 2.0. On `accepted_20261008_001449` a white 183 reads at 1.0,
+/// 1.5, 1.684 and 2.0 but is empty at 1.60 to 1.66 (Scuffed Vision
+/// baseline, PR 158). The per-cell read retries here when the capped read
+/// is empty, so the cap never loses a cell the old factor read.
+pub fn prepare_cell_binary_uncapped(img: &DynamicImage) -> Option<GrayImage> {
+    let h = img.height();
+    let capped = cell_upscale_factor(h);
+    let uncapped = uncapped_cell_upscale_factor(h);
+    ((uncapped - capped).abs() > 1e-9).then(|| prepare_cell_binary_at(img, uncapped))
+}
+
+fn prepare_cell_binary_at(img: &DynamicImage, factor: f64) -> GrayImage {
     let masked = hsv_white_mask(img);
     let gray = DynamicImage::ImageRgb8(masked).to_luma8();
-    let work_img = upscale_cell_for_ocr(&gray);
+    let work_img = upscale_cell_at(&gray, factor);
 
     let (ww, hh) = work_img.dimensions();
     let mut binary = GrayImage::new(ww, hh);
@@ -463,19 +551,26 @@ pub fn prepare_cell_binary(img: &DynamicImage) -> GrayImage {
     binary
 }
 
+/// Test helper: [`upscale_cell_at`] at the normal [`cell_upscale_factor`].
+#[cfg(test)]
+fn upscale_cell_for_ocr(gray: &GrayImage) -> GrayImage {
+    upscale_cell_at(gray, cell_upscale_factor(gray.height()))
+}
+
 /// CG-4 D: upscale **only** cells with height &lt; [`CELL_UPSCALE_TRIGGER_H`]
 /// toward [`CELL_UPSCALE_TARGET_H`] (factor capped at [`CELL_UPSCALE_MAX_FACTOR`],
 /// and at [`CELL_UPSCALE_FACTOR_CAP`] once the crop is at least
 /// [`CELL_UPSCALE_CAP_MIN_H`]). Native-height cells pass through unchanged so
 /// dim low-contrast glyphs are not smooth-warped into phantom digits.
 /// CatmullRom (not Lanczos). Lanczos on dim "0" glyphs produced conf-96 "9"
-/// phantoms at any factor ≥1.05 (Claude reject).
-fn upscale_cell_for_ocr(gray: &GrayImage) -> GrayImage {
+/// phantoms at any factor ≥1.05 (Claude reject). `factor` is normally
+/// [`cell_upscale_factor`]; [`prepare_cell_binary_uncapped`] passes the
+/// uncapped one.
+fn upscale_cell_at(gray: &GrayImage, factor: f64) -> GrayImage {
     let (w, h) = gray.dimensions();
     if w == 0 || h == 0 || h >= CELL_UPSCALE_TRIGGER_H {
         return gray.clone();
     }
-    let factor = cell_upscale_factor(h);
     if factor < 1.05 {
         return gray.clone();
     }
@@ -486,15 +581,20 @@ fn upscale_cell_for_ocr(gray: &GrayImage) -> GrayImage {
 
 /// Height to scale factor. 1.0 at or above the trigger (no upscale).
 fn cell_upscale_factor(h: u32) -> f64 {
+    let toward = uncapped_cell_upscale_factor(h);
+    if h >= CELL_UPSCALE_CAP_MIN_H {
+        toward.min(CELL_UPSCALE_FACTOR_CAP)
+    } else {
+        toward
+    }
+}
+
+/// [`cell_upscale_factor`] without the [`CELL_UPSCALE_FACTOR_CAP`] cap.
+fn uncapped_cell_upscale_factor(h: u32) -> f64 {
     if h == 0 || h >= CELL_UPSCALE_TRIGGER_H {
         1.0
     } else {
-        let toward = (CELL_UPSCALE_TARGET_H as f64 / h as f64).min(CELL_UPSCALE_MAX_FACTOR);
-        if h >= CELL_UPSCALE_CAP_MIN_H {
-            toward.min(CELL_UPSCALE_FACTOR_CAP)
-        } else {
-            toward
-        }
+        (CELL_UPSCALE_TARGET_H as f64 / h as f64).min(CELL_UPSCALE_MAX_FACTOR)
     }
 }
 
@@ -2135,6 +2235,35 @@ mod dim_zero_tests {
     }
 
     #[test]
+    fn dim_zero_confidence_follows_the_documented_scale() {
+        use super::dim_zero_confidence;
+        assert_eq!(dim_zero_confidence(38, 22), 55, "the floor");
+        assert_eq!(dim_zero_confidence(30, 40), 55, "never below the floor");
+        assert_eq!(dim_zero_confidence(44, 0), 95, "the ceiling");
+        assert_eq!(dim_zero_confidence(60, 0), 95, "never above the ceiling");
+        assert!(dim_zero_confidence(41, 5) >= 78);
+        assert!(dim_zero_confidence(42, 4) > dim_zero_confidence(40, 4));
+        assert!(dim_zero_confidence(42, 2) > dim_zero_confidence(42, 10));
+    }
+
+    #[test]
+    fn a_hit_carries_its_geometric_confidence_and_the_edge_penalty() {
+        use super::{DIM_ZERO_EDGE_PENALTY, dim_zero_confidence};
+        let hit = dim_zero_glyph(&dim_zero_cell(), 2).expect("centered dim ring");
+        assert_eq!(
+            hit.confidence,
+            dim_zero_confidence(hit.hole_extent_pct, hit.centre_offset_pct)
+        );
+        assert!(hit.confidence >= 70, "a clean ring is not suspect: {hit:?}");
+        let edge = dim_zero_glyph(&dim_zero_touching_left_edge(), 2).expect("edge ring");
+        assert_eq!(
+            edge.confidence,
+            dim_zero_confidence(edge.hole_extent_pct, edge.centre_offset_pct)
+                - DIM_ZERO_EDGE_PENALTY
+        );
+    }
+
+    #[test]
     fn a_bright_ring_is_not_the_dim_zero_path() {
         let mut img = cell(48, 56);
         paint_ring(&mut img, 24.0, 28.0, 8.0, 14.0, 3.0, Rgb([236, 236, 236]));
@@ -2246,5 +2375,27 @@ mod dim_zero_tests {
             assert!(!is_zero(&dim_ten_gap(3, gap)), "3px stroke at gap {gap}");
         }
         assert!(!is_zero(&dim_ten()), "fixture gap");
+    }
+}
+
+#[cfg(test)]
+mod uncapped_retry_tests {
+    use super::{prepare_cell_binary, prepare_cell_binary_uncapped};
+    use image::{DynamicImage, RgbImage};
+
+    fn blank(h: u32) -> DynamicImage {
+        DynamicImage::ImageRgb8(RgbImage::new(40, h))
+    }
+
+    #[test]
+    fn only_capped_heights_get_an_uncapped_retry() {
+        // 38 px is the truncated bottom row at native: capped to 64/39.
+        let retry = prepare_cell_binary_uncapped(&blank(38)).expect("38 px is capped");
+        let capped = prepare_cell_binary(&blank(38));
+        assert_eq!(retry.height(), 64, "64/38 of 38 px");
+        assert_eq!(capped.height(), 62, "64/39 of 38 px");
+        for h in [20, 27, 39, 44, 48, 60] {
+            assert!(prepare_cell_binary_uncapped(&blank(h)).is_none(), "h={h}");
+        }
     }
 }

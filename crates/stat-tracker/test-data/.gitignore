@@ -5,3 +5,6 @@
 # Name-free single stat cells. The child gitignore narrows this to the PNGs.
 !real-cells/
 !real-cells/**
+# Name-free cells and name-blanked boards from the Scuffed Vision baseline.
+!vision-baseline/
+!vision-baseline/**

@@ -2023,6 +2023,15 @@ enum FrameAnalysisOutcome {
         frame: image::DynamicImage,
         dip_count: usize,
     },
+    /// Row structure is there, but the row pitch does not say 5v5 or 6v6
+    /// without contradiction (`RowScan::checked_team_size`). Reading it with
+    /// a guessed size cuts every row one slot off and stores neighbours'
+    /// stats at high confidence, so the frame is rejected instead.
+    TeamSizeUncertain {
+        outcome: detect::MatchOutcome,
+        frame: image::DynamicImage,
+        scan: detect::hero_portrait::RowScan,
+    },
 }
 
 /// What a Tab capture actually did, reported back to the session state machine.
@@ -3381,7 +3390,13 @@ fn analyze_frame(
             dip_count: row_scan.dip_count,
         };
     }
-    let team_size = row_scan.team_size();
+    let Some(team_size) = row_scan.checked_team_size() else {
+        return FrameAnalysisOutcome::TeamSizeUncertain {
+            outcome,
+            frame: img,
+            scan: row_scan,
+        };
+    };
     // Pass team_size into portrait match + cell OCR so neither re-detects
     // size or re-crops the full scoreboard (P7).
     let player_match = matcher.match_player_hero_with_team_size(&scoreboard, team_size);
@@ -3698,7 +3713,7 @@ async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<
     })
     .await?;
     let analysis = match analysis {
-        FrameAnalysisOutcome::Analyzed(a) => *a,
+        FrameAnalysisOutcome::Analyzed(a) => Ok(*a),
         FrameAnalysisOutcome::NotAScoreboard {
             outcome,
             frame,
@@ -3706,9 +3721,28 @@ async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<
         } => {
             tracing::warn!(
                 dip_count,
-                "capture rejected by pre-OCR preflight — no scoreboard row structure (saved to debug/rejected)"
+                "capture rejected by pre-OCR preflight: no scoreboard row structure (saved to debug/rejected)"
             );
-            save_rejected_frame(data_dir, frame, "preflight");
+            Err((outcome, frame, "preflight"))
+        }
+        FrameAnalysisOutcome::TeamSizeUncertain {
+            outcome,
+            frame,
+            scan,
+        } => {
+            tracing::warn!(
+                dip_count = scan.dip_count,
+                dip_pitch = ?scan.median_pitch,
+                spectral_pitch = ?scan.spectral_pitch,
+                "capture rejected: row pitch does not settle 5v5 vs 6v6 (saved to debug/rejected)"
+            );
+            Err((outcome, frame, "teamsize"))
+        }
+    };
+    let analysis = match analysis {
+        Ok(a) => a,
+        Err((outcome, frame, reason)) => {
+            save_rejected_frame(data_dir, frame, reason);
             return Ok(CaptureReport {
                 recorded: false,
                 outcome,
