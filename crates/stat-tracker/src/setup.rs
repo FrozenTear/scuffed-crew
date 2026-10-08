@@ -58,7 +58,7 @@ const TRAINING_PAGES: &[TrainingPage] = &[
     TrainingPage {
         text: TRAINING_MAPS,
         xsize: 1800,
-        ysize: 600,
+        ysize: 720,
         exposure: 0,
     },
     TrainingPage {
@@ -133,6 +133,8 @@ King's Row Circuit Royal Dorado Havana\n\
 Junkertown Rialto Route 66 Shambali Monastery\n\
 Watchpoint: Gibraltar Blizzard World Eichenwalde\n\
 Grimsvotn\n\
+Adlersbrunn\n\
+Chateau Guillard\n\
 Hollywood Midtown Numbani Paraiso Neon Junction\n\
 Antarctic Peninsula Busan Ilios Lijiang Tower\n\
 Nepal Oasis Samoa Colosseo Esperanca\n\
@@ -747,6 +749,13 @@ mod training_maps_tests {
             .expect("gibraltar line");
         assert!(gibraltar.contains("Blizzard World"));
         assert!(gibraltar.contains("Eichenwalde"));
+        for sample in ["Adlersbrunn", "Chateau Guillard"] {
+            let line = TRAINING_MAPS
+                .lines()
+                .find(|line| line.contains(sample))
+                .unwrap_or_else(|| panic!("{sample} sample"));
+            assert_eq!(line.trim(), sample);
+        }
         assert!(!gibraltar.contains("Grimsvotn"));
     }
 }

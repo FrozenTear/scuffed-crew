@@ -532,16 +532,30 @@ fn reconcile_watchpoint_votes(norm: &str, found: &mut Vec<String>) {
     if !grimsvotn_present {
         return;
     }
-    let watchpoint_count = norm
+    // A watchpoint token whose next word is Grímsvötn is that card's prefix.
+    // Counting every token treated the same Grímsvötn card, read twice, as
+    // a second map and added a phantom Gibraltar.
+    let words: Vec<&str> = norm
         .split(|c: char| !c.is_ascii_alphanumeric())
-        .filter(|word| *word == "watchpoint")
-        .count();
+        .filter(|word| !word.is_empty())
+        .collect();
+    let mut leftover_watchpoint = 0usize;
+    for (i, word) in words.iter().enumerate() {
+        if *word != "watchpoint" {
+            continue;
+        }
+        let next = words.get(i + 1).copied().unwrap_or("");
+        let next_folded = folded(next).replace('6', "o");
+        if !next_folded.contains("grimsvotn") {
+            leftover_watchpoint += 1;
+        }
+    }
     found.retain(|name| folded(name) != "watchpoint");
     // Glyph fold turns `l` into `i`, so compare the folded token, not the
     // raw spelling. Otherwise a Gibraltar card already in the list is added
     // again.
     let gibraltar = folded("gibraltar");
-    if watchpoint_count >= 2 && !found.iter().any(|name| folded(name) == gibraltar) {
+    if leftover_watchpoint >= 1 && !found.iter().any(|name| folded(name) == gibraltar) {
         found.push("GIBRALTAR".to_string());
     }
 }
@@ -620,6 +634,13 @@ mod tests {
             1,
             "an existing Gibraltar token is not added twice: {labeled:?}"
         );
+
+        let twice = extract_map_names("WATCHPOINT: GRIMSVOTN WATCHPOINT: GRIMSVOTN");
+        assert!(
+            !twice.iter().any(|name| name == "GIBRALTAR"),
+            "the same Grímsvötn card read twice is not a second map: {twice:?}"
+        );
+        assert!(twice.iter().any(|name| name == "GRIMSVOTN"));
     }
 
     #[test]

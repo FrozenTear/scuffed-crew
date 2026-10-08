@@ -144,15 +144,55 @@ pub fn both_teams_have_stats(rows: &[RowOcrResult], team_size: usize) -> bool {
     team1 && team2
 }
 
-/// Halloween Eichenwalde is labeled Adlersbrunn. Literal "Eichenwalde" is not.
-pub fn is_adlersbrunn_alias(text: &str) -> bool {
-    let folded = normalize_ocr_glyphs(&text.to_lowercase());
-    folded.contains(&normalize_ocr_glyphs("adlersbrunn"))
+/// PvE Adlersbrunn (Junkenstein) has no enemy team. Do not store it as
+/// Eichenwalde. A real Eichenwalde board, or an alias board with both
+/// teams, is kept.
+pub fn reject_pve_adlersbrunn(alias: bool, map_name: &str, both_teams: bool) -> bool {
+    alias && map_name == "Eichenwalde" && !both_teams
 }
 
-/// Deathmatch maps are kept on disk and never uploaded.
+/// Adlersbrunn is the Junkenstein event map. The both-teams gate excludes
+/// the PvE board, which has no enemy team. Literal "Eichenwalde" is not
+/// an alias. A one-letter misread counts when it is closer to Adlersbrunn
+/// than to Eichenwalde and the same matcher would store Eichenwalde.
+pub fn is_adlersbrunn_alias(text: &str) -> bool {
+    let folded = normalize_ocr_glyphs(&text.to_lowercase());
+    let eichenwalde = normalize_ocr_glyphs("eichenwalde");
+    if folded.contains(&eichenwalde) {
+        return false;
+    }
+    let adlersbrunn = normalize_ocr_glyphs("adlersbrunn");
+    if folded.contains(&adlersbrunn) {
+        return true;
+    }
+    if map_from_normalized(&folded, true).as_deref() != Some("Eichenwalde") {
+        return false;
+    }
+    best_word_score(&folded, &adlersbrunn) > best_word_score(&folded, &eichenwalde)
+}
+
+fn best_word_score(text: &str, pattern: &str) -> f64 {
+    text.split_whitespace()
+        .map(|word| normalized_levenshtein(word, pattern))
+        .fold(0.0_f64, f64::max)
+}
+
+/// Deathmatch maps are kept in the local store and never uploaded.
+/// Only a trusted map read (top bar, accolade, or an already trusted
+/// session) may divert a capture. A fuzzy board read must not.
 pub fn map_is_untracked(name: &str) -> bool {
     map_mode(name) == Some("Deathmatch")
+}
+
+/// Mode sent for a row. A known map wins, including a manual map correction.
+/// An unknown map keeps the mode stored on the row.
+pub fn uploaded_game_mode(map_name: &str, game_mode: &str) -> String {
+    let from_map = stored_game_mode(map_name);
+    if from_map.is_empty() {
+        game_mode.to_string()
+    } else {
+        from_map
+    }
 }
 
 /// A stats row is uploaded only when neither the map nor the mode is Deathmatch.
@@ -466,18 +506,18 @@ const MAPS: &[(&str, &str)] = &[
     ("Aatlis", "aatlis"),
     ("Hanaoka", "hanaoka"),
     ("Throne of Anubis", "anubis"),
-    // Deathmatch only. `map_mode` returns "Deathmatch" and the daemon does
-    // not upload those sessions.
+    // Deathmatch only. Kept in the local store. Never uploaded.
+    // A trusted read is required before a capture is diverted.
     ("Château Guillard", "guillard"),
 ];
 
 /// Fold OCR-ambiguous glyphs and Latin diacritics so a mangled map name still
 /// matches. `1`, `|`, `l` collapse to `i`; `0` collapses to `o`. Precomposed
-/// accents fold to ASCII (`í`→`i`, `ö`→`o`, and the other letters this table
-/// already stores). Turkish `İ` (U+0130) and dotless `ı` (U+0131) fold to `i`,
-/// matching the site map parser. Combining marks are dropped. Callers
-/// lowercase first; `İ` then arrives as `i` plus a combining dot, which this
-/// fold deletes, leaving the `i`.
+/// accents fold to ASCII (`í` to `i`, `ö` to `o`, and the other letters this
+/// table already stores). Turkish `İ` (U+0130) and dotless `ı` (U+0131) fold
+/// to `i`. Combining marks are dropped. Callers lowercase first; `İ` then
+/// arrives as `i` plus a combining dot, which this fold deletes, leaving `i`.
+/// The explicit `İ` arm still covers a caller that has not lowercased.
 ///
 /// Applied to BOTH the OCR candidate text and the map patterns (see `find_map`,
 /// `fuzzy_match_map`, and the vote reader in `detect::match_start`). The fold is
@@ -603,19 +643,24 @@ fn watchpoint_tails(words: &[String]) -> Vec<String> {
 
 fn score_watchpoint_tail(tail: &str) -> (f64, f64) {
     let grim_pattern = "grimsvotn";
-    let gib_pattern = "gibraltar";
+    // `l` folds to `i`, so the Gibraltar pattern is "gibraitar", not the
+    // spelling "gibraltar". Comparing the unfolded spelling made one-letter
+    // misreads miss on the accolade path.
+    let gib_pattern = normalize_ocr_glyphs("gibraltar");
+    let tail = normalize_ocr_glyphs(tail);
     let folded_six = tail.replace('6', "o");
-    let mut grim = normalized_levenshtein(tail, grim_pattern);
+    let mut grim = normalized_levenshtein(&tail, grim_pattern);
     if folded_six != tail {
         grim = grim.max(normalized_levenshtein(&folded_six, grim_pattern));
     }
     if tail.contains(grim_pattern) || folded_six.contains(grim_pattern) {
         grim = 1.0;
     }
-    let gib = if tail.contains(gib_pattern) {
+    let gib = if tail.contains(&gib_pattern) || folded_six.contains(&gib_pattern) {
         1.0
     } else {
-        normalized_levenshtein(tail, gib_pattern)
+        normalized_levenshtein(&tail, &gib_pattern)
+            .max(normalized_levenshtein(&folded_six, &gib_pattern))
     };
     (grim, gib)
 }
@@ -626,8 +671,11 @@ fn score_watchpoint_tail(tail: &str) -> (f64, f64) {
 /// Route 66 is left alone. The next two tokens are also joined, so
 /// "GRIMS VOTN" can still hit Grímsvötn.
 fn resolve_watchpoint(text: &str) -> WatchpointFamily {
+    // Fold first so an accented letter stays inside its word. Splitting on
+    // every non-ASCII byte used to break "Grímsvötn" into two tokens.
+    let text = normalize_ocr_glyphs(&text.to_lowercase());
     let words: Vec<String> = text
-        .split(|c: char| !c.is_ascii_alphanumeric() && c != '\'')
+        .split(|c: char| !c.is_alphanumeric() && c != '\'')
         .filter(|word| !word.is_empty())
         .map(|word| word.replace('\'', ""))
         .filter(|word| !word.is_empty())
@@ -639,9 +687,6 @@ fn resolve_watchpoint(text: &str) -> WatchpointFamily {
     let stripped = text.replace('\'', "");
     if stripped.contains("grimsvotn") {
         return WatchpointFamily::Named(GRIMSVOTN_NAME);
-    }
-    if text.contains("gibraltar") {
-        return WatchpointFamily::Named(GIBRALTAR_NAME);
     }
     let tails = watchpoint_tails(&words);
     if tails.is_empty() {
@@ -1143,6 +1188,7 @@ mod hero_map_name_tests {
             "WATCHPOINT: GRMSVOTN",
             "WATCHPOINT: GR'IMSVOTN",
             "WATCHPOINT: GRIMS VOTN",
+            "WATCHPOINT: GRIMSV6T",
         ] {
             assert_eq!(
                 exact_map_in_text(raw).as_deref(),
@@ -1169,6 +1215,35 @@ mod hero_map_name_tests {
             canonical_map("Gri\u{301}msvo\u{308}tn").as_deref(),
             Some(GRIMSVOTN)
         );
+        // Dotless ı survives lowercasing, so the accolade path pins that arm.
+        assert_eq!(
+            exact_map_in_text("GR\u{0131}MSVÖTN").as_deref(),
+            Some(GRIMSVOTN)
+        );
+        // İ is already i plus a combining dot after lowercasing. Call the
+        // fold directly so dropping the İ arm fails this test.
+        assert_eq!(normalize_ocr_glyphs("İ"), "i");
+        assert_eq!(normalize_ocr_glyphs("ı"), "i");
+    }
+
+    #[test]
+    fn one_letter_gibraltar_misread_stays_gibraltar() {
+        for raw in [
+            "WATCHPOINT: GIBRALTAP",
+            "WATCHPOINT: GIBRALTA",
+            "WATCHPOINT: CIBRALTAR",
+        ] {
+            assert_eq!(
+                exact_map_in_text(raw).as_deref(),
+                Some(GIBRALTAR_NAME),
+                "accolade {raw}"
+            );
+            assert_eq!(
+                match_map_in_text(raw).as_deref(),
+                Some(GIBRALTAR_NAME),
+                "top bar {raw}"
+            );
+        }
     }
 
     #[test]
@@ -1193,6 +1268,13 @@ mod hero_map_name_tests {
         assert!(!is_adlersbrunn_alias("Eichenwalde"));
         assert!(is_adlersbrunn_alias("Adlersbrunn"));
         assert!(is_adlersbrunn_alias("adiersbrunn"));
+        assert!(is_adlersbrunn_alias("ADLERSBRUNM"));
+        assert!(is_adlersbrunn_alias("ADLER5BRUNN"));
+        assert!(!is_adlersbrunn_alias("EICHENWALD"));
+        assert!(reject_pve_adlersbrunn(true, "Eichenwalde", false));
+        assert!(!reject_pve_adlersbrunn(true, "Eichenwalde", true));
+        assert!(!reject_pve_adlersbrunn(false, "Eichenwalde", false));
+        assert!(!reject_pve_adlersbrunn(true, "Busan", false));
     }
 
     #[test]

@@ -544,9 +544,30 @@ impl LocalStore {
         capture_time: SurrealDatetime,
         outcome: &str,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        // A carried board is written after the current row and carries an
+        // older timestamp. Do not move last_capture_at backwards. Sessions
+        // are listed by that stamp.
+        let mut existing = self
+            .db
+            .query("SELECT last_capture_at FROM match_session WHERE session_id = $sid")
+            .bind(("sid", session_id.to_string()))
+            .await?;
+        let rows: Vec<SessionStamp> = existing.take(0)?;
+        let time = match rows.first() {
+            Some(row) => {
+                let have: chrono::DateTime<chrono::Utc> = row.last_capture_at.into();
+                let incoming: chrono::DateTime<chrono::Utc> = capture_time.into();
+                if have > incoming {
+                    row.last_capture_at
+                } else {
+                    capture_time
+                }
+            }
+            None => capture_time,
+        };
         self.db
             .query("UPDATE match_session SET last_capture_at = $time, capture_count += 1, final_outcome = $outcome WHERE session_id = $sid")
-            .bind(("time", capture_time))
+            .bind(("time", time))
             .bind(("outcome", outcome.to_string()))
             .bind(("sid", session_id.to_string()))
             .await?;
@@ -817,14 +838,16 @@ impl LocalStore {
         session_id: &str,
         map: &str,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let mode = crate::parse::stored_game_mode(map);
         self.db
             .query(
                 "UPDATE match_session SET map_name = $map WHERE session_id = $sid; \
-                 UPDATE personal_match SET map_name = $map, synced = false, \
+                 UPDATE personal_match SET map_name = $map, game_mode = $mode, synced = false, \
                  sync_rev = (sync_rev ?? 0) + 1 \
-                 WHERE session_id = $sid AND map_name != $map",
+                 WHERE session_id = $sid AND (map_name != $map OR game_mode != $mode)",
             )
             .bind(("map", map.to_string()))
+            .bind(("mode", mode.clone()))
             .bind(("sid", session_id.to_string()))
             .await?;
         let map = map.to_string();
@@ -833,6 +856,7 @@ impl LocalStore {
             session_id,
             Some(&|m| {
                 m.map_name = map.clone();
+                m.game_mode = mode.clone();
             }),
         );
         Ok(())
@@ -1125,6 +1149,11 @@ fn match_log_path(data_dir: &Path) -> PathBuf {
 #[derive(Debug, Serialize, Deserialize, SurrealValue)]
 struct DeletedSession {
     session_id: String,
+}
+
+#[derive(Debug, Deserialize, SurrealValue)]
+struct SessionStamp {
+    last_capture_at: SurrealDatetime,
 }
 
 /// Rewrite `matches.jsonl` rows of one session (atomic tmp+rename): apply

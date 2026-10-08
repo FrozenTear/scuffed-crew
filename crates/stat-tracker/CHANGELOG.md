@@ -10,24 +10,49 @@ A bare or ambiguous Watchpoint is not stored as Gibraltar. A following
 word is matched against Grímsvötn and Gibraltar, including the misreads
 the English OCR model produces when í and ö are missing. Turkish İ
 and dotless ı fold to i, so GRİMSVÖTN is Grímsvötn. If neither
-name wins, the read is dropped. Adlersbrunn is stored as Eichenwalde
-when both teams have stat rows. Château Guillard is Deathmatch: it is
-kept in the local store and never uploaded. The desktop totals and
-history skip those rows. The 20-minute
-timer no longer closes an unfinished game, so a long match can still
-take its result. That game is closed at the next new-game boundary,
-on daemon shutdown, or on the next start once the saved session is
-older than 20 minutes. A restart inside that bound resumes the same
-session. The server cannot store an outcome-less game, so the tracker
-does not send those rows. It holds them locally, marked synced, and
-makes no request. Games > card > Victory, Defeat, or Draw requeues
-the row, and the next sync uploads it with edited set. A SetOutcome
-on the still-open session does the same on the next sync, without
-waiting for that close. Uploads from startup, resume, and the
-quiet-close timer no longer block Tab, polling, or shutdown signals.
-A held board on a finished game is carried onto the next session
-when that game closes. `game_mode` is taken from the map that was
-stored.
+name wins, the read is dropped.
+
+The map vote reader treats one Watchpoint prefix beside Grímsvötn as
+that card. A second Watchpoint card is Gibraltar. A lone Watchpoint
+is not a candidate. The same Grímsvötn card, read twice, does not add
+a phantom Gibraltar.
+
+Adlersbrunn is the Junkenstein event map. It is stored as Eichenwalde
+when both teams have stat rows. The both-teams gate excludes the PvE
+board, including a one-letter misread of the alias. Literal
+Eichenwalde is unchanged.
+
+Château Guillard is Deathmatch. A trusted read (the top bar, an
+accolade, or a session that is already Deathmatch) is kept in the
+local store and never uploaded. A fuzzy board read does not rename an
+open game. The desktop totals and history skip those rows, including
+a map corrected to Château Guillard.
+
+The 20-minute timer no longer closes an unfinished game, so a long
+match can still take its result. After 6 hours with no result, that
+timer closes it. An unfinished game is also closed at the next
+new-game boundary, on the next start once the saved session is older
+than 20 minutes, and when a suspend gap is longer than 20 minutes.
+A clean shutdown keeps the skeleton, so a restart inside 20 minutes
+resumes the same session. A finished game still closes and uploads
+on shutdown. A held fresh-match board is not written onto that
+finished game. It stays with the next session.
+
+The server cannot store an outcome-less game, so the tracker does not
+send those rows. On a close it marks that session's unknown rows
+synced locally and makes no request. Other unknown rows stay
+unsynced. Games > card > Victory, Defeat, or Draw requeues the row
+with edited set. The command tick schedules that upload within about
+3 seconds, including while the session is still open.
+
+Uploads from startup, resume, the quiet-close timer, and SetOutcome
+do not block Tab, polling, or shutdown signals. A held board on a
+finished game is carried onto the next session when that game closes
+on the quiet timer or a new-game boundary. `game_mode` follows the
+stored map, including a map correction and the mode sent on upload.
+
+Training text includes an ASCII Grimsvotn line, plus Adlersbrunn and
+Chateau Guillard on their own lines.
 
 ### Install
 
@@ -121,8 +146,8 @@ writes it, and not again on later Tabs. A hero select or ban before that
 board is the other signal. A select after the held board does not split
 by itself. A ban after that held board does not split either.
 An unidentified or implausible row is stored and leaves the held board
-and the streak. A
-plausible continuation, or counted progress, clears them. A hero
+and the streak. A plausible continuation, or counted progress, clears
+them. A hero
 change by itself is not a split. A different row never counts as a reset.
 A row with no id never counts. The new session's outcome is Unknown
 unless the split is the 120-second gap or a different-map Tab, which

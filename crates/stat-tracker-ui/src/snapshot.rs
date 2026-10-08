@@ -45,7 +45,9 @@ pub fn games_from_snapshot(snap: &Snapshot) -> Vec<Game> {
     let mut seen = std::collections::HashSet::new();
     let mut out = Vec::new();
     for m in &snap.matches {
-        if !stat_tracker::parse::stats_row_is_tracked(&m.map_name, &m.game_mode) {
+        let map = m.display_map_name();
+        let mode = stat_tracker::parse::uploaded_game_mode(map, &m.game_mode);
+        if !stat_tracker::parse::stats_row_is_tracked(map, &mode) {
             continue;
         }
         if m.session_id.is_empty() {
@@ -127,5 +129,15 @@ mod tests {
                 .iter()
                 .all(|map| map.map_name != "Château Guillard")
         );
+
+        let mut corrected = snap.matches[0].clone();
+        corrected.session_id = "edited-to-dm".into();
+        corrected.map_name = "Busan".into();
+        corrected.game_mode = "Control".into();
+        corrected.corrected_map_name = Some("Château Guillard".into());
+        snap.matches.insert(0, corrected);
+        let games = games_from_snapshot(&snap);
+        assert!(games.iter().all(|game| game.session_id != "edited-to-dm"));
+        assert_eq!(games.len(), tracked);
     }
 }

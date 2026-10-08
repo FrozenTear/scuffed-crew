@@ -333,7 +333,7 @@ impl SyncClient {
                 session_id: m.session_id.clone(),
                 hero: m.display_hero().to_string(),
                 map_name: m.display_map_name().to_string(),
-                game_mode: m.game_mode.clone(),
+                game_mode: crate::parse::uploaded_game_mode(m.display_map_name(), &m.game_mode),
                 role: m.display_role().to_string(),
                 outcome: m.display_outcome().to_string(),
                 elims: m.display_elims(),
