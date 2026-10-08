@@ -340,7 +340,9 @@ First visit → create admin if `setup-status` still needs setup.
 
 Each stored entry stays fresh for `TTL` times a factor chosen once in the inclusive range 0.8 to 1.2. Keys filled together after a restart therefore do not all expire on the same tick. Past that window the handler keeps serving the previous board, with its original `cached_at`, while exactly one background refresh runs for that key. A request waits for a scan only when the key is cold, or when the stored board is older than 10 TTLs. A failed refresh is not stored, so the previous board stays until a later refresh succeeds.
 
-At most `LEADERBOARD_CACHE_MAX_SCANS` scans run at once (default 2, clamped to 1..=8). Cold loads and background refreshes share that cap and wait for a free slot.
+At most `LEADERBOARD_CACHE_MAX_SCANS` scans run at once (default 2, clamped to 1..=8). Background refreshes may use at most one fewer slot than that cap, and always at least one. They try once and do not wait: if no refresh slot is free, the refresh is skipped, the stale board stays, and the next try waits about half a TTL so the key does not spin. Cold keys and boards older than 10 TTLs may use any free slot, including the one a refresh cannot take, so they are not queued behind background refreshes. A blocking read whose refresh is already running joins that one scan.
+
+Under saturation those skipped refreshes add up, so a board is commonly 2 to 3 TTLs old. That is the trade for keeping a cold read off the refresh queue. `LEADERBOARD_CACHE_MAX_SCANS` and `LEADERBOARD_CACHE_TTL_SECS` are the knobs. The 10 TTL cap still forces a wait, so a board is not served older than that.
 
 `limit` is rounded up to 10, 25, 50, or 100 before the cache key and the database query. The JSON `rows` array is then cut back to the limit the caller asked for, so an unusual limit does not add another key.
 

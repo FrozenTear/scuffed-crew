@@ -14,7 +14,13 @@
 //! refresh runs in the background, so a restart does not make every key
 //! block again on the same tick. Each entry's window is the TTL times a
 //! factor in 0.8..=1.2. A board older than 10 TTLs is not served; that
-//! request waits for the refresh. At most a few scans run at once.
+//! request waits for a scan. Background refreshes may use at most one
+//! fewer slot than the scan cap (and at least one). They do not wait in
+//! line: if no refresh slot is free the refresh is skipped and tried
+//! again after half a TTL. Cold keys and boards past 10 TTLs may use any
+//! free slot, including one a refresh cannot take, so they are not queued
+//! behind those refreshes. A blocking read whose key is already refreshing
+//! joins that scan.
 //!
 //! The cache is per process. A restart clears it, and two instances do not
 //! share it. A failed load is not stored. If a previous board for the same
@@ -30,7 +36,7 @@ use std::time::{Duration, Instant};
 use chrono::{DateTime, Utc};
 use rand::Rng;
 use scuffed_types::MemberLeaderboardRow;
-use tokio::sync::{Semaphore, watch};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, watch};
 
 /// Default lifetime when `LEADERBOARD_CACHE_TTL_SECS` is unset, blank, or not an integer.
 pub const DEFAULT_TTL_SECS: u64 = 30;
@@ -141,6 +147,9 @@ struct Entry {
     stored_at_ms: u64,
     /// How long this entry stays fresh. `TTL * jitter`, with jitter in 0.8..=1.2.
     fresh_for_ms: u64,
+    /// Earliest monotonic time a skipped background refresh may be tried again.
+    /// Zero means there is no backoff.
+    next_refresh_ms: u64,
 }
 
 #[derive(Clone, Copy)]
@@ -155,6 +164,18 @@ enum FlightState {
     Pending,
     Ready(Arc<CachedBoard>),
     Failed(FailKind),
+    /// The background refresh did not get a slot. No scan ran.
+    Skipped,
+}
+
+/// Permits held for the duration of one scan.
+///
+/// A refresh holds both the shared cap and a refresh-budget permit, so it
+/// cannot occupy the slot reserved for blocking reads. A blocking read holds
+/// only the shared cap.
+struct HeldScan {
+    _total: OwnedSemaphorePermit,
+    _refresh: Option<OwnedSemaphorePermit>,
 }
 
 #[derive(Default)]
@@ -230,13 +251,22 @@ enum Begin {
     },
 }
 
+enum Follow<E> {
+    Ready(Result<CachedBoard, CacheError<E>>),
+    /// The flight we joined did not scan. Become the leader if we still must.
+    Retry,
+}
+
 /// Process-local leaderboard cache. Cheap to clone (`Arc` inside).
 #[derive(Clone)]
 pub struct LeaderboardCache {
     inner: Arc<Mutex<Inner>>,
     ttl: Duration,
     max_entries: usize,
+    /// Shared cap. Blocking reads wait on this. Refreshes only try it.
     scans: Arc<Semaphore>,
+    /// Refresh budget: `max(1, MAX_SCANS - 1)`. Never waited on.
+    refresh_scans: Arc<Semaphore>,
     jitter: JitterMode,
     clock: Arc<dyn CacheClock>,
     #[cfg(test)]
@@ -273,6 +303,7 @@ impl LeaderboardCache {
             ttl,
             max_entries: max_entries.max(1),
             scans: Arc::new(Semaphore::new(scans)),
+            refresh_scans: Arc::new(Semaphore::new(refresh_slots(scans))),
             jitter,
             clock,
             #[cfg(test)]
@@ -290,22 +321,73 @@ impl LeaderboardCache {
         Fut: Future<Output = Result<Vec<MemberLeaderboardRow>, E>> + Send + 'static,
         E: LoadError + Send + 'static,
     {
-        match self.begin(&key) {
-            Begin::Hit(board) | Begin::ServeStale { board, lead: None } => Ok(board),
-            Begin::ServeStale {
-                board,
-                lead: Some(tx),
-            } => {
-                let cache = self.clone();
-                let key = key.clone();
-                tokio::spawn(async move {
-                    let _ = cache.lead(key, tx, load).await;
-                });
-                Ok(board)
+        let mut load = Some(load);
+        loop {
+            match self.begin(&key) {
+                Begin::Hit(board) | Begin::ServeStale { board, lead: None } => return Ok(board),
+                Begin::ServeStale {
+                    board,
+                    lead: Some(tx),
+                } => {
+                    if let Some(permit) = self.try_refresh_permit() {
+                        let load = load.take().expect("loader is used once");
+                        let cache = self.clone();
+                        let key = key.clone();
+                        tokio::spawn(async move {
+                            let _ = cache.lead(key, tx, load, Some(permit)).await;
+                        });
+                    } else {
+                        // No refresh slot. Do not queue behind the scans that
+                        // are already running, and do not call `load`.
+                        self.skip_refresh(&key, tx);
+                    }
+                    return Ok(board);
+                }
+                Begin::Wait(rx) => match self.finish_follower(rx, &key).await {
+                    Follow::Ready(result) => return result,
+                    Follow::Retry => continue,
+                },
+                Begin::Lead { tx } => {
+                    let load = load.take().expect("loader is used once");
+                    let permit = self.acquire_blocking().await;
+                    return self.lead(key, tx, load, permit).await;
+                }
             }
-            Begin::Wait(rx) => self.finish_follower(rx, &key).await,
-            Begin::Lead { tx } => self.lead(key, tx, load).await,
         }
+    }
+
+    /// Take a refresh slot without waiting. `None` means skip this attempt.
+    fn try_refresh_permit(&self) -> Option<HeldScan> {
+        let refresh = self.refresh_scans.clone().try_acquire_owned().ok()?;
+        let total = match self.scans.clone().try_acquire_owned() {
+            Ok(total) => total,
+            Err(_) => return None,
+        };
+        Some(HeldScan {
+            _total: total,
+            _refresh: Some(refresh),
+        })
+    }
+
+    /// Wait for any free scan slot. Refreshes never sit in this queue.
+    async fn acquire_blocking(&self) -> Option<HeldScan> {
+        let total = self.scans.clone().acquire_owned().await.ok()?;
+        Some(HeldScan {
+            _total: total,
+            _refresh: None,
+        })
+    }
+
+    fn skip_refresh(&self, key: &LeaderboardKey, tx: watch::Sender<FlightState>) {
+        {
+            let mut guard = self.lock();
+            let backoff = self.refresh_backoff_ms();
+            if let Some(entry) = guard.entries.get_mut(key) {
+                entry.next_refresh_ms = self.clock.now_ms().saturating_add(backoff);
+            }
+            guard.inflight.remove(key);
+        }
+        let _ = tx.send(FlightState::Skipped);
     }
 
     fn begin(&self, key: &LeaderboardKey) -> Begin {
@@ -317,9 +399,10 @@ impl LeaderboardCache {
                 entry.board.as_ref().clone(),
                 now.saturating_sub(entry.stored_at_ms),
                 entry.fresh_for_ms,
+                entry.next_refresh_ms,
             )
         });
-        if let Some((board, age, fresh_for_ms)) = stored {
+        if let Some((board, age, fresh_for_ms, next_refresh_ms)) = stored {
             if age < fresh_for_ms {
                 touch(&mut guard, key);
                 return Begin::Hit(board);
@@ -331,6 +414,12 @@ impl LeaderboardCache {
                     self.followers.fetch_add(1, Ordering::SeqCst);
                     return Begin::Wait(rx.clone());
                 }
+                return Begin::ServeStale { board, lead: None };
+            }
+            // A skipped refresh stays stale until the backoff elapses, so a
+            // busy cap does not spin a new attempt on every request. Past
+            // 10 TTLs this does not apply: that request has to scan.
+            if !too_stale && now < next_refresh_ms {
                 return Begin::ServeStale { board, lead: None };
             }
             let (tx, rx) = watch::channel(FlightState::Pending);
@@ -359,15 +448,13 @@ impl LeaderboardCache {
         key: LeaderboardKey,
         tx: watch::Sender<FlightState>,
         load: F,
+        permit: Option<HeldScan>,
     ) -> Result<CachedBoard, CacheError<E>>
     where
         F: FnOnce() -> Fut,
         Fut: Future<Output = Result<Vec<MemberLeaderboardRow>, E>>,
         E: LoadError + Send + 'static,
     {
-        // Cold loads and background refreshes share this cap. Waiting here
-        // is the point: a wave of expiries must not all scan at once.
-        let permit = self.scans.clone().acquire_owned().await;
         // Stamp the board when the query starts. A scan that runs for a
         // second must not be labeled as if it finished just now.
         let started_ms = self.clock.now_ms();
@@ -391,6 +478,7 @@ impl LeaderboardCache {
                         board: Arc::clone(&board),
                         stored_at_ms: started_ms,
                         fresh_for_ms,
+                        next_refresh_ms: 0,
                     },
                 );
                 let _ = tx.send(FlightState::Ready(Arc::clone(&board)));
@@ -416,7 +504,7 @@ impl LeaderboardCache {
         &self,
         mut rx: watch::Receiver<FlightState>,
         key: &LeaderboardKey,
-    ) -> Result<CachedBoard, CacheError<E>> {
+    ) -> Follow<E> {
         loop {
             let state = rx.borrow().clone();
             match state {
@@ -425,22 +513,52 @@ impl LeaderboardCache {
                         break;
                     }
                 }
-                FlightState::Ready(board) => return Ok(board.as_ref().clone()),
+                FlightState::Ready(board) => {
+                    return Follow::Ready(Ok(board.as_ref().clone()));
+                }
                 FlightState::Failed(FailKind::Rejected) => {
-                    return Err(CacheError::Leader(FailKind::Rejected));
+                    return Follow::Ready(Err(CacheError::Leader(FailKind::Rejected)));
                 }
                 FlightState::Failed(FailKind::Unavailable) => {
                     if let Some(board) = self.stale(key) {
-                        return Ok(board);
+                        return Follow::Ready(Ok(board));
                     }
-                    return Err(CacheError::Leader(FailKind::Unavailable));
+                    return Follow::Ready(Err(CacheError::Leader(FailKind::Unavailable)));
+                }
+                // The refresh we joined never scanned. Try again so a
+                // blocking reader becomes the leader instead of hanging.
+                FlightState::Skipped => {
+                    if self.must_block(key) {
+                        return Follow::Retry;
+                    }
+                    if let Some(board) = self.stale(key) {
+                        return Follow::Ready(Ok(board));
+                    }
+                    return Follow::Retry;
                 }
             }
         }
-        if let Some(board) = self.stale(key) {
-            return Ok(board);
+        if self.must_block(key) {
+            return Follow::Retry;
         }
-        Err(CacheError::Leader(FailKind::Unavailable))
+        if let Some(board) = self.stale(key) {
+            return Follow::Ready(Ok(board));
+        }
+        Follow::Ready(Err(CacheError::Leader(FailKind::Unavailable)))
+    }
+
+    fn must_block(&self, key: &LeaderboardKey) -> bool {
+        let guard = self.lock();
+        let now = self.clock.now_ms();
+        let max_stale = self.ttl_ms().saturating_mul(MAX_STALE_FACTOR);
+        match guard.entries.get(key) {
+            None => true,
+            Some(entry) => now.saturating_sub(entry.stored_at_ms) >= max_stale,
+        }
+    }
+
+    fn refresh_backoff_ms(&self) -> u64 {
+        (self.ttl_ms() / 2).max(1)
     }
 
     fn stale(&self, key: &LeaderboardKey) -> Option<CachedBoard> {
@@ -531,6 +649,12 @@ pub fn truncate_to_requested<T>(mut rows: Vec<T>, requested: u32) -> Vec<T> {
         rows.truncate(n);
     }
     rows
+}
+
+/// Background refreshes may use at most one fewer slot than `max_scans`,
+/// and always at least one. The leftover slot is for blocking reads.
+fn refresh_slots(max_scans: usize) -> usize {
+    max_scans.saturating_sub(1).max(1)
 }
 
 fn fresh_for_ms(ttl_ms: u64, jitter_millis: u64) -> u64 {
@@ -676,6 +800,9 @@ mod tests {
         assert_eq!(scans_from_raw(Some("1")), 1);
         assert_eq!(scans_from_raw(Some("8")), 8);
         assert_eq!(scans_from_raw(Some("9")), 8);
+        assert_eq!(refresh_slots(1), 1);
+        assert_eq!(refresh_slots(2), 1);
+        assert_eq!(refresh_slots(8), 7);
 
         assert_eq!(limit_bucket(0), 10);
         assert_eq!(limit_bucket(1), 10);
@@ -1405,5 +1532,287 @@ mod tests {
         let board = task.await.unwrap();
         assert_eq!(board.rows[0].member_id, "fresh");
         assert_eq!(done.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn cold_miss_does_not_wait_behind_a_busy_refresh() {
+        let (cache, clock) = cache_built(Duration::from_millis(20), 8, 2, JitterMode::Fixed(1000));
+        assert_eq!(refresh_slots(2), 1);
+        let refresh_loads = Arc::new(AtomicU32::new(0));
+        let cold_started = Arc::new(AtomicU32::new(0));
+        let (hold_tx, hold_rx) = watch::channel(false);
+        let refresh_key = public_key("winrate", 25, "refresh", "");
+
+        cache
+            .get_or_load(refresh_key.clone(), {
+                let refresh_loads = Arc::clone(&refresh_loads);
+                move || {
+                    let refresh_loads = Arc::clone(&refresh_loads);
+                    async move {
+                        refresh_loads.fetch_add(1, Ordering::SeqCst);
+                        Ok::<_, DbErr>(vec![sample("old", 1)])
+                    }
+                }
+            })
+            .await
+            .unwrap();
+        clock.advance(20);
+
+        let mut hold = hold_rx.clone();
+        let cache_bg = cache.clone();
+        let refresh_loads_bg = Arc::clone(&refresh_loads);
+        let refresh_task = tokio::spawn(async move {
+            cache_bg
+                .get_or_load(refresh_key, move || {
+                    let refresh_loads_bg = Arc::clone(&refresh_loads_bg);
+                    async move {
+                        refresh_loads_bg.fetch_add(1, Ordering::SeqCst);
+                        while !*hold.borrow() {
+                            if hold.changed().await.is_err() {
+                                break;
+                            }
+                        }
+                        Ok::<_, DbErr>(vec![sample("refreshed", 2)])
+                    }
+                })
+                .await
+                .unwrap()
+        });
+        wait_until(|| refresh_loads.load(Ordering::SeqCst) >= 2).await;
+
+        let cold = tokio::time::timeout(Duration::from_millis(500), {
+            cache.get_or_load(public_key("winrate", 25, "cold", ""), {
+                let cold_started = Arc::clone(&cold_started);
+                move || {
+                    let cold_started = Arc::clone(&cold_started);
+                    async move {
+                        cold_started.fetch_add(1, Ordering::SeqCst);
+                        Ok::<_, DbErr>(vec![sample("cold", 1)])
+                    }
+                }
+            })
+        })
+        .await
+        .expect("cold miss waited behind the refresh")
+        .unwrap();
+        assert_eq!(cold.rows[0].member_id, "cold");
+        assert_eq!(cold_started.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            refresh_loads.load(Ordering::SeqCst),
+            2,
+            "the refresh must still be the only scan on its key"
+        );
+
+        hold_tx.send(true).unwrap();
+        let refreshed = refresh_task.await.unwrap();
+        assert_eq!(refreshed.rows[0].member_id, "old");
+    }
+
+    #[tokio::test]
+    async fn refresh_without_a_slot_is_skipped_and_stale_is_served() {
+        let (cache, clock) = cache_built(Duration::from_millis(20), 8, 2, JitterMode::Fixed(1000));
+        let (hold_tx, hold_rx) = watch::channel(false);
+        let busy_loads = Arc::new(AtomicU32::new(0));
+        let skipped_loads = Arc::new(AtomicU32::new(0));
+        let busy_key = public_key("games", 25, "busy", "");
+        let skipped_key = public_key("games", 25, "skipped", "");
+
+        cache
+            .get_or_load(busy_key.clone(), {
+                let busy_loads = Arc::clone(&busy_loads);
+                move || {
+                    let busy_loads = Arc::clone(&busy_loads);
+                    async move {
+                        busy_loads.fetch_add(1, Ordering::SeqCst);
+                        Ok::<_, DbErr>(vec![sample("busy-old", 1)])
+                    }
+                }
+            })
+            .await
+            .unwrap();
+        let first = cache
+            .get_or_load(skipped_key.clone(), {
+                let skipped_loads = Arc::clone(&skipped_loads);
+                move || {
+                    let skipped_loads = Arc::clone(&skipped_loads);
+                    async move {
+                        skipped_loads.fetch_add(1, Ordering::SeqCst);
+                        Ok::<_, DbErr>(vec![sample("kept", 1)])
+                    }
+                }
+            })
+            .await
+            .unwrap();
+        clock.advance(20);
+
+        let mut hold = hold_rx.clone();
+        let cache_bg = cache.clone();
+        let busy_loads_bg = Arc::clone(&busy_loads);
+        let busy_task = tokio::spawn(async move {
+            cache_bg
+                .get_or_load(busy_key, move || {
+                    let busy_loads_bg = Arc::clone(&busy_loads_bg);
+                    async move {
+                        busy_loads_bg.fetch_add(1, Ordering::SeqCst);
+                        while !*hold.borrow() {
+                            if hold.changed().await.is_err() {
+                                break;
+                            }
+                        }
+                        Ok::<_, DbErr>(vec![sample("busy-new", 2)])
+                    }
+                })
+                .await
+                .unwrap()
+        });
+        wait_until(|| busy_loads.load(Ordering::SeqCst) >= 2).await;
+
+        let started = Instant::now();
+        let served = tokio::time::timeout(Duration::from_millis(200), {
+            let skipped_loads = Arc::clone(&skipped_loads);
+            cache.get_or_load(skipped_key.clone(), move || {
+                let skipped_loads = Arc::clone(&skipped_loads);
+                async move {
+                    skipped_loads.fetch_add(1, Ordering::SeqCst);
+                    Ok::<_, DbErr>(vec![sample("should-not-load", 2)])
+                }
+            })
+        })
+        .await
+        .expect("a skipped refresh must not block")
+        .unwrap();
+        assert!(started.elapsed() < Duration::from_millis(200));
+        assert_eq!(served.rows[0].member_id, "kept");
+        assert_eq!(served.cached_at, first.cached_at);
+        assert_eq!(skipped_loads.load(Ordering::SeqCst), 1);
+
+        let again = cache
+            .get_or_load(skipped_key.clone(), {
+                let skipped_loads = Arc::clone(&skipped_loads);
+                move || {
+                    let skipped_loads = Arc::clone(&skipped_loads);
+                    async move {
+                        skipped_loads.fetch_add(1, Ordering::SeqCst);
+                        Ok::<_, DbErr>(vec![sample("should-not-load", 3)])
+                    }
+                }
+            })
+            .await
+            .unwrap();
+        assert_eq!(again.rows[0].member_id, "kept");
+        assert_eq!(skipped_loads.load(Ordering::SeqCst), 1);
+
+        hold_tx.send(true).unwrap();
+        busy_task.await.unwrap();
+        wait_until(|| cache.inflight_len() == 0).await;
+        clock.advance(10);
+        let retried = cache
+            .get_or_load(skipped_key, {
+                let skipped_loads = Arc::clone(&skipped_loads);
+                move || {
+                    let skipped_loads = Arc::clone(&skipped_loads);
+                    async move {
+                        skipped_loads.fetch_add(1, Ordering::SeqCst);
+                        Ok::<_, DbErr>(vec![sample("after-backoff", 4)])
+                    }
+                }
+            })
+            .await
+            .unwrap();
+        assert_eq!(retried.rows[0].member_id, "kept");
+        wait_until(|| skipped_loads.load(Ordering::SeqCst) >= 2 && cache.inflight_len() == 0).await;
+        let stored = cache
+            .get_or_load(public_key("games", 25, "skipped", ""), || async {
+                Ok::<_, DbErr>(vec![sample("should-not-load", 5)])
+            })
+            .await
+            .unwrap();
+        assert_eq!(stored.rows[0].member_id, "after-backoff");
+        assert_eq!(skipped_loads.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn blocking_miss_joins_the_inflight_refresh() {
+        let (cache, clock) = cache_built(Duration::from_millis(20), 8, 2, JitterMode::Fixed(1000));
+        let loads = Arc::new(AtomicU32::new(0));
+        let done = Arc::new(AtomicU32::new(0));
+        let key = public_key("kd", 25, "join", "");
+        let (tx, rx) = watch::channel(false);
+
+        cache
+            .get_or_load(key.clone(), {
+                let loads = Arc::clone(&loads);
+                move || {
+                    let loads = Arc::clone(&loads);
+                    async move {
+                        loads.fetch_add(1, Ordering::SeqCst);
+                        Ok::<_, DbErr>(vec![sample("old", 1)])
+                    }
+                }
+            })
+            .await
+            .unwrap();
+        clock.advance(20);
+
+        let mut gate = rx.clone();
+        let cache_bg = cache.clone();
+        let loads_bg = Arc::clone(&loads);
+        let refresh_key = key.clone();
+        let refresh_task = tokio::spawn(async move {
+            cache_bg
+                .get_or_load(refresh_key, move || {
+                    let loads_bg = Arc::clone(&loads_bg);
+                    async move {
+                        loads_bg.fetch_add(1, Ordering::SeqCst);
+                        while !*gate.borrow() {
+                            if gate.changed().await.is_err() {
+                                break;
+                            }
+                        }
+                        Ok::<_, DbErr>(vec![sample("shared", 2)])
+                    }
+                })
+                .await
+                .unwrap()
+        });
+        wait_until(|| loads.load(Ordering::SeqCst) >= 2).await;
+
+        // 10x the 20ms TTL, while that refresh is still the in-flight scan.
+        clock.advance(180);
+        let mut join_gate = rx.clone();
+        let cache_bg = cache.clone();
+        let loads_bg = Arc::clone(&loads);
+        let done_bg = Arc::clone(&done);
+        let join_key = key.clone();
+        let join_task = tokio::spawn(async move {
+            let board = cache_bg
+                .get_or_load(join_key, move || {
+                    let loads_bg = Arc::clone(&loads_bg);
+                    async move {
+                        loads_bg.fetch_add(1, Ordering::SeqCst);
+                        while !*join_gate.borrow() {
+                            if join_gate.changed().await.is_err() {
+                                break;
+                            }
+                        }
+                        Ok::<_, DbErr>(vec![sample("second-scan", 3)])
+                    }
+                })
+                .await
+                .unwrap();
+            done_bg.store(1, Ordering::SeqCst);
+            board
+        });
+
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        assert_eq!(done.load(Ordering::SeqCst), 0);
+        assert_eq!(loads.load(Ordering::SeqCst), 2);
+
+        tx.send(true).unwrap();
+        let joined = join_task.await.unwrap();
+        let refreshed = refresh_task.await.unwrap();
+        assert_eq!(joined.rows[0].member_id, "shared");
+        assert_eq!(refreshed.rows[0].member_id, "old");
+        assert_eq!(loads.load(Ordering::SeqCst), 2);
     }
 }
