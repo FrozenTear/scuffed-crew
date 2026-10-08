@@ -1038,8 +1038,8 @@ async fn unmatched_api_paths_are_json_404_and_client_routes_stay_the_shell() {
             get_body = Some(body);
         }
     }
-    let get_headers = get_headers.expect("GET");
-    let get_body = get_body.expect("GET");
+    let get_headers = get_headers.expect("the loop must include GET");
+    let get_body = get_body.expect("the loop must include GET");
 
     let (status, headers, body) = exchange(app.clone(), Method::HEAD, "/api/nope").await;
     assert_eq!(status, StatusCode::NOT_FOUND);
@@ -1067,7 +1067,7 @@ async fn unmatched_api_paths_are_json_404_and_client_routes_stay_the_shell() {
 
     // The CORS layer answers every OPTIONS request before the JSON 404.
     let (status, headers, body) = exchange(app.clone(), Method::OPTIONS, "/api/nope").await;
-    assert_eq!(status, StatusCode::OK);
+    assert_eq!(status, StatusCode::OK, "OPTIONS");
     assert!(
         body.is_empty(),
         "OPTIONS must not include a body, got {body:?}"
@@ -1076,7 +1076,7 @@ async fn unmatched_api_paths_are_json_404_and_client_routes_stay_the_shell() {
         headers.get(header::ACCESS_CONTROL_ALLOW_METHODS).is_some(),
         "CORS layer must answer OPTIONS"
     );
-    assert_ne!(content_type(&headers), "application/json");
+    assert_ne!(content_type(&headers), "application/json", "OPTIONS");
 
     // `/api/stats/me/roles` is a registered route (401 without a session).
     // This path is not.
