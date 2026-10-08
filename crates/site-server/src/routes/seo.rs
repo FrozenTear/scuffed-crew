@@ -3,8 +3,9 @@
 //! `/robots.txt` and `/sitemap.xml` are explicit routes so they win over the
 //! `dist/` catch-all (which would otherwise return `index.html` as 200 HTML).
 //! Unmatched `/api` and `/api/*` requests get the JSON error envelope
-//! (`{"error":"Not found"}`) instead of that shell. Cache headers are applied
-//! only to the SPA catch-all, never to `/api/*` or `/uploads`.
+//! (`{"error":"Not found"}`) instead of that shell. The static cache policy
+//! (`cache_control_value`) applies only to `dist/` responses, never to
+//! registered `/api/*` routes or `/uploads`; the unmatched-API 404 is `no-store`.
 //!
 //! # `sc-settings` embed
 //!
@@ -286,7 +287,8 @@ fn unmatched_api_response(method: &Method) -> Response {
     let json = serde_json::to_vec(&ErrorResponse {
         error: "Not found".to_string(),
     })
-    .unwrap_or_else(|_| br#"{"error":"Not found"}"#.to_vec());
+    .expect("ErrorResponse serializes");
+    let len = json.len();
     let body = if *method == Method::HEAD {
         Body::empty()
     } else {
@@ -296,6 +298,7 @@ fn unmatched_api_response(method: &Method) -> Response {
         .status(StatusCode::NOT_FOUND)
         .header(header::CONTENT_TYPE, "application/json")
         .header(header::CACHE_CONTROL, "no-store")
+        .header(header::CONTENT_LENGTH, len.to_string())
         .body(body)
         .expect("unmatched api response")
 }
@@ -2111,7 +2114,10 @@ mod tests {
 
     /// A shell that has the other rewritten tags but no `og:site_name` fails
     /// the bundled-template check. The live `index.html` carries the tag.
+    /// Going through `assert_real_index_rewrite` keeps the requirement on the
+    /// path the bundled file actually uses.
     #[test]
+    #[should_panic(expected = "og:site_name must appear exactly once, found 0")]
     fn template_without_og_site_name_is_rejected() {
         let html = "\
 <!DOCTYPE html><html><head>\
@@ -2120,10 +2126,7 @@ mod tests {
 <meta property=\"og:title\" content=\"Community\">\
 <meta property=\"og:description\" content=\"Desc\">\
 </head><body></body></html>";
-        let err = og_site_name_requirement(html)
-            .expect_err("missing og:site_name must fail the template check");
-        assert!(err.contains("og:site_name"), "{err}");
-        assert!(err.contains("found 0"), "{err}");
+        assert_real_index_rewrite(html);
     }
 
     /// `og:site_name` is required exactly once on every template this check

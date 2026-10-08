@@ -1008,12 +1008,18 @@ async fn missing_index_html_does_not_500() {
 async fn unmatched_api_paths_are_json_404_and_client_routes_stay_the_shell() {
     let tree = TempTree::new("api-404");
     let state = test_state(tree.uploads()).await;
-    // A route merged after `create_router` must still win over the API 404.
-    // `scuffed-server` registers strategy and chat this way.
-    let app = create_router_with_dist(state, tree.dist()).route(
-        "/api/merged-probe",
-        axum::routing::get(|| async { "merged-ok" }),
-    );
+    // A route registered after `create_router` must still win over the API 404.
+    // `scuffed-server` merges strategy (`.merge`) and routes chat and the
+    // websocket (`.route`).
+    let app = create_router_with_dist(state, tree.dist())
+        .route(
+            "/api/merged-probe",
+            axum::routing::get(|| async { "merged-ok" }),
+        )
+        .merge(axum::Router::new().route(
+            "/api/merge-probe",
+            axum::routing::get(|| async { "merge-ok" }),
+        ));
 
     for method in [
         Method::GET,
@@ -1027,6 +1033,10 @@ async fn unmatched_api_paths_are_json_404_and_client_routes_stay_the_shell() {
         assert_json_not_found(&headers, &body, method.as_str());
     }
 
+    let (get_status, get_headers, get_body) = exchange(app.clone(), Method::GET, "/api/nope").await;
+    assert_eq!(get_status, StatusCode::NOT_FOUND);
+    assert_json_not_found(&get_headers, &get_body, "GET length");
+
     let (status, headers, body) = exchange(app.clone(), Method::HEAD, "/api/nope").await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert_eq!(content_type(&headers), "application/json");
@@ -1035,6 +1045,17 @@ async fn unmatched_api_paths_are_json_404_and_client_routes_stay_the_shell() {
         body.is_empty(),
         "HEAD must not include a body, got {body:?}"
     );
+    assert_eq!(
+        get_headers.get(header::CONTENT_LENGTH),
+        headers.get(header::CONTENT_LENGTH),
+        "GET and HEAD Content-Length must match"
+    );
+    let len = get_headers
+        .get(header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<usize>().ok())
+        .expect("content-length");
+    assert_eq!(len, get_body.len());
 
     // `/api/stats/me/roles` is a registered route (401 without a session).
     // This path is not.
@@ -1070,6 +1091,10 @@ async fn unmatched_api_paths_are_json_404_and_client_routes_stay_the_shell() {
     let (status, _, body) = exchange(app.clone(), Method::GET, "/api/merged-probe").await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body, "merged-ok");
+
+    let (status, _, body) = exchange(app.clone(), Method::GET, "/api/merge-probe").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, "merge-ok");
 
     for path in [
         "/",

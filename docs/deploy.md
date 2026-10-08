@@ -238,6 +238,8 @@ The blob lives in memory on each server process for 10 seconds (`PUBLIC_SETTINGS
 
 A missing file under `/assets/`, or a missing top-level file whose extension is a real static type (`js`, `mjs`, `css`, `wasm`, `map`, `svg`, `png`, `jpg`, `jpeg`, `webp`, `gif`, `avif`, `ico`, `woff`, `woff2`, `ttf`, `json` — for example `/favicon.ico` or `/foo.wasm`), is `404` with `Cache-Control: no-store` and a plain-text body. A multi-segment path outside `/assets/` is a client route even when the last segment looks like a file (`/wiki/config.json`, `/blog/foo.png`, `/articles/v1.2.png`, `/wiki/foo.bar`).
 
+Unmatched `/api` and `/api/*` requests (any method) return `404` `application/json` `{"error":"Not found"}` with `Cache-Control: no-store`; a wrong method on a known API path stays `405`.
+
 The app sets `Content-Security-Policy-Report-Only` itself (same-origin scripts,
 Google Fonts, Discord/Google avatar hosts, and `NOSTR_RELAY_URL` for chat
 sockets). Leave CSP off the Caddy block so the two policies do not intersect.
