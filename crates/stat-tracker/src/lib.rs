@@ -10,6 +10,7 @@ pub mod parse;
 pub mod proc_id;
 pub mod sandbox;
 pub mod setup;
+pub mod shadow;
 pub mod stats;
 pub mod storage;
 pub mod sync;

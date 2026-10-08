@@ -4,6 +4,27 @@ User-facing notes for `stat-tracker-v*` GitHub Releases. The release workflow
 prepends the section whose heading matches the tag version (for example
 `## 0.4.15` for `stat-tracker-v0.4.15`).
 
+## 0.4.23
+
+Adds an optional shadow digit reader, off by default. When it is on
+(`shadow_recognizer = true` in config.toml, or
+`SCUFFED_SHADOW_RECOGNIZER=1` for one run), a background thread reads
+each accepted scoreboard with a template digit matcher and writes the
+values and confidences to a local log at
+`<data dir>/shadow/digits.jsonl` (rotated, about 4 MB at most). It
+never changes stored stats, the capture gate, or uploads, and nothing
+from it leaves the machine. Settings does not save the environment
+override into config.toml.
+
+### Install
+
+```sh
+curl --proto '=https' -fsSL https://raw.githubusercontent.com/FrozenTear/scuffed-crew/main/crates/stat-tracker/dist/bootstrap.sh | bash
+```
+
+Or extract the tarball and run `./install.sh`. Pin with
+`STAT_TRACKER_TAG=stat-tracker-v0.4.23`.
+
 ## 0.4.22
 
 A bare or ambiguous Watchpoint is not stored as Gibraltar. A following

@@ -323,39 +323,12 @@ impl SyncClient {
         self.refuse_unsafe_transport()
             .map_err(|e| SyncUploadError::plain(e.to_string()))?;
         let creds = self.credentials();
-        let entries: Vec<StatsUploadEntry> = matches
-            .iter()
-            // Upload the effective (corrected-if-present, else OCR) values so
-            // server aggregates and the leaderboard reflect manual fixes, and
-            // flag edited rows for the site badge. The immutable OCR reads stay
-            // local — the transparency detail lives in the tracker GUI.
-            .map(|m| StatsUploadEntry {
-                session_id: m.session_id.clone(),
-                hero: m.display_hero().to_string(),
-                map_name: m.display_map_name().to_string(),
-                game_mode: crate::parse::uploaded_game_mode(m.display_map_name(), &m.game_mode),
-                role: m.display_role().to_string(),
-                outcome: m.display_outcome().to_string(),
-                elims: m.display_elims(),
-                deaths: m.display_deaths(),
-                assists: m.display_assists(),
-                damage: m.display_damage(),
-                healing: m.display_healing(),
-                mitigation: m.display_mitigation(),
-                played_at: chrono::DateTime::<chrono::Utc>::from(m.played_at),
-                edited: m.is_edited(),
-            })
-            .collect();
-
         let url = format!("{}/api/stats/upload", creds.server_url);
         let resp = self
             .http
             .post(&url)
             .bearer_auth(&creds.token)
-            .json(&StatsUploadRequest {
-                matches: entries,
-                deleted_sessions: deleted_sessions.to_vec(),
-            })
+            .json(&upload_request(matches, deleted_sessions))
             .send()
             .await
             .map_err(|e| SyncUploadError::plain(e.to_string()))?;
@@ -430,6 +403,41 @@ struct AuthPauseFile {
 }
 
 /// Remember that this URL + token was refused (401/403). Mode 0600.
+/// The JSON body `upload_matches` posts. A pure function so tests can pin
+/// the exact bytes (for example, that shadow mode leaves them unchanged).
+pub fn upload_request(
+    matches: &[PersonalMatch],
+    deleted_sessions: &[String],
+) -> StatsUploadRequest {
+    let entries: Vec<StatsUploadEntry> = matches
+        .iter()
+        // Upload the effective (corrected-if-present, else OCR) values so
+        // server aggregates and the leaderboard reflect manual fixes, and
+        // flag edited rows for the site badge. The immutable OCR reads stay
+        // local; the transparency detail lives in the tracker GUI.
+        .map(|m| StatsUploadEntry {
+            session_id: m.session_id.clone(),
+            hero: m.display_hero().to_string(),
+            map_name: m.display_map_name().to_string(),
+            game_mode: crate::parse::uploaded_game_mode(m.display_map_name(), &m.game_mode),
+            role: m.display_role().to_string(),
+            outcome: m.display_outcome().to_string(),
+            elims: m.display_elims(),
+            deaths: m.display_deaths(),
+            assists: m.display_assists(),
+            damage: m.display_damage(),
+            healing: m.display_healing(),
+            mitigation: m.display_mitigation(),
+            played_at: chrono::DateTime::<chrono::Utc>::from(m.played_at),
+            edited: m.is_edited(),
+        })
+        .collect();
+    StatsUploadRequest {
+        matches: entries,
+        deleted_sessions: deleted_sessions.to_vec(),
+    }
+}
+
 pub fn write_auth_pause(data_dir: &Path, server_url: &str, token: &str) -> std::io::Result<()> {
     if let Some(parent) = auth_pause_path(data_dir).parent() {
         std::fs::create_dir_all(parent)?;

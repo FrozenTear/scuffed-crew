@@ -1,7 +1,7 @@
 use stat_tracker::boundary::{self, ResultMark};
 use stat_tracker::capture_gate::{self, Counters, GateState};
 use stat_tracker::hero_auth::{self, HeroAuthState, HeroSource};
-use stat_tracker::{capture, config, detect, ocr, parse, setup, storage, sync};
+use stat_tracker::{capture, config, detect, ocr, parse, setup, shadow, storage, sync};
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -278,6 +278,10 @@ struct DaemonCtx {
     /// Consecutive scoreboard captures that parsed but resolved no map. Drives
     /// the `debug/mapmiss/` region dump (see `EMPTY_MAP_DUMP_THRESHOLD`).
     empty_map_reads: std::sync::atomic::AtomicUsize,
+    /// Shadow digit recognizer (log only), `Some` when `shadow_recognizer`
+    /// is on. Never joined: dropping it on exit drops the sender, so a slow
+    /// shadow frame can not delay the final session save.
+    shadow: Option<shadow::worker::ShadowWorker>,
 }
 
 /// Per-capture parameters decided by the session state machine at Tab time.
@@ -454,6 +458,7 @@ async fn main() -> anyhow::Result<()> {
         debug_ocr: config.debug_ocr_enabled(),
         data_dir,
         empty_map_reads: std::sync::atomic::AtomicUsize::new(0),
+        shadow: shadow::worker::ShadowWorker::start_if_enabled(&config),
     });
     run_loop(ctx).await
 }
@@ -2205,14 +2210,17 @@ struct FrameAnalysis {
     /// Top-bar OCR before canonicalization. The Adlersbrunn alias check
     /// needs the raw label; a literal Eichenwalde read is not an alias.
     map_panel_raw: Option<String>,
-    /// Cropped scoreboard (portrait auto-collection reads from it).
-    scoreboard: image::DynamicImage,
+    /// Cropped scoreboard (portrait auto-collection reads from it). Shared
+    /// with the shadow worker when it is on, never copied.
+    scoreboard: Arc<image::DynamicImage>,
     /// The player's row index, by name match or brightness highlight.
     player_row_idx: Option<usize>,
     /// Detected team size (5 or 6) — portrait geometry depends on it.
     team_size: usize,
     /// The full frame, kept for the rejected-capture archive.
     frame: image::DynamicImage,
+    /// Shadow recognizer input; `None` unless shadow mode is on.
+    shadow_input: Option<shadow::worker::ShadowInput>,
 }
 
 /// Result of the blocking vision pass: a full analysis, or a cheap rejection
@@ -3512,6 +3520,7 @@ fn analyze_frame(
     game_outcome: detect::MatchOutcome,
     allow_banner_recovery: bool,
     session_map_known: bool,
+    shadow_on: bool,
 ) -> FrameAnalysisOutcome {
     // Outcome: prefer the open game's result (read off the accolade
     // screen by the poller); else color-flood detection (only when the
@@ -3537,7 +3546,7 @@ fn analyze_frame(
         frame_outcome
     };
 
-    let scoreboard = ocr::preprocess::crop_scoreboard(&img);
+    let scoreboard = Arc::new(ocr::preprocess::crop_scoreboard(&img));
     // Pre-OCR preflight (H1): a few milliseconds of pixel work that
     // rejects menus/transitions/gameplay/black frames before the
     // expensive portrait-match + calibration + row-OCR pipeline runs.
@@ -3621,6 +3630,12 @@ fn analyze_frame(
         career_hero,
         map_from_panel,
         map_panel_raw,
+        shadow_input: shadow::worker::ShadowInput::when(
+            shadow_on,
+            &scoreboard,
+            team_size,
+            img.height(),
+        ),
         scoreboard,
         player_row_idx: row_idx,
         team_size,
@@ -4000,6 +4015,7 @@ async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<
     // Clone player_name so the blocking closure can own it.
     let player_name_owned = player_name.map(|s| s.to_string());
     let session_map_known = session_map.is_some();
+    let shadow_on = ctx.shadow.is_some();
     let analysis = tokio::task::spawn_blocking(move || {
         analyze_frame(
             img,
@@ -4008,6 +4024,7 @@ async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<
             game_outcome,
             allow_banner_recovery,
             session_map_known,
+            shadow_on,
         )
     })
     .await?;
@@ -4080,6 +4097,7 @@ async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<
         player_row_idx,
         team_size,
         frame: frame_img,
+        shadow_input,
     } = analysis;
     let ocr_result = ocr
         .map_err(anyhow::Error::from_boxed)
@@ -4328,6 +4346,17 @@ async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<
                 ));
             }
             let mut staged = stage_capture(&req, &plan, &facts, captured_at);
+            // Shadow recognizer: hand the accepted board to the log-only
+            // worker. try_send, never blocks; a busy worker drops it.
+            if let (Some(worker), Some(input)) = (&ctx.shadow, &shadow_input) {
+                worker.try_submit(shadow::worker::ShadowJob::new(
+                    input,
+                    &rows,
+                    player_row_idx,
+                    &staged.target_session,
+                    captured_at,
+                ));
+            }
             let split = staged.split;
             outcome = staged.outcome;
             outcome_label = staged.outcome_label.clone();
@@ -4661,7 +4690,7 @@ fn save_rejected_frame(data_dir: &std::path::Path, img: image::DynamicImage, rea
 /// board that OCR'd wrong but still passed every trust gate can be inspected
 /// after the fact (the capture gate holds bad cells, but the underlying crop is
 /// the only way to retune calibration). Fire-and-forget; encode off-runtime.
-fn save_accepted_frame(data_dir: &std::path::Path, board: image::DynamicImage) {
+fn save_accepted_frame(data_dir: &std::path::Path, board: Arc<image::DynamicImage>) {
     let dir = data_dir.join("debug").join("accepted");
     tokio::task::spawn_blocking(move || {
         save_frame_ring(&dir, "accepted", &board, ACCEPTED_KEEP);
@@ -7463,6 +7492,105 @@ mod tests {
             heroes_played: Vec::new(),
             segment_resolutions: Vec::new(),
         }
+    }
+
+    /// Shadow mode is log only: the same capture stored and uploaded with the
+    /// flag off and on gives byte-identical stored rows and upload body. The
+    /// hand-off below is the one the accept path runs after `stage_capture`.
+    #[tokio::test]
+    async fn shadow_flag_on_and_off_store_and_upload_identical_rows() {
+        async fn run(flag_on: bool) -> (String, String, bool) {
+            let dir = tempfile::tempdir().unwrap();
+            let cfg = config::Config {
+                data_dir: dir.path().to_path_buf(),
+                shadow_recognizer: flag_on,
+                ..config::Config::default()
+            };
+            let worker = shadow::worker::ShadowWorker::start_if_enabled(&cfg);
+            assert_eq!(worker.is_some(), flag_on);
+            let scoreboard = Arc::new(image::DynamicImage::new_rgb8(1664, 1007));
+            let rows: Vec<ocr::RowOcrResult> = (0..10)
+                .map(|i| ocr::RowOcrResult {
+                    name: None,
+                    stats: ["12", "3", "4", "5,480", "950", "2,347"]
+                        .iter()
+                        .map(|v| ocr::CellOcrResult {
+                            value: v.to_string(),
+                            confidence: 80 + i,
+                            suspect: false,
+                        })
+                        .collect(),
+                    mean_confidence: 80 + i,
+                })
+                .collect();
+            let rows_before = format!("{rows:?}");
+            let input = shadow::worker::ShadowInput::when(worker.is_some(), &scoreboard, 5, 1440);
+            if let (Some(w), Some(input)) = (&worker, &input) {
+                assert!(w.try_submit(shadow::worker::ShadowJob::new(
+                    input,
+                    &rows,
+                    Some(0),
+                    "sess-shadow",
+                    Utc::now(),
+                )));
+            }
+            let store = storage::LocalStore::open(dir.path()).await.unwrap();
+            let mut row = test_match("sess-shadow", "victory");
+            row.played_at = SurrealDatetime::from(
+                chrono::DateTime::<Utc>::from_timestamp(1_760_000_000, 0).unwrap(),
+            );
+            store.insert_match(row).await.unwrap();
+            let log = dir.path().join("shadow").join("digits.jsonl");
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while flag_on && !log.exists() && std::time::Instant::now() < deadline {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            drop(worker);
+            assert_eq!(
+                format!("{rows:?}"),
+                rows_before,
+                "the hand-off never edits rows"
+            );
+            let stored = store.get_unsynced().await.unwrap();
+            assert_eq!(stored.len(), 1);
+            let stored_json = serde_json::to_string(&stored).unwrap();
+            let body = serde_json::to_string(&sync::upload_request(&stored, &[])).unwrap();
+            (stored_json, body, log.exists())
+        }
+        let (stored_off, body_off, log_off) = run(false).await;
+        let (stored_on, body_on, log_on) = run(true).await;
+        assert_eq!(
+            stored_off, stored_on,
+            "stored rows must not depend on shadow mode"
+        );
+        assert_eq!(
+            body_off, body_on,
+            "upload body must not depend on shadow mode"
+        );
+        assert!(!log_off, "flag off writes no shadow log");
+        assert!(log_on, "flag on wrote its log line");
+    }
+
+    /// The accept path hands the shadow worker shared borrows only, and the
+    /// row commit never sees shadow state.
+    #[test]
+    fn shadow_hook_only_borrows_and_stays_out_of_the_commit() {
+        let src = include_str!("main.rs");
+        let hook = src
+            .find("worker.try_submit(shadow::worker::ShadowJob::new(")
+            .expect("shadow hand-off in the accept path");
+        let call = &src[hook..hook + 300];
+        assert!(call.contains("&rows,"), "{call}");
+        assert!(call.contains("&staged.target_session,"), "{call}");
+        let commit = src
+            .find("async fn commit_capture_rows(")
+            .expect("commit_capture_rows");
+        let body = src[commit..].split("\nasync fn ").next().unwrap();
+        let body = body.split("\nfn ").next().unwrap();
+        assert!(
+            !body.contains("shadow"),
+            "commit_capture_rows must not read shadow state"
+        );
     }
 
     #[tokio::test]
