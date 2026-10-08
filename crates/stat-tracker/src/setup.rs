@@ -58,7 +58,9 @@ const TRAINING_PAGES: &[TrainingPage] = &[
     TrainingPage {
         text: TRAINING_MAPS,
         xsize: 1800,
-        ysize: 720,
+        // 20 lines: 20 * 60px + 60px margin. The repeated names below
+        // need the extra height; a short page busy-spins text2image.
+        ysize: 1260,
         exposure: 0,
     },
     TrainingPage {
@@ -132,6 +134,15 @@ const TRAINING_MAPS: &str = "\
 King's Row Circuit Royal Dorado Havana\n\
 Junkertown Rialto Route 66 Shambali Monastery\n\
 Watchpoint: Gibraltar Blizzard World Eichenwalde\n\
+Grimsvotn\n\
+Adlersbrunn\n\
+Chateau Guillard\n\
+Grimsvotn\n\
+Adlersbrunn\n\
+Chateau Guillard\n\
+Grimsvotn\n\
+Adlersbrunn\n\
+Chateau Guillard\n\
 Grimsvotn\n\
 Adlersbrunn\n\
 Chateau Guillard\n\
@@ -749,12 +760,16 @@ mod training_maps_tests {
             .expect("gibraltar line");
         assert!(gibraltar.contains("Blizzard World"));
         assert!(gibraltar.contains("Eichenwalde"));
-        for sample in ["Adlersbrunn", "Chateau Guillard"] {
-            let line = TRAINING_MAPS
+        for sample in ["Grimsvotn", "Adlersbrunn", "Chateau Guillard"] {
+            let owned: Vec<_> = TRAINING_MAPS
                 .lines()
-                .find(|line| line.contains(sample))
-                .unwrap_or_else(|| panic!("{sample} sample"));
-            assert_eq!(line.trim(), sample);
+                .filter(|line| line.trim() == sample)
+                .collect();
+            assert!(
+                owned.len() >= 4,
+                "{sample} needs repeated own-line samples, got {}",
+                owned.len()
+            );
         }
         assert!(!gibraltar.contains("Grimsvotn"));
     }
