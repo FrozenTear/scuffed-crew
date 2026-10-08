@@ -76,7 +76,7 @@ pub async fn upload_stats(
     let inserted = if stub_matches.is_empty() {
         0
     } else {
-        let inserted = state
+        state
             .db
             .upsert_personal_matches(&daemon.member.id, &stub_matches)
             .await
@@ -87,11 +87,7 @@ pub async fn upload_stats(
                         error: "Internal error".into(),
                     }),
                 )
-            })?;
-        // New games and edits of an existing session both come through this
-        // upsert. Drop the board now so the next read is not stuck on the TTL.
-        state.leaderboard_cache.invalidate();
-        inserted
+            })?
     };
 
     // Tombstones: sessions the user deleted locally. Scoped to this member's
@@ -108,9 +104,6 @@ pub async fn upload_stats(
                 }),
             )
         })?;
-    if deleted > 0 {
-        state.leaderboard_cache.invalidate();
-    }
 
     audit(
         &state.db,

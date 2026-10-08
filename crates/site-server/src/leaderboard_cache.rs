@@ -3,14 +3,16 @@
 //! The query aggregates every `personal_match` row. A load test at main
 //! `9590e52` measured p95 322 ms at 60k rows, 1.2 s at 300k, and 5.7 s at
 //! 1.5M, and those scans queued behind the single Surreal socket so uploads
-//! slowed down too. Results only change when a game is uploaded, so a short
-//! TTL plus a generation bump on upload is enough.
+//! slowed down too. Freshness is the TTL alone (default 30s, clamped to
+//! 5..=300). Uploads do not clear the cache. A generation bump on every
+//! upload dropped in-flight results whenever uploads arrived faster than
+//! the scan, so a busy process never stored a board. A finished load is
+//! always stored. `cached_at` is the wall time when that query started, so
+//! the label does not claim the board is newer than the scan.
 //!
 //! The cache is per process. A restart clears it, and two instances do not
-//! share it. Correctness does not depend on the generation bump: a missed
-//! invalidation still expires within the TTL. A failed load is not stored.
-//! If a previous board for the same key is still in memory, that board is
-//! served instead of the error.
+//! share it. A failed load is not stored. If a previous board for the same
+//! key is still in memory, that board is served instead of the error.
 
 use std::collections::{HashMap, VecDeque};
 use std::future::Future;
@@ -75,7 +77,7 @@ impl LeaderboardKey {
     }
 }
 
-/// A stored board. `cached_at` is wall time from when the load finished.
+/// A stored board. `cached_at` is the wall time when the load started.
 #[derive(Clone, Debug)]
 pub struct CachedBoard {
     pub rows: Vec<MemberLeaderboardRow>,
@@ -110,8 +112,8 @@ pub enum CacheError<E> {
 
 struct Entry {
     board: Arc<CachedBoard>,
+    /// Monotonic time when the query started. The TTL is measured from here.
     stored_at_ms: u64,
-    generation: u64,
 }
 
 #[derive(Clone)]
@@ -123,7 +125,6 @@ enum FlightState {
 
 #[derive(Default)]
 struct Inner {
-    generation: u64,
     order: VecDeque<LeaderboardKey>,
     entries: HashMap<LeaderboardKey, Entry>,
     inflight: HashMap<LeaderboardKey, watch::Receiver<FlightState>>,
@@ -131,6 +132,7 @@ struct Inner {
 
 trait CacheClock: Send + Sync {
     fn now_ms(&self) -> u64;
+    fn wall(&self) -> DateTime<Utc>;
 }
 
 struct SystemClock {
@@ -141,12 +143,17 @@ impl CacheClock for SystemClock {
     fn now_ms(&self) -> u64 {
         self.start.elapsed().as_millis() as u64
     }
+
+    fn wall(&self) -> DateTime<Utc> {
+        Utc::now()
+    }
 }
 
 #[cfg(test)]
 #[derive(Clone)]
 struct ManualClock {
     ms: Arc<AtomicU64>,
+    origin: DateTime<Utc>,
 }
 
 #[cfg(test)]
@@ -154,6 +161,9 @@ impl ManualClock {
     fn new() -> Self {
         Self {
             ms: Arc::new(AtomicU64::new(0)),
+            origin: DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
+                .unwrap()
+                .with_timezone(&Utc),
         }
     }
 
@@ -167,15 +177,16 @@ impl CacheClock for ManualClock {
     fn now_ms(&self) -> u64 {
         self.ms.load(Ordering::SeqCst)
     }
+
+    fn wall(&self) -> DateTime<Utc> {
+        self.origin + chrono::Duration::milliseconds(self.now_ms() as i64)
+    }
 }
 
 enum Begin {
     Hit(CachedBoard),
     Wait(watch::Receiver<FlightState>),
-    Lead {
-        generation: u64,
-        tx: watch::Sender<FlightState>,
-    },
+    Lead { tx: watch::Sender<FlightState> },
 }
 
 /// Process-local leaderboard cache. Cheap to clone (`Arc` inside).
@@ -214,14 +225,6 @@ impl LeaderboardCache {
         }
     }
 
-    /// Drop every fresh hit. In-flight loads still finish, but they do not
-    /// store if this generation moved while they were running. Previous
-    /// boards stay available as the stale fallback when a reload fails.
-    pub fn invalidate(&self) {
-        let mut guard = self.lock();
-        guard.generation = guard.generation.wrapping_add(1);
-    }
-
     pub async fn get_or_load<F, Fut, E>(
         &self,
         key: LeaderboardKey,
@@ -235,7 +238,7 @@ impl LeaderboardCache {
         match self.begin(&key) {
             Begin::Hit(board) => Ok(board),
             Begin::Wait(rx) => self.finish_follower(rx, &key).await,
-            Begin::Lead { generation, tx } => self.lead(key, generation, tx, load).await,
+            Begin::Lead { tx } => self.lead(key, tx, load).await,
         }
     }
 
@@ -251,14 +254,12 @@ impl LeaderboardCache {
         }
         let (tx, rx) = watch::channel(FlightState::Pending);
         guard.inflight.insert(key.clone(), rx);
-        let generation = guard.generation;
-        Begin::Lead { generation, tx }
+        Begin::Lead { tx }
     }
 
     async fn lead<F, Fut, E>(
         &self,
         key: LeaderboardKey,
-        generation: u64,
         tx: watch::Sender<FlightState>,
         load: F,
     ) -> Result<CachedBoard, CacheError<E>>
@@ -267,30 +268,28 @@ impl LeaderboardCache {
         Fut: Future<Output = Result<Vec<MemberLeaderboardRow>, E>>,
         E: LoadError,
     {
+        // Stamp the board when the query starts. A scan that runs for a
+        // second must not be labeled as if it finished just now.
+        let started_ms = self.clock.now_ms();
+        let started = self.clock.wall();
         let result = load().await;
-        let now_ms = self.clock.now_ms();
         let mut guard = self.lock();
-        // Drop the flight before storing so a request that arrives after an
-        // invalidation starts its own load instead of joining this one.
         guard.inflight.remove(&key);
         match result {
             Ok(rows) => {
                 let board = Arc::new(CachedBoard {
                     rows,
-                    cached_at: Utc::now(),
+                    cached_at: started,
                 });
-                if guard.generation == generation {
-                    store(
-                        &mut guard,
-                        self.max_entries,
-                        key,
-                        Entry {
-                            board: Arc::clone(&board),
-                            stored_at_ms: now_ms,
-                            generation,
-                        },
-                    );
-                }
+                store(
+                    &mut guard,
+                    self.max_entries,
+                    key,
+                    Entry {
+                        board: Arc::clone(&board),
+                        stored_at_ms: started_ms,
+                    },
+                );
                 let _ = tx.send(FlightState::Ready(Arc::clone(&board)));
                 Ok(board.as_ref().clone())
             }
@@ -375,9 +374,6 @@ fn take_fresh(
     now_ms: u64,
 ) -> Option<CachedBoard> {
     let entry = inner.entries.get(key)?;
-    if entry.generation != inner.generation {
-        return None;
-    }
     if now_ms.saturating_sub(entry.stored_at_ms) >= ttl_ms {
         return None;
     }
@@ -777,32 +773,93 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn invalidate_forces_a_reload() {
-        let (cache, _clock) = cache_with(Duration::from_secs(30), 4);
+    async fn load_finishing_during_uploads_is_stored_until_ttl() {
+        let (cache, clock) = cache_with(Duration::from_millis(100), 4);
         let loads = Arc::new(AtomicU32::new(0));
+        let uploads = Arc::new(AtomicU32::new(0));
+        let (tx, rx) = watch::channel(false);
         let key = public_key("games", 25, "", "");
+        let started = clock.wall();
 
-        let load = |loads: Arc<AtomicU32>, id: &'static str| {
-            move || {
-                let loads = Arc::clone(&loads);
-                async move {
-                    loads.fetch_add(1, Ordering::SeqCst);
-                    Ok::<_, DbErr>(vec![sample(id, 1)])
-                }
+        let cache_bg = cache.clone();
+        let loads_bg = Arc::clone(&loads);
+        let uploads_bg = Arc::clone(&uploads);
+        let mut gate = rx.clone();
+        let task = tokio::spawn(async move {
+            cache_bg
+                .get_or_load(key, move || {
+                    let loads_bg = Arc::clone(&loads_bg);
+                    let uploads_bg = Arc::clone(&uploads_bg);
+                    async move {
+                        loads_bg.fetch_add(1, Ordering::SeqCst);
+                        while !*gate.borrow() {
+                            if gate.changed().await.is_err() {
+                                break;
+                            }
+                        }
+                        assert!(
+                            uploads_bg.load(Ordering::SeqCst) >= 1,
+                            "uploads must overlap the in-flight query"
+                        );
+                        Ok::<_, DbErr>(vec![sample("held", 4)])
+                    }
+                })
+                .await
+                .unwrap()
+        });
+
+        let wait = Instant::now();
+        while loads.load(Ordering::SeqCst) < 1 {
+            if wait.elapsed() > Duration::from_secs(5) {
+                panic!("load did not start");
             }
-        };
+            tokio::task::yield_now().await;
+        }
+        // Uploads used to bump a generation and drop this result on the way out.
+        uploads.fetch_add(3, Ordering::SeqCst);
+        clock.advance(40);
+        tx.send(true).unwrap();
 
-        let first = cache
-            .get_or_load(key.clone(), load(Arc::clone(&loads), "before"))
+        let board = task.await.unwrap();
+        assert_eq!(board.rows[0].member_id, "held");
+        assert_eq!(board.cached_at, started);
+
+        let hit = cache
+            .get_or_load(public_key("games", 25, "", ""), || async {
+                Ok::<_, DbErr>(vec![sample("should-not-load", 1)])
+            })
             .await
             .unwrap();
-        assert_eq!(first.rows[0].member_id, "before");
-        cache.invalidate();
-        let second = cache
-            .get_or_load(key, load(Arc::clone(&loads), "after"))
+        assert_eq!(hit.rows[0].member_id, "held");
+        assert_eq!(hit.cached_at, started);
+        assert_eq!(loads.load(Ordering::SeqCst), 1);
+
+        clock.advance(59);
+        let still = cache
+            .get_or_load(public_key("games", 25, "", ""), || async {
+                Ok::<_, DbErr>(vec![sample("should-not-load", 1)])
+            })
             .await
             .unwrap();
-        assert_eq!(second.rows[0].member_id, "after");
+        assert_eq!(still.rows[0].member_id, "held");
+        assert_eq!(loads.load(Ordering::SeqCst), 1);
+
+        clock.advance(1);
+        let expired = cache
+            .get_or_load(public_key("games", 25, "", ""), {
+                let loads = Arc::clone(&loads);
+                move || {
+                    let loads = Arc::clone(&loads);
+                    async move {
+                        loads.fetch_add(1, Ordering::SeqCst);
+                        Ok::<_, DbErr>(vec![sample("after-ttl", 1)])
+                    }
+                }
+            })
+            .await
+            .unwrap();
+        assert_eq!(expired.rows[0].member_id, "after-ttl");
+        assert_eq!(expired.cached_at, clock.wall());
         assert_eq!(loads.load(Ordering::SeqCst), 2);
     }
 

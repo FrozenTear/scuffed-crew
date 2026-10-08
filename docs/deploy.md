@@ -338,9 +338,9 @@ First visit → create admin if `setup-status` still needs setup.
 
 `GET /api/public/leaderboards` keeps an in-process cache so the full `personal_match` scan does not run on every request. The default lifetime is 30 seconds (`LEADERBOARD_CACHE_TTL_SECS` in `data/secrets.env`). Values below 5 or above 300 are clamped. A blank or non-numeric value uses 30. The cache is per process: a restart clears it, and two app instances do not share it.
 
-A successful stats upload on that process drops the cache immediately, including an edit of an existing game and a deleted session. If that drop is missed, the board is still at most one TTL old. A failed database read is not stored. If a previous board for the same query is still in memory, the handler may serve it instead of a 500.
+Freshness is that TTL only. A stats upload, an edit, or a deleted session does not clear the cache. Clearing on every upload dropped boards that were still loading once uploads arrived faster than the scan, so a busy process never stored a result. A member's new game shows up on the next miss after the TTL. A failed database read is not stored. If a previous board for the same query is still in memory, the handler may serve it instead of a 500.
 
-The JSON body is an object. `rows` has the same member fields as the old array (`member_id`, `display_name`, `games`, `winrate`, `kd`). `cached_at` is RFC 3339 UTC, the time this process finished the query. The site uses it to show how long ago the board was computed. A cache hit repeats that timestamp.
+The JSON body is an object. `rows` has the same member fields as the old array (`member_id`, `display_name`, `games`, `winrate`, `kd`). `cached_at` is RFC 3339 UTC, the time this process started the query that produced `rows`. The site uses it to show how long ago the board was computed, and refreshes that label while the page is open. A cache hit repeats that timestamp. A response with no `cached_at` still renders the rows; the site hides the label.
 
 The cache key is the metric, limit, season id, hero, and a public audience tag. This route does not take a role or game-mode filter. Anonymous and logged-in callers see the same rows, and inactive members stay off the board. The audience tag is there so a crew-only board cannot be stored in a slot an anonymous caller reads.
 

@@ -173,7 +173,7 @@ pub async fn resolve_season_window(
 /// JSON body for `GET /api/public/leaderboards`.
 ///
 /// `rows` keeps the member fields the array body used to return.
-/// `cached_at` is when this process finished the query that produced `rows`
+/// `cached_at` is when this process started the query that produced `rows`
 /// (RFC 3339 UTC). A cache hit repeats that timestamp.
 #[derive(Serialize)]
 pub struct PublicLeaderboardBody {
@@ -573,7 +573,7 @@ mod cache_http_tests {
     }
 
     #[tokio::test]
-    async fn upload_and_edit_drop_the_cached_board() {
+    async fn upload_and_edit_do_not_drop_the_cached_board() {
         let state = test_state().await;
         let token = "tracker-token-board";
         member_with_token(&state, "onboard", token).await;
@@ -589,15 +589,12 @@ mod cache_http_tests {
             "{cached_at}"
         );
 
-        // Same session, corrected elims: an edit, not a second game.
+        // Same session, corrected elims, then a second game. The cached
+        // board stays until the TTL. Freshness does not depend on uploads.
         post_upload(&app, token, &upload("sess-a", 8, true)).await;
-        let edited = get_board(&app, None).await;
-        assert_eq!(edited["rows"][0]["games"].as_u64(), Some(1));
-        assert_eq!(edited["rows"][0]["kd"].as_f64(), Some(8.0));
-
         post_upload(&app, token, &upload("sess-b", 2, false)).await;
-        let second = get_board(&app, None).await;
-        assert_eq!(second["rows"][0]["games"].as_u64(), Some(2));
+        let still = get_board(&app, None).await;
+        assert_eq!(still, first);
     }
 
     #[tokio::test]

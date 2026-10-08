@@ -111,15 +111,19 @@ const PAGE_CSS: &str = r#"
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 struct LeaderboardPayload {
     rows: Vec<LeaderboardRow>,
-    cached_at: String,
+    /// Missing on an older response. Empty or unparseable hides the label.
+    #[serde(default)]
+    cached_at: Option<String>,
 }
 
 /// "Updated just now" / "Updated 12s ago" / "Updated 3m ago".
-fn updated_label(cached_at: &str) -> String {
+///
+/// An empty string means the label is hidden. A timestamp ahead of `now`
+/// (clock skew) reads as just now. A value that is not RFC 3339 is hidden.
+fn updated_label(cached_at: &str, now: chrono::DateTime<chrono::Utc>) -> String {
     let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(cached_at) else {
         return String::new();
     };
-    let now = chrono::Utc::now();
     let secs = now
         .signed_duration_since(parsed.with_timezone(&chrono::Utc))
         .num_seconds()
@@ -133,11 +137,37 @@ fn updated_label(cached_at: &str) -> String {
     }
 }
 
+fn parse_cached_at(raw: Option<&str>) -> Option<chrono::DateTime<chrono::Utc>> {
+    let raw = raw.map(str::trim).filter(|s| !s.is_empty())?;
+    chrono::DateTime::parse_from_rfc3339(raw)
+        .ok()
+        .map(|dt| dt.with_timezone(&chrono::Utc))
+}
+
 #[component]
 pub fn Leaderboards() -> Element {
     let mut metric = use_signal(|| "winrate".to_string());
     let mut hero = use_signal(|| None::<String>);
     let mut season = use_signal(|| None::<String>);
+    // Last stamp that arrived. A filter change does not clear this, so the
+    // header keeps its label until the next payload lands.
+    let mut shown_at = use_signal(|| None::<chrono::DateTime<chrono::Utc>>);
+    let mut label_tick = use_signal(|| 0u32);
+    // `use_future` spawns on this component's scope. Dioxus drops that task
+    // when the page unmounts, which stops the timer.
+    let _label_timer = use_future(move || async move {
+        loop {
+            #[cfg(feature = "web")]
+            {
+                gloo_timers::future::TimeoutFuture::new(15_000).await;
+            }
+            #[cfg(not(feature = "web"))]
+            {
+                tokio::time::sleep(std::time::Duration::from_secs(15)).await;
+            }
+            label_tick += 1;
+        }
+    });
     let board = use_resource(move || {
         let m = metric();
         let h = hero();
@@ -148,26 +178,31 @@ pub fn Leaderboards() -> Element {
                 url.push_str(&format!("&hero={}", encode_query(&h)));
             }
             let url = season_url(&url, se);
-            ApiClient::web()
-                .fetch::<LeaderboardPayload>(&url)
-                .await
-                .ok()
-                .map(|payload| (payload.rows, updated_label(&payload.cached_at)))
+            match ApiClient::web().fetch::<LeaderboardPayload>(&url).await {
+                Ok(payload) => {
+                    shown_at.set(parse_cached_at(payload.cached_at.as_deref()));
+                    Some(payload.rows)
+                }
+                Err(_) => None,
+            }
         }
     });
+    let _tick = label_tick();
+    let updated = match shown_at() {
+        Some(at) => updated_label(
+            &at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            chrono::Utc::now(),
+        ),
+        None => String::new(),
+    };
 
     rsx! {
         style { {PAGE_CSS} }
         main { class: "lb-page",
             h1 { "Leaderboards" }
             p { class: "lb-sub", "Ranked from uploaded personal stats (OCR). Sparse data is normal." }
-            {
-                match board.read().as_ref() {
-                    Some(Some((_, updated))) if !updated.is_empty() => rsx! {
-                        p { class: "lb-updated", "{updated}" }
-                    },
-                    _ => rsx! {},
-                }
+            if !updated.is_empty() {
+                p { class: "lb-updated", "{updated}" }
             }
 
             div { class: "lb-tabs",
@@ -210,13 +245,13 @@ pub fn Leaderboards() -> Element {
                     match board.read().as_ref() {
                         None => rsx! { p { class: "lb-status", "Loading..." } },
                         Some(None) => rsx! { p { class: "lb-status", "Couldn't load leaderboards." } },
-                        Some(Some((list, _))) if list.is_empty() && hero().is_some() => rsx! {
+                        Some(Some(list)) if list.is_empty() && hero().is_some() => rsx! {
                             p { class: "lb-status", "No ranked matches on this hero yet." }
                         },
-                        Some(Some((list, _))) if list.is_empty() => rsx! {
+                        Some(Some(list)) if list.is_empty() => rsx! {
                             p { class: "lb-status", "No ranked matches yet. Upload stats from the tracker." }
                         },
-                        Some(Some((list, _))) => rsx! {
+                        Some(Some(list)) => rsx! {
                             table { class: "lb-table",
                                 thead {
                                     tr {
@@ -258,5 +293,56 @@ pub fn Leaderboards() -> Element {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{LeaderboardPayload, updated_label};
+    use chrono::{TimeZone, Utc};
+
+    fn at(secs_from_now: i64, now: chrono::DateTime<Utc>) -> String {
+        (now + chrono::Duration::seconds(secs_from_now))
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+    }
+
+    #[test]
+    fn updated_label_just_now_seconds_and_minutes() {
+        let now = Utc.with_ymd_and_hms(2026, 10, 8, 12, 0, 0).unwrap();
+        assert_eq!(updated_label(&at(0, now), now), "Updated just now");
+        assert_eq!(updated_label(&at(-4, now), now), "Updated just now");
+        assert_eq!(updated_label(&at(-5, now), now), "Updated 5s ago");
+        assert_eq!(updated_label(&at(-59, now), now), "Updated 59s ago");
+        assert_eq!(updated_label(&at(-60, now), now), "Updated 1m ago");
+        assert_eq!(updated_label(&at(-125, now), now), "Updated 2m ago");
+    }
+
+    #[test]
+    fn updated_label_future_stamp_reads_as_just_now() {
+        let now = Utc.with_ymd_and_hms(2026, 10, 8, 12, 0, 0).unwrap();
+        assert_eq!(updated_label(&at(30, now), now), "Updated just now");
+    }
+
+    #[test]
+    fn updated_label_malformed_is_hidden() {
+        let now = Utc.with_ymd_and_hms(2026, 10, 8, 12, 0, 0).unwrap();
+        assert_eq!(updated_label("", now), "");
+        assert_eq!(updated_label("not-a-timestamp", now), "");
+        assert_eq!(updated_label("2026-13-99", now), "");
+    }
+
+    #[test]
+    fn payload_without_cached_at_still_parses() {
+        let payload: LeaderboardPayload = serde_json::from_str(
+            r#"{"rows":[{"member_id":"m","display_name":"M","games":1,"winrate":1.0,"kd":1.0}]}"#,
+        )
+        .unwrap();
+        assert!(payload.cached_at.is_none());
+        assert_eq!(payload.rows.len(), 1);
+        let now = Utc.with_ymd_and_hms(2026, 10, 8, 12, 0, 0).unwrap();
+        assert_eq!(
+            updated_label(payload.cached_at.as_deref().unwrap_or(""), now),
+            ""
+        );
     }
 }
