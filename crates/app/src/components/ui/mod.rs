@@ -22,7 +22,7 @@ pub use hero_select::HeroSelect;
 #[allow(unused_imports)]
 pub use label::Label;
 pub use pill::{Pill, PillTone};
-pub use season_select::SeasonSelect;
+pub use season_select::{SeasonSelect, use_stats_season};
 #[allow(unused_imports)]
 pub use shell::PageShell;
 
