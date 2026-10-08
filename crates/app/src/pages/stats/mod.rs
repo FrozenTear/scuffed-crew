@@ -1160,6 +1160,7 @@ mod map_mode_tests {
             "Watchpoint: Grimsvotn",
             "Watchpoint: Grímsvotn",
             "Watchpoint: Grimsvötn",
+            "Watchpoint: Gri\u{0301}msvo\u{0308}tn",
             "WATCHPOINT: grímsvötn",
             "watchpoint grimsvotn",
             "watchpointgrimsvotn",
@@ -1168,7 +1169,7 @@ mod map_mode_tests {
             "grimsvötn",
             "grímsvotn",
         ] {
-            assert_eq!(map_game_mode(name), "Escort", "{name}");
+            assert_eq!(map_game_mode(name), "Escort", "{name:?}");
         }
         assert_eq!(map_game_mode("Watchpoint: Gibraltar"), "Escort");
         assert_eq!(map_game_mode("Watchpoint"), "Escort");
