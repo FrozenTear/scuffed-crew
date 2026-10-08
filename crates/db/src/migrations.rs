@@ -635,6 +635,11 @@ pub async fn run_migrations(client: &Surreal<Any>) -> DbResult<()> {
         -- this flag only drives the site's "edited" badge. Legacy rows default
         -- false.
         DEFINE FIELD OVERWRITE edited ON personal_match TYPE bool DEFAULT false;
+        -- Digit recognizer that produced the row. `ocr-v1` is Tesseract, which
+        -- is what every upload stored before this column existed. The default
+        -- fills new writes that omit it. Rows already on disk are not rewritten;
+        -- a missing or empty value is read back as `ocr-v1`.
+        DEFINE FIELD OVERWRITE recognizer ON personal_match TYPE string DEFAULT 'ocr-v1';
 
         DEFINE INDEX IF NOT EXISTS pm_member_idx ON personal_match COLUMNS member_id, played_at;
         -- Non-unique placeholder only. `DEFINE INDEX IF NOT EXISTS` will not

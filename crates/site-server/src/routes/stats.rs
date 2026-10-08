@@ -11,8 +11,8 @@ use scuffed_db::{
 };
 use scuffed_types::api::{
     CreateDaemonTokenRequest, CreateDaemonTokenResponse, CursorResponse, DaemonConfigResponse,
-    MemberSettingsResponse, PaginationParams, SeasonQuery, StatsUploadRequest, StatsUploadResponse,
-    UpdateMemberSettingsRequest,
+    MemberSettingsResponse, PaginationParams, RECOGNIZER_ID_ERROR, SeasonQuery, StatsUploadBody,
+    StatsUploadResponse, UpdateMemberSettingsRequest, resolve_recognizer,
 };
 
 use crate::extractors::{DaemonUser, OrgMember};
@@ -24,7 +24,7 @@ use crate::state::AppState;
 pub async fn upload_stats(
     State(state): State<AppState>,
     daemon: DaemonUser,
-    Json(body): Json<StatsUploadRequest>,
+    Json(body): Json<StatsUploadBody>,
 ) -> Result<Json<StatsUploadResponse>, (StatusCode, Json<ErrorResponse>)> {
     if body.matches.is_empty() && body.deleted_sessions.is_empty() {
         return Ok(Json(StatsUploadResponse {
@@ -32,6 +32,23 @@ pub async fn upload_stats(
             skipped: 0,
             deleted: 0,
         }));
+    }
+
+    // Reject the whole batch before any write. A bad id must not be stored,
+    // and a later entry must not leave the earlier ones committed.
+    let mut recognizers = Vec::with_capacity(body.matches.len());
+    for (i, entry) in body.matches.iter().enumerate() {
+        match resolve_recognizer(&entry.recognizer) {
+            Ok(id) => recognizers.push(id),
+            Err(_) => {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    Json(ErrorResponse {
+                        error: format!("matches[{i}]: {RECOGNIZER_ID_ERROR}"),
+                    }),
+                ));
+            }
+        }
     }
 
     let total = body.matches.len() as u32;
@@ -43,25 +60,30 @@ pub async fn upload_stats(
     let stub_matches: Vec<PersonalMatch> = body
         .matches
         .into_iter()
-        .filter(|e| matches!(e.outcome.as_str(), "victory" | "defeat" | "draw"))
-        .map(|e| PersonalMatch {
-            id: String::new(),
-            member_id: daemon.member.id.clone(),
-            session_id: e.session_id,
-            hero: e.hero,
-            map_name: e.map_name,
-            game_mode: e.game_mode,
-            role: e.role,
-            outcome: e.outcome,
-            elims: e.elims,
-            deaths: e.deaths,
-            assists: e.assists,
-            damage: e.damage,
-            healing: e.healing,
-            mitigation: e.mitigation,
-            played_at: e.played_at,
-            uploaded_at: chrono::Utc::now(),
-            edited: e.edited,
+        .zip(recognizers)
+        .filter(|(e, _)| matches!(e.entry.outcome.as_str(), "victory" | "defeat" | "draw"))
+        .map(|(e, recognizer)| {
+            let e = e.entry;
+            PersonalMatch {
+                id: String::new(),
+                member_id: daemon.member.id.clone(),
+                session_id: e.session_id,
+                hero: e.hero,
+                map_name: e.map_name,
+                game_mode: e.game_mode,
+                role: e.role,
+                outcome: e.outcome,
+                elims: e.elims,
+                deaths: e.deaths,
+                assists: e.assists,
+                damage: e.damage,
+                healing: e.healing,
+                mitigation: e.mitigation,
+                played_at: e.played_at,
+                uploaded_at: chrono::Utc::now(),
+                edited: e.edited,
+                recognizer,
+            }
         })
         .collect();
     let dropped = total - stub_matches.len() as u32;
@@ -634,5 +656,239 @@ mod tests {
             .unwrap();
         assert_eq!(rows.len(), 1, "retried uploads of one session stay one row");
         assert_eq!(rows[0].session_id, "sess-m11");
+        assert_eq!(
+            rows[0].recognizer, "ocr-v1",
+            "a body that omits recognizer is stored as ocr-v1"
+        );
+    }
+
+    fn match_object(session_id: &str, elims: u32) -> serde_json::Value {
+        serde_json::json!({
+            "session_id": session_id,
+            "hero": "Ana",
+            "map_name": "Oasis",
+            "game_mode": "control",
+            "role": "Support",
+            "outcome": "victory",
+            "elims": elims,
+            "deaths": 1,
+            "assists": 2,
+            "damage": 1000,
+            "healing": 4000,
+            "mitigation": 0,
+            "played_at": "2026-07-01T20:00:00Z",
+            "edited": false
+        })
+    }
+
+    async fn post_raw(
+        app: axum::Router,
+        token: &str,
+        body: serde_json::Value,
+    ) -> (StatusCode, serde_json::Value) {
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/stats/upload")
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        let status = resp.status();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let parsed = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+        (status, parsed)
+    }
+
+    async fn daemon() -> (crate::state::AppState, String, String) {
+        let state = test_state().await;
+        let member = state
+            .db
+            .create_member("u-rec", "recplayer", OrgRole::Member)
+            .await
+            .unwrap();
+        let token = "rec-daemon-token".to_string();
+        state
+            .db
+            .create_daemon_token(&member.id, &token, "tracker")
+            .await
+            .unwrap();
+        (state, member.id, token)
+    }
+
+    #[tokio::test]
+    async fn upload_without_recognizer_stores_ocr_v1_and_keeps_response_shape() {
+        let (state, member_id, token) = daemon().await;
+        let app = create_router(state.clone());
+        let body = serde_json::json!({
+            "matches": [match_object("sess-omit", 4)]
+        });
+        let (status, parsed) = post_raw(app, &token, body).await;
+        assert_eq!(status, StatusCode::OK);
+        let mut keys: Vec<&str> = parsed
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            ["deleted", "inserted", "skipped"],
+            "upload response stays inserted/skipped/deleted"
+        );
+        assert_eq!(parsed["inserted"], 1);
+        assert_eq!(parsed["skipped"], 0);
+        assert_eq!(parsed["deleted"], 0);
+
+        let rows = state
+            .db
+            .list_personal_matches(&member_id, 10, 0)
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].recognizer, "ocr-v1");
+        assert_eq!(rows[0].elims, 4);
+        let stats = state.db.get_personal_stats(&member_id).await.unwrap();
+        assert_eq!(stats.wins, 1);
+    }
+
+    #[tokio::test]
+    async fn upload_cv_v1_stores_cv_v1() {
+        let (state, member_id, token) = daemon().await;
+        let mut entry = match_object("sess-cv", 8);
+        entry["recognizer"] = serde_json::json!("cv-v1");
+        let (status, parsed) = post_raw(
+            create_router(state.clone()),
+            &token,
+            serde_json::json!({ "matches": [entry] }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(parsed["inserted"], 1);
+
+        let rows = state
+            .db
+            .list_personal_matches(&member_id, 10, 0)
+            .await
+            .unwrap();
+        assert_eq!(rows[0].recognizer, "cv-v1");
+        assert_eq!(rows[0].elims, 8);
+        let stats = state.db.get_personal_stats(&member_id).await.unwrap();
+        assert_eq!((stats.total_matches, stats.wins), (1, 1));
+    }
+
+    #[tokio::test]
+    async fn upload_null_recognizer_stores_ocr_v1() {
+        let (state, member_id, token) = daemon().await;
+        let mut entry = match_object("sess-null", 3);
+        entry["recognizer"] = serde_json::Value::Null;
+        let (status, _) = post_raw(
+            create_router(state.clone()),
+            &token,
+            serde_json::json!({ "matches": [entry] }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let rows = state
+            .db
+            .list_personal_matches(&member_id, 10, 0)
+            .await
+            .unwrap();
+        assert_eq!(rows[0].recognizer, "ocr-v1");
+    }
+
+    #[tokio::test]
+    async fn upload_invalid_recognizer_is_400_and_stores_nothing() {
+        let (state, member_id, token) = daemon().await;
+        // A good row is stored first. A later batch that mixes a valid id
+        // with garbage must not update that row or insert the sibling.
+        let (status, _) = post_raw(
+            create_router(state.clone()),
+            &token,
+            serde_json::json!({ "matches": [match_object("sess-keep", 4)] }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let mut bad = match_object("sess-keep", 99);
+        bad["recognizer"] = serde_json::json!("NOPE");
+        let mut sibling = match_object("sess-new", 1);
+        sibling["recognizer"] = serde_json::json!("cv-v1");
+        let (status, parsed) = post_raw(
+            create_router(state.clone()),
+            &token,
+            serde_json::json!({ "matches": [sibling, bad] }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            parsed["error"],
+            "matches[1]: recognizer must be a string of 1-32 characters in [a-z0-9.-] including a letter or digit"
+        );
+
+        let rows = state
+            .db
+            .list_personal_matches(&member_id, 10, 0)
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1, "rejected batch must not insert or update");
+        assert_eq!(rows[0].session_id, "sess-keep");
+        assert_eq!(rows[0].elims, 4);
+        assert_eq!(rows[0].recognizer, "ocr-v1");
+
+        let mut empty = match_object("sess-empty", 1);
+        empty["recognizer"] = serde_json::json!("");
+        let (status, _) = post_raw(
+            create_router(state.clone()),
+            &token,
+            serde_json::json!({ "matches": [empty] }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+
+        let mut number = match_object("sess-num", 1);
+        number["recognizer"] = serde_json::json!(1);
+        let (status, _) = post_raw(
+            create_router(state.clone()),
+            &token,
+            serde_json::json!({ "matches": [number] }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+
+        let rows = state
+            .db
+            .list_personal_matches(&member_id, 10, 0)
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn historical_upload_body_without_optional_fields_stores_ocr_v1() {
+        let (state, member_id, token) = daemon().await;
+        let body = serde_json::json!({
+            "matches": [{
+                "hero": "Ana",
+                "map_name": "Oasis",
+                "game_mode": "control",
+                "role": "Support",
+                "outcome": "victory",
+                "played_at": "2026-07-01T20:00:00Z"
+            }]
+        });
+        let (status, parsed) = post_raw(create_router(state.clone()), &token, body).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(parsed["inserted"], 1);
+        let rows = state
+            .db
+            .list_personal_matches(&member_id, 10, 0)
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].recognizer, "ocr-v1");
+        assert_eq!(rows[0].elims, 0);
+        assert!(!rows[0].edited);
     }
 }
