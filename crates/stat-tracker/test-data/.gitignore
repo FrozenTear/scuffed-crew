@@ -2,3 +2,6 @@
 *
 !.gitignore
 !README.md
+# Name-free single stat cells. The child gitignore narrows this to the PNGs.
+!real-cells/
+!real-cells/**

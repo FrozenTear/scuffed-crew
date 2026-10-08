@@ -3,6 +3,9 @@
 Drop native-resolution scoreboard screenshots here to validate the capture
 pipeline. Files are gitignored (copyrighted game captures — do not commit).
 
+`real-cells/` is the exception: name-free single stat cells, tracked, and
+read by `tests/real_dim_zero_cells.rs`. Full scoreboard frames stay gitignored.
+
 Run the extraction pipeline against any image:
 
 ```

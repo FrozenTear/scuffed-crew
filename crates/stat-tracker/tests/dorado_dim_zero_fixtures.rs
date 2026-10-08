@@ -1,6 +1,7 @@
 //! Dim-zero band check on the 2026-10-08 Dorado captures.
 //!
-//! The 96..148 value band and the saturation cap are absolute. This replay
+//! The dim-zero check is a neutral-and-below-white rule (value 96..=220,
+//! saturation at most 40), not one grey level. This replay
 //! is how a local copy of those frames confirms a real dim zero still reads
 //! as 0 and a shifted assists/deaths pair does not come back.
 //!

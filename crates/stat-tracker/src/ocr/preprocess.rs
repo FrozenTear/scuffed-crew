@@ -138,33 +138,52 @@ const CELL_UPSCALE_TARGET_H: u32 = 64;
 /// oversmooth thin digits into empty reads.
 const CELL_UPSCALE_MAX_FACTOR: f64 = 3.0;
 
-/// Gray value band of a dim zero *value*. OW2 draws a value of 0 fainter
-/// than a non-zero digit. [`hsv_white_mask`]'s hard floor is 150, and a
-/// glyph near 122 is weighted under the binary cut in
-/// [`prepare_cell_binary`], so the cell comes back empty and the whole row
-/// is dropped. Bright digits stay above this ceiling and keep the Tesseract
-/// path. Saturated row-fill fails the saturation cap and is not ink.
+/// Once a crop is at least this tall, the smooth upscale does not go past
+/// [`CELL_UPSCALE_FACTOR_CAP`]. A shorter crop is a tiny glyph, not a
+/// trimmed stat cell, and still climbs toward [`CELL_UPSCALE_TARGET_H`].
+const CELL_UPSCALE_CAP_MIN_H: u32 = 28;
+
+/// 64/39. A native Dorado stat cell is 39px tall and already reads at this
+/// factor (PR 158). Targeting 64px after a 3-4px trim raises the factor
+/// to about 1.94-2.06, and Tesseract then returns "" or "1" for a "11".
+/// Capping here keeps a trimmed crop on the same scale as the cell it was
+/// cut from.
+const CELL_UPSCALE_FACTOR_CAP: f64 = CELL_UPSCALE_TARGET_H as f64 / 39.0;
+
+/// Two checks for a dim zero stroke. Not a calibrated grey level.
 ///
-/// The band overlaps the main mask from 128 to 148: those pixels can become
-/// ink when enough of them clear the binary cut. This path runs only after
-/// that mask found fewer than the empty-cell ink floor, so the overlap does
-/// not steal a digit Tesseract already has.
+/// Neutral grey: R, G, and B roughly equal. Purple and yellow row fills
+/// are strongly saturated, and the soft edge of a glyph picks that colour
+/// up. On the Dorado cells in PR 158 the zero stroke stays at saturation
+/// at most about 33, so the cap is 40 (that measurement plus a small
+/// margin). Fill near saturation 240 fails this check.
 ///
-/// The floors are absolute. The crop is one cell, so there is no brighter
-/// neighbor digit in the same image to measure against, and a threshold
-/// relative to the rest of the row would need pixels this function does not
-/// receive. Gray below 96 stays unread. That drops the row, which is the
-/// same failure as before this check existed.
+/// Below white: white digits on those cells reach 250-255. The ceiling is
+/// 220, clear of that range and above the measured stroke cores (about
+/// 171-186). The floor is 96, just above team-fill brightness in the low
+/// 90s, which still keeps the neutral stroke.
+///
+/// The HSV mask already keeps a neutral pixel at about 172 (saturation
+/// under 60 and value at least 150), so a native cell often has enough
+/// ink for Tesseract and this path does not run. The same stroke still
+/// has to pass here when that mask leaves the cell empty.
+///
+/// The crop is one cell, so there is no brighter digit in the same image
+/// to measure against. A threshold relative to the rest of the row would
+/// need pixels this function does not receive.
 const DIM_ZERO_V_MIN: u8 = 96;
-const DIM_ZERO_V_MAX: u8 = 148;
-const DIM_ZERO_SAT_MAX: u8 = 80;
+const DIM_ZERO_V_MAX: u8 = 220;
+const DIM_ZERO_SAT_MAX: u8 = 40;
 
 /// A hole narrower or shorter than this fraction of the glyph box is a
-/// bowl (6, 9) or a closed 4, not the counter of a 0. A "10" is not
-/// rejected by this fraction when the "1" sits close to the ring: the
-/// ring's own hole is still large. That pair is two ink components, and
-/// a zero is one ring.
-const DIM_ZERO_HOLE_EXTENT_MIN: u32 = 45;
+/// bowl (6, 9) or a closed 4, not the counter of a 0. The Dorado zeros
+/// in PR 158 have a counter 4px wide in a 10px box (40%). A realistic 6
+/// is about 35% on its short axis, so 38 still rejects that bowl and
+/// accepts the real counter with a little room. A "10" is not rejected
+/// by this fraction when the "1" sits close to the ring: the ring's own
+/// hole is still large. That pair is two ink components, and a zero is
+/// one ring.
+const DIM_ZERO_HOLE_EXTENT_MIN: u32 = 38;
 
 const DIM_LABEL_INK: u8 = 1;
 const DIM_LABEL_EXTERIOR: u8 = 2;
@@ -265,7 +284,10 @@ pub fn dim_zero_glyph(img: &DynamicImage, edge_cols: u32) -> Option<DimZeroHit> 
             } else {
                 ((u16::from(v - min_c) * 255) / u16::from(v)) as u8
             };
-            if !(DIM_ZERO_V_MIN..=DIM_ZERO_V_MAX).contains(&v) || sat > DIM_ZERO_SAT_MAX {
+            // Neutral grey, then clearly darker than white text.
+            let neutral = sat <= DIM_ZERO_SAT_MAX;
+            let below_white = (DIM_ZERO_V_MIN..=DIM_ZERO_V_MAX).contains(&v);
+            if !neutral || !below_white {
                 continue;
             }
             label[(y * w + x) as usize] = DIM_LABEL_INK;
@@ -442,16 +464,18 @@ pub fn prepare_cell_binary(img: &DynamicImage) -> GrayImage {
 }
 
 /// CG-4 D: upscale **only** cells with height &lt; [`CELL_UPSCALE_TRIGGER_H`]
-/// toward [`CELL_UPSCALE_TARGET_H`] (factor capped at [`CELL_UPSCALE_MAX_FACTOR`]).
-/// Native-height cells pass through unchanged so dim low-contrast glyphs are not
-/// smooth-warped into phantom digits. CatmullRom (not Lanczos) — Lanczos on dim
-/// "0" glyphs produced conf-96 "9" phantoms at any factor ≥1.05 (Claude reject).
+/// toward [`CELL_UPSCALE_TARGET_H`] (factor capped at [`CELL_UPSCALE_MAX_FACTOR`],
+/// and at [`CELL_UPSCALE_FACTOR_CAP`] once the crop is at least
+/// [`CELL_UPSCALE_CAP_MIN_H`]). Native-height cells pass through unchanged so
+/// dim low-contrast glyphs are not smooth-warped into phantom digits.
+/// CatmullRom (not Lanczos). Lanczos on dim "0" glyphs produced conf-96 "9"
+/// phantoms at any factor ≥1.05 (Claude reject).
 fn upscale_cell_for_ocr(gray: &GrayImage) -> GrayImage {
     let (w, h) = gray.dimensions();
     if w == 0 || h == 0 || h >= CELL_UPSCALE_TRIGGER_H {
         return gray.clone();
     }
-    let factor = (CELL_UPSCALE_TARGET_H as f64 / h as f64).min(CELL_UPSCALE_MAX_FACTOR);
+    let factor = cell_upscale_factor(h);
     if factor < 1.05 {
         return gray.clone();
     }
@@ -460,14 +484,17 @@ fn upscale_cell_for_ocr(gray: &GrayImage) -> GrayImage {
     image::imageops::resize(gray, nw, nh, image::imageops::FilterType::CatmullRom)
 }
 
-/// Test-visible factor selection for CG-4 D (height → scale, capped).
-/// Returns 1.0 when the cell is at/above the trigger (no upscale).
-#[cfg(test)]
+/// Height to scale factor. 1.0 at or above the trigger (no upscale).
 fn cell_upscale_factor(h: u32) -> f64 {
     if h == 0 || h >= CELL_UPSCALE_TRIGGER_H {
         1.0
     } else {
-        (CELL_UPSCALE_TARGET_H as f64 / h as f64).min(CELL_UPSCALE_MAX_FACTOR)
+        let toward = (CELL_UPSCALE_TARGET_H as f64 / h as f64).min(CELL_UPSCALE_MAX_FACTOR);
+        if h >= CELL_UPSCALE_CAP_MIN_H {
+            toward.min(CELL_UPSCALE_FACTOR_CAP)
+        } else {
+            toward
+        }
     }
 }
 
@@ -1603,26 +1630,33 @@ mod cell_upscale_tests {
 
     #[test]
     fn factor_targets_64_only_below_trigger_and_caps_at_3x() {
-        // 42px (<48) → 64/42 ≈ 1.524
+        // 42px (<48) → 64/42 ≈ 1.524, under the Dorado cap.
         let f42 = cell_upscale_factor(42);
         assert!((f42 - (64.0 / 42.0)).abs() < 1e-9);
         assert!(f42 < CELL_UPSCALE_MAX_FACTOR);
 
-        // 32px → exactly 2×
-        assert!((cell_upscale_factor(32) - 2.0).abs() < 1e-9);
+        // 39px is the native Dorado cell. A 31px trim of that cell must
+        // not scale harder, or a "11" comes back as "1".
+        let native = cell_upscale_factor(39);
+        assert!((native - CELL_UPSCALE_FACTOR_CAP).abs() < 1e-9);
+        assert!(cell_upscale_factor(31) <= native + 1e-9);
+        assert!(cell_upscale_factor(33) <= native + 1e-9);
 
-        // Very short cell would want >3× → capped
+        // Very short cell would want >3× → capped. The Dorado cap does
+        // not apply under 28px.
         assert!((cell_upscale_factor(15) - 3.0).abs() < 1e-9);
         assert!((cell_upscale_factor(10) - 3.0).abs() < 1e-9);
     }
 
     #[test]
     fn upscale_grows_short_cell_to_about_target_height() {
-        let gray = GrayImage::from_pixel(20, 32, Luma([200]));
+        // 22px is under the Dorado cap's minimum height, so it still
+        // climbs to the 64px target (64/22, under the 3× ceiling).
+        let gray = GrayImage::from_pixel(20, 22, Luma([200]));
         let up = upscale_cell_for_ocr(&gray);
         let (w, h) = up.dimensions();
-        assert_eq!(h, 64, "32×2 → 64");
-        assert_eq!(w, 40, "width scales with height");
+        assert_eq!(h, 64, "22 × 64/22 → 64");
+        assert_eq!(w, 58, "width scales with height");
     }
 
     #[test]
@@ -2110,9 +2144,19 @@ mod dim_zero_tests {
         );
     }
 
+    /// Below white, not a single grey. Floor 96, a core like the measured
+    /// stroke, a value well above that core, the ceiling, then the first
+    /// step past it and a white digit.
     #[test]
-    fn gray_outside_the_band_is_unread_and_the_edges_of_the_band_are_not() {
-        for (gray, readable) in [(90u8, false), (96, true), (148, true), (150, false)] {
+    fn a_ring_clearly_darker_than_white_is_a_zero() {
+        for (gray, readable) in [
+            (90u8, false),
+            (96, true),
+            (180, true),
+            (220, true),
+            (221, false),
+            (250, false),
+        ] {
             let mut img = cell(48, 56);
             paint_ring(
                 &mut img,
@@ -2131,11 +2175,37 @@ mod dim_zero_tests {
         }
     }
 
+    /// Neutral grey: channels roughly equal. Saturation 40 is the cap
+    /// (measured stroke max about 33, plus margin). Just over the cap is
+    /// row-fill colour on the edge of a glyph, not the stroke.
     #[test]
-    fn a_saturated_ring_is_not_a_dim_zero() {
+    fn a_neutral_grey_ring_is_a_zero_and_a_saturated_ring_is_not() {
+        // (172 - 145) * 255 / 172 = 40. The next step is 41.
+        let mut at_cap = cell(48, 56);
+        paint_ring(
+            &mut at_cap,
+            24.0,
+            28.0,
+            8.0,
+            14.0,
+            3.0,
+            Rgb([172, 145, 145]),
+        );
+        assert!(is_zero(&wrap(at_cap)), "saturation 40 still reads");
+        let mut over_cap = cell(48, 56);
+        paint_ring(
+            &mut over_cap,
+            24.0,
+            28.0,
+            8.0,
+            14.0,
+            3.0,
+            Rgb([172, 144, 144]),
+        );
+        assert!(!is_zero(&wrap(over_cap)), "saturation 41 is not neutral");
         let mut img = cell(48, 56);
         paint_ring(&mut img, 24.0, 28.0, 8.0, 14.0, 3.0, Rgb([140, 40, 40]));
-        assert!(!is_zero(&wrap(img)));
+        assert!(!is_zero(&wrap(img)), "a red ring is row fill");
     }
 
     #[test]
@@ -2157,7 +2227,7 @@ mod dim_zero_tests {
     #[test]
     fn a_bold_zero_still_reads_and_each_shape_check_has_its_own_reject() {
         // 4px stroke on a 16px-wide ring. Hole extent is about half the
-        // box, so raising the 45% rule to 60% drops this zero.
+        // box, so raising the 38% rule to 60% drops this zero.
         assert!(is_zero(&dim_bold_zero()), "bold zero");
         assert!(is_zero(&dim_thin_zero()), "thin zero stays one component");
         assert!(!is_zero(&dim_fill_frame()), "fill");

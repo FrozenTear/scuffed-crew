@@ -331,15 +331,11 @@ fn recognize_cell_with_whitelist(
     let binary = preprocess::prepare_cell_binary(img);
     let suspect = preprocess::has_edge_ink(&binary, EDGE_INK_COLS, EDGE_INK_THRESHOLD);
     if prepared_ink_pixels(&binary) < MIN_CELL_INK_PIXELS {
-        // A dim 0 never clears the HSV mask, so the cell is empty and the
-        // row used to be thrown away. Recover that glyph as 0. Anything
-        // else with no bright ink stays empty — a blank cell is not a zero.
+        // The bright mask found almost nothing. A dim 0 can still be there.
+        // Anything else with no bright ink stays empty. A blank cell is not
+        // a zero.
         if let Some(hit) = preprocess::dim_zero_glyph(img, EDGE_INK_COLS) {
-            return Ok(CellOcrResult {
-                value: "0".to_string(),
-                confidence: DIM_ZERO_CONFIDENCE,
-                suspect: hit.touches_edge,
-            });
+            return Ok(dim_zero_result(hit));
         }
         return Ok(CellOcrResult {
             value: String::new(),
@@ -349,12 +345,33 @@ fn recognize_cell_with_whitelist(
     }
     let png_buf = encode_png(&preprocess::add_cell_border(&binary))?;
     let (text, confidence) = ocr_with("eng", "7", Some(whitelist), &png_buf)?;
+    let text = text.trim().to_string();
+    // The Dorado stroke cores are about 171-186 and neutral, so the HSV
+    // mask keeps them and this branch runs. Tesseract still returns an
+    // empty string for some of those rings. The geometric check is what
+    // recovers them. A white digit is not a ring, so an empty read of one
+    // stays empty.
+    if text.is_empty()
+        && let Some(hit) = preprocess::dim_zero_glyph(img, EDGE_INK_COLS)
+    {
+        let mut recovered = dim_zero_result(hit);
+        recovered.suspect = recovered.suspect || suspect;
+        return Ok(recovered);
+    }
 
     Ok(CellOcrResult {
-        value: text.trim().to_string(),
+        value: text,
         confidence,
         suspect,
     })
+}
+
+fn dim_zero_result(hit: preprocess::DimZeroHit) -> CellOcrResult {
+    CellOcrResult {
+        value: "0".to_string(),
+        confidence: DIM_ZERO_CONFIDENCE,
+        suspect: hit.touches_edge,
+    }
 }
 
 /// Recognize a player name cell.

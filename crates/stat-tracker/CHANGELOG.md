@@ -14,6 +14,14 @@ of the six stat columns. A row that is on screen but whose cells still
 cannot be read is logged separately from a frame where the player row
 was not found.
 
+That check is two tests, not one grey level. The stroke has to be
+neutral grey, because purple and yellow row fills are strongly
+saturated and the soft edge of a glyph picks that colour up. It also
+has to be clearly darker than white text. On the Dorado cells the
+stroke cores are about 171-186 and white digits reach 250-255. When
+the bright mask keeps the stroke but Tesseract returns nothing, the
+same check still reads the ring as 0.
+
 The text fallback no longer takes the last six numbers on the player's
 line. The name has to match as a whole word. That line can also contain
 the hero panel's objective timer, and a trailing `00:02` shifted the
