@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use axum::{
     Json,
     extract::{Path, Query, State},
@@ -13,7 +15,7 @@ use scuffed_types::{HeroAgg, MemberLeaderboardRow as TypesMemberRow, resolve_her
 
 use crate::extractors::AdminUser;
 use crate::leaderboard_cache::{
-    CacheError, FailKind, LeaderboardKey, LoadError, OnError, limit_bucket, truncate_to_requested,
+    CacheError, FailKind, LeaderboardKey, LoadError, LoadedBoard, OnError, truncate_to_requested,
 };
 use crate::routes::audit_log::audit;
 use crate::state::AppState;
@@ -201,8 +203,10 @@ impl LoadError for BoardError {
 /// GET /api/public/leaderboards?metric=winrate|kd|games&limit=25&season=<id>&hero=<name>
 ///
 /// Anonymous and logged-in callers get the same rows. Inactive members are
-/// omitted by the query. The cache key still carries a public audience tag
-/// so a crew-only board cannot be stored in this slot.
+/// omitted by the query. One grouped scan per season is cached. Metric,
+/// hero, and limit are projections of that snapshot, so a different hero
+/// does not start another scan. The cache key still carries a public
+/// audience tag so a crew-only board cannot be stored in this slot.
 pub async fn public_leaderboards(
     State(state): State<AppState>,
     Query(q): Query<LeaderboardQuery>,
@@ -212,12 +216,9 @@ pub async fn public_leaderboards(
         _ => "winrate".to_string(),
     };
     let requested = q.limit.clamp(1, 100);
-    // Cache and scan the bucket (10, 25, 50, 100). The response is cut
-    // back to `requested` so odd limits do not create extra keys.
-    let bucket = limit_bucket(requested);
 
-    // W3 B2: optional ?hero= → canonical HEROES name, then DB bound filter.
-    // Unknown names are 400 and are not cached.
+    // W3 B2: optional ?hero= → canonical HEROES name. Unknown names are 400
+    // and are not cached. The hero is applied to the season snapshot.
     let hero = match resolve_leaderboard_hero(q.hero.as_deref()) {
         Ok(h) => h.map(str::to_string),
         Err(()) => {
@@ -236,14 +237,16 @@ pub async fn public_leaderboards(
         .filter(|s| !s.is_empty())
         .unwrap_or("")
         .to_string();
-    let key =
-        LeaderboardKey::public_board(&metric, bucket, &season_id, hero.as_deref().unwrap_or(""));
+    // One cache entry per season. Metric, hero, and limit are projections.
+    let key = LeaderboardKey::public_board("scan", 0, &season_id, "");
 
     let load_state = state.clone();
+    let load_season = season_id.clone();
     let board = state
         .leaderboard_cache
         .get_or_load(key, move || {
             let state = load_state;
+            let season_id = load_season;
             async move {
                 let season_window = resolve_season_window(
                     &state,
@@ -261,12 +264,15 @@ pub async fn public_leaderboards(
                         BoardError::Db
                     }
                 })?;
-                state
+                let snapshot = state
                     .db
-                    .member_leaderboard(&metric, bucket, season_window, hero.as_deref())
+                    .leaderboard_snapshot(season_window)
                     .await
-                    .map(|rows| rows.into_iter().map(map_lb_row).collect())
-                    .map_err(|_e| BoardError::Db)
+                    .map_err(|_e| BoardError::Db)?;
+                Ok(LoadedBoard {
+                    rows: Vec::new(),
+                    snapshot: Some(Arc::new(snapshot)),
+                })
             }
         })
         .await
@@ -278,8 +284,18 @@ pub async fn public_leaderboards(
             }
         })?;
 
+    let hero_name = hero.as_deref().unwrap_or("");
+    let rows = match &board.snapshot {
+        Some(snapshot) => snapshot
+            .project(&metric, hero_name, requested)
+            .into_iter()
+            .map(map_lb_row)
+            .collect(),
+        None => truncate_to_requested(board.rows, requested),
+    };
+
     Ok(Json(PublicLeaderboardBody {
-        rows: truncate_to_requested(board.rows, requested),
+        rows,
         cached_at: board.cached_at,
     }))
 }

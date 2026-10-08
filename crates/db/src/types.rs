@@ -584,6 +584,172 @@ pub struct MemberLeaderboardRow {
     pub kd: f64,
 }
 
+/// Minimum games for winrate and kd. The games metric has no floor.
+pub const LEADERBOARD_MIN_GAMES: u32 = 5;
+
+/// One member's totals on a single hero, before sorting.
+#[derive(Debug, Clone)]
+pub struct LeaderboardHeroAgg {
+    pub member_id: String,
+    pub display_name: String,
+    pub games: u32,
+    pub wins: u32,
+    pub elims: u32,
+    pub deaths: u32,
+}
+
+/// Every hero's totals from one pass over `personal_match`.
+///
+/// `all` rolls those heroes up per member. A leaderboard key is then a sort
+/// and a truncate, not another scan.
+#[derive(Debug, Clone, Default)]
+pub struct LeaderboardSnapshot {
+    pub all: Vec<LeaderboardHeroAgg>,
+    pub by_hero: std::collections::HashMap<String, Vec<LeaderboardHeroAgg>>,
+}
+
+impl LeaderboardSnapshot {
+    /// Build per-hero totals and the all-heroes rollup in one pass.
+    pub fn from_rows(rows: Vec<(String, LeaderboardHeroAgg)>) -> Self {
+        let mut by_hero: std::collections::HashMap<
+            String,
+            std::collections::HashMap<String, LeaderboardHeroAgg>,
+        > = std::collections::HashMap::new();
+        let mut all: std::collections::HashMap<String, LeaderboardHeroAgg> =
+            std::collections::HashMap::new();
+        for (hero, agg) in rows {
+            if agg.games == 0 {
+                continue;
+            }
+            merge_agg_one(by_hero.entry(hero).or_default(), agg.clone());
+            merge_agg_one(&mut all, agg);
+        }
+        Self {
+            all: all.into_values().collect(),
+            by_hero: by_hero
+                .into_iter()
+                .map(|(hero, members)| (hero, members.into_values().collect()))
+                .collect(),
+        }
+    }
+
+    /// `hero` empty means every hero. `limit` is the row cap after sorting.
+    pub fn project(&self, metric: &str, hero: &str, limit: u32) -> Vec<MemberLeaderboardRow> {
+        let source: &[LeaderboardHeroAgg] = if hero.is_empty() {
+            &self.all
+        } else {
+            match self.by_hero.get(hero) {
+                Some(rows) => rows.as_slice(),
+                None => &[],
+            }
+        };
+        let rate_metric = matches!(metric, "winrate" | "kd");
+        let mut out = Vec::new();
+        for agg in source {
+            if agg.games == 0 {
+                continue;
+            }
+            if rate_metric && agg.games < LEADERBOARD_MIN_GAMES {
+                continue;
+            }
+            out.push(MemberLeaderboardRow {
+                member_id: agg.member_id.clone(),
+                display_name: agg.display_name.clone(),
+                games: agg.games,
+                winrate: agg.wins as f32 / agg.games as f32,
+                kd: agg.elims as f64 / (agg.deaths.max(1) as f64),
+            });
+        }
+        match metric {
+            "kd" => out.sort_by(|a, b| {
+                b.kd.partial_cmp(&a.kd)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| b.games.cmp(&a.games))
+            }),
+            "games" => out.sort_by(|a, b| {
+                b.games.cmp(&a.games).then_with(|| {
+                    b.winrate
+                        .partial_cmp(&a.winrate)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+            }),
+            _ => out.sort_by(|a, b| {
+                b.winrate
+                    .partial_cmp(&a.winrate)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| b.games.cmp(&a.games))
+            }),
+        }
+        let n = limit as usize;
+        if out.len() > n {
+            out.truncate(n);
+        }
+        out
+    }
+}
+
+#[cfg(test)]
+mod snapshot_project_tests {
+    use super::{LeaderboardHeroAgg, LeaderboardSnapshot};
+
+    fn agg(id: &str, games: u32, wins: u32) -> LeaderboardHeroAgg {
+        LeaderboardHeroAgg {
+            member_id: id.into(),
+            display_name: id.into(),
+            games,
+            wins,
+            elims: wins,
+            deaths: 1,
+        }
+    }
+
+    #[test]
+    fn one_pass_covers_hero_metric_and_limit() {
+        let snap = LeaderboardSnapshot::from_rows(vec![
+            ("Ana".into(), agg("a", 6, 6)),
+            ("Genji".into(), agg("a", 3, 0)),
+            ("Genji".into(), agg("b", 8, 4)),
+        ]);
+        let ana = snap.project("games", "Ana", 10);
+        assert_eq!(ana.len(), 1);
+        assert_eq!(ana[0].member_id, "a");
+        assert_eq!(ana[0].games, 6);
+
+        let genji = snap.project("games", "Genji", 10);
+        assert_eq!(genji.len(), 2);
+
+        let all = snap.project("games", "", 10);
+        assert_eq!(all[0].member_id, "a");
+        assert_eq!(all[0].games, 9);
+        assert_eq!(all[1].member_id, "b");
+        assert_eq!(all[1].games, 8);
+
+        let winrate = snap.project("winrate", "Genji", 10);
+        assert_eq!(winrate.len(), 1);
+        assert_eq!(winrate[0].member_id, "b");
+
+        let top = snap.project("games", "", 1);
+        let both = snap.project("games", "", 2);
+        assert_eq!(top.len(), 1);
+        assert_eq!(top[0].member_id, both[0].member_id);
+        assert_eq!(both.len(), 2);
+    }
+}
+
+fn merge_agg_one(
+    all: &mut std::collections::HashMap<String, LeaderboardHeroAgg>,
+    agg: LeaderboardHeroAgg,
+) {
+    all.entry(agg.member_id.clone())
+        .and_modify(|existing| {
+            existing.games = existing.games.saturating_add(agg.games);
+            existing.wins = existing.wins.saturating_add(agg.wins);
+            existing.elims = existing.elims.saturating_add(agg.elims);
+            existing.deaths = existing.deaths.saturating_add(agg.deaths);
+        })
+        .or_insert(agg);
+}
+
 /// Per-hero aggregate for a single member (no display_name — page already has it).
 /// Used by public members `?hero=` attach (HS-DR P1) so we do not N+1 lookup.
 #[derive(Debug, Clone, Serialize, Deserialize)]

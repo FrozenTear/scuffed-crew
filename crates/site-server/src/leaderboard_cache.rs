@@ -16,17 +16,25 @@
 //! factor in 0.8..=1.2. A board older than 10 TTLs is not served; that
 //! request waits for a scan. Background refreshes may use at most one
 //! fewer slot than the scan cap (and at least one). They do not wait in
-//! line: if no refresh slot is free the refresh is skipped and tried
-//! again after half a TTL. Cold keys and boards past 10 TTLs may use any
-//! free slot, including one a refresh cannot take, so they are not queued
-//! behind those refreshes. A blocking read whose key is already refreshing
-//! joins that scan.
+//! line. If no refresh slot is free the key joins a queue ordered by age.
+//! When a scan finishes, its refresh slot goes straight to the oldest key
+//! still waiting, so refreshes run back to back while a slot is free.
+//! A skipped key that is not handed a slot is tried from a later request
+//! after a jittered backoff of 0.25 to 1 times the TTL, so those retries
+//! do not all land on the same millisecond. Cold keys and boards past 10
+//! TTLs may use any free slot, including one a refresh cannot take, so
+//! they are not queued behind those refreshes. A blocking read whose key
+//! is already refreshing joins that scan.
+//!
+//! The public handler stores one grouped snapshot per season. Hero, metric,
+//! and limit are projections of that snapshot, so they do not each take a
+//! scan.
 //!
 //! The cache is per process. A restart clears it, and two instances do not
 //! share it. A failed load is not stored. If a previous board for the same
 //! key is still in memory, that board is served instead of the error.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::future::Future;
 #[cfg(test)]
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
@@ -57,8 +65,12 @@ pub const MAX_STALE_FACTOR: u64 = 10;
 /// Inclusive jitter applied to each entry, in thousandths of the TTL (0.8..=1.2).
 const JITTER_MIN: u64 = 800;
 const JITTER_MAX: u64 = 1200;
+/// Inclusive fallback backoff, in thousandths of the TTL (0.25..=1).
+const BACKOFF_MIN: u64 = 250;
+const BACKOFF_MAX: u64 = 1000;
 
-/// `limit` values the cache actually stores. Callers round up into one of these.
+/// Historical `limit` buckets. The public handler no longer scans per bucket.
+/// It stores one snapshot per season and cuts the rows to the requested limit.
 pub const LIMIT_BUCKETS: [u32; 4] = [10, 25, 50, 100];
 
 /// Who the board was built for.
@@ -68,7 +80,7 @@ pub const LIMIT_BUCKETS: [u32; 4] = [10, 25, 50, 100];
 /// members, and the handler does not read the session. `Crew` exists so a
 /// later crew-only board cannot be written into a slot an anonymous caller
 /// reads.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Ord, PartialOrd)]
 pub enum LeaderboardAudience {
     Public,
     /// Not produced by the public handler. See the enum docs.
@@ -76,14 +88,13 @@ pub enum LeaderboardAudience {
     Crew,
 }
 
-/// Everything that changes the board.
+/// Everything that changes a stored board.
 ///
-/// Live query parameters on `GET /api/public/leaderboards` are `metric`
-/// (the sort), `limit`, `season`, and `hero`. `limit` is stored as a
-/// bucket from [`limit_bucket`], not the raw request. There is no role
-/// filter and no game-mode filter on this handler, so those are not key
-/// fields.
-#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+/// The public handler stores one snapshot per season under metric `"scan"`,
+/// limit 0, and an empty hero. Metric, limit, and hero on the request are
+/// projections of that snapshot. There is no role filter and no game-mode
+/// filter on this handler, so those are not key fields.
+#[derive(Clone, Debug, Eq, PartialEq, Hash, Ord, PartialOrd)]
 pub struct LeaderboardKey {
     pub audience: LeaderboardAudience,
     pub metric: String,
@@ -107,10 +118,39 @@ impl LeaderboardKey {
 }
 
 /// A stored board. `cached_at` is the wall time when the load started.
+///
+/// `snapshot` is set when the load was one grouped scan. Every hero, metric,
+/// and limit for that season is a projection of it.
 #[derive(Clone, Debug)]
 pub struct CachedBoard {
     pub rows: Vec<MemberLeaderboardRow>,
     pub cached_at: DateTime<Utc>,
+    pub snapshot: Option<Arc<scuffed_db::LeaderboardSnapshot>>,
+}
+
+/// What a loader returns. A plain row vec is the single-key case.
+pub struct LoadedBoard {
+    pub rows: Vec<MemberLeaderboardRow>,
+    pub snapshot: Option<Arc<scuffed_db::LeaderboardSnapshot>>,
+}
+
+pub trait IntoLoaded {
+    fn into_loaded(self) -> LoadedBoard;
+}
+
+impl IntoLoaded for Vec<MemberLeaderboardRow> {
+    fn into_loaded(self) -> LoadedBoard {
+        LoadedBoard {
+            rows: self,
+            snapshot: None,
+        }
+    }
+}
+
+impl IntoLoaded for LoadedBoard {
+    fn into_loaded(self) -> LoadedBoard {
+        self
+    }
 }
 
 /// What a failed load should do with a previous board for the same key.
@@ -178,11 +218,23 @@ struct HeldScan {
     _refresh: Option<OwnedSemaphorePermit>,
 }
 
+impl HeldScan {
+    fn is_refresh(&self) -> bool {
+        self._refresh.is_some()
+    }
+}
+
+struct QueuedRefresh {
+    launch: Box<dyn FnOnce(watch::Sender<FlightState>, HeldScan) + Send>,
+}
+
 #[derive(Default)]
 struct Inner {
     order: VecDeque<LeaderboardKey>,
     entries: HashMap<LeaderboardKey, Entry>,
     inflight: HashMap<LeaderboardKey, watch::Receiver<FlightState>>,
+    /// Stale keys waiting for a refresh slot, oldest `stored_at_ms` first.
+    refresh_wait: BTreeMap<(u64, LeaderboardKey), QueuedRefresh>,
 }
 
 trait CacheClock: Send + Sync {
@@ -311,14 +363,15 @@ impl LeaderboardCache {
         }
     }
 
-    pub async fn get_or_load<F, Fut, E>(
+    pub async fn get_or_load<F, Fut, T, E>(
         &self,
         key: LeaderboardKey,
         load: F,
     ) -> Result<CachedBoard, CacheError<E>>
     where
         F: FnOnce() -> Fut + Send + 'static,
-        Fut: Future<Output = Result<Vec<MemberLeaderboardRow>, E>> + Send + 'static,
+        Fut: Future<Output = Result<T, E>> + Send + 'static,
+        T: IntoLoaded + Send + 'static,
         E: LoadError + Send + 'static,
     {
         let mut load = Some(load);
@@ -337,9 +390,11 @@ impl LeaderboardCache {
                             let _ = cache.lead(key, tx, load, Some(permit)).await;
                         });
                     } else {
-                        // No refresh slot. Do not queue behind the scans that
-                        // are already running, and do not call `load`.
-                        self.skip_refresh(&key, tx);
+                        // No refresh slot. Queue the loader so the next scan
+                        // to finish can hand its slot over. Do not call `load`
+                        // on this request.
+                        let load = load.take().expect("loader is used once");
+                        self.enqueue_refresh(&key, tx, load);
                     }
                     return Ok(board);
                 }
@@ -378,16 +433,94 @@ impl LeaderboardCache {
         })
     }
 
-    fn skip_refresh(&self, key: &LeaderboardKey, tx: watch::Sender<FlightState>) {
+    fn enqueue_refresh<F, Fut, T, E>(
+        &self,
+        key: &LeaderboardKey,
+        tx: watch::Sender<FlightState>,
+        load: F,
+    ) where
+        F: FnOnce() -> Fut + Send + 'static,
+        Fut: Future<Output = Result<T, E>> + Send + 'static,
+        T: IntoLoaded + Send + 'static,
+        E: LoadError + Send + 'static,
+    {
+        let stored_at = self
+            .lock()
+            .entries
+            .get(key)
+            .map(|entry| entry.stored_at_ms)
+            .unwrap_or(0);
+        let backoff = self.refresh_backoff_ms();
+        let cache = self.clone();
+        let key_owned = key.clone();
+        let launch = Box::new(move |tx: watch::Sender<FlightState>, permit: HeldScan| {
+            tokio::spawn(async move {
+                let _ = cache.lead(key_owned, tx, load, Some(permit)).await;
+            });
+        });
         {
             let mut guard = self.lock();
-            let backoff = self.refresh_backoff_ms();
+            let now = self.clock.now_ms();
             if let Some(entry) = guard.entries.get_mut(key) {
-                entry.next_refresh_ms = self.clock.now_ms().saturating_add(backoff);
+                entry.next_refresh_ms = now.saturating_add(backoff);
             }
             guard.inflight.remove(key);
+            let stale_keys: Vec<_> = guard
+                .refresh_wait
+                .keys()
+                .filter(|(_, queued)| queued == key)
+                .cloned()
+                .collect();
+            for stale_key in stale_keys {
+                guard.refresh_wait.remove(&stale_key);
+            }
+            let wait_key = (stored_at, key.clone());
+            while guard.refresh_wait.len() >= self.max_entries {
+                let Some(freshest) = guard.refresh_wait.keys().next_back().cloned() else {
+                    break;
+                };
+                if wait_key >= freshest {
+                    let _ = tx.send(FlightState::Skipped);
+                    return;
+                }
+                guard.refresh_wait.remove(&freshest);
+            }
+            guard
+                .refresh_wait
+                .insert(wait_key, QueuedRefresh { launch });
         }
         let _ = tx.send(FlightState::Skipped);
+    }
+
+    /// Start the stalest queued refresh with `permit`. Consumes the permit
+    /// either way.
+    fn handoff(&self, permit: HeldScan) -> bool {
+        let now = self.clock.now_ms();
+        let mut guard = self.lock();
+        let candidates: Vec<_> = guard.refresh_wait.keys().cloned().collect();
+        for candidate in candidates {
+            let Some(queued) = guard.refresh_wait.remove(&candidate) else {
+                continue;
+            };
+            let key = candidate.1.clone();
+            if guard.inflight.contains_key(&key) {
+                continue;
+            }
+            let still_due = guard
+                .entries
+                .get(&key)
+                .is_none_or(|entry| now.saturating_sub(entry.stored_at_ms) >= entry.fresh_for_ms);
+            if !still_due {
+                continue;
+            }
+            let (tx, rx) = watch::channel(FlightState::Pending);
+            guard.inflight.insert(key, rx);
+            drop(guard);
+            (queued.launch)(tx, permit);
+            return true;
+        }
+        drop(permit);
+        false
     }
 
     fn begin(&self, key: &LeaderboardKey) -> Begin {
@@ -416,9 +549,10 @@ impl LeaderboardCache {
                 }
                 return Begin::ServeStale { board, lead: None };
             }
-            // A skipped refresh stays stale until the backoff elapses, so a
-            // busy cap does not spin a new attempt on every request. Past
-            // 10 TTLs this does not apply: that request has to scan.
+            // A request does not start another refresh until the jittered
+            // backoff elapses, so a busy cap does not spin. A finished scan
+            // can still hand its slot to this key sooner. Past 10 TTLs this
+            // does not apply: that request has to scan.
             if !too_stale && now < next_refresh_ms {
                 return Begin::ServeStale { board, lead: None };
             }
@@ -443,7 +577,7 @@ impl LeaderboardCache {
         Begin::Lead { tx }
     }
 
-    async fn lead<F, Fut, E>(
+    async fn lead<F, Fut, T, E>(
         &self,
         key: LeaderboardKey,
         tx: watch::Sender<FlightState>,
@@ -452,7 +586,8 @@ impl LeaderboardCache {
     ) -> Result<CachedBoard, CacheError<E>>
     where
         F: FnOnce() -> Fut,
-        Fut: Future<Output = Result<Vec<MemberLeaderboardRow>, E>>,
+        Fut: Future<Output = Result<T, E>>,
+        T: IntoLoaded,
         E: LoadError + Send + 'static,
     {
         // Stamp the board when the query starts. A scan that runs for a
@@ -461,14 +596,16 @@ impl LeaderboardCache {
         let started = self.clock.wall();
         let fresh_for_ms = fresh_for_ms(self.ttl_ms(), self.jitter_millis());
         let result = load().await;
-        drop(permit);
+        let refresh = permit.as_ref().is_some_and(|held| held.is_refresh());
         let mut guard = self.lock();
         guard.inflight.remove(&key);
-        match result {
-            Ok(rows) => {
+        let outcome = match result {
+            Ok(loaded) => {
+                let loaded = loaded.into_loaded();
                 let board = Arc::new(CachedBoard {
-                    rows,
+                    rows: loaded.rows,
                     cached_at: started,
+                    snapshot: loaded.snapshot,
                 });
                 store(
                     &mut guard,
@@ -493,10 +630,25 @@ impl LeaderboardCache {
                 if kind == FailKind::Unavailable
                     && let Some(stale) = guard.entries.get(&key)
                 {
-                    return Ok(stale.board.as_ref().clone());
+                    Ok(stale.board.as_ref().clone())
+                } else {
+                    Err(CacheError::Load(err))
                 }
-                Err(CacheError::Load(err))
             }
+        };
+        drop(guard);
+        self.release_scan(permit, refresh);
+        outcome
+    }
+
+    fn release_scan(&self, permit: Option<HeldScan>, refresh: bool) {
+        if refresh && let Some(permit) = permit {
+            let _ = self.handoff(permit);
+            return;
+        }
+        drop(permit);
+        if let Some(permit) = self.try_refresh_permit() {
+            let _ = self.handoff(permit);
         }
     }
 
@@ -558,7 +710,9 @@ impl LeaderboardCache {
     }
 
     fn refresh_backoff_ms(&self) -> u64 {
-        (self.ttl_ms() / 2).max(1)
+        let ttl = self.ttl_ms().max(1);
+        let factor = rand::thread_rng().gen_range(BACKOFF_MIN..=BACKOFF_MAX);
+        (ttl.saturating_mul(factor) / 1000).max(1)
     }
 
     fn stale(&self, key: &LeaderboardKey) -> Option<CachedBoard> {
@@ -603,6 +757,14 @@ impl LeaderboardCache {
     #[cfg(test)]
     fn fresh_window_ms(&self, key: &LeaderboardKey) -> Option<u64> {
         self.lock().entries.get(key).map(|entry| entry.fresh_for_ms)
+    }
+
+    #[cfg(test)]
+    fn next_refresh_ms(&self, key: &LeaderboardKey) -> Option<u64> {
+        self.lock()
+            .entries
+            .get(key)
+            .map(|entry| entry.next_refresh_ms)
     }
 }
 
@@ -1449,7 +1611,11 @@ mod tests {
                     let loads = Arc::clone(&loads);
                     async move {
                         loads.fetch_add(1, Ordering::SeqCst);
-                        Ok::<_, DbErr>((0..10).map(|i| sample(&format!("m{i}"), i)).collect())
+                        Ok::<_, DbErr>(
+                            (0..10)
+                                .map(|i| sample(&format!("m{i}"), i))
+                                .collect::<Vec<_>>(),
+                        )
                     }
                 }
             })
@@ -1704,22 +1870,9 @@ mod tests {
 
         hold_tx.send(true).unwrap();
         busy_task.await.unwrap();
-        wait_until(|| cache.inflight_len() == 0).await;
-        clock.advance(10);
-        let retried = cache
-            .get_or_load(skipped_key, {
-                let skipped_loads = Arc::clone(&skipped_loads);
-                move || {
-                    let skipped_loads = Arc::clone(&skipped_loads);
-                    async move {
-                        skipped_loads.fetch_add(1, Ordering::SeqCst);
-                        Ok::<_, DbErr>(vec![sample("after-backoff", 4)])
-                    }
-                }
-            })
-            .await
-            .unwrap();
-        assert_eq!(retried.rows[0].member_id, "kept");
+        // The finished scan hands its slot to the queued loader. That loader
+        // is the first skip, which stores "should-not-load" without waiting
+        // out the backoff.
         wait_until(|| skipped_loads.load(Ordering::SeqCst) >= 2 && cache.inflight_len() == 0).await;
         let stored = cache
             .get_or_load(public_key("games", 25, "skipped", ""), || async {
@@ -1727,7 +1880,7 @@ mod tests {
             })
             .await
             .unwrap();
-        assert_eq!(stored.rows[0].member_id, "after-backoff");
+        assert_eq!(stored.rows[0].member_id, "should-not-load");
         assert_eq!(skipped_loads.load(Ordering::SeqCst), 2);
     }
 
@@ -1814,5 +1967,291 @@ mod tests {
         assert_eq!(joined.rows[0].member_id, "shared");
         assert_eq!(refreshed.rows[0].member_id, "old");
         assert_eq!(loads.load(Ordering::SeqCst), 2);
+    }
+
+    async fn wait_gate(mut gate: watch::Receiver<bool>) {
+        while !*gate.borrow() {
+            if gate.changed().await.is_err() {
+                break;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn finished_scan_starts_the_stalest_waiting_refresh() {
+        let (cache, clock) = cache_built(Duration::from_millis(100), 8, 2, JitterMode::Fixed(1000));
+        let a_loads = Arc::new(AtomicU32::new(0));
+        let b_loads = Arc::new(AtomicU32::new(0));
+        let h_loads = Arc::new(AtomicU32::new(0));
+        let (a_tx, a_rx) = watch::channel(false);
+        let (b_tx, b_rx) = watch::channel(false);
+        let (h_tx, h_rx) = watch::channel(false);
+        let a_key = public_key("games", 25, "a", "");
+        let b_key = public_key("games", 25, "b", "");
+        let h_key = public_key("games", 25, "h", "");
+
+        cache
+            .get_or_load(a_key.clone(), {
+                let a_loads = Arc::clone(&a_loads);
+                move || {
+                    let a_loads = Arc::clone(&a_loads);
+                    async move {
+                        a_loads.fetch_add(1, Ordering::SeqCst);
+                        Ok::<_, DbErr>(vec![sample("a-old", 1)])
+                    }
+                }
+            })
+            .await
+            .unwrap();
+        clock.advance(10);
+        cache
+            .get_or_load(b_key.clone(), {
+                let b_loads = Arc::clone(&b_loads);
+                move || {
+                    let b_loads = Arc::clone(&b_loads);
+                    async move {
+                        b_loads.fetch_add(1, Ordering::SeqCst);
+                        Ok::<_, DbErr>(vec![sample("b-old", 1)])
+                    }
+                }
+            })
+            .await
+            .unwrap();
+        cache
+            .get_or_load(h_key.clone(), {
+                let h_loads = Arc::clone(&h_loads);
+                move || {
+                    let h_loads = Arc::clone(&h_loads);
+                    async move {
+                        h_loads.fetch_add(1, Ordering::SeqCst);
+                        Ok::<_, DbErr>(vec![sample("h-old", 1)])
+                    }
+                }
+            })
+            .await
+            .unwrap();
+        // Fresh window is 100ms. At t=120 every board is stale, and A (t=0)
+        // is older than B (t=10).
+        clock.advance(110);
+
+        let h_gate = h_rx.clone();
+        let cache_bg = cache.clone();
+        let h_loads_bg = Arc::clone(&h_loads);
+        let h_task = tokio::spawn(async move {
+            cache_bg
+                .get_or_load(h_key, move || {
+                    let h_loads_bg = Arc::clone(&h_loads_bg);
+                    async move {
+                        h_loads_bg.fetch_add(1, Ordering::SeqCst);
+                        wait_gate(h_gate).await;
+                        Ok::<_, DbErr>(vec![sample("h-new", 2)])
+                    }
+                })
+                .await
+                .unwrap()
+        });
+        wait_until(|| h_loads.load(Ordering::SeqCst) >= 2).await;
+
+        let a_gate = a_rx.clone();
+        let served_a = cache
+            .get_or_load(a_key, {
+                let a_loads = Arc::clone(&a_loads);
+                move || {
+                    let a_loads = Arc::clone(&a_loads);
+                    async move {
+                        a_loads.fetch_add(1, Ordering::SeqCst);
+                        wait_gate(a_gate).await;
+                        Ok::<_, DbErr>(vec![sample("a-new", 2)])
+                    }
+                }
+            })
+            .await
+            .unwrap();
+        assert_eq!(served_a.rows[0].member_id, "a-old");
+        assert_eq!(a_loads.load(Ordering::SeqCst), 1);
+
+        let b_gate = b_rx.clone();
+        let served_b = cache
+            .get_or_load(b_key, {
+                let b_loads = Arc::clone(&b_loads);
+                move || {
+                    let b_loads = Arc::clone(&b_loads);
+                    async move {
+                        b_loads.fetch_add(1, Ordering::SeqCst);
+                        wait_gate(b_gate).await;
+                        Ok::<_, DbErr>(vec![sample("b-new", 2)])
+                    }
+                }
+            })
+            .await
+            .unwrap();
+        assert_eq!(served_b.rows[0].member_id, "b-old");
+        assert_eq!(b_loads.load(Ordering::SeqCst), 1);
+
+        h_tx.send(true).unwrap();
+        h_task.await.unwrap();
+        wait_until(|| a_loads.load(Ordering::SeqCst) >= 2).await;
+        assert_eq!(
+            b_loads.load(Ordering::SeqCst),
+            1,
+            "the fresher waiter must not start while the older one holds the slot"
+        );
+
+        a_tx.send(true).unwrap();
+        wait_until(|| b_loads.load(Ordering::SeqCst) >= 2).await;
+        b_tx.send(true).unwrap();
+        wait_until(|| cache.inflight_len() == 0).await;
+    }
+
+    #[tokio::test]
+    async fn skipped_keys_do_not_retry_on_the_same_instant() {
+        let (cache, clock) =
+            cache_built(Duration::from_millis(1000), 64, 2, JitterMode::Fixed(1000));
+        let (hold_tx, hold_rx) = watch::channel(false);
+        let hold_loads = Arc::new(AtomicU32::new(0));
+        let hold_key = public_key("games", 25, "hold", "");
+        cache
+            .get_or_load(hold_key.clone(), {
+                let hold_loads = Arc::clone(&hold_loads);
+                move || {
+                    let hold_loads = Arc::clone(&hold_loads);
+                    async move {
+                        hold_loads.fetch_add(1, Ordering::SeqCst);
+                        Ok::<_, DbErr>(vec![sample("hold-old", 1)])
+                    }
+                }
+            })
+            .await
+            .unwrap();
+        for i in 0..24 {
+            cache
+                .get_or_load(public_key("games", 25, &format!("k{i}"), ""), || async {
+                    Ok::<_, DbErr>(vec![sample("old", 1)])
+                })
+                .await
+                .unwrap();
+        }
+        clock.advance(1000);
+
+        let hold_gate = hold_rx.clone();
+        let cache_bg = cache.clone();
+        let hold_loads_bg = Arc::clone(&hold_loads);
+        let hold_task = tokio::spawn(async move {
+            cache_bg
+                .get_or_load(hold_key, move || {
+                    let hold_loads_bg = Arc::clone(&hold_loads_bg);
+                    async move {
+                        hold_loads_bg.fetch_add(1, Ordering::SeqCst);
+                        wait_gate(hold_gate).await;
+                        Ok::<_, DbErr>(vec![sample("hold-new", 2)])
+                    }
+                })
+                .await
+                .unwrap()
+        });
+        wait_until(|| hold_loads.load(Ordering::SeqCst) >= 2).await;
+
+        let now = clock.now_ms();
+        let mut deltas = Vec::new();
+        for i in 0..24 {
+            let key = public_key("games", 25, &format!("k{i}"), "");
+            let served = cache
+                .get_or_load(key.clone(), || async {
+                    Ok::<_, DbErr>(vec![sample("should-not-run", 2)])
+                })
+                .await
+                .unwrap();
+            assert_eq!(served.rows[0].member_id, "old");
+            let next = cache.next_refresh_ms(&key).unwrap();
+            let delta = next.saturating_sub(now);
+            assert!(
+                (250..=1000).contains(&delta),
+                "backoff {delta} ms is outside 0.25x..=1x TTL"
+            );
+            deltas.push(delta);
+        }
+        assert!(
+            deltas.iter().any(|delta| *delta != deltas[0]),
+            "every skipped key retried at {deltas:?}"
+        );
+
+        hold_tx.send(true).unwrap();
+        hold_task.await.unwrap();
+        wait_until(|| cache.inflight_len() == 0).await;
+    }
+
+    #[tokio::test]
+    async fn one_grouped_load_serves_every_hero() {
+        assert_eq!(
+            scuffed_types::HEROES.len(),
+            54,
+            "the QA harness's 54 keys are one per hero"
+        );
+        let (cache, _) = cache_with(Duration::from_secs(30), 8);
+        let loads = Arc::new(AtomicU32::new(0));
+        let key = public_key("scan", 0, "season", "");
+        let loads_bg = Arc::clone(&loads);
+        let board = cache
+            .get_or_load(key.clone(), move || {
+                let loads_bg = Arc::clone(&loads_bg);
+                async move {
+                    loads_bg.fetch_add(1, Ordering::SeqCst);
+                    let snapshot = scuffed_db::LeaderboardSnapshot::from_rows(vec![
+                        ("Ana".into(), hero_agg("a", 6, 6)),
+                        ("Genji".into(), hero_agg("a", 3, 0)),
+                        ("Genji".into(), hero_agg("b", 8, 4)),
+                    ]);
+                    Ok::<_, DbErr>(LoadedBoard {
+                        rows: Vec::new(),
+                        snapshot: Some(Arc::new(snapshot)),
+                    })
+                }
+            })
+            .await
+            .unwrap();
+        assert!(board.snapshot.is_some());
+
+        let loads_bg = Arc::clone(&loads);
+        let again = cache
+            .get_or_load(key, move || {
+                let loads_bg = Arc::clone(&loads_bg);
+                async move {
+                    loads_bg.fetch_add(1, Ordering::SeqCst);
+                    Ok::<_, DbErr>(LoadedBoard {
+                        rows: vec![sample("nope", 1)],
+                        snapshot: None,
+                    })
+                }
+            })
+            .await
+            .unwrap();
+        assert_eq!(loads.load(Ordering::SeqCst), 1);
+        let snapshot = again.snapshot.expect("grouped snapshot is stored");
+        let ana = snapshot.project("games", "Ana", 10);
+        assert_eq!(ana.len(), 1);
+        assert_eq!(ana[0].member_id, "a");
+        assert_eq!(ana[0].games, 6);
+        let genji = snapshot.project("winrate", "Genji", 10);
+        assert_eq!(genji.len(), 1);
+        assert_eq!(genji[0].member_id, "b");
+        let all = snapshot.project("games", "", 2);
+        assert_eq!(all[0].member_id, "a");
+        assert_eq!(all[0].games, 9);
+        assert_eq!(all[1].member_id, "b");
+        assert_eq!(all[1].games, 8);
+        let top = snapshot.project("games", "", 1);
+        assert_eq!(top.len(), 1);
+        assert_eq!(top[0].member_id, all[0].member_id);
+    }
+
+    fn hero_agg(id: &str, games: u32, wins: u32) -> scuffed_db::LeaderboardHeroAgg {
+        scuffed_db::LeaderboardHeroAgg {
+            member_id: id.to_string(),
+            display_name: id.to_string(),
+            games,
+            wins,
+            elims: wins,
+            deaths: 1,
+        }
     }
 }
