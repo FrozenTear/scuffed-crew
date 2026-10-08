@@ -41,7 +41,7 @@ pub async fn get_team(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<Team>, (StatusCode, Json<ErrorResponse>)> {
-    state
+    let team = state
         .db
         .get_team(&id)
         .await
@@ -53,7 +53,6 @@ pub async fn get_team(
                 }),
             )
         })?
-        .map(Json)
         .ok_or_else(|| {
             (
                 StatusCode::NOT_FOUND,
@@ -61,7 +60,16 @@ pub async fn get_team(
                     error: "Team not found".into(),
                 }),
             )
-        })
+        })?;
+    if !team.is_active {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: "Team not found".into(),
+            }),
+        ));
+    }
+    Ok(Json(team))
 }
 
 #[derive(Deserialize)]
@@ -262,4 +270,41 @@ pub async fn provision_all_channels(
     Ok(Json(ProvisionChannelsResponse {
         teams_provisioned: n,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::Json;
+    use axum::extract::{Path, State};
+    use axum::http::StatusCode;
+
+    use super::get_team;
+    use crate::test_support::{must_err, must_ok, test_state};
+
+    #[tokio::test]
+    async fn inactive_team_is_not_found_by_id() {
+        let state = test_state().await;
+        let team = state
+            .db
+            .create_team("Alpha", "ow2", None, None, None)
+            .await
+            .expect("team");
+        let Json(visible) = must_ok(
+            get_team(State(state.clone()), Path(team.id.clone())).await,
+            "active team",
+        );
+        assert_eq!(visible.name, "Alpha");
+
+        state
+            .db
+            .client
+            .query("UPDATE team SET is_active = false WHERE meta::id(id) = $id")
+            .bind(("id", team.id.clone()))
+            .await
+            .expect("deactivate");
+
+        let (status, body) = must_err(get_team(State(state), Path(team.id)).await, "inactive");
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body.error, "Team not found");
+    }
 }

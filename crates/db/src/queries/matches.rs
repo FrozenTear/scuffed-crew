@@ -295,43 +295,57 @@ impl Database {
         .await
     }
 
+    /// Full completed record, including private rows and scrims.
     pub async fn get_team_record(&self, team_id: &str) -> DbResult<TeamRecord> {
+        self.team_record(team_id, false).await
+    }
+
+    /// Completed public non-scrim results. Private rows and scrims stay off
+    /// the public W/L (overview and the public team page).
+    pub async fn get_public_team_record(&self, team_id: &str) -> DbResult<TeamRecord> {
+        self.team_record(team_id, true).await
+    }
+
+    async fn team_record(&self, team_id: &str, public_only: bool) -> DbResult<TeamRecord> {
         with_timeout(async {
             #[derive(Deserialize, SurrealValue)]
             struct CountResult {
                 count: u32,
             }
 
+            // `public_only` is a trusted bool. The extra clause is a fixed
+            // fragment, never caller text.
+            let visibility = if public_only {
+                " AND is_public = true AND match_type != 'scrim'"
+            } else {
+                ""
+            };
+            let count_sql = |cmp: &str| {
+                format!(
+                    "SELECT count() FROM match_result WHERE team_id = $tid \
+                     AND score_us != NONE AND score_them != NONE \
+                     AND score_us {cmp} score_them{visibility} GROUP ALL"
+                )
+            };
+
             // Only count completed matches (both scores present).
             let mut wins_result = self
                 .client
-                .query(
-                    "SELECT count() FROM match_result WHERE team_id = $tid \
-                     AND score_us != NONE AND score_them != NONE \
-                     AND score_us > score_them GROUP ALL",
-                )
+                .query(count_sql(">"))
                 .bind(("tid", team_id.to_string()))
                 .await?;
             let wins: Vec<CountResult> = wins_result.take(0)?;
 
             let mut losses_result = self
                 .client
-                .query(
-                    "SELECT count() FROM match_result WHERE team_id = $tid \
-                     AND score_us != NONE AND score_them != NONE \
-                     AND score_us < score_them GROUP ALL",
-                )
+                .query(count_sql("<"))
                 .bind(("tid", team_id.to_string()))
                 .await?;
             let losses: Vec<CountResult> = losses_result.take(0)?;
 
             let mut draws_result = self
                 .client
-                .query(
-                    "SELECT count() FROM match_result WHERE team_id = $tid \
-                     AND score_us != NONE AND score_them != NONE \
-                     AND score_us = score_them GROUP ALL",
-                )
+                .query(count_sql("="))
                 .bind(("tid", team_id.to_string()))
                 .await?;
             let draws: Vec<CountResult> = draws_result.take(0)?;
@@ -401,5 +415,107 @@ impl Database {
             })
         })
         .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::Utc;
+
+    use super::*;
+    use crate::migrations::run_migrations;
+    use crate::Database;
+
+    #[tokio::test]
+    async fn public_record_ignores_private_and_scrim_results() {
+        let db = Database::connect_memory().await.expect("mem db");
+        run_migrations(&db.client).await.expect("migrations");
+        let team = db
+            .create_team("Alpha", "ow2", None, None, None)
+            .await
+            .expect("team");
+
+        let played = Some(Utc::now());
+        db.record_match(
+            &team.id,
+            "Public",
+            Some(2),
+            Some(0),
+            None,
+            None,
+            MatchType::Official,
+            played,
+            None,
+            "rec",
+            None,
+            true,
+            None,
+            None,
+        )
+        .await
+        .expect("public official");
+        db.record_match(
+            &team.id,
+            "Private scrim",
+            Some(0),
+            Some(1),
+            None,
+            None,
+            MatchType::Scrim,
+            played,
+            None,
+            "rec",
+            None,
+            false,
+            None,
+            None,
+        )
+        .await
+        .expect("private scrim");
+        db.record_match(
+            &team.id,
+            "Public scrim",
+            Some(3),
+            Some(1),
+            None,
+            None,
+            MatchType::Scrim,
+            played,
+            None,
+            "rec",
+            None,
+            true,
+            None,
+            None,
+        )
+        .await
+        .expect("public scrim");
+        db.record_match(
+            &team.id,
+            "Private official",
+            Some(1),
+            Some(0),
+            None,
+            None,
+            MatchType::Official,
+            played,
+            None,
+            "rec",
+            None,
+            false,
+            None,
+            None,
+        )
+        .await
+        .expect("private official");
+
+        let public = db.get_public_team_record(&team.id).await.expect("public");
+        assert_eq!(public.wins, 1, "only the public official win");
+        assert_eq!(public.losses, 0);
+        assert_eq!(public.draws, 0);
+
+        let full = db.get_team_record(&team.id).await.expect("full");
+        assert_eq!(full.wins, 3);
+        assert_eq!(full.losses, 1);
     }
 }

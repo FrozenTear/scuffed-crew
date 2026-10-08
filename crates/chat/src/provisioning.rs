@@ -200,6 +200,12 @@ pub async fn sync_team_roster(
             None => continue, // No Nostr key — skip
         };
 
+        // Same active / not-banned filter as `get_team_roster`. A banned or
+        // deactivated officer must not be added to the officer group.
+        if !member.is_active || db.is_member_banned(&member.id).await? {
+            continue;
+        }
+
         let nip29_role = member.org_role.to_nip29_role();
 
         for channel in &channels {
