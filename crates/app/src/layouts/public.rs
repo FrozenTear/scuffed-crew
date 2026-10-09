@@ -29,6 +29,46 @@ fn disclosure_focus_id(mobile: bool, more: bool, account: bool) -> Option<&'stat
     }
 }
 
+/// Closed `#site-nav-menu` is `inert` and never `aria-hidden`.
+/// `aria-hidden` while a descendant still has focus is the console warning
+/// "Blocked aria-hidden on an element because its descendant retained focus".
+///
+/// There is no bool field. Dioxus 0.7.9 web turns `inert: false` into the
+/// string `"false"`, and `inert` is not in the interpreter's boolean attribute
+/// list, so `inert="false"` stays on the element and blocks clicks. `None`
+/// removes the attribute. A regression to `inert: menu_a11y.inert` cannot
+/// compile.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct NavMenuA11y {
+    inert_attr: Option<&'static str>,
+    aria_hidden: Option<bool>,
+}
+
+fn nav_menu_a11y(open: bool) -> NavMenuA11y {
+    NavMenuA11y {
+        inert_attr: if open { None } else { Some("true") },
+        aria_hidden: None,
+    }
+}
+
+// `use_signal` runs this once. Tests set `NAV_MENU_STARTS_OPEN` so the real
+// menu mounts open; production always starts closed.
+#[cfg(test)]
+thread_local! {
+    static NAV_MENU_STARTS_OPEN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+fn initial_mobile_open() -> bool {
+    #[cfg(test)]
+    {
+        NAV_MENU_STARTS_OPEN.with(|slot| slot.get())
+    }
+    #[cfg(not(test))]
+    {
+        false
+    }
+}
+
 /// Hamburger regains focus when the mobile menu closes.
 /// Already-closed stays `None` so a desktop click does not steal focus.
 fn mobile_menu_close_focus(was_open: bool) -> Option<&'static str> {
@@ -474,7 +514,7 @@ const NAV_CSS: &str = r#"
 
 #[component]
 pub fn PublicLayout() -> Element {
-    let mut mobile_open = use_signal(|| false);
+    let mut mobile_open = use_signal(initial_mobile_open);
     let mut more_open = use_signal(|| false);
     let mut account_open = use_signal(|| false);
     let auth = use_auth();
@@ -554,6 +594,11 @@ pub fn PublicLayout() -> Element {
     } else {
         "nav-overlay"
     };
+    let menu_a11y = nav_menu_a11y(mobile_open());
+    debug_assert!(
+        menu_a11y.aria_hidden.is_none(),
+        "site nav menu must not set aria-hidden"
+    );
 
     rsx! {
         style { {NAV_CSS} }
@@ -755,7 +800,7 @@ pub fn PublicLayout() -> Element {
         div {
             class: overlay_class,
             id: NAV_MENU_ID,
-            aria_hidden: if mobile_open() { "false" } else { "true" },
+            inert: menu_a11y.inert_attr,
             button {
                 class: "nav-backdrop",
                 r#type: "button",
@@ -961,12 +1006,128 @@ mod tests {
         assert_eq!(disclosure_focus_id(true, true, true), Some(NAV_TOGGLE_ID));
     }
 
+    fn render(root: fn() -> Element) -> String {
+        let mut dom = VirtualDom::new(root);
+        dom.rebuild_in_place();
+        dioxus_ssr::render(&dom)
+    }
+
+    fn opening_tag_with_id(html: &str, id: &str) -> String {
+        let needle = format!("id=\"{id}\"");
+        let id_at = html
+            .find(&needle)
+            .unwrap_or_else(|| panic!("missing {needle} in {html}"));
+        let start = html[..id_at].rfind('<').expect("tag start");
+        let end = html[id_at..]
+            .find('>')
+            .map(|rel| id_at + rel)
+            .expect("tag end");
+        html[start..=end].to_string()
+    }
+
+    /// Holds the real menu's initial open state until dropped.
+    struct NavStartsOpen;
+
+    impl NavStartsOpen {
+        fn open() -> Self {
+            NAV_MENU_STARTS_OPEN.with(|slot| slot.set(true));
+            Self
+        }
+    }
+
+    impl Drop for NavStartsOpen {
+        fn drop(&mut self) {
+            NAV_MENU_STARTS_OPEN.with(|slot| slot.set(false));
+        }
+    }
+
+    fn public_shell() -> Element {
+        let history =
+            use_hook(|| std::rc::Rc::new(dioxus::history::MemoryHistory::with_initial_path("/")));
+        let auth = use_signal(|| AuthState {
+            user: None,
+            loading: false,
+        });
+        use_context_provider(|| auth);
+        crate::state::provide_site_settings();
+        rsx! {
+            crate::theme::ThemeProvider {
+                dioxus::router::components::HistoryProvider {
+                    history: move |_| history.clone() as std::rc::Rc<dyn dioxus::history::History>,
+                    Router::<crate::routes::Route> {}
+                }
+            }
+        }
+    }
+
     #[test]
-    fn my_reports_closes_the_mobile_menu_through_one_helper() {
+    fn closed_overlay_is_inert_and_not_aria_hidden_with_focus() {
+        let closed = nav_menu_a11y(false);
+        assert_eq!(
+            closed.aria_hidden, None,
+            "aria-hidden must stay unset so a focused link cannot trip the warning"
+        );
+        let open = nav_menu_a11y(true);
+        assert_eq!(open.inert_attr, None);
+        assert_eq!(closed.inert_attr, Some("true"));
+        assert_eq!(open.aria_hidden, None);
         assert_eq!(mobile_menu_close_focus(true), Some(NAV_TOGGLE_ID));
         assert_eq!(mobile_menu_close_focus(false), None);
+
+        NAV_MENU_STARTS_OPEN.with(|slot| slot.set(false));
+        let shell = render(public_shell);
+        let shell_tag = opening_tag_with_id(&shell, NAV_MENU_ID);
+        assert!(
+            !shell_tag.contains("nav-overlay open"),
+            "real menu starts closed: {shell_tag}"
+        );
+        assert!(
+            shell_tag.contains("inert"),
+            "closed #site-nav-menu must be inert: {shell_tag}"
+        );
+        assert!(!shell_tag.contains("aria-hidden"), "{shell_tag}");
+        assert!(
+            shell.contains("<a "),
+            "closed menu still contains a link that could hold focus: {shell}"
+        );
+        assert!(
+            shell.contains("site-nav-toggle"),
+            "closing returns focus to the hamburger, html={shell}"
+        );
+        assert_menu_inert_writes(Some("true"));
+
+        // SSR drops false boolean attributes, so the HTML check cannot tell
+        // `inert: false` from a missing attribute. The web renderer writes
+        // Bool(false) as the string "false", and `inert` is not in its boolean
+        // list, so that string stays on the element.
+        let _open_guard = NavStartsOpen::open();
+        let opened = render(public_shell);
+        let open_tag = opening_tag_with_id(&opened, NAV_MENU_ID);
+        assert!(
+            open_tag.contains("nav-overlay open"),
+            "real #site-nav-menu must mount open: {open_tag}"
+        );
+        assert!(
+            !open_tag.contains("inert"),
+            "open menu must stay focusable: {open_tag}"
+        );
+        assert!(!open_tag.contains("aria-hidden"), "{open_tag}");
+        assert_menu_inert_writes(None);
+
         let src = include_str!("public.rs");
         let prod = src.split("mod tests").next().expect("tests module");
+        assert!(
+            prod.contains("inert: menu_a11y.inert_attr,"),
+            "the real menu must pass inert_attr"
+        );
+        assert!(
+            !prod.lines().any(|line| {
+                let code = line.split("//").next().unwrap_or(line);
+                code.contains("inert: bool")
+                    || (code.contains("menu_a11y.inert") && !code.contains("menu_a11y.inert_attr"))
+            }),
+            "NavMenuA11y must not keep a bool inert field"
+        );
         assert_eq!(
             prod.matches("mobile_open.set(false)").count(),
             1,
@@ -980,8 +1141,14 @@ mod tests {
         let set_at = body.find("mobile_open.set(false)").expect("set");
         assert!(
             focus_at < set_at,
-            "focus the hamburger before the menu is marked closed: {body}"
+            "focus the hamburger before the closed render sets inert: {body}"
         );
+    }
+
+    #[test]
+    fn my_reports_closes_the_mobile_menu_through_one_helper() {
+        let src = include_str!("public.rs");
+        let prod = src.split("mod tests").next().expect("tests module");
         let sheet = prod
             .split("nav-overlay-sheet")
             .nth(2)
@@ -992,5 +1159,72 @@ mod tests {
             !sheet.contains("mobile_open.set(false)"),
             "My reports must not add another mobile_open.set(false)"
         );
+    }
+
+    /// Dioxus web `set_attribute` for 0.7.9: bools become the strings `"true"`
+    /// and `"false"`. `None` removes the attribute. `inert` is not in
+    /// `isBoolAttr` in dioxus-interpreter-js, so `"false"` is stored as
+    /// `inert="false"`, which HTML still treats as inert.
+    fn web_inert_attribute(value: &dioxus::dioxus_core::AttributeValue) -> Option<String> {
+        use dioxus::dioxus_core::AttributeValue;
+        match value {
+            AttributeValue::None => None,
+            AttributeValue::Bool(flag) => Some(flag.to_string()),
+            AttributeValue::Text(text) => Some(text.clone()),
+            other => panic!("unexpected inert attribute {other:?}"),
+        }
+    }
+
+    /// `inert` writes on the real `#site-nav-menu` inside [`public_shell`].
+    fn menu_inert_values() -> Vec<dioxus::dioxus_core::AttributeValue> {
+        use dioxus::dioxus_core::{AttributeValue, Mutation, Mutations};
+        let mut dom = VirtualDom::new(public_shell);
+        let mut edits = Mutations::default();
+        dom.rebuild(&mut edits);
+        let menu_id = edits.edits.iter().find_map(|edit| match edit {
+            Mutation::SetAttribute {
+                name: "id",
+                value: AttributeValue::Text(text),
+                id,
+                ..
+            } if text == NAV_MENU_ID => Some(*id),
+            _ => None,
+        });
+        let Some(menu_id) = menu_id else {
+            panic!("real #{NAV_MENU_ID} did not receive an id attribute write");
+        };
+        edits
+            .edits
+            .into_iter()
+            .filter_map(|edit| match edit {
+                Mutation::SetAttribute {
+                    name: "inert",
+                    value,
+                    id,
+                    ..
+                } if id == menu_id => Some(value),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn assert_menu_inert_writes(expect: Option<&str>) {
+        let values = menu_inert_values();
+        assert!(
+            !values.is_empty(),
+            "real #{NAV_MENU_ID} must emit an inert attribute write so the test can see None vs false"
+        );
+        for value in &values {
+            let written = web_inert_attribute(value);
+            assert_eq!(
+                written.as_deref(),
+                expect,
+                "real #{NAV_MENU_ID} inert must be {expect:?}, not {written:?}; mutation was {value:?}"
+            );
+            assert!(
+                !matches!(value, dioxus::dioxus_core::AttributeValue::Bool(false)),
+                "Bool(false) is what the web renderer turns into inert=\"false\""
+            );
+        }
     }
 }

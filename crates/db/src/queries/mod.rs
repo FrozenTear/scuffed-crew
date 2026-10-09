@@ -24,6 +24,7 @@ pub mod scrims;
 pub mod seasons;
 pub mod sessions;
 pub mod settings;
+pub mod stat_reports;
 pub mod strategies;
 pub mod teams;
 pub mod tournaments;

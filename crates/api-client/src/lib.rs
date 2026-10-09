@@ -68,6 +68,9 @@ pub(crate) fn parse_retry_after_header(header: Option<&str>) -> Option<u64> {
 }
 
 fn format_http_error(status: u16, body: &str) -> String {
+    if let Some(msg) = scuffed_types::too_many_requests_message(status, body) {
+        return msg;
+    }
     let message = serde_json::from_str::<serde_json::Value>(body)
         .ok()
         .and_then(|v| v.get("error")?.as_str().map(str::to_owned));
@@ -328,6 +331,53 @@ mod tests {
         assert_eq!(
             format_http_error(404, r#"{"detail":"x"}"#),
             "HTTP error: 404"
+        );
+    }
+
+    #[test]
+    fn governor_json_429_says_try_again_and_other_429_bodies_stay() {
+        assert_eq!(
+            format_http_error(429, r#"{"error":"rate_limited","retry_after":9}"#),
+            "Try again in 9 s"
+        );
+        assert_eq!(
+            format_http_error(429, "Too Many Requests! Wait for 9s"),
+            "Too many requests. Try again later."
+        );
+        assert_eq!(
+            format_http_error(429, r#"{"error":"too many login attempts"}"#),
+            "Too many requests. Try again later."
+        );
+        assert_eq!(
+            format_http_error(429, r#"{"error":"rate_limited","retry_after":3601}"#),
+            "Too many requests. Try again later."
+        );
+        assert_eq!(
+            format_http_error(429, r#"{"error":"rate_limited","retry_after":1.5}"#),
+            "Too many requests. Try again later."
+        );
+        assert_eq!(
+            format_http_error(400, r#"{"error":"rate_limited","retry_after":9}"#),
+            "HTTP error 400: rate_limited"
+        );
+    }
+
+    #[test]
+    fn http_status_is_some_only_for_an_http_response() {
+        use super::ClientError;
+        assert_eq!(
+            ClientError::Http {
+                status: 429,
+                body: String::new(),
+                retry_after: None,
+            }
+            .http_status(),
+            Some(429)
+        );
+        assert_eq!(ClientError::Network("offline".into()).http_status(), None);
+        assert_eq!(
+            ClientError::Deserialize("bad json".into()).http_status(),
+            None
         );
     }
 

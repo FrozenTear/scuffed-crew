@@ -10,6 +10,8 @@ target/
 data/secrets.env
 # Runtime uploads (host volume / local dev)
 data/uploads/
+# Tracker bug-report zips (REPORTS_DIR default). Not the web root.
+data/reports/
 dist/
 # Exception: prebuilt-release installer sources (not app SPA output)
 !crates/stat-tracker/dist/
