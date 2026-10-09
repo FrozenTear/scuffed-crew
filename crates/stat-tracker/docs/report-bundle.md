@@ -101,7 +101,7 @@ For `mode`, `result`, and `hero`, the matcher does not read the field. `value` a
 - `role`: `log`, `crop`, `own_name`, or `glyph`.
 - `screen_class`: the screen class from section 4 for a `crop`, otherwise `null`.
 
-There is exactly one `log` entry, and its path is `log.txt`. A `glyph` or `own_name` entry exists only when the matching consent flag is `true`. Glyph paths look like `crops/glyph-01.png`. The number is assigned after sorting those files by their hash. It is not a row, a column, or a board position. The own-name paths are `crops/own-name.png` and, only when the HUD plate is also included, `crops/own-name-hud.png`. Every other image is role `crop` and lives under `crops/`.
+There is exactly one `log` entry, and its path is `log.txt`. A `glyph` or `own_name` entry exists only when the matching consent flag is `true`. A glyph path is `crops/glyph-<id>.png`. `<id>` is 8 lowercase hex characters drawn at random for that file, unique inside the zip. It is not a counter, not a place in a name, and not shared by glyphs that came from the same name. The manifest has no glyph index, no name id, and no field that groups glyphs. The `files` array lists glyph entries in the shuffled order from section 5, and it is not sorted again by id, hash, or name. The own-name paths are `crops/own-name.png` and, only when the HUD plate is also included, `crops/own-name-hud.png`. Every other image is role `crop` and lives under `crops/`.
 
 The manifest does not list a hash of itself. Unknown keys are invalid. The schema test and the API both reject them.
 
@@ -268,7 +268,11 @@ Other players' whole names never leave the PC. They are not in the log, the mani
 
 The member may tick "include my own name". That box is off by default. When it is on, the zip may contain only that member's own name, as a crop of the name rectangle and nothing around it. On a scoreboard frame this is the name rectangle of the row the tracker already treats as the member, cut before the frame is blanked, saved as `crops/own-name.png`. If the HUD plate region is on a frame we are allowed to send, that plate is `crops/own-name-hud.png`. If the tracker does not know which row is the member, the box cannot be ticked, and the app says why. It does not guess a row. The BattleTag discriminator (the `#` and the digits) is part of the member's own name and is included only in that crop, only when the box is on.
 
-When the name reader gets a glyph wrong, the bundle may include that glyph by itself. This is a second box, also off by default (`glyphs_included`). A glyph image contains one character the reader got wrong, plus two pixels of padding. Padding outside the glyph is the solid blank colour, so a neighbour is not in the image. If the reader cannot separate the glyph from its neighbours, that glyph is left out. The image, the file name, and the manifest carry no board position, no row, no column, and no neighbouring character. Glyph files are ordered by hash, not by where they sat on the board. Glyphs are cut from other players' names. The member's own name uses the own-name box, not the glyph box.
+When the name reader gets a glyph wrong, the bundle may include that glyph by itself. This is a second box, also off by default (`glyphs_included`). A glyph image contains one character the reader got wrong, plus two pixels of padding. Padding outside the glyph is the solid blank colour, so a neighbour is not in the image. If the reader cannot separate the glyph from its neighbours, that glyph is left out. The image, the file name, and the manifest carry no board position, no row, no column, and no neighbouring character. Glyphs are cut from other players' names. The member's own name uses the own-name box, not the glyph box.
+
+A report sends at most 2 glyphs from any one name. The cap is for the whole zip, so the same name on two frames still contributes at most 2 glyphs. If that name has more than two wrong glyphs, the app picks two of them at random. It does not prefer the left end, the right end, or the order the reader saw them.
+
+Those chosen glyphs, from every name, go into one pool. The app shuffles that pool across the whole bundle. Zip entry order and the manifest `files` order follow the shuffle. They are not sorted by name, by character position, or by a counter. Two glyphs from the same name are not grouped, and nothing in the manifest or the filenames says they belong together. Each file uses its own random id, as in section 2. The bundle keeps no ordering, no index, and no name grouping for glyphs.
 
 Both boxes can be off. That is the default. The zip then has blanked crops and the scrubbed log only.
 
@@ -362,7 +366,14 @@ Log fixture: seed a log with a fake sync token, a fake server URL, a fake home p
 
 Manifest: the bundle's `manifest.json` validates against section 2. Every listed hash matches the file bytes. The zip contains those files and `manifest.json` only. Every PNG meets section 3. Training is false unless the test ticked it. With both name boxes off, the fake name does not appear as text anywhere in the zip, and there is no `own_name` or `glyph` file.
 
-Glyph fixture: with the glyph box on, each glyph image holds one character and no neighbour, and neither the path nor the manifest records a row or a board position. With the box off, those files are absent. With the own-name box off, `crops/own-name.png` is absent.
+Glyph fixture: with the glyph box on, each glyph image holds one character and no neighbour, and neither the path nor the manifest records a row or a board position. Filenames use random ids, not a counter. With the box off, those files are absent. With the own-name box off, `crops/own-name.png` is absent.
+
+Name rebuild fixture, required: seed at least three fake names. Each name is at least four characters, the names are distinct, and none is a prefix of another. Mark every character as a wrong glyph. Build one bundle with the glyph box on. From the zip alone, none of the seeded names can be rebuilt. In particular:
+
+- Each seeded name contributes at most 2 glyph images.
+- No filename, manifest field, zip order, or `files` order groups those glyphs by name or by their place in the name.
+- Reading the glyph characters in filename order, manifest order, or zip order does not spell a seeded name.
+- No pair of glyphs that the bundle ties together spells a seeded name, because the bundle does not tie them together.
 
 ## 10. Out of scope and open questions
 
@@ -386,5 +397,5 @@ Open questions:
 - UI scale is not read from the game. Until it is, the field stays whatever the member types, or `null`.
 - The API still has to lock the route paths, the daily cap (proposed at 5), and the private directory path. Those do not change the zip layout.
 - The desktop app does not have a site login today. Report upload waits on that. Local Save report does not.
-- A glyph cut from a rare name can still be recognisable. The box stays off by default. Dropping glyphs entirely would not change the rest of this contract.
+- A single glyph cut from a rare name can still be recognisable. The box stays off by default, and a report keeps at most 2 glyphs from any one name, shuffled, with random ids. Dropping glyphs entirely would not change the rest of this contract.
 - Training copies need a disk that has backups before anyone relies on them. Contabo is not that disk.
