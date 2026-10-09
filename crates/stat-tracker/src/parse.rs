@@ -995,7 +995,10 @@ fn map_from_normalized(text: &str, allow_fuzzy: bool) -> Option<String> {
         return Some(name.to_string());
     }
     for &(display_name, pattern) in MAPS {
-        if text.contains(&normalize_ocr_glyphs(pattern)) {
+        // Whole word or phrase. A short key must not fire inside a longer
+        // word: "paris" inside "comparison", "petra" inside "competra",
+        // "practice" inside "inpractice".
+        if contains_map_key(text, pattern) {
             return Some(display_name.to_string());
         }
     }
@@ -1090,6 +1093,34 @@ fn resolve_watchpoint(text: &str) -> WatchpointFamily {
     } else {
         WatchpointFamily::Undecided
     }
+}
+
+/// `pattern` is a map key. It matches only when every character of the key
+/// is bounded by a non-alphanumeric edge, so a shorter key cannot hide
+/// inside a longer word.
+fn contains_map_key(text: &str, pattern: &str) -> bool {
+    let pattern = normalize_ocr_glyphs(pattern);
+    if pattern.is_empty() {
+        return false;
+    }
+    let mut rest = text;
+    while let Some(at) = rest.find(&pattern) {
+        let before_ok = rest[..at]
+            .chars()
+            .next_back()
+            .is_none_or(|c| !c.is_alphanumeric());
+        let after = at + pattern.len();
+        let after_ok = rest[after..]
+            .chars()
+            .next()
+            .is_none_or(|c| !c.is_alphanumeric());
+        if before_ok && after_ok {
+            return true;
+        }
+        let step = rest[at..].chars().next().map(char::len_utf8).unwrap_or(1);
+        rest = &rest[at + step..];
+    }
+    false
 }
 
 fn find_map(lines: &[&str]) -> Option<String> {
@@ -2087,6 +2118,33 @@ mod hero_map_name_tests {
         assert!(stats_row_is_tracked("Hanamura", "Assault"));
         assert!(!stats_row_is_tracked("Practice Range", "Practice"));
         assert!(!stats_row_is_tracked("Busan", "Practice"));
+    }
+
+    #[test]
+    fn short_map_keys_match_whole_words_and_do_not_block_a_real_upload() {
+        // "paris" is a letter run inside "comparison".
+        assert_eq!(canonical_map("comparison"), None);
+        assert_eq!(canonical_map("COMPARISON").as_deref(), None);
+        let ilios = canonical_map("Ilios comparison").expect("ilios");
+        assert_eq!(ilios, "Ilios");
+        assert!(stats_row_is_tracked(&ilios, &stored_game_mode(&ilios)));
+
+        // "petra" inside a longer word must not become the deathmatch map.
+        assert_eq!(canonical_map("competra"), None);
+        let kings = canonical_map("King's Row competra").expect("kings");
+        assert_eq!(kings, "King's Row");
+        assert!(stats_row_is_tracked(&kings, "Hybrid"));
+
+        // "practice" inside a longer word must not become Practice Range.
+        assert_eq!(canonical_map("inpractice"), None);
+        let busan = canonical_map("Busan inpractice").expect("busan");
+        assert_eq!(busan, "Busan");
+        assert!(stats_row_is_tracked(&busan, "Control"));
+
+        // The keys still match when they are the whole word.
+        assert_eq!(canonical_map("PARIS").as_deref(), Some("Paris"));
+        assert_eq!(canonical_map("PETRA").as_deref(), Some("Petra"));
+        assert_eq!(canonical_map("PRACTICE").as_deref(), Some("Practice Range"));
     }
 
     #[test]
