@@ -34,18 +34,14 @@ pub struct StatsUploadEntry {
     /// badge on the site. Defaulted so older daemons keep uploading.
     #[serde(default)]
     pub edited: bool,
-    /// Recognizer stored on the local row. Always sent. Older clients that
-    /// omit it still deserialize as `ocr-v1`.
-    #[serde(default = "default_upload_recognizer")]
-    pub recognizer: String,
+    /// Recognizer stored on the local row. The tracker sends it. Older
+    /// clients omit it, and that deserializes as `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recognizer: Option<String>,
     /// Flat names this row was not sure about. Omitted when empty so a
     /// confident or ocr-v1 row does not add the key.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub suspect_fields: Vec<String>,
-}
-
-fn default_upload_recognizer() -> String {
-    RECOGNIZER_OCR_V1.to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -357,7 +353,7 @@ mod tests {
                     .unwrap()
                     .with_timezone(&chrono::Utc),
                 edited: false,
-                recognizer: RECOGNIZER_OCR_V1.into(),
+                recognizer: Some(RECOGNIZER_OCR_V1.into()),
                 suspect_fields: Vec::new(),
             }],
             deleted_sessions: vec![],
@@ -474,6 +470,12 @@ mod tests {
         assert_eq!(old.matches[0].entry.session_id, "");
         assert_eq!(old.matches[0].entry.elims, 0);
         assert!(!old.matches[0].entry.edited);
+        assert_eq!(old.matches[0].entry.recognizer, None);
+        let bare: StatsUploadEntry = serde_json::from_str(
+            r#"{"hero":"Ana","map_name":"Oasis","game_mode":"control","role":"Support","outcome":"victory","played_at":"2026-07-01T20:00:00Z"}"#,
+        )
+        .unwrap();
+        assert_eq!(bare.recognizer, None);
         assert!(old.deleted_sessions.is_empty());
 
         // A body that also carries recognizer and suspect_fields still

@@ -4033,8 +4033,9 @@ async fn commit_capture_rows(
 /// Replace stored fields from the new reader when the member's own row agrees.
 ///
 /// A missing board, an unknown team size, or an uncertain own row leaves the
-/// ocr-v1 row unchanged, including its recognizer tag. This does not touch
-/// the capture gate, the session map, or the report.
+/// ocr-v1 row unchanged, including its recognizer tag. The map and mode
+/// already chosen by capture policy stay even when the board names another
+/// map. This does not touch the capture gate, the session map, or the report.
 async fn apply_new_reader(
     parsed: &mut storage::PersonalMatch,
     frame: &image::DynamicImage,
@@ -12919,6 +12920,120 @@ mod tests {
         assert!(!called.load(std::sync::atomic::Ordering::SeqCst));
         let rows = store.get_session_snapshots("dm-keep").await.unwrap();
         assert!(rows.iter().all(|row| row.synced));
+    }
+
+    #[tokio::test]
+    async fn a_deathmatch_row_stays_local_when_the_new_reader_names_another_map() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = storage::LocalStore::open(dir.path()).await.unwrap();
+        let (mut staged, mut parsed) = staged_row(
+            "dm-new",
+            "Château Guillard",
+            Some(boundary::MapSource::TopBar),
+        );
+        assert!(!prepare_capture_row(
+            &mut parsed,
+            &mut staged,
+            None,
+            Some("CHATEAU GUILLARD"),
+            "",
+            true,
+        ));
+        assert_eq!(parsed.game_mode, "Deathmatch");
+        let board = {
+            let mut fields = vec![
+                shadow::FieldRead {
+                    name: "map".into(),
+                    value: Some(shadow::Value::Text("Ilios".into())),
+                    confidence: 0.95,
+                    suspect: false,
+                },
+                shadow::FieldRead {
+                    name: "mode".into(),
+                    value: Some(shadow::Value::Text("Control".into())),
+                    confidence: 0.95,
+                    suspect: false,
+                },
+            ];
+            fields.push(shadow::FieldRead {
+                name: "r0.hero".into(),
+                value: Some(shadow::Value::Text("Kiriko".into())),
+                confidence: 0.95,
+                suspect: false,
+            });
+            for (suffix, value) in [
+                ("e", 21u32),
+                ("a", 9),
+                ("d", 3),
+                ("dmg", 9100),
+                ("h", 1200),
+                ("mit", 50),
+            ] {
+                fields.push(shadow::FieldRead {
+                    name: format!("r0.{suffix}"),
+                    value: Some(shadow::Value::Int(value)),
+                    confidence: 0.95,
+                    suspect: false,
+                });
+            }
+            shadow::BoardRead {
+                status: shadow::BoardStatus::Read,
+                team_size: Some(5),
+                fields,
+                elapsed_ms: 1,
+            }
+        };
+        let saved = reader_apply::merge_saved(
+            &reader_apply::OcrSnapshot {
+                map: parsed.map_name.clone(),
+                mode: parsed.game_mode.clone(),
+                result: parsed.outcome.clone(),
+                hero: parsed.hero.clone(),
+                elims: parsed.elims,
+                assists: parsed.assists,
+                deaths: parsed.deaths,
+                damage: parsed.damage,
+                healing: parsed.healing,
+                mitigation: parsed.mitigation,
+            },
+            reader_apply::OwnRow::Identified {
+                index: 0,
+                team_size: 5,
+            },
+            Some(&board),
+        );
+        parsed.map_name = saved.map;
+        parsed.game_mode = saved.mode;
+        parsed.hero = saved.hero;
+        parsed.elims = saved.elims;
+        parsed.recognizer = saved.recognizer.to_string();
+        parsed.suspect_fields = saved.suspect_fields;
+        assert_eq!(parsed.map_name, "Château Guillard");
+        assert_eq!(parsed.game_mode, "Deathmatch");
+        assert!(parsed.suspect_fields.iter().any(|name| name == "map"));
+        commit_capture_rows(
+            &store,
+            dir.path(),
+            &staged,
+            &parsed,
+            SurrealDatetime::from(Utc::now()),
+        )
+        .await
+        .unwrap();
+        let called = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let called_upload = std::sync::Arc::clone(&called);
+        try_sync_with(&store, dir.path(), None, move |_matches, _| {
+            let called_upload = std::sync::Arc::clone(&called_upload);
+            async move {
+                called_upload.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(upload_ok())
+            }
+        })
+        .await;
+        assert!(
+            !called.load(std::sync::atomic::Ordering::SeqCst),
+            "reader = new must not upload a Deathmatch row"
+        );
     }
 
     #[tokio::test]

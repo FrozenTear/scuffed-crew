@@ -607,7 +607,7 @@ pub fn upload_request(
                 mitigation: m.display_mitigation(),
                 played_at: chrono::DateTime::<chrono::Utc>::from(m.played_at),
                 edited: m.is_edited(),
-                recognizer: m.stored_recognizer().to_string(),
+                recognizer: Some(m.stored_recognizer().to_string()),
                 suspect_fields: crate::reader_apply::upload_suspect_fields(&m.suspect_fields),
             })
         })

@@ -2,18 +2,25 @@
 //!
 //! ocr-v1 still decides game start and end, screen detection, and the
 //! plausibility holds. This module only chooses the values stored on the
-//! member's own row. A field from [`BoardRead`] is used when it has a value
-//! and is not suspect. Anything else keeps that field's ocr-v1 value and is
-//! listed in `suspect_fields` under the flat names the server accepts.
+//! member's own row. A stat, hero, or result from [`BoardRead`] is used when
+//! that field was read and is not suspect. Anything else keeps that field's
+//! ocr-v1 value. A field is listed in `suspect_fields` only when the new
+//! reader actually attempted it and did not supply a value to store.
+//!
+//! The map and mode already chosen by capture policy stay as they are. A
+//! confident or suspect board map that names a different map adds `map` to
+//! `suspect_fields` and does not replace the policy map or mode.
 //!
 //! The whole ocr-v1 read is kept, with recognizer `ocr-v1` and no suspect
 //! list, when the board is missing, the team size is unknown, or the member's
 //! own row is uncertain or does not agree with the new reader's row index.
+//! The recognizer is also `ocr-v1` when every stored field fell back to
+//! ocr-v1.
 
 use scuffed_types::{RECOGNIZER_OCR_V1, SUSPECT_FIELD_NAMES};
 
 use crate::shadow::digits::RECOGNIZER_ID;
-use crate::shadow::{BoardRead, BoardStatus, Value};
+use crate::shadow::{BoardRead, BoardStatus, FieldRead, Value};
 
 /// ocr-v1 values for the row that will be stored, after holds and map policy.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -115,13 +122,32 @@ pub fn merge_saved(ocr: &OcrSnapshot, own: OwnRow, board: Option<&BoardRead>) ->
     }
 
     let mut suspect = Vec::new();
-    let map = take_text(board, "map", &mut suspect, "map").unwrap_or_else(|| ocr.map.clone());
-    let mode = take_text(board, "mode", &mut suspect, "mode").unwrap_or_else(|| ocr.mode.clone());
-    let result =
-        take_text(board, "result", &mut suspect, "result").unwrap_or_else(|| ocr.result.clone());
+    let mut used_cv = false;
+    // Capture policy already chose the map and mode (including Deathmatch,
+    // which must stay local). The board may disagree, and that is the only
+    // reason `map` is marked. The stored mode stays with the policy map.
+    let map = ocr.map.clone();
+    let mode = ocr.mode.clone();
+    if let Some(board_map) = text_on(board, "map")
+        && board_map.trim() != ocr.map.trim()
+    {
+        push_suspect(&mut suspect, "map");
+    }
+    let result = match take_text(board, "result", &mut suspect, "result") {
+        Some(value) => {
+            used_cv = true;
+            value
+        }
+        None => ocr.result.clone(),
+    };
     let hero_name = format!("r{index}.hero");
-    let hero =
-        take_text(board, &hero_name, &mut suspect, "hero").unwrap_or_else(|| ocr.hero.clone());
+    let hero = match take_text(board, &hero_name, &mut suspect, "hero") {
+        Some(value) => {
+            used_cv = true;
+            value
+        }
+        None => ocr.hero.clone(),
+    };
     let stats = [
         ("e", ocr.elims),
         ("a", ocr.assists),
@@ -130,10 +156,17 @@ pub fn merge_saved(ocr: &OcrSnapshot, own: OwnRow, board: Option<&BoardRead>) ->
         ("h", ocr.healing),
         ("mit", ocr.mitigation),
     ];
+    let row_attempted = stat_row_attempted(board, index);
     let mut numbers = [0u32; 6];
     for (slot, (suffix, fallback)) in stats.into_iter().enumerate() {
         let name = format!("r{index}.{suffix}");
-        numbers[slot] = take_int(board, &name, &mut suspect, suffix).unwrap_or(fallback);
+        match take_int(board, &name, &mut suspect, suffix, row_attempted) {
+            Some(value) => {
+                used_cv = true;
+                numbers[slot] = value;
+            }
+            None => numbers[slot] = fallback,
+        }
     }
     SavedRead {
         map,
@@ -146,7 +179,11 @@ pub fn merge_saved(ocr: &OcrSnapshot, own: OwnRow, board: Option<&BoardRead>) ->
         damage: numbers[3],
         healing: numbers[4],
         mitigation: numbers[5],
-        recognizer: RECOGNIZER_ID,
+        recognizer: if used_cv {
+            RECOGNIZER_ID
+        } else {
+            RECOGNIZER_OCR_V1
+        },
         suspect_fields: order_suspects(suspect),
     }
 }
@@ -221,37 +258,68 @@ fn flat_suspect_name(name: &str) -> Option<&str> {
     SUSPECT_FIELD_NAMES.contains(&field).then_some(field)
 }
 
+/// Non-empty text on a field, including a suspect read. Missing and blank
+/// fields are not a second map name.
+fn text_on(board: &BoardRead, name: &str) -> Option<String> {
+    match board.get(name).and_then(|field| field.value.clone()) {
+        Some(Value::Text(text)) if !text.trim().is_empty() => Some(text),
+        _ => None,
+    }
+}
+
 fn take_text(
     board: &BoardRead,
     name: &str,
     suspect: &mut Vec<String>,
     flat: &str,
 ) -> Option<String> {
-    match confident_value(board, name) {
-        Some(Value::Text(text)) if !text.trim().is_empty() => Some(text),
-        _ => {
-            push_suspect(suspect, flat);
-            None
-        }
-    }
-}
-
-fn take_int(board: &BoardRead, name: &str, suspect: &mut Vec<String>, flat: &str) -> Option<u32> {
-    match confident_value(board, name) {
-        Some(Value::Int(n)) => Some(n),
-        _ => {
-            push_suspect(suspect, flat);
-            None
-        }
-    }
-}
-
-fn confident_value(board: &BoardRead, name: &str) -> Option<Value> {
     let field = board.get(name)?;
-    if field.suspect {
-        return None;
+    if let Some(Value::Text(text)) = field.value.clone()
+        && !field.suspect
+        && !text.trim().is_empty()
+    {
+        return Some(text);
     }
-    field.value.clone()
+    // Unread placeholders (no value, confidence 0, suspect) were not
+    // attempted: no hero pack, no result evidence, no map pack.
+    if field_attempted(field) {
+        push_suspect(suspect, flat);
+    }
+    None
+}
+
+fn take_int(
+    board: &BoardRead,
+    name: &str,
+    suspect: &mut Vec<String>,
+    flat: &str,
+    row_attempted: bool,
+) -> Option<u32> {
+    let field = board.get(name)?;
+    if let Some(Value::Int(n)) = field.value
+        && !field.suspect
+    {
+        return Some(n);
+    }
+    if row_attempted {
+        push_suspect(suspect, flat);
+    }
+    None
+}
+
+/// The digit reader ran on this row. A row of unread placeholders did not.
+fn stat_row_attempted(board: &BoardRead, index: usize) -> bool {
+    ["e", "a", "d", "dmg", "h", "mit"].iter().any(|suffix| {
+        board
+            .get(&format!("r{index}.{suffix}"))
+            .is_some_and(field_attempted)
+    })
+}
+
+/// A field the new reader wrote, as opposed to the unread placeholder
+/// (`value` none, confidence 0, suspect).
+fn field_attempted(field: &FieldRead) -> bool {
+    field.value.is_some() || field.confidence > 0.0 || !field.suspect
 }
 
 fn push_suspect(suspect: &mut Vec<String>, flat: &str) {
@@ -375,8 +443,9 @@ mod tests {
     #[test]
     fn confident_own_row_uses_new_values_and_cv_recognizer() {
         let saved = merge_saved(&ocr(), identified(2, 5), Some(&confident_board(5, 2)));
-        assert_eq!(saved.map, "Ilios");
-        assert_eq!(saved.mode, "Control");
+        assert_eq!(saved.map, "Busan", "policy map stays");
+        assert_eq!(saved.mode, "Control", "policy mode stays");
+        assert_eq!(saved.suspect_fields, vec!["map".to_string()]);
         assert_eq!(saved.result, "defeat");
         assert_eq!(saved.hero, "Kiriko");
         assert_eq!(saved.elims, 21);
@@ -386,13 +455,18 @@ mod tests {
         assert_eq!(saved.healing, 1200);
         assert_eq!(saved.mitigation, 50);
         assert_eq!(saved.recognizer, RECOGNIZER_ID);
-        assert!(saved.suspect_fields.is_empty());
         assert!(!saved.recognizer.contains(' '), "{:?}", saved.recognizer);
     }
 
     #[test]
     fn suspect_digit_falls_back_for_that_field_only() {
         let mut board = confident_board(5, 1);
+        let map = board
+            .fields
+            .iter_mut()
+            .find(|field| field.name == "map")
+            .unwrap();
+        map.value = Some(Value::Text("Busan".into()));
         let deaths = board
             .fields
             .iter_mut()
@@ -498,10 +572,85 @@ mod tests {
         assert_eq!(saved.mode, "Control");
         assert_eq!(saved.hero, "Ana");
         assert_eq!(saved.elims, 21);
-        assert_eq!(
-            saved.suspect_fields,
-            vec!["map".to_string(), "mode".into(), "hero".into()]
-        );
+        assert_eq!(saved.suspect_fields, vec!["hero".to_string()]);
+        assert_eq!(saved.recognizer, RECOGNIZER_ID);
+    }
+
+    #[test]
+    fn agreeing_map_is_not_suspect_and_mode_stays_on_policy() {
+        let mut board = confident_board(5, 0);
+        let map = board
+            .fields
+            .iter_mut()
+            .find(|field| field.name == "map")
+            .unwrap();
+        map.value = Some(Value::Text("Busan".into()));
+        let mode = board
+            .fields
+            .iter_mut()
+            .find(|field| field.name == "mode")
+            .unwrap();
+        mode.value = Some(Value::Text("Escort".into()));
+        let saved = merge_saved(&ocr(), identified(0, 5), Some(&board));
+        assert_eq!(saved.map, "Busan");
+        assert_eq!(saved.mode, "Control");
+        assert!(!saved.suspect_fields.iter().any(|name| name == "map"));
+        assert!(!saved.suspect_fields.iter().any(|name| name == "mode"));
+        assert_eq!(saved.recognizer, RECOGNIZER_ID);
+    }
+
+    #[test]
+    fn deathmatch_policy_stays_when_the_new_reader_names_another_map() {
+        let mut policy = ocr();
+        policy.map = "Château Guillard".into();
+        policy.mode = "Deathmatch".into();
+        let saved = merge_saved(&policy, identified(0, 5), Some(&confident_board(5, 0)));
+        assert_eq!(saved.map, "Château Guillard");
+        assert_eq!(saved.mode, "Deathmatch");
+        assert!(saved.suspect_fields.iter().any(|name| name == "map"));
+        assert!(!saved.suspect_fields.iter().any(|name| name == "mode"));
+        assert!(!crate::parse::stats_row_is_tracked(&saved.map, &saved.mode));
+        assert!(crate::parse::map_is_untracked(&saved.map));
+    }
+
+    #[test]
+    fn every_fallback_is_tagged_ocr_v1() {
+        let mut board = confident_board(5, 0);
+        for field in &mut board.fields {
+            field.suspect = true;
+        }
+        let saved = merge_saved(&ocr(), identified(0, 5), Some(&board));
+        assert_eq!(saved.map, "Busan");
+        assert_eq!(saved.mode, "Control");
+        assert_eq!(saved.result, "victory");
+        assert_eq!(saved.hero, "Ana");
+        assert_eq!(saved.elims, 10);
+        assert_eq!(saved.damage, 4000);
+        assert_eq!(saved.recognizer, RECOGNIZER_OCR_V1);
+        assert!(saved.suspect_fields.iter().any(|name| name == "map"));
+        assert!(saved.suspect_fields.iter().any(|name| name == "hero"));
+        assert!(saved.suspect_fields.iter().any(|name| name == "e"));
+        assert!(!saved.suspect_fields.iter().any(|name| name == "mode"));
+    }
+
+    #[test]
+    fn unread_match_fields_are_not_suspect() {
+        let mut board = confident_board(5, 0);
+        for name in ["map", "mode", "result", "r0.hero"] {
+            let field = board
+                .fields
+                .iter_mut()
+                .find(|field| field.name == name)
+                .unwrap();
+            *field = unread(name);
+        }
+        let saved = merge_saved(&ocr(), identified(0, 5), Some(&board));
+        assert_eq!(saved.map, "Busan");
+        assert_eq!(saved.mode, "Control");
+        assert_eq!(saved.result, "victory");
+        assert_eq!(saved.hero, "Ana");
+        assert_eq!(saved.elims, 21);
+        assert!(saved.suspect_fields.is_empty());
         assert_eq!(saved.recognizer, RECOGNIZER_ID);
     }
 
