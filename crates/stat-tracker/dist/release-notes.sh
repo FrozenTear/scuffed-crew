@@ -53,17 +53,32 @@ done
 
 NOTES_VERSION="${TAG#stat-tracker-v}"
 
-die_em() {
-  echo "$1 contains an em dash" >&2
-  printf '%s\n' "$2" | grep -n $'\u2014' >&2 || true
+# Stable stat-tracker-v* tags must have a changelog section. Release
+# candidates (*-rc*) and other refs stay lenient: a missing section still
+# prints the intro and footer.
+require_section=0
+if [[ "$TAG" == stat-tracker-v* && "$TAG" != *-rc* ]]; then
+  require_section=1
+fi
+
+die_dash() {
+  local label="$1"
+  local text="$2"
+  local kind="$3"
+  local char="$4"
+  echo "${label} contains ${kind}" >&2
+  printf '%s\n' "$text" | grep -n "$char" >&2 || true
   exit 1
 }
 
-no_em() {
+no_long_dash() {
   local label="$1"
   local text="$2"
   if [[ "$text" == *$'\u2014'* ]]; then
-    die_em "$label" "$text"
+    die_dash "$label" "$text" "an em dash" $'\u2014'
+  fi
+  if [[ "$text" == *$'\u2013'* ]]; then
+    die_dash "$label" "$text" "an en dash" $'\u2013'
   fi
 }
 
@@ -90,11 +105,17 @@ if [[ -f "$CHANGELOG" ]]; then
     /^## / && p {exit}
     p
   ' "$CHANGELOG")"
+elif [[ "$require_section" -eq 1 ]]; then
+  echo "changelog not found: ${CHANGELOG} (required for ${TAG})" >&2
+  exit 1
 fi
 
 if [[ -n "$(printf '%s' "${CURATED}" | tr -d '[:space:]')" ]]; then
   CURATED="$(pin_install_curls "$TAG" "$CURATED")"
-  no_em "changelog section ${NOTES_VERSION}" "$CURATED"
+  no_long_dash "changelog section ${NOTES_VERSION}" "$CURATED"
+elif [[ "$require_section" -eq 1 ]]; then
+  echo "changelog has no ## ${NOTES_VERSION} section (required for ${TAG})" >&2
+  exit 1
 fi
 
 FOOTER="$(cat <<'EOF'
@@ -109,12 +130,14 @@ FOOTER="$(cat <<'EOF'
 **Install:** extract the tarball and run `./install.sh` inside it. No Rust toolchain needed. Existing Dioxus installs: run the same installer (or `crates/stat-tracker/install.sh` from a source checkout) to replace `stat-tracker-gui`.
 EOF
 )"
-no_em "requirements footer" "$FOOTER"
+no_long_dash "requirements footer" "$FOOTER"
 
 INTRO="Prebuilt Linux x86_64 build of the Overwatch 2 stat tracker (daemon + Iced GUI)."
-no_em "release intro" "$INTRO"
+no_long_dash "release intro" "$INTRO"
 
-{
+MAIN_BOOTSTRAP_URL="https://raw.githubusercontent.com/FrozenTear/scuffed-crew/main/crates/stat-tracker/dist/bootstrap.sh"
+
+body="$(
   printf '%s\n\n' "$INTRO"
   if [[ -n "$(printf '%s' "${CURATED}" | tr -d '[:space:]')" ]]; then
     printf '%s\n\n' "${CURATED}"
@@ -142,4 +165,13 @@ no_em "release intro" "$INTRO"
     fi
   fi
   printf '%s\n' "$FOOTER"
-}
+)"
+
+# A stat-tracker-v* body that still names main's bootstrap.sh means the
+# curl rewrite above did not match that line.
+if [[ "$TAG" == stat-tracker-v* && "$body" == *"$MAIN_BOOTSTRAP_URL"* ]]; then
+  echo "release notes still contain the unpinned main bootstrap.sh URL; Install curl was not pinned to ${TAG}" >&2
+  exit 1
+fi
+
+printf '%s\n' "$body"

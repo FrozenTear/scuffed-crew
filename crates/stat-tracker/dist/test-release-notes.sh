@@ -141,8 +141,65 @@ set -e
 grep -q 'em dash' "$TMP/em.err" || fail "em dash failure did not say why"
 pass "em dash in the curated section fails the notes build"
 
-# The three footer dashes were the release-body bug. Count them on the
-# static footer by rendering a tag with no changelog section.
-empty="$(bash "$NOTES" --tag stat-tracker-v0.0.0 --changelog "$TMP/empty.md" --skip-commits)"
-printf '%s\n' "$empty" | grep -q $'\u2014' && fail "empty notes still have an em dash"
-pass "footer has no em dash"
+{
+  printf '%s\n' '## 1.2.4' ''
+  printf 'Hello %sworld.\n' $'\u2013'
+} > "$TMP/en.md"
+set +e
+bash "$NOTES" --tag stat-tracker-v1.2.4 --changelog "$TMP/en.md" --skip-commits >"$TMP/en.out" 2>"$TMP/en.err"
+en_code=$?
+set -e
+[[ "$en_code" -ne 0 ]] || fail "en dash in the changelog section was accepted"
+grep -q 'en dash' "$TMP/en.err" || fail "en dash failure did not say why"
+pass "en dash in the curated section fails the notes build"
+
+# A stable tag with no matching section must not publish intro+footer only.
+set +e
+missing_out="$(bash "$NOTES" --tag stat-tracker-v9.9.9 --changelog "$TMP/empty.md" --skip-commits 2>"$TMP/missing.err")"
+missing_code=$?
+set -e
+[[ "$missing_code" -ne 0 ]] || fail "stable tag with no changelog section exited 0"
+[[ -z "$missing_out" ]] || fail "stable tag with no section still printed notes"
+grep -q 'no ## 9.9.9 section' "$TMP/missing.err" \
+  || fail "missing-section error was: $(cat "$TMP/missing.err")"
+pass "stable tag with no changelog section exits 1"
+
+set +e
+nofile_out="$(bash "$NOTES" --tag stat-tracker-v9.9.9 --changelog "$TMP/does-not-exist.md" --skip-commits 2>"$TMP/nofile.err")"
+nofile_code=$?
+set -e
+[[ "$nofile_code" -ne 0 ]] || fail "stable tag with a missing changelog file exited 0"
+[[ -z "$nofile_out" ]] || fail "missing changelog file still printed notes"
+grep -q 'changelog not found' "$TMP/nofile.err" \
+  || fail "missing-file error was: $(cat "$TMP/nofile.err")"
+pass "stable tag with a missing changelog file exits 1"
+
+# Release candidates stay lenient when the section is absent.
+rc="$(bash "$NOTES" --tag stat-tracker-v9.9.9-rc1 --changelog "$TMP/empty.md" --skip-commits)"
+printf '%s\n' "$rc" | grep -F '## Requirements & install' >/dev/null \
+  || fail "rc tag did not print the footer"
+pass "rc tag with no changelog section still prints the footer"
+
+# The footer itself has neither dash. An rc tag is the lenient path that
+# still renders that footer when the changelog section is absent.
+printf '%s\n' "$rc" | grep -q $'\u2014' && fail "footer contains an em dash"
+printf '%s\n' "$rc" | grep -q $'\u2013' && fail "footer contains an en dash"
+pass "footer has no em dash or en dash"
+
+# A curl the rewriter does not recognize must not ship the main URL.
+cat > "$TMP/unpinned.md" <<EOF
+## 8.8.8
+
+### Install
+
+curl -fL ${MAIN_URL} | bash
+EOF
+set +e
+unpinned_out="$(bash "$NOTES" --tag stat-tracker-v8.8.8 --changelog "$TMP/unpinned.md" --skip-commits 2>"$TMP/unpinned.err")"
+unpinned_code=$?
+set -e
+[[ "$unpinned_code" -ne 0 ]] || fail "unpinned main bootstrap URL was accepted"
+[[ -z "$unpinned_out" ]] || fail "unpinned URL was written to stdout"
+grep -q 'unpinned main bootstrap.sh URL' "$TMP/unpinned.err" \
+  || fail "unpinned URL error was: $(cat "$TMP/unpinned.err")"
+pass "unpinned main bootstrap URL fails the notes build"

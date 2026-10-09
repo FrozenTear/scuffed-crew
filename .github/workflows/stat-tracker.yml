@@ -5,16 +5,20 @@ on:
     branches: [main]
     paths:
       - "crates/stat-tracker/**"
+      - "crates/stat-tracker/dist/release-notes.sh"
       - "crates/stat-tracker-ui/**"
       - "crates/types/**"
       - ".github/workflows/stat-tracker.yml"
+      - ".github/workflows/stat-tracker-release.yml"
   pull_request:
     branches: [main]
     paths:
       - "crates/stat-tracker/**"
+      - "crates/stat-tracker/dist/release-notes.sh"
       - "crates/stat-tracker-ui/**"
       - "crates/types/**"
       - ".github/workflows/stat-tracker.yml"
+      - ".github/workflows/stat-tracker-release.yml"
 
 env:
   CARGO_TERM_COLOR: always
