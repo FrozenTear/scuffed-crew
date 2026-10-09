@@ -187,7 +187,7 @@ fn region(rgb: &RgbImage, layout: &Layout) -> Option<Gray> {
                 / 255.0;
         }
     }
-    let s = WORK * gh as f64 / 1440.0;
+    let s = WORK * 1440.0 / gh as f64;
     let nw = ((rw as f64 * s).round_ties_even() as usize).max(1);
     let nh = ((rh as f64 * s).round_ties_even() as usize).max(1);
     Some(g.resize(nw, nh))
@@ -525,6 +525,23 @@ mod tests {
         assert_eq!(r.outcome, Some(Outcome::Defeat));
         assert_eq!(r.source.as_deref(), Some(RANK_SCREEN));
         assert!(!r.suspect);
+    }
+
+    #[test]
+    fn same_screen_reads_at_1080p() {
+        let t = templates();
+        let mut img = RgbImage::from_pixel(2560, 1440, Rgb([150, 100, 30]));
+        paint(
+            &mut img,
+            &lay(RANK_SCREEN),
+            &word(7, 50, 20),
+            [245, 245, 245],
+        );
+        let small =
+            image::imageops::resize(&img, 1920, 1080, image::imageops::FilterType::Triangle);
+        let r = t.read(&small);
+        assert_eq!(r.outcome, Some(Outcome::Defeat), "{r:?}");
+        assert!(!r.suspect, "{r:?}");
     }
 
     #[test]
