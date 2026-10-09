@@ -14,10 +14,10 @@
 //!   is the code lifetime (600 seconds on the current server).
 //! * `POST /api/link/poll` with `{device_code}` returns `{status}` of
 //!   `pending`, `slow_down`, `denied`, `expired`, or `approved`.
-//!   `slow_down` means the poll arrived before `interval` seconds. The
-//!   client waits that same interval again. `approved` includes `token`
-//!   once. The next poll is `expired` and has no token. A later result
-//!   does not replace the token already saved.
+//!   Each `slow_down` adds 5 seconds to this client's poll interval and
+//!   keeps that raised gap for the rest of that device code. `approved`
+//!   includes `token` once. The next poll is `expired` and has no token.
+//!   A later result does not replace the token already saved.
 //! * A non-success body is `{"error":"..."}` except HTTP 429, which is not
 //!   parsed, and HTTP 404, which means the route is not on this server yet.
 //! * `GET /api/stats/token-check` returns `{display_name}` or
@@ -25,7 +25,7 @@
 //! * HTTP 429 on token-check, link start, or link poll ignores the body.
 //!   `Retry-After` seconds are the wait when that header is a number.
 //!   Otherwise the wait is 10 seconds. A poll waits that long before the
-//!   next request.
+//!   next request and does not change its interval.
 //! * HTTP 404 on token-check or `POST /api/link/start` means this server
 //!   does not have those routes yet. The token is still saved, and site
 //!   sign-in is hidden in favour of pasting a token.
@@ -92,6 +92,10 @@ pub fn connected_as(display_name: &str) -> String {
 
 /// Used when a 429 has no `Retry-After` seconds.
 pub const RATE_LIMIT_FALLBACK_SECS: u64 = 10;
+
+/// Added to the poll interval on each `slow_down`. It stays raised for
+/// the rest of that device code. A 429 does not use this step.
+pub const SLOW_DOWN_STEP_SECS: u64 = 5;
 
 /// Header seconds when present, otherwise [`RATE_LIMIT_FALLBACK_SECS`].
 pub fn rate_limit_seconds(retry_after: Option<u64>) -> u64 {
@@ -478,6 +482,17 @@ impl LinkMachine {
         self.device_code.for_request()
     }
 
+    /// Keep the longer gap for later polls of this same device code.
+    fn raise_interval(&mut self, step: u64) -> u64 {
+        match &mut self.phase {
+            LinkPhase::Polling { interval_secs, .. } => {
+                *interval_secs = normalize_interval(interval_secs.saturating_add(step));
+                *interval_secs
+            }
+            _ => self.interval_secs(),
+        }
+    }
+
     /// A second approved result does not replace the token.
     pub fn apply(&mut self, outcome: PollOutcome) -> PollDecision {
         if self.is_terminal() {
@@ -491,12 +506,9 @@ impl LinkMachine {
                 }
             }
             PollOutcome::SlowDown => {
-                // The server interval stays fixed. slow_down means this poll
-                // was early, so the next one waits that same interval.
                 log_link_status("slow_down");
-                PollDecision::Continue {
-                    interval_secs: self.interval_secs(),
-                }
+                let interval_secs = self.raise_interval(SLOW_DOWN_STEP_SECS);
+                PollDecision::Continue { interval_secs }
             }
             PollOutcome::Denied => {
                 self.phase = LinkPhase::Denied;
@@ -1164,6 +1176,8 @@ impl GuideUi {
                 None
             }
             Ok(PollUpdate::RateLimited { seconds }) => {
+                // A 429 waits out Retry-After (or the 10 second fallback).
+                // It does not change the interval slow_down may have raised.
                 self.link_message = Some(rate_limit_message(seconds));
                 if machine.is_polling() {
                     self.next_poll_at = Some(Instant::now() + Duration::from_secs(seconds));
@@ -1795,13 +1809,18 @@ mod tests {
         );
         assert_eq!(
             machine.apply(PollOutcome::SlowDown),
-            PollDecision::Continue { interval_secs: 5 }
+            PollDecision::Continue { interval_secs: 10 }
         );
         assert_eq!(
             machine.apply(PollOutcome::SlowDown),
-            PollDecision::Continue { interval_secs: 5 }
+            PollDecision::Continue { interval_secs: 15 }
         );
-        assert_eq!(machine.interval_secs(), 5);
+        assert_eq!(machine.interval_secs(), 15);
+        assert_eq!(
+            machine.apply(PollOutcome::Pending),
+            PollDecision::Continue { interval_secs: 15 },
+            "the raised interval stays for the rest of this code"
+        );
 
         let mut denied = LinkMachine::start(
             "code".into(),
@@ -2222,8 +2241,9 @@ mod tests {
         );
         assert_eq!(
             machine.apply(second),
-            PollDecision::Continue { interval_secs: 5 }
+            PollDecision::Continue { interval_secs: 10 }
         );
+        assert_eq!(machine.interval_secs(), 10);
         let third = expect_outcome(
             poll_link(base.clone(), machine.device_code_for_request().to_string())
                 .await
@@ -2448,5 +2468,106 @@ mod tests {
             .server_url()
             .to_string();
         assert!(guide.token_checked(Ok(check_json)).is_none());
+    }
+
+    #[test]
+    fn slow_down_raises_the_interval_twice_and_a_429_leaves_it() {
+        let mut guide = GuideUi::startup(true, &Config::default(), Some("0.4.24"));
+        guide.link = Some(LinkMachine::start(
+            "dc-SECRET-9f3a-not-for-disk".into(),
+            "ABCD-EFGH".into(),
+            "http://127.0.0.1:9".into(),
+            5,
+            600,
+        ));
+
+        let before = Instant::now();
+        assert!(
+            guide
+                .poll_ready(Ok(PollUpdate::Outcome(PollOutcome::SlowDown)))
+                .is_none()
+        );
+        assert_eq!(guide.link.as_ref().expect("machine").interval_secs(), 10);
+        let wait = guide
+            .next_poll_at
+            .expect("next poll")
+            .saturating_duration_since(before);
+        assert!(wait >= Duration::from_secs(10), "{wait:?}");
+        assert!(wait < Duration::from_secs(11), "{wait:?}");
+
+        let before = Instant::now();
+        assert!(
+            guide
+                .poll_ready(Ok(PollUpdate::Outcome(PollOutcome::SlowDown)))
+                .is_none()
+        );
+        assert_eq!(guide.link.as_ref().expect("machine").interval_secs(), 15);
+        let wait = guide
+            .next_poll_at
+            .expect("next poll")
+            .saturating_duration_since(before);
+        assert!(wait >= Duration::from_secs(15), "{wait:?}");
+        assert!(wait < Duration::from_secs(16), "{wait:?}");
+
+        let before = Instant::now();
+        assert!(
+            guide
+                .poll_ready(Ok(PollUpdate::Outcome(PollOutcome::Pending)))
+                .is_none()
+        );
+        assert_eq!(guide.link.as_ref().expect("machine").interval_secs(), 15);
+        let wait = guide
+            .next_poll_at
+            .expect("next poll")
+            .saturating_duration_since(before);
+        assert!(wait >= Duration::from_secs(15), "{wait:?}");
+        assert!(wait < Duration::from_secs(16), "{wait:?}");
+
+        let before = Instant::now();
+        assert!(
+            guide
+                .poll_ready(Ok(PollUpdate::RateLimited { seconds: 6 }))
+                .is_none()
+        );
+        assert_eq!(guide.link.as_ref().expect("machine").interval_secs(), 15);
+        assert_eq!(
+            guide.link_message.as_deref(),
+            Some(rate_limit_message(6).as_str())
+        );
+        let wait = guide
+            .next_poll_at
+            .expect("next poll")
+            .saturating_duration_since(before);
+        assert!(wait >= Duration::from_secs(6), "{wait:?}");
+        assert!(wait < Duration::from_secs(7), "{wait:?}");
+
+        let before = Instant::now();
+        assert!(
+            guide
+                .poll_ready(Ok(PollUpdate::RateLimited {
+                    seconds: RATE_LIMIT_FALLBACK_SECS
+                }))
+                .is_none()
+        );
+        assert_eq!(guide.link.as_ref().expect("machine").interval_secs(), 15);
+        assert_eq!(
+            guide.link_message.as_deref(),
+            Some("Too many tries, wait 10 seconds and try again")
+        );
+        let wait = guide
+            .next_poll_at
+            .expect("next poll")
+            .saturating_duration_since(before);
+        assert!(wait >= Duration::from_secs(10), "{wait:?}");
+        assert!(wait < Duration::from_secs(11), "{wait:?}");
+
+        let fresh = LinkMachine::start(
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+            "WXYZ-2345".into(),
+            "http://127.0.0.1:9".into(),
+            5,
+            600,
+        );
+        assert_eq!(fresh.interval_secs(), 5);
     }
 }
