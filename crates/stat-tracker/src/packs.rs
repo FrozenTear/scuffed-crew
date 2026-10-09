@@ -33,7 +33,7 @@ pub const PACK_MAX_BYTES: u64 = 32 * 1024 * 1024;
 pub const HEROES_PACK_NAME: &str = "heroes-v1.tar";
 pub const HEROES_PACK_VERSION: &str = "1";
 pub const HEROES_PACK_SHA256: &str =
-    "3e2731330bc37a42ffd671ff98c73fa013c6463d577dbc83035747cc17167978";
+    "6933dfa317fab51454818145da62cae42e2b0e0a42fec3f0b5624daf147e02cd";
 pub const HEROES_PACK_SIZE: u64 = 1_280_000;
 
 pub const PACK_SAVED: &str = "Reader pack saved.";
@@ -794,7 +794,7 @@ mod tests {
 
     #[test]
     fn vision_pack_manifest_matches_the_published_entry() {
-        let raw = r#"[{"name":"heroes-v1.tar","version":"1","sha256":"3e2731330bc37a42ffd671ff98c73fa013c6463d577dbc83035747cc17167978","size":1280000}]"#;
+        let raw = r#"[{"name":"heroes-v1.tar","version":"1","sha256":"6933dfa317fab51454818145da62cae42e2b0e0a42fec3f0b5624daf147e02cd","size":1280000}]"#;
         let entries: Vec<PackListEntry> = serde_json::from_str(raw).expect("list");
         let entry = select_heroes_pack(&entries).expect("first pack");
         assert_eq!(entry.name, HEROES_PACK_NAME);
@@ -805,7 +805,7 @@ mod tests {
         assert_eq!(HEROES_PACK_VERSION, "1");
         assert_eq!(
             HEROES_PACK_SHA256,
-            "3e2731330bc37a42ffd671ff98c73fa013c6463d577dbc83035747cc17167978"
+            "6933dfa317fab51454818145da62cae42e2b0e0a42fec3f0b5624daf147e02cd"
         );
         assert_eq!(HEROES_PACK_SIZE, 1_280_000);
         let wrong = vec![PackListEntry {
