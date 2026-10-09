@@ -29,18 +29,53 @@ fn disclosure_focus_id(mobile: bool, more: bool, account: bool) -> Option<&'stat
     }
 }
 
+/// Closed `#site-nav-menu` is `inert` and never `aria-hidden`.
+/// `aria-hidden` while a descendant still has focus is the console warning
+/// "Blocked aria-hidden on an element because its descendant retained focus".
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct NavMenuA11y {
+    inert: bool,
+    aria_hidden: Option<bool>,
+}
+
+fn nav_menu_a11y(open: bool) -> NavMenuA11y {
+    NavMenuA11y {
+        inert: !open,
+        aria_hidden: None,
+    }
+}
+
+/// Hamburger regains focus when the mobile menu closes.
+/// Already-closed stays `None` so a desktop click does not steal focus.
+fn mobile_menu_close_focus(was_open: bool) -> Option<&'static str> {
+    if was_open { Some(NAV_TOGGLE_ID) } else { None }
+}
+
+/// Move focus to the hamburger first, then mark the menu closed.
+/// The next render sets `inert`. Doing it in this order means the closed
+/// overlay is not `aria-hidden` over a link that still holds focus.
+fn close_mobile_nav(mut mobile_open: Signal<bool>) {
+    let was_open = mobile_open();
+    if let Some(id) = mobile_menu_close_focus(was_open) {
+        focus_element(id);
+    }
+    if was_open {
+        mobile_open.set(false);
+    }
+}
+
 fn close_disclosures(
-    mut mobile_open: Signal<bool>,
+    mobile_open: Signal<bool>,
     mut more_open: Signal<bool>,
     mut account_open: Signal<bool>,
 ) {
-    let focus = disclosure_focus_id(mobile_open(), more_open(), account_open());
-    mobile_open.set(false);
-    more_open.set(false);
-    account_open.set(false);
-    if let Some(id) = focus {
+    if mobile_open() {
+        close_mobile_nav(mobile_open);
+    } else if let Some(id) = disclosure_focus_id(false, more_open(), account_open()) {
         focus_element(id);
     }
+    more_open.set(false);
+    account_open.set(false);
 }
 
 /// Map catalog id → public route. Unknown ids are skipped.
@@ -535,6 +570,11 @@ pub fn PublicLayout() -> Element {
     } else {
         "nav-overlay"
     };
+    let menu_a11y = nav_menu_a11y(mobile_open());
+    debug_assert!(
+        menu_a11y.aria_hidden.is_none(),
+        "site nav menu must not set aria-hidden"
+    );
 
     rsx! {
         style { {NAV_CSS} }
@@ -546,7 +586,7 @@ pub fn PublicLayout() -> Element {
                 to: Route::Home {},
                 class: "nav-mark",
                 onclick: move |_| {
-                    mobile_open.set(false);
+                    close_mobile_nav(mobile_open);
                     more_open.set(false);
                     account_open.set(false);
                 },
@@ -670,7 +710,7 @@ pub fn PublicLayout() -> Element {
                                         });
                                     });
                                     account_open.set(false);
-                                    mobile_open.set(false);
+                                    close_mobile_nav(mobile_open);
                                 },
                                 "Log out"
                             }
@@ -698,12 +738,12 @@ pub fn PublicLayout() -> Element {
                     aria_expanded: if mobile_open() { "true" } else { "false" },
                     aria_controls: NAV_MENU_ID,
                     onclick: move |_| {
-                        let closing = mobile_open();
-                        mobile_open.toggle();
                         more_open.set(false);
                         account_open.set(false);
-                        if closing {
-                            focus_element(NAV_TOGGLE_ID);
+                        if mobile_open() {
+                            close_mobile_nav(mobile_open);
+                        } else {
+                            mobile_open.set(true);
                         }
                     },
                     span {}
@@ -731,30 +771,27 @@ pub fn PublicLayout() -> Element {
         div {
             class: overlay_class,
             id: NAV_MENU_ID,
-            aria_hidden: if mobile_open() { "false" } else { "true" },
+            inert: menu_a11y.inert,
             button {
                 class: "nav-backdrop",
                 r#type: "button",
                 tabindex: "-1",
                 aria_label: "Close menu",
-                onclick: move |_| {
-                    mobile_open.set(false);
-                    focus_element(NAV_TOGGLE_ID);
-                },
+                onclick: move |_| close_mobile_nav(mobile_open),
             }
             div { class: "nav-overlay-sheet",
             for link in primary_links.iter() {
                 Link {
                     key: "m-{link.id}",
                     to: link.route.clone(),
-                    onclick: move |_| mobile_open.set(false),
+                    onclick: move |_| close_mobile_nav(mobile_open),
                     "{link.label}"
                 }
             }
             Link {
                 to: Route::Apply {},
                 class: "nav-cta",
-                onclick: move |_| mobile_open.set(false),
+                onclick: move |_| close_mobile_nav(mobile_open),
                 "Apply"
             }
             if !more_links.is_empty() {
@@ -763,7 +800,7 @@ pub fn PublicLayout() -> Element {
                     Link {
                         key: "mm-{link.id}",
                         to: link.route.clone(),
-                        onclick: move |_| mobile_open.set(false),
+                        onclick: move |_| close_mobile_nav(mobile_open),
                         "{link.label}"
                     }
                 }
@@ -773,28 +810,28 @@ pub fn PublicLayout() -> Element {
                 if is_officer {
                     Link {
                         to: Route::AdminDashboard {},
-                        onclick: move |_| mobile_open.set(false),
+                        onclick: move |_| close_mobile_nav(mobile_open),
                         "Admin"
                     }
                 }
                 Link {
                     to: Route::ProfileSettings {},
-                    onclick: move |_| mobile_open.set(false),
+                    onclick: move |_| close_mobile_nav(mobile_open),
                     "Edit Profile"
                 }
                 Link {
                     to: Route::IdentitySettings {},
-                    onclick: move |_| mobile_open.set(false),
+                    onclick: move |_| close_mobile_nav(mobile_open),
                     "Settings"
                 }
                 Link {
                     to: Route::DmInbox {},
-                    onclick: move |_| mobile_open.set(false),
+                    onclick: move |_| close_mobile_nav(mobile_open),
                     "DMs"
                 }
                 Link {
                     to: Route::TeamChat {},
-                    onclick: move |_| mobile_open.set(false),
+                    onclick: move |_| close_mobile_nav(mobile_open),
                     "Chat"
                 }
                 button {
@@ -807,14 +844,14 @@ pub fn PublicLayout() -> Element {
                                 loading: false,
                             });
                         });
-                        mobile_open.set(false);
+                        close_mobile_nav(mobile_open);
                     },
                     "Log out"
                 }
             } else if !loading {
                 Link {
                     to: Route::Login {},
-                    onclick: move |_| mobile_open.set(false),
+                    onclick: move |_| close_mobile_nav(mobile_open),
                     "Login"
                 }
             }
@@ -924,5 +961,129 @@ mod tests {
             Some(ACCOUNT_TOGGLE_ID)
         );
         assert_eq!(disclosure_focus_id(true, true, true), Some(NAV_TOGGLE_ID));
+    }
+
+    fn render(root: fn() -> Element) -> String {
+        let mut dom = VirtualDom::new(root);
+        dom.rebuild_in_place();
+        dioxus_ssr::render(&dom)
+    }
+
+    fn opening_tag_with_id(html: &str, id: &str) -> String {
+        let needle = format!("id=\"{id}\"");
+        let id_at = html
+            .find(&needle)
+            .unwrap_or_else(|| panic!("missing {needle} in {html}"));
+        let start = html[..id_at].rfind('<').expect("tag start");
+        let end = html[id_at..]
+            .find('>')
+            .map(|rel| id_at + rel)
+            .expect("tag end");
+        html[start..=end].to_string()
+    }
+
+    #[component]
+    fn NavMenuA11yProbe(open: bool) -> Element {
+        let a11y = nav_menu_a11y(open);
+        rsx! {
+            div {
+                id: NAV_MENU_ID,
+                class: if open { "nav-overlay open" } else { "nav-overlay" },
+                inert: a11y.inert,
+                a { href: "/members", "Members" }
+            }
+        }
+    }
+
+    fn closed_menu_probe() -> Element {
+        rsx! { NavMenuA11yProbe { open: false } }
+    }
+
+    fn open_menu_probe() -> Element {
+        rsx! { NavMenuA11yProbe { open: true } }
+    }
+
+    fn public_shell() -> Element {
+        let history =
+            use_hook(|| std::rc::Rc::new(dioxus::history::MemoryHistory::with_initial_path("/")));
+        let auth = use_signal(|| AuthState {
+            user: None,
+            loading: false,
+        });
+        use_context_provider(|| auth);
+        crate::state::provide_site_settings();
+        rsx! {
+            crate::theme::ThemeProvider {
+                dioxus::router::components::HistoryProvider {
+                    history: move |_| history.clone() as std::rc::Rc<dyn dioxus::history::History>,
+                    Router::<crate::routes::Route> {}
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn closed_overlay_is_inert_and_not_aria_hidden_with_focus() {
+        let closed = nav_menu_a11y(false);
+        assert!(closed.inert);
+        assert_eq!(
+            closed.aria_hidden, None,
+            "aria-hidden must stay unset so a focused link cannot trip the warning"
+        );
+        let open = nav_menu_a11y(true);
+        assert!(!open.inert);
+        assert_eq!(open.aria_hidden, None);
+        assert_eq!(mobile_menu_close_focus(true), Some(NAV_TOGGLE_ID));
+        assert_eq!(mobile_menu_close_focus(false), None);
+
+        let probe = render(closed_menu_probe);
+        let tag = opening_tag_with_id(&probe, NAV_MENU_ID);
+        assert!(tag.contains("inert"), "{tag}");
+        assert!(!tag.contains("aria-hidden"), "{tag}");
+        assert!(
+            probe.contains("<a "),
+            "closed menu still contains a link that could hold focus: {probe}"
+        );
+
+        let opened = render(open_menu_probe);
+        let open_tag = opening_tag_with_id(&opened, NAV_MENU_ID);
+        assert!(
+            !open_tag.contains("inert"),
+            "open menu must stay focusable: {open_tag}"
+        );
+        assert!(!open_tag.contains("aria-hidden"), "{open_tag}");
+
+        let shell = render(public_shell);
+        let shell_tag = opening_tag_with_id(&shell, NAV_MENU_ID);
+        assert!(
+            shell_tag.contains("inert"),
+            "closed #site-nav-menu must be inert: {shell_tag}"
+        );
+        assert!(
+            !shell_tag.contains("aria-hidden"),
+            "closed overlay must not be aria-hidden while a descendant can keep focus: {shell_tag}"
+        );
+        assert!(
+            shell.contains("site-nav-toggle"),
+            "closing returns focus to the hamburger, html={shell}"
+        );
+
+        let src = include_str!("public.rs");
+        let prod = src.split("mod tests").next().expect("tests module");
+        assert_eq!(
+            prod.matches("mobile_open.set(false)").count(),
+            1,
+            "only close_mobile_nav may close the menu"
+        );
+        let close_at = prod.find("fn close_mobile_nav").expect("close_mobile_nav");
+        let body = &prod[close_at..];
+        let end = body.find("\nfn ").expect("next fn");
+        let body = &body[..end];
+        let focus_at = body.find("focus_element").expect("focus");
+        let set_at = body.find("mobile_open.set(false)").expect("set");
+        assert!(
+            focus_at < set_at,
+            "focus the hamburger before the closed render sets inert: {body}"
+        );
     }
 }

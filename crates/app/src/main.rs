@@ -158,6 +158,9 @@ fn App() -> Element {
         }
     };
 
+    // Desktop only. Native Rust cannot call web_sys, so the canvas module is
+    // injected as script text. This is not in the web bundle. The site CSP
+    // does not need 'unsafe-eval' for it.
     #[cfg(feature = "desktop")]
     {
         use_hook(|| {
@@ -259,6 +262,176 @@ mod tests {
             }
         }
         out.push_str(rest);
+        out
+    }
+
+    /// String-eval in this crate is the desktop canvas bridge. The web bundle
+    /// sets the document title with `web_sys` and must not grow a new
+    /// `document::eval` / `Function` constructor.
+    #[test]
+    fn string_eval_call_sites_are_desktop_only() {
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut hits = Vec::new();
+        collect_string_eval(&root, &root, &mut hits);
+        let mut files: Vec<&str> = hits.iter().map(|(path, _, _)| path.as_str()).collect();
+        files.sort();
+        files.dedup();
+        assert_eq!(
+            files,
+            vec![
+                "src/components/strategy/desktop_map_canvas.rs",
+                "src/main.rs",
+            ],
+            "unexpected string-eval sites: {hits:?}"
+        );
+        let main_hits: Vec<_> = hits
+            .iter()
+            .filter(|(path, _, _)| path == "src/main.rs")
+            .collect();
+        assert_eq!(main_hits.len(), 1, "{main_hits:?}");
+        let canvas_hits: Vec<_> = hits
+            .iter()
+            .filter(|(path, _, _)| path.ends_with("desktop_map_canvas.rs"))
+            .collect();
+        assert_eq!(canvas_hits.len(), 5, "{canvas_hits:?}");
+
+        let main = include_str!("main.rs");
+        let eval_at = main
+            .find("document::eval(DESKTOP_CANVAS_JS)")
+            .expect("desktop inject");
+        let cfg_at = main[..eval_at]
+            .rfind("#[cfg(feature = \"desktop\")]")
+            .expect("desktop cfg");
+        assert!(
+            !main[cfg_at..eval_at].contains("feature = \"web\""),
+            "canvas inject must stay on the desktop target"
+        );
+        let title_fn = main
+            .find("fn document_title_element")
+            .expect("title helper");
+        let title_body = &main[title_fn..];
+        let title_end = title_body
+            .find("\n#[cfg(test)]")
+            .unwrap_or(title_body.len());
+        let title_body = &title_body[..title_end];
+        let web_at = title_body
+            .find("all(feature = \"web\", target_arch = \"wasm32\")")
+            .expect("web cfg");
+        let desktop_at = title_body
+            .find("not(all(feature = \"web\", target_arch = \"wasm32\"))")
+            .expect("desktop cfg");
+        assert!(web_at < desktop_at);
+        assert!(
+            !title_body[web_at..desktop_at].contains("document::Title"),
+            "web title helper must not use document::Title"
+        );
+        assert!(
+            title_body[desktop_at..].contains("document::Title"),
+            "desktop window title still uses document::Title"
+        );
+        assert!(
+            main.contains("document.set_title"),
+            "web title must use web_sys Document::set_title"
+        );
+    }
+
+    fn collect_string_eval(
+        crate_src: &std::path::Path,
+        dir: &std::path::Path,
+        hits: &mut Vec<(String, usize, String)>,
+    ) {
+        let entries =
+            std::fs::read_dir(dir).unwrap_or_else(|err| panic!("read {}: {err}", dir.display()));
+        for entry in entries {
+            let entry = entry.expect("dir entry");
+            let path = entry.path();
+            if path.is_dir() {
+                collect_string_eval(crate_src, &path, hits);
+                continue;
+            }
+            if path.extension().and_then(|ext| ext.to_str()) != Some("rs") {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path).expect("read rs");
+            let rel = path
+                .strip_prefix(crate_src.parent().expect("crates/app"))
+                .expect("relative")
+                .to_string_lossy()
+                .replace('\\', "/");
+            for (idx, line) in text.lines().enumerate() {
+                let trimmed = line.trim_start();
+                if trimmed.starts_with("//")
+                    || trimmed.starts_with("///")
+                    || trimmed.starts_with("//!")
+                    || trimmed.starts_with('*')
+                    || trimmed.starts_with("/*")
+                    || trimmed.starts_with("*/")
+                {
+                    continue;
+                }
+                let code = strip_rust_strings(line);
+                let is_eval = code.contains("document::eval")
+                    || code.contains("js_sys::eval")
+                    || code.contains("Function::new_with_args")
+                    || code.contains("Function::new(");
+                if is_eval {
+                    hits.push((rel.clone(), idx + 1, line.trim().to_string()));
+                }
+            }
+        }
+    }
+
+    fn strip_rust_strings(line: &str) -> String {
+        let mut out = String::with_capacity(line.len());
+        let mut chars = line.chars().peekable();
+        while let Some(ch) = chars.next() {
+            if ch == 'r' && matches!(chars.peek(), Some('"' | '#')) {
+                let mut hashes = 0usize;
+                while chars.peek() == Some(&'#') {
+                    hashes += 1;
+                    chars.next();
+                }
+                if chars.peek() == Some(&'"') {
+                    chars.next();
+                    let mut matched = 0usize;
+                    for next in chars.by_ref() {
+                        if next == '"' {
+                            matched = 0;
+                            continue;
+                        }
+                        if next == '#' && matched < hashes {
+                            matched += 1;
+                            if matched == hashes {
+                                break;
+                            }
+                            continue;
+                        }
+                        matched = 0;
+                    }
+                    out.push(' ');
+                    continue;
+                }
+                out.push('r');
+                for _ in 0..hashes {
+                    out.push('#');
+                }
+                continue;
+            }
+            if ch == '"' {
+                while let Some(next) = chars.next() {
+                    if next == '\\' {
+                        chars.next();
+                        continue;
+                    }
+                    if next == '"' {
+                        break;
+                    }
+                }
+                out.push(' ');
+                continue;
+            }
+            out.push(ch);
+        }
         out
     }
 }
