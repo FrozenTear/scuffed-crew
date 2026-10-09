@@ -10,6 +10,7 @@ pub mod login_lockout;
 pub mod membership_policy;
 pub mod nostr_rate_limit;
 pub mod notifications;
+pub mod packs;
 pub mod rate_limit;
 pub mod routes;
 pub mod seed;
@@ -140,6 +141,32 @@ pub fn create_router_with_dist(state: AppState, dist_dir: impl Into<PathBuf>) ->
         .route("/api/stats/token-check", get(routes::stats::token_check))
         .layer(
             GovernorLayer::new(token_check_governor_config)
+                .error_handler(rate_limit::governor_error_response),
+        );
+
+    // Own per-IP bucket, same budget as token-check (burst 8, then 1 every
+    // 10s). Filling this bucket does not block uploads or token-check.
+    // The governor calls `rate_limited_response` for the JSON 429.
+    let pack_governor_config = std::sync::Arc::new(
+        GovernorConfigBuilder::default()
+            .key_extractor(key_extractor.clone())
+            .per_second(10)
+            .burst_size(8)
+            .finish()
+            .expect("valid pack governor config"),
+    );
+    let pack_routes = Router::new()
+        .route("/api/tracker/packs", get(routes::packs::list_packs))
+        .route(
+            "/api/tracker/packs/{name}",
+            get(routes::packs::download_pack),
+        )
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            routes::packs::require_packs,
+        ))
+        .layer(
+            GovernorLayer::new(pack_governor_config)
                 .error_handler(rate_limit::governor_error_response),
         );
 
@@ -287,6 +314,7 @@ pub fn create_router_with_dist(state: AppState, dist_dir: impl Into<PathBuf>) ->
         // Upload routes carry their own (dedicated) rate limiter
         .merge(upload_routes)
         .merge(token_check_routes)
+        .merge(pack_routes)
         // Public aggregate routes (dedicated rate limiter — HS-DR P1)
         .merge(public_routes)
         .merge(link_start_routes)
