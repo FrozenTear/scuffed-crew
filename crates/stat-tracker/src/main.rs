@@ -3915,9 +3915,10 @@ enum PreparedRow {
 /// stores that row locally. Adlersbrunn with stats on only one team is not
 /// stored as Eichenwalde.
 ///
-/// An untrusted read of a local-only map with no open map is dropped.
-/// Storing it used to leave a blank map, which uploads, and which the
-/// blank-map review hold would keep until someone picked a map.
+/// An untrusted read of a local-only map with no open map is dropped,
+/// except when this capture is the stat-reset split. That split stores
+/// the new session with an empty map. The review hold keeps it unsynced
+/// until a pick, and it is not uploaded as the game that just closed.
 fn prepare_capture_row(
     parsed: &mut storage::PersonalMatch,
     staged: &mut StagedCapture,
@@ -3943,7 +3944,7 @@ fn prepare_capture_row(
         staged.map_name = fallback.unwrap_or("").to_string();
         staged.recorded_map = (!staged.map_name.is_empty()).then(|| staged.map_name.clone());
         staged.map_source = None;
-        if staged.map_name.is_empty() {
+        if staged.map_name.is_empty() && !staged.split {
             tracing::info!("untracked map with no open game is not stored");
             return PreparedRow::Drop;
         }
