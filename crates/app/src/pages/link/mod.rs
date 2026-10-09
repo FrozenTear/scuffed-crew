@@ -309,6 +309,7 @@ pub(crate) fn clear_return_to_link() {
     let _ = take_stored_return_flag();
 }
 
+#[cfg(test)]
 pub(crate) fn return_to_link_pending() -> bool {
     RETURN_TO_LINK.with(|flag| flag.get()) || STORED_RETURN_TO_LINK.with(|flag| flag.get())
 }
