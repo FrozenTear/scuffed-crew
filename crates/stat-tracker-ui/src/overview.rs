@@ -43,6 +43,7 @@ pub fn view(app: &TrackerApp, content_width: f32) -> Element<'_, Message> {
             &app.update_progress,
             &app.update_plan,
             &app.update_notes,
+            app.update_notes_ui(),
         ));
     }
     col = col.push(tonight_shelf).push(heroes_shelf).push(bottom);

@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 
@@ -81,6 +82,11 @@ pub enum Message {
     OpenAbout,
     DismissNotes,
     OpenNotesLink(String),
+    ToggleReleaseDetails {
+        surface: notes::NotesSurface,
+        version: String,
+    },
+    ShowOlderReleases(notes::NotesSurface),
 }
 
 struct NotesDialog {
@@ -152,6 +158,10 @@ pub struct TrackerApp {
     pub update_plan: UpdatePlan,
     /// Notes for the offered update, drawn inside the update prompt.
     pub update_notes: Vec<ShownRelease>,
+    update_open_details: HashSet<String>,
+    update_show_older: bool,
+    dialog_open_details: HashSet<String>,
+    dialog_show_older: bool,
     notes_dialog: Option<NotesDialog>,
     /// Resolved once at startup so Settings can pin a tag without spawning
     /// the daemon on every frame.
@@ -286,6 +296,10 @@ impl TrackerApp {
                 hint: String::new(),
             },
             update_notes: Vec::new(),
+            update_open_details: HashSet::new(),
+            update_show_older: false,
+            dialog_open_details: HashSet::new(),
+            dialog_show_older: false,
             notes_dialog,
             confirm_clear: false,
             tessdata_busy: false,
@@ -774,13 +788,19 @@ impl TrackerApp {
                 Task::none()
             }
             Message::UpdateChecked(info) => {
+                self.update_open_details.clear();
+                self.update_show_older = false;
                 self.update_notes = info
                     .as_ref()
                     .map(|i| {
-                        let remote: Vec<(&str, &str)> = i
+                        let remote: Vec<notes::RemoteRelease<'_>> = i
                             .release_bodies
                             .iter()
-                            .map(|body| (body.version.as_str(), body.body.as_str()))
+                            .map(|body| notes::RemoteRelease {
+                                version: body.version.as_str(),
+                                body: body.body.as_str(),
+                                published_at: body.published_at.as_deref(),
+                            })
                             .collect();
                         notes::render(notes::notes_for_update(
                             notes::BUNDLED_CHANGELOG,
@@ -802,6 +822,8 @@ impl TrackerApp {
             }
             Message::OpenAbout => {
                 let remember = self.notes_dialog.as_ref().and_then(|d| d.remember.clone());
+                self.dialog_open_details.clear();
+                self.dialog_show_older = false;
                 self.notes_dialog = Some(NotesDialog {
                     subtitle:
                         "Release notes bundled with this app. Install steps stay on the GitHub page."
@@ -821,6 +843,25 @@ impl TrackerApp {
                     tracing::warn!(error = %e, "failed to remember installed version");
                 }
                 self.notes_dialog = None;
+                self.dialog_open_details.clear();
+                self.dialog_show_older = false;
+                Task::none()
+            }
+            Message::ToggleReleaseDetails { surface, version } => {
+                let open = match surface {
+                    notes::NotesSurface::Update => &mut self.update_open_details,
+                    notes::NotesSurface::Dialog => &mut self.dialog_open_details,
+                };
+                if !open.remove(&version) {
+                    open.insert(version);
+                }
+                Task::none()
+            }
+            Message::ShowOlderReleases(surface) => {
+                match surface {
+                    notes::NotesSurface::Update => self.update_show_older = true,
+                    notes::NotesSurface::Dialog => self.dialog_show_older = true,
+                }
                 Task::none()
             }
             Message::OpenNotesLink(url) => {
@@ -1100,12 +1141,35 @@ impl TrackerApp {
             .style(theme::page_background);
 
         if let Some(dialog) = &self.notes_dialog {
-            stack![page, notes::dialog(&dialog.subtitle, &dialog.sections)]
-                .width(Fill)
-                .height(Fill)
-                .into()
+            stack![
+                page,
+                notes::dialog(&dialog.subtitle, &dialog.sections, self.dialog_notes_ui())
+            ]
+            .width(Fill)
+            .height(Fill)
+            .into()
         } else {
             page.into()
+        }
+    }
+
+    pub fn update_notes_ui(&self) -> notes::NotesUi<'_> {
+        notes::NotesUi {
+            surface: notes::NotesSurface::Update,
+            installed: self.installed_version.as_deref(),
+            offered: self.update.as_ref().map(|info| info.latest.as_str()),
+            open_details: &self.update_open_details,
+            show_older: self.update_show_older,
+        }
+    }
+
+    fn dialog_notes_ui(&self) -> notes::NotesUi<'_> {
+        notes::NotesUi {
+            surface: notes::NotesSurface::Dialog,
+            installed: self.installed_version.as_deref(),
+            offered: self.update.as_ref().map(|info| info.latest.as_str()),
+            open_details: &self.dialog_open_details,
+            show_older: self.dialog_show_older,
         }
     }
 

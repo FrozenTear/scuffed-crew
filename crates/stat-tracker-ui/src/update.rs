@@ -12,8 +12,8 @@ use std::time::Duration;
 
 use crate::daemon::DaemonVerb;
 
-use iced::widget::{button, column, container, row, scrollable, text};
-use iced::{Element, Fill, Length, Padding};
+use iced::widget::{button, column, container, row, text};
+use iced::{Element, Fill, Padding};
 
 use crate::app::Message;
 use crate::theme::{
@@ -52,6 +52,8 @@ pub struct UpdateInfo {
 pub struct ReleaseBody {
     pub version: String,
     pub body: String,
+    /// GitHub `published_at`, when the API included one.
+    pub published_at: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -391,6 +393,7 @@ pub fn select_newer_release(current: &str, releases: &[serde_json::Value]) -> Op
         ver_str: String,
         html: String,
         body: String,
+        published_at: Option<String>,
     }
     let mut parsed = Vec::new();
     for release in releases {
@@ -413,6 +416,7 @@ pub fn select_newer_release(current: &str, releases: &[serde_json::Value]) -> Op
             ver_str: ver_str.to_string(),
             html: release["html_url"].as_str().unwrap_or_default().to_string(),
             body: release["body"].as_str().unwrap_or_default().to_string(),
+            published_at: release["published_at"].as_str().map(str::to_string),
         });
     }
     let best = parsed.iter().max_by_key(|item| item.ver)?;
@@ -436,6 +440,7 @@ pub fn select_newer_release(current: &str, releases: &[serde_json::Value]) -> Op
             .map(|item| ReleaseBody {
                 version: item.ver_str,
                 body: item.body,
+                published_at: item.published_at,
             })
             .collect(),
     })
@@ -627,6 +632,7 @@ pub fn banner<'a>(
     progress: &UpdateProgress,
     plan: &UpdatePlan,
     notes: &'a [crate::notes::ShownRelease],
+    notes_ui: crate::notes::NotesUi<'a>,
 ) -> Element<'a, Message> {
     let url = info.url.clone();
     let cmd = pinned_install_command(&info.latest);
@@ -734,7 +740,7 @@ pub fn banner<'a>(
     .spacing(8);
 
     body = body.push(actions);
-    body = body.push(update_notes_block(info, notes));
+    body = body.push(update_notes_block(info, notes, notes_ui));
 
     container(body)
         .padding(PAD_INNER)
@@ -755,6 +761,7 @@ pub fn banner<'a>(
 fn update_notes_block<'a>(
     info: &UpdateInfo,
     notes: &'a [crate::notes::ShownRelease],
+    notes_ui: crate::notes::NotesUi<'a>,
 ) -> Element<'a, Message> {
     if notes.is_empty() {
         return text(format!(
@@ -776,11 +783,9 @@ fn update_notes_block<'a>(
             .size(SIZE_META)
             .font(FONT_SEMIBOLD)
             .color(TEXT_2),
-        scrollable(crate::notes::notes_column(notes))
-            .height(Length::Fixed(280.0))
-            .width(Fill),
+        crate::notes::notes_column(notes, notes_ui),
     ]
-    .spacing(8)
+    .spacing(12)
     .width(Fill)
     .into()
 }
@@ -799,7 +804,8 @@ mod tests {
                 "draft": false,
                 "prerelease": false,
                 "html_url": "https://example.com/22",
-                "body": "notes 22"
+                "body": "notes 22",
+                "published_at": "2026-02-01T00:00:00Z"
             }),
             serde_json::json!({
                 "tag_name": "stat-tracker-v0.4.23",
@@ -828,9 +834,16 @@ mod tests {
         assert_eq!(
             info.release_bodies
                 .iter()
-                .map(|body| (body.version.as_str(), body.body.as_str()))
+                .map(|body| (
+                    body.version.as_str(),
+                    body.body.as_str(),
+                    body.published_at.as_deref()
+                ))
                 .collect::<Vec<_>>(),
-            [("0.4.23", "notes 23"), ("0.4.22", "notes 22")]
+            [
+                ("0.4.23", "notes 23", None),
+                ("0.4.22", "notes 22", Some("2026-02-01T00:00:00Z"))
+            ]
         );
         assert!(select_newer_release("0.4.23", &releases).is_none());
     }

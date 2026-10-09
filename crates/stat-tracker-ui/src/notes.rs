@@ -7,11 +7,15 @@
 //! come from that widget. No separate Markdown crate is added.
 //!
 //! `### Install` blocks stay in the changelog for the GitHub release page.
-//! This view drops them. The first paragraph of each release is the player
-//! summary and is drawn ahead of the rest.
+//! This view drops them. Each release is a card: the player summary, then
+//! the `### Highlights` bullets, then the remaining text under Details
+//! (closed until opened). Only the latest few cards show until the reader
+//! asks for older releases.
+
+use std::collections::HashSet;
 
 use iced::widget::markdown::{self, Item};
-use iced::widget::{button, column, container, row, scrollable, text};
+use iced::widget::{button, column, container, rich_text, row, scrollable, text};
 use iced::{Alignment, Element, Fill, Font, Length, Padding};
 
 use crate::app::Message;
@@ -23,21 +27,58 @@ use crate::theme::{
 /// Changelog shipped inside the GUI binary.
 pub const BUNDLED_CHANGELOG: &str = include_str!("../../stat-tracker/CHANGELOG.md");
 
+/// Cards kept on screen before "Show older releases".
+pub const VISIBLE_RELEASES: usize = 3;
+
+/// Readable card width, about 70 to 80 characters of body text.
+const READING_WIDTH: f32 = 600.0;
+/// Player summary, a step above body text.
+const LEAD_SIZE: f32 = 17.0;
+
 /// One release, after Install blocks are removed and the summary is split out.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReleaseNotes {
     pub version: String,
-    /// First paragraph. Plain language, shown ahead of `body_markdown`.
+    /// First paragraph. Plain language, shown ahead of the highlights.
     pub summary: String,
+    /// `### Highlights` bullets, plain text, in changelog order.
+    pub highlights: Vec<String>,
     /// Remaining Markdown (headings, paragraphs, lists, code, links).
     pub body_markdown: String,
+    /// Short date from a GitHub `published_at`, when that release was fetched.
+    pub published_on: Option<String>,
 }
 
 /// Notes ready to draw. Markdown is parsed once, not on every frame.
 pub struct ShownRelease {
     pub version: String,
     pub summary: String,
+    pub highlights: Vec<String>,
     pub items: Vec<Item>,
+    pub published_on: Option<String>,
+}
+
+/// Which notes surface owns a Details toggle or the older-releases button.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum NotesSurface {
+    Update,
+    Dialog,
+}
+
+/// What the card list needs besides the release text.
+pub struct NotesUi<'a> {
+    pub surface: NotesSurface,
+    pub installed: Option<&'a str>,
+    pub offered: Option<&'a str>,
+    pub open_details: &'a HashSet<String>,
+    pub show_older: bool,
+}
+
+/// A GitHub release body plus the publish time, when the API sent one.
+pub struct RemoteRelease<'a> {
+    pub version: &'a str,
+    pub body: &'a str,
+    pub published_at: Option<&'a str>,
 }
 
 /// How the installed version compares with the version stored in `ui_state.json`.
@@ -145,7 +186,7 @@ pub fn notes_for_update(
     bundled: &str,
     current: &str,
     latest: &str,
-    remote: &[(&str, &str)],
+    remote: &[RemoteRelease<'_>],
 ) -> Vec<ReleaseNotes> {
     let Some(latest_key) = version_key(latest) else {
         return Vec::new();
@@ -163,8 +204,8 @@ pub fn notes_for_update(
             keys.push(key);
         }
     }
-    for (ver, _) in remote {
-        if let Some(key) = version_key(ver)
+    for remote in remote {
+        if let Some(key) = version_key(remote.version)
             && key > current_key
             && key <= latest_key
             && !keys.contains(&key)
@@ -185,19 +226,53 @@ pub fn render(notes: Vec<ReleaseNotes>) -> Vec<ShownRelease> {
             items: markdown::parse(&notes.body_markdown).collect(),
             version: notes.version,
             summary: notes.summary,
+            highlights: notes.highlights,
+            published_on: notes.published_on,
         })
         .collect()
 }
 
-pub fn notes_column(sections: &[ShownRelease]) -> Element<'_, Message> {
-    let mut col = column![].spacing(18).width(Fill);
-    for section in sections {
-        col = col.push(release_block(section));
+/// Releases drawn before the older-releases button. Newest first already.
+pub fn releases_on_screen<T>(sections: &[T], show_older: bool) -> &[T] {
+    if show_older || sections.len() <= VISIBLE_RELEASES {
+        sections
+    } else {
+        &sections[..VISIBLE_RELEASES]
+    }
+}
+
+/// Details stay closed until that version is in the open set.
+pub fn details_open(open: &HashSet<String>, version: &str) -> bool {
+    open.contains(version)
+}
+
+pub fn notes_column<'a>(sections: &'a [ShownRelease], ui: NotesUi<'a>) -> Element<'a, Message> {
+    let visible = releases_on_screen(sections, ui.show_older);
+    let mut col = column![].spacing(16).width(Fill);
+    for section in visible {
+        col = col.push(release_card(section, &ui));
+    }
+    if !ui.show_older && sections.len() > VISIBLE_RELEASES {
+        col = col.push(
+            button(
+                text("Show older releases")
+                    .size(SIZE_META)
+                    .font(FONT_SEMIBOLD)
+                    .color(TEXT),
+            )
+            .padding(Padding::from([8, 16]))
+            .style(theme::ghost_btn())
+            .on_press(Message::ShowOlderReleases(ui.surface)),
+        );
     }
     col.into()
 }
 
-pub fn dialog<'a>(subtitle: &'a str, sections: &'a [ShownRelease]) -> Element<'a, Message> {
+pub fn dialog<'a>(
+    subtitle: &'a str,
+    sections: &'a [ShownRelease],
+    ui: NotesUi<'a>,
+) -> Element<'a, Message> {
     let header = row![
         column![
             text("What's new")
@@ -228,7 +303,7 @@ pub fn dialog<'a>(subtitle: &'a str, sections: &'a [ShownRelease]) -> Element<'a
         column![
             header,
             scrollable(
-                container(notes_column(sections))
+                container(notes_column(sections, ui))
                     .padding(Padding {
                         right: 8.0,
                         ..Padding::ZERO
@@ -262,15 +337,33 @@ pub fn dialog<'a>(subtitle: &'a str, sections: &'a [ShownRelease]) -> Element<'a
 fn notes_for_key(
     bundled: &str,
     key: (u32, u32, u32),
-    remote: &[(&str, &str)],
+    remote: &[RemoteRelease<'_>],
 ) -> Option<ReleaseNotes> {
-    if let Some((_, body)) = remote.iter().find(|(ver, _)| version_key(ver) == Some(key)) {
-        let from_remote = from_github_body(&display_version(key), body);
+    let published_on = remote
+        .iter()
+        .find(|row| version_key(row.version) == Some(key))
+        .and_then(|row| row.published_at)
+        .and_then(format_release_date);
+    let bundled_notes = section_for(bundled, &display_version(key));
+    if let Some(row) = remote
+        .iter()
+        .find(|row| version_key(row.version) == Some(key))
+    {
+        let mut from_remote = from_github_body(&display_version(key), row.body);
         if usable(&from_remote) {
+            if from_remote.highlights.is_empty()
+                && let Some(bundled_notes) = &bundled_notes
+            {
+                from_remote.highlights.clone_from(&bundled_notes.highlights);
+            }
+            from_remote.published_on = published_on;
             return Some(from_remote);
         }
     }
-    section_for(bundled, &display_version(key))
+    bundled_notes.map(|mut notes| {
+        notes.published_on = published_on;
+        notes
+    })
 }
 
 fn from_github_body(version: &str, body: &str) -> ReleaseNotes {
@@ -281,26 +374,48 @@ fn from_github_body(version: &str, body: &str) -> ReleaseNotes {
     });
     let stripped =
         drop_leading_paragraph_if(&stripped, |summary| summary.starts_with("Prebuilt Linux"));
-    let (summary, rest) = split_summary(&stripped);
-    ReleaseNotes {
-        version: version.to_string(),
-        summary,
-        body_markdown: rest.trim().to_string(),
-    }
+    player_text(version, &stripped)
 }
 
 fn player_from_section(version: &str, raw: &str) -> ReleaseNotes {
     let stripped = hide_sections(raw, |_level, title| title.eq_ignore_ascii_case("install"));
+    player_text(version, &stripped)
+}
+
+fn player_text(version: &str, raw: &str) -> ReleaseNotes {
+    let highlights = extract_highlights(raw);
+    let stripped = strip_highlights(raw);
     let (summary, rest) = split_summary(&stripped);
     ReleaseNotes {
         version: version.to_string(),
         summary,
+        highlights,
         body_markdown: rest.trim().to_string(),
+        published_on: None,
     }
 }
 
 fn usable(notes: &ReleaseNotes) -> bool {
-    !notes.summary.trim().is_empty() || !notes.body_markdown.trim().is_empty()
+    !notes.summary.trim().is_empty()
+        || !notes.highlights.is_empty()
+        || !notes.body_markdown.trim().is_empty()
+}
+
+/// `2026-03-04T12:00:00Z` becomes `4 Mar 2026`. Anything else is omitted.
+fn format_release_date(raw: &str) -> Option<String> {
+    let date = raw.get(..10)?;
+    let mut parts = date.split('-');
+    let year = parts.next()?;
+    let month: usize = parts.next()?.parse().ok()?;
+    let day: u32 = parts.next()?.parse().ok()?;
+    if year.len() != 4 || year.chars().any(|c| !c.is_ascii_digit()) {
+        return None;
+    }
+    let month_name = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ]
+    .get(month.checked_sub(1)?)?;
+    Some(format!("{day} {month_name} {year}"))
 }
 
 fn raw_sections(changelog: &str) -> Vec<(String, String)> {
@@ -428,6 +543,95 @@ fn split_summary(text: &str) -> (String, String) {
     (summary, rest.trim().to_string())
 }
 
+fn extract_highlights(markdown: &str) -> Vec<String> {
+    highlight_lines(markdown).0
+}
+
+/// Drop the `### Highlights` heading and its bullet list. Following prose stays.
+fn strip_highlights(markdown: &str) -> String {
+    let drop_lines = highlight_lines(markdown).1;
+    let mut out = String::new();
+    for (index, line) in markdown.lines().enumerate() {
+        if drop_lines.contains(&index) {
+            continue;
+        }
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        out.push_str(line);
+    }
+    if markdown.ends_with('\n') {
+        out.push('\n');
+    }
+    out
+}
+
+/// Bullet text, plus the source line indexes of the heading and that list.
+fn highlight_lines(markdown: &str) -> (Vec<String>, std::collections::BTreeSet<usize>) {
+    let mut bullets = Vec::new();
+    let mut drop_lines = std::collections::BTreeSet::new();
+    let mut in_section = false;
+    let mut in_fence = false;
+    let mut started = false;
+    for (index, line) in markdown.lines().enumerate() {
+        let fence = line.trim_start().starts_with("```");
+        if fence {
+            if !in_section {
+                in_fence = !in_fence;
+            } else {
+                break;
+            }
+            continue;
+        }
+        if in_fence {
+            continue;
+        }
+        if let Some((_level, title)) = atx(line) {
+            if in_section {
+                break;
+            }
+            if title.eq_ignore_ascii_case("highlights") {
+                in_section = true;
+                drop_lines.insert(index);
+            }
+            continue;
+        }
+        if !in_section {
+            continue;
+        }
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            if started {
+                drop_lines.insert(index);
+            }
+            continue;
+        }
+        if let Some(item) = trimmed
+            .strip_prefix("- ")
+            .or_else(|| trimmed.strip_prefix("* "))
+        {
+            let item = item.trim();
+            if !item.is_empty() {
+                bullets.push(item.to_string());
+                drop_lines.insert(index);
+                started = true;
+            }
+            continue;
+        }
+        break;
+    }
+    // A blank line after the list belongs to the following prose.
+    if let Some(last) = drop_lines.iter().next_back().copied()
+        && markdown
+            .lines()
+            .nth(last)
+            .is_some_and(|line| line.trim().is_empty())
+    {
+        drop_lines.remove(&last);
+    }
+    (bullets, drop_lines)
+}
+
 fn drop_leading_paragraph_if(text: &str, pred: impl Fn(&str) -> bool) -> String {
     let (summary, rest) = split_summary(text);
     if pred(&summary) {
@@ -437,51 +641,124 @@ fn drop_leading_paragraph_if(text: &str, pred: impl Fn(&str) -> bool) -> String 
     }
 }
 
-fn release_block(section: &ShownRelease) -> Element<'_, Message> {
-    let mut col = column![
+fn release_card<'a>(section: &'a ShownRelease, ui: &NotesUi<'a>) -> Element<'a, Message> {
+    let open = details_open(ui.open_details, &section.version);
+    let mut header = row![
         text(format!("v{}", section.version))
             .size(SIZE_TITLE)
-            .font(FONT_BOLD)
+            .font(FONT_EXTRABOLD)
             .color(TEXT),
     ]
-    .spacing(8)
-    .width(Fill);
-    if !section.summary.is_empty() {
-        col = col.push(summary_callout(&section.summary));
-    }
-    if !section.items.is_empty() {
-        col = col.push(
-            container(markdown::view_with(
-                section.items.iter(),
-                markdown_settings(),
-                &NotesViewer,
-            ))
-            .width(Fill),
+    .spacing(12)
+    .align_y(Alignment::Center);
+    if let Some(date) = &section.published_on {
+        header = header.push(
+            text(date.clone())
+                .size(SIZE_META)
+                .font(FONT_MEDIUM)
+                .color(TEXT_2),
         );
     }
-    col.into()
+    header = header.push(iced::widget::space().width(Fill));
+    if let Some(label) = release_badge(&section.version, ui.installed, ui.offered) {
+        header = header.push(badge_pill(label));
+    }
+
+    let mut col = column![header].spacing(14).width(Fill);
+    if !section.summary.is_empty() {
+        col = col.push(
+            text(section.summary.clone())
+                .size(LEAD_SIZE)
+                .font(FONT_MEDIUM)
+                .color(TEXT)
+                .line_height(1.5),
+        );
+    }
+    if !section.highlights.is_empty() {
+        let mut list = column![].spacing(10).width(Fill);
+        for item in &section.highlights {
+            list = list.push(
+                text(format!("• {item}"))
+                    .size(SIZE_BODY)
+                    .font(FONT_MEDIUM)
+                    .color(TEXT)
+                    .line_height(1.5),
+            );
+        }
+        col = col.push(list);
+    }
+    if !section.items.is_empty() {
+        let label = if open { "Hide details" } else { "Details" };
+        col = col.push(
+            button(text(label).size(SIZE_META).font(FONT_SEMIBOLD).color(TEXT))
+                .padding(Padding::from([6, 14]))
+                .style(theme::ghost_btn())
+                .on_press(Message::ToggleReleaseDetails {
+                    surface: ui.surface,
+                    version: section.version.clone(),
+                }),
+        );
+        if open {
+            col = col.push(
+                container(markdown::view_with(
+                    section.items.iter(),
+                    markdown_settings(),
+                    &NotesViewer,
+                ))
+                .width(Fill),
+            );
+        }
+    }
+
+    container(col)
+        .padding(20)
+        .width(Fill)
+        .max_width(READING_WIDTH)
+        .style(theme::surface_panel)
+        .into()
 }
 
-fn summary_callout(summary: &str) -> Element<'_, Message> {
-    container(
-        text(summary.to_string())
-            .size(SIZE_BODY)
-            .font(FONT_SEMIBOLD)
-            .color(TEXT),
-    )
-    .padding(Padding::from([8, 12]))
-    .width(Fill)
-    .style(|_theme| container::Style {
-        background: Some(iced::Background::Color(theme::BG)),
-        text_color: Some(TEXT),
-        border: iced::Border {
-            color: theme::ACCENT,
-            width: 1.0,
-            radius: theme::inner_radius(),
-        },
-        ..container::Style::default()
-    })
-    .into()
+/// "Update available" for the offered release, "Installed" for this build,
+/// "New" for a version newer than the one installed.
+pub fn release_badge(
+    version: &str,
+    installed: Option<&str>,
+    offered: Option<&str>,
+) -> Option<&'static str> {
+    let key = version_key(version)?;
+    let installed_key = installed.and_then(version_key);
+    let offered_key = offered.and_then(version_key);
+    if offered_key == Some(key) && installed_key != Some(key) {
+        return Some("Update available");
+    }
+    if installed_key == Some(key) {
+        return Some("Installed");
+    }
+    if installed_key.is_some_and(|installed_key| key > installed_key) {
+        return Some("New");
+    }
+    None
+}
+
+fn badge_pill(label: &'static str) -> Element<'static, Message> {
+    let (bg, fg, border) = if label == "Installed" {
+        (theme::SURFACE, theme::TEXT_2, theme::BORDER)
+    } else {
+        (theme::ACCENT, theme::TEXT, theme::ACCENT)
+    };
+    container(text(label).size(SIZE_META).font(FONT_SEMIBOLD).color(fg))
+        .padding(Padding::from([3, 10]))
+        .style(move |_theme| container::Style {
+            background: Some(iced::Background::Color(bg)),
+            text_color: Some(fg),
+            border: iced::Border {
+                color: border,
+                width: 1.0,
+                radius: theme::RADIUS_CHIP.into(),
+            },
+            ..container::Style::default()
+        })
+        .into()
 }
 
 fn markdown_settings() -> markdown::Settings {
@@ -495,7 +772,7 @@ fn markdown_settings() -> markdown::Settings {
     settings.h1_size = SIZE_TITLE.into();
     settings.h2_size = 18.0.into();
     settings.h3_size = 16.0.into();
-    settings.spacing = 10.0.into();
+    settings.spacing = 18.0.into();
     settings.code_size = SIZE_META.into();
     settings
 }
@@ -517,6 +794,18 @@ impl<'a> markdown::Viewer<'a, Message> for NotesViewer {
         settings.style.font = FONT_BOLD;
         markdown::heading(settings, level, text, index, Message::OpenNotesLink)
     }
+
+    fn paragraph(
+        &self,
+        settings: markdown::Settings,
+        text: &markdown::Text,
+    ) -> Element<'a, Message> {
+        rich_text(text.spans(settings.style))
+            .size(settings.text_size)
+            .line_height(1.5)
+            .on_link_click(Message::OpenNotesLink)
+            .into()
+    }
 }
 
 #[cfg(test)]
@@ -531,6 +820,11 @@ Preamble that is not a release.
 ## 0.4.2
 
 Player summary for two. It stays short.
+
+### Highlights
+
+- Maps stay on the right game
+- Long games are not cut off
 
 More detail with `code` and a [link](https://example.com/notes).
 
@@ -576,6 +870,12 @@ still visible
         assert!(notes.body_markdown.contains("`code`"));
         assert!(notes.body_markdown.contains("https://example.com/notes"));
         assert!(notes.body_markdown.contains("- first bullet"));
+        assert_eq!(
+            notes.highlights,
+            ["Maps stay on the right game", "Long games are not cut off"]
+        );
+        assert!(!notes.body_markdown.contains("### Highlights"));
+        assert!(!notes.body_markdown.contains("Maps stay on the right game"));
         assert!(section_for(FIXTURE, "0.9.9").is_none());
     }
 
@@ -674,8 +974,16 @@ curl secret-remote
 Need GTK.
 ";
         let remote = [
-            ("0.4.2", remote_two),
-            ("0.4.3", "Brand new summary.\n\nOnly on GitHub.\n"),
+            RemoteRelease {
+                version: "0.4.2",
+                body: remote_two,
+                published_at: Some("2026-03-04T18:22:11Z"),
+            },
+            RemoteRelease {
+                version: "0.4.3",
+                body: "Brand new summary.\n\nOnly on GitHub.\n",
+                published_at: None,
+            },
         ];
         let notes = notes_for_update(FIXTURE, "0.4.0", "0.4.3", &remote);
         let versions: Vec<_> = notes.iter().map(|n| n.version.as_str()).collect();
@@ -683,8 +991,11 @@ Need GTK.
 
         assert_eq!(notes[0].summary, "Brand new summary.");
         assert!(notes[0].body_markdown.contains("Only on GitHub."));
+        assert!(notes[0].highlights.is_empty());
+        assert!(notes[0].published_on.is_none());
 
         assert_eq!(notes[1].summary, "Player summary from GitHub.");
+        assert_eq!(notes[1].published_on.as_deref(), Some("4 Mar 2026"));
         assert!(notes[1].body_markdown.contains("Detail line"));
         assert!(notes[1].body_markdown.contains("- a bullet"));
         assert!(!notes[1].body_markdown.contains("Prebuilt Linux"));
@@ -694,17 +1005,55 @@ Need GTK.
 
         assert_eq!(notes[2].summary, "Summary for one.");
 
-        let fallback = notes_for_update(FIXTURE, "0.4.1", "0.4.2", &[("0.4.2", "   \n")]);
+        let fallback = notes_for_update(
+            FIXTURE,
+            "0.4.1",
+            "0.4.2",
+            &[RemoteRelease {
+                version: "0.4.2",
+                body: "   \n",
+                published_at: Some("not-a-date"),
+            }],
+        );
         assert_eq!(fallback.len(), 1);
         assert_eq!(
             fallback[0].summary,
             "Player summary for two. It stays short."
         );
+        assert_eq!(
+            fallback[0].highlights,
+            ["Maps stay on the right game", "Long games are not cut off"]
+        );
+        assert!(fallback[0].published_on.is_none());
+
+        let remote_highlights = "\
+Player summary from GitHub.
+
+### Highlights
+
+- remote highlight
+
+Detail line with `inline`.
+";
+        let preferred = notes_for_update(
+            FIXTURE,
+            "0.4.1",
+            "0.4.2",
+            &[RemoteRelease {
+                version: "0.4.2",
+                body: remote_highlights,
+                published_at: None,
+            }],
+        );
+        assert_eq!(preferred[0].highlights, ["remote highlight"]);
+        assert!(!preferred[0].body_markdown.contains("remote highlight"));
+        assert!(preferred[0].body_markdown.contains("Detail line"));
     }
 
     #[test]
     fn bundled_recent_releases_lead_with_a_summary_and_hide_install() {
         assert!(BUNDLED_CHANGELOG.contains("first paragraph under the `## X.Y.Z` heading"));
+        assert!(BUNDLED_CHANGELOG.contains("a `### Highlights` list gives two to four"));
         for version in ["0.4.23", "0.4.22", "0.4.21", "0.4.20", "0.4.19"] {
             let raw = workflow_body(BUNDLED_CHANGELOG, version);
             assert!(
@@ -731,6 +1080,19 @@ Need GTK.
                 !notes.body_markdown.starts_with(&notes.summary),
                 "{version} summary should be split out of the body"
             );
+            assert!(
+                (2..=4).contains(&notes.highlights.len()),
+                "{version} highlights: {:?}",
+                notes.highlights
+            );
+            assert!(!notes.body_markdown.contains("### Highlights"), "{version}");
+            for bullet in &notes.highlights {
+                assert!(!bullet.contains('\u{2014}'), "{version} bullet: {bullet}");
+                assert!(
+                    !notes.body_markdown.contains(bullet),
+                    "{version} highlight leaked into details: {bullet}"
+                );
+            }
         }
         let latest = section_for(BUNDLED_CHANGELOG, "0.4.23").expect("latest");
         assert!(latest.summary.contains("private log"));
@@ -741,6 +1103,55 @@ Need GTK.
                 .body_markdown
                 .contains("board-order state machine")
         );
+    }
+
+    #[test]
+    fn details_start_closed_and_older_than_three_stay_hidden() {
+        let notes = all_notes(BUNDLED_CHANGELOG);
+        assert!(notes.len() > VISIBLE_RELEASES);
+        let shown = releases_on_screen(&notes, false);
+        assert_eq!(shown.len(), VISIBLE_RELEASES);
+        assert_eq!(
+            shown
+                .iter()
+                .map(|note| note.version.as_str())
+                .collect::<Vec<_>>(),
+            ["0.4.23", "0.4.22", "0.4.21"]
+        );
+        assert_eq!(releases_on_screen(&notes, true).len(), notes.len());
+
+        let open = HashSet::new();
+        assert!(notes.iter().all(|note| !details_open(&open, &note.version)));
+        let mut open = open;
+        open.insert("0.4.23".to_string());
+        assert!(details_open(&open, "0.4.23"));
+        assert!(!details_open(&open, "0.4.22"));
+    }
+
+    #[test]
+    fn badges_mark_the_offered_update_the_install_and_newer_skips() {
+        assert_eq!(
+            release_badge("0.4.23", Some("0.4.20"), Some("0.4.23")),
+            Some("Update available")
+        );
+        assert_eq!(
+            release_badge("0.4.22", Some("0.4.20"), Some("0.4.23")),
+            Some("New")
+        );
+        assert_eq!(
+            release_badge("0.4.23", Some("0.4.23"), None),
+            Some("Installed")
+        );
+        assert_eq!(
+            release_badge("0.4.23", Some("0.4.23"), Some("0.4.23")),
+            Some("Installed")
+        );
+        assert_eq!(release_badge("0.4.19", Some("0.4.23"), None), None);
+        assert_eq!(
+            format_release_date("2026-10-09T00:00:00Z").as_deref(),
+            Some("9 Oct 2026")
+        );
+        assert!(format_release_date("yesterday").is_none());
     }
 
     #[test]

@@ -7,16 +7,24 @@ prepends the section whose heading matches the tag version (for example
 Each release section starts with a short summary for players: one to three
 sentences in plain language, before any technical detail. That summary is
 the first paragraph under the `## X.Y.Z` heading (a blank line ends it).
+After the summary, a `### Highlights` list gives two to four short
+player-facing bullets. The rest of the section is technical detail.
 Keep the `## X.Y.Z` headings and the `### Install` blocks. The release
 workflow copies from the matching heading through the next `##` heading,
-including `### Install`. The desktop app hides `### Install` and shows the
-summary first.
+including `### Install`. The desktop app hides `### Install`, shows the
+summary, then the highlights, and tucks the remaining text under Details.
 
 ## 0.4.23
 
 You can turn on an extra number reader that only writes a private log on
 this computer. It does not change your saved games or what gets uploaded,
 and it stays off unless you enable it.
+
+### Highlights
+
+- An optional number reader can write a private log on this computer.
+- It stays off unless you turn it on.
+- Saved games and uploads are left unchanged.
 
 Adds an optional shadow digit reader, off by default. When it is on
 (`shadow_recognizer = true` in config.toml, or
@@ -42,6 +50,12 @@ Or extract the tarball and run `./install.sh`. Pin with
 Map names are less likely to be mixed up, including the two Watchpoint
 maps and a couple of event maps. Long games are no longer closed too
 early, and uploading a result no longer freezes the tracker.
+
+### Highlights
+
+- Map names are less likely to be mixed up, including Watchpoint and event maps.
+- Long games are no longer closed too early.
+- Uploading a result no longer freezes the tracker.
 
 A bare or ambiguous Watchpoint is not stored as Gibraltar. A following
 word is matched against Grímsvötn and Gibraltar, including the misreads
@@ -110,6 +124,11 @@ A faint 0 on the scoreboard was sometimes missed, which shoved the other
 numbers into the wrong columns. Those zeros are read now, and a timer on
 the same line is no longer treated as a stat.
 
+### Highlights
+
+- Faint zeros on the scoreboard are read, so the other numbers stay in their columns.
+- A timer on the same line is no longer treated as a stat.
+
 A zero on the scoreboard is drawn fainter than the other digits. The
 cell reader was dropping those cells, and one empty cell threw away the
 whole row. Those Tabs were often saved anyway, through the text
@@ -177,6 +196,11 @@ The last game of a session uploads on its own a few minutes after the
 result, instead of waiting until the next game or a shutdown. Watchpoint:
 Grímsvötn is stored as its own map, not as Watchpoint: Gibraltar.
 
+### Highlights
+
+- The last game uploads on its own a few minutes after the result.
+- Watchpoint: Grímsvötn is stored as its own map, not as Gibraltar.
+
 The last game of the night now uploads by itself about 3 minutes after
 the result screen. Before this, that game stayed open until the next
 Tab or a clean shutdown, so it could sit unsynced for hours. A Tab
@@ -214,6 +238,11 @@ Or extract the tarball and run `./install.sh`. Pin with
 The tracker is better at telling one match from the next, so a result
 and the stats after it stay on the right game. It no longer uses a short
 timer to decide that a new match has started.
+
+### Highlights
+
+- A result and the stats after it stay on the right game.
+- A short timer is no longer what decides that a new match has started.
 
 Boundaries are one board-order state machine. A result hint stays sealable
 until a second board with progressed stats is accepted after it, or one
