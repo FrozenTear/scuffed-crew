@@ -265,9 +265,10 @@ fn scale_portrait_px(ref_px: u32, board_w: u32) -> u32 {
 /// - Portrait ~leftmost 5-6% of width, square
 /// - One-row team gap between team 1 and team 2
 ///
-/// A rect that would run past the crop is clamped to the crop. The crop
-/// itself is already clamped to the frame in `crop_scoreboard`. Stat and
-/// digit cells use `crop_player_row`, not this grid.
+/// Returns None unless the full square fits in the crop. A cut-off
+/// rectangle can be saved as a hero reference, so a short board is
+/// refused instead of clipped.
+/// Stat and digit cells use `crop_player_row`, not this grid.
 pub fn portrait_rect(
     scoreboard_dims: (u32, u32),
     row_idx: usize,
@@ -282,9 +283,9 @@ pub fn portrait_rect(
         return None;
     }
 
-    let portrait_w = w * 6 / 100;
+    let side = w * 6 / 100;
     let portrait_x = w / 100;
-    if portrait_x >= w || portrait_w == 0 {
+    if side == 0 || portrait_x.saturating_add(side) > w {
         return None;
     }
 
@@ -303,21 +304,15 @@ pub fn portrait_rect(
         team_size as u32 + 1 + row_in_team
     };
     let y = scale_portrait_px(PORTRAIT_REF_START_Y + steps * pitch, w);
-    if y >= h {
-        return None;
-    }
-
-    let portrait_w = portrait_w.min(w - portrait_x);
-    let portrait_h = portrait_w.min(h - y);
-    if portrait_h == 0 {
+    if y.saturating_add(side) > h {
         return None;
     }
 
     Some(PortraitRect {
         x: portrait_x,
         y,
-        w: portrait_w,
-        h: portrait_h,
+        w: side,
+        h: side,
     })
 }
 
@@ -863,25 +858,31 @@ mod portrait_rect_tests {
                     dst.y, expect_y as u32,
                     "team {team} row {row} must scale with board width"
                 );
-                assert!(
-                    dst.y + dst.h <= d1080.1,
-                    "team {team} row {row} bottom {} past crop {}",
-                    dst.y + dst.h,
-                    d1080.1
+                let full_1440 = d1440.0 * 6 / 100;
+                let full_1080 = d1080.0 * 6 / 100;
+                assert_eq!(
+                    (src.w, src.h),
+                    (full_1440, full_1440),
+                    "team {team} row {row} 1440 portrait is the full square"
                 );
-                assert_eq!(dst.w, dst.h, "team {team} row {row} stays square");
+                assert_eq!(
+                    (dst.w, dst.h),
+                    (full_1080, full_1080),
+                    "team {team} row {row} 1080 portrait is the full square"
+                );
+                assert!(src.y + src.h <= d1440.1);
+                assert!(dst.y + dst.h <= d1080.1);
             }
         }
     }
 
     #[test]
-    fn portrait_rect_clamps_to_the_crop() {
-        // 1440-wide crop, short height: row 0 starts at y=120 and the
-        // square portrait (99px) would run past y=150.
-        let r = portrait_rect((1664, 150), 0, 5).expect("partial row");
-        assert_eq!(r.y, 120);
-        assert_eq!(r.w, 99);
-        assert_eq!(r.h, 30);
+    fn short_board_returns_none() {
+        // 1440-wide crop. Row 0 starts at y=120 and the square is 99px,
+        // so anything shorter than 219px would cut it. That used to come
+        // back as 99x30. Callers save this rect as a hero reference.
+        assert!(portrait_rect((1664, 150), 0, 5).is_none());
+        assert!(portrait_rect((1664, 218), 0, 5).is_none());
         assert!(portrait_rect((1664, 100), 0, 5).is_none());
     }
 }
