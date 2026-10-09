@@ -22,6 +22,11 @@ pub struct AppState {
     pub session_config: SessionConfig,
     pub oauth_config: OAuthConfig,
     pub upload_dir: PathBuf,
+    /// Private directory for tracker bug-report zips. Not served over HTTP.
+    pub reports_dir: PathBuf,
+    /// False when `REPORTS_DIR` is missing, not writable, or overlaps uploads
+    /// or the web root. The rest of the site still starts.
+    pub reports_enabled: bool,
     /// Fan-out Matrix + Discord notifications. `None` when neither is configured.
     pub notifier: Option<Notifier>,
     /// 32-byte key for HMAC-signing Nostr challenge tokens.
@@ -35,6 +40,8 @@ pub struct AppState {
     /// Failed password-login backoff, keyed by normalized username.
     /// Password login only — not bearer tokens or OAuth. See [`crate::login_lockout`].
     pub login_lockout: crate::login_lockout::LoginLockout,
+    /// Wrong device-link user codes, keyed by client IP. See [`crate::link_attempts`].
+    pub link_code_attempts: crate::link_attempts::LinkCodeAttempts,
     /// Shared encryption service (same `Arc` as `db.crypto`).
     /// `None` when `ENCRYPTION_KEY` is not configured.
     pub crypto: Option<Arc<CryptoService>>,

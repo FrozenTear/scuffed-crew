@@ -115,6 +115,10 @@ async fn main() {
         .await
         .expect("Failed to create upload directory");
 
+    let reports_configured = scuffed_site_server::stat_reports::reports_dir_from_env();
+    let (reports_dir, reports_enabled) =
+        scuffed_site_server::stat_reports::open_reports_dir(&reports_configured, &upload_dir).await;
+
     let notifier = Notifier::from_env();
     if notifier.is_none() {
         tracing::info!("Notifications not configured (Matrix/Discord) — running without");
@@ -168,11 +172,14 @@ async fn main() {
         session_config: SessionConfig::default(),
         oauth_config,
         upload_dir,
+        reports_dir: reports_dir.clone(),
+        reports_enabled,
         notifier,
         nostr_challenge_key,
         consumed_challenges: scuffed_site_server::challenge_store::ConsumedChallengeStore::new(),
         nostr_rate_limiter: scuffed_site_server::nostr_rate_limit::NostrRateLimiter::new(),
         login_lockout: scuffed_site_server::login_lockout::LoginLockout::new(),
+        link_code_attempts: scuffed_site_server::link_attempts::LinkCodeAttempts::new(),
         crypto,
         relay_url,
         dm_events,
@@ -210,8 +217,15 @@ async fn main() {
             if let Err(e) = cleanup_db.cleanup_expired_sessions().await {
                 tracing::error!("Session cleanup failed: {e}");
             }
+            if let Err(e) = cleanup_db.cleanup_expired_device_links().await {
+                tracing::error!("device link cleanup failed: {e}");
+            }
         }
     });
+
+    if reports_enabled {
+        scuffed_site_server::stat_reports::spawn_sweeper(db.clone(), reports_dir);
+    }
 
     // Build the unified router: existing org routes + strategy routes + chat + WebSocket,
     // then apply production middleware to the combined router.
@@ -299,12 +313,15 @@ mod compression_shell {
                 allowed_origins: vec!["https://crew.example.test".into()],
             },
             upload_dir: root.join("uploads"),
+            reports_dir: root.join("reports"),
+            reports_enabled: true,
             notifier: None,
             nostr_challenge_key: [0u8; 32],
             consumed_challenges: scuffed_site_server::challenge_store::ConsumedChallengeStore::new(
             ),
             nostr_rate_limiter: scuffed_site_server::nostr_rate_limit::NostrRateLimiter::new(),
             login_lockout: scuffed_site_server::login_lockout::LoginLockout::new(),
+            link_code_attempts: scuffed_site_server::link_attempts::LinkCodeAttempts::new(),
             crypto: None,
             relay_url: None,
             dm_events: None,
