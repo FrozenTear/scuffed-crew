@@ -49,6 +49,8 @@ jobs:
           bash dist/test-packaging.sh
           bash dist/test-desktop-entry.sh
           bash dist/test-systemd-unit.sh
+          bash dist/test-release-notes.sh
+          bash dist/test-stage-assets.sh
 
       - name: Install system dependencies
         run: |
