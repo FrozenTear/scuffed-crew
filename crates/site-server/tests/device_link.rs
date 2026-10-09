@@ -927,6 +927,7 @@ async fn rate_limits_are_per_ip_separate_and_trusted_proxy_aware() {
     )
     .await;
     assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{body}");
+    assert_eq!(json_of(&body)["error"], "rate_limited", "{body}");
 }
 
 #[tokio::test]
@@ -974,6 +975,12 @@ async fn wrong_user_codes_are_limited_per_ip() {
             .get(header::RETRY_AFTER)
             .and_then(|v| v.to_str().ok()),
         Some(retry_after.to_string()).as_deref()
+    );
+    assert_eq!(
+        headers
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok()),
+        Some("application/json")
     );
     assert_eq!(
         headers
@@ -1495,6 +1502,17 @@ async fn poll_slow_down_and_per_ip_limit_sets_retry_after() {
         .parse()
         .unwrap_or_else(|_| panic!("Retry-After must be seconds, got {retry_after:?} body {body}"));
     assert!(wait >= 1, "Retry-After={retry_after} body {body}");
+    assert_eq!(
+        body,
+        format!(r#"{{"error":"rate_limited","retry_after":{wait}}}"#)
+    );
+    assert_eq!(
+        headers
+            .get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok()),
+        Some("application/json")
+    );
+    assert!(!body.contains("Too Many Requests"), "{body}");
     assert_no_store(&headers, &body);
 }
 

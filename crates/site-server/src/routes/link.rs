@@ -17,6 +17,8 @@
 //! `SameSite=Lax`.
 //!
 //! Every `/api/link/*` response, success or error, sends `Cache-Control: no-store`.
+//! Per-IP 429s on these routes, including poll, use [`crate::rate_limit::rate_limited_response`]:
+//! `{"error":"rate_limited","retry_after":N}` with a matching `Retry-After` header.
 //!
 //! A pending code can be denied by any signed-in member. After approve, and
 //! before the device collects the token, only that member can deny the code.
@@ -116,19 +118,7 @@ fn internal() -> (StatusCode, Json<ErrorResponse>) {
 }
 
 fn too_many_codes(secs: u64) -> Response {
-    let secs = secs.max(1);
-    (
-        StatusCode::TOO_MANY_REQUESTS,
-        [
-            (header::RETRY_AFTER, secs.to_string()),
-            (header::CACHE_CONTROL, "no-store".to_string()),
-        ],
-        Json(serde_json::json!({
-            "error": "rate_limited",
-            "retry_after": secs,
-        })),
-    )
-        .into_response()
+    crate::rate_limit::rate_limited_response(secs)
 }
 
 fn note_invalid(state: &AppState, ip: std::net::IpAddr) -> Response {
@@ -168,13 +158,7 @@ fn origin_is_allowed(state: &AppState, headers: &HeaderMap) -> bool {
 }
 
 fn too_many_polls(secs: u64) -> Response {
-    let secs = secs.max(1);
-    (
-        StatusCode::TOO_MANY_REQUESTS,
-        [(header::RETRY_AFTER, secs.to_string())],
-        format!("Too Many Requests! Wait for {secs}s"),
-    )
-        .into_response()
+    crate::rate_limit::rate_limited_response(secs)
 }
 
 /// `Cache-Control: no-store` on every link response, including errors.
