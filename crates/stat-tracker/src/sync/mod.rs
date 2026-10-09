@@ -407,6 +407,9 @@ fn clip_text(text: &str) -> String {
     format!("{}...", &text[..end])
 }
 
+/// Logged when every probed row in a pass comes back 400 or 422.
+pub const SERVER_REFUSING_UPLOADS: &str = "Server is refusing uploads";
+
 /// How many HTTP calls one sync pass may spend isolating 400/422 rows.
 /// `2 * ceil(log2(n)) + n` once the batch is larger than one row.
 pub fn isolation_request_budget(n: usize) -> usize {
@@ -430,14 +433,20 @@ pub struct UploadIsolation {
     pub accepted: Vec<usize>,
     pub rejected: Vec<RejectedUpload>,
     pub deferred: Vec<usize>,
-    /// 5xx, network, 401, 403, or 429. Splitting stops. Already accepted
-    /// indexes stay accepted.
+    /// 5xx, network, 401, 403, 429, or a server-wide 400/422 (every probed
+    /// row refused, so nothing was quarantined). Splitting stops. Already
+    /// accepted indexes stay accepted.
     pub stopped: Option<SyncUploadError>,
     pub requests: usize,
 }
 
 /// Upload `rows`. On HTTP 400 or 422, split the slice in half and retry
 /// each half until a singleton is refused or the request budget runs out.
+/// A singleton is quarantined only when some other row in the same pass
+/// was accepted. If both halves of the first split are fully refused, or
+/// every probed row comes back 400 or 422, nothing is quarantined: the
+/// whole batch is deferred and [`UploadIsolation::stopped`] is
+/// [`SERVER_REFUSING_UPLOADS`] (backoff, same as a 5xx).
 /// A 5xx, a network error, 401, 403, or 429 does not split: the rest of
 /// the pass stops and those indexes are [`UploadIsolation::deferred`].
 pub async fn isolate_rejected<T, F, Fut>(rows: &[T], mut upload: F) -> UploadIsolation
@@ -482,12 +491,33 @@ where
             }
         }
     }
+    // No accepted row means the 400/422s were not single bad payloads.
+    // A validator change refuses every subset, including both halves of
+    // the first split. Keep the batch queued and back off.
+    if accepted.is_empty() && !rejected.is_empty() {
+        let mut queued: Vec<usize> = rejected.iter().map(|row| row.index).collect();
+        queued.append(&mut deferred);
+        queued.sort_unstable();
+        deferred = queued;
+        if stopped.is_none() {
+            stopped = Some(server_wide_refusal(&rejected[0].message));
+        }
+        rejected.clear();
+    }
     UploadIsolation {
         accepted,
         rejected,
         deferred,
         stopped,
         requests,
+    }
+}
+
+fn server_wide_refusal(detail: &str) -> SyncUploadError {
+    SyncUploadError {
+        message: format!("{SERVER_REFUSING_UPLOADS}: {detail}"),
+        status: None,
+        retry_after: None,
     }
 }
 
@@ -1170,12 +1200,91 @@ mod tests {
             isolation.requests,
             calls.load(std::sync::atomic::Ordering::SeqCst)
         );
-        assert!(isolation.stopped.is_none());
-        let mut seen: Vec<usize> = isolation.rejected.iter().map(|row| row.index).collect();
-        seen.extend(isolation.deferred.iter().copied());
-        seen.sort_unstable();
-        assert_eq!(seen, (0..n).collect::<Vec<_>>());
+        assert!(
+            isolation.requests > 1,
+            "the batch is split before giving up"
+        );
         assert!(isolation.accepted.is_empty());
+        assert!(
+            isolation.rejected.is_empty(),
+            "a pass that accepts nothing quarantines nothing"
+        );
+        assert_eq!(isolation.deferred, (0..n).collect::<Vec<_>>());
+        let stopped = isolation.stopped.expect("server-wide refusal");
+        assert!(stopped.message.starts_with(SERVER_REFUSING_UPLOADS));
+        assert!(stopped.message.contains("nope"), "{}", stopped.message);
+        assert!(matches!(
+            stopped.attempt(),
+            SyncAttempt::ServerError { retry_after: None }
+        ));
+    }
+
+    #[tokio::test]
+    async fn one_bad_row_in_eight_uploads_seven() {
+        let n = 8usize;
+        let bad = 3usize;
+        let uploaded = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let rows: Vec<usize> = (0..n).collect();
+        let isolation = isolate_rejected(&rows, |batch| {
+            let uploaded = std::sync::Arc::clone(&uploaded);
+            let bad_here = batch.contains(&bad);
+            let ids = batch.to_vec();
+            async move {
+                if bad_here {
+                    Err(payload_reject(400))
+                } else {
+                    let inserted = ids.len() as u32;
+                    uploaded.lock().unwrap().extend(ids);
+                    Ok(scuffed_types::api::StatsUploadResponse {
+                        inserted,
+                        skipped: 0,
+                        deleted: 0,
+                    })
+                }
+            }
+        })
+        .await;
+        let mut got = uploaded.lock().unwrap().clone();
+        got.sort_unstable();
+        got.dedup();
+        assert_eq!(got.len(), n - 1);
+        assert!(!got.contains(&bad));
+        assert_eq!(isolation.rejected.len(), 1);
+        assert_eq!(isolation.rejected[0].index, bad);
+        assert!(isolation.stopped.is_none());
+        assert_eq!(isolation.accepted.len(), n - 1);
+    }
+
+    #[tokio::test]
+    async fn bad_rows_in_both_halves_still_upload_the_rest() {
+        let n = 8usize;
+        let bad = [0usize, 4];
+        let uploaded = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let rows: Vec<usize> = (0..n).collect();
+        let isolation = isolate_rejected(&rows, |batch| {
+            let uploaded = std::sync::Arc::clone(&uploaded);
+            let bad_here = batch.iter().any(|index| bad.contains(index));
+            let ids = batch.to_vec();
+            async move {
+                if bad_here {
+                    Err(payload_reject(400))
+                } else {
+                    uploaded.lock().unwrap().extend(ids);
+                    Ok(scuffed_types::api::StatsUploadResponse {
+                        inserted: 1,
+                        skipped: 0,
+                        deleted: 0,
+                    })
+                }
+            }
+        })
+        .await;
+        let mut got = uploaded.lock().unwrap().clone();
+        got.sort_unstable();
+        got.dedup();
+        assert_eq!(got, vec![1, 2, 3, 5, 6, 7]);
+        assert_eq!(isolation.rejected.len(), 2);
+        assert!(isolation.stopped.is_none());
     }
 
     #[tokio::test]

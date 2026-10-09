@@ -5414,6 +5414,9 @@ fn sync_attempt_from_error(err: &sync::SyncUploadError) -> sync::SyncAttempt {
                 "sync token rejected, will not retry until the URL or token changes"
             );
         }
+        _ if err.message.starts_with(sync::SERVER_REFUSING_UPLOADS) => {
+            tracing::error!("{}", err.message);
+        }
         _ => tracing::error!(error = %err, "sync upload failed"),
     }
     attempt
@@ -5568,7 +5571,9 @@ where
         };
     }
     // 400 and 422 split the batch so one refused row does not retry the
-    // whole queue forever. 5xx, network errors, 401, and 403 stop the pass.
+    // whole queue forever. A pass that accepts nothing is a server-wide
+    // refusal: quarantine nothing and back off. 5xx, network errors, 401,
+    // and 403 stop the pass without splitting.
     let isolation = sync::isolate_rejected(&to_upload, |batch| {
         upload(batch.to_vec(), tombstones.clone())
     })
@@ -11353,37 +11358,58 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn quarantined_rows_still_send_pending_deletes() {
+    async fn all_rows_rejected_stays_queued_and_backs_off() {
+        let n = 8_i64;
         let dir = tempfile::tempdir().unwrap();
         let store = storage::LocalStore::open(dir.path()).await.unwrap();
-        store
-            .insert_match(test_match("bad", "victory"))
-            .await
-            .unwrap();
-        store.delete_session("gone").await.unwrap();
-        let first = try_sync_with(&store, dir.path(), None, |matches, tombstones| async move {
-            assert_eq!(matches.len(), 1);
-            assert!(tombstones.iter().any(|id| id == "gone"));
-            Err(sync::SyncUploadError {
-                message: "matches[0]: hero is not allowed".into(),
-                status: Some(400),
-                retry_after: None,
-            })
-        })
-        .await;
-        assert!(matches!(first, sync::SyncAttempt::Uploaded));
-        assert!(
-            store
-                .get_pending_tombstones()
-                .await
-                .unwrap()
-                .iter()
-                .any(|id| id == "gone")
-        );
-
+        for i in 0..n {
+            let mut row = test_match(&format!("s{i}"), "victory");
+            row.played_at = SurrealDatetime::from(Utc::now() + chrono::Duration::seconds(i));
+            store.insert_match(row).await.unwrap();
+        }
         let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let calls_pass = std::sync::Arc::clone(&calls);
-        let second = try_sync_with(&store, dir.path(), None, move |matches, tombstones| {
+        let attempt = try_sync_with(&store, dir.path(), None, move |_matches, _| {
+            let calls_pass = std::sync::Arc::clone(&calls_pass);
+            async move {
+                calls_pass.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Err(sync::SyncUploadError {
+                    message: "matches[0]: recognizer is not allowed".into(),
+                    status: Some(422),
+                    retry_after: None,
+                })
+            }
+        })
+        .await;
+        assert!(matches!(
+            attempt,
+            sync::SyncAttempt::ServerError { retry_after: None }
+        ));
+        assert!(calls.load(std::sync::atomic::Ordering::SeqCst) > 1);
+        let rows = store.get_all_matches().await.unwrap();
+        assert_eq!(rows.len(), n as usize);
+        assert!(
+            rows.iter()
+                .all(|row| !row.synced && row.upload_rejection().is_none()),
+            "a server-wide refusal quarantines nothing"
+        );
+        assert_eq!(store.get_unsynced().await.unwrap().len(), n as usize);
+        let mut backoff = sync::SyncBackoff::default();
+        let now = std::time::Instant::now();
+        backoff.observe(attempt, now);
+        assert!(!backoff.should_attempt(now));
+        assert!(backoff.retry_after(now) >= sync::SYNC_BACKOFF_BASE);
+        assert_eq!(backoff.failures(), 1);
+    }
+
+    #[tokio::test]
+    async fn pending_deletes_upload_when_no_match_rows_are_queued() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = storage::LocalStore::open(dir.path()).await.unwrap();
+        store.delete_session("gone").await.unwrap();
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let calls_pass = std::sync::Arc::clone(&calls);
+        let attempt = try_sync_with(&store, dir.path(), None, move |matches, tombstones| {
             let calls_pass = std::sync::Arc::clone(&calls_pass);
             async move {
                 calls_pass.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -11393,7 +11419,7 @@ mod tests {
             }
         })
         .await;
-        assert!(matches!(second, sync::SyncAttempt::Uploaded));
+        assert!(matches!(attempt, sync::SyncAttempt::Uploaded));
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
         assert!(store.get_pending_tombstones().await.unwrap().is_empty());
     }
