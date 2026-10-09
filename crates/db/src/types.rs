@@ -1270,15 +1270,11 @@ pub struct EventAttendance {
     pub marked_at: DateTime<Utc>,
 }
 
-/// Attendance stats for a member.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AttendanceStats {
-    pub member_id: String,
-    pub attended: u32,
-    pub no_show: u32,
-    pub excused: u32,
-    pub total: u32,
-}
+/// Attendance stats for a member (`GET /api/members/{id}/attendance/stats`).
+///
+/// Canonical definition is [`scuffed_types::AttendanceStats`] so the WASM app
+/// deserializes the same shape this crate builds.
+pub use scuffed_types::AttendanceStats;
 
 /// A poll/survey.
 #[derive(Debug, Clone, Serialize, Deserialize)]

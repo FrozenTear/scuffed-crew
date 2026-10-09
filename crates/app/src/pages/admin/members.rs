@@ -8,7 +8,8 @@ use crate::components::{
 };
 use crate::hooks::{ModalController, use_api_list, use_api_list_prefer};
 use crate::state::use_auth;
-use scuffed_api_client::ApiClient;
+use scuffed_api_client::{ApiClient, ClientError};
+use scuffed_types::AttendanceStats;
 use scuffed_types::api::{ChangeRoleRequest, CreateGameAccountRequest, ToggleActiveRequest};
 
 // --- Types ---
@@ -45,15 +46,6 @@ struct ModerationAction {
     reason: String,
     is_active: bool,
     created_at: String,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct AttendanceStats {
-    total_events: u32,
-    attended: u32,
-    absent: u32,
-    excused: u32,
-    attendance_rate: f64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -143,6 +135,21 @@ fn avatar_upload_failure_message(status: u16) -> String {
         403 => "You don't have permission to change this member's avatar.".to_string(),
         404 => "That member no longer exists.".to_string(),
         other => format!("Upload failed: HTTP {other}"),
+    }
+}
+
+/// User-facing copy for a failed attendance stats fetch. Never includes the
+/// raw serde error (field names, column numbers).
+fn attendance_stats_load_message(err: &ClientError) -> &'static str {
+    match err {
+        ClientError::Deserialize(_) => "Attendance stats could not be read. Try again.",
+        ClientError::Http { status: 403, .. } => {
+            "You don't have permission to view this member's attendance."
+        }
+        ClientError::Http { status: 404, .. } => "That member no longer exists.",
+        ClientError::Network(_) | ClientError::Http { .. } => {
+            "Could not load attendance stats. Try again."
+        }
     }
 }
 
@@ -383,7 +390,7 @@ pub fn AdminMembers() -> Element {
                 .await
             {
                 Ok(data) => stats_data.set(Some(data)),
-                Err(e) => stats_error.set(Some(e.to_string())),
+                Err(e) => stats_error.set(Some(attendance_stats_load_message(&e).to_string())),
             }
             stats_loading.set(false);
         });
@@ -886,24 +893,37 @@ pub fn AdminMembers() -> Element {
                             p { class: "admin-loading", "Loading..." }
                         } else if let Some(err) = stats_error() {
                             p { class: "empty-state", style: "color: var(--danger);",
-                                "Failed to load attendance stats: {err}"
+                                "{err}"
                             }
                         } else if let Some(stats) = stats_data() {
-                            div { class: "summary-cards",
-                                SummaryCard { value: stats.total_events.to_string(), label: "Total Events" }
-                                SummaryCard { value: stats.attended.to_string(), label: "Attended" }
-                                SummaryCard { value: stats.absent.to_string(), label: "Absent" }
-                                SummaryCard { value: stats.excused.to_string(), label: "Excused" }
-                            }
-                            div {
-                                style: "text-align:center;margin-top:1rem;",
-                                span {
-                                    style: "font-family:var(--font-head);font-size:2.5rem;color:var(--accent);",
-                                    "{stats.attendance_rate:.1}%"
-                                }
-                                div {
-                                    style: "font-size:0.75rem;color:var(--text-3);text-transform:uppercase;letter-spacing:0.05em;",
-                                    "Attendance Rate"
+                            {
+                                let total = stats.total.to_string();
+                                let attended = stats.attended.to_string();
+                                let absent = stats.no_show.to_string();
+                                let excused = stats.excused.to_string();
+                                let rate = format!("{:.1}%", stats.attendance_rate());
+                                let no_events = stats.total == 0;
+                                rsx! {
+                                    div { class: "summary-cards",
+                                        SummaryCard { value: total, label: "Total Events" }
+                                        SummaryCard { value: attended, label: "Attended" }
+                                        SummaryCard { value: absent, label: "Absent" }
+                                        SummaryCard { value: excused, label: "Excused" }
+                                    }
+                                    if no_events {
+                                        p { class: "empty-state", "No events recorded for this member." }
+                                    }
+                                    div {
+                                        style: "text-align:center;margin-top:1rem;",
+                                        span {
+                                            style: "font-family:var(--font-head);font-size:2.5rem;color:var(--accent);",
+                                            "{rate}"
+                                        }
+                                        div {
+                                            style: "font-size:0.75rem;color:var(--text-3);text-transform:uppercase;letter-spacing:0.05em;",
+                                            "Attendance Rate"
+                                        }
+                                    }
                                 }
                             }
                         } else {
@@ -1235,6 +1255,29 @@ mod tests {
         assert_eq!(
             admin_avatar_upload_url("a b/c+d"),
             "/api/upload/avatar?member_id=a%20b%2Fc%2Bd"
+        );
+    }
+
+    #[test]
+    fn attendance_stats_load_message_hides_serde_text() {
+        let raw =
+            ClientError::Deserialize("missing field `total_events` at line 1 column 83".into());
+        let msg = attendance_stats_load_message(&raw);
+        assert_eq!(msg, "Attendance stats could not be read. Try again.");
+        assert!(!msg.contains("total_events"));
+        assert!(!msg.contains("missing field"));
+        assert!(!msg.contains("Deserialization"));
+
+        assert_eq!(
+            attendance_stats_load_message(&ClientError::Http {
+                status: 403,
+                body: r#"{"error":"Can only view your own attendance stats"}"#.into(),
+            }),
+            "You don't have permission to view this member's attendance."
+        );
+        assert_eq!(
+            attendance_stats_load_message(&ClientError::Network("connection reset".into())),
+            "Could not load attendance stats. Try again."
         );
     }
 
