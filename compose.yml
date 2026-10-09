@@ -98,6 +98,8 @@ services:
       # fallback). install.sh/update.sh generate it into data/secrets.env.
       NOSTR_CHALLENGE_SECRET: ${NOSTR_CHALLENGE_SECRET:-}
       UPLOAD_DIR: /app/data/uploads
+      # Private member bug-report zips. The entrypoint gives this path to scuffed.
+      REPORTS_DIR: /app/data/reports
       # Rate-limiter trusted proxies (comma-separated IPs/CIDRs). Forwarded
       # headers are honored only from loopback plus this list. The default in
       # the app is loopback only — do not leave this empty in production.
@@ -116,6 +118,7 @@ services:
       RUST_LOG: ${RUST_LOG:-info}
     volumes:
       - uploads-data:/app/data/uploads
+      - reports-data:/app/data/reports
     networks:
       - internal
       - external
@@ -131,4 +134,5 @@ networks:
 volumes:
   surrealdb-data:
   uploads-data:
+  reports-data:
   strfry-data:
