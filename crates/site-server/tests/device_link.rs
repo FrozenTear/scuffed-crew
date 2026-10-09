@@ -21,6 +21,8 @@ use scuffed_site_server::state::{AppState, OAuthConfig};
 
 const SESSION: &str = "link-session-token";
 const INVALID: &str = r#"{"error":"invalid code"}"#;
+const SITE_ORIGIN: &str = "http://localhost:3000";
+const FOREIGN_ORIGIN: &str = "https://evil.example";
 
 async fn test_state() -> AppState {
     let db = Database::connect_memory().await.expect("in-memory DB");
@@ -106,6 +108,7 @@ fn req(
     bearer: Option<&str>,
     peer: [u8; 4],
     forwarded_for: &str,
+    origin: Option<&str>,
 ) -> Request<Body> {
     let mut builder = Request::builder()
         .method(method)
@@ -116,6 +119,9 @@ fn req(
     if let Some(token) = bearer {
         builder = builder.header(header::AUTHORIZATION, format!("Bearer {token}"));
     }
+    if let Some(origin) = origin {
+        builder = builder.header(header::ORIGIN, origin);
+    }
     let payload = body
         .map(|value| serde_json::to_vec(&value).unwrap())
         .unwrap_or_default();
@@ -123,7 +129,15 @@ fn req(
 }
 
 fn trusted(method: Method, uri: &str, body: Option<Value>, bearer: Option<&str>) -> Request<Body> {
-    req(method, uri, body, bearer, [127, 0, 0, 1], "127.0.0.1")
+    req(
+        method,
+        uri,
+        body,
+        bearer,
+        [127, 0, 0, 1],
+        "127.0.0.1",
+        Some(SITE_ORIGIN),
+    )
 }
 
 fn from_xff(
@@ -133,14 +147,31 @@ fn from_xff(
     body: Option<Value>,
     bearer: Option<&str>,
 ) -> Request<Body> {
-    req(method, uri, body, bearer, [127, 0, 0, 1], ip)
+    req(
+        method,
+        uri,
+        body,
+        bearer,
+        [127, 0, 0, 1],
+        ip,
+        Some(SITE_ORIGIN),
+    )
 }
 
 async fn send(app: &axum::Router, request: Request<Body>) -> (StatusCode, String) {
+    let (status, _headers, body) = send_full(app, request).await;
+    (status, body)
+}
+
+async fn send_full(
+    app: &axum::Router,
+    request: Request<Body>,
+) -> (StatusCode, axum::http::HeaderMap, String) {
     let response = app.clone().oneshot(request).await.expect("response");
     let status = response.status();
+    let headers = response.headers().clone();
     let bytes = response.into_body().collect().await.unwrap().to_bytes();
-    (status, String::from_utf8(bytes.to_vec()).unwrap())
+    (status, headers, String::from_utf8(bytes.to_vec()).unwrap())
 }
 
 fn json_of(body: &str) -> Value {
@@ -796,6 +827,7 @@ async fn rate_limits_are_per_ip_separate_and_trusted_proxy_aware() {
                 None,
                 [198, 51, 100, 8],
                 &xff,
+                Some(SITE_ORIGIN),
             ),
         )
         .await;
@@ -814,6 +846,7 @@ async fn rate_limits_are_per_ip_separate_and_trusted_proxy_aware() {
             None,
             [198, 51, 100, 8],
             "203.0.113.99",
+            Some(SITE_ORIGIN),
         ),
     )
     .await;
@@ -907,6 +940,9 @@ async fn logs_do_not_contain_codes_or_the_token() {
     let subscriber = tracing_subscriber::fmt()
         .with_max_level(tracing::Level::TRACE)
         .with_writer(Capture(buf.clone()))
+        .with_env_filter(tracing_subscriber::EnvFilter::new(
+            "scuffed_site_server=trace",
+        ))
         .without_time()
         .finish();
     let guard = tracing::subscriber::set_default(subscriber);
@@ -954,8 +990,379 @@ async fn logs_do_not_contain_codes_or_the_token() {
         logs.contains("device link started"),
         "subscriber captured nothing useful: {logs}"
     );
+    assert!(
+        logs.contains("device link token handed over"),
+        "handover was not traced: {logs}"
+    );
     assert!(!logs.contains(&user_code), "{logs}");
     assert!(!logs.contains(&canonical_user_code(&user_code)), "{logs}");
     assert!(!logs.contains(&device_code), "{logs}");
     assert!(!logs.contains(&token), "{logs}");
+}
+
+fn authed_post(uri: &str, body: Value, origin: Option<&str>, cookie: bool) -> Request<Body> {
+    let mut request = req(
+        Method::POST,
+        uri,
+        Some(body),
+        if cookie { None } else { Some(SESSION) },
+        [127, 0, 0, 1],
+        "203.0.113.110",
+        origin,
+    );
+    if cookie {
+        request.headers_mut().insert(
+            header::COOKIE,
+            axum::http::HeaderValue::from_str(&format!("sc_session={SESSION}")).unwrap(),
+        );
+    }
+    request
+}
+
+#[tokio::test]
+async fn approve_and_deny_reject_a_valid_session_without_the_allowed_origin() {
+    let state = test_state().await;
+    seed_member(&state.db).await;
+    let app = create_router(state);
+    let approve_me = start_link(&app, "Living Room PC", "0.4.2").await;
+    let approve_code = approve_me["user_code"].as_str().unwrap();
+    let approve_device = approve_me["device_code"].as_str().unwrap();
+    let deny_me = start_link(&app, "Desk", "0.4.2").await;
+    let deny_code = deny_me["user_code"].as_str().unwrap();
+    let deny_device = deny_me["device_code"].as_str().unwrap();
+
+    for (path, code, cookie, origin) in [
+        ("/api/link/approve", approve_code, false, None),
+        (
+            "/api/link/approve",
+            approve_code,
+            false,
+            Some(FOREIGN_ORIGIN),
+        ),
+        ("/api/link/approve", approve_code, true, None),
+        (
+            "/api/link/approve",
+            approve_code,
+            true,
+            Some(FOREIGN_ORIGIN),
+        ),
+        ("/api/link/deny", deny_code, false, None),
+        ("/api/link/deny", deny_code, false, Some(FOREIGN_ORIGIN)),
+        ("/api/link/deny", deny_code, true, None),
+        ("/api/link/deny", deny_code, true, Some(FOREIGN_ORIGIN)),
+    ] {
+        let (status, body) = send(
+            &app,
+            authed_post(path, json!({"user_code": code}), origin, cookie),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::FORBIDDEN,
+            "{path} cookie={cookie} {body}"
+        );
+        assert_eq!(body, r#"{"error":"origin not allowed"}"#);
+        assert!(!body.contains(code), "{body}");
+    }
+
+    let (status, body) = send(
+        &app,
+        trusted(Method::GET, "/api/stats/tokens", None, Some(SESSION)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(json_of(&body).as_array().unwrap().len(), 0, "{body}");
+
+    for device in [approve_device, deny_device] {
+        let (status, body) = send(
+            &app,
+            trusted(
+                Method::POST,
+                "/api/link/poll",
+                Some(json!({"device_code": device})),
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(json_of(&body)["status"], "pending");
+    }
+
+    let (status, body) = send(
+        &app,
+        trusted(
+            Method::POST,
+            "/api/link/approve",
+            Some(json!({"user_code": approve_code})),
+            Some(SESSION),
+        ),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "allowed origin still approves: {body}"
+    );
+
+    let (status, body) = send(
+        &app,
+        authed_post(
+            "/api/link/deny",
+            json!({"user_code": deny_code}),
+            Some(SITE_ORIGIN),
+            true,
+        ),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "allowed origin still denies: {body}"
+    );
+}
+
+#[tokio::test]
+async fn lookup_returns_device_label_app_version_and_created_at() {
+    let state = test_state().await;
+    seed_member(&state.db).await;
+    let app = create_router(state);
+    let started = start_link(&app, "Living Room PC", "0.4.2").await;
+    let user_code = started["user_code"].as_str().unwrap();
+
+    let (status, body) = send(
+        &app,
+        trusted(
+            Method::POST,
+            "/api/link/lookup",
+            Some(json!({"user_code": user_code})),
+            Some(SESSION),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let lookup = json_of(&body);
+    assert_eq!(lookup["device_label"], "Living Room PC");
+    assert_eq!(lookup["app_version"], "0.4.2");
+    let created_at = lookup["created_at"].as_str().unwrap();
+    let created = chrono::DateTime::parse_from_rfc3339(created_at).unwrap();
+    let age = chrono::Utc::now().signed_duration_since(created.with_timezone(&chrono::Utc));
+    assert!(
+        age.num_seconds() >= 0 && age.num_seconds() < 60,
+        "{created_at}"
+    );
+}
+
+#[tokio::test]
+async fn concurrent_polls_after_approval_hand_the_token_over_once() {
+    let state = test_state().await;
+    seed_member(&state.db).await;
+    let app = create_router(state);
+    let started = start_link(&app, "Living Room PC", "0.4.2").await;
+    let user_code = started["user_code"].as_str().unwrap().to_string();
+    let device_code = started["device_code"].as_str().unwrap().to_string();
+    let (status, body) = send(
+        &app,
+        trusted(
+            Method::POST,
+            "/api/link/approve",
+            Some(json!({"user_code": user_code})),
+            Some(SESSION),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let first = trusted(
+        Method::POST,
+        "/api/link/poll",
+        Some(json!({"device_code": device_code})),
+        None,
+    );
+    let second = trusted(
+        Method::POST,
+        "/api/link/poll",
+        Some(json!({"device_code": device_code})),
+        None,
+    );
+    let ((status_a, body_a), (status_b, body_b)) =
+        tokio::join!(send(&app, first), send(&app, second));
+    assert_eq!(status_a, StatusCode::OK, "{body_a}");
+    assert_eq!(status_b, StatusCode::OK, "{body_b}");
+    let bodies = [json_of(&body_a), json_of(&body_b)];
+    let tokens: Vec<&str> = bodies
+        .iter()
+        .filter_map(|body| body["token"].as_str())
+        .collect();
+    assert_eq!(tokens.len(), 1, "{body_a} {body_b}");
+    assert_eq!(tokens[0].len(), 64, "{body_a} {body_b}");
+    assert_eq!(
+        bodies
+            .iter()
+            .filter(|body| body["status"] == "expired" && body.get("token").is_none())
+            .count(),
+        1,
+        "{body_a} {body_b}"
+    );
+    assert_eq!(
+        bodies
+            .iter()
+            .filter(|body| body["status"] == "approved")
+            .count(),
+        1,
+        "{body_a} {body_b}"
+    );
+}
+
+#[tokio::test]
+async fn deny_then_poll_is_denied_and_approve_is_the_generic_error() {
+    let state = test_state().await;
+    seed_member(&state.db).await;
+    let app = create_router(state);
+    let started = start_link(&app, "Desk", "1.0.0").await;
+    let user_code = started["user_code"].as_str().unwrap();
+    let device_code = started["device_code"].as_str().unwrap();
+
+    let (status, body) = send(
+        &app,
+        trusted(
+            Method::POST,
+            "/api/link/deny",
+            Some(json!({"user_code": user_code})),
+            Some(SESSION),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let (status, body) = send(
+        &app,
+        trusted(
+            Method::POST,
+            "/api/link/poll",
+            Some(json!({"device_code": device_code})),
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body, r#"{"status":"denied"}"#);
+
+    let (status, body) = send(
+        &app,
+        trusted(
+            Method::POST,
+            "/api/link/approve",
+            Some(json!({"user_code": user_code})),
+            Some(SESSION),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body, INVALID);
+}
+
+#[tokio::test]
+async fn approve_after_ten_minute_expiry_mints_no_token() {
+    let state = test_state().await;
+    seed_member(&state.db).await;
+    let app = create_router(state.clone());
+    let started = start_link(&app, "Expire Me", "1.0.0").await;
+    assert_eq!(started["expires_in"], DEVICE_LINK_TTL_SECS);
+    assert_eq!(DEVICE_LINK_TTL_SECS, 600);
+    let user_code = started["user_code"].as_str().unwrap().to_string();
+    let device_code = started["device_code"].as_str().unwrap().to_string();
+    state
+        .db
+        .client
+        .query(
+            "UPDATE device_link SET expires_at = time::now() - 600s WHERE device_label = 'Expire Me'",
+        )
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+
+    let (status, body) = send(
+        &app,
+        trusted(
+            Method::POST,
+            "/api/link/approve",
+            Some(json!({"user_code": user_code})),
+            Some(SESSION),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body, INVALID);
+
+    let (status, body) = send(
+        &app,
+        trusted(Method::GET, "/api/stats/tokens", None, Some(SESSION)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(json_of(&body).as_array().unwrap().len(), 0, "{body}");
+
+    let (status, body) = send(
+        &app,
+        trusted(
+            Method::POST,
+            "/api/link/poll",
+            Some(json!({"device_code": device_code})),
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body, r#"{"status":"expired"}"#);
+}
+
+#[tokio::test]
+async fn poll_slow_down_and_per_ip_limit_sets_retry_after() {
+    let state = test_state().await;
+    let app = create_router(state);
+    let started = start_link(&app, "Desk", "1.0.0").await;
+    let device_code = started["device_code"].as_str().unwrap();
+    let ip = "203.0.113.90";
+
+    for i in 0..LINK_POLL_BURST {
+        let (status, body) = send(
+            &app,
+            from_xff(
+                ip,
+                Method::POST,
+                "/api/link/poll",
+                Some(json!({"device_code": device_code})),
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "poll {i}: {body}");
+        if i == 0 {
+            assert_eq!(body, r#"{"status":"pending"}"#);
+        } else {
+            assert_eq!(body, r#"{"status":"slow_down"}"#);
+        }
+    }
+
+    let (status, headers, body) = send_full(
+        &app,
+        from_xff(
+            ip,
+            Method::POST,
+            "/api/link/poll",
+            Some(json!({"device_code": device_code})),
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{body}");
+    let retry_after = headers
+        .get(header::RETRY_AFTER)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("");
+    let wait: u64 = retry_after
+        .parse()
+        .unwrap_or_else(|_| panic!("Retry-After must be seconds, got {retry_after:?} body {body}"));
+    assert!(wait >= 1, "Retry-After={retry_after} body {body}");
 }

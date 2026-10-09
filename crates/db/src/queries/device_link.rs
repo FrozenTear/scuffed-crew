@@ -388,6 +388,8 @@ impl Database {
         Ok(found)
     }
 
+    /// One statement claims the secret. The `status = approved` predicate is the
+    /// compare-and-swap: a second poll matches no row and gets [`Consume::Lost`].
     async fn consume_approved(&self, device_code_hash: &str) -> DbResult<Consume> {
         let interval = poll_interval_ok_sql();
         let sql = format!(
@@ -585,6 +587,48 @@ mod tests {
         assert!(
             rows.iter().any(|row| row.device_label == "Desk"),
             "a code that is only denied, not expired, stays until its TTL"
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrent_polls_hand_the_secret_to_exactly_one() {
+        let db = test_db().await;
+        seed_member(&db).await;
+        let user_code = "HJKM2345";
+        let device_code = "ab".repeat(32);
+        let secret = "cd".repeat(32);
+        db.insert_device_link(user_code, &device_code, "Desk", "1.0.0")
+            .await
+            .unwrap();
+        db.create_daemon_token("linkmember", &secret, "Desk")
+            .await
+            .unwrap();
+        let tokens = db.list_daemon_tokens("linkmember").await.unwrap();
+        assert!(db
+            .approve_device_link(user_code, "linkmember", &tokens[0].id, &secret)
+            .await
+            .unwrap());
+
+        let (left, right) = tokio::join!(
+            db.poll_device_link(&device_code),
+            db.poll_device_link(&device_code),
+        );
+        let outcomes = [left.unwrap(), right.unwrap()];
+        let tokens: Vec<&str> = outcomes
+            .iter()
+            .filter_map(|outcome| match outcome {
+                DeviceLinkPoll::Approved(token) => Some(token.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(tokens, vec![secret.as_str()], "{outcomes:?}");
+        assert_eq!(
+            outcomes
+                .iter()
+                .filter(|outcome| matches!(outcome, DeviceLinkPoll::Expired))
+                .count(),
+            1,
+            "{outcomes:?}"
         );
     }
 }

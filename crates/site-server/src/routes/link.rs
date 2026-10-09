@@ -4,9 +4,11 @@
 //! device shows `user_code` (shaped `XXXX-XXXX`) and polls with `device_code`.
 //! `POST /api/link/lookup`, `/approve`, and `/deny` require a signed-in session
 //! (`OrgMember`), the same cookie or bearer session check as other mutations.
-//! Cross-site protection is the existing one: `SameSite=Lax` session cookies
-//! plus the CORS allow-list on the router. These three routes are POST only,
-//! which keeps the "no state-changing GET" rule intact.
+//! Approve and deny also require the `Origin` header to be one of
+//! `ALLOWED_ORIGINS`, the same allow-list the CORS layer uses. A valid session
+//! with a missing or foreign origin is rejected. These three routes are POST
+//! only, which keeps the "no state-changing GET" rule intact. Session cookies
+//! stay `SameSite=Lax`.
 //!
 //! Codes are read from the JSON body only. A query string that carries one is
 //! stripped before the trace layer logs the URI, and the request is rejected.
@@ -17,7 +19,7 @@ use std::sync::OnceLock;
 use axum::Json;
 use axum::extract::{ConnectInfo, State};
 use axum::http::uri::PathAndQuery;
-use axum::http::{HeaderMap, StatusCode, Uri};
+use axum::http::{HeaderMap, StatusCode, Uri, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use chrono::{DateTime, Utc};
@@ -51,6 +53,7 @@ const VERSION_ERROR: &str =
     "app_version must be 1-32 characters from [A-Za-z0-9._+-] and include a letter or digit";
 const INVALID_CODE: &str = "invalid code";
 const QUERY_CODE_ERROR: &str = "codes must be sent in the request body";
+const ORIGIN_ERROR: &str = "origin not allowed";
 
 /// Set by [`strip_link_query_secrets`] when the URI carried a code or token.
 #[derive(Clone, Copy)]
@@ -158,6 +161,31 @@ fn note_invalid(state: &AppState, ip: std::net::IpAddr) -> Response {
 
 fn blocked_response(state: &AppState, ip: std::net::IpAddr) -> Option<Response> {
     state.link_code_attempts.retry_after(ip).map(too_many_codes)
+}
+
+/// Same allow-list as the router CORS layer. Missing and foreign origins fail.
+fn origin_is_allowed(state: &AppState, headers: &HeaderMap) -> bool {
+    let Some(origin) = headers
+        .get(header::ORIGIN)
+        .and_then(|value| value.to_str().ok())
+    else {
+        return false;
+    };
+    state
+        .oauth_config
+        .allowed_origins
+        .iter()
+        .any(|allowed| allowed == origin)
+}
+
+fn origin_rejected() -> Response {
+    (
+        StatusCode::FORBIDDEN,
+        Json(ErrorResponse {
+            error: ORIGIN_ERROR.into(),
+        }),
+    )
+        .into_response()
 }
 
 /// Drop query secrets before access logs see the URI, and flag the request.
@@ -418,6 +446,9 @@ pub async fn approve(
     member: OrgMember,
     Json(body): Json<UserCodeRequest>,
 ) -> Response {
+    if !origin_is_allowed(&state, &headers) {
+        return origin_rejected();
+    }
     let ip = client_ip(peer, &headers);
     if let Some(response) = blocked_response(&state, ip) {
         return response;
@@ -490,6 +521,9 @@ pub async fn deny(
     member: OrgMember,
     Json(body): Json<UserCodeRequest>,
 ) -> Response {
+    if !origin_is_allowed(&state, &headers) {
+        return origin_rejected();
+    }
     let ip = client_ip(peer, &headers);
     if let Some(response) = blocked_response(&state, ip) {
         return response;
