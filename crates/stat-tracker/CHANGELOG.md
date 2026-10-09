@@ -15,6 +15,28 @@ workflow copies from the matching heading through the next `##` heading,
 including `### Install`. The desktop app hides `### Install`, shows the
 summary, then the highlights, and tucks the remaining text under Details.
 
+## 0.5.0-alpha.2
+
+This build is the next alpha. Signed-in members get the hero icon pack from the Scuffed Crew server.
+
+### Highlights
+
+- The tracker downloads that pack for signed-in members and checks it before using it, so hero names use the new reader for everyone.
+- In the setup guide, Enter and Escape no longer act while you type in a box.
+- The sync paused message has a small wording fix.
+
+The New reader (alpha) switch still stays off until you turn it on. With this pack, hero names from that reader no longer need a file you copied into the data folder yourself.
+
+A stable update is not offered this alpha. The desktop app skips it until config.toml has `update_channel = "prerelease"`. bootstrap.sh skips it until `STAT_TRACKER_CHANNEL=prerelease`. Pinning this tag still installs it.
+
+### Install
+
+```sh
+curl --proto '=https' -fsSL https://raw.githubusercontent.com/FrozenTear/scuffed-crew/stat-tracker-v0.5.0-alpha.2/crates/stat-tracker/dist/bootstrap.sh | STAT_TRACKER_TAG=stat-tracker-v0.5.0-alpha.2 bash
+```
+
+Or extract the tarball and run `./install.sh`.
+
 ## 0.5.0-alpha.1
 
 This build is an alpha. You can turn on a new scoreboard reader in Settings, and it stays off until you do.
