@@ -360,6 +360,7 @@ if [[ -f "$BUNDLED_ENG" ]]; then
     else
         mkdir -p "$USER_TESSDATA_DIR"
         install -m644 "$BUNDLED_ENG" "$USER_ENG"
+        MANIFEST_ENTRIES+=("$USER_ENG")
         info "Installed bundled eng.traineddata → $USER_ENG"
     fi
 fi
@@ -380,6 +381,7 @@ if [[ -f "$BUNDLED_KOV" ]]; then
             info "Existing koverwatch.traineddata backed up → $USER_KOV.bak"
         fi
         install -m644 "$BUNDLED_KOV" "$USER_KOV"
+        MANIFEST_ENTRIES+=("$USER_KOV")
         info "Installed bundled koverwatch.traineddata → $USER_KOV"
     fi
 fi
@@ -443,9 +445,13 @@ else
 fi
 
 # ── Install manifest ──────────────────────────────────────────────────────────
+# One absolute path per line. uninstall.sh removes exactly these entries.
+# The manifest path is itself an entry so it does not linger. config.toml
+# is not an installed file and is never recorded here.
 # Union with any previous manifest so an upgrade that drops a file still
 # leaves the old copy removable by the uninstaller.
 
+MANIFEST_ENTRIES+=("$MANIFEST")
 mkdir -p "$MANIFEST_DIR"
 {
     if [[ -f "$MANIFEST" ]]; then

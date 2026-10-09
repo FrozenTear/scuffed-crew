@@ -17,6 +17,11 @@ BIN_DIR="${BIN_DIR:-$(dirname "$(_named bin scuffed-stat-tracker)")}"
 LIB_DIR="${LIB_DIR:-$(dirname "$(_named libdir scuffed-stat-tracker)")}"
 DESKTOP_DIR="$(dirname "$(_named desktop scuffed-stat-tracker.desktop)")"
 SYSTEMD_DIR="$(dirname "$(_named unit scuffed-stat-tracker.service)")"
+MANIFEST="$(_named manifest install-manifest.txt)"
+MANIFEST_DIR="$(dirname "$MANIFEST")"
+# Absolute paths this run writes. The manifest is the only set uninstall
+# may remove. config.toml is created by the app and is not recorded.
+MANIFEST_ENTRIES=()
 
 RED='\033[0;31m'
 YLW='\033[1;33m'
@@ -174,6 +179,7 @@ cargo build --release -p scuffed-stat-tracker-ui \
 mkdir -p "$BIN_DIR"
 install -m755 "$REPO_ROOT/target/release/scuffed-stat-tracker" "$BIN_DIR/scuffed-stat-tracker"
 install -m755 "$REPO_ROOT/target/release/stat-tracker-gui"     "$BIN_DIR/stat-tracker-gui"
+MANIFEST_ENTRIES+=("$BIN_DIR/scuffed-stat-tracker" "$BIN_DIR/stat-tracker-gui")
 info "Installed binaries → $BIN_DIR"
 
 # ── Generate koverwatch tessdata ───────────────────────────────────────────────
@@ -198,6 +204,7 @@ else
     # ── Desktop entry ─────────────────────────────────────────────────────────
     write_desktop_entry "$ASSETS/scuffed-stat-tracker.desktop" \
         "$DESKTOP_DIR/scuffed-stat-tracker.desktop" "$(absolute_gui_bin)"
+    MANIFEST_ENTRIES+=("$DESKTOP_DIR/scuffed-stat-tracker.desktop")
     refresh_desktop_database "$DESKTOP_DIR"
     info "Installed desktop entry → $DESKTOP_DIR (Exec=$(absolute_gui_bin))"
 
@@ -208,7 +215,13 @@ else
     HELPER_DEST="$(absolute_install_path "$LIB_DIR/scuffed-stat-tracker/import-session-env.sh")"
     install_user_units "$ASSETS" "$SYSTEMD_DIR" "$DAEMON_EXEC" \
         "$DIST/import-session-env.sh" "$HELPER_DEST"
+    MANIFEST_ENTRIES+=(
+        "$HELPER_DEST"
+        "$SYSTEMD_DIR/scuffed-stat-tracker.service"
+        "$SYSTEMD_DIR/scuffed-stat-tracker-session.service"
+    )
     if [[ -n "${DATA_DIR_DROPIN:-}" && -f "$DATA_DIR_DROPIN" ]]; then
+        MANIFEST_ENTRIES+=("$DATA_DIR_DROPIN")
         info "Custom data_dir is outside the unit sandbox — wrote $DATA_DIR_DROPIN"
     fi
     SYSTEMCTL_BIN="${SCUFFED_SYSTEMCTL:-systemctl}"
@@ -222,6 +235,19 @@ else
     info "ExecStart=$DAEMON_EXEC"
     INSTALLED_UNITS=1
 fi
+
+# ── Install manifest ──────────────────────────────────────────────────────────
+# Same file the tarball installer writes. One absolute path per line.
+MANIFEST_ENTRIES+=("$MANIFEST")
+mkdir -p "$MANIFEST_DIR"
+{
+    if [[ -f "$MANIFEST" ]]; then
+        cat "$MANIFEST"
+    fi
+    printf '%s\n' "${MANIFEST_ENTRIES[@]}"
+} | awk 'NF && !seen[$0]++' > "$MANIFEST.tmp"
+mv "$MANIFEST.tmp" "$MANIFEST"
+info "Wrote install manifest → $MANIFEST"
 
 # ── Done ──────────────────────────────────────────────────────────────────────
 # Human-facing summary to stderr too — stdout stays reserved for machine output

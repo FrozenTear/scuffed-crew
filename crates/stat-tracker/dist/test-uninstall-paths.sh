@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# The install path list is the only set uninstall may touch.
-# Fails if install.sh writes a path the list does not name, if a
-# package-owned or /usr install deletes anything, or if keep-data
-# removes the data directory.
+# install.sh records every file it writes. uninstall.sh removes exactly
+# those manifest entries. A package owner (pacman -Qo / dpkg -S) deletes
+# nothing. An extra file next to an installed file must survive. Keep-data
+# leaves config.toml in place.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -112,14 +112,19 @@ plant_canaries() {
     printf 'crop\n' > "$home/.local/share/scuffed-stat-tracker/debug/crop.png"
     printf 'shadow\n' > "$home/.local/share/scuffed-stat-tracker/shadow/digits.jsonl"
     printf 'sync_token = "secret-token"\n' > "$home/.config/scuffed-stat-tracker/config.toml"
-    # A manifest line outside the list must survive.
-    printf '%s\n' "$home/keep-me" >> "$prefix/share/scuffed-stat-tracker/install-manifest.txt"
+    # Recorded in the manifest on purpose. Still kept unless --purge.
+    printf '%s\n' "$home/.config/scuffed-stat-tracker/config.toml" \
+        >> "$prefix/share/scuffed-stat-tracker/install-manifest.txt"
+    # Sits next to the installed GUI binary and is not in the manifest.
+    printf 'neighbor\n' > "$prefix/bin/neighbor-tool"
 }
 
 assert_canaries() {
     local home="$1" prefix="$2"
     [[ "$(cat "$home/keep-me")" == "keep" ]] || fail "canary outside HOME root was touched"
     [[ -f "$prefix/bin/other-tool" ]] || fail "unrelated binary in PREFIX/bin was removed"
+    [[ "$(cat "$prefix/bin/neighbor-tool")" == "neighbor" ]] \
+        || fail "extra file next to the installed binary was removed"
     [[ -f "$prefix/lib/libother.so" ]] || fail "unrelated library in PREFIX/lib was removed"
     [[ -f "$home/.config/other-app/file" ]] || fail "unrelated config was removed"
     [[ -f "$home/.local/share/applications/mimeinfo.cache" ]] || fail "desktop cache outside the list was removed"
@@ -183,14 +188,15 @@ env HOME="$HOME_DIR" PREFIX="$PREFIX" \
 
 grep -q 'disable --now scuffed-stat-tracker.service' "$LOG" \
     || fail "systemd unit was not disabled before removal. log: $(cat "$LOG")"
+grep -q 'disable --now scuffed-stat-tracker.timer' "$LOG" \
+    || fail "timer was not disabled before removal. log: $(cat "$LOG")"
 if grep -q 'UNIT MISSING' "$LOG"; then
     fail "disable ran after the unit file was deleted"
 fi
 assert_removed_install "$HOME_DIR" "$PREFIX"
 assert_data_kept "$HOME_DIR"
 assert_canaries "$HOME_DIR" "$PREFIX"
-[[ -f "$HOME_DIR/keep-me" ]] || fail "path listed only in the manifest was removed"
-pass "bootstrap.sh --uninstall keeps data and leaves everything else"
+pass "bootstrap.sh --uninstall keeps data and leaves the neighbor file"
 
 # Purge removes the data dir and config, still nothing outside the list.
 run_install "$HOME_DIR" "$PREFIX"
@@ -246,18 +252,66 @@ apt_out="$(env HOME="$HOME_DIR" PREFIX="$PREFIX" PATH="$TMP/fakedeb:$PATH" \
 [[ -x "$PREFIX/bin/scuffed-stat-tracker" ]] || fail "dpkg-owned daemon was deleted"
 pass "dpkg install prints sudo apt remove and deletes nothing"
 
-# /usr is outside the bootstrap user paths. Do not create files there.
-# The refusal happens before any removal.
-set +e
-env HOME="$HOME_DIR" PREFIX=/usr \
+# A file sitting next to a recorded library, not in the manifest, survives.
+# The library file itself is removed. The directory stays because it is not empty.
+run_install "$HOME_DIR" "$PREFIX"
+printf 'neighbor-lib\n' > "$PREFIX/lib/scuffed-stat-tracker/ocr/neighbor.so"
+env HOME="$HOME_DIR" PREFIX="$PREFIX" \
     SCUFFED_SYSTEMCTL="$FAKE_CTL" \
-    bash "$UNINSTALL" --purge --yes >/dev/null 2>"$TMP/usr.err"
-usr_status=$?
-set -e
-[[ "$usr_status" -ne 0 ]] || fail "PREFIX=/usr uninstall exited 0"
-grep -q 'outside the bootstrap.sh user install paths' "$TMP/usr.err" \
-    || fail "PREFIX=/usr did not explain the refusal: $(cat "$TMP/usr.err")"
-[[ -f "$HOME_DIR/keep-me" ]] || fail "PREFIX=/usr uninstall touched HOME"
-pass "paths under /usr are not removed"
+    bash "$UNINSTALL" --yes >/dev/null
+[[ -f "$PREFIX/lib/scuffed-stat-tracker/ocr/neighbor.so" ]] \
+    || fail "extra file next to a bundled library was removed"
+[[ ! -e "$PREFIX/lib/scuffed-stat-tracker/ocr/liblept.so.5" ]] \
+    || fail "recorded library survived"
+[[ ! -e "$PREFIX/bin/stat-tracker-gui" ]] || fail "recorded GUI survived"
+pass "extra file next to a recorded library survives"
+
+# No manifest: show the fixed list, remove those paths, leave the neighbor
+# and config.toml.
+run_install "$HOME_DIR" "$PREFIX"
+rm -f "$MANIFEST"
+printf 'neighbor\n' > "$PREFIX/bin/neighbor-tool"
+printf 'sync_token = "secret-token"\n' > "$HOME_DIR/.config/scuffed-stat-tracker/config.toml"
+env HOME="$HOME_DIR" PREFIX="$PREFIX" \
+    SCUFFED_SYSTEMCTL="$FAKE_CTL" \
+    bash "$UNINSTALL" --yes >/dev/null 2>"$TMP/fallback.err"
+grep -q 'No install manifest' "$TMP/fallback.err" \
+    || fail "fallback did not say the manifest was missing: $(cat "$TMP/fallback.err")"
+grep -q "$PREFIX/bin/stat-tracker-gui" "$TMP/fallback.err" \
+    || fail "fallback did not show the fixed list"
+[[ ! -e "$PREFIX/bin/stat-tracker-gui" ]] || fail "fallback left the GUI"
+[[ "$(cat "$PREFIX/bin/neighbor-tool")" == "neighbor" ]] \
+    || fail "fallback removed the neighbor file"
+[[ -f "$HOME_DIR/.config/scuffed-stat-tracker/config.toml" ]] \
+    || fail "fallback removed config.toml"
+pass "missing manifest shows the fixed list and leaves config.toml"
+
+# Ownership, not the path. A prefix whose path contains /usr/bin is still
+# removed when no package owns the binary, and left alone when pacman does.
+if grep -q 'is_system_install_path' "$UNINSTALL"; then
+    fail "uninstall.sh still classifies installs by path"
+fi
+USR_PREFIX="$TMP/usr"
+run_install "$HOME_DIR" "$USR_PREFIX"
+printf 'neighbor\n' > "$USR_PREFIX/bin/neighbor-tool"
+env HOME="$HOME_DIR" PREFIX="$USR_PREFIX" PATH="$TMP/bin:/usr/bin:/bin" \
+    SCUFFED_SYSTEMCTL="$FAKE_CTL" \
+    bash "$UNINSTALL" --yes >/dev/null
+[[ ! -e "$USR_PREFIX/bin/stat-tracker-gui" ]] \
+    || fail "unmanaged /usr-like prefix was not uninstalled"
+[[ "$(cat "$USR_PREFIX/bin/neighbor-tool")" == "neighbor" ]] \
+    || fail "neighbor next to a /usr-like install was removed"
+run_install "$HOME_DIR" "$USR_PREFIX"
+printf 'neighbor\n' > "$USR_PREFIX/bin/neighbor-tool"
+owned="$(env HOME="$HOME_DIR" PREFIX="$USR_PREFIX" PATH="$TMP/fakepac:/usr/bin:/bin" \
+    SCUFFED_SYSTEMCTL="$FAKE_CTL" \
+    bash "$UNINSTALL" --purge --yes)"
+[[ "$owned" == "sudo pacman -R scuffed-stat-tracker" ]] \
+    || fail "package owner on a /usr-like path was '$owned'"
+[[ -x "$USR_PREFIX/bin/stat-tracker-gui" ]] \
+    || fail "package-owned binary under a /usr-like path was deleted"
+[[ -f "$USR_PREFIX/bin/neighbor-tool" ]] \
+    || fail "package-owned uninstall deleted the neighbor"
+pass "package ownership is what blocks removal, not the path"
 
 echo "all uninstall path checks passed"

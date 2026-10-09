@@ -1125,6 +1125,7 @@ impl TrackerApp {
                     home,
                     prefix,
                     delete_data,
+                    ..
                 }) = self.uninstall_dialog.clone()
                 else {
                     return Task::none();

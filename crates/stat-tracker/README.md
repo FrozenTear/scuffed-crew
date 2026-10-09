@@ -116,12 +116,18 @@ scuffed-stat-tracker-uninstall           # same as bootstrap.sh --uninstall
 
 The desktop app has Uninstall in the sidebar, next to About. It asks before
 removing anything. Local data (games database, debug crops, shadow logs,
-and config including the sync token) stays unless that box is checked.
+and config.toml, including the sync token) stays unless that box is checked.
 
-`dist/install-paths.sh` is the only list of paths. `install.sh` and both
-uninstall entry points read it. A pacman/AUR or apt/dpkg install, and any
-copy under `/usr`, is left on disk. The app shows `sudo pacman -R <pkg>`
-or `sudo apt remove <pkg>` instead, with a button that copies the command.
+`install.sh` writes `install-manifest.txt`, one absolute path per installed
+file. The uninstaller removes exactly those entries. It does not match by
+pattern. An older install with no manifest falls back to the fixed list in
+`dist/install-paths.sh` and shows that list before removing anything.
+`config.toml` is left in place unless local data is included.
+
+A pacman/AUR or apt/dpkg install is detected by who owns the running
+binary (`pacman -Qo`, `dpkg -S`), not by its path. Nothing is deleted.
+The app shows `sudo pacman -R <pkg>` or `sudo apt remove <pkg>` with a
+button that copies the command. An AppImage counts as a script install.
 
 ## Running
 

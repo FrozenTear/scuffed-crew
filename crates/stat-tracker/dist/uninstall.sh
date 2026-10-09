@@ -9,9 +9,14 @@
 #   --purge   also delete local data and config
 #   --yes     never prompt (keeps data unless --purge)
 #
-# Removes only paths from install-paths.sh. A package-manager install
-# (pacman/AUR, apt/dpkg) or a path under /usr is left untouched. The
-# remove command is printed instead.
+# Removes exactly the files install.sh recorded in the install manifest.
+# No globs and no "everything under this directory". An older install
+# with no manifest falls back to the fixed list in install-paths.sh and
+# shows that list before deleting. config.toml stays unless --purge.
+#
+# A package install is detected by who owns the GUI binary
+# (`pacman -Qo`, `dpkg -S`), not by its path. An AppImage is not a
+# package. The remove command is printed and nothing is deleted.
 #
 # Env (must match install time):
 #   PREFIX        default ~/.local
@@ -59,8 +64,6 @@ LIB_DIR="$(require_path "library directory" libdir scuffed-stat-tracker)"
 DATA_DIR="$(require_path "data directory" data scuffed-stat-tracker)"
 CONFIG_DIR="$(require_path "config directory" config scuffed-stat-tracker)"
 MANIFEST="$(require_path "install manifest" manifest install-manifest.txt)"
-UNIT="scuffed-stat-tracker.service"
-SESSION_UNIT="scuffed-stat-tracker-session.service"
 
 PURGE=0
 ASSUME_YES=0
@@ -79,8 +82,9 @@ for arg in "$@"; do
     esac
 done
 
-# Package managers and system prefixes are never deleted.
-if [[ -e "$GUI_BIN" ]]; then
+# Package manager owns the GUI binary: print the command, delete nothing.
+# Path is not consulted. An AppImage is not owned, so it stays a script install.
+if [[ -e "$GUI_BIN" || -L "$GUI_BIN" ]]; then
     owner=""
     if owner="$(package_owner_of "$GUI_BIN")"; then
         kind="${owner%% *}"
@@ -90,19 +94,6 @@ if [[ -e "$GUI_BIN" ]]; then
         info "Run: $(package_remove_command "$kind" "$pkg")"
         exit 0
     fi
-fi
-if is_system_install_path "$GUI_BIN" || is_system_install_path "$PREFIX"; then
-    error "Refusing to remove $GUI_BIN."
-    error "That path is outside the bootstrap.sh user install paths."
-    error "Nothing was removed."
-    exit 1
-fi
-
-# Stop and disable before any file is removed, so a restart cannot
-# rewrite a unit we are about to delete.
-if [[ -x "$SYSTEMCTL_BIN" ]] || command -v "$SYSTEMCTL_BIN" >/dev/null 2>&1; then
-    "$SYSTEMCTL_BIN" --user disable --now "$UNIT" >/dev/null 2>&1 || true
-    "$SYSTEMCTL_BIN" --user stop "$SESSION_UNIT" >/dev/null 2>&1 || true
 fi
 
 # A parent symlink would make a listed path point somewhere else.
@@ -118,46 +109,78 @@ parents_are_real() {
     return 0
 }
 
-path_is_under() {
-    local child="$1" parent="$2"
-    [[ "$child" == "$parent"/* ]]
+# Stop and disable the user service, its timer, and the session unit
+# before any file is removed. A restart must not rewrite a unit we delete.
+disable_user_units() {
+    if [[ -x "$SYSTEMCTL_BIN" ]] || command -v "$SYSTEMCTL_BIN" >/dev/null 2>&1; then
+        local unit
+        while read -r unit; do
+            [[ -n "$unit" ]] || continue
+            "$SYSTEMCTL_BIN" --user disable --now "$unit" >/dev/null 2>&1 || true
+        done < <(systemd_units_to_disable)
+    fi
 }
 
-declare -A ALWAYS_EXACT=()
-declare -a ALWAYS_FILES=()
-while read -r cat when path; do
-    case "$cat" in
-        libdir|data|config) continue ;;
-    esac
-    if [[ "$when" == "always" ]]; then
-        ALWAYS_EXACT["$path"]=1
-        ALWAYS_FILES+=("$path")
-    fi
-done < <(expanded_install_paths "$HOME" "$PREFIX" always)
-
-declare -A REMOVE=()
-for f in "${ALWAYS_FILES[@]}"; do
-    REMOVE["$f"]=1
-done
-
+# Exact absolute paths only. A glob character is not expanded.
+declare -a REMOVE_FILES=()
 if [[ -f "$MANIFEST" ]]; then
     while IFS= read -r line || [[ -n "$line" ]]; do
+        line="${line#"${line%%[![:space:]]*}"}"
+        line="${line%"${line##*[![:space:]]}"}"
         [[ "$line" == /* ]] || continue
-        if [[ -n "${ALWAYS_EXACT[$line]:-}" ]] || path_is_under "$line" "$LIB_DIR"; then
-            REMOVE["$line"]=1
-        else
-            warn "not removing $line (outside the install path list)"
-        fi
+        case "$line" in
+            *'*'*|*'?'*|*'['*)
+                warn "not removing $line (refusing a pattern)"
+                continue
+                ;;
+        esac
+        REMOVE_FILES+=("$line")
     done < "$MANIFEST"
+else
+    while read -r cat when path; do
+        case "$cat" in
+            libdir|data|config) continue ;;
+        esac
+        [[ "$when" == "always" ]] || continue
+        REMOVE_FILES+=("$path")
+    done < <(expanded_install_paths "$HOME" "$PREFIX" always)
+    info "No install manifest at $MANIFEST."
+    info "These fixed paths would be removed:"
+    for f in "${REMOVE_FILES[@]}"; do
+        printf '  %s\n' "$f" >&2
+    done
+    if [[ $ASSUME_YES -eq 0 ]]; then
+        reply=""
+        printf '%b' "${YLW}[uninstall]${NC} Remove these paths? [y/N] " >&2
+        IFS= read -r reply || reply=""
+        case "$reply" in
+            [yY]*) ;;
+            *)
+                info "Uninstall cancelled. Nothing was removed."
+                exit 0
+                ;;
+        esac
+    fi
 fi
 
+disable_user_units
+
 removed=0
-for f in "${!REMOVE[@]}"; do
+for f in "${REMOVE_FILES[@]}"; do
     if [[ ! -e "$f" && ! -L "$f" ]]; then
         continue
     fi
     if ! parents_are_real "$f"; then
         warn "not removing $f (a parent directory is a symlink)"
+        continue
+    fi
+    # config.toml is local data. The data checkbox (--purge) removes the
+    # config directory later. A manifest line must not delete it early.
+    if [[ "$(basename "$f")" == "config.toml" ]]; then
+        continue
+    fi
+    if [[ "$f" == "$DATA_DIR" || "$f" == "$CONFIG_DIR" || "$f" == "/" || "$f" == "$HOME" ]]; then
+        warn "not removing $f (local data stays unless --purge)"
         continue
     fi
     if [[ -d "$f" && ! -L "$f" ]]; then

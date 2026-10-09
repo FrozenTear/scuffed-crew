@@ -70,16 +70,14 @@ install_path_named() {
     return 1
 }
 
-# /usr, /bin, /lib, /opt, /etc, and anything under them. Bootstrap's
-# default prefix is ~/.local. These system roots are never a user install.
-is_system_install_path() {
-    local p="$1"
-    case "$p" in
-        /usr|/usr/*|/bin|/bin/*|/sbin|/sbin/*|/lib|/lib/*|/lib64|/lib64/*|/opt|/opt/*|/etc|/etc/*)
-            return 0
-            ;;
-    esac
-    return 1
+# Stop and disable these user units before any installed file is removed.
+# The timer may not exist. disable --now is still attempted.
+systemd_units_to_disable() {
+    cat <<'EOF'
+scuffed-stat-tracker.service
+scuffed-stat-tracker.timer
+scuffed-stat-tracker-session.service
+EOF
 }
 
 valid_package_name() {
