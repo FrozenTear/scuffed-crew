@@ -401,6 +401,7 @@ mod tests {
             ocr: GameOcr::default(),
             segments: Vec::new(),
             upload_reject: None,
+            synced: false,
         }
     }
 

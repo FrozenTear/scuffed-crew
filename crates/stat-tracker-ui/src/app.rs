@@ -154,6 +154,14 @@ pub enum Message {
     ToggleEdit,
     EditField(EditField, String),
     SaveEdit,
+    PickMap {
+        session_id: String,
+        map: String,
+    },
+    PickHero {
+        session_id: String,
+        hero: String,
+    },
     ResolveSegment {
         session_id: String,
         segment: u32,
@@ -722,6 +730,24 @@ impl TrackerApp {
                     );
                 }
                 self.editing = false;
+                Task::none()
+            }
+            Message::PickMap { session_id, map } => {
+                self.toast = Some(
+                    match crate::commands::pick_map(&self.data_dir, &session_id, &map) {
+                        Ok(()) => "Map saved".into(),
+                        Err(e) => format!("Could not save map: {e}"),
+                    },
+                );
+                Task::none()
+            }
+            Message::PickHero { session_id, hero } => {
+                self.toast = Some(
+                    match crate::commands::pick_hero(&self.data_dir, &session_id, &hero) {
+                        Ok(()) => "Hero saved".into(),
+                        Err(e) => format!("Could not save hero: {e}"),
+                    },
+                );
                 Task::none()
             }
             Message::RetryUpload(session_id) => {

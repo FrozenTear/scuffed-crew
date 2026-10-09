@@ -479,6 +479,10 @@ async fn main() {
         .await
         .expect("Failed to create upload directory");
 
+    let reports_configured = scuffed_site_server::stat_reports::reports_dir_from_env();
+    let (reports_dir, reports_enabled) =
+        scuffed_site_server::stat_reports::open_reports_dir(&reports_configured, &upload_dir).await;
+
     let notifier = Notifier::from_env();
     if notifier.is_none() {
         tracing::info!("Notifications not configured (Matrix/Discord) — running without");
@@ -533,6 +537,8 @@ async fn main() {
         session_config: SessionConfig::default(),
         oauth_config,
         upload_dir,
+        reports_dir: reports_dir.clone(),
+        reports_enabled,
         notifier,
         nostr_challenge_key,
         consumed_challenges: scuffed_site_server::challenge_store::ConsumedChallengeStore::new(),
@@ -561,6 +567,10 @@ async fn main() {
             }
         }
     });
+
+    if reports_enabled {
+        scuffed_site_server::stat_reports::spawn_sweeper(db.clone(), reports_dir);
+    }
 
     let app = create_router(state);
 

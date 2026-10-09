@@ -4,6 +4,7 @@ pub mod heroes;
 pub mod nostr;
 pub mod org;
 pub mod patch_notes;
+pub mod stat_report;
 pub mod stats;
 pub mod strategy;
 
@@ -15,5 +16,6 @@ pub use heroes::{
 pub use nostr::*;
 pub use org::*;
 pub use patch_notes::*;
+pub use stat_report::*;
 pub use stats::*;
 pub use strategy::*;
