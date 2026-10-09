@@ -703,6 +703,9 @@ pub async fn run_migrations(client: &Surreal<Any>) -> DbResult<()> {
         DEFINE FIELD OVERWRITE is_active ON daemon_token TYPE bool DEFAULT true;
         DEFINE FIELD OVERWRITE created_at ON daemon_token TYPE datetime DEFAULT time::now();
         DEFINE FIELD OVERWRITE last_used_at ON daemon_token TYPE option<datetime>;
+        -- NONE does not expire. A past value fails token auth the same way an
+        -- unknown token does, and does not bump last_used_at.
+        DEFINE FIELD OVERWRITE expires_at ON daemon_token TYPE option<datetime>;
 
         DEFINE INDEX IF NOT EXISTS dt_token_hash_idx ON daemon_token COLUMNS token_hash UNIQUE;
         DEFINE INDEX IF NOT EXISTS dt_member_idx ON daemon_token COLUMNS member_id;

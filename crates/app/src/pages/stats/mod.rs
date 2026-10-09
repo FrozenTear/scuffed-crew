@@ -58,7 +58,6 @@ struct PersonalMatch {
     id: String,
     hero: String,
     map_name: String,
-    #[allow(dead_code)]
     game_mode: String,
     role: String,
     outcome: String,
@@ -67,7 +66,16 @@ struct PersonalMatch {
     assists: u32,
     damage: u32,
     healing: u32,
+    /// Match JSON from before mitigation was returned. A missing value is 0.
+    #[serde(default)]
+    mitigation: u32,
     played_at: DateTime<Utc>,
+    /// Reader id. Missing or null is None, which reads as `ocr-v1`.
+    #[serde(default)]
+    recognizer: Option<String>,
+    /// Cell names the reader flagged. Missing or null is None (no marks).
+    #[serde(default)]
+    suspect_fields: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -220,7 +228,10 @@ const STATS_CSS: &str = r#"
     }
     .stats-header-actions {
         display: flex;
+        flex-wrap: wrap;
         gap: 0.5rem;
+        min-width: 0;
+        max-width: 100%;
     }
     .stats-header-actions a, .stats-header-actions button {
         padding: 0.4rem 1rem;
@@ -333,23 +344,88 @@ const STATS_CSS: &str = r#"
         font-weight: 700;
         text-transform: uppercase;
         line-height: 1.15;
+        display: flex;
+        align-items: baseline;
+        min-width: 0;
+        overflow: hidden;
+    }
+    .match-identity { min-width: 0; }
+    .match-hero-line {
+        display: flex;
+        align-items: center;
+        flex-wrap: wrap;
+        gap: 0.4rem;
+        min-width: 0;
+    }
+    .match-card .match-hero {
+        color: var(--text);
+        font-weight: 500;
+        display: inline-flex;
+        align-items: baseline;
+        min-width: 0;
+        max-width: 100%;
+        overflow: hidden;
+    }
+    /* Ellipsis lives on the value, so the unsure mark stays outside the clip. */
+    .stat-value-text {
+        min-width: 0;
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: nowrap;
     }
-    .match-identity { min-width: 0; }
-    .match-card .match-hero {
-        color: var(--text);
-        font-weight: 500;
+    .match-stat .stat-value-text,
+    .stat-flagged .stat-value-text {
+        overflow: visible;
+        text-overflow: clip;
+        flex: 0 0 auto;
+    }
+    .match-hero-line .tracker-badge { flex-shrink: 1; }
+    .reader-badge-short { display: none; }
+    .sr-only {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        padding: 0;
+        margin: -1px;
         overflow: hidden;
-        text-overflow: ellipsis;
+        clip: rect(0, 0, 0, 0);
+        white-space: nowrap;
+        border: 0;
+    }
+    /* Unsure cells: a dotted underline plus a question mark, not color alone. */
+    .stat-unsure .stat-value-text {
+        text-decoration-line: underline;
+        text-decoration-style: dotted;
+        text-underline-offset: 0.18em;
+    }
+    .stat-unsure-mark {
+        flex-shrink: 0;
+        margin-left: 0.1em;
+        font-size: 0.7em;
+        font-weight: 700;
+        vertical-align: super;
+        line-height: 0;
+        text-decoration: none;
+    }
+    .stat-flagged {
+        flex: 0 0 auto;
+        max-width: 100%;
         white-space: nowrap;
     }
     .match-card .match-map {
         color: var(--text-2);
         font-size: 0.75rem;
-        overflow: hidden;
-        text-overflow: ellipsis;
+        display: flex;
+        flex-wrap: wrap;
+        align-items: baseline;
+        column-gap: 0.25rem;
+        min-width: 0;
+    }
+    .match-map-name { min-width: 0; max-width: 100%; }
+    .match-stat.stat-unsure {
+        display: flex;
+        justify-content: flex-end;
+        align-items: baseline;
         white-space: nowrap;
     }
     .match-stat {
@@ -842,6 +918,21 @@ const STATS_CSS: &str = r#"
     }
     @media (max-width: 720px) {
         .stats-page { padding: 1.25rem 1rem; }
+        /* Phone widths: the season select takes the full actions row so the
+           closed control is wide enough to show "Current season". */
+        .stats-header { align-items: stretch; }
+        .stats-header-actions { flex: 1 1 100%; }
+        .stats-header-actions .season-select {
+            flex: 1 1 100%;
+            min-width: 0;
+            width: 100%;
+            max-width: 100%;
+        }
+        .stats-header-actions .season-select select {
+            width: 100%;
+            min-width: 0;
+            max-width: 100%;
+        }
         .overview-grid { grid-template-columns: 1fr; }
         .stats-summary { grid-template-columns: 1fr; }
         /* W5b mobile: row1 outcome | identity | date; row2 equal stats strip.
@@ -861,6 +952,18 @@ const STATS_CSS: &str = r#"
             grid-template-columns: repeat(5, minmax(0, 1fr));
         }
         .match-card .match-date { grid-area: date; text-align: right; }
+        .reader-badge-full {
+            display: none;
+        }
+        .reader-badge-short {
+            display: inline;
+        }
+        .match-hero-line {
+            flex-wrap: wrap;
+        }
+        .match-hero-line .tracker-badge {
+            flex-shrink: 1;
+        }
         .stats-tabs { overflow-x: auto; flex-wrap: nowrap; }
         .stats-tab { white-space: nowrap; padding: 0.55rem 0.9rem; }
         .map-callouts { flex-direction: column; }
@@ -1148,6 +1251,191 @@ pub fn Stats() -> Element {
             // Tab content
             {tab_body}
         }
+    }
+}
+
+#[cfg(test)]
+mod match_row_tests {
+    use super::{MatchPage, PersonalMatch};
+
+    fn row_json(extra: &str) -> String {
+        format!(
+            r#"{{
+                "id": "m1",
+                "hero": "Ana",
+                "map_name": "Ilios",
+                "game_mode": "control",
+                "role": "Support",
+                "outcome": "victory",
+                "elims": 1,
+                "deaths": 2,
+                "assists": 3,
+                "damage": 4,
+                "healing": 5,
+                "played_at": "2026-03-15T12:00:00Z"{extra}
+            }}"#
+        )
+    }
+
+    #[test]
+    fn missing_reader_fields_default_to_old_reader_and_empty() {
+        let row: PersonalMatch = serde_json::from_str(&row_json("")).expect("row");
+        assert!(row.recognizer.is_none());
+        assert!(row.suspect_fields.is_none());
+        assert_eq!(row.mitigation, 0);
+        assert_eq!(
+            scuffed_types::effective_recognizer(row.recognizer.as_deref().unwrap_or("")),
+            "ocr-v1"
+        );
+
+        let row = row_json("");
+        let page: MatchPage =
+            serde_json::from_str(&format!(r#"{{"data":[{row}],"next_cursor":null}}"#))
+                .expect("page");
+        assert!(page.data[0].recognizer.is_none());
+        assert!(page.data[0].suspect_fields.is_none());
+    }
+
+    #[test]
+    fn null_recognizer_and_suspect_fields_keep_the_page() {
+        let raw = row_json(r#","recognizer":null,"suspect_fields":null"#);
+        let page: MatchPage =
+            serde_json::from_str(&format!(r#"{{"data":[{raw}],"next_cursor":null}}"#))
+                .expect("page");
+        assert!(page.data[0].recognizer.is_none());
+        assert!(page.data[0].suspect_fields.is_none());
+        let stored = page.data[0].recognizer.as_deref().unwrap_or("");
+        assert_eq!(scuffed_types::effective_recognizer(stored), "ocr-v1");
+    }
+
+    #[test]
+    fn empty_recognizer_counts_as_ocr_v1() {
+        let raw = row_json(r#","recognizer":"","suspect_fields":[]"#);
+        let row: PersonalMatch = serde_json::from_str(&raw).expect("row");
+        assert_eq!(row.recognizer.as_deref(), Some(""));
+        assert_eq!(row.suspect_fields.as_deref(), Some(&[][..]));
+        assert_eq!(
+            scuffed_types::effective_recognizer(row.recognizer.as_deref().unwrap_or("")),
+            "ocr-v1"
+        );
+    }
+
+    #[test]
+    fn present_reader_fields_deserialize() {
+        let raw = row_json(
+            r#","mitigation":9,"recognizer":"cv-v1","suspect_fields":["hero","not-a-cell"]"#,
+        );
+        let page: MatchPage =
+            serde_json::from_str(&format!(r#"{{"data":[{raw}],"next_cursor":null}}"#))
+                .expect("page");
+        assert_eq!(page.data[0].recognizer.as_deref(), Some("cv-v1"));
+        assert_eq!(
+            page.data[0].suspect_fields,
+            Some(vec!["hero".to_string(), "not-a-cell".to_string()])
+        );
+        assert_eq!(page.data[0].mitigation, 9);
+        assert!(page.next_cursor.is_none());
+    }
+}
+
+#[cfg(test)]
+mod header_layout_tests {
+    use super::STATS_CSS;
+
+    fn block_after<'a>(css: &'a str, marker: &str) -> &'a str {
+        let start = css
+            .find(marker)
+            .unwrap_or_else(|| panic!("missing {marker}"));
+        &css[start..]
+    }
+
+    #[test]
+    fn phone_width_gives_the_season_select_the_full_row() {
+        let actions = block_after(STATS_CSS, ".stats-header-actions {");
+        let actions_head = actions.split('}').next().unwrap();
+        assert!(actions_head.contains("flex-wrap: wrap"), "{actions_head}");
+        assert!(actions_head.contains("min-width: 0"), "{actions_head}");
+
+        let phone = block_after(STATS_CSS, "@media (max-width: 720px)");
+        let season = block_after(phone, ".stats-header-actions .season-select {");
+        let season_head = season.split('}').next().unwrap();
+        assert!(season_head.contains("flex: 1 1 100%"), "{season_head}");
+        assert!(season_head.contains("min-width: 0"), "{season_head}");
+        assert!(has_declaration(season_head, "width: 100%"), "{season_head}");
+        let select = block_after(phone, ".stats-header-actions .season-select select {");
+        let select_head = select.split('}').next().unwrap();
+        assert!(select_head.contains("min-width: 0"), "{select_head}");
+        assert!(has_declaration(select_head, "width: 100%"), "{select_head}");
+    }
+
+    fn has_declaration(block: &str, decl: &str) -> bool {
+        block
+            .split(';')
+            .any(|part| part.lines().any(|line| line.trim() == decl))
+    }
+
+    #[test]
+    fn width_declaration_does_not_match_max_width() {
+        assert!(has_declaration(
+            "width: 100%; max-width: 100%;",
+            "width: 100%"
+        ));
+        assert!(!has_declaration("max-width: 100%;", "width: 100%"));
+        assert!(has_declaration("max-width: 100%;", "max-width: 100%"));
+    }
+
+    #[test]
+    fn narrow_history_row_keeps_badge_mark_and_flagged_value() {
+        let phone = block_after(STATS_CSS, "@media (max-width: 720px)");
+        let full = block_after(phone, ".reader-badge-full");
+        let full_head = full.split('}').next().unwrap();
+        assert!(
+            has_declaration(full_head, "display: none"),
+            "narrow widths hide the long badge: {full_head}"
+        );
+        let short = block_after(phone, ".reader-badge-short");
+        let short_head = short.split('}').next().unwrap();
+        assert!(
+            has_declaration(short_head, "display: inline"),
+            "narrow widths show the short badge: {short_head}"
+        );
+        let line = block_after(phone, ".match-hero-line");
+        let line_head = line.split('}').next().unwrap();
+        assert!(line_head.contains("flex-wrap: wrap"), "{line_head}");
+        let badge = block_after(phone, ".match-hero-line .tracker-badge");
+        let badge_head = badge.split('}').next().unwrap();
+        assert!(badge_head.contains("flex-shrink: 1"), "{badge_head}");
+
+        let value = block_after(STATS_CSS, ".stat-value-text {");
+        let value_head = value.split('}').next().unwrap();
+        assert!(
+            value_head.contains("text-overflow: ellipsis"),
+            "only the value text is clipped: {value_head}"
+        );
+        let hero = block_after(STATS_CSS, ".match-card .match-hero {");
+        let hero_head = hero.split('}').next().unwrap();
+        assert!(
+            !hero_head.contains("text-overflow"),
+            "the hero box must not clip its mark: {hero_head}"
+        );
+        let mark = block_after(STATS_CSS, ".stat-unsure-mark {");
+        let mark_head = mark.split('}').next().unwrap();
+        assert!(mark_head.contains("flex-shrink: 0"), "{mark_head}");
+
+        let map = block_after(STATS_CSS, ".match-card .match-map {");
+        let map_head = map.split('}').next().unwrap();
+        assert!(map_head.contains("flex-wrap: wrap"), "{map_head}");
+        assert!(
+            !map_head.contains("white-space: nowrap"),
+            "the map line must not ellipsize flagged values: {map_head}"
+        );
+        let flagged = block_after(STATS_CSS, ".stat-flagged {");
+        let flagged_head = flagged.split('}').next().unwrap();
+        assert!(flagged_head.contains("flex: 0 0 auto"), "{flagged_head}");
+        assert!(
+            flagged_head.contains("white-space: nowrap"),
+            "{flagged_head}"
+        );
     }
 }
 

@@ -182,6 +182,25 @@ fn http_host_is_loopback(url: &reqwest::Url) -> bool {
     false
 }
 
+/// Settings view of `shadow_recognizer`.
+///
+/// `file_on` is the config.toml value. `locked` means
+/// `SCUFFED_SHADOW_RECOGNIZER` forces the extra reader on for this process.
+/// A save writes `file_on` only. The checkbox can later become a reader
+/// picker without a second env rule.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ShadowRecognizerControl {
+    pub file_on: bool,
+    pub locked: bool,
+}
+
+impl ShadowRecognizerControl {
+    /// On for this process. Same rule the daemon uses.
+    pub fn enabled(self) -> bool {
+        self.file_on || self.locked
+    }
+}
+
 impl Config {
     /// Load config from file, then overlay CLI args / env vars.
     ///
@@ -195,15 +214,7 @@ impl Config {
 
         let config_path = config_dir.join("config.toml");
 
-        let mut config = if config_path.exists() {
-            // The file carries the sync bearer token — tighten permissions on
-            // files written before saves enforced 0600.
-            Self::restrict_permissions(&config_path);
-            let content = std::fs::read_to_string(&config_path)?;
-            toml::from_str::<Config>(&content)?
-        } else {
-            Config::default()
-        };
+        let mut config = Self::read_at(&config_path)?;
 
         // CLI / env overlay: --token / SCUFFED_TOKEN and --server / SCUFFED_SERVER
         let cli_token = Self::arg_value("--token").or_else(|| std::env::var("SCUFFED_TOKEN").ok());
@@ -245,7 +256,7 @@ impl Config {
             config.debug_ocr = true;
         }
 
-        // SCUFFED_SHADOW_RECOGNIZER is read by `shadow_recognizer_enabled()`,
+        // SCUFFED_SHADOW_RECOGNIZER is read by `shadow_recognizer_control()`,
         // never folded into the struct, so a Settings save can't persist it.
 
         // OCR worker count: CLI > env > config file > auto (None).
@@ -268,6 +279,38 @@ impl Config {
         Ok(config)
     }
 
+    /// Parse `config.toml` text the way [`Self::load`] reads the file.
+    ///
+    /// No CLI or env overlay. A missing `shadow_recognizer` stays off.
+    pub fn parse_file_contents(
+        content: &str,
+    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        Ok(toml::from_str(content)?)
+    }
+
+    /// Read the on-disk file [`Self::load`] starts from, without env overlays.
+    pub fn read_stored() -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        Self::read_at(&Self::config_path()?)
+    }
+
+    /// Re-read `config.toml` at `path`. Settings calls this on every Save.
+    ///
+    /// A missing file is the default config. A file that does not parse is an
+    /// error, and the caller must not write over it.
+    pub fn read_at(
+        config_path: &std::path::Path,
+    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        if config_path.exists() {
+            // The file carries the sync bearer token. Tighten permissions on
+            // files written before saves enforced 0600.
+            Self::restrict_permissions(config_path);
+            let content = std::fs::read_to_string(config_path)?;
+            Self::parse_file_contents(&content)
+        } else {
+            Ok(Self::default())
+        }
+    }
+
     /// Path of the user config file (`~/.config/scuffed-stat-tracker/config.toml`).
     pub fn config_path() -> Result<std::path::PathBuf, Box<dyn std::error::Error + Send + Sync>> {
         Ok(dirs::config_dir()
@@ -276,17 +319,69 @@ impl Config {
             .join("config.toml"))
     }
 
-    /// Serialize and write the config, owner-readable only — the file carries
+    /// Serialize and write the config, owner-readable only. The file carries
     /// the sync bearer token.
+    ///
+    /// When the file already on disk parses as this same config, it is left
+    /// untouched, so comments and key layout survive an unchanged Settings save.
+    /// A file that does not parse is left untouched too: save returns an error
+    /// instead of replacing it with defaults.
     pub fn save(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let path = Self::config_path()?;
-        if let Some(dir) = path.parent() {
+        self.save_at(&Self::config_path()?)
+    }
+
+    /// In-place write of this config to `path`. Same rules as [`Self::save`].
+    pub fn save_at(
+        &self,
+        path: &std::path::Path,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        self.save_to_path(path)
+    }
+
+    fn save_to_path(
+        &self,
+        path: &std::path::Path,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        if let Some(dir) = path.parent()
+            && !dir.as_os_str().is_empty()
+        {
             std::fs::create_dir_all(dir)?;
         }
-        let toml = toml::to_string_pretty(self)?;
-        std::fs::write(&path, toml)?;
-        Self::restrict_permissions(&path);
-        Ok(())
+        let existing = std::fs::read_to_string(path).ok();
+        let toml = Self::text_for_save(existing.as_deref(), self)?;
+        if existing.as_deref() == Some(toml.as_str()) {
+            return Ok(());
+        }
+        atomic_write_600(path, toml.as_bytes())
+    }
+
+    /// Text `save` would write.
+    ///
+    /// An `existing` document that parses as `next` is returned unchanged
+    /// (byte for byte), comments included. When the only change is
+    /// `shadow_recognizer`, that key is edited in place so comments, order,
+    /// and every other key stay as they were. A document that does not parse
+    /// is an error, not a pretty-printed replacement. A missing file (no
+    /// `existing` text) is a fresh pretty-printed document.
+    pub fn text_for_save(
+        existing: Option<&str>,
+        next: &Self,
+    ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+        let Some(existing) = existing else {
+            return Ok(toml::to_string_pretty(next)?);
+        };
+        let loaded = toml::from_str::<Self>(existing).map_err(|err| {
+            unreadable_config(format!(
+                "config.toml could not be parsed, so it was not replaced: {err}"
+            ))
+        })?;
+        if loaded == *next {
+            return Ok(existing.to_string());
+        }
+        if only_shadow_recognizer_differs(&loaded, next) {
+            return patch_shadow_recognizer(existing, next.shadow_recognizer);
+        }
+        Ok(toml::to_string_pretty(next)?)
     }
 
     /// Best-effort chmod 600 (no-op off unix).
@@ -306,18 +401,36 @@ impl Config {
     }
 
     /// Whether the shadow digit recognizer runs this process (config file
-    /// and/or env `SCUFFED_SHADOW_RECOGNIZER`). The env override is read here
-    /// only, so `shadow_recognizer` always holds the file value and a save
-    /// never writes the override.
+    /// and/or env `SCUFFED_SHADOW_RECOGNIZER`).
+    ///
+    /// The env override is read only by [`Self::shadow_recognizer_control`],
+    /// so `shadow_recognizer` always holds the file value and a save never
+    /// writes the override.
     pub fn shadow_recognizer_enabled(&self) -> bool {
-        Self::shadow_enabled(
+        self.shadow_recognizer_control().enabled()
+    }
+
+    /// File value plus whether `SCUFFED_SHADOW_RECOGNIZER` locks this process on.
+    ///
+    /// This is the only read of that variable, and it is this process's
+    /// environment. The tracker service is started by systemd with
+    /// `session.env`, and it does not report the shadow reader back here, so
+    /// Settings cannot treat this lock as the service's. `file_on` is what
+    /// Settings may write. `locked` is display-only and must not be saved.
+    pub fn shadow_recognizer_control(&self) -> ShadowRecognizerControl {
+        Self::shadow_control(
             self.shadow_recognizer,
             std::env::var("SCUFFED_SHADOW_RECOGNIZER").ok().as_deref(),
         )
     }
 
-    fn shadow_enabled(file_flag: bool, env: Option<&str>) -> bool {
-        file_flag || Self::truthy(env)
+    /// Pure form of [`Self::shadow_recognizer_control`] for tests and Settings.
+    /// `env` is the raw variable value, not a process lookup.
+    pub fn shadow_control(file_flag: bool, env: Option<&str>) -> ShadowRecognizerControl {
+        ShadowRecognizerControl {
+            file_on: file_flag,
+            locked: Self::truthy(env),
+        }
     }
 
     /// Resolved OCR worker count for the Rayon pool (and thus Tesseract instances).
@@ -349,6 +462,151 @@ impl Config {
     fn arg_value(key: &str) -> Option<String> {
         let args: Vec<String> = std::env::args().collect();
         args.windows(2).find(|w| w[0] == key).map(|w| w[1].clone())
+    }
+}
+
+fn unreadable_config(message: String) -> Box<dyn std::error::Error + Send + Sync> {
+    message.into()
+}
+
+fn only_shadow_recognizer_differs(loaded: &Config, next: &Config) -> bool {
+    if loaded.shadow_recognizer == next.shadow_recognizer {
+        return false;
+    }
+    let mut same = loaded.clone();
+    same.shadow_recognizer = next.shadow_recognizer;
+    same == *next
+}
+
+/// Change `shadow_recognizer` and nothing else.
+///
+/// A root boolean is spliced in place, so comments, order, spacing, and
+/// every other key stay byte for byte. A missing root key is inserted on
+/// the root table, before the first `[table]` header (or at the end when
+/// the file has no tables). A copy of the key inside a table is left
+/// alone, and the root key is never inserted twice.
+fn patch_shadow_recognizer(
+    existing: &str,
+    on: bool,
+) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    let doc = toml_edit::Document::parse(existing).map_err(|err| {
+        unreadable_config(format!(
+            "config.toml could not be parsed, so it was not replaced: {err}"
+        ))
+    })?;
+    if doc.get("shadow_recognizer").is_some() {
+        return splice_root_shadow_bool(existing, &doc, on);
+    }
+    insert_root_shadow_recognizer(existing, on)
+}
+
+fn splice_root_shadow_bool(
+    existing: &str,
+    doc: &toml_edit::Document<&str>,
+    on: bool,
+) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    let wanted = if on { "true" } else { "false" };
+    if let Some(item) = doc.get("shadow_recognizer")
+        && let Some(value) = item.as_value()
+        && value.as_bool().is_some()
+        && let Some(span) = value.span()
+        && existing.is_char_boundary(span.start)
+        && existing.is_char_boundary(span.end)
+    {
+        let current = &existing[span.start..span.end];
+        if current == "true" || current == "false" {
+            let mut out = String::with_capacity(existing.len() + wanted.len());
+            out.push_str(&existing[..span.start]);
+            out.push_str(wanted);
+            out.push_str(&existing[span.end..]);
+            return Ok(out);
+        }
+    }
+    // The root key is already there. Inserting another would be a duplicate.
+    Err(unreadable_config(
+        "config.toml could not be updated in place, so it was not replaced".to_string(),
+    ))
+}
+
+/// Insert `shadow_recognizer` on the document root.
+///
+/// `toml_edit` emits root values before standard tables, so the new key
+/// stays at the top level instead of falling into the last `[table]`.
+fn insert_root_shadow_recognizer(
+    existing: &str,
+    on: bool,
+) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    let mut doc = existing.parse::<toml_edit::DocumentMut>().map_err(|err| {
+        unreadable_config(format!(
+            "config.toml could not be parsed, so it was not replaced: {err}"
+        ))
+    })?;
+    if doc.get("shadow_recognizer").is_some() {
+        return Err(unreadable_config(
+            "config.toml already has shadow_recognizer at the root, so it was not replaced"
+                .to_string(),
+        ));
+    }
+    doc.as_table_mut()
+        .insert("shadow_recognizer", toml_edit::value(on));
+    Ok(doc.to_string())
+}
+
+/// Write `bytes` by creating a 0600 temp file in the same directory, fsyncing
+/// it, and renaming it over `path`. A failed write removes the temp file.
+fn atomic_write_600(
+    path: &std::path::Path,
+    bytes: &[u8],
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let dir = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .ok_or_else(|| unreadable_config("config path has no directory".to_string()))?;
+    let file_name = path
+        .file_name()
+        .ok_or_else(|| unreadable_config("config path has no file name".to_string()))?;
+    let mut tmp_name = file_name.to_os_string();
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    tmp_name.push(format!(".{}.{unique}.tmp", std::process::id()));
+    let tmp_path = dir.join(tmp_name);
+
+    let write_result = (|| -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let mut file = open_private(&tmp_path)?;
+        use std::io::Write;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        std::fs::rename(&tmp_path, path)?;
+        Ok(())
+    })();
+    if write_result.is_err() {
+        let _ = std::fs::remove_file(&tmp_path);
+    }
+    write_result
+}
+
+fn open_private(
+    path: &std::path::Path,
+) -> Result<std::fs::File, Box<dyn std::error::Error + Send + Sync>> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(path)?;
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        Ok(file)
+    }
+    #[cfg(not(unix))]
+    {
+        Ok(std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)?)
     }
 }
 
@@ -414,18 +672,27 @@ mod tests {
             Some("no"),
             Some(""),
         ] {
-            assert!(
-                !Config::shadow_enabled(false, v),
-                "{v:?} must not turn it on"
-            );
+            let control = Config::shadow_control(false, v);
+            assert!(!control.enabled(), "{v:?} must not turn it on");
+            assert!(!control.locked, "{v:?} must not lock Settings");
+            assert!(!control.file_on);
         }
-        for v in [Some("1"), Some("true"), Some("yes")] {
-            assert!(Config::shadow_enabled(false, v), "{v:?} turns it on");
+        for v in [
+            Some("1"),
+            Some("true"),
+            Some("TRUE"),
+            Some("yes"),
+            Some("YES"),
+        ] {
+            let control = Config::shadow_control(false, v);
+            assert!(control.locked, "{v:?} locks the toggle on");
+            assert!(control.enabled(), "{v:?} turns it on for this process");
+            assert!(!control.file_on, "{v:?} must not become the file value");
         }
-        assert!(
-            Config::shadow_enabled(true, Some("0")),
-            "file flag still wins"
-        );
+        let control = Config::shadow_control(true, Some("0"));
+        assert!(control.file_on);
+        assert!(!control.locked);
+        assert!(control.enabled(), "file flag still wins");
     }
 
     #[test]
@@ -434,7 +701,10 @@ mod tests {
         // file value (what Settings saves) serializes without the key even
         // when the env would turn the recognizer on.
         let cfg = Config::default();
-        assert!(Config::shadow_enabled(cfg.shadow_recognizer, Some("1")));
+        let control = Config::shadow_control(cfg.shadow_recognizer, Some("1"));
+        assert!(control.enabled());
+        assert!(control.locked);
+        assert!(!control.file_on);
         assert!(!cfg.shadow_recognizer);
         let raw = toml::to_string_pretty(&cfg).unwrap();
         assert!(!raw.contains("shadow_recognizer"), "{raw}");
@@ -617,6 +887,312 @@ token = "secret"
         assert!(
             changelog.contains(&format!("## {version}")),
             "CHANGELOG is missing a section for {version}"
+        );
+    }
+
+    fn hand_edited_config(shadow_line: &str) -> String {
+        format!(
+            "\
+# hand-edited tracker config. keep this comment.
+data_dir = \"/tmp/sst-hand-edited\"
+
+# scoreboard name, not a default key dump
+player_name = \"the streamer\"
+
+# extra number reader (private log only)
+{shadow_line}
+
+# a key Settings does not own
+custom_note = \"leave this line alone\"
+
+session_window_secs = 1200
+"
+        )
+    }
+
+    fn changed_lines<'a>(before: &'a str, after: &'a str) -> Vec<(&'a str, &'a str)> {
+        let before_lines: Vec<_> = before.split_inclusive('\n').collect();
+        let after_lines: Vec<_> = after.split_inclusive('\n').collect();
+        let mut diffs = Vec::new();
+        let count = before_lines.len().max(after_lines.len());
+        for index in 0..count {
+            let left = before_lines.get(index).copied().unwrap_or("");
+            let right = after_lines.get(index).copied().unwrap_or("");
+            if left != right {
+                diffs.push((left, right));
+            }
+        }
+        diffs
+    }
+
+    #[test]
+    fn flipping_shadow_recognizer_changes_only_that_line() {
+        for (before_line, after_line) in [
+            ("shadow_recognizer = false", "shadow_recognizer = true"),
+            ("shadow_recognizer = true", "shadow_recognizer = false"),
+        ] {
+            let raw = hand_edited_config(before_line);
+            let mut next: Config = toml::from_str(&raw).expect("hand-edited file must parse");
+            next.shadow_recognizer = !next.shadow_recognizer;
+            let saved = Config::text_for_save(Some(&raw), &next).expect("shadow-only save");
+            let diffs = changed_lines(&raw, &saved);
+            assert_eq!(
+                diffs.len(),
+                1,
+                "flipping the toggle must change one line, got {diffs:?}\n{saved}"
+            );
+            assert!(
+                diffs[0].0.contains(before_line),
+                "old line: {:?}",
+                diffs[0].0
+            );
+            assert!(
+                diffs[0].1.contains(after_line),
+                "new line: {:?}",
+                diffs[0].1
+            );
+            assert!(saved.contains("# hand-edited tracker config. keep this comment."));
+            assert!(saved.contains("# scoreboard name, not a default key dump"));
+            assert!(saved.contains("# extra number reader (private log only)"));
+            assert!(saved.contains("custom_note = \"leave this line alone\""));
+            assert!(saved.contains("player_name = \"the streamer\""));
+            assert!(
+                !saved.contains("game_process_names"),
+                "a shadow toggle must not add default keys: {saved}"
+            );
+        }
+    }
+
+    #[test]
+    fn save_skips_write_when_nothing_changed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        let raw = hand_edited_config("shadow_recognizer = true");
+        std::fs::write(&path, &raw).expect("seed");
+        let stamped = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .expect("open")
+            .set_modified(stamped)
+            .expect("stamp mtime");
+
+        let cfg: Config = toml::from_str(&raw).expect("parse");
+        cfg.save_to_path(&path).expect("unchanged save");
+
+        assert_eq!(std::fs::read_to_string(&path).expect("read"), raw);
+        assert_eq!(
+            std::fs::metadata(&path)
+                .expect("meta")
+                .modified()
+                .expect("mtime"),
+            stamped,
+            "save() must not touch the file when the text is unchanged"
+        );
+        let names: Vec<_> = std::fs::read_dir(dir.path())
+            .expect("dir")
+            .map(|entry| entry.expect("entry").file_name())
+            .collect();
+        assert_eq!(names, vec![std::ffi::OsString::from("config.toml")]);
+    }
+
+    #[test]
+    fn save_refuses_to_replace_an_unparseable_config() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        let raw = "\
+this is not toml
+server_url = \"https://crew.example\"
+token = \"secret-token-must-stay\"
+";
+        std::fs::write(&path, raw).expect("seed");
+        let err = Config::default()
+            .save_to_path(&path)
+            .expect_err("a broken config must not be replaced");
+        let message = err.to_string();
+        assert!(
+            message.contains("not replaced"),
+            "error should say the file was kept: {message}"
+        );
+        assert!(
+            !message.contains('—') && !message.contains('–'),
+            "{message}"
+        );
+        assert_eq!(std::fs::read_to_string(&path).expect("read"), raw);
+        assert!(
+            std::fs::read_to_string(&path)
+                .expect("read")
+                .contains("secret-token-must-stay")
+        );
+    }
+
+    #[test]
+    fn save_replaces_the_file_atomically_with_mode_0600() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        let raw = hand_edited_config("shadow_recognizer = false");
+        std::fs::write(&path, &raw).expect("seed");
+        let mut next: Config = toml::from_str(&raw).expect("parse");
+        next.shadow_recognizer = true;
+        next.save_to_path(&path).expect("save");
+
+        let saved = std::fs::read_to_string(&path).expect("read");
+        let diffs = changed_lines(&raw, &saved);
+        assert_eq!(diffs.len(), 1, "{diffs:?}\n{saved}");
+        assert!(diffs[0].1.contains("shadow_recognizer = true"));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).expect("meta").permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "saved config must be owner-only");
+        }
+        let names: Vec<_> = std::fs::read_dir(dir.path())
+            .expect("dir")
+            .map(|entry| entry.expect("entry").file_name())
+            .collect();
+        assert_eq!(
+            names,
+            vec![std::ffi::OsString::from("config.toml")],
+            "the temp file must be renamed, not left behind"
+        );
+    }
+
+    /// Shape Settings writes: top-level keys, then `[auto_detect]` and `[sync]`.
+    fn settings_shaped_without_shadow() -> String {
+        "\
+data_dir = \"/tmp/sst-settings-shape\"
+capture_output = \"DP-1\"
+player_name = \"the streamer\"
+session_window_secs = 1800
+finished_game_close_secs = 180
+game_process_names = [\"Overwatch.exe\"]
+debug_ocr = false
+
+[auto_detect]
+enabled = true
+poll_interval_secs = 4
+cooldown_secs = 120
+
+[sync]
+server_url = \"https://crew.example\"
+token = \"not-a-real-token\"
+"
+        .to_string()
+    }
+
+    fn table_block(text: &str) -> &str {
+        text.find("[auto_detect]")
+            .map(|index| &text[index..])
+            .unwrap_or(text)
+    }
+
+    fn assert_root_shadow(text: &str, on: bool) {
+        let parsed = toml_edit::Document::parse(text).expect("edited file must parse");
+        let root = parsed
+            .get("shadow_recognizer")
+            .and_then(|item| item.as_value())
+            .and_then(|value| value.as_bool());
+        assert_eq!(
+            root,
+            Some(on),
+            "exactly one root shadow_recognizer:\n{text}"
+        );
+        let loaded = Config::parse_file_contents(text).expect("Config::load parse");
+        assert_eq!(
+            loaded.shadow_recognizer, on,
+            "Config::load must read the root value"
+        );
+        let header = text
+            .find("\n[")
+            .map(|index| index + 1)
+            .or_else(|| text.starts_with('[').then_some(0))
+            .expect("table header");
+        assert!(
+            text[..header].contains("shadow_recognizer"),
+            "the root key must sit before the first table:\n{text}"
+        );
+        assert_eq!(
+            text[..header].matches("shadow_recognizer").count(),
+            1,
+            "the root key must not be duplicated:\n{text}"
+        );
+    }
+
+    #[test]
+    fn missing_shadow_recognizer_toggles_stay_on_the_root() {
+        let original = settings_shaped_without_shadow();
+        let tables = table_block(&original).to_string();
+        assert!(!original.contains("shadow_recognizer"));
+        let mut current = Config::parse_file_contents(&original).expect("seed parses");
+        assert!(!current.shadow_recognizer);
+
+        let mut text = original.clone();
+        for on in [true, false, true] {
+            current.shadow_recognizer = on;
+            text = Config::text_for_save(Some(&text), &current).expect("toggle");
+            assert_root_shadow(&text, on);
+            assert_eq!(
+                table_block(&text),
+                tables,
+                "tables must stay byte for byte on toggle {on}:\n{text}"
+            );
+            current = Config::parse_file_contents(&text).expect("reload");
+        }
+    }
+
+    #[test]
+    fn nested_shadow_recognizer_is_left_alone_and_root_is_inserted_once() {
+        let original = "\
+data_dir = \"/tmp/sst-nested-shadow\"
+player_name = \"the streamer\"
+
+[sync]
+server_url = \"https://crew.example\"
+token = \"not-a-real-token\"
+shadow_recognizer = true
+";
+        let mut next = Config::parse_file_contents(original).expect("nested key is not the root");
+        assert!(!next.shadow_recognizer);
+        next.shadow_recognizer = true;
+        let saved = Config::text_for_save(Some(original), &next).expect("insert root");
+        assert_root_shadow(&saved, true);
+        let doc = toml_edit::Document::parse(&saved).expect("parse");
+        let nested = doc
+            .get("sync")
+            .and_then(|item| item.as_table())
+            .and_then(|table| table.get("shadow_recognizer"))
+            .and_then(|item| item.as_value())
+            .and_then(|value| value.as_bool());
+        assert_eq!(nested, Some(true), "the mistaken table key stays:\n{saved}");
+        let again = Config::text_for_save(Some(&saved), &next).expect("second toggle");
+        assert_eq!(again, saved, "a second on must not add another key");
+        assert_root_shadow(&again, true);
+    }
+
+    #[test]
+    fn missing_shadow_recognizer_without_tables_is_appended_at_the_end() {
+        let original = "\
+data_dir = \"/tmp/sst-no-tables\"
+player_name = \"the streamer\"
+";
+        let mut next = Config::parse_file_contents(original).expect("parse");
+        next.shadow_recognizer = true;
+        let saved = Config::text_for_save(Some(original), &next).expect("insert");
+        let doc = toml_edit::Document::parse(&saved).expect("parse");
+        assert_eq!(
+            doc.get("shadow_recognizer")
+                .and_then(|item| item.as_value())
+                .and_then(|value| value.as_bool()),
+            Some(true)
+        );
+        assert!(
+            !saved.contains('['),
+            "a file with no tables stays free of headers:\n{saved}"
+        );
+        assert!(
+            Config::parse_file_contents(&saved)
+                .expect("load")
+                .shadow_recognizer
         );
     }
 }

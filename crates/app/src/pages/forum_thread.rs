@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use crate::components::{Toast, fetch_error, is_http_status, use_toast};
 use crate::routes::Route;
 use crate::state::auth::use_auth;
-use crate::util::{FetchClass, classify_fetch, format_local_datetime};
+use crate::util::{FetchClass, classify_fetch, local_time_node};
 use scuffed_api_client::ApiClient;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -168,11 +168,15 @@ const PAGE_CSS: &str = r#"
         padding: 1.5rem;
     }
     .thread-compose-title {
+        display: block;
         font-family: var(--font-head);
         font-weight: 700;
         font-size: 1rem;
         color: var(--text);
         margin: 0 0 0.75rem;
+    }
+    .thread-compose-title label {
+        cursor: pointer;
     }
     .thread-compose-textarea {
         width: 100%;
@@ -289,7 +293,7 @@ pub fn ForumThread(id: String) -> Element {
                             };
                         };
                         let t = &resp.thread;
-                        let date = format_local_datetime(&t.created_at);
+                        let created_at = t.created_at.clone();
                         let reply_id = id.clone();
                         let board_slug = resp.board.as_ref().map(|b| b.slug.clone());
                         let board_name = resp
@@ -330,7 +334,8 @@ pub fn ForumThread(id: String) -> Element {
                                 }
                                 h1 { class: "thread-title", "{t.title}" }
                                 div { class: "thread-meta",
-                                    "{date} \u{00b7} {resp.reply_count} replies"
+                                    {local_time_node(&created_at)}
+                                    " \u{00b7} {resp.reply_count} replies"
                                 }
                             }
 
@@ -358,13 +363,9 @@ pub fn ForumThread(id: String) -> Element {
                                     p { class: "thread-locked-notice", "This thread is locked. No new replies can be posted." }
                                 } else {
                                     div { class: "thread-compose",
-                                        h4 { class: "thread-compose-title", "Post a Reply" }
-                                        textarea {
-                                            class: "thread-compose-textarea",
-                                            rows: 4,
-                                            placeholder: "Write your reply...",
-                                            value: "{reply_content}",
-                                            oninput: move |e| reply_content.set(e.value()),
+                                        ReplyComposeFields {
+                                            content: reply_content(),
+                                            on_input: move |value| reply_content.set(value),
                                         }
                                         div { class: "thread-compose-actions",
                                             button {
@@ -409,12 +410,60 @@ pub fn ForumThread(id: String) -> Element {
 }
 
 fn render_reply(r: &ForumReplyData) -> Element {
-    let date = format_local_datetime(&r.created_at);
+    let created_at = r.created_at.clone();
 
     rsx! {
         div { class: "thread-reply-card",
-            div { class: "thread-reply-meta", "{date}" }
+            div { class: "thread-reply-meta", {local_time_node(&created_at)} }
             p { class: "thread-reply-content", "{r.content}" }
         }
+    }
+}
+
+#[component]
+fn ReplyComposeFields(content: String, on_input: EventHandler<String>) -> Element {
+    rsx! {
+        h4 { class: "thread-compose-title",
+            label { r#for: "forum-reply", "Post a Reply" }
+        }
+        textarea {
+            id: "forum-reply",
+            name: "forum-reply",
+            class: "thread-compose-textarea",
+            rows: 4,
+            placeholder: "Write your reply...",
+            value: "{content}",
+            oninput: move |evt| on_input.call(evt.value()),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn reply_probe() -> Element {
+        rsx! {
+            ReplyComposeFields {
+                content: "hello".to_string(),
+                on_input: |_| {},
+            }
+        }
+    }
+
+    #[test]
+    fn reply_field_has_id_name_and_label() {
+        let mut dom = VirtualDom::new(reply_probe);
+        dom.rebuild_in_place();
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains("id=\"forum-reply\""), "{html}");
+        assert!(html.contains("name=\"forum-reply\""), "{html}");
+        assert!(html.contains("for=\"forum-reply\""), "{html}");
+        assert!(html.contains("Post a Reply"), "{html}");
+        assert!(html.contains("<textarea"), "{html}");
+        assert!(
+            !html.contains("aria-label"),
+            "the visible label is the accessible name: {html}"
+        );
     }
 }

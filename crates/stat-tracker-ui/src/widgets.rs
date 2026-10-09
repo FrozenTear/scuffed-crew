@@ -272,10 +272,24 @@ pub fn status_stub<'a>(live: &'a str, dot: Color) -> Element<'a, Message> {
 
 pub fn toast_bar(msg: &str) -> Element<'static, Message> {
     container(
-        text(msg.to_string())
-            .size(SIZE_META)
-            .font(FONT_SEMIBOLD)
-            .color(TEXT),
+        row![
+            text(msg.to_string())
+                .size(SIZE_META)
+                .font(FONT_SEMIBOLD)
+                .color(TEXT)
+                .width(Fill),
+            button(
+                text("Dismiss")
+                    .size(SIZE_META)
+                    .font(FONT_MEDIUM)
+                    .color(TEXT_2),
+            )
+            .padding(Padding::from([4, 10]))
+            .style(theme::ghost_btn())
+            .on_press(Message::DismissToast),
+        ]
+        .align_y(Alignment::Center)
+        .spacing(12),
     )
     .padding(Padding::from([8, 14]))
     .width(Fill)
