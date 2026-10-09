@@ -1,9 +1,15 @@
 //! Reader packs from `GET /api/tracker/packs`.
 //!
-//! The daemon token is the same bearer used for stat uploads. A pack is a
-//! plain ustar archive with a top-level `manifest.json`. Files land in
-//! [`crate::shadow::heroes::HeroTemplates::dir_in`]. A failed download leaves
-//! that directory as it was. The token is never written to a log.
+//! The list is a JSON array of `name`, `version`, `sha256`, and `size`.
+//! The published pack is [`HEROES_PACK_NAME`] (version [`HEROES_PACK_VERSION`],
+//! [`HEROES_PACK_SIZE`] bytes, sha256 [`HEROES_PACK_SHA256`]). The daemon
+//! token is the same bearer used for stat uploads. The file is a plain ustar
+//! archive with a top-level `manifest.json`. Template files land in
+//! [`crate::shadow::heroes::HeroTemplates::dir_in`] as `<hero-key>.png` and
+//! `special/<class>*.png`, the layout [`HeroTemplates::load_dir`] reads.
+//! Size and sha256 are checked against the list before anything is unpacked.
+//! A failed download leaves that directory as it was. The token is never
+//! written to a log.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
@@ -22,6 +28,13 @@ pub const RETRY_AFTER_MAX_SECS: u64 = 3600;
 pub const RATE_LIMIT_FALLBACK_SECS: u64 = 10;
 /// Hard cap while streaming a pack. The list's `size` is not this cap.
 pub const PACK_MAX_BYTES: u64 = 32 * 1024 * 1024;
+
+/// First entry of the published pack list (Vision).
+pub const HEROES_PACK_NAME: &str = "heroes-v1.tar";
+pub const HEROES_PACK_VERSION: &str = "1";
+pub const HEROES_PACK_SHA256: &str =
+    "3e2731330bc37a42ffd671ff98c73fa013c6463d577dbc83035747cc17167978";
+pub const HEROES_PACK_SIZE: u64 = 1_280_000;
 
 pub const PACK_SAVED: &str = "Reader pack saved.";
 pub const PACK_CURRENT: &str = "The reader pack is already installed.";
@@ -131,15 +144,15 @@ pub async fn sync_reader_packs(
         Ok(entries) => entries,
         Err(_) => return PackSync::Failed(PACK_MISMATCH.to_string()),
     };
-    if entries.is_empty() {
-        return PackSync::Current;
-    }
+    let entry = match select_heroes_pack(&entries) {
+        Ok(entry) => entry,
+        Err(outcome) => return outcome,
+    };
     let installed = read_versions(data_dir);
-    if entries.iter().all(|entry| {
-        installed
-            .get(&entry.name)
-            .is_some_and(|version| version == &entry.version)
-    }) {
+    if installed
+        .get(HEROES_PACK_NAME)
+        .is_some_and(|version| version == &entry.version)
+    {
         return PackSync::Current;
     }
     let parent = HeroTemplates::dir_in(data_dir)
@@ -161,52 +174,47 @@ pub async fn sync_reader_packs(
     if std::fs::create_dir(&staging).is_err() {
         return PackSync::Failed(PACK_FAILED.to_string());
     }
-    let mut versions = BTreeMap::new();
-    for entry in &entries {
-        if !is_pack_name(&entry.name) || !is_sha256(&entry.sha256) {
+    let bytes = match get_bytes(
+        &client,
+        &format!("{base}/api/tracker/packs/{HEROES_PACK_NAME}"),
+        token,
+        max_bytes,
+    )
+    .await
+    {
+        Get::Ok(bytes) => bytes,
+        Get::Unavailable => {
             let _ = std::fs::remove_dir_all(&staging);
-            return PackSync::Failed(PACK_MISMATCH.to_string());
+            return PackSync::Unavailable;
         }
-        let bytes = match get_bytes(
-            &client,
-            &format!("{base}/api/tracker/packs/{}", entry.name),
-            token,
-            max_bytes,
-        )
-        .await
-        {
-            Get::Ok(bytes) => bytes,
-            Get::Unavailable => {
-                let _ = std::fs::remove_dir_all(&staging);
-                return PackSync::Unavailable;
-            }
-            Get::Unsupported => {
-                let _ = std::fs::remove_dir_all(&staging);
-                return PackSync::Failed(PACK_FAILED.to_string());
-            }
-            Get::Auth => {
-                let _ = std::fs::remove_dir_all(&staging);
-                return PackSync::Failed(PACK_AUTH.to_string());
-            }
-            Get::Limited(seconds) => {
-                let _ = std::fs::remove_dir_all(&staging);
-                return PackSync::Failed(rate_limit_message(seconds));
-            }
-            Get::Failed(message) => {
-                let _ = std::fs::remove_dir_all(&staging);
-                return PackSync::Failed(message);
-            }
-        };
-        if bytes.len() as u64 != entry.size || sha256_hex(&bytes) != entry.sha256 {
+        Get::Unsupported => {
             let _ = std::fs::remove_dir_all(&staging);
-            return PackSync::Failed(PACK_MISMATCH.to_string());
+            return PackSync::Failed(PACK_FAILED.to_string());
         }
-        if let Err(message) = unpack_pack(&bytes, &entry.name, &entry.version, &staging) {
+        Get::Auth => {
             let _ = std::fs::remove_dir_all(&staging);
-            return PackSync::Failed(message.to_string());
+            return PackSync::Failed(PACK_AUTH.to_string());
         }
-        versions.insert(entry.name.clone(), entry.version.clone());
+        Get::Limited(seconds) => {
+            let _ = std::fs::remove_dir_all(&staging);
+            return PackSync::Failed(rate_limit_message(seconds));
+        }
+        Get::Failed(message) => {
+            let _ = std::fs::remove_dir_all(&staging);
+            return PackSync::Failed(message);
+        }
+    };
+    // List size and sha256 are checked before any file is written.
+    if bytes.len() as u64 != entry.size || sha256_hex(&bytes) != entry.sha256 {
+        let _ = std::fs::remove_dir_all(&staging);
+        return PackSync::Failed(PACK_MISMATCH.to_string());
     }
+    if let Err(message) = unpack_pack(&bytes, &entry.name, &entry.version, &staging) {
+        let _ = std::fs::remove_dir_all(&staging);
+        return PackSync::Failed(message.to_string());
+    }
+    let mut versions = BTreeMap::new();
+    versions.insert(HEROES_PACK_NAME.to_string(), entry.version.clone());
     let live = HeroTemplates::dir_in(data_dir);
     if let Err(message) = swap_dir(&staging, &live) {
         let _ = std::fs::remove_dir_all(&staging);
@@ -225,6 +233,25 @@ struct PackListEntry {
     version: String,
     sha256: String,
     size: u64,
+}
+
+/// The first list entry is the hero template pack. Anything else is refused
+/// before a download.
+fn select_heroes_pack(entries: &[PackListEntry]) -> Result<&PackListEntry, PackSync> {
+    let Some(entry) = entries.first() else {
+        return Err(PackSync::Current);
+    };
+    if entry.name != HEROES_PACK_NAME || !is_sha256(&entry.sha256) || !is_version(&entry.version) {
+        return Err(PackSync::Failed(PACK_MISMATCH.to_string()));
+    }
+    // Version 1 is the published Vision pack. A different size or sha256 is
+    // not that pack, so it is not unpacked.
+    if entry.version == HEROES_PACK_VERSION
+        && (entry.sha256 != HEROES_PACK_SHA256 || entry.size != HEROES_PACK_SIZE)
+    {
+        return Err(PackSync::Failed(PACK_MISMATCH.to_string()));
+    }
+    Ok(entry)
 }
 
 enum Get {
@@ -437,13 +464,10 @@ fn is_sha256(value: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
 }
 
-fn is_pack_name(name: &str) -> bool {
-    let bytes = name.as_bytes();
+fn is_version(value: &str) -> bool {
+    let bytes = value.as_bytes();
     !bytes.is_empty()
-        && bytes.len() <= 64
-        && name != "manifest.json"
-        && !name.contains("..")
-        && bytes[0].is_ascii_alphanumeric()
+        && bytes.len() <= 32
         && bytes
             .iter()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
@@ -608,19 +632,27 @@ mod tests {
         bytes
     }
 
-    fn pack_bytes(name: &str, version: &str, file_name: &str, file_bytes: &[u8]) -> Vec<u8> {
+    fn pack_bytes(name: &str, version: &str, files: &[(&str, &[u8])]) -> Vec<u8> {
+        let listed: Vec<serde_json::Value> = files
+            .iter()
+            .map(|(path, data)| {
+                serde_json::json!({
+                    "path": path,
+                    "sha256": sha256_hex(data),
+                    "size": data.len(),
+                })
+            })
+            .collect();
         let manifest = serde_json::json!({
             "name": name,
             "version": version,
-            "files": [{
-                "path": file_name,
-                "sha256": sha256_hex(file_bytes),
-                "size": file_bytes.len(),
-            }],
+            "files": listed,
         });
         let manifest_bytes = serde_json::to_vec(&manifest).unwrap();
         let mut bytes = ustar_file("manifest.json", &manifest_bytes);
-        bytes.extend(ustar_file(file_name, file_bytes));
+        for (path, data) in files {
+            bytes.extend(ustar_file(path, data));
+        }
         bytes.extend(std::iter::repeat_n(0u8, 1024));
         bytes
     }
@@ -647,6 +679,7 @@ mod tests {
         file_body: Vec<u8>,
         file_chunked: bool,
         file_hits: Arc<std::sync::atomic::AtomicUsize>,
+        requested: Arc<Mutex<Vec<String>>>,
     }
 
     fn spawn_fake(fake: Arc<Fake>) -> String {
@@ -683,6 +716,7 @@ mod tests {
                     .split_whitespace()
                     .nth(1)
                     .unwrap_or("");
+                fake.requested.lock().expect("paths").push(path.to_string());
                 let response = if !authed {
                     http_bytes(401, br#"{"error":"Unauthorized"}"#, None, false)
                 } else if path == "/api/tracker/packs" {
@@ -754,10 +788,44 @@ mod tests {
         );
     }
 
+    fn requested_paths() -> Arc<Mutex<Vec<String>>> {
+        Arc::new(Mutex::new(Vec::new()))
+    }
+
     #[test]
-    fn ustar_rejects_dotdot_and_links() {
+    fn vision_pack_manifest_matches_the_published_entry() {
+        let raw = r#"[{"name":"heroes-v1.tar","version":"1","sha256":"3e2731330bc37a42ffd671ff98c73fa013c6463d577dbc83035747cc17167978","size":1280000}]"#;
+        let entries: Vec<PackListEntry> = serde_json::from_str(raw).expect("list");
+        let entry = select_heroes_pack(&entries).expect("first pack");
+        assert_eq!(entry.name, HEROES_PACK_NAME);
+        assert_eq!(entry.version, HEROES_PACK_VERSION);
+        assert_eq!(entry.sha256, HEROES_PACK_SHA256);
+        assert_eq!(entry.size, HEROES_PACK_SIZE);
+        assert_eq!(HEROES_PACK_NAME, "heroes-v1.tar");
+        assert_eq!(HEROES_PACK_VERSION, "1");
+        assert_eq!(
+            HEROES_PACK_SHA256,
+            "3e2731330bc37a42ffd671ff98c73fa013c6463d577dbc83035747cc17167978"
+        );
+        assert_eq!(HEROES_PACK_SIZE, 1_280_000);
+        let wrong = vec![PackListEntry {
+            name: "heroes-v1.tar".into(),
+            version: "1".into(),
+            sha256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            size: 1280000,
+        }];
+        assert_eq!(
+            select_heroes_pack(&wrong).unwrap_err(),
+            PackSync::Failed(PACK_MISMATCH.into())
+        );
+    }
+
+    #[test]
+    fn ustar_rejects_absolute_paths_dotdot_and_links() {
         let escape = ustar_file("../escape.txt", b"nope");
         assert_eq!(read_ustar(&escape).unwrap_err(), PACK_UNSAFE);
+        let absolute = ustar_file("/tmp/escape.txt", b"nope");
+        assert_eq!(read_ustar(&absolute).unwrap_err(), PACK_UNSAFE);
         let mut link = ustar_header("link.txt", 0, b'2');
         link[157..161].copy_from_slice(b"dest");
         let sum: u64 = {
@@ -784,11 +852,12 @@ mod tests {
             file_body: body.to_vec(),
             file_chunked: true,
             file_hits: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            requested: requested_paths(),
         });
         let base = spawn_fake(fake);
         let client = reqwest::Client::new();
         let response = client
-            .get(format!("{base}/api/tracker/packs/hero-icons.tar"))
+            .get(format!("{base}/api/tracker/packs/{HEROES_PACK_NAME}"))
             .bearer_auth("pack-token")
             .send()
             .await
@@ -801,41 +870,99 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn signed_in_pack_installs_and_a_later_match_does_not_download_again() {
+    async fn synthetic_tar_unpacks_into_the_reader_layout() {
         let token = "pack-token";
-        let bytes = pack_bytes("hero-icons.tar", "1", "marker.txt", b"synthetic-template");
+        // Not the published 1280000-byte archive. Version 1 is pinned to that
+        // file, so this fixture uses another version label and its own hash.
+        let hero: &[u8] = b"synthetic-hero";
+        let special: &[u8] = b"synthetic-special";
+        let bytes = pack_bytes(
+            HEROES_PACK_NAME,
+            "2",
+            &[("ana.png", hero), ("special/placeholder_01.png", special)],
+        );
         let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let requested = requested_paths();
         let fake = Arc::new(Fake {
             token: token.into(),
             list_status: 200,
-            list_body: list_json("hero-icons.tar", "1", &bytes),
+            list_body: list_json(HEROES_PACK_NAME, "2", &bytes),
             list_retry: None,
             file_status: 200,
             file_body: bytes,
             file_chunked: false,
             file_hits: hits.clone(),
+            requested: requested.clone(),
         });
         let base = spawn_fake(fake);
         let dir = tempfile::tempdir().expect("tempdir");
+        let heroes = HeroTemplates::dir_in(dir.path());
+        assert_eq!(heroes, dir.path().join("templates/heroes"));
         let first = sync_reader_packs(base.as_str(), token, dir.path(), PACK_MAX_BYTES).await;
         assert_eq!(first, PackSync::Installed);
+        assert_eq!(std::fs::read(heroes.join("ana.png")).expect("hero"), hero);
         assert_eq!(
-            std::fs::read(HeroTemplates::dir_in(dir.path()).join("marker.txt")).expect("file"),
-            b"synthetic-template"
+            std::fs::read(heroes.join("special/placeholder_01.png")).expect("special"),
+            special
         );
-        assert!(
-            !HeroTemplates::dir_in(dir.path())
-                .join("manifest.json")
-                .exists()
-        );
+        assert!(!heroes.join("manifest.json").exists());
         let stored: BTreeMap<String, String> =
             serde_json::from_slice(&std::fs::read(versions_path(dir.path())).unwrap()).unwrap();
-        assert_eq!(stored.get("hero-icons.tar").map(String::as_str), Some("1"));
+        assert_eq!(stored.get(HEROES_PACK_NAME).map(String::as_str), Some("2"));
         assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let paths = requested.lock().expect("paths").clone();
+        assert!(paths.iter().any(|path| path == "/api/tracker/packs"));
+        assert!(
+            paths
+                .iter()
+                .any(|path| path == "/api/tracker/packs/heroes-v1.tar")
+        );
 
         let second = sync_reader_packs(base.as_str(), token, dir.path(), PACK_MAX_BYTES).await;
         assert_eq!(second, PackSync::Current);
         assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn published_pack_is_checked_before_it_is_unpacked() {
+        let token = "pack-token";
+        let dir = tempfile::tempdir().expect("tempdir");
+        let heroes = HeroTemplates::dir_in(dir.path());
+        std::fs::create_dir_all(&heroes).unwrap();
+        std::fs::write(heroes.join("ana.png"), b"old").unwrap();
+        let small = pack_bytes(
+            HEROES_PACK_NAME,
+            HEROES_PACK_VERSION,
+            &[("ana.png", b"nope")],
+        );
+        let listed = format!(
+            r#"[{{"name":"{HEROES_PACK_NAME}","version":"{HEROES_PACK_VERSION}","sha256":"{HEROES_PACK_SHA256}","size":{HEROES_PACK_SIZE}}}]"#
+        );
+        let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let requested = requested_paths();
+        let fake = Arc::new(Fake {
+            token: token.into(),
+            list_status: 200,
+            list_body: listed.into_bytes(),
+            list_retry: None,
+            file_status: 200,
+            file_body: small,
+            file_chunked: false,
+            file_hits: hits.clone(),
+            requested: requested.clone(),
+        });
+        let base = spawn_fake(fake);
+        let result = sync_reader_packs(base.as_str(), token, dir.path(), PACK_MAX_BYTES).await;
+        assert_eq!(result, PackSync::Failed(PACK_MISMATCH.into()));
+        assert_eq!(std::fs::read(heroes.join("ana.png")).unwrap(), b"old");
+        assert!(!heroes.join("special").exists());
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let paths = requested.lock().expect("paths").clone();
+        assert!(
+            paths
+                .iter()
+                .any(|path| path == "/api/tracker/packs/heroes-v1.tar")
+        );
     }
 
     #[tokio::test]
@@ -845,9 +972,9 @@ mod tests {
         let heroes = HeroTemplates::dir_in(dir.path());
         std::fs::create_dir_all(&heroes).unwrap();
         std::fs::write(heroes.join("keep.txt"), b"old").unwrap();
-        let bytes = pack_bytes("hero-icons.tar", "2", "marker.txt", b"new");
+        let bytes = pack_bytes(HEROES_PACK_NAME, "2", &[("ana.png", b"new")]);
         let listed = serde_json::to_vec(&serde_json::json!([{
-            "name": "hero-icons.tar",
+            "name": HEROES_PACK_NAME,
             "version": "2",
             "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             "size": bytes.len(),
@@ -862,6 +989,7 @@ mod tests {
             file_body: bytes,
             file_chunked: false,
             file_hits: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            requested: requested_paths(),
         });
         let base = spawn_fake(fake);
         let log = Arc::new(Mutex::new(Vec::<u8>::new()));
@@ -875,7 +1003,7 @@ mod tests {
         sync_on_startup(base.as_str(), token, dir.path()).await;
         drop(_guard);
         assert_eq!(std::fs::read(heroes.join("keep.txt")).unwrap(), b"old");
-        assert!(!heroes.join("marker.txt").exists());
+        assert!(!heroes.join("ana.png").exists());
         let logs = String::from_utf8(log.lock().unwrap().clone()).unwrap();
         assert!(logs.contains(PACK_MISMATCH), "{logs}");
         assert!(!logs.contains(token), "{logs}");
@@ -897,6 +1025,7 @@ mod tests {
             file_body: Vec::new(),
             file_chunked: false,
             file_hits: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            requested: requested_paths(),
         });
         let base = spawn_fake(disabled);
         assert_eq!(
@@ -914,6 +1043,7 @@ mod tests {
             file_body: Vec::new(),
             file_chunked: false,
             file_hits: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            requested: requested_paths(),
         });
         let base = spawn_fake(missing);
         assert_eq!(
@@ -935,6 +1065,7 @@ mod tests {
             file_body: Vec::new(),
             file_chunked: false,
             file_hits: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            requested: requested_paths(),
         });
         let base = spawn_fake(fake);
         let result = sync_reader_packs(base.as_str(), token, Path::new("/tmp"), 32).await;
@@ -955,6 +1086,7 @@ mod tests {
             file_body: Vec::new(),
             file_chunked: false,
             file_hits: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            requested: requested_paths(),
         });
         let base = spawn_fake(fake);
         let result = sync_reader_packs(base.as_str(), "wrong-token", Path::new("/tmp"), 32).await;
