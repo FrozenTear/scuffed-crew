@@ -6155,6 +6155,7 @@ async fn public_members_hero_scoped_query() {
             played_at: Utc.with_ymd_and_hms(2026, 7, 1, 20, 0, 0).unwrap(),
             uploaded_at: Utc::now(),
             edited: false,
+            recognizer: scuffed_types::RECOGNIZER_OCR_V1.into(),
         },
         PersonalMatch {
             id: String::new(),
@@ -6174,6 +6175,7 @@ async fn public_members_hero_scoped_query() {
             played_at: Utc.with_ymd_and_hms(2026, 7, 2, 20, 0, 0).unwrap(),
             uploaded_at: Utc::now(),
             edited: false,
+            recognizer: scuffed_types::RECOGNIZER_OCR_V1.into(),
         },
         // Different hero must not count toward Ana-scoped games.
         PersonalMatch {
@@ -6194,6 +6196,7 @@ async fn public_members_hero_scoped_query() {
             played_at: Utc.with_ymd_and_hms(2026, 7, 3, 20, 0, 0).unwrap(),
             uploaded_at: Utc::now(),
             edited: false,
+            recognizer: scuffed_types::RECOGNIZER_OCR_V1.into(),
         },
     ];
     state
@@ -7462,6 +7465,7 @@ async fn seasons_crud_and_stats_season_filter() {
         played_at: Utc.with_ymd_and_hms(2026, m, 15, 20, 0, 0).unwrap(),
         uploaded_at: Utc::now(),
         edited: false,
+        recognizer: scuffed_types::RECOGNIZER_OCR_V1.into(),
     };
     // January game inside season 1, July game outside it.
     let matches = vec![
@@ -7773,6 +7777,7 @@ async fn role_stats_endpoints_match_heroes_auth_and_group_stored_role() {
         played_at: played(day, month),
         uploaded_at: Utc::now(),
         edited: false,
+        recognizer: scuffed_types::RECOGNIZER_OCR_V1.into(),
     };
 
     state

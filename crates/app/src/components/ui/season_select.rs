@@ -1,8 +1,10 @@
 //! Season picker shared by My Stats, member stats, and leaderboards.
 //!
 //! The control offers "All time", an explicit "Current season", and each
-//! season from `GET /api/public/seasons`. It renders nothing while that list
-//! is loading or empty, and a retry when the request fails.
+//! season from `GET /api/public/seasons`. The select is omitted while that
+//! list is loading or empty, and a retry is shown when the request fails.
+//! A visible label still renders in those states, without `for`, because
+//! there is no select to point at.
 //!
 //! Nothing saved means all time. The "Current season" option stores
 //! [`CURRENT_SEASON`] so a later rollover follows. Every season row is pinned
@@ -14,6 +16,7 @@
 use dioxus::prelude::*;
 use scuffed_types::Season;
 
+use crate::components::ui::label::{field_aria_label, nonempty};
 use crate::components::ui::{BtnSize, BtnVariant, Button, Label};
 #[cfg(not(test))]
 use crate::hooks::use_api;
@@ -548,11 +551,18 @@ pub fn SeasonSelect(
     /// Optional `id` on the underlying `<select>`.
     #[props(default)]
     id: Option<String>,
+    /// Optional `name` on the underlying `<select>`.
+    #[props(default)]
+    name: Option<String>,
     /// Optional visible label rendered above the control.
     #[props(default)]
     label: Option<String>,
 ) -> Element {
     let current = value.unwrap_or_default();
+    let field_id = nonempty(id);
+    let field_name = nonempty(name);
+    let label_text = nonempty(label);
+    let aria_label = field_aria_label(label_text.as_deref(), field_id.as_deref(), "Season");
     let data = seasons.read();
     let failed = seasons_error.read().is_some();
     match data.as_ref() {
@@ -562,16 +572,19 @@ pub fn SeasonSelect(
             } else {
                 CURRENT_SEASON_GAP_LABEL
             };
+            let label_for = field_id.clone();
+            let shown_label = label_text.clone();
             rsx! {
                 div { class: "season-select",
-                    if let Some(label) = label {
-                        Label { {label} }
+                    if let Some(text) = shown_label {
+                        Label { for_id: label_for, {text} }
                     }
                     select {
                         class: "ui-field",
-                        id,
+                        id: field_id,
+                        name: field_name,
+                        aria_label,
                         value: "{current}",
-                        "aria-label": "Season",
                         onchange: move |e| {
                             let v = e.value();
                             onchange.call(if v.is_empty() { None } else { Some(v) });
@@ -605,10 +618,11 @@ pub fn SeasonSelect(
         // button mounted so keyboard focus is not dropped between them.
         Some(None) => {
             let retrying = !failed;
+            let shown_label = label_text;
             rsx! {
                 div { class: "season-select",
-                    if let Some(label) = label {
-                        Label { {label} }
+                    if let Some(text) = shown_label {
+                        Label { {text} }
                     }
                     p { class: "season-select-status", "Couldn't load seasons." }
                     Button {
@@ -621,7 +635,13 @@ pub fn SeasonSelect(
                 }
             }
         }
-        _ => rsx! {},
+        _ => rsx! {
+            if let Some(text) = label_text {
+                div { class: "season-select",
+                    Label { {text} }
+                }
+            }
+        },
     }
 }
 
@@ -1697,5 +1717,71 @@ mod tests {
                 "{rel} must retry the season list"
             );
         }
+    }
+
+    fn labeled_season_probe() -> Element {
+        let season = use_stats_season();
+        rsx! {
+            SeasonSelect {
+                id: "leaderboard-season".to_string(),
+                name: "leaderboard-season".to_string(),
+                label: "Season".to_string(),
+                seasons: season.season_list(),
+                seasons_error: season.seasons_error(),
+                on_retry: move |_| season.retry(),
+                value: season.selected_id(),
+                onchange: move |picked| season.choose(picked),
+            }
+        }
+    }
+
+    #[test]
+    fn labeled_season_select_sets_id_name_and_for() {
+        let _timeout = abort_on_timeout(std::time::Duration::from_secs(8));
+        blank_hooks();
+        set_seasons(vec![season_row("season-4", "Season 4", true)]);
+        let mut dom = VirtualDom::new(labeled_season_probe);
+        dom.rebuild_in_place();
+        pump(&mut dom);
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains("id=\"leaderboard-season\""), "{html}");
+        assert!(html.contains("name=\"leaderboard-season\""), "{html}");
+        assert!(html.contains("for=\"leaderboard-season\""), "{html}");
+        assert!(html.contains(">Season<"), "{html}");
+        assert!(
+            !html.contains("aria-label"),
+            "a wired label should be the accessible name: {html}"
+        );
+    }
+
+    #[test]
+    fn failed_season_label_does_not_point_at_a_missing_select() {
+        let _timeout = abort_on_timeout(std::time::Duration::from_secs(8));
+        blank_hooks();
+        fail_seasons();
+        let mut dom = VirtualDom::new(labeled_season_probe);
+        dom.rebuild_in_place();
+        pump(&mut dom);
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains(">Season<"), "{html}");
+        assert!(html.contains("season-select-status"), "{html}");
+        assert!(html.contains("load seasons."), "{html}");
+        assert!(!html.contains("<select"), "{html}");
+        assert!(!html.contains("<label"), "{html}");
+        assert!(!html.contains("for="), "{html}");
+    }
+
+    #[test]
+    fn loading_season_label_has_no_for() {
+        let _timeout = abort_on_timeout(std::time::Duration::from_secs(8));
+        blank_hooks();
+        let mut dom = VirtualDom::new(labeled_season_probe);
+        dom.rebuild_in_place();
+        pump(&mut dom);
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains(">Season<"), "{html}");
+        assert!(!html.contains("<select"), "{html}");
+        assert!(!html.contains("<label"), "{html}");
+        assert!(!html.contains("for="), "{html}");
     }
 }

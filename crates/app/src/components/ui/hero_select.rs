@@ -1,4 +1,5 @@
 use crate::components::ui::Label;
+use crate::components::ui::label::{field_aria_label, nonempty};
 use dioxus::prelude::*;
 use scuffed_types::HEROES;
 
@@ -42,6 +43,9 @@ pub fn HeroSelect(
     /// Optional `id` on the underlying `<select>` (e.g. for label `for=`).
     #[props(default)]
     id: Option<String>,
+    /// Optional `name` on the underlying `<select>`.
+    #[props(default)]
+    name: Option<String>,
     /// Optional visible label rendered above the control.
     #[props(default)]
     label: Option<String>,
@@ -50,14 +54,21 @@ pub fn HeroSelect(
     disabled: bool,
 ) -> Element {
     let current = value.unwrap_or_default();
+    let field_id = nonempty(id);
+    let field_name = nonempty(name);
+    let label_text = nonempty(label);
+    let aria_label = field_aria_label(label_text.as_deref(), field_id.as_deref(), "Hero");
+    let label_for = field_id.clone();
     rsx! {
         div { class: "hero-select",
-            if let Some(label) = label {
-                Label { {label} }
+            if let Some(text) = label_text {
+                Label { for_id: label_for, {text} }
             }
             select {
                 class: "ui-field",
-                id,
+                id: field_id,
+                name: field_name,
+                aria_label,
                 disabled,
                 value: "{current}",
                 onchange: move |e| {
@@ -90,5 +101,51 @@ mod tests {
         for (i, &hero) in HEROES.iter().enumerate() {
             assert_eq!(opts[i + 1], (hero, hero));
         }
+    }
+
+    fn render(view: fn() -> Element) -> String {
+        let mut dom = VirtualDom::new(view);
+        dom.rebuild_in_place();
+        dioxus_ssr::render(&dom)
+    }
+
+    #[test]
+    fn labeled_hero_select_sets_id_name_and_for() {
+        fn view() -> Element {
+            rsx! {
+                HeroSelect {
+                    id: "leaderboard-hero".to_string(),
+                    name: "leaderboard-hero".to_string(),
+                    label: "Hero".to_string(),
+                    value: None,
+                    onchange: |_| {},
+                }
+            }
+        }
+        let html = render(view);
+        assert!(html.contains("id=\"leaderboard-hero\""), "{html}");
+        assert!(html.contains("name=\"leaderboard-hero\""), "{html}");
+        assert!(html.contains("for=\"leaderboard-hero\""), "{html}");
+        assert!(html.contains(">Hero<"), "{html}");
+        assert!(
+            !html.contains("aria-label"),
+            "a wired label should be the accessible name: {html}"
+        );
+    }
+
+    #[test]
+    fn unlabeled_hero_select_exposes_an_aria_label() {
+        fn view() -> Element {
+            rsx! {
+                HeroSelect {
+                    value: None,
+                    onchange: |_| {},
+                }
+            }
+        }
+        let html = render(view);
+        assert!(html.contains("aria-label=\"Hero\""), "{html}");
+        assert!(!html.contains("name="), "{html}");
+        assert!(!html.contains("<label"), "{html}");
     }
 }

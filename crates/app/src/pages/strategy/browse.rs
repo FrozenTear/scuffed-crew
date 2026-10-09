@@ -279,9 +279,12 @@ pub fn StrategyBrowse() -> Element {
             // Search
             div { class: "strategy-search",
                 input {
+                    id: "strategy-search",
+                    name: "strategy-search",
                     class: "strategy-search-input",
                     r#type: "text",
                     placeholder: "Search strategies...",
+                    aria_label: "Search strategies",
                     value: "{search_input}",
                     oninput: move |e| search_input.set(e.value()),
                 }

@@ -366,8 +366,10 @@ pub fn Apply() -> Element {
                                 }
 
                                 div { class: "apply-field",
-                                    label { class: "apply-label", "Message (optional)" }
+                                    label { class: "apply-label", r#for: "apply-message", "Message (optional)" }
                                     Textarea {
+                                        id: "apply-message".to_string(),
+                                        name: "apply-message".to_string(),
                                         value: message(),
                                         placeholder: "Tell us about yourself, your experience, what you're looking for...",
                                         oninput: move |e: FormEvent| message.set(e.value()),

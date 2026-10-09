@@ -286,7 +286,14 @@ pub fn view(app: &TrackerApp, content_width: f32) -> Element<'_, Message> {
     let mut col = column![].spacing(GRID_GAP).width(Fill);
 
     if let Some(info) = &app.update {
-        col = col.push(update::banner(info, &app.update_progress, &app.update_plan));
+        col = col.push(update::banner(
+            info,
+            &app.update_progress,
+            &app.update_plan,
+            &app.update_notes,
+            app.update_notes_ui(),
+            app.update_notes_expanded,
+        ));
     }
 
     if demo {

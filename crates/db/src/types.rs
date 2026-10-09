@@ -511,6 +511,10 @@ pub struct TournamentBracket {
     pub matches: Vec<TournamentMatch>,
 }
 
+fn default_recognizer() -> String {
+    scuffed_types::RECOGNIZER_OCR_V1.to_string()
+}
+
 /// A personal match record (stat-tracker upload).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PersonalMatch {
@@ -538,6 +542,11 @@ pub struct PersonalMatch {
     /// rows uploaded before edit support.
     #[serde(default)]
     pub edited: bool,
+    /// Digit recognizer that produced this row (`ocr-v1` is Tesseract).
+    /// Rows written before the column existed, and uploads that omit the
+    /// field, are `ocr-v1`. Additive on match-list JSON.
+    #[serde(default = "default_recognizer")]
+    pub recognizer: String,
 }
 
 /// Aggregated personal stats for a member.

@@ -64,7 +64,7 @@ pub fn app_header(app: &TrackerApp) -> Element<'_, Message> {
 }
 
 pub fn sidebar(current: Screen) -> Element<'static, Message> {
-    let mut col = column![].spacing(8);
+    let mut col = column![].spacing(8).height(Fill);
     for screen in Screen::all() {
         col = col.push(
             button(
@@ -79,6 +79,18 @@ pub fn sidebar(current: Screen) -> Element<'static, Message> {
             .on_press(Message::Navigate(screen)),
         );
     }
+    col = col.push(space().height(Fill)).push(
+        button(
+            text("About")
+                .size(SIZE_BODY)
+                .font(FONT_SEMIBOLD)
+                .color(TEXT_2),
+        )
+        .padding(Padding::from([10, 14]))
+        .width(Fill)
+        .style(theme::nav_btn(false))
+        .on_press(Message::OpenAbout),
+    );
     col.into()
 }
 
