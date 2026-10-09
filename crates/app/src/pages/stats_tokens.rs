@@ -88,7 +88,36 @@ const TRACKER_SETUP_DOC_PATH: &str = "crates/stat-tracker/README.md";
 const TRACKER_SETUP_DOC_HREF: &str =
     "https://github.com/FrozenTear/scuffed-crew/blob/main/crates/stat-tracker/README.md";
 const TRACKER_SETUP_TITLE: &str = "Set up the tracker";
-const TRACKER_SETUP_BODY: &str = "Paste this token into the tracker app's first-run setup, on the Sync step. Copy it right after you create it, since it is shown only once.";
+/// Production origin when the page has no browser location (tests, non-web).
+const TRACKER_SITE_FALLBACK: &str = "https://ow.scuffedcrew.no";
+const COPY_FAILED_TOAST: &str = "Couldn't copy. Select the token and copy it by hand.";
+
+fn tracker_site_address() -> String {
+    // `location.origin()` touches wasm-only js imports, so host tests use the fallback.
+    #[cfg(target_arch = "wasm32")]
+    if let Some(origin) = web_sys::window().and_then(|window| window.location().origin().ok())
+        && origin != "null"
+        && (origin.starts_with("https://") || origin.starts_with("http://"))
+    {
+        return origin;
+    }
+    TRACKER_SITE_FALLBACK.to_string()
+}
+
+fn tracker_setup_body(site: &str) -> String {
+    format!(
+        "In the tracker app, open Settings, Website sync, and paste it as the Account token along with the site address ({site}). Newer versions also ask for it in the first-run setup."
+    )
+}
+
+/// Clipboard text for a newly created token. The value is copied exactly.
+fn token_clipboard_text(token: &str) -> String {
+    token.to_string()
+}
+
+fn dispatch_copy(token: &str, on_copy: EventHandler<String>) {
+    on_copy.call(token_clipboard_text(token));
+}
 
 fn format_date(dt: &DateTime<Utc>) -> String {
     dt.format("%b %d, %Y %H:%M").to_string()
@@ -128,7 +157,7 @@ async fn copy_daemon_token(text: &str) -> Result<(), &'static str> {
 #[component]
 fn TrackerSetupBox(
     token: Option<String>,
-    on_copy: EventHandler<MouseEvent>,
+    on_copy: EventHandler<String>,
     on_dismiss: EventHandler<MouseEvent>,
 ) -> Element {
     let class = if token.is_some() {
@@ -136,10 +165,16 @@ fn TrackerSetupBox(
     } else {
         "tracker-setup"
     };
+    let setup_body = token
+        .as_ref()
+        .map(|_| tracker_setup_body(&tracker_site_address()));
+    let shown = token.clone();
     rsx! {
         div { class: "{class}",
             h2 { "{TRACKER_SETUP_TITLE}" }
-            p { "{TRACKER_SETUP_BODY}" }
+            if let Some(body) = setup_body {
+                p { "{body}" }
+            }
             p {
                 a {
                     href: "{TRACKER_SETUP_DOC_HREF}",
@@ -148,14 +183,14 @@ fn TrackerSetupBox(
                     "Stat tracker setup"
                 }
             }
-            if let Some(raw) = token {
+            if let Some(raw) = shown {
                 p { "Your new token:" }
                 code { "{raw}" }
                 div { class: "tracker-setup-actions",
                     button {
                         class: "btn-add",
-                        onclick: move |evt| on_copy.call(evt),
-                        "Copy"
+                        onclick: move |_| dispatch_copy(&raw, on_copy),
+                        "Copy token"
                     }
                     button {
                         class: "btn-cancel",
@@ -216,15 +251,12 @@ pub fn StatsTokens() -> Element {
         });
     };
 
-    let on_copy = move |_: MouseEvent| {
-        let Some(raw) = revealed_token() else {
-            return;
-        };
+    let on_copy = move |raw: String| {
         spawn(async move {
             if copy_daemon_token(&raw).await.is_ok() {
                 toast.show(Toast::success("Token copied."));
             } else {
-                toast.show(Toast::error("Could not copy the token."));
+                toast.show(Toast::error(COPY_FAILED_TOAST));
             }
         });
     };
@@ -337,6 +369,11 @@ pub fn StatsTokens() -> Element {
 mod tests {
     use super::*;
 
+    std::thread_local! {
+        static COPIED_TOKEN: std::cell::RefCell<Option<String>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
     fn render(root: fn() -> Element) -> String {
         let mut dom = VirtualDom::new(root);
         dom.rebuild_in_place();
@@ -348,15 +385,33 @@ mod tests {
         assert!(!text.contains('\u{2013}'), "en dash in {text}");
     }
 
+    fn assert_readme_link_noopener(html: &str) {
+        let href_at = html.find(TRACKER_SETUP_DOC_HREF).expect("readme link");
+        let end = (href_at + TRACKER_SETUP_DOC_HREF.len() + 160).min(html.len());
+        let tag = &html[href_at.saturating_sub(80)..end];
+        assert!(
+            tag.contains("noopener"),
+            "readme link missing rel noopener: {tag}"
+        );
+    }
+
     #[test]
     fn setup_copy_points_at_the_stat_tracker_readme() {
+        let body = tracker_setup_body(TRACKER_SITE_FALLBACK);
         assert_eq!(TRACKER_SETUP_TITLE, "Set up the tracker");
-        assert!(TRACKER_SETUP_BODY.contains("first-run setup"));
-        assert!(TRACKER_SETUP_BODY.contains("Sync step"));
+        assert_eq!(
+            body,
+            "In the tracker app, open Settings, Website sync, and paste it as the Account token along with the site address (https://ow.scuffedcrew.no). Newer versions also ask for it in the first-run setup."
+        );
+        assert_eq!(
+            COPY_FAILED_TOAST,
+            "Couldn't copy. Select the token and copy it by hand."
+        );
         assert_eq!(TRACKER_SETUP_DOC_PATH, "crates/stat-tracker/README.md");
         assert!(TRACKER_SETUP_DOC_HREF.contains(TRACKER_SETUP_DOC_PATH));
         assert_plain_copy(TRACKER_SETUP_TITLE);
-        assert_plain_copy(TRACKER_SETUP_BODY);
+        assert_plain_copy(&body);
+        assert_plain_copy(COPY_FAILED_TOAST);
         let readme =
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../stat-tracker/README.md");
         assert!(
@@ -367,7 +422,7 @@ mod tests {
     }
 
     #[test]
-    fn setup_box_hides_copy_until_a_token_exists() {
+    fn setup_box_hides_paste_text_until_a_token_exists() {
         fn view() -> Element {
             rsx! {
                 TrackerSetupBox {
@@ -379,10 +434,12 @@ mod tests {
         }
         let html = render(view);
         assert!(html.contains("Set up the tracker"), "{html}");
-        assert!(html.contains("first-run setup"), "{html}");
-        assert!(html.contains("Sync step"), "{html}");
         assert!(html.contains(TRACKER_SETUP_DOC_PATH), "{html}");
-        assert!(!html.contains(">Copy</button>"), "{html}");
+        assert_readme_link_noopener(&html);
+        assert!(!html.contains("Account token"), "{html}");
+        assert!(!html.contains("Paste this token"), "{html}");
+        assert!(!html.contains("first-run setup"), "{html}");
+        assert!(!html.contains(">Copy token</button>"), "{html}");
         assert_plain_copy(&html);
     }
 
@@ -399,8 +456,34 @@ mod tests {
         }
         let html = render(view);
         assert!(html.contains("sst_test_token"), "{html}");
-        assert!(html.contains(">Copy</button>"), "{html}");
+        assert!(html.contains(">Copy token</button>"), "{html}");
+        assert!(html.contains(TRACKER_SITE_FALLBACK), "{html}");
+        assert!(html.contains("Website sync"), "{html}");
+        assert!(html.contains("Account token"), "{html}");
+        assert!(html.contains("first-run setup"), "{html}");
         assert!(html.contains(TRACKER_SETUP_DOC_PATH), "{html}");
+        assert_readme_link_noopener(&html);
         assert_plain_copy(&html);
+    }
+
+    fn copy_probe() -> Element {
+        let token = "  sst_exact/token  ";
+        let handler = EventHandler::new(|value: String| {
+            COPIED_TOKEN.with(|slot| *slot.borrow_mut() = Some(value));
+        });
+        dispatch_copy(token, handler);
+        rsx! { "" }
+    }
+
+    #[test]
+    fn copy_copies_exactly_the_new_token_value() {
+        let token = "  sst_exact/token  ";
+        assert_eq!(token_clipboard_text(token), token);
+        assert_ne!(token.trim(), token);
+        COPIED_TOKEN.with(|slot| *slot.borrow_mut() = None);
+        let mut dom = VirtualDom::new(copy_probe);
+        dom.rebuild_in_place();
+        let copied = COPIED_TOKEN.with(|slot| slot.borrow().clone());
+        assert_eq!(copied.as_deref(), Some(token));
     }
 }
