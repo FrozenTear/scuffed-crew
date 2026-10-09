@@ -198,16 +198,17 @@ Wait until `dig +short ow.scuffedcrew.no` returns the VPS.
 ```caddy
 ow.scuffedcrew.no {
 	encode zstd gzip
-	header X-Content-Type-Options "nosniff"
 	header X-Frame-Options "DENY"
 	header Referrer-Policy "strict-origin-when-cross-origin"
 	reverse_proxy 127.0.0.1:HOST_PORT   # from data/secrets.env on the VPS
 }
 ```
 
+`X-Content-Type-Options: nosniff` is set by scuffed-server. Do not add `header X-Content-Type-Options "nosniff"` in Caddy. A second line is sent beside the origin header. If the live host file still has that line, delete it and reload Caddy.
+
 Do not add a Caddy `Cache-Control` header for `*.wasm` / `*.js` / `*.css`. The origin is the only cache policy (`cache_control_value` in `crates/site-server`): Dioxus `dxh`-hashed assets are `public, max-age=31536000, immutable`, unhashed `.js` / `.css` / `.wasm` are `no-cache`, other static files are one day, and the HTML shell is `no-cache`. A matcher on every `.js` / `.css` / `.wasm` path also covers unhashed files and the HTML fallback, and Caddy emits a second `Cache-Control` beside the origin's.
 
-`deploy/Caddyfile` is the repo template. Changing it does not edit the live host file (often `/etc/caddy/Caddyfile`). Copy this block there and reload Caddy yourself.
+`deploy/Caddyfile` is the repo template. Changing it does not edit the live host file (often `/etc/caddy/Caddyfile`). Copy this block there, drop any leftover `X-Content-Type-Options` line, and reload Caddy yourself.
 
 ```bash
 # on VPS

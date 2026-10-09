@@ -174,6 +174,8 @@ pub async fn apply(
     let mut response = next.run(request).await;
     let headers = response.headers_mut();
 
+    // One value. `insert` replaces a copy the upload layer already set.
+    // Caddy must not send this header as well (deploy/Caddyfile).
     headers.insert(
         header::X_CONTENT_TYPE_OPTIONS,
         HeaderValue::from_static("nosniff"),
@@ -464,6 +466,20 @@ mod tests {
             .unwrap_or_else(|| panic!("missing directive {name} in {policy}"))
     }
 
+    fn assert_nosniff_once(response: &axum::response::Response, label: &str) {
+        let values: Vec<_> = response
+            .headers()
+            .get_all(header::X_CONTENT_TYPE_OPTIONS)
+            .iter()
+            .map(|value| value.to_str().unwrap_or(""))
+            .collect();
+        assert_eq!(
+            values,
+            ["nosniff"],
+            "{label}: X-Content-Type-Options nosniff must appear exactly once, got {values:?}"
+        );
+    }
+
     fn test_policy(enforce: bool) -> SecurityPolicy {
         SecurityPolicy::from_config(SecurityConfig {
             enforce,
@@ -634,13 +650,9 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(health.status(), StatusCode::OK);
-        assert_eq!(
-            health
-                .headers()
-                .get(header::X_CONTENT_TYPE_OPTIONS)
-                .and_then(|v| v.to_str().ok()),
-            Some("nosniff"),
-            "global security layer sets nosniff on every response, including ones ServeDir would return"
+        assert_nosniff_once(
+            &health,
+            "global security layer sets nosniff once on every response, including ones ServeDir would return",
         );
         let report = health
             .headers()
@@ -665,12 +677,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(
-            png.headers()
-                .get(header::X_CONTENT_TYPE_OPTIONS)
-                .and_then(|v| v.to_str().ok()),
-            Some("nosniff")
-        );
+        assert_nosniff_once(&png, "upload png stacked with the security layer");
         assert_eq!(
             png.headers()
                 .get(header::CONTENT_DISPOSITION)
@@ -692,12 +699,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(
-            html.headers()
-                .get(header::X_CONTENT_TYPE_OPTIONS)
-                .and_then(|v| v.to_str().ok()),
-            Some("nosniff")
-        );
+        assert_nosniff_once(&html, "upload html stacked with the security layer");
         assert_eq!(
             html.headers()
                 .get(header::CONTENT_DISPOSITION)
@@ -745,6 +747,7 @@ mod tests {
             )
             .await
             .unwrap();
+        assert_nosniff_once(&health, "enforcing security layer");
         let enforced = health
             .headers()
             .get(CSP_ENFORCE_HEADER)
@@ -762,6 +765,7 @@ mod tests {
             )
             .await
             .unwrap();
+        assert_nosniff_once(&html, "enforcing upload sandbox");
         assert_eq!(
             html.headers()
                 .get(CSP_ENFORCE_HEADER)
@@ -811,6 +815,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
+        assert_nosniff_once(&response, "html shell");
         let csp = response
             .headers()
             .get(CSP_REPORT_ONLY_HEADER)

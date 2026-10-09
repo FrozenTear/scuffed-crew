@@ -159,11 +159,27 @@ fn last_used(tokens: &[DaemonToken], label: &str) -> bool {
         .is_some()
 }
 
+fn cache_control_values(headers: &axum::http::HeaderMap) -> Vec<String> {
+    headers
+        .get_all(header::CACHE_CONTROL)
+        .iter()
+        .map(|value| value.to_str().unwrap_or("").to_string())
+        .collect()
+}
+
+fn assert_no_store(cache: &[String], label: &str) {
+    assert_eq!(
+        cache,
+        &["no-store".to_string()],
+        "{label}: Cache-Control no-store must appear exactly once, got {cache:?}"
+    );
+}
+
 async fn get_token_check(
     app: &axum::Router,
     peer: [u8; 4],
     bearer: Option<&str>,
-) -> (StatusCode, Vec<u8>) {
+) -> (StatusCode, Vec<String>, Vec<u8>) {
     let mut builder = Request::builder()
         .method("GET")
         .uri("/api/stats/token-check");
@@ -181,8 +197,9 @@ async fn get_token_check(
         .await
         .unwrap();
     let status = response.status();
+    let cache = cache_control_values(response.headers());
     let bytes = response.into_body().collect().await.unwrap().to_bytes();
-    (status, bytes.to_vec())
+    (status, cache, bytes.to_vec())
 }
 
 #[tokio::test]
@@ -223,22 +240,26 @@ async fn token_check_returns_display_name_and_identical_401s() {
     let app = create_router(state.clone());
     let unauthorized = serde_json::to_vec(&json!({"error": TOKEN_CHECK_UNAUTHORIZED})).unwrap();
 
-    let (status, body) = get_token_check(&app, AUTH_PEER, Some(VALID)).await;
+    let (status, cache, body) = get_token_check(&app, AUTH_PEER, Some(VALID)).await;
     assert_eq!(status, StatusCode::OK);
+    assert_no_store(&cache, "token-check 200");
     assert_eq!(
         body,
         serde_json::to_vec(&json!({"display_name": DISPLAY_NAME})).unwrap(),
         "success body is display_name only"
     );
 
-    let (future_status, future_body) = get_token_check(&app, AUTH_PEER, Some(FUTURE)).await;
+    let (future_status, future_cache, future_body) =
+        get_token_check(&app, AUTH_PEER, Some(FUTURE)).await;
     assert_eq!(future_status, StatusCode::OK);
+    assert_no_store(&future_cache, "token-check 200 with future expiry");
     assert_eq!(future_body, body, "a future expires_at is still valid");
 
     let cases = [Some("not-a-real-token"), Some(REVOKED), Some(EXPIRED), None];
     for bearer in cases {
-        let (status, body) = get_token_check(&app, AUTH_PEER, bearer).await;
+        let (status, cache, body) = get_token_check(&app, AUTH_PEER, bearer).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED, "bearer={bearer:?}");
+        assert_no_store(&cache, "token-check 401");
         assert_eq!(body, unauthorized, "bearer={bearer:?}");
     }
 
@@ -266,9 +287,10 @@ async fn token_check_returns_display_name_and_identical_401s() {
     // peer so the auth calls above do not consume this bucket.
     let mut statuses = Vec::new();
     for i in 0..12 {
-        let (status, body) = get_token_check(&app, RATE_PEER, Some("guess")).await;
+        let (status, cache, body) = get_token_check(&app, RATE_PEER, Some("guess")).await;
         if i < 8 {
             assert_eq!(status, StatusCode::UNAUTHORIZED);
+            assert_no_store(&cache, "token-check 401 inside the burst");
             assert_eq!(body, unauthorized);
         }
         statuses.push(status);
@@ -310,7 +332,7 @@ async fn token_check_and_image_upload_rate_limits_are_separate() {
     let token_peer = [203, 0, 113, 20];
     let mut token_statuses = Vec::new();
     for _ in 0..9 {
-        let (status, _) = get_token_check(&app, token_peer, None).await;
+        let (status, _, _) = get_token_check(&app, token_peer, None).await;
         token_statuses.push(status);
     }
     assert!(
@@ -340,11 +362,41 @@ async fn token_check_and_image_upload_rate_limits_are_separate() {
         "image upload burst should reach the handler, saw {image_statuses:?}"
     );
     assert_eq!(image_statuses[8], StatusCode::TOO_MANY_REQUESTS);
-    let (token_after, _) = get_token_check(&app, image_peer, None).await;
+    let (token_after, token_cache, _) = get_token_check(&app, image_peer, None).await;
     assert_ne!(
         token_after,
         StatusCode::TOO_MANY_REQUESTS,
         "a used-up image upload bucket must not block token-check from the same IP"
     );
     assert_eq!(token_after, StatusCode::UNAUTHORIZED);
+    assert_no_store(&token_cache, "token-check 401 after image-upload burst");
+}
+
+#[tokio::test]
+async fn upload_daemon_401_is_not_stored() {
+    let state = test_state().await;
+    let app = create_router(state);
+    for bearer in [None, Some("not-a-real-token")] {
+        let mut builder = Request::builder()
+            .method("POST")
+            .uri("/api/stats/upload")
+            .header(header::CONTENT_TYPE, "application/json");
+        if let Some(token) = bearer {
+            builder = builder.header(header::AUTHORIZATION, format!("Bearer {token}"));
+        }
+        let response = app
+            .clone()
+            .oneshot(builder.body(Body::from("{}")).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::UNAUTHORIZED,
+            "bearer={bearer:?}"
+        );
+        assert_no_store(
+            &cache_control_values(response.headers()),
+            "upload daemon-token 401",
+        );
+    }
 }

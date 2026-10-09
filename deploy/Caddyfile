@@ -14,7 +14,8 @@ ow.scuffedcrew.no {
 	# Security headers. CSP is set by scuffed-server
 	# (Content-Security-Policy-Report-Only, or Content-Security-Policy when
 	# CSP_ENFORCE=1). Do not add a second CSP here — two policies intersect.
-	header X-Content-Type-Options "nosniff"
+	# X-Content-Type-Options: nosniff is set by scuffed-server. Do not add it
+	# here. A second header makes clients see the value twice.
 	header X-Frame-Options "DENY"
 	header Referrer-Policy "strict-origin-when-cross-origin"
 
