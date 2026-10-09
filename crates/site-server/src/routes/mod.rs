@@ -12,6 +12,7 @@ pub mod games;
 pub mod health;
 pub mod integrations;
 pub mod leaderboards;
+pub mod link;
 pub mod matches;
 pub mod members;
 pub mod moderation;

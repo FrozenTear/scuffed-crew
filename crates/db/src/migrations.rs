@@ -787,6 +787,29 @@ pub async fn run_migrations(client: &Surreal<Any>) -> DbResult<()> {
         DEFINE FIELD OVERWRITE claimed ON bootstrap_lock TYPE bool DEFAULT false;
         DEFINE FIELD OVERWRITE claimed_at ON bootstrap_lock TYPE option<datetime>;
         DEFINE INDEX IF NOT EXISTS bootstrap_lock_slot_idx ON bootstrap_lock COLUMNS slot UNIQUE;
+
+        -- ================================================
+        -- Device-link codes (stat tracker sign-in)
+        -- Raw user_code and device_code are never stored. handover_token is the
+        -- daemon secret waiting for a single poll, then wiped.
+        -- ================================================
+        DEFINE TABLE IF NOT EXISTS device_link SCHEMAFULL;
+        DEFINE FIELD OVERWRITE user_code_hash ON device_link TYPE string;
+        DEFINE FIELD OVERWRITE device_code_hash ON device_link TYPE string;
+        DEFINE FIELD OVERWRITE device_label ON device_link TYPE string;
+        DEFINE FIELD OVERWRITE app_version ON device_link TYPE string;
+        DEFINE FIELD OVERWRITE status ON device_link TYPE string
+            ASSERT $value IN ['pending', 'approved', 'denied', 'consumed'];
+        DEFINE FIELD OVERWRITE member_id ON device_link TYPE option<string>;
+        DEFINE FIELD OVERWRITE daemon_token_id ON device_link TYPE option<string>;
+        DEFINE FIELD OVERWRITE handover_token ON device_link TYPE option<string>;
+        DEFINE FIELD OVERWRITE created_at ON device_link TYPE datetime DEFAULT time::now();
+        DEFINE FIELD OVERWRITE expires_at ON device_link TYPE datetime;
+        DEFINE FIELD OVERWRITE last_poll_at ON device_link TYPE option<datetime>;
+
+        DEFINE INDEX IF NOT EXISTS device_link_user_hash_idx ON device_link COLUMNS user_code_hash UNIQUE;
+        DEFINE INDEX IF NOT EXISTS device_link_device_hash_idx ON device_link COLUMNS device_code_hash UNIQUE;
+        DEFINE INDEX IF NOT EXISTS device_link_expires_idx ON device_link COLUMNS expires_at;
     "#,
         )
         .await?

@@ -173,6 +173,7 @@ async fn main() {
         consumed_challenges: scuffed_site_server::challenge_store::ConsumedChallengeStore::new(),
         nostr_rate_limiter: scuffed_site_server::nostr_rate_limit::NostrRateLimiter::new(),
         login_lockout: scuffed_site_server::login_lockout::LoginLockout::new(),
+        link_code_attempts: scuffed_site_server::link_attempts::LinkCodeAttempts::new(),
         crypto,
         relay_url,
         dm_events,
@@ -209,6 +210,9 @@ async fn main() {
             interval.tick().await;
             if let Err(e) = cleanup_db.cleanup_expired_sessions().await {
                 tracing::error!("Session cleanup failed: {e}");
+            }
+            if let Err(e) = cleanup_db.cleanup_expired_device_links().await {
+                tracing::error!("device link cleanup failed: {e}");
             }
         }
     });
@@ -305,6 +309,7 @@ mod compression_shell {
             ),
             nostr_rate_limiter: scuffed_site_server::nostr_rate_limit::NostrRateLimiter::new(),
             login_lockout: scuffed_site_server::login_lockout::LoginLockout::new(),
+            link_code_attempts: scuffed_site_server::link_attempts::LinkCodeAttempts::new(),
             crypto: None,
             relay_url: None,
             dm_events: None,

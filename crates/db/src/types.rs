@@ -932,6 +932,7 @@ pub enum AuditAction {
     CreatedPatchNote,
     UpdatedPatchNote,
     DeletedPatchNote,
+    DeniedDeviceLink,
 }
 
 impl std::fmt::Display for AuditAction {

@@ -35,6 +35,8 @@ pub struct AppState {
     /// Failed password-login backoff, keyed by normalized username.
     /// Password login only — not bearer tokens or OAuth. See [`crate::login_lockout`].
     pub login_lockout: crate::login_lockout::LoginLockout,
+    /// Wrong device-link user codes, keyed by client IP. See [`crate::link_attempts`].
+    pub link_code_attempts: crate::link_attempts::LinkCodeAttempts,
     /// Shared encryption service (same `Arc` as `db.crypto`).
     /// `None` when `ENCRYPTION_KEY` is not configured.
     pub crypto: Option<Arc<CryptoService>>,

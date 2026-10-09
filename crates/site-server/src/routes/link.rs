@@ -1,0 +1,603 @@
+//! Device-code sign-in for the stat tracker.
+//!
+//! `POST /api/link/start` and `POST /api/link/poll` are unauthenticated. The
+//! device shows `user_code` (shaped `XXXX-XXXX`) and polls with `device_code`.
+//! `POST /api/link/lookup`, `/approve`, and `/deny` require a signed-in session
+//! (`OrgMember`), the same cookie or bearer session check as other mutations.
+//! Cross-site protection is the existing one: `SameSite=Lax` session cookies
+//! plus the CORS allow-list on the router. These three routes are POST only,
+//! which keeps the "no state-changing GET" rule intact.
+//!
+//! Codes are read from the JSON body only. A query string that carries one is
+//! stripped before the trace layer logs the URI, and the request is rejected.
+
+use std::net::SocketAddr;
+use std::sync::OnceLock;
+
+use axum::Json;
+use axum::extract::{ConnectInfo, State};
+use axum::http::uri::PathAndQuery;
+use axum::http::{HeaderMap, StatusCode, Uri};
+use axum::middleware::Next;
+use axum::response::{IntoResponse, Response};
+use chrono::{DateTime, Utc};
+use rand::RngCore;
+use serde::{Deserialize, Serialize};
+use zeroize::Zeroize;
+
+use scuffed_auth::server::session::ErrorResponse;
+use scuffed_db::queries::device_link::{
+    DEVICE_LINK_INTERVAL_SECS, DEVICE_LINK_TTL_SECS, DeviceLinkPoll,
+};
+use scuffed_db::{AuditAction, AuditTargetType};
+
+use crate::extractors::OrgMember;
+use crate::rate_limit::TrustedProxyIpKeyExtractor;
+use crate::routes::audit_log::audit;
+use crate::state::AppState;
+
+/// Burst for `POST /api/link/start`, then one request per 30s.
+pub const LINK_START_BURST: u32 = 4;
+/// Burst for `POST /api/link/poll`, then one request per 30s.
+pub const LINK_POLL_BURST: u32 = 8;
+/// Burst shared by lookup, approve, and deny, then one request per 30s.
+pub const LINK_USER_BURST: u32 = 12;
+
+const USER_CODE_ALPHABET: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+const USER_CODE_LEN: usize = 8;
+const DEVICE_CODE_HEX_LEN: usize = 64;
+const LABEL_ERROR: &str = "device_label must be 1-64 characters without control characters";
+const VERSION_ERROR: &str =
+    "app_version must be 1-32 characters from [A-Za-z0-9._+-] and include a letter or digit";
+const INVALID_CODE: &str = "invalid code";
+const QUERY_CODE_ERROR: &str = "codes must be sent in the request body";
+
+/// Set by [`strip_link_query_secrets`] when the URI carried a code or token.
+#[derive(Clone, Copy)]
+pub(crate) struct LinkSecretInQuery;
+
+#[derive(Deserialize)]
+pub struct StartRequest {
+    pub device_label: String,
+    pub app_version: String,
+}
+
+#[derive(Deserialize)]
+pub struct UserCodeRequest {
+    pub user_code: String,
+}
+
+#[derive(Deserialize)]
+pub struct DeviceCodeRequest {
+    pub device_code: String,
+}
+
+#[derive(Serialize)]
+pub struct StartBody {
+    pub user_code: String,
+    pub device_code: String,
+    pub interval: u64,
+    pub expires_in: u64,
+}
+
+#[derive(Serialize)]
+struct LookupBody {
+    device_label: String,
+    app_version: String,
+    created_at: DateTime<Utc>,
+}
+
+#[derive(Serialize)]
+pub struct PollBody {
+    pub status: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub token: Option<String>,
+}
+
+#[derive(Serialize)]
+struct OkBody {
+    ok: bool,
+}
+
+fn key_extractor() -> &'static TrustedProxyIpKeyExtractor {
+    static EXTRACTOR: OnceLock<TrustedProxyIpKeyExtractor> = OnceLock::new();
+    EXTRACTOR.get_or_init(TrustedProxyIpKeyExtractor::from_env)
+}
+
+fn client_ip(peer: SocketAddr, headers: &HeaderMap) -> std::net::IpAddr {
+    key_extractor().client_ip(peer.ip(), headers)
+}
+
+fn invalid_code() -> (StatusCode, Json<ErrorResponse>) {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(ErrorResponse {
+            error: INVALID_CODE.into(),
+        }),
+    )
+}
+
+fn bad_request(message: &'static str) -> (StatusCode, Json<ErrorResponse>) {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(ErrorResponse {
+            error: message.into(),
+        }),
+    )
+}
+
+fn internal() -> (StatusCode, Json<ErrorResponse>) {
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(ErrorResponse {
+            error: "Internal error".into(),
+        }),
+    )
+}
+
+fn too_many_codes(secs: u64) -> Response {
+    let mut response = (
+        StatusCode::TOO_MANY_REQUESTS,
+        Json(ErrorResponse {
+            error: "too many invalid codes".into(),
+        }),
+    )
+        .into_response();
+    if let Ok(value) = axum::http::HeaderValue::from_str(&secs.to_string()) {
+        response
+            .headers_mut()
+            .insert(axum::http::header::RETRY_AFTER, value);
+    }
+    response
+}
+
+fn note_invalid(state: &AppState, ip: std::net::IpAddr) -> Response {
+    state.link_code_attempts.record_failure(ip);
+    invalid_code().into_response()
+}
+
+fn blocked_response(state: &AppState, ip: std::net::IpAddr) -> Option<Response> {
+    state.link_code_attempts.retry_after(ip).map(too_many_codes)
+}
+
+/// Drop query secrets before access logs see the URI, and flag the request.
+pub async fn strip_link_query_secrets(mut req: axum::extract::Request, next: Next) -> Response {
+    let carries_secret = req.uri().path().starts_with("/api/link")
+        && req.uri().query().is_some_and(query_has_link_secret);
+    if carries_secret {
+        let cleaned = uri_without_query(req.uri());
+        *req.uri_mut() = cleaned;
+        req.extensions_mut().insert(LinkSecretInQuery);
+    }
+    next.run(req).await
+}
+
+/// Reject a flagged link request. Runs inside the per-route governor.
+pub async fn reject_link_query_secrets(req: axum::extract::Request, next: Next) -> Response {
+    if req.extensions().get::<LinkSecretInQuery>().is_some() {
+        return bad_request(QUERY_CODE_ERROR).into_response();
+    }
+    next.run(req).await
+}
+
+fn query_has_link_secret(query: &str) -> bool {
+    query.split('&').any(|pair| {
+        let raw_key = pair.split_once('=').map(|(key, _)| key).unwrap_or(pair);
+        let key = decode_query_key(raw_key);
+        is_secret_query_key(key.trim())
+    })
+}
+
+fn decode_query_key(raw: &str) -> String {
+    let plus = raw.replace('+', " ");
+    urlencoding::decode(&plus)
+        .map(|decoded| decoded.into_owned())
+        .unwrap_or(plus)
+}
+
+fn is_secret_query_key(key: &str) -> bool {
+    matches!(
+        key.to_ascii_lowercase().as_str(),
+        "user_code"
+            | "device_code"
+            | "usercode"
+            | "devicecode"
+            | "user-code"
+            | "device-code"
+            | "token"
+            | "code"
+    )
+}
+
+fn uri_without_query(uri: &Uri) -> Uri {
+    let path = uri.path();
+    let path = if path.is_empty() { "/" } else { path };
+    let Ok(path_and_query) = path.parse::<PathAndQuery>() else {
+        return Uri::from_static("/");
+    };
+    let mut parts = uri.clone().into_parts();
+    parts.path_and_query = Some(path_and_query);
+    Uri::from_parts(parts).unwrap_or_else(|_| Uri::from_static("/"))
+}
+
+fn validate_device_label(raw: &str) -> Result<String, &'static str> {
+    let label = raw.trim();
+    let len = label.chars().count();
+    if !(1..=64).contains(&len) || label.chars().any(|c| c.is_control()) {
+        return Err(LABEL_ERROR);
+    }
+    Ok(label.to_string())
+}
+
+fn validate_app_version(raw: &str) -> Result<String, &'static str> {
+    let version = raw.trim();
+    let bytes = version.as_bytes();
+    if !(1..=32).contains(&bytes.len())
+        || !bytes
+            .iter()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'+' | b'-'))
+        || !bytes.iter().any(|b| b.is_ascii_alphanumeric())
+    {
+        return Err(VERSION_ERROR);
+    }
+    Ok(version.to_string())
+}
+
+fn canonical_user_code(raw: &str) -> Option<String> {
+    if raw.len() > 32 {
+        return None;
+    }
+    let mut out = String::with_capacity(USER_CODE_LEN);
+    for ch in raw.chars() {
+        if ch == '-' || ch == ' ' {
+            continue;
+        }
+        let upper = ch.to_ascii_uppercase();
+        if !upper.is_ascii() || !USER_CODE_ALPHABET.contains(&(upper as u8)) {
+            return None;
+        }
+        out.push(upper);
+    }
+    if out.len() == USER_CODE_LEN {
+        Some(out)
+    } else {
+        None
+    }
+}
+
+fn format_user_code(canonical: &str) -> String {
+    debug_assert_eq!(canonical.len(), USER_CODE_LEN);
+    format!("{}-{}", &canonical[..4], &canonical[4..])
+}
+
+fn canonical_device_code(raw: &str) -> Option<String> {
+    if raw.len() > 80 {
+        return None;
+    }
+    let mut out = String::with_capacity(DEVICE_CODE_HEX_LEN);
+    for ch in raw.chars() {
+        if ch == ' ' || ch == '-' {
+            continue;
+        }
+        if !ch.is_ascii_hexdigit() {
+            return None;
+        }
+        out.push(ch.to_ascii_lowercase());
+    }
+    if out.len() == DEVICE_CODE_HEX_LEN {
+        Some(out)
+    } else {
+        None
+    }
+}
+
+fn generate_user_code() -> (String, String) {
+    let mut bytes = [0u8; USER_CODE_LEN];
+    rand::rngs::OsRng.fill_bytes(&mut bytes);
+    let canonical: String = bytes
+        .iter()
+        .map(|byte| USER_CODE_ALPHABET[(*byte as usize) % USER_CODE_ALPHABET.len()] as char)
+        .collect();
+    let display = format_user_code(&canonical);
+    (display, canonical)
+}
+
+/// 32 random bytes, lowercase hex. Same shape as a pasted daemon token.
+fn generate_secret_hex() -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut bytes = [0u8; 32];
+    rand::rngs::OsRng.fill_bytes(&mut bytes);
+    let mut out = String::with_capacity(64);
+    for byte in bytes {
+        out.push(HEX[(byte >> 4) as usize] as char);
+        out.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    out
+}
+
+fn poll_body(status: &'static str, token: Option<String>) -> Json<PollBody> {
+    Json(PollBody { status, token })
+}
+
+/// POST /api/link/start
+pub async fn start(
+    State(state): State<AppState>,
+    Json(body): Json<StartRequest>,
+) -> Result<Json<StartBody>, (StatusCode, Json<ErrorResponse>)> {
+    if let Err(_error) = state.db.cleanup_expired_device_links().await {
+        tracing::error!("device link cleanup failed");
+    }
+    let device_label = validate_device_label(&body.device_label).map_err(bad_request)?;
+    let app_version = validate_app_version(&body.app_version).map_err(bad_request)?;
+    let (user_code, canonical_user) = generate_user_code();
+    let device_code = generate_secret_hex();
+    state
+        .db
+        .insert_device_link(&canonical_user, &device_code, &device_label, &app_version)
+        .await
+        .map_err(|_error| {
+            tracing::error!("device link start failed");
+            internal()
+        })?;
+    tracing::info!("device link started");
+    Ok(Json(StartBody {
+        user_code,
+        device_code,
+        interval: DEVICE_LINK_INTERVAL_SECS,
+        expires_in: DEVICE_LINK_TTL_SECS,
+    }))
+}
+
+/// POST /api/link/poll
+pub async fn poll(
+    State(state): State<AppState>,
+    Json(body): Json<DeviceCodeRequest>,
+) -> Result<Json<PollBody>, (StatusCode, Json<ErrorResponse>)> {
+    let Some(device_code) = canonical_device_code(&body.device_code) else {
+        return Ok(poll_body("expired", None));
+    };
+    let outcome = state
+        .db
+        .poll_device_link(&device_code)
+        .await
+        .map_err(|_error| {
+            tracing::error!("device link poll failed");
+            internal()
+        })?;
+    let body = match outcome {
+        DeviceLinkPoll::Pending => poll_body("pending", None),
+        DeviceLinkPoll::SlowDown => poll_body("slow_down", None),
+        DeviceLinkPoll::Denied => poll_body("denied", None),
+        DeviceLinkPoll::Expired => poll_body("expired", None),
+        DeviceLinkPoll::Approved(token) => {
+            tracing::info!("device link token handed over");
+            poll_body("approved", Some(token))
+        }
+    };
+    Ok(body)
+}
+
+/// POST /api/link/lookup
+pub async fn lookup(
+    State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    _member: OrgMember,
+    Json(body): Json<UserCodeRequest>,
+) -> Response {
+    let ip = client_ip(peer, &headers);
+    if let Some(response) = blocked_response(&state, ip) {
+        return response;
+    }
+    let Some(user_code) = canonical_user_code(&body.user_code) else {
+        return note_invalid(&state, ip);
+    };
+    match state.db.lookup_device_link(&user_code).await {
+        Ok(Some(info)) => (
+            StatusCode::OK,
+            Json(LookupBody {
+                device_label: info.device_label,
+                app_version: info.app_version,
+                created_at: info.created_at,
+            }),
+        )
+            .into_response(),
+        Ok(None) => note_invalid(&state, ip),
+        Err(_error) => {
+            tracing::error!("device link lookup failed");
+            internal().into_response()
+        }
+    }
+}
+
+/// POST /api/link/approve
+pub async fn approve(
+    State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    member: OrgMember,
+    Json(body): Json<UserCodeRequest>,
+) -> Response {
+    let ip = client_ip(peer, &headers);
+    if let Some(response) = blocked_response(&state, ip) {
+        return response;
+    }
+    let Some(user_code) = canonical_user_code(&body.user_code) else {
+        return note_invalid(&state, ip);
+    };
+    let info = match state.db.lookup_device_link(&user_code).await {
+        Ok(Some(info)) => info,
+        Ok(None) => return note_invalid(&state, ip),
+        Err(_error) => {
+            tracing::error!("device link lookup failed");
+            return internal().into_response();
+        }
+    };
+    let mut secret = generate_secret_hex();
+    let minted = match state
+        .db
+        .create_daemon_token(&member.member.id, &secret, &info.device_label)
+        .await
+    {
+        Ok(token) => token,
+        Err(_error) => {
+            secret.zeroize();
+            tracing::error!("device link token mint failed");
+            return internal().into_response();
+        }
+    };
+    let approved = state
+        .db
+        .approve_device_link(&user_code, &member.member.id, &minted.id, &secret)
+        .await;
+    secret.zeroize();
+    match approved {
+        Ok(true) => {
+            tracing::info!("device link approved");
+            audit(
+                &state.db,
+                &member.member.id,
+                AuditAction::CreatedDaemonToken,
+                AuditTargetType::DaemonToken,
+                &minted.id,
+                Some(&format!("label: {}", info.device_label)),
+            )
+            .await;
+            (StatusCode::OK, Json(OkBody { ok: true })).into_response()
+        }
+        Ok(false) => {
+            if let Err(_error) = state
+                .db
+                .revoke_daemon_token(&minted.id, &member.member.id)
+                .await
+            {
+                tracing::error!("device link approve lost the race and revoke failed");
+            }
+            note_invalid(&state, ip)
+        }
+        Err(_error) => {
+            tracing::error!("device link approve failed");
+            internal().into_response()
+        }
+    }
+}
+
+/// POST /api/link/deny
+pub async fn deny(
+    State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    member: OrgMember,
+    Json(body): Json<UserCodeRequest>,
+) -> Response {
+    let ip = client_ip(peer, &headers);
+    if let Some(response) = blocked_response(&state, ip) {
+        return response;
+    }
+    let Some(user_code) = canonical_user_code(&body.user_code) else {
+        return note_invalid(&state, ip);
+    };
+    match state.db.deny_device_link(&user_code).await {
+        Ok(Some(denied)) => {
+            if let (Some(token_id), Some(member_id)) = (denied.daemon_token_id, denied.member_id) {
+                if let Err(_error) = state.db.revoke_daemon_token(&token_id, &member_id).await {
+                    tracing::error!("device link deny could not revoke daemon token");
+                }
+                audit(
+                    &state.db,
+                    &member.member.id,
+                    AuditAction::DeniedDeviceLink,
+                    AuditTargetType::DaemonToken,
+                    &token_id,
+                    None,
+                )
+                .await;
+            } else {
+                audit(
+                    &state.db,
+                    &member.member.id,
+                    AuditAction::DeniedDeviceLink,
+                    AuditTargetType::Member,
+                    &member.member.id,
+                    None,
+                )
+                .await;
+            }
+            (StatusCode::OK, Json(OkBody { ok: true })).into_response()
+        }
+        Ok(None) => note_invalid(&state, ip),
+        Err(_error) => {
+            tracing::error!("device link deny failed");
+            internal().into_response()
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn user_code_alphabet_is_unambiguous_and_32() {
+        assert_eq!(USER_CODE_ALPHABET.len(), 32);
+        let alphabet = std::str::from_utf8(USER_CODE_ALPHABET).unwrap();
+        for banned in ['0', 'O', '1', 'I', 'l'] {
+            assert!(!alphabet.contains(banned), "{banned}");
+        }
+        assert_eq!(256 % 32, 0, "byte modulo alphabet must be unbiased");
+    }
+
+    #[test]
+    fn user_code_accepts_hyphen_and_case() {
+        assert_eq!(
+            canonical_user_code("abcd-2345").as_deref(),
+            Some("ABCD2345")
+        );
+        assert_eq!(canonical_user_code("ABCD2345").as_deref(), Some("ABCD2345"));
+        assert_eq!(
+            canonical_user_code("ABCD 2345").as_deref(),
+            Some("ABCD2345")
+        );
+        assert!(canonical_user_code("ABCD-234").is_none());
+        assert!(canonical_user_code("ABCD-234O").is_none());
+        assert!(canonical_user_code(&"A".repeat(40)).is_none());
+        assert_eq!(format_user_code("ABCD2345"), "ABCD-2345");
+    }
+
+    #[test]
+    fn device_code_is_64_hex() {
+        let code = generate_secret_hex();
+        assert_eq!(code.len(), 64);
+        assert_eq!(canonical_device_code(&code).as_deref(), Some(code.as_str()));
+        assert!(canonical_device_code("zz").is_none());
+        assert!(canonical_device_code(&"ab".repeat(40)).is_none());
+    }
+
+    #[test]
+    fn query_secret_keys_are_detected_without_keeping_values() {
+        assert!(query_has_link_secret("user_code=ABCD-2345"));
+        assert!(query_has_link_secret("foo=1&device_code=abc"));
+        assert!(query_has_link_secret("user%5Fcode=ABCD"));
+        assert!(query_has_link_secret("TOKEN=secret"));
+        assert!(!query_has_link_secret("device_label=pc&app_version=1.0.0"));
+    }
+
+    #[test]
+    fn label_and_version_bounds() {
+        assert!(validate_device_label("  Desk  ").is_ok());
+        assert!(validate_device_label("").is_err());
+        assert!(validate_device_label(&"a".repeat(65)).is_err());
+        assert!(validate_device_label("bad\nname").is_err());
+        assert_eq!(validate_app_version(" 0.4.2 ").unwrap(), "0.4.2");
+        assert!(validate_app_version("").is_err());
+        assert!(validate_app_version("1.0.0 beta").is_err());
+        assert!(validate_app_version(&"a".repeat(33)).is_err());
+        assert!(validate_app_version("...").is_err());
+    }
+
+    #[test]
+    fn wrong_code_limit_constant_is_the_documented_budget() {
+        assert_eq!(crate::link_attempts::LINK_WRONG_CODE_LIMIT, 5);
+        assert!((LINK_USER_BURST as usize) > crate::link_attempts::LINK_WRONG_CODE_LIMIT);
+    }
+}

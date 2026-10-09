@@ -5,6 +5,7 @@ pub mod attendance;
 pub mod audit_log;
 pub mod channels;
 pub mod daemon_tokens;
+pub mod device_link;
 pub mod dms;
 pub mod events;
 pub mod forum;
