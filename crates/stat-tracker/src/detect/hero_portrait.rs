@@ -403,11 +403,11 @@ impl RowScan {
     /// 6v6 table was cut one slot off, and 60 of 72 cells were wrong, 20 of
     /// them at confidence 90 or more (Scuffed Vision baseline, PR 158).
     ///
-    /// The band is provisional until there are real 5v5 boards at 1080p
-    /// and 1440p. Highest real 6v6 so far: dip 0.07937 (four 1080p boards)
+    /// The 0.080/0.083 band is provisional, pending native 1440p 5v5
+    /// boards. Highest real 6v6 so far: dip 0.07937 (four 1080p boards)
     /// and spectral 0.07672. At 1440p the 6v6 dip runs 0.0725 to 0.0775.
-    /// The only real 5v5 Tab board so far is `wiki_scoreboard.png` at
-    /// 414p, both pitches 0.08304.
+    /// Weakest real 5v5 PC board so far: spectral 0.0847, dip 0.0866.
+    /// `wiki_scoreboard.png` at 414p measured 0.08304 on both pitches.
     ///
     /// - No pitch measured at all: 5, the documented default, as before.
     /// - A plausible pitch strictly below [`TEAM_SIZE_6V6_PITCH_MAX`] is 6.
@@ -449,9 +449,9 @@ impl RowScan {
 
 /// Row pitch strictly below this (fraction of crop height) is 6v6.
 ///
-/// Used only by [`RowScan::checked_team_size`]. Provisional until there
-/// are real 5v5 boards at 1080p and 1440p. The closed interval from here
-/// through [`TEAM_SIZE_5V5_PITCH_MIN`] is a no-guess band.
+/// Used only by [`RowScan::checked_team_size`]. The 0.080/0.083 band is
+/// provisional, pending native 1440p 5v5 boards. The closed interval from
+/// here through [`TEAM_SIZE_5V5_PITCH_MIN`] is a no-guess band.
 const TEAM_SIZE_6V6_PITCH_MAX: f64 = 0.080;
 
 /// Row pitch strictly above this (fraction of crop height) is 5v5.
@@ -1230,12 +1230,18 @@ mod team_size_tests {
 
     #[test]
     fn measured_pitch_band_does_not_guess() {
-        // Provisional until there are real 5v5 boards at 1080p and 1440p.
-        // Highest real 6v6: dip 0.07937 (four 1080p boards), spectral
-        // 0.07672. At 1440p the 6v6 dip runs 0.0725 to 0.0775.
+        // The 0.080/0.083 band is provisional, pending native 1440p 5v5
+        // boards. Highest real 6v6: dip 0.07937 (four 1080p boards),
+        // spectral 0.07672. At 1440p the 6v6 dip runs 0.0725 to 0.0775.
         assert_eq!(
             scan(6, Some(0.07937), Some(0.07937)).checked_team_size(),
             Some(6)
+        );
+        // Weakest real 5v5 PC board: spectral 0.0847, dip 0.0866.
+        // Synthetic pitches only. No scoreboard image.
+        assert_eq!(
+            scan(5, Some(0.0866), Some(0.0847)).checked_team_size(),
+            Some(5)
         );
         assert_eq!(
             scan(6, Some(0.07672), Some(0.07672)).checked_team_size(),
