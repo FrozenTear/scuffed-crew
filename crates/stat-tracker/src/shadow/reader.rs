@@ -86,8 +86,9 @@ pub enum BoardStatus {
     /// No board structure (same preflight as the capture path: row dips or
     /// header stat labels). `team_size` is `None`, no row fields.
     NotFound,
-    /// Passed the preflight (header labels) but no row pitch was measured,
-    /// so there is no 5v5 or 6v6 layout. `team_size` is `None`, no row fields.
+    /// Passed the preflight, but the row pitch gives no 5v5 or 6v6 under
+    /// Tracker's rule (no pitch, implausible pitches, or dip and spectral
+    /// pitches that disagree). `team_size` is `None`, no row fields.
     TeamSizeUnknown,
 }
 
@@ -300,25 +301,32 @@ fn elapsed_ms(t0: Instant) -> u32 {
 
 /// The layout of a cropped scoreboard. A board is found with the capture
 /// path's preflight (main.rs): row dips at a plausible pitch, or 3 to 10
-/// header stat labels. The size must come from a measured row pitch: with no
-/// pitch at all there is no layout, where `RowScan::team_size` would say 5.
-///
-/// With a pitch, the size is `RowScan::team_size` (spectral pitch when the
-/// two disagree), as before. `checked_team_size` is stricter and returns
-/// `None` on 7 real 1080p 6v6 boards in the eval set (dip pitch 0.0794, just
-/// over the 0.079 split, spectral 0.074 to 0.075), where the spectral answer
-/// 6 is right, so it is not used here.
+/// header stat labels. See [`layout_from_scan`] for the size.
 pub fn board_layout(scoreboard: &DynamicImage) -> Result<usize, BoardStatus> {
     let scan = crate::detect::hero_portrait::scan_rows(scoreboard);
     let labels = crate::ocr::preprocess::header_label_groups(scoreboard).len();
-    if !scan.looks_like_scoreboard() && !(3..=10).contains(&labels) {
+    layout_from_scan(&scan, labels)
+}
+
+/// The size comes from Tracker's own rule, `RowScan::checked_team_size`
+/// (#158): split at a row pitch of 0.079 (6v6 below, 5v5 at or above), pitches
+/// outside 0.062 to 0.095 ignored, and dip and spectral pitches that both
+/// count but disagree give no size. Here that is
+/// [`BoardStatus::TeamSizeUnknown`], as the capture path rejects such a frame
+/// as team size uncertain. With no pitch at all there is no layout either,
+/// where `checked_team_size` would default to 5. Nothing guesses a size.
+pub fn layout_from_scan(
+    scan: &crate::detect::hero_portrait::RowScan,
+    header_labels: usize,
+) -> Result<usize, BoardStatus> {
+    if !scan.looks_like_scoreboard() && !(3..=10).contains(&header_labels) {
         return Err(BoardStatus::NotFound);
     }
     if scan.spectral_pitch.is_none() && scan.median_pitch.is_none() {
         return Err(BoardStatus::TeamSizeUnknown);
     }
-    match scan.team_size() {
-        n @ (5 | 6) => Ok(n),
+    match scan.checked_team_size() {
+        Some(n @ (5 | 6)) => Ok(n),
         _ => Err(BoardStatus::TeamSizeUnknown),
     }
 }
@@ -470,6 +478,7 @@ pub fn read_result(result_frame: &DynamicImage) -> ResultRead {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::detect::hero_portrait::RowScan;
     use crate::shadow::digits::{CellRead, RowRead};
     use crate::shadow::heroes::HeroRead;
 
@@ -640,6 +649,51 @@ mod tests {
         assert!(json.contains(r#""team_size":null"#), "{json}");
         let b = assemble(6, None, None);
         assert_eq!((b.status, b.team_size), (BoardStatus::Read, Some(6)));
+    }
+
+    fn scan(dips: usize, dip: Option<f64>, spectral: Option<f64>) -> RowScan {
+        RowScan {
+            dip_count: dips,
+            median_pitch: dip,
+            spectral_pitch: spectral,
+        }
+    }
+
+    #[test]
+    fn disagreeing_or_implausible_pitches_are_team_size_unknown() {
+        let unknown = Err(BoardStatus::TeamSizeUnknown);
+        // the real 1080p 6v6 case: dip 0.0794 says 5, spectral 0.0754 says 6
+        assert_eq!(
+            layout_from_scan(&scan(5, Some(0.0794), Some(0.0754)), 6),
+            unknown
+        );
+        // both plausible, opposite sides of the 0.079 split
+        assert_eq!(
+            layout_from_scan(&scan(5, Some(0.083), Some(0.074)), 6),
+            unknown
+        );
+        // measured, but neither plausible (0.101 / 0.102 traps)
+        assert_eq!(
+            layout_from_scan(&scan(4, Some(0.101), Some(0.102)), 6),
+            unknown
+        );
+        // header labels only, no pitch at all: no 5v5 default
+        assert_eq!(layout_from_scan(&scan(0, None, None), 6), unknown);
+        // no preflight at all
+        assert_eq!(
+            layout_from_scan(&scan(1, None, None), 0),
+            Err(BoardStatus::NotFound)
+        );
+        // agreeing or single plausible pitches still read
+        assert_eq!(
+            layout_from_scan(&scan(5, Some(0.083), Some(0.084)), 6),
+            Ok(5)
+        );
+        assert_eq!(
+            layout_from_scan(&scan(5, Some(0.0745), Some(0.102)), 6),
+            Ok(6)
+        );
+        assert_eq!(layout_from_scan(&scan(5, Some(0.074), None), 0), Ok(6));
     }
 
     #[test]
