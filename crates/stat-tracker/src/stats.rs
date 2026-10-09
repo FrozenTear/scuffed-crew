@@ -342,6 +342,7 @@ mod tests {
             played_at: SurrealDatetime::from(Utc::now()),
             synced: false,
             sync_rev: 0,
+            upload_reject: None,
             corrected_hero: None,
             corrected_role: None,
             corrected_map_name: None,

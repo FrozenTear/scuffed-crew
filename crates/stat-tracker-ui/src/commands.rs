@@ -45,6 +45,15 @@ pub fn edit_match(data_dir: &Path, session_id: &str, edit: MatchEdit) -> Result<
     )
 }
 
+pub fn retry_upload(data_dir: &Path, session_id: &str) -> Result<(), String> {
+    queue(
+        data_dir,
+        &StoreCommand::RetryUpload {
+            session_id: session_id.to_string(),
+        },
+    )
+}
+
 pub fn resolve_segment(
     data_dir: &Path,
     session_id: &str,
@@ -117,6 +126,7 @@ mod tests {
             edited_fields: Vec::new(),
             ocr: GameOcr::default(),
             segments: Vec::new(),
+            upload_reject: None,
         }
     }
 
@@ -177,6 +187,18 @@ mod tests {
                     .any(|(_, c)| matches!(c, StoreCommand::SetOutcome { .. })),
             "command files must deserialize as tagged StoreCommand: {bytes}"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn retry_upload_queues_a_retry_command() {
+        let dir = tmp();
+        retry_upload(&dir, "sess-t1").unwrap();
+        let cmds = queued(&dir);
+        assert!(matches!(
+            &cmds[0],
+            StoreCommand::RetryUpload { session_id } if session_id == "sess-t1"
+        ));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
