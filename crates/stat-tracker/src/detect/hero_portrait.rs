@@ -417,24 +417,19 @@ impl RowScan {
     }
 }
 
-/// Row pitch (fraction of crop height) between the two layouts: 6v6 below,
-/// 5v5 at or above.
+/// Row pitch (fraction of crop height): 6v6 below, 5v5 at or above.
 ///
-/// The bound is the gap in `crop_player_row` slot height over crop height,
-/// not a step above the measured 0.0794 boards.
-/// 1080p crop 756 is 6v6 58/756 = 0.076720 and 5v5 68/756 = 0.089947.
-/// 1440p crop 1007 is 6v6 77/1007 = 0.076465 and 5v5 90/1007 = 0.089374.
-/// 4K crop 1512 matches 1080p (116/1512 and 136/1512).
-/// The closest pair is 6v6 at 0.076720 and 5v5 at 0.089374. Their midpoint
-/// is 0.083047. The split is 0.083, strictly between them: 0.006280 above
-/// the highest 6v6 slot and 0.006374 below the lowest 5v5 slot.
+/// Provisional. 0.081 is a stand-in until measured pitches from real
+/// boards replace it. It is not a final bound. The layout midpoint 0.083
+/// sat on the lowest 5v5 sample already in the tests, so a 5v5 reading of
+/// 0.083 was not safely above the split.
 ///
-/// Native 1080p 6v6 boards measure about 0.0794 (60/756). That is above the
-/// old 0.079 split, so a dip at 0.0788 and a spectral peak at 0.0794 landed
-/// on opposite sides and the capture was rejected as uncertain. 0.0794 is
-/// still below this split, on the 6v6 side of the layout gap. A pitch of
-/// 0.083 stays 5v5.
-const TEAM_SIZE_PITCH_SPLIT: f64 = 0.083;
+/// Layout slots, for the tests that still check them: 1080p crop 756 is
+/// 6v6 58/756 = 0.076720 and 5v5 68/756 = 0.089947. 1440p crop 1007 is
+/// 6v6 77/1007 = 0.076465 and 5v5 90/1007 = 0.089374. 4K crop 1512 matches
+/// 1080p. 0.081 is between those slots. The highest 6v6 sample so far is
+/// 0.0794 and the lowest 5v5 sample so far is 0.083.
+const TEAM_SIZE_PITCH_SPLIT: f64 = 0.081;
 
 /// Row pitches that can be a real 6v6 (about 0.074 to 0.0794) or 5v5
 /// (about 0.083 to 0.090) scoreboard, with room on each side. 0.101 and
@@ -449,7 +444,8 @@ const ROW_PITCH_PLAUSIBLE: std::ops::RangeInclusive<f64> = 0.062..=0.095;
 /// row — occupied or empty — has white text that dips saturation once per row,
 /// so the dip-to-dip pitch reveals the row count regardless of empty slots or
 /// team colors. 6v6 rows are tighter (about 7.5% to 7.9% of crop height)
-/// than 5v5 (about 8.3% to 9.0%). See [`TEAM_SIZE_PITCH_SPLIT`].
+/// than 5v5 (about 8.3% to 9.0%). The cutoff is the provisional
+/// [`TEAM_SIZE_PITCH_SPLIT`].
 pub fn detect_team_size(scoreboard: &DynamicImage) -> usize {
     scan_rows(scoreboard).team_size()
 }
@@ -1165,18 +1161,15 @@ mod team_size_tests {
         assert_eq!((h1440, six_px_1440, five_px_1440), (1007, 77, 90));
         assert_eq!((h4k, six_px_4k, five_px_4k), (1512, 116, 136));
 
+        // 0.081 is provisional. The layout slots must still land on their
+        // own side of it. The old midpoint margins are not the claim.
         let split = super::TEAM_SIZE_PITCH_SPLIT;
+        assert!((split - 0.081).abs() < 1e-9);
         let max_six = six_1080.max(six_1440).max(six_4k);
         let min_five = five_1080.min(five_1440).min(five_4k);
         assert!(
             max_six < split && split < min_five,
             "split {split} must sit between layout 6v6 {max_six} and layout 5v5 {min_five}"
-        );
-        let below = split - max_six;
-        let above = min_five - split;
-        assert!(
-            (below - 0.006280).abs() < 1e-6 && (above - 0.006374).abs() < 1e-6,
-            "margin below {below}, above {above}, 6v6 {max_six}, 5v5 {min_five}"
         );
 
         // Real 5v5 slot at 1080p (68/756) and 1440p (90/1007), both pitches
@@ -1210,5 +1203,29 @@ mod team_size_tests {
         let straddle = scan(6, Some(0.0788), Some(0.0794));
         assert_eq!(straddle.checked_team_size(), Some(6));
         assert_eq!(straddle.team_size(), 6);
+    }
+
+    #[test]
+    fn provisional_split_separates_the_real_pitches_seen_so_far() {
+        // Placeholders until measured pitches from real boards arrive.
+        // 0.0794 is the highest 6v6 pitch recorded so far. 0.083 is the
+        // lowest 5v5 pitch recorded so far, and the old split sat on it.
+        const HIGHEST_REAL_6V6_PITCH: f64 = 0.0794;
+        const LOWEST_REAL_5V5_PITCH: f64 = 0.083;
+        let split = super::TEAM_SIZE_PITCH_SPLIT;
+        assert!(
+            HIGHEST_REAL_6V6_PITCH < split && split < LOWEST_REAL_5V5_PITCH,
+            "provisional split {split} must sit between {HIGHEST_REAL_6V6_PITCH} and {LOWEST_REAL_5V5_PITCH}"
+        );
+        let six = scan(
+            6,
+            Some(HIGHEST_REAL_6V6_PITCH),
+            Some(HIGHEST_REAL_6V6_PITCH),
+        );
+        assert_eq!(six.checked_team_size(), Some(6));
+        assert_eq!(six.team_size(), 6);
+        let five = scan(5, Some(LOWEST_REAL_5V5_PITCH), Some(LOWEST_REAL_5V5_PITCH));
+        assert_eq!(five.checked_team_size(), Some(5));
+        assert_eq!(five.team_size(), 5);
     }
 }
