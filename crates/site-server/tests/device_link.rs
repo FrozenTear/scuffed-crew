@@ -831,7 +831,7 @@ async fn rate_limits_are_per_ip_separate_and_trusted_proxy_aware() {
     )
     .await;
     assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{body}");
-    assert!(body.contains("Too Many Requests"), "{body}");
+    assert_eq!(json_of(&body)["error"], "rate_limited", "{body}");
 
     let (status, body) = send(
         &app,
@@ -890,7 +890,7 @@ async fn rate_limits_are_per_ip_separate_and_trusted_proxy_aware() {
     )
     .await;
     assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{body}");
-    assert!(body.contains("Too Many Requests"), "{body}");
+    assert_eq!(json_of(&body)["error"], "rate_limited", "{body}");
 
     for n in 0..LINK_POLL_BURST {
         let xff = format!("198.51.100.{n}");
@@ -1675,7 +1675,7 @@ async fn link_responses_are_not_stored() {
     )
     .await;
     assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{body}");
-    assert!(body.contains("Too Many Requests"), "{body}");
+    assert_eq!(json_of(&body)["error"], "rate_limited", "{body}");
     assert_no_store(&headers, &body);
 
     let pending = send(
@@ -1721,8 +1721,7 @@ async fn link_responses_are_not_stored() {
     )
     .await;
     assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{body}");
-    assert!(body.contains("Too Many Requests"), "{body}");
-    assert!(!body.contains("rate_limited"), "{body}");
+    assert_eq!(json_of(&body)["error"], "rate_limited", "{body}");
     assert_no_store(&headers, &body);
 }
 
