@@ -1192,11 +1192,27 @@ mod header_layout_tests {
         let season_head = season.split('}').next().unwrap();
         assert!(season_head.contains("flex: 1 1 100%"), "{season_head}");
         assert!(season_head.contains("min-width: 0"), "{season_head}");
-        assert!(season_head.contains("width: 100%"), "{season_head}");
+        assert!(has_declaration(season_head, "width: 100%"), "{season_head}");
         let select = block_after(phone, ".stats-header-actions .season-select select {");
         let select_head = select.split('}').next().unwrap();
         assert!(select_head.contains("min-width: 0"), "{select_head}");
-        assert!(select_head.contains("width: 100%"), "{select_head}");
+        assert!(has_declaration(select_head, "width: 100%"), "{select_head}");
+    }
+
+    fn has_declaration(block: &str, decl: &str) -> bool {
+        block
+            .split(';')
+            .any(|part| part.lines().any(|line| line.trim() == decl))
+    }
+
+    #[test]
+    fn width_declaration_does_not_match_max_width() {
+        assert!(has_declaration(
+            "width: 100%; max-width: 100%;",
+            "width: 100%"
+        ));
+        assert!(!has_declaration("max-width: 100%;", "width: 100%"));
+        assert!(has_declaration("max-width: 100%;", "max-width: 100%"));
     }
 }
 

@@ -266,9 +266,6 @@ pub struct StatsSeason {
     /// `Some(Pending)` is representable, but [`Self::choose`] never writes it.
     /// `Id(current)` follows; any other id is pinned.
     pick: Signal<Option<ResolvedSeason>>,
-    /// Bumps when another document writes `stats-season-v2` or clears storage.
-    /// localStorage itself is not a signal.
-    storage_rev: Signal<u64>,
 }
 
 impl StatsSeason {
@@ -328,7 +325,7 @@ impl StatsSeason {
 
     #[cfg(test)]
     fn apply_storage_event(self, key: Option<&str>) {
-        note_season_storage(key, self.pick, self.storage_rev);
+        note_season_storage(key, self.pick);
     }
 }
 
@@ -428,17 +425,14 @@ thread_local! {
     static TEST_PROBE: std::cell::Cell<Option<StatsSeason>> = const { std::cell::Cell::new(None) };
 }
 
-/// `storage` handler. A matching key drops the in-session pick and bumps
-/// `rev` so the memo re-reads localStorage. Other keys are ignored.
+/// `storage` handler. A matching key drops the in-session pick so the memo
+/// re-reads localStorage. Other keys are ignored.
 /// A null key is `localStorage.clear()`.
-fn note_season_storage(
-    key: Option<&str>,
-    mut pick: Signal<Option<ResolvedSeason>>,
-    mut rev: Signal<u64>,
-) {
+/// `Signal::set` notifies even when the pick was already empty, so no extra
+/// counter is required to re-read.
+fn note_season_storage(key: Option<&str>, mut pick: Signal<Option<ResolvedSeason>>) {
     if storage_event_targets_season(key) {
         pick.set(None);
-        rev += 1;
     }
 }
 
@@ -499,15 +493,12 @@ fn use_season_storage_sync(_on_key: impl FnMut(Option<&str>) + 'static) {}
 /// share `stats-season-v2`, so a pick on one page is the pick on the others.
 pub fn use_stats_season() -> StatsSeason {
     let pick = use_signal(|| None::<ResolvedSeason>);
-    let storage_rev = use_signal(|| 0u64);
     let (rows, refresh, error) = use_season_rows();
     // The memo is the only signal stats resources should read. It notifies
     // only when PartialEq says the view changed, so nothing saved stays
     // one all-time fetch after the season list arrives. The select token
     // rides along so a render does not read storage on its own.
-    // `storage_rev` is how another tab's `storage` event gets into this memo.
     let view = use_memo(move || {
-        let _storage_rev = storage_rev();
         let choice = pick();
         let v2 = read_v2();
         let legacy = read_legacy();
@@ -558,13 +549,15 @@ pub fn use_stats_season() -> StatsSeason {
         } else if read_legacy().is_some() {
             write_legacy(None);
         }
+        // A tab whose season list is stale can see another tab's brand-new
+        // season id as unknown and write All time over that pick. Rare, accepted.
         if stored_season_is_stale(read_v2().as_deref(), &choices) {
             write_v2(None);
         }
     });
 
     use_season_storage_sync(move |key| {
-        note_season_storage(key, pick, storage_rev);
+        note_season_storage(key, pick);
     });
 
     StatsSeason {
@@ -573,7 +566,6 @@ pub fn use_stats_season() -> StatsSeason {
         refresh,
         error,
         pick,
-        storage_rev,
     }
 }
 
