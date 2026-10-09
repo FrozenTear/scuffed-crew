@@ -1,7 +1,7 @@
 use axum::{
     Json,
     extract::{Path, Query, State},
-    http::StatusCode,
+    http::{StatusCode, header},
 };
 
 use scuffed_auth::server::session::ErrorResponse;
@@ -532,11 +532,20 @@ pub async fn update_member_settings(
 /// 401 body.
 ///
 /// `validate_daemon_token` already sets `last_used_at` on success (the upload
-/// path does this). This handler does not write.
-pub async fn token_check(daemon: OpaqueDaemonUser) -> Json<TokenCheckResponse> {
-    Json(TokenCheckResponse {
-        display_name: daemon.member.display_name,
-    })
+/// path does this). This handler does not write. The 200 is `no-store`, same
+/// as the daemon-token 401, so a shared cache cannot keep the display name.
+pub async fn token_check(
+    daemon: OpaqueDaemonUser,
+) -> (
+    [(header::HeaderName, &'static str); 1],
+    Json<TokenCheckResponse>,
+) {
+    (
+        [(header::CACHE_CONTROL, "no-store")],
+        Json(TokenCheckResponse {
+            display_name: daemon.member.display_name,
+        }),
+    )
 }
 
 /// GET /api/stats/daemon-config — fetch config for daemon (token auth)
