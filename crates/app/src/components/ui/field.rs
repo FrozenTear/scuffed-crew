@@ -63,6 +63,9 @@ pub fn Input(
     #[props(default)] aria_describedby: Option<String>,
     #[props(default)] aria_invalid: Option<bool>,
     #[props(default)] aria_required: Option<bool>,
+    /// Optional `name` on the input.
+    #[props(default)]
+    name: Option<String>,
 ) -> Element {
     // Always run: hook order must not depend on whether a label was passed.
     let generated_id: String =
@@ -82,6 +85,7 @@ pub fn Input(
                 input {
                     class: "{class}",
                     id: dom_id,
+                    name,
                     value,
                     placeholder,
                     disabled,
@@ -98,6 +102,7 @@ pub fn Input(
             input {
                 class: "{class}",
                 id: dom_id,
+                name,
                 value,
                 placeholder,
                 disabled,
@@ -117,10 +122,18 @@ pub fn Textarea(
     #[props(default)] placeholder: String,
     #[props(default = false)] invalid: bool,
     #[props(default)] oninput: Option<EventHandler<FormEvent>>,
+    #[props(default)] id: Option<String>,
+    #[props(default)] name: Option<String>,
 ) -> Element {
     rsx! {
-        textarea { class: field_class(invalid), placeholder, value: "{value}",
-            oninput: move |e| { if let Some(h) = &oninput { h.call(e); } } }
+        textarea {
+            class: field_class(invalid),
+            id,
+            name,
+            placeholder,
+            value: "{value}",
+            oninput: move |e| { if let Some(h) = &oninput { h.call(e); } },
+        }
     }
 }
 
@@ -128,11 +141,18 @@ pub fn Textarea(
 pub fn Select(
     #[props(default = false)] invalid: bool,
     #[props(default)] onchange: Option<EventHandler<FormEvent>>,
+    #[props(default)] id: Option<String>,
+    #[props(default)] name: Option<String>,
     children: Element,
 ) -> Element {
     rsx! {
-        select { class: field_class(invalid),
-            onchange: move |e| { if let Some(h) = &onchange { h.call(e); } }, {children} }
+        select {
+            class: field_class(invalid),
+            id,
+            name,
+            onchange: move |e| { if let Some(h) = &onchange { h.call(e); } },
+            {children}
+        }
     }
 }
 

@@ -209,6 +209,7 @@ pub fn StatsMember(id: String) -> Element {
             div { class: "stats-season-row",
                 SeasonSelect {
                     id: "member-stats-season".to_string(),
+                    name: "member-stats-season".to_string(),
                     seasons: season.season_list(),
                     seasons_error: season.seasons_error(),
                     on_retry: move |_| season.retry(),

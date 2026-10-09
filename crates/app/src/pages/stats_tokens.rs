@@ -209,8 +209,10 @@ pub fn StatsTokens() -> Element {
                 on_submit: on_submit,
 
                 div { class: "form-field",
-                    label { class: "form-label", "Label" }
+                    label { class: "form-label", r#for: "daemon-token-label", "Label" }
                     input {
+                        id: "daemon-token-label",
+                        name: "daemon-token-label",
                         class: "form-input",
                         r#type: "text",
                         placeholder: "e.g. my-desktop",
