@@ -179,6 +179,25 @@ fn http_host_is_loopback(url: &reqwest::Url) -> bool {
     false
 }
 
+/// Settings view of `shadow_recognizer`.
+///
+/// `file_on` is the config.toml value. `locked` means
+/// `SCUFFED_SHADOW_RECOGNIZER` forces the extra reader on for this process.
+/// A save writes `file_on` only. The checkbox can later become a reader
+/// picker without a second env rule.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ShadowRecognizerControl {
+    pub file_on: bool,
+    pub locked: bool,
+}
+
+impl ShadowRecognizerControl {
+    /// On for this process. Same rule the daemon uses.
+    pub fn enabled(self) -> bool {
+        self.file_on || self.locked
+    }
+}
+
 impl Config {
     /// Load config from file, then overlay CLI args / env vars.
     ///
@@ -242,7 +261,7 @@ impl Config {
             config.debug_ocr = true;
         }
 
-        // SCUFFED_SHADOW_RECOGNIZER is read by `shadow_recognizer_enabled()`,
+        // SCUFFED_SHADOW_RECOGNIZER is read by `shadow_recognizer_control()`,
         // never folded into the struct, so a Settings save can't persist it.
 
         // OCR worker count: CLI > env > config file > auto (None).
@@ -303,18 +322,33 @@ impl Config {
     }
 
     /// Whether the shadow digit recognizer runs this process (config file
-    /// and/or env `SCUFFED_SHADOW_RECOGNIZER`). The env override is read here
-    /// only, so `shadow_recognizer` always holds the file value and a save
-    /// never writes the override.
+    /// and/or env `SCUFFED_SHADOW_RECOGNIZER`).
+    ///
+    /// The env override is read only by [`Self::shadow_recognizer_control`],
+    /// so `shadow_recognizer` always holds the file value and a save never
+    /// writes the override.
     pub fn shadow_recognizer_enabled(&self) -> bool {
-        Self::shadow_enabled(
+        self.shadow_recognizer_control().enabled()
+    }
+
+    /// File value plus whether `SCUFFED_SHADOW_RECOGNIZER` locks this process on.
+    ///
+    /// This is the only read of that variable. `file_on` is what Settings may
+    /// write. `locked` is display-only and must not be saved.
+    pub fn shadow_recognizer_control(&self) -> ShadowRecognizerControl {
+        Self::shadow_control(
             self.shadow_recognizer,
             std::env::var("SCUFFED_SHADOW_RECOGNIZER").ok().as_deref(),
         )
     }
 
-    fn shadow_enabled(file_flag: bool, env: Option<&str>) -> bool {
-        file_flag || Self::truthy(env)
+    /// Pure form of [`Self::shadow_recognizer_control`] for tests and Settings.
+    /// `env` is the raw variable value, not a process lookup.
+    pub fn shadow_control(file_flag: bool, env: Option<&str>) -> ShadowRecognizerControl {
+        ShadowRecognizerControl {
+            file_on: file_flag,
+            locked: Self::truthy(env),
+        }
     }
 
     /// Resolved OCR worker count for the Rayon pool (and thus Tesseract instances).
@@ -411,18 +445,27 @@ mod tests {
             Some("no"),
             Some(""),
         ] {
-            assert!(
-                !Config::shadow_enabled(false, v),
-                "{v:?} must not turn it on"
-            );
+            let control = Config::shadow_control(false, v);
+            assert!(!control.enabled(), "{v:?} must not turn it on");
+            assert!(!control.locked, "{v:?} must not lock Settings");
+            assert!(!control.file_on);
         }
-        for v in [Some("1"), Some("true"), Some("yes")] {
-            assert!(Config::shadow_enabled(false, v), "{v:?} turns it on");
+        for v in [
+            Some("1"),
+            Some("true"),
+            Some("TRUE"),
+            Some("yes"),
+            Some("YES"),
+        ] {
+            let control = Config::shadow_control(false, v);
+            assert!(control.locked, "{v:?} locks the toggle on");
+            assert!(control.enabled(), "{v:?} turns it on for this process");
+            assert!(!control.file_on, "{v:?} must not become the file value");
         }
-        assert!(
-            Config::shadow_enabled(true, Some("0")),
-            "file flag still wins"
-        );
+        let control = Config::shadow_control(true, Some("0"));
+        assert!(control.file_on);
+        assert!(!control.locked);
+        assert!(control.enabled(), "file flag still wins");
     }
 
     #[test]
@@ -431,7 +474,10 @@ mod tests {
         // file value (what Settings saves) serializes without the key even
         // when the env would turn the recognizer on.
         let cfg = Config::default();
-        assert!(Config::shadow_enabled(cfg.shadow_recognizer, Some("1")));
+        let control = Config::shadow_control(cfg.shadow_recognizer, Some("1"));
+        assert!(control.enabled());
+        assert!(control.locked);
+        assert!(!control.file_on);
         assert!(!cfg.shadow_recognizer);
         let raw = toml::to_string_pretty(&cfg).unwrap();
         assert!(!raw.contains("shadow_recognizer"), "{raw}");

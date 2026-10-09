@@ -2,11 +2,12 @@
 //!
 //! Layout: two-column masonry (Maps density tokens), Stored data spanning the
 //! pane, Save as a full-width footer strip. Does not invent daemon config keys.
-//! `data_dir` and `ocr_threads` are preserved from the loaded file.
+//! `data_dir`, `ocr_threads`, and `finished_game_close_secs` are preserved
+//! from the loaded file. The extra number reader writes `shadow_recognizer`.
 
 use iced::widget::{Row, button, checkbox, column, container, row, space, text, text_input};
 use iced::{Alignment, Element, Fill, Padding};
-use stat_tracker::config::{AutoDetectConfig, Config, SyncConfig};
+use stat_tracker::config::{AutoDetectConfig, Config, ShadowRecognizerControl, SyncConfig};
 
 use crate::app::{Message, TrackerApp};
 use crate::layout::settings_columns;
@@ -49,7 +50,62 @@ pub enum SettingsToggle {
     AutoDetect,
     DebugOcr,
     OverlayHotkey,
+    ShadowRecognizer,
 }
+
+/// Scoreboard number reader the Settings control can select.
+///
+/// Today the control is one checkbox. Off is [`Self::OcrV1`] (nothing extra
+/// is stored). On is [`Self::Extra`], which writes `shadow_recognizer = true`
+/// and runs the cv-v2 test reader as a private log. A later picker can list
+/// [`Self::choices`] in this order and still write the same bool until the
+/// config key itself becomes an id.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScoreboardReader {
+    /// Default. Saved games use ocr-v1. The extra reader is off.
+    OcrV1,
+    /// Extra test reader (cv-v2). Private log only.
+    Extra,
+}
+
+impl ScoreboardReader {
+    pub const OCR_V1: &'static str = "ocr-v1";
+    pub const CV_V2: &'static str = "cv-v2";
+
+    pub const fn id(self) -> &'static str {
+        match self {
+            Self::OcrV1 => Self::OCR_V1,
+            Self::Extra => Self::CV_V2,
+        }
+    }
+
+    /// Display order for a later picker. The checkbox uses the ends of this list.
+    pub const fn choices() -> [Self; 2] {
+        [Self::OcrV1, Self::Extra]
+    }
+
+    pub const fn from_file_flag(on: bool) -> Self {
+        if on { Self::Extra } else { Self::OcrV1 }
+    }
+
+    pub const fn file_flag(self) -> bool {
+        matches!(self, Self::Extra)
+    }
+}
+
+pub(crate) const SHADOW_READER_LABEL: &str = "Extra number reader (test)";
+
+pub(crate) const SHADOW_READER_HINT: &str = "\
+It only writes a private log on this computer. \
+It doesn't change saved games or uploads, and it's off by default.";
+
+/// The daemon reads config once at startup. This setting does not apply live.
+pub(crate) const SHADOW_READER_RESTART: &str =
+    "The tracker reads this when it starts. Restart it after you save.";
+
+pub(crate) const SHADOW_READER_ENV_NOTE: &str = "\
+On for this run because the environment variable SCUFFED_SHADOW_RECOGNIZER is set. \
+It is not written to the config file.";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SettingsForm {
@@ -65,6 +121,9 @@ pub struct SettingsForm {
     pub debug_ocr: bool,
     pub overlay_hotkey: String,
     pub overlay_hotkey_enabled: bool,
+    /// File value and env lock for the extra number reader.
+    /// Save writes `file_on` only.
+    pub shadow: ShadowRecognizerControl,
 }
 
 impl Default for SettingsForm {
@@ -75,6 +134,15 @@ impl Default for SettingsForm {
 
 impl SettingsForm {
     pub fn from_config(config: &Config) -> Self {
+        Self::from_config_and_shadow(config, config.shadow_recognizer_control())
+    }
+
+    /// [`Self::from_config`] with an explicit shadow control.
+    ///
+    /// Tests pass this so they do not read `SCUFFED_SHADOW_RECOGNIZER` from
+    /// the process. `shadow.file_on` is the value Save writes. The app passes
+    /// [`Config::shadow_recognizer_control`], whose `file_on` is the file.
+    pub fn from_config_and_shadow(config: &Config, shadow: ShadowRecognizerControl) -> Self {
         Self {
             capture_output: config.capture_output.clone().unwrap_or_default(),
             player_name: config.player_name.clone().unwrap_or_default(),
@@ -96,7 +164,31 @@ impl SettingsForm {
             debug_ocr: config.debug_ocr,
             overlay_hotkey: crate::hotkey::DEFAULT_BIND.to_string(),
             overlay_hotkey_enabled: true,
+            shadow,
         }
+    }
+
+    /// Checkbox state. The env lock shows the extra reader even when the file is off.
+    pub fn displayed_reader(&self) -> ScoreboardReader {
+        if self.shadow.enabled() {
+            ScoreboardReader::Extra
+        } else {
+            ScoreboardReader::OcrV1
+        }
+    }
+
+    /// Value Save writes. Never the env override.
+    pub fn persisted_reader(&self) -> ScoreboardReader {
+        ScoreboardReader::from_file_flag(self.shadow.file_on)
+    }
+
+    /// Picker seam. Ignored while the env lock is on, so a click cannot
+    /// write the override into config.toml.
+    pub fn set_scoreboard_reader(&mut self, reader: ScoreboardReader) {
+        if self.shadow.locked {
+            return;
+        }
+        self.shadow.file_on = reader.file_flag();
     }
 
     pub fn set_text(&mut self, field: SettingsField, value: String) {
@@ -117,13 +209,15 @@ impl SettingsForm {
             SettingsToggle::AutoDetect => self.auto_detect_enabled = value,
             SettingsToggle::DebugOcr => self.debug_ocr = value,
             SettingsToggle::OverlayHotkey => self.overlay_hotkey_enabled = value,
+            SettingsToggle::ShadowRecognizer => {
+                self.set_scoreboard_reader(ScoreboardReader::from_file_flag(value));
+            }
         }
     }
 
-    /// Map the form onto `base`, keeping `data_dir`, `ocr_threads`,
-    /// `shadow_recognizer`, and `finished_game_close_secs`. Those keys are
-    /// config-file only; Settings has no control for them, so the values
-    /// already in `base` are kept.
+    /// Map the form onto `base`, keeping `data_dir`, `ocr_threads`, and
+    /// `finished_game_close_secs`. `shadow_recognizer` comes from the form's
+    /// persisted reader (the file value). An env lock never writes true by itself.
     pub fn to_config(&self, base: &Config) -> Config {
         Config {
             data_dir: base.data_dir.clone(),
@@ -140,7 +234,7 @@ impl SettingsForm {
             game_process_names: parse_process_names(&self.game_process_names),
             debug_ocr: self.debug_ocr,
             ocr_threads: base.ocr_threads,
-            shadow_recognizer: base.shadow_recognizer,
+            shadow_recognizer: self.persisted_reader().file_flag(),
         }
     }
 }
@@ -721,7 +815,35 @@ fn ocr_card(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
         );
     }
     body = body.push(actions);
+    body = body.push(shadow_reader_block(app));
     settings_card("Scoreboard reading", body.into())
+}
+
+fn shadow_reader_block(app: &TrackerApp) -> Element<'_, Message> {
+    let mut toggle = checkbox(app.settings.displayed_reader().file_flag())
+        .label(SHADOW_READER_LABEL)
+        .size(16)
+        .text_size(SIZE_BODY)
+        .style(checkbox_style);
+    if shadow_toggle_interactive(app.settings.shadow.locked) {
+        toggle = toggle.on_toggle(|v| Message::SettingsToggle(SettingsToggle::ShadowRecognizer, v));
+    }
+    let mut body = column![
+        toggle,
+        hint(SHADOW_READER_HINT),
+        hint(SHADOW_READER_RESTART),
+    ]
+    .spacing(4);
+    if app.settings.shadow.locked {
+        body = body.push(hint(SHADOW_READER_ENV_NOTE));
+    }
+    body.into()
+}
+
+/// False when the env override is on. The checkbox stays checked and does not
+/// emit toggles, so Save cannot persist the variable.
+pub(crate) fn shadow_toggle_interactive(locked: bool) -> bool {
+    !locked
 }
 
 fn diagnostics_card(app: &TrackerApp, _demo: bool) -> Element<'_, Message> {
@@ -988,12 +1110,14 @@ mod tests {
             debug_ocr: false,
             overlay_hotkey: crate::hotkey::DEFAULT_BIND.into(),
             overlay_hotkey_enabled: true,
+            shadow: Config::shadow_control(false, None),
         };
         let c = form.to_config(&base());
         assert!(c.capture_output.is_none());
         assert!(c.player_name.is_none());
         assert!(c.sync.is_none());
         assert!(c.game_process_names.is_empty());
+        assert!(!c.shadow_recognizer);
         assert_eq!(c.data_dir, PathBuf::from("/tmp/sst-ui-settings-test"));
         assert_eq!(c.ocr_threads, Some(2));
     }
@@ -1075,8 +1199,13 @@ mod tests {
         base.finished_game_close_secs = 240;
         base.game_process_names = vec!["Overwatch.exe".into()];
         base.debug_ocr = true;
-        let form = SettingsForm::from_config(&base);
+        base.shadow_recognizer = true;
+        let form = SettingsForm::from_config_and_shadow(
+            &base,
+            Config::shadow_control(base.shadow_recognizer, None),
+        );
         let out = form.to_config(&base);
+        assert_eq!(form.persisted_reader(), ScoreboardReader::Extra);
         assert_eq!(out.capture_output.as_deref(), Some("DP-1"));
         assert_eq!(out.player_name.as_deref(), Some("Ada"));
         assert_eq!(
@@ -1088,6 +1217,7 @@ mod tests {
         assert_eq!(out.finished_game_close_secs, 240);
         assert_eq!(out.game_process_names, vec!["Overwatch.exe"]);
         assert!(out.debug_ocr);
+        assert!(out.shadow_recognizer);
         assert_eq!(out.ocr_threads, Some(2));
         assert_eq!(form.overlay_hotkey, crate::hotkey::DEFAULT_BIND);
         assert!(form.overlay_hotkey_enabled);
@@ -1209,5 +1339,147 @@ mod tests {
     fn save_footer_label_stays_primary_action() {
         assert_eq!(SAVE_LABEL, "Save settings");
         assert_eq!(theme::SIZE_LABEL, 11.0);
+    }
+
+    #[test]
+    fn shadow_copy_is_plain() {
+        for copy in [
+            SHADOW_READER_LABEL,
+            SHADOW_READER_HINT,
+            SHADOW_READER_RESTART,
+            SHADOW_READER_ENV_NOTE,
+        ] {
+            assert!(!copy.contains('—'), "{copy}");
+            assert!(!copy.contains('–'), "{copy}");
+        }
+        assert_eq!(SHADOW_READER_LABEL, "Extra number reader (test)");
+        assert!(SHADOW_READER_HINT.contains("private log"));
+        assert!(SHADOW_READER_HINT.contains("saved games"));
+        assert!(SHADOW_READER_HINT.contains("off by default"));
+        assert!(SHADOW_READER_RESTART.contains("Restart"));
+        assert!(SHADOW_READER_RESTART.contains("when it starts"));
+        assert!(SHADOW_READER_ENV_NOTE.contains("SCUFFED_SHADOW_RECOGNIZER"));
+        assert!(SHADOW_READER_ENV_NOTE.contains("not written"));
+    }
+
+    #[test]
+    fn reader_choices_are_ocr_v1_then_the_extra_test_reader() {
+        assert_eq!(
+            ScoreboardReader::choices(),
+            [ScoreboardReader::OcrV1, ScoreboardReader::Extra]
+        );
+        assert_eq!(ScoreboardReader::OcrV1.id(), "ocr-v1");
+        assert_eq!(ScoreboardReader::Extra.id(), "cv-v2");
+        assert!(!ScoreboardReader::OcrV1.file_flag());
+        assert!(ScoreboardReader::Extra.file_flag());
+        assert!(shadow_toggle_interactive(false));
+        assert!(!shadow_toggle_interactive(true));
+    }
+
+    #[test]
+    fn shadow_toggle_round_trip_preserves_the_rest_of_the_file() {
+        let raw = r#"
+data_dir = "/tmp/sst-ui-settings-test"
+player_name = "the streamer"
+session_window_secs = 900
+finished_game_close_secs = 240
+debug_ocr = true
+ocr_threads = 2
+game_process_names = ["Overwatch.exe"]
+
+[auto_detect]
+enabled = false
+poll_interval_secs = 8
+cooldown_secs = 60
+"#;
+        let base: Config = toml::from_str(raw).unwrap();
+        assert!(!base.shadow_recognizer);
+        let mut form = SettingsForm::from_config_and_shadow(
+            &base,
+            Config::shadow_control(base.shadow_recognizer, None),
+        );
+        assert_eq!(form.displayed_reader(), ScoreboardReader::OcrV1);
+        assert_eq!(form.persisted_reader(), ScoreboardReader::OcrV1);
+        assert!(shadow_toggle_interactive(form.shadow.locked));
+
+        form.set_toggle(SettingsToggle::ShadowRecognizer, true);
+        assert_eq!(form.persisted_reader(), ScoreboardReader::Extra);
+        assert_eq!(form.displayed_reader().id(), ScoreboardReader::CV_V2);
+        let saved = toml::to_string_pretty(&form.to_config(&base)).unwrap();
+        assert!(saved.contains("shadow_recognizer = true"), "{saved}");
+        assert!(saved.contains("the streamer"), "{saved}");
+        assert!(saved.contains("finished_game_close_secs = 240"), "{saved}");
+        assert!(saved.contains("ocr_threads = 2"), "{saved}");
+        assert!(saved.contains("session_window_secs = 900"), "{saved}");
+
+        let loaded: Config = toml::from_str(&saved).unwrap();
+        let mut again = SettingsForm::from_config_and_shadow(
+            &loaded,
+            Config::shadow_control(loaded.shadow_recognizer, None),
+        );
+        let back = again.to_config(&loaded);
+        assert!(back.shadow_recognizer);
+        assert_eq!(back.player_name.as_deref(), Some("the streamer"));
+        assert_eq!(back.finished_game_close_secs, 240);
+        assert_eq!(back.ocr_threads, Some(2));
+        assert_eq!(back.session_window_secs, 900);
+        assert!(back.debug_ocr);
+        assert!(!back.auto_detect.enabled);
+
+        again.set_scoreboard_reader(ScoreboardReader::OcrV1);
+        let off = toml::to_string_pretty(&again.to_config(&loaded)).unwrap();
+        assert!(!off.contains("shadow_recognizer"), "{off}");
+        assert!(off.contains("the streamer"), "{off}");
+        assert!(off.contains("finished_game_close_secs = 240"), "{off}");
+    }
+
+    #[test]
+    fn env_override_shows_locked_and_is_not_saved() {
+        let base = base();
+        assert!(!base.shadow_recognizer);
+        for env in [Some("1"), Some("true"), Some("yes")] {
+            let control = Config::shadow_control(base.shadow_recognizer, env);
+            assert!(control.locked, "{env:?}");
+            assert!(control.enabled(), "{env:?}");
+            assert!(!control.file_on, "{env:?}");
+
+            let mut form = SettingsForm::from_config_and_shadow(&base, control);
+            assert_eq!(form.displayed_reader(), ScoreboardReader::Extra);
+            assert_eq!(form.persisted_reader(), ScoreboardReader::OcrV1);
+            assert!(!shadow_toggle_interactive(form.shadow.locked));
+
+            form.set_toggle(SettingsToggle::ShadowRecognizer, true);
+            form.set_toggle(SettingsToggle::ShadowRecognizer, false);
+            form.set_scoreboard_reader(ScoreboardReader::Extra);
+            assert_eq!(form.persisted_reader(), ScoreboardReader::OcrV1);
+            assert_eq!(form.displayed_reader(), ScoreboardReader::Extra);
+
+            form.player_name = "the streamer".into();
+            let out = form.to_config(&base);
+            assert!(!out.shadow_recognizer, "{env:?} must not be saved");
+            assert_eq!(out.player_name.as_deref(), Some("the streamer"));
+            assert_eq!(out.ocr_threads, Some(2));
+            assert_eq!(out.data_dir, base.data_dir);
+            let raw = toml::to_string_pretty(&out).unwrap();
+            assert!(
+                !raw.contains("shadow_recognizer"),
+                "{env:?} leaked into the file: {raw}"
+            );
+        }
+    }
+
+    #[test]
+    fn env_lock_does_not_clear_a_file_that_was_already_on() {
+        let mut base = base();
+        base.shadow_recognizer = true;
+        let control = Config::shadow_control(true, Some("TRUE"));
+        let mut form = SettingsForm::from_config_and_shadow(&base, control);
+        assert!(form.shadow.locked);
+        assert_eq!(form.displayed_reader(), ScoreboardReader::Extra);
+        form.set_scoreboard_reader(ScoreboardReader::OcrV1);
+        let out = form.to_config(&base);
+        assert!(out.shadow_recognizer);
+        let raw = toml::to_string_pretty(&out).unwrap();
+        assert!(raw.contains("shadow_recognizer = true"), "{raw}");
     }
 }
