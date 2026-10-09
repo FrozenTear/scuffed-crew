@@ -359,6 +359,8 @@ A saved zip may be handed to an officer before upload exists. The file is the pr
 
 When the endpoint exists, the same preview gains an upload action that POSTs that same zip. Save report can remain as a local copy. Upload does not ship until the site has a My reports page with a Delete button and a Withdraw button for the member's own reports (section 8). The app does not send the zip anywhere else in the meantime.
 
+If the server has reports switched off, upload gets 503 with `{"error":"reports_disabled"}` (section 8). The app shows "Reports are off right now". It keeps the saved bundle. It does not retry on its own. The member can try the upload again by hand later.
+
 ## 8. API contract
 
 This section is the contract the API in #189 builds against. The privacy rules and the status codes below are fixed. How the desktop app obtains a site session is still open.
@@ -386,6 +388,8 @@ Limits: the request body is at most 10 MB (`10 * 1024 * 1024` bytes). The uncomp
 The server checks the zip again. It does not trust the client. It responds 400 for a bad manifest, a path that escapes the zip, a repeated JSON key, JPEG magic (`FF D8 FF`), a file named as JPEG, or a PNG that is not a real 8-bit image (bad magic, bad CRC, interlace, or a critical chunk other than `IHDR`, `IDAT`, `IEND`, or `PLTE`). On that failure it stores nothing. It does not keep the last value of a repeated key.
 
 Text, EXIF, time, colour profile, and physical-pixel chunks are stripped. The server rebuilds each PNG, rebuilds the zip, and recomputes each file `sha256`, the byte sizes, and the zip `sha256`. The stored manifest uses those recomputed hashes. A missing or bad session is 401. A signed-in user who is not a member is 403.
+
+When reports are switched off, every report route returns 503. The body is exactly `{"error":"reports_disabled"}`. That covers create, list, download, the manifest read, delete, and both withdraw routes. The server stores nothing for that response. It does not answer 401, 404, or 200 instead.
 
 Storage is private. The zip bytes sit outside the database and outside the git repo. They are not placed in the public upload directory and they are not served as static files. The database may store metadata only: id, member id, received time, training flag, expiry, byte size, zip sha256, reason category, app version, and recognizer ids. Free text is stored with that metadata for officers, not in a public response. Image bytes and log bytes are not columns in the database.
 
@@ -432,6 +436,8 @@ Name rebuild fixture, required: seed at least three fake names. Each name is at 
 - No pair of glyphs that the bundle ties together spells a seeded name, because the bundle does not tie them together.
 
 Repeat-report fixture: use the same session and the same seeded names, each with more than two wrong letters. Build two bundles with the glyph box on. Each name contributes the same two letters in both zips. The two zips together do not contain a third letter from that name. Ids and order may differ.
+
+Reports-off fixture, required: with reports switched off, each report route returns 503 and the body `{"error":"reports_disabled"}`. Nothing is stored. On that response the app shows "Reports are off right now", the saved zip is still on disk, and no automatic retry is queued. A later upload happens only when the member tries again by hand.
 
 ## 10. Out of scope and open questions
 
