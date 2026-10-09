@@ -1080,6 +1080,7 @@ Detail line with `inline`.
     fn bundled_recent_releases_lead_with_a_summary_and_hide_install() {
         assert!(BUNDLED_CHANGELOG.contains("first paragraph under the `## X.Y.Z` heading"));
         assert!(BUNDLED_CHANGELOG.contains("a `### Highlights` list gives two to four"));
+        assert!(BUNDLED_CHANGELOG.contains("Each bullet adds a concrete change the summary"));
         for version in ["0.4.23", "0.4.22", "0.4.21", "0.4.20", "0.4.19"] {
             let raw = workflow_body(BUNDLED_CHANGELOG, version);
             assert!(
@@ -1114,6 +1115,10 @@ Detail line with `inline`.
             assert!(!notes.body_markdown.contains("### Highlights"), "{version}");
             for bullet in &notes.highlights {
                 assert!(!bullet.contains('\u{2014}'), "{version} bullet: {bullet}");
+                assert!(
+                    !notes.summary.contains(bullet),
+                    "{version} highlight repeats the summary: {bullet}"
+                );
                 assert!(
                     !notes.body_markdown.contains(bullet),
                     "{version} highlight leaked into details: {bullet}"
