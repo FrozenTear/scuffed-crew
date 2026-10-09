@@ -3915,9 +3915,9 @@ enum PreparedRow {
 /// stores that row locally. Adlersbrunn with stats on only one team is not
 /// stored as Eichenwalde.
 ///
-/// An untrusted Practice Range read with no open map is dropped. Storing
-/// it used to leave a blank map, which uploads, and which the blank-map
-/// review hold would keep until someone picked a map.
+/// An untrusted read of a local-only map with no open map is dropped.
+/// Storing it used to leave a blank map, which uploads, and which the
+/// blank-map review hold would keep until someone picked a map.
 fn prepare_capture_row(
     parsed: &mut storage::PersonalMatch,
     staged: &mut StagedCapture,
@@ -3931,10 +3931,10 @@ fn prepare_capture_row(
             .map_source
             .is_some_and(|source| source.trusted_for_board_split())
     {
-        let practice = parse::stored_game_mode(&staged.map_name) == "Practice";
         // `session_map` is the open game. On a split that game is the one
-        // being closed, and an untrusted Deathmatch read must not name the
-        // new session after it.
+        // being closed, and an untrusted read must not name the new session
+        // after it. With no open map the row would be blank, and a blank
+        // map uploads, so the capture is dropped.
         let fallback = if staged.split {
             None
         } else {
@@ -3943,8 +3943,8 @@ fn prepare_capture_row(
         staged.map_name = fallback.unwrap_or("").to_string();
         staged.recorded_map = (!staged.map_name.is_empty()).then(|| staged.map_name.clone());
         staged.map_source = None;
-        if practice && staged.map_name.is_empty() {
-            tracing::info!("practice range is not a game, not stored");
+        if staged.map_name.is_empty() {
+            tracing::info!("untracked map with no open game is not stored");
             return PreparedRow::Drop;
         }
     }
@@ -5535,8 +5535,9 @@ where
         }
     };
     let (local_only, unsynced): (Vec<_>, Vec<_>) = unsynced.into_iter().partition(|row| {
-        let mode = parse::uploaded_game_mode(row.display_map_name(), &row.game_mode);
-        !parse::stats_row_is_tracked(row.display_map_name(), &mode)
+        let sent = parse::uploaded_game_mode(row.display_map_name(), &row.game_mode);
+        !parse::stats_row_is_tracked(row.display_map_name(), &row.game_mode)
+            || !parse::stats_row_is_tracked(row.display_map_name(), &sent)
     });
     if !local_only.is_empty() {
         let claims = storage::SyncClaim::capture(&local_only);
@@ -11259,6 +11260,54 @@ mod tests {
             !called.load(std::sync::atomic::Ordering::SeqCst),
             "a deathmatch-only batch must not call upload"
         );
+    }
+
+    #[tokio::test]
+    async fn arcade_and_stadium_rows_stay_local() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = storage::LocalStore::open(dir.path()).await.unwrap();
+        let local = [
+            ("assault", "Hanamura", "Assault"),
+            ("elim", "Black Forest", "Elimination"),
+            ("ctf", "Ayutthaya", "Capture the Flag"),
+            ("race", "Powder Keg Mine", "Payload Race"),
+            ("shop", "Workshop Chamber", "Workshop"),
+            ("stadium", "Arena Victoriae", "Stadium"),
+            ("temple", "Temple of Anubis", "Assault"),
+        ];
+        for (id, map, mode) in local {
+            let mut row = test_match(id, "victory");
+            row.map_name = map.into();
+            row.game_mode = mode.into();
+            store.insert_match(row).await.unwrap();
+        }
+        let mut busan = test_match("busan-row", "victory");
+        busan.map_name = "Busan".into();
+        busan.game_mode = "Control".into();
+        store.insert_match(busan).await.unwrap();
+        let mut mode_only = test_match("mode-assault", "victory");
+        mode_only.map_name = "Busan".into();
+        mode_only.game_mode = "Assault".into();
+        store.insert_match(mode_only).await.unwrap();
+
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen_upload = std::sync::Arc::clone(&seen);
+        try_sync_with(&store, dir.path(), None, move |matches, _| {
+            let seen_upload = std::sync::Arc::clone(&seen_upload);
+            async move {
+                *seen_upload.lock().unwrap() =
+                    matches.into_iter().map(|row| row.session_id).collect();
+                Ok(upload_ok())
+            }
+        })
+        .await;
+        assert_eq!(*seen.lock().unwrap(), vec!["busan-row".to_string()]);
+        let rows = store.get_all_matches().await.unwrap();
+        assert!(
+            rows.iter().all(|row| row.synced),
+            "local-only rows are marked synced and not left pending: {rows:?}"
+        );
+        assert!(store.get_unsynced().await.unwrap().is_empty());
     }
 
     #[tokio::test]

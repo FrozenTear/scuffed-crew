@@ -217,23 +217,53 @@ fn best_word_score(text: &str, pattern: &str) -> f64 {
         .fold(0.0_f64, f64::max)
 }
 
-/// Deathmatch and practice maps are kept in the local store and never
-/// uploaded. Only a trusted map read (top bar, accolade, or an already
-/// trusted session) may divert a capture. A fuzzy board read must not.
+/// Modes kept in the local store and never uploaded.
+///
+/// Deathmatch and Practice were already local. Workshop, Elimination,
+/// Capture the Flag, Payload Race, Assault, and Stadium stay local too,
+/// until there is a decision on whether those games count.
+const UNTRACKED_MODES: &[&str] = &[
+    "Deathmatch",
+    "Practice",
+    "Workshop",
+    "Elimination",
+    "Capture the Flag",
+    "Payload Race",
+    "Assault",
+    "Stadium",
+];
+
+/// True when `mode` is one of [`UNTRACKED_MODES`], ignoring ASCII case.
+pub fn mode_is_untracked(mode: &str) -> bool {
+    let mode = mode.trim();
+    UNTRACKED_MODES
+        .iter()
+        .any(|name| mode.eq_ignore_ascii_case(name))
+}
+
+/// Deathmatch, practice, and the other [`UNTRACKED_MODES`] maps are kept
+/// in the local store and never uploaded. Only a trusted map read (top
+/// bar, accolade, or an already trusted session) may divert a capture. A
+/// fuzzy board read must not.
 ///
 /// Practice Range is not a game. With no table entry the name used to
 /// canonicalize to nothing, the row kept an empty map, and that empty map
 /// was uploaded. The Practice bucket keeps it out of uploads.
 pub fn map_is_untracked(name: &str) -> bool {
-    matches!(map_mode(name), Some("Deathmatch" | "Practice"))
+    map_mode(name).is_some_and(mode_is_untracked)
 }
 
 /// Reason recorded when an untracked map is kept out of uploads.
 pub fn untracked_close_reason(name: &str) -> &'static str {
-    if map_mode(name) == Some("Practice") {
-        "practice: not tracked"
-    } else {
-        "deathmatch: not tracked"
+    match map_mode(name) {
+        Some("Practice") => "practice: not tracked",
+        Some("Workshop") => "workshop: not tracked",
+        Some("Elimination") => "elimination: not tracked",
+        Some("Capture the Flag") => "capture the flag: not tracked",
+        Some("Payload Race") => "payload race: not tracked",
+        Some("Assault") => "assault: not tracked",
+        Some("Stadium") => "stadium: not tracked",
+        _ => "deathmatch: not tracked",
     }
 }
 
@@ -248,12 +278,10 @@ pub fn uploaded_game_mode(map_name: &str, game_mode: &str) -> String {
     }
 }
 
-/// A stats row is uploaded only when neither the map nor the mode is
-/// Deathmatch or Practice.
+/// A stats row is uploaded only when neither the map nor the mode is in
+/// [`UNTRACKED_MODES`].
 pub fn stats_row_is_tracked(map_name: &str, game_mode: &str) -> bool {
-    !map_is_untracked(map_name)
-        && !game_mode.eq_ignore_ascii_case("Deathmatch")
-        && !game_mode.eq_ignore_ascii_case("Practice")
+    !map_is_untracked(map_name) && !mode_is_untracked(game_mode)
 }
 
 /// Mode stored on a row, from the canonical map that was actually kept.
@@ -937,17 +965,13 @@ pub(crate) fn map_mode(canonical_name: &str) -> Option<&'static str> {
         "Blizzard World" | "Eichenwalde" | "Hollywood" | "King's Row" | "Midtown"
         | "Neon Junction" | "Numbani" | "Paraiso" => Some("Hybrid"),
         "Antarctic Peninsula"
-        | "Arena Victoriae"
         | "Busan"
-        | "Gogadoro"
         | "Ilios"
         | "Lijiang Tower"
         | "Nepal"
         | "Oasis"
-        | "Samoa"
-        | "Wuxing University - Water College" => Some("Control"),
-        "Colosseo" | "Esperanca" | "New Queen Street" | "Place Lacroix" | "Redwood Dam"
-        | "Runasapi" | "Serenza" => Some("Push"),
+        | "Samoa" => Some("Control"),
+        "Colosseo" | "Esperanca" | "New Queen Street" | "Runasapi" => Some("Push"),
         "Aatlis" | "New Junk City" | "Suravasa" => Some("Flashpoint"),
         "Hanaoka" | "Throne of Anubis" => Some("Clash"),
         "Hanamura"
@@ -958,6 +982,12 @@ pub(crate) fn map_mode(canonical_name: &str) -> Option<&'static str> {
         "Black Forest" | "Castillo" | "Ecopoint: Antarctica" | "Necropolis" => Some("Elimination"),
         "Ayutthaya" => Some("Capture the Flag"),
         "Powder Keg Mine" | "Thames District" => Some("Payload Race"),
+        "Arena Victoriae"
+        | "Gogadoro"
+        | "Place Lacroix"
+        | "Redwood Dam"
+        | "Serenza"
+        | "Wuxing University - Water College" => Some("Stadium"),
         "Workshop Chamber" | "Workshop Expanse" | "Workshop Green Screen" | "Workshop Island" => {
             Some("Workshop")
         }
@@ -2031,69 +2061,71 @@ mod hero_map_name_tests {
 
     #[test]
     fn maps_missing_from_the_ocr_table_canonicalize_with_their_mode() {
+        // Assault, Elimination, Capture the Flag, Payload Race, Workshop,
+        // and Stadium stay local. `tracked` is false for every one of them.
         let cases = [
-            ("Hanamura", "Hanamura", "Assault", true),
-            ("HANAMURA", "Hanamura", "Assault", true),
+            ("Hanamura", "Hanamura", "Assault", false),
+            ("HANAMURA", "Hanamura", "Assault", false),
             (
                 "Horizon Lunar Colony",
                 "Horizon Lunar Colony",
                 "Assault",
-                true,
+                false,
             ),
-            ("HORIZON", "Horizon Lunar Colony", "Assault", true),
-            ("LUNAR COLONY", "Horizon Lunar Colony", "Assault", true),
-            ("Paris", "Paris", "Assault", true),
-            ("PARIS", "Paris", "Assault", true),
+            ("HORIZON", "Horizon Lunar Colony", "Assault", false),
+            ("LUNAR COLONY", "Horizon Lunar Colony", "Assault", false),
+            ("Paris", "Paris", "Assault", false),
+            ("PARIS", "Paris", "Assault", false),
             (
                 "Volskaya Industries",
                 "Volskaya Industries",
                 "Assault",
-                true,
+                false,
             ),
-            ("VOLSKAYA", "Volskaya Industries", "Assault", true),
-            ("Black Forest", "Black Forest", "Elimination", true),
-            ("Castillo", "Castillo", "Elimination", true),
-            ("Necropolis", "Necropolis", "Elimination", true),
-            ("Ayutthaya", "Ayutthaya", "Capture the Flag", true),
-            ("Arena Victoriae", "Arena Victoriae", "Control", true),
-            ("VICTORIAE", "Arena Victoriae", "Control", true),
-            ("Gogadoro", "Gogadoro", "Control", true),
+            ("VOLSKAYA", "Volskaya Industries", "Assault", false),
+            ("Black Forest", "Black Forest", "Elimination", false),
+            ("Castillo", "Castillo", "Elimination", false),
+            ("Necropolis", "Necropolis", "Elimination", false),
+            ("Ayutthaya", "Ayutthaya", "Capture the Flag", false),
+            ("Arena Victoriae", "Arena Victoriae", "Stadium", false),
+            ("VICTORIAE", "Arena Victoriae", "Stadium", false),
+            ("Gogadoro", "Gogadoro", "Stadium", false),
             (
                 "Wuxing University - Water College",
                 "Wuxing University - Water College",
-                "Control",
-                true,
+                "Stadium",
+                false,
             ),
             (
                 "WUXING",
                 "Wuxing University - Water College",
-                "Control",
-                true,
+                "Stadium",
+                false,
             ),
             (
                 "WATER COLLEGE",
                 "Wuxing University - Water College",
-                "Control",
-                true,
+                "Stadium",
+                false,
             ),
-            ("Place Lacroix", "Place Lacroix", "Push", true),
-            ("LACROIX", "Place Lacroix", "Push", true),
-            ("Redwood Dam", "Redwood Dam", "Push", true),
-            ("REDWOOD", "Redwood Dam", "Push", true),
-            ("Serenza", "Serenza", "Push", true),
-            ("Powder Keg Mine", "Powder Keg Mine", "Payload Race", true),
-            ("POWDER KEG MINES", "Powder Keg Mine", "Payload Race", true),
-            ("Thames District", "Thames District", "Payload Race", true),
-            ("THAMES", "Thames District", "Payload Race", true),
-            ("Workshop Chamber", "Workshop Chamber", "Workshop", true),
-            ("Workshop Expanse", "Workshop Expanse", "Workshop", true),
+            ("Place Lacroix", "Place Lacroix", "Stadium", false),
+            ("LACROIX", "Place Lacroix", "Stadium", false),
+            ("Redwood Dam", "Redwood Dam", "Stadium", false),
+            ("REDWOOD", "Redwood Dam", "Stadium", false),
+            ("Serenza", "Serenza", "Stadium", false),
+            ("Powder Keg Mine", "Powder Keg Mine", "Payload Race", false),
+            ("POWDER KEG MINES", "Powder Keg Mine", "Payload Race", false),
+            ("Thames District", "Thames District", "Payload Race", false),
+            ("THAMES", "Thames District", "Payload Race", false),
+            ("Workshop Chamber", "Workshop Chamber", "Workshop", false),
+            ("Workshop Expanse", "Workshop Expanse", "Workshop", false),
             (
                 "Workshop Green Screen",
                 "Workshop Green Screen",
                 "Workshop",
-                true,
+                false,
             ),
-            ("Workshop Island", "Workshop Island", "Workshop", true),
+            ("Workshop Island", "Workshop Island", "Workshop", false),
             ("Kanezaka", "Kanezaka", "Deathmatch", false),
             ("Malevento", "Malevento", "Deathmatch", false),
             ("Petra", "Petra", "Deathmatch", false),
@@ -2115,9 +2147,37 @@ mod hero_map_name_tests {
         assert_eq!(canonical_map("HANAOKA").as_deref(), Some("Hanaoka"));
         assert_eq!(canonical_map("Paraiso").as_deref(), Some("Paraiso"));
         assert_eq!(canonical_map("PARAISO").as_deref(), Some("Paraiso"));
-        assert!(stats_row_is_tracked("Hanamura", "Assault"));
+        assert!(!stats_row_is_tracked("Hanamura", "Assault"));
         assert!(!stats_row_is_tracked("Practice Range", "Practice"));
         assert!(!stats_row_is_tracked("Busan", "Practice"));
+        assert!(stats_row_is_tracked("Busan", "Control"));
+        assert!(stats_row_is_tracked("King's Row", "Hybrid"));
+    }
+
+    #[test]
+    fn arcade_and_stadium_modes_stay_local() {
+        for (map, mode) in [
+            ("Hanamura", "Assault"),
+            ("Temple of Anubis", "Assault"),
+            ("Black Forest", "Elimination"),
+            ("Ecopoint: Antarctica", "Elimination"),
+            ("Ayutthaya", "Capture the Flag"),
+            ("Powder Keg Mine", "Payload Race"),
+            ("Thames District", "Payload Race"),
+            ("Workshop Chamber", "Workshop"),
+            ("Arena Victoriae", "Stadium"),
+            ("Place Lacroix", "Stadium"),
+            ("Château Guillard", "Deathmatch"),
+            ("Practice Range", "Practice"),
+        ] {
+            assert_eq!(map_mode(map), Some(mode), "{map}");
+            assert!(map_is_untracked(map), "{map}");
+            assert!(!stats_row_is_tracked(map, mode), "{map}");
+            assert!(
+                !stats_row_is_tracked("Busan", mode),
+                "{mode} on another map stays local"
+            );
+        }
     }
 
     #[test]

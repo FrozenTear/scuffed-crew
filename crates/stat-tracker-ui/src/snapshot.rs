@@ -47,7 +47,9 @@ pub fn games_from_snapshot(snap: &Snapshot) -> Vec<Game> {
     for m in &snap.matches {
         let map = m.display_map_name();
         let mode = stat_tracker::parse::uploaded_game_mode(map, &m.game_mode);
-        if !stat_tracker::parse::stats_row_is_tracked(map, &mode) {
+        if !stat_tracker::parse::stats_row_is_tracked(map, &m.game_mode)
+            || !stat_tracker::parse::stats_row_is_tracked(map, &mode)
+        {
             continue;
         }
         if m.session_id.is_empty() {
@@ -166,5 +168,14 @@ mod tests {
         let games = games_from_snapshot(&snap);
         assert_eq!(games.len(), tracked);
         assert!(games.iter().all(|game| game.session_id != "practice-range"));
+
+        let mut assault = snap.matches[0].clone();
+        assault.session_id = "hanamura".into();
+        assault.map_name = "Hanamura".into();
+        assault.game_mode = "Assault".into();
+        snap.matches.insert(0, assault);
+        let games = games_from_snapshot(&snap);
+        assert_eq!(games.len(), tracked);
+        assert!(games.iter().all(|game| game.session_id != "hanamura"));
     }
 }
