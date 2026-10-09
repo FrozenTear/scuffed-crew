@@ -1,7 +1,9 @@
 use stat_tracker::boundary::{self, ResultMark};
 use stat_tracker::capture_gate::{self, Counters, GateState};
 use stat_tracker::hero_auth::{self, HeroAuthState, HeroSource};
-use stat_tracker::{capture, config, detect, ocr, parse, setup, shadow, storage, sync};
+use stat_tracker::{
+    capture, config, detect, ocr, parse, reader_apply, setup, shadow, storage, sync,
+};
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -282,6 +284,9 @@ struct DaemonCtx {
     /// is on. Never joined: dropping it on exit drops the sender, so a slow
     /// shadow frame can not delay the final session save.
     shadow: Option<shadow::worker::ShadowWorker>,
+    /// `reader = "new"`. Saved rows may use the new reader. Game boundaries
+    /// stay on ocr-v1.
+    use_new_reader: bool,
 }
 
 /// Per-capture parameters decided by the session state machine at Tab time.
@@ -328,6 +333,10 @@ struct CaptureRequest {
     carried_deferred: Option<Counters>,
     carried_deferred_hero: Option<String>,
     carried_deferred_at: Option<chrono::DateTime<Utc>>,
+    /// Result-word reads collected for this game while `reader = "new"`.
+    /// Not persisted. A restart drops them, and the next capture keeps the
+    /// ocr-v1 result for that field.
+    result_evidence: shadow::result::ResultEvidence,
 }
 
 /// Package version shown by `--version` / `--help`.
@@ -434,6 +443,11 @@ async fn main() -> anyhow::Result<()> {
 
     let store = open_store(&config.data_dir).await?;
 
+    if config.uses_new_reader() {
+        shadow::init(&shadow::ReaderConfig::from_data_dir(&config.data_dir));
+        tracing::info!("new scoreboard reader on for saved stats");
+    }
+
     let portraits_path = detect::hero_portrait::portraits_dir(&config.data_dir);
     let portrait_matcher = Arc::new(detect::hero_portrait::PortraitMatcher::load(
         &portraits_path,
@@ -459,6 +473,7 @@ async fn main() -> anyhow::Result<()> {
         data_dir,
         empty_map_reads: std::sync::atomic::AtomicUsize::new(0),
         shadow: shadow::worker::ShadowWorker::start_if_enabled(&config),
+        use_new_reader: config.uses_new_reader(),
     });
     run_loop(ctx).await
 }
@@ -832,6 +847,9 @@ struct ActiveGame {
     /// except when recovery drops the hint because its timestamp cannot be
     /// mapped onto this boot: the lock stays.
     text_fallback_locked: bool,
+    /// Result-word reads for `reader = "new"`. Memory only: a restart loses
+    /// them and the next capture falls back the result field to ocr-v1.
+    result_evidence: shadow::result::ResultEvidence,
 }
 
 impl ActiveGame {
@@ -876,6 +894,7 @@ impl ActiveGame {
             deferred_at: None,
             deferred_imported: false,
             text_fallback_locked: false,
+            result_evidence: shadow::result::ResultEvidence::default(),
         }
     }
 
@@ -1644,6 +1663,7 @@ fn active_game_from_persisted(p: PersistedGame) -> Option<ActiveGame> {
         // survive the restart. The arm is the other way around: it is
         // dropped in that same case, above.
         text_fallback_locked: p.text_fallback_locked,
+        result_evidence: shadow::result::ResultEvidence::default(),
     })
 }
 
@@ -2445,6 +2465,7 @@ fn build_capture_request(g: &ActiveGame, opened_by_this_tab: bool, now: Instant)
         carried_deferred: g.deferred,
         carried_deferred_hero: g.deferred_hero.clone(),
         carried_deferred_at: g.deferred_at,
+        result_evidence: g.result_evidence.clone(),
     }
 }
 
@@ -3086,6 +3107,7 @@ async fn run_loop(ctx: Arc<DaemonCtx>) -> anyhow::Result<()> {
     let new_game_debounce = std::time::Duration::from_secs(auto_detect.cooldown_secs);
     let tab_debounce = std::time::Duration::from_secs(3);
     let finished_close = ctx.finished_game_close;
+    let use_new_reader = ctx.use_new_reader;
 
     // Periodic sync runs as a spawned task so a slow or hung server can't
     // stall Tab capture, polling, or shutdown. Single-flight: while one sync
@@ -3283,7 +3305,7 @@ async fn run_loop(ctx: Arc<DaemonCtx>) -> anyhow::Result<()> {
                             .as_ref()
                             .map(|streak| (streak.outcome, streak.seen_at.elapsed()));
                         let mut stability = std::mem::take(&mut st.ocr_stability);
-                        let (signal, phase, accolade_map, end_reel, stability) = tokio::task::spawn_blocking(move || {
+                        let (signal, phase, accolade_map, end_reel, stability, result_read) = tokio::task::spawn_blocking(move || {
                             if let Some(dir) = &dump_dir {
                                 save_frame_ring(dir, "poll", &img, POLL_DUMP_KEEP);
                             }
@@ -3329,6 +3351,14 @@ async fn run_loop(ctx: Arc<DaemonCtx>) -> anyhow::Result<()> {
                             // and is excluded inside detect_end_reel; do not
                             // treat GamePhase::HeroBan as end_reel_wake_until.
                             let end_reel = detect::match_end::detect_end_reel(&img, &rgb);
+                            // Result templates are not on the Tab frame. A
+                            // polled outcome frame feeds the new reader's
+                            // result only. It does not decide the game end.
+                            let result_read = if use_new_reader && signal.is_some() {
+                                Some(shadow::read_result(&img))
+                            } else {
+                                None
+                            };
                             if let Some(dir) = &on_hit_dir
                                 && let Some((kind, outcome)) =
                                     poll_debug_hit(signal, prior_streak, OUTCOME_CONFIRM_WINDOW)
@@ -3340,11 +3370,16 @@ async fn run_loop(ctx: Arc<DaemonCtx>) -> anyhow::Result<()> {
                                     POLL_DUMP_KEEP,
                                 );
                             }
-                            (signal, phase, accolade_map, end_reel, stability)
+                            (signal, phase, accolade_map, end_reel, stability, result_read)
                         }).await.unwrap_or_else(|_| {
-                            (None, detect::GamePhase::Unknown, None, false, detect::stability::FrameStability::default())
+                            (None, detect::GamePhase::Unknown, None, false, detect::stability::FrameStability::default(), None)
                         });
                         st.ocr_stability = stability;
+                        if let Some(read) = result_read
+                            && let Some(game) = st.active_game.as_mut()
+                        {
+                            game.result_evidence.add(read);
+                        }
 
                         if end_reel {
                             let already_awake = st
@@ -3746,6 +3781,8 @@ async fn store_held_board(
         edited_at: None,
         heroes_played: Vec::new(),
         segment_resolutions: Vec::new(),
+        recognizer: scuffed_types::RECOGNIZER_OCR_V1.to_string(),
+        suspect_fields: Vec::new(),
     };
     storage::append_match_log(data_dir, &row);
     store
@@ -4019,6 +4056,71 @@ async fn commit_capture_rows(
     )
     .await?;
     Ok(created)
+}
+
+#[allow(clippy::too_many_arguments)]
+/// Replace stored fields from the new reader when the member's own row agrees.
+///
+/// A missing board, an unknown team size, or an uncertain own row leaves the
+/// ocr-v1 row unchanged, including its recognizer tag. The map and mode
+/// already chosen by capture policy stay even when the board names another
+/// map. This does not touch the capture gate, the session map, or the report.
+async fn apply_new_reader(
+    parsed: &mut storage::PersonalMatch,
+    frame: &image::DynamicImage,
+    evidence: &shadow::result::ResultEvidence,
+    player_name: Option<&str>,
+    rows: &[ocr::RowOcrResult],
+    player_row_idx: Option<usize>,
+    team_size: usize,
+) {
+    let frame = frame.clone();
+    let evidence = evidence.clone();
+    let board = tokio::task::spawn_blocking(move || {
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut board = shadow::read_board(&frame);
+            board.set_result(shadow::result_field(&evidence));
+            board
+        }))
+        .unwrap_or_else(|_| shadow::reader::not_found(shadow::BoardStatus::NotFound))
+    })
+    .await
+    .unwrap_or_else(|_| shadow::reader::not_found(shadow::BoardStatus::NotFound));
+    let name_match = player_name.and_then(|name| parse::find_player_row_by_name(rows, name));
+    let own = reader_apply::own_row(player_name, name_match, player_row_idx, team_size);
+    let ocr = reader_apply::OcrSnapshot {
+        map: parsed.map_name.clone(),
+        mode: parsed.game_mode.clone(),
+        result: parsed.outcome.clone(),
+        hero: parsed.hero.clone(),
+        elims: parsed.elims,
+        assists: parsed.assists,
+        deaths: parsed.deaths,
+        damage: parsed.damage,
+        healing: parsed.healing,
+        mitigation: parsed.mitigation,
+    };
+    let saved = reader_apply::merge_saved(&ocr, own, Some(&board));
+    if parsed.hero != saved.hero {
+        parsed.role = parse::guess_role_public(&saved.hero);
+    }
+    parsed.map_name = saved.map;
+    parsed.game_mode = saved.mode;
+    parsed.outcome = saved.result;
+    parsed.hero = saved.hero;
+    parsed.elims = saved.elims;
+    parsed.assists = saved.assists;
+    parsed.deaths = saved.deaths;
+    parsed.damage = saved.damage;
+    parsed.healing = saved.healing;
+    parsed.mitigation = saved.mitigation;
+    parsed.recognizer = saved.recognizer.to_string();
+    parsed.suspect_fields = saved.suspect_fields;
+    tracing::info!(
+        recognizer = parsed.recognizer,
+        suspects = ?parsed.suspect_fields,
+        "saved scoreboard reader"
+    );
 }
 
 async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<CaptureReport> {
@@ -4493,6 +4595,18 @@ async fn handle_capture(ctx: &DaemonCtx, req: CaptureRequest) -> anyhow::Result<
             // first capture creates the session row; later captures (including hero
             // swaps and the post-match scoreboard) append to the same session.
             parsed.session_id = target_session.clone();
+            if ctx.use_new_reader {
+                apply_new_reader(
+                    &mut parsed,
+                    &frame_img,
+                    &req.result_evidence,
+                    player_name,
+                    &rows,
+                    player_row_idx,
+                    team_size,
+                )
+                .await;
+            }
             let created_this_capture =
                 commit_capture_rows(store, data_dir, &staged, &parsed, now).await?;
 
@@ -5898,6 +6012,7 @@ mod tests {
             deferred_at: None,
             deferred_imported: false,
             text_fallback_locked: false,
+            result_evidence: shadow::result::ResultEvidence::default(),
         }
     }
 
@@ -7636,6 +7751,8 @@ mod tests {
             edited_at: None,
             heroes_played: Vec::new(),
             segment_resolutions: Vec::new(),
+            recognizer: scuffed_types::RECOGNIZER_OCR_V1.to_string(),
+            suspect_fields: Vec::new(),
         }
     }
 
@@ -12893,6 +13010,123 @@ mod tests {
         assert!(!called.load(std::sync::atomic::Ordering::SeqCst));
         let rows = store.get_session_snapshots("dm-keep").await.unwrap();
         assert!(rows.iter().all(|row| row.synced));
+    }
+
+    #[tokio::test]
+    async fn a_deathmatch_row_stays_local_when_the_new_reader_names_another_map() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = storage::LocalStore::open(dir.path()).await.unwrap();
+        let (mut staged, mut parsed) = staged_row(
+            "dm-new",
+            "Château Guillard",
+            Some(boundary::MapSource::TopBar),
+        );
+        assert_eq!(
+            prepare_capture_row(
+                &mut parsed,
+                &mut staged,
+                None,
+                Some("CHATEAU GUILLARD"),
+                "",
+                true,
+            ),
+            PreparedRow::Store
+        );
+        assert_eq!(parsed.game_mode, "Deathmatch");
+        let board = {
+            let mut fields = vec![
+                shadow::FieldRead {
+                    name: "map".into(),
+                    value: Some(shadow::Value::Text("Ilios".into())),
+                    confidence: 0.95,
+                    suspect: false,
+                },
+                shadow::FieldRead {
+                    name: "mode".into(),
+                    value: Some(shadow::Value::Text("Control".into())),
+                    confidence: 0.95,
+                    suspect: false,
+                },
+            ];
+            fields.push(shadow::FieldRead {
+                name: "r0.hero".into(),
+                value: Some(shadow::Value::Text("Kiriko".into())),
+                confidence: 0.95,
+                suspect: false,
+            });
+            for (suffix, value) in [
+                ("e", 21u32),
+                ("a", 9),
+                ("d", 3),
+                ("dmg", 9100),
+                ("h", 1200),
+                ("mit", 50),
+            ] {
+                fields.push(shadow::FieldRead {
+                    name: format!("r0.{suffix}"),
+                    value: Some(shadow::Value::Int(value)),
+                    confidence: 0.95,
+                    suspect: false,
+                });
+            }
+            shadow::BoardRead {
+                status: shadow::BoardStatus::Read,
+                team_size: Some(5),
+                fields,
+                elapsed_ms: 1,
+            }
+        };
+        let saved = reader_apply::merge_saved(
+            &reader_apply::OcrSnapshot {
+                map: parsed.map_name.clone(),
+                mode: parsed.game_mode.clone(),
+                result: parsed.outcome.clone(),
+                hero: parsed.hero.clone(),
+                elims: parsed.elims,
+                assists: parsed.assists,
+                deaths: parsed.deaths,
+                damage: parsed.damage,
+                healing: parsed.healing,
+                mitigation: parsed.mitigation,
+            },
+            reader_apply::OwnRow::Identified {
+                index: 0,
+                team_size: 5,
+            },
+            Some(&board),
+        );
+        parsed.map_name = saved.map;
+        parsed.game_mode = saved.mode;
+        parsed.hero = saved.hero;
+        parsed.elims = saved.elims;
+        parsed.recognizer = saved.recognizer.to_string();
+        parsed.suspect_fields = saved.suspect_fields;
+        assert_eq!(parsed.map_name, "Château Guillard");
+        assert_eq!(parsed.game_mode, "Deathmatch");
+        assert!(parsed.suspect_fields.iter().any(|name| name == "map"));
+        commit_capture_rows(
+            &store,
+            dir.path(),
+            &staged,
+            &parsed,
+            SurrealDatetime::from(Utc::now()),
+        )
+        .await
+        .unwrap();
+        let called = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let called_upload = std::sync::Arc::clone(&called);
+        try_sync_with(&store, dir.path(), None, move |_matches, _| {
+            let called_upload = std::sync::Arc::clone(&called_upload);
+            async move {
+                called_upload.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(upload_ok())
+            }
+        })
+        .await;
+        assert!(
+            !called.load(std::sync::atomic::Ordering::SeqCst),
+            "reader = new must not upload a Deathmatch row"
+        );
     }
 
     #[tokio::test]

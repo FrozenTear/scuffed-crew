@@ -223,7 +223,7 @@ pub struct ShadowWorker {
 impl ShadowWorker {
     /// Spawn the worker only when the config flag is on.
     pub fn start_if_enabled(config: &crate::config::Config) -> Option<Self> {
-        if !config.shadow_recognizer_enabled() {
+        if !config.shadow_log_enabled() {
             return None;
         }
         let log = ShadowLog::new(&config.data_dir);
@@ -449,12 +449,26 @@ mod tests {
     fn flag_off_never_spawns_and_never_builds_input() {
         let config = crate::config::Config::default();
         assert!(!config.shadow_recognizer);
+        assert!(!config.uses_new_reader());
         assert!(ShadowWorker::start_if_enabled(&config).is_none());
         let board = Arc::new(DynamicImage::new_rgb8(4, 4));
         assert!(ShadowInput::when(false, &board, 5, 1440).is_none());
         assert_eq!(Arc::strong_count(&board), 1, "no extra reference when off");
         let on = ShadowInput::when(true, &board, 6, 1080).unwrap();
         assert!(Arc::ptr_eq(&on.scoreboard, &board), "shared, not copied");
+    }
+
+    #[test]
+    fn reader_new_spawns_the_log_even_when_the_shadow_flag_is_off() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = crate::config::Config {
+            data_dir: dir.path().to_path_buf(),
+            reader: crate::config::ReaderSetting::New,
+            ..crate::config::Config::default()
+        };
+        assert!(!config.shadow_recognizer);
+        assert!(config.shadow_log_enabled());
+        assert!(ShadowWorker::start_if_enabled(&config).is_some());
     }
 
     #[test]

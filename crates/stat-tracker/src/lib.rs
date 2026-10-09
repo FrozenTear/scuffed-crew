@@ -8,6 +8,7 @@ pub mod hero_auth;
 pub mod ocr;
 pub mod parse;
 pub mod proc_id;
+pub mod reader_apply;
 pub mod sandbox;
 pub mod setup;
 pub mod shadow;
