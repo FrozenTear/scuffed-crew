@@ -15,17 +15,32 @@ workflow copies from the matching heading through the next `##` heading,
 including `### Install`. The desktop app hides `### Install`, shows the
 summary, then the highlights, and tucks the remaining text under Details.
 
-## Unreleased
+## 0.5.0-alpha.1
 
-You can turn the new scoreboard reader on in Settings. It stays off until you do. The tracker reads that switch when it starts, so restart it after you save. A field the new reader is not sure about keeps the old read, and Games marks that field unsure until you edit it.
+This build is an alpha. You can turn on a new scoreboard reader in Settings, and it stays off until you do.
 
 ### Highlights
 
-- Settings has a New reader (alpha) switch. Saved games and uploads use it only after you turn it on and restart.
-- Games shows a small unsure mark on a field the new reader was not sure about. Editing that field clears the mark.
-- Each saved game remembers which reader produced it, including after a restart and when an upload is tried again.
+- Settings has a New reader (alpha) switch (`reader` in config.toml). It stays off until you turn it on. When it is on, it reads numbers, the map, Victory or Defeat, and heroes. A field it is not sure about keeps the old reader's value, and the Games tab marks that field unsure.
+- Hero names: the new reader needs the hero icon pack. In this alpha the pack isn't downloaded for you yet, so hero names come from the old reader unless the pack is already in your tracker's data folder. A members-only download comes in alpha.2.
+- The first launch opens a setup guide: a screen capture check, Overwatch settings, sync sign-in by a code or a pasted token, and the reader pack.
+- Settings can remove the tracker's own files and services. If a package manager installed this copy, Settings shows that package's remove command instead. Saved games are removed only if you tick that option.
 
-The switch is `reader` in config.toml. `ocr-v1` is today's reader and the default when the key is missing. `new` stores the new reader's value for each field it read confidently on your own row, and keeps the old value for the rest. The map and mode already chosen for the game stay, including a Deathmatch game, which stays on this machine. If the new reader names a different map, Games marks the map unsure. If it cannot find the board, cannot tell the team size, finds the columns but reads no numbers, is not sure which row is yours, or does not replace any field, the game stays tagged with the old reader. A field it never tried is not marked unsure. Game start, game end, and the checks that hold a bad number do not change. Uploads send the reader name stored on the game, not whatever the switch says now.
+The tracker reads `reader` when it starts, so restart it after you save. `ocr-v1` is the default when the key is missing. `new` stores the new reader's value for each field it read confidently on your own row, and keeps the old value for the rest. The map and mode already chosen for the game stay, including a Deathmatch game, which stays on this machine. If the new reader names a different map, Games marks the map unsure. If it cannot find the board, cannot tell the team size, finds the columns but reads no numbers, is not sure which row is yours, or does not replace any field, the game stays tagged with the old reader. A field it never tried is not marked unsure. Editing an unsure field clears the mark. Game start, game end, and the checks that hold a bad number do not change. Uploads send the reader name stored on the game, not whatever the switch says now.
+
+Hero icon templates live in the data folder under `templates/heroes/`. Without them the new reader does not name heroes, and those names stay with the old reader.
+
+The Extra number reader (test) switch is still there. It only writes a private log and does not change saved games or uploads on its own.
+
+A stable update is not offered this alpha. The desktop app skips it until config.toml has `update_channel = "prerelease"`. bootstrap.sh skips it until `STAT_TRACKER_CHANNEL=prerelease`. Pinning this tag still installs it.
+
+### Install
+
+```sh
+curl --proto '=https' -fsSL https://raw.githubusercontent.com/FrozenTear/scuffed-crew/stat-tracker-v0.5.0-alpha.1/crates/stat-tracker/dist/bootstrap.sh | STAT_TRACKER_TAG=stat-tracker-v0.5.0-alpha.1 bash
+```
+
+Or extract the tarball and run `./install.sh`.
 
 ## 0.4.24
 

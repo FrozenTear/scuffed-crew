@@ -139,16 +139,138 @@ fn installed_daemon_version() -> Option<String> {
     parse_daemon_version_line(&String::from_utf8_lossy(&out.stdout))
 }
 
-/// Parse `MAJOR.MINOR.PATCH`; a leading `v` and any `-pre`/`+build` suffix
-/// are stripped. `None` on anything unparseable.
-pub fn parse_semver(s: &str) -> Option<(u32, u32, u32)> {
-    let core = s.trim().trim_start_matches('v');
-    let core = core.split(['-', '+']).next().unwrap_or(core);
+/// `major.minor.patch` plus an optional prerelease. Build metadata (`+...`)
+/// is ignored. A final release sorts after every prerelease of the same
+/// triple, so `0.4.24 < 0.5.0-alpha.1 < 0.5.0`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SemVer {
+    major: u32,
+    minor: u32,
+    patch: u32,
+    pre: Vec<PreId>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum PreId {
+    Num(u64),
+    Text(String),
+}
+
+impl SemVer {
+    pub fn is_prerelease(&self) -> bool {
+        !self.pre.is_empty()
+    }
+}
+
+impl std::fmt::Display for SemVer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}.{}.{}", self.major, self.minor, self.patch)?;
+        if self.pre.is_empty() {
+            return Ok(());
+        }
+        write!(f, "-")?;
+        for (index, id) in self.pre.iter().enumerate() {
+            if index > 0 {
+                write!(f, ".")?;
+            }
+            match id {
+                PreId::Num(n) => write!(f, "{n}")?,
+                PreId::Text(text) => write!(f, "{text}")?,
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Ord for SemVer {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        (self.major, self.minor, self.patch)
+            .cmp(&(other.major, other.minor, other.patch))
+            .then_with(|| match (self.pre.is_empty(), other.pre.is_empty()) {
+                (true, false) => std::cmp::Ordering::Greater,
+                (false, true) => std::cmp::Ordering::Less,
+                _ => cmp_pre(&self.pre, &other.pre),
+            })
+    }
+}
+
+impl PartialOrd for SemVer {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for PreId {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        match (self, other) {
+            (Self::Num(left), Self::Num(right)) => left.cmp(right),
+            (Self::Text(left), Self::Text(right)) => left.cmp(right),
+            (Self::Num(_), Self::Text(_)) => std::cmp::Ordering::Less,
+            (Self::Text(_), Self::Num(_)) => std::cmp::Ordering::Greater,
+        }
+    }
+}
+
+impl PartialOrd for PreId {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+fn cmp_pre(left: &[PreId], right: &[PreId]) -> std::cmp::Ordering {
+    for (a, b) in left.iter().zip(right.iter()) {
+        let ord = a.cmp(b);
+        if ord != std::cmp::Ordering::Equal {
+            return ord;
+        }
+    }
+    left.len().cmp(&right.len())
+}
+
+fn pre_id(piece: &str) -> Option<PreId> {
+    if piece.is_empty() || piece.chars().any(|c| c.is_whitespace()) {
+        return None;
+    }
+    if piece.bytes().all(|b| b.is_ascii_digit()) {
+        return Some(PreId::Num(piece.parse().ok()?));
+    }
+    Some(PreId::Text(piece.to_string()))
+}
+
+/// Parse `MAJOR.MINOR.PATCH` with an optional `-prerelease` and `+build`.
+/// A leading `v` is ignored. `None` on anything unparseable.
+pub fn parse_semver(s: &str) -> Option<SemVer> {
+    let raw = s.trim().trim_start_matches('v');
+    if raw.is_empty() || raw.split_whitespace().nth(1).is_some() {
+        return None;
+    }
+    let raw = raw.split('+').next().unwrap_or(raw);
+    let (core, pre) = match raw.split_once('-') {
+        Some((core, pre)) => (core, Some(pre)),
+        None => (raw, None),
+    };
     let mut it = core.split('.');
     let major = it.next()?.parse().ok()?;
     let minor = it.next()?.parse().ok()?;
     let patch = it.next().unwrap_or("0").parse().ok()?;
-    Some((major, minor, patch))
+    if it.next().is_some() {
+        return None;
+    }
+    let mut ids = Vec::new();
+    if let Some(pre) = pre {
+        if pre.is_empty() {
+            return None;
+        }
+        for piece in pre.split('.') {
+            ids.push(pre_id(piece)?);
+        }
+    }
+    Some(SemVer {
+        major,
+        minor,
+        patch,
+        pre: ids,
+    })
 }
 
 pub fn is_newer(latest: &str, current: &str) -> bool {
@@ -156,6 +278,16 @@ pub fn is_newer(latest: &str, current: &str) -> bool {
         (Some(l), Some(c)) => l > c,
         _ => false,
     }
+}
+
+/// Which GitHub releases the updater may offer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UpdateChannel {
+    /// Release builds only. An alpha or rc is not offered.
+    Stable,
+    /// Release builds and prereleases. The newest semver still wins, so
+    /// `0.5.0` is offered ahead of `0.5.0-alpha.1`.
+    Prerelease,
 }
 
 pub fn release_tag(latest: &str) -> String {
@@ -381,15 +513,34 @@ pub async fn check_for_update() -> Option<UpdateInfo> {
         .json()
         .await
         .ok()?;
-    select_newer_release(&current, &releases)
+    select_newer_release_on(installed_update_channel(), &current, &releases)
+}
+
+fn installed_update_channel() -> UpdateChannel {
+    stat_tracker::config::Config::read_stored()
+        .ok()
+        .filter(|config| config.wants_prerelease_updates())
+        .map(|_| UpdateChannel::Prerelease)
+        .unwrap_or(UpdateChannel::Stable)
 }
 
 /// Newest stable `stat-tracker-v*` newer than `current`, plus the bodies of
 /// every stable release between them (newest first).
 pub fn select_newer_release(current: &str, releases: &[serde_json::Value]) -> Option<UpdateInfo> {
+    select_newer_release_on(UpdateChannel::Stable, current, releases)
+}
+
+/// Same as [`select_newer_release`], but `Prerelease` may offer an alpha or rc
+/// when it is the newest version. Stable never does, including when the
+/// GitHub prerelease flag was left off.
+pub fn select_newer_release_on(
+    channel: UpdateChannel,
+    current: &str,
+    releases: &[serde_json::Value],
+) -> Option<UpdateInfo> {
     let cur = parse_semver(current)?;
     struct Parsed {
-        ver: (u32, u32, u32),
+        ver: SemVer,
         ver_str: String,
         html: String,
         body: String,
@@ -397,9 +548,7 @@ pub fn select_newer_release(current: &str, releases: &[serde_json::Value]) -> Op
     }
     let mut parsed = Vec::new();
     for release in releases {
-        if release["draft"].as_bool().unwrap_or(false)
-            || release["prerelease"].as_bool().unwrap_or(false)
-        {
+        if release["draft"].as_bool().unwrap_or(false) {
             continue;
         }
         let Some(ver_str) = release["tag_name"]
@@ -411,6 +560,10 @@ pub fn select_newer_release(current: &str, releases: &[serde_json::Value]) -> Op
         let Some(ver) = parse_semver(ver_str) else {
             continue;
         };
+        let flagged = release["prerelease"].as_bool().unwrap_or(false);
+        if channel == UpdateChannel::Stable && (flagged || ver.is_prerelease()) {
+            continue;
+        }
         parsed.push(Parsed {
             ver,
             ver_str: ver_str.to_string(),
@@ -419,18 +572,18 @@ pub fn select_newer_release(current: &str, releases: &[serde_json::Value]) -> Op
             published_at: release["published_at"].as_str().map(str::to_string),
         });
     }
-    let best = parsed.iter().max_by_key(|item| item.ver)?;
+    let best = parsed.iter().max_by(|a, b| a.ver.cmp(&b.ver))?;
     if best.ver <= cur {
         return None;
     }
-    let latest_ver = best.ver;
+    let latest_ver = best.ver.clone();
     let latest = best.ver_str.clone();
     let url = best.html.clone();
     let mut notes: Vec<_> = parsed
         .into_iter()
         .filter(|item| item.ver > cur && item.ver <= latest_ver)
         .collect();
-    notes.sort_by_key(|item| std::cmp::Reverse(item.ver));
+    notes.sort_by(|a, b| b.ver.cmp(&a.ver));
     Some(UpdateInfo {
         latest,
         current: current.trim().trim_start_matches('v').to_string(),
@@ -950,16 +1103,78 @@ mod tests {
 
     #[test]
     fn semver_parses_and_orders() {
-        assert_eq!(parse_semver("0.2.1"), Some((0, 2, 1)));
-        assert_eq!(parse_semver("v1.0.0"), Some((1, 0, 0)));
-        assert_eq!(parse_semver("0.2"), Some((0, 2, 0)));
-        assert_eq!(parse_semver("0.3.0-rc1"), Some((0, 3, 0)));
+        assert_eq!(parse_semver("0.2.1").unwrap().to_string(), "0.2.1");
+        assert_eq!(parse_semver("v1.0.0").unwrap().to_string(), "1.0.0");
+        assert_eq!(parse_semver("0.2").unwrap().to_string(), "0.2.0");
+        assert!(parse_semver("0.3.0-rc1").unwrap().is_prerelease());
+        assert!(parse_semver("0.3.0").unwrap() > parse_semver("0.3.0-rc1").unwrap());
         assert!(parse_semver("garbage").is_none());
+        assert!(parse_semver("0.5.0-").is_none());
         assert!(parse_semver("0.2.1").unwrap() > parse_semver("0.1.0").unwrap());
         assert!(parse_semver("0.2.0").unwrap() > parse_semver("0.1.9").unwrap());
         assert!(is_newer("0.3.0", "0.2.1"));
         assert!(!is_newer("0.2.1", "0.2.1"));
         assert!(!is_newer("nope", "0.1.0"));
+        assert!(parse_semver("0.4.24").unwrap() < parse_semver("0.5.0-alpha.1").unwrap());
+        assert!(parse_semver("0.5.0-alpha.1").unwrap() < parse_semver("0.5.0").unwrap());
+        assert!(is_newer("0.5.0-alpha.1", "0.4.24"));
+        assert!(is_newer("0.5.0", "0.5.0-alpha.1"));
+        assert!(!is_newer("0.5.0-alpha.1", "0.5.0"));
+        assert!(is_newer("0.5.0-alpha.2", "0.5.0-alpha.1"));
+        assert!(!is_newer("0.5.0-alpha.1", "0.5.0-alpha.2"));
+        assert!(is_newer("0.5.0-alpha.10", "0.5.0-alpha.2"));
+        assert!(parse_semver("0.5.0-1").unwrap() < parse_semver("0.5.0-alpha").unwrap());
+    }
+
+    fn gh_release(tag: &str, prerelease: bool, body: &str) -> serde_json::Value {
+        serde_json::json!({
+            "tag_name": tag,
+            "draft": false,
+            "prerelease": prerelease,
+            "html_url": "https://example.com/rel",
+            "body": body,
+        })
+    }
+
+    #[test]
+    fn stable_skips_alpha_unless_the_channel_opts_in() {
+        let alpha_only = vec![
+            gh_release("stat-tracker-v0.5.0-alpha.1", true, "alpha notes"),
+            gh_release("stat-tracker-v0.4.24", false, "stable notes"),
+        ];
+        assert!(
+            select_newer_release("0.4.24", &alpha_only).is_none(),
+            "stable must not be offered the alpha"
+        );
+        let opted = select_newer_release_on(UpdateChannel::Prerelease, "0.4.24", &alpha_only)
+            .expect("prerelease channel");
+        assert_eq!(opted.latest, "0.5.0-alpha.1");
+
+        let unflagged = vec![gh_release(
+            "stat-tracker-v0.5.0-alpha.1",
+            false,
+            "alpha without the github flag",
+        )];
+        assert!(
+            select_newer_release("0.4.24", &unflagged).is_none(),
+            "a prerelease suffix is skipped on stable even without the flag"
+        );
+
+        let with_final = vec![
+            gh_release("stat-tracker-v0.5.0", false, "final notes"),
+            gh_release("stat-tracker-v0.5.0-alpha.1", true, "alpha notes"),
+            gh_release("stat-tracker-v0.4.24", false, "old notes"),
+        ];
+        let stable = select_newer_release("0.4.24", &with_final).expect("final");
+        assert_eq!(stable.latest, "0.5.0");
+        assert!(
+            stable
+                .release_bodies
+                .iter()
+                .all(|body| body.version != "0.5.0-alpha.1")
+        );
+        let from_alpha = select_newer_release("0.5.0-alpha.1", &with_final).expect("upgrade");
+        assert_eq!(from_alpha.latest, "0.5.0");
     }
 
     #[test]

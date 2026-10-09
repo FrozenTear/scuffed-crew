@@ -232,9 +232,9 @@ impl SettingsForm {
     }
 
     /// Map the form onto `base`, keeping `data_dir`, `ocr_threads`,
-    /// `finished_game_close_secs`, `setup_completed`, and `reader_pack_url`.
-    /// `shadow_recognizer` comes from the form's persisted reader (the file
-    /// value). An env lock never writes true by itself.
+    /// `finished_game_close_secs`, `update_channel`, `setup_completed`, and
+    /// `reader_pack_url`. `shadow_recognizer` comes from the form's persisted
+    /// reader (the file value). An env lock never writes true by itself.
     pub fn to_config(&self, base: &Config) -> Config {
         Config {
             data_dir: base.data_dir.clone(),
@@ -252,6 +252,7 @@ impl SettingsForm {
             debug_ocr: self.debug_ocr,
             ocr_threads: base.ocr_threads,
             shadow_recognizer: self.persisted_reader().file_flag(),
+            update_channel: base.update_channel.clone(),
             setup_completed: base.setup_completed,
             reader_pack_url: base.reader_pack_url.clone(),
             reader: if self.new_reader {

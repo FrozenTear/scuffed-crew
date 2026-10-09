@@ -336,9 +336,9 @@ jobs:
             TAG="stat-tracker-manual-${GITHUB_SHA::8}"
             EXTRA_FLAGS="--draft --target ${GITHUB_SHA}"
           fi
-          # RCs are not production releases: pre-release badge, never "Latest".
+          # Alphas and RCs are not production releases: pre-release badge, never "Latest".
           case "${TAG}" in
-            *-rc*) EXTRA_FLAGS="${EXTRA_FLAGS} --prerelease" ;;
+            *-rc*|*-alpha*) EXTRA_FLAGS="${EXTRA_FLAGS} --prerelease" ;;
           esac
           bash crates/stat-tracker/dist/release-notes.sh --tag "${TAG}" > release-notes.md
           gh release create "${TAG}" ${EXTRA_FLAGS} \

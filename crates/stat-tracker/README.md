@@ -75,16 +75,16 @@ have it saved. The script resolves the release tag (newest **stable** by
 default) and runs `bootstrap.sh` from that tag. `install.sh` is the copy
 inside the release tarball, not whatever is currently on `main`.
 
-If a newer prerelease (RC) exists and you're at an interactive terminal, the
-script asks which one you want (stable is the default answer). Skip the
-question with `STAT_TRACKER_CHANNEL=prerelease` (or `=stable`); non-interactive
-runs always get stable.
+The script installs the newest stable release. It does not offer an alpha or
+rc unless `STAT_TRACKER_CHANNEL=prerelease`. The desktop app does the same
+until `update_channel = "prerelease"` is set in config.toml. Pin a tag to
+install one release, including an alpha.
 
 Pin a tag by fetching that tag's bootstrap (the assignment has to be on
 `bash`, because `VAR=x curl … | bash` does not pass `VAR` to `bash`):
 
 ```sh
-TAG=stat-tracker-v0.4.24
+TAG=stat-tracker-v0.5.0-alpha.1
 curl --proto '=https' -fsSL "https://raw.githubusercontent.com/FrozenTear/scuffed-crew/${TAG}/crates/stat-tracker/dist/bootstrap.sh" \
   | STAT_TRACKER_TAG="$TAG" STAT_TRACKER_PREFIX="$HOME/.local" bash
 ```

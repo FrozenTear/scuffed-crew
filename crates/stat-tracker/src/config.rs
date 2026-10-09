@@ -56,6 +56,11 @@ pub struct Config {
     /// without templates that step is skipped.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub shadow_recognizer: bool,
+    /// `prerelease` opts the desktop updater into alphas and rcs.
+    /// Missing, empty, and anything else mean stable, so a release install
+    /// is not offered an alpha. Edited in place when this is the only change.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub update_channel: String,
     /// First-run guide finished or skipped. Missing means not completed, so
     /// the desktop app shows the guide. The guide writes this with the same
     /// in-place edit as `shadow_recognizer`.
@@ -428,10 +433,11 @@ impl Config {
     ///
     /// An `existing` document that parses as `next` is returned unchanged
     /// (byte for byte), comments included. When the only change is
-    /// `shadow_recognizer`, that key is edited in place so comments, order,
-    /// and every other key stay as they were. A document that does not parse
-    /// is an error, not a pretty-printed replacement. A missing file (no
-    /// `existing` text) is a fresh pretty-printed document.
+    /// `shadow_recognizer`, `reader`, or `update_channel`, that key is edited
+    /// in place so comments, order, and every other key stay as they were. A
+    /// document that does not parse is an error, not a pretty-printed
+    /// replacement. A missing file (no `existing` text) is a fresh
+    /// pretty-printed document.
     pub fn text_for_save(
         existing: Option<&str>,
         next: &Self,
@@ -450,6 +456,9 @@ impl Config {
         if only_shadow_recognizer_differs(&loaded, next) {
             return patch_shadow_recognizer(existing, next.shadow_recognizer);
         }
+        if only_update_channel_differs(&loaded, next) {
+            return patch_update_channel(existing, &next.update_channel);
+        }
         if only_reader_differs(&loaded, next) {
             return patch_reader(existing, next.reader);
         }
@@ -458,6 +467,13 @@ impl Config {
             return patch_reader(&with_shadow, next.reader);
         }
         Ok(toml::to_string_pretty(next)?)
+    }
+
+    /// True when `update_channel` is the prerelease opt-in.
+    pub fn wants_prerelease_updates(&self) -> bool {
+        self.update_channel
+            .trim()
+            .eq_ignore_ascii_case("prerelease")
     }
 
     /// Best-effort chmod 600 (no-op off unix).
@@ -563,6 +579,93 @@ fn only_shadow_recognizer_differs(loaded: &Config, next: &Config) -> bool {
     let mut same = loaded.clone();
     same.shadow_recognizer = next.shadow_recognizer;
     same == *next
+}
+
+fn only_update_channel_differs(loaded: &Config, next: &Config) -> bool {
+    if loaded.update_channel == next.update_channel {
+        return false;
+    }
+    let mut same = loaded.clone();
+    same.update_channel.clone_from(&next.update_channel);
+    same == *next
+}
+
+fn channel_word(raw: &str) -> &'static str {
+    if raw.trim().eq_ignore_ascii_case("prerelease") {
+        "prerelease"
+    } else {
+        "stable"
+    }
+}
+
+/// Change `update_channel` and nothing else.
+///
+/// A root string is spliced in place, so comments, order, spacing, and
+/// every other key stay. A missing root key is inserted on the root table.
+fn patch_update_channel(
+    existing: &str,
+    raw: &str,
+) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    let word = channel_word(raw);
+    let doc = toml_edit::Document::parse(existing).map_err(|err| {
+        unreadable_config(format!(
+            "config.toml could not be parsed, so it was not replaced: {err}"
+        ))
+    })?;
+    if doc.get("update_channel").is_some() {
+        return splice_root_string(existing, &doc, "update_channel", word);
+    }
+    insert_root_string(existing, "update_channel", word)
+}
+
+fn splice_root_string(
+    existing: &str,
+    doc: &toml_edit::Document<&str>,
+    key: &str,
+    word: &str,
+) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    let quoted = format!("\"{word}\"");
+    if let Some(item) = doc.get(key)
+        && let Some(value) = item.as_value()
+        && value.as_str().is_some()
+        && let Some(span) = value.span()
+        && existing.is_char_boundary(span.start)
+        && existing.is_char_boundary(span.end)
+    {
+        let current = &existing[span.start..span.end];
+        let replacement = if current.starts_with('"') || current.starts_with('\'') {
+            quoted
+        } else {
+            word.to_string()
+        };
+        let mut out = String::with_capacity(existing.len() + replacement.len());
+        out.push_str(&existing[..span.start]);
+        out.push_str(&replacement);
+        out.push_str(&existing[span.end..]);
+        return Ok(out);
+    }
+    Err(unreadable_config(
+        "config.toml could not be updated in place, so it was not replaced".to_string(),
+    ))
+}
+
+fn insert_root_string(
+    existing: &str,
+    key: &str,
+    word: &str,
+) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    let mut doc = existing.parse::<toml_edit::DocumentMut>().map_err(|err| {
+        unreadable_config(format!(
+            "config.toml could not be parsed, so it was not replaced: {err}"
+        ))
+    })?;
+    if doc.get(key).is_some() {
+        return Err(unreadable_config(
+            "config.toml already has that key at the root, so it was not replaced".to_string(),
+        ));
+    }
+    doc.as_table_mut().insert(key, toml_edit::value(word));
+    Ok(doc.to_string())
 }
 
 fn only_reader_differs(loaded: &Config, next: &Config) -> bool {
@@ -800,6 +903,7 @@ impl Default for Config {
             debug_ocr: false,
             ocr_threads: None,
             shadow_recognizer: false,
+            update_channel: String::new(),
             setup_completed: false,
             reader_pack_url: None,
             reader: ReaderSetting::OcrV1,
@@ -1083,6 +1187,39 @@ mod tests {
     }
 
     #[test]
+    fn update_channel_is_edited_in_place_and_defaults_to_stable() {
+        let raw = "\
+# keep this comment
+data_dir = \"/tmp/data\"
+shadow_recognizer = false
+";
+        let loaded = Config::parse_file_contents(raw).expect("parse");
+        assert!(!loaded.wants_prerelease_updates());
+        assert!(!Config::default().wants_prerelease_updates());
+
+        let mut next = loaded.clone();
+        next.update_channel = "prerelease".to_string();
+        let saved = Config::text_for_save(Some(raw), &next).expect("patch");
+        assert!(saved.contains("# keep this comment"), "{saved}");
+        assert!(saved.contains("shadow_recognizer = false"), "{saved}");
+        assert!(saved.contains("update_channel = \"prerelease\""), "{saved}");
+        let opted = Config::parse_file_contents(&saved).expect("reparse");
+        assert!(opted.wants_prerelease_updates());
+
+        let mut back = opted.clone();
+        back.update_channel.clear();
+        let stable = Config::text_for_save(Some(&saved), &back).expect("clear");
+        assert!(stable.contains("# keep this comment"), "{stable}");
+        assert!(stable.contains("shadow_recognizer = false"), "{stable}");
+        assert!(stable.contains("update_channel = \"stable\""), "{stable}");
+        assert!(
+            !Config::parse_file_contents(&stable)
+                .expect("stable")
+                .wants_prerelease_updates()
+        );
+    }
+
+    #[test]
     fn shadow_recognizer_defaults_off_and_is_not_written_when_off() {
         assert!(!Config::default().shadow_recognizer);
         let raw = toml::to_string_pretty(&Config::default()).unwrap();
@@ -1274,6 +1411,7 @@ token = "secret"
             debug_ocr: full,
             ocr_threads: full.then_some(2),
             shadow_recognizer: full,
+            update_channel: String::new(),
             setup_completed: full,
             reader_pack_url: full.then(|| "https://crew.example/packs/reader.zip".to_string()),
             reader: if full {
