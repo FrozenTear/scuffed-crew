@@ -93,7 +93,7 @@ pub(crate) const COPY_TRY_AGAIN: &str = "Try again";
 pub(crate) const COPY_NO_DELETION: &str = "No deletion date";
 pub(crate) const COPY_DELETION_MISSING: &str = "Deletion date missing";
 pub(crate) const COPY_UNUSABLE: &str = "This report cannot be changed from this page.";
-pub(crate) const COPY_DISABLED: &str = "Reports are switched off right now.";
+pub(crate) const COPY_DISABLED: &str = "Reports are off right now.";
 
 pub(crate) const MY_REPORTS_RETRY_ID: &str = "my-reports-retry";
 pub(crate) const OFFICER_REPORTS_RETRY_ID: &str = "officer-reports-retry";
@@ -1385,6 +1385,7 @@ mod tests {
 
     #[test]
     fn reports_disabled_replaces_the_list_and_the_empty_state() {
+        assert_eq!(COPY_DISABLED, "Reports are off right now.");
         let text = reports_disabled_text();
         assert_eq!(text, "HTTP error 503: reports_disabled");
         assert!(is_reports_disabled(&text));
