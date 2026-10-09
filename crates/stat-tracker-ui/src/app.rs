@@ -1303,12 +1303,27 @@ impl TrackerApp {
                 Task::none()
             }
             Step::DownloadPack => {
-                let dest = self.saved_config.data_dir.clone();
-                let Some((url, dir)) = self.setup.begin_download(&dest) else {
+                let Some(sync) = self.saved_config.sync.clone().filter(|sync| {
+                    !sync.token.trim().is_empty() && !sync.server_url.trim().is_empty()
+                }) else {
+                    self.setup.pack_needs_sign_in();
                     return Task::none();
                 };
+                if !self.setup.begin_pack_fetch() {
+                    return Task::none();
+                }
+                let dir = self.saved_config.data_dir.clone();
                 Task::perform(
-                    crate::setup_guide::download_reader_pack(url, dir),
+                    async move {
+                        stat_tracker::packs::sync_reader_packs(
+                            &sync.server_url,
+                            &sync.token,
+                            &dir,
+                            stat_tracker::packs::PACK_MAX_BYTES,
+                        )
+                        .await
+                        .guide_result()
+                    },
                     |result| Message::Setup(Step::PackReady(result)),
                 )
             }
@@ -1685,14 +1700,28 @@ fn notes_dialog_escape(
 
 fn setup_guide_keys(
     event: iced::Event,
-    _status: iced::event::Status,
+    status: iced::event::Status,
     _window: window::Id,
 ) -> Option<Message> {
     let iced::Event::Keyboard(iced::keyboard::Event::KeyPressed { key, .. }) = event else {
         return None;
     };
     // The guide is open, so Escape must not dismiss notes underneath it.
-    foreground_key_message(true, true, &key)
+    // A text field that already took the key keeps it.
+    guide_shortcut(status, true, true, &key)
+}
+
+/// Escape and Enter drive the guide unless a text input already handled them.
+pub fn guide_shortcut(
+    status: iced::event::Status,
+    guide_open: bool,
+    notes_open: bool,
+    key: &iced::keyboard::Key,
+) -> Option<Message> {
+    if guide_open && status == iced::event::Status::Captured {
+        return None;
+    }
+    foreground_key_message(guide_open, notes_open, key)
 }
 
 /// While the setup guide is open it owns Escape and Enter.
@@ -1766,7 +1795,7 @@ fn health_status_for(
         if !url.is_empty()
             && let Err(e) = stat_tracker::config::validate_sync_server_url(url)
         {
-            return format!("Sync paused — {}", e.message());
+            return format!("Sync paused: {}", e.message());
         }
         if !url.is_empty() && stat_tracker::sync::auth_pause_matches(data_dir, url, token) {
             return stat_tracker::sync::SYNC_TOKEN_REJECTED_STATUS.to_string();
@@ -1796,6 +1825,18 @@ mod tests {
         match super::foreground_key_message(true, true, &escape) {
             Some(super::Message::Setup(crate::setup_guide::SetupMessage::Skip)) => {}
             other => panic!("escape should skip the guide, got {other:?}"),
+        }
+        match super::guide_shortcut(iced::event::Status::Captured, true, true, &escape) {
+            None => {}
+            other => panic!("a focused text input keeps escape, got {other:?}"),
+        }
+        match super::guide_shortcut(iced::event::Status::Captured, true, true, &enter) {
+            None => {}
+            other => panic!("a focused text input keeps enter, got {other:?}"),
+        }
+        match super::guide_shortcut(iced::event::Status::Ignored, true, true, &enter) {
+            Some(super::Message::Setup(crate::setup_guide::SetupMessage::Next)) => {}
+            other => panic!("enter should continue the guide, got {other:?}"),
         }
         match super::foreground_key_message(true, true, &enter) {
             Some(super::Message::Setup(crate::setup_guide::SetupMessage::Next)) => {}
@@ -2115,9 +2156,11 @@ token = \"secret-token-must-stay\"
         std::fs::write(dir.join("live_snapshot.json"), b"{}").unwrap();
         let paused = super::health_status_for(&dir, &[], Some(("http://example.com", "tok")));
         assert!(
-            paused.starts_with("Sync paused"),
+            paused.starts_with("Sync paused:"),
             "existing cleartext config must be visible in tracker health, got {paused}"
         );
+        assert!(!paused.contains('—'), "{paused}");
+        assert!(!paused.contains('–'), "{paused}");
         assert!(paused.contains("https"), "{paused}");
         assert_eq!(
             super::health_status_for(&dir, &[], Some(("https://crew.example", "tok"))),

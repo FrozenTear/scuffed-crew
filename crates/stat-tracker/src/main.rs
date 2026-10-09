@@ -399,6 +399,8 @@ async fn main() -> anyhow::Result<()> {
             );
         } else {
             fetch_player_name_if_needed(&mut config, client).await;
+            stat_tracker::packs::sync_on_startup(&creds.server_url, &creds.token, &config.data_dir)
+                .await;
         }
     }
 
