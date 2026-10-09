@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use crate::components::{Toast, fetch_error, use_toast};
 use crate::routes::Route;
 use crate::state::auth::use_auth;
-use crate::util::{FetchClass, classify_fetch, format_local_datetime};
+use crate::util::{FetchClass, classify_fetch, local_time_node};
 use scuffed_api_client::ApiClient;
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -369,7 +369,7 @@ pub fn ForumBoardPage(slug: String) -> Element {
                                 for t in resp.into_iter().flat_map(|r| r.threads.iter()) {
                                     {
                                         let tid = t.id.clone();
-                                        let created = format_local_datetime(&t.created_at);
+                                        let created = t.created_at.clone();
                                         rsx! {
                                             Link {
                                                 to: Route::ForumThread { id: tid },
@@ -384,7 +384,8 @@ pub fn ForumBoardPage(slug: String) -> Element {
                                                     "{t.title}"
                                                 }
                                                 div { class: "forum-thread-meta",
-                                                    "{t.reply_count} replies · {created}"
+                                                    "{t.reply_count} replies · "
+                                                    {local_time_node(&created)}
                                                 }
                                             }
                                         }
