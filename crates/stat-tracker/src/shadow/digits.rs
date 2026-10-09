@@ -1578,13 +1578,15 @@ pub fn read_board(
     })
 }
 
+/// Test support shared with the reader tests: the embedded 1440 templates
+/// drawn as synthetic stat text. No captured pixels.
 #[cfg(test)]
-mod tests {
+pub(crate) mod test_glyphs {
     use super::*;
     use image::{Rgb, RgbImage};
 
     /// Mean glyph canvases (0..1) straight from the embedded 1440 templates.
-    fn glyph_means() -> Vec<Plane> {
+    pub(super) fn glyph_means() -> Vec<Plane> {
         let img = image::load_from_memory(TPL_1440_PNG).unwrap().to_luma8();
         (0..NCLS)
             .map(|c| {
@@ -1601,14 +1603,14 @@ mod tests {
     }
 
     /// Glyph columns that carry ink, so glyphs can be laid out with a fixed gap.
-    fn ink_cols(g: &Plane) -> (usize, usize) {
+    pub(super) fn ink_cols(g: &Plane) -> (usize, usize) {
         let cols: Vec<usize> = (0..g.w)
             .filter(|&x| (0..g.h).any(|y| g.at(x, y) > 0.2))
             .collect();
         (cols[0], cols[cols.len() - 1] + 1)
     }
 
-    fn text_for(v: u32, k: usize) -> String {
+    pub(super) fn text_for(v: u32, k: usize) -> String {
         if plain_field(k) {
             v.to_string()
         } else {
@@ -1617,7 +1619,7 @@ mod tests {
     }
 
     /// Paste `text` centred at (cx, top) in neutral grey on a dark board.
-    fn draw_text(
+    pub(super) fn draw_text(
         img: &mut RgbImage,
         glyphs: &[Plane],
         text: &str,
@@ -1652,6 +1654,20 @@ mod tests {
             x += b - a + gap;
         }
     }
+
+    /// Draw stat `v` of column `k` (with its thousands commas) centred at
+    /// (cx, top), 3 px between glyphs, as [`super::read_board`] expects on a
+    /// 1440p board crop.
+    pub(crate) fn draw_stat(img: &mut RgbImage, v: u32, k: usize, cx: usize, top: usize) {
+        draw_text(img, &glyph_means(), &text_for(v, k), cx, top, 3);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use image::{Rgb, RgbImage};
+    use test_glyphs::{draw_text, glyph_means, ink_cols, text_for};
 
     /// 1664x1007 scoreboard (a 1440p crop): bright header with six dark labels,
     /// dark rows holding the given stat values. No name or hero pixels.
