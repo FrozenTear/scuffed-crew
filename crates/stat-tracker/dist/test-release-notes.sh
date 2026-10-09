@@ -229,3 +229,32 @@ printf '%s\n' "$commits_out" | grep -F -- '- fix(stat-tracker-ui): P1 review - w
 printf '%s\n' "$commits_out" | grep -F -- '- range - end' >/dev/null \
   || fail "en dash in a commit subject was not replaced with a hyphen"
 pass "commit subjects replace em dashes and en dashes with a hyphen"
+
+# An en dash in the footer is not a commit subject, so it is not rewritten.
+# Plant it after the footer's own check. Only the whole-notes guard
+# (no_long_dash "release notes") can reject it. Removing that guard makes
+# this test fail.
+grep -F 'no_long_dash "release notes" "$body"' "$NOTES" >/dev/null \
+  || fail "whole-notes dash guard is missing"
+cp "$NOTES" "$TMP/guard.sh"
+python3 - "$TMP/guard.sh" <<'PY'
+import pathlib, sys
+path = pathlib.Path(sys.argv[1])
+text = path.read_text()
+needle = 'no_long_dash "requirements footer" "$FOOTER"\n'
+extra = "FOOTER=\"${FOOTER}\"$'" + "\\u2013'\n"
+if needle not in text:
+    raise SystemExit("footer check anchor missing")
+path.write_text(text.replace(needle, needle + extra, 1))
+PY
+set +e
+guard_out="$(bash "$TMP/guard.sh" --tag stat-tracker-v9.9.9-rc1 --changelog "$TMP/empty.md" --skip-commits 2>"$TMP/guard.err")"
+guard_code=$?
+set -e
+[[ "$guard_code" -ne 0 ]] || fail "en dash in the footer was accepted"
+[[ -z "$guard_out" ]] || fail "footer en dash was written to stdout"
+grep -q 'release notes contains an en dash' "$TMP/guard.err" \
+  || fail "whole-notes guard did not report the en dash: $(cat "$TMP/guard.err")"
+grep -q 'requirements footer contains an en dash' "$TMP/guard.err" \
+  && fail "the footer check ran instead of the whole-notes guard"
+pass "en dash in the footer exits 1 through the whole-notes guard"
