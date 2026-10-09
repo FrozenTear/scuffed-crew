@@ -189,7 +189,7 @@ fn register_failure_message(err: &scuffed_api_client::ClientError) -> String {
             "Registration is currently closed".into()
         }
         other => client_rate_limit_message(other)
-            .unwrap_or_else(|| "Registration failed — try again".into()),
+            .unwrap_or_else(|| "Registration failed. Try again.".into()),
     }
 }
 
@@ -815,11 +815,11 @@ mod tests {
         assert_eq!(register_failure_message(&json_err), "Try again in 9 s");
         assert_eq!(
             register_failure_message(&plain_err),
-            "Registration failed — try again"
+            "Registration failed. Try again."
         );
         assert_eq!(
             register_failure_message(&lockout_err),
-            "Registration failed — try again"
+            "Registration failed. Try again."
         );
         assert_eq!(
             register_failure_message(&http(409, json)),

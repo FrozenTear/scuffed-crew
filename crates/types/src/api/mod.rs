@@ -40,20 +40,22 @@ pub struct ApiError {
 /// Seconds from a governor JSON body's `retry_after`.
 ///
 /// `{"error":"rate_limited","retry_after":N}` yields `N` when `N` is a JSON
-/// number or a numeric string, and at least 1. Any other body is `None`,
-/// including plain text and password-lockout JSON.
+/// number or a numeric string in `1..=3600`. Any other body is `None`,
+/// including plain text, password-lockout JSON, negatives, and waits over an hour.
 pub fn json_retry_after(body: &str) -> Option<u64> {
     let value: serde_json::Value = serde_json::from_str(body).ok()?;
     if value.get("error").and_then(|error| error.as_str()) != Some("rate_limited") {
         return None;
     }
     match value.get("retry_after")? {
-        serde_json::Value::Number(number) => number.as_u64().filter(|seconds| *seconds >= 1),
+        serde_json::Value::Number(number) => number
+            .as_u64()
+            .filter(|seconds| (1..=3600).contains(seconds)),
         serde_json::Value::String(text) => text
             .trim()
             .parse::<u64>()
             .ok()
-            .filter(|seconds| *seconds >= 1),
+            .filter(|seconds| (1..=3600).contains(seconds)),
         _ => None,
     }
 }
@@ -173,6 +175,28 @@ mod tests {
             None
         );
         assert_eq!(json_retry_after("Too Many Requests! Wait for 9s"), None);
+        assert_eq!(
+            json_retry_after(r#"{"error":"rate_limited","retry_after":3600}"#),
+            Some(3600)
+        );
+        assert_eq!(
+            json_retry_after(r#"{"error":"rate_limited","retry_after":3601}"#),
+            None
+        );
+        assert_eq!(
+            json_retry_after(r#"{"error":"rate_limited","retry_after":"3601"}"#),
+            None
+        );
+        assert_eq!(
+            json_retry_after(r#"{"error":"rate_limited","retry_after":-1}"#),
+            None
+        );
+        assert_eq!(
+            json_retry_after(r#"{"error":"rate_limited","retry_after":"-5"}"#),
+            None
+        );
+        assert_eq!(json_retry_after("[]"), None);
+        assert_eq!(json_retry_after("null"), None);
     }
 
     #[test]
