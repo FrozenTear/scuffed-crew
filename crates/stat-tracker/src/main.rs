@@ -7702,6 +7702,50 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn held_game_stays_unsynced_while_a_ready_game_syncs() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = storage::LocalStore::open(dir.path()).await.unwrap();
+        store
+            .insert_match(test_match("ready-game", "victory"))
+            .await
+            .unwrap();
+        let mut held = test_match("held-game", "victory");
+        held.map_name.clear();
+        held.game_mode.clear();
+        store.insert_match(held).await.unwrap();
+
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen_bg = std::sync::Arc::clone(&seen);
+        let attempt = try_sync_with(&store, dir.path(), None, move |matches, _| {
+            let seen_bg = std::sync::Arc::clone(&seen_bg);
+            async move {
+                seen_bg.lock().unwrap().extend(matches);
+                Ok(upload_ok())
+            }
+        })
+        .await;
+        assert!(matches!(attempt, sync::SyncAttempt::Uploaded));
+        let got = seen.lock().unwrap().clone();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].session_id, "ready-game");
+        let body = serde_json::to_string(&sync::upload_request(&got, &[])).unwrap();
+        assert!(!body.contains("\"map_name\":\"\""));
+
+        let rows = store.get_all_matches().await.unwrap();
+        let ready = rows
+            .iter()
+            .find(|row| row.session_id == "ready-game")
+            .unwrap();
+        let held = rows
+            .iter()
+            .find(|row| row.session_id == "held-game")
+            .unwrap();
+        assert!(ready.synced, "the ready game is marked synced");
+        assert!(!held.synced, "the held game stays unsynced");
+        assert!(held.map_name.is_empty());
+    }
+
     /// Shadow mode is log only: the same capture stored and uploaded with the
     /// flag off and on gives byte-identical stored rows and upload body. The
     /// hand-off below is the one the accept path runs after `stage_capture`.

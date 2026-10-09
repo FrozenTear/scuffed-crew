@@ -224,6 +224,9 @@ pub struct Game {
     /// Server message when this game was refused on upload. `None` when the
     /// row is synced or still queued.
     pub upload_reject: Option<String>,
+    /// True when this row has already been uploaded. A blank map on a
+    /// synced row was stored by an older build. It is not a local hold.
+    pub synced: bool,
 }
 
 /// Label for a game the server refused. The detail line is the server message.
@@ -265,6 +268,7 @@ impl Game {
                 .map(|(i, s)| SegmentView::from_segment(i as u32, s))
                 .collect(),
             upload_reject: m.upload_rejection().map(str::to_string),
+            synced: m.synced,
         }
     }
 
@@ -291,6 +295,35 @@ impl Game {
 
     pub fn needs_review(&self) -> bool {
         !self.review_fields().is_empty()
+    }
+
+    /// Unsynced and missing a map or hero. The game has not been uploaded.
+    pub fn held_locally(&self) -> bool {
+        self.needs_review() && !self.synced
+    }
+
+    /// Banner for a missing map or hero.
+    ///
+    /// A game that is still queued says it stays on this machine. A game
+    /// that already uploaded must not say that. Picking a value re-queues
+    /// the row so the site can be corrected.
+    pub fn review_notice(&self) -> Option<&'static str> {
+        if !self.needs_review() {
+            return None;
+        }
+        if self.synced {
+            let fields = self.review_fields();
+            let map = fields
+                .iter()
+                .any(|field| *field == "map" || *field == "mode");
+            let hero = fields.contains(&"hero");
+            return Some(match (map, hero) {
+                (true, false) => "Map is missing. Pick one to fix it on the site.",
+                (false, true) => "Hero is missing. Pick one to fix it on the site.",
+                _ => "Map and hero are missing. Pick them to fix this game on the site.",
+            });
+        }
+        Some("Needs review. This game stays on this machine until you pick the missing fields.")
     }
 
     pub fn has_stat_line(&self) -> bool {
@@ -463,6 +496,7 @@ mod review_tests {
             ocr: GameOcr::default(),
             segments: Vec::new(),
             upload_reject: None,
+            synced: false,
         }
     }
 
@@ -481,6 +515,36 @@ mod review_tests {
         assert!(ready.review_fields().is_empty());
         assert!(!ready.needs_review());
         assert_eq!(ready.display_map(), "King's Row");
+        assert_eq!(
+            blank.review_notice(),
+            Some(
+                "Needs review. This game stays on this machine until you pick the missing fields."
+            )
+        );
+        assert!(blank.held_locally());
+    }
+
+    #[test]
+    fn synced_blank_map_does_not_say_the_game_stays_on_this_machine() {
+        let mut blank = game("Ana", "");
+        blank.synced = true;
+        let notice = blank
+            .review_notice()
+            .expect("a synced blank map still offers a pick");
+        assert_eq!(notice, "Map is missing. Pick one to fix it on the site.");
+        assert!(!notice.contains("stays on this machine"));
+        assert!(!notice.contains("Needs review"));
+        assert!(!notice.contains('—') && !notice.contains('–'));
+        assert!(!blank.held_locally());
+        assert!(blank.needs_review());
+
+        let mut hero = game("Unknown", "Busan");
+        hero.synced = true;
+        assert_eq!(
+            hero.review_notice(),
+            Some("Hero is missing. Pick one to fix it on the site.")
+        );
+        assert!(!hero.held_locally());
     }
 }
 

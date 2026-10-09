@@ -875,14 +875,20 @@ fn field_input<'a>(label: &'static str, value: &'a str, field: EditField) -> Ele
 
 fn review_panel(game: &Game) -> Element<'static, Message> {
     let fields = game.review_fields();
-    let mut col = column![
-        text("Needs review. This game stays on this machine until you pick the missing fields.")
-            .size(SIZE_BODY)
-            .font(FONT_MEDIUM)
-            .color(theme::WARN),
-    ]
-    .spacing(8)
-    .width(Fill);
+    let notice = game.review_notice().unwrap_or("");
+    let mut col =
+        column![
+            text(notice)
+                .size(SIZE_BODY)
+                .font(FONT_MEDIUM)
+                .color(if game.held_locally() {
+                    theme::WARN
+                } else {
+                    TEXT_2
+                }),
+        ]
+        .spacing(8)
+        .width(Fill);
 
     if fields
         .iter()
@@ -934,7 +940,7 @@ fn role_and_edited(game: &Game) -> Element<'static, Message> {
     let mut r = row![label_text(game.role.label())]
         .spacing(8)
         .align_y(Alignment::Center);
-    if game.needs_review() {
+    if game.held_locally() {
         r = r.push(status_chip("needs review", theme::WARN));
     }
     if game.edited {
