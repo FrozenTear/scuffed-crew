@@ -211,7 +211,7 @@ impl Config {
 
         let config_path = config_dir.join("config.toml");
 
-        let mut config = Self::read_stored_at(&config_path)?;
+        let mut config = Self::read_at(&config_path)?;
 
         // CLI / env overlay: --token / SCUFFED_TOKEN and --server / SCUFFED_SERVER
         let cli_token = Self::arg_value("--token").or_else(|| std::env::var("SCUFFED_TOKEN").ok());
@@ -287,10 +287,14 @@ impl Config {
 
     /// Read the on-disk file [`Self::load`] starts from, without env overlays.
     pub fn read_stored() -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
-        Self::read_stored_at(&Self::config_path()?)
+        Self::read_at(&Self::config_path()?)
     }
 
-    fn read_stored_at(
+    /// Re-read `config.toml` at `path`. Settings calls this on every Save.
+    ///
+    /// A missing file is the default config. A file that does not parse is an
+    /// error, and the caller must not write over it.
+    pub fn read_at(
         config_path: &std::path::Path,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         if config_path.exists() {
@@ -320,7 +324,15 @@ impl Config {
     /// A file that does not parse is left untouched too: save returns an error
     /// instead of replacing it with defaults.
     pub fn save(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        self.save_to_path(&Self::config_path()?)
+        self.save_at(&Self::config_path()?)
+    }
+
+    /// In-place write of this config to `path`. Same rules as [`Self::save`].
+    pub fn save_at(
+        &self,
+        path: &std::path::Path,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        self.save_to_path(path)
     }
 
     fn save_to_path(

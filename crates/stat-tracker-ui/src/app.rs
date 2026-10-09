@@ -40,10 +40,10 @@ fn toast_if_config_unreadable(unreadable: bool) -> Option<&'static str> {
     unreadable.then_some(SETTINGS_SAVE_REFUSED)
 }
 
-/// A file that failed to parse at startup can be fixed without restarting.
-/// Save proceeds once the file parses again. Until then the refused toast is shown.
-fn gate_unreadable_save(flagged: bool, file_parses_now: bool) -> bool {
-    flagged && !file_parses_now
+/// Every Save re-reads the file. The startup flag is not consulted.
+/// `Ok` means the file parses now and the in-place edit may proceed.
+fn reread_config_for_save(path: &std::path::Path) -> Result<Config, &'static str> {
+    Config::read_at(path).map_err(|_| SETTINGS_SAVE_REFUSED)
 }
 
 fn toast_after_successful_save(daemon_up: bool) -> &'static str {
@@ -700,16 +700,28 @@ impl TrackerApp {
                 if self.fixture.is_some() {
                     return Task::none();
                 }
-                if self.config_unreadable {
-                    let stored = Config::read_stored();
-                    if gate_unreadable_save(true, stored.is_ok()) {
+                let config_path = match Config::config_path() {
+                    Ok(path) => path,
+                    Err(_) => {
+                        self.config_unreadable = true;
                         self.show_refused_toast();
                         return Task::none();
                     }
-                    if let Ok(config) = stored {
-                        self.reload_settings_from_stored(config);
+                };
+                match reread_config_for_save(&config_path) {
+                    Ok(fresh) => {
+                        self.config_unreadable = false;
+                        self.saved_config = fresh;
+                        if self.toast.as_deref() == Some(SETTINGS_SAVE_REFUSED) {
+                            self.toast = None;
+                            self.toast_shown_at = None;
+                        }
                     }
-                    self.config_unreadable = false;
+                    Err(_) => {
+                        self.config_unreadable = true;
+                        self.show_refused_toast();
+                        return Task::none();
+                    }
                 }
                 // Block the whole save. Writing the form would either store
                 // the cleartext URL or drop the sync block; the file on disk
@@ -1077,16 +1089,6 @@ impl TrackerApp {
         self.toast_shown_at = Some(SystemTime::now());
     }
 
-    fn reload_settings_from_stored(&mut self, config: Config) {
-        let hotkey = self.settings.overlay_hotkey.clone();
-        let hotkey_enabled = self.settings.overlay_hotkey_enabled;
-        self.saved_config = config;
-        self.settings = SettingsForm::from_config(&self.saved_config);
-        self.settings.overlay_hotkey = hotkey;
-        self.settings.overlay_hotkey_enabled = hotkey_enabled;
-        self.health_status = self.health_now();
-    }
-
     fn expire_refused_toast(&mut self) {
         if refused_toast_expired(
             self.toast.as_deref(),
@@ -1431,6 +1433,7 @@ fn health_status_for(
 mod tests {
     use super::{TrayWindowOp, tray_hide_op, tray_show_op};
     use iced::window;
+    use stat_tracker::config::Config;
     use tracing_subscriber::layer::SubscriberExt;
 
     #[test]
@@ -1453,22 +1456,69 @@ mod tests {
     }
 
     #[test]
-    fn refused_toast_clears_without_a_restart() {
-        let refused = super::SETTINGS_SAVE_REFUSED;
-        assert!(super::gate_unreadable_save(true, false));
+    fn save_succeeds_after_the_config_file_is_fixed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        let broken = "\
+this is not toml
+token = \"secret-token-must-stay\"
+";
+        std::fs::write(&path, broken).expect("seed broken file");
+
+        let mut config_unreadable = true;
         assert!(
-            !super::gate_unreadable_save(true, true),
-            "a fixed file must allow the next save"
+            config_unreadable,
+            "startup still treats the broken file as unreadable"
         );
-        assert!(!super::gate_unreadable_save(false, false));
+        let refused = super::reread_config_for_save(&path);
+        config_unreadable = refused.is_err();
+        assert!(config_unreadable);
+        assert_eq!(refused, Err(super::SETTINGS_SAVE_REFUSED));
+        assert_eq!(std::fs::read_to_string(&path).expect("unchanged"), broken);
 
-        let success = super::toast_after_successful_save(true);
-        assert_ne!(success, refused);
-        assert!(!success.contains("Fix that file"));
-        assert_eq!(super::toast_after_successful_save(false), "Settings saved");
+        let fixed = "\
+data_dir = \"/tmp/sst-fixed-on-disk\"
+player_name = \"the streamer\"
+session_window_secs = 1800
+finished_game_close_secs = 180
+game_process_names = [\"Overwatch.exe\"]
+debug_ocr = false
 
+[auto_detect]
+enabled = true
+poll_interval_secs = 4
+cooldown_secs = 120
+
+[sync]
+server_url = \"https://crew.example\"
+token = \"secret-token-must-stay\"
+";
+        std::fs::write(&path, fixed).expect("fix the file");
+
+        let fresh = super::reread_config_for_save(&path).expect("fixed file parses");
+        config_unreadable = false;
+        assert!(!config_unreadable);
+        assert!(!fresh.shadow_recognizer);
+        let mut next = fresh.clone();
+        next.shadow_recognizer = true;
+        next.save_at(&path)
+            .expect("Save succeeds without a restart");
+
+        let saved = std::fs::read_to_string(&path).expect("saved");
+        let loaded = Config::read_at(&path).expect("load after save");
+        assert!(loaded.shadow_recognizer);
+        assert!(saved.contains("secret-token-must-stay"));
+        assert!(saved.contains("[auto_detect]"));
+        assert!(saved.contains("[sync]"));
+        let header = saved.find("[auto_detect]").expect("header");
+        assert_eq!(saved[..header].matches("shadow_recognizer").count(), 1);
+        assert!(saved[..header].contains("shadow_recognizer = true"));
+    }
+
+    #[test]
+    fn refused_toast_clears_on_dismiss_or_timeout() {
+        let refused = super::SETTINGS_SAVE_REFUSED;
         assert!(super::toast_after_dismiss().is_none());
-
         let shown = std::time::SystemTime::UNIX_EPOCH;
         let almost = shown + super::REFUSED_TOAST_TIMEOUT - std::time::Duration::from_secs(1);
         let due = shown + super::REFUSED_TOAST_TIMEOUT;
@@ -1482,12 +1532,7 @@ mod tests {
             Some(shown),
             due
         ));
-        assert!(!super::refused_toast_expired(
-            Some("Settings saved"),
-            Some(shown),
-            due
-        ));
-        assert!(!super::refused_toast_expired(Some(refused), None, due));
+        assert_ne!(super::toast_after_successful_save(true), refused);
     }
 
     #[test]
