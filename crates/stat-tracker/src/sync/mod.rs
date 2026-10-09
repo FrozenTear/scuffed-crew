@@ -402,7 +402,6 @@ struct AuthPauseFile {
     token_fingerprint: String,
 }
 
-/// Remember that this URL + token was refused (401/403). Mode 0600.
 /// The JSON body `upload_matches` posts. A pure function so tests can pin
 /// the exact bytes (for example, that shadow mode leaves them unchanged).
 pub fn upload_request(
@@ -438,6 +437,7 @@ pub fn upload_request(
     }
 }
 
+/// Remember that this URL + token was refused (401/403). Mode 0600.
 pub fn write_auth_pause(data_dir: &Path, server_url: &str, token: &str) -> std::io::Result<()> {
     if let Some(parent) = auth_pause_path(data_dir).parent() {
         std::fs::create_dir_all(parent)?;

@@ -4,7 +4,29 @@ User-facing notes for `stat-tracker-v*` GitHub Releases. The release workflow
 prepends the section whose heading matches the tag version (for example
 `## 0.4.15` for `stat-tracker-v0.4.15`).
 
+Each release section starts with a short summary for players: one to three
+sentences in plain language, before any technical detail. That summary is
+the first paragraph under the `## X.Y.Z` heading (a blank line ends it).
+After the summary, a `### Highlights` list gives two to four short
+player-facing bullets. Each bullet adds a concrete change the summary
+does not already say. The rest of the section is technical detail.
+Keep the `## X.Y.Z` headings and the `### Install` blocks. The release
+workflow copies from the matching heading through the next `##` heading,
+including `### Install`. The desktop app hides `### Install`, shows the
+summary, then the highlights, and tucks the remaining text under Details.
+
 ## 0.4.23
+
+You can turn on an extra number reader that only writes a private log on
+this computer. It does not change your saved games or what gets uploaded,
+and it stays off unless you enable it.
+
+### Highlights
+
+- Turn it on with shadow_recognizer = true in config.toml.
+- For one run only, set SCUFFED_SHADOW_RECOGNIZER=1. That is not saved into the config file.
+- The log is shadow/digits.jsonl in your data folder, and it rolls over around 4 MB.
+- The extra read stays on a side thread and stops if one board takes longer than 300 ms, so a capture is not held up.
 
 Adds an optional shadow digit reader, off by default. When it is on
 (`shadow_recognizer = true` in config.toml, or
@@ -26,6 +48,17 @@ Or extract the tarball and run `./install.sh`. Pin with
 `STAT_TRACKER_TAG=stat-tracker-v0.4.23`.
 
 ## 0.4.22
+
+Map names are less likely to be mixed up, including the two Watchpoint
+maps and a couple of event maps. Long games are no longer closed too
+early, and uploading a result no longer freezes the tracker.
+
+### Highlights
+
+- An unclear Watchpoint name is dropped. Grímsvötn still wins when that name is readable, even if the accents are missing.
+- Adlersbrunn is saved as Eichenwalde when both teams have stats. Château Guillard games stay on this computer and are skipped in totals and history.
+- A match with no result can run longer than 20 minutes. It closes after 6 hours without a result, or when the next game starts.
+- Choosing Victory, Defeat, or Draw queues an upload in about 3 seconds, and Tab still works while that send is in progress.
 
 A bare or ambiguous Watchpoint is not stored as Gibraltar. A following
 word is matched against Grímsvötn and Gibraltar, including the misreads
@@ -90,6 +123,16 @@ Or extract the tarball and run `./install.sh`. Pin with
 
 ## 0.4.21
 
+A faint 0 on the scoreboard was sometimes missed, which shoved the other
+numbers into the wrong columns. Those zeros are read now, and a timer on
+the same line is no longer treated as a stat.
+
+### Highlights
+
+- Those zeros count in every stat column, not only one of them.
+- A clock like 00:02 on the player line is skipped, so it cannot push assists into the damage figure.
+- If the gap between rows cannot decide 5v5 or 6v6, that capture is thrown out instead of moving every player one slot.
+
 A zero on the scoreboard is drawn fainter than the other digits. The
 cell reader was dropping those cells, and one empty cell threw away the
 whole row. Those Tabs were often saved anyway, through the text
@@ -153,6 +196,17 @@ Or extract the tarball and run `./install.sh`. Pin with
 
 ## 0.4.20
 
+The last game of a session uploads on its own a few minutes after the
+result, instead of waiting until the next game or a shutdown. Watchpoint:
+Grímsvötn is stored as its own map, not as Watchpoint: Gibraltar.
+
+### Highlights
+
+- The quiet wait is about 3 minutes from the last activity, and never shorter than 75 seconds after the result.
+- A Tab during those 75 seconds still counts toward the game that just ended.
+- Grímsvötn is recognized with or without accents, and with or without the Watchpoint prefix.
+- A game with no result that sits idle for 20 minutes is closed as Unknown and not uploaded (0.4.22 removed this timeout).
+
 The last game of the night now uploads by itself about 3 minutes after
 the result screen. Before this, that game stayed open until the next
 Tab or a clean shutdown, so it could sit unsynced for hours. A Tab
@@ -186,6 +240,17 @@ Or extract the tarball and run `./install.sh`. Pin with
 `STAT_TRACKER_TAG=stat-tracker-v0.4.20`.
 
 ## 0.4.19
+
+The tracker is better at telling one match from the next, so a result
+and the stats after it stay on the right game. It no longer uses a short
+timer to decide that a new match has started.
+
+### Highlights
+
+- The 75 second grace starts when the result is saved, not when the result word first shows up.
+- Changing heroes in the middle of a match does not open a new game by itself.
+- A later Tab with a different map name can end the current game, once that game already has a map.
+- The first board of a new game has to be at least 45 seconds after the old one, and it stays off the old game until a second board agrees.
 
 Boundaries are one board-order state machine. A result hint stays sealable
 until a second board with progressed stats is accepted after it, or one

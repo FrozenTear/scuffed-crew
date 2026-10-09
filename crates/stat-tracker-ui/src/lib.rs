@@ -8,7 +8,9 @@
 //! iced_layershell process the daemon window starts and stops. Companion
 //! show/hide shortcut is evdev in this process (Settings → Companion). Does
 //! not change OCR, capture, sync, or the store schema. There is no software
-//! `--preview` path.
+//! `--preview` path. Release notes from the tracker changelog are bundled
+//! into this binary and shown from the update prompt, once after the
+//! installed version changes, and from About.
 
 pub mod aggregate;
 pub mod app;
@@ -24,6 +26,7 @@ pub mod hotkey;
 pub mod layout;
 pub mod maps;
 pub mod model;
+pub mod notes;
 pub mod overlay;
 #[cfg(feature = "companion")]
 pub mod overlay_shell;

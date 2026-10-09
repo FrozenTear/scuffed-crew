@@ -43,6 +43,17 @@ pub struct UpdateInfo {
     pub latest: String,
     pub current: String,
     pub url: String,
+    /// GitHub release bodies for versions newer than `current`, newest first.
+    /// Empty bodies mean the bundled changelog is the fallback.
+    pub release_bodies: Vec<ReleaseBody>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReleaseBody {
+    pub version: String,
+    pub body: String,
+    /// GitHub `published_at`, when the API included one.
+    pub published_at: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -349,10 +360,13 @@ pub fn evaluate_plan_with(latest: &str, probes: UpdateProbes<'_>) -> UpdatePlan 
 }
 
 /// Query GitHub Releases; `None` on failure or when already current.
+///
+/// `per_page=100` so a player who skipped several releases still gets those
+/// bodies for the in-app notes. The bundled changelog covers anything the
+/// response leaves out.
 pub async fn check_for_update() -> Option<UpdateInfo> {
     let current = current_version()?;
-    let cur = parse_semver(&current)?;
-    let url = format!("https://api.github.com/repos/{REPO}/releases?per_page=20");
+    let url = format!("https://api.github.com/repos/{REPO}/releases?per_page=100");
     let client = reqwest::Client::builder()
         .user_agent("scuffed-stat-tracker-gui")
         .timeout(Duration::from_secs(8))
@@ -367,32 +381,68 @@ pub async fn check_for_update() -> Option<UpdateInfo> {
         .json()
         .await
         .ok()?;
+    select_newer_release(&current, &releases)
+}
 
-    let mut best: Option<((u32, u32, u32), String, String)> = None;
-    for r in releases {
-        if r["draft"].as_bool().unwrap_or(false) || r["prerelease"].as_bool().unwrap_or(false) {
+/// Newest stable `stat-tracker-v*` newer than `current`, plus the bodies of
+/// every stable release between them (newest first).
+pub fn select_newer_release(current: &str, releases: &[serde_json::Value]) -> Option<UpdateInfo> {
+    let cur = parse_semver(current)?;
+    struct Parsed {
+        ver: (u32, u32, u32),
+        ver_str: String,
+        html: String,
+        body: String,
+        published_at: Option<String>,
+    }
+    let mut parsed = Vec::new();
+    for release in releases {
+        if release["draft"].as_bool().unwrap_or(false)
+            || release["prerelease"].as_bool().unwrap_or(false)
+        {
             continue;
         }
-        let Some(ver_str) = r["tag_name"]
+        let Some(ver_str) = release["tag_name"]
             .as_str()
-            .and_then(|t| t.strip_prefix("stat-tracker-v"))
+            .and_then(|tag| tag.strip_prefix("stat-tracker-v"))
         else {
             continue;
         };
         let Some(ver) = parse_semver(ver_str) else {
             continue;
         };
-        if best.as_ref().is_none_or(|(b, _, _)| ver > *b) {
-            let html = r["html_url"].as_str().unwrap_or_default().to_string();
-            best = Some((ver, ver_str.to_string(), html));
-        }
+        parsed.push(Parsed {
+            ver,
+            ver_str: ver_str.to_string(),
+            html: release["html_url"].as_str().unwrap_or_default().to_string(),
+            body: release["body"].as_str().unwrap_or_default().to_string(),
+            published_at: release["published_at"].as_str().map(str::to_string),
+        });
     }
-
-    let (latest_ver, latest_str, html_url) = best?;
-    (latest_ver > cur).then_some(UpdateInfo {
-        latest: latest_str,
-        current,
-        url: html_url,
+    let best = parsed.iter().max_by_key(|item| item.ver)?;
+    if best.ver <= cur {
+        return None;
+    }
+    let latest_ver = best.ver;
+    let latest = best.ver_str.clone();
+    let url = best.html.clone();
+    let mut notes: Vec<_> = parsed
+        .into_iter()
+        .filter(|item| item.ver > cur && item.ver <= latest_ver)
+        .collect();
+    notes.sort_by_key(|item| std::cmp::Reverse(item.ver));
+    Some(UpdateInfo {
+        latest,
+        current: current.trim().trim_start_matches('v').to_string(),
+        url,
+        release_bodies: notes
+            .into_iter()
+            .map(|item| ReleaseBody {
+                version: item.ver_str,
+                body: item.body,
+                published_at: item.published_at,
+            })
+            .collect(),
     })
 }
 
@@ -577,30 +627,93 @@ async fn download_and_run_bootstrap(
     ))
 }
 
-pub fn banner(
+/// Notes stay closed until the player presses What's new.
+pub fn update_notes_expanded_default() -> bool {
+    false
+}
+
+/// The banner draws release cards only after that button.
+pub fn banner_shows_notes(expanded: bool) -> bool {
+    expanded
+}
+
+/// Heading for the compact banner. One line, no extra punctuation.
+pub fn banner_title(latest: &str) -> String {
+    format!("Update available: v{latest}")
+}
+
+/// Characters of the player summary kept on the compact banner.
+pub const BANNER_LEAD_CHARS: usize = 110;
+
+/// First sentence of the newest release, cut on a word boundary when it is long.
+pub fn banner_lead(summary: &str) -> String {
+    let sentence = first_sentence(summary.trim());
+    truncate_clean(sentence, BANNER_LEAD_CHARS)
+}
+
+fn first_sentence(text: &str) -> &str {
+    let bytes = text.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'.' {
+            let rest = text[i + 1..].trim_start();
+            if rest.is_empty() || rest.starts_with(|c: char| c.is_ascii_uppercase()) {
+                return text[..=i].trim();
+            }
+        }
+        i += 1;
+    }
+    text
+}
+
+fn truncate_clean(text: &str, max_chars: usize) -> String {
+    if text.chars().count() <= max_chars {
+        return text.to_string();
+    }
+    let keep = max_chars.saturating_sub(3);
+    let mut end = text.len();
+    for (seen, (i, _)) in text.char_indices().enumerate() {
+        if seen == keep {
+            end = i;
+            break;
+        }
+    }
+    let cut = text[..end].trim_end();
+    let cut = match cut.rfind(' ') {
+        Some(space) if space > 0 => &cut[..space],
+        _ => cut,
+    };
+    let cut = cut.trim_end_matches(['.', ',', ';', ':']);
+    format!("{cut}...")
+}
+
+pub fn banner<'a>(
     info: &UpdateInfo,
     progress: &UpdateProgress,
     plan: &UpdatePlan,
-) -> Element<'static, Message> {
+    notes: &'a [crate::notes::ShownRelease],
+    notes_ui: crate::notes::NotesUi<'a>,
+    notes_expanded: bool,
+) -> Element<'a, Message> {
     let url = info.url.clone();
     let cmd = pinned_install_command(&info.latest);
     let running = matches!(progress, UpdateProgress::Running);
     let can_run = plan.can_run() && !running && !matches!(progress, UpdateProgress::Succeeded(_));
+    let lead = notes
+        .first()
+        .map(|section| banner_lead(&section.summary))
+        .filter(|lead| !lead.is_empty());
 
     let mut body = column![
-        text(format!("Update available — v{}", info.latest))
+        text(banner_title(&info.latest))
             .size(SIZE_TITLE)
             .font(FONT_BOLD)
             .color(TEXT),
-        text(format!(
-            "You're on v{}. Update now downloads the release and runs the installer, or copy the command and run it in a terminal.",
-            info.current
-        ))
-        .size(SIZE_BODY)
-        .font(FONT_MEDIUM)
-        .color(TEXT_2),
     ]
-    .spacing(10);
+    .spacing(8);
+    if let Some(lead) = lead {
+        body = body.push(text(lead).size(SIZE_BODY).font(FONT_MEDIUM).color(TEXT_2));
+    }
 
     match progress {
         UpdateProgress::Idle => {}
@@ -676,7 +789,7 @@ pub fn banner(
         .style(theme::ghost_btn())
         .on_press(Message::CopyUpdateCmd),
         button(
-            text("Release notes")
+            text("Open on GitHub")
                 .size(SIZE_META)
                 .font(FONT_SEMIBOLD)
                 .color(TEXT),
@@ -684,10 +797,26 @@ pub fn banner(
         .padding(Padding::from([8, 16]))
         .style(theme::ghost_btn())
         .on_press(Message::OpenUpdate(url)),
+        button(
+            text(if banner_shows_notes(notes_expanded) {
+                "Hide what's new"
+            } else {
+                "What's new"
+            })
+            .size(SIZE_META)
+            .font(FONT_SEMIBOLD)
+            .color(TEXT),
+        )
+        .padding(Padding::from([8, 16]))
+        .style(theme::ghost_btn())
+        .on_press(Message::ToggleUpdateNotes),
     ]
     .spacing(8);
 
     body = body.push(actions);
+    if banner_shows_notes(notes_expanded) {
+        body = body.push(update_notes_block(info, notes, notes_ui));
+    }
 
     container(body)
         .padding(PAD_INNER)
@@ -705,11 +834,119 @@ pub fn banner(
         .into()
 }
 
+fn update_notes_block<'a>(
+    info: &UpdateInfo,
+    notes: &'a [crate::notes::ShownRelease],
+    notes_ui: crate::notes::NotesUi<'a>,
+) -> Element<'a, Message> {
+    if notes.is_empty() {
+        return text(format!(
+            "Release notes for v{} could not be loaded. They will show here after you update.",
+            info.latest
+        ))
+        .size(SIZE_META)
+        .font(FONT_MEDIUM)
+        .color(TEXT_2)
+        .into();
+    }
+    let heading = if notes.len() > 1 {
+        "What's new, including versions since the one you have installed."
+    } else {
+        "What's new in this update."
+    };
+    column![
+        text(heading)
+            .size(SIZE_META)
+            .font(FONT_SEMIBOLD)
+            .color(TEXT_2),
+        crate::notes::notes_column(notes, notes_ui),
+    ]
+    .spacing(12)
+    .width(Fill)
+    .into()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::daemon::DaemonVerb;
     use std::path::PathBuf;
+
+    #[test]
+    fn select_newer_release_keeps_bodies_between_current_and_latest() {
+        let releases = vec![
+            serde_json::json!({
+                "tag_name": "stat-tracker-v0.4.22",
+                "draft": false,
+                "prerelease": false,
+                "html_url": "https://example.com/22",
+                "body": "notes 22",
+                "published_at": "2026-02-01T00:00:00Z"
+            }),
+            serde_json::json!({
+                "tag_name": "stat-tracker-v0.4.23",
+                "draft": false,
+                "prerelease": false,
+                "html_url": "https://example.com/23",
+                "body": "notes 23"
+            }),
+            serde_json::json!({
+                "tag_name": "stat-tracker-v0.4.24",
+                "draft": true,
+                "html_url": "https://example.com/draft",
+                "body": "draft"
+            }),
+            serde_json::json!({
+                "tag_name": "stat-tracker-v0.4.21",
+                "draft": false,
+                "html_url": "https://example.com/21",
+                "body": "notes 21"
+            }),
+        ];
+        let info = select_newer_release("0.4.21", &releases).expect("update");
+        assert_eq!(info.latest, "0.4.23");
+        assert_eq!(info.current, "0.4.21");
+        assert_eq!(info.url, "https://example.com/23");
+        assert_eq!(
+            info.release_bodies
+                .iter()
+                .map(|body| (
+                    body.version.as_str(),
+                    body.body.as_str(),
+                    body.published_at.as_deref()
+                ))
+                .collect::<Vec<_>>(),
+            [
+                ("0.4.23", "notes 23", None),
+                ("0.4.22", "notes 22", Some("2026-02-01T00:00:00Z"))
+            ]
+        );
+        assert!(select_newer_release("0.4.23", &releases).is_none());
+    }
+
+    #[test]
+    fn update_banner_notes_start_collapsed() {
+        assert!(!update_notes_expanded_default());
+        assert!(!banner_shows_notes(update_notes_expanded_default()));
+        assert!(banner_shows_notes(true));
+        assert_eq!(banner_title("0.4.23"), "Update available: v0.4.23");
+        assert!(!banner_title("0.4.23").contains('\u{2014}'));
+    }
+
+    #[test]
+    fn banner_lead_keeps_one_sentence_and_cuts_on_a_word() {
+        let summary = "You can turn on an extra number reader that only writes a private log on this computer. It does not change your saved games or what gets uploaded, and it stays off unless you enable it.";
+        assert_eq!(
+            banner_lead(summary),
+            "You can turn on an extra number reader that only writes a private log on this computer."
+        );
+        let long = "alpha ".repeat(40);
+        let cut = banner_lead(long.trim());
+        assert!(cut.ends_with("..."), "{cut}");
+        assert!(cut.chars().count() <= BANNER_LEAD_CHARS, "{cut}");
+        assert!(!cut[..cut.len() - 3].ends_with(' '));
+        assert_eq!(banner_lead("Short note."), "Short note.");
+    }
 
     #[test]
     fn semver_parses_and_orders() {

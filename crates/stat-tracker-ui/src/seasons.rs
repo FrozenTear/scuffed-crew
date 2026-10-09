@@ -59,6 +59,11 @@ struct UiStateFile {
     /// Missing → on. The overlay stays click-through; this is an evdev bind.
     #[serde(default)]
     overlay_hotkey_enabled: Option<bool>,
+    /// Tracker version whose in-app notes were last closed. Missing on the
+    /// first launch, so the notes open once. Install method does not matter:
+    /// the GUI compares this with the version it is actually running.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    last_seen_version: Option<String>,
 }
 
 pub fn cache_path(data_dir: &Path) -> PathBuf {
@@ -151,6 +156,24 @@ pub fn save_overlay_hotkey(data_dir: &Path, hotkey: &OverlayHotkey) -> std::io::
     let mut file = read_ui_state_file(data_dir).unwrap_or_default();
     file.overlay_hotkey = Some(hotkey.bind.clone());
     file.overlay_hotkey_enabled = Some(hotkey.enabled);
+    write_ui_state_file(data_dir, &file)
+}
+
+/// `None` when the file is missing, the field is absent, or it is blank.
+pub fn load_last_seen_version(data_dir: &Path) -> Option<String> {
+    read_ui_state_file(data_dir).and_then(|file| {
+        file.last_seen_version
+            .filter(|version| !version.trim().is_empty())
+            .map(|version| version.trim().to_string())
+    })
+}
+
+/// Remember which tracker version's notes the player has already closed.
+/// Other `ui_state.json` fields are left as they were.
+pub fn save_last_seen_version(data_dir: &Path, version: &str) -> std::io::Result<()> {
+    let mut file = read_ui_state_file(data_dir).unwrap_or_default();
+    let trimmed = version.trim();
+    file.last_seen_version = (!trimmed.is_empty()).then(|| trimmed.to_string());
     write_ui_state_file(data_dir, &file)
 }
 
