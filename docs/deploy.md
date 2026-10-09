@@ -469,8 +469,9 @@ entrypoint does this instead of starting the binary directly.
 
 If the directory is missing or not writable when the server starts, stat
 reports turn themselves off. The log line is `stat reports disabled: ...` and
-the rest of the site keeps serving. Report routes then return 503 until the
-directory can be written and the server is restarted.
+the rest of the site keeps serving. Every report route then returns 503
+with body `{"error":"reports_disabled"}` until the directory can be written
+and the server is restarted.
 
 `scripts/backup.sh` includes the `reports-data` volume in the restic snapshot,
 the same way it includes uploads.

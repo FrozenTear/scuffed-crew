@@ -1677,16 +1677,60 @@ async fn sweep_skips_orphan_files_inside_the_grace_period() {
 #[tokio::test]
 async fn reports_disable_when_the_directory_cannot_be_opened() {
     let h = harness_enabled(false).await;
-    let (status, body) = send(
-        &h.app,
-        Method::POST,
-        "/api/stat-reports",
-        Some(MEMBER_TOKEN),
-        Some(valid_bundle(false).bytes),
-    )
-    .await;
-    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
-    assert_eq!(body["error"], "Report uploads are disabled");
+    let id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let routes = [
+        (
+            Method::POST,
+            "/api/stat-reports".to_string(),
+            MEMBER_TOKEN,
+            Some(valid_bundle(false).bytes),
+        ),
+        (
+            Method::GET,
+            "/api/stat-reports".to_string(),
+            MEMBER_TOKEN,
+            None,
+        ),
+        (
+            Method::GET,
+            format!("/api/stat-reports/{id}"),
+            OFFICER_TOKEN,
+            None,
+        ),
+        (
+            Method::GET,
+            format!("/api/stat-reports/{id}/manifest"),
+            OFFICER_TOKEN,
+            None,
+        ),
+        (
+            Method::DELETE,
+            format!("/api/stat-reports/{id}"),
+            MEMBER_TOKEN,
+            None,
+        ),
+        (
+            Method::POST,
+            format!("/api/stat-reports/{id}/withdraw"),
+            MEMBER_TOKEN,
+            None,
+        ),
+        (
+            Method::PATCH,
+            format!("/api/stat-reports/{id}"),
+            MEMBER_TOKEN,
+            None,
+        ),
+    ];
+    for (method, path, token, body) in routes {
+        let (status, response) = send(&h.app, method.clone(), &path, Some(token), body).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{method} {path}");
+        assert_eq!(
+            response,
+            json!({"error": "reports_disabled"}),
+            "{method} {path}"
+        );
+    }
 
     let root = std::env::temp_dir().join(format!("scuffed-reports-open-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&root).unwrap();

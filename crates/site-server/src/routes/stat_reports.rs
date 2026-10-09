@@ -92,10 +92,7 @@ fn officer_item(report: &StatReport) -> StatReportListItem {
 
 fn configured(state: &AppState) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
     if !state.reports_enabled {
-        return Err(err(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "Report uploads are disabled",
-        ));
+        return Err(err(StatusCode::SERVICE_UNAVAILABLE, "reports_disabled"));
     }
     if reports_dir_conflicts(&state.reports_dir, &state.upload_dir) {
         tracing::error!("REPORTS_DIR overlaps the upload directory or the web root");
