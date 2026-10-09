@@ -109,6 +109,18 @@ mod tests {
     }
 
     #[test]
+    fn rejected_upload_keeps_the_server_message() {
+        let mut snap = fixtures::snapshot(FixtureKind::Sample);
+        snap.matches[0].upload_reject = Some("matches[0]: hero is not allowed".into());
+        let games = games_from_snapshot(&snap);
+        assert_eq!(
+            games[0].upload_reject.as_deref(),
+            Some("matches[0]: hero is not allowed")
+        );
+        assert_eq!(crate::model::UPLOAD_REJECTED_LABEL, "Upload rejected");
+    }
+
+    #[test]
     fn deathmatch_rows_are_left_out_of_history_and_totals() {
         let mut snap = fixtures::snapshot(FixtureKind::Sample);
         let tracked = games_from_snapshot(&snap).len();

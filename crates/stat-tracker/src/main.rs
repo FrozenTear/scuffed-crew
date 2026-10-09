@@ -3724,6 +3724,7 @@ async fn store_held_board(
         played_at,
         synced: false,
         sync_rev: 0,
+        upload_reject: None,
         session_id: session_id.to_string(),
         corrected_hero: None,
         corrected_role: None,
@@ -5178,12 +5179,17 @@ async fn apply_queued_commands(
                     persist_active_game(data_dir, Some(g));
                 }
             }
-            storage::StoreCommand::ResolveSegment { .. } => {}
+            storage::StoreCommand::ResolveSegment { .. }
+            | storage::StoreCommand::RetryUpload { .. } => {}
         }
         match store.apply_command(cmd).await {
             Ok(()) => {
                 storage::remove_command_file(cmd_file);
-                if matches!(cmd, storage::StoreCommand::SetOutcome { .. }) {
+                if matches!(
+                    cmd,
+                    storage::StoreCommand::SetOutcome { .. }
+                        | storage::StoreCommand::RetryUpload { .. }
+                ) {
                     schedule_store_sync(
                         sync_task,
                         sync_backoff,
@@ -5396,18 +5402,59 @@ async fn finish_sync_on_shutdown(
     .await;
 }
 
+fn sync_attempt_from_error(err: &sync::SyncUploadError) -> sync::SyncAttempt {
+    let attempt = err.attempt();
+    match attempt {
+        sync::SyncAttempt::RateLimited { .. } => {
+            tracing::warn!(error = %err, "sync rate-limited, will retry after backoff");
+        }
+        sync::SyncAttempt::AuthRejected => {
+            tracing::error!(
+                error = %err,
+                "sync token rejected, will not retry until the URL or token changes"
+            );
+        }
+        _ => tracing::error!(error = %err, "sync upload failed"),
+    }
+    attempt
+}
+
 /// Read unsynced rows, upload, then mark synced only where `sync_rev` is
 /// still the revision captured here. `upload` is the HTTP call (or a test
 /// double). It runs after the read and before the mark, which is the window
 /// a local outcome/map/hero/GUI write can revise a row.
+fn claims_covering(
+    claims: &[storage::SyncClaim],
+    rows: &[storage::PersonalMatch],
+    indexes: impl IntoIterator<Item = usize>,
+) -> Vec<storage::SyncClaim> {
+    let mut picked = vec![false; claims.len()];
+    for index in indexes {
+        let Some(row) = rows.get(index) else {
+            continue;
+        };
+        for (i, claim) in claims.iter().enumerate() {
+            if claim.covers_row(row) {
+                picked[i] = true;
+            }
+        }
+    }
+    claims
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| picked[*i])
+        .map(|(_, claim)| claim.clone())
+        .collect()
+}
+
 async fn try_sync_with<F, Fut>(
     store: &storage::LocalStore,
     data_dir: &std::path::Path,
     settle_session: Option<String>,
-    upload: F,
+    mut upload: F,
 ) -> sync::SyncAttempt
 where
-    F: FnOnce(Vec<storage::PersonalMatch>, Vec<String>) -> Fut,
+    F: FnMut(Vec<storage::PersonalMatch>, Vec<String>) -> Fut,
     Fut: std::future::Future<
             Output = Result<scuffed_types::api::StatsUploadResponse, sync::SyncUploadError>,
         >,
@@ -5501,45 +5548,98 @@ where
         tombstones = tombstones.len(),
         "syncing unsynced matches"
     );
-    match upload(to_upload, tombstones.clone()).await {
-        Ok(resp) => {
-            tracing::info!(
-                inserted = resp.inserted,
-                skipped = resp.skipped,
-                deleted = resp.deleted,
-                "sync complete"
-            );
-            if let Err(e) = store.mark_synced(&claims).await.map_err(|e| e.to_string()) {
-                tracing::error!(error = %e, "failed to mark matches as synced");
-            }
-            if let Err(e) = store
-                .clear_tombstones(tombstones)
-                .await
-                .map_err(|e| e.to_string())
-            {
-                tracing::error!(error = %e, "failed to clear acknowledged tombstones");
-            }
-            // Sync flips `synced` flags — GUI must see that promptly.
-            refresh_snapshot_force(store, data_dir).await;
-            sync::SyncAttempt::Uploaded
-        }
-        Err(e) => {
-            let attempt = e.attempt();
-            match attempt {
-                sync::SyncAttempt::RateLimited { .. } => {
-                    tracing::warn!(error = %e, "sync rate-limited — will retry after backoff");
+    // Quarantine can leave deletes with no match rows. Those still need one
+    // request. There is nothing to split.
+    if to_upload.is_empty() {
+        return match upload(Vec::new(), tombstones.clone()).await {
+            Ok(resp) => {
+                tracing::info!(deleted = resp.deleted, "sync complete");
+                if let Err(e) = store
+                    .clear_tombstones(tombstones)
+                    .await
+                    .map_err(|e| e.to_string())
+                {
+                    tracing::error!(error = %e, "failed to clear acknowledged tombstones");
                 }
-                sync::SyncAttempt::AuthRejected => {
-                    tracing::error!(
-                        error = %e,
-                        "sync token rejected — will not retry until the URL or token changes"
-                    );
-                }
-                _ => tracing::error!(error = %e, "sync upload failed"),
+                refresh_snapshot_force(store, data_dir).await;
+                sync::SyncAttempt::Uploaded
             }
-            attempt
+            Err(err) => sync_attempt_from_error(&err),
+        };
+    }
+    // 400 and 422 split the batch so one refused row does not retry the
+    // whole queue forever. 5xx, network errors, 401, and 403 stop the pass.
+    let isolation = sync::isolate_rejected(&to_upload, |batch| {
+        upload(batch.to_vec(), tombstones.clone())
+    })
+    .await;
+
+    for rejected in &isolation.rejected {
+        let covered = claims_covering(&claims, &to_upload, [rejected.index]);
+        let session_id = to_upload
+            .get(rejected.index)
+            .map(|row| row.session_id.as_str())
+            .unwrap_or("");
+        tracing::warn!(
+            session_id,
+            error = %rejected.message,
+            "upload rejected this row"
+        );
+        if let Err(e) = store
+            .quarantine_upload(&covered, &rejected.message)
+            .await
+            .map_err(|e| e.to_string())
+        {
+            tracing::error!(error = %e, session_id, "failed to quarantine a rejected row");
         }
     }
+
+    let accepted = claims_covering(&claims, &to_upload, isolation.accepted.iter().copied());
+    if !accepted.is_empty() {
+        if let Err(e) = store
+            .mark_synced(&accepted)
+            .await
+            .map_err(|e| e.to_string())
+        {
+            tracing::error!(error = %e, "failed to mark matches as synced");
+        }
+        if let Err(e) = store
+            .clear_tombstones(tombstones)
+            .await
+            .map_err(|e| e.to_string())
+        {
+            tracing::error!(error = %e, "failed to clear acknowledged tombstones");
+        }
+    }
+
+    if !isolation.accepted.is_empty() || !isolation.rejected.is_empty() {
+        refresh_snapshot_force(store, data_dir).await;
+    }
+
+    if let Some(err) = isolation.stopped {
+        return sync_attempt_from_error(&err);
+    }
+
+    if !isolation.deferred.is_empty() {
+        tracing::warn!(
+            deferred = isolation.deferred.len(),
+            requests = isolation.requests,
+            "sync left rows queued after the request cap"
+        );
+    }
+
+    if isolation.accepted.is_empty() && isolation.rejected.is_empty() {
+        return sync::SyncAttempt::NoServerCall;
+    }
+
+    tracing::info!(
+        uploaded = isolation.accepted.len(),
+        quarantined = isolation.rejected.len(),
+        deferred = isolation.deferred.len(),
+        requests = isolation.requests,
+        "sync pass finished"
+    );
+    sync::SyncAttempt::Uploaded
 }
 
 #[cfg(test)]
@@ -7476,6 +7576,7 @@ mod tests {
             played_at: SurrealDatetime::from(Utc::now()),
             synced: false,
             sync_rev: 0,
+            upload_reject: None,
             session_id: session_id.into(),
             corrected_hero: None,
             corrected_role: None,
@@ -11123,6 +11224,178 @@ mod tests {
             !called.load(std::sync::atomic::Ordering::SeqCst),
             "a deathmatch-only batch must not call upload"
         );
+    }
+
+    #[tokio::test]
+    async fn one_bad_row_uploads_the_rest_and_stays_quarantined() {
+        let n = 8_i64;
+        let dir = tempfile::tempdir().unwrap();
+        let store = storage::LocalStore::open(dir.path()).await.unwrap();
+        for i in 0..n {
+            let mut row = test_match(&format!("s{i}"), "victory");
+            row.played_at = SurrealDatetime::from(Utc::now() + chrono::Duration::seconds(i));
+            store.insert_match(row).await.unwrap();
+        }
+        let bad = "s3";
+        let uploaded = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let uploaded_pass = std::sync::Arc::clone(&uploaded);
+        let attempt = try_sync_with(&store, dir.path(), None, move |matches, _tombstones| {
+            let uploaded_pass = std::sync::Arc::clone(&uploaded_pass);
+            let bad_here = matches.iter().any(|row| row.session_id == bad);
+            let ids: Vec<String> = matches.iter().map(|row| row.session_id.clone()).collect();
+            async move {
+                if bad_here {
+                    Err(sync::SyncUploadError {
+                        message: "matches[0]: hero is not allowed".into(),
+                        status: Some(400),
+                        retry_after: None,
+                    })
+                } else {
+                    uploaded_pass.lock().unwrap().extend(ids);
+                    Ok(upload_ok())
+                }
+            }
+        })
+        .await;
+        assert!(matches!(attempt, sync::SyncAttempt::Uploaded));
+        let mut got = uploaded.lock().unwrap().clone();
+        got.sort();
+        got.dedup();
+        assert_eq!(got.len(), (n as usize) - 1);
+        assert!(!got.iter().any(|id| id == bad));
+        let rows = store.get_all_matches().await.unwrap();
+        assert!(
+            rows.iter()
+                .filter(|row| row.session_id != bad)
+                .all(|row| row.synced),
+            "the other rows upload"
+        );
+        let bad_row = rows.iter().find(|row| row.session_id == bad).unwrap();
+        assert!(!bad_row.synced);
+        assert_eq!(
+            bad_row.upload_rejection(),
+            Some("matches[0]: hero is not allowed")
+        );
+        assert!(store.get_unsynced().await.unwrap().is_empty());
+
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let calls_pass = std::sync::Arc::clone(&calls);
+        let again = try_sync_with(&store, dir.path(), None, move |_matches, _| {
+            let calls_pass = std::sync::Arc::clone(&calls_pass);
+            async move {
+                calls_pass.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(upload_ok())
+            }
+        })
+        .await;
+        assert!(matches!(again, sync::SyncAttempt::NoServerCall));
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+        store
+            .apply_command(&storage::StoreCommand::RetryUpload {
+                session_id: bad.into(),
+            })
+            .await
+            .unwrap();
+        let retried = try_sync_with(&store, dir.path(), None, move |matches, _| async move {
+            assert_eq!(matches.len(), 1);
+            assert_eq!(matches[0].session_id, bad);
+            Ok(upload_ok())
+        })
+        .await;
+        assert!(matches!(retried, sync::SyncAttempt::Uploaded));
+        let done = store.get_all_matches().await.unwrap();
+        assert!(
+            done.iter()
+                .find(|row| row.session_id == bad)
+                .unwrap()
+                .synced
+        );
+    }
+
+    #[tokio::test]
+    async fn server_error_still_retries_the_whole_batch() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = storage::LocalStore::open(dir.path()).await.unwrap();
+        store
+            .insert_match(test_match("s1", "victory"))
+            .await
+            .unwrap();
+        store
+            .insert_match(test_match("s2", "defeat"))
+            .await
+            .unwrap();
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let calls_pass = std::sync::Arc::clone(&calls);
+        let attempt = try_sync_with(&store, dir.path(), None, move |_matches, _| {
+            let calls_pass = std::sync::Arc::clone(&calls_pass);
+            async move {
+                calls_pass.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Err(sync::SyncUploadError {
+                    message: "down".into(),
+                    status: Some(500),
+                    retry_after: None,
+                })
+            }
+        })
+        .await;
+        assert!(matches!(
+            attempt,
+            sync::SyncAttempt::ServerError { retry_after: None }
+        ));
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let rows = store.get_all_matches().await.unwrap();
+        assert!(
+            rows.iter()
+                .all(|row| !row.synced && row.upload_rejection().is_none())
+        );
+        assert_eq!(store.get_unsynced().await.unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn quarantined_rows_still_send_pending_deletes() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = storage::LocalStore::open(dir.path()).await.unwrap();
+        store
+            .insert_match(test_match("bad", "victory"))
+            .await
+            .unwrap();
+        store.delete_session("gone").await.unwrap();
+        let first = try_sync_with(&store, dir.path(), None, |matches, tombstones| async move {
+            assert_eq!(matches.len(), 1);
+            assert!(tombstones.iter().any(|id| id == "gone"));
+            Err(sync::SyncUploadError {
+                message: "matches[0]: hero is not allowed".into(),
+                status: Some(400),
+                retry_after: None,
+            })
+        })
+        .await;
+        assert!(matches!(first, sync::SyncAttempt::Uploaded));
+        assert!(
+            store
+                .get_pending_tombstones()
+                .await
+                .unwrap()
+                .iter()
+                .any(|id| id == "gone")
+        );
+
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let calls_pass = std::sync::Arc::clone(&calls);
+        let second = try_sync_with(&store, dir.path(), None, move |matches, tombstones| {
+            let calls_pass = std::sync::Arc::clone(&calls_pass);
+            async move {
+                calls_pass.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                assert!(matches.is_empty());
+                assert!(tombstones.iter().any(|id| id == "gone"));
+                Ok(upload_ok())
+            }
+        })
+        .await;
+        assert!(matches!(second, sync::SyncAttempt::Uploaded));
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(store.get_pending_tombstones().await.unwrap().is_empty());
     }
 
     fn unfinished_row(session_id: &str) -> storage::PersonalMatch {
