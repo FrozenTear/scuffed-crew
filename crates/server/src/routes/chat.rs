@@ -538,6 +538,7 @@ mod tests {
                 allowed_origins: vec!["http://localhost:3000".into()],
             },
             upload_dir: PathBuf::from("/tmp/scuffed-test-uploads"),
+            reports_dir: PathBuf::from("/tmp/scuffed-test-reports"),
             notifier: None,
             nostr_challenge_key: [0u8; 32],
             consumed_challenges: scuffed_site_server::challenge_store::ConsumedChallengeStore::new(

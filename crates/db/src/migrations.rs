@@ -787,6 +787,30 @@ pub async fn run_migrations(client: &Surreal<Any>) -> DbResult<()> {
         DEFINE FIELD OVERWRITE claimed ON bootstrap_lock TYPE bool DEFAULT false;
         DEFINE FIELD OVERWRITE claimed_at ON bootstrap_lock TYPE option<datetime>;
         DEFINE INDEX IF NOT EXISTS bootstrap_lock_slot_idx ON bootstrap_lock COLUMNS slot UNIQUE;
+
+        -- ================================================
+        -- Stat-tracker bug reports (metadata only)
+        -- Zip bytes live under REPORTS_DIR, not in this table and not in uploads.
+        -- expires_at is NONE while training consent is set. Otherwise it is
+        -- created_at plus 30 days.
+        -- ================================================
+        DEFINE TABLE IF NOT EXISTS stat_report SCHEMAFULL;
+        DEFINE FIELD OVERWRITE member_id ON stat_report TYPE string;
+        DEFINE FIELD OVERWRITE created_at ON stat_report TYPE datetime;
+        DEFINE FIELD OVERWRITE reason_category ON stat_report TYPE string
+            ASSERT $value IN ['wrong_stats', 'wrong_hero', 'wrong_map', 'wrong_mode', 'wrong_result', 'missed_game', 'other'];
+        DEFINE FIELD OVERWRITE reason_text ON stat_report TYPE string;
+        DEFINE FIELD OVERWRITE app_version ON stat_report TYPE string;
+        DEFINE FIELD OVERWRITE recognizer_matcher ON stat_report TYPE string;
+        DEFINE FIELD OVERWRITE recognizer_ocr ON stat_report TYPE string;
+        DEFINE FIELD OVERWRITE training_consent ON stat_report TYPE bool;
+        DEFINE FIELD OVERWRITE own_name_included ON stat_report TYPE bool;
+        DEFINE FIELD OVERWRITE glyphs_included ON stat_report TYPE bool;
+        DEFINE FIELD OVERWRITE size_bytes ON stat_report TYPE int;
+        DEFINE FIELD OVERWRITE zip_sha256 ON stat_report TYPE string;
+        DEFINE FIELD OVERWRITE expires_at ON stat_report TYPE option<datetime>;
+        DEFINE INDEX IF NOT EXISTS stat_report_member_created_idx ON stat_report COLUMNS member_id, created_at;
+        DEFINE INDEX IF NOT EXISTS stat_report_expires_idx ON stat_report COLUMNS expires_at;
     "#,
         )
         .await?

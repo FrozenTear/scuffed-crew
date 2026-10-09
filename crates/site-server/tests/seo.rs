@@ -85,6 +85,7 @@ async fn test_state(upload_dir: PathBuf) -> AppState {
             allowed_origins: vec![PUBLIC_BASE.into()],
         },
         upload_dir,
+        reports_dir: PathBuf::from("/tmp/scuffed-test-reports"),
         notifier: None,
         nostr_challenge_key: [0u8; 32],
         consumed_challenges: scuffed_site_server::challenge_store::ConsumedChallengeStore::new(),
