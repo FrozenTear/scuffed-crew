@@ -1,32 +1,44 @@
-//! VICTORY / DEFEAT from a result frame (shadow only).
+//! VICTORY / DEFEAT / DRAW from result frames (shadow only).
 //!
-//! Two end screens carry the word, both read here from one frame:
+//! The regions are ocr-v1's (`detect::match_end`), as fractions of the
+//! centred 16:9 game rect, one [`Layout`] each, tagged with a source id:
 //!
-//! * **Post-match accolade screen** (layout `A`, player cards): the word top
-//!   left in the team colour, the map name and match time to its right.
-//! * **Competitive rank screen** (layout `B`, also the defeat screen): white
-//!   italic `DEFEAT` / `VICTORY!` under `COMPETITIVE`.
-//! * Any further screen plugs in through `layouts.json` in the pack (see
-//!   [`ResultTemplates::load_dir`]).
+//! | source        | screen                                   | region (x, y)        | plane | real frames |
+//! |---------------|------------------------------------------|----------------------|-------|-------------|
+//! | `accolade`    | post-match accolade screen, player cards | 0.5-25.5%, 3.5-9.5%  | max   | 52 (1440p)  |
+//! | `rank_screen` | competitive rank screen (incl. defeat)   | 1-25%, 14.5-22.5%    | min   | 98 (1440p)  |
+//! | `end_title`   | centred italic end title                 | 32-68%, 34-52%       | max   | none        |
+//! | `tab_header`  | post-match Tab board header              | 30-70%, 2-24%        | min   | none        |
 //!
-//! Each layout has a fixed region in the 16:9 game rect. The region is turned
-//! into one brightness plane (layout A: the brightest channel, so any bright
-//! team colour reads alike; layout B: the darkest channel, so only white text
-//! survives on the gold or blue background), scaled to a 720p work size, and
-//! searched with zero-mean normalised correlation for each word template at
-//! three scales. A result is sure when the best word scores at least
-//! [`FLOOR`] and leads the other word by at least [`MARGIN`]. Below
-//! [`PRESENT`] there is no result word on the frame.
+//! The plane makes the reader colour-blind: `max` (brightest channel) reads
+//! a team-coloured word the same in any bright colour, `min` (darkest
+//! channel) keeps only white text on a coloured background. The region is
+//! scaled to a 720p work size and searched with zero-mean normalised
+//! correlation for each word template at three scales. A read names a word
+//! when the best template scores at least [`PRESENT`], and is sure when it
+//! scores at least [`FLOOR`] and leads the best other word by [`MARGIN`].
 //!
-//! The word templates are game art and are not embedded: they load from
-//! `<data_dir>/templates/result/{A,B}_{victory,defeat}.png` (8-bit grey at
-//! the work scale). DRAW has no template yet (no real frame), so a draw reads
-//! as flagged or nothing, never as a sure win or loss.
+//! Like ocr-v1, one sure read is not enough: [`ResultEvidence`] collects every
+//! read of one match (poll frames, the accolade screen, the rank screen) and
+//! the result is sure only with [`MIN_AGREE`] agreeing sure reads and no read
+//! of another word. An accolade read is a second look at the same result,
+//! never a new event: the reader creates no events, the caller adds each
+//! frame of a match to that match's evidence.
+//!
+//! Templates are game art and are not embedded. They load from
+//! `<data_dir>/templates/result/<source>_<word>.png` (8-bit grey at the work
+//! scale, `word` one of `victory`, `defeat`, `draw`). A layout without
+//! templates reads nothing. Further screens plug in through an optional
+//! `layouts.json` in the same directory (see [`ResultTemplates::load_dir`]).
+//! Only `accolade` and `rank_screen` have real templates so far; DRAW,
+//! `end_title`, `tab_header` and 1080p-native accolade frames are untested.
+//! The tracker's colour-flood banner (gold or red over y 30-70%) is not read
+//! here: it depends on colour, and a word read covers the same screens.
 
 use std::path::{Path, PathBuf};
 
 use image::RgbImage;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use super::banner::Gray;
 use crate::ocr::preprocess::game_rect_16_9;
@@ -39,25 +51,42 @@ pub const TEMPLATE_SUBDIR: &str = "templates/result";
 pub const PRESENT: f32 = 0.50;
 /// Minimum score for a sure read.
 pub const FLOOR: f32 = 0.70;
-/// Minimum lead over the other word for a sure read.
+/// Minimum lead over the best other word for a sure read.
 pub const MARGIN: f32 = 0.12;
+/// Agreeing sure reads a match needs before its result is sure (ocr-v1 rule).
+pub const MIN_AGREE: usize = 2;
 /// Work scale relative to a 1440p game rect.
 const WORK: f64 = 0.5;
 const SCALES: [f64; 3] = [0.96, 1.0, 1.04];
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Source ids of the built-in layouts.
+pub const ACCOLADE: &str = "accolade";
+pub const RANK_SCREEN: &str = "rank_screen";
+pub const END_TITLE: &str = "end_title";
+pub const TAB_HEADER: &str = "tab_header";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Outcome {
     Victory,
     Defeat,
+    Draw,
 }
 
 impl Outcome {
+    pub const ALL: [Outcome; 3] = [Outcome::Victory, Outcome::Defeat, Outcome::Draw];
+
     /// The value ocr-v1 stores (`PersonalMatch.outcome`).
     pub fn as_str(self) -> &'static str {
         match self {
             Outcome::Victory => "victory",
             Outcome::Defeat => "defeat",
+            Outcome::Draw => "draw",
         }
+    }
+
+    fn index(self) -> usize {
+        self as usize
     }
 }
 
@@ -71,9 +100,9 @@ pub enum Plane {
     Min,
 }
 
-/// One screen that shows the result word: a fixed region in the 16:9 game
-/// rect (fractions x0, y0, x1, y1) and its plane. Templates for layout `id`
-/// are `<id>_victory.png` and `<id>_defeat.png`.
+/// One screen that shows the result word: a region of the 16:9 game rect
+/// (fractions x0, y0, x1, y1) and its plane. `id` is the source tag and the
+/// template file prefix.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct Layout {
     pub id: String,
@@ -82,41 +111,51 @@ pub struct Layout {
 }
 
 impl Layout {
-    /// Post-match accolade screen (player cards): the word top left in the
-    /// team colour. 52 real 1440p frames.
-    pub fn accolade() -> Self {
+    fn new(id: &str, roi: [f64; 4], plane: Plane) -> Self {
         Self {
-            id: ACCOLADE.into(),
-            roi: [0.008, 0.022, 0.165, 0.098],
-            plane: Plane::Max,
+            id: id.into(),
+            roi,
+            plane,
         }
     }
 
-    /// Competitive rank screen: white italic word under COMPETITIVE. 98 real
-    /// 1440p frames.
-    pub fn rank_screen() -> Self {
-        Self {
-            id: RANK_SCREEN.into(),
-            roi: [0.016, 0.150, 0.145, 0.235],
-            plane: Plane::Min,
-        }
+    /// The four ocr-v1 regions.
+    pub fn builtin() -> Vec<Layout> {
+        vec![
+            Self::new(ACCOLADE, [0.005, 0.035, 0.255, 0.095], Plane::Max),
+            Self::new(RANK_SCREEN, [0.010, 0.145, 0.250, 0.225], Plane::Min),
+            Self::new(END_TITLE, [0.320, 0.340, 0.680, 0.520], Plane::Max),
+            Self::new(TAB_HEADER, [0.300, 0.020, 0.700, 0.240], Plane::Min),
+        ]
+    }
+
+    pub fn by_id(id: &str) -> Option<Layout> {
+        Self::builtin().into_iter().find(|l| l.id == id)
     }
 }
 
-/// Layout ids of the built-in screens (template file prefixes).
-pub const ACCOLADE: &str = "A";
-pub const RANK_SCREEN: &str = "B";
-
-/// One result read.
-#[derive(Debug, Clone, PartialEq)]
+/// One frame's read.
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ResultRead {
     /// Best word when one is present (also when flagged).
     pub outcome: Option<Outcome>,
-    /// Id of the layout the best word was found in.
-    pub layout: Option<String>,
+    /// Source tag: id of the layout the best word was found in.
+    pub source: Option<String>,
     pub score: f32,
     pub margin: f32,
     pub suspect: bool,
+}
+
+impl ResultRead {
+    fn nothing(score: f64, margin: f64) -> Self {
+        Self {
+            outcome: None,
+            source: None,
+            score: score.max(0.0) as f32,
+            margin: margin.max(0.0) as f32,
+            suspect: true,
+        }
+    }
 }
 
 /// Word templates, per layout and outcome.
@@ -218,14 +257,14 @@ impl ResultTemplates {
         data_dir.join(TEMPLATE_SUBDIR)
     }
 
-    /// Load `<id>_{victory,defeat}.png` for the built-in layouts plus any
-    /// listed in an optional `<dir>/layouts.json` (a JSON array of
+    /// Load `<source>_{victory,defeat,draw}.png` for the built-in layouts
+    /// plus any listed in an optional `<dir>/layouts.json` (a JSON array of
     /// `{"id", "roi": [x0, y0, x1, y1], "plane": "max"|"min"}`; an entry with a
-    /// built-in id replaces it). New result screens plug in with a layout
-    /// entry and two templates, no code change. `None` unless at least one
+    /// built-in id replaces it). A new result screen plugs in with a layout
+    /// entry and its templates, no code change. `None` unless at least one
     /// victory and one defeat template load.
     pub fn load_dir(dir: &Path) -> Option<Self> {
-        let mut layouts = vec![Layout::accolade(), Layout::rank_screen()];
+        let mut layouts = Layout::builtin();
         if let Ok(text) = std::fs::read_to_string(dir.join("layouts.json")) {
             match serde_json::from_str::<Vec<Layout>>(&text) {
                 Ok(extra) => {
@@ -241,8 +280,8 @@ impl ResultTemplates {
         }
         let mut tpls = Vec::new();
         for layout in layouts {
-            for (outcome, word) in [(Outcome::Victory, "victory"), (Outcome::Defeat, "defeat")] {
-                let p = dir.join(format!("{}_{word}.png", layout.id));
+            for outcome in Outcome::ALL {
+                let p = dir.join(format!("{}_{}.png", layout.id, outcome.as_str()));
                 let Ok(img) = image::open(&p) else { continue };
                 let l = img.to_luma8();
                 if l.width() == 0 || l.height() == 0 {
@@ -268,10 +307,16 @@ impl ResultTemplates {
         (has(Outcome::Victory) && has(Outcome::Defeat)).then_some(Self { tpls })
     }
 
-    /// Read the result word from one result frame (accolade screen, rank
-    /// screen, or any plugged-in layout).
+    /// Source ids that have at least one template.
+    pub fn sources(&self) -> Vec<&str> {
+        let mut v: Vec<&str> = self.tpls.iter().map(|t| t.0.id.as_str()).collect();
+        v.dedup();
+        v
+    }
+
+    /// Read the result word from one result frame (any layout).
     pub fn read(&self, rgb: &RgbImage) -> ResultRead {
-        let mut best: [(f64, Option<&str>); 2] = [(-1.0, None), (-1.0, None)];
+        let mut best: [(f64, Option<&str>); 3] = [(-1.0, None); 3];
         let mut regions: Vec<(&str, Option<Gray>)> = Vec::new();
         for (layout, o, t) in &self.tpls {
             let idx = match regions.iter().position(|r| r.0 == layout.id) {
@@ -283,32 +328,106 @@ impl ResultTemplates {
             };
             let Some(p) = &regions[idx].1 else { continue };
             let s = best_ncc(p, t);
-            let slot = &mut best[usize::from(*o == Outcome::Defeat)];
+            let slot = &mut best[o.index()];
             if s > slot.0 {
                 *slot = (s, Some(&layout.id));
             }
         }
-        let (v, d) = (best[0], best[1]);
-        let (win, s1, s2) = if v.0 >= d.0 {
-            ((Outcome::Victory, v.1), v.0, d.0)
-        } else {
-            ((Outcome::Defeat, d.1), d.0, v.0)
-        };
+        let mut order = Outcome::ALL;
+        order.sort_by(|a, b| best[b.index()].0.total_cmp(&best[a.index()].0));
+        let (s1, src) = best[order[0].index()];
+        let s2 = best[order[1].index()].0;
         if s1 < PRESENT as f64 {
-            return ResultRead {
-                outcome: None,
-                layout: None,
-                score: s1.max(0.0) as f32,
-                margin: (s1 - s2).max(0.0) as f32,
-                suspect: true,
-            };
+            return ResultRead::nothing(s1, s1 - s2);
         }
         ResultRead {
-            outcome: Some(win.0),
-            layout: win.1.map(str::to_string),
+            outcome: Some(order[0]),
+            source: src.map(str::to_string),
             score: s1 as f32,
             margin: (s1 - s2) as f32,
             suspect: !(s1 >= FLOOR as f64 && s1 - s2 >= MARGIN as f64),
+        }
+    }
+}
+
+/// Every result read of one match, from any source.
+#[derive(Debug, Clone, Default)]
+pub struct ResultEvidence {
+    reads: Vec<ResultRead>,
+}
+
+/// What a match's evidence says.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ResultDecision {
+    pub outcome: Option<Outcome>,
+    pub confidence: f32,
+    pub suspect: bool,
+    /// Sure reads that agree with `outcome`.
+    pub agreeing: usize,
+    /// Source tags of the reads behind `outcome`, deduplicated.
+    pub sources: Vec<String>,
+}
+
+impl ResultEvidence {
+    /// Add one frame's read. A read that names no word is ignored.
+    pub fn add(&mut self, read: ResultRead) {
+        if read.outcome.is_some() {
+            self.reads.push(read);
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.reads.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.reads.is_empty()
+    }
+
+    /// Most-read word; sure with [`MIN_AGREE`] agreeing sure reads and no read
+    /// (sure or flagged) of another word.
+    pub fn decide(&self) -> ResultDecision {
+        let count = |o: Outcome, sure_only: bool| {
+            self.reads
+                .iter()
+                .filter(|r| r.outcome == Some(o) && (!sure_only || !r.suspect))
+                .count()
+        };
+        let Some(top) = Outcome::ALL
+            .into_iter()
+            .filter(|&o| count(o, false) > 0)
+            .max_by_key(|&o| (count(o, true), count(o, false)))
+        else {
+            return ResultDecision {
+                outcome: None,
+                confidence: 0.0,
+                suspect: true,
+                agreeing: 0,
+                sources: Vec::new(),
+            };
+        };
+        let agreeing = count(top, true);
+        let conflict = self.reads.iter().any(|r| r.outcome != Some(top));
+        let mut sources: Vec<String> = Vec::new();
+        for r in self.reads.iter().filter(|r| r.outcome == Some(top)) {
+            if let Some(s) = &r.source
+                && !sources.contains(s)
+            {
+                sources.push(s.clone());
+            }
+        }
+        let confidence = self
+            .reads
+            .iter()
+            .filter(|r| r.outcome == Some(top))
+            .map(|r| r.score)
+            .fold(0.0, f32::max);
+        ResultDecision {
+            outcome: Some(top),
+            confidence,
+            suspect: conflict || agreeing < MIN_AGREE,
+            agreeing,
+            sources,
         }
     }
 }
@@ -333,17 +452,21 @@ mod tests {
         g
     }
 
+    fn lay(id: &str) -> Layout {
+        Layout::by_id(id).unwrap()
+    }
+
     fn templates() -> ResultTemplates {
         ResultTemplates::from_templates(vec![
-            (Layout::accolade(), Outcome::Victory, word(1, 70, 30)),
-            (Layout::accolade(), Outcome::Defeat, word(3, 60, 30)),
-            (Layout::rank_screen(), Outcome::Victory, word(5, 66, 20)),
-            (Layout::rank_screen(), Outcome::Defeat, word(7, 50, 20)),
+            (lay(ACCOLADE), Outcome::Victory, word(1, 70, 30)),
+            (lay(ACCOLADE), Outcome::Defeat, word(3, 60, 30)),
+            (lay(RANK_SCREEN), Outcome::Victory, word(5, 66, 20)),
+            (lay(RANK_SCREEN), Outcome::Defeat, word(7, 50, 20)),
         ])
         .unwrap()
     }
 
-    /// Paint a work-scale word into a 2560x1440 frame at a layout's region.
+    /// Paint a work-scale word into a 2560x1440 frame inside a layout's region.
     fn paint(img: &mut RgbImage, layout: &Layout, t: &Gray, colour: [u8; 3]) {
         let [fx0, fy0, _, _] = layout.roi;
         let (x0, y0) = ((fx0 * 2560.0) as u32 + 20, (fy0 * 1440.0) as u32 + 10);
@@ -356,14 +479,34 @@ mod tests {
         }
     }
 
+    fn sure(o: Outcome, src: &str) -> ResultRead {
+        ResultRead {
+            outcome: Some(o),
+            source: Some(src.into()),
+            score: 0.9,
+            margin: 0.4,
+            suspect: false,
+        }
+    }
+
+    #[test]
+    fn regions_are_ocr_v1s() {
+        let roi = |id: &str| lay(id).roi;
+        assert_eq!(roi(ACCOLADE), [0.005, 0.035, 0.255, 0.095]);
+        assert_eq!(roi(RANK_SCREEN), [0.010, 0.145, 0.250, 0.225]);
+        assert_eq!(roi(END_TITLE), [0.320, 0.340, 0.680, 0.520]);
+        assert_eq!(roi(TAB_HEADER), [0.300, 0.020, 0.700, 0.240]);
+    }
+
     #[test]
     fn accolade_word_reads_in_any_team_colour() {
         let t = templates();
         for colour in [[255, 220, 0], [150, 20, 160], [40, 200, 255]] {
             let mut img = RgbImage::from_pixel(2560, 1440, Rgb([20, 26, 50]));
-            paint(&mut img, &Layout::accolade(), &word(3, 60, 30), colour);
+            paint(&mut img, &lay(ACCOLADE), &word(3, 60, 30), colour);
             let r = t.read(&img);
             assert_eq!(r.outcome, Some(Outcome::Defeat), "{colour:?}");
+            assert_eq!(r.source.as_deref(), Some(ACCOLADE));
             assert!(!r.suspect, "{colour:?}: {r:?}");
         }
     }
@@ -374,14 +517,29 @@ mod tests {
         let mut img = RgbImage::from_pixel(2560, 1440, Rgb([150, 100, 30]));
         paint(
             &mut img,
-            &Layout::rank_screen(),
+            &lay(RANK_SCREEN),
             &word(7, 50, 20),
             [245, 245, 245],
         );
         let r = t.read(&img);
         assert_eq!(r.outcome, Some(Outcome::Defeat));
-        assert_eq!(r.layout.as_deref(), Some(RANK_SCREEN));
+        assert_eq!(r.source.as_deref(), Some(RANK_SCREEN));
         assert!(!r.suspect);
+    }
+
+    #[test]
+    fn draw_template_reads_draw() {
+        let mut v = vec![
+            (lay(ACCOLADE), Outcome::Victory, word(1, 70, 30)),
+            (lay(ACCOLADE), Outcome::Defeat, word(3, 60, 30)),
+        ];
+        v.push((lay(ACCOLADE), Outcome::Draw, word(6, 50, 30)));
+        let t = ResultTemplates::from_templates(v).unwrap();
+        let mut img = RgbImage::from_pixel(2560, 1440, Rgb([20, 26, 50]));
+        paint(&mut img, &lay(ACCOLADE), &word(6, 50, 30), [230, 230, 230]);
+        let r = t.read(&img);
+        assert_eq!(r.outcome, Some(Outcome::Draw), "{r:?}");
+        assert_eq!(Outcome::Draw.as_str(), "draw");
     }
 
     #[test]
@@ -392,16 +550,55 @@ mod tests {
     }
 
     #[test]
-    fn needs_both_words_to_load() {
-        assert!(
-            ResultTemplates::from_templates(vec![(
-                Layout::accolade(),
-                Outcome::Victory,
-                word(1, 20, 10)
-            )])
-            .is_none()
-        );
+    fn needs_victory_and_defeat_to_load() {
+        let one = vec![(lay(ACCOLADE), Outcome::Victory, word(1, 20, 10))];
+        assert!(ResultTemplates::from_templates(one).is_none());
         assert!(ResultTemplates::load_dir(Path::new("/nonexistent/result")).is_none());
+    }
+
+    #[test]
+    fn one_sure_read_is_not_enough() {
+        let mut e = ResultEvidence::default();
+        e.add(sure(Outcome::Victory, RANK_SCREEN));
+        let d = e.decide();
+        assert_eq!(d.outcome, Some(Outcome::Victory));
+        assert!(d.suspect);
+        e.add(sure(Outcome::Victory, RANK_SCREEN));
+        assert!(!e.decide().suspect);
+    }
+
+    #[test]
+    fn accolade_read_is_a_second_look_at_the_same_result() {
+        let mut e = ResultEvidence::default();
+        e.add(sure(Outcome::Defeat, RANK_SCREEN));
+        e.add(sure(Outcome::Defeat, ACCOLADE));
+        let d = e.decide();
+        assert_eq!(
+            (d.outcome, d.suspect, d.agreeing),
+            (Some(Outcome::Defeat), false, 2)
+        );
+        assert_eq!(
+            d.sources,
+            vec![RANK_SCREEN.to_string(), ACCOLADE.to_string()]
+        );
+    }
+
+    #[test]
+    fn any_conflicting_read_flags_the_match() {
+        let mut e = ResultEvidence::default();
+        e.add(sure(Outcome::Victory, RANK_SCREEN));
+        e.add(sure(Outcome::Victory, RANK_SCREEN));
+        let mut odd = sure(Outcome::Defeat, ACCOLADE);
+        odd.suspect = true;
+        e.add(odd);
+        let d = e.decide();
+        assert_eq!(d.outcome, Some(Outcome::Victory));
+        assert!(d.suspect);
+        // a frame without a word adds nothing
+        let mut e2 = ResultEvidence::default();
+        e2.add(ResultRead::nothing(0.1, 0.0));
+        assert!(e2.is_empty());
+        assert_eq!(e2.decide().outcome, None);
     }
 
     #[test]
@@ -414,25 +611,25 @@ mod tests {
             });
             img.save(dir.join(name)).unwrap();
         };
-        save("C_victory.png", &word(1, 70, 30));
-        save("C_defeat.png", &word(3, 60, 30));
+        save("cards_victory.png", &word(1, 70, 30));
+        save("cards_defeat.png", &word(3, 60, 30));
         std::fs::write(
             dir.join("layouts.json"),
-            r#"[{"id": "C", "roi": [0.40, 0.40, 0.60, 0.50], "plane": "max"}]"#,
+            r#"[{"id": "cards", "roi": [0.40, 0.40, 0.60, 0.50], "plane": "max"}]"#,
         )
         .unwrap();
         let t = ResultTemplates::load_dir(&dir).expect("plugged-in layout loads");
+        std::fs::remove_dir_all(&dir).ok();
+        assert_eq!(t.sources(), vec!["cards"]);
         let mut img = RgbImage::from_pixel(2560, 1440, Rgb([20, 26, 50]));
         let c = Layout {
-            id: "C".into(),
+            id: "cards".into(),
             roi: [0.40, 0.40, 0.60, 0.50],
             plane: Plane::Max,
         };
         paint(&mut img, &c, &word(1, 70, 30), [200, 40, 40]);
         let r = t.read(&img);
-        std::fs::remove_dir_all(&dir).ok();
         assert_eq!(r.outcome, Some(Outcome::Victory));
-        assert_eq!(r.layout.as_deref(), Some("C"));
-        assert!(!r.suspect, "{r:?}");
+        assert_eq!(r.source.as_deref(), Some("cards"));
     }
 }

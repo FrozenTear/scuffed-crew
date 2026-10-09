@@ -22,7 +22,7 @@ fn main() {
         let m = maps.read(&rgb);
         let r = res.read(&rgb);
         println!(
-            "{path}\t{}\t{:.3}\t{:.3}\t{}\t{}\t{:.3}\t{:.3}\t{}",
+            "{path}\t{}\t{:.3}\t{:.3}\t{}\t{}\t{:.3}\t{:.3}\t{}\t{}",
             m.map.map_or("-", |i| i.key),
             m.score,
             m.margin,
@@ -30,7 +30,8 @@ fn main() {
             r.outcome.map_or("-", |o| o.as_str()),
             r.score,
             r.margin,
-            r.suspect
+            r.suspect,
+            r.source.as_deref().unwrap_or("-")
         );
     }
 }

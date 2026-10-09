@@ -14,10 +14,12 @@
 //! * no hero icon pack (or no map / result pack): those fields are suspect,
 //! * `mode` comes from the map (single-mode maps only) and is suspect
 //!   whenever the map is,
-//! * `result` comes from a separate result frame (end card or competitive
-//!   rank screen, see [`super::result`]); a Tab frame alone leaves it suspect
-//!   until [`BoardRead::set_result`] or [`Reader::read_board_with_result`]
-//!   supplies it.
+//! * `result` comes from result frames (accolade screen, rank screen, see
+//!   [`super::result`]), never from the Tab frame alone: each result frame
+//!   gives a source-tagged [`ResultRead`], all reads of one match go into one
+//!   [`ResultEvidence`], and the field is sure only with
+//!   [`super::result::MIN_AGREE`] agreeing sure reads and no conflict. Without
+//!   evidence it stays suspect.
 //!
 //! Packs load from a configurable directory ([`ReaderConfig`]). Nothing here
 //! writes stats; the caller decides what to store.
@@ -32,7 +34,7 @@ use serde::Serialize;
 use super::banner::MapTemplates;
 use super::digits;
 use super::heroes::{HeroTemplates, RowClass};
-use super::result::ResultTemplates;
+use super::result::{ResultEvidence, ResultRead, ResultTemplates};
 
 /// Stat field suffixes, in board column order (`digits::FIELDS`).
 pub const STAT_FIELDS: [&str; 6] = ["e", "a", "d", "dmg", "h", "mit"];
@@ -222,34 +224,54 @@ impl Reader {
         board
     }
 
-    /// Read the `result` field from a result frame (end card or rank screen).
-    pub fn read_result(&self, result_frame: &DynamicImage) -> FieldRead {
-        let Some(t) = &self.results else {
-            return FieldRead::unread("result".into());
-        };
-        let r = t.read(&result_frame.to_rgb8());
-        match r.outcome {
-            Some(o) => FieldRead {
-                name: "result".into(),
-                value: Some(Value::Text(o.as_str().into())),
-                confidence: r.score,
-                suspect: r.suspect,
+    /// Read one result frame (accolade screen, rank screen, or a plugged-in
+    /// layout). Add the read to the match's [`ResultEvidence`].
+    pub fn read_result(&self, result_frame: &DynamicImage) -> ResultRead {
+        match &self.results {
+            Some(t) => t.read(&result_frame.to_rgb8()),
+            None => ResultRead {
+                outcome: None,
+                source: None,
+                score: 0.0,
+                margin: 0.0,
+                suspect: true,
             },
-            None => FieldRead::unread("result".into()),
         }
     }
 
-    /// [`Self::read_board`] plus the result from `result_frame`, when given.
-    pub fn read_board_with_result(
+    /// [`Self::read_board`] with the `result` field from a match's evidence.
+    pub fn read_board_with_evidence(
         &self,
         frame: &DynamicImage,
-        result_frame: Option<&DynamicImage>,
+        evidence: &ResultEvidence,
     ) -> BoardRead {
         let mut b = self.read_board(frame);
-        if let Some(rf) = result_frame {
-            b.set_result(self.read_result(rf));
-        }
+        b.set_result(result_field(evidence));
         b
+    }
+
+    /// [`Self::read_board`] plus the result from this match's result frames.
+    pub fn read_board_with_results(
+        &self,
+        frame: &DynamicImage,
+        result_frames: &[&DynamicImage],
+    ) -> BoardRead {
+        let mut e = ResultEvidence::default();
+        for f in result_frames {
+            e.add(self.read_result(f));
+        }
+        self.read_board_with_evidence(frame, &e)
+    }
+}
+
+/// The `result` field a match's evidence supports.
+pub fn result_field(evidence: &ResultEvidence) -> FieldRead {
+    let d = evidence.decide();
+    FieldRead {
+        name: "result".into(),
+        value: d.outcome.map(|o| Value::Text(o.as_str().into())),
+        confidence: d.confidence,
+        suspect: d.suspect,
     }
 }
 
@@ -328,8 +350,8 @@ pub fn read_board(frame: &DynamicImage) -> BoardRead {
         .read_board(frame)
 }
 
-/// Read the `result` field from a result frame with the process-wide reader.
-pub fn read_result(result_frame: &DynamicImage) -> FieldRead {
+/// Read one result frame with the process-wide reader.
+pub fn read_result(result_frame: &DynamicImage) -> ResultRead {
     READER
         .get_or_init(|| Reader::load(&ReaderConfig::from_env()))
         .read_result(result_frame)
@@ -455,10 +477,32 @@ mod tests {
         let f = b.get("result").unwrap();
         assert_eq!(f.value, Some(Value::Text("defeat".into())));
         assert!(!f.suspect);
-        // without a result pack the reader leaves it unread
+        // without a result pack the reader reads nothing, and no evidence
+        // leaves the field suspect
         let reader = Reader::load(&ReaderConfig::default());
         let img = DynamicImage::new_rgb8(64, 36);
-        assert!(reader.read_result(&img).suspect);
+        assert_eq!(reader.read_result(&img).outcome, None);
+        let b = reader.read_board_with_results(&img, &[&img]);
+        assert!(b.get("result").unwrap().suspect);
+    }
+
+    #[test]
+    fn result_field_needs_two_agreeing_sure_reads() {
+        use crate::shadow::result::{ACCOLADE, Outcome, RANK_SCREEN};
+        let read = |src: &str| ResultRead {
+            outcome: Some(Outcome::Defeat),
+            source: Some(src.into()),
+            score: 0.95,
+            margin: 0.5,
+            suspect: false,
+        };
+        let mut e = ResultEvidence::default();
+        e.add(read(RANK_SCREEN));
+        assert!(result_field(&e).suspect);
+        e.add(read(ACCOLADE));
+        let f = result_field(&e);
+        assert_eq!(f.value, Some(Value::Text("defeat".into())));
+        assert!(!f.suspect);
     }
 
     #[test]

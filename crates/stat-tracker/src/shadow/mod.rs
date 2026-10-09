@@ -21,5 +21,5 @@ pub mod worker;
 
 pub use reader::{
     BoardRead, FieldRead, Reader, ReaderConfig, Value, field_names, init, read_board, read_result,
-    suspect_field_names,
+    result_field, suspect_field_names,
 };
