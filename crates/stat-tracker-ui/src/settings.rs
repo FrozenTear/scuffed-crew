@@ -943,7 +943,7 @@ fn uninstall_row() -> Element<'static, Message> {
     settings_card(
         "Uninstall",
         row![
-            text("Removes a bootstrap.sh install. Sits with About in the sidebar.")
+            text("Removes the tracker from this computer.")
                 .size(SIZE_META)
                 .font(FONT_MEDIUM)
                 .color(TEXT_3)

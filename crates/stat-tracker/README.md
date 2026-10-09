@@ -108,26 +108,36 @@ the tarball root by the release workflow). Source checkouts still use
 
 **Uninstall:**
 
+The desktop app has Uninstall in the sidebar, next to About. It removes the
+tracker from this computer and asks before removing anything.
+
+Saved games, debug images, logs, and settings (including the sync token) stay
+unless that box is checked. The box uses the folder this copy is actually
+using, and shows that path. A folder outside your home folder is left in place.
+
+From a terminal:
+
 ```sh
-bash bootstrap.sh --uninstall            # keeps local data and config
-bash bootstrap.sh --uninstall --purge    # also deletes local data and config
-scuffed-stat-tracker-uninstall           # same as bootstrap.sh --uninstall
+bash bootstrap.sh --uninstall
+bash bootstrap.sh --uninstall --purge
+scuffed-stat-tracker-uninstall
 ```
 
-The desktop app has Uninstall in the sidebar, next to About. It asks before
-removing anything. Local data (games database, debug crops, shadow logs,
-and config.toml, including the sync token) stays unless that box is checked.
+The first command keeps saved games and settings. `--purge` deletes them too.
+`scuffed-stat-tracker-uninstall` does the same as the first command. It lists
+the files and asks before removing them. Add `--yes` to skip the question.
 
-`install.sh` writes `install-manifest.txt`, one absolute path per installed
-file. The uninstaller removes exactly those entries. It does not match by
-pattern. An older install with no manifest falls back to the fixed list in
-`dist/install-paths.sh` and shows that list before removing anything.
-`config.toml` is left in place unless local data is included.
+The installer records each file it wrote. Uninstall removes those files and
+nothing else. A recorded path that leaves your home folder, or that contains
+`..`, is left alone. If that record is missing, uninstall shows the original
+files that are still there and asks first. Settings stay unless you also
+delete saved games.
 
-A pacman/AUR or apt/dpkg install is detected by who owns the running
-binary (`pacman -Qo`, `dpkg -S`), not by its path. Nothing is deleted.
-The app shows `sudo pacman -R <pkg>` or `sudo apt remove <pkg>` with a
-button that copies the command. An AppImage counts as a script install.
+If a system package owns this copy, nothing is removed. The app shows
+`sudo pacman -R <pkg>` or `sudo apt remove <pkg>` and can copy that command.
+An AppImage is removed like any other copy, including the AppImage file.
+A copy outside your home folder is left alone. The app lists the paths and
+says to remove them manually.
 
 ## Running
 

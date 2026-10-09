@@ -314,4 +314,70 @@ owned="$(env HOME="$HOME_DIR" PREFIX="$USR_PREFIX" PATH="$TMP/fakepac:/usr/bin:/
     || fail "package-owned uninstall deleted the neighbor"
 pass "package ownership is what blocks removal, not the path"
 
+# A manifest line outside home, or one that uses .., must not be deleted.
+run_install "$HOME_DIR" "$PREFIX"
+OUTSIDE="$TMP/outside-secret"
+ESCAPED="$TMP/escaped"
+printf 'secret\n' > "$OUTSIDE"
+printf 'escaped\n' > "$ESCAPED"
+etc_before=0
+[[ -e /etc/x ]] && etc_before=1
+{
+    printf '\n/etc/x\n'
+    printf '%s\n' "$PREFIX/bin/../../escaped"
+    printf '%s\n' "$OUTSIDE"
+} >> "$MANIFEST"
+env HOME="$HOME_DIR" PREFIX="$PREFIX" \
+    SCUFFED_SYSTEMCTL="$FAKE_CTL" \
+    bash "$UNINSTALL" --yes >/dev/null
+[[ "$(cat "$OUTSIDE")" == "secret" ]] || fail "manifest line outside home was deleted"
+[[ "$(cat "$ESCAPED")" == "escaped" ]] || fail "manifest line with .. was deleted"
+etc_after=0
+[[ -e /etc/x ]] && etc_after=1
+[[ "$etc_before" == "$etc_after" ]] || fail "manifest line /etc/x changed that file"
+[[ ! -e "$PREFIX/bin/stat-tracker-gui" ]] || fail "a safe manifest line was not removed"
+pass "manifest lines outside home or with .. are not removed"
+
+# A manifest still lists the files and waits for yes. No answer removes nothing
+# and does not stop the service.
+run_install "$HOME_DIR" "$PREFIX"
+: > "$LOG"
+cancel_out="$(printf 'n\n' | env HOME="$HOME_DIR" PREFIX="$PREFIX" \
+    SCUFFED_SYSTEMCTL="$FAKE_CTL" \
+    bash "$UNINSTALL" 2>&1)"
+printf '%s\n' "$cancel_out" | grep -q "$PREFIX/bin/stat-tracker-gui" \
+    || fail "manifest uninstall did not list the files: $cancel_out"
+printf '%s\n' "$cancel_out" | grep -q 'Uninstall cancelled' \
+    || fail "declining did not cancel: $cancel_out"
+[[ -x "$PREFIX/bin/stat-tracker-gui" ]] || fail "declining removed the GUI"
+if grep -q 'disable --now' "$LOG"; then
+    fail "declining stopped the service. log: $(cat "$LOG")"
+fi
+printf 'y\n' | env HOME="$HOME_DIR" PREFIX="$PREFIX" \
+    SCUFFED_SYSTEMCTL="$FAKE_CTL" \
+    bash "$UNINSTALL" >/dev/null
+[[ ! -e "$PREFIX/bin/stat-tracker-gui" ]] || fail "confirming left the GUI"
+pass "manifest uninstall lists files and asks before removing them"
+
+# If the service is still running, remove nothing.
+run_install "$HOME_DIR" "$PREFIX"
+ACTIVE_CTL="$TMP/bin/systemctl-active"
+cat > "$ACTIVE_CTL" << 'EOF'
+#!/bin/sh
+echo active
+exit 0
+EOF
+chmod +x "$ACTIVE_CTL"
+set +e
+env HOME="$HOME_DIR" PREFIX="$PREFIX" \
+    SCUFFED_SYSTEMCTL="$ACTIVE_CTL" \
+    bash "$UNINSTALL" --yes >/dev/null 2>"$TMP/active.err"
+active_code=$?
+set -e
+[[ "$active_code" -ne 0 ]] || fail "a still-running tracker exited 0"
+grep -q 'still running' "$TMP/active.err" \
+    || fail "still-running message missing: $(cat "$TMP/active.err")"
+[[ -x "$PREFIX/bin/stat-tracker-gui" ]] || fail "a still-running tracker was uninstalled"
+pass "a tracker that is still running is not uninstalled"
+
 echo "all uninstall path checks passed"

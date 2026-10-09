@@ -1101,7 +1101,17 @@ impl TrackerApp {
                 let exe = std::env::current_exe().unwrap_or_default();
                 let home = dirs::home_dir().unwrap_or_default();
                 let owner = crate::uninstall::probe_package_owner(&exe);
-                self.uninstall_dialog = Some(crate::uninstall::open_dialog(&exe, &home, owner));
+                let mut dialog = crate::uninstall::open_dialog(&exe, &home, owner, &self.data_dir);
+                if let crate::uninstall::UninstallDialog::Confirm { appimage, .. } = &mut dialog
+                    && appimage.is_none()
+                    && let Some(path) = std::env::var_os("APPIMAGE")
+                {
+                    let path = PathBuf::from(path);
+                    if !path.as_os_str().is_empty() {
+                        *appimage = Some(path);
+                    }
+                }
+                self.uninstall_dialog = Some(dialog);
                 self.uninstall_busy = false;
                 Task::none()
             }
@@ -1125,6 +1135,8 @@ impl TrackerApp {
                     home,
                     prefix,
                     delete_data,
+                    data_dir,
+                    appimage,
                     ..
                 }) = self.uninstall_dialog.clone()
                 else {
@@ -1134,18 +1146,16 @@ impl TrackerApp {
                     return Task::none();
                 }
                 self.uninstall_busy = true;
-                let data_dir = self.data_dir.clone();
                 let req = crate::uninstall::UninstallRequest {
                     home: home.clone(),
                     prefix: prefix.clone(),
+                    data_dir,
+                    appimage,
                     delete_data,
                     origin: crate::uninstall::InstallOrigin::Bootstrap { prefix },
                     systemctl: PathBuf::from("systemctl"),
                 };
-                Task::perform(
-                    uninstall_from_app(req, data_dir),
-                    Message::UninstallFinished,
-                )
+                Task::perform(uninstall_from_app(req), Message::UninstallFinished)
             }
             Message::UninstallFinished(result) => {
                 self.uninstall_busy = false;
@@ -1560,9 +1570,17 @@ fn uninstall_dialog_escape(
 
 async fn uninstall_from_app(
     req: crate::uninstall::UninstallRequest,
-    data_dir: PathBuf,
 ) -> Result<crate::uninstall::UninstallReport, String> {
-    let _ = daemon::stop_daemon(&data_dir).await;
+    match daemon::stop_daemon(&req.data_dir).await {
+        Ok(()) => {}
+        Err(err) if err == "Tracker is not running" => {}
+        Err(_) => {
+            return Err("Could not stop the tracker. Nothing was removed.".into());
+        }
+    }
+    if daemon::daemon_running(&req.data_dir).is_some() {
+        return Err("The tracker is still running. Nothing was removed.".into());
+    }
     crate::uninstall::apply(&req)
 }
 

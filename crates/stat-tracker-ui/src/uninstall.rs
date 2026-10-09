@@ -1,17 +1,18 @@
-//! Uninstall a bootstrap.sh user install from the desktop app.
+//! Uninstall the tracker from this computer.
 //!
-//! The path list is `crates/stat-tracker/dist/install-paths.sh`. install.sh
+//! The path list is `crates/stat-tracker/dist/install-paths.sh`. The installer
 //! writes a manifest of the files it installed. This module removes exactly
-//! those entries. An older install with no manifest falls back to that list
-//! and shows it before deleting.
+//! those entries, and only when each one resolves under the home folder or
+//! the install folder. An older install with no manifest falls back to that
+//! list and shows the files that are still there.
 //!
-//! A pacman/AUR or apt/dpkg install is whoever owns the running binary
-//! (`pacman -Qo`, `dpkg -S`). The path is not consulted. An AppImage is a
-//! script install. The dialog shows `sudo pacman -R <pkg>` or
-//! `sudo apt remove <pkg>` when a package owns the binary.
+//! A system package is whoever owns the running program. The folder is not
+//! consulted. An AppImage is removed like any other copy, including the
+//! AppImage file. The dialog shows `sudo pacman -R <pkg>` or
+//! `sudo apt remove <pkg>` when a package owns the program.
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
 use iced::widget::{button, checkbox, column, container, opaque, row, scrollable, text};
@@ -77,11 +78,11 @@ impl PackageOwner {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InstallOrigin {
-    /// User-level bootstrap.sh / install.sh prefix.
+    /// User install folder, under the home folder.
     Bootstrap { prefix: PathBuf },
-    /// Owned by pacman or dpkg. `command` is what the user should run.
+    /// Owned by a system package. `command` is what the user should run.
     Package { command: String },
-    /// Not a bootstrap install. Nothing is deleted.
+    /// Not a user install. Nothing is deleted.
     Outside { exe: PathBuf },
 }
 
@@ -92,13 +93,18 @@ pub enum UninstallDialog {
         prefix: PathBuf,
         /// Unchecked until the user opts in. Local data stays.
         delete_data: bool,
-        /// No install manifest. The dialog lists the fixed install paths.
+        /// Saved games folder the app is using.
+        data_dir: PathBuf,
+        /// The .AppImage file, when this copy is one.
+        appimage: Option<PathBuf>,
+        /// No install record. The dialog lists the original files that exist.
         fallback: bool,
     },
-    /// Package manager, or a path this app must not delete.
+    /// Package manager, or a copy this app must not delete.
     Manual {
         command: Option<String>,
         detail: String,
+        paths: Vec<PathBuf>,
     },
 }
 
@@ -106,6 +112,10 @@ pub enum UninstallDialog {
 pub struct UninstallRequest {
     pub home: PathBuf,
     pub prefix: PathBuf,
+    /// Folder the running app is using for saved games. Not the fixed default
+    /// when Settings points somewhere else.
+    pub data_dir: PathBuf,
+    pub appimage: Option<PathBuf>,
     pub delete_data: bool,
     pub origin: InstallOrigin,
     pub systemctl: PathBuf,
@@ -113,7 +123,7 @@ pub struct UninstallRequest {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UninstallReport {
-    /// True when the origin was not a bootstrap install. No path was touched.
+    /// True when this copy is not a user install. No path was touched.
     pub skipped: bool,
     pub removed_files: usize,
 }
@@ -225,8 +235,13 @@ pub fn parse_dpkg_s(text: &str) -> Option<String> {
 }
 
 pub fn probe_package_owner(path: &Path) -> Option<PackageOwner> {
+    probe_package_owner_with(path, Path::new("pacman"), Path::new("dpkg"))
+}
+
+/// `pacman` and `dpkg` may be absolute paths. The app calls [`probe_package_owner`].
+pub fn probe_package_owner_with(path: &Path, pacman: &Path, dpkg: &Path) -> Option<PackageOwner> {
     let target = path.display().to_string();
-    if let Some(text) = command_stdout("pacman", &["-Qo".to_string(), target.clone()])
+    if let Some(text) = command_stdout(pacman, &["-Qo".to_string(), target.clone()])
         && let Some(package) = parse_pacman_qo(&text)
     {
         return Some(PackageOwner {
@@ -234,7 +249,7 @@ pub fn probe_package_owner(path: &Path) -> Option<PackageOwner> {
             package,
         });
     }
-    if let Some(text) = command_stdout("dpkg", &["-S".to_string(), target])
+    if let Some(text) = command_stdout(dpkg, &["-S".to_string(), target])
         && let Some(package) = parse_dpkg_s(&text)
     {
         return Some(PackageOwner {
@@ -245,7 +260,7 @@ pub fn probe_package_owner(path: &Path) -> Option<PackageOwner> {
     None
 }
 
-fn command_stdout(cmd: &str, args: &[String]) -> Option<String> {
+fn command_stdout(cmd: &Path, args: &[String]) -> Option<String> {
     let out = Command::new(cmd).args(args).output().ok()?;
     if !out.status.success() {
         return None;
@@ -301,7 +316,7 @@ pub fn prefix_from_gui(exe: &Path) -> Option<PathBuf> {
 }
 
 pub fn decide(exe: &Path, home: &Path, owner: Option<PackageOwner>) -> InstallOrigin {
-    // The package manager's answer about this binary wins. The path does not.
+    // The package manager's answer about this binary wins.
     if let Some(owner) = owner {
         return InstallOrigin::Package {
             command: owner.remove_command(),
@@ -313,11 +328,23 @@ pub fn decide(exe: &Path, home: &Path, owner: Option<PackageOwner>) -> InstallOr
         };
     }
     if let Some(prefix) = prefix_from_gui(exe) {
-        return InstallOrigin::Bootstrap { prefix };
+        // /usr and any other prefix outside the home folder is not removed.
+        if prefix_within_home(&prefix, home) {
+            return InstallOrigin::Bootstrap { prefix };
+        }
     }
     InstallOrigin::Outside {
         exe: exe.to_path_buf(),
     }
+}
+
+fn prefix_within_home(prefix: &Path, home: &Path) -> bool {
+    if contains_dotdot(prefix) || contains_dotdot(home) {
+        return false;
+    }
+    let prefix = lexical(prefix);
+    let home = lexical(home);
+    prefix.starts_with(&home)
 }
 
 fn spec_path(home: &Path, prefix: &Path, class: PathClass) -> PathBuf {
@@ -328,30 +355,62 @@ fn spec_path(home: &Path, prefix: &Path, class: PathClass) -> PathBuf {
         .unwrap_or_default()
 }
 
-pub fn open_dialog(exe: &Path, home: &Path, owner: Option<PackageOwner>) -> UninstallDialog {
+pub fn open_dialog(
+    exe: &Path,
+    home: &Path,
+    owner: Option<PackageOwner>,
+    data_dir: &Path,
+) -> UninstallDialog {
+    let appimage = appimage_file(exe);
     match decide(exe, home, owner) {
         InstallOrigin::Bootstrap { prefix } => {
-            let plan = removal_plan(home, &prefix);
+            let plan = removal_plan(home, &prefix, appimage.as_deref());
             UninstallDialog::Confirm {
                 home: home.to_path_buf(),
                 prefix,
+                data_dir: data_dir.to_path_buf(),
+                appimage: appimage.clone(),
                 delete_data: false,
                 fallback: plan.fallback,
             }
         }
         InstallOrigin::Package { command } => UninstallDialog::Manual {
-            detail: "This copy is owned by a package manager (pacman -Qo or dpkg -S). Nothing on disk will be removed."
-                .into(),
+            detail:
+                "This copy was installed by your system package manager. Nothing will be removed."
+                    .into(),
             command: Some(command),
+            paths: Vec::new(),
         },
-        InstallOrigin::Outside { exe } => UninstallDialog::Manual {
-            detail: format!(
-                "This copy is outside the bootstrap.sh install paths ({}). Nothing will be removed.",
-                exe.display()
-            ),
-            command: None,
-        },
+        InstallOrigin::Outside { exe } => {
+            let outside_prefix =
+                prefix_from_gui(&exe).filter(|prefix| !prefix_within_home(prefix, home));
+            let mut paths = outside_prefix
+                .as_ref()
+                .map(|prefix| display_paths(home, prefix))
+                .unwrap_or_default();
+            if outside_prefix.is_some() && path_exists(&exe) && !paths.contains(&exe) {
+                paths.push(exe.clone());
+            }
+            let detail = if outside_prefix.is_some() {
+                "Remove it manually.".into()
+            } else {
+                "Nothing will be removed.".into()
+            };
+            UninstallDialog::Manual {
+                detail,
+                command: None,
+                paths,
+            }
+        }
     }
+}
+
+fn appimage_file(exe: &Path) -> Option<PathBuf> {
+    let name = exe.file_name()?.to_string_lossy();
+    if name.ends_with(".AppImage") || name.ends_with(".appimage") {
+        return Some(exe.to_path_buf());
+    }
+    None
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -363,10 +422,10 @@ pub struct RemovalPlan {
 }
 
 /// Manifest entries when that file exists. Otherwise the fixed install list.
-/// Never expands a directory or a glob.
-pub fn removal_plan(home: &Path, prefix: &Path) -> RemovalPlan {
+/// Never expands a directory or a glob. `extra` is the AppImage file, if any.
+pub fn removal_plan(home: &Path, prefix: &Path, extra: Option<&Path>) -> RemovalPlan {
     let manifest = spec_path(home, prefix, PathClass::Manifest);
-    if manifest.is_file() {
+    let mut plan = if manifest.is_file() {
         let files = manifest_lines(home, prefix)
             .into_iter()
             .filter(|path| keep_exact_file(path, home, prefix))
@@ -389,15 +448,80 @@ pub fn removal_plan(home: &Path, prefix: &Path) -> RemovalPlan {
             fallback: true,
             files,
         }
+    };
+    if let Some(extra) = extra
+        && keep_exact_file(extra, home, prefix)
+        && !plan.files.iter().any(|path| path == extra)
+    {
+        plan.files.push(extra.to_path_buf());
     }
+    plan
+}
+
+/// Paths to show when this app will not delete anything.
+fn display_paths(home: &Path, prefix: &Path) -> Vec<PathBuf> {
+    let manifest = spec_path(home, prefix, PathClass::Manifest);
+    let candidates = if manifest.is_file() {
+        raw_manifest_lines(&manifest)
+    } else {
+        expanded_specs(home, prefix)
+            .into_iter()
+            .filter(|(spec, _)| spec.when == When::Always && !is_directory_class(spec.class))
+            .map(|(_, path)| path)
+            .collect()
+    };
+    candidates
+        .into_iter()
+        .filter(|path| !contains_dotdot(path) && path_exists(path))
+        .collect()
 }
 
 fn keep_exact_file(path: &Path, home: &Path, prefix: &Path) -> bool {
-    path.is_absolute()
-        && !path_has_pattern(path)
+    confined_path(path, home, prefix)
         && !is_config_toml(path)
         && !is_data_or_config_dir(path, home, prefix)
         && !too_broad(path, home)
+}
+
+/// Reject `..`, resolve the parent, and require the file to sit under the
+/// home folder or the install prefix.
+fn confined_path(path: &Path, home: &Path, prefix: &Path) -> bool {
+    if !path.is_absolute() || contains_dotdot(path) || path_has_pattern(path) {
+        return false;
+    }
+    let Some(parent) = path.parent() else {
+        return false;
+    };
+    let Some(name) = path.file_name() else {
+        return false;
+    };
+    if name.is_empty() || name == ".." || name == "." {
+        return false;
+    }
+    let Ok(canon_parent) = fs::canonicalize(parent) else {
+        return false;
+    };
+    let resolved = canon_parent.join(name);
+    let home_root = fs::canonicalize(home).unwrap_or_else(|_| lexical(home));
+    let prefix_root = fs::canonicalize(prefix).unwrap_or_else(|_| lexical(prefix));
+    strictly_inside(&resolved, &home_root) || strictly_inside(&resolved, &prefix_root)
+}
+
+fn contains_dotdot(path: &Path) -> bool {
+    let text = path.to_string_lossy();
+    text.split(['/', '\\']).any(|part| part == "..")
+        || path
+            .components()
+            .any(|component| matches!(component, Component::ParentDir))
+}
+
+fn strictly_inside(path: &Path, root: &Path) -> bool {
+    path.strip_prefix(root)
+        .is_ok_and(|rest| rest.components().next().is_some())
+}
+
+fn path_exists(path: &Path) -> bool {
+    fs::symlink_metadata(path).is_ok()
 }
 
 fn path_has_pattern(path: &Path) -> bool {
@@ -415,21 +539,36 @@ fn is_data_or_config_dir(path: &Path, home: &Path, prefix: &Path) -> bool {
         || path == spec_path(home, prefix, PathClass::Config)
 }
 
-pub fn preview(home: &Path, prefix: &Path, delete_data: bool) -> Vec<PreviewGroup> {
-    let plan = removal_plan(home, prefix);
+pub fn preview(
+    home: &Path,
+    prefix: &Path,
+    delete_data: bool,
+    data_dir: &Path,
+    extra: Option<&Path>,
+) -> Vec<PreviewGroup> {
+    let plan = removal_plan(home, prefix, extra);
+    let files: Vec<PathBuf> = if plan.fallback {
+        plan.files
+            .iter()
+            .filter(|path| path_exists(path))
+            .cloned()
+            .collect()
+    } else {
+        plan.files.clone()
+    };
     let mut groups = vec![
         PreviewGroup {
             heading: "Files",
             note: if plan.fallback {
-                "No install manifest was found. These are the fixed install paths. Confirm to remove them."
+                "These are the files from the original install."
             } else {
-                "Only these recorded files are removed."
+                "These files will be removed."
             },
-            paths: plan.files.clone(),
+            paths: files,
         },
         PreviewGroup {
-            heading: "Systemd user service",
-            note: "The user service and any timer are stopped and disabled before any file is removed.",
+            heading: "Tracker service",
+            note: "The tracker is stopped before anything is removed.",
             paths: vec![],
         },
     ];
@@ -440,27 +579,31 @@ pub fn preview(home: &Path, prefix: &Path, delete_data: bool) -> Vec<PreviewGrou
     {
         groups.push(PreviewGroup {
             heading: "Desktop entry and icon",
-            note: "The desktop file names the theme icon applications-games. No icon file is installed, so none is removed.",
+            note: "No separate icon file is removed.",
             paths: vec![],
         });
     }
     if delete_data {
+        let data_note = if confined_path(data_dir, home, prefix) {
+            "Saved games, debug images, and logs."
+        } else {
+            "This folder is outside your home folder, so it will be left in place."
+        };
         groups.push(PreviewGroup {
-            heading: "Local data",
-            note: "Games database, debug crops, and shadow logs.",
-            paths: vec![spec_path(home, prefix, PathClass::Data)],
+            heading: "Saved games",
+            note: data_note,
+            paths: vec![data_dir.to_path_buf()],
         });
         groups.push(PreviewGroup {
-            heading: "Config",
-            note: "config.toml, including the sync token.",
+            heading: "Settings",
+            note: "Settings, including the sync token.",
             paths: vec![spec_path(home, prefix, PathClass::Config)],
         });
     }
     groups
 }
 
-fn manifest_lines(home: &Path, prefix: &Path) -> Vec<PathBuf> {
-    let path = spec_path(home, prefix, PathClass::Manifest);
+fn raw_manifest_lines(path: &Path) -> Vec<PathBuf> {
     let Ok(text) = fs::read_to_string(path) else {
         return Vec::new();
     };
@@ -471,6 +614,14 @@ fn manifest_lines(home: &Path, prefix: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
+fn manifest_lines(home: &Path, prefix: &Path) -> Vec<PathBuf> {
+    let path = spec_path(home, prefix, PathClass::Manifest);
+    raw_manifest_lines(&path)
+        .into_iter()
+        .filter(|line| confined_path(line, home, prefix))
+        .collect()
+}
+
 pub fn apply(req: &UninstallRequest) -> Result<UninstallReport, String> {
     let InstallOrigin::Bootstrap { prefix } = &req.origin else {
         return Ok(UninstallReport {
@@ -478,48 +629,129 @@ pub fn apply(req: &UninstallRequest) -> Result<UninstallReport, String> {
             removed_files: 0,
         });
     };
-    if prefix != &req.prefix {
+    if prefix != &req.prefix || !prefix_within_home(prefix, &req.home) {
         return Ok(UninstallReport {
             skipped: true,
             removed_files: 0,
         });
     }
 
-    // Stop and disable the service and any timer before any file is unlinked.
-    for unit in units_to_disable() {
-        run_systemctl(
-            &req.systemctl,
-            &["--user", "disable", "--now", unit.as_str()],
-        );
-    }
+    // Stop the service and any timer before any file is unlinked.
+    stop_units(&req.systemctl)?;
 
-    let plan = removal_plan(&req.home, &req.prefix);
-    let mut removed_files = 0;
-    for path in &plan.files {
-        if remove_exact_file(path, &req.home)? {
-            removed_files += 1;
+    let plan = removal_plan(&req.home, &req.prefix, req.appimage.as_deref());
+    let mut removed: Vec<PathBuf> = Vec::new();
+    let mut left: Vec<PathBuf> = plan.files.clone();
+    while !left.is_empty() {
+        let path = left[0].clone();
+        match remove_exact_file(&path, &req.home) {
+            Ok(true) => {
+                removed.push(left.remove(0));
+            }
+            Ok(false) => {
+                left.remove(0);
+            }
+            Err(_) => {
+                return Err(partial_message(&removed, &left));
+            }
         }
     }
     if let Some(lib_dir) = lib_dir(&req.home, &req.prefix) {
         rmdir_empty_tree(&lib_dir);
     }
-    run_systemctl(&req.systemctl, &["--user", "daemon-reload"]);
+    let _ = run_systemctl(&req.systemctl, &["--user", "daemon-reload"]);
 
     if req.delete_data {
-        for class in [PathClass::Data, PathClass::Config] {
-            let dir = spec_path(&req.home, &req.prefix, class);
-            remove_listed_tree(&dir, &req.home)?;
+        let config = spec_path(&req.home, &req.prefix, PathClass::Config);
+        let mut dirs = Vec::new();
+        if confined_path(&req.data_dir, &req.home, &req.prefix) {
+            dirs.push(req.data_dir.clone());
+        }
+        if confined_path(&config, &req.home, &req.prefix) && !dirs.iter().any(|dir| dir == &config)
+        {
+            dirs.push(config);
+        }
+        for dir in dirs {
+            if remove_listed_tree(&dir, &req.home).is_err() {
+                left.push(dir);
+                return Err(partial_message(&removed, &left));
+            }
+            removed.push(dir);
         }
     }
 
     Ok(UninstallReport {
         skipped: false,
-        removed_files,
+        removed_files: removed.len(),
     })
 }
 
-fn run_systemctl(bin: &Path, args: &[&str]) {
-    let _ = Command::new(bin).args(args).status();
+fn partial_message(removed: &[PathBuf], left: &[PathBuf]) -> String {
+    let removed_text = plain_list(removed);
+    let left_text = plain_list(left);
+    if removed.is_empty() {
+        format!("Uninstall stopped. Nothing was removed. Still there: {left_text}.")
+    } else {
+        format!("Uninstall stopped. Removed {removed_text}. Still there: {left_text}.")
+    }
+}
+
+fn plain_list(paths: &[PathBuf]) -> String {
+    if paths.is_empty() {
+        return "nothing".into();
+    }
+    paths
+        .iter()
+        .map(|path| path.display().to_string())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn stop_units(systemctl: &Path) -> Result<(), String> {
+    if !systemctl_exists(systemctl) {
+        return Err("Could not stop the tracker. Nothing was removed.".into());
+    }
+    for unit in units_to_disable() {
+        let output = run_systemctl(systemctl, &["--user", "disable", "--now", unit.as_str()])?;
+        if !output.status.success() && !unit_is_missing(&output) {
+            return Err("Could not stop the tracker. Nothing was removed.".into());
+        }
+        if unit == "scuffed-stat-tracker.service" {
+            let active = run_systemctl(systemctl, &["--user", "is-active", unit.as_str()])?;
+            let state = String::from_utf8_lossy(&active.stdout);
+            if active.status.success() && state.trim() == "active" {
+                return Err("The tracker is still running. Nothing was removed.".into());
+            }
+        }
+    }
+    Ok(())
+}
+
+fn systemctl_exists(path: &Path) -> bool {
+    if path.components().count() == 1 {
+        return Command::new(path).arg("--version").output().is_ok();
+    }
+    path.is_file()
+}
+
+fn unit_is_missing(output: &std::process::Output) -> bool {
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let lower = text.to_ascii_lowercase();
+    lower.contains("not found")
+        || lower.contains("does not exist")
+        || lower.contains("not loaded")
+        || lower.contains("no such file")
+}
+
+fn run_systemctl(bin: &Path, args: &[&str]) -> Result<std::process::Output, String> {
+    Command::new(bin)
+        .args(args)
+        .output()
+        .map_err(|_| "Could not stop the tracker. Nothing was removed.".to_string())
 }
 
 fn lib_dir(home: &Path, prefix: &Path) -> Option<PathBuf> {
@@ -603,6 +835,20 @@ fn too_broad(path: &Path, home: &Path) -> bool {
     path == Path::new("/") || path == home || path.as_os_str().is_empty()
 }
 
+fn lexical(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::ParentDir => {
+                out.pop();
+            }
+            Component::CurDir => {}
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
+}
+
 fn parents_are_real(path: &Path) -> bool {
     let mut current = path.parent();
     while let Some(dir) = current {
@@ -625,9 +871,22 @@ pub fn view<'a>(dialog: &'a UninstallDialog, busy: bool) -> Element<'a, Message>
             home,
             prefix,
             delete_data,
+            data_dir,
+            appimage,
             ..
-        } => confirm_card(home, prefix, *delete_data, busy),
-        UninstallDialog::Manual { command, detail } => manual_card(detail, command.as_deref()),
+        } => confirm_card(
+            home,
+            prefix,
+            data_dir,
+            appimage.as_deref(),
+            *delete_data,
+            busy,
+        ),
+        UninstallDialog::Manual {
+            command,
+            detail,
+            paths,
+        } => manual_card(detail, command.as_deref(), paths),
     };
     let mut backdrop = theme::BG;
     backdrop.a = 0.88;
@@ -645,6 +904,8 @@ pub fn view<'a>(dialog: &'a UninstallDialog, busy: bool) -> Element<'a, Message>
 fn confirm_card<'a>(
     home: &'a Path,
     prefix: &'a Path,
+    data_dir: &'a Path,
+    appimage: Option<&'a Path>,
     delete_data: bool,
     busy: bool,
 ) -> Element<'a, Message> {
@@ -653,7 +914,7 @@ fn confirm_card<'a>(
             .size(SIZE_FEATURED)
             .font(FONT_EXTRABOLD)
             .color(TEXT),
-        text("Only the paths below are removed. The systemd user service is stopped and disabled first.")
+        text("These files will be removed. The tracker is stopped first.")
             .size(SIZE_META)
             .font(FONT_MEDIUM)
             .color(TEXT_2),
@@ -661,15 +922,14 @@ fn confirm_card<'a>(
     .spacing(8)
     .width(Fill);
 
-    for group in preview(home, prefix, delete_data) {
+    for group in preview(home, prefix, delete_data, data_dir, appimage) {
         body = body.push(group_block(&group));
     }
 
-    let data = spec_path(home, prefix, PathClass::Data);
     let config = spec_path(home, prefix, PathClass::Config);
     body = body.push(
         checkbox(delete_data)
-            .label("Also delete local data")
+            .label("Also delete saved games and settings")
             .on_toggle(Message::ToggleUninstallData)
             .size(18)
             .text_size(SIZE_BODY)
@@ -678,8 +938,8 @@ fn confirm_card<'a>(
     );
     body = body.push(
         text(format!(
-            "{}\nGames database, debug crops, and shadow logs.\n{}\nConfig, including the sync token.",
-            data.display(),
+            "{}\nSaved games, debug images, and logs.\n{}\nSettings, including the sync token.",
+            data_dir.display(),
             config.display()
         ))
         .size(SIZE_LABEL)
@@ -713,7 +973,11 @@ fn confirm_card<'a>(
     dialog_shell(scrollable(body).height(Fill).width(Fill).into())
 }
 
-fn manual_card<'a>(detail: &'a str, command: Option<&'a str>) -> Element<'a, Message> {
+fn manual_card<'a>(
+    detail: &'a str,
+    command: Option<&'a str>,
+    paths: &'a [PathBuf],
+) -> Element<'a, Message> {
     let mut body = column![
         text("Uninstall")
             .size(SIZE_FEATURED)
@@ -723,6 +987,15 @@ fn manual_card<'a>(detail: &'a str, command: Option<&'a str>) -> Element<'a, Mes
     ]
     .spacing(10)
     .width(Fill);
+
+    for path in paths {
+        body = body.push(
+            text(path.display().to_string())
+                .size(SIZE_LABEL)
+                .font(FONT_MEDIUM)
+                .color(TEXT_2),
+        );
+    }
 
     if let Some(command) = command {
         body = body.push(
@@ -899,6 +1172,8 @@ mod tests {
         UninstallRequest {
             home: home.to_path_buf(),
             prefix: prefix.to_path_buf(),
+            data_dir: spec_path(home, prefix, PathClass::Data),
+            appimage: None,
             delete_data,
             origin,
             systemctl,
@@ -1021,12 +1296,30 @@ mod tests {
     }
 
     #[test]
-    fn usr_path_without_a_package_owner_is_a_script_install() {
+    fn usr_path_without_a_package_owner_is_not_a_script_install() {
         let home = Path::new("/home/player");
         let exe = Path::new("/usr/bin/stat-tracker-gui");
-        match decide(exe, home, None) {
-            InstallOrigin::Bootstrap { prefix } => assert_eq!(prefix, Path::new("/usr")),
-            other => panic!("expected a script install, got {other:?}"),
+        assert!(matches!(
+            decide(exe, home, None),
+            InstallOrigin::Outside { .. }
+        ));
+        let dialog = open_dialog(
+            exe,
+            home,
+            None,
+            &home.join(".local/share/scuffed-stat-tracker"),
+        );
+        match dialog {
+            UninstallDialog::Manual {
+                command,
+                detail,
+                paths,
+            } => {
+                assert!(command.is_none());
+                assert_eq!(detail, "Remove it manually.");
+                assert!(paths.is_empty() || paths.iter().all(|path| !path.starts_with("/home")));
+            }
+            other => panic!("expected a manual dialog, got {other:?}"),
         }
     }
 
@@ -1098,7 +1391,12 @@ mod tests {
         let exe = prefix.join("bin/stat-tracker-gui");
         let origin = decide(&exe, &home, None);
         assert!(matches!(origin, InstallOrigin::Bootstrap { .. }));
-        let dialog = open_dialog(&exe, &home, None);
+        let dialog = open_dialog(
+            &exe,
+            &home,
+            None,
+            &spec_path(&home, &prefix, PathClass::Data),
+        );
         match &dialog {
             UninstallDialog::Confirm { delete_data, .. } => assert!(!*delete_data),
             other => panic!("expected confirm, got {other:?}"),
@@ -1154,7 +1452,12 @@ mod tests {
         let neighbor = prefix.join("bin/neighbor-tool");
         write(&neighbor, "neighbor\n");
         let exe = prefix.join("bin/stat-tracker-gui");
-        let dialog = open_dialog(&exe, &home, None);
+        let dialog = open_dialog(
+            &exe,
+            &home,
+            None,
+            &spec_path(&home, &prefix, PathClass::Data),
+        );
         match &dialog {
             UninstallDialog::Confirm {
                 fallback,
@@ -1166,10 +1469,16 @@ mod tests {
             }
             other => panic!("expected confirm, got {other:?}"),
         }
-        let shown: Vec<_> = preview(&home, &prefix, false)
-            .into_iter()
-            .flat_map(|group| group.paths)
-            .collect();
+        let shown: Vec<_> = preview(
+            &home,
+            &prefix,
+            false,
+            &spec_path(&home, &prefix, PathClass::Data),
+            None,
+        )
+        .into_iter()
+        .flat_map(|group| group.paths)
+        .collect();
         assert!(shown.contains(&exe));
         assert!(!shown.contains(&neighbor));
         let origin = decide(&exe, &home, None);
@@ -1195,7 +1504,7 @@ mod tests {
         text.push_str(&config.display().to_string());
         text.push('\n');
         fs::write(&manifest, text).unwrap();
-        let plan = removal_plan(&home, &prefix);
+        let plan = removal_plan(&home, &prefix, None);
         assert!(!plan.fallback);
         assert!(!plan.files.iter().any(|path| path == &config));
         let origin = decide(&prefix.join("bin/stat-tracker-gui"), &home, None);
@@ -1236,7 +1545,245 @@ mod tests {
         std::os::unix::fs::symlink(&elsewhere, &data).unwrap();
         let origin = decide(&prefix.join("bin/stat-tracker-gui"), &home, None);
         let err = apply(&request(&home, &prefix, true, origin)).unwrap_err();
-        assert!(err.contains("symlink"), "{err}");
+        assert!(err.contains("Still there"), "{err}");
+        assert!(!err.contains("Os {"), "{err}");
         assert!(elsewhere.join("secret").is_file());
+    }
+
+    #[test]
+    fn manifest_cannot_escape_home_or_use_dotdot() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let prefix = home.join(".local");
+        fs::create_dir_all(&home).unwrap();
+        layout(&home, &prefix);
+        let outside = dir.path().join("outside-secret");
+        write(&outside, "secret\n");
+        let manifest = spec_path(&home, &prefix, PathClass::Manifest);
+        let mut text = fs::read_to_string(&manifest).unwrap();
+        text.push_str("\n/etc/x\n");
+        text.push_str(&format!(
+            "{}\n",
+            prefix.join("bin/../../outside-secret").display()
+        ));
+        text.push_str(&format!("{}\n", outside.display()));
+        fs::write(&manifest, text).unwrap();
+        let plan = removal_plan(&home, &prefix, None);
+        assert!(
+            plan.files
+                .iter()
+                .all(|path| !path.ends_with("outside-secret"))
+        );
+        assert!(plan.files.iter().all(|path| path != Path::new("/etc/x")));
+        let origin = decide(&prefix.join("bin/stat-tracker-gui"), &home, None);
+        apply(&request(&home, &prefix, false, origin)).unwrap();
+        assert_eq!(fs::read_to_string(&outside).unwrap(), "secret\n");
+        assert!(!prefix.join("bin/stat-tracker-gui").exists());
+    }
+
+    #[test]
+    fn prefix_outside_home_lists_paths_and_deletes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let prefix = dir.path().join("opt").join("scuffed");
+        fs::create_dir_all(&home).unwrap();
+        layout(&home, &prefix);
+        let exe = prefix.join("bin/stat-tracker-gui");
+        assert!(matches!(
+            decide(&exe, &home, None),
+            InstallOrigin::Outside { .. }
+        ));
+        let dialog = open_dialog(&exe, &home, None, &home.join("data"));
+        match dialog {
+            UninstallDialog::Manual { detail, paths, .. } => {
+                assert_eq!(detail, "Remove it manually.");
+                assert!(paths.contains(&exe));
+            }
+            other => panic!("expected a manual dialog, got {other:?}"),
+        }
+        let mut req = request(
+            &home,
+            &prefix,
+            true,
+            InstallOrigin::Bootstrap {
+                prefix: prefix.clone(),
+            },
+        );
+        req.prefix = prefix.clone();
+        let report = apply(&req).unwrap();
+        assert!(report.skipped);
+        assert!(exe.is_file());
+    }
+
+    #[test]
+    fn checkbox_deletes_the_configured_data_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let prefix = home.join(".local");
+        fs::create_dir_all(&home).unwrap();
+        layout(&home, &prefix);
+        let custom = home.join("saved-games");
+        write(&custom.join("stats.surrealkv/db"), "custom\n");
+        let default_data = spec_path(&home, &prefix, PathClass::Data);
+        let shown: Vec<_> = preview(&home, &prefix, true, &custom, None)
+            .into_iter()
+            .flat_map(|group| group.paths)
+            .collect();
+        assert!(shown.contains(&custom));
+        assert!(!shown.contains(&default_data) || custom == default_data);
+        let mut req = request(
+            &home,
+            &prefix,
+            true,
+            decide(&prefix.join("bin/stat-tracker-gui"), &home, None),
+        );
+        req.data_dir = custom.clone();
+        apply(&req).unwrap();
+        assert!(!custom.exists());
+        assert!(default_data.join("stats.surrealkv/db").is_file());
+
+        let outside = dir.path().join("outside-data");
+        write(&outside.join("db"), "nope\n");
+        let saved = preview(&home, &prefix, true, &outside, None)
+            .into_iter()
+            .find(|group| group.heading == "Saved games")
+            .unwrap();
+        assert!(saved.paths.contains(&outside));
+        assert!(saved.note.contains("left in place"));
+        layout(&home, &prefix);
+        let mut left = request(
+            &home,
+            &prefix,
+            true,
+            decide(&prefix.join("bin/stat-tracker-gui"), &home, None),
+        );
+        left.data_dir = outside.clone();
+        apply(&left).unwrap();
+        assert!(outside.join("db").is_file());
+    }
+
+    #[test]
+    fn appimage_file_is_removed_and_missing_files_are_hidden() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        fs::create_dir_all(home.join("Downloads")).unwrap();
+        let image = home.join("Downloads/ScuffedStatTracker.AppImage");
+        write(&image, "appimage\n");
+        let prefix = home.join(".local");
+        fs::create_dir_all(prefix.join("bin")).unwrap();
+        let missing = prefix.join("bin/stat-tracker-gui");
+        match decide(&image, &home, None) {
+            InstallOrigin::Bootstrap { prefix: got } => assert_eq!(got, prefix),
+            other => panic!("expected a script install, got {other:?}"),
+        }
+        let shown: Vec<_> = preview(&home, &prefix, false, &home.join("data"), Some(&image))
+            .into_iter()
+            .flat_map(|group| group.paths)
+            .collect();
+        assert!(shown.contains(&image));
+        assert!(!shown.contains(&missing));
+        let mut req = request(
+            &home,
+            &prefix,
+            false,
+            InstallOrigin::Bootstrap {
+                prefix: prefix.clone(),
+            },
+        );
+        req.appimage = Some(image.clone());
+        write(&req.systemctl, "#!/bin/sh\nexit 0\n");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = fs::metadata(&req.systemctl).unwrap().permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&req.systemctl, perms).unwrap();
+        }
+        apply(&req).unwrap();
+        assert!(!image.exists());
+    }
+
+    #[test]
+    fn probe_package_owner_reads_the_package_manager() {
+        let dir = tempfile::tempdir().unwrap();
+        let pacman = dir.path().join("pacman");
+        write(
+            &pacman,
+            "#!/bin/sh\nif [ \"$1\" = -Qo ]; then echo \"$2 is owned by scuffed-stat-tracker 1.0-1\"; exit 0; fi\nexit 1\n",
+        );
+        let dpkg = dir.path().join("dpkg");
+        write(&dpkg, "#!/bin/sh\nexit 1\n");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            for path in [&pacman, &dpkg] {
+                let mut perms = fs::metadata(path).unwrap().permissions();
+                perms.set_mode(0o755);
+                fs::set_permissions(path, perms).unwrap();
+            }
+        }
+        let target = Path::new("/usr/bin/stat-tracker-gui");
+        let owner = probe_package_owner_with(target, &pacman, &dpkg).unwrap();
+        assert_eq!(
+            owner.remove_command(),
+            "sudo pacman -R scuffed-stat-tracker"
+        );
+        assert!(probe_package_owner(&dir.path().join("not-a-tracked-binary")).is_none());
+    }
+
+    #[test]
+    fn systemctl_failure_removes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let prefix = home.join(".local");
+        fs::create_dir_all(&home).unwrap();
+        layout(&home, &prefix);
+        let req = request(
+            &home,
+            &prefix,
+            false,
+            decide(&prefix.join("bin/stat-tracker-gui"), &home, None),
+        );
+        write(&req.systemctl, "#!/bin/sh\necho active\nexit 0\n");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = fs::metadata(&req.systemctl).unwrap().permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&req.systemctl, perms).unwrap();
+        }
+        let err = apply(&req).unwrap_err();
+        assert!(err.contains("still running"), "{err}");
+        assert!(prefix.join("bin/stat-tracker-gui").is_file());
+    }
+
+    #[test]
+    fn halfway_failure_says_what_is_left() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let prefix = home.join(".local");
+        fs::create_dir_all(&home).unwrap();
+        layout(&home, &prefix);
+        let bin = prefix.join("bin");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = fs::metadata(&bin).unwrap().permissions();
+            perms.set_mode(0o555);
+            fs::set_permissions(&bin, perms).unwrap();
+        }
+        let origin = decide(&prefix.join("bin/stat-tracker-gui"), &home, None);
+        let err = apply(&request(&home, &prefix, false, origin)).unwrap_err();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = fs::metadata(&bin).unwrap().permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&bin, perms).unwrap();
+        }
+        assert!(err.contains("Uninstall stopped"), "{err}");
+        assert!(err.contains("Still there"), "{err}");
+        assert!(!err.contains("Os {"), "{err}");
+        assert!(prefix.join("bin/stat-tracker-gui").is_file());
     }
 }
