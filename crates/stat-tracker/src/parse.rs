@@ -235,6 +235,60 @@ pub fn uploaded_game_mode(map_name: &str, game_mode: &str) -> String {
     }
 }
 
+/// Display names from [`MAPS`], in table order, duplicates removed.
+///
+/// The strings are the table's own spellings. `Paraiso` and `Esperanca`
+/// stay unaccented. `Watchpoint: Grímsvötn` and `Château Guillard` keep
+/// the accents already stored on those rows.
+pub fn known_map_names() -> Vec<&'static str> {
+    let mut names = Vec::new();
+    for &(display, _) in MAPS {
+        if !names.contains(&display) {
+            names.push(display);
+        }
+    }
+    names
+}
+
+/// True when `name` is a [`known_map_names`] display string.
+pub fn map_is_known(name: &str) -> bool {
+    map_mode(name.trim()).is_some()
+}
+
+/// Empty, or the literal `Unknown` in any ASCII case.
+///
+/// Other hero strings are left as read. This is the OCR miss that must
+/// not be uploaded.
+pub fn hero_is_unknown_label(name: &str) -> bool {
+    let trimmed = name.trim();
+    trimmed.is_empty() || trimmed.eq_ignore_ascii_case("unknown")
+}
+
+/// Server `suspect_fields` names for one row that is not ready to upload.
+///
+/// `map` when the map is empty or not in [`known_map_names`]. `mode` when
+/// the mode that would be sent is empty. `hero` when
+/// [`hero_is_unknown_label`] is true.
+///
+/// A non-empty list holds the whole match on the machine. The upload
+/// leaves that match out. `POST /api/stats/upload` requires `hero` and
+/// `map_name` as strings: a null hero and an omitted hero both fail JSON
+/// decode, and an empty `map_name` is what got stored on the server.
+pub fn review_suspect_fields(map_name: &str, game_mode: &str, hero: &str) -> Vec<&'static str> {
+    let map = map_name.trim();
+    let mut fields = Vec::new();
+    if !map_is_known(map) {
+        fields.push("map");
+    }
+    if uploaded_game_mode(map, game_mode).trim().is_empty() {
+        fields.push("mode");
+    }
+    if hero_is_unknown_label(hero) {
+        fields.push("hero");
+    }
+    fields
+}
+
 /// A stats row is uploaded only when neither the map nor the mode is Deathmatch.
 pub fn stats_row_is_tracked(map_name: &str, game_mode: &str) -> bool {
     !map_is_untracked(map_name) && !game_mode.eq_ignore_ascii_case("Deathmatch")
@@ -1466,6 +1520,48 @@ mod tests {
         let mut mixed: Vec<RowOcrResult> = (0..2).map(|_| valid_row("X")).collect();
         mixed.extend((0..8).map(|_| garbage_row()));
         assert!(!looks_like_scoreboard(&mixed));
+    }
+
+    #[test]
+    fn known_map_names_keep_the_table_spellings() {
+        let names = known_map_names();
+        assert_eq!(names.first().copied(), Some("King's Row"));
+        assert_eq!(
+            names.iter().filter(|name| **name == "Eichenwalde").count(),
+            1
+        );
+        assert!(names.contains(&"Paraiso"));
+        assert!(names.contains(&"Esperanca"));
+        assert!(!names.contains(&"Paraíso"));
+        assert!(!names.contains(&"Esperança"));
+        assert!(names.contains(&"Watchpoint: Grímsvötn"));
+        assert!(names.contains(&"Château Guillard"));
+        assert!(names.contains(&"King's Row"));
+        for name in &names {
+            assert!(map_is_known(name), "{name}");
+        }
+    }
+
+    #[test]
+    fn blank_or_unknown_map_mode_and_hero_are_suspect() {
+        assert_eq!(review_suspect_fields("", "", "Ana"), vec!["map", "mode"]);
+        assert_eq!(
+            review_suspect_fields("Not a map", "", "Ana"),
+            vec!["map", "mode"]
+        );
+        assert_eq!(
+            review_suspect_fields("Not a map", "Escort", "Ana"),
+            vec!["map"]
+        );
+        assert_eq!(
+            review_suspect_fields("Busan", "", "Ana"),
+            Vec::<&str>::new()
+        );
+        assert_eq!(review_suspect_fields("Busan", "", "Unknown"), vec!["hero"]);
+        assert_eq!(review_suspect_fields("Busan", "", "unknown"), vec!["hero"]);
+        assert_eq!(review_suspect_fields("Busan", "", "  "), vec!["hero"]);
+        assert!(review_suspect_fields("Busan", "", "Ana").is_empty());
+        assert_eq!(uploaded_game_mode("Busan", ""), "Control");
     }
 
     #[test]
