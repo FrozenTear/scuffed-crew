@@ -83,8 +83,10 @@ impl FieldRead {
 pub enum BoardStatus {
     /// A board with a measured 5v5 or 6v6 layout: every field is present.
     Read,
-    /// No board structure (same preflight as the capture path: row dips or
-    /// header stat labels). `team_size` is `None`, no row fields.
+    /// No board: the capture path's preflight (row dips or header stat
+    /// labels) fails, the six stat labels are not in the Tab header strip,
+    /// or fewer than 3 rows have 4 read stat cells (ocr-v1's final check).
+    /// `team_size` is `None`, no row fields.
     NotFound,
     /// Passed the preflight, but the row pitch gives no 5v5 or 6v6 under
     /// Tracker's rule (no pitch, implausible pitches, or dip and spectral
@@ -225,6 +227,11 @@ impl Reader {
             }
         };
         let digit_read = digits::read_board(&scoreboard, team_size, READ_BUDGET).ok();
+        if digit_read.as_ref().is_some_and(|d| !has_stat_rows(d)) {
+            let mut b = not_found(BoardStatus::NotFound);
+            b.elapsed_ms = elapsed_ms(t0);
+            return b;
+        }
         let hero_read = self
             .heroes
             .as_ref()
@@ -302,10 +309,35 @@ fn elapsed_ms(t0: Instant) -> u32 {
 /// The layout of a cropped scoreboard. A board is found with the capture
 /// path's preflight (main.rs): row dips at a plausible pitch, or 3 to 10
 /// header stat labels. See [`layout_from_scan`] for the size.
+///
+/// The preflight alone also passes gameplay frames, Practice Range and
+/// history Teams screens: their rows give dips at a 5v5-like pitch. None of
+/// them has the six stat labels in the Tab header strip, so a board also
+/// needs [`digits::stat_columns_found`]; otherwise it is
+/// [`BoardStatus::NotFound`].
 pub fn board_layout(scoreboard: &DynamicImage) -> Result<usize, BoardStatus> {
     let scan = crate::detect::hero_portrait::scan_rows(scoreboard);
     let labels = crate::ocr::preprocess::header_label_groups(scoreboard).len();
-    layout_from_scan(&scan, labels)
+    let n = layout_from_scan(&scan, labels);
+    if n != Err(BoardStatus::NotFound) && !digits::stat_columns_found(scoreboard) {
+        return Err(BoardStatus::NotFound);
+    }
+    n
+}
+
+/// Rows with at least this many read stat cells count toward a board, and a
+/// board needs [`MIN_STAT_ROWS`] of them: ocr-v1's final check
+/// (`parse::looks_like_scoreboard`, 3 rows with 4 clean cells) on the digit
+/// reads instead of OCR text.
+const MIN_STAT_CELLS: usize = 4;
+const MIN_STAT_ROWS: usize = 3;
+
+fn has_stat_rows(d: &digits::BoardRead) -> bool {
+    d.rows
+        .iter()
+        .filter(|r| r.cells.iter().filter(|c| c.value.is_some()).count() >= MIN_STAT_CELLS)
+        .count()
+        >= MIN_STAT_ROWS
 }
 
 /// The size comes from Tracker's own rule, `RowScan::checked_team_size`
@@ -649,6 +681,97 @@ mod tests {
         assert!(json.contains(r#""team_size":null"#), "{json}");
         let b = assemble(6, None, None);
         assert_eq!((b.status, b.team_size), (BoardStatus::Read, Some(6)));
+    }
+
+    /// Top-left of the 1440p scoreboard crop inside a 2560x1440 frame, and
+    /// its size (`crop_scoreboard`).
+    const CROP_X: u32 = 448;
+    const CROP_Y: u32 = 216;
+    const CROP_W: u32 = 1664;
+    const CROP_H: u32 = 1007;
+
+    /// Synthetic stand-in for a frame that is not a Tab board but passes the
+    /// row-dip preflight: saturated background with grey bands across the
+    /// crop's name strip every `pitch` of crop height, from the top down to
+    /// `rows_to` of the crop height. `header_at` paints six dark stat labels
+    /// on a bright strip at that crop row (0 = the Tab header strip).
+    /// Built from the measured signals only (dip count, pitch, header labels),
+    /// no captured pixels.
+    fn stand_in(pitch: f64, rows_to: f64, header_at: Option<u32>) -> DynamicImage {
+        let mut img = image::RgbImage::from_pixel(2560, 1440, image::Rgb([40, 90, 160]));
+        let p = pitch * CROP_H as f64;
+        let mut y = p / 2.0;
+        while y < rows_to * CROP_H as f64 {
+            for dy in 0..12 {
+                for x in 0..CROP_W {
+                    img.put_pixel(
+                        CROP_X + x,
+                        CROP_Y + y as u32 + dy,
+                        image::Rgb([150, 150, 150]),
+                    );
+                }
+            }
+            y += p;
+        }
+        if let Some(top) = header_at {
+            for dy in 0..26 {
+                for x in 0..CROP_W {
+                    let label = (0..6).any(|i| (x as i64 - (960 + i * 100)).abs() < 6);
+                    let v = if label { 30 } else { 225 };
+                    img.put_pixel(CROP_X + x, CROP_Y + top + dy, image::Rgb([v, v, v]));
+                }
+            }
+        }
+        DynamicImage::ImageRgb8(img)
+    }
+
+    #[test]
+    fn gameplay_practice_and_history_stand_ins_are_not_found() {
+        let marker = {
+            let mut m = image::RgbImage::new(2560, 1440);
+            m.put_pixel(CROP_X, CROP_Y, image::Rgb([255, 0, 0]));
+            crate::ocr::preprocess::crop_scoreboard(&DynamicImage::ImageRgb8(m)).to_rgb8()
+        };
+        assert_eq!(marker.dimensions(), (CROP_W, CROP_H));
+        assert_eq!(marker.get_pixel(0, 0).0, [255, 0, 0], "crop origin moved");
+
+        let reader = Reader::load(&ReaderConfig::default());
+        let cases = [
+            // gameplay frames (dip and spectral pitch as measured: 0.090,
+            // 0.094, 0.086), no header labels
+            ("gameplay a", stand_in(0.0904, 0.45, None)),
+            ("gameplay b", stand_in(0.0943, 0.45, None)),
+            ("gameplay c", stand_in(0.0864, 0.45, None)),
+            // Practice Range: one team block of rows at about 0.084, board
+            // header not in the Tab header strip
+            ("practice range", stand_in(0.0844, 0.5, None)),
+            // history Teams screen: rows at about 0.084, its header sits well
+            // below the Tab header strip
+            ("history teams", stand_in(0.0844, 0.45, Some(150))),
+            // six stat labels where a Tab board has them, rows, but no stat
+            // digits at all: ocr-v1's 3-rows-of-4-cells check fails
+            ("labels, no digits", stand_in(0.0904, 0.45, Some(0))),
+        ];
+        for (what, frame) in cases {
+            let crop = crate::ocr::preprocess::crop_scoreboard(&frame);
+            let scan = crate::detect::hero_portrait::scan_rows(&crop);
+            let labels = crate::ocr::preprocess::header_label_groups(&crop).len();
+            // the stand-in fools the preflight and the pitch rule alone
+            assert!(scan.looks_like_scoreboard(), "{what}: {scan:?}");
+            assert_eq!(layout_from_scan(&scan, labels), Ok(5), "{what}: {scan:?}");
+            let b = reader.read_board(&frame);
+            assert_eq!(b.status, BoardStatus::NotFound, "{what}");
+            assert_eq!(b.team_size, None, "{what}");
+            let names: Vec<&str> = b.fields.iter().map(|f| f.name.as_str()).collect();
+            assert_eq!(names, MATCH_FIELDS, "{what}");
+        }
+        // the labels stand-in has its columns; the others do not
+        let cols = |f: &DynamicImage| {
+            digits::stat_columns_found(&crate::ocr::preprocess::crop_scoreboard(f))
+        };
+        assert!(cols(&stand_in(0.0904, 0.45, Some(0))));
+        assert!(!cols(&stand_in(0.0844, 0.45, Some(150))));
+        assert!(!cols(&stand_in(0.0904, 0.45, None)));
     }
 
     fn scan(dips: usize, dip: Option<f64>, spectral: Option<f64>) -> RowScan {

@@ -394,6 +394,14 @@ fn column_centres(board: &DynamicImage) -> Result<[f64; 6], ShadowError> {
     Ok(c)
 }
 
+/// True when the six stat header labels (E A D DMG H MIT) sit in the Tab
+/// header strip at a plausible spacing: the same column rule
+/// [`read_board`] needs before it can read a cell. Reading this never
+/// changes digit output.
+pub fn stat_columns_found(board: &DynamicImage) -> bool {
+    column_centres(board).is_ok()
+}
+
 fn column_windows(c: &[f64; 6], w: usize) -> [(usize, usize); 6] {
     let mut out = [(0, 0); 6];
     for i in 0..6 {
