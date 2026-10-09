@@ -45,6 +45,10 @@ struct DbPersonalMatch {
     #[serde(default)]
     #[surreal(default)]
     recognizer: Option<String>,
+    /// Absent on rows written before the column existed (NONE / missing).
+    #[serde(default)]
+    #[surreal(default)]
+    suspect_fields: Option<Vec<String>>,
 }
 
 fn db_to_personal_match(db: DbPersonalMatch) -> PersonalMatch {
@@ -72,6 +76,7 @@ fn db_to_personal_match(db: DbPersonalMatch) -> PersonalMatch {
         edited: db.edited,
         recognizer: scuffed_types::effective_recognizer(db.recognizer.as_deref().unwrap_or(""))
             .to_string(),
+        suspect_fields: db.suspect_fields.unwrap_or_default(),
     }
 }
 
@@ -160,7 +165,7 @@ const UPSERT_BY_ID_SQL: &str = r#"UPSERT $rid SET
     role = $role, outcome = $outcome,
     elims = $elims, deaths = $deaths, assists = $assists,
     damage = $damage, healing = $healing, mitigation = $mit,
-    edited = $edited, recognizer = $recognizer,
+    edited = $edited, recognizer = $recognizer, suspect_fields = $suspect_fields,
     played_at = $played, uploaded_at = time::now()
     RETURN AFTER"#;
 
@@ -169,7 +174,7 @@ const UPDATE_BY_SESSION_SQL: &str = r#"UPDATE personal_match SET
     role = $role, outcome = $outcome,
     elims = $elims, deaths = $deaths, assists = $assists,
     damage = $damage, healing = $healing, mitigation = $mit,
-    edited = $edited, recognizer = $recognizer,
+    edited = $edited, recognizer = $recognizer, suspect_fields = $suspect_fields,
     played_at = $played, uploaded_at = time::now()
     WHERE member_id = $mid AND session_id = $sid
     RETURN AFTER"#;
@@ -282,6 +287,7 @@ impl Database {
                     "recognizer",
                     scuffed_types::effective_recognizer(&m.recognizer).to_string(),
                 ))
+                .bind(("suspect_fields", m.suspect_fields.clone()))
                 .bind(("played", SurrealDatetime::from(m.played_at)))
                 .await?
                 .check()?;
@@ -877,7 +883,7 @@ const PERSONAL_MATCH_MIGRATION_BATCH: u32 = 2_000;
 
 const PERSONAL_MATCH_MIGRATION_COLS: &str =
     "id, member_id, session_id, hero, map_name, game_mode, \
-     role, outcome, elims, deaths, assists, damage, healing, mitigation, edited, recognizer, played_at, \
+     role, outcome, elims, deaths, assists, damage, healing, mitigation, edited, recognizer, suspect_fields, played_at, \
      uploaded_at";
 
 #[cfg(test)]
@@ -1405,7 +1411,7 @@ async fn relocate_personal_match(
                 role = $role, outcome = $outcome,
                 elims = $elims, deaths = $deaths, assists = $assists,
                 damage = $damage, healing = $healing, mitigation = $mit,
-                edited = $edited, recognizer = $recognizer,
+                edited = $edited, recognizer = $recognizer, suspect_fields = $suspect_fields,
                 played_at = $played, uploaded_at = $uploaded"#,
         )
         .bind(("rid", rid))
@@ -1427,6 +1433,10 @@ async fn relocate_personal_match(
             "recognizer",
             scuffed_types::effective_recognizer(row.recognizer.as_deref().unwrap_or(""))
                 .to_string(),
+        ))
+        .bind((
+            "suspect_fields",
+            row.suspect_fields.clone().unwrap_or_default(),
         ))
         .bind(("played", row.played_at))
         .bind(("uploaded", row.uploaded_at))
@@ -1468,6 +1478,7 @@ mod tests {
             uploaded_at: Utc::now(),
             edited: false,
             recognizer: scuffed_types::RECOGNIZER_OCR_V1.into(),
+            suspect_fields: Vec::new(),
         }
     }
 
@@ -1590,6 +1601,60 @@ mod tests {
         let rows = db.list_personal_matches("m-legacy", 10, 0).await.unwrap();
         let cv = rows.iter().find(|r| r.session_id == "s-cv").unwrap();
         assert_eq!(cv.recognizer, "cv-v1");
+        let stats = db.get_personal_stats("m-legacy").await.unwrap();
+        assert_eq!(stats.total_matches, 2);
+        assert_eq!(stats.wins, 2);
+    }
+
+    /// A row inserted before `suspect_fields` existed reads back as [].
+    /// An explicit list round-trips in the order it was stored.
+    #[tokio::test]
+    async fn missing_suspect_fields_reads_as_empty_and_values_round_trip() {
+        let db = test_db().await;
+        db.client
+            .query(
+                r#"REMOVE FIELD IF EXISTS suspect_fields ON personal_match;
+                   CREATE personal_match SET
+                       member_id = 'm-legacy',
+                       session_id = 'legacy-sus',
+                       hero = 'Ana',
+                       map_name = 'Oasis',
+                       game_mode = 'control',
+                       role = 'Support',
+                       outcome = 'victory',
+                       elims = 7,
+                       deaths = 1,
+                       assists = 1,
+                       damage = 1,
+                       healing = 1,
+                       mitigation = 0,
+                       edited = false,
+                       played_at = d'2026-07-01T20:00:00Z',
+                       uploaded_at = d'2026-07-01T21:00:00Z';
+                   DEFINE FIELD OVERWRITE suspect_fields ON personal_match TYPE array<string> DEFAULT [];"#,
+            )
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+
+        let legacy = db.list_personal_matches("m-legacy", 10, 0).await.unwrap();
+        assert_eq!(legacy.len(), 1);
+        assert!(legacy[0].suspect_fields.is_empty());
+        assert_eq!(legacy[0].recognizer, scuffed_types::RECOGNIZER_OCR_V1);
+
+        let mut uploaded = entry("s-sus", "victory", 9);
+        uploaded.member_id = "m-legacy".into();
+        uploaded.suspect_fields = vec!["mit".into(), "map".into(), "hero".into()];
+        db.upsert_personal_matches("m-legacy", &[uploaded])
+            .await
+            .unwrap();
+        let rows = db.list_personal_matches("m-legacy", 10, 0).await.unwrap();
+        let stored = rows.iter().find(|r| r.session_id == "s-sus").unwrap();
+        assert_eq!(
+            stored.suspect_fields,
+            vec!["mit".to_string(), "map".to_string(), "hero".to_string()]
+        );
         let stats = db.get_personal_stats("m-legacy").await.unwrap();
         assert_eq!(stats.total_matches, 2);
         assert_eq!(stats.wins, 2);

@@ -73,6 +73,7 @@ fn pm(
         played_at,
         synced: false,
         sync_rev: 0,
+        upload_reject: None,
         session_id: session_id.into(),
         corrected_hero: None,
         corrected_role: None,
