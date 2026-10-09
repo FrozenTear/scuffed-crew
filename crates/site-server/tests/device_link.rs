@@ -21,6 +21,7 @@ use scuffed_site_server::state::{AppState, OAuthConfig};
 
 const SESSION: &str = "link-session-token";
 const INVALID: &str = r#"{"error":"invalid code"}"#;
+const BAD_ORIGIN: &str = r#"{"error":"bad_origin"}"#;
 const SITE_ORIGIN: &str = "http://localhost:3000";
 const FOREIGN_ORIGIN: &str = "https://evil.example";
 
@@ -876,7 +877,7 @@ async fn wrong_user_codes_are_limited_per_ip() {
         assert_eq!(status, StatusCode::BAD_REQUEST, "{i} {body}");
         assert_eq!(body, INVALID);
     }
-    let (status, body) = send(
+    let (status, headers, body) = send_full(
         &app,
         from_xff(
             "203.0.113.70",
@@ -888,7 +889,23 @@ async fn wrong_user_codes_are_limited_per_ip() {
     )
     .await;
     assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{body}");
-    assert!(body.contains("too many invalid codes"), "{body}");
+    let retry_after = json_of(&body)["retry_after"].as_u64().unwrap();
+    assert_eq!(
+        body,
+        format!(r#"{{"error":"rate_limited","retry_after":{retry_after}}}"#)
+    );
+    assert_eq!(
+        headers
+            .get(header::RETRY_AFTER)
+            .and_then(|v| v.to_str().ok()),
+        Some(retry_after.to_string()).as_deref()
+    );
+    assert_eq!(
+        headers
+            .get(header::CACHE_CONTROL)
+            .and_then(|v| v.to_str().ok()),
+        Some("no-store")
+    );
 
     let (status, body) = send(
         &app,
@@ -1000,6 +1017,21 @@ async fn logs_do_not_contain_codes_or_the_token() {
     assert!(!logs.contains(&token), "{logs}");
 }
 
+fn with_fetch_site(mut request: Request<Body>, value: &'static str) -> Request<Body> {
+    request.headers_mut().insert(
+        axum::http::HeaderName::from_static("sec-fetch-site"),
+        axum::http::HeaderValue::from_static(value),
+    );
+    request
+}
+
+async fn assert_bad_origin(app: &axum::Router, request: Request<Body>, code: &str) {
+    let (status, body) = send(app, request).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert_eq!(body, BAD_ORIGIN);
+    assert!(!body.contains(code), "{body}");
+}
+
 fn authed_post(uri: &str, body: Value, origin: Option<&str>, cookie: bool) -> Request<Body> {
     let mut request = req(
         Method::POST,
@@ -1020,73 +1052,137 @@ fn authed_post(uri: &str, body: Value, origin: Option<&str>, cookie: bool) -> Re
 }
 
 #[tokio::test]
-async fn approve_and_deny_reject_a_valid_session_without_the_allowed_origin() {
+async fn cross_origin_is_rejected_on_lookup_approve_and_deny() {
     let state = test_state().await;
     seed_member(&state.db).await;
     let app = create_router(state);
-    let approve_me = start_link(&app, "Living Room PC", "0.4.2").await;
-    let approve_code = approve_me["user_code"].as_str().unwrap();
-    let approve_device = approve_me["device_code"].as_str().unwrap();
-    let deny_me = start_link(&app, "Desk", "0.4.2").await;
-    let deny_code = deny_me["user_code"].as_str().unwrap();
-    let deny_device = deny_me["device_code"].as_str().unwrap();
+    let started = start_link(&app, "Living Room PC", "0.4.2").await;
+    let user_code = started["user_code"].as_str().unwrap();
+    let device_code = started["device_code"].as_str().unwrap();
 
-    for (path, code, cookie, origin) in [
-        ("/api/link/approve", approve_code, false, None),
-        (
-            "/api/link/approve",
-            approve_code,
-            false,
-            Some(FOREIGN_ORIGIN),
-        ),
-        ("/api/link/approve", approve_code, true, None),
-        (
-            "/api/link/approve",
-            approve_code,
-            true,
-            Some(FOREIGN_ORIGIN),
-        ),
-        ("/api/link/deny", deny_code, false, None),
-        ("/api/link/deny", deny_code, false, Some(FOREIGN_ORIGIN)),
-        ("/api/link/deny", deny_code, true, None),
-        ("/api/link/deny", deny_code, true, Some(FOREIGN_ORIGIN)),
-    ] {
-        let (status, body) = send(
+    for path in ["/api/link/lookup", "/api/link/approve", "/api/link/deny"] {
+        let body = json!({"user_code": user_code});
+        assert_bad_origin(
             &app,
-            authed_post(path, json!({"user_code": code}), origin, cookie),
+            authed_post(path, body.clone(), Some(FOREIGN_ORIGIN), false),
+            user_code,
         )
         .await;
-        assert_eq!(
-            status,
-            StatusCode::FORBIDDEN,
-            "{path} cookie={cookie} {body}"
-        );
-        assert_eq!(body, r#"{"error":"origin not allowed"}"#);
-        assert!(!body.contains(code), "{body}");
+        assert_bad_origin(
+            &app,
+            authed_post(path, body.clone(), Some(FOREIGN_ORIGIN), true),
+            user_code,
+        )
+        .await;
+        assert_bad_origin(
+            &app,
+            with_fetch_site(
+                authed_post(path, body, Some(FOREIGN_ORIGIN), false),
+                "same-origin",
+            ),
+            user_code,
+        )
+        .await;
     }
 
     let (status, body) = send(
         &app,
-        trusted(Method::GET, "/api/stats/tokens", None, Some(SESSION)),
+        trusted(
+            Method::POST,
+            "/api/link/poll",
+            Some(json!({"device_code": device_code})),
+            None,
+        ),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(json_of(&body).as_array().unwrap().len(), 0, "{body}");
+    assert_eq!(json_of(&body)["status"], "pending");
+}
 
-    for device in [approve_device, deny_device] {
-        let (status, body) = send(
+#[tokio::test]
+async fn missing_origin_headers_are_rejected_on_lookup_approve_and_deny() {
+    let state = test_state().await;
+    seed_member(&state.db).await;
+    let app = create_router(state);
+    let started = start_link(&app, "Desk", "1.0.0").await;
+    let user_code = started["user_code"].as_str().unwrap();
+    let device_code = started["device_code"].as_str().unwrap();
+
+    for path in ["/api/link/lookup", "/api/link/approve", "/api/link/deny"] {
+        let body = json!({"user_code": user_code});
+        assert_bad_origin(
             &app,
-            trusted(
-                Method::POST,
-                "/api/link/poll",
-                Some(json!({"device_code": device})),
-                None,
-            ),
+            authed_post(path, body.clone(), None, false),
+            user_code,
         )
         .await;
-        assert_eq!(status, StatusCode::OK, "{body}");
-        assert_eq!(json_of(&body)["status"], "pending");
+        assert_bad_origin(&app, authed_post(path, body.clone(), None, true), user_code).await;
+        assert_bad_origin(
+            &app,
+            with_fetch_site(authed_post(path, body, None, false), "cross-site"),
+            user_code,
+        )
+        .await;
     }
+
+    let (status, body) = send(
+        &app,
+        trusted(
+            Method::POST,
+            "/api/link/poll",
+            Some(json!({"device_code": device_code})),
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(json_of(&body)["status"], "pending");
+}
+
+#[tokio::test]
+async fn same_origin_is_accepted_on_lookup_approve_and_deny() {
+    let state = test_state().await;
+    seed_member(&state.db).await;
+    let app = create_router(state);
+    let approve_me = start_link(&app, "Living Room PC", "0.4.2").await;
+    let approve_code = approve_me["user_code"].as_str().unwrap().to_string();
+    let deny_me = start_link(&app, "Desk", "0.4.2").await;
+    let deny_code = deny_me["user_code"].as_str().unwrap().to_string();
+    let deny_device = deny_me["device_code"].as_str().unwrap().to_string();
+
+    let (status, body) = send(
+        &app,
+        trusted(
+            Method::POST,
+            "/api/link/lookup",
+            Some(json!({"user_code": approve_code})),
+            Some(SESSION),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(json_of(&body)["device_label"], "Living Room PC");
+    assert_eq!(json_of(&body)["app_version"], "0.4.2");
+
+    let (status, body) = send(
+        &app,
+        with_fetch_site(
+            authed_post(
+                "/api/link/lookup",
+                json!({"user_code": approve_code}),
+                None,
+                false,
+            ),
+            "same-origin",
+        ),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "Sec-Fetch-Site same-origin stands in for a missing Origin: {body}"
+    );
+    assert_eq!(json_of(&body)["device_label"], "Living Room PC");
 
     let (status, body) = send(
         &app,
@@ -1098,27 +1194,37 @@ async fn approve_and_deny_reject_a_valid_session_without_the_allowed_origin() {
         ),
     )
     .await;
-    assert_eq!(
-        status,
-        StatusCode::OK,
-        "allowed origin still approves: {body}"
-    );
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body, r#"{"ok":true}"#);
 
     let (status, body) = send(
         &app,
-        authed_post(
-            "/api/link/deny",
-            json!({"user_code": deny_code}),
-            Some(SITE_ORIGIN),
-            true,
+        with_fetch_site(
+            authed_post(
+                "/api/link/deny",
+                json!({"user_code": deny_code}),
+                None,
+                true,
+            ),
+            "same-origin",
         ),
     )
     .await;
-    assert_eq!(
-        status,
-        StatusCode::OK,
-        "allowed origin still denies: {body}"
-    );
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body, r#"{"ok":true}"#);
+
+    let (status, body) = send(
+        &app,
+        trusted(
+            Method::POST,
+            "/api/link/poll",
+            Some(json!({"device_code": deny_device})),
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(json_of(&body)["status"], "denied");
 }
 
 #[tokio::test]

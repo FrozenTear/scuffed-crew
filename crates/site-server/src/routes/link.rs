@@ -4,11 +4,13 @@
 //! device shows `user_code` (shaped `XXXX-XXXX`) and polls with `device_code`.
 //! `POST /api/link/lookup`, `/approve`, and `/deny` require a signed-in session
 //! (`OrgMember`), the same cookie or bearer session check as other mutations.
-//! Approve and deny also require the `Origin` header to be one of
-//! `ALLOWED_ORIGINS`, the same allow-list the CORS layer uses. A valid session
-//! with a missing or foreign origin is rejected. These three routes are POST
-//! only, which keeps the "no state-changing GET" rule intact. Session cookies
-//! stay `SameSite=Lax`.
+//! Lookup, approve, and deny reject a request with 403 `{"error":"bad_origin"}`
+//! unless `Origin` matches a configured site origin (`ALLOWED_ORIGINS`, or
+//! `REDIRECT_BASE_URL` when that list is unset). When `Origin` is absent,
+//! `Sec-Fetch-Site: same-origin` is accepted instead. Missing both is rejected.
+//! A present `Origin` that does not match is rejected even if `Sec-Fetch-Site`
+//! says same-origin. These three routes are POST only, which keeps the "no
+//! state-changing GET" rule intact. Session cookies stay `SameSite=Lax`.
 //!
 //! Codes are read from the JSON body only. A query string that carries one is
 //! stripped before the trace layer logs the URI, and the request is rejected.
@@ -22,7 +24,6 @@ use axum::http::uri::PathAndQuery;
 use axum::http::{HeaderMap, StatusCode, Uri, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
-use chrono::{DateTime, Utc};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroize;
@@ -32,6 +33,7 @@ use scuffed_db::queries::device_link::{
     DEVICE_LINK_INTERVAL_SECS, DEVICE_LINK_TTL_SECS, DeviceLinkPoll,
 };
 use scuffed_db::{AuditAction, AuditTargetType};
+use scuffed_types::{DeviceLinkLookupResponse, DeviceLinkOkResponse, DeviceLinkUserCodeRequest};
 
 use crate::extractors::OrgMember;
 use crate::rate_limit::TrustedProxyIpKeyExtractor;
@@ -53,7 +55,8 @@ const VERSION_ERROR: &str =
     "app_version must be 1-32 characters from [A-Za-z0-9._+-] and include a letter or digit";
 const INVALID_CODE: &str = "invalid code";
 const QUERY_CODE_ERROR: &str = "codes must be sent in the request body";
-const ORIGIN_ERROR: &str = "origin not allowed";
+const BAD_ORIGIN: &str = "bad_origin";
+const SEC_FETCH_SITE: header::HeaderName = header::HeaderName::from_static("sec-fetch-site");
 
 /// Set by [`strip_link_query_secrets`] when the URI carried a code or token.
 #[derive(Clone, Copy)]
@@ -63,11 +66,6 @@ pub(crate) struct LinkSecretInQuery;
 pub struct StartRequest {
     pub device_label: String,
     pub app_version: String,
-}
-
-#[derive(Deserialize)]
-pub struct UserCodeRequest {
-    pub user_code: String,
 }
 
 #[derive(Deserialize)]
@@ -84,22 +82,10 @@ pub struct StartBody {
 }
 
 #[derive(Serialize)]
-struct LookupBody {
-    device_label: String,
-    app_version: String,
-    created_at: DateTime<Utc>,
-}
-
-#[derive(Serialize)]
 pub struct PollBody {
     pub status: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub token: Option<String>,
-}
-
-#[derive(Serialize)]
-struct OkBody {
-    ok: bool,
 }
 
 fn key_extractor() -> &'static TrustedProxyIpKeyExtractor {
@@ -139,19 +125,19 @@ fn internal() -> (StatusCode, Json<ErrorResponse>) {
 }
 
 fn too_many_codes(secs: u64) -> Response {
-    let mut response = (
+    let secs = secs.max(1);
+    (
         StatusCode::TOO_MANY_REQUESTS,
-        Json(ErrorResponse {
-            error: "too many invalid codes".into(),
-        }),
+        [
+            (header::RETRY_AFTER, secs.to_string()),
+            (header::CACHE_CONTROL, "no-store".to_string()),
+        ],
+        Json(serde_json::json!({
+            "error": "rate_limited",
+            "retry_after": secs,
+        })),
     )
-        .into_response();
-    if let Ok(value) = axum::http::HeaderValue::from_str(&secs.to_string()) {
-        response
-            .headers_mut()
-            .insert(axum::http::header::RETRY_AFTER, value);
-    }
-    response
+        .into_response()
 }
 
 fn note_invalid(state: &AppState, ip: std::net::IpAddr) -> Response {
@@ -163,26 +149,38 @@ fn blocked_response(state: &AppState, ip: std::net::IpAddr) -> Option<Response> 
     state.link_code_attempts.retry_after(ip).map(too_many_codes)
 }
 
-/// Same allow-list as the router CORS layer. Missing and foreign origins fail.
+fn header_text<'a>(headers: &'a HeaderMap, name: &header::HeaderName) -> Option<&'a str> {
+    headers.get(name).and_then(|value| value.to_str().ok())
+}
+
+fn normalized_origin(value: &str) -> &str {
+    value.trim().trim_end_matches('/')
+}
+
+/// `Origin` must match a configured site origin. With no `Origin`, only
+/// `Sec-Fetch-Site: same-origin` is enough. A mismatched `Origin` fails on its own.
 fn origin_is_allowed(state: &AppState, headers: &HeaderMap) -> bool {
-    let Some(origin) = headers
-        .get(header::ORIGIN)
-        .and_then(|value| value.to_str().ok())
-    else {
-        return false;
-    };
-    state
-        .oauth_config
-        .allowed_origins
-        .iter()
-        .any(|allowed| allowed == origin)
+    if let Some(origin) = header_text(headers, &header::ORIGIN) {
+        let origin = normalized_origin(origin);
+        if origin.is_empty() {
+            return false;
+        }
+        let redirect = normalized_origin(&state.oauth_config.redirect_base_url);
+        return origin == redirect
+            || state
+                .oauth_config
+                .allowed_origins
+                .iter()
+                .any(|allowed| normalized_origin(allowed) == origin);
+    }
+    header_text(headers, &SEC_FETCH_SITE) == Some("same-origin")
 }
 
 fn origin_rejected() -> Response {
     (
         StatusCode::FORBIDDEN,
         Json(ErrorResponse {
-            error: ORIGIN_ERROR.into(),
+            error: BAD_ORIGIN.into(),
         }),
     )
         .into_response()
@@ -411,8 +409,11 @@ pub async fn lookup(
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     _member: OrgMember,
-    Json(body): Json<UserCodeRequest>,
+    Json(body): Json<DeviceLinkUserCodeRequest>,
 ) -> Response {
+    if !origin_is_allowed(&state, &headers) {
+        return origin_rejected();
+    }
     let ip = client_ip(peer, &headers);
     if let Some(response) = blocked_response(&state, ip) {
         return response;
@@ -423,7 +424,7 @@ pub async fn lookup(
     match state.db.lookup_device_link(&user_code).await {
         Ok(Some(info)) => (
             StatusCode::OK,
-            Json(LookupBody {
+            Json(DeviceLinkLookupResponse {
                 device_label: info.device_label,
                 app_version: info.app_version,
                 created_at: info.created_at,
@@ -444,7 +445,7 @@ pub async fn approve(
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     member: OrgMember,
-    Json(body): Json<UserCodeRequest>,
+    Json(body): Json<DeviceLinkUserCodeRequest>,
 ) -> Response {
     if !origin_is_allowed(&state, &headers) {
         return origin_rejected();
@@ -494,7 +495,7 @@ pub async fn approve(
                 Some(&format!("label: {}", info.device_label)),
             )
             .await;
-            (StatusCode::OK, Json(OkBody { ok: true })).into_response()
+            (StatusCode::OK, Json(DeviceLinkOkResponse { ok: true })).into_response()
         }
         Ok(false) => {
             if let Err(_error) = state
@@ -519,7 +520,7 @@ pub async fn deny(
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     member: OrgMember,
-    Json(body): Json<UserCodeRequest>,
+    Json(body): Json<DeviceLinkUserCodeRequest>,
 ) -> Response {
     if !origin_is_allowed(&state, &headers) {
         return origin_rejected();
@@ -557,7 +558,7 @@ pub async fn deny(
                 )
                 .await;
             }
-            (StatusCode::OK, Json(OkBody { ok: true })).into_response()
+            (StatusCode::OK, Json(DeviceLinkOkResponse { ok: true })).into_response()
         }
         Ok(None) => note_invalid(&state, ip),
         Err(_error) => {
