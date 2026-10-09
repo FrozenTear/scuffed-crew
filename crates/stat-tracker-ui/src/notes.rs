@@ -15,7 +15,7 @@
 use std::collections::HashSet;
 
 use iced::widget::markdown::{self, Item};
-use iced::widget::{button, column, container, rich_text, row, scrollable, text};
+use iced::widget::{button, column, container, opaque, rich_text, row, scrollable, text};
 use iced::{Alignment, Element, Fill, Font, Length, Padding};
 
 use crate::app::Message;
@@ -26,6 +26,11 @@ use crate::theme::{
 
 /// Changelog shipped inside the GUI binary.
 pub const BUNDLED_CHANGELOG: &str = include_str!("../../stat-tracker/CHANGELOG.md");
+
+/// Daemon `Cargo.toml`, read at build time. This is not `CARGO_PKG_VERSION`:
+/// that env var is the GUI crate, which stays at 0.1.0.
+#[cfg(test)]
+const STAT_TRACKER_CARGO_TOML: &str = include_str!("../../stat-tracker/Cargo.toml");
 
 /// Cards kept on screen before "Show older releases".
 pub const VISIBLE_RELEASES: usize = 3;
@@ -269,6 +274,8 @@ pub fn notes_column<'a>(sections: &'a [ShownRelease], ui: NotesUi<'a>) -> Elemen
     col.into()
 }
 
+/// Modal notes layer. The backdrop is part of the layer, and mouse presses
+/// on the backdrop or the card do not reach the page underneath.
 pub fn dialog<'a>(
     subtitle: &'a str,
     sections: &'a [ShownRelease],
@@ -325,14 +332,60 @@ pub fn dialog<'a>(
     let mut backdrop = theme::BG;
     backdrop.a = 0.88;
 
-    container(card)
-        .padding(28)
-        .center(Fill)
-        .style(move |_theme| container::Style {
-            background: Some(iced::Background::Color(backdrop)),
-            ..container::Style::default()
-        })
-        .into()
+    opaque(
+        container(card)
+            .padding(28)
+            .center(Fill)
+            .style(move |_theme| container::Style {
+                background: Some(iced::Background::Color(backdrop)),
+                ..container::Style::default()
+            }),
+    )
+}
+
+/// http and https may open in a browser. Any other scheme is refused,
+/// including a different case or a leading space.
+pub fn notes_link_allowed(url: &str) -> bool {
+    url.starts_with("https://") || url.starts_with("http://")
+}
+
+/// Escape dismisses the notes dialog the same way Close does.
+pub fn escape_closes_notes(key: &iced::keyboard::Key) -> bool {
+    matches!(
+        key,
+        iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape)
+    )
+}
+
+/// `[package] version` from a Cargo.toml. Dependency versions are ignored.
+pub fn stat_tracker_package_version(cargo_toml: &str) -> Option<&str> {
+    let mut in_package = false;
+    for line in cargo_toml.lines() {
+        let trimmed = line.trim();
+        if let Some(header) = trimmed.strip_prefix('[') {
+            in_package = header
+                .trim_end()
+                .strip_suffix(']')
+                .is_some_and(|name| name.trim() == "package");
+            continue;
+        }
+        if !in_package {
+            continue;
+        }
+        let Some(rest) = trimmed.strip_prefix("version") else {
+            continue;
+        };
+        let rest = rest.trim_start();
+        let Some(rest) = rest.strip_prefix('=') else {
+            continue;
+        };
+        let value = rest.trim().trim_matches('"').trim();
+        if value.is_empty() || value.contains(char::is_whitespace) {
+            continue;
+        }
+        return Some(value);
+    }
+    None
 }
 
 fn notes_for_key(
@@ -1142,13 +1195,23 @@ Detail line with `inline`.
         assert!(notes.len() > VISIBLE_RELEASES);
         let shown = releases_on_screen(&notes, false);
         assert_eq!(shown.len(), VISIBLE_RELEASES);
+        let newest: Vec<_> = notes
+            .iter()
+            .take(VISIBLE_RELEASES)
+            .map(|note| note.version.as_str())
+            .collect();
         assert_eq!(
             shown
                 .iter()
                 .map(|note| note.version.as_str())
                 .collect::<Vec<_>>(),
-            ["0.4.23", "0.4.22", "0.4.21"]
+            newest
         );
+        let latest_key = notes
+            .iter()
+            .filter_map(|note| version_key(&note.version))
+            .max();
+        assert_eq!(version_key(&shown[0].version), latest_key);
         assert_eq!(releases_on_screen(&notes, true).len(), notes.len());
 
         let open = HashSet::new();
@@ -1157,6 +1220,76 @@ Detail line with `inline`.
         open.insert("0.4.23".to_string());
         assert!(details_open(&open, "0.4.23"));
         assert!(!details_open(&open, "0.4.22"));
+    }
+
+    #[test]
+    fn notes_links_allow_http_and_https_only() {
+        assert!(notes_link_allowed("https://example.com/notes"));
+        assert!(notes_link_allowed("http://example.com/notes"));
+        assert!(!notes_link_allowed("javascript:alert(1)"));
+        assert!(!notes_link_allowed("file:///tmp/x"));
+        assert!(!notes_link_allowed("HTTP://example.com"));
+        assert!(!notes_link_allowed("HTTPS://example.com"));
+        assert!(!notes_link_allowed(" https://example.com"));
+    }
+
+    #[test]
+    fn escape_closes_the_notes_dialog() {
+        assert!(escape_closes_notes(&iced::keyboard::Key::Named(
+            iced::keyboard::key::Named::Escape
+        )));
+        assert!(!escape_closes_notes(&iced::keyboard::Key::Named(
+            iced::keyboard::key::Named::Enter
+        )));
+        assert!(!escape_closes_notes(&iced::keyboard::Key::Character(
+            "a".into()
+        )));
+    }
+
+    #[test]
+    fn changelog_section_matches_the_stat_tracker_package_version() {
+        let version =
+            stat_tracker_package_version(STAT_TRACKER_CARGO_TOML).expect("package version");
+        assert_ne!(version, "0.1.0", "the GUI crate version is not the daemon");
+        let notes = section_for(BUNDLED_CHANGELOG, version).expect("matching changelog section");
+        assert_eq!(notes.version, version);
+    }
+
+    #[test]
+    fn package_version_ignores_dependency_versions() {
+        let toml = "\
+[dependencies]
+image = { version = \"0.25\" }
+
+[package]
+name = \"scuffed-stat-tracker\"
+version = \"0.4.23\"
+";
+        assert_eq!(stat_tracker_package_version(toml), Some("0.4.23"));
+        assert_eq!(
+            stat_tracker_package_version("[dependencies]\nversion = \"9.9.9\"\n"),
+            None
+        );
+    }
+
+    #[test]
+    fn dialog_layer_covers_the_page() {
+        let open = HashSet::new();
+        let ui = NotesUi {
+            surface: NotesSurface::Dialog,
+            installed: Some("0.4.23"),
+            offered: None,
+            open_details: &open,
+            show_older: false,
+        };
+        let sections = render(vec![
+            section_for(BUNDLED_CHANGELOG, "0.4.23").expect("0.4.23"),
+        ]);
+        let layer = dialog("Notes for the version installed now.", &sections, ui);
+        assert_eq!(
+            layer.as_widget().size(),
+            iced::Size::new(Length::Fill, Length::Fill)
+        );
     }
 
     #[test]

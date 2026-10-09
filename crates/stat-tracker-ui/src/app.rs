@@ -98,6 +98,23 @@ struct NotesDialog {
     remember: Option<String>,
 }
 
+/// Version already acknowledged in this process, plus whether a failed
+/// `ui_state.json` write has been logged.
+#[derive(Debug, Default)]
+struct NotesSeen {
+    version: Option<String>,
+    write_error_logged: bool,
+}
+
+enum LaunchNotes {
+    Show(NotesDialog),
+    /// Nothing to show. `persist` is the installed version to mark seen now,
+    /// so an empty note list does not open again this session.
+    Quiet {
+        persist: Option<String>,
+    },
+}
+
 /// What tray Hide / Show must do. Close+open (not Hidden/minimize) is the
 /// only path that drops the surface from Wayland/niri Alt-Tab.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -165,6 +182,7 @@ pub struct TrackerApp {
     dialog_open_details: HashSet<String>,
     dialog_show_older: bool,
     notes_dialog: Option<NotesDialog>,
+    notes_seen: NotesSeen,
     /// Resolved once at startup so Settings can pin a tag without spawning
     /// the daemon on every frame.
     pub installed_version: Option<String>,
@@ -235,7 +253,18 @@ impl TrackerApp {
         );
         let overlay_hotkey = seasons::load_overlay_hotkey(&cli.data_dir);
         let installed_version = update::current_version();
-        let notes_dialog = notes_dialog_for(&cli.data_dir, installed_version.as_deref());
+        let mut notes_seen = NotesSeen::default();
+        let notes_dialog = match notes_dialog_for(&cli.data_dir, installed_version.as_deref(), None)
+        {
+            LaunchNotes::Show(dialog) => Some(dialog),
+            LaunchNotes::Quiet {
+                persist: Some(version),
+            } => {
+                remember_installed(&mut notes_seen, &cli.data_dir, &version);
+                None
+            }
+            LaunchNotes::Quiet { persist: None } => None,
+        };
         let mut settings = SettingsForm::from_config(&saved_config);
         settings.overlay_hotkey = overlay_hotkey.bind.clone();
         settings.overlay_hotkey_enabled = overlay_hotkey.enabled;
@@ -304,6 +333,7 @@ impl TrackerApp {
             dialog_open_details: HashSet::new(),
             dialog_show_older: false,
             notes_dialog,
+            notes_seen,
             confirm_clear: false,
             tessdata_busy: false,
             tessdata_installed: capture::tessdata_installed(),
@@ -366,6 +396,9 @@ impl TrackerApp {
             && let Ok(bind) = hotkey::parse_bind(&self.overlay_hotkey.bind)
         {
             subs.push(hotkey::subscription(bind));
+        }
+        if self.notes_dialog.is_some() {
+            subs.push(iced::event::listen_with(notes_dialog_escape));
         }
         Subscription::batch(subs)
     }
@@ -842,9 +875,8 @@ impl TrackerApp {
                     .notes_dialog
                     .as_ref()
                     .and_then(|dialog| dialog.remember.clone())
-                    && let Err(e) = seasons::save_last_seen_version(&self.data_dir, &version)
                 {
-                    tracing::warn!(error = %e, "failed to remember installed version");
+                    remember_installed(&mut self.notes_seen, &self.data_dir, &version);
                 }
                 self.notes_dialog = None;
                 self.dialog_open_details.clear();
@@ -873,7 +905,7 @@ impl TrackerApp {
                 Task::none()
             }
             Message::OpenNotesLink(url) => {
-                if url.starts_with("https://") || url.starts_with("http://") {
+                if notes::notes_link_allowed(&url) {
                     update::open_release_page(&url);
                 }
                 Task::none()
@@ -1149,6 +1181,8 @@ impl TrackerApp {
             .style(theme::page_background);
 
         if let Some(dialog) = &self.notes_dialog {
+            // `notes::dialog` includes the backdrop and is opaque, so a press
+            // on the scrim or the card does not reach Update now underneath.
             stack![
                 page,
                 notes::dialog(&dialog.subtitle, &dialog.sections, self.dialog_notes_ui())
@@ -1209,30 +1243,60 @@ fn live_status_for(games: &[Game]) -> String {
     }
 }
 
-fn notes_dialog_for(data_dir: &std::path::Path, installed: Option<&str>) -> Option<NotesDialog> {
-    let last_seen = seasons::load_last_seen_version(data_dir);
-    let change = notes::classify_seen(last_seen.as_deref(), installed);
+fn notes_dialog_escape(
+    event: iced::Event,
+    _status: iced::event::Status,
+    _window: window::Id,
+) -> Option<Message> {
+    let iced::Event::Keyboard(iced::keyboard::Event::KeyPressed { key, .. }) = event else {
+        return None;
+    };
+    notes::escape_closes_notes(&key).then_some(Message::DismissNotes)
+}
+
+fn notes_dialog_for(
+    data_dir: &std::path::Path,
+    installed: Option<&str>,
+    seen_memory: Option<&str>,
+) -> LaunchNotes {
+    let from_file = seasons::load_last_seen_version(data_dir);
+    let effective = seen_memory.or(from_file.as_deref());
+    let change = notes::classify_seen(effective, installed);
     if change == notes::SeenChange::Unchanged {
-        return None;
+        return LaunchNotes::Quiet { persist: None };
     }
-    let installed = installed?;
-    let sections = notes::notes_for_change(
-        notes::BUNDLED_CHANGELOG,
-        change,
-        last_seen.as_deref(),
-        installed,
-    );
+    let Some(installed) = installed else {
+        return LaunchNotes::Quiet { persist: None };
+    };
+    let sections = notes::notes_for_change(notes::BUNDLED_CHANGELOG, change, effective, installed);
     if sections.is_empty() {
-        if let Err(e) = seasons::save_last_seen_version(data_dir, installed) {
-            tracing::warn!(error = %e, "failed to remember installed version");
-        }
-        return None;
+        return LaunchNotes::Quiet {
+            persist: Some(installed.to_string()),
+        };
     }
-    Some(NotesDialog {
+    LaunchNotes::Show(NotesDialog {
         subtitle: notes::launch_subtitle(change).to_string(),
         sections: notes::render(sections),
         remember: Some(installed.to_string()),
     })
+}
+
+/// Mark this version seen for the rest of the process, then try the file.
+/// A write error is logged once, and the in-memory flag still suppresses
+/// the dialog if launch notes are decided again this session.
+fn remember_installed(seen: &mut NotesSeen, data_dir: &std::path::Path, version: &str) {
+    seen.version = Some(version.to_string());
+    if let Err(error) = seasons::save_last_seen_version(data_dir, version) {
+        log_seen_write_error(seen, &error);
+    }
+}
+
+fn log_seen_write_error(seen: &mut NotesSeen, error: &dyn std::fmt::Display) {
+    if seen.write_error_logged {
+        return;
+    }
+    tracing::warn!(error = %error, "failed to remember installed version");
+    seen.write_error_logged = true;
 }
 
 fn health_status_for(
@@ -1262,6 +1326,7 @@ fn health_status_for(
 mod tests {
     use super::{TrayWindowOp, tray_hide_op, tray_show_op};
     use iced::window;
+    use tracing_subscriber::layer::SubscriberExt;
 
     #[test]
     fn hide_closes_the_open_window_and_is_noop_when_already_hidden() {
@@ -1270,23 +1335,51 @@ mod tests {
         assert_eq!(tray_hide_op(None), None);
     }
 
+    struct WarnCount(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+
+    impl<S> tracing_subscriber::Layer<S> for WarnCount
+    where
+        S: tracing::Subscriber,
+    {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _ctx: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            if *event.metadata().level() == tracing::Level::WARN {
+                self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+    }
+
+    fn shown_launch(
+        dir: &std::path::Path,
+        installed: Option<&str>,
+        seen_memory: Option<&str>,
+    ) -> Option<super::NotesDialog> {
+        match super::notes_dialog_for(dir, installed, seen_memory) {
+            super::LaunchNotes::Show(dialog) => Some(dialog),
+            super::LaunchNotes::Quiet { .. } => None,
+        }
+    }
+
     #[test]
     fn launch_notes_follow_the_stored_version() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let first = super::notes_dialog_for(dir.path(), Some("0.4.23")).expect("first run");
+        let first = shown_launch(dir.path(), Some("0.4.23"), None).expect("first run");
         assert_eq!(first.remember.as_deref(), Some("0.4.23"));
         assert_eq!(first.sections[0].version, "0.4.23");
         assert!(first.sections[0].summary.contains("private log"));
 
         super::seasons::save_last_seen_version(dir.path(), "0.4.23").expect("save");
-        assert!(super::notes_dialog_for(dir.path(), Some("0.4.23")).is_none());
+        assert!(shown_launch(dir.path(), Some("0.4.23"), None).is_none());
 
-        let upgraded = super::notes_dialog_for(dir.path(), Some("0.4.23"));
+        let upgraded = shown_launch(dir.path(), Some("0.4.23"), None);
         // Stored version is already 0.4.23, so a same-version launch stays quiet.
         assert!(upgraded.is_none());
 
         super::seasons::save_last_seen_version(dir.path(), "0.4.19").expect("older");
-        let upgraded = super::notes_dialog_for(dir.path(), Some("0.4.23")).expect("upgrade");
+        let upgraded = shown_launch(dir.path(), Some("0.4.23"), None).expect("upgrade");
         let versions: Vec<_> = upgraded
             .sections
             .iter()
@@ -1295,9 +1388,36 @@ mod tests {
         assert_eq!(versions, ["0.4.23", "0.4.22", "0.4.21", "0.4.20"]);
 
         super::seasons::save_last_seen_version(dir.path(), "0.4.23").expect("newer");
-        let downgraded = super::notes_dialog_for(dir.path(), Some("0.4.20")).expect("downgrade");
+        let downgraded = shown_launch(dir.path(), Some("0.4.20"), None).expect("downgrade");
         assert_eq!(downgraded.sections.len(), 1);
         assert_eq!(downgraded.sections[0].version, "0.4.20");
+    }
+
+    #[test]
+    fn failed_ui_state_write_keeps_the_version_seen_for_the_session() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let blocker = dir.path().join("not-a-directory");
+        std::fs::write(&blocker, b"x").expect("blocker file");
+
+        let count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let subscriber = tracing_subscriber::registry().with(WarnCount(count.clone()));
+        tracing::subscriber::with_default(subscriber, || {
+            let mut seen = super::NotesSeen::default();
+            super::remember_installed(&mut seen, &blocker, "0.4.23");
+            assert_eq!(seen.version.as_deref(), Some("0.4.23"));
+            assert!(seen.write_error_logged);
+            assert!(shown_launch(&blocker, Some("0.4.23"), seen.version.as_deref()).is_none());
+            super::remember_installed(&mut seen, &blocker, "0.4.23");
+            assert!(seen.write_error_logged);
+        });
+        assert_eq!(
+            count.load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "a failed ui_state write is logged once per session"
+        );
+
+        let fresh = tempfile::tempdir().expect("tempdir");
+        assert!(shown_launch(fresh.path(), Some("0.4.23"), Some("0.4.23")).is_none());
     }
 
     #[test]
