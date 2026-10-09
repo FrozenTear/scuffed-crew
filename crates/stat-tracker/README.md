@@ -13,7 +13,7 @@ install paths and the `.desktop` entry stay the same).
   - Wayland: libwayshot on wlr-screencopy compositors (Sway, Hyprland, …),
     with XDG Desktop Portal fallback.
   - X11: native capture when a usable X server is detected and
-    Wayland capture is unavailable. X11 is still being tested more widely.
+    Wayland capture is unavailable.
   - Portal remains last-resort on either stack (slower; not ideal for the poller).
 - **Keyboard access via evdev.** Tab detection (daemon) and the companion
   overlay show/hide shortcut (GUI, default Super+Shift+C) read `/dev/input`.
