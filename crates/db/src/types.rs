@@ -547,6 +547,11 @@ pub struct PersonalMatch {
     /// field, are `ocr-v1`. Additive on match-list JSON.
     #[serde(default = "default_recognizer")]
     pub recognizer: String,
+    /// Names the tracker flagged as unsure on this player's own row.
+    /// Uploads that omit the field, and rows written before the column
+    /// existed, read as an empty list. Additive on match-list JSON.
+    #[serde(default)]
+    pub suspect_fields: Vec<String>,
 }
 
 /// Aggregated personal stats for a member.

@@ -640,6 +640,11 @@ pub async fn run_migrations(client: &Surreal<Any>) -> DbResult<()> {
         -- fills new writes that omit it. Rows already on disk are not rewritten;
         -- a missing or empty value is read back as `ocr-v1`.
         DEFINE FIELD OVERWRITE recognizer ON personal_match TYPE string DEFAULT 'ocr-v1';
+        -- Names the tracker flagged as unsure on this player's own row.
+        -- An upload that omits the field, or sends null, is stored as [].
+        -- Rows already on disk are not rewritten; a missing value is read
+        -- back as [].
+        DEFINE FIELD OVERWRITE suspect_fields ON personal_match TYPE array<string> DEFAULT [];
 
         DEFINE INDEX IF NOT EXISTS pm_member_idx ON personal_match COLUMNS member_id, played_at;
         -- Non-unique placeholder only. `DEFINE INDEX IF NOT EXISTS` will not
