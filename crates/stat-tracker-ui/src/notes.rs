@@ -147,7 +147,7 @@ pub fn notes_for_change(
 pub fn section_for(changelog: &str, version: &str) -> Option<ReleaseNotes> {
     let want = version_key(version)?;
     raw_sections(changelog).into_iter().find_map(|(ver, body)| {
-        (version_key(&ver) == Some(want)).then(|| player_from_section(&ver, &body))
+        (version_key(&ver).as_ref() == Some(&want)).then(|| player_from_section(&ver, &body))
     })
 }
 
@@ -168,7 +168,7 @@ pub fn sections_between(changelog: &str, after: &str, through: &str) -> Vec<Rele
             rows.push((key, player_from_section(&ver, &body)));
         }
     }
-    rows.sort_by_key(|row| std::cmp::Reverse(row.0));
+    rows.sort_by(|a, b| b.0.cmp(&a.0));
     rows.into_iter().map(|(_, notes)| notes).collect()
 }
 
@@ -180,7 +180,7 @@ pub fn all_notes(changelog: &str) -> Vec<ReleaseNotes> {
             rows.push((key, player_from_section(&ver, &body)));
         }
     }
-    rows.sort_by_key(|row| std::cmp::Reverse(row.0));
+    rows.sort_by(|a, b| b.0.cmp(&a.0));
     rows.into_iter().map(|(_, notes)| notes).collect()
 }
 
@@ -219,7 +219,7 @@ pub fn notes_for_update(
             keys.push(key);
         }
     }
-    keys.sort_by_key(|key| std::cmp::Reverse(*key));
+    keys.sort_by(|a, b| b.cmp(a));
     keys.into_iter()
         .filter_map(|key| notes_for_key(bundled, key, remote))
         .collect()
@@ -390,19 +390,19 @@ pub fn stat_tracker_package_version(cargo_toml: &str) -> Option<&str> {
 
 fn notes_for_key(
     bundled: &str,
-    key: (u32, u32, u32),
+    key: crate::update::SemVer,
     remote: &[RemoteRelease<'_>],
 ) -> Option<ReleaseNotes> {
     let published_on = remote
         .iter()
-        .find(|row| version_key(row.version) == Some(key))
+        .find(|row| version_key(row.version).as_ref() == Some(&key))
         .and_then(|row| row.published_at)
         .and_then(format_release_date);
-    let bundled_notes = section_for(bundled, &display_version(key));
-    let label = version_label(key, bundled_notes.as_ref(), remote);
+    let bundled_notes = section_for(bundled, &display_version(&key));
+    let label = version_label(&key, bundled_notes.as_ref(), remote);
     if let Some(row) = remote
         .iter()
-        .find(|row| version_key(row.version) == Some(key))
+        .find(|row| version_key(row.version).as_ref() == Some(&key))
     {
         let mut from_remote = from_github_body(&label, row.body);
         if usable(&from_remote) {
@@ -511,7 +511,7 @@ fn raw_sections(changelog: &str) -> Vec<(String, String)> {
 
 /// Keep a prerelease or build suffix on the card label. `## 0.5.0-alpha.1`
 /// stays `0.5.0-alpha.1` so it matches the daemon `Cargo.toml` version.
-/// Ordering still uses the numeric triple from [`version_key`].
+/// [`version_key`] includes that suffix, so `0.5.0` is a different card.
 fn version_heading(line: &str) -> Option<String> {
     let (level, title) = atx(line)?;
     if level != 2 {
@@ -525,11 +525,10 @@ fn version_heading(line: &str) -> Option<String> {
     Some(title.to_string())
 }
 
-/// Card label for a numeric triple. Prefer the changelog heading, which
-/// keeps a prerelease suffix, then the GitHub version string, then
-/// `major.minor.patch`.
+/// Card label for a version. Prefer the changelog heading, which keeps a
+/// prerelease suffix, then the GitHub version string, then `major.minor.patch`.
 fn version_label(
-    key: (u32, u32, u32),
+    key: &crate::update::SemVer,
     bundled: Option<&ReleaseNotes>,
     remote: &[RemoteRelease<'_>],
 ) -> String {
@@ -538,7 +537,7 @@ fn version_label(
     }
     if let Some(row) = remote
         .iter()
-        .find(|row| version_key(row.version) == Some(key))
+        .find(|row| version_key(row.version).as_ref() == Some(key))
     {
         let shown = row.version.trim().trim_start_matches('v');
         if !shown.is_empty() {
@@ -548,21 +547,12 @@ fn version_label(
     display_version(key)
 }
 
-fn version_key(raw: &str) -> Option<(u32, u32, u32)> {
-    let core = raw.trim().trim_start_matches('v');
-    let core = core.split(['-', '+']).next().unwrap_or(core);
-    if core.is_empty() || core.split_whitespace().nth(1).is_some() {
-        return None;
-    }
-    let mut it = core.split('.');
-    let major = it.next()?.parse().ok()?;
-    let minor = it.next()?.parse().ok()?;
-    let patch = it.next().unwrap_or("0").parse().ok()?;
-    Some((major, minor, patch))
+fn version_key(raw: &str) -> Option<crate::update::SemVer> {
+    crate::update::parse_semver(raw)
 }
 
-fn display_version((major, minor, patch): (u32, u32, u32)) -> String {
-    format!("{major}.{minor}.{patch}")
+fn display_version(ver: &crate::update::SemVer) -> String {
+    ver.to_string()
 }
 
 /// Drop ATX sections whose title matches `drop_title`, through the next
@@ -828,10 +818,10 @@ pub fn release_badge(
     let key = version_key(version)?;
     let installed_key = installed.and_then(version_key);
     let offered_key = offered.and_then(version_key);
-    if offered_key == Some(key) && installed_key != Some(key) {
+    if offered_key.as_ref() == Some(&key) && installed_key.as_ref() != Some(&key) {
         return Some("Update available");
     }
-    if installed_key == Some(key) {
+    if installed_key.as_ref() == Some(&key) {
         return Some("Installed");
     }
     if installed_key.is_some_and(|installed_key| key > installed_key) {
@@ -1300,8 +1290,9 @@ curl secret-alpha
 ";
         let notes = section_for(changelog, "0.5.0-alpha.1").expect("section");
         assert_eq!(notes.version, "0.5.0-alpha.1");
-        assert_eq!(version_key("0.5.0-alpha.1"), Some((0, 5, 0)));
-        assert_eq!(version_key("0.5.0"), version_key("0.5.0-alpha.1"));
+        assert!(version_key("0.4.24") < version_key("0.5.0-alpha.1"));
+        assert!(version_key("0.5.0-alpha.1") < version_key("0.5.0"));
+        assert_ne!(version_key("0.5.0"), version_key("0.5.0-alpha.1"));
 
         let offered = notes_for_update(
             changelog,
@@ -1325,6 +1316,72 @@ A detail line.
         assert_eq!(offered[0].version, "0.5.0-alpha.1");
         assert_eq!(offered[0].summary, "Alpha summary from GitHub.");
         assert_eq!(offered[0].highlights, ["remote highlight"]);
+    }
+
+    #[test]
+    fn final_release_does_not_show_the_alpha_notes_twice() {
+        let changelog = "\
+## 0.5.0
+
+Final summary for the stable release.
+
+### Highlights
+
+- Stable highlight
+
+## 0.5.0-alpha.1
+
+Alpha summary for the test reader.
+
+### Highlights
+
+- Alpha highlight
+";
+        let stable = section_for(changelog, "0.5.0").expect("stable section");
+        let alpha = section_for(changelog, "0.5.0-alpha.1").expect("alpha section");
+        assert_eq!(stable.version, "0.5.0");
+        assert_eq!(alpha.version, "0.5.0-alpha.1");
+        assert_eq!(stable.summary, "Final summary for the stable release.");
+        assert_eq!(alpha.summary, "Alpha summary for the test reader.");
+        assert!(!stable.summary.contains("Alpha"));
+        assert!(!stable.body_markdown.contains("Alpha summary"));
+        assert!(!alpha.summary.contains("Final summary"));
+
+        let both = notes_for_update(changelog, "0.4.24", "0.5.0", &[]);
+        assert_eq!(
+            both.iter()
+                .map(|note| note.version.as_str())
+                .collect::<Vec<_>>(),
+            ["0.5.0", "0.5.0-alpha.1"]
+        );
+        assert_eq!(
+            both.iter()
+                .filter(|note| note.summary.contains("Alpha summary"))
+                .count(),
+            1
+        );
+        assert_eq!(
+            both.iter()
+                .filter(|note| note.summary.contains("Final summary"))
+                .count(),
+            1
+        );
+
+        let upgraded = notes_for_change(
+            changelog,
+            SeenChange::Upgrade,
+            Some("0.5.0-alpha.1"),
+            "0.5.0",
+        );
+        assert_eq!(
+            upgraded
+                .iter()
+                .map(|note| note.version.as_str())
+                .collect::<Vec<_>>(),
+            ["0.5.0"]
+        );
+        assert_eq!(upgraded[0].summary, "Final summary for the stable release.");
+        assert!(!upgraded[0].body_markdown.contains("Alpha highlight"));
     }
 
     #[test]

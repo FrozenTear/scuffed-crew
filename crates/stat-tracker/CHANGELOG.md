@@ -42,6 +42,8 @@ Uploads post the same fields as 0.4.24 (no recognizer id, no suspect_fields list
 
 The GitHub release install command fetches bootstrap.sh from this tag. The release tarball no longer ships the digit template images as loose files. Those images are compiled into the tracker.
 
+A stable update is not offered this alpha. The desktop app skips it until config.toml has `update_channel = "prerelease"`. bootstrap.sh skips it until `STAT_TRACKER_CHANNEL=prerelease`. Pinning this tag still installs it.
+
 ### Install
 
 ```sh

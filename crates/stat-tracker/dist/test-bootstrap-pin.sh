@@ -236,4 +236,63 @@ set -e
 [[ "$warn_tool" == *skipping* ]] || fail "no-key missing sha256sum did not warn: $warn_tool"
 pass "no key and missing sha256sum stays a warning"
 
+# Stable channel keeps 0.4.24 when a newer alpha is published. The alpha is
+# the prerelease line, including when GitHub left the prerelease flag off.
+ASSET="scuffed-stat-tracker-linux-x86_64.tar.gz"
+cat > "$TMP/releases.json" <<'JSON'
+[
+  {"tag_name":"stat-tracker-v0.5.0-alpha.1","draft":false,"prerelease":true,"assets":[{"name":"scuffed-stat-tracker-linux-x86_64.tar.gz"}]},
+  {"tag_name":"stat-tracker-v0.4.24","draft":false,"prerelease":false,"assets":[{"name":"scuffed-stat-tracker-linux-x86_64.tar.gz"}]}
+]
+JSON
+mapfile -t picked < <(choose_release_tags "$ASSET" < "$TMP/releases.json")
+[[ "${picked[0]}" == "stat-tracker-v0.4.24" ]] || fail "stable tag was ${picked[0]}"
+[[ "${picked[1]}" == "stat-tracker-v0.5.0-alpha.1" ]] || fail "prerelease tag was ${picked[1]}"
+pass "0.4.24 stays the stable pick beside 0.5.0-alpha.1"
+
+cat > "$TMP/releases.json" <<'JSON'
+[
+  {"tag_name":"stat-tracker-v0.4.24","draft":false,"prerelease":false,"assets":[{"name":"scuffed-stat-tracker-linux-x86_64.tar.gz"}]},
+  {"tag_name":"stat-tracker-v0.5.0-alpha.1","draft":false,"prerelease":false,"assets":[{"name":"scuffed-stat-tracker-linux-x86_64.tar.gz"}]}
+]
+JSON
+mapfile -t picked < <(choose_release_tags "$ASSET" < "$TMP/releases.json")
+[[ "${picked[0]}" == "stat-tracker-v0.4.24" ]] || fail "unflagged alpha became stable: ${picked[0]}"
+[[ "${picked[1]}" == "stat-tracker-v0.5.0-alpha.1" ]] || fail "unflagged alpha was not the prerelease: ${picked[1]}"
+pass "an unflagged alpha suffix is not the stable release"
+
+cat > "$TMP/releases.json" <<'JSON'
+[
+  {"tag_name":"stat-tracker-v0.5.0-alpha.2","draft":false,"prerelease":true,"assets":[{"name":"scuffed-stat-tracker-linux-x86_64.tar.gz"}]},
+  {"tag_name":"stat-tracker-v0.5.0","draft":false,"prerelease":false,"assets":[{"name":"scuffed-stat-tracker-linux-x86_64.tar.gz"}]},
+  {"tag_name":"stat-tracker-v0.5.0-alpha.10","draft":false,"prerelease":true,"assets":[{"name":"scuffed-stat-tracker-linux-x86_64.tar.gz"}]},
+  {"tag_name":"stat-tracker-v0.4.24","draft":false,"prerelease":false,"assets":[{"name":"scuffed-stat-tracker-linux-x86_64.tar.gz"}]}
+]
+JSON
+mapfile -t picked < <(choose_release_tags "$ASSET" < "$TMP/releases.json")
+[[ "${picked[0]}" == "stat-tracker-v0.5.0" ]] || fail "final stable tag was ${picked[0]}"
+[[ -z "${picked[1]}" ]] || fail "alpha was still newer than 0.5.0: ${picked[1]}"
+pass "0.5.0 is newer than 0.5.0-alpha.10"
+
+cat > "$TMP/releases.json" <<'JSON'
+[
+  {"tag_name":"stat-tracker-v0.5.0-alpha.2","draft":false,"prerelease":true,"assets":[{"name":"scuffed-stat-tracker-linux-x86_64.tar.gz"}]},
+  {"tag_name":"stat-tracker-v0.5.0-alpha.10","draft":false,"prerelease":true,"assets":[{"name":"scuffed-stat-tracker-linux-x86_64.tar.gz"}]},
+  {"tag_name":"stat-tracker-v0.4.24","draft":false,"prerelease":false,"assets":[{"name":"scuffed-stat-tracker-linux-x86_64.tar.gz"}]}
+]
+JSON
+mapfile -t picked < <(choose_release_tags "$ASSET" < "$TMP/releases.json")
+[[ "${picked[0]}" == "stat-tracker-v0.4.24" ]] || fail "stable beside alphas was ${picked[0]}"
+[[ "${picked[1]}" == "stat-tracker-v0.5.0-alpha.10" ]] || fail "newer alpha was ${picked[1]}"
+pass "alpha.10 sorts after alpha.2"
+
+stable_pick="$(pick_release_tag stat-tracker-v0.4.24 stat-tracker-v0.5.0-alpha.1 "")"
+[[ "$stable_pick" == "stat-tracker-v0.4.24" ]] || fail "default channel picked $stable_pick"
+stable_pick="$(pick_release_tag stat-tracker-v0.4.24 stat-tracker-v0.5.0-alpha.1 stable)"
+[[ "$stable_pick" == "stat-tracker-v0.4.24" ]] || fail "stable channel picked $stable_pick"
+pre_pick="$(pick_release_tag stat-tracker-v0.4.24 stat-tracker-v0.5.0-alpha.1 prerelease)"
+[[ "$pre_pick" == "stat-tracker-v0.5.0-alpha.1" ]] || fail "prerelease channel picked $pre_pick"
+grep -F 'Install [s]table' "$BOOTSTRAP" >/dev/null && fail "bootstrap still prompts for a prerelease"
+pass "stable skips the alpha unless the channel is prerelease"
+
 echo "All bootstrap pin checks passed."
