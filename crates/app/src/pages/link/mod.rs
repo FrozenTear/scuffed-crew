@@ -37,6 +37,16 @@ pub const DENIED_COPY: &str = "Request denied";
 /// Where login sends the member back. Never includes a device code.
 pub const LOGIN_RETURN_PATH: &str = "/link";
 
+pub const LINK_ERROR_ID: &str = "link-code-error";
+
+pub const LINK_STEP_ENTER: &str = "link-step-enter";
+pub const LINK_STEP_CONFIRM: &str = "link-step-confirm";
+pub const LINK_STEP_APPROVED: &str = "link-step-approved";
+pub const LINK_STEP_DENIED: &str = "link-step-denied";
+
+/// Waits longer than this, or a missing header, use the plain 429 sentence.
+const RETRY_AFTER_CAP_SECS: u64 = 3600;
+
 const RETURN_STORAGE_KEY: &str = "scuffed.return-to-link";
 const RETURN_STORAGE_VALUE: &str = "1";
 
@@ -153,6 +163,7 @@ fn is_rejected_code(status: u16) -> bool {
 ///
 /// `scuffed_types` has no `json_retry_after` on this branch, so the wrong-code
 /// 429 is read from this header. The JSON body is not parsed for a wait.
+/// `None` means missing, unreadable, or longer than [`RETRY_AFTER_CAP_SECS`].
 pub fn retry_after_seconds(
     header: Option<&str>,
     now: chrono::DateTime<chrono::Utc>,
@@ -161,19 +172,62 @@ pub fn retry_after_seconds(
     if raw.is_empty() {
         return None;
     }
-    if raw.bytes().all(|byte| byte.is_ascii_digit()) {
-        let secs: u64 = raw.parse().ok()?;
-        return Some(secs.max(1));
-    }
-    let when = chrono::DateTime::parse_from_rfc2822(raw).ok()?;
-    let delta = when.with_timezone(&chrono::Utc) - now;
-    Some(u64::try_from(delta.num_seconds().max(1)).unwrap_or(1))
+    let secs = if raw.bytes().all(|byte| byte.is_ascii_digit()) {
+        raw.parse().ok()?
+    } else {
+        let when = chrono::DateTime::parse_from_rfc2822(raw).ok()?;
+        let delta = when.with_timezone(&chrono::Utc) - now;
+        u64::try_from(delta.num_seconds().max(1)).unwrap_or(u64::MAX)
+    };
+    let secs = secs.max(1);
+    (secs <= RETRY_AFTER_CAP_SECS).then_some(secs)
 }
 
 pub fn rate_limit_message_at(header: Option<&str>, now: chrono::DateTime<chrono::Utc>) -> String {
     match retry_after_seconds(header, now) {
+        Some(1) => "Too many tries. Try again in 1 second.".to_string(),
         Some(secs) => format!("Too many tries. Try again in {secs} seconds."),
         None => RATE_LIMITED.to_string(),
+    }
+}
+
+/// `aria-invalid` and `aria-describedby` for the code field.
+pub fn code_field_aria(has_error: bool) -> (&'static str, Option<&'static str>) {
+    if has_error {
+        ("true", Some(LINK_ERROR_ID))
+    } else {
+        ("false", None)
+    }
+}
+
+/// Element that should take focus after this step becomes visible.
+pub fn step_focus_id(step: &LinkStep) -> &'static str {
+    match step {
+        LinkStep::Enter => LINK_STEP_ENTER,
+        LinkStep::Confirm { .. } => LINK_STEP_CONFIRM,
+        LinkStep::Approved => LINK_STEP_APPROVED,
+        LinkStep::Denied => LINK_STEP_DENIED,
+    }
+}
+
+fn focus_link_step(step: &LinkStep) {
+    let id = step_focus_id(step);
+    #[cfg(target_arch = "wasm32")]
+    {
+        use wasm_bindgen::JsCast;
+        let Some(document) = web_sys::window().and_then(|window| window.document()) else {
+            return;
+        };
+        let Some(el) = document.get_element_by_id(id) else {
+            return;
+        };
+        if let Ok(el) = el.dyn_into::<web_sys::HtmlElement>() {
+            let _ = el.focus();
+        }
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let _ = id;
     }
 }
 
@@ -352,11 +406,18 @@ const CSS: &str = r#"
     margin: 0 0 0.5rem;
 }
 .link-card p.lead,
+.link-card h2.link-step,
 .link-card p.note {
     color: var(--text-2);
     font-size: 0.9rem;
+    font-weight: 400;
+    font-family: inherit;
     margin: 0 0 1.25rem;
     line-height: 1.45;
+}
+.link-card h2.link-step:focus {
+    outline: 2px solid var(--accent);
+    outline-offset: 3px;
 }
 .link-field {
     display: flex;
@@ -445,6 +506,20 @@ pub fn LinkDevice() -> Element {
         }
     });
 
+    let mut focused_step = use_signal(|| None::<LinkStep>);
+    use_effect(move || {
+        let current = step();
+        let previous = focused_step.peek().clone();
+        if previous.as_ref() == Some(&current) {
+            return;
+        }
+        let moved = previous.is_some();
+        focused_step.set(Some(current.clone()));
+        if moved {
+            focus_link_step(&current);
+        }
+    });
+
     let gate = link_gate(auth().loading, auth().is_logged_in());
     if gate != LinkGate::Show {
         return rsx! {
@@ -523,6 +598,9 @@ pub fn LinkDevice() -> Element {
         });
     };
 
+    let has_error = notice().is_some();
+    let (code_invalid, code_described_by) = code_field_aria(has_error);
+
     rsx! {
         style { {CSS} }
         div { class: "link-page",
@@ -530,9 +608,19 @@ pub fn LinkDevice() -> Element {
                 h1 { "Link the stat tracker" }
                 match step() {
                     LinkStep::Enter => rsx! {
-                        p { class: "lead", "Type the short code shown in the app." }
+                        h2 {
+                            id: LINK_STEP_ENTER,
+                            class: "link-step",
+                            tabindex: "-1",
+                            "Type the short code shown in the app."
+                        }
                         if let Some(text) = notice() {
-                            p { class: "link-error", "{text}" }
+                            p {
+                                id: LINK_ERROR_ID,
+                                class: "link-error",
+                                role: "alert",
+                                "{text}"
+                            }
                         }
                         form { onsubmit: on_lookup,
                             div { class: "link-field",
@@ -547,6 +635,8 @@ pub fn LinkDevice() -> Element {
                                     maxlength: 32,
                                     value: "{code}",
                                     disabled: busy(),
+                                    aria_invalid: code_invalid,
+                                    aria_describedby: code_described_by,
                                     oninput: move |e| code.set(e.value()),
                                 }
                             }
@@ -559,7 +649,12 @@ pub fn LinkDevice() -> Element {
                         }
                     },
                     LinkStep::Confirm { code: shown } => rsx! {
-                        p { class: "lead", "Check this request, then approve or deny it." }
+                        h2 {
+                            id: LINK_STEP_CONFIRM,
+                            class: "link-step",
+                            tabindex: "-1",
+                            "Check this request, then approve or deny it."
+                        }
                         if let Some(device) = pending() {
                             dl { class: "link-facts",
                                 div {
@@ -581,7 +676,7 @@ pub fn LinkDevice() -> Element {
                             }
                         }
                         if let Some(text) = notice() {
-                            p { class: "link-error", "{text}" }
+                            p { class: "link-error", role: "alert", "{text}" }
                         }
                         div { class: "link-actions",
                             button {
@@ -601,7 +696,12 @@ pub fn LinkDevice() -> Element {
                         }
                     },
                     LinkStep::Approved => rsx! {
-                        p { class: "lead", "{APPROVED_COPY}" }
+                        h2 {
+                            id: LINK_STEP_APPROVED,
+                            class: "link-step",
+                            tabindex: "-1",
+                            "{APPROVED_COPY}"
+                        }
                         p { class: "note",
                             "The new token can be revoked on the "
                             Link { to: Route::StatsTokens {}, "tracker tokens list" }
@@ -609,7 +709,12 @@ pub fn LinkDevice() -> Element {
                         }
                     },
                     LinkStep::Denied => rsx! {
-                        p { class: "lead", "{DENIED_COPY}" }
+                        h2 {
+                            id: LINK_STEP_DENIED,
+                            class: "link-step",
+                            tabindex: "-1",
+                            "{DENIED_COPY}"
+                        }
                     },
                 }
             }
@@ -791,8 +896,15 @@ mod tests {
         );
         assert_eq!(
             rate_limit_message(Some("1")),
-            "Too many tries. Try again in 1 seconds."
+            "Too many tries. Try again in 1 second."
         );
+        assert_eq!(
+            rate_limit_message(Some("3600")),
+            "Too many tries. Try again in 3600 seconds."
+        );
+        assert_eq!(rate_limit_message(Some("3601")), RATE_LIMITED);
+        assert_eq!(retry_after_seconds(Some("3601"), chrono::Utc::now()), None);
+        assert_eq!(rate_limit_message(None), RATE_LIMITED);
 
         let now = chrono::DateTime::parse_from_rfc3339("2026-10-09T13:00:00Z")
             .expect("now")
@@ -803,6 +915,34 @@ mod tests {
             rate_limit_message_at(Some(when), now),
             "Too many tries. Try again in 30 seconds."
         );
+        let far = "Fri, 09 Oct 2026 15:00:01 GMT";
+        assert_eq!(retry_after_seconds(Some(far), now), None);
+        assert_eq!(rate_limit_message_at(Some(far), now), RATE_LIMITED);
+    }
+
+    #[test]
+    fn errors_are_alerts_and_steps_take_focus() {
+        assert_eq!(code_field_aria(true), ("true", Some(LINK_ERROR_ID)));
+        assert_eq!(code_field_aria(false), ("false", None));
+        assert_eq!(LINK_ERROR_ID, "link-code-error");
+        assert_eq!(step_focus_id(&LinkStep::Enter), LINK_STEP_ENTER);
+        assert_eq!(
+            step_focus_id(&LinkStep::Confirm {
+                code: "ABCD".into()
+            }),
+            LINK_STEP_CONFIRM
+        );
+        assert_eq!(step_focus_id(&LinkStep::Approved), LINK_STEP_APPROVED);
+        assert_eq!(step_focus_id(&LinkStep::Denied), LINK_STEP_DENIED);
+        assert_ne!(LINK_STEP_ENTER, LINK_STEP_CONFIRM);
+
+        let src = include_str!("mod.rs");
+        assert!(src.contains("role: \"alert\""));
+        assert!(src.contains("aria_invalid: code_invalid"));
+        assert!(src.contains("aria_describedby: code_described_by"));
+        assert!(src.contains("tabindex: \"-1\""));
+        assert!(src.contains("focus_link_step"));
+        assert!(src.contains("id: LINK_ERROR_ID"));
     }
 
     #[test]
@@ -891,7 +1031,8 @@ mod tests {
             APPROVED_COPY,
             DENIED_COPY,
             "Too many tries. Try again in 90 seconds.",
-            "Too many tries. Try again in 1 seconds.",
+            "Too many tries. Try again in 1 second.",
+            "Too many tries. Try again in 3600 seconds.",
             "Enter the code from the app.",
         ] {
             assert!(!text.contains('\u{2014}'), "{text}");
